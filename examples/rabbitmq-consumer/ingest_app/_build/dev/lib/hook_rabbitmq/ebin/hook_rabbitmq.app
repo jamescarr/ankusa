@@ -1,0 +1,1 @@
+{application,hook_rabbitmq,[{modules,['Elixir.Hook.Sink.RabbitMQ','Elixir.Hook.Sink.RabbitMQ.Application','Elixir.Hook.Sink.RabbitMQ.Connection']},{optional_applications,[]},{applications,[kernel,stdlib,elixir,logger,hook,amqp]},{description,"hook_rabbitmq"},{registered,[]},{vsn,"0.1.0"},{mod,{'Elixir.Hook.Sink.RabbitMQ.Application',[]}}]}.

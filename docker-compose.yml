@@ -1,0 +1,62 @@
+name: hook
+
+# Local S3 + GCS emulators for developing/testing the object-store blob
+# adapters (`Hook.BlobStore.S3`, `Hook.BlobStore.GCS`) without a cloud
+# account. See https://floci.io.
+#
+#   docker compose up -d          # start both emulators + bucket bootstrap
+#   mix test --include integration
+#   docker compose down -v        # tear down (drops emulator state)
+#
+# Endpoints/buckets match the defaults `Hook.BlobStore.S3`/`Hook.BlobStore.GCS`
+# expect in test/hook/blob_store_*_test.exs and the README examples.
+
+services:
+  # S3-compatible object store (AWS emulator; also fronts SQS/Kafka/etc if
+  # you need them later — we only use S3 here).
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+
+  # Creates the S3 bucket once floci is answering requests. Runs to
+  # completion; re-run is idempotent (`mb` on an existing bucket is a no-op
+  # error we swallow).
+  s3-bootstrap:
+    image: amazon/aws-cli:2.17.62
+    depends_on: [floci]
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://floci:4566
+      HOOK_S3_BUCKET: hook-segments-dev
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws s3 ls >/dev/null 2>&1; do echo "waiting for floci..."; sleep 1; done
+        aws s3 mb "s3://$$HOOK_S3_BUCKET" || true
+        echo "s3 bucket $$HOOK_S3_BUCKET ready"
+
+  # GCS emulator.
+  floci-gcp:
+    image: floci/floci-gcp:latest
+    ports:
+      - "4588:4588"
+
+  # Creates the GCS bucket once floci-gcp is answering requests.
+  gcs-bootstrap:
+    image: curlimages/curl:8.10.1
+    depends_on: [floci-gcp]
+    environment:
+      HOOK_GCS_BUCKET: hook-segments-dev
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until curl -sf http://floci-gcp:4588/health >/dev/null 2>&1; do echo "waiting for floci-gcp..."; sleep 1; done
+        curl -sf -X POST "http://floci-gcp:4588/storage/v1/b?project=floci-local" \
+          -H 'Content-Type: application/json' \
+          -d "{\"name\":\"$$HOOK_GCS_BUCKET\"}" || true
+        echo "gcs bucket $$HOOK_GCS_BUCKET ready"
