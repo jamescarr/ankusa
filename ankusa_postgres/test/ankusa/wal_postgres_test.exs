@@ -59,7 +59,9 @@ defmodule Ankusa.WAL.PostgresTest do
   end
 
   test "a nil tenant_id is coalesced at the storage boundary, not rejected", %{instance: inst} do
-    assert {:ok, [{:committed, committed}]} = WAL.append(inst, [%{envelope: envelope(%{tenant_id: nil})}])
+    assert {:ok, [{:committed, committed}]} =
+             WAL.append(inst, [%{envelope: envelope(%{tenant_id: nil})}])
+
     assert committed.seq
   end
 

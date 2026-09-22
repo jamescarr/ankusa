@@ -1,0 +1,119 @@
+name: Release
+
+# Standard Elixir/Hex release flow: bump `version` in mix.exs + CHANGELOG.md
+# in your PR, merge to main. This workflow re-runs tests, then publishes
+# each package whose mix.exs version isn't already on Hex — nothing to
+# tag, nothing to trigger by hand. See docs/deployment.md#releasing.
+#
+# Requires a `HEX_API_KEY` repository secret (hex.pm dashboard → API keys).
+# `ankusa_postgres`/`ankusa_rabbitmq` publish only after `ankusa` (core) does,
+# since their published package declares `{:ankusa, "~> 0.1"}` as a real Hex
+# dependency, not the path dep local dev uses — see their mix.exs for why.
+
+on:
+  push:
+    branches: [main]
+
+env:
+  OTP_VERSION: "29.0"
+  ELIXIR_VERSION: "1.20.4"
+
+jobs:
+  ankusa:
+    name: ankusa (core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - run: mix deps.get
+      - run: mix test
+      - name: Publish if version changed
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          VERSION=$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')
+          if curl -sf -o /dev/null "https://hex.pm/api/packages/ankusa/releases/${VERSION}"; then
+            echo "ankusa ${VERSION} already published, skipping"
+          else
+            MIX_ENV=prod mix deps.get
+            MIX_ENV=prod mix hex.publish --yes
+          fi
+
+  ankusa_postgres:
+    name: ankusa_postgres
+    needs: ankusa
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ankusa
+          POSTGRES_PASSWORD: ankusa
+          POSTGRES_DB: ankusa_dev
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ankusa -d ankusa_dev"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_postgres
+        run: mix deps.get
+      - working-directory: ankusa_postgres
+        run: mix test
+      - name: Publish if version changed
+        working-directory: ankusa_postgres
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          VERSION=$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')
+          if curl -sf -o /dev/null "https://hex.pm/api/packages/ankusa_postgres/releases/${VERSION}"; then
+            echo "ankusa_postgres ${VERSION} already published, skipping"
+          else
+            MIX_ENV=prod mix deps.get
+            MIX_ENV=prod mix hex.publish --yes
+          fi
+
+  ankusa_rabbitmq:
+    name: ankusa_rabbitmq
+    needs: ankusa
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        ports: ["5673:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_rabbitmq
+        run: mix deps.get
+      - working-directory: ankusa_rabbitmq
+        run: mix test
+      - name: Publish if version changed
+        working-directory: ankusa_rabbitmq
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          VERSION=$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')
+          if curl -sf -o /dev/null "https://hex.pm/api/packages/ankusa_rabbitmq/releases/${VERSION}"; then
+            echo "ankusa_rabbitmq ${VERSION} already published, skipping"
+          else
+            MIX_ENV=prod mix deps.get
+            MIX_ENV=prod mix hex.publish --yes
+          fi

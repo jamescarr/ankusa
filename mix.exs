@@ -8,7 +8,22 @@ defmodule Ankusa.MixProject do
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
-      deps: deps()
+      deps: deps(),
+      description: description(),
+      package: package()
+    ]
+  end
+
+  defp description do
+    "A loosely coupled, high-throughput webhook ingestion framework: durable " <>
+      "WAL, pluggable verification/dedup/storage/delivery, multi-tenant " <>
+      "catch-URL routing."
+  end
+
+  defp package do
+    [
+      licenses: ["Apache-2.0"]
+      # links: %{"GitHub" => "https://github.com/<org>/ankusa"}  # set before first publish
     ]
   end
 

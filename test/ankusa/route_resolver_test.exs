@@ -4,26 +4,26 @@ defmodule Ankusa.RouteResolverTest do
   import Ankusa.TestHelpers
   alias Ankusa.Edge.Router
   alias Ankusa.{Route, RouteResolver, WAL}
-    defp start(resolver, sources) do
-      config =
-        test_config(
-          roles: [:edge],
-          route_resolver: resolver,
-          source_store: {Ankusa.SourceStore.Static, sources: sources}
-        )
 
-      start_supervised!({Ankusa.Instance, config})
-      config
-    end
+  defp start(resolver, sources) do
+    config =
+      test_config(
+        roles: [:edge],
+        route_resolver: resolver,
+        source_store: {Ankusa.SourceStore.Static, sources: sources}
+      )
 
-    defp post(config, path, body, headers \\ []) do
-      Plug.Test.conn(:post, path, body)
-      |> then(fn c ->
-        Enum.reduce(headers, c, fn {k, v}, c -> Plug.Conn.put_req_header(c, k, v) end)
-      end)
-      |> Router.call(Router.init(instance: config.instance))
-    end
+    start_supervised!({Ankusa.Instance, config})
+    config
+  end
 
+  defp post(config, path, body, headers \\ []) do
+    Plug.Test.conn(:post, path, body)
+    |> then(fn c ->
+      Enum.reduce(headers, c, fn {k, v}, c -> Plug.Conn.put_req_header(c, k, v) end)
+    end)
+    |> Router.call(Router.init(instance: config.instance))
+  end
 
   describe "RouteResolver.Path" do
     test "maps /hooks/:source_id to a route with an unset tenant" do

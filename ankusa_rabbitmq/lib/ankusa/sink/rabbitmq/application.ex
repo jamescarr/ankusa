@@ -16,7 +16,10 @@ defmodule Ankusa.Sink.RabbitMQ.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [{DynamicSupervisor, name: Ankusa.Sink.RabbitMQ.Supervisor, strategy: :one_for_one}]
+    children = [
+      {DynamicSupervisor, name: Ankusa.Sink.RabbitMQ.Supervisor, strategy: :one_for_one}
+    ]
+
     Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.RabbitMQ.TopSup)
   end
 end

@@ -116,3 +116,37 @@ Its own README documents the architecture diagram, both the inline and
 fat-payload code paths, and what's intentionally left as a stub (the
 worker's own business logic — everything around it: topology declaration,
 decode, blob fetch, ack/nack, is real working code).
+
+## Releasing
+
+Three independently versioned Hex packages (`ankusa`, `ankusa_postgres`,
+`ankusa_rabbitmq`), each with its own `mix.exs` `version` and
+`CHANGELOG.md`. The release flow is the standard Elixir/Hex one — no bot,
+no separate changeset files, no tag to remember to push:
+
+1. In your PR, bump `version` in the package's `mix.exs` (follow
+   [SemVer](https://semver.org/)) and move the relevant entries from that
+   package's `CHANGELOG.md` `[Unreleased]` section under a new dated
+   heading.
+2. Merge to `main`. [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+   runs each package's tests, then checks Hex for that exact version; if
+   it's not there yet, publishes it (`mix hex.publish --yes`). A package
+   whose version didn't change in that push is a no-op — nothing publishes
+   twice.
+3. `ankusa_postgres` and `ankusa_rabbitmq` publish only after `ankusa`
+   (core) does, since their published package declares a real Hex
+   dependency on it (`{:ankusa, "~> 0.1"}`) — not the path dependency local
+   development uses. See their `mix.exs` for why a plain `{:ankusa, path:
+   "..", only: [:dev, :test]}` alongside a hex entry doesn't work (Mix
+   rejects duplicate entries for the same app regardless of `:only`); the
+   working pattern is a single `Mix.env()`-conditional entry.
+
+Requires a `HEX_API_KEY` repository secret — generate one from the Hex.pm
+dashboard (Keys → scoped to `api:write`, ideally limited to these package
+names) and add it under repo Settings → Secrets and variables → Actions.
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same
+tests (plus `mix format --check-formatted` and
+`mix compile --warnings-as-errors`) on every PR and push, independent of
+the release workflow — a red CI check is a merge blocker regardless of
+whether anything's being released.

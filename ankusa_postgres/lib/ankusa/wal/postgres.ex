@@ -312,5 +312,6 @@ defmodule Ankusa.WAL.Postgres do
   # the instance back out rather than threading a second argument through
   # every callback, and reuse it as the Postgrex conn target (same name the
   # pool was registered under in `start_link/1`).
-  defp instance_key({:via, Registry, {Ankusa.Registry, {instance, :wal}}}), do: to_string(instance)
+  defp instance_key({:via, Registry, {Ankusa.Registry, {instance, :wal}}}),
+    do: to_string(instance)
 end

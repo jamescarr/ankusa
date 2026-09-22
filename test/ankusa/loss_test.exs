@@ -15,7 +15,8 @@ defmodule Ankusa.LossTest do
       test_config(
         roles: [:edge],
         source_store:
-          {Ankusa.SourceStore.Static, sources: %{"load" => [verifier: {Ankusa.Verifier.None, []}]}},
+          {Ankusa.SourceStore.Static,
+           sources: %{"load" => [verifier: {Ankusa.Verifier.None, []}]}},
         batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
       )
 

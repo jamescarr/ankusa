@@ -56,6 +56,7 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
       conn: nil,
       chan: nil
     }
+
     {:ok, try_connect(state)}
   end
 
