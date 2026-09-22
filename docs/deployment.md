@@ -84,6 +84,27 @@ services:
       dockerfile: examples/rabbitmq-consumer/ingest_app/Dockerfile
 ```
 
+**Depending on `ankusa` directly *and* transitively through an adapter
+package needs `override: true`.** `ankusa_postgres`/`ankusa_rabbitmq`'s own
+`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.1`) whenever Mix
+evaluates it as a nested dependency — Mix builds dependencies under `:prod`
+by default regardless of *your* project's `Mix.env()`, so the adapter
+package's dev/test-only path-dep branch never gets hit there. A wrapper app
+like `ingest_app` that depends on both `ankusa` (path) and
+`ankusa_rabbitmq` (path, which transitively wants `ankusa` from Hex) hits a
+real conflict — `mix deps.get` refuses with "the dependency ankusa in
+mix.exs is overriding a child dependency." Fix: mark your direct entry
+`override: true` so Mix uses it everywhere in the tree:
+
+```elixir
+defp deps do
+  [
+    {:ankusa, path: "../../..", override: true},
+    {:ankusa_rabbitmq, path: "../../../ankusa_rabbitmq"}
+  ]
+end
+```
+
 ## Scaling the ingest fleet
 
 ```sh

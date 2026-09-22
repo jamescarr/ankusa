@@ -23,7 +23,13 @@ defmodule AnkusaExample.Ingest.MixProject do
 
   defp deps do
     [
-      {:ankusa, path: "../../.."},
+      # `override: true`: ankusa_rabbitmq's own deps() picks its Hex entry for
+      # `:ankusa` when Mix evaluates it as a nested dependency (deps build
+      # under :prod by default, regardless of this project's own Mix.env())
+      # — that conflicts with our direct path entry below. override tells
+      # Mix to use ours everywhere in the tree, which is exactly what a
+      # monorepo example wiring both path-dependent packages together needs.
+      {:ankusa, path: "../../..", override: true},
       {:ankusa_rabbitmq, path: "../../../ankusa_rabbitmq"}
     ]
   end
