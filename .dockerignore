@@ -1,0 +1,12 @@
+_build/
+deps/
+cover/
+doc/
+tmp/
+data/
+.elixir_ls/
+.git/
+erl_crash.dump
+*.ez
+hook-*.tar
+node_modules/

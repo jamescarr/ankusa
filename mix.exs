@@ -15,9 +15,10 @@ defmodule Hook.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      # :inets/:ssl back the Hook.Sink.Http forwarder (:httpc); :crypto backs
-      # the verifiers, UUIDv7, and WAL CRCs.
-      extra_applications: [:logger, :crypto, :inets, :ssl],
+      # :inets/:ssl back the Hook.Sink.Http forwarder and the S3/GCS
+      # BlobStore adapters (:httpc); :crypto backs the verifiers, UUIDv7,
+      # WAL CRCs, and S3 SigV4 signing; :xmerl parses S3 ListObjectsV2 XML.
+      extra_applications: [:logger, :crypto, :inets, :ssl, :xmerl],
       mod: {Hook.Application, []}
     ]
   end

@@ -1,0 +1,19 @@
+name: hook_rabbitmq
+
+# Local RabbitMQ for developing/testing Hook.Sink.RabbitMQ.
+#
+#   docker compose up -d --wait
+#   mix test
+#   docker compose down -v
+
+services:
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5673:5672"    # AMQP
+      - "15673:15672"  # management UI, http://localhost:15673 (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

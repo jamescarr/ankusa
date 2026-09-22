@@ -1,0 +1,1 @@
+{application,hook_example_ingest,[{modules,['Elixir.HookExample.Ingest.Application']},{optional_applications,[]},{applications,[kernel,stdlib,elixir,logger,hook,hook_rabbitmq]},{description,"hook_example_ingest"},{registered,[]},{vsn,"0.1.0"},{mod,{'Elixir.HookExample.Ingest.Application',[]}}]}.

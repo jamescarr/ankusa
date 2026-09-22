@@ -1,0 +1,19 @@
+{
+  "name": "hook-example-worker",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "tsx src/worker.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0",
+    "amqplib": "^0.10.4"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.5",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}
