@@ -1,14 +1,16 @@
-# The directory Mix will write compiled artifacts to.
-/_build/
+# The directory Mix will write compiled artifacts to. Recursive: this repo
+# is a mono-repo of multiple Mix projects (ankusa_postgres/, ankusa_rabbitmq/,
+# examples/*/ingest_app/), each with its own _build/.
+**/_build/
 
 # If you run "mix test --cover", coverage assets end up here.
-/cover/
+**/cover/
 
 # The directory Mix downloads your dependencies sources to.
-/deps/
+**/deps/
 
 # Where third-party dependencies like ExDoc output generated docs.
-/doc/
+**/doc/
 
 # Temporary files, for example, from tests.
 /tmp/
@@ -22,6 +24,10 @@ erl_crash.dump
 # Also ignore archive artifacts (built via "mix archive.build").
 *.ez
 
-# Ignore package tarball (built via "mix hex.build").
-hook-*.tar
+# Ignore package tarballs (built via "mix hex.build").
+ankusa-*.tar
+ankusa_postgres-*.tar
+ankusa_rabbitmq-*.tar
 
+# Node (examples/rabbitmq-consumer/worker).
+**/node_modules/

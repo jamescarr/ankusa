@@ -14,47 +14,47 @@ wrong again for a product minting unguessable tokens on demand. Hardcoding
 any one scheme into the router would force every other use case to fork the
 router.
 
-## `Hook.Route` and `Hook.RouteResolver`
+## `Ankusa.Route` and `Ankusa.RouteResolver`
 
-`Hook.Route` is the resolved identity of a request:
+`Ankusa.Route` is the resolved identity of a request:
 
 ```elixir
-%Hook.Route{source_id: "stripe", tenant_id: "acme", params: %{}}
+%Ankusa.Route{source_id: "stripe", tenant_id: "acme", params: %{}}
 ```
 
-`Hook.RouteResolver` is the behaviour that produces one from a raw
+`Ankusa.RouteResolver` is the behaviour that produces one from a raw
 `Plug.Conn`:
 
 ```elixir
 @callback resolve(instance :: atom(), conn :: Plug.Conn.t(), opts :: keyword()) ::
-            {:ok, Hook.Route.t()} | :error
+            {:ok, Ankusa.Route.t()} | :error
 ```
 
-The router (`Hook.Edge.Router`) is a catch-all `POST` that does nothing but
-call the configured resolver, then hand the result to `Hook.Edge.Ingest`. A
+The router (`Ankusa.Edge.Router`) is a catch-all `POST` that does nothing but
+call the configured resolver, then hand the result to `Ankusa.Edge.Ingest`. A
 resolver does **URL-scheme work only** — it never reads the body, verifies a
 signature, or touches storage. It answers "which endpoint is this?" and
-nothing else; policy (verify/dedup/sinks) still comes from `Hook.SourceStore`
+nothing else; policy (verify/dedup/sinks) still comes from `Ankusa.SourceStore`
 keyed by the returned `source_id`.
 
 ## Shipped resolvers
 
-**`Hook.RouteResolver.Path`** (default) — `POST /hooks/:source_id`.
-`tenant_id` is left `nil`, so `Hook.Edge.Ingest` falls back to the resolved
+**`Ankusa.RouteResolver.Path`** (default) — `POST /hooks/:source_id`.
+`tenant_id` is left `nil`, so `Ankusa.Edge.Ingest` falls back to the resolved
 source's own `tenant_id` (default `"default"`). This is the single-tenant
 case: one operator, a handful of sources, tenancy doesn't vary by URL.
 
 ```elixir
-config :hook, route_resolver: {Hook.RouteResolver.Path, prefix: ["hooks"]}  # prefix is the default
+config :ankusa, route_resolver: {Ankusa.RouteResolver.Path, prefix: ["hooks"]}  # prefix is the default
 ```
 
-**`Hook.RouteResolver.TenantPath`** — `POST /hooks/:tenant_id/:source_id`.
+**`Ankusa.RouteResolver.TenantPath`** — `POST /hooks/:tenant_id/:source_id`.
 The tenant is carried in the URL and is **authoritative** — it wins over
 whatever the resolved source's own `tenant_id` says. One instance serves
 many tenants over one path scheme.
 
 ```elixir
-config :hook, route_resolver: {Hook.RouteResolver.TenantPath, prefix: ["hooks"]}
+config :ankusa, route_resolver: {Ankusa.RouteResolver.TenantPath, prefix: ["hooks"]}
 ```
 
 ```
@@ -71,8 +71,8 @@ anything else. Implement the one callback:
 
 ```elixir
 defmodule MyApp.RouteResolver.OpaqueToken do
-  @behaviour Hook.RouteResolver
-  alias Hook.Route
+  @behaviour Ankusa.RouteResolver
+  alias Ankusa.Route
 
   @impl true
   def resolve(_instance, conn, _opts) do
@@ -96,7 +96,7 @@ An unresolvable URL shape returns `:error`, which the router turns into a
 
 ## Tenant scoping — what `tenant_id` actually does
 
-`tenant_id` on a `%Hook.Source{}` (default `"default"`) is the
+`tenant_id` on a `%Ankusa.Source{}` (default `"default"`) is the
 **dedup/storage/retention scope**. Concretely:
 
 - **Dedup**: the WAL's uniqueness constraint is `(tenant_id, source_id,
@@ -105,13 +105,13 @@ An unresolvable URL shape returns `:error`, which the router turns into a
   `WAL.DiskLog`'s dedup key is the tuple `{tenant_id, source_id, dedup_key}`
   directly; `WAL.Postgres`'s dedup ledger has `tenant_id` as a real column
   and part of its primary key.
-- **Storage**: the segment index row (`Hook.Storage.Index`) carries
+- **Storage**: the segment index row (`Ankusa.Storage.Index`) carries
   `tenant_id`, so per-tenant retention/deletion is a real, queryable
   dimension, not something bolted on after the fact.
-- **Delivery**: `tenant_id` is in every `Hook.Sink`'s `ctx` map
+- **Delivery**: `tenant_id` is in every `Ankusa.Sink`'s `ctx` map
   (`ctx.tenant_id`), so a sink can route, tag, or partition by it — e.g.
-  `Hook.Sink.RabbitMQ`'s default routing key doesn't include it, but a
-  custom `:routing_key` function easily can (`"hook.#{env.tenant_id}.#{env.source_id}"`).
+  `Ankusa.Sink.RabbitMQ`'s default routing key doesn't include it, but a
+  custom `:routing_key` function easily can (`"ankusa.#{env.tenant_id}.#{env.source_id}"`).
 
 Resolution order for a given request: `route.tenant_id` (if the resolver set
 one) wins; otherwise `source.tenant_id` (if the source's config set one);

@@ -1,4 +1,4 @@
-# Hook documentation
+# Ankusa documentation
 
 Start with the root [`README.md`](../README.md) for the pitch and a two-minute
 quickstart. These pages go deeper, one concern at a time.
@@ -7,8 +7,8 @@ quickstart. These pages go deeper, one concern at a time.
 | --- | --- |
 | [`architecture.md`](architecture.md) | The core invariant, the ingest pipeline end to end, per-component durability guarantees, the instance/supervision model |
 | [`quickstart.md`](quickstart.md) | Install, run, ingest a hook, inspect state, point a real provider at it |
-| [`configuration.md`](configuration.md) | Full `%Hook.Config{}` reference, source configuration, every behaviour's options |
-| [`multi-tenancy.md`](multi-tenancy.md) | Catch-URL routing (`Hook.RouteResolver`), tenant scoping, building your own catch-URL scheme |
+| [`configuration.md`](configuration.md) | Full `%Ankusa.Config{}` reference, source configuration, every behaviour's options |
+| [`multi-tenancy.md`](multi-tenancy.md) | Catch-URL routing (`Ankusa.RouteResolver`), tenant scoping, building your own catch-URL scheme |
 | [`storage.md`](storage.md) | WAL (`DiskLog`, `Postgres`), segment compaction, `BlobStore` (`LocalFS`, `S3`, `GCS`), replay by id |
 | [`delivery.md`](delivery.md) | Dispatch pipeline, `Sink` (`Log`, `Http`, `RabbitMQ`), retry/backoff, DLQ + replay, quarantine |
 | [`packaging.md`](packaging.md) | Mono-repo layout, why adapters live in separate packages, the rule for when to split, how to add one |
@@ -29,5 +29,5 @@ package", `deployment.md` for "how do I actually run this".
 These docs describe behavior; the modules' own `@moduledoc`s are the
 canonical reference for exact callback signatures and options — every
 behaviour and adapter in the framework is documented in place. Run
-`mix docs` (or read `lib/hook/**/*.ex` directly) when you need the precise
+`mix docs` (or read `lib/ankusa/**/*.ex` directly) when you need the precise
 contract, not the narrative.

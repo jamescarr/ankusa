@@ -8,11 +8,11 @@ import amqp from "amqplib";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://guest:guest@localhost:5672";
-const EXCHANGE = process.env.RABBITMQ_EXCHANGE ?? "hook.events";
-const ROUTING_PATTERN = process.env.ROUTING_PATTERN ?? "hook.#";
-const QUEUE_NAME = process.env.QUEUE_NAME ?? "hook-example-worker";
+const EXCHANGE = process.env.RABBITMQ_EXCHANGE ?? "ankusa.events";
+const ROUTING_PATTERN = process.env.ROUTING_PATTERN ?? "ankusa.#";
+const QUEUE_NAME = process.env.QUEUE_NAME ?? "ankusa-example-worker";
 
-const S3_BUCKET = process.env.S3_BUCKET ?? "hook-example";
+const S3_BUCKET = process.env.S3_BUCKET ?? "ankusa-example";
 const s3 = new S3Client({
   region: process.env.S3_REGION ?? "us-east-1",
   endpoint: process.env.S3_ENDPOINT ?? "http://localhost:4566",

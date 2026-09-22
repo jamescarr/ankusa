@@ -53,24 +53,24 @@ a `WAL.Postgres` database (see [`storage.md`](storage.md)).
 
 ## Request path, step by step
 
-1. **`Hook.Edge.Router`** (`Plug.Router` under Bandit) matches any path via a
+1. **`Ankusa.Edge.Router`** (`Plug.Router` under Bandit) matches any path via a
    catch-all `POST`, enforces `max_body_bytes` while reading the body, and
-   hands off to `Hook.RouteResolver.resolve/2` — the pluggable seam that
-   turns a URL into `%Hook.Route{source_id, tenant_id}`. See
+   hands off to `Ankusa.RouteResolver.resolve/2` — the pluggable seam that
+   turns a URL into `%Ankusa.Route{source_id, tenant_id}`. See
    [`multi-tenancy.md`](multi-tenancy.md).
-2. **`Hook.Edge.Ingest`** looks the resolved `source_id` up via
-   `Hook.SourceStore`, builds a `%Hook.Envelope{}` (raw body kept
+2. **`Ankusa.Edge.Ingest`** looks the resolved `source_id` up via
+   `Ankusa.SourceStore`, builds a `%Ankusa.Envelope{}` (raw body kept
    byte-for-byte verbatim — signature checks need the exact bytes, not a
-   re-serialized copy), and runs the source's `Hook.Verifier`.
+   re-serialized copy), and runs the source's `Ankusa.Verifier`.
    - Verification failure follows the source's `on_verify_failure` policy:
      `:reject` (`401`, nothing stored), `:quarantine` (`202`, held in a
      rate-limited durable pen — see [`delivery.md`](delivery.md)), or
      `:accept_flag` (commits anyway, envelope marked `flagged: true`).
-3. **Dedup key extraction** (`Hook.DedupKey`) runs before the commit, not
+3. **Dedup key extraction** (`Ankusa.DedupKey`) runs before the commit, not
    after — the WAL's uniqueness constraint on `(tenant_id, source_id,
    dedup_key)` is what actually enforces idempotency; the extractor just
    supplies the key.
-4. **`Hook.Edge.Batcher`** (one GenServer per partition, default one per
+4. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default one per
    scheduler) receives the envelope and **blocks the caller** until the
    batch it lands in commits. Every `max_delay_ms` (default 5ms) or once
    `max_batch` (default 256) envelopes accumulate, the batcher flushes the
@@ -79,21 +79,21 @@ a `WAL.Postgres` database (see [`storage.md`](storage.md)).
    to only after that commit returns; that's what makes the ack honest.
    The queue is bounded (`max_queue`, default 10,000): full means `503` with
    `Retry-After`, never a promise the store can't back.
-5. **`Hook.WAL`** commits durably and returns `{:committed, envelope}` (with
+5. **`Ankusa.WAL`** commits durably and returns `{:committed, envelope}` (with
    `seq` assigned) or `{:duplicate, existing_seq}` per record, in the
    original order. The edge maps this to `201`/`200`/`202`/`401`/`404`/`413`/`503`.
 
 From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 
-- **`Hook.Storage.Compactor`** reads everything past its cursor, encodes many
-  records into one immutable segment via `Hook.Codec`, `PUT`s it to
-  `Hook.BlobStore`, appends index rows, advances its cursor, and truncates
+- **`Ankusa.Storage.Compactor`** reads everything past its cursor, encodes many
+  records into one immutable segment via `Ankusa.Codec`, `PUT`s it to
+  `Ankusa.BlobStore`, appends index rows, advances its cursor, and truncates
   the WAL through `min(compactor_seq, dispatch_seq)` — records dispatch
   hasn't consumed yet are never dropped, at-least-once delivery survives
   compaction. Detail in [`storage.md`](storage.md).
-- **`Hook.Dispatch.Pipeline`** reads everything past its cursor and delivers
-  each envelope to every one of the source's `Hook.Sink`s, retrying per the
-  source's `Hook.RetryPolicy` and dead-lettering on give-up. Detail in
+- **`Ankusa.Dispatch.Pipeline`** reads everything past its cursor and delivers
+  each envelope to every one of the source's `Ankusa.Sink`s, retrying per the
+  source's `Ankusa.RetryPolicy` and dead-lettering on give-up. Detail in
   [`delivery.md`](delivery.md).
 
 ## Guarantees, by component
@@ -109,21 +109,21 @@ From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 
 ## Instance model
 
-Every process is registered through a single `Registry` (`Hook.Registry`)
-with a `via` tuple keyed by instance name (`Hook.via(instance, key)`) — there
+Every process is registered through a single `Registry` (`Ankusa.Registry`)
+with a `via` tuple keyed by instance name (`Ankusa.via(instance, key)`) — there
 are no global process names anywhere in the framework. That's what makes two
 independent instances runnable in one VM (and what makes the test suite
 `async: true`-safe for anything that doesn't share on-disk state).
 
-Config is a `%Hook.Config{}` struct built once and passed down the
-supervision tree at start (`Hook.Instance.init/1`), then cached in
+Config is a `%Ankusa.Config{}` struct built once and passed down the
+supervision tree at start (`Ankusa.Instance.init/1`), then cached in
 `:persistent_term` for read-mostly access — no `Application.get_env/2`
 buried in call sites, and instance-scoped config falls out of the struct for
 free.
 
 **Roles** (`:edge`, `:dispatch`, `:storage`) boot independently based on
 `config.roles`. The same release runs all three on a laptop, or as split
-fleets via `HOOK_ROLES=edge,dispatch` — see
+fleets via `ANKUSA_ROLES=edge,dispatch` — see
 [`deployment.md`](deployment.md#roles-and-topologies). No component may
 require another to be *reachable at runtime*; they only ever hand off
 through the WAL and the object store.
@@ -131,10 +131,10 @@ through the WAL and the object store.
 ## Deployment topologies
 
 The same code runs unmodified in each of these — only config changes
-(`wal:`, `storage.blob_store:`, `roles:`/`HOOK_ROLES`, and which sinks a
+(`wal:`, `storage.blob_store:`, `roles:`/`ANKUSA_ROLES`, and which sinks a
 source declares). None of these diagrams require a different release
 artifact from any other; they're the same supervision tree
-(`Hook.Instance.init/1`) booting a different subset of children with
+(`Ankusa.Instance.init/1`) booting a different subset of children with
 different adapter tuples. Operational how-tos live in
 [`deployment.md`](deployment.md); adapter details in
 [`storage.md`](storage.md) and [`delivery.md`](delivery.md).
@@ -161,7 +161,7 @@ process crash and power loss on that box; not to losing the box.
 
 ### 2. Role-split processes, one host
 
-`HOOK_ROLES=edge` / `HOOK_ROLES=dispatch` / `HOOK_ROLES=storage` as separate
+`ANKUSA_ROLES=edge` / `ANKUSA_ROLES=dispatch` / `ANKUSA_ROLES=storage` as separate
 OS processes or containers sharing one volume. Still `WAL.DiskLog` — it's a
 local file, so every role reading/writing it must be able to see the same
 disk. Useful for isolating edge CPU/memory from compaction, without standing
@@ -169,11 +169,11 @@ up a database yet.
 
 ```mermaid
 flowchart LR
-    P[Provider] --> E["edge process\nHOOK_ROLES=edge"]
+    P[Provider] --> E["edge process\nANKUSA_ROLES=edge"]
     subgraph Host["one host, shared volume"]
         E --> WAL[("WAL.DiskLog\nshared volume")]
-        D["dispatch process\nHOOK_ROLES=dispatch"] --> WAL
-        S["storage process\nHOOK_ROLES=storage"] --> WAL
+        D["dispatch process\nANKUSA_ROLES=dispatch"] --> WAL
+        S["storage process\nANKUSA_ROLES=storage"] --> WAL
         S --> BS[(segments)]
     end
     D --> SK[Sinks]
@@ -185,7 +185,7 @@ N independent edge nodes (behind a load balancer) each run their own local
 `Postgrex` pool against the **same** Postgres database — coordination
 between nodes happens entirely through row-locked SQL, never BEAM
 distribution. This is the topology that actually needs `WAL.Postgres`
-(separate `hook_postgres` package); `DiskLog` cannot do this because it's
+(separate `ankusa_postgres` package); `DiskLog` cannot do this because it's
 one local file per node.
 
 ```mermaid
@@ -207,7 +207,7 @@ run on any node that can reach Postgres and the object store. See
 ### 4. Queue fan-out to independent consumers
 
 Ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
-`hook_rabbitmq` package); fat payloads go straight to the object store with
+`ankusa_rabbitmq` package); fat payloads go straight to the object store with
 only a pointer on the queue. Each consumer owns its **own** queue and
 binding — the framework never declares one, so adding a fifth consumer
 later is a change on the consumer side only, not a config change here.
@@ -217,7 +217,7 @@ flowchart LR
     P[Provider] --> E1[Ingest node 1]
     P --> E2[Ingest node N]
     E1 & E2 --> WAL[("WAL\nper-node or shared")]
-    E1 & E2 -->|small: inline body| X(("hook.events\nexchange"))
+    E1 & E2 -->|small: inline body| X(("ankusa.events\nexchange"))
     E1 & E2 -.fat: PUT + pointer.-> Obj[("Object store")]
     X --> QA[queue A\nowned by consumer A]
     X --> QB[queue B\nowned by consumer B]
@@ -235,9 +235,9 @@ to the same instance, not a different architecture.
 
 ## Telemetry
 
-Every stage emits `:telemetry` events under the `[:hook, ...]` prefix —
+Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix —
 `ingest`, `commit`, `verify`, `dedup`, `load_shed`, `dispatch`, `compact`,
 `quarantine`. Components emit events; they never call each other's
 reporters, so wiring a metrics/tracing backend is additive, never a code
-change to the pipeline itself. See `Hook.Telemetry`'s moduledoc for the
+change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for the
 full event list and measurement/metadata shapes.

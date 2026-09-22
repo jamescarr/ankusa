@@ -5,26 +5,26 @@ it's something you run, front real webhooks with, and consume from a queue.
 
 ```mermaid
 flowchart LR
-    P[Provider / curl] -->|POST /hooks/demo| I[Hook ingest\nedge+dispatch+storage]
+    P[Provider / curl] -->|POST /hooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
     I -->|WAL fsync, then ack| P
-    I -->|"small body (base64)"| X((hook.events\nexchange))
+    I -->|"small body (base64)"| X((ankusa.events\nexchange))
     I -->|"fat body → PUT raw/...\nmessage carries pointer"| S[(S3 / floci)]
     I -.pointer only.-> X
-    X -->|hook.# binding, owned by consumer| Q[worker's queue]
+    X -->|ankusa.# binding, owned by consumer| Q[worker's queue]
     Q --> W[TypeScript worker]
     W -->|GetObject for blob pointers| S
 ```
 
 **What each piece is doing:**
 
-- `ingest/` — a real `Hook.Instance` (edge + dispatch + storage), configured
-  entirely from environment variables. `Hook.Sink.RabbitMQ` publishes every
-  delivered hook to the `hook.events` exchange, `Hook.BlobStore.S3` backs
+- `ingest/` — a real `Ankusa.Instance` (edge + dispatch + storage), configured
+  entirely from environment variables. `Ankusa.Sink.RabbitMQ` publishes every
+  delivered hook to the `ankusa.events` exchange, `Ankusa.BlobStore.S3` backs
   segment compaction (the framework's own async archival, `seg/...` keys) —
   the sink reuses that *same* configured blob store for its own fat-payload
   offload (`raw/...` keys), no separate storage code.
 - `worker/` — a minimal TypeScript consumer. It declares and binds its own
-  queue (`hook.#` against the exchange) — the ingest framework never touches
+  queue (`ankusa.#` against the exchange) — the ingest framework never touches
   a queue, only the exchange. This is deliberate: producers own exchanges,
   consumers own their own topology downstream of it.
 - `floci` — local S3-compatible emulator (see the root README's "Object
@@ -32,7 +32,7 @@ flowchart LR
 
 ## Small vs. fat payloads
 
-`Hook.Sink.RabbitMQ` inlines a body under `INLINE_MAX_BYTES` (default 8 KiB,
+`Ankusa.Sink.RabbitMQ` inlines a body under `INLINE_MAX_BYTES` (default 8 KiB,
 base64-encoded in the message). Anything larger is `PUT` directly to the
 blob store and the message carries `{"blob": {"key": ..., "size": ...}}`
 instead — RabbitMQ throughput and memory stay flat regardless of how large a
@@ -47,7 +47,7 @@ docker compose up --build
 ```
 
 Brings up: RabbitMQ (management UI at `http://localhost:15672`, guest/guest),
-`floci` (S3 emulator, bucket `hook-example` auto-created), the ingest server
+`floci` (S3 emulator, bucket `ankusa-example` auto-created), the ingest server
 (`localhost:4000`), and the worker (consuming and printing to its own logs).
 
 Send a small hook:
@@ -85,13 +85,13 @@ docker compose down -v
 
 `docker compose up --build --scale ingest=3` runs three independent ingest
 containers, each with its own local WAL, all publishing to the same
-exchange and writing to the same bucket. Nothing about `Hook.Sink.RabbitMQ`
-or `Hook.BlobStore.S3` changes — that's the "durable state, not RPC" rule
+exchange and writing to the same bucket. Nothing about `Ankusa.Sink.RabbitMQ`
+or `Ankusa.BlobStore.S3` changes — that's the "durable state, not RPC" rule
 holding here exactly like it does between the edge/dispatch/storage roles
 inside one instance. (You'd need a load balancer in front for the ingest
 port at that point — a deployment concern, not something the framework
 does for you.) For a *shared* WAL across those nodes instead of N
-independent local ones, see `hook_postgres/` in the repo root.
+independent local ones, see `ankusa_postgres/` in the repo root.
 
 ## What's stubbed on purpose
 
