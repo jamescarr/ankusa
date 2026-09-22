@@ -1,15 +1,15 @@
-name: hook
+name: ankusa
 
 # Local S3 + GCS emulators for developing/testing the object-store blob
-# adapters (`Hook.BlobStore.S3`, `Hook.BlobStore.GCS`) without a cloud
+# adapters (`Ankusa.BlobStore.S3`, `Ankusa.BlobStore.GCS`) without a cloud
 # account. See https://floci.io.
 #
 #   docker compose up -d          # start both emulators + bucket bootstrap
 #   mix test --include integration
 #   docker compose down -v        # tear down (drops emulator state)
 #
-# Endpoints/buckets match the defaults `Hook.BlobStore.S3`/`Hook.BlobStore.GCS`
-# expect in test/hook/blob_store_*_test.exs and the README examples.
+# Endpoints/buckets match the defaults `Ankusa.BlobStore.S3`/`Ankusa.BlobStore.GCS`
+# expect in test/ankusa/blob_store_*_test.exs and the README examples.
 
 services:
   # S3-compatible object store (AWS emulator; also fronts SQS/Kafka/etc if
@@ -32,13 +32,13 @@ services:
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL: http://floci:4566
-      HOOK_S3_BUCKET: hook-segments-dev
+      ANKUSA_S3_BUCKET: ankusa-segments-dev
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         until aws s3 ls >/dev/null 2>&1; do echo "waiting for floci..."; sleep 1; done
-        aws s3 mb "s3://$$HOOK_S3_BUCKET" || true
-        echo "s3 bucket $$HOOK_S3_BUCKET ready"
+        aws s3 mb "s3://$$ANKUSA_S3_BUCKET" || true
+        echo "s3 bucket $$ANKUSA_S3_BUCKET ready"
 
   # GCS emulator.
   floci-gcp:
@@ -51,12 +51,12 @@ services:
     image: curlimages/curl:8.10.1
     depends_on: [floci-gcp]
     environment:
-      HOOK_GCS_BUCKET: hook-segments-dev
+      ANKUSA_GCS_BUCKET: ankusa-segments-dev
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         until curl -sf http://floci-gcp:4588/health >/dev/null 2>&1; do echo "waiting for floci-gcp..."; sleep 1; done
         curl -sf -X POST "http://floci-gcp:4588/storage/v1/b?project=floci-local" \
           -H 'Content-Type: application/json' \
-          -d "{\"name\":\"$$HOOK_GCS_BUCKET\"}" || true
-        echo "gcs bucket $$HOOK_GCS_BUCKET ready"
+          -d "{\"name\":\"$$ANKUSA_GCS_BUCKET\"}" || true
+        echo "gcs bucket $$ANKUSA_GCS_BUCKET ready"

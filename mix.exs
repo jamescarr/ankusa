@@ -1,9 +1,9 @@
-defmodule Hook.MixProject do
+defmodule Ankusa.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :hook,
+      app: :ankusa,
       version: "0.1.0",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
@@ -15,11 +15,11 @@ defmodule Hook.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      # :inets/:ssl back the Hook.Sink.Http forwarder and the S3/GCS
+      # :inets/:ssl back the Ankusa.Sink.Http forwarder and the S3/GCS
       # BlobStore adapters (:httpc); :crypto backs the verifiers, UUIDv7,
       # WAL CRCs, and S3 SigV4 signing; :xmerl parses S3 ListObjectsV2 XML.
       extra_applications: [:logger, :crypto, :inets, :ssl, :xmerl],
-      mod: {Hook.Application, []}
+      mod: {Ankusa.Application, []}
     ]
   end
 

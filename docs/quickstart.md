@@ -12,13 +12,13 @@ iex -S mix               # or: mix run --no-halt
 You'll see the durability banner and the listener come up:
 
 ```
-[hook] starting instance default roles=[:edge, :dispatch, :storage] port=4000 data_dir=./data
-[hook] DiskLog WAL at ./data/default/wal/hook.wal: recovered 0 record(s), next_seq=1. Durable to power loss on THIS host only.
-Running Hook.Edge.Router with Bandit 1.12.5 at 0.0.0.0:4000 (http)
+[ankusa] starting instance default roles=[:edge, :dispatch, :storage] port=4000 data_dir=./data
+[ankusa] DiskLog WAL at ./data/default/wal/ankusa.wal: recovered 0 record(s), next_seq=1. Durable to power loss on THIS host only.
+Running Ankusa.Edge.Router with Bandit 1.12.5 at 0.0.0.0:4000 (http)
 ```
 
 A zero-config `demo` source is preconfigured (accepts anything, logs it).
-Override the port with `PORT=4055 iex -S mix` or `config :hook, port: <n>`.
+Override the port with `PORT=4055 iex -S mix` or `config :ankusa, port: <n>`.
 
 ## 2. Ingest a webhook
 
@@ -61,7 +61,7 @@ segments):
 
 ```sh
 find data/default -type f
-# data/default/wal/hook.wal        data/default/segments/index.log
+# data/default/wal/ankusa.wal        data/default/segments/index.log
 # data/default/segments/seg/00000000000000000001-...seg
 ```
 
@@ -83,7 +83,7 @@ ngrok http 4000     # or cloudflared / tailscale funnel / etc.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Hook.RouteResolver` (default `/hooks/:source_id`; `TenantPath` gives `/hooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/hooks/:source_id`; `TenantPath` gives `/hooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
 | `GET` | `/health` | Liveness + WAL stats. |
 | `GET` | `/stats` | WAL stats. |
 

@@ -1,1 +1,0 @@
-{application,hook_postgres,[{modules,['Elixir.Hook.WAL.Postgres','Elixir.Hook.WAL.Postgres.Migration']},{optional_applications,[]},{applications,[kernel,stdlib,elixir,logger,hook,postgrex]},{description,"hook_postgres"},{registered,[]},{vsn,"0.1.0"}]}.

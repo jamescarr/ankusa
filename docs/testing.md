@@ -4,7 +4,7 @@ Every package's test suite is run from its own directory — there's no
 top-level test runner spanning all three, because each has a genuinely
 different infrastructure dependency (none, Postgres, RabbitMQ).
 
-## `hook` core — `mix test`
+## `ankusa` core — `mix test`
 
 ```sh
 mix test                              # 59 tests, no external infra needed
@@ -25,7 +25,7 @@ The 59 always-on tests cover:
   tolerance — this is the test that actually backs the core invariant claim
   in [`architecture.md`](architecture.md), not just the description of it.
 
-The 8 `:integration`-tagged tests (`test/hook/blob_store_s3_test.exs`,
+The 8 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`) exercise `BlobStore.S3`/`BlobStore.GCS` against
 real running emulators — put/get round-trip, `get_range` byte-slicing,
 `:not_found`, `list`+`delete`. Excluded by default
@@ -38,14 +38,14 @@ mix test --include integration
 docker compose down -v
 ```
 
-## `hook_postgres` — `mix test`
+## `ankusa_postgres` — `mix test`
 
 Every test here inherently needs a live Postgres — there's no meaningful
 "offline" mode for a WAL adapter, so nothing is tagged `:integration`; the
 whole suite just requires the container:
 
 ```sh
-cd hook_postgres
+cd ankusa_postgres
 docker compose up -d --wait   # Postgres on :5433
 mix test                      # 10 tests
 docker compose down -v
@@ -69,12 +69,12 @@ Notably covers, against the *real* database (not a mock):
   table); see the adapter's own moduledoc.
 - Two instances sharing one database never cross-contaminate seq or dedup.
 
-## `hook_rabbitmq` — `mix test`
+## `ankusa_rabbitmq` — `mix test`
 
 Same pattern — every test needs live RabbitMQ:
 
 ```sh
-cd hook_rabbitmq
+cd ankusa_rabbitmq
 docker compose up -d --wait   # RabbitMQ on :5673 (AMQP), :15673 (management UI)
 mix test                      # 4 tests
 docker compose down -v
@@ -100,7 +100,7 @@ docker compose down -v
 
 ## Writing a new adapter's tests
 
-Follow `hook_postgres`/`hook_rabbitmq`: a `docker-compose.yml` for the real
+Follow `ankusa_postgres`/`ankusa_rabbitmq`: a `docker-compose.yml` for the real
 dependency, `config/config.exs` setting `autostart: false`, and tests that
 hit the real thing. A mock proves your code calls a mock correctly; it
 proves nothing about whether a hand-rolled protocol implementation (SQL,

@@ -1,0 +1,25 @@
+name: ankusa_postgres
+
+# Local Postgres for developing/testing Ankusa.WAL.Postgres. Not the emulator
+# story (there's no emulator here — it's real Postgres) — just an isolated
+# dev instance on a non-default port so it won't collide with one you may
+# already be running.
+#
+#   docker compose up -d --wait
+#   mix test
+#   docker compose down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ankusa
+      POSTGRES_PASSWORD: ankusa
+      POSTGRES_DB: ankusa_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ankusa -d ankusa_dev"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

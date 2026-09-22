@@ -1,4 +1,4 @@
-# Hook — a loosely coupled, high-throughput webhook ingestion framework
+# Ankusa — a loosely coupled, high-throughput webhook ingestion framework
 
 Built on [Bandit](https://github.com/mtrudel/bandit) + Plug. Implements the plan in
 [`webhook-ingest-framework-plan.md`](webhook-ingest-framework-plan.md).
@@ -10,6 +10,24 @@ the response: the provider retries anyway, dedup absorbs it. Store slow or
 down: `503` with `Retry-After`, never ack what wasn't saved. See
 [`docs/architecture.md`](docs/architecture.md) for the full pipeline and why
 each guarantee holds.
+
+## The name
+
+**अंकुश (aṅkuśa)** — Sanskrit for "hook" or "goad": the curved tool a mahout
+uses to steer an elephant, applying precise pressure to direct enormous,
+forceful movement without fighting it head-on. The word's root (aṅka, "to
+bend/curve") carries the same idea — controlled redirection, not brute
+force.
+
+That's a literal description of what this framework does. Webhook traffic
+from a provider is exactly the elephant: large, forceful, arrives on its
+own schedule, and cannot be told to slow down or wait. An ankusa doesn't
+stop the elephant or fight its momentum — it's a small, precise point of
+contact that reliably steers it. Every design decision here follows that
+shape: absorb the traffic durably and fast (the WAL/batcher), then apply
+precise, deliberate control over where it goes next (routing, dedup,
+dispatch) — never brute-force buffering, never blocking the source, never
+losing control of something moving that fast.
 
 ```mermaid
 flowchart LR
@@ -37,16 +55,16 @@ including across separate BEAM nodes and separate adapter packages.
 ## Repo layout — a mono-repo of separate Mix projects
 
 ```
-.                    hook — core. mix.exs deps: {bandit, plug}. Zero adapter deps.
-hook_postgres/       shared, multi-node WAL (Postgres). Path-dep on hook + postgrex.
-hook_rabbitmq/       queue delivery (RabbitMQ exchange publish). Path-dep on hook + amqp.
+.                    ankusa — core. mix.exs deps: {bandit, plug}. Zero adapter deps.
+ankusa_postgres/       shared, multi-node WAL (Postgres). Path-dep on ankusa + postgrex.
+ankusa_rabbitmq/       queue delivery (RabbitMQ exchange publish). Path-dep on ankusa + amqp.
 examples/            deployable demos (Docker Compose, not published packages)
 docs/                everything below, in depth
 ```
 
 Each adapter package exists because it introduces an external dependency
-`hook` core shouldn't force on every user — a laptop user running `mix
-deps.get` on `hook` alone never fetches `postgrex` or `amqp`. Full rationale
+`ankusa` core shouldn't force on every user — a laptop user running `mix
+deps.get` on `ankusa` alone never fetches `postgrex` or `amqp`. Full rationale
 and the decision rule for adding a new one: [`docs/packaging.md`](docs/packaging.md).
 
 ## Quickstart
@@ -66,15 +84,15 @@ at it): [`docs/quickstart.md`](docs/quickstart.md).
 
 | Behaviour | Job | Default | Also shipped |
 | --- | --- | --- | --- |
-| `Hook.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/hooks/:source_id`) | `RouteResolver.TenantPath` (`/hooks/:tenant/:source`) |
-| `Hook.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | `WAL.Postgres` (shared, multi-node — `hook_postgres`) |
-| `Hook.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
-| `Hook.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
-| `Hook.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
-| `Hook.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `hook_rabbitmq`) |
-| `Hook.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
-| `Hook.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
-| `Hook.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | — |
+| `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/hooks/:source_id`) | `RouteResolver.TenantPath` (`/hooks/:tenant/:source`) |
+| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | `WAL.Postgres` (shared, multi-node — `ankusa_postgres`) |
+| `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
+| `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
+| `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq`) |
+| `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
+| `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
+| `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | — |
 
 Full option reference for every row: [`docs/configuration.md`](docs/configuration.md).
 
@@ -84,12 +102,12 @@ Full option reference for every row: [`docs/configuration.md`](docs/configuratio
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | Core invariant, request path, guarantees per component, instance model, **four deployment topology diagrams** (laptop → role-split host → multi-node Postgres fleet → RabbitMQ fan-out) |
 | [`docs/quickstart.md`](docs/quickstart.md) | Install, run, ingest, inspect, point a real provider at it |
-| [`docs/configuration.md`](docs/configuration.md) | Full `%Hook.Config{}` + `%Hook.Source{}` reference |
+| [`docs/configuration.md`](docs/configuration.md) | Full `%Ankusa.Config{}` + `%Ankusa.Source{}` reference |
 | [`docs/multi-tenancy.md`](docs/multi-tenancy.md) | Catch-URL routing, tenant scoping, writing your own `RouteResolver` |
 | [`docs/storage.md`](docs/storage.md) | WAL (`DiskLog`, `Postgres`), segment compaction, `BlobStore` (`LocalFS`, `S3`, `GCS`), replay by id |
 | [`docs/delivery.md`](docs/delivery.md) | Dispatch, `Sink` (`Log`, `Http`, `RabbitMQ`), retry/backoff, DLQ + replay, quarantine |
 | [`docs/packaging.md`](docs/packaging.md) | Why adapters live in separate packages, the split rule, adding your own |
-| [`docs/deployment.md`](docs/deployment.md) | Roles/`HOOK_ROLES`, Docker, scaling the fleet |
+| [`docs/deployment.md`](docs/deployment.md) | Roles/`ANKUSA_ROLES`, Docker, scaling the fleet |
 | [`docs/testing.md`](docs/testing.md) | Test suites across all three packages, integration tags, dev infra |
 
 ## Test
@@ -102,7 +120,7 @@ mix test --include integration    # +8, needs floci (S3/GCS emulators) running
 Covers group commit, dedup (tenant-scoped), crash-replay, dispatch retry +
 DLQ, compaction round-trip, and a **loss checker** that acks 500 hooks
 concurrently, hard-kills the instance, and proves every acked id survives
-replay. `hook_postgres` (10 tests) and `hook_rabbitmq` (4 tests) each need
+replay. `ankusa_postgres` (10 tests) and `ankusa_rabbitmq` (4 tests) each need
 their own live infra — see [`docs/testing.md`](docs/testing.md).
 
 ## Examples
@@ -116,7 +134,7 @@ that owns its own queue/binding, fetches, and prints. `docker compose up
 ## Not yet implemented (deferred adapters from the plan)
 
 Kafka/Ra WAL adapters, zstd codec, Broadway-backed dispatch, LiveView
-dashboard, `mix hook.new` generator, `SourceStore.Ecto` + a catch-URL
+dashboard, `mix ankusa.new` generator, `SourceStore.Ecto` + a catch-URL
 control-plane API, and per-source envelope encryption. Each is an adapter
 behind an existing behaviour — the ingest guarantees above do not change when
 they land.

@@ -5,7 +5,7 @@ depends on. The object store is the cheap, large, long-term tier — segments
 roll off the WAL asynchronously, never blocking an ack. See
 [`architecture.md`](architecture.md) for how this fits the request path.
 
-## `Hook.WAL`
+## `Ankusa.WAL`
 
 ```elixir
 @callback append(server(), [entry()]) :: {:ok, [result()]}
@@ -49,23 +49,23 @@ Zero external dependencies.
   fleet case.
 
 ```elixir
-config :hook, wal: {Hook.WAL.DiskLog, []}   # the default; no opts
+config :ankusa, wal: {Ankusa.WAL.DiskLog, []}   # the default; no opts
 ```
 
 ### Shared Postgres WAL
 
 `WAL.Postgres` — the multi-node case.
 
-Ships as the separate `hook_postgres` package (see
+Ships as the separate `ankusa_postgres` package (see
 [`packaging.md`](packaging.md) for why). This is what a *fleet* of ingest
 servers coordinates through — every node runs its own local `Postgrex` pool
 against the same database; nodes never talk to each other directly.
 
 ```elixir
-config :hook,
-  wal: {Hook.WAL.Postgres,
+config :ankusa,
+  wal: {Ankusa.WAL.Postgres,
         hostname: "localhost", port: 5432,
-        username: "hook", password: "hook", database: "hook_prod",
+        username: "ankusa", password: "ankusa", database: "ankusa_prod",
         pool_size: 10}
 ```
 
@@ -74,16 +74,16 @@ config :hook,
 per batch):
 
 1. **Claim dedup keys** — one `INSERT ... ON CONFLICT DO NOTHING` against a
-   permanent `hook_wal_dedup` ledger table, batched via `unnest/1`. Postgres
+   permanent `ankusa_wal_dedup` ledger table, batched via `unnest/1`. Postgres
    takes a row lock on the conflicting index entry and blocks until the
    other writer's transaction resolves, so two nodes racing the same dedup
    key never double-claim it.
 2. **Insert winners** — rows that had no dedup key, or won their claim, go
-   into `hook_wal` (`RETURNING event_id, seq`). A losing row is never
+   into `ankusa_wal` (`RETURNING event_id, seq`). A losing row is never
    written here at all.
-3. **Resolve losers' seq** — one lookup against `hook_wal_dedup`, which
+3. **Resolve losers' seq** — one lookup against `ankusa_wal_dedup`, which
    carries its own `seq` column (backfilled right after step 2) rather than
-   joining back to `hook_wal`. That's deliberate: `hook_wal` rows get
+   joining back to `ankusa_wal`. That's deliberate: `ankusa_wal` rows get
    deleted by `truncate_through/2` once compacted, and a lookup that
    depended on the data row still existing would stop catching duplicates
    of an already-truncated event. The dedup ledger is **never** truncated —
@@ -95,17 +95,17 @@ regardless of dedup key), never by array/result position — Postgres doesn't
 guarantee `RETURNING` order for a multi-row statement.
 
 Every table carries an `instance` column, so one Postgres database can back
-multiple `Hook.Instance`s — including the *same* instance name running on
+multiple `Ankusa.Instance`s — including the *same* instance name running on
 many independent BEAM nodes, which is the actual point: `seq` may have
 small gaps (a deduped row still consumes a sequence value) and is **not**
 reset per instance, but it's still strictly increasing and safe as a
 cursor.
 
-Local dev/test: `cd hook_postgres && docker compose up -d --wait && mix test`
+Local dev/test: `cd ankusa_postgres && docker compose up -d --wait && mix test`
 (10 tests, including concurrent-writer dedup races — N tasks racing the same
 key, exactly one commits — and a truncation-survives-dedup regression).
 
-## `Hook.BlobStore`
+## `Ankusa.BlobStore`
 
 ```elixir
 @callback put(instance, key :: String.t(), data :: iodata(), opts :: keyword()) :: :ok | {:error, term()}
@@ -127,20 +127,20 @@ one record's bytes back out.
 
 ```elixir
 # S3 / MinIO / R2
-config :hook,
+config :ankusa,
   storage: %{
     blob_store:
-      {Hook.BlobStore.S3,
-       bucket: "hook-segments", region: "us-east-1",
+      {Ankusa.BlobStore.S3,
+       bucket: "ankusa-segments", region: "us-east-1",
        access_key_id: System.get_env("AWS_ACCESS_KEY_ID"),
        secret_access_key: System.get_env("AWS_SECRET_ACCESS_KEY")}
        # endpoint: "http://localhost:4566"  # only for MinIO/R2/floci; omit for real AWS
   }
 
 # GCS
-config :hook,
+config :ankusa,
   storage: %{
-    blob_store: {Hook.BlobStore.GCS, bucket: "hook-segments", token_provider: {MyApp.Auth, :gcs_token, []}}
+    blob_store: {Ankusa.BlobStore.GCS, bucket: "ankusa-segments", token_provider: {MyApp.Auth, :gcs_token, []}}
   }
 ```
 
@@ -152,7 +152,7 @@ mix test --include integration
 docker compose down -v
 ```
 
-## `Hook.Codec` and segment format
+## `Ankusa.Codec` and segment format
 
 ```elixir
 @callback encode([%{key: String.t(), payload: binary()}]) :: {segment :: binary(), index :: [index_entry]}
@@ -162,9 +162,9 @@ docker compose down -v
 `Codec.Raw` (the only shipped codec) frames each record length-prefixed with
 a per-record CRC32; `encode/1` packs many into one segment binary and
 returns the byte offset + length of each, which is exactly what
-`Hook.BlobStore.get_range/5` needs.
+`Ankusa.BlobStore.get_range/5` needs.
 
-## `Hook.Storage.Compactor` — how segments get written
+## `Ankusa.Storage.Compactor` — how segments get written
 
 One tick (default every `storage.interval_ms`, 1s):
 
@@ -172,7 +172,7 @@ One tick (default every `storage.interval_ms`, 1s):
 2. Encode them all into one segment via the configured `Codec`.
 3. `PUT` the segment to the blob store under a deterministic key:
    `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
-4. Append one index row per record to `Hook.Storage.Index` (durable,
+4. Append one index row per record to `Ankusa.Storage.Index` (durable,
    append-only, on local disk regardless of which `BlobStore` is
    configured) — `event_id`, `tenant_id`, `source_id`, `seq`,
    `segment_key`, `offset`, `length`.
@@ -187,12 +187,12 @@ bills a minimum object size) stays cheap at scale.
 
 ## Replay by id
 
-`Hook.Storage.fetch/2` looks an event id up through the index, range-reads
+`Ankusa.Storage.fetch/2` looks an event id up through the index, range-reads
 exactly its frame from the blob store, and decodes it back into the
-original `%Hook.Envelope{}` — the read-side counterpart to compaction,
+original `%Ankusa.Envelope{}` — the read-side counterpart to compaction,
 usable for building a replay/audit API or a dashboard without touching the
 WAL.
 
 ```elixir
-{:ok, envelope} = Hook.Storage.fetch(:default, event_id)
+{:ok, envelope} = Ankusa.Storage.fetch(:default, event_id)
 ```

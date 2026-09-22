@@ -1,4 +1,4 @@
-name: hook-rabbitmq-example
+name: ankusa-rabbitmq-example
 
 # Full deployed topology: N ingest servers (here, one) writing fat payloads
 # to S3 and publishing small messages to a RabbitMQ exchange, with a
@@ -37,13 +37,13 @@ services:
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL: http://floci:4566
-      HOOK_S3_BUCKET: hook-example
+      ANKUSA_S3_BUCKET: ankusa-example
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         until aws s3 ls >/dev/null 2>&1; do echo "waiting for floci..."; sleep 1; done
-        aws s3 mb "s3://$$HOOK_S3_BUCKET" || true
-        echo "s3 bucket $$HOOK_S3_BUCKET ready"
+        aws s3 mb "s3://$$ANKUSA_S3_BUCKET" || true
+        echo "s3 bucket $$ANKUSA_S3_BUCKET ready"
 
   # N ingest servers. `docker compose up --scale ingest=3` runs three of
   # them; they share nothing but the exchange and the bucket — no code
@@ -64,8 +64,8 @@ services:
     environment:
       PORT: "4000"
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      RABBITMQ_EXCHANGE: hook.events
-      S3_BUCKET: hook-example
+      RABBITMQ_EXCHANGE: ankusa.events
+      S3_BUCKET: ankusa-example
       S3_REGION: us-east-1
       S3_ENDPOINT: http://floci:4566
       S3_ACCESS_KEY_ID: test
@@ -83,10 +83,10 @@ services:
         condition: service_healthy
     environment:
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
-      RABBITMQ_EXCHANGE: hook.events
-      ROUTING_PATTERN: "hook.#"
-      QUEUE_NAME: hook-example-worker
-      S3_BUCKET: hook-example
+      RABBITMQ_EXCHANGE: ankusa.events
+      ROUTING_PATTERN: "ankusa.#"
+      QUEUE_NAME: ankusa-example-worker
+      S3_BUCKET: ankusa-example
       S3_REGION: us-east-1
       S3_ENDPOINT: http://floci:4566
       S3_ACCESS_KEY_ID: test

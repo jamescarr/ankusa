@@ -5,7 +5,7 @@ for the four shapes this section explains how to actually run.
 
 ## Roles and topologies
 
-`Hook.Instance.init/1` starts children conditionally on `config.roles`:
+`Ankusa.Instance.init/1` starts children conditionally on `config.roles`:
 
 ```elixir
 defp edge_children(config, opts), do: if Config.role?(config, :edge), do: [...], else: []
@@ -18,11 +18,11 @@ all-in-one on a laptop or as split fleets, because *which* children start is
 a runtime config decision, never a build-time one.
 
 ```sh
-HOOK_ROLES=edge,dispatch mix run --no-halt    # this node: edge + dispatch, no compactor
-HOOK_ROLES=storage mix run --no-halt          # this node: compactor only
+ANKUSA_ROLES=edge,dispatch mix run --no-halt    # this node: edge + dispatch, no compactor
+ANKUSA_ROLES=storage mix run --no-halt          # this node: compactor only
 ```
 
-`Hook.Application` reads `HOOK_ROLES` (comma-separated) and `PORT` on top of
+`Ankusa.Application` reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of
 whatever `config.exs` sets — see
 [`configuration.md#runtime-environment-overrides`](configuration.md#runtime-environment-overrides).
 
@@ -50,14 +50,14 @@ shows the pattern rather than prescribing one image for every use case:
 
 Either way, a deployable wrapper app (like
 [`ingest_app/`](../examples/rabbitmq-consumer/ingest_app)) is the intended
-pattern: a tiny Mix project that depends on `hook` (+ whichever adapter
-packages it needs), reads its own env vars, and calls `Hook.Config.new/1` +
-`Hook.Instance.start_link/1` directly. `hook` core stays a library; the
+pattern: a tiny Mix project that depends on `ankusa` (+ whichever adapter
+packages it needs), reads its own env vars, and calls `Ankusa.Config.new/1` +
+`Ankusa.Instance.start_link/1` directly. `ankusa` core stays a library; the
 wrapper is where "how do I actually deploy this" config lives.
 
 ### Mono-repo Docker builds (path deps)
 
-Because `hook_postgres`/`hook_rabbitmq` are path-dependencies during local
+Because `ankusa_postgres`/`ankusa_rabbitmq` are path-dependencies during local
 development, a Dockerfile building an app that depends on them needs a
 build **context** wide enough to see the whole slice, with the relative
 paths preserved so the same `mix.exs` files resolve identically inside the
@@ -66,10 +66,10 @@ container as they do on disk:
 ```dockerfile
 # examples/rabbitmq-consumer/ingest_app/Dockerfile
 WORKDIR /repo
-COPY mix.exs mix.lock ./          # hook core
+COPY mix.exs mix.lock ./          # ankusa core
 COPY lib ./lib
 COPY config ./config
-COPY hook_rabbitmq ./hook_rabbitmq
+COPY ankusa_rabbitmq ./ankusa_rabbitmq
 COPY examples/rabbitmq-consumer/ingest_app ./examples/rabbitmq-consumer/ingest_app
 WORKDIR /repo/examples/rabbitmq-consumer/ingest_app
 RUN mix deps.get && mix compile
@@ -93,12 +93,12 @@ docker compose up --build --scale ingest=3
 Three independent ingest containers, each with its own local WAL (if using
 `DiskLog`) or sharing one Postgres WAL (if configured with `WAL.Postgres`),
 all publishing to the same RabbitMQ exchange and writing to the same
-bucket. Nothing about `Hook.Sink.RabbitMQ` or `Hook.BlobStore.S3` changes —
+bucket. Nothing about `Ankusa.Sink.RabbitMQ` or `Ankusa.BlobStore.S3` changes —
 this is the "durable state, not RPC" rule holding at the fleet level exactly
 like it holds between the edge/dispatch/storage roles inside one instance.
 You'd need a load balancer in front of the ingest port at that point; that's
 a deployment concern the framework doesn't solve for you (nothing in
-`hook`'s job description is "be a load balancer").
+`ankusa`'s job description is "be a load balancer").
 
 ## The worked example
 
