@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  OTP_VERSION: "29.0"
+  ELIXIR_VERSION: "1.20.4"
+
+jobs:
+  ankusa:
+    name: ankusa (core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix test
+
+  ankusa_postgres:
+    name: ankusa_postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ankusa
+          POSTGRES_PASSWORD: ankusa
+          POSTGRES_DB: ankusa_dev
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ankusa -d ankusa_dev"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_postgres
+        run: mix deps.get
+      - working-directory: ankusa_postgres
+        run: mix format --check-formatted
+      - working-directory: ankusa_postgres
+        run: mix compile --warnings-as-errors
+      - working-directory: ankusa_postgres
+        run: mix test
+
+  ankusa_rabbitmq:
+    name: ankusa_rabbitmq
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        ports: ["5673:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_rabbitmq
+        run: mix deps.get
+      - working-directory: ankusa_rabbitmq
+        run: mix format --check-formatted
+      - working-directory: ankusa_rabbitmq
+        run: mix compile --warnings-as-errors
+      - working-directory: ankusa_rabbitmq
+        run: mix test

@@ -12,7 +12,7 @@ quickstart. These pages go deeper, one concern at a time.
 | [`storage.md`](storage.md) | WAL (`DiskLog`, `Postgres`), segment compaction, `BlobStore` (`LocalFS`, `S3`, `GCS`), replay by id |
 | [`delivery.md`](delivery.md) | Dispatch pipeline, `Sink` (`Log`, `Http`, `RabbitMQ`), retry/backoff, DLQ + replay, quarantine |
 | [`packaging.md`](packaging.md) | Mono-repo layout, why adapters live in separate packages, the rule for when to split, how to add one |
-| [`deployment.md`](deployment.md) | Roles and topologies, Docker, scaling an ingest fleet, the worked example |
+| [`deployment.md`](deployment.md) | Roles and topologies, Docker, scaling an ingest fleet, releasing to Hex, the worked example |
 | [`testing.md`](testing.md) | How the test suites are organized across packages, integration tags, local dev infra |
 
 ## Reading order

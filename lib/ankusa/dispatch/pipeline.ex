@@ -95,7 +95,12 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp deliver_with_retry(env, {mod, opts} = sink, state, attempt) do
-    ctx = %{instance: state.instance, source_id: env.source_id, tenant_id: env.tenant_id, attempt: attempt}
+    ctx = %{
+      instance: state.instance,
+      source_id: env.source_id,
+      tenant_id: env.tenant_id,
+      attempt: attempt
+    }
 
     case mod.deliver(env, ctx, opts) do
       :ok ->

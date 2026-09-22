@@ -46,7 +46,10 @@ defmodule Ankusa.EdgeTest do
 
   test "idempotent: a repeated dedup key returns 200 duplicate and is stored once" do
     sources = %{
-      "stripe" => [verifier: {Ankusa.Verifier.None, []}, dedup: {Ankusa.DedupKey.Rules, json: ["id"]}]
+      "stripe" => [
+        verifier: {Ankusa.Verifier.None, []},
+        dedup: {Ankusa.DedupKey.Rules, json: ["id"]}
+      ]
     }
 
     config = start_edge(sources)

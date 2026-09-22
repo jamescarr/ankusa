@@ -100,7 +100,10 @@ defmodule Ankusa.BlobStore.GCS do
   defp query_string([]), do: ""
 
   defp query_string(query) do
-    "?" <> Enum.map_join(query, "&", fn {k, v} -> "#{URI.encode_www_form(k)}=#{URI.encode_www_form(v)}" end)
+    "?" <>
+      Enum.map_join(query, "&", fn {k, v} ->
+        "#{URI.encode_www_form(k)}=#{URI.encode_www_form(v)}"
+      end)
   end
 
   defp request(opts, method, url, body, headers, content_type) do

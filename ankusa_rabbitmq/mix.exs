@@ -11,7 +11,9 @@ defmodule AnkusaRabbitmq.MixProject do
       version: "0.1.0",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      description: "Ankusa.Sink adapter publishing delivered hooks to a RabbitMQ exchange.",
+      package: [licenses: ["Apache-2.0"]]
     ]
   end
 
@@ -24,8 +26,18 @@ defmodule AnkusaRabbitmq.MixProject do
 
   defp deps do
     [
-      {:ankusa, path: ".."},
+      ankusa_dep(),
       {:amqp, "~> 4.0"}
     ]
+  end
+
+  # See ankusa_postgres/mix.exs for why this exists and why it must be a
+  # single conditional entry rather than duplicate entries with :only.
+  defp ankusa_dep do
+    if Mix.env() in [:dev, :test] do
+      {:ankusa, path: ".."}
+    else
+      {:ankusa, "~> 0.1"}
+    end
   end
 end

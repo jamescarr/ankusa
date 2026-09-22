@@ -93,7 +93,9 @@ defmodule Ankusa.Sink.RabbitMQTest do
     body = :crypto.strong_rand_bytes(20_000)
     env = envelope(%{body: body, size: byte_size(body), content_type: "application/octet-stream"})
 
-    blob_dir = Path.join(System.tmp_dir!(), "ankusa_rmq_blob_#{System.unique_integer([:positive])}")
+    blob_dir =
+      Path.join(System.tmp_dir!(), "ankusa_rmq_blob_#{System.unique_integer([:positive])}")
+
     on_exit(fn -> File.rm_rf(blob_dir) end)
     Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: blob_dir))
 
@@ -122,7 +124,13 @@ defmodule Ankusa.Sink.RabbitMQTest do
   } do
     env = envelope()
 
-    assert :ok = RabbitMQ.deliver(env, ctx(inst), exchange: exch, url: @amqp_url, routing_key: "custom.key")
+    assert :ok =
+             RabbitMQ.deliver(env, ctx(inst),
+               exchange: exch,
+               url: @amqp_url,
+               routing_key: "custom.key"
+             )
+
     {_payload, meta} = get_message(chan, queue)
     assert meta.routing_key == "custom.key"
 

@@ -37,7 +37,8 @@ defmodule Ankusa.Application do
       port: port(),
       data_dir: Application.get_env(:ankusa, :data_dir, "./data"),
       roles: roles(),
-      source_store: {Ankusa.SourceStore.Static, sources: Application.get_env(:ankusa, :sources, %{})}
+      source_store:
+        {Ankusa.SourceStore.Static, sources: Application.get_env(:ankusa, :sources, %{})}
     )
   end
 

@@ -40,7 +40,9 @@ defmodule Ankusa.Edge.Batcher do
   `503` — again, nothing was acked.
   """
   @spec commit(atom(), non_neg_integer(), WAL.entry(), timeout()) ::
-          {:committed, Ankusa.Envelope.t()} | {:duplicate, non_neg_integer()} | {:error, :overload}
+          {:committed, Ankusa.Envelope.t()}
+          | {:duplicate, non_neg_integer()}
+          | {:error, :overload}
   def commit(instance, partition, record, timeout \\ 15_000) do
     GenServer.call(Ankusa.via(instance, {:batcher, partition}), {:enqueue, record}, timeout)
   end

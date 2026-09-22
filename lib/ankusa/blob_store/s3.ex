@@ -90,7 +90,10 @@ defmodule Ankusa.BlobStore.S3 do
   defp sign_and_send(opts, method, endpoint, path, query, body, extra_headers) do
     region = Keyword.fetch!(opts, :region)
     access_key = Keyword.get(opts, :access_key_id) || System.fetch_env!("AWS_ACCESS_KEY_ID")
-    secret_key = Keyword.get(opts, :secret_access_key) || System.fetch_env!("AWS_SECRET_ACCESS_KEY")
+
+    secret_key =
+      Keyword.get(opts, :secret_access_key) || System.fetch_env!("AWS_SECRET_ACCESS_KEY")
+
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
 
     uri = URI.parse(endpoint)
