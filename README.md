@@ -1,15 +1,13 @@
 # Ankusa — a loosely coupled, high-throughput webhook ingestion framework
 
-Built on [Bandit](https://github.com/mtrudel/bandit) + Plug. Implements the plan in
-[`webhook-ingest-framework-plan.md`](https://github.com/jamescarr/ankusa/blob/main/plans/webhook-ingest-framework-plan.md).
+![./static/ankusa.png]
 
-**Never return `2xx` until the hook is durably stored.** The edge acks only
-after the group-commit batcher's WAL commit (one `fsync`) returns. Crash
-before commit: no `2xx`, the provider retries. Crash after commit, before
-the response: the provider retries anyway, dedup absorbs it. Store slow or
-down: `503` with `Retry-After`, never ack what wasn't saved. See
-[`docs/architecture.md`](docs/architecture.md) for the full pipeline and why
-each guarantee holds.
+_Don't fight the traffic. Steer it. Durable webhook ingestion for any volume._
+
+Catching webhooks sounds easy. Doing it without losing one is not.
+Ack before you save and a crash drops the event. Ack after and you face
+timeouts, retries, and duplicates. Add signatures, dedup, backpressure,
+and replay, and a simple endpoint becomes a distributed systems problem.
 
 ## The name
 
