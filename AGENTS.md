@@ -47,3 +47,16 @@ Two rules that follow from all of the above:
 - **Never mark a task done while its own acceptance criteria fail** — a
   step that crashed, or a drill that was never run, is not done. Say what
   failed and what's still open.
+
+## Dependencies
+
+**Take the dependency when it is the right tool.** Judge it on merit: is the
+library more correct, better tested, and less surface for us to own and be wrong
+about than the code it replaces? Then use it. "Zero dependencies" is not a goal,
+and refusing a good library to keep a count at zero is not a principle — it is
+how you end up maintaining hand-rolled SigV4 signing.
+
+The rule that *does* hold is about placement: a dependency only some deployments
+need goes in its own adapter package, so nobody else's `mix deps.get` compiles
+it. A dependency every user benefits from belongs in `ankusa` core. Full decision
+rule, and the worked examples: [`docs/packaging.md`](docs/packaging.md).

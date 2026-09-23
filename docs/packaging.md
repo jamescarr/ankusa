@@ -2,10 +2,24 @@
 
 ## The decision rule
 
+Two questions, deliberately kept separate:
+
+**1. Should we depend on this at all?** Judge it on merit: does the library do
+the job better than the code we would otherwise own — more correct, better
+tested, less surface for us to maintain and be wrong about? Then take it. *Zero
+dependencies is not a goal here*; the goal is the least code we have to be right
+about, and a well-maintained library replacing a hand-rolled protocol
+implementation is usually the cheaper side of that trade.
+
+**2. Where should it live?** That is the packaging question:
+
 > **Split a package when, and only when, an adapter introduces an external
 > dependency the default deployment shouldn't compile. Everything else
 > stays in core. Role separation (edge/dispatch/storage) is runtime config,
 > not packaging.**
+
+A dependency every user benefits from belongs in `ankusa` core — no split, no
+ceremony. A dependency only one adapter needs belongs in that adapter's package.
 
 This isn't a stylistic preference — it's the direct consequence of the
 project being library-first (embeds in an existing Phoenix/Bandit app) as
@@ -18,7 +32,8 @@ configured.
 ## Layout
 
 ```
-bandit_example/            ankusa — core. mix.exs deps: {bandit, plug}. Zero adapter deps.
+bandit_example/            ankusa — core. mix.exs deps: {bandit, plug, req,
+                              aws_signature}. No adapter deps.
   lib/ankusa/…                behaviours, envelope, config, registry, telemetry,
                               edge/dispatch/storage machinery, and every
                               zero-external-dep default adapter
@@ -45,11 +60,33 @@ transitive OTP application dependency.
 
 ## Why S3/GCS stayed in-tree but Postgres/RabbitMQ/Kafka didn't
 
-`Ankusa.BlobStore.S3` and `Ankusa.BlobStore.GCS` needed real signing (AWS SigV4)
-and a real HTTP client — but stdlib already provides both (`:crypto` for
-HMAC, `:httpc`/`:inets` for HTTP, `:xmerl` for the one bit of XML parsing
-S3's `ListObjectsV2` needs). Zero *external* dependency, so they stayed in
-`ankusa` core alongside `BlobStore.LocalFS`.
+This is a dependency-weight split, not a position on hand-rolling.
+
+`Ankusa.BlobStore.S3` and `Ankusa.BlobStore.GCS` are in core rather than in
+their own packages because their dependencies are small and focused:
+`aws_signature` (signing only) and `Req` (HTTP, with its own Finch pool).
+Neither drags a credential stack or a framework along, so a `LocalFS` user's
+`deps.get` stays cheap. GCS bundles nothing credential-shaped at all — it takes
+a `:token_provider` callback and leaves token acquisition (Goth, ADC) to the
+deployment.
+
+### Resolved: the hand-rolled SigV4 signing is gone
+
+`Ankusa.BlobStore.S3` used to hand-roll canonical-request / string-to-sign /
+HMAC-chain code — ~80 lines, security-sensitive, and covered only by
+`:integration`-tagged tests. That is precisely the profile where a focused
+library wins, so it now calls `aws_signature` (the implementation behind the
+official aws-elixir SDK) through the same `Req` client the other adapters use.
+Core shrank by ~50 lines, and the part we would most regret getting subtly wrong
+is no longer ours to get wrong.
+
+Worth knowing when reading the tests: `floci` does **not** validate SigV4 — a
+bogus signature, no signature at all, and a wrong-secret signature all return
+`200` — so the integration suite could never have caught a signing bug.
+`test/ankusa/blob_store_s3_signing_test.exs` does, from both ends: it
+reproduces AWS's published reference signatures, and it reconstructs the
+adapter's own signing call from a captured request to pin S3's "sign the path as
+sent" rule.
 
 `Ankusa.WAL.Postgres` needs `postgrex` (which pulls `db_connection`,
 `decimal`). `Ankusa.Sink.RabbitMQ` needs `amqp` (which pulls `amqp_client`,
@@ -77,11 +114,13 @@ release, many roles, config decides what boots. See
 
 ## Adding a new adapter package
 
-1. Confirm it actually needs an external dependency `ankusa` core shouldn't
-   carry. If it doesn't (stdlib covers it), it belongs in `ankusa` core next
-   to the existing zero-dep adapters — see `Ankusa.BlobStore.S3` for the
-   pattern (hand-roll what stdlib can do rather than pull a dependency for
-   convenience).
+1. Decide whether it needs a dependency at all, on merit (question 1 above). If a
+   library is the right tool, take it — then put the adapter in its own package
+   so deployments that don't configure it never compile it. If no dependency is
+   warranted, the adapter belongs in `ankusa` core next to the dependency-free
+   ones (`BlobStore.LocalFS`, `WAL.DiskLog`, `Codec.Raw`, the verifiers) — not
+   because hand-rolling is preferred, but because a dependency that buys nothing
+   is a liability.
 2. Scaffold a sibling directory: `mix.exs` with `{:ankusa, path: ".."}` plus
    the real dependency; `config/config.exs` with `config :ankusa, autostart:
    false`; a `docker-compose.yml` if the adapter needs live infra to test

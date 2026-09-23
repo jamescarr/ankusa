@@ -119,7 +119,7 @@ the map.
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
 | `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
-| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce — `ankusa_kafka` package) |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce — `ankusa_kafka` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
 | `Ankusa.ClaimCheck` | Check bytes in, redeem by ticket | `ClaimCheck.Direct` (in-process `BlobStore`) | `ClaimCheck.Remote` (HTTP, `:claim_check` role) |
