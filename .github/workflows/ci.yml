@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 env:
   OTP_VERSION: "29.0"
@@ -27,6 +28,8 @@ jobs:
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
       - run: mix test
+      - run: mix docs --warnings-as-errors
+      - run: mix hex.build
 
   ankusa_postgres:
     name: ankusa_postgres
@@ -60,6 +63,8 @@ jobs:
         run: mix compile --warnings-as-errors
       - working-directory: ankusa_postgres
         run: mix test
+      - working-directory: ankusa_postgres
+        run: mix docs --warnings-as-errors
 
   ankusa_rabbitmq:
     name: ankusa_rabbitmq
@@ -89,6 +94,8 @@ jobs:
         run: mix compile --warnings-as-errors
       - working-directory: ankusa_rabbitmq
         run: mix test
+      - working-directory: ankusa_rabbitmq
+        run: mix docs --warnings-as-errors
 
   ankusa_kafka:
     name: ankusa_kafka
@@ -117,6 +124,8 @@ jobs:
         run: mix compile --warnings-as-errors
       - working-directory: ankusa_kafka
         run: KAFKA_BROKERS=localhost:19092 mix test
+      - working-directory: ankusa_kafka
+        run: mix docs --warnings-as-errors
       - if: always()
         working-directory: ankusa_kafka
         run: docker compose down -v
@@ -151,3 +160,35 @@ jobs:
         run: npm ci
       - working-directory: examples/${{ matrix.example }}/worker
         run: npx tsc --noEmit
+
+  # examples/oban-consumer's Elixir projects: no external services needed to
+  # compile (the e2e proof against a real kind cluster is a separate local
+  # gate — see AGENTS.md and examples/oban-consumer/run.sh).
+  oban-example:
+    name: oban-example
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - examples/oban-consumer/ingest_app
+          - examples/oban-consumer/consumer_app
+          - tools/loadgen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ${{ matrix.project }}
+        run: mix deps.get --check-locked
+      - working-directory: ${{ matrix.project }}
+        run: mix deps.unlock --check-unused
+      - working-directory: ${{ matrix.project }}
+        run: mix format --check-formatted
+      - if: matrix.project != 'tools/loadgen'
+        working-directory: ${{ matrix.project }}
+        run: MIX_ENV=prod mix compile --warnings-as-errors
+      - if: matrix.project == 'tools/loadgen'
+        working-directory: ${{ matrix.project }}
+        run: mix compile --warnings-as-errors

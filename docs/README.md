@@ -11,6 +11,7 @@ quickstart. These pages go deeper, one concern at a time.
 | [`multi-tenancy.md`](multi-tenancy.md) | Catch-URL routing (`Ankusa.RouteResolver`), tenant scoping, building your own catch-URL scheme |
 | [`storage.md`](storage.md) | WAL (`DiskLog`, `Postgres`), segment compaction, `BlobStore` (`LocalFS`, `S3`, `GCS`), replay by id |
 | [`delivery.md`](delivery.md) | Dispatch pipeline, `Sink` (`Log`, `Http`, `RabbitMQ`), retry/backoff, DLQ + replay, quarantine |
+| [`integrations.md`](integrations.md) | Using Ankusa with a job framework (Oban, Celery) without coupling to one |
 | [`packaging.md`](packaging.md) | Mono-repo layout, why adapters live in separate packages, the rule for when to split, how to add one |
 | [`deployment.md`](deployment.md) | Roles and topologies, Docker, scaling an ingest fleet, releasing to Hex, the worked example |
 | [`testing.md`](testing.md) | How the test suites are organized across packages, integration tags, local dev infra |

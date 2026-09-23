@@ -62,6 +62,7 @@ defmodule Ankusa.Sink.HttpTest do
     assert h["x-ankusa-id"] == env.id
     assert h["x-ankusa-source"] == "stripe"
     assert h["x-ankusa-seq"] == "42"
+    assert h["x-ankusa-tenant"] == "acme"
     assert h["content-type"] == "application/json"
   end
 

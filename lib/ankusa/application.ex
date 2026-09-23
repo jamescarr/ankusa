@@ -14,10 +14,12 @@ defmodule Ankusa.Application do
     Supervisor.start_link(children, opts)
   end
 
-  # The default instance boots from application env unless `autostart` is false
-  # (tests start their own isolated instances).
+  # The default instance boots from application env only if `autostart` is
+  # explicitly enabled (opt-in — a library must not bind a port just because
+  # it's a dependency). The repo's own `config/config.exs` turns it on
+  # outside `:test`.
   defp default_instance do
-    if Application.get_env(:ankusa, :autostart, true) do
+    if Application.get_env(:ankusa, :autostart, false) do
       config = build_config()
 
       Logger.info(
@@ -55,7 +57,7 @@ defmodule Ankusa.Application do
         Application.get_env(:ankusa, :roles, [:edge, :dispatch, :storage])
 
       value ->
-        value |> String.split(",", trim: true) |> Enum.map(&String.to_atom(String.trim(&1)))
+        Ankusa.Config.parse_roles!(value)
     end
   end
 end

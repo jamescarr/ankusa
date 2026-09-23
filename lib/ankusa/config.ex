@@ -53,6 +53,40 @@ defmodule Ankusa.Config do
 
   @type t :: %__MODULE__{}
 
+  @roles [:edge, :dispatch, :storage, :claim_check]
+
+  @role_names %{
+    "edge" => :edge,
+    "dispatch" => :dispatch,
+    "storage" => :storage,
+    "claim_check" => :claim_check
+  }
+
+  @doc """
+  Parse a comma-separated `ANKUSA_ROLES`-shaped string into role atoms.
+  Never calls `String.to_atom/1` — each part must name one of the fixed
+  roles (`edge`, `dispatch`, `storage`, `claim_check`).
+  """
+  @spec parse_roles!(String.t()) :: [atom()]
+  def parse_roles!(value) do
+    roles =
+      value
+      |> String.split(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(fn name ->
+        Map.get(@role_names, name) ||
+          raise ArgumentError,
+                "unknown Ankusa role #{inspect(name)}; expected one of: edge, dispatch, storage, claim_check"
+      end)
+
+    if roles == [] do
+      raise ArgumentError, "ANKUSA_ROLES must name at least one role"
+    end
+
+    roles
+  end
+
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`) over the
@@ -64,8 +98,17 @@ defmodule Ankusa.Config do
 
     Enum.reduce(opts, base, fn {k, v}, acc ->
       cond do
-        k in [:batcher, :dispatch, :storage, :claim_check] and is_map(v) ->
-          Map.put(acc, k, Map.merge(Map.get(acc, k), Map.new(v)))
+        k == :roles ->
+          bad = Enum.reject(v, &(&1 in @roles))
+
+          if bad != [] do
+            raise ArgumentError, "unknown Ankusa role(s) #{inspect(bad)} in :roles"
+          end
+
+          Map.put(acc, k, v)
+
+        k in [:batcher, :dispatch, :storage, :claim_check] ->
+          put_section(acc, k, v)
 
         Map.has_key?(base, k) ->
           Map.put(acc, k, v)
@@ -74,6 +117,26 @@ defmodule Ankusa.Config do
           raise ArgumentError, "unknown Ankusa.Config key: #{inspect(k)}"
       end
     end)
+  end
+
+  defp put_section(acc, k, v) do
+    cond do
+      is_map(v) -> merge_section(acc, k, Map.new(v))
+      Keyword.keyword?(v) -> merge_section(acc, k, Map.new(v))
+      true -> raise ArgumentError, "Ankusa.Config #{k} must be a map or keyword list"
+    end
+  end
+
+  defp merge_section(acc, k, v) do
+    defaults = Map.get(acc, k)
+
+    Enum.each(Map.keys(v), fn nk ->
+      unless Map.has_key?(defaults, nk) do
+        raise ArgumentError, "unknown Ankusa.Config key: #{k}.#{nk}"
+      end
+    end)
+
+    Map.put(acc, k, Map.merge(defaults, v))
   end
 
   @doc "Absolute path for an instance-scoped data sub-directory."

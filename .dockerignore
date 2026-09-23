@@ -1,5 +1,5 @@
-_build/
-deps/
+**/_build
+**/deps
 cover/
 doc/
 tmp/
@@ -8,5 +8,5 @@ data/
 .git/
 erl_crash.dump
 *.ez
-hook-*.tar
-node_modules/
+**/*.tar
+**/node_modules

@@ -32,3 +32,6 @@ ankusa_kafka-*.tar
 
 # Node (examples/*/worker).
 **/node_modules/
+
+# Load-generator output from examples/oban-consumer/run.sh (CSVs + JSON reports).
+examples/oban-consumer/.e2e-out/

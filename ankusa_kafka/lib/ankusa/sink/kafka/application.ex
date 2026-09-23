@@ -1,7 +1,7 @@
 defmodule Ankusa.Sink.Kafka.Application do
   @moduledoc """
   Boots a bare `DynamicSupervisor` that owns the brod clients
-  `Ankusa.Sink.Kafka.deliver/3` starts on demand. `ankusa` core doesn't know
+  `Ankusa.Sink.Kafka`'s `deliver/3` starts on demand. `ankusa` core doesn't know
   this package exists. A crashed or disconnected client never takes down
   ingest or dispatch; `deliver/3` returns `{:error, _}` and the source's
   `Ankusa.RetryPolicy` handles it.

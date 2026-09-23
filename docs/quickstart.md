@@ -94,4 +94,4 @@ ngrok http 4000     # or cloudflared / tailscale funnel / etc.
 - Object storage / shared Postgres WAL for a fleet: [`storage.md`](storage.md).
 - Forward to HTTP or publish to RabbitMQ: [`delivery.md`](delivery.md).
 - See a full deployed example (Docker + RabbitMQ + S3 + a TypeScript
-  consumer): [`../examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/).
+  consumer): [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/).

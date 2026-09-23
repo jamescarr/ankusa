@@ -14,6 +14,10 @@ touches, not just the one you edited. All three adapter packages depend on
 | `ankusa_kafka` | the same three, in `ankusa_kafka/` (after `docker compose up -d --wait`) |
 | `examples/*/ingest_app` | `mix compile --warnings-as-errors` |
 | `examples/*/worker` | `npx tsc --noEmit` |
+| `examples/oban-consumer/ingest_app` | `mix compile --warnings-as-errors` |
+| `examples/oban-consumer/consumer_app` | `mix compile --warnings-as-errors` |
+| `tools/loadgen` | `mix compile --warnings-as-errors` |
+| `examples/oban-consumer/run.sh` | the e2e gate — must pass locally before tagging any release (needs `kind`, `kubectl`, `docker`) |
 
 `mix format --check-formatted` is what CI fails on first: run `mix format`
 before pushing, not after CI tells you.

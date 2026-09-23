@@ -49,6 +49,13 @@ defmodule Ankusa.BlobStore.S3 do
 
   @behaviour Ankusa.BlobStore
 
+  # :xmerl ships with OTP and is declared in mix.exs's extra_applications, but
+  # Elixir's compile-time xref pass can warn on :xmerl_scan/:xmerl_xpath calls
+  # depending on module compile order in a fresh build (the app isn't loaded
+  # yet at that point in the parallel compile) — a known false positive for
+  # OTP stdlib apps that aren't themselves Mix dependencies.
+  @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
+
   alias Ankusa.HttpClient
 
   @impl true

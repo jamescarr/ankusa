@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-23
+
 ### Added
 
 - Initial release: `Ankusa.Sink.Kafka` adapter
@@ -15,3 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-key ordering via configurable record key
 - Synchronous produce with `acks=all`
 - Kafka headers: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `content_type`
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.1.0...HEAD
+[0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_kafka-v0.1.0

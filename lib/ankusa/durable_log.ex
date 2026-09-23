@@ -8,7 +8,7 @@ defmodule Ankusa.DurableLog do
   same three properties, which is why this exists once instead of three times:
 
     * **an append is one write.** `append/2` frames every record and issues a
-      single `:file.write/3` with `[:append]`, so a crash mid-batch can only
+      single :file.write/3 call with `[:append]`, so a crash mid-batch can only
       damage the last frame.
     * **a torn tail is dropped, never raised on.** `read/2` decodes frames until
       one is short — a write that never completed — and stops there. A record

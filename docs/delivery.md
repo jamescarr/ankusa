@@ -34,7 +34,7 @@ handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`.
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq` headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
 | `Sink.RabbitMQ` | `:amqp` — separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF) — separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 
@@ -46,7 +46,7 @@ sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5
 
 The queue-adapter story: an ingest fleet publishing to a broker instead of
 (or in addition to) HTTP-forwarding or in-process handling. See
-[`examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/) for a full
+[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) for a full
 worked deployment.
 
 **Publishes to an exchange only — never a queue.** Binding a queue to the
@@ -114,7 +114,7 @@ publishes meanwhile, which flows straight into the existing
 The same story one transport over: an ingest fleet producing to a Kafka
 topic instead of an AMQP exchange, publishing the identical
 `Ankusa.Sink.Message`. See
-[`examples/kafka-sqs-consumer/`](../examples/kafka-sqs-consumer/) for a full
+[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) for a full
 worked deployment (topic → bridge → SQS FIFO → worker).
 
 ```elixir

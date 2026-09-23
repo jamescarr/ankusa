@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ankusa-edge
+  namespace: ankusa-e2e
+  labels:
+    app: ankusa-edge
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ankusa-edge
+  template:
+    metadata:
+      labels:
+        app: ankusa-edge
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: ankusa-edge
+          image: ankusa-oban-ingest:e2e
+          imagePullPolicy: IfNotPresent
+          lifecycle:
+            preStop:
+              # Same k8s Service endpoint-removal race as the consumer
+              # Deployment: give kube-proxy time to stop routing new
+              # connections here before the listener actually closes.
+              exec:
+                command: ["sleep", "5"]
+          env:
+            - name: ANKUSA_ROLES
+              value: "edge"
+            - name: PORT
+              value: "4000"
+            - name: DATA_DIR
+              value: "/data"
+            - name: WAL_DB_HOST
+              value: "postgres"
+            - name: WAL_DB_PORT
+              value: "5432"
+            - name: WAL_DB_USER
+              value: "ankusa"
+            - name: WAL_DB_PASSWORD
+              value: "ankusa"
+            - name: WAL_DB_NAME
+              value: "ankusa"
+            - name: CONSUMER_URL
+              value: "http://consumer/deliveries"
+          ports:
+            - containerPort: 4000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankusa-edge
+  namespace: ankusa-e2e
+spec:
+  type: NodePort
+  selector:
+    app: ankusa-edge
+  ports:
+    - port: 80
+      targetPort: 4000
+      nodePort: 30080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ankusa-worker
+  namespace: ankusa-e2e
+spec:
+  serviceName: ankusa-worker
+  # Singleton by design: the :dispatch/:storage roles hold no lease and are
+  # not safe to run with more than one replica — see docs/deployment.md.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ankusa-worker
+  template:
+    metadata:
+      labels:
+        app: ankusa-worker
+    spec:
+      containers:
+        - name: ankusa-worker
+          image: ankusa-oban-ingest:e2e
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ANKUSA_ROLES
+              value: "dispatch,storage"
+            - name: DATA_DIR
+              value: "/data"
+            - name: WAL_DB_HOST
+              value: "postgres"
+            - name: WAL_DB_PORT
+              value: "5432"
+            - name: WAL_DB_USER
+              value: "ankusa"
+            - name: WAL_DB_PASSWORD
+              value: "ankusa"
+            - name: WAL_DB_NAME
+              value: "ankusa"
+            - name: CONSUMER_URL
+              value: "http://consumer/deliveries"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

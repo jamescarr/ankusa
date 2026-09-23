@@ -51,12 +51,11 @@ bandit_example/            ankusa — core. mix.exs deps: {bandit, plug, req,
 ".."}` for local development, and would become normal Hex dependencies once
 published. Each ships its **own** `docker-compose.yml` for local dev/test
 infra (`ankusa_postgres/` → Postgres on `:5433`; `ankusa_rabbitmq/` → RabbitMQ
-on `:5673`/`:15673`; `ankusa_kafka/` → Redpanda on `:19092`) and its **own**
-`config/config.exs` setting `config
-:ankusa, autostart: false` — every adapter package test suite needs
-`Ankusa.Registry` running (started by `ankusa`'s own `Application`) but must not
-let `ankusa`'s built-in demo instance boot as a side effect of `ankusa` being a
-transitive OTP application dependency.
+on `:5673`/`:15673`; `ankusa_kafka/` → Redpanda on `:19092`). Every adapter
+package test suite needs `Ankusa.Registry` running (started by `ankusa`'s own
+Application); none needs any config to get it, since Ankusa.Application's
+built-in default instance is off (`autostart: false`) by default and only the
+root project's own `config/config.exs` turns it on.
 
 ## Why S3/GCS stayed in-tree but Postgres/RabbitMQ/Kafka didn't
 
@@ -122,9 +121,9 @@ release, many roles, config decides what boots. See
    because hand-rolling is preferred, but because a dependency that buys nothing
    is a liability.
 2. Scaffold a sibling directory: `mix.exs` with `{:ankusa, path: ".."}` plus
-   the real dependency; `config/config.exs` with `config :ankusa, autostart:
-   false`; a `docker-compose.yml` if the adapter needs live infra to test
-   against.
+   the real dependency; a `docker-compose.yml` if the adapter needs live infra
+   to test against. No config is needed to keep `ankusa`'s built-in demo
+   instance from booting — `autostart` defaults to `false`.
 3. Implement the behaviour. Register any supervised process (a connection
    pool, a channel) through `Ankusa.Registry`/`Ankusa.via/2` exactly like the
    framework's own processes do — this is what lets the facade

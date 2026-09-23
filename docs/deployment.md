@@ -5,7 +5,7 @@ for the four shapes this section explains how to actually run.
 
 ## Roles and topologies
 
-`Ankusa.Instance.init/1` starts children conditionally on `config.roles`:
+Ankusa.Instance's `init/1` starts children conditionally on `config.roles`:
 
 ```elixir
 defp edge_children(config, opts), do: if Config.role?(config, :edge), do: [...], else: []
@@ -24,7 +24,7 @@ ANKUSA_ROLES=storage mix run --no-halt          # this node: compactor only
 ANKUSA_ROLES=claim_check mix run --no-halt      # this node: claim-check gateway only
 ```
 
-`Ankusa.Application` reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of
+Ankusa.Application reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of
 whatever `config.exs` sets — see
 [`configuration.md#runtime-environment-overrides`](configuration.md#runtime-environment-overrides).
 
@@ -44,11 +44,19 @@ reach over the network — that's `WAL.Postgres` (see
 [`storage.md`](storage.md)), not `WAL.DiskLog`. This constraint doesn't
 apply to `:claim_check`, which never touches the WAL at all.
 
+**`:dispatch` and `:storage` are singletons per instance.** Neither cursor
+has a lease. Two `:dispatch` nodes on one `WAL.Postgres` deliver every hook
+twice, and two `:storage` nodes compact the same ranges and write duplicate
+index rows. Scale `:edge` horizontally; run `:dispatch` and `:storage` as
+exactly one replica each (in Kubernetes, a 1-replica StatefulSet). Also note
+that `Ankusa.Storage.Index` lives on the `:storage` node's local disk
+(`segments/index.log`), which needs a persistent volume.
+
 ## Docker
 
 There's no single canonical "the" Dockerfile shipped at the repo root —
 deployment shape is a choice the operator makes, so the worked example
-([`examples/rabbitmq-consumer/ingest_app/Dockerfile`](../examples/rabbitmq-consumer/ingest_app/Dockerfile))
+([`examples/rabbitmq-consumer/ingest_app/Dockerfile`](https://github.com/jamescarr/ankusa/blob/main/examples/rabbitmq-consumer/ingest_app/Dockerfile))
 shows the pattern rather than prescribing one image for every use case:
 
 - **Dev-mode image** (what the example uses): `elixir:1.20.4-alpine`,
@@ -61,7 +69,7 @@ shows the pattern rather than prescribing one image for every use case:
   (env-var vs. `runtime.exs`-based config, which roles per image, etc.).
 
 Either way, a deployable wrapper app (like
-[`ingest_app/`](../examples/rabbitmq-consumer/ingest_app)) is the intended
+[`ingest_app/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/ingest_app)) is the intended
 pattern: a tiny Mix project that depends on `ankusa` (+ whichever adapter
 packages it needs), reads its own env vars, and calls `Ankusa.Config.new/1` +
 `Ankusa.Instance.start_link/1` directly. `ankusa` core stays a library; the
@@ -133,9 +141,22 @@ You'd need a load balancer in front of the ingest port at that point; that's
 a deployment concern the framework doesn't solve for you (nothing in
 `ankusa`'s job description is "be a load balancer").
 
+### Dispatch throughput
+
+`Ankusa.Dispatch.Pipeline` delivers one envelope at a time and writes the
+cursor after each (`drain/1`, `deliver_with_retry/4`). A retrying sink
+therefore blocks the instance's whole pipeline, and throughput is bounded by
+sink latency — there's no concurrent dispatch (see
+[`delivery.md`](delivery.md) and "Not yet implemented" in the root README).
+Measured numbers from a full ingest → dispatch → consumer run are recorded
+in [`testing.md`](testing.md#load-and-end-to-end-kind--oban), including an
+open finding: killing the singleton `:dispatch`/`:storage` node mid-load can
+rarely drop a hook permanently — see that section's "Known issue" for what's
+been ruled out and what hasn't.
+
 ## The worked example
 
-[`examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/) is the full
+[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) is the full
 picture: dockerized ingest → RabbitMQ exchange (fat payloads offloaded to
 S3, small ones inlined) → a real TypeScript consumer that owns its own
 queue/binding, fetches, and prints. `docker compose up --build`, then:
@@ -150,7 +171,7 @@ fat-payload code paths, and what's intentionally left as a stub (the
 worker's own business logic — everything around it: topology declaration,
 decode, blob fetch, ack/nack, is real working code).
 
-[`examples/kafka-sqs-consumer/`](../examples/kafka-sqs-consumer/) is the
+[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) is the
 same shape over Kafka: ingest → topic → a Redpanda Connect bridge → SQS FIFO
 → worker. It's the one to read if you want a broker the consumer doesn't
 speak natively (the bridge owns the consumer group; per-key order survives
@@ -163,31 +184,36 @@ what each one is supposed to prove.
 
 Four independently versioned Hex packages (`ankusa`, `ankusa_postgres`,
 `ankusa_rabbitmq`, `ankusa_kafka`), each with its own `mix.exs` `version` and
-`CHANGELOG.md`. The release flow is the standard Elixir/Hex one — no bot,
-no separate changeset files, no tag to remember to push:
+`CHANGELOG.md`. The release flow is tag-driven — the Elixir/Hex norm — not
+triggered by every push to `main`:
 
-1. In your PR, bump `version` in the package's `mix.exs` (follow
+1. In a PR: bump `@version` in the package's `mix.exs` (follow
    [SemVer](https://semver.org/)) and move the relevant entries from that
    package's `CHANGELOG.md` `[Unreleased]` section under a new dated
    heading.
-2. Merge to `main`. [`.github/workflows/release.yml`](../.github/workflows/release.yml)
-   runs each package's tests, then checks Hex for that exact version; if
-   it's not there yet, publishes it (`mix hex.publish --yes`). A package
-   whose version didn't change in that push is a no-op — nothing publishes
-   twice.
-3. `ankusa_postgres` and `ankusa_rabbitmq` publish only after `ankusa`
-   (core) does, since their published package declares a real Hex
-   dependency on it (`{:ankusa, "~> 0.1"}`) — not the path dependency local
-   development uses. See their `mix.exs` for why a plain `{:ankusa, path:
-   "..", only: [:dev, :test]}` alongside a hex entry doesn't work (Mix
-   rejects duplicate entries for the same app regardless of `:only`); the
-   working pattern is a single `Mix.env()`-conditional entry.
+2. Merge.
+3. From `main`, tag and push: `git tag <pkg>-vX.Y.Z && git push origin
+   <pkg>-vX.Y.Z`. [`.github/workflows/release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml)
+   triggers on that tag, resolves the package and directory from it,
+   verifies the tag's version matches `mix.exs` and that the `CHANGELOG.md`
+   has a matching dated entry, runs the full test suite
+   ([`.github/workflows/ci.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/ci.yml)
+   via `workflow_call`, so a core tag can't ship something that breaks an
+   adapter), then publishes the package and its docs to Hex and cuts a
+   GitHub release from the CHANGELOG section.
+4. The first release is ordered: tag `ankusa-v0.1.0` and wait for its
+   publish job to finish green before tagging the adapters. Their `:prod`
+   deps resolve `ankusa` from Hex — an adapter tag pushed before core is
+   live fails at `MIX_ENV=prod mix deps.get` and is re-run from the Actions
+   UI once core has landed.
+5. `HEX_API_KEY` is a repository secret from a Hex key scoped to
+   `api:write` — generate one from the Hex.pm dashboard (Keys) and add it
+   under repo Settings → Secrets and variables → Actions.
+6. The pre-tag gate is
+   [`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh)
+   passing locally.
 
-Requires a `HEX_API_KEY` repository secret — generate one from the Hex.pm
-dashboard (Keys → scoped to `api:write`, ideally limited to these package
-names) and add it under repo Settings → Secrets and variables → Actions.
-
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same
+[`.github/workflows/ci.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/ci.yml) runs the same
 tests (plus `mix format --check-formatted` and
 `mix compile --warnings-as-errors`) on every PR and push, independent of
 the release workflow — a red CI check is a merge blocker regardless of

@@ -1,7 +1,7 @@
 # Ankusa — a loosely coupled, high-throughput webhook ingestion framework
 
 Built on [Bandit](https://github.com/mtrudel/bandit) + Plug. Implements the plan in
-[`webhook-ingest-framework-plan.md`](webhook-ingest-framework-plan.md).
+[`webhook-ingest-framework-plan.md`](https://github.com/jamescarr/ankusa/blob/main/plans/webhook-ingest-framework-plan.md).
 
 **Never return `2xx` until the hook is durably stored.** The edge acks only
 after the group-commit batcher's WAL commit (one `fsync`) returns. Crash
@@ -112,6 +112,7 @@ Full option reference for every row: [`docs/configuration.md`](docs/configuratio
 | [`docs/multi-tenancy.md`](docs/multi-tenancy.md) | Catch-URL routing, tenant scoping, writing your own `RouteResolver` |
 | [`docs/storage.md`](docs/storage.md) | WAL (`DiskLog`, `Postgres`), segment compaction, `BlobStore` (`LocalFS`, `S3`, `GCS`), replay by id |
 | [`docs/delivery.md`](docs/delivery.md) | Dispatch, `Sink` (`Log`, `Http`, `RabbitMQ`), retry/backoff, DLQ + replay, quarantine |
+| [`docs/integrations.md`](docs/integrations.md) | Using Ankusa with a job framework (Oban, Celery) without coupling to one |
 | [`docs/claim-check.md`](docs/claim-check.md) | `Ankusa.ClaimCheck` gateway: ticket contract, `Direct`/`Remote` adapters, the `:claim_check` role's HTTP API, retention |
 | [`docs/packaging.md`](docs/packaging.md) | Why adapters live in separate packages, the split rule, adding your own |
 | [`docs/deployment.md`](docs/deployment.md) | Roles/`ANKUSA_ROLES`, Docker, scaling the fleet |
@@ -120,8 +121,8 @@ Full option reference for every row: [`docs/configuration.md`](docs/configuratio
 ## Test
 
 ```sh
-mix test                          # 98 tests, no external infra
-mix test --include integration    # +8, needs floci (S3/GCS emulators) running
+mix test                          # no external infra
+mix test --include integration    # needs floci (S3/GCS emulators) running
 ```
 
 Covers group commit, dedup (tenant-scoped), crash-replay, dispatch retry +
@@ -129,20 +130,19 @@ DLQ, compaction round-trip, the Claim Check gateway (ticket integrity, the
 `:claim_check` HTTP API, a real cross-mode `Direct`↔`Remote` proof, LocalFS
 retention), and a **loss checker** that acks 500 hooks concurrently,
 hard-kills the instance, and proves every acked id survives replay.
-`ankusa_postgres` (10 tests), `ankusa_rabbitmq` (4 tests), and
-`ankusa_kafka` (5 tests) each need their own live infra — see
-[`docs/testing.md`](docs/testing.md).
+`ankusa_postgres`, `ankusa_rabbitmq`, and `ankusa_kafka` each need their own
+live infra — see [`docs/testing.md`](docs/testing.md).
 
 ## Examples
 
-[`examples/rabbitmq-consumer/`](examples/rabbitmq-consumer/) — a full
+[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) — a full
 deployed topology: dockerized ingest fleet → RabbitMQ exchange (fat
 payloads checked in through the Claim Check gateway, small ones inlined) →
 a real TypeScript worker that owns its own queue/binding, redeems claims
 over HTTP with **no storage credentials of its own**, and prints. `docker
 compose up --build` runs the whole thing.
 
-[`examples/kafka-sqs-consumer/`](examples/kafka-sqs-consumer/) — the same
+[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) — the same
 guarantees through a different transport: ingest → Kafka topic → a Redpanda
 Connect bridge → SQS FIFO queue → a TypeScript worker, again with no storage
 credentials (claims are redeemed over HTTP). The bridge commits Kafka
@@ -152,10 +152,11 @@ FIFO `MessageGroupId`.
 ## Not yet implemented (deferred adapters from the plan)
 
 `WAL.Kafka`/`WAL.Ra` adapters (a Kafka *sink* ships as
-[`ankusa_kafka`](ankusa_kafka/); a Kafka *WAL* would need an external dedup
+[`ankusa_kafka`](https://github.com/jamescarr/ankusa/tree/main/ankusa_kafka/); a Kafka *WAL* would need an external dedup
 ledger, since Kafka has no unique constraint), zstd codec,
 Broadway-backed dispatch, LiveView
 dashboard, `mix ankusa.new` generator, `SourceStore.Ecto` + a catch-URL
-control-plane API, and per-source envelope encryption. Each is an adapter
-behind an existing behaviour — the ingest guarantees above do not change when
-they land.
+control-plane API, per-source envelope encryption, concurrent dispatch, and
+a lease so `:dispatch`/`:storage` can run hot-standby replicas. Each is an
+adapter behind an existing behaviour — the ingest guarantees above do not
+change when they land.

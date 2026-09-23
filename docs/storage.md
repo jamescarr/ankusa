@@ -174,7 +174,7 @@ docker compose down -v
 `Codec.Raw` (the only shipped codec) frames each record length-prefixed with
 a per-record CRC32; `encode/1` packs many into one segment binary and
 returns the byte offset + length of each, which is exactly what
-`Ankusa.BlobStore.get_range/5` needs.
+the `get_range` callback needs.
 
 ## `Ankusa.Storage.Compactor` — how segments get written
 
