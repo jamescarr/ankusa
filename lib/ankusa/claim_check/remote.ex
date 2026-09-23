@@ -1,10 +1,10 @@
 defmodule Ankusa.ClaimCheck.Remote do
   @moduledoc """
   `Ankusa.ClaimCheck` adapter that talks HTTP to a `:claim_check`-role
-  `Ankusa.ClaimCheck.Router`, via `:httpc` — no HTTP client dependency,
-  mirroring `Ankusa.Sink.Http`. Pure transport: the facade already built and
-  validated the ticket; this just moves bytes over the wire and maps HTTP
-  status codes back to `Ankusa.ClaimCheck.reason()`.
+  `Ankusa.ClaimCheck.Router`, via `Req` — mirroring `Ankusa.Sink.Http`. Pure
+  transport: the facade already built and validated the ticket; this just moves
+  bytes over the wire and maps HTTP status codes back to
+  `Ankusa.ClaimCheck.reason()`.
 
   For callers that must not hold blob-store credentials: a non-BEAM
   consumer, or an Ankusa node deliberately isolated from the store. Per
@@ -18,6 +18,8 @@ defmodule Ankusa.ClaimCheck.Remote do
     * `:url`         — required, e.g. `"http://claim-check.internal:4001"`
     * `:token`        — required bearer token
     * `:timeout_ms`  — default `10_000`
+    * `:req_options` — extra options for `Req` (custom Finch pool, proxy, or
+                       `plug:` for `Req.Test` in tests)
   """
 
   @behaviour Ankusa.ClaimCheck
@@ -79,38 +81,38 @@ defmodule Ankusa.ClaimCheck.Remote do
     "#{base}/v1/claims/#{URI.encode(tenant_id, &URI.char_unreserved?/1)}/#{id}"
   end
 
-  # `content_type` is only meaningful (and only supplied) for `:put` —
-  # httpc's PUT/POST request tuple carries content-type as a dedicated
-  # positional field, never as a plain header, so it's kept separate from
-  # `extra_headers` here rather than risking two conflicting values.
+  # `content_type` is only supplied for `:put` — the router requires *some*
+  # Content-Type on a body, but a GET carries none.
   defp request(opts, method, url, body, extra_headers, content_type \\ nil) do
     token = Keyword.fetch!(opts, :token)
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
-    http_opts = [timeout: timeout, connect_timeout: timeout]
 
     headers =
-      [{"authorization", "Bearer #{token}"} | extra_headers]
-      |> Enum.map(fn {k, v} -> {to_charlist(k), to_charlist(v)} end)
+      [{"authorization", "Bearer #{token}"} | extra_headers] ++
+        if content_type, do: [{"content-type", content_type}], else: []
 
-    ensure_started()
+    request =
+      [
+        method: method,
+        url: url,
+        headers: headers,
+        decode_body: false,
+        http_errors: :return,
+        retry: false,
+        receive_timeout: timeout,
+        connect_options: [timeout: timeout]
+      ]
+      |> with_body(method, body)
+      |> Kernel.++(Keyword.get(opts, :req_options, []))
 
-    result =
-      if method == :put do
-        :httpc.request(
-          :put,
-          {to_charlist(url), headers, to_charlist(content_type), body},
-          http_opts,
-          body_format: :binary
-        )
-      else
-        :httpc.request(method, {to_charlist(url), headers}, http_opts, body_format: :binary)
-      end
-
-    case result do
-      {:ok, {{_v, code, _r}, _h, resp_body}} -> {:ok, code, resp_body}
+    case Req.request(request) do
+      {:ok, %Req.Response{status: status, body: body}} -> {:ok, status, body}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp with_body(request, :put, body), do: request ++ [body: body]
+  defp with_body(request, _method, _body), do: request
 
   defp map_error(400, body), do: {:error, error_atom(body, :invalid_tenant)}
   defp map_error(401, _body), do: {:error, :unauthorized}
@@ -126,11 +128,5 @@ defmodule Ankusa.ClaimCheck.Remote do
       {:ok, %{"error" => "invalid_tenant"}} -> :invalid_tenant
       _ -> default
     end
-  end
-
-  defp ensure_started do
-    {:ok, _} = Application.ensure_all_started(:inets)
-    {:ok, _} = Application.ensure_all_started(:ssl)
-    :ok
   end
 end

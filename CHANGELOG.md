@@ -26,6 +26,20 @@ accordance with SemVer. Merging to `main` publishes automatically — see
   (`Sink.RabbitMQ`, `Sink.Kafka`) — inline base64 up to `inline_max_bytes` or
   a claim ticket above it, with an additive `"v": 1` version field.
 
+### Changed
+
+- HTTP is `Req` throughout — the S3 and GCS blob stores, the claim-check
+  `Remote` adapter, and `Sink.Http` no longer hand-roll `:httpc` plumbing
+  (and `:inets` is no longer started by this package).
+- `Ankusa.BlobStore.S3` signs requests with `aws_signature`, the SigV4
+  implementation behind the official aws-elixir SDK, replacing ~80 lines of
+  hand-rolled canonical-request/HMAC code. Signing is now pinned by tests that
+  reproduce AWS's published reference signatures — the emulator the integration
+  suite uses accepts *any* signature, so it never covered this.
+- New dependencies: `req` and `aws_signature`. See
+  [`docs/packaging.md`](docs/packaging.md) for when a dependency is worth taking
+  and where it belongs.
+
 ### Fixed
 
 - `Ankusa.BlobStore.LocalFS.get/3` and `get_range/5` now map a missing file

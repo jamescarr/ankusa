@@ -34,7 +34,7 @@ handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`.
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | none (`:httpc`) | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq` headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq` headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
 | `Sink.RabbitMQ` | `:amqp` — separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF) — separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 

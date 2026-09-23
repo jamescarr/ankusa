@@ -32,7 +32,7 @@ Contract every adapter must uphold:
 ### `WAL.DiskLog` — the default, single-node
 
 Append-only, length-prefixed, CRC32-per-record binary log on local disk.
-Zero external dependencies.
+No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
 
 - One `:file.pwrite` + one `:file.datasync` (fsync) per batch — hundreds of
   hooks, one fsync.
@@ -134,8 +134,8 @@ payload in). Retention differs per namespace too — see
 | Adapter | Deps | Notes |
 | --- | --- | --- |
 | `BlobStore.LocalFS` | none | Default. Atomic writes (temp file + rename). `get_range` uses `:file.pread/3`, never slurps the whole segment. |
-| `BlobStore.S3` | none (`:httpc` + `:crypto`) | Real AWS SigV4 request signing, hand-rolled — no HTTP client dependency. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
-| `BlobStore.GCS` | none (`:httpc`) | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS — the adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
+| `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature) — the implementation behind the official aws-elixir SDK — with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
+| `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS — the adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
 
 ```elixir
 # S3 / MinIO / R2

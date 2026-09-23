@@ -143,7 +143,8 @@ different adapter tuples. Operational how-tos live in
 
 ### 1. Laptop / single container — the default
 
-One process, every role, zero external dependencies.
+One process, every role. Nothing else to run: no broker, no database, no object
+store.
 
 ```mermaid
 flowchart LR
