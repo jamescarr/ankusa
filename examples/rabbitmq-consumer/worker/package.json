@@ -7,7 +7,6 @@
     "start": "tsx src/worker.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.658.0",
     "amqplib": "^0.10.4"
   },
   "devDependencies": {

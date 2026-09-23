@@ -81,10 +81,10 @@ defmodule Ankusa.Sink.RabbitMQTest do
     assert decoded["source_id"] == "src"
     assert decoded["tenant_id"] == "t1"
     assert Base.decode64!(decoded["body_base64"]) == env.body
-    refute Map.has_key?(decoded, "blob")
+    refute Map.has_key?(decoded, "claim")
   end
 
-  test "a fat payload is offloaded to the blob store and the message carries a pointer", %{
+  test "a fat payload is checked in through ClaimCheck and the message carries a ticket", %{
     instance: inst,
     exchange: exch,
     chan: chan,
@@ -93,27 +93,26 @@ defmodule Ankusa.Sink.RabbitMQTest do
     body = :crypto.strong_rand_bytes(20_000)
     env = envelope(%{body: body, size: byte_size(body), content_type: "application/octet-stream"})
 
-    blob_dir =
-      Path.join(System.tmp_dir!(), "ankusa_rmq_blob_#{System.unique_integer([:positive])}")
+    claim_dir =
+      Path.join(System.tmp_dir!(), "ankusa_rmq_claim_#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf(blob_dir) end)
-    Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: blob_dir))
+    on_exit(fn -> File.rm_rf(claim_dir) end)
+    Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: claim_dir))
 
-    opts = [
-      exchange: exch,
-      url: @amqp_url,
-      inline_max_bytes: 1_000,
-      blob_store: {Ankusa.BlobStore.LocalFS, []}
-    ]
+    opts = [exchange: exch, url: @amqp_url, inline_max_bytes: 1_000]
 
     assert :ok = RabbitMQ.deliver(env, ctx(inst), opts)
 
     {payload, _meta} = get_message(chan, queue)
     decoded = JSON.decode!(payload)
     refute Map.has_key?(decoded, "body_base64")
-    assert %{"key" => key, "size" => 20_000} = decoded["blob"]
-    assert key == "raw/t1/src/#{env.id}.bin"
-    assert {:ok, ^body} = Ankusa.BlobStore.LocalFS.get(inst, key, [])
+    assert %{"claim" => claim_map} = decoded
+    assert claim_map["tenant_id"] == "t1"
+    assert claim_map["id"] == env.id
+    assert claim_map["size"] == 20_000
+
+    assert {:ok, ticket} = Ankusa.ClaimCheck.Ticket.from_map(claim_map)
+    assert {:ok, ^body} = Ankusa.ClaimCheck.redeem(inst, ticket)
   end
 
   test "routing_key accepts a static string or a 1-arity function", %{

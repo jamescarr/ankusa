@@ -12,8 +12,17 @@ defmodule AnkusaExample.Ingest.Application do
 
   Two independent things land in the object store under different prefixes:
   the async segment compactor (`seg/...`, always, every hook) and the
-  RabbitMQ sink's fat-payload offload (`raw/...`, only when a body exceeds
-  `INLINE_MAX_BYTES`). No collision, no coordination needed between them.
+  RabbitMQ sink's fat-payload claim check (`claims/...`, only when a body
+  exceeds `INLINE_MAX_BYTES`). No collision, no coordination needed between
+  them.
+
+  The same image also runs as the standalone `:claim_check`-role gateway
+  (`ANKUSA_ROLES=claim_check` — see `docker-compose.yml`'s `claim-check`
+  service): both containers point `storage.blob_store` at the same S3
+  bucket, so a ticket checked in by the ingest node (through `Direct`, using
+  its own S3 credentials) redeems through the claim-check node's HTTP API —
+  the surface the worker actually calls, since the worker holds no S3
+  credentials of its own.
   """
 
   use Application
@@ -24,7 +33,8 @@ defmodule AnkusaExample.Ingest.Application do
     config = build_config()
 
     Logger.info(
-      "[ankusa-example] starting: port=#{config.port} exchange=#{exchange()} " <>
+      "[ankusa-example] starting: roles=#{inspect(config.roles)} port=#{config.port} " <>
+        "claim_check_port=#{config.claim_check.port} exchange=#{exchange()} " <>
         "s3_bucket=#{env("S3_BUCKET", "ankusa-example")} s3_endpoint=#{env("S3_ENDPOINT", "http://localhost:4566")}"
     )
 
@@ -36,10 +46,21 @@ defmodule AnkusaExample.Ingest.Application do
       instance: :default,
       port: env_int("PORT", 4000),
       data_dir: env("DATA_DIR", "./data"),
-      roles: [:edge, :dispatch, :storage],
+      roles: roles(),
       storage: %{blob_store: {Ankusa.BlobStore.S3, s3_opts()}},
-      source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}}
+      source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}},
+      claim_check: %{
+        port: env_int("CLAIM_CHECK_PORT", 4001),
+        api_tokens: %{env("CLAIM_CHECK_TOKEN", "dev-claim-check-token") => :all}
+      }
     )
+  end
+
+  defp roles do
+    "ANKUSA_ROLES"
+    |> System.get_env("edge,dispatch,storage")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.to_atom(String.trim(&1)))
   end
 
   # A single zero-config `demo` source, matching the root project's own

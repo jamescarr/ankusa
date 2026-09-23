@@ -13,6 +13,11 @@ defmodule Ankusa.Telemetry do
     * `[:ankusa, :dispatch, :stop]` — meta: `%{result, attempts}`
     * `[:ankusa, :dispatch, :dlq]`  — a hook was dead-lettered
     * `[:ankusa, :compact, :stop]`  — measurements: `%{records, bytes, duration}`
+    * `[:ankusa, :claim_check, :check_in]` — measurements: `%{duration, size}`;
+      meta: `%{tenant_id, adapter, result}`
+    * `[:ankusa, :claim_check, :redeem]`   — measurements: `%{duration, size}`;
+      meta: `%{tenant_id, id, adapter, result}`
+    * `[:ankusa, :claim_check, :sweep]`    — measurements: `%{deleted, scanned, duration}`
   """
 
   @doc "Emit a telemetry event."

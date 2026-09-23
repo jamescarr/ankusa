@@ -207,10 +207,11 @@ run on any node that can reach Postgres and the object store. See
 ### 4. Queue fan-out to independent consumers
 
 Ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
-`ankusa_rabbitmq` package); fat payloads go straight to the object store with
-only a pointer on the queue. Each consumer owns its **own** queue and
-binding — the framework never declares one, so adding a fifth consumer
-later is a change on the consumer side only, not a config change here.
+`ankusa_rabbitmq` package); fat payloads are checked in through
+`Ankusa.ClaimCheck` with only a ticket on the queue. Each consumer owns its
+**own** queue and binding — the framework never declares one, so adding a
+fifth consumer later is a change on the consumer side only, not a config
+change here.
 
 ```mermaid
 flowchart LR
@@ -218,13 +219,23 @@ flowchart LR
     P --> E2[Ingest node N]
     E1 & E2 --> WAL[("WAL\nper-node or shared")]
     E1 & E2 -->|small: inline body| X(("ankusa.events\nexchange"))
-    E1 & E2 -.fat: PUT + pointer.-> Obj[("Object store")]
+    E1 & E2 -.fat: Direct check-in.-> Obj[("Object store")]
+    E1 & E2 -->|"fat: message carries a ticket"| X
     X --> QA[queue A\nowned by consumer A]
     X --> QB[queue B\nowned by consumer B]
-    QA --> CA[Worker A]
-    QB --> CB[Worker B]
-    CA & CB -.fetch fat payloads.-> Obj
+    QA --> CA[Worker A\nno store credentials]
+    QB --> CB[Worker B\nno store credentials]
+    CA & CB -->|GET /v1/claims/...\nBearer token| CC["claim-check\n:claim_check role"]
+    CC -.Direct.-> Obj
 ```
+
+A consumer that shouldn't hold object-store credentials (a non-BEAM worker,
+a third party) redeems through a `:claim_check`-role node's HTTP API
+instead of the object store directly — see [`claim-check.md`](claim-check.md)
+for the full contract, the trust-boundary table for picking `Direct` vs.
+`Remote`, and why `Remote` (an RPC dependency) is allowed only downstream of
+the WAL — dispatch sinks and external consumers, never the edge's pre-ack
+path.
 
 Worked end to end, dockerized, in
 [`examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/).
@@ -237,7 +248,8 @@ to the same instance, not a different architecture.
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix —
 `ingest`, `commit`, `verify`, `dedup`, `load_shed`, `dispatch`, `compact`,
-`quarantine`. Components emit events; they never call each other's
-reporters, so wiring a metrics/tracing backend is additive, never a code
-change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for the
-full event list and measurement/metadata shapes.
+`quarantine`, `claim_check`. Components emit events; they never call each
+other's reporters, so wiring a metrics/tracing backend is additive, never a
+code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for
+the full event list and measurement/metadata shapes.
+
