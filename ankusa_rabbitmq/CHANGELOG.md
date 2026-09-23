@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Messages carry a format version, `"v": 1`. Additive: consumers that ignore
+  unknown keys need no change.
+
+### Changed
+
+- The message is built by `Ankusa.Sink.Message` (new in `ankusa`), shared
+  with `ankusa_kafka`, so both sinks publish byte-identical messages.
+
 ### Changed (breaking)
 
 - `Ankusa.Sink.RabbitMQ`'s fat-payload path now checks bodies in through

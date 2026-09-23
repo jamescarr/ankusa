@@ -5,8 +5,9 @@ One contract for every producer and consumer in the system, Elixir or not:
 The storage engine (LocalFS/S3/GCS, via `Ankusa.BlobStore`) and the network
 topology (in-process vs. an HTTP hop) stay hidden behind it.
 
-`Ankusa.Sink.RabbitMQ`'s fat-payload offload is the shipped user of this —
-see [`delivery.md`](delivery.md#sinkrabbitmq--queue-delivery) — but it's a
+The queue sinks' fat-payload offload (`Sink.RabbitMQ`, `Sink.Kafka`) is the
+shipped user of this — see
+[`delivery.md`](delivery.md#sinkrabbitmq--queue-delivery) — but it's a
 general-purpose gateway, usable anywhere a payload is too big to carry
 inline.
 
@@ -258,7 +259,7 @@ config :ankusa,
   serving stale bytes.
 - **Durability**: the ticket returns only after the adapter reports a
   durable write. Never publish a message carrying a ticket before
-  `check_in/4` returns `{:ok, _}` — `Ankusa.Sink.RabbitMQ` already orders it
+  `check_in/4` returns `{:ok, _}` — the queue sinks already order it
   this way.
 - **No delete on redeem.** A fan-out exchange means multiple independent
   consumers redeem the same claim. Removal is purely time-based (retention,

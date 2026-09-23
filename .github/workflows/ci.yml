@@ -81,3 +81,32 @@ jobs:
         run: mix compile --warnings-as-errors
       - working-directory: ankusa_rabbitmq
         run: mix test
+
+  ankusa_kafka:
+    name: ankusa_kafka
+    needs: ankusa
+    runs-on: ubuntu-latest
+    # Not a `services:` container: Redpanda needs command-line flags
+    # (`--kafka-addr`, `--advertise-kafka-addr`) that `services:` can't pass.
+    # `ankusa_kafka/docker-compose.yml` is the same compose file local dev
+    # uses. brod's crc32cer NIF builds from source; it needs CMake >= 3.16,
+    # which the runner image already has.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_kafka
+        run: docker compose up -d --wait
+      - working-directory: ankusa_kafka
+        run: mix deps.get
+      - working-directory: ankusa_kafka
+        run: mix format --check-formatted
+      - working-directory: ankusa_kafka
+        run: mix compile --warnings-as-errors
+      - working-directory: ankusa_kafka
+        run: KAFKA_BROKERS=localhost:19092 mix test
+      - if: always()
+        working-directory: ankusa_kafka
+        run: docker compose down -v

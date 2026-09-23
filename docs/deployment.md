@@ -125,8 +125,8 @@ docker compose up --build --scale ingest=3
 
 Three independent ingest containers, each with its own local WAL (if using
 `DiskLog`) or sharing one Postgres WAL (if configured with `WAL.Postgres`),
-all publishing to the same RabbitMQ exchange and writing to the same
-bucket. Nothing about `Ankusa.Sink.RabbitMQ` or `Ankusa.BlobStore.S3` changes —
+all publishing to the same exchange (or Kafka topic) and writing to the same
+bucket. Nothing about the sink or `Ankusa.BlobStore.S3` changes —
 this is the "durable state, not RPC" rule holding at the fleet level exactly
 like it holds between the edge/dispatch/storage roles inside one instance.
 You'd need a load balancer in front of the ingest port at that point; that's
@@ -150,10 +150,19 @@ fat-payload code paths, and what's intentionally left as a stub (the
 worker's own business logic — everything around it: topology declaration,
 decode, blob fetch, ack/nack, is real working code).
 
+[`examples/kafka-sqs-consumer/`](../examples/kafka-sqs-consumer/) is the
+same shape over Kafka: ingest → topic → a Redpanda Connect bridge → SQS FIFO
+→ worker. It's the one to read if you want a broker the consumer doesn't
+speak natively (the bridge owns the consumer group; per-key order survives
+as the FIFO `MessageGroupId`) or want to see the Claim Check gateway used
+from a runtime with no object-store credentials at all. Its README documents
+three failure drills — bridge down, worker down, and a poison claim — and
+what each one is supposed to prove.
+
 ## Releasing
 
-Three independently versioned Hex packages (`ankusa`, `ankusa_postgres`,
-`ankusa_rabbitmq`), each with its own `mix.exs` `version` and
+Four independently versioned Hex packages (`ankusa`, `ankusa_postgres`,
+`ankusa_rabbitmq`, `ankusa_kafka`), each with its own `mix.exs` `version` and
 `CHANGELOG.md`. The release flow is the standard Elixir/Hex one — no bot,
 no separate changeset files, no tag to remember to push:
 

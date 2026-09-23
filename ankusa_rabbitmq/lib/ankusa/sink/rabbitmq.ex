@@ -5,30 +5,12 @@ defmodule Ankusa.Sink.RabbitMQ do
   the consumer's job, not this sink's. That mirrors real AMQP topology
   ownership: producers own exchanges, consumers own their own queues.
 
-  Messages are small on purpose. A body under `:inline_max_bytes` (default
-  8 KiB) rides along base64-encoded; anything larger is checked in through
-  `Ankusa.ClaimCheck` (the instance's configured `claim_check.adapter` — see
-  `docs/claim-check.md`) and the message carries a claim ticket instead. This
-  is the same "small hot path, big payloads elsewhere" principle the
-  WAL/segment design already applies, now extended to the queue: RabbitMQ
-  throughput and memory stay flat regardless of how large a webhook payload
-  is, and any consumer — BEAM or not — redeems the ticket without needing
-  blob-store credentials of its own.
-
-  ## Message shape (JSON)
-
-      {
-        "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
-        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
-        "body_base64": "eyJpZCI6...."           // inline, when size <= threshold
-      }
-
-      {
-        "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
-        "received_at": 1737500000000, "content_type": "application/octet-stream", "size": 3145728,
-        "claim": {"v": 1, "tenant_id": "acme", "id": "01a0...", "size": 3145728,
-                  "sha256": "9f86d0...", "content_type": "application/octet-stream"}
-      }
+  Messages are small on purpose: the body rides inline up to
+  `:inline_max_bytes` (default 8 KiB) and is checked in through
+  `Ankusa.ClaimCheck` above that, so RabbitMQ throughput and memory stay flat
+  regardless of payload size, and any consumer — BEAM or not — redeems the
+  ticket without blob-store credentials of its own. The message is
+  `Ankusa.Sink.Message`, byte-identical to what `Ankusa.Sink.Kafka` produces.
 
   ## opts
 
@@ -45,14 +27,16 @@ defmodule Ankusa.Sink.RabbitMQ do
   @behaviour Ankusa.Sink
 
   alias Ankusa.Envelope
+  alias Ankusa.Sink.Message
   alias Ankusa.Sink.RabbitMQ.Connection
 
   @impl true
   def deliver(%Envelope{} = env, ctx, opts) do
     exchange = Keyword.fetch!(opts, :exchange)
+    inline_max_bytes = Keyword.get(opts, :inline_max_bytes, 8_192)
 
     with {:ok, name} <- ensure_started(ctx.instance, exchange, opts),
-         {:ok, payload} <- build_payload(env, ctx, opts) do
+         {:ok, payload} <- Message.encode(env, ctx, inline_max_bytes) do
       Connection.publish(name, routing_key(env, opts), payload)
     end
   end
@@ -72,38 +56,6 @@ defmodule Ankusa.Sink.RabbitMQ do
       {:error, {:already_started, _pid}} -> {:ok, name}
       {:error, reason} -> {:error, reason}
     end
-  end
-
-  # ── message building ────────────────────────────────────────────────────
-
-  defp build_payload(env, ctx, opts) do
-    threshold = Keyword.get(opts, :inline_max_bytes, 8_192)
-
-    base = %{
-      id: env.id,
-      source_id: env.source_id,
-      tenant_id: env.tenant_id,
-      received_at: env.received_at,
-      content_type: env.content_type,
-      size: env.size
-    }
-
-    if env.size <= threshold do
-      {:ok, JSON.encode!(Map.put(base, :body_base64, Base.encode64(env.body)))}
-    else
-      case check_in_claim(env, ctx) do
-        {:ok, ticket} ->
-          {:ok, JSON.encode!(Map.put(base, :claim, Ankusa.ClaimCheck.Ticket.to_map(ticket)))}
-
-        {:error, reason} ->
-          {:error, {:claim_check, reason}}
-      end
-    end
-  end
-
-  defp check_in_claim(env, ctx) do
-    meta = %{tenant_id: env.tenant_id, id: env.id, content_type: env.content_type}
-    Ankusa.ClaimCheck.check_in(ctx.instance, env.body, meta)
   end
 
   defp routing_key(env, opts) do

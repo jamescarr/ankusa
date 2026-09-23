@@ -101,7 +101,7 @@ config :ankusa,
 
 A source can override the dispatch-wide retry policy by putting a
 `:retry` opt directly in a sink tuple's opts if that sink's module reads it
-(none of the shipped sinks do — `Sink.Http`/`Sink.RabbitMQ` retries are all
+(none of the shipped sinks do — `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka` retries are all
 driven by `config.dispatch.retry`, applied uniformly per source by
 `Ankusa.Dispatch.Pipeline`). Per-source retry policy override is not currently
 supported; it's dispatch-wide.
@@ -119,7 +119,7 @@ the map.
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
 | `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
-| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package) |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce — `ankusa_kafka` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
 | `Ankusa.ClaimCheck` | Check bytes in, redeem by ticket | `ClaimCheck.Direct` (in-process `BlobStore`) | `ClaimCheck.Remote` (HTTP, `:claim_check` role) |

@@ -22,6 +22,9 @@ accordance with SemVer. Merging to `main` publishes automatically — see
   (`PUT`/`GET /v1/claims/:tenant_id/:id`), off by default, bearer-token
   authenticated and tenant-scoped. See
   [`docs/claim-check.md`](docs/claim-check.md).
+- `Ankusa.Sink.Message`: the wire format every queue-style sink publishes
+  (`Sink.RabbitMQ`, `Sink.Kafka`) — inline base64 up to `inline_max_bytes` or
+  a claim ticket above it, with an additive `"v": 1` version field.
 
 ### Fixed
 

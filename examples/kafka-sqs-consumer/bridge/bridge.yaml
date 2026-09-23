@@ -1,0 +1,38 @@
+# Messaging bridge: Kafka topic `ankusa.events` -> SQS FIFO queue. Owned by
+# the consumer side; ingest never knows this consumer group exists.
+#
+# The input commits a Kafka offset only after the SQS send succeeds, so a
+# crash replays from the last commit (at-least-once). FIFO dedup on the
+# envelope id absorbs replays inside SQS's 5-minute window.
+
+input:
+  redpanda:
+    seed_brokers: ["redpanda:9092"]
+    topics: ["ankusa.events"]
+    consumer_group: ankusa-sqs-bridge
+    start_offset: earliest
+
+pipeline:
+  processors:
+    # aws_sqs sends metadata as message attributes and keeps only the first
+    # 10 (alphabetically); the input alone adds 8 kafka_* keys. Keep exactly
+    # the ankusa_* headers plus the three kafka_* keys worth having.
+    - mutation: |
+        meta = @.filter(kv -> kv.key.has_prefix("ankusa_") || ["kafka_key", "kafka_partition", "kafka_offset"].contains(kv.key))
+
+output:
+  aws_sqs:
+    url: http://floci:4566/000000000000/ankusa-worker.fifo
+    endpoint: http://floci:4566
+    region: us-east-1
+    credentials:
+      id: test
+      secret: test
+    # Ordering scope end to end: Kafka key (tenant/source) = FIFO group.
+    message_group_id: ${! @kafka_key }
+    message_deduplication_id: ${! @ankusa_id }
+    # More than one in flight can reorder sends within a group.
+    max_in_flight: 1
+    batching:
+      count: 10
+      period: 100ms
