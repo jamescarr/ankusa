@@ -3,7 +3,8 @@ defmodule Ankusa.RouteResolver do
   Maps a raw ingest request (`Plug.Conn`) to a `Ankusa.Route`. This is the seam
   that makes the catch-URL scheme pluggable, so the framework fits a single
   static server, a multi-tenant SaaS handing every customer their own path, or a
-  product minting opaque tokens — without touching the hot path.
+  product minting opaque catch URLs of its own shape at runtime —
+  without touching the hot path.
 
   This module is both the **behaviour** every resolver implements and the
   instance-scoped **facade** (resolves `config.route_resolver` and delegates).

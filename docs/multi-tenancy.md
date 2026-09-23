@@ -2,8 +2,8 @@
 
 This is the seam that makes the framework fit three different products with
 no code change: a single-tenant standalone gateway, a multi-tenant SaaS
-where every customer gets their own catch URL, and a product
-minting opaque per-integration URLs at runtime.
+where every customer gets their own catch URL, and a product minting opaque
+per-integration URLs, in whatever shape it wants, at runtime.
 
 ## The problem this solves
 
@@ -64,8 +64,8 @@ POST /hooks/globex/stripe  →  %Route{tenant_id: "globex", source_id: "stripe"}
 
 ## Writing your own scheme
 
-This is the extension point for a real product's catch-URL story — a
-bespoke opaque-token scheme (`POST /hooks/catch/:app_id/:token`), a
+This is the extension point for a real product's catch-URL story — an
+opaque-token scheme (`POST /hooks/catch/:app_id/:token`), a
 host-routed scheme (`https://<tenant>.hooks.example.com/:source`), or
 anything else. Implement the one callback:
 
@@ -123,7 +123,8 @@ declared one, never the reverse.
 
 Everything above works today against `SourceStore.Static` (sources declared
 in `config.exs`), which means the *set* of valid `source_id`s is still
-fixed at boot. A real multi-tenant SaaS or a product minting opaque catch URLs of its own shape at runtime needs a
+fixed at boot. A real multi-tenant SaaS or a product minting opaque catch
+URLs at runtime needs a
 **dynamic** endpoint store — mint a catch URL via an API call, have it work
 immediately, no redeploy — which means a DB-backed `SourceStore` (e.g.
 `SourceStore.Ecto`, read-through cached, invalidated on write) plus a small

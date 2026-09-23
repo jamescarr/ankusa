@@ -45,7 +45,8 @@ flowchart LR
 
 A webhook catcher designed to be the front door for one operator's laptop,
 a multi-tenant SaaS's shared ingest fleet, or a product minting opaque
-catch URLs at runtime — the same code, different config. Every layer (URL
+catch URLs of its own shape at runtime — the same code, different config.
+Every layer (URL
 routing, durable log, verification, dedup, object storage, delivery) is a
 behaviour with `{module, opts}` config, so swapping one is a one-line
 change, never a fork. See [`docs/architecture.md`](docs/architecture.md) for
