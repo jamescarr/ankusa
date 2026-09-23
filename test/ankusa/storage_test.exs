@@ -143,26 +143,49 @@ defmodule Ankusa.StorageTest do
     assert {:ok, 0} == Compactor.tick(inst)
   end
 
-  test "a lookup after a later compaction never serves the cached earlier index",
+  test "a lookup after a later compaction sees the rows that tick just wrote",
        %{inst: inst, config: config} do
     [first] = commit!(inst, [envelope("acme", ~s({"n":1}))])
     :ok = Ankusa.WAL.put_cursor(inst, :dispatch, first.seq)
     assert {:ok, 1} == Compactor.tick(inst)
 
-    # populates the cached map with exactly this one row
     assert {:ok, _row} = Index.lookup(config, first.id)
 
     [second] = commit!(inst, [envelope("acme", ~s({"n":2}))])
     :ok = Ankusa.WAL.put_cursor(inst, :dispatch, second.seq)
     assert {:ok, 1} == Compactor.tick(inst)
 
-    # the row appended after the cache was populated must be visible
+    # the row appended by that earlier read's tick must still be there, and the
+    # new one visible
     assert {:ok, row} = Index.lookup(config, second.id)
     assert row.event_id == second.id
     assert {:ok, _old} = Index.lookup(config, first.id)
 
     assert {:ok, fetched} = Storage.fetch(inst, second.id)
     assert fetched.body == second.body
+  end
+
+  test "a lookup works while the compactor is down, and the restart reloads the index",
+       %{inst: inst, config: config} do
+    [env] = commit!(inst, [envelope("acme", ~s({"n":1}))])
+    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, env.seq)
+    assert {:ok, 1} == Compactor.tick(inst)
+
+    assert {:ok, row} = Index.lookup(config, env.id)
+
+    # The table belongs to the compactor, so with it stopped a lookup has none —
+    # that is the crash-restart window, and it reads the file instead: slow,
+    # never wrong.
+    :ok = stop_supervised({Compactor, inst})
+    assert {:ok, from_file} = Index.lookup(config, env.id)
+    assert from_file.segment_key == row.segment_key
+
+    # the restart reloads the table from the same file
+    start_supervised!({Compactor, instance: inst, config: config})
+    assert {:ok, reloaded} = Index.lookup(config, env.id)
+    assert reloaded == row
+    assert {:ok, fetched} = Storage.fetch(inst, env.id)
+    assert fetched.body == env.body
   end
 
   test "compaction never truncates past the dispatch cursor", %{inst: inst, config: config} do
