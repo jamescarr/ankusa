@@ -84,30 +84,21 @@ jobs:
 
   ankusa_kafka:
     name: ankusa_kafka
+    needs: ankusa
     runs-on: ubuntu-latest
-    services:
-      redpanda:
-        image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
-        options: >-
-          --health-cmd "rpk cluster health | grep -q 'Healthy:.*true'"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
-        ports: ["19092:19092", "9644:9644"]
+    # Not a `services:` container: Redpanda needs command-line flags
+    # (`--kafka-addr`, `--advertise-kafka-addr`) that `services:` can't pass.
+    # `ankusa_kafka/docker-compose.yml` is the same compose file local dev
+    # uses. brod's crc32cer NIF builds from source; it needs CMake >= 3.16,
+    # which the runner image already has.
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
-      - name: Install CMake for brod NIF
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake
-      - name: Create test topic
-        run: |
-          docker run --rm --network host docker.redpanda.com/redpandadata/redpanda:v26.2.3 \
-            rpk topic create ankusa.test --brokers localhost:19092 --partitions 3 --replicas 1
+      - working-directory: ankusa_kafka
+        run: docker compose up -d --wait
       - working-directory: ankusa_kafka
         run: mix deps.get
       - working-directory: ankusa_kafka
@@ -115,4 +106,7 @@ jobs:
       - working-directory: ankusa_kafka
         run: mix compile --warnings-as-errors
       - working-directory: ankusa_kafka
-        run: mix test
+        run: KAFKA_BROKERS=localhost:19092 mix test
+      - if: always()
+        working-directory: ankusa_kafka
+        run: docker compose down -v

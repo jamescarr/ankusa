@@ -1,79 +1,38 @@
 defmodule Ankusa.Sink.Message do
   @moduledoc """
-  Canonical wire message format for queue-style sinks (RabbitMQ, Kafka, SQS).
+  The wire format every queue-style sink publishes (`Sink.RabbitMQ`,
+  `Sink.Kafka`), so a consumer parses one format regardless of transport.
 
-  This is the byte-identical JSON message shape across every transport: the same
-  payload rides AMQP, Kafka, and a bridge into SQS. Consumers parse one format,
-  not three.
+  A body of at most `inline_max_bytes` rides inline, base64-encoded. Anything
+  larger is checked in through `Ankusa.ClaimCheck` and the message carries the
+  ticket instead (see `docs/claim-check.md`):
 
-  ## Message shape
+      {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
+       "received_at": 1737500000000, "content_type": "application/json", "size": 245,
+       "body_base64": "eyJpZCI6..."}
 
-  Small payloads (≤ `inline_max_bytes`, default 8 KiB) ride along base64-encoded.
-  Large ones are claim-checked into the blob store and the message carries a ticket.
+      {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
+       "received_at": 1737500000000, "content_type": "application/octet-stream", "size": 3145728,
+       "claim": {"v": 1, "tenant_id": "acme", "id": "01a0...", "size": 3145728,
+                 "sha256": "9f86d0...", "content_type": "application/octet-stream"}}
 
-      {
-        "v": 1,
-        "id": "01a0b1c2d3...",
-        "source_id": "stripe",
-        "tenant_id": "acme",
-        "received_at": 1737500000000,
-        "content_type": "application/json",
-        "size": 245,
-        "body_base64": "eyJpZCI6..."
-      }
+  `v` changes only when an existing field changes meaning or disappears.
+  Adding a field keeps `v: 1`; consumers must ignore keys they don't know.
 
-  or
-
-      {
-        "v": 1,
-        "id": "01a0b1c2d3...",
-        "source_id": "stripe",
-        "tenant_id": "acme",
-        "received_at": 1737500000000,
-        "content_type": "application/json",
-        "size": 524288,
-        "claim": {
-          "v": 1,
-          "tenant_id": "acme",
-          "id": "01a0b1c2d3...",
-          "size": 524288,
-          "sha256": "d4e5f6...",
-          "content_type": "application/json"
-        }
-      }
-
-  ## Version indicator
-
-  `"v": 1` is **additive**. Existing consumers ignore unknown keys, so a `v2`
-  message with new fields is still readable by a `v1` consumer. Breaking changes
-  increment the version and require consumer updates. This module guards the
-  contract.
-
-  ## Size ceiling (documented, not enforced)
-
-  Base64 inflates by 4/3, so `inline_max_bytes × 4/3 + ~1 KiB` overhead must stay
-  under the smallest limit on the path: Kafka `max.message.bytes` (1 MiB default)
-  and the SQS message size limit (256 KiB). The 8 KiB default leaves plenty of
-  room. If a message exceeds the transport's limit, the sink fails with
-  `{:error, reason}` and the retry policy takes over (then the DLQ if retries
-  exhaust).
+  Base64 inflates the inline body by 4/3, so `inline_max_bytes * 4/3` plus
+  ~1 KiB of envelope must stay under the smallest message limit on the path
+  (Kafka `max.message.bytes`, 1 MiB by default; SQS, 256 KiB). The 8 KiB
+  default is far below both. Nothing here enforces it: an oversized message
+  fails at the broker and goes through the source's retry policy like any
+  other sink error.
   """
 
-  alias Ankusa.Envelope
+  alias Ankusa.{ClaimCheck, Envelope}
 
-  @doc """
-  Encode an envelope into the canonical JSON wire format.
-
-  - `env`: the envelope to encode
-  - `ctx`: the sink context (instance name for claim check)
-  - `inline_max_bytes`: threshold; larger payloads are claim-checked
-
-  Returns `{:ok, json_binary}` or `{:error, {:claim_check, reason}}` if the
-  claim check fails.
-  """
-  @spec encode(Envelope.t(), ctx :: map(), inline_max_bytes :: pos_integer()) ::
-          {:ok, binary()} | {:error, {:claim_check, Ankusa.ClaimCheck.reason()}}
-  def encode(%Envelope{} = env, ctx, inline_max_bytes) when inline_max_bytes > 0 do
+  @spec encode(Envelope.t(), Ankusa.Sink.ctx(), pos_integer()) ::
+          {:ok, binary()} | {:error, {:claim_check, ClaimCheck.reason()}}
+  def encode(%Envelope{} = env, ctx, inline_max_bytes)
+      when is_integer(inline_max_bytes) and inline_max_bytes > 0 do
     base = %{
       v: 1,
       id: env.id,
@@ -87,14 +46,15 @@ defmodule Ankusa.Sink.Message do
     if env.size <= inline_max_bytes do
       {:ok, JSON.encode!(Map.put(base, :body_base64, Base.encode64(env.body)))}
     else
-      with {:ok, ticket} <- check_in_claim(env, ctx) do
-        {:ok, JSON.encode!(Map.put(base, :claim, Ankusa.ClaimCheck.Ticket.to_map(ticket)))}
+      meta = %{tenant_id: env.tenant_id, id: env.id, content_type: env.content_type}
+
+      case ClaimCheck.check_in(ctx.instance, env.body, meta) do
+        {:ok, ticket} ->
+          {:ok, JSON.encode!(Map.put(base, :claim, ClaimCheck.Ticket.to_map(ticket)))}
+
+        {:error, reason} ->
+          {:error, {:claim_check, reason}}
       end
     end
-  end
-
-  defp check_in_claim(env, ctx) do
-    meta = %{tenant_id: env.tenant_id, id: env.id, content_type: env.content_type}
-    Ankusa.ClaimCheck.check_in(ctx.instance, env.body, meta)
   end
 end

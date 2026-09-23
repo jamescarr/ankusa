@@ -1,5 +1,15 @@
 name: ankusa-kafka-sqs-example
 
+# Ingest produces to a Kafka topic (Redpanda); a Redpanda Connect bridge
+# forwards it into an SQS FIFO queue (floci); a TypeScript worker consumes
+# the queue and redeems fat payloads through the claim-check gateway, with
+# no S3 credentials of its own.
+#
+#   docker compose up --build -d --wait
+#   curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+#   docker compose logs -f worker
+#   docker compose down -v
+
 services:
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
@@ -12,25 +22,24 @@ services:
       - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
     ports:
       - "19092:19092"
-      - "9644:9644"
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 2s
       timeout: 5s
       retries: 30
 
+  # The topic belongs to ops, never to the sink: partition count is an
+  # ordering and capacity decision (see Ankusa.Sink.Kafka). Idempotent, since
+  # compose re-runs it whenever a dependent service (re)starts.
   redpanda-bootstrap:
     image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
     depends_on:
       redpanda:
         condition: service_healthy
-    entrypoint: /bin/sh
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - -c
-      - |
-        rpk cluster health --api-urls redpanda:9644 --watch --exit-when-healthy
-        rpk topic create ankusa.events --brokers redpanda:9092 --partitions 6 --replicas 1
-        echo "topic ankusa.events created"
+      - rpk topic create ankusa.events -X brokers=redpanda:9092 -p 6 -r 1
+        || rpk topic describe ankusa.events -X brokers=redpanda:9092 >/dev/null
 
   redpanda-console:
     image: docker.redpanda.com/redpandadata/console:v2.8.2
@@ -38,7 +47,7 @@ services:
       redpanda:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "8080:8080"   # topic, messages, consumer group lag: http://localhost:8080
     environment:
       KAFKA_BROKERS: redpanda:9092
 
@@ -49,6 +58,7 @@ services:
     environment:
       AWS_DEFAULT_REGION: us-east-1
 
+  # S3 bucket for claims and segments; SQS FIFO queue plus its DLQ.
   aws-bootstrap:
     image: amazon/aws-cli:2.17.62
     depends_on: [floci]
@@ -57,37 +67,27 @@ services:
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL: http://floci:4566
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
         until aws s3 ls >/dev/null 2>&1; do echo "waiting for floci..."; sleep 1; done
-        
-        # S3 bucket for claim check
-        aws s3 mb "s3://ankusa-example" || true
-        
-        # SQS DLQ (must be created first for RedrivePolicy)
-        DLQ_URL=$$(aws sqs create-queue \
-          --queue-name ankusa-worker-dlq.fifo \
-          --attributes FifoQueue=true \
-          --query 'QueueUrl' --output text)
-        
-        DLQ_ARN=$$(aws sqs get-queue-attributes \
-          --queue-url "$$DLQ_URL" \
-          --attribute-names QueueArn \
-          --query 'Attributes.QueueArn' --output text)
-        
-        # Create main queue without redrive policy first
-        QUEUE_URL=$$(aws sqs create-queue \
-          --queue-name ankusa-worker.fifo \
-          --attributes FifoQueue=true,ContentBasedDeduplication=false \
-          --query 'QueueUrl' --output text)
-        
-        # Set redrive policy separately
-        aws sqs set-queue-attributes \
-          --queue-url "$$QUEUE_URL" \
-          --attributes VisibilityTimeout=30,RedrivePolicy='{"deadLetterTargetArn":"'"$$DLQ_ARN"'","maxReceiveCount":5}'
-        
-        echo "S3 bucket and SQS queues ready"
+        aws s3 mb s3://ankusa-example || true
+
+        aws sqs create-queue --queue-name ankusa-worker-dlq.fifo --attributes FifoQueue=true >/dev/null
+        dlq_arn=$$(aws sqs get-queue-attributes \
+          --queue-url http://floci:4566/000000000000/ankusa-worker-dlq.fifo \
+          --attribute-names QueueArn --query Attributes.QueueArn --output text)
+
+        cat > /tmp/attrs.json <<EOF
+        {
+          "FifoQueue": "true",
+          "ContentBasedDeduplication": "false",
+          "VisibilityTimeout": "30",
+          "RedrivePolicy": "{\"deadLetterTargetArn\":\"$$dlq_arn\",\"maxReceiveCount\":\"5\"}"
+        }
+        EOF
+        aws sqs create-queue --queue-name ankusa-worker.fifo --attributes file:///tmp/attrs.json
+        echo "bucket and queues ready"
 
   ingest:
     build:
@@ -111,6 +111,7 @@ services:
       S3_SECRET_ACCESS_KEY: test
       INLINE_MAX_BYTES: "8192"
 
+  # Same image, `:claim_check` role only: the one surface the worker calls.
   claim-check:
     build:
       context: ../..
@@ -139,20 +140,23 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./bridge/bridge.yaml:/connect.yaml:ro
-    command: run /connect.yaml
+    command: ["run", "/connect.yaml"]
 
+  # SQS credentials only (fake, floci). No S3 credentials: fat payloads are
+  # redeemed through `claim-check`.
   worker:
     build:
       context: ./worker
     depends_on:
-      bridge:
-        condition: service_started
+      aws-bootstrap:
+        condition: service_completed_successfully
       claim-check:
         condition: service_started
     environment:
       SQS_QUEUE_URL: http://floci:4566/000000000000/ankusa-worker.fifo
+      SQS_DLQ_URL: http://floci:4566/000000000000/ankusa-worker-dlq.fifo
       SQS_ENDPOINT: http://floci:4566
-      SQS_REGION: us-east-1
+      AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       CLAIM_CHECK_URL: http://claim-check:4001

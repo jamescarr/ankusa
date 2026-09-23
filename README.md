@@ -58,13 +58,15 @@ including across separate BEAM nodes and separate adapter packages.
 .                    ankusa — core. mix.exs deps: {bandit, plug}. Zero adapter deps.
 ankusa_postgres/       shared, multi-node WAL (Postgres). Path-dep on ankusa + postgrex.
 ankusa_rabbitmq/       queue delivery (RabbitMQ exchange publish). Path-dep on ankusa + amqp.
+ankusa_kafka/          queue delivery (Kafka topic produce). Path-dep on ankusa + brod.
 examples/            deployable demos (Docker Compose, not published packages)
 docs/                everything below, in depth
 ```
 
 Each adapter package exists because it introduces an external dependency
 `ankusa` core shouldn't force on every user — a laptop user running `mix
-deps.get` on `ankusa` alone never fetches `postgrex` or `amqp`. Full rationale
+deps.get` on `ankusa` alone never fetches `postgrex`, `amqp`, or `brod`
+(whose `crc32cer` NIF needs a C++ toolchain and CMake to build). Full rationale
 and the decision rule for adding a new one: [`docs/packaging.md`](docs/packaging.md).
 
 ## Quickstart
@@ -89,7 +91,7 @@ at it): [`docs/quickstart.md`](docs/quickstart.md).
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
 | `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
-| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq`) |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq`), `Sink.Kafka` (topic produce — `ankusa_kafka`) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
 | `Ankusa.ClaimCheck` | Check bytes in, redeem by ticket | `ClaimCheck.Direct` (in-process) | `ClaimCheck.Remote` (HTTP, `:claim_check` role) |
@@ -124,8 +126,9 @@ DLQ, compaction round-trip, the Claim Check gateway (ticket integrity, the
 `:claim_check` HTTP API, a real cross-mode `Direct`↔`Remote` proof, LocalFS
 retention), and a **loss checker** that acks 500 hooks concurrently,
 hard-kills the instance, and proves every acked id survives replay.
-`ankusa_postgres` (10 tests) and `ankusa_rabbitmq` (4 tests) each need
-their own live infra — see [`docs/testing.md`](docs/testing.md).
+`ankusa_postgres` (10 tests), `ankusa_rabbitmq` (4 tests), and
+`ankusa_kafka` (5 tests) each need their own live infra — see
+[`docs/testing.md`](docs/testing.md).
 
 ## Examples
 
@@ -136,9 +139,19 @@ a real TypeScript worker that owns its own queue/binding, redeems claims
 over HTTP with **no storage credentials of its own**, and prints. `docker
 compose up --build` runs the whole thing.
 
+[`examples/kafka-sqs-consumer/`](examples/kafka-sqs-consumer/) — the same
+guarantees through a different transport: ingest → Kafka topic → a Redpanda
+Connect bridge → SQS FIFO queue → a TypeScript worker, again with no storage
+credentials (claims are redeemed over HTTP). The bridge commits Kafka
+offsets only after SQS accepts, and per-key order survives the hop as the
+FIFO `MessageGroupId`.
+
 ## Not yet implemented (deferred adapters from the plan)
 
-Kafka/Ra WAL adapters, zstd codec, Broadway-backed dispatch, LiveView
+`WAL.Kafka`/`WAL.Ra` adapters (a Kafka *sink* ships as
+[`ankusa_kafka`](ankusa_kafka/); a Kafka *WAL* would need an external dedup
+ledger, since Kafka has no unique constraint), zstd codec,
+Broadway-backed dispatch, LiveView
 dashboard, `mix ankusa.new` generator, `SourceStore.Ecto` + a catch-URL
 control-plane API, and per-source envelope encryption. Each is an adapter
 behind an existing behaviour — the ingest guarantees above do not change when

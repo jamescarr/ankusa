@@ -28,6 +28,7 @@ erl_crash.dump
 ankusa-*.tar
 ankusa_postgres-*.tar
 ankusa_rabbitmq-*.tar
+ankusa_kafka-*.tar
 
-# Node (examples/rabbitmq-consumer/worker).
+# Node (examples/*/worker).
 **/node_modules/

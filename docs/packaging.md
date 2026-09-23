@@ -28,6 +28,7 @@ bandit_example/            ankusa — core. mix.exs deps: {bandit, plug}. Zero a
                               RouteResolver.{Path,TenantPath})
   ankusa_postgres/            path-dep on ankusa + postgrex. Ankusa.WAL.Postgres.
   ankusa_rabbitmq/            path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
+  ankusa_kafka/               path-dep on ankusa + brod. Ankusa.Sink.Kafka.
   examples/                 deployable demos; not published packages
 ```
 
@@ -35,13 +36,14 @@ bandit_example/            ankusa — core. mix.exs deps: {bandit, plug}. Zero a
 ".."}` for local development, and would become normal Hex dependencies once
 published. Each ships its **own** `docker-compose.yml` for local dev/test
 infra (`ankusa_postgres/` → Postgres on `:5433`; `ankusa_rabbitmq/` → RabbitMQ
-on `:5673`/`:15673`) and its **own** `config/config.exs` setting `config
+on `:5673`/`:15673`; `ankusa_kafka/` → Redpanda on `:19092`) and its **own**
+`config/config.exs` setting `config
 :ankusa, autostart: false` — every adapter package test suite needs
 `Ankusa.Registry` running (started by `ankusa`'s own `Application`) but must not
 let `ankusa`'s built-in demo instance boot as a side effect of `ankusa` being a
 transitive OTP application dependency.
 
-## Why S3/GCS stayed in-tree but Postgres/RabbitMQ didn't
+## Why S3/GCS stayed in-tree but Postgres/RabbitMQ/Kafka didn't
 
 `Ankusa.BlobStore.S3` and `Ankusa.BlobStore.GCS` needed real signing (AWS SigV4)
 and a real HTTP client — but stdlib already provides both (`:crypto` for
@@ -51,7 +53,11 @@ S3's `ListObjectsV2` needs). Zero *external* dependency, so they stayed in
 
 `Ankusa.WAL.Postgres` needs `postgrex` (which pulls `db_connection`,
 `decimal`). `Ankusa.Sink.RabbitMQ` needs `amqp` (which pulls `amqp_client`,
-`rabbit_common` — real NIF/native-adjacent Erlang libraries). Those are
+`rabbit_common` — real NIF/native-adjacent Erlang libraries).
+`Ankusa.Sink.Kafka` needs `brod`, which pulls `crc32cer`: a C++ NIF that
+compiles from source on every `mix deps.compile`, so that package carries a
+build-toolchain requirement (CMake ≥ 3.16 plus a C++ compiler) that no
+`ankusa` core user should be forced to satisfy. Those are
 genuine external dependencies the laptop/standalone user shouldn't pay to
 compile, so each got its own package the moment it was built — not before.
 `ankusa_postgres` didn't exist until the Postgres WAL adapter was actually

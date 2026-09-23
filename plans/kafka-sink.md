@@ -409,3 +409,57 @@ This follows `docs/testing.md`: real infrastructure, no mocks.
 - [ ] Compression (snappy/lz4/zstd). Trigger: broker egress or storage cost.
 - [ ] A native `Sink.SQS` in core (SigV4 reuse, zero dependencies). Trigger: SQS-only users.
 - [ ] `WAL.Kafka`, as its own plan. Trigger: a user with Kafka and no Postgres.
+
+## Phase 0 findings (2026-09-23)
+
+Every check in the list above, with its result:
+
+1. **`crc32cer` on Alpine: works.** Built on `elixir:1.20.4-alpine` with
+   `apk add build-base cmake` (CMake 4.2.3); the NIF loads and `:brod`
+   starts. `crc32cer`'s manifest requires CMake 3.16, so the GitHub runner's
+   CMake is sufficient — no `setup-cmake` action and no Debian base image
+   needed. The Alpine/Debian fallback stays documented in
+   `examples/kafka-sqs-consumer/ingest_app/Dockerfile`, unused.
+2. **brod against Redpanda: works, with one trap.** `produce_sync` with
+   `required_acks: -1` returns `:ok` only after the ack; a message map with
+   `ts`/`headers` round-trips (headers come back as a map, not a list);
+   an unreachable broker fails in ~1s instead of hanging; an unknown topic
+   errors. **The trap:** `brod:produce/5` with the `:hash` partitioner
+   resolves the partition count through `brod_client:get_partitions_count/2`,
+   which passes `allow_topic_auto_creation => true` regardless of the
+   client's config — so the "sink never creates topics" rule is not
+   enforceable through that call. `Sink.Kafka` therefore partitions
+   explicitly: `get_partitions_count_safe/2` (`allow_topic_auto_creation:
+   false`) plus `erlang:phash2/1` (the same hash brod's `:hash` uses), then
+   `produce/5` with an integer partition. The unknown-topic test asserts the
+   topic still doesn't exist afterwards. Also confirmed: brod's regular
+   producer has no idempotence, so at-least-once with consumer-side dedup is
+   the honest contract. A brod client that can't reach any broker exits
+   during init, so clients start as `:temporary` children — restarting them
+   would crash-loop past the supervisor's intensity and take the app down.
+3. **floci for SQS: works.** FIFO queues, `MessageGroupId` ordering,
+   `MessageDeduplicationId` dropping a duplicate inside the window, DLQ
+   creation, and a redrive policy moving a message after `maxReceiveCount`
+   (verified with `maxReceiveCount: 2`: two receives, then the message is in
+   the DLQ). ElasticMQ is not needed.
+4. **`rpk connect lint` on the bridge: passes** (after fixing the metadata
+   whitelist to a single-line Bloblang expression — a multi-line lambda fails
+   to parse). The whitelist yields 8 attributes: 5 `ankusa_*` headers plus
+   `kafka_key`, `kafka_partition`, `kafka_offset`, inside the 10-attribute
+   cap.
+
+Two further findings from Phase 3 that changed the design:
+
+- The bridge's Kafka key arrives in metadata as `kafka_key`; it is not
+  automatically the SQS group id, so `message_group_id: ${! @kafka_key}` is
+  load-bearing for end-to-end ordering.
+- The worker must be given the DLQ URL explicitly (it sends, then deletes);
+  the redrive policy is only the backstop for messages it never gets to.
+
+## Status
+
+Phases 1–4 are built and verified. `Ankusa.Sink.Message` (Phase 1),
+`ankusa_kafka` including `Sink.Kafka` and its Redpanda-backed 5-test suite
+(Phase 2), `examples/kafka-sqs-consumer/` with all three failure drills run
+(Phase 3), and the docs/changelogs (Phase 4). The deferred decisions above
+are still deferred.

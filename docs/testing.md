@@ -94,6 +94,31 @@ against a real `BlobStore`), routing key as both a static string and a
 function, and a fast-fail check (`:econnrefused`, not a hang) against an
 unreachable broker.
 
+## `ankusa_kafka` — `mix test`
+
+Same pattern, against Redpanda:
+
+```sh
+cd ankusa_kafka
+docker compose up -d --wait   # Redpanda on :19092
+mix test                      # 5 tests
+docker compose down -v
+```
+
+`KAFKA_BROKERS` (default `localhost:19092`) points the suite at another
+broker. Each test creates its own topic in `setup` and deletes it in
+`on_exit`, and records are read back with `:brod.fetch/4`, so no consumer
+group is involved. Covers: inline record round-trip (value, key, headers,
+event timestamp), fat record claim check-in plus redeem, `:key` as a static
+string and as a function, an unknown topic being an error that is **not**
+auto-created, and an unreachable broker failing within `produce_timeout_ms`
+instead of hanging.
+
+brod's `crc32cer` NIF compiles from source, so the first `mix deps.compile`
+needs a C toolchain and CMake ≥ 3.16 (`apk add build-base cmake` on Alpine,
+`brew install cmake` on macOS) — or run the suite in a container, see
+[`AGENTS.md`](../AGENTS.md).
+
 ## Verifying the worked example
 
 [`examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/) isn't a Mix
@@ -107,9 +132,26 @@ docker compose logs worker     # confirm the hook printed
 docker compose down -v
 ```
 
+[`examples/kafka-sqs-consumer/`](../examples/kafka-sqs-consumer/) is verified
+the same way, plus its three failure drills (bridge down, worker down, poison
+claim — each with its own `docker compose` commands and expected output in
+that example's README). After it's up, one small and one fat hook exercise
+both payload paths end to end:
+
+```sh
+cd examples/kafka-sqs-consumer
+docker compose up --build -d --wait
+curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+python3 -c "import json;print(json.dumps({'id':'evt_2','items':[{'n':i} for i in range(2000)]}))" \
+  | curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' --data-binary @-
+docker compose logs worker   # via=inline, then via=claim:<id>
+docker compose down -v
+```
+
 ## Writing a new adapter's tests
 
-Follow `ankusa_postgres`/`ankusa_rabbitmq`: a `docker-compose.yml` for the real
+Follow `ankusa_postgres`/`ankusa_rabbitmq`/`ankusa_kafka`: a
+`docker-compose.yml` for the real
 dependency, `config/config.exs` setting `autostart: false`, and tests that
 hit the real thing. A mock proves your code calls a mock correctly; it
 proves nothing about whether a hand-rolled protocol implementation (SQL,
