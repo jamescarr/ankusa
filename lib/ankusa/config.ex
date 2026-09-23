@@ -38,13 +38,25 @@ defmodule Ankusa.Config do
               roll_bytes: 16 * 1024 * 1024,
               roll_ms: 30_000,
               interval_ms: 1_000
+            },
+            # claim check gateway — check bytes in, get a ticket back
+            claim_check: %{
+              adapter: {Ankusa.ClaimCheck.Direct, []},
+              max_bytes: 8_000_000,
+              # :claim_check role only
+              port: 4001,
+              api_tokens: %{},
+              # LocalFS retention only; nil disables the sweeper
+              retention_days: nil,
+              sweep_interval_ms: 3_600_000
             }
 
   @type t :: %__MODULE__{}
 
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
-  sections (`:batcher`, `:dispatch`, `:storage`) over the defaults.
+  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`) over the
+  defaults.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -52,7 +64,7 @@ defmodule Ankusa.Config do
 
     Enum.reduce(opts, base, fn {k, v}, acc ->
       cond do
-        k in [:batcher, :dispatch, :storage] and is_map(v) ->
+        k in [:batcher, :dispatch, :storage, :claim_check] and is_map(v) ->
           Map.put(acc, k, Map.merge(Map.get(acc, k), Map.new(v)))
 
         Map.has_key?(base, k) ->

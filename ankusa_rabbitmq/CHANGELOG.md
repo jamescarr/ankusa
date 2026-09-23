@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `Ankusa.Sink.RabbitMQ`'s fat-payload path now checks bodies in through
+  `Ankusa.ClaimCheck` (new in `ankusa`) instead of writing directly to a
+  `Ankusa.BlobStore`. The message shape changes: `{"blob": {"store", "key",
+  "size"}}` is now `{"claim": {"v", "tenant_id", "id", "size", "sha256",
+  "content_type"}}` — a consumer redeems the ticket via
+  `Ankusa.ClaimCheck.redeem/3` (or, for a non-BEAM consumer, the
+  `:claim_check` role's HTTP API) instead of reading the pointed-to object
+  directly. The `:blob_store` and `:blob_key_prefix` sink opts are removed;
+  configure `claim_check.adapter` on the instance instead.
+  **Rollout:** drain consumer queues of `blob`-shaped messages before
+  deploying this version; old `raw/...` objects are orphaned and can be
+  deleted afterwards.
+
 ## [0.1.0] - 2026-09-22
 
 ### Added

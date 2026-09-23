@@ -11,6 +11,7 @@ for the four shapes this section explains how to actually run.
 defp edge_children(config, opts), do: if Config.role?(config, :edge), do: [...], else: []
 defp dispatch_children(config, opts), do: if Config.role?(config, :dispatch), do: [...], else: []
 defp storage_children(config, opts), do: if Config.role?(config, :storage), do: [...], else: []
+defp claim_check_children(config, opts), do: if Config.role?(config, :claim_check), do: [...], else: []
 ```
 
 One Mix release, many deployments — the same compiled artifact runs
@@ -20,17 +21,28 @@ a runtime config decision, never a build-time one.
 ```sh
 ANKUSA_ROLES=edge,dispatch mix run --no-halt    # this node: edge + dispatch, no compactor
 ANKUSA_ROLES=storage mix run --no-halt          # this node: compactor only
+ANKUSA_ROLES=claim_check mix run --no-halt      # this node: claim-check gateway only
 ```
 
 `Ankusa.Application` reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of
 whatever `config.exs` sets — see
 [`configuration.md#runtime-environment-overrides`](configuration.md#runtime-environment-overrides).
 
+**`:claim_check` is a fourth, opt-in role**, absent from the default
+`roles` list (`[:edge, :dispatch, :storage]`) because it opens an
+authenticated port. A node running it alone needs no WAL — only blob-store
+credentials and `claim_check.api_tokens` — and can be scaled independently
+from ingest/dispatch/storage exactly like any other role. See
+[`claim-check.md`](claim-check.md) for the full contract and the worked
+`examples/rabbitmq-consumer/` deployment (an `ingest` service plus a
+separate `claim-check` service, same image, different `ANKUSA_ROLES`).
+
 **Important constraint:** splitting roles across different *processes on
 one host* works with any WAL, because they can share a local disk path.
 Splitting roles across different *machines* requires a WAL every role can
 reach over the network — that's `WAL.Postgres` (see
-[`storage.md`](storage.md)), not `WAL.DiskLog`.
+[`storage.md`](storage.md)), not `WAL.DiskLog`. This constraint doesn't
+apply to `:claim_check`, which never touches the WAL at all.
 
 ## Docker
 

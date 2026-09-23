@@ -7,11 +7,11 @@ different infrastructure dependency (none, Postgres, RabbitMQ).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 59 tests, no external infra needed
+mix test                              # 98 tests, no external infra needed
 mix test --include integration        # +8 tests, needs floci running (see below)
 ```
 
-The 59 always-on tests cover:
+The 98 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
   crash-replay (torn-frame handling), truncation.
@@ -20,6 +20,14 @@ The 59 always-on tests cover:
   through the HTTP layer.
 - **Dispatch**: retry, DLQ.
 - **Storage**: compaction round-trip.
+- **Claim Check** (`test/ankusa/claim_check/`): ticket validation and
+  traversal-safe key derivation; `Direct` round-trip over `LocalFS`;
+  idempotent re-check-in; tampered-object integrity detection;
+  `validate_config!/1` boot-time rejections; the `:claim_check` role's HTTP
+  API (auth, tenant scoping, size cap, status-code mapping); a **real**
+  cross-mode proof — a ticket checked in via `Direct` redeems via `Remote`
+  over an actual HTTP hop (`ThousandIsland.listener_info/1` resolves the
+  live port), and back; the `LocalFS` retention sweeper.
 - **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
   mid-flight, and proves every acked id survives replay from the WAL. Zero
   tolerance — this is the test that actually backs the core invariant claim
@@ -80,10 +88,11 @@ mix test                      # 4 tests
 docker compose down -v
 ```
 
-Covers: inline-payload publish + decode, fat-payload blob offload (message
-carries a pointer, the blob round-trips through a real `BlobStore`),
-routing key as both a static string and a function, and a fast-fail check
-(`:econnrefused`, not a hang) against an unreachable broker.
+Covers: inline-payload publish + decode, fat-payload claim check-in (message
+carries a ticket, the claim round-trips through `Ankusa.ClaimCheck.redeem/3`
+against a real `BlobStore`), routing key as both a static string and a
+function, and a fast-fail check (`:econnrefused`, not a hang) against an
+unreachable broker.
 
 ## Verifying the worked example
 
