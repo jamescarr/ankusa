@@ -1,8 +1,9 @@
-# Redpanda Connect: Kafka → SQS FIFO bridge
+# Messaging bridge: Kafka topic `ankusa.events` -> SQS FIFO queue. Owned by
+# the consumer side; ingest never knows this consumer group exists.
 #
-# Consumes from ankusa.events topic, filters metadata to the 10-attribute SQS
-# limit, and publishes to a FIFO queue with ordering per Kafka key and
-# deduplication per envelope id.
+# The input commits a Kafka offset only after the SQS send succeeds, so a
+# crash replays from the last commit (at-least-once). FIFO dedup on the
+# envelope id absorbs replays inside SQS's 5-minute window.
 
 input:
   redpanda:
@@ -10,19 +11,14 @@ input:
     topics: ["ankusa.events"]
     consumer_group: ankusa-sqs-bridge
     start_offset: earliest
-    # At-least-once: offset committed only after SQS confirms
-    auto_replay_nacks: true
 
 pipeline:
   processors:
-    # Whitelist metadata: aws_sqs keeps only 10 attributes (alphabetical order).
-    # The redpanda input adds 8 kafka_* fields; without filtering, our headers
-    # would push some out.
+    # aws_sqs sends metadata as message attributes and keeps only the first
+    # 10 (alphabetically); the input alone adds 8 kafka_* keys. Keep exactly
+    # the ankusa_* headers plus the three kafka_* keys worth having.
     - mutation: |
-        meta = @.filter(kv -> 
-          kv.key.has_prefix("ankusa_") ||
-          ["kafka_key", "kafka_partition", "kafka_offset"].contains(kv.key)
-        )
+        meta = @.filter(kv -> kv.key.has_prefix("ankusa_") || ["kafka_key", "kafka_partition", "kafka_offset"].contains(kv.key))
 
 output:
   aws_sqs:
@@ -32,21 +28,11 @@ output:
     credentials:
       id: test
       secret: test
-    
-    # Ordering scope = Kafka key (tenant_id/source_id by default)
+    # Ordering scope end to end: Kafka key (tenant/source) = FIFO group.
     message_group_id: ${! @kafka_key }
-    
-    # Deduplication window (5 min) on envelope id
     message_deduplication_id: ${! @ankusa_id }
-    
-    # max_in_flight > 1 can reorder sends within a group
+    # More than one in flight can reorder sends within a group.
     max_in_flight: 1
-    
-    # SendMessageBatch caps at 10
     batching:
       count: 10
       period: 100ms
-
-logger:
-  level: INFO
-  format: json

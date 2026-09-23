@@ -1,3 +1,12 @@
+name: ankusa_kafka
+
+# Local Redpanda for developing/testing Ankusa.Sink.Kafka. Tests create and
+# delete their own topics.
+#
+#   docker compose up -d --wait
+#   mix test
+#   docker compose down -v
+
 services:
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
@@ -10,21 +19,8 @@ services:
       - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
     ports:
       - "19092:19092"
-      - "9644:9644"
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 2s
       timeout: 5s
       retries: 30
-
-  redpanda-bootstrap:
-    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        rpk cluster health --api-urls redpanda:9644 --watch --exit-when-healthy
-        rpk topic create ankusa.test --brokers redpanda:9092 --partitions 3 --replicas 1
-    depends_on:
-      redpanda:
-        condition: service_healthy

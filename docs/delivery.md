@@ -36,6 +36,7 @@ handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`.
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
 | `Sink.Http` | none (`:httpc`) | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq` headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
 | `Sink.RabbitMQ` | `:amqp` — separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
+| `Sink.Kafka` | `:brod` (native `crc32cer` NIF) — separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 
 ```elixir
 sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
@@ -74,19 +75,22 @@ sinks: [
 ]
 ```
 
-Message shape:
+Message shape (`Ankusa.Sink.Message` — byte-identical for `Sink.Kafka`):
 
 ```jsonc
 // inline
-{"id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
+{"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/json", "size": 245, "body_base64": "eyJpZCI6..."}
 
 // fat payload
-{"id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
+{"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728,
  "claim": {"v": 1, "tenant_id": "acme", "id": "01a0...", "size": 3145728,
            "sha256": "9f86d0...", "content_type": "application/octet-stream"}}
 ```
+
+`"v"` changes only when an existing field changes meaning or disappears;
+consumers must ignore keys they don't know.
 
 A consumer decodes `claim` back into a `Ankusa.ClaimCheck.Ticket` and calls
 `Ankusa.ClaimCheck.redeem/3` (or, for a non-BEAM consumer, `GET
@@ -104,6 +108,54 @@ RabbitMQ, not just handed to a socket. Connection loss doesn't crash the
 GenServer; it retries on a timer and replies `{:error, :not_connected}` to
 publishes meanwhile, which flows straight into the existing
 `Ankusa.RetryPolicy` — no separate reconnect policy to get wrong.
+
+### `Sink.Kafka` — topic delivery
+
+The same story one transport over: an ingest fleet producing to a Kafka
+topic instead of an AMQP exchange, publishing the identical
+`Ankusa.Sink.Message`. See
+[`examples/kafka-sqs-consumer/`](../examples/kafka-sqs-consumer/) for a full
+worked deployment (topic → bridge → SQS FIFO → worker).
+
+```elixir
+sinks: [
+  {Ankusa.Sink.Kafka,
+   brokers: ["localhost:9092"],
+   topic: "ankusa.events",
+   inline_max_bytes: 8_192,
+   key: fn env -> "#{env.tenant_id}/#{env.source_id}" end}  # or a static string; this is the default
+]
+```
+
+**The record key is the ordering scope.** The same key lands on the same
+partition, and a retried record never overtakes a later one from that key
+(inline retries block the dispatch batch). Order is *not* preserved across a
+DLQ replay, across a fleet sharing a `WAL.Postgres`, or after the topic's
+partition count changes. Keys are hashed with brod's `:hash`
+(`erlang:phash2/1`), not the Java client's murmur2, so the same key can land
+on a different partition than a Java producer would choose.
+
+**It never creates the topic.** An exchange declaration is idempotent and
+free; a topic's partition count is a capacity and ordering contract that can
+only grow, remapping keys when it does. An unknown topic is an error that
+flows into `Ankusa.RetryPolicy` — never a silently auto-created
+single-partition topic.
+
+**`deliver/3` returns `:ok` only once every in-sync replica has the record**
+(`required_acks: -1`, then a synchronous wait bounded by
+`:produce_timeout_ms`, default 5s), the Kafka equivalent of RabbitMQ's
+publisher confirms. brod's producer is not idempotent, so a produce retried
+after a lost ack can duplicate a record — delivery is at-least-once anyway,
+and consumers dedupe on `id`.
+
+**Client lifecycle**: one brod client per `(instance, :client)`, started on
+demand by the first `deliver/3` call under `ankusa_kafka`'s own
+`DynamicSupervisor` (`ankusa` core unchanged). brod's client owns
+reconnects, leader changes, and metadata refresh. A brod client id must be a
+registered atom, so it is `:"ankusa_kafka.<instance>.<client>"` — both parts
+come from config, so the number of atoms is bounded and two instances never
+collide. Unreachable brokers, unknown topics, timeouts, and oversized
+messages all surface as `{:error, reason}`.
 
 ## `Ankusa.RetryPolicy`
 
