@@ -38,6 +38,9 @@ defmodule Ankusa.Edge.Router do
 
           {:too_large, conn} ->
             send_json(conn, 413, %{error: "payload_too_large", limit: max})
+
+          {:error, reason, conn} ->
+            send_json(conn, 400, %{error: "body_read_failed", reason: inspect(reason)})
         end
 
       :error ->

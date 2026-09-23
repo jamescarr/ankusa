@@ -18,6 +18,13 @@ touches, not just the one you edited. All three adapter packages depend on
 `mix format --check-formatted` is what CI fails on first: run `mix format`
 before pushing, not after CI tells you.
 
+Changing core's dependencies touches every package that path-depends on it, so
+after adding or removing one, run `mix deps.get` in each of the packages above
+and commit their `mix.lock` files. CI runs `mix deps.get --check-locked` and
+`mix deps.unlock --check-unused` everywhere — including the examples — so a
+`deps.get` that rewrites a stale lock, or a lock entry for a dependency nobody
+declares, fails the build instead of passing quietly.
+
 Core's suite excludes `:integration` tests (S3/GCS against a floci
 emulator); add `--include integration` with the emulator running. What each
 suite covers: [`docs/testing.md`](docs/testing.md).
@@ -29,11 +36,21 @@ package's checks in a container instead:
 ```sh
 cd ankusa_kafka
 docker compose up -d --wait
-docker run --rm --network ankusa_kafka_default -v "$PWD":/repo \
-  -e KAFKA_BROKERS=redpanda:9092 -w /repo/ankusa_kafka \
-  elixir:1.20.4-alpine \
-  sh -c 'apk add --no-cache -q build-base cmake git && mix deps.get && mix test'
+# The repo *root* is the mount, not `ankusa_kafka/`: in :dev/:test this package
+# path-depends on `..`, so mounting only the package leaves `..` with no
+# `mix.exs` and Mix fails before it compiles anything.
+# MIX_BUILD_PATH keeps the container's Linux artifacts out of your `_build` —
+# a Linux-built `crc32cer` NIF will not load on macOS, and its CMake cache
+# records container paths that break a later local build.
+docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
+  -e KAFKA_BROKERS=redpanda:9092 -e MIX_BUILD_PATH=/tmp/build \
+  -w /repo/ankusa_kafka elixir:1.20.4-alpine \
+  sh -c 'mix local.hex --force >/dev/null && apk add --no-cache -q build-base cmake git >/dev/null \
+         && mix format --check-formatted && mix compile --warnings-as-errors && mix test'
 ```
+
+The same applies to `examples/kafka-sqs-consumer/ingest_app`, which path-depends
+on both core and `ankusa_kafka`.
 
 Working on something that needs a browser or a running system? Exercise the
 real thing (or a throwaway script against it) — see the verification
@@ -47,3 +64,16 @@ Two rules that follow from all of the above:
 - **Never mark a task done while its own acceptance criteria fail** — a
   step that crashed, or a drill that was never run, is not done. Say what
   failed and what's still open.
+
+## Dependencies
+
+**Take the dependency when it is the right tool.** Judge it on merit: is the
+library more correct, better tested, and less surface for us to own and be wrong
+about than the code it replaces? Then use it. "Zero dependencies" is not a goal,
+and refusing a good library to keep a count at zero is not a principle — it is
+how you end up maintaining hand-rolled SigV4 signing.
+
+The rule that *does* hold is about placement: a dependency only some deployments
+need goes in its own adapter package, so nobody else's `mix deps.get` compiles
+it. A dependency every user benefits from belongs in `ankusa` core. Full decision
+rule, and the worked examples: [`docs/packaging.md`](docs/packaging.md).

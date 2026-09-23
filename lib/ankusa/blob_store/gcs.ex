@@ -1,8 +1,12 @@
 defmodule Ankusa.BlobStore.GCS do
   @moduledoc """
-  `Ankusa.BlobStore` backed by Google Cloud Storage's JSON API, via `:httpc` —
-  no HTTP client dependency. Works against real GCS or the `floci-gcp`
-  emulator in `docker-compose.yml`.
+  `Ankusa.BlobStore` backed by Google Cloud Storage's JSON API, via
+  [`Req`](https://hex.pm/packages/req). Works against real GCS or the
+  `floci-gcp` emulator in `docker-compose.yml`.
+
+  This adapter deliberately carries **no credential dependency**: `:token_provider`
+  is a callback you point at whatever your deployment already uses (Goth, ADC),
+  rather than a bundled OAuth2 client.
 
   opts:
 
@@ -12,11 +16,13 @@ defmodule Ankusa.BlobStore.GCS do
     * `:token_provider` — `{module, fun, args}`, applied per request, must
                            return `{:ok, bearer_token} | :error`. Omit for the
                            emulator (unauthenticated). **Required against real
-                           GCS** — this adapter carries no OAuth2 dependency of
-                           its own; wire up your own token source (Goth, ADC,
+                           GCS** — wire up your own token source (Goth, ADC,
                            whatever your deployment already uses) and pass it
                            here.
-    * `:timeout_ms`     — default `10_000`
+    * `:timeout_ms`     — default `10_000`, for both connect and response
+    * `:req_options`    — transport options for the HTTP client, e.g. a custom
+                           Finch pool, a proxy, or `plug:` for `Req.Test` in
+                           tests. See `Ankusa.HttpClient` for the accepted keys
 
   ## Local dev
 
@@ -31,6 +37,8 @@ defmodule Ankusa.BlobStore.GCS do
   """
 
   @behaviour Ankusa.BlobStore
+
+  alias Ankusa.HttpClient
 
   @impl true
   def put(_instance, key, data, opts) do
@@ -52,13 +60,13 @@ defmodule Ankusa.BlobStore.GCS do
   def get_range(_instance, key, offset, length, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [{"alt", "media"}])
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, url, "", [{"range", range}], nil)
+    request(opts, :get, url, nil, [{"range", range}], nil)
   end
 
   @impl true
   def delete(_instance, key, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [])
-    _ = request(opts, :delete, url, "", [], nil)
+    _ = request(opts, :delete, url, nil, [], nil)
     :ok
   end
 
@@ -66,7 +74,7 @@ defmodule Ankusa.BlobStore.GCS do
   def list(_instance, prefix, opts) do
     url = media_url(opts, "o", [{"prefix", prefix}])
 
-    case request(opts, :get, url, "", [], nil) do
+    case request(opts, :get, url, nil, [], nil) do
       {:ok, body} ->
         case JSON.decode(body) do
           {:ok, %{"items" => items}} -> items |> Enum.map(& &1["name"]) |> Enum.sort()
@@ -92,46 +100,35 @@ defmodule Ankusa.BlobStore.GCS do
   # under `/storage/v1/...`.
   defp media_url(opts, "o" <> _ = suffix, [{"uploadType", "media"} | _] = query) do
     Keyword.get(opts, :endpoint, "https://storage.googleapis.com") <>
-      "/upload/storage/v1/b/#{bucket(opts)}/#{suffix}" <> query_string(query)
+      "/upload/storage/v1/b/#{bucket(opts)}/#{suffix}" <> query_suffix(query)
   end
 
-  defp media_url(opts, suffix, query), do: base(opts, suffix) <> query_string(query)
+  defp media_url(opts, suffix, query), do: base(opts, suffix) <> query_suffix(query)
 
-  defp query_string([]), do: ""
-
-  defp query_string(query) do
-    "?" <>
-      Enum.map_join(query, "&", fn {k, v} ->
-        "#{URI.encode_www_form(k)}=#{URI.encode_www_form(v)}"
-      end)
-  end
+  defp query_suffix([]), do: ""
+  defp query_suffix(query), do: "?" <> URI.encode_query(query)
 
   defp request(opts, method, url, body, headers, content_type) do
-    ensure_started()
-
-    all_headers =
-      (auth_headers(opts) ++ headers)
-      |> Enum.map(fn {k, v} -> {to_charlist(k), to_charlist(v)} end)
-
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
-    http_opts = [timeout: timeout, connect_timeout: timeout]
-    url = to_charlist(url)
 
-    result =
-      if method in [:post, :put] do
-        ct = to_charlist(content_type || "application/octet-stream")
-        :httpc.request(method, {url, all_headers, ct, body}, http_opts, body_format: :binary)
-      else
-        :httpc.request(method, {url, all_headers}, http_opts, body_format: :binary)
-      end
-
-    case result do
-      {:ok, {{_v, code, _r}, _h, resp_body}} when code in 200..299 -> {:ok, resp_body}
-      {:ok, {{_v, 404, _r}, _h, _resp_body}} -> {:error, :not_found}
-      {:ok, {{_v, code, _r}, _h, resp_body}} -> {:error, {:status, code, resp_body}}
+    case HttpClient.request(
+           method,
+           url,
+           auth_headers(opts) ++ headers ++ content_type_header(content_type),
+           body,
+           timeout,
+           Keyword.get(opts, :req_options, [])
+         ) do
+      # Keep the status visible so 404 can mean :not_found.
+      {:ok, status, body} when status in 200..299 -> {:ok, body}
+      {:ok, 404, _body} -> {:error, :not_found}
+      {:ok, status, body} -> {:error, {:status, status, body}}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp content_type_header(nil), do: []
+  defp content_type_header(content_type), do: [{"content-type", content_type}]
 
   defp auth_headers(opts) do
     case Keyword.get(opts, :token_provider) do
@@ -144,11 +141,5 @@ defmodule Ankusa.BlobStore.GCS do
       nil ->
         []
     end
-  end
-
-  defp ensure_started do
-    {:ok, _} = Application.ensure_all_started(:inets)
-    {:ok, _} = Application.ensure_all_started(:ssl)
-    :ok
   end
 end

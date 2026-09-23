@@ -125,7 +125,7 @@ opts: `:blob_store` — `{module, opts}`; default: the instance's
 
 ### `Ankusa.ClaimCheck.Remote`
 
-HTTP client (via `:httpc`, no dependency — mirrors `Ankusa.Sink.Http`)
+HTTP client (via `Req` — mirrors `Ankusa.Sink.Http`)
 against a `:claim_check`-role `Ankusa.ClaimCheck.Router`.
 
 ```elixir

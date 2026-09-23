@@ -7,19 +7,27 @@ different infrastructure dependency (none, Postgres, RabbitMQ).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 98 tests, no external infra needed
+mix test                              # 123 tests, no external infra needed
 mix test --include integration        # +8 tests, needs floci running (see below)
 ```
 
-The 98 always-on tests cover:
+The 123 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
-  crash-replay (torn-frame handling), truncation.
+  crash-replay (torn-frame handling), truncation, and the measurements
+  `[:commit, :stop]` reports.
+- **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
+  wire, pinned against AWS's published reference signatures and against the
+  request `Req.Test` captures; `Sink.Http` forwarding, status mapping, and the
+  rule that a redirect is reported rather than followed; the shared
+  `Ankusa.HttpClient` allowlist.
 - **Edge**: accept/duplicate/verify/quarantine/load-shed/oversize, pluggable
   route resolvers (`Path` and `TenantPath`), tenant-scoped dedup end to end
   through the HTTP layer.
 - **Dispatch**: retry, DLQ.
-- **Storage**: compaction round-trip.
+- **Storage**: compaction round-trip, and the live index — a lookup after a
+  later compaction sees every row, and one taken while the compactor is down
+  falls back to the file and is correct again after its restart.
 - **Claim Check** (`test/ankusa/claim_check/`): ticket validation and
   traversal-safe key derivation; `Direct` round-trip over `LocalFS`;
   idempotent re-check-in; tampered-object integrity detection;

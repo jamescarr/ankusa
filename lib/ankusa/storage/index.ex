@@ -3,13 +3,37 @@ defmodule Ankusa.Storage.Index do
   Durable, append-only index mapping an event id to its byte range inside a
   compacted segment.
 
-  Lives at `Config.path(config, "segments/index.log")`. Each row is written as
-  `<<len::32, term::binary>>` where `term` is `:erlang.term_to_binary/1` of the
-  row map. `all/1` replays the file and drops a torn trailing record (a write
-  that never finished), mirroring the WAL's crash-safety discipline.
+  Rows are framed terms (see `Ankusa.DurableLog`) at
+  `Config.path(config, "segments/index.log")`. A torn trailing row — a write that
+  never completed — is dropped, mirroring the WAL's crash-safety discipline.
+
+  ## The in-memory table
+
+  The file is written once per compaction tick and read on every
+  `Ankusa.Storage.fetch/2`, which is the replay/audit path a dashboard drives.
+  Replaying the file per lookup would make every fetch O(events), so
+  `Ankusa.Storage.Compactor` — the only writer — owns an ETS table of the same
+  rows and keeps it current:
+
+    * `open/1` loads the file once, at the compactor's start;
+    * `append/2` adds what a tick just wrote, so per-tick work is proportional to
+      the new rows rather than to the whole index, and nothing is re-decoded;
+    * `lookup/2` is an `:ets.lookup/2` on a `read_concurrency` table, from any
+      process — it never queues behind a tick, which a `GenServer.call` into the
+      compactor would.
+
+  Rows go in with `:ets.insert_new/2`, so the first row wins: an event that was
+  compacted twice still resolves to its earliest frame, matching the linear scan
+  this replaces.
+
+  The table is `:protected` and dies with the compactor, and it is found through
+  `Ankusa.Registry` rather than a name of its own, so a stale reference is not
+  possible. A lookup that finds no table — a node without the `:storage` role, or
+  the moment between a crash and the restart that reloads it — reads the file
+  instead, so a lookup is never wrong, only occasionally the old speed.
   """
 
-  alias Ankusa.Config
+  alias Ankusa.{Config, DurableLog}
 
   @type row :: %{
           event_id: String.t(),
@@ -22,49 +46,87 @@ defmodule Ankusa.Storage.Index do
           length: pos_integer()
         }
 
+  @doc """
+  Create the live table from the on-disk index. Called by the compactor, which
+  owns it; the file stays the durable record and the only thing read at startup.
+  """
+  @spec open(Config.t()) :: :ets.table()
+  def open(%Config{} = config) do
+    table = :ets.new(:ankusa_storage_index, [:set, :protected, read_concurrency: true])
+
+    for row <- DurableLog.read(path(config)) do
+      :ets.insert_new(table, {row.event_id, row})
+    end
+
+    {:ok, _pid} = Registry.register(Ankusa.Registry, key(config.instance), table)
+    table
+  end
+
+  @doc """
+  Append rows, keeping the live table in step.
+
+  The table is updated *before* the file: a lookup must never miss a row the file
+  is about to have, and the reverse mistake — a row in the table that a failed
+  write never made durable — cannot survive a crash, because the table dies with
+  the compactor and `open/1` rebuilds it from the file. The segment those rows
+  point into is `PUT` before this is called, so the table never references bytes
+  that aren't in the blob store.
+  """
   @spec append(Config.t(), [row()]) :: :ok
   def append(config, rows) do
-    path = path(config)
-    File.mkdir_p!(Path.dirname(path))
+    case table(config.instance) do
+      {:ok, table} ->
+        for row <- rows, do: :ets.insert_new(table, {row.event_id, row})
 
-    iodata =
-      Enum.map(rows, fn row ->
-        bin = :erlang.term_to_binary(row)
-        [<<byte_size(bin)::32>>, bin]
-      end)
-
-    File.write!(path, iodata, [:append])
-    :ok
-  end
-
-  @spec all(Config.t()) :: [row()]
-  def all(config) do
-    case File.read(path(config)) do
-      {:ok, bin} -> parse(bin, [])
-      {:error, _} -> []
+      :error ->
+        :ok
     end
+
+    DurableLog.append(path(config), rows)
   end
+
+  @doc "Every row in the index file, in append order."
+  @spec all(Config.t()) :: [row()]
+  def all(config), do: DurableLog.read(path(config))
 
   @spec lookup(Config.t(), String.t()) :: {:ok, row()} | :error
   def lookup(config, event_id) do
-    case Enum.find(all(config), fn row -> row.event_id == event_id end) do
-      nil -> :error
-      row -> {:ok, row}
+    case table(config.instance) do
+      {:ok, table} -> lookup_in(table, config, event_id)
+      :error -> from_file(config, event_id)
     end
   end
 
-  defp parse(<<len::32, rest::binary>>, acc) do
-    case rest do
-      <<bin::binary-size(^len), tail::binary>> ->
-        parse(tail, [:erlang.binary_to_term(bin, [:safe]) | acc])
+  defp lookup_in(table, config, event_id) do
+    case :ets.lookup(table, event_id) do
+      [{^event_id, row}] -> {:ok, row}
+      [] -> :error
+    end
+  rescue
+    # The owner died between the registry read and here; the file still has it.
+    ArgumentError -> from_file(config, event_id)
+  end
 
-      # torn trailing record: length prefix promises more than is present
-      _ ->
-        Enum.reverse(acc)
+  # No table: a node that doesn't run the compactor, or one between a crash and
+  # the restart that reloads it. This is what lookups did before the table
+  # existed — O(rows), and only on that path.
+  defp from_file(config, event_id) do
+    config
+    |> path()
+    |> DurableLog.read()
+    |> Enum.find_value(:error, fn row ->
+      if row.event_id == event_id, do: {:ok, row}
+    end)
+  end
+
+  defp table(instance) do
+    case Registry.lookup(Ankusa.Registry, key(instance)) do
+      [{_pid, table}] -> {:ok, table}
+      [] -> :error
     end
   end
 
-  defp parse(_leftover, acc), do: Enum.reverse(acc)
+  defp key(instance), do: {instance, :storage_index}
 
   defp path(config), do: Config.path(config, "segments/index.log")
 end

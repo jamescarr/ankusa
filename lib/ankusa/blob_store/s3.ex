@@ -3,9 +3,13 @@ defmodule Ankusa.BlobStore.S3 do
   `Ankusa.BlobStore` backed by S3 or any S3-compatible endpoint (MinIO,
   Cloudflare R2, or the `floci` emulator in `docker-compose.yml`).
 
-  Every request is signed with AWS Signature Version 4 using only `:crypto`
-  and `:httpc` — no HTTP client dependency, so this adapter costs the core
-  package nothing when unused (see the packaging note in the module source).
+  Requests are signed with
+  [`aws_signature`](https://hex.pm/packages/aws_signature) — the SigV4
+  implementation behind the official aws-elixir SDK — and sent with
+  [`Req`](https://hex.pm/packages/req). Signing is exactly the kind of code not
+  to hand-roll: a canonicalization bug is invisible until it fails in
+  production, and the failure mode is a signature mismatch on someone else's
+  infrastructure.
 
   opts:
 
@@ -15,7 +19,13 @@ defmodule Ankusa.BlobStore.S3 do
     * `:secret_access_key` — default `System.get_env("AWS_SECRET_ACCESS_KEY")`
     * `:endpoint`          — default `"https://s3.\#{region}.amazonaws.com"`;
                               point at `http://localhost:4566` for floci/MinIO
-    * `:timeout_ms`        — default `10_000`
+    * `:timeout_ms`        — default `10_000`, for both connect and response
+    * `:req_options`       — transport options for the HTTP client, e.g. a
+                              custom Finch pool (`finch: [name: MyFinch]`), a
+                              proxy (via `:connect_options`), or `plug:` for
+                              `Req.Test` in tests. See `Ankusa.HttpClient` —
+                              an allowlist, because a redirected or re-tuned
+                              request would no longer match its signature.
 
   Addressing is always path-style (`{endpoint}/{bucket}/{key}`) — the one
   scheme every target (AWS, MinIO, R2, floci) accepts unambiguously.
@@ -39,6 +49,8 @@ defmodule Ankusa.BlobStore.S3 do
 
   @behaviour Ankusa.BlobStore
 
+  alias Ankusa.HttpClient
+
   @impl true
   def put(_instance, key, data, opts) do
     case request(opts, :put, key, IO.iodata_to_binary(data), []) do
@@ -48,172 +60,104 @@ defmodule Ankusa.BlobStore.S3 do
   end
 
   @impl true
-  def get(_instance, key, opts), do: request(opts, :get, key, "", [])
+  def get(_instance, key, opts), do: request(opts, :get, key, nil, [])
 
   @impl true
   def get_range(_instance, key, offset, length, opts) do
-    range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, key, "", [{"range", range}])
+    request(opts, :get, key, nil, [{"range", "bytes=#{offset}-#{offset + length - 1}"}])
   end
 
   @impl true
   def delete(_instance, key, opts) do
-    _ = request(opts, :delete, key, "", [])
+    _ = request(opts, :delete, key, nil, [])
     :ok
   end
 
   @impl true
   def list(_instance, prefix, opts) do
-    case list_request(opts, prefix) do
+    url =
+      endpoint(opts) <>
+        "/" <> bucket(opts) <> "?" <> URI.encode_query(list_query(prefix), :rfc3986)
+
+    case signed_request(opts, :get, url, nil, []) do
       {:ok, body} -> parse_list_keys(body)
       {:error, _reason} -> []
     end
   end
 
-  # ── signed request (object operations) ───────────────────────────────────
+  # ── requests ──────────────────────────────────────────────────────────────
 
   defp request(opts, method, key, body, extra_headers) do
-    endpoint = endpoint(opts)
-    path = "/" <> bucket(opts) <> "/" <> uri_encode(key, true)
-    sign_and_send(opts, method, endpoint, path, "", body, extra_headers)
+    url = endpoint(opts) <> "/" <> bucket(opts) <> "/" <> encode_path(key)
+    signed_request(opts, method, url, body, extra_headers)
   end
 
-  # ── signed request (bucket-level ListObjectsV2) ──────────────────────────
-
-  defp list_request(opts, prefix) do
-    endpoint = endpoint(opts)
-    path = "/" <> bucket(opts)
-    query = canonical_query([{"list-type", "2"}, {"prefix", prefix}])
-    sign_and_send(opts, :get, endpoint, path, query, "", [])
-  end
-
-  defp sign_and_send(opts, method, endpoint, path, query, body, extra_headers) do
+  defp signed_request(opts, method, url, body, extra_headers) do
     region = Keyword.fetch!(opts, :region)
     access_key = Keyword.get(opts, :access_key_id) || System.fetch_env!("AWS_ACCESS_KEY_ID")
-
-    secret_key =
-      Keyword.get(opts, :secret_access_key) || System.fetch_env!("AWS_SECRET_ACCESS_KEY")
-
+    secret = Keyword.get(opts, :secret_access_key) || System.fetch_env!("AWS_SECRET_ACCESS_KEY")
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
 
-    uri = URI.parse(endpoint)
-    now = DateTime.utc_now() |> DateTime.truncate(:second)
-    amz_date = DateTime.to_iso8601(now, :basic)
-    date8 = String.slice(amz_date, 0, 8)
-    payload_hash = hex_sha256(body)
+    # The signature covers the host header, so it has to be derived from the same
+    # URL handed to the signer — not from anything the HTTP client might do.
+    headers = [{"host", authority(url)} | stringify(extra_headers)]
 
-    headers0 =
-      [
-        {"host", authority(uri)},
-        {"x-amz-content-sha256", payload_hash},
-        {"x-amz-date", amz_date}
-      ] ++ extra_headers
-
-    {canonical_headers, signed_headers} = canonical_headers(headers0)
-
-    canonical_request =
-      Enum.join(
-        [method_string(method), path, query, canonical_headers, signed_headers, payload_hash],
-        "\n"
+    signed =
+      :aws_signature.sign_v4(
+        access_key,
+        secret,
+        region,
+        "s3",
+        :calendar.universal_time(),
+        method |> Atom.to_string() |> String.upcase(),
+        url,
+        headers,
+        # A bodyless request signs the empty string — the hash S3 expects as
+        # `x-amz-content-sha256` on a GET or DELETE.
+        body || "",
+        # S3 signs the path exactly as sent; every other service wants it
+        # URI-encoded a second time.
+        uri_encode_path: false
       )
 
-    credential_scope = "#{date8}/#{region}/s3/aws4_request"
-
-    string_to_sign =
-      Enum.join(
-        ["AWS4-HMAC-SHA256", amz_date, credential_scope, hex_sha256(canonical_request)],
-        "\n"
-      )
-
-    signature = sigv4_signature(secret_key, date8, region, string_to_sign)
-
-    authorization =
-      "AWS4-HMAC-SHA256 Credential=#{access_key}/#{credential_scope}, " <>
-        "SignedHeaders=#{signed_headers}, Signature=#{signature}"
-
-    headers =
-      (headers0 ++ [{"authorization", authorization}])
-      |> Enum.map(fn {k, v} -> {to_charlist(k), to_charlist(v)} end)
-
-    qs_suffix = if query == "", do: "", else: "?" <> query
-    url = to_charlist(endpoint <> path <> qs_suffix)
-    http_opts = [timeout: timeout, connect_timeout: timeout]
-
-    ensure_started()
-
-    result =
-      if method in [:put, :post] do
-        :httpc.request(
-          method,
-          {url, headers, ~c"application/octet-stream", body},
-          http_opts,
-          body_format: :binary
-        )
-      else
-        :httpc.request(method, {url, headers}, http_opts, body_format: :binary)
-      end
-
-    case result do
-      {:ok, {{_v, code, _r}, _h, resp_body}} when code in 200..299 -> {:ok, resp_body}
-      {:ok, {{_v, 404, _r}, _h, _resp_body}} -> {:error, :not_found}
-      {:ok, {{_v, code, _r}, _h, resp_body}} -> {:error, {:status, code, resp_body}}
+    case HttpClient.request(
+           method,
+           url,
+           signed,
+           body,
+           timeout,
+           Keyword.get(opts, :req_options, [])
+         ) do
+      # Keep the status visible so 404 can mean :not_found.
+      {:ok, status, body} when status in 200..299 -> {:ok, body}
+      {:ok, 404, _body} -> {:error, :not_found}
+      {:ok, status, body} -> {:error, {:status, status, body}}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  # ── SigV4 primitives ──────────────────────────────────────────────────────
+  # ── URL building ──────────────────────────────────────────────────────────
 
-  defp hex_sha256(data), do: Base.encode16(:crypto.hash(:sha256, data), case: :lower)
-  defp hmac(key, data), do: :crypto.mac(:hmac, :sha256, key, data)
-  defp hex_hmac(key, data), do: Base.encode16(hmac(key, data), case: :lower)
+  # Per-segment RFC 3986 percent-encoding: `/` stays a separator, everything
+  # outside the unreserved set is escaped.
+  defp encode_path(key) do
+    unreserved = &URI.char_unreserved?/1
 
-  defp sigv4_signature(secret, date8, region, string_to_sign) do
-    k_date = hmac("AWS4" <> secret, date8)
-    k_region = hmac(k_date, region)
-    k_service = hmac(k_region, "s3")
-    k_signing = hmac(k_service, "aws4_request")
-    hex_hmac(k_signing, string_to_sign)
+    key
+    |> String.split("/")
+    |> Enum.map_join("/", &URI.encode(&1, unreserved))
   end
 
-  defp canonical_headers(headers) do
-    sorted =
-      headers
-      |> Enum.map(fn {k, v} -> {String.downcase(to_string(k)), String.trim(to_string(v))} end)
-      |> Enum.sort_by(fn {k, _} -> k end)
+  defp list_query(prefix), do: [{"list-type", "2"}, {"prefix", prefix}]
 
-    canonical = Enum.map_join(sorted, "", fn {k, v} -> "#{k}:#{v}\n" end)
-    signed = Enum.map_join(sorted, ";", fn {k, _} -> k end)
-    {canonical, signed}
-  end
-
-  defp canonical_query(params) do
-    params
-    |> Enum.sort_by(fn {k, _} -> k end)
-    |> Enum.map_join("&", fn {k, v} -> "#{uri_encode(k, false)}=#{uri_encode(v, false)}" end)
-  end
-
-  # RFC 3986 percent-encoding over raw bytes. `keep_slash?` leaves `/`
-  # unescaped for path segments; query-string values escape it (`%2F`).
-  defp uri_encode(binary, keep_slash?) do
-    for <<byte <- binary>>, into: "" do
-      cond do
-        byte in ?A..?Z or byte in ?a..?z or byte in ?0..?9 or byte in ~c"-_.~" ->
-          <<byte>>
-
-        keep_slash? and byte == ?/ ->
-          "/"
-
-        true ->
-          "%" <> (Integer.to_string(byte, 16) |> String.pad_leading(2, "0") |> String.upcase())
-      end
-    end
-  end
-
-  defp method_string(method), do: method |> Atom.to_string() |> String.upcase()
-
-  defp authority(%URI{host: host, port: port, scheme: scheme}) do
+  defp authority(url) do
+    %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
     default = if scheme == "https", do: 443, else: 80
     if port == default, do: host, else: "#{host}:#{port}"
+  end
+
+  defp stringify(headers) do
+    Enum.map(headers, fn {k, v} -> {to_string(k), v} end)
   end
 
   defp bucket(opts), do: Keyword.fetch!(opts, :bucket)
@@ -222,20 +166,25 @@ defmodule Ankusa.BlobStore.S3 do
     Keyword.get(opts, :endpoint, "https://s3.#{Keyword.fetch!(opts, :region)}.amazonaws.com")
   end
 
-  # ── ListObjectsV2 XML (stdlib :xmerl, no extra dependency) ────────────────
+  # ── ListObjectsV2 XML (stdlib :xmerl, no dependency needed for one xpath) ──
 
+  # A 200 body is not guaranteed to be ListObjectsV2 XML — a proxy error page or
+  # an emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document,
+  # and this runs inside the claim-check sweeper, so a bad body has to read as
+  # "no keys" instead of taking that process down.
+  #
+  # The scanner is handed the raw bytes, not a charlist: it decodes the UTF-8 the
+  # document declares, so codepoints above 127 read as illegal characters and a
+  # listing containing one non-ASCII key would come back empty. Bytes that are not
+  # valid UTF-8 in the first place exit the same way.
   defp parse_list_keys(xml_body) do
-    {doc, _rest} = :xmerl_scan.string(String.to_charlist(xml_body))
+    {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
 
     ~c"//Contents/Key/text()"
     |> :xmerl_xpath.string(doc)
     |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
     |> Enum.sort()
-  end
-
-  defp ensure_started do
-    {:ok, _} = Application.ensure_all_started(:inets)
-    {:ok, _} = Application.ensure_all_started(:ssl)
-    :ok
+  catch
+    :exit, _not_xml -> []
   end
 end

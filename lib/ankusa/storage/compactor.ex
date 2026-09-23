@@ -41,6 +41,11 @@ defmodule Ankusa.Storage.Compactor do
     %Config{} = config = Keyword.fetch!(opts, :config)
     cursor = Ankusa.WAL.get_cursor(instance, :compactor)
     interval = config.storage.interval_ms
+
+    # This process owns the live index: it is the only writer, it reloads the
+    # table from the file whenever it (re)starts, and lookups elsewhere read it.
+    Index.open(config)
+
     schedule(interval)
     {:ok, %{instance: instance, config: config, cursor: cursor, interval: interval}}
   end
@@ -63,6 +68,8 @@ defmodule Ankusa.Storage.Compactor do
   # ── compaction ────────────────────────────────────────────────────────────
 
   defp compact(%{instance: instance, config: config, cursor: cursor} = state) do
+    started = System.monotonic_time()
+
     case Ankusa.WAL.read(instance, cursor, @read_limit) do
       [] ->
         {0, state}
@@ -105,7 +112,11 @@ defmodule Ankusa.Storage.Compactor do
 
         Ankusa.Telemetry.emit(
           [:compact, :stop],
-          %{records: length(envelopes), bytes: byte_size(segment)},
+          %{
+            records: length(envelopes),
+            bytes: byte_size(segment),
+            duration: System.monotonic_time() - started
+          },
           %{instance: instance}
         )
 

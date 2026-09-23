@@ -48,7 +48,7 @@ defmodule Ankusa.Edge.Ingest do
     env = build_envelope(source, tenant_id, req)
 
     case verify(instance, source, env) do
-      {:accept, env} -> commit(instance, env)
+      {:accept, env} -> commit(instance, source, env)
       {:quarantine, env, reason} -> quarantine(instance, env, reason)
       {:reject, reason} -> {:rejected, reason}
     end
@@ -59,7 +59,8 @@ defmodule Ankusa.Edge.Ingest do
   defp verify(instance, %Source{verifier: {mod, opts}} = source, env) do
     outcome =
       Ankusa.Telemetry.span([:verify], %{instance: instance, source_id: source.id}, fn ->
-        {mod.verify(env, opts), %{provider: mod}}
+        result = mod.verify(env, opts)
+        {result, %{provider: mod, status: verify_status(result)}}
       end)
 
     case outcome do
@@ -77,10 +78,13 @@ defmodule Ankusa.Edge.Ingest do
     end
   end
 
+  defp verify_status(:ok), do: :ok
+  defp verify_status({:error, _}), do: :failed
+
   # ── dedup + commit ────────────────────────────────────────────────────────
 
-  defp commit(instance, env) do
-    env = %{env | dedup_key: dedup_key(instance, env)}
+  defp commit(instance, source, env) do
+    env = %{env | dedup_key: dedup_key(source, env)}
     partition = BatcherSupervisor.partition(instance, env.id)
 
     try do
@@ -94,13 +98,10 @@ defmodule Ankusa.Edge.Ingest do
     end
   end
 
-  defp dedup_key(instance, env) do
-    {mod, opts} =
-      case Ankusa.SourceStore.fetch(instance, env.source_id) do
-        {:ok, %Source{dedup: dedup}} -> dedup
-        :error -> {Ankusa.DedupKey.Rules, []}
-      end
-
+  # The source was already resolved at the top of the request; fetching it again
+  # here was a second store lookup per hook (a DB round trip, for a dynamic
+  # store) for a value we are already holding.
+  defp dedup_key(%Source{dedup: {mod, opts}}, env) do
     case mod.extract(env, opts) do
       {:ok, key} when is_binary(key) -> key
       _ -> nil
@@ -119,7 +120,7 @@ defmodule Ankusa.Edge.Ingest do
   # ── envelope construction ─────────────────────────────────────────────────
 
   defp build_envelope(%Source{} = source, tenant_id, req) do
-    %Envelope{
+    env = %Envelope{
       id: Ankusa.UUIDv7.generate(),
       source_id: source.id,
       tenant_id: tenant_id,
@@ -127,17 +128,15 @@ defmodule Ankusa.Edge.Ingest do
       method: req.method,
       path: req.path,
       headers: req.headers,
-      content_type: content_type(req.headers),
+      content_type: nil,
       # keep raw bytes verbatim; copy so a small slice can't pin a large binary
       body: :binary.copy(req.body),
       size: byte_size(req.body)
     }
-  end
 
-  defp content_type(headers) do
-    Enum.find_value(headers, fn {k, v} ->
-      if String.downcase(k) == "content-type", do: v
-    end)
+    # Read it back through the envelope so "the content-type header" is defined
+    # in exactly one place, `Ankusa.Envelope.header/2`.
+    %{env | content_type: Envelope.header(env, "content-type")}
   end
 
   defp tag({:ok, _}), do: :committed

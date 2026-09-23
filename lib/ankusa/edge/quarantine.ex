@@ -5,13 +5,13 @@ defmodule Ankusa.Edge.Quarantine do
   events — but a flood of forged requests should never be able to fill the disk
   either, so writes are token-bucket rate limited.
 
-  Records are appended to `quarantine/quarantine.log` (length-prefixed terms) and
-  the most recent are kept in memory for the dashboard.
+  Records are appended to `quarantine/quarantine.log` through
+  `Ankusa.DurableLog` and the most recent are kept in memory for the dashboard.
   """
 
   use GenServer
 
-  alias Ankusa.{Config, Envelope}
+  alias Ankusa.{Config, DurableLog, Envelope}
 
   @keep_recent 200
 
@@ -71,7 +71,7 @@ defmodule Ankusa.Edge.Quarantine do
         body: env.body
       }
 
-      :ok = :file.write(state.fd, framed(record))
+      :ok = :file.write(state.fd, DurableLog.frame(record))
       :ok = :file.datasync(state.fd)
 
       summary = Map.drop(record, [:body, :headers])
@@ -94,11 +94,6 @@ defmodule Ankusa.Edge.Quarantine do
     elapsed = (now - state.last) / 1000.0
     tokens = min(state.burst, state.tokens + elapsed * state.rate)
     %{state | tokens: tokens, last: now}
-  end
-
-  defp framed(term) do
-    bin = :erlang.term_to_binary(term)
-    <<byte_size(bin)::32, bin::binary>>
   end
 
   defp mono_ms, do: System.monotonic_time(:millisecond)

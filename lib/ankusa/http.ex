@@ -5,14 +5,24 @@ defmodule Ankusa.Http do
   instead of duplicated so both surfaces enforce request bodies identically.
   """
 
-  @doc "Read the body, refusing anything over `max` bytes without buffering it all."
+  @doc """
+  Read the body, refusing anything over `max` bytes without buffering it all.
+
+  `{:too_large, conn}` is a body that exceeded the limit; `{:error, reason, conn}`
+  is one that could not be read at all (client disconnect, read timeout). Those
+  are different failures and are reported as such — folding a dropped connection
+  into "payload too large" tells the caller to shrink a body that was never the
+  problem.
+  """
   @spec read_body_limited(Plug.Conn.t(), pos_integer()) ::
-          {:ok, binary(), Plug.Conn.t()} | {:too_large, Plug.Conn.t()}
+          {:ok, binary(), Plug.Conn.t()}
+          | {:too_large, Plug.Conn.t()}
+          | {:error, term(), Plug.Conn.t()}
   def read_body_limited(conn, max) do
     case Plug.Conn.read_body(conn, length: max, read_length: 1_000_000) do
       {:ok, body, conn} -> {:ok, body, conn}
       {:more, _partial, conn} -> {:too_large, conn}
-      {:error, _} -> {:too_large, conn}
+      {:error, reason} -> {:error, reason, conn}
     end
   end
 

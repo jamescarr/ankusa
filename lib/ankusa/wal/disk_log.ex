@@ -78,6 +78,7 @@ defmodule Ankusa.WAL.DiskLog do
 
     {:ok,
      %{
+       instance: Keyword.fetch!(opts, :instance),
        path: path,
        fd: fd,
        write_pos: valid_end,
@@ -122,17 +123,15 @@ defmodule Ankusa.WAL.DiskLog do
       # all duplicates — nothing to write, no fsync
       {:reply, {:ok, results}, state}
     else
-      :ok = :file.pwrite(state.fd, state.write_pos, iodata)
-      :ok = :file.datasync(state.fd)
+      Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
+        :ok = :file.pwrite(state.fd, state.write_pos, iodata)
+        :ok = :file.datasync(state.fd)
+        # measurements, then metadata: `:duration` is added by the span itself.
+        {:ok, %{batch_size: length(inserts), bytes: bytes}, %{}}
+      end)
 
       :ets.insert(state.index, inserts)
       if dedup_inserts != [], do: :ets.insert(state.dedup, dedup_inserts)
-
-      Ankusa.Telemetry.emit(
-        [:commit, :stop],
-        %{batch_size: length(inserts), bytes: bytes},
-        %{instance: instance(state)}
-      )
 
       {:reply, {:ok, results}, %{state | write_pos: pos, next_seq: next_seq}}
     end
@@ -193,7 +192,7 @@ defmodule Ankusa.WAL.DiskLog do
           existing != nil ->
             Ankusa.Telemetry.emit([:dedup, :hit], %{}, %{
               source_id: env.source_id,
-              instance: instance(state)
+              instance: state.instance
             })
 
             {[{:duplicate, existing} | results], iodata, inserts, dedup_inserts, seq, bytes, pos,
@@ -340,8 +339,6 @@ defmodule Ankusa.WAL.DiskLog do
       first -> {first, :ets.last(index)}
     end
   end
-
-  defp instance(state), do: Path.basename(Path.dirname(Path.dirname(state.path)))
 
   defp load_cursors(path) do
     case File.read(path) do

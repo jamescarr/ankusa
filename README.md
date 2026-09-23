@@ -55,7 +55,7 @@ including across separate BEAM nodes and separate adapter packages.
 ## Repo layout — a mono-repo of separate Mix projects
 
 ```
-.                    ankusa — core. mix.exs deps: {bandit, plug}. Zero adapter deps.
+.                    ankusa — core. mix.exs deps: {bandit, plug, req, aws_signature}.
 ankusa_postgres/       shared, multi-node WAL (Postgres). Path-dep on ankusa + postgrex.
 ankusa_rabbitmq/       queue delivery (RabbitMQ exchange publish). Path-dep on ankusa + amqp.
 ankusa_kafka/          queue delivery (Kafka topic produce). Path-dep on ankusa + brod.
@@ -66,8 +66,10 @@ docs/                everything below, in depth
 Each adapter package exists because it introduces an external dependency
 `ankusa` core shouldn't force on every user — a laptop user running `mix
 deps.get` on `ankusa` alone never fetches `postgrex`, `amqp`, or `brod`
-(whose `crc32cer` NIF needs a C++ toolchain and CMake to build). Full rationale
-and the decision rule for adding a new one: [`docs/packaging.md`](docs/packaging.md).
+(whose `crc32cer` NIF needs a C++ toolchain and CMake to build). That split is
+about dependency *weight*, not purity: a dependency that earns its place is
+welcome, and one that benefits every user belongs in core. Full rationale and the
+decision rule for adding a new one: [`docs/packaging.md`](docs/packaging.md).
 
 ## Quickstart
 
@@ -91,7 +93,7 @@ at it): [`docs/quickstart.md`](docs/quickstart.md).
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
 | `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
-| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq`), `Sink.Kafka` (topic produce — `ankusa_kafka`) |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq`), `Sink.Kafka` (topic produce — `ankusa_kafka`) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
 | `Ankusa.ClaimCheck` | Check bytes in, redeem by ticket | `ClaimCheck.Direct` (in-process) | `ClaimCheck.Remote` (HTTP, `:claim_check` role) |
