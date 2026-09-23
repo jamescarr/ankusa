@@ -1,0 +1,52 @@
+# Redpanda Connect: Kafka → SQS FIFO bridge
+#
+# Consumes from ankusa.events topic, filters metadata to the 10-attribute SQS
+# limit, and publishes to a FIFO queue with ordering per Kafka key and
+# deduplication per envelope id.
+
+input:
+  redpanda:
+    seed_brokers: ["redpanda:9092"]
+    topics: ["ankusa.events"]
+    consumer_group: ankusa-sqs-bridge
+    start_offset: earliest
+    # At-least-once: offset committed only after SQS confirms
+    auto_replay_nacks: true
+
+pipeline:
+  processors:
+    # Whitelist metadata: aws_sqs keeps only 10 attributes (alphabetical order).
+    # The redpanda input adds 8 kafka_* fields; without filtering, our headers
+    # would push some out.
+    - mutation: |
+        meta = @.filter(kv -> 
+          kv.key.has_prefix("ankusa_") ||
+          ["kafka_key", "kafka_partition", "kafka_offset"].contains(kv.key)
+        )
+
+output:
+  aws_sqs:
+    url: http://floci:4566/000000000000/ankusa-worker.fifo
+    endpoint: http://floci:4566
+    region: us-east-1
+    credentials:
+      id: test
+      secret: test
+    
+    # Ordering scope = Kafka key (tenant_id/source_id by default)
+    message_group_id: ${! @kafka_key }
+    
+    # Deduplication window (5 min) on envelope id
+    message_deduplication_id: ${! @ankusa_id }
+    
+    # max_in_flight > 1 can reorder sends within a group
+    max_in_flight: 1
+    
+    # SendMessageBatch caps at 10
+    batching:
+      count: 10
+      period: 100ms
+
+logger:
+  level: INFO
+  format: json
