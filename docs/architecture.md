@@ -81,7 +81,9 @@ a `WAL.Postgres` database (see [`storage.md`](storage.md)).
    `Retry-After`, never a promise the store can't back.
 5. **`Ankusa.WAL`** commits durably and returns `{:committed, envelope}` (with
    `seq` assigned) or `{:duplicate, existing_seq}` per record, in the
-   original order. The edge maps this to `201`/`200`/`202`/`401`/`404`/`413`/`503`.
+   original order. The edge maps this to `201`/`200`/`202`/`401`/`404`/`413`/`503`;
+   a body it cannot read at all (client disconnect, read timeout) is `400`, kept
+   distinct from `413` rather than reported as "too large".
 
 From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 

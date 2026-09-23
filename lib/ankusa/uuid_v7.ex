@@ -1,8 +1,20 @@
 defmodule Ankusa.UUIDv7 do
   @moduledoc """
-  UUIDv7 generation (RFC 9562): 48-bit Unix millisecond timestamp, then random.
+  UUIDv7 generation (RFC 9562 §5.7): 48-bit Unix millisecond timestamp followed
+  by 74 random bits.
 
-  Time-ordered ids keep WAL and segment keys naturally sortable by arrival.
+  Ordering is at **millisecond granularity only**. Two ids generated inside the
+  same millisecond are random relative to each other, and a backwards clock step
+  (NTP correcting) can yield an id that sorts before an earlier one. That is
+  sufficient for what ids are used for here — a lexicographically time-sortable
+  key (`claims/<tenant>/<id>`, the sweeper's expiry parse) and a unique
+  dedup/index key — and records are ordered by the WAL's `seq`, never by id.
+
+  If intra-millisecond ordering is ever genuinely needed (an audit listing sorted
+  by id, say), the fix is RFC 9562's counter layout: a 12-bit counter in `rand_a`
+  that borrows from the next millisecond on rollover. That needs shared mutable
+  state (`:atomics`) plus a clock-regression guard, which is a deliberate design
+  change rather than a tweak.
   """
 
   @doc "Generate a UUIDv7 as a lowercase, hyphenated string."
