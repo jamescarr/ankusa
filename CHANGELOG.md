@@ -11,6 +11,28 @@ accordance with SemVer. Merging to `main` publishes automatically — see
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.ClaimCheck` gateway: check bytes in, get a versioned ticket back;
+  present the ticket, get the bytes back. `Ankusa.ClaimCheck.Direct` (calls
+  the instance's configured `BlobStore` in-process) and
+  `Ankusa.ClaimCheck.Remote` (HTTP client against a `:claim_check`-role
+  node, for callers that must not hold blob-store credentials). New
+  `:claim_check` role and `Ankusa.ClaimCheck.Router` HTTP API
+  (`PUT`/`GET /v1/claims/:tenant_id/:id`), off by default, bearer-token
+  authenticated and tenant-scoped. See
+  [`docs/claim-check.md`](docs/claim-check.md).
+
+### Fixed
+
+- `Ankusa.BlobStore.LocalFS.get/3` and `get_range/5` now map a missing file
+  to `{:error, :not_found}` (previously `:enoent`), matching `BlobStore.S3`
+  and `BlobStore.GCS` — `:not_found` is now part of the `BlobStore` contract
+  for every adapter.
+- `Ankusa.Instance` no longer starts the configured `WAL` on a node running
+  none of `:edge`, `:dispatch`, `:storage` — a `:claim_check`-only node
+  needs only blob-store credentials.
+
 ## [0.1.0] - 2026-09-22
 
 ### Added

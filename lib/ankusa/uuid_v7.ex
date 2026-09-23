@@ -18,6 +18,29 @@ defmodule Ankusa.UUIDv7 do
     |> encode()
   end
 
+  @doc """
+  Extract the 48-bit Unix millisecond timestamp embedded in a UUIDv7 string.
+
+  `:error` for anything that isn't a well-formed UUIDv7 (wrong length, wrong
+  version/variant nibbles, non-hex characters) — never raises on untrusted
+  input.
+  """
+  @spec timestamp_ms(String.t()) :: {:ok, non_neg_integer()} | :error
+  def timestamp_ms(
+        <<a::binary-8, "-", b::binary-4, "-7", c::binary-3, "-", v, d::binary-3, "-",
+          e::binary-12>>
+      )
+      when v in ~c"89ab" do
+    with {:ok, <<ms::48, _rest::binary>>} <-
+           Base.decode16(a <> b <> "7" <> c <> <<v>> <> d <> e, case: :lower) do
+      {:ok, ms}
+    else
+      _ -> :error
+    end
+  end
+
+  def timestamp_ms(_), do: :error
+
   defp encode(<<a::32, b::16, c::16, d::16, e::48>>) do
     [
       Base.encode16(<<a::32>>, case: :lower),

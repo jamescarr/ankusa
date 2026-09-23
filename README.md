@@ -92,6 +92,7 @@ at it): [`docs/quickstart.md`](docs/quickstart.md).
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq`) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
+| `Ankusa.ClaimCheck` | Check bytes in, redeem by ticket | `ClaimCheck.Direct` (in-process) | `ClaimCheck.Remote` (HTTP, `:claim_check` role) |
 | `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | — |
 
 Full option reference for every row: [`docs/configuration.md`](docs/configuration.md).
@@ -106,6 +107,7 @@ Full option reference for every row: [`docs/configuration.md`](docs/configuratio
 | [`docs/multi-tenancy.md`](docs/multi-tenancy.md) | Catch-URL routing, tenant scoping, writing your own `RouteResolver` |
 | [`docs/storage.md`](docs/storage.md) | WAL (`DiskLog`, `Postgres`), segment compaction, `BlobStore` (`LocalFS`, `S3`, `GCS`), replay by id |
 | [`docs/delivery.md`](docs/delivery.md) | Dispatch, `Sink` (`Log`, `Http`, `RabbitMQ`), retry/backoff, DLQ + replay, quarantine |
+| [`docs/claim-check.md`](docs/claim-check.md) | `Ankusa.ClaimCheck` gateway: ticket contract, `Direct`/`Remote` adapters, the `:claim_check` role's HTTP API, retention |
 | [`docs/packaging.md`](docs/packaging.md) | Why adapters live in separate packages, the split rule, adding your own |
 | [`docs/deployment.md`](docs/deployment.md) | Roles/`ANKUSA_ROLES`, Docker, scaling the fleet |
 | [`docs/testing.md`](docs/testing.md) | Test suites across all three packages, integration tags, dev infra |
@@ -113,23 +115,26 @@ Full option reference for every row: [`docs/configuration.md`](docs/configuratio
 ## Test
 
 ```sh
-mix test                          # 59 tests, no external infra
+mix test                          # 98 tests, no external infra
 mix test --include integration    # +8, needs floci (S3/GCS emulators) running
 ```
 
 Covers group commit, dedup (tenant-scoped), crash-replay, dispatch retry +
-DLQ, compaction round-trip, and a **loss checker** that acks 500 hooks
-concurrently, hard-kills the instance, and proves every acked id survives
-replay. `ankusa_postgres` (10 tests) and `ankusa_rabbitmq` (4 tests) each need
+DLQ, compaction round-trip, the Claim Check gateway (ticket integrity, the
+`:claim_check` HTTP API, a real cross-mode `Direct`↔`Remote` proof, LocalFS
+retention), and a **loss checker** that acks 500 hooks concurrently,
+hard-kills the instance, and proves every acked id survives replay.
+`ankusa_postgres` (10 tests) and `ankusa_rabbitmq` (4 tests) each need
 their own live infra — see [`docs/testing.md`](docs/testing.md).
 
 ## Examples
 
 [`examples/rabbitmq-consumer/`](examples/rabbitmq-consumer/) — a full
 deployed topology: dockerized ingest fleet → RabbitMQ exchange (fat
-payloads offloaded to S3, small ones inlined) → a real TypeScript worker
-that owns its own queue/binding, fetches, and prints. `docker compose up
---build` runs the whole thing.
+payloads checked in through the Claim Check gateway, small ones inlined) →
+a real TypeScript worker that owns its own queue/binding, redeems claims
+over HTTP with **no storage credentials of its own**, and prints. `docker
+compose up --build` runs the whole thing.
 
 ## Not yet implemented (deferred adapters from the plan)
 

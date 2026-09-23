@@ -10,8 +10,8 @@ never `Application.get_env/2` scattered through call sites:
 
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
-`:dispatch`, and `:storage` are maps and get **deep-merged** over the
-defaults — pass only the keys you want to change.
+`:dispatch`, `:storage`, and `:claim_check` are maps and get **deep-merged**
+over the defaults — pass only the keys you want to change.
 
 ```elixir
 config :ankusa,
@@ -31,6 +31,14 @@ config :ankusa,
     roll_bytes: 16 * 1024 * 1024,
     roll_ms: 30_000,
     interval_ms: 1_000
+  },
+  claim_check: %{
+    adapter: {Ankusa.ClaimCheck.Direct, []},
+    max_bytes: 8_000_000,
+    port: 4001,
+    api_tokens: %{},
+    retention_days: nil,
+    sweep_interval_ms: 3_600_000
   }
 ```
 
@@ -38,7 +46,7 @@ config :ankusa,
 | --- | --- | --- |
 | `instance` | `:default` | Registry namespace — see [`architecture.md#instance-model`](architecture.md#instance-model). Two instances with different names run independently in one VM. |
 | `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{wal,segments,quarantine,dlq}`. |
-| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in `Ankusa.Application`. See [`deployment.md`](deployment.md). |
+| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role — see [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in `Ankusa.Application`. See [`deployment.md`](deployment.md). |
 | `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in `Ankusa.Application`. |
 | `max_body_bytes` | `8_000_000` | Hard cap enforced while streaming the request body; over it is `413` without buffering the whole thing. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver` — catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
@@ -56,6 +64,12 @@ config :ankusa,
 | `storage.roll_bytes` | `16 MiB` | Roll a new segment past this size. |
 | `storage.roll_ms` | `30_000` | ...or after this long, whichever comes first. |
 | `storage.interval_ms` | `1_000` | Compactor tick interval. |
+| `claim_check.adapter` | `{Ankusa.ClaimCheck.Direct, []}` | `{module, opts}` implementing `Ankusa.ClaimCheck`. See [`claim-check.md`](claim-check.md). |
+| `claim_check.max_bytes` | `8_000_000` | Hard cap on a checked-in body. |
+| `claim_check.port` | `4001` | The `:claim_check` role's Bandit port. |
+| `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`; required (non-empty) on a `:claim_check`-role node. |
+| `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
+| `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
 
 ## Configuring a source
 
@@ -108,6 +122,7 @@ the map.
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (`:httpc` forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
+| `Ankusa.ClaimCheck` | Check bytes in, redeem by ticket | `ClaimCheck.Direct` (in-process `BlobStore`) | `ClaimCheck.Remote` (HTTP, `:claim_check` role) |
 | `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | — |
 
 Swapping any of these is a one-line config change — `wal: {Ankusa.WAL.Postgres,
