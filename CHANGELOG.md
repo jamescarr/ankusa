@@ -1,5 +1,26 @@
 # Changelog
 
+All notable changes to `ankusa` will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- `Ankusa.Sink.Message` — canonical v1 wire format for queue-style sinks (RabbitMQ, Kafka, SQS bridges)
+- Message format version indicator `"v": 1` for forward-compatible evolution
+- New adapter package: `ankusa_kafka` providing `Ankusa.Sink.Kafka`
+- Claim Check pattern documentation (`docs/claim-check.md`)
+- Example: `examples/kafka-sqs-consumer/` — full Kafka → SQS FIFO bridge topology with claim redemption
+
+### Changed
+
+- `ankusa_rabbitmq`: migrated to use `Ankusa.Sink.Message` (COMPATIBLE: consumers ignore unknown `"v"` field)
+
+# Changelog
+
 All notable changes to `ankusa` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/).

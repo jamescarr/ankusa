@@ -1,0 +1,159 @@
+name: ankusa-kafka-sqs-example
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  redpanda-bootstrap:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        rpk cluster health --api-urls redpanda:9644 --watch --exit-when-healthy
+        rpk topic create ankusa.events --brokers redpanda:9092 --partitions 6 --replicas 1
+        echo "topic ankusa.events created"
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.2
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+
+  aws-bootstrap:
+    image: amazon/aws-cli:2.17.62
+    depends_on: [floci]
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://floci:4566
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws s3 ls >/dev/null 2>&1; do echo "waiting for floci..."; sleep 1; done
+        
+        # S3 bucket for claim check
+        aws s3 mb "s3://ankusa-example" || true
+        
+        # SQS DLQ (must be created first for RedrivePolicy)
+        DLQ_URL=$$(aws sqs create-queue \
+          --queue-name ankusa-worker-dlq.fifo \
+          --attributes FifoQueue=true \
+          --query 'QueueUrl' --output text)
+        
+        DLQ_ARN=$$(aws sqs get-queue-attributes \
+          --queue-url "$$DLQ_URL" \
+          --attribute-names QueueArn \
+          --query 'Attributes.QueueArn' --output text)
+        
+        # Create main queue without redrive policy first
+        QUEUE_URL=$$(aws sqs create-queue \
+          --queue-name ankusa-worker.fifo \
+          --attributes FifoQueue=true,ContentBasedDeduplication=false \
+          --query 'QueueUrl' --output text)
+        
+        # Set redrive policy separately
+        aws sqs set-queue-attributes \
+          --queue-url "$$QUEUE_URL" \
+          --attributes VisibilityTimeout=30,RedrivePolicy='{"deadLetterTargetArn":"'"$$DLQ_ARN"'","maxReceiveCount":5}'
+        
+        echo "S3 bucket and SQS queues ready"
+
+  ingest:
+    build:
+      context: ../..
+      dockerfile: examples/kafka-sqs-consumer/ingest_app/Dockerfile
+    ports:
+      - "4000:4000"
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      aws-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      PORT: "4000"
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: ankusa.events
+      S3_BUCKET: ankusa-example
+      S3_REGION: us-east-1
+      S3_ENDPOINT: http://floci:4566
+      S3_ACCESS_KEY_ID: test
+      S3_SECRET_ACCESS_KEY: test
+      INLINE_MAX_BYTES: "8192"
+
+  claim-check:
+    build:
+      context: ../..
+      dockerfile: examples/kafka-sqs-consumer/ingest_app/Dockerfile
+    ports:
+      - "4001:4001"
+    depends_on:
+      aws-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      ANKUSA_ROLES: claim_check
+      CLAIM_CHECK_PORT: "4001"
+      CLAIM_CHECK_TOKEN: dev-claim-check-token
+      S3_BUCKET: ankusa-example
+      S3_REGION: us-east-1
+      S3_ENDPOINT: http://floci:4566
+      S3_ACCESS_KEY_ID: test
+      S3_SECRET_ACCESS_KEY: test
+
+  bridge:
+    image: docker.redpanda.com/redpandadata/connect:4.110.0
+    depends_on:
+      redpanda-bootstrap:
+        condition: service_completed_successfully
+      aws-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./bridge/bridge.yaml:/connect.yaml:ro
+    command: run /connect.yaml
+
+  worker:
+    build:
+      context: ./worker
+    depends_on:
+      bridge:
+        condition: service_started
+      claim-check:
+        condition: service_started
+    environment:
+      SQS_QUEUE_URL: http://floci:4566/000000000000/ankusa-worker.fifo
+      SQS_ENDPOINT: http://floci:4566
+      SQS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      CLAIM_CHECK_URL: http://claim-check:4001
+      CLAIM_CHECK_TOKEN: dev-claim-check-token

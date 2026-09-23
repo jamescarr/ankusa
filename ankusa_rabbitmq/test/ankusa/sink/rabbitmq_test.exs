@@ -77,6 +77,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
     assert meta.routing_key == "ankusa.src"
 
     decoded = JSON.decode!(payload)
+    assert decoded["v"] == 1
     assert decoded["id"] == env.id
     assert decoded["source_id"] == "src"
     assert decoded["tenant_id"] == "t1"
@@ -105,6 +106,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
 
     {payload, _meta} = get_message(chan, queue)
     decoded = JSON.decode!(payload)
+    assert decoded["v"] == 1
     refute Map.has_key?(decoded, "body_base64")
     assert %{"claim" => claim_map} = decoded
     assert claim_map["tenant_id"] == "t1"
