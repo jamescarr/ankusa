@@ -19,7 +19,11 @@ jobs:
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
-      - run: mix deps.get
+      # `--check-locked` rather than a plain `deps.get`: a plain get silently
+      # rewrites a stale lock, which is how the lock drifted out of sync with
+      # the adapters and examples once already.
+      - run: mix deps.get --check-locked
+      - run: mix deps.unlock --check-unused
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
       - run: mix test
@@ -47,7 +51,9 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
       - working-directory: ankusa_postgres
-        run: mix deps.get
+        run: mix deps.get --check-locked
+      - working-directory: ankusa_postgres
+        run: mix deps.unlock --check-unused
       - working-directory: ankusa_postgres
         run: mix format --check-formatted
       - working-directory: ankusa_postgres
@@ -74,7 +80,9 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
       - working-directory: ankusa_rabbitmq
-        run: mix deps.get
+        run: mix deps.get --check-locked
+      - working-directory: ankusa_rabbitmq
+        run: mix deps.unlock --check-unused
       - working-directory: ankusa_rabbitmq
         run: mix format --check-formatted
       - working-directory: ankusa_rabbitmq
@@ -100,7 +108,9 @@ jobs:
       - working-directory: ankusa_kafka
         run: docker compose up -d --wait
       - working-directory: ankusa_kafka
-        run: mix deps.get
+        run: mix deps.get --check-locked
+      - working-directory: ankusa_kafka
+        run: mix deps.unlock --check-unused
       - working-directory: ankusa_kafka
         run: mix format --check-formatted
       - working-directory: ankusa_kafka
@@ -110,3 +120,34 @@ jobs:
       - if: always()
         working-directory: ankusa_kafka
         run: docker compose down -v
+
+  # The examples are the deployable wrappers: path-dep consumers of core and an
+  # adapter, plus the TypeScript workers. They are where a lockfile goes stale
+  # without anyone noticing, so they assert their locks and compile too — the
+  # Kafka one pulls in brod's crc32cer NIF, same as the job above.
+  examples:
+    name: examples
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [kafka-sqs-consumer, rabbitmq-consumer]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - working-directory: examples/${{ matrix.example }}/ingest_app
+        run: mix deps.get --check-locked
+      - working-directory: examples/${{ matrix.example }}/ingest_app
+        run: mix deps.unlock --check-unused
+      - working-directory: examples/${{ matrix.example }}/ingest_app
+        run: MIX_ENV=prod mix compile --warnings-as-errors
+      - working-directory: examples/${{ matrix.example }}/worker
+        run: npm ci
+      - working-directory: examples/${{ matrix.example }}/worker
+        run: npx tsc --noEmit

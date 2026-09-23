@@ -18,6 +18,13 @@ touches, not just the one you edited. All three adapter packages depend on
 `mix format --check-formatted` is what CI fails on first: run `mix format`
 before pushing, not after CI tells you.
 
+Changing core's dependencies touches every package that path-depends on it, so
+after adding or removing one, run `mix deps.get` in each of the packages above
+and commit their `mix.lock` files. CI runs `mix deps.get --check-locked` and
+`mix deps.unlock --check-unused` everywhere — including the examples — so a
+`deps.get` that rewrites a stale lock, or a lock entry for a dependency nobody
+declares, fails the build instead of passing quietly.
+
 Core's suite excludes `:integration` tests (S3/GCS against a floci
 emulator); add `--include integration` with the emulator running. What each
 suite covers: [`docs/testing.md`](docs/testing.md).
