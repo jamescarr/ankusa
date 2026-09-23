@@ -30,7 +30,16 @@ accordance with SemVer. Merging to `main` publishes automatically — see
 
 - HTTP is `Req` throughout — the S3 and GCS blob stores, the claim-check
   `Remote` adapter, and `Sink.Http` no longer hand-roll `:httpc` plumbing
-  (and `:inets` is no longer started by this package).
+  (and `:inets` is no longer started by this package). Outbound requests go
+  through `Ankusa.HttpClient`, which never follows a redirect (a followed one
+  re-sends a hook as a `GET`) and takes `:req_options` from an allowlist:
+  transport tuning only, so a caller cannot rewrite a URL that has already been
+  signed.
+- `Ankusa.Storage.Index` is backed by an ETS table owned by the compactor
+  instead of a `:persistent_term` map rebuilt from the file on lookup, so a
+  lookup never re-decodes the index and a compaction tick only touches the rows
+  it wrote. A node without the compactor — or the window while it restarts —
+  reads the file, as before.
 - `Ankusa.BlobStore.S3` signs requests with `aws_signature`, the SigV4
   implementation behind the official aws-elixir SDK, replacing ~80 lines of
   hand-rolled canonical-request/HMAC code. Signing is now pinned by tests that
@@ -39,6 +48,12 @@ accordance with SemVer. Merging to `main` publishes automatically — see
 - New dependencies: `req` and `aws_signature`. See
   [`docs/packaging.md`](docs/packaging.md) for when a dependency is worth taking
   and where it belongs.
+- Telemetry now emits what `Ankusa.Telemetry` documents: `[:ankusa, :commit]` is
+  a span reporting `:duration` on `:stop` alongside `:batch_size` and `:bytes`
+  (measurements), `[:ankusa, :verify, :stop]` carries `:status`, and
+  `[:ankusa, :compact, :stop]` carries `:duration`. Verifiers share one failure
+  vocabulary — Standard Webhooks reports `:missing_signature` where it reported
+  `:missing_headers`.
 
 ### Fixed
 
@@ -49,6 +64,11 @@ accordance with SemVer. Merging to `main` publishes automatically — see
 - `Ankusa.Instance` no longer starts the configured `WAL` on a node running
   none of `:edge`, `:dispatch`, `:storage` — a `:claim_check`-only node
   needs only blob-store credentials.
+- `Ankusa.BlobStore.S3.list/3` reads a `200` body defensively: a response that
+  isn't ListObjectsV2 XML — or isn't even valid UTF-8 — reads as an empty
+  listing instead of taking the claim-check sweeper down, and a listing
+  containing a non-ASCII key no longer comes back empty. The XML scanner is
+  handed raw bytes, which is what it decodes.
 
 ## [0.1.0] - 2026-09-22
 
