@@ -6,7 +6,7 @@ name: ankusa-kafka-sqs-example
 # no S3 credentials of its own.
 #
 #   docker compose up --build -d --wait
-#   curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+#   curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 #   docker compose logs -f worker
 #   docker compose down -v
 

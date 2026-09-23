@@ -30,12 +30,12 @@ end
 defmodule Ankusa.RouteResolver.Path do
   @moduledoc """
   Default resolver: a single path segment after a fixed prefix is the source id.
-  `POST /hooks/:source_id` (the original scheme). Tenant is left `nil`, so it is
+  `POST /webhooks/:source_id` (the original scheme). Tenant is left `nil`, so it is
   taken from the resolved `%Ankusa.Source{}` — the single-tenant / static case.
 
   Opts:
 
-    * `:prefix` — path segments before the id. Default `["hooks"]`.
+    * `:prefix` — path segments before the id. Default `["webhooks"]`.
   """
 
   @behaviour Ankusa.RouteResolver
@@ -44,7 +44,7 @@ defmodule Ankusa.RouteResolver.Path do
 
   @impl true
   def resolve(_instance, conn, opts) do
-    prefix = Keyword.get(opts, :prefix, ["hooks"])
+    prefix = Keyword.get(opts, :prefix, ["webhooks"])
     plen = length(prefix)
 
     case conn.path_info do
@@ -61,13 +61,13 @@ end
 defmodule Ankusa.RouteResolver.TenantPath do
   @moduledoc """
   Multi-tenant resolver: the tenant is carried in the URL. `POST
-  /hooks/:tenant_id/:source_id` maps to `%Route{tenant_id: t, source_id: s}`, so
+  /webhooks/:tenant_id/:source_id` maps to `%Route{tenant_id: t, source_id: s}`, so
   one instance serves many tenants and the tenant is authoritative from the path
   rather than inferred from the source.
 
   Opts:
 
-    * `:prefix` — path segments before `tenant/source`. Default `["hooks"]`.
+    * `:prefix` — path segments before `tenant/source`. Default `["webhooks"]`.
   """
 
   @behaviour Ankusa.RouteResolver
@@ -76,7 +76,7 @@ defmodule Ankusa.RouteResolver.TenantPath do
 
   @impl true
   def resolve(_instance, conn, opts) do
-    prefix = Keyword.get(opts, :prefix, ["hooks"])
+    prefix = Keyword.get(opts, :prefix, ["webhooks"])
     plen = length(prefix)
 
     case conn.path_info do

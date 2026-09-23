@@ -29,7 +29,7 @@ defmodule Ankusa.TestHelpers do
     %{
       source_id: source_id,
       method: "POST",
-      path: "/hooks/#{source_id}",
+      path: "/webhooks/#{source_id}",
       headers: headers,
       body: body
     }

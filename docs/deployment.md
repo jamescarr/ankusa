@@ -141,7 +141,7 @@ S3, small ones inlined) → a real TypeScript consumer that owns its own
 queue/binding, fetches, and prints. `docker compose up --build`, then:
 
 ```sh
-curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 docker compose logs -f worker
 ```
 

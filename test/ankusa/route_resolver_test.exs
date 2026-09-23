@@ -26,8 +26,8 @@ defmodule Ankusa.RouteResolverTest do
   end
 
   describe "RouteResolver.Path" do
-    test "maps /hooks/:source_id to a route with an unset tenant" do
-      conn = Plug.Test.conn(:post, "/hooks/demo", "x")
+    test "maps /webhooks/:source_id to a route with an unset tenant" do
+      conn = Plug.Test.conn(:post, "/webhooks/demo", "x")
 
       assert {:ok, %Route{source_id: "demo", tenant_id: nil}} =
                RouteResolver.Path.resolve(:i, conn, [])
@@ -41,22 +41,23 @@ defmodule Ankusa.RouteResolverTest do
     end
 
     test "rejects a path whose segment count doesn't fit the scheme" do
-      assert :error = RouteResolver.Path.resolve(:i, Plug.Test.conn(:post, "/hooks/a/b"), [])
-      assert :error = RouteResolver.Path.resolve(:i, Plug.Test.conn(:post, "/hooks"), [])
+      assert :error = RouteResolver.Path.resolve(:i, Plug.Test.conn(:post, "/webhooks/a/b"), [])
+      assert :error = RouteResolver.Path.resolve(:i, Plug.Test.conn(:post, "/webhooks"), [])
       assert :error = RouteResolver.Path.resolve(:i, Plug.Test.conn(:post, "/other/demo"), [])
     end
   end
 
   describe "RouteResolver.TenantPath" do
-    test "maps /hooks/:tenant/:source to a tenant-scoped route" do
-      conn = Plug.Test.conn(:post, "/hooks/acme/stripe", "x")
+    test "maps /webhooks/:tenant/:source to a tenant-scoped route" do
+      conn = Plug.Test.conn(:post, "/webhooks/acme/stripe", "x")
 
       assert {:ok, %Route{source_id: "stripe", tenant_id: "acme"}} =
                RouteResolver.TenantPath.resolve(:i, conn, [])
     end
 
     test "rejects a single-segment path" do
-      assert :error = RouteResolver.TenantPath.resolve(:i, Plug.Test.conn(:post, "/hooks/x"), [])
+      assert :error =
+               RouteResolver.TenantPath.resolve(:i, Plug.Test.conn(:post, "/webhooks/x"), [])
     end
   end
 
@@ -69,9 +70,9 @@ defmodule Ankusa.RouteResolverTest do
 
       body = ~s({"id":"evt_1","type":"x"})
 
-      acme_first = post(config, "/hooks/acme/stripe", body)
-      globex = post(config, "/hooks/globex/stripe", body)
-      acme_again = post(config, "/hooks/acme/stripe", body)
+      acme_first = post(config, "/webhooks/acme/stripe", body)
+      globex = post(config, "/webhooks/globex/stripe", body)
+      acme_again = post(config, "/webhooks/acme/stripe", body)
 
       # same source_id + same event id, but two different tenants → both commit
       assert acme_first.status == 201
@@ -92,7 +93,7 @@ defmodule Ankusa.RouteResolverTest do
           "demo" => [tenant_id: "customer-42"]
         })
 
-      assert post(config, "/hooks/demo", ~s({"hi":1})).status == 201
+      assert post(config, "/webhooks/demo", ~s({"hi":1})).status == 201
       assert [env] = WAL.read(config.instance, -1, 10)
       assert env.tenant_id == "customer-42"
       assert env.source_id == "demo"
@@ -100,7 +101,7 @@ defmodule Ankusa.RouteResolverTest do
 
     test "an unresolvable URL shape is a 404" do
       config = start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => []})
-      assert post(config, "/hooks/stripe", "x").status == 404
+      assert post(config, "/webhooks/stripe", "x").status == 404
     end
   end
 end

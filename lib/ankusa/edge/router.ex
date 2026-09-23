@@ -3,7 +3,7 @@ defmodule Ankusa.Edge.Router do
   The Bandit edge. Minimal work on the hot path: enforce a size limit, capture
   the exact raw body and headers, and hand off to `Ankusa.Edge.Ingest`. No JSON
   parsing here. The catch-URL scheme is pluggable via `Ankusa.RouteResolver`
-  (default `POST /hooks/:source_id`); it maps the request to a `Ankusa.Route`.
+  (default `POST /webhooks/:source_id`); it maps the request to a `Ankusa.Route`.
 
   The instance name is passed through `init/1` (`plug: {Ankusa.Edge.Router,
   instance: :default}`) and is available as `opts` inside each route.

@@ -135,7 +135,7 @@ test suite — it's verified by actually running it:
 ```sh
 cd examples/rabbitmq-consumer
 docker compose up --build
-curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 docker compose logs worker     # confirm the hook printed
 docker compose down -v
 ```
@@ -149,9 +149,9 @@ both payload paths end to end:
 ```sh
 cd examples/kafka-sqs-consumer
 docker compose up --build -d --wait
-curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 python3 -c "import json;print(json.dumps({'id':'evt_2','items':[{'n':i} for i in range(2000)]}))" \
-  | curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' --data-binary @-
+  | curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @-
 docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```

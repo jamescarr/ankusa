@@ -25,7 +25,7 @@ Override the port with `PORT=4055 iex -S mix` or `config :ankusa, port: <n>`.
 From another terminal:
 
 ```sh
-curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' \
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' \
   -d '{"id":"evt_1","event":"push"}'
 # => {"id":"01a0...","status":"accepted","seq":1}
 ```
@@ -43,7 +43,7 @@ The dispatch pipeline then delivers it, visible in the server log:
 Replay the same event id — it's absorbed but still gets a `2xx`:
 
 ```sh
-curl -XPOST localhost:4000/hooks/demo -d '{"id":"evt_1"}'
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
 # => {"status":"duplicate","seq":1}
 ```
 
@@ -71,7 +71,7 @@ State lives under `./data/<instance>/` (`wal/`, `segments/`, `quarantine/`,
 ## 5. Point a real provider at it
 
 Expose the port with any tunnel, then set the provider's webhook URL to
-`<tunnel>/hooks/<source_id>` and configure that source (see
+`<tunnel>/webhooks/<source_id>` and configure that source (see
 [`configuration.md`](configuration.md#configuring-a-source)). Verification
 runs inline, before the ack.
 
@@ -83,7 +83,7 @@ ngrok http 4000     # or cloudflared / tailscale funnel / etc.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/hooks/:source_id`; `TenantPath` gives `/hooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
 | `GET` | `/health` | Liveness + WAL stats. |
 | `GET` | `/stats` | WAL stats. |
 

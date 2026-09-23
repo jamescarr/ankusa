@@ -7,7 +7,7 @@ per-integration URLs, in whatever shape it wants, at runtime.
 
 ## The problem this solves
 
-A webhook framework's URL scheme is not one thing. `POST /hooks/:source_id`
+A webhook framework's URL scheme is not one thing. `POST /webhooks/:source_id`
 is fine for a single operator with a handful of known providers. It's wrong
 for a SaaS handing each of thousands of customers their own endpoint, and
 wrong again for a product minting unguessable tokens on demand. Hardcoding
@@ -39,33 +39,33 @@ keyed by the returned `source_id`.
 
 ## Shipped resolvers
 
-**`Ankusa.RouteResolver.Path`** (default) — `POST /hooks/:source_id`.
+**`Ankusa.RouteResolver.Path`** (default) — `POST /webhooks/:source_id`.
 `tenant_id` is left `nil`, so `Ankusa.Edge.Ingest` falls back to the resolved
 source's own `tenant_id` (default `"default"`). This is the single-tenant
 case: one operator, a handful of sources, tenancy doesn't vary by URL.
 
 ```elixir
-config :ankusa, route_resolver: {Ankusa.RouteResolver.Path, prefix: ["hooks"]}  # prefix is the default
+config :ankusa, route_resolver: {Ankusa.RouteResolver.Path, prefix: ["webhooks"]}  # prefix is the default
 ```
 
-**`Ankusa.RouteResolver.TenantPath`** — `POST /hooks/:tenant_id/:source_id`.
+**`Ankusa.RouteResolver.TenantPath`** — `POST /webhooks/:tenant_id/:source_id`.
 The tenant is carried in the URL and is **authoritative** — it wins over
 whatever the resolved source's own `tenant_id` says. One instance serves
 many tenants over one path scheme.
 
 ```elixir
-config :ankusa, route_resolver: {Ankusa.RouteResolver.TenantPath, prefix: ["hooks"]}
+config :ankusa, route_resolver: {Ankusa.RouteResolver.TenantPath, prefix: ["webhooks"]}
 ```
 
 ```
-POST /hooks/acme/stripe    →  %Route{tenant_id: "acme", source_id: "stripe"}
-POST /hooks/globex/stripe  →  %Route{tenant_id: "globex", source_id: "stripe"}
+POST /webhooks/acme/stripe    →  %Route{tenant_id: "acme", source_id: "stripe"}
+POST /webhooks/globex/stripe  →  %Route{tenant_id: "globex", source_id: "stripe"}
 ```
 
 ## Writing your own scheme
 
 This is the extension point for a real product's catch-URL story — an
-opaque-token scheme (`POST /hooks/catch/:app_id/:token`), a
+opaque-token scheme (`POST /webhooks/catch/:app_id/:token`), a
 host-routed scheme (`https://<tenant>.hooks.example.com/:source`), or
 anything else. Implement the one callback:
 
@@ -77,7 +77,7 @@ defmodule MyApp.RouteResolver.OpaqueToken do
   @impl true
   def resolve(_instance, conn, _opts) do
     case conn.path_info do
-      ["hooks", "catch", app_id, token] ->
+      ["webhooks", "catch", app_id, token] ->
         # look up `token` in your own endpoint table/cache here —
         # this is exactly where a control-plane-backed SourceStore.Ecto
         # would live too

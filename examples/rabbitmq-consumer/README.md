@@ -7,7 +7,7 @@ for consumers that shouldn't hold storage credentials.
 
 ```mermaid
 flowchart LR
-    P[Provider / curl] -->|POST /hooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
+    P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
     I -->|WAL fsync, then ack| P
     I -->|"small body (base64)"| X((ankusa.events\nexchange))
     I -.fat body: Direct check-in.-> S[(S3 / floci)]
@@ -64,7 +64,7 @@ worker (consuming and printing to its own logs).
 Send a small hook:
 
 ```sh
-curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' \
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' \
   -d '{"id":"evt_1","event":"push"}'
 ```
 
@@ -72,7 +72,7 @@ Send a fat one (anything over 8 KiB checks in through the gateway instead):
 
 ```sh
 python3 -c "import json; print(json.dumps({'id':'evt_2','items':[{'n':i} for i in range(2000)]}))" \
-  | curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' --data-binary @-
+  | curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @-
 ```
 
 Watch the worker print both:

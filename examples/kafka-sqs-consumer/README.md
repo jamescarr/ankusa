@@ -10,7 +10,7 @@ credentials of its own.
 
 ```mermaid
 flowchart LR
-    P[Provider / curl] -->|POST /hooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
+    P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
     I -->|WAL fsync, then ack| P
     I -->|"produce, acks=all\nkey tenant/source"| K[("Redpanda\ntopic ankusa.events")]
     I -.fat body: Direct check-in.-> S[(S3 / floci)]
@@ -92,14 +92,14 @@ docker compose up --build -d --wait
 Small hook:
 
 ```sh
-curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 ```
 
 Fat hook (same endpoint, larger body):
 
 ```sh
 python3 -c "import json;print(json.dumps({'id':'evt_2','items':[{'n':i} for i in range(2000)]}))" \
-  | curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' --data-binary @-
+  | curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @-
 ```
 
 Watch it land:
@@ -138,9 +138,9 @@ Each proves one thing. They're worth running by hand at least once.
 # drill 3, in full
 docker compose stop worker
 FAT_ID=$(python3 -c "import json;print(json.dumps({'id':'poison','pad':'x'*20000}))" \
-  | curl -s -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' --data-binary @- \
+  | curl -s -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @- \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
-curl -s -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"after_poison"}'
+curl -s -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"after_poison"}'
 
 # delete the claim object out from under the worker, then let it try
 docker compose run --rm --entrypoint sh aws-bootstrap -c \

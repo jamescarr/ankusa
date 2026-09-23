@@ -78,7 +78,7 @@ decision rule for adding a new one: [`docs/packaging.md`](docs/packaging.md).
 mix deps.get
 iex -S mix               # starts on :4000 with a zero-config `demo` source
 
-curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   — returned only after the WAL fsync
 ```
 
@@ -89,7 +89,7 @@ at it): [`docs/quickstart.md`](docs/quickstart.md).
 
 | Behaviour | Job | Default | Also shipped |
 | --- | --- | --- | --- |
-| `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/hooks/:source_id`) | `RouteResolver.TenantPath` (`/hooks/:tenant/:source`) |
+| `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
 | `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | `WAL.Postgres` (shared, multi-node — `ankusa_postgres`) |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
 | `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |

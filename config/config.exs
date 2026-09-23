@@ -8,7 +8,7 @@ config :ankusa, port: 4000
 config :ankusa, autostart: config_env() != :test
 
 # Zero-config demo source so the quick-start endpoint works before you have any
-# provider credentials. `POST /hooks/demo` accepts anything and logs it.
+# provider credentials. `POST /webhooks/demo` accepts anything and logs it.
 config :ankusa,
   sources: %{
     "demo" => [

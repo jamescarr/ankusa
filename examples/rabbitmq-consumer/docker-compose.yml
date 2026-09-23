@@ -7,7 +7,7 @@ name: ankusa-rabbitmq-example
 # own), and prints what it receives.
 #
 #   docker compose up --build
-#   curl -XPOST localhost:4000/hooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+#   curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 #   docker compose logs -f worker
 #   docker compose down -v
 
