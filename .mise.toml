@@ -1,0 +1,421 @@
+# Toolchain + release tasks for the ankusa monorepo.
+#
+#   mise install          # install the pinned tools
+#   mise tasks ls         # list everything below
+#   mise run ci           # the full local equivalent of .github/workflows/ci.yml
+#
+# Versions must stay compatible with .github/workflows/ci.yml's
+# OTP_VERSION / ELIXIR_VERSION, and with the `node-version` the examples job
+# pins. CI is the authority for a release; this file exists so the same
+# toolchain is reproducible locally.
+
+[tools]
+# CI pins OTP 29.0 / Elixir 1.20.4. 29.1 here is a patch-level difference and
+# is what's already installed locally; bump CI if you ever need parity exactly.
+elixir = "1.20.4-otp-29"
+erlang = "29.1"
+# The examples' TypeScript workers. CI's `examples` job pins node 22 — not
+# whatever your global mise config has (24 as of writing).
+node = "22"
+# The e2e gate (`mise run e2e`) and workflow lint. Managing these here means
+# no `brew install kind` / `docker run rhysd/actionlint` prerequisite.
+kind = "0.33.0"
+kubectl = "1.37.0"
+actionlint = "1.7.12"
+
+# ── setup ─────────────────────────────────────────────────────────────────
+
+[tasks.deps]
+description = "Fetch deps for every Mix project in the repo"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+for d in . ankusa_postgres ankusa_rabbitmq ankusa_kafka \
+         examples/rabbitmq-consumer/ingest_app \
+         examples/kafka-sqs-consumer/ingest_app \
+         examples/oban-consumer/ingest_app \
+         examples/oban-consumer/consumer_app \
+         tools/loadgen; do
+  echo "==> $d"
+  (cd "$d" && mix deps.get)
+done
+'''
+
+# ── adapter test infrastructure ───────────────────────────────────────────
+
+[tasks."infra:up"]
+description = "Start Postgres / RabbitMQ / Redpanda for the adapter suites"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+  echo "==> $p"
+  (cd "$p" && docker compose up -d --wait)
+done
+'''
+
+[tasks."infra:down"]
+description = "Tear down the adapter test infrastructure"
+run = '''
+#!/usr/bin/env bash
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+rc=0
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+  (cd "$p" && docker compose down -v) || rc=1
+done
+exit $rc
+'''
+
+# ── per-package checks (what CI runs for each, plus docs) ─────────────────
+
+[tasks."check:core"]
+description = "ankusa core: format + compile + test + docs"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+mix deps.get --check-locked
+mix deps.unlock --check-unused
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix test
+mix docs --warnings-as-errors
+'''
+
+[tasks."check:postgres"]
+description = "ankusa_postgres: format + compile + test + docs (needs infra:up)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)/ankusa_postgres"
+mix deps.get --check-locked
+mix deps.unlock --check-unused
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix test
+mix docs --warnings-as-errors
+'''
+
+[tasks."check:rabbitmq"]
+description = "ankusa_rabbitmq: format + compile + test + docs (needs infra:up)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)/ankusa_rabbitmq"
+mix deps.get --check-locked
+mix deps.unlock --check-unused
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix test
+mix docs --warnings-as-errors
+'''
+
+[tasks."check:kafka"]
+description = "ankusa_kafka + kafka-sqs ingest_app, in a container (crc32cer needs cmake)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)/ankusa_kafka"
+docker compose up -d --wait
+
+# The repo *root* is the mount, not ankusa_kafka/: in :dev/:test this package
+# path-depends on `..`. MIX_BUILD_PATH keeps the container's Linux build —
+# including crc32cer's NIF and its CMake cache — out of the host _build.
+docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
+  -e KAFKA_BROKERS=redpanda:9092 -e MIX_BUILD_PATH=/tmp/build \
+  -w /repo/ankusa_kafka elixir:1.20.4-alpine \
+  sh -c 'mix local.hex --force >/dev/null && apk add --no-cache -q build-base cmake git >/dev/null \
+         && mix deps.get --check-locked && mix deps.unlock --check-unused \
+         && mix format --check-formatted && mix compile --warnings-as-errors \
+         && mix test && mix docs --warnings-as-errors'
+
+docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
+  -e MIX_BUILD_PATH=/tmp/build-example \
+  -w /repo/examples/kafka-sqs-consumer/ingest_app elixir:1.20.4-alpine \
+  sh -c 'mix local.hex --force >/dev/null && apk add --no-cache -q build-base cmake git >/dev/null \
+         && mix deps.get --check-locked && MIX_ENV=prod mix compile --warnings-as-errors'
+'''
+
+[tasks."check:examples"]
+description = "The two Docker-Compose examples: rabbitmq ingest_app + both TS workers"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "==> rabbitmq-consumer/ingest_app"
+(cd examples/rabbitmq-consumer/ingest_app && \
+  mix deps.get --check-locked && mix deps.unlock --check-unused && \
+  MIX_ENV=prod mix compile --warnings-as-errors)
+
+# kafka-sqs-consumer/ingest_app is covered by check:kafka (needs cmake -> container).
+
+for ex in rabbitmq-consumer kafka-sqs-consumer; do
+  echo "==> $ex/worker"
+  (cd "examples/$ex/worker" && npm ci && npx tsc --noEmit)
+done
+'''
+
+[tasks."check:oban"]
+description = "examples/oban-consumer's projects + tools/loadgen"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+for d in examples/oban-consumer/ingest_app examples/oban-consumer/consumer_app; do
+  echo "==> $d"
+  (cd "$d" && mix deps.get --check-locked && mix deps.unlock --check-unused && \
+    mix format --check-formatted && MIX_ENV=prod mix compile --warnings-as-errors)
+done
+echo "==> tools/loadgen"
+(cd tools/loadgen && mix deps.get --check-locked && mix deps.unlock --check-unused && \
+  mix format --check-formatted && mix compile --warnings-as-errors)
+'''
+
+# ── aggregate ─────────────────────────────────────────────────────────────
+
+[tasks.check]
+description = "Every check CI runs, across all packages and examples"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+mise run infra:up
+trap 'mise run infra:down' EXIT
+mise run check:core
+mise run check:postgres
+mise run check:rabbitmq
+mise run check:kafka
+mise run check:examples
+mise run check:oban
+'''
+
+[tasks."lint:workflows"]
+description = "actionlint the GitHub Actions workflows"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+actionlint -color .github/workflows/*.yml
+'''
+
+[tasks."check:links"]
+description = "Fail if any doc link points at a path outside README.md/docs/*.md (breaks on hexdocs)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+if grep -nE '\]\((\.\./)?(examples|ankusa_[a-z_]+|\.github|priv|lib|test|plans)/|\]\((\.\./)?LICENSE\)' \
+     README.md docs/*.md; then
+  echo "^^ rewrite these to absolute https://github.com/jamescarr/ankusa URLs" >&2
+  exit 1
+fi
+echo "no relative links escaping README.md/docs/"
+'''
+
+[tasks.package]
+description = "Build each package the way the release workflow does"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+rm -rf ankusa-0.1.0
+mix hex.build --unpack
+rm -rf ankusa-0.1.0
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+  echo "==> $p (MIX_ENV=prod: must resolve ankusa from Hex, not the path dep)"
+  (cd "$p" && MIX_ENV=prod mix hex.build)
+  rm -f "$p"/*.tar
+done
+'''
+
+[tasks.ci]
+description = "Local equivalent of .github/workflows/ci.yml"
+depends = ["lint:workflows", "check:links"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+mise run check
+mise run package
+'''
+
+# ── end-to-end gate ───────────────────────────────────────────────────────
+
+[tasks.e2e]
+description = "kind + Oban end-to-end proof (the pre-tag gate). KEEP=1 to keep the cluster"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+exec ./examples/oban-consumer/run.sh
+'''
+
+# ── release ───────────────────────────────────────────────────────────────
+
+[tasks."release:guard"]
+description = "Guards shared by both release phases"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+[ -z "$(git status --porcelain)" ] || fail "working tree is dirty; commit or stash first"
+
+# The tag must point at the commit CI ran on. Checked against origin/main
+# rather than a branch name, because the flow is "merge the version-bump PR,
+# then tag from the merged commit" — your local branch name is irrelevant.
+git fetch --quiet origin main
+local_sha=$(git rev-parse HEAD)
+remote_sha=$(git rev-parse origin/main)
+[ "$local_sha" = "$remote_sha" ] || fail "HEAD ($local_sha) != origin/main ($remote_sha); merge and push first"
+
+gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
+
+printf '  clean tree, HEAD == origin/main, HEX_API_KEY present\n'
+'''
+
+[tasks."release:preflight-core"]
+description = "Checks before tagging ankusa (phase 1 of 2)"
+depends = ["release:guard"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
+[ -n "$VERSION" ] || fail "could not read @version from mix.exs"
+TAG="ankusa-v$VERSION"
+
+grep -q "^## \[$VERSION\]" CHANGELOG.md || fail "CHANGELOG.md has no '## [$VERSION]' heading"
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && fail "tag $TAG already exists locally"
+git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 && fail "tag $TAG already exists on origin"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/ankusa/releases/$VERSION")
+[ "$code" = "404" ] || fail "ankusa $VERSION is already on Hex (HTTP $code) — bump @version and the CHANGELOG"
+
+printf '  ankusa %s -> %s, not yet on Hex\n' "$VERSION" "$TAG"
+printf '\nNext: mise run release:tag-core\n'
+'''
+
+[tasks."release:preflight-adapters"]
+description = "Checks before tagging the adapters (phase 2 of 2; core must be live)"
+depends = ["release:guard"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+# Core must be on Hex first: the adapters' :prod deps resolve
+# {:ankusa, "~> 0.1"} from Hex, not the path dep, so an early tag dies at
+# `MIX_ENV=prod mix deps.get`.
+core=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
+code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/ankusa/releases/$core")
+[ "$code" = "200" ] || fail "ankusa $core is not on Hex yet (HTTP $code) — run release:tag-core first"
+printf '  ankusa %s is live on Hex\n' "$core"
+
+for pkg in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+  v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$pkg/mix.exs")
+  [ -n "$v" ] || fail "$pkg: could not read @version from $pkg/mix.exs"
+  tag="$pkg-v$v"
+
+  grep -q "^## \[$v\]" "$pkg/CHANGELOG.md" || fail "$pkg: CHANGELOG.md has no '## [$v]' heading"
+  git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "$pkg: tag $tag already exists locally"
+  git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1 && fail "$pkg: tag $tag already exists on origin"
+
+  code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/$pkg/releases/$v")
+  [ "$code" = "404" ] || fail "$pkg $v is already on Hex (HTTP $code)"
+
+  printf '  %-18s %s -> %s\n' "$pkg" "$v" "$tag"
+done
+
+printf '\nNext: mise run release:tag-adapters\n'
+'''
+
+[tasks."release:notes"]
+description = "Preview the GitHub release notes the workflow will extract for a version"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+VERSION="${1:-$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)}"
+start=$(grep -n "^## \[$VERSION\]" CHANGELOG.md | head -1 | cut -d: -f1)
+[ -n "$start" ] || { echo "no '## [$VERSION]' section in CHANGELOG.md" >&2; exit 1; }
+end=$(awk -v s="$start" 'NR > s && /^## / { print NR; exit }' CHANGELOG.md)
+if [ -n "$end" ]; then
+  sed -n "$((start + 1)),$((end - 1))p" CHANGELOG.md
+else
+  sed -n "$((start + 1)),\$p" CHANGELOG.md
+fi
+'''
+
+[tasks."release:tag-core"]
+description = "Tag + push ankusa-v<version> (do this first, alone)"
+depends = ["release:preflight-core"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
+TAG="ankusa-v$VERSION"
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && { echo "tag $TAG already exists" >&2; exit 1; }
+git tag "$TAG"
+git push origin "$TAG"
+echo
+echo "pushed $TAG. Wait for it to publish green before tagging the adapters:"
+echo "  mise run release:watch"
+'''
+
+[tasks."release:tag-adapters"]
+description = "Tag + push the three adapter packages (only after core is live on Hex)"
+depends = ["release:preflight-adapters"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# Core-is-live and tag-free checks live in release:preflight-adapters above.
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+  v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$p/mix.exs")
+  tag="$p-v$v"
+  git tag "$tag"
+  git push origin "$tag"
+  echo "pushed $tag"
+done
+
+echo
+echo "Watch them: mise run release:watch"
+'''
+
+[tasks."release:watch"]
+description = "Watch the release workflow runs"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+gh run list --workflow=release.yml --limit 5
+echo
+id=$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+[ -n "$id" ] && exec gh run watch "$id"
+'''
+
+[tasks."release:verify"]
+description = "Confirm all four packages are live on Hex"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+for p in ankusa ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/$p")
+  printf '  %-18s %s\n' "$p" "$code"
+  [ "$code" = "200" ] || { echo "  ^ not published" >&2; exit 1; }
+done
+'''
