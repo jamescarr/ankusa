@@ -36,11 +36,21 @@ package's checks in a container instead:
 ```sh
 cd ankusa_kafka
 docker compose up -d --wait
-docker run --rm --network ankusa_kafka_default -v "$PWD":/repo \
-  -e KAFKA_BROKERS=redpanda:9092 -w /repo/ankusa_kafka \
-  elixir:1.20.4-alpine \
-  sh -c 'apk add --no-cache -q build-base cmake git && mix deps.get && mix test'
+# The repo *root* is the mount, not `ankusa_kafka/`: in :dev/:test this package
+# path-depends on `..`, so mounting only the package leaves `..` with no
+# `mix.exs` and Mix fails before it compiles anything.
+# MIX_BUILD_PATH keeps the container's Linux artifacts out of your `_build` —
+# a Linux-built `crc32cer` NIF will not load on macOS, and its CMake cache
+# records container paths that break a later local build.
+docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
+  -e KAFKA_BROKERS=redpanda:9092 -e MIX_BUILD_PATH=/tmp/build \
+  -w /repo/ankusa_kafka elixir:1.20.4-alpine \
+  sh -c 'mix local.hex --force >/dev/null && apk add --no-cache -q build-base cmake git >/dev/null \
+         && mix format --check-formatted && mix compile --warnings-as-errors && mix test'
 ```
+
+The same applies to `examples/kafka-sqs-consumer/ingest_app`, which path-depends
+on both core and `ankusa_kafka`.
 
 Working on something that needs a browser or a running system? Exercise the
 real thing (or a throwaway script against it) — see the verification
