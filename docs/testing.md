@@ -125,11 +125,11 @@ instead of hanging.
 brod's `crc32cer` NIF compiles from source, so the first `mix deps.compile`
 needs a C toolchain and CMake ≥ 3.16 (`apk add build-base cmake` on Alpine,
 `brew install cmake` on macOS) — or run the suite in a container, see
-[`AGENTS.md`](../AGENTS.md).
+[`AGENTS.md`](https://github.com/jamescarr/ankusa/blob/main/AGENTS.md).
 
 ## Verifying the worked example
 
-[`examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/) isn't a Mix
+[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) isn't a Mix
 test suite — it's verified by actually running it:
 
 ```sh
@@ -140,7 +140,7 @@ docker compose logs worker     # confirm the hook printed
 docker compose down -v
 ```
 
-[`examples/kafka-sqs-consumer/`](../examples/kafka-sqs-consumer/) is verified
+[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) is verified
 the same way, plus its three failure drills (bridge down, worker down, poison
 claim — each with its own `docker compose` commands and expected output in
 that example's README). After it's up, one small and one fat hook exercise
@@ -156,14 +156,82 @@ docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```
 
-## Writing a new adapter's tests
-
 Follow `ankusa_postgres`/`ankusa_rabbitmq`/`ankusa_kafka`: a
 `docker-compose.yml` for the real
-dependency, `config/config.exs` setting `autostart: false`, and tests that
+dependency, and tests that
 hit the real thing. A mock proves your code calls a mock correctly; it
 proves nothing about whether a hand-rolled protocol implementation (SQL,
 AMQP, SigV4, whatever) is actually right. Every adapter in this repo that
 talks to external infrastructure is tested against a real instance of that
 infrastructure, not a stand-in for it — that standard applies to new
 adapters too.
+
+## Load and end-to-end (kind + Oban)
+
+[`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh)
+is the only test in this repo that proves zero loss on a real, multi-node
+Kubernetes deployment rather than in-process. It stands up a `kind` cluster
+(3-replica `ankusa-edge`, a singleton `ankusa-worker` running `dispatch,storage`,
+2-replica `consumer` running Oban), then drives [`tools/loadgen`](https://github.com/jamescarr/ankusa/blob/main/tools/loadgen)
+through three phases against it:
+
+1. **steady** — a paced `RATE` req/s for `DURATION` seconds.
+2. **chaos** — the same load, with `kubectl delete pod` against one `ankusa-edge`
+   pod, `ankusa-worker-0`, and one `consumer` pod at +10s/+20s/+30s.
+3. **burst** — closed-loop at `CONCURRENCY` workers, no rate cap, for
+   `BURST_SECONDS`; the drain time this reports is the dispatch throughput
+   ceiling referenced in [`deployment.md`](deployment.md#dispatch-throughput)
+   (`Ankusa.Dispatch.Pipeline` delivers one envelope at a time).
+
+`mix loadgen.verify` polls `processed_webhooks` (the consumer's ground truth,
+written by the idempotent `WebhookWorker.perform/1` upsert) until every acked
+id shows up or its timeout expires, and fails the run on any `missing > 0` or
+`sha_mismatches > 0`.
+
+Run it yourself: `cd examples/oban-consumer && ./run.sh` (needs `kind`,
+`kubectl`, `docker`, `mix`; `brew install kind` if missing). `RATE` defaults
+to 60 — a first pass at `RATE=100` built a growing backlog under load on a
+resource-constrained laptop `kind` cluster (`drain_s` hit the verify timeout
+with `missing > 0` while dispatch was still progressing, not a loss); halving
+it against the measured burst drain rate cleared that up entirely. Results
+from a verification run, `kind` cluster otherwise idle:
+
+| Machine | `RATE` | `DURATION` | Phase | accepted/s | p50 | p95 | p99 | shed | errors | missing | extra deliveries | `drain_s` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Apple M4 Pro, macOS, OrbStack | 60 | 60s | steady | 23.6 | 32.9 | 42.4 | 46.4 | 0 | 0 | **0** | 0 | 0.04 |
+| Apple M4 Pro, macOS, OrbStack | 60 | 60s | chaos | 23.5 | 32.9 | 43.6 | 49.5 | 0 | 4 | **12 (of 1581)** | 0 | 301.7 (timeout) |
+| Apple M4 Pro, macOS, OrbStack | — (burst, 64 concurrency) | 15s | burst | 3296.0 | 17.6 | 29.7 | 37.0 | 0 | 0 | **0** | 0 | 325.1 |
+
+(Latencies in ms.) This is the same machine every other number in this doc
+was measured on, not a production-scale claim.
+
+### Known issue: chaos-phase loss under an `ankusa-worker` pod kill
+
+**`steady` and `burst` are clean (`missing: 0`) every run once the `kind`
+cluster isn't resource-starved by other work on the host — see the `RATE`
+note above.** `chaos` is not: it reproduces a small (~0.5–1.5%, single- to
+low-double-digit envelope) permanent loss, isolated by bisection to killing
+`ankusa-worker-0` alone (killing only `ankusa-edge` and/or `consumer` does
+not reproduce it). After the loss, the affected envelope id is absent from
+`ankusa_wal`, `oban_jobs`, and `processed_webhooks` alike, the dispatch
+cursor has already advanced past its seq, and
+`Ankusa.Dispatch.DLQ`'s log file was never created — so dispatch believes it
+delivered successfully, but no receiver ever recorded it, and it never
+entered the give-up path either.
+
+A preStop hook (`sleep 5` before SIGTERM, giving `kube-proxy` time to drain
+Service endpoints — see `k8s/20-consumer.yaml`/`k8s/30-ankusa.yaml`) does not
+fix it, which rules out the ordinary "new connection routed to a terminating
+pod" class of Kubernetes race. Code review of `Ankusa.Dispatch.Pipeline`
+(`drain/1`, `deliver_with_retry/4`), `Ankusa.WAL.Postgres` (`read/2`,
+`get_cursor/2`, `put_cursor/3`), and `Ankusa.Storage.Compactor`'s
+never-truncate-past-dispatch guard did not turn up the mechanism — the
+cursor-then-deliver ordering looks self-healing by construction. Root cause
+is **not isolated**; reproducing and fixing it needs deeper live tracing of
+`ankusa-worker` across a real kill (a debugger attached to the pod, or
+telemetry spanning the crash) that's out of scope for this change, and
+`Ankusa.Dispatch.Pipeline` is explicitly off-limits to modify here (see
+`plans/prepare-release.md`'s critical files list). Filed as a known issue
+for 0.1.0 rather than silently reported as passing: **the chaos-phase
+acceptance criterion (`missing: 0`) is not met** by the current `ankusa`
+core, only the infrastructure and example wiring around it.

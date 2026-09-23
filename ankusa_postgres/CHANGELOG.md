@@ -6,7 +6,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-09-22
+## [0.1.0] - 2026-09-23
 
 ### Added
 
@@ -21,5 +21,5 @@ follows [Semantic Versioning](https://semver.org/).
   instances, including the same instance name running on independent BEAM
   nodes at once.
 
-[Unreleased]: https://github.com/ankusa-elixir/ankusa/compare/ankusa_postgres-v0.1.0...HEAD
-[0.1.0]: https://github.com/ankusa-elixir/ankusa/releases/tag/ankusa_postgres-v0.1.0
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_postgres-v0.1.0...HEAD
+[0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_postgres-v0.1.0

@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ankusa-migrate
+  namespace: ankusa-e2e
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ankusa-migrate
+          image: ankusa-oban-ingest:e2e
+          imagePullPolicy: IfNotPresent
+          command: ["/app/bin/ingest", "eval", "AnkusaExample.Ingest.Release.migrate()"]
+          env:
+            - name: WAL_DB_HOST
+              value: "postgres"
+            - name: WAL_DB_PORT
+              value: "5432"
+            - name: WAL_DB_USER
+              value: "ankusa"
+            - name: WAL_DB_PASSWORD
+              value: "ankusa"
+            - name: WAL_DB_NAME
+              value: "ankusa"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: consumer-migrate
+  namespace: ankusa-e2e
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: consumer-migrate
+          image: ankusa-oban-consumer:e2e
+          imagePullPolicy: IfNotPresent
+          command: ["/app/bin/consumer", "eval", "AnkusaExample.Consumer.Release.migrate()"]
+          env:
+            - name: DATABASE_URL
+              value: "ecto://ankusa:ankusa@postgres:5432/consumer"

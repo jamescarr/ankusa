@@ -118,7 +118,7 @@ independent instances runnable in one VM (and what makes the test suite
 `async: true`-safe for anything that doesn't share on-disk state).
 
 Config is a `%Ankusa.Config{}` struct built once and passed down the
-supervision tree at start (`Ankusa.Instance.init/1`), then cached in
+supervision tree at start (`Ankusa.Instance`'s `init/1`), then cached in
 `:persistent_term` for read-mostly access — no `Application.get_env/2`
 buried in call sites, and instance-scoped config falls out of the struct for
 free.
@@ -136,7 +136,7 @@ The same code runs unmodified in each of these — only config changes
 (`wal:`, `storage.blob_store:`, `roles:`/`ANKUSA_ROLES`, and which sinks a
 source declares). None of these diagrams require a different release
 artifact from any other; they're the same supervision tree
-(`Ankusa.Instance.init/1`) booting a different subset of children with
+(`Ankusa.Instance`'s `init/1`) booting a different subset of children with
 different adapter tuples. Operational how-tos live in
 [`deployment.md`](deployment.md); adapter details in
 [`storage.md`](storage.md) and [`delivery.md`](delivery.md).
@@ -159,7 +159,7 @@ flowchart LR
 ```
 
 `mix run --no-halt` / `iex -S mix`, or the single-container image in
-[`examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/). Durable to
+[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/). Durable to
 process crash and power loss on that box; not to losing the box.
 
 ### 2. Role-split processes, one host
@@ -218,7 +218,7 @@ is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its
 fifth consumer later is a change on the consumer side only, not a config
 change here. Kafka has no bindings: the consumer side owns a consumer group
 instead, and one that wants SQS or another broker in between runs a bridge
-(see [`examples/kafka-sqs-consumer/`](../examples/kafka-sqs-consumer/)).
+(see [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)).
 
 ```mermaid
 flowchart LR
@@ -245,7 +245,7 @@ the WAL — dispatch sinks and external consumers, never the edge's pre-ack
 path.
 
 Worked end to end, dockerized, in
-[`examples/rabbitmq-consumer/`](../examples/rabbitmq-consumer/).
+[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/).
 
 These compose: 3 and 4 together — a Postgres-backed multi-node edge fleet
 that *also* fans out to RabbitMQ — are the same two config changes applied

@@ -45,10 +45,7 @@ defmodule AnkusaExample.Ingest.Application do
   end
 
   defp roles do
-    "ANKUSA_ROLES"
-    |> System.get_env("edge,dispatch,storage")
-    |> String.split(",", trim: true)
-    |> Enum.map(&String.to_atom(String.trim(&1)))
+    Ankusa.Config.parse_roles!(System.get_env("ANKUSA_ROLES", "edge,dispatch,storage"))
   end
 
   defp source do

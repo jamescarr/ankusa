@@ -46,8 +46,8 @@ config :ankusa,
 | --- | --- | --- |
 | `instance` | `:default` | Registry namespace — see [`architecture.md#instance-model`](architecture.md#instance-model). Two instances with different names run independently in one VM. |
 | `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{wal,segments,quarantine,dlq}`. |
-| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role — see [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in `Ankusa.Application`. See [`deployment.md`](deployment.md). |
-| `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in `Ankusa.Application`. |
+| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role — see [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. See [`deployment.md`](deployment.md). |
+| `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in the default Ankusa.Application. |
 | `max_body_bytes` | `8_000_000` | Hard cap enforced while streaming the request body; over it is `413` without buffering the whole thing. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver` — catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. |
@@ -131,15 +131,24 @@ hostname: "...", database: "..."}` — because every layer is a behaviour with
 
 ## Runtime environment overrides
 
-`Ankusa.Application` (the default OTP application boot path) reads two env
+Ankusa.Application (the default OTP application boot path) reads two env
 vars on top of whatever `config.exs` sets:
 
 - `PORT` — overrides `config.port`.
 - `ANKUSA_ROLES` — comma-separated, overrides `config.roles` (e.g.
-  `ANKUSA_ROLES=edge,dispatch`).
+  `ANKUSA_ROLES=edge,dispatch`). Parsed with `Ankusa.Config.parse_roles!/1`:
+  an unknown role name (anything other than `edge`, `dispatch`, `storage`,
+  `claim_check`) raises `ArgumentError` and fails boot rather than silently
+  starting with the wrong roles.
+
+`autostart` (application env, default `false`) gates whether
+Ankusa.Application boots its built-in default instance at all — a library
+must not bind a port just because it's a dependency. Set `config :ankusa,
+autostart: true` in a deployment that wants the zero-config default instance
+(the repo's own `config/config.exs` does this outside `:test`).
 
 This is deliberately the *only* place env vars are read inside `ankusa` core —
 everything else is `%Ankusa.Config{}` passed explicitly. A deployment wrapper
-(like [`examples/rabbitmq-consumer/ingest_app`](../examples/rabbitmq-consumer/ingest_app))
+(like [`examples/rabbitmq-consumer/ingest_app`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/ingest_app))
 is free to read as many env vars as it wants and build the config struct
 itself; that's the intended extension point, not a gap.

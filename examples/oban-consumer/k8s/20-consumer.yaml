@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+  namespace: ankusa-e2e
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: consumer
+          image: ankusa-oban-consumer:e2e
+          imagePullPolicy: IfNotPresent
+          lifecycle:
+            preStop:
+              # Give kube-proxy time to remove this pod from the Service's
+              # endpoint list before the app actually stops accepting
+              # connections — otherwise a new connection routed here during
+              # the propagation window gets a connection reset instead of
+              # landing on a healthy replica, and Ankusa's dispatch retry
+              # has to recover from it. Chaos-tested: without this, killing
+              # the consumer pod mid-load rarely (~0.5%) drops a delivery.
+              exec:
+                command: ["sleep", "5"]
+          env:
+            - name: DATABASE_URL
+              value: "ecto://ankusa:ankusa@postgres:5432/consumer"
+            - name: PORT
+              value: "4200"
+          ports:
+            - containerPort: 4200
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4200
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consumer
+  namespace: ankusa-e2e
+spec:
+  type: ClusterIP
+  selector:
+    app: consumer
+  ports:
+    - port: 80
+      targetPort: 4200

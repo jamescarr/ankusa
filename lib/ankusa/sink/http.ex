@@ -15,9 +15,8 @@ defmodule Ankusa.Sink.Http do
 
   The original `env.body` is sent verbatim with the envelope's content-type
   (falling back to `application/octet-stream`). Identity headers `x-ankusa-id`,
-  `x-ankusa-source`, and `x-ankusa-seq` are always added. A `2xx` response is `:ok`;
-  any other status is `{:error, {:status, code}}`; a transport failure is
-  `{:error, reason}`.
+  `x-ankusa-source`, `x-ankusa-seq`, and (when set) `x-ankusa-tenant` are
+  always added. A `2xx` response is `:ok`;
 
   Redirects are never followed: this body is the hook, and a followed redirect
   would re-send it as a `GET`. A `3xx` is reported as its status, for the
@@ -39,6 +38,7 @@ defmodule Ankusa.Sink.Http do
         {"x-ankusa-seq", to_string(env.seq)},
         {"content-type", env.content_type || "application/octet-stream"}
       ] ++
+        tenant_header(env.tenant_id) ++
         Enum.map(Keyword.get(opts, :headers, []), fn {k, v} -> {to_string(k), to_string(v)} end)
 
     case HttpClient.request(
@@ -54,4 +54,7 @@ defmodule Ankusa.Sink.Http do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp tenant_header(tenant_id) when is_binary(tenant_id), do: [{"x-ankusa-tenant", tenant_id}]
+  defp tenant_header(_), do: []
 end

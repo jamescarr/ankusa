@@ -1,29 +1,22 @@
 defmodule Ankusa.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+  @source_url "https://github.com/jamescarr/ankusa"
+
   def project do
     [
       app: :ankusa,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       description: description(),
-      package: package()
-    ]
-  end
-
-  defp description do
-    "A loosely coupled, high-throughput webhook ingestion framework: durable " <>
-      "WAL, pluggable verification/dedup/storage/delivery, multi-tenant " <>
-      "catch-URL routing."
-  end
-
-  defp package do
-    [
-      licenses: ["Apache-2.0"]
-      # links: %{"GitHub" => "https://github.com/<org>/ankusa"}  # set before first publish
+      package: package(),
+      source_url: @source_url,
+      homepage_url: @source_url,
+      docs: docs()
     ]
   end
 
@@ -35,6 +28,62 @@ defmodule Ankusa.MixProject do
       # its own Finch/Mint TLS stack), so `:inets` is no longer needed.
       extra_applications: [:logger, :crypto, :xmerl],
       mod: {Ankusa.Application, []}
+    ]
+  end
+
+  defp description do
+    "A loosely coupled, high-throughput webhook ingestion framework: durable " <>
+      "WAL, pluggable verification/dedup/storage/delivery, multi-tenant " <>
+      "catch-URL routing."
+  end
+
+  defp package do
+    [
+      licenses: ["Apache-2.0"],
+      links: %{"GitHub" => @source_url, "Changelog" => "https://hexdocs.pm/ankusa/changelog.html"},
+      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE CHANGELOG.md)
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      source_ref: "ankusa-v#{@version}",
+      extras: [
+        "README.md",
+        "docs/quickstart.md",
+        "docs/architecture.md",
+        "docs/configuration.md",
+        "docs/multi-tenancy.md",
+        "docs/integrations.md",
+        "docs/storage.md",
+        "docs/delivery.md",
+        "docs/claim-check.md",
+        "docs/deployment.md",
+        "docs/packaging.md",
+        "docs/testing.md",
+        "CHANGELOG.md"
+      ],
+      groups_for_extras: [Guides: ~r{^docs/}],
+      groups_for_modules: [
+        "Internals (no stability guarantee)": [
+          Ankusa.Edge.Router,
+          Ankusa.Edge.Ingest,
+          Ankusa.Edge.Batcher,
+          Ankusa.Edge.BatcherSupervisor,
+          Ankusa.Edge.Quarantine,
+          Ankusa.Storage.Compactor,
+          Ankusa.Storage.Index,
+          Ankusa.Dispatch.Pipeline,
+          Ankusa.Dispatch.DLQ,
+          Ankusa.ClaimCheck.Router,
+          Ankusa.ClaimCheck.Sweeper,
+          Ankusa.DurableLog,
+          Ankusa.Http,
+          Ankusa.HttpClient,
+          Ankusa.UUIDv7
+        ]
+      ]
     ]
   end
 
@@ -53,7 +102,8 @@ defmodule Ankusa.MixProject do
       # AWS Signature V4 — the signing implementation behind the official
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
       # string-to-sign / HMAC-chain code in Ankusa.BlobStore.S3.
-      {:aws_signature, "~> 0.4"}
+      {:aws_signature, "~> 0.4"},
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
   end
 end

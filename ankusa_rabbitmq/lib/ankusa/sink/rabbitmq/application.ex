@@ -1,7 +1,7 @@
 defmodule Ankusa.Sink.RabbitMQ.Application do
   @moduledoc """
   Boots a bare `DynamicSupervisor` that owns one `Ankusa.Sink.RabbitMQ.Connection`
-  per instance, started on demand by `Ankusa.Sink.RabbitMQ.deliver/3`.
+  per instance, started on demand by `Ankusa.Sink.RabbitMQ`'s `deliver/3`.
 
   Self-contained: `ankusa` core has no idea this package exists, no changes to
   `Ankusa.Instance` were needed. Connections register through the same

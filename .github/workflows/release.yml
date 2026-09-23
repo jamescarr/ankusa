@@ -1,149 +1,102 @@
 name: Release
 
-# Standard Elixir/Hex release flow: bump `version` in mix.exs + CHANGELOG.md
-# in your PR, merge to main. This workflow re-runs tests, then publishes
-# each package whose mix.exs version isn't already on Hex — nothing to
-# tag, nothing to trigger by hand. See docs/deployment.md#releasing.
+# Tag-driven Hex publish, the Elixir norm: a package's own git tag
+# (`<pkg>-vX.Y.Z`) triggers its release, not a push to `main`. See
+# docs/deployment.md#releasing for the full flow, including the ordering
+# constraint (core publishes before the adapters).
 #
-# Requires a `HEX_API_KEY` repository secret (hex.pm dashboard → API keys).
-# The adapter packages publish only after `ankusa` (core) does, since their
-# published package declares `{:ankusa, "~> 0.1"}` as a real Hex dependency,
-# not the path dep local dev uses — see their mix.exs for why.
+# Requires a `HEX_API_KEY` repository secret (hex.pm dashboard → API keys,
+# scoped to `api:write`).
 
 on:
   push:
-    branches: [main]
+    tags:
+      - "ankusa-v*"
+      - "ankusa_postgres-v*"
+      - "ankusa_rabbitmq-v*"
+      - "ankusa_kafka-v*"
 
-env:
-  OTP_VERSION: "29.0"
-  ELIXIR_VERSION: "1.20.4"
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
-  ankusa:
-    name: ankusa (core)
+  resolve:
+    name: Resolve package from tag
     runs-on: ubuntu-latest
+    outputs:
+      pkg: ${{ steps.resolve.outputs.pkg }}
+      dir: ${{ steps.resolve.outputs.dir }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - run: mix deps.get
-      - run: mix test
-      - name: Publish if version changed
-        env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+      - id: resolve
         run: |
-          VERSION=$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')
-          if curl -sf -o /dev/null "https://hex.pm/api/packages/ankusa/releases/${VERSION}"; then
-            echo "ankusa ${VERSION} already published, skipping"
-          else
-            MIX_ENV=prod mix deps.get
-            MIX_ENV=prod mix hex.publish --yes
-          fi
+          TAG="$GITHUB_REF_NAME"; PKG="${TAG%-v*}"; VERSION="${TAG##*-v}"
+          case "$PKG" in
+            ankusa) DIR=. ;;
+            ankusa_postgres|ankusa_rabbitmq|ankusa_kafka) DIR="$PKG" ;;
+            *) echo "::error::unknown package in tag $TAG"; exit 1 ;;
+          esac
 
-  ankusa_postgres:
-    name: ankusa_postgres
-    needs: ankusa
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: ankusa
-          POSTGRES_PASSWORD: ankusa
-          POSTGRES_DB: ankusa_dev
-        ports: ["5433:5432"]
-        options: >-
-          --health-cmd "pg_isready -U ankusa -d ankusa_dev"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_postgres
-        run: mix deps.get
-      - working-directory: ankusa_postgres
-        run: mix test
-      - name: Publish if version changed
-        working-directory: ankusa_postgres
-        env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: |
-          VERSION=$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')
-          if curl -sf -o /dev/null "https://hex.pm/api/packages/ankusa_postgres/releases/${VERSION}"; then
-            echo "ankusa_postgres ${VERSION} already published, skipping"
-          else
-            MIX_ENV=prod mix deps.get
-            MIX_ENV=prod mix hex.publish --yes
-          fi
+          MIX_VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$DIR/mix.exs")
+          [ "$MIX_VERSION" = "$VERSION" ] || { echo "::error::tag $VERSION != mix.exs $MIX_VERSION"; exit 1; }
 
-  ankusa_kafka:
-    name: ankusa_kafka
-    needs: ankusa
-    runs-on: ubuntu-latest
-    # See .github/workflows/ci.yml for why this is compose, not `services:`.
-    steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_kafka
-        run: docker compose up -d --wait
-      - working-directory: ankusa_kafka
-        run: mix deps.get
-      - working-directory: ankusa_kafka
-        run: KAFKA_BROKERS=localhost:19092 mix test
-      - name: Publish if version changed
-        working-directory: ankusa_kafka
-        env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-        run: |
-          VERSION=$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')
-          if curl -sf -o /dev/null "https://hex.pm/api/packages/ankusa_kafka/releases/${VERSION}"; then
-            echo "ankusa_kafka ${VERSION} already published, skipping"
-          else
-            MIX_ENV=prod mix deps.get
-            MIX_ENV=prod mix hex.publish --yes
-          fi
+          grep -q "^## \[$VERSION\]" "$DIR/CHANGELOG.md" || { echo "::error::no CHANGELOG entry for $VERSION"; exit 1; }
 
-  ankusa_rabbitmq:
-    name: ankusa_rabbitmq
-    needs: ankusa
+          {
+            echo "pkg=$PKG"
+            echo "dir=$DIR"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to Hex + GitHub release
+    needs: [resolve, ci]
     runs-on: ubuntu-latest
-    services:
-      rabbitmq:
-        image: rabbitmq:4-management-alpine
-        ports: ["5673:5672"]
-        options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
+    env:
+      OTP_VERSION: "29.0"
+      ELIXIR_VERSION: "1.20.4"
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_rabbitmq
+
+      - name: mix deps.get
+        working-directory: ${{ needs.resolve.outputs.dir }}
         run: mix deps.get
-      - working-directory: ankusa_rabbitmq
-        run: mix test
-      - name: Publish if version changed
-        working-directory: ankusa_rabbitmq
+
+      - name: MIX_ENV=prod mix deps.get
+        working-directory: ${{ needs.resolve.outputs.dir }}
+        run: MIX_ENV=prod mix deps.get
+
+      - name: Publish package
+        working-directory: ${{ needs.resolve.outputs.dir }}
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: MIX_ENV=prod mix hex.publish package --yes
+
+      - name: Publish docs
+        working-directory: ${{ needs.resolve.outputs.dir }}
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.publish docs --yes
+
+      - name: Create GitHub release
+        working-directory: ${{ needs.resolve.outputs.dir }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          VERSION=$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')
-          if curl -sf -o /dev/null "https://hex.pm/api/packages/ankusa_rabbitmq/releases/${VERSION}"; then
-            echo "ankusa_rabbitmq ${VERSION} already published, skipping"
-          else
-            MIX_ENV=prod mix deps.get
-            MIX_ENV=prod mix hex.publish --yes
-          fi
+          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## \[/ {exit} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
