@@ -1,6 +1,6 @@
 # Ankusa — a loosely coupled, high-throughput webhook ingestion framework
 
-![./static/ankusa.png]
+![Ankusa](./static/ankusa.png)
 
 _Don't fight the traffic. Steer it. Durable webhook ingestion for any volume._
 
