@@ -18,11 +18,14 @@ defmodule Ankusa.ClaimCheck.Remote do
     * `:url`         — required, e.g. `"http://claim-check.internal:4001"`
     * `:token`        — required bearer token
     * `:timeout_ms`  — default `10_000`
-    * `:req_options` — extra options for `Req` (custom Finch pool, proxy, or
-                       `plug:` for `Req.Test` in tests)
+    * `:req_options` — transport options for the HTTP client (custom Finch pool,
+                       proxy, or `plug:` for `Req.Test` in tests). See
+                       `Ankusa.HttpClient` for the accepted keys.
   """
 
   @behaviour Ankusa.ClaimCheck
+
+  alias Ankusa.HttpClient
 
   alias Ankusa.ClaimCheck.Ticket
 
@@ -53,7 +56,7 @@ defmodule Ankusa.ClaimCheck.Remote do
   def fetch(_instance, %Ticket{} = ticket, opts) do
     url = ticket_url(opts, ticket)
 
-    case request(opts, :get, url, "", []) do
+    case request(opts, :get, url, nil, []) do
       {:ok, 200, body} -> {:ok, body}
       {:ok, status, body} -> map_error(status, body)
       {:error, reason} -> {:error, {:unavailable, reason}}
@@ -91,28 +94,8 @@ defmodule Ankusa.ClaimCheck.Remote do
       [{"authorization", "Bearer #{token}"} | extra_headers] ++
         if content_type, do: [{"content-type", content_type}], else: []
 
-    request =
-      [
-        method: method,
-        url: url,
-        headers: headers,
-        decode_body: false,
-        http_errors: :return,
-        retry: false,
-        receive_timeout: timeout,
-        connect_options: [timeout: timeout]
-      ]
-      |> with_body(method, body)
-      |> Kernel.++(Keyword.get(opts, :req_options, []))
-
-    case Req.request(request) do
-      {:ok, %Req.Response{status: status, body: body}} -> {:ok, status, body}
-      {:error, reason} -> {:error, reason}
-    end
+    HttpClient.request(method, url, headers, body, timeout, Keyword.get(opts, :req_options, []))
   end
-
-  defp with_body(request, :put, body), do: request ++ [body: body]
-  defp with_body(request, _method, _body), do: request
 
   defp map_error(400, body), do: {:error, error_atom(body, :invalid_tenant)}
   defp map_error(401, _body), do: {:error, :unauthorized}

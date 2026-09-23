@@ -20,9 +20,12 @@ defmodule Ankusa.BlobStore.S3 do
     * `:endpoint`          — default `"https://s3.\#{region}.amazonaws.com"`;
                               point at `http://localhost:4566` for floci/MinIO
     * `:timeout_ms`        — default `10_000`, for both connect and response
-    * `:req_options`       — extra options for `Req`, e.g. a custom Finch pool
-                              (`finch: [name: MyFinch]`), a proxy, or `plug:`
-                              for `Req.Test` in tests
+    * `:req_options`       — transport options for the HTTP client, e.g. a
+                              custom Finch pool (`finch: [name: MyFinch]`), a
+                              proxy (via `:connect_options`), or `plug:` for
+                              `Req.Test` in tests. See `Ankusa.HttpClient` —
+                              an allowlist, because a redirected or re-tuned
+                              request would no longer match its signature.
 
   Addressing is always path-style (`{endpoint}/{bucket}/{key}`) — the one
   scheme every target (AWS, MinIO, R2, floci) accepts unambiguously.
@@ -46,6 +49,8 @@ defmodule Ankusa.BlobStore.S3 do
 
   @behaviour Ankusa.BlobStore
 
+  alias Ankusa.HttpClient
+
   @impl true
   def put(_instance, key, data, opts) do
     case request(opts, :put, key, IO.iodata_to_binary(data), []) do
@@ -55,16 +60,16 @@ defmodule Ankusa.BlobStore.S3 do
   end
 
   @impl true
-  def get(_instance, key, opts), do: request(opts, :get, key, "", [])
+  def get(_instance, key, opts), do: request(opts, :get, key, nil, [])
 
   @impl true
   def get_range(_instance, key, offset, length, opts) do
-    request(opts, :get, key, "", [{"range", "bytes=#{offset}-#{offset + length - 1}"}])
+    request(opts, :get, key, nil, [{"range", "bytes=#{offset}-#{offset + length - 1}"}])
   end
 
   @impl true
   def delete(_instance, key, opts) do
-    _ = request(opts, :delete, key, "", [])
+    _ = request(opts, :delete, key, nil, [])
     :ok
   end
 
@@ -74,7 +79,7 @@ defmodule Ankusa.BlobStore.S3 do
       endpoint(opts) <>
         "/" <> bucket(opts) <> "?" <> URI.encode_query(list_query(prefix), :rfc3986)
 
-    case signed_request(opts, :get, url, "", []) do
+    case signed_request(opts, :get, url, nil, []) do
       {:ok, body} -> parse_list_keys(body)
       {:error, _reason} -> []
     end
@@ -107,36 +112,26 @@ defmodule Ankusa.BlobStore.S3 do
         method |> Atom.to_string() |> String.upcase(),
         url,
         headers,
-        body,
+        # A bodyless request signs the empty string — the hash S3 expects as
+        # `x-amz-content-sha256` on a GET or DELETE.
+        body || "",
         # S3 signs the path exactly as sent; every other service wants it
         # URI-encoded a second time.
         uri_encode_path: false
       )
 
-    case Req.request(
-           # The adapter's own options win: they are what its contract depends on
-           # (raw bodies, visible status codes, no hidden retries). `:req_options`
-           # is appended so a caller can still add a Finch pool, proxy, or
-           # `plug:` for `Req.Test`.
-           [
-             method: method,
-             url: url,
-             headers: signed,
-             body: body,
-             # Segments and claim bodies are raw binaries, never JSON.
-             decode_body: false,
-             # Keep the status visible so 404 can mean :not_found.
-             http_errors: :return,
-             # Retries belong to the framework's own tick/retry loops; Req's
-             # default retry would add hidden latency inside them.
-             retry: false,
-             receive_timeout: timeout,
-             connect_options: [timeout: timeout]
-           ] ++ Keyword.get(opts, :req_options, [])
+    case HttpClient.request(
+           method,
+           url,
+           signed,
+           body,
+           timeout,
+           Keyword.get(opts, :req_options, [])
          ) do
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 -> {:ok, body}
-      {:ok, %Req.Response{status: 404}} -> {:error, :not_found}
-      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:status, status, body}}
+      # Keep the status visible so 404 can mean :not_found.
+      {:ok, status, body} when status in 200..299 -> {:ok, body}
+      {:ok, 404, _body} -> {:error, :not_found}
+      {:ok, status, body} -> {:error, {:status, status, body}}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -177,8 +172,13 @@ defmodule Ankusa.BlobStore.S3 do
   # an emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document,
   # and this runs inside the claim-check sweeper, so a bad body has to read as
   # "no keys" instead of taking that process down.
+  #
+  # The scanner is handed the raw bytes, not a charlist: it decodes the UTF-8 the
+  # document declares, so codepoints above 127 read as illegal characters and a
+  # listing containing one non-ASCII key would come back empty. Bytes that are not
+  # valid UTF-8 in the first place exit the same way.
   defp parse_list_keys(xml_body) do
-    {doc, _rest} = :xmerl_scan.string(String.to_charlist(xml_body), quiet: true)
+    {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
 
     ~c"//Contents/Key/text()"
     |> :xmerl_xpath.string(doc)

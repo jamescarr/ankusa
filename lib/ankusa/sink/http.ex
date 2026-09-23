@@ -9,17 +9,24 @@ defmodule Ankusa.Sink.Http do
     * `:method`     — HTTP method (default `:post`)
     * `:headers`    — extra request headers as `[{key, value}]` strings
     * `:timeout_ms` — request/connect timeout (default `5000`)
-    * `:req_options` — extra options for `Req` (custom Finch pool, proxy, or
-                       `plug:` for `Req.Test` in tests)
+    * `:req_options` — transport options for the HTTP client (custom Finch pool,
+                       proxy, or `plug:` for `Req.Test` in tests). See
+                       `Ankusa.HttpClient` for the accepted keys
 
   The original `env.body` is sent verbatim with the envelope's content-type
   (falling back to `application/octet-stream`). Identity headers `x-ankusa-id`,
   `x-ankusa-source`, and `x-ankusa-seq` are always added. A `2xx` response is `:ok`;
   any other status is `{:error, {:status, code}}`; a transport failure is
   `{:error, reason}`.
+
+  Redirects are never followed: this body is the hook, and a followed redirect
+  would re-send it as a `GET`. A `3xx` is reported as its status, for the
+  source's retry policy to act on.
   """
 
   @behaviour Ankusa.Sink
+
+  alias Ankusa.HttpClient
 
   @impl true
   def deliver(env, _ctx, opts) do
@@ -34,24 +41,16 @@ defmodule Ankusa.Sink.Http do
       ] ++
         Enum.map(Keyword.get(opts, :headers, []), fn {k, v} -> {to_string(k), to_string(v)} end)
 
-    request =
-      [
-        method: Keyword.get(opts, :method, :post),
-        url: Keyword.fetch!(opts, :url),
-        headers: headers,
-        body: env.body,
-        # The body is forwarded verbatim; nothing here parses a response.
-        decode_body: false,
-        http_errors: :return,
-        # Retries belong to the source's Ankusa.RetryPolicy, not hidden in here.
-        retry: false,
-        receive_timeout: timeout,
-        connect_options: [timeout: timeout]
-      ] ++ Keyword.get(opts, :req_options, [])
-
-    case Req.request(request) do
-      {:ok, %Req.Response{status: status}} when status in 200..299 -> :ok
-      {:ok, %Req.Response{status: status}} -> {:error, {:status, status}}
+    case HttpClient.request(
+           Keyword.get(opts, :method, :post),
+           Keyword.fetch!(opts, :url),
+           headers,
+           env.body,
+           timeout,
+           Keyword.get(opts, :req_options, [])
+         ) do
+      {:ok, status, _body} when status in 200..299 -> :ok
+      {:ok, status, _body} -> {:error, {:status, status}}
       {:error, reason} -> {:error, reason}
     end
   end

@@ -90,4 +90,33 @@ defmodule Ankusa.Sink.HttpTest do
     assert {:error, {:status, 503}} = Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/boom"))
     assert [_seen] = Agent.get(capture, & &1)
   end
+
+  test "a redirect is reported, not followed", %{capture: capture} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      Agent.update(capture, &[{conn.method, conn.request_path, conn.req_headers, body} | &1])
+
+      conn
+      |> Plug.Conn.put_resp_header("location", "/login")
+      |> Plug.Conn.send_resp(302, "")
+    end)
+
+    # Following it would re-send the hook as a GET and return that response,
+    # so the source would see a successful delivery of a hook nobody accepted.
+    assert {:error, {:status, 302}} = Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/hooks"))
+
+    assert [{"POST", "/hooks", _headers, body}] = Agent.get(capture, & &1)
+    assert body == envelope().body
+  end
+
+  test "transport options are an allowlist — ones that change the request raise" do
+    # A caller reaching for these would quietly defeat the adapter: `params:`
+    # rewrites a signed URL, `auth:` adds a second credential.
+    assert_raise ArgumentError, ~r/unsupported :req_options key :params/, fn ->
+      Sink.Http.deliver(envelope(), %{attempt: 1},
+        url: "http://sink.test/hooks",
+        req_options: [params: [a: 1], plug: {Req.Test, __MODULE__}]
+      )
+    end
+  end
 end
