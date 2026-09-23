@@ -24,7 +24,11 @@ defmodule Ankusa.BlobStore.LocalFS do
 
   @impl true
   def get(instance, key, _opts) do
-    File.read(abs(instance, key))
+    case File.read(abs(instance, key)) do
+      {:ok, bin} -> {:ok, bin}
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @impl true
@@ -39,6 +43,9 @@ defmodule Ankusa.BlobStore.LocalFS do
           :eof -> {:error, :eof}
           {:error, reason} -> {:error, reason}
         end
+
+      {:error, :enoent} ->
+        {:error, :not_found}
 
       {:error, reason} ->
         {:error, reason}
@@ -55,12 +62,25 @@ defmodule Ankusa.BlobStore.LocalFS do
   def list(instance, prefix, _opts) do
     root = root(instance)
 
-    Path.join(root, "**")
+    root
+    |> Path.join(prefix_dir(prefix))
+    |> Path.join("**")
     |> Path.wildcard()
     |> Enum.filter(&File.regular?/1)
     |> Enum.map(&Path.relative_to(&1, root))
     |> Enum.filter(&String.starts_with?(&1, prefix))
     |> Enum.sort()
+  end
+
+  # Walk only the prefix's containing directory, not the whole store root —
+  # a deep prefix (`claims/<tenant>/`) shouldn't have to glob every segment
+  # to find its own keys. A bare prefix with no `/` (e.g. `"seg"`) still
+  # walks the whole root, same as before.
+  defp prefix_dir(prefix) do
+    case Path.dirname(prefix) do
+      "." -> ""
+      dir -> dir
+    end
   end
 
   defp abs(instance, key), do: Path.join(root(instance), key)

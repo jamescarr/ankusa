@@ -23,7 +23,7 @@ defmodule Ankusa.Edge.Router do
       {:ok, route} ->
         max = Ankusa.config(instance).max_body_bytes
 
-        case read_body_limited(conn, max) do
+        case Ankusa.Http.read_body_limited(conn, max) do
           {:ok, body, conn} ->
             req = %{
               source_id: route.source_id,
@@ -85,15 +85,6 @@ defmodule Ankusa.Edge.Router do
 
   # ── helpers ───────────────────────────────────────────────────────────────
 
-  # Read the body, refusing anything over `max` bytes without buffering it all.
-  defp read_body_limited(conn, max) do
-    case Plug.Conn.read_body(conn, length: max, read_length: 1_000_000) do
-      {:ok, body, conn} -> {:ok, body, conn}
-      {:more, _partial, conn} -> {:too_large, conn}
-      {:error, _} -> {:too_large, conn}
-    end
-  end
-
   defp safe_stats(instance) do
     Ankusa.WAL.stats(instance)
   rescue
@@ -106,9 +97,5 @@ defmodule Ankusa.Edge.Router do
     Keyword.get(conn.assigns[:ankusa_opts] || [], :instance, :default)
   end
 
-  defp send_json(conn, status, payload) do
-    conn
-    |> Plug.Conn.put_resp_content_type("application/json")
-    |> Plug.Conn.send_resp(status, JSON.encode!(payload))
-  end
+  defp send_json(conn, status, payload), do: Ankusa.Http.send_json(conn, status, payload)
 end

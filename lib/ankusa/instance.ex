@@ -31,17 +31,29 @@ defmodule Ankusa.Instance do
   def init(%Config{} = config) do
     # read-mostly config for every call site, no Application.get_env buried deep
     Ankusa.put_config(config)
-
-    {wal_mod, _} = config.wal
+    Ankusa.ClaimCheck.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =
-      [{wal_mod, opts}] ++
+      wal_children(config, opts) ++
         edge_children(config, opts) ++
         dispatch_children(config, opts) ++
-        storage_children(config, opts)
+        storage_children(config, opts) ++
+        claim_check_children(config, opts)
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  # The WAL only matters to roles that actually read or write it. A node
+  # running only `:claim_check` needs blob-store credentials, never WAL
+  # credentials (e.g. a Postgres connection) — so it shouldn't open one.
+  defp wal_children(config, opts) do
+    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
+      {wal_mod, _} = config.wal
+      [{wal_mod, opts}]
+    else
+      []
+    end
   end
 
   defp edge_children(config, opts) do
@@ -57,11 +69,35 @@ defmodule Ankusa.Instance do
     end
   end
 
+  defp claim_check_children(config, _opts) do
+    if Config.role?(config, :claim_check) do
+      [
+        Supervisor.child_spec(
+          {Bandit,
+           plug: {Ankusa.ClaimCheck.Router, [instance: config.instance]},
+           scheme: :http,
+           port: config.claim_check.port},
+          id: Ankusa.ClaimCheck.Router
+        )
+      ]
+    else
+      []
+    end
+  end
+
   defp dispatch_children(config, opts) do
     if Config.role?(config, :dispatch), do: [{Ankusa.Dispatch.Pipeline, opts}], else: []
   end
 
   defp storage_children(config, opts) do
-    if Config.role?(config, :storage), do: [{Ankusa.Storage.Compactor, opts}], else: []
+    if Config.role?(config, :storage) do
+      [{Ankusa.Storage.Compactor, opts}] ++ sweeper_children(config, opts)
+    else
+      []
+    end
+  end
+
+  defp sweeper_children(config, opts) do
+    if config.claim_check.retention_days, do: [{Ankusa.ClaimCheck.Sweeper, opts}], else: []
   end
 end

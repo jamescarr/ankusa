@@ -56,11 +56,13 @@ config.
 
 **Messages stay small on purpose.** A body under `:inline_max_bytes`
 (default 8 KiB) rides along base64-encoded in the message; anything larger
-is `PUT` straight to a `Ankusa.BlobStore` (reusing the S3/GCS/LocalFS adapters
-— no separate storage code) and the message carries a pointer instead. This
-extends the WAL/segment design's "small hot path, big payloads in the
-object store" principle to the queue: RabbitMQ throughput and memory stay
-flat regardless of how large a webhook payload is.
+is checked in through `Ankusa.ClaimCheck` (see
+[`claim-check.md`](claim-check.md)) and the message carries a ticket
+instead. This extends the WAL/segment design's "small hot path, big
+payloads elsewhere" principle to the queue: RabbitMQ throughput and memory
+stay flat regardless of how large a webhook payload is, and any consumer —
+BEAM or not — redeems the ticket without needing blob-store credentials of
+its own.
 
 ```elixir
 sinks: [
@@ -82,8 +84,14 @@ Message shape:
 // fat payload
 {"id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728,
- "blob": {"store": "Elixir.Ankusa.BlobStore.S3", "key": "raw/acme/stripe/01a0....bin", "size": 3145728}}
+ "claim": {"v": 1, "tenant_id": "acme", "id": "01a0...", "size": 3145728,
+           "sha256": "9f86d0...", "content_type": "application/octet-stream"}}
 ```
+
+A consumer decodes `claim` back into a `Ankusa.ClaimCheck.Ticket` and calls
+`Ankusa.ClaimCheck.redeem/3` (or, for a non-BEAM consumer, `GET
+/v1/claims/:tenant_id/:id` against a `:claim_check`-role node — see
+[`claim-check.md`](claim-check.md)).
 
 **Connection lifecycle**: one supervised connection + confirm-mode channel
 per `(instance, exchange)`, started on demand by the first `deliver/3` call,
