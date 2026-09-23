@@ -129,9 +129,10 @@ defmodule Ankusa.BlobStore.S3SigningTest do
     <?xml version="1.0" encoding="UTF-8"?>
     <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
       <Name>b</Name><Prefix>claims/a b/</Prefix>
-      <KeyCount>2</KeyCount><IsTruncated>false</IsTruncated>
+      <KeyCount>3</KeyCount><IsTruncated>false</IsTruncated>
       <Contents><Key>claims/a b/2</Key><Size>3</Size></Contents>
       <Contents><Key>claims/a b/1</Key><Size>3</Size></Contents>
+      <Contents><Key>claims/café/3</Key><Size>3</Size></Contents>
     </ListBucketResult>
     """
 
@@ -208,7 +209,9 @@ defmodule Ankusa.BlobStore.S3SigningTest do
       capture: capture,
       opts: opts
     } do
-      assert ["claims/a b/1", "claims/a b/2"] = S3.list(:i, "claims/a b/", opts)
+      # a non-ASCII key in the listing: the scanner decodes the declared UTF-8,
+      # so handing it codepoints instead of bytes would drop every key
+      assert ["claims/a b/1", "claims/a b/2", "claims/café/3"] = S3.list(:i, "claims/a b/", opts)
 
       assert [{method, path, query, _headers, _body}] = Agent.get(capture, & &1)
       assert method == "GET"
@@ -223,6 +226,15 @@ defmodule Ankusa.BlobStore.S3SigningTest do
       end)
 
       # the claim-check sweeper calls this: a bad body must not take it down
+      assert [] = S3.list(:i, "claims/", opts)
+    end
+
+    test "a 200 whose body isn't even valid UTF-8 reads as no keys too", %{opts: opts} do
+      Req.Test.stub(__MODULE__, fn conn ->
+        # an HTML error page out of a proxy, in latin1
+        Plug.Conn.send_resp(conn, 200, <<"<html>caf", 0xE9, "</html>">>)
+      end)
+
       assert [] = S3.list(:i, "claims/", opts)
     end
 

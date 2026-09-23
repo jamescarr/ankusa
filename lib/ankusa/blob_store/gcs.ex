@@ -20,8 +20,9 @@ defmodule Ankusa.BlobStore.GCS do
                            whatever your deployment already uses) and pass it
                            here.
     * `:timeout_ms`     — default `10_000`, for both connect and response
-    * `:req_options`    — extra options for `Req`, e.g. a custom Finch pool, a
-                           proxy, or `plug:` for `Req.Test` in tests
+    * `:req_options`    — transport options for the HTTP client, e.g. a custom
+                           Finch pool, a proxy, or `plug:` for `Req.Test` in
+                           tests. See `Ankusa.HttpClient` for the accepted keys
 
   ## Local dev
 
@@ -36,6 +37,8 @@ defmodule Ankusa.BlobStore.GCS do
   """
 
   @behaviour Ankusa.BlobStore
+
+  alias Ankusa.HttpClient
 
   @impl true
   def put(_instance, key, data, opts) do
@@ -57,13 +60,13 @@ defmodule Ankusa.BlobStore.GCS do
   def get_range(_instance, key, offset, length, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [{"alt", "media"}])
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, url, "", [{"range", range}], nil)
+    request(opts, :get, url, nil, [{"range", range}], nil)
   end
 
   @impl true
   def delete(_instance, key, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [])
-    _ = request(opts, :delete, url, "", [], nil)
+    _ = request(opts, :delete, url, nil, [], nil)
     :ok
   end
 
@@ -71,7 +74,7 @@ defmodule Ankusa.BlobStore.GCS do
   def list(_instance, prefix, opts) do
     url = media_url(opts, "o", [{"prefix", prefix}])
 
-    case request(opts, :get, url, "", [], nil) do
+    case request(opts, :get, url, nil, [], nil) do
       {:ok, body} ->
         case JSON.decode(body) do
           {:ok, %{"items" => items}} -> items |> Enum.map(& &1["name"]) |> Enum.sort()
@@ -108,33 +111,21 @@ defmodule Ankusa.BlobStore.GCS do
   defp request(opts, method, url, body, headers, content_type) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
 
-    request =
-      [
-        method: method,
-        url: url,
-        headers: auth_headers(opts) ++ headers ++ content_type_header(content_type),
-        # Segment and claim bodies are raw binaries, never JSON.
-        decode_body: false,
-        # Keep the status visible so 404 can mean :not_found.
-        http_errors: :return,
-        # Retries belong to the framework's own tick loops.
-        retry: false,
-        receive_timeout: timeout,
-        connect_options: [timeout: timeout]
-      ]
-      |> with_body(method, body)
-      |> Kernel.++(Keyword.get(opts, :req_options, []))
-
-    case Req.request(request) do
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 -> {:ok, body}
-      {:ok, %Req.Response{status: 404}} -> {:error, :not_found}
-      {:ok, %Req.Response{status: status, body: body}} -> {:error, {:status, status, body}}
+    case HttpClient.request(
+           method,
+           url,
+           auth_headers(opts) ++ headers ++ content_type_header(content_type),
+           body,
+           timeout,
+           Keyword.get(opts, :req_options, [])
+         ) do
+      # Keep the status visible so 404 can mean :not_found.
+      {:ok, status, body} when status in 200..299 -> {:ok, body}
+      {:ok, 404, _body} -> {:error, :not_found}
+      {:ok, status, body} -> {:error, {:status, status, body}}
       {:error, reason} -> {:error, reason}
     end
   end
-
-  defp with_body(request, method, body) when method in [:post, :put], do: request ++ [body: body]
-  defp with_body(request, _method, _body), do: request
 
   defp content_type_header(nil), do: []
   defp content_type_header(content_type), do: [{"content-type", content_type}]
