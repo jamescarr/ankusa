@@ -1,5 +1,9 @@
 # Ankusa
 
+<p align="center">
+  <img src="./static/ankusa.png" alt="Ankusa" width="300">
+</p>
+
 [![Hex version](https://img.shields.io/hexpm/v/ankusa.svg)](https://hex.pm/packages/ankusa)
 [![Hex downloads](https://img.shields.io/hexpm/dt/ankusa.svg)](https://hex.pm/packages/ankusa)
 [![Hex docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/ankusa)
@@ -8,24 +12,28 @@
 [![Elixir](https://img.shields.io/badge/elixir-1.20-4B275F?logo=elixir&logoColor=white)](https://elixir-lang.org)
 [![Stars](https://img.shields.io/github/stars/jamescarr/ankusa.svg?style=flat)](https://github.com/jamescarr/ankusa/stargazers)
 
-A loosely coupled, high-throughput webhook ingestion framework for Elixir.
+_**Don't fight the traffic. Steer it.** Durable webhook ingestion for any volume._
 
-![Ankusa](./static/ankusa.png)
+A loosely coupled, high-throughput webhook ingestion framework designed to let you
+stop thinking about reliable webhook ingestion and get back to building.
 
-Catching webhooks sounds easy. Doing it without losing one is not. Ack before
-you save and a crash drops the event. Ack after and you face timeouts, retries,
-and duplicate deliveries. Add signatures, dedup, backpressure, and replay, and
-one endpoint becomes a distributed systems problem.
+## Get Started
 
-## The name
+```sh
+mix deps.get
+iex -S mix               # starts on :4000 with a zero-config `demo` source
 
-अंकुश (aṅkuśa) is Sanskrit for "hook" or "goad": the curved tool a mahout uses
-to steer an elephant. Its root, aṅka, means "to bend" or "curve".
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+# => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
+```
 
-Webhook traffic behaves like the elephant. It is large, it arrives on its own
-schedule, and it will not wait for you. Ankusa absorbs it durably and fast (the
-WAL and batcher), then steers where it goes next through routing, dedup, and
-dispatch.
+The full walkthrough, including idempotency, inspecting state, and pointing a
+real provider at it: [`docs/quickstart.md`](docs/quickstart.md).
+
+## How It Works
+
+[`docs/architecture.md`](docs/architecture.md) walks the full pipeline and shows
+why each guarantee holds.
 
 ```mermaid
 flowchart LR
@@ -38,6 +46,16 @@ flowchart LR
     C --> S[(Object store)]
     D --> SK[Sinks]
 ```
+
+## The name
+
+अंकुश (aṅkuśa) is Sanskrit for "hook" or "goad": the curved tool a mahout uses
+to steer an elephant. Its root, aṅka, means "to bend" or "curve".
+
+Webhook traffic behaves like the elephant. It is large, it arrives on its own
+schedule, and it will not wait for you. So the framework takes the same shape:
+absorb the traffic durably and fast through the WAL and batcher, then steer
+where it goes next through routing, dedup, and dispatch.
 
 ## What this is
 
@@ -70,19 +88,6 @@ fetches `postgrex`, `amqp`, or `brod`, whose `crc32cer` NIF needs CMake and a C+
 compiler to build. A dependency that benefits every user still belongs in core;
 the split only keeps out the ones some deployments do not need. Full rationale
 and the rule for adding an adapter: [`docs/packaging.md`](docs/packaging.md).
-
-## Quickstart
-
-```sh
-mix deps.get
-iex -S mix               # starts on :4000 with a zero-config `demo` source
-
-curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
-```
-
-The full walkthrough, including idempotency, inspecting state, and pointing a
-real provider at it: [`docs/quickstart.md`](docs/quickstart.md).
 
 ## Pluggable behaviours
 
@@ -159,4 +164,5 @@ constraint), a zstd codec, Broadway-backed dispatch, a LiveView dashboard, a
 API, per-source envelope encryption, concurrent dispatch, and a lease so
 `:dispatch` and `:storage` can run hot-standby replicas. Each is an adapter
 behind an existing behaviour, and the ingest guarantees above do not change when
-they land.
+they land. The full plan is in
+[`plans/webhook-ingest-framework-plan.md`](plans/webhook-ingest-framework-plan.md).
