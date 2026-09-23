@@ -126,7 +126,8 @@ defmodule Ankusa.WAL.DiskLog do
       Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
         :ok = :file.pwrite(state.fd, state.write_pos, iodata)
         :ok = :file.datasync(state.fd)
-        {:ok, %{batch_size: length(inserts), bytes: bytes}}
+        # measurements, then metadata: `:duration` is added by the span itself.
+        {:ok, %{batch_size: length(inserts), bytes: bytes}, %{}}
       end)
 
       :ets.insert(state.index, inserts)

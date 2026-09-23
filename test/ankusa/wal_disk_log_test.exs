@@ -104,4 +104,32 @@ defmodule Ankusa.WAL.DiskLogTest do
     {:ok, [dup]} = WAL.append(inst, [%{envelope: env("s", "a-again", "ka")}])
     assert {:duplicate, 1} = dup
   end
+
+  @doc false
+  def handle_commit(_event, measurements, meta, test_pid),
+    do: send(test_pid, {:commit, measurements, meta})
+
+  test "a commit reports its size on the measurement side of [:commit, :stop]", %{inst: inst} do
+    handler = {__MODULE__, System.unique_integer()}
+
+    :telemetry.attach(
+      handler,
+      [:ankusa, :commit, :stop],
+      &__MODULE__.handle_commit/4,
+      self()
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    {:ok, _} = WAL.append(inst, [%{envelope: env("s", "a")}, %{envelope: env("s", "bb")}])
+
+    assert_receive {:commit, measurements, meta}
+
+    # Measurements, not metadata: `:batch_size` and `:bytes` are what a
+    # `Telemetry.Metrics.sum/2` is wired to, and a metric reads measurements.
+    assert measurements.batch_size == 2
+    assert measurements.bytes > 0
+    assert is_integer(measurements.duration)
+    assert meta.instance == inst
+  end
 end

@@ -15,7 +15,7 @@ defmodule Ankusa.Telemetry do
   | --- | --- | --- |
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome` |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:status` |
-  | `[:ankusa, :commit]` (span) | `:duration` | `:instance`, `:batch_size`, `:bytes` |
+  | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
   | `[:ankusa, :dedup, :hit]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
@@ -40,12 +40,21 @@ defmodule Ankusa.Telemetry do
   @doc """
   Run `fun` as a telemetry span, emitting `:start`/`:stop`/`:exception` events
   under `[:ankusa | event]`. Returns whatever `fun` returns.
+
+  `fun` returns `{result, extra_meta}`, or `{result, measurements, extra_meta}`
+  when the span has measurements of its own to report on `:stop` — what
+  `Ankusa.WAL.DiskLog` does with a commit's `batch_size` and `bytes`. Either
+  return shape merges the start metadata into the stop event, so a handler can
+  read `:stop` alone.
   """
-  @spec span([atom()], map(), (-> {result, map()})) :: result when result: term()
+  @spec span([atom()], map(), (-> {result, map()} | {result, map(), map()})) :: result
+        when result: term()
   def span(event, meta, fun) do
-    :telemetry.span([:ankusa | event], meta, fn ->
-      {result, extra} = fun.()
-      {result, Map.merge(meta, extra)}
-    end)
+    :telemetry.span([:ankusa | event], meta, fn -> stop_event(meta, fun.()) end)
   end
+
+  defp stop_event(meta, {result, measurements, extra_meta}),
+    do: {result, measurements, Map.merge(meta, extra_meta)}
+
+  defp stop_event(meta, {result, extra_meta}), do: {result, Map.merge(meta, extra_meta)}
 end
