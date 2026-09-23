@@ -51,6 +51,9 @@ defmodule Ankusa.ClaimCheck.Router do
 
         {:too_large, conn} ->
           Http.send_json(conn, 413, %{error: "payload_too_large", limit: max})
+
+        {:error, reason, conn} ->
+          Http.send_json(conn, 400, %{error: "body_read_failed", reason: inspect(reason)})
       end
     else
       {:error, reason} -> error_response(conn, reason)

@@ -143,6 +143,28 @@ defmodule Ankusa.StorageTest do
     assert {:ok, 0} == Compactor.tick(inst)
   end
 
+  test "a lookup after a later compaction never serves the cached earlier index",
+       %{inst: inst, config: config} do
+    [first] = commit!(inst, [envelope("acme", ~s({"n":1}))])
+    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, first.seq)
+    assert {:ok, 1} == Compactor.tick(inst)
+
+    # populates the cached map with exactly this one row
+    assert {:ok, _row} = Index.lookup(config, first.id)
+
+    [second] = commit!(inst, [envelope("acme", ~s({"n":2}))])
+    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, second.seq)
+    assert {:ok, 1} == Compactor.tick(inst)
+
+    # the row appended after the cache was populated must be visible
+    assert {:ok, row} = Index.lookup(config, second.id)
+    assert row.event_id == second.id
+    assert {:ok, _old} = Index.lookup(config, first.id)
+
+    assert {:ok, fetched} = Storage.fetch(inst, second.id)
+    assert fetched.body == second.body
+  end
+
   test "compaction never truncates past the dispatch cursor", %{inst: inst, config: config} do
     originals = commit!(inst, [envelope("acme", "one"), envelope("acme", "two")])
     [first_seq, last_seq] = Enum.map(originals, & &1.seq)

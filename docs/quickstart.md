@@ -83,7 +83,7 @@ ngrok http 4000     # or cloudflared / tailscale funnel / etc.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/hooks/:source_id`; `TenantPath` gives `/hooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/hooks/:source_id`; `TenantPath` gives `/hooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
 | `GET` | `/health` | Liveness + WAL stats. |
 | `GET` | `/stats` | WAL stats. |
 

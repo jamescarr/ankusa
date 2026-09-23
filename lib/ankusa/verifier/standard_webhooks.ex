@@ -16,8 +16,6 @@ defmodule Ankusa.Verifier.StandardWebhooks do
   alias Ankusa.Envelope
   alias Ankusa.Verifier
 
-  @default_tolerance 300
-
   @impl true
   @spec verify(Envelope.t(), keyword()) :: :ok | {:error, term()}
   def verify(%Envelope{} = env, opts) do
@@ -26,7 +24,7 @@ defmodule Ankusa.Verifier.StandardWebhooks do
     sig_header = Envelope.header(env, "webhook-signature")
 
     with true <- present?(id) and present?(ts) and present?(sig_header),
-         :ok <- check_timestamp(ts, opts),
+         :ok <- Verifier.check_timestamp(ts, opts),
          {:ok, key} <- decode_secret(opts) do
       signed = "#{id}.#{ts}.#{env.body}"
       expected = Base.encode64(:crypto.mac(:hmac, :sha256, key, signed))
@@ -37,7 +35,7 @@ defmodule Ankusa.Verifier.StandardWebhooks do
         {:error, :no_match}
       end
     else
-      false -> {:error, :missing_headers}
+      false -> {:error, :missing_signature}
       {:error, _} = err -> err
     end
   end
@@ -45,24 +43,6 @@ defmodule Ankusa.Verifier.StandardWebhooks do
   defp present?(nil), do: false
   defp present?(""), do: false
   defp present?(v) when is_binary(v), do: true
-
-  defp check_timestamp(ts, opts) do
-    tolerance = Keyword.get(opts, :tolerance, @default_tolerance)
-
-    case Integer.parse(ts) do
-      {ts_int, _} ->
-        now = System.system_time(:second)
-
-        if abs(now - ts_int) <= tolerance do
-          :ok
-        else
-          {:error, :timestamp_out_of_tolerance}
-        end
-
-      :error ->
-        {:error, :timestamp_out_of_tolerance}
-    end
-  end
 
   defp decode_secret(opts) do
     secret = Keyword.get(opts, :secret, "")

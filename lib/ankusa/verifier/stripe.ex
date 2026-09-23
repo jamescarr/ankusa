@@ -13,8 +13,6 @@ defmodule Ankusa.Verifier.Stripe do
   alias Ankusa.Envelope
   alias Ankusa.Verifier
 
-  @default_tolerance 300
-
   @impl true
   @spec verify(Envelope.t(), keyword()) :: :ok | {:error, term()}
   def verify(%Envelope{} = env, opts) do
@@ -22,7 +20,7 @@ defmodule Ankusa.Verifier.Stripe do
 
     with true <- is_binary(header),
          %{"t" => t, v1: sigs} <- parse(header),
-         :ok <- check_timestamp(t, opts) do
+         :ok <- Verifier.check_timestamp(t, opts) do
       secret = Keyword.get(opts, :secret, "")
       signed = "#{t}.#{env.body}"
       expected = Base.encode16(:crypto.mac(:hmac, :sha256, secret, signed), case: :lower)
@@ -58,24 +56,6 @@ defmodule Ankusa.Verifier.Stripe do
       %{"t" => t, v1: sigs}
     else
       {:error, :malformed_signature}
-    end
-  end
-
-  defp check_timestamp(t, opts) do
-    tolerance = Keyword.get(opts, :tolerance, @default_tolerance)
-
-    case Integer.parse(t) do
-      {t_int, _} ->
-        now = System.system_time(:second)
-
-        if abs(now - t_int) <= tolerance do
-          :ok
-        else
-          {:error, :timestamp_out_of_tolerance}
-        end
-
-      :error ->
-        {:error, :malformed_signature}
     end
   end
 end

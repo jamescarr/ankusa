@@ -92,7 +92,7 @@ defmodule Ankusa.VerifierTest do
     end
 
     test "rejects missing headers", %{secret: secret} do
-      assert {:error, :missing_headers} =
+      assert {:error, :missing_signature} =
                Ankusa.Verifier.StandardWebhooks.verify(env([], "body"), secret: secret)
     end
   end
