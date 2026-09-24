@@ -24,7 +24,7 @@
 #   docker run --rm httpd:2.4-alpine htpasswd -nbB admin 'your-password'
 
 x-ankusa: &ankusa
-  image: ${ANKUSA_IMAGE:-jamescarr/ankusa:latest}
+  image: ${ANKUSA_IMAGE:-jamescarr/ankusa:edge}
   volumes:
     # The fleet config: shared Postgres WAL plus the credential-free demo
     # source.
