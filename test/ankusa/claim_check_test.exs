@@ -163,12 +163,10 @@ defmodule Ankusa.ClaimCheckTest do
       end
     end
 
-    test "rejects a :claim_check-role node with no api_tokens" do
+    test "accepts a :claim_check-role node with no api_tokens (open gateway)" do
       config = Config.new(instance: :cc_validate2, roles: [:claim_check])
 
-      assert_raise ArgumentError, ~r/api_tokens is empty/, fn ->
-        ClaimCheck.validate_config!(config)
-      end
+      assert :ok = ClaimCheck.validate_config!(config)
     end
 
     test "accepts a :claim_check-role node with Direct adapter and tokens configured" do

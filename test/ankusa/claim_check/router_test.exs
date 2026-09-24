@@ -129,4 +129,21 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     conn = call(inst, :get, "/nope")
     assert conn.status == 404
   end
+
+  test "with no api_tokens configured the gateway is open: no header needed", %{
+    inst: inst,
+    config: config
+  } do
+    Ankusa.put_config(%{config | claim_check: %{config.claim_check | api_tokens: %{}}})
+
+    id = UUIDv7.generate()
+    body = :crypto.strong_rand_bytes(64)
+
+    put_conn = call(inst, :put, "/v1/claims/acme/#{id}", body)
+    assert put_conn.status == 201
+
+    get_conn = call(inst, :get, "/v1/claims/acme/#{id}")
+    assert get_conn.status == 200
+    assert get_conn.resp_body == body
+  end
 end

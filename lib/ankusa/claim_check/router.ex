@@ -118,12 +118,20 @@ defmodule Ankusa.ClaimCheck.Router do
   defp authenticate(conn, instance) do
     %Ankusa.Config{claim_check: %{api_tokens: tokens}} = Ankusa.config(instance)
 
-    with ["Bearer " <> token] <- Plug.Conn.get_req_header(conn, "authorization"),
-         hash = Base.encode16(:crypto.hash(:sha256, token), case: :lower),
-         %{^hash => scope} <- hash_tokens(tokens) do
-      {:ok, scope}
-    else
-      _ -> {:error, :unauthorized}
+    case tokens do
+      # No tokens configured: authentication is delegated to whatever fronts
+      # this port.
+      empty when map_size(empty) == 0 ->
+        {:ok, :all}
+
+      tokens ->
+        with ["Bearer " <> token] <- Plug.Conn.get_req_header(conn, "authorization"),
+             hash = Base.encode16(:crypto.hash(:sha256, token), case: :lower),
+             %{^hash => scope} <- hash_tokens(tokens) do
+          {:ok, scope}
+        else
+          _ -> {:error, :unauthorized}
+        end
     end
   end
 

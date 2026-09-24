@@ -125,7 +125,6 @@ defmodule Ankusa.ClaimCheck do
 
     * a `:claim_check`-role node configured with the `Remote` adapter (it
       would proxy to itself)
-    * a `:claim_check`-role node with no `api_tokens` (never an open blob proxy)
     * `claim_check.max_bytes < max_body_bytes` on a `:dispatch` node (would
       dead-letter hooks the edge legitimately accepted)
     * `claim_check.retention_days` set with a non-`LocalFS` claim store (the
@@ -142,12 +141,6 @@ defmodule Ankusa.ClaimCheck do
 
         _ ->
           :ok
-      end
-
-      if cc.api_tokens == %{} do
-        raise ArgumentError,
-              "claim_check.api_tokens is empty on a :claim_check-role node — refusing to boot an " <>
-                "unauthenticated blob proxy. Configure at least one bearer token."
       end
     end
 
