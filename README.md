@@ -17,22 +17,65 @@ _**Don't fight the traffic. Steer it.** Durable webhook ingestion for any volume
 A loosely coupled, high-throughput webhook ingestion framework designed to let you
 stop thinking about reliable webhook ingestion and get back to building.
 
-Start with a single Elixir process on your laptop. When traffic grows, run the
-same code as a fleet that takes Stripe-scale volume in stride. You change
-config, not code.
+Start with a single process on your laptop — or one container. When traffic
+grows, run the same code as a fleet that takes Stripe-scale volume in stride.
+You change config, not code.
 
 ## Get Started
 
+### Run the server in Docker
+
+No Elixir toolchain needed: one container, one volume, HTTP in and HTTP out.
+
+```sh
+docker run -d --name ankusa \
+  -p 4000:4000 -p 127.0.0.1:4002:4002 \
+  -v ankusa-data:/var/lib/ankusa \
+  jamescarr/ankusa:edge
+
+# the image ships a healthcheck: wait for it rather than racing the listener
+until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy ]; do sleep 1; done
+
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+# => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
+# => {"id":"01a0...","status":"duplicate","seq":1}  (the retry is absorbed, not stored twice)
+
+curl localhost:4002/health
+# => {"status":"ok","instance":"default","roles":["dispatch","edge","storage"]}
+curl localhost:4002/metrics   # Prometheus text format
+```
+
+That is a complete, durable webhook receiver. The image ships a `demo` source
+that accepts anything, so it works before you have any provider credentials:
+4000 is ingest, 4002 is the operator API (`/health`, `/metrics`), and
+`/var/lib/ankusa` holds the only state worth keeping.
+
+For anything real, mount your own config and check it before you start:
+
+```sh
+docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
+  -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
+  jamescarr/ankusa:edge check-config
+```
+
+`edge` tracks `main`; cutting an `ankusa_server-v*` tag publishes `X.Y.Z`,
+`X.Y` and `latest`. Every key, `${VAR}` interpolation, the env overrides, and
+the compose files for a fleet: [`ankusa_server/README.md`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/README.md).
+To build the same image from source, `mise run docker:build` tags it
+`jamescarr/ankusa:dev`.
+
+### Embed it in your app
+
 ```sh
 mix deps.get
-iex -S mix               # starts on :4000 with a zero-config `demo` source
+iex -S mix               # starts on :4000 with the same zero-config `demo` source
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
 ```
 
-That is a complete, durable webhook receiver. There is no database, message
-broker, or object store to set up first.
+There is no database, message broker, or object store to set up first either.
 
 The full walkthrough, including idempotency, inspecting state, and pointing a
 real provider at it: [`docs/quickstart.md`](docs/quickstart.md).
