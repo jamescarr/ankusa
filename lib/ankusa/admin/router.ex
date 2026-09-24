@@ -92,7 +92,12 @@ defmodule Ankusa.Admin.Router do
         |> config()
         |> Ankusa.Dispatch.DLQ.entries()
         |> Enum.filter(&matches?(&1, source_id, since))
-        |> Enum.sort_by(& &1.at, :desc)
+        # Newest first. The file is append-ordered, so the index breaks ties
+        # between entries dead-lettered in the same millisecond — an operator
+        # paging the DLQ needs a stable order, and `at` alone isn't one.
+        |> Enum.with_index()
+        |> Enum.sort_by(fn {%{at: at}, index} -> {at, index} end, :desc)
+        |> Enum.map(&elem(&1, 0))
 
       limited = Enum.take(entries, clamp_limit(limit))
 

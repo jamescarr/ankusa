@@ -8,7 +8,7 @@
 [![Hex downloads](https://img.shields.io/hexpm/dt/ankusa.svg)](https://hex.pm/packages/ankusa)
 [![Hex docs](https://img.shields.io/badge/hex-docs-lightgreen.svg)](https://hexdocs.pm/ankusa)
 [![CI](https://github.com/jamescarr/ankusa/actions/workflows/ci.yml/badge.svg)](https://github.com/jamescarr/ankusa/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/hexpm/l/ankusa.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/hexpm/l/ankusa.svg)](https://github.com/jamescarr/ankusa/blob/main/LICENSE)
 [![Elixir](https://img.shields.io/badge/elixir-1.20-4B275F?logo=elixir&logoColor=white)](https://elixir-lang.org)
 [![Stars](https://img.shields.io/github/stars/jamescarr/ankusa.svg?style=flat)](https://github.com/jamescarr/ankusa/stargazers)
 
@@ -168,4 +168,4 @@ Start with the [quickstart](docs/quickstart.md). From there:
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](https://github.com/jamescarr/ankusa/blob/main/LICENSE).
