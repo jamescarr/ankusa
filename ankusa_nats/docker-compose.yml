@@ -1,0 +1,29 @@
+name: ankusa_nats
+
+# Local NATS server with JetStream for developing/testing Ankusa.Sink.NATS.
+# Tests create and delete their own streams. The sink never creates one.
+#
+#   docker compose up -d --wait
+#   mix test
+#   docker compose down -v
+#
+# Bytes live in the container's /data, so `down -v` is what clears a stream
+# whose test died before its cleanup ran.
+
+services:
+  nats:
+    image: nats:2-alpine
+    command:
+      - -js
+      - -m
+      - "8222"
+      - --store_dir
+      - /data
+    ports:
+      - "4223:4222"   # client port
+      - "8223:8222"   # monitoring, http://localhost:8223
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
