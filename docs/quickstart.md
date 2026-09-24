@@ -44,7 +44,7 @@ Replay the same event id — it's absorbed but still gets a `2xx`:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
-# => {"status":"duplicate","seq":1}
+# => {"id":"01a0...","status":"duplicate","seq":1}
 ```
 
 ## 4. Inspect state
