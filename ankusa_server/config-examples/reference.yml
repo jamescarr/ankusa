@@ -1,0 +1,196 @@
+# Every key in the schema, at its default, with the alternatives next to it.
+# This file loads as-is: copy it, delete what you don't use, and replace the
+# ${VAR}s with your own.
+#
+# Env vars referenced here (all supplied by config-examples' test fixture, and
+# by you in production):
+#
+#   ANKUSA_WAL_POSTGRES_URL   S3_BUCKET  S3_REGION  S3_ENDPOINT
+#   AWS_ACCESS_KEY_ID         AWS_SECRET_ACCESS_KEY  GCS_BUCKET
+#   CLAIM_CHECK_TOKEN         STRIPE_WHSEC  SINK_URL  RABBITMQ_URL
+#   RABBITMQ_EXCHANGE         KAFKA_BROKERS  KAFKA_TOPIC  KAFKA_USERNAME
+#   KAFKA_SASL_PASSWORD       STANDARD_WEBHOOKS_SECRET   GITHUB_WEBHOOK_SECRET
+#
+# Anything you can also set with an ANKUSA_* env var is marked [env]; env wins
+# over this file, which is how a container gets reconfigured without a rebuild.
+
+node:
+  # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
+  # to start with; split for scale (edge in front, dispatch+storage behind).
+  roles: [edge, dispatch, storage]
+  # [env ANKUSA_DATA_DIR] WAL, quarantine, DLQ, and local segments land here.
+  data_dir: /var/lib/ankusa
+
+log:
+  # [env ANKUSA_LOG_LEVEL] debug | info | warning | error
+  level: info
+
+http:
+  # [env ANKUSA_HTTP_PORT, else PORT] the ingest listener.
+  port: 4000
+  max_body_bytes: 8000000
+  # path        -> POST /webhooks/:source_id
+  # tenant_path -> POST /webhooks/:tenant_id/:source_id (tenant from the URL)
+  routing: path
+  # Segments before the source id. "/" means no prefix.
+  prefix: /webhooks
+
+admin:
+  # The operator API (health, /metrics, /v1/config, DLQ, quarantine). The image
+  # defaults this on because it is the only way to operate a container without
+  # an Elixir shell; core's default for embedded users is false.
+  enabled: true
+  # [env ANKUSA_ADMIN_PORT] unauthenticated — do not publish it.
+  port: 4002
+
+batcher:
+  # Default: System.schedulers_online().
+  partitions: 8
+  max_batch: 256
+  max_delay_ms: 5
+  # Full queue = shed load with 503 rather than grow without bound.
+  max_queue: 10000
+
+dispatch:
+  poll_ms: 200
+  batch: 128
+  retry:
+    base_ms: 100
+    max_ms: 30000
+    max_attempts: 12
+    # Full jitter: delay is multiplied by a random factor in [0.5, 1.0].
+    jitter: true
+
+wal:
+  # [env ANKUSA_WAL_TYPE] disk | postgres
+  #   disk     — local append-only log; survives process crash and power loss on
+  #              this host, not the loss of the host.
+  #   postgres — shared log; the same WAL for a whole fleet of edge nodes.
+  type: disk
+  postgres:
+    # A connection URL, or the discrete keys below — never both.
+    url: "${ANKUSA_WAL_POSTGRES_URL}"
+    # host: postgres
+    # port: 5432
+    # username: ankusa
+    # password: "${POSTGRES_PASSWORD}"
+    # database: ankusa
+    pool_size: 10
+    ssl: false
+    # Run the adapter's DDL bootstrap on boot. Set false if you migrate
+    # separately.
+    migrate: true
+
+storage:
+  # [env ANKUSA_STORAGE_TYPE] local | s3 | gcs
+  type: local
+  # Segment rollover: whichever comes first.
+  roll_bytes: 16777216
+  roll_ms: 30000
+  # Used only when type: s3. Omit access_key_id/secret_access_key to fall back
+  # to AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (static keys only: instance
+  # profiles and IRSA are not supported by this adapter yet).
+  s3:
+    bucket: "${S3_BUCKET}"
+    region: "${S3_REGION}"
+    endpoint: "${S3_ENDPOINT}"
+    access_key_id: "${AWS_ACCESS_KEY_ID}"
+    secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+  # Used only when type: gcs.
+  gcs:
+    bucket: "${GCS_BUCKET}"
+    endpoint: https://storage.googleapis.com
+    # metadata — take tokens from the GCE/GKE instance metadata server.
+    # token    — use the static token below.
+    # none     — send no credentials (an emulator).
+    auth: metadata
+    # token: "${GCS_TOKEN}"   # required iff auth: token
+
+claim_check:
+  # [env ANKUSA_CLAIM_CHECK_PORT] the gateway listener (:claim_check role).
+  port: 4001
+  max_bytes: 8000000
+  # LocalFS retention only. nil disables the sweeper; use a bucket lifecycle
+  # rule for S3/GCS.
+  retention_days: null
+  # OPTIONAL. Omit the whole block for an open gateway — auth is then whatever
+  # fronts the port.
+  tokens:
+    - token: "${CLAIM_CHECK_TOKEN}"
+      # all | [tenant, ...]
+      tenants: all
+  # Talk to a remote gateway instead of holding blob-store credentials here.
+  # The token is optional: omit it when the target gateway has no tokens.
+  # remote: {url: "http://claim-check.internal:4001", token: "${CLAIM_CHECK_TOKEN}"}
+
+sources:
+  # One source per provider endpoint. The id is the catch-URL segment:
+  # POST /webhooks/stripe here.
+  stripe:
+    # Scopes dedup and storage. With routing: tenant_path the URL wins.
+    tenant: default
+    # reject | quarantine | accept_flag (what happens when verification fails)
+    on_verify_failure: reject
+    # none | stripe | github | standard_webhooks. The last three require secret;
+    # stripe and standard_webhooks also take tolerance_seconds (default 300).
+    verify:
+      type: stripe
+      secret: "${STRIPE_WHSEC}"
+      tolerance_seconds: 300
+    # rules | stripe | github. rules takes header and/or json_path
+    # (a dot path into the JSON body); with neither, it tries the `webhook-id`
+    # header then JSON `id`.
+    dedup:
+      type: rules
+      header: webhook-id
+      json_path: data.id
+    # At least one. Every sink is tried on every delivered hook.
+    sinks:
+      - {type: log}
+      - type: http
+        url: "${SINK_URL}"
+        # post | put | patch
+        method: post
+        timeout_ms: 5000
+        headers:
+          x-ankusa-env: prod
+      - type: rabbitmq
+        url: "${RABBITMQ_URL}"
+        exchange: "${RABBITMQ_EXCHANGE}"
+        # topic | direct | fanout | headers
+        exchange_type: topic
+        routing_key: "ankusa.stripe"
+        inline_max_bytes: 8192
+      - type: kafka
+        brokers: ["${KAFKA_BROKERS}"]
+        topic: "${KAFKA_TOPIC}"
+        # Static string only (a fun is an embedding API, not a config surface).
+        key: stripe
+        inline_max_bytes: 8192
+        # Omit both to talk to a plaintext broker.
+        ssl: false
+        sasl:
+          # plain | scram_sha_256 | scram_sha_512
+          mechanism: plain
+          username: "${KAFKA_USERNAME}"
+          password: "${KAFKA_SASL_PASSWORD}"
+
+  # A second source, showing the other verifier and the quarantine policy.
+  standard:
+    verify: {type: standard_webhooks, secret: "${STANDARD_WEBHOOKS_SECRET}"}
+    dedup: {type: rules}
+    on_verify_failure: quarantine
+    sinks: [{type: log}]
+
+  github:
+    verify: {type: github, secret: "${GITHUB_WEBHOOK_SECRET}"}
+    dedup: {type: github}
+    on_verify_failure: accept_flag
+    sinks: [{type: log}]
+
+  # Verify nothing at all. Useful behind a trusted network, or as the demo the
+  # image ships with.
+  open:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks: [{type: log}]
