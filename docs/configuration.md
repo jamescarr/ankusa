@@ -1,4 +1,136 @@
-# Configuration reference
+# Configuration
+
+The container reads a YAML file; the library takes a `%Ankusa.Config{}`, and
+both describe the same pipeline.
+
+## Container configuration (YAML)
+
+The image starts with a baked-in demo config at `/etc/ankusa/ankusa.yml`. Mount
+yours over it:
+
+```sh
+-v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro"
+```
+
+or point `ANKUSA_CONFIG` at another path.
+
+`${VAR}` and `${VAR:-default}` are interpolated from the environment. A
+`${VAR}` with no value and no default stops the container at startup and names
+the field, so an empty secret can never quietly accept everything an attacker
+signs. An invalid file exits `78` (`EX_CONFIG`) — a message, not a crash dump.
+Check a file before you start the container:
+
+```sh
+docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
+  -e STRIPE_WHSEC jamescarr/ankusa:edge check-config
+# => config OK: roles=[:edge, :dispatch, :storage] sources=demo,stripe \
+#      wal=Ankusa.WAL.DiskLog storage=Ankusa.BlobStore.LocalFS
+
+docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
+  -e STRIPE_WHSEC jamescarr/ankusa:edge print-config
+# => the effective config as JSON, with every secret redacted
+```
+
+`version` prints the server and core versions.
+
+A minimal file — one open source and one HTTP sink:
+
+```yaml
+sources:
+  demo:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks:
+      - type: http
+        url: http://worker:8080/hooks
+        timeout_ms: 5000
+```
+
+### Sections
+
+Every top-level section, with its keys and defaults:
+
+| Section | Keys (default) |
+| --- | --- |
+| `node` | `roles` (`[edge, dispatch, storage]`), `data_dir` (`/var/lib/ankusa`) |
+| `log` | `level` (`info`) |
+| `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
+| `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002) |
+| `batcher` | `partitions` (the scheduler count), `max_batch` (256), `max_delay_ms` (5), `max_queue` (10000) |
+| `dispatch` | `poll_ms` (200), `batch` (128), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
+| `wal` | `type` (`disk` \| `postgres`), `postgres.url` (or the discrete `host`/`port`/`username`/`password`/`database` keys, never both), `pool_size` (10), `ssl` (false), `migrate` (true) |
+| `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
+| `claim_check` | `port` (4001), `max_bytes` (8000000), `retention_days` (null disables the sweeper), optional `tokens`, optional `remote` |
+| `sources` | One entry per catch-URL source — see below |
+
+`wal.postgres` and `storage.s3`/`storage.gcs` are read only when the matching
+`type` is set. See
+[`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml)
+for every key with its comment and the alternatives.
+
+### Sources
+
+One source per provider endpoint; the key is the catch-URL segment
+(`POST /webhooks/stripe`).
+
+| Key | Meaning |
+| --- | --- |
+| `tenant` | The dedup/storage/retention scope. With `routing: tenant_path` the URL wins. Default `default` — see [`multi-tenancy.md`](multi-tenancy.md). |
+| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks`. The last three require `secret`; `stripe` and `standard_webhooks` also take `tolerance_seconds` (default 300). |
+| `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag` — what happens when verification fails. |
+| `dedup.type` | `rules` \| `stripe` \| `github`. `rules` takes `header` and/or `json_path` (a dot path into the JSON body); with neither it tries the `webhook-id` header, then the JSON `id`. |
+| `sinks` | At least one; every sink is tried on every delivered hook. |
+
+### Sinks
+
+| `type` | Keys |
+| --- | --- |
+| `log` | — |
+| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
+| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (8192). |
+| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (8192), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
+
+Bodies above a sink's `inline_max_bytes` are checked in to the object store and
+the message carries a ticket — see [`claim-check.md`](claim-check.md).
+
+### Environment overrides
+
+Anything you would normally read from the platform, so a container can be
+reconfigured without a new file. Env wins over the file.
+
+| Variable | Field |
+| --- | --- |
+| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
+| `ANKUSA_DATA_DIR` | `node.data_dir` |
+| `ANKUSA_LOG_LEVEL` | `log.level` |
+| `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
+| `ANKUSA_ADMIN_PORT` | `admin.port` |
+| `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` or `postgres`) |
+| `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
+| `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
+| `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
+| `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
+
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are read by the S3 adapter
+directly when the config does not name static keys.
+
+Sources and sinks are not env-overridable: they carry behaviour, so they live in
+the file, with secrets injected through `${VAR}`.
+
+### Starting points
+
+All loadable as-is — copy one, delete what you don't use, replace the `${VAR}`s:
+
+| File | What it is |
+| --- | --- |
+| [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
+| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
+| [`config-examples/fleet-postgres-s3.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/fleet-postgres-s3.yml) | edge replicas on a shared Postgres WAL, segments in S3 |
+| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
+| [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
+
+## Library configuration (Elixir)
 
 Two structs, both built once at boot and passed down the supervision tree —
 never `Application.get_env/2` scattered through call sites:
@@ -6,7 +138,7 @@ never `Application.get_env/2` scattered through call sites:
 - **`%Ankusa.Config{}`** — instance-wide: roles, ports, adapters, tuning.
 - **`%Ankusa.Source{}`** — per catch-URL: verification, dedup, sinks, tenant.
 
-## `%Ankusa.Config{}`
+### `%Ankusa.Config{}`
 
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
@@ -74,7 +206,7 @@ config :ankusa,
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 
-### The admin API
+#### The admin API
 
 With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 (Prometheus text), `GET /v1/config` (the effective config, secrets redacted),
@@ -84,7 +216,7 @@ roles. It is **unauthenticated by design**: put it behind your own proxy, SSO,
 or network policy. The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/admin.v1.yaml).
 
-## Configuring a source
+### Configuring a source
 
 Sources are what `Ankusa.SourceStore.Static` (the default store) returns for a
 given `source_id`; every field has a default, so `%{"demo" => []}` is valid
@@ -119,7 +251,7 @@ driven by `config.dispatch.retry`, applied uniformly per source by
 `Ankusa.Dispatch.Pipeline`). Per-source retry policy override is not currently
 supported; it's dispatch-wide.
 
-## Every behaviour, at a glance
+### Every behaviour, at a glance
 
 Full detail (options, guarantees, how to write your own) lives in
 [`storage.md`](storage.md) and [`delivery.md`](delivery.md); this table is
@@ -142,7 +274,7 @@ Swapping any of these is a one-line config change — `wal: {Ankusa.WAL.Postgres
 hostname: "...", database: "..."}` — because every layer is a behaviour with
 `{module, opts}` config, resolved at the call site, never hardcoded.
 
-## Runtime environment overrides
+### Runtime environment overrides
 
 Ankusa.Application (the default OTP application boot path) reads two env
 vars on top of whatever `config.exs` sets:
