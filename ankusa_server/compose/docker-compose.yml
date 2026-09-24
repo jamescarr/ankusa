@@ -1,0 +1,34 @@
+# Single node: the whole framework in one container.
+#
+#   docker compose -f ankusa_server/compose/docker-compose.yml up -d
+#
+# The image is the published one; to run a local build, either tag it
+# (`docker tag jamescarr/ankusa:dev jamescarr/ankusa:latest`) or set ANKUSA_IMAGE.
+services:
+  ankusa:
+    image: ${ANKUSA_IMAGE:-jamescarr/ankusa:latest}
+    ports:
+      # Ingest. Safe to publish: providers authenticate with their own
+      # signatures (that is what a verifier is for).
+      - "4000:4000"
+      # Admin API and /metrics — unauthenticated by design. Bound to loopback so
+      # it is reachable from this host (curl, a Prometheus on the same box) and
+      # from nowhere else. To read it remotely, front it with your own proxy;
+      # compose/docker-compose.fleet.yml shows nginx basic auth doing exactly
+      # that.
+      - "127.0.0.1:4002:4002"
+    volumes:
+      # The data volume: WAL, quarantine log, DLQ, local segments. Losing it
+      # loses un-dispatched hooks, so back it or move the WAL to Postgres.
+      - ankusa-data:/var/lib/ankusa
+      # Your config. The image's baked-in demo config is used until you mount
+      # one.
+      # - ../config-examples/single-node.yml:/etc/ankusa/ankusa.yml:ro
+    # Secrets are injected, never baked: mount ${VAR}s in the config file and
+    # pass the values here.
+    # environment:
+    #   STRIPE_WHSEC: ${STRIPE_WHSEC}
+    restart: unless-stopped
+
+volumes:
+  ankusa-data:

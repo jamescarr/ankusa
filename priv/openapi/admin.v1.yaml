@@ -1,0 +1,319 @@
+openapi: 3.2.0
+info:
+  title: Ankusa Admin API
+  version: 1.0.0
+  summary: Health, metrics, redacted config, DLQ, quarantine — over HTTP.
+  description: |
+    HTTP surface of the operator API, served by any node with
+    `admin.enabled: true` (default port 4002). This document is the
+    cross-language contract. The Elixir code conforms to it, not the reverse.
+
+    This API performs **no** authentication or authorization. Ankusa does not
+    manage users, API keys, or tokens; the only request authentication in the
+    framework is provider signature verification on ingest. Deployers secure
+    this port at their own boundary (network policy, a reverse proxy, SSO, a
+    service mesh) — the same way Elasticsearch was operated before it shipped
+    security. `GET /v1/config` is redacted anyway, because a proxy may let many
+    people read it.
+
+    Responses are node-local by design: the DLQ is the dispatch node's disk and
+    the quarantine list is the edge node's memory. A route that needs a role
+    this node does not run answers `409 role_not_enabled` so an operator can
+    tell "wrong node" from "nothing there". Scrape every node's admin port to
+    see the fleet.
+servers:
+  - url: http://localhost:4002
+    description: Local development listener (default `admin.port`).
+security: []
+tags:
+  - name: operations
+    description: Health, metrics, and the effective configuration.
+  - name: dlq
+    description: Inspect and replay dead-lettered hooks. `:dispatch` role only.
+  - name: quarantine
+    description: Recent quarantined hooks. `:edge` role only.
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [operations]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: The listener is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [operations]
+      summary: Prometheus metrics
+      description: |
+        The node's `Ankusa.Metrics` scrape: ingest, verification, WAL commit,
+        dedup, load shedding, quarantine, dispatch, compaction, and claim-check
+        series. Only the events this node emits appear — an edge node has no
+        dispatch series, a storage node has no ingest series.
+      responses:
+        '200':
+          description: Prometheus text exposition format, version 0.0.4.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                ankusa_ingest_requests_total{instance="default",outcome="committed",source_id="demo"} 1
+  /v1/config:
+    get:
+      operationId: getConfig
+      tags: [operations]
+      summary: The effective, redacted configuration
+      description: |
+        The whole `Ankusa.Config` as the node resolved it: defaults, then the
+        YAML file, then env overrides. Secrets are redacted by key name
+        (`secret`, `password`, `secret_access_key`, `token`, `api_tokens`,
+        `sasl`) and by shape (a URI password becomes `user:[REDACTED]`), so this
+        is safe to hand to anyone who can reach the port.
+      responses:
+        '200':
+          description: |
+            A JSON object mirroring the config's nesting. `{module, opts}`
+            becomes `{"module": "...", "opts": {...}}`; keyword lists become
+            objects; atoms become strings.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /v1/dlq:
+    get:
+      operationId: listDeadLetters
+      tags: [dlq]
+      summary: List dead-lettered hooks
+      description: |
+        Newest first, metadata only — bodies are never returned. Results are
+        this node's DLQ file; with several dispatch nodes, ask each one.
+      parameters:
+        - name: source_id
+          in: query
+          required: false
+          description: Exact source id to filter on.
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: Inclusive lower bound on when the hook was dead-lettered, in unix milliseconds.
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          required: false
+          description: Maximum entries returned. Values outside 0..1000 are clamped to that range.
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Matching entries, newest first. `total` counts all matches, before `limit`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqPage'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+  /v1/dlq/replay:
+    post:
+      operationId: replayDeadLetters
+      tags: [dlq]
+      summary: Re-deliver dead-lettered hooks
+      description: |
+        Re-delivers matching entries through their source's configured sinks.
+        Replay is at-least-once: an entry already delivered upstream but not
+        recorded as such will be delivered again, so consumers should dedupe on
+        the envelope id. Entries stay in the DLQ — replay does not remove them.
+      requestBody:
+        required: false
+        description: |
+          A filter, not a payload. Omitted or empty (`{}`) replays everything.
+          Unknown keys are ignored.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayFilter'
+      responses:
+        '200':
+          description: The number of entries replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Replayed'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+  /v1/quarantine:
+    get:
+      operationId: listQuarantined
+      tags: [quarantine]
+      summary: Recent quarantined hooks
+      description: |
+        The edge node's in-memory recent list (at most 200 entries), newest
+        first. Metadata only — bodies are never returned. The durable record
+        lives in `quarantine/quarantine.log` on the node's data volume.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum entries returned. Values outside 0..1000 are clamped to that range.
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Recent quarantined entries, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuarantinePage'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+components:
+  schemas:
+    Health:
+      type: object
+      required: [status, instance, roles]
+      properties:
+        status:
+          const: ok
+        instance:
+          type: string
+        roles:
+          type: array
+          description: The roles this node runs, sorted.
+          items:
+            type: string
+            enum: [claim_check, dispatch, edge, storage]
+    DlqEntry:
+      type: object
+      description: A dead-lettered hook. The recorded reason is `inspect/1` of a term.
+      required:
+        - id
+        - source_id
+        - tenant_id
+        - seq
+        - received_at
+        - dead_lettered_at
+        - size
+        - content_type
+        - reason
+      properties:
+        id:
+          type: string
+          description: Envelope id (a UUIDv7).
+        source_id:
+          type: string
+        tenant_id:
+          type: [string, 'null']
+        seq:
+          type: [integer, 'null']
+          description: WAL sequence number, `null` if the record never committed.
+        received_at:
+          type: integer
+          description: When the edge received the hook, unix milliseconds.
+        dead_lettered_at:
+          type: integer
+          description: When dispatch gave up, unix milliseconds.
+        size:
+          type: integer
+        content_type:
+          type: [string, 'null']
+        reason:
+          type: string
+          description: '`inspect/1` of the give-up reason, e.g. `{:sink, Ankusa.Sink.Http, {:status, 503}}`.'
+    DlqPage:
+      type: object
+      required: [total, entries]
+      properties:
+        total:
+          type: integer
+          description: Number of matching entries, before `limit`.
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/DlqEntry'
+    QuarantineEntry:
+      type: object
+      required: [id, source_id, received_at, reason]
+      properties:
+        id:
+          type: string
+        source_id:
+          type: string
+        received_at:
+          type: integer
+          description: When the edge received the hook, unix milliseconds.
+        reason:
+          type: string
+          description: '`inspect/1` of the verifier failure, e.g. `:no_match`.'
+    QuarantinePage:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuarantineEntry'
+    ReplayFilter:
+      type: object
+      properties:
+        source_id:
+          type: string
+          description: Exact source id.
+        id:
+          type: string
+          description: Exact envelope id.
+        since:
+          type: integer
+          description: Inclusive lower bound on the dead-letter timestamp, unix milliseconds.
+    Replayed:
+      type: object
+      required: [replayed]
+      properties:
+        replayed:
+          type: integer
+          description: Number of entries re-delivered.
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum:
+            - not_found
+            - invalid_filter
+            - role_not_enabled
+        field:
+          type: string
+          description: Present on `invalid_filter`; the offending parameter or `body`.
+        role:
+          type: string
+          description: Present on `role_not_enabled`; the role this node does not run.
+  responses:
+    InvalidFilter:
+      description: '`400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter, or `body`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RoleNotEnabled:
+      description: '`409`. `role_not_enabled`: this node does not run the role the route needs. Ask another node.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

@@ -31,7 +31,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-for d in . ankusa_postgres ankusa_rabbitmq ankusa_kafka \
+for d in . ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_server \
          examples/rabbitmq-consumer/ingest_app \
          examples/kafka-sqs-consumer/ingest_app \
          examples/oban-consumer/ingest_app \
@@ -139,6 +139,28 @@ docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
          && mix deps.get --check-locked && MIX_ENV=prod mix compile --warnings-as-errors'
 '''
 
+[tasks."check:server"]
+description = "ankusa_server: format + compile + test, in a container (crc32cer needs cmake)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# A container for the same reason as check:kafka: brod's crc32cer NIF has no
+# prebuilt artifact and needs CMake >= 3.16. Unlike check:kafka there are no
+# services to bring up — the suite never talks to Postgres, RabbitMQ, or
+# Redpanda — so this is only about having the toolchain, and the repo *root* is
+# the mount because :dev/:test path-depends on `..`. MIX_BUILD_PATH keeps the
+# container's Linux artifacts out of the host `_build`.
+docker run --rm -v "$PWD":/repo \
+  -e MIX_BUILD_PATH=/tmp/build-server \
+  -w /repo/ankusa_server elixir:1.20.4-alpine \
+  sh -c 'mix local.hex --force >/dev/null && apk add --no-cache -q build-base cmake git >/dev/null \
+         && mix deps.get --check-locked && mix deps.unlock --check-unused \
+         && mix format --check-formatted && mix compile --warnings-as-errors \
+         && mix test'
+'''
+
 [tasks."check:examples"]
 description = "The two Docker-Compose examples: rabbitmq ingest_app + both TS workers"
 run = '''
@@ -175,6 +197,27 @@ echo "==> tools/loadgen"
   mix format --check-formatted && mix compile --warnings-as-errors)
 '''
 
+# ── server image ──────────────────────────────────────────────────────────
+
+[tasks."docker:build"]
+description = "Build the jamescarr/ankusa image (context is the repo root)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+docker build -f ankusa_server/Dockerfile -t jamescarr/ankusa:dev .
+'''
+
+[tasks."docker:smoke"]
+description = "Build and smoke-test the image (starts a container on 4000/4002)"
+depends = ["docker:build"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+exec ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
+'''
+
 # ── aggregate ─────────────────────────────────────────────────────────────
 
 [tasks.check]
@@ -191,6 +234,7 @@ mise run check:rabbitmq
 mise run check:kafka
 mise run check:examples
 mise run check:oban
+mise run check:server
 '''
 
 [tasks."lint:workflows"]
@@ -275,9 +319,7 @@ local_sha=$(git rev-parse HEAD)
 remote_sha=$(git rev-parse origin/main)
 [ "$local_sha" = "$remote_sha" ] || fail "HEAD ($local_sha) != origin/main ($remote_sha); merge and push first"
 
-gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
-
-printf '  clean tree, HEAD == origin/main, HEX_API_KEY present\n'
+printf '  clean tree, HEAD == origin/main\n'
 '''
 
 [tasks."release:preflight-core"]
@@ -289,6 +331,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
 
 VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
 [ -n "$VERSION" ] || fail "could not read @version from mix.exs"
@@ -314,6 +358,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
 
 # Core must be on Hex first: the adapters' :prod deps resolve
 # {:ankusa, "~> 0.1"} from Hex, not the path dep, so an early tag dies at
@@ -417,5 +463,97 @@ for p in ankusa ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/$p")
   printf '  %-18s %s\n' "$p" "$code"
   [ "$code" = "200" ] || { echo "  ^ not published" >&2; exit 1; }
+done
+'''
+
+# ── release: the server image ─────────────────────────────────────────────
+#
+# A separate tag (`ankusa_server-vX.Y.Z`) and a separate lifecycle from the Hex
+# packages: the image is built from this checkout, so it does not wait on core
+# being published to Hex and needs no HEX_API_KEY — but it does ride the same
+# clean-tree/HEAD==origin/main guard, because a tag is a promise about a commit.
+
+[tasks."release:preflight-server"]
+description = "Checks before tagging the server image (needs DOCKERHUB_* secrets)"
+depends = ["release:guard"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' ankusa_server/mix.exs)
+[ -n "$VERSION" ] || fail "could not read @version from ankusa_server/mix.exs"
+TAG="ankusa_server-v$VERSION"
+
+grep -q "^## \[$VERSION\]" ankusa_server/CHANGELOG.md || \
+  fail "ankusa_server/CHANGELOG.md has no '## [$VERSION]' heading"
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && fail "tag $TAG already exists locally"
+git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 && fail "tag $TAG already exists on origin"
+
+# The image cannot be published without these, and finding out from a failed
+# workflow after the tag exists is worse than finding out now.
+gh secret list | grep -q '^DOCKERHUB_USERNAME' || fail "repo secret DOCKERHUB_USERNAME is not set"
+gh secret list | grep -q '^DOCKERHUB_TOKEN' || fail "repo secret DOCKERHUB_TOKEN is not set"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' \
+  "https://hub.docker.com/v2/namespaces/jamescarr/repositories/ankusa/tags/$VERSION")
+[ "$code" = "404" ] || fail "jamescarr/ankusa:$VERSION already on Docker Hub (HTTP $code) — bump @version and the CHANGELOG"
+
+printf '  jamescarr/ankusa %s -> %s, not yet on Docker Hub\n' "$VERSION" "$TAG"
+printf '\nNext: mise run release:tag-server\n'
+'''
+
+[tasks."release:tag-server"]
+description = "Tag + push ankusa_server-v<version> (builds and publishes the image)"
+depends = ["release:preflight-server"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' ankusa_server/mix.exs)
+TAG="ankusa_server-v$VERSION"
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && { echo "tag $TAG already exists" >&2; exit 1; }
+git tag "$TAG"
+git push origin "$TAG"
+echo
+echo "pushed $TAG. The image build is long (two architectures), so:"
+echo "  mise run release:watch-server"
+'''
+
+[tasks."release:watch-server"]
+description = "Watch the docker.yml run that publishes the image"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+gh run list --workflow=docker.yml --limit 5
+echo
+id=$(gh run list --workflow=docker.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+[ -n "$id" ] && exec gh run watch "$id"
+'''
+
+[tasks."release:verify-server"]
+description = "Confirm the image is on Docker Hub for the current version and latest"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' ankusa_server/mix.exs)
+
+for tag in "$VERSION" latest; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    "https://hub.docker.com/v2/namespaces/ankusa/repositories/ankusa/tags/$tag")
+  printf '  %-10s %s\n' "$tag" "$code"
+  [ "$code" = "200" ] || { echo "  ^ not published" >&2; exit 1; }
+done
+
+# Both architectures, or the tag is not really usable.
+manifest=$(docker buildx imagetools inspect "jamescarr/ankusa:$VERSION")
+grep -E 'Platform|Manifest' <<<"$manifest"
+for platform in linux/amd64 linux/arm64; do
+  grep -qE "Platform:[[:space:]]+$platform(/v[0-9]+)?\$" <<<"$manifest" || \
+    { echo "  ^ $platform missing from jamescarr/ankusa:$VERSION" >&2; exit 1; }
 done
 '''

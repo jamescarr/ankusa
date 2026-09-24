@@ -49,7 +49,10 @@ defmodule Ankusa.Config do
               # LocalFS retention only; nil disables the sweeper
               retention_days: nil,
               sweep_interval_ms: 3_600_000
-            }
+            },
+            # operator HTTP API + Prometheus /metrics, unauthenticated; off by
+            # default for embedded use
+            admin: %{enabled: false, port: 4002}
 
   @type t :: %__MODULE__{}
 
@@ -89,8 +92,8 @@ defmodule Ankusa.Config do
 
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
-  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`) over the
-  defaults.
+  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:admin`) over
+  the defaults.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -107,7 +110,7 @@ defmodule Ankusa.Config do
 
           Map.put(acc, k, v)
 
-        k in [:batcher, :dispatch, :storage, :claim_check] ->
+        k in [:batcher, :dispatch, :storage, :claim_check, :admin] ->
           put_section(acc, k, v)
 
         Map.has_key?(base, k) ->

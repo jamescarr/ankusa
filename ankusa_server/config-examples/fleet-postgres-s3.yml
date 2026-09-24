@@ -1,0 +1,44 @@
+# The reference fleet: several edge nodes sharing one Postgres WAL, dispatching
+# to a worker, with segments in object storage.
+#
+#   topology : `edge` nodes in front (ANKUSA_ROLES=edge, replicas >= 2)
+#              one `dispatch,storage` node behind
+#              Postgres as the shared WAL and dedup authority
+#   storage  : S3 (S3_BUCKET / S3_REGION / S3_ENDPOINT); the compose file
+#              overrides ANKUSA_STORAGE_TYPE=local so the demo needs no bucket
+#   secrets  : ANKUSA_WAL_POSTGRES_URL
+#
+# Dedup lives in Postgres, so a retry that lands on a different edge replica is
+# still absorbed — that is the point of the shared WAL, and what compose/
+# docker-compose.fleet.yml demonstrates.
+#
+# The `demo` source below is the same one the image ships with: no provider
+# credentials, log sink, so the fleet can be exercised before you have any.
+
+node:
+  roles: [edge, dispatch, storage]
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+  port: 4002
+
+wal:
+  type: postgres
+  postgres:
+    url: "${ANKUSA_WAL_POSTGRES_URL}"
+    pool_size: 10
+    migrate: true
+
+storage:
+  type: s3
+  s3:
+    bucket: "${S3_BUCKET:-ankusa-segments}"
+    region: "${S3_REGION:-us-east-1}"
+    endpoint: "${S3_ENDPOINT:-https://s3.us-east-1.amazonaws.com}"
+
+sources:
+  demo:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks: [{type: log}]

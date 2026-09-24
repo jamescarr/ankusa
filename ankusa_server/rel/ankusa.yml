@@ -1,0 +1,28 @@
+# The config baked into the jamescarr/ankusa image.
+#
+# This is a working demo, not a deployment: one `demo` source that accepts
+# anything and logs it, so the quick start works before you have provider
+# credentials:
+#
+#   curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
+#
+# Mount your own file over it (`-v ./ankusa.yml:/etc/ankusa/ankusa.yml`) or
+# override individual fields with ANKUSA_* env vars. Every key with its default
+# is documented in config-examples/reference.yml.
+#
+# SECURITY: nothing here is authenticated. The admin API on 4002 and the
+# claim-check gateway on 4001 are open by design (see README) — do NOT publish
+# those ports publicly; front them with your own proxy or network policy.
+
+node:
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+  port: 4002
+
+sources:
+  demo:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks: [{type: log}]

@@ -104,7 +104,12 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     case mod.deliver(env, ctx, opts) do
       :ok ->
-        Telemetry.emit([:dispatch, :stop], %{}, %{result: :ok, attempts: attempt})
+        Telemetry.emit([:dispatch, :stop], %{}, %{
+          instance: state.instance,
+          result: :ok,
+          attempts: attempt
+        })
+
         :ok
 
       {:error, reason} ->
@@ -117,8 +122,19 @@ defmodule Ankusa.Dispatch.Pipeline do
 
           :give_up ->
             DLQ.write(state.config, env, {:sink, mod, reason})
-            Telemetry.emit([:dispatch, :dlq], %{}, %{source_id: env.source_id, sink: mod})
-            Telemetry.emit([:dispatch, :stop], %{}, %{result: :dlq, attempts: attempt})
+
+            Telemetry.emit([:dispatch, :dlq], %{}, %{
+              instance: state.instance,
+              source_id: env.source_id,
+              sink: mod
+            })
+
+            Telemetry.emit([:dispatch, :stop], %{}, %{
+              instance: state.instance,
+              result: :dlq,
+              attempts: attempt
+            })
+
             :ok
         end
     end

@@ -1,0 +1,54 @@
+# One process, one host, no external services beyond the sinks themselves.
+#
+#   topology : edge + dispatch + storage in a single container
+#   WAL      : local disk (survives process crash and power loss on this host)
+#   storage  : local filesystem
+#   secrets  : STRIPE_WHSEC, GITHUB_WEBHOOK_SECRET (injected via ${VAR})
+#   sink     : SINK_URL, an HTTP endpoint you own
+#
+# Run it with:
+#
+#   docker run --rm -p 4000:4000 -p 127.0.0.1:4002:4002 \
+#     -v "$PWD/single-node.yml:/etc/ankusa/ankusa.yml" \
+#     -v ankusa-data:/var/lib/ankusa \
+#     -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
+#     jamescarr/ankusa
+
+node:
+  roles: [edge, dispatch, storage]
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+
+sources:
+  stripe:
+    tenant: default
+    verify:
+      type: stripe
+      secret: "${STRIPE_WHSEC}"
+      tolerance_seconds: 300
+    dedup: {type: stripe}
+    # A rotated secret should not silently eat real events: hold them instead.
+    on_verify_failure: quarantine
+    sinks:
+      - type: http
+        url: "${SINK_URL}"
+        method: post
+        timeout_ms: 5000
+        headers:
+          x-ankusa-source: stripe
+
+  github:
+    verify:
+      type: github
+      secret: "${GITHUB_WEBHOOK_SECRET}"
+    # GitHub retries and can deliver the same event twice.
+    dedup: {type: github}
+    on_verify_failure: reject
+    sinks:
+      - type: http
+        url: "${SINK_URL}"
+        method: post
+        headers:
+          x-ankusa-source: github

@@ -1,0 +1,50 @@
+# Fan out every accepted hook to Kafka, with large bodies offloaded to the
+# claim-check gateway.
+#
+#   topology : all roles in one container, the claim-check gateway included
+#              (port 4001)
+#   sink     : KAFKA_BROKERS ("host:port,host:port"), topic KAFKA_TOPIC
+#   secrets  : STRIPE_WHSEC, KAFKA_USERNAME, KAFKA_SASL_PASSWORD,
+#              CLAIM_CHECK_TOKEN
+#
+# Messages are `Ankusa.Sink.Message`: the body rides inline up to
+# `inline_max_bytes`, and above that it is checked in to the claim check and
+# the message carries a ticket instead. Consumers redeem the ticket at the
+# gateway on port 4001, with no blob-store credentials of their own.
+#
+# The claim-check gateway's tokens are OPTIONAL: drop the `tokens:` block (and
+# CLAIM_CHECK_TOKEN) and the gateway is open, with auth delegated to whatever
+# fronts port 4001.
+
+node:
+  roles: [edge, dispatch, storage, claim_check]
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+
+claim_check:
+  port: 4001
+  max_bytes: 8000000
+  tokens:
+    - token: "${CLAIM_CHECK_TOKEN}"
+      tenants: all
+
+sources:
+  stripe:
+    verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
+    dedup: {type: stripe}
+    on_verify_failure: quarantine
+    sinks:
+      - type: kafka
+        brokers: "${KAFKA_BROKERS}"
+        topic: "${KAFKA_TOPIC:-ankusa.hooks}"
+        # Partition key: same tenant/source stays ordered.
+        key: stripe
+        # Above this, the body becomes a claim ticket.
+        inline_max_bytes: 8192
+        ssl: false
+        sasl:
+          mechanism: plain
+          username: "${KAFKA_USERNAME}"
+          password: "${KAFKA_SASL_PASSWORD}"

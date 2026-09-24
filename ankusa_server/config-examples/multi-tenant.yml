@@ -1,0 +1,45 @@
+# One instance, many tenants: the tenant is in the URL.
+#
+#   POST /webhooks/{tenant_id}/{source_id}
+#
+# The path segment is authoritative — it scopes dedup and storage — so one
+# provider source can serve every customer without a source per customer:
+#
+#   POST /webhooks/acme/stripe
+#   POST /webhooks/globex/stripe
+#
+# are independent dedup scopes. Authorization is your proxy's job: the URL
+# carries the tenant precisely so a policy layer can decide on the route,
+# without reading bodies.
+#
+# Caveat: senders must be told the tenant-scoped URL. Providers that let you
+# configure one webhook endpoint per tenant (or a per-tenant signing secret)
+# fit naturally; providers that only allow a single global endpoint do not.
+
+node:
+  roles: [edge, dispatch, storage]
+  data_dir: /var/lib/ankusa
+
+http:
+  routing: tenant_path
+  prefix: /webhooks
+
+admin:
+  enabled: true
+
+sources:
+  stripe:
+    # Overridden per request by the tenant in the path.
+    tenant: default
+    verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
+    dedup: {type: stripe}
+    on_verify_failure: reject
+    sinks:
+      - type: http
+        url: "${SINK_URL}"
+        method: post
+
+  demo:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks: [{type: log}]

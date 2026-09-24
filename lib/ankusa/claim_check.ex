@@ -85,7 +85,7 @@ defmodule Ankusa.ClaimCheck do
         {:ok, ticket}
       end
 
-    emit(:check_in, started, byte_size(bin), meta, mod, result)
+    emit(instance, :check_in, started, byte_size(bin), meta, mod, result)
     result
   end
 
@@ -108,6 +108,7 @@ defmodule Ankusa.ClaimCheck do
       end
 
     emit(
+      instance,
       :redeem,
       started,
       ticket.size,
@@ -125,7 +126,6 @@ defmodule Ankusa.ClaimCheck do
 
     * a `:claim_check`-role node configured with the `Remote` adapter (it
       would proxy to itself)
-    * a `:claim_check`-role node with no `api_tokens` (never an open blob proxy)
     * `claim_check.max_bytes < max_body_bytes` on a `:dispatch` node (would
       dead-letter hooks the edge legitimately accepted)
     * `claim_check.retention_days` set with a non-`LocalFS` claim store (the
@@ -142,12 +142,6 @@ defmodule Ankusa.ClaimCheck do
 
         _ ->
           :ok
-      end
-
-      if cc.api_tokens == %{} do
-        raise ArgumentError,
-              "claim_check.api_tokens is empty on a :claim_check-role node — refusing to boot an " <>
-                "unauthenticated blob proxy. Configure at least one bearer token."
       end
     end
 
@@ -208,13 +202,13 @@ defmodule Ankusa.ClaimCheck do
     end
   end
 
-  defp emit(op, started, size, meta, adapter, result) do
+  defp emit(instance, op, started, size, meta, adapter, result) do
     duration = System.monotonic_time() - started
 
     Telemetry.emit(
       [:claim_check, op],
       %{duration: duration, size: size},
-      Map.merge(meta, %{adapter: adapter, result: result_tag(result)})
+      Map.merge(meta, %{instance: instance, adapter: adapter, result: result_tag(result)})
     )
   end
 

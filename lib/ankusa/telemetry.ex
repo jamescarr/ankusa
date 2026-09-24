@@ -19,16 +19,19 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dedup, :hit]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
-  | `[:ankusa, :dispatch, :stop]` | — | `:result`, `:attempts` |
-  | `[:ankusa, :dispatch, :dlq]` | — | `:source_id`, `:sink` |
+  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
+  | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
-  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size` | `:tenant_id`, `:adapter`, `:result` |
-  | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:tenant_id`, `:id`, `:adapter`, `:result` |
+  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
+  | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
 
   `:outcome` on `:ingest` is `:committed | :duplicate | :quarantined | :rejected`,
   or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,
   independent of what the source's `on_verify_failure` policy then decides.
+
+  `Ankusa.Metrics` is the built-in Prometheus mapping of these events, served by
+  the admin API's `GET /metrics`.
   """
 
   @doc "Emit a telemetry event."

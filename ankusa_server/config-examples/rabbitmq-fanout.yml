@@ -1,0 +1,45 @@
+# Fan out every accepted hook to a RabbitMQ exchange, with large bodies
+# offloaded to the claim-check gateway.
+#
+#   topology : all roles in one container, the claim-check gateway included
+#              (port 4001)
+#   sink     : RABBITMQ_URL ("amqp://user:pass@host:5672"), exchange
+#              RABBITMQ_EXCHANGE (created durable if missing; queues are the
+#              consumer's business, not this sink's)
+#   secrets  : STANDARD_WEBHOOKS_SECRET, CLAIM_CHECK_TOKEN
+#
+# Messages are `Ankusa.Sink.Message`, byte-identical to what the Kafka sink
+# produces, so one consumer can read either. Bodies above `inline_max_bytes`
+# become a claim ticket, redeemed at the gateway on port 4001.
+#
+# The claim-check gateway's tokens are OPTIONAL: drop the `tokens:` block (and
+# CLAIM_CHECK_TOKEN) and the gateway is open, with auth delegated to whatever
+# fronts port 4001.
+
+node:
+  roles: [edge, dispatch, storage, claim_check]
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+
+claim_check:
+  port: 4001
+  max_bytes: 8000000
+  tokens:
+    - token: "${CLAIM_CHECK_TOKEN}"
+      # Scope a token to the tenants it may read/write, or `all`.
+      tenants: all
+
+sources:
+  shopify:
+    verify: {type: standard_webhooks, secret: "${STANDARD_WEBHOOKS_SECRET}"}
+    dedup: {type: rules}
+    on_verify_failure: quarantine
+    sinks:
+      - type: rabbitmq
+        url: "${RABBITMQ_URL}"
+        exchange: "${RABBITMQ_EXCHANGE}"
+        exchange_type: topic
+        routing_key: "ankusa.shopify"
+        inline_max_bytes: 8192

@@ -11,6 +11,31 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 
 ## [Unreleased]
 
+### Added
+
+- Admin API (`Ankusa.Admin.Router`), started when `admin.enabled` is true
+  (default `false`, port `4002`): `GET /health`, `GET /metrics`,
+  `GET /v1/config` (redacted), `GET /v1/dlq`, `POST /v1/dlq/replay`,
+  `GET /v1/quarantine`. Unauthenticated by design — front it with your own
+  proxy or network policy. Contract:
+  [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/admin.v1.yaml).
+- `Ankusa.Metrics`: a per-instance Prometheus reporter behind `/metrics`,
+  covering ingest, verification, WAL commit, dedup, load shedding,
+  quarantine, dispatch, compaction, and claim check. New dependencies:
+  `telemetry_metrics` and `telemetry_metrics_prometheus_core`.
+- `:instance` in the metadata of `[:ankusa, :dispatch, :stop]`,
+  `[:ankusa, :dispatch, :dlq]`, `[:ankusa, :claim_check, :check_in]`, and
+  `[:ankusa, :claim_check, :redeem]`.
+
+### Changed
+
+- `claim_check.api_tokens` is optional. Empty (the default) leaves the
+  claim-check gateway open, with authentication delegated to whatever fronts
+  the port; a `:claim_check`-role node no longer fails to boot without
+  tokens.
+- `Ankusa.ClaimCheck.Remote`'s `:token` is optional; omit it when the gateway
+  has no `api_tokens`.
+
 ## [0.1.0] - 2026-09-23
 
 ### Added

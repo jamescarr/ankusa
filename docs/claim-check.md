@@ -133,8 +133,8 @@ config :ankusa,
   claim_check: %{adapter: {Ankusa.ClaimCheck.Remote, url: "http://claim-check.internal:4001", token: "..."}}
 ```
 
-opts: `:url` (required), `:token` (required), `:timeout_ms` (default
-`10_000`).
+opts: `:url` (required), `:token` (optional; omit it when the gateway has no
+`api_tokens`), `:timeout_ms` (default `10_000`).
 
 **Architecture rule: RPC only downstream of the WAL.** Per
 [`architecture.md`](architecture.md)'s "no component may require another to
@@ -148,10 +148,11 @@ today; if one is ever added, it must be `Direct`-only.
 ## The `:claim_check` role
 
 Off by default (`roles` defaults to `[:edge, :dispatch, :storage]`) — it
-opens an authenticated port. Enable with `ANKUSA_ROLES=claim_check` or
-`roles: [:claim_check]`. Its own `Bandit` listener (`claim_check.port`,
-default `4001`), separate from the edge on purpose: the edge is
-internet-facing and the claim API is internal-network only.
+opens a port that serves stored payloads. Enable with
+`ANKUSA_ROLES=claim_check` or `roles: [:claim_check]`. Its own `Bandit`
+listener (`claim_check.port`, default `4001`), separate from the edge on
+purpose: the edge is internet-facing and the claim API is internal-network
+only.
 
 A node running only `:claim_check` needs no WAL — `Ankusa.Instance` boots
 the configured `Ankusa.WAL` only when `:edge`, `:dispatch`, or `:storage` is
@@ -160,7 +161,8 @@ credentials.
 
 ### HTTP API (v1)
 
-Every `/v1/claims/*` request requires `authorization: Bearer <token>`.
+With `api_tokens` configured, every `/v1/claims/*` request requires
+`authorization: Bearer <token>`. With none, the gateway is open (see below).
 
 | Request | Success | Errors |
 | --- | --- | --- |
@@ -184,11 +186,13 @@ check itself. Integrity is verified end-to-end by the actual redeemer, in
 config :ankusa, claim_check: %{api_tokens: %{"<token>" => :all | ["acme", "globex"]}}
 ```
 
-Tokens are stored `sha256(token) => scope` in `:persistent_term`; a request
-hashes the presented token and does one map lookup — raw tokens are never
-compared byte-by-byte. `:all` authorizes every tenant; a list scopes to
-exactly those. A `:claim_check`-role node with no `api_tokens` configured
-fails to boot — **never an open blob proxy.**
+Tokens are optional. With `api_tokens` configured, they are stored
+`sha256(token) => scope`; a request hashes the presented token and does one
+map lookup — raw tokens are never compared byte-by-byte. `:all` authorizes
+every tenant; a list scopes to exactly those. With no `api_tokens`, the
+gateway is open: every request is authorized for every tenant, and
+authentication is delegated to whatever fronts the port (a proxy, SSO,
+network policy) — the same stance as the admin API.
 
 Static config is enough today. Dynamic, per-tenant tokens depend on the
 same missing control plane as `SourceStore.Ecto` — see
@@ -215,7 +219,7 @@ config :ankusa,
 | `claim_check.adapter` | `{Ankusa.ClaimCheck.Direct, []}` | `{module, opts}` implementing `Ankusa.ClaimCheck`. |
 | `claim_check.max_bytes` | `8_000_000` | Hard cap on a checked-in body. `Ankusa.ClaimCheck.validate_config!/1` fails boot if this is smaller than `max_body_bytes` on a `:dispatch` node — that combination would dead-letter hooks the edge already accepted. |
 | `claim_check.port` | `4001` | The `:claim_check` role's Bandit port. |
-| `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`. Required (non-empty) on a `:claim_check`-role node. |
+| `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`. Optional; empty leaves the gateway open, with authentication delegated to whatever fronts the port. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
 
@@ -224,7 +228,6 @@ config :ankusa,
 
 - `claim_check.adapter` set to `Remote` on a `:claim_check`-role node — it
   would proxy the API to itself.
-- An empty `api_tokens` on a `:claim_check`-role node.
 - `claim_check.max_bytes` smaller than `max_body_bytes` on a `:dispatch`
   node.
 - `claim_check.retention_days` set against a non-`LocalFS` claim store —
@@ -271,8 +274,10 @@ Emitted by the facade — covers every adapter and every caller, Direct or
 Remote:
 
 - `[:ankusa, :claim_check, :check_in]` — measurements `%{duration, size}`;
-  meta `%{tenant_id, id, adapter, result}`
-- `[:ankusa, :claim_check, :redeem]` — same shape
+  meta `%{instance, tenant_id, id, adapter, result}`, plus `content_type`
+  when the caller passes one
+- `[:ankusa, :claim_check, :redeem]` — measurements `%{duration, size}`;
+  meta `%{instance, tenant_id, id, adapter, result}`
 - `[:ankusa, :claim_check, :sweep]` — measurements `%{deleted, scanned, duration}`
 
 ## Open decisions (deferred, each with a trigger)

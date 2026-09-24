@@ -12,6 +12,8 @@ defmodule Ankusa.Instance do
 
   use Supervisor
 
+  require Logger
+
   alias Ankusa.Config
 
   @spec start_link(Config.t()) :: Supervisor.on_start()
@@ -35,13 +37,23 @@ defmodule Ankusa.Instance do
     opts = [instance: config.instance, config: config]
 
     children =
-      wal_children(config, opts) ++
+      metrics_children(config, opts) ++
+        wal_children(config, opts) ++
         edge_children(config, opts) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
-        claim_check_children(config, opts)
+        claim_check_children(config, opts) ++
+        admin_children(config, opts)
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  # The admin API's Prometheus reporter, first of all: it attaches its handlers
+  # synchronously (`start_async: false`), so the events every later child emits
+  # while starting — boot-time dispatch of the WAL backlog, ingest the edge
+  # accepts before the rest of the tree is up — are counted.
+  defp metrics_children(config, opts) do
+    if config.admin.enabled, do: [{Ankusa.Metrics, opts}], else: []
   end
 
   # The WAL only matters to roles that actually read or write it. A node
@@ -71,6 +83,13 @@ defmodule Ankusa.Instance do
 
   defp claim_check_children(config, _opts) do
     if Config.role?(config, :claim_check) do
+      if config.claim_check.api_tokens == %{} do
+        Logger.warning(
+          "[ankusa] claim-check API on :#{config.claim_check.port} has no api_tokens and is " <>
+            "unauthenticated; protect it with your own proxy or network policy"
+        )
+      end
+
       [
         Supervisor.child_spec(
           {Bandit,
@@ -99,5 +118,28 @@ defmodule Ankusa.Instance do
 
   defp sweeper_children(config, opts) do
     if config.claim_check.retention_days, do: [{Ankusa.ClaimCheck.Sweeper, opts}], else: []
+  end
+
+  # The operator API, last, so it only listens once everything it reports on
+  # has started.
+  defp admin_children(config, _opts) do
+    if config.admin.enabled do
+      Logger.warning(
+        "[ankusa] admin API on :#{config.admin.port} is unauthenticated; do not expose it " <>
+          "publicly, front it with your own proxy or network policy"
+      )
+
+      [
+        Supervisor.child_spec(
+          {Bandit,
+           plug: {Ankusa.Admin.Router, [instance: config.instance]},
+           scheme: :http,
+           port: config.admin.port},
+          id: Ankusa.Admin.Router
+        )
+      ]
+    else
+      []
+    end
   end
 end

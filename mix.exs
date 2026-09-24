@@ -103,6 +103,11 @@ defmodule Ankusa.MixProject do
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
       # string-to-sign / HMAC-chain code in Ankusa.BlobStore.S3.
       {:aws_signature, "~> 0.4"},
+      # Built-in Prometheus mapping of Ankusa.Telemetry (Ankusa.Metrics).
+      # Every deployment wants metrics, so they live in core rather than an
+      # adapter package.
+      {:telemetry_metrics, "~> 1.2"},
+      {:telemetry_metrics_prometheus_core, "~> 1.2"},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
   end

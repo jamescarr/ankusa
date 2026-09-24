@@ -16,7 +16,7 @@ defmodule Ankusa.ClaimCheck.Remote do
   opts:
 
     * `:url`         — required, e.g. `"http://claim-check.internal:4001"`
-    * `:token`        — required bearer token
+    * `:token`       — optional bearer token; omit when the gateway has no api_tokens
     * `:timeout_ms`  — default `10_000`
     * `:req_options` — transport options for the HTTP client (custom Finch pool,
                        proxy, or `plug:` for `Req.Test` in tests). See
@@ -87,15 +87,17 @@ defmodule Ankusa.ClaimCheck.Remote do
   # `content_type` is only supplied for `:put` — the router requires *some*
   # Content-Type on a body, but a GET carries none.
   defp request(opts, method, url, body, extra_headers, content_type \\ nil) do
-    token = Keyword.fetch!(opts, :token)
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
 
     headers =
-      [{"authorization", "Bearer #{token}"} | extra_headers] ++
-        if content_type, do: [{"content-type", content_type}], else: []
+      auth_header(Keyword.get(opts, :token)) ++
+        extra_headers ++ if content_type, do: [{"content-type", content_type}], else: []
 
     HttpClient.request(method, url, headers, body, timeout, Keyword.get(opts, :req_options, []))
   end
+
+  defp auth_header(nil), do: []
+  defp auth_header(token), do: [{"authorization", "Bearer #{token}"}]
 
   defp map_error(400, body), do: {:error, error_atom(body, :invalid_tenant)}
   defp map_error(401, _body), do: {:error, :unauthorized}
