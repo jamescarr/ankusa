@@ -1,0 +1,295 @@
+openapi: 3.2.0
+info:
+  title: Ankusa Ingest API
+  version: 1.0.0
+  summary: Point a provider's webhook at a catch URL, get an honest 2xx.
+  description: |
+    HTTP surface of the `:edge` role. This document is the cross-language
+    contract for webhook *senders*: the Elixir code conforms to it, not the
+    reverse.
+
+    The core invariant is visible in the status codes: a `2xx` is never
+    returned until the hook is durably in the WAL. `201 accepted` means
+    committed, `200 duplicate` means the dedup key was already committed (the
+    provider retried; nothing extra was stored), `202 quarantined` means the
+    source's policy kept a failed-verification hook instead of rejecting it.
+
+    There is no request authentication here beyond provider signature
+    verification, which is webhook semantics rather than access control: the
+    source's configured verifier (Stripe, GitHub, Standard Webhooks, or none)
+    checks the provider's own signature header over the exact raw body.
+
+    The catch-URL shape is pluggable (`Ankusa.RouteResolver`). The two paths
+    below are the shipped resolvers: `.../webhooks/{source_id}` (single-tenant,
+    the default) and `.../webhooks/{tenant_id}/{source_id}` (the tenant is
+    authoritative from the path).
+servers:
+  - url: http://localhost:4000
+    description: Local development listener (default `port`).
+security: []
+tags:
+  - name: ingest
+    description: Accept a provider's webhook.
+  - name: operations
+    description: Health and self-description.
+paths:
+  /webhooks/{source_id}:
+    parameters:
+      - $ref: '#/components/parameters/SourceId'
+    post:
+      operationId: ingestHook
+      tags: [ingest]
+      summary: Ingest a hook for a source
+      description: |
+        The default catch URL (`Ankusa.RouteResolver.Path`, prefix
+        `webhooks`). The tenant comes from the source config.
+      requestBody:
+        required: true
+        description: |
+          The provider's exact raw bytes, at most `max_body_bytes`. Signature
+          verification runs over these bytes verbatim, so any transformation
+          (JSON re-encoding, whitespace) invalidates the signature.
+        content:
+          '*/*': {}
+      responses:
+        '201':
+          $ref: '#/components/responses/Accepted'
+        '200':
+          $ref: '#/components/responses/Duplicate'
+        '202':
+          $ref: '#/components/responses/Quarantined'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/VerificationFailed'
+        '404':
+          $ref: '#/components/responses/UnknownSource'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '503':
+          $ref: '#/components/responses/Overloaded'
+  /webhooks/{tenant_id}/{source_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantId'
+      - $ref: '#/components/parameters/SourceId'
+    post:
+      operationId: ingestHookForTenant
+      tags: [ingest]
+      summary: Ingest a hook for a tenant's source
+      description: |
+        The multi-tenant catch URL (`Ankusa.RouteResolver.TenantPath`, prefix
+        `webhooks`). The tenant in the path is authoritative: it scopes dedup
+        and storage, and overrides the source's configured tenant.
+      requestBody:
+        required: true
+        description: The provider's exact raw bytes, at most `max_body_bytes`.
+        content:
+          '*/*': {}
+      responses:
+        '201':
+          $ref: '#/components/responses/Accepted'
+        '200':
+          $ref: '#/components/responses/Duplicate'
+        '202':
+          $ref: '#/components/responses/Quarantined'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/VerificationFailed'
+        '404':
+          $ref: '#/components/responses/UnknownSource'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '503':
+          $ref: '#/components/responses/Overloaded'
+  /health:
+    get:
+      operationId: getHealth
+      tags: [operations]
+      summary: Liveness probe
+      description: |
+        Always `200` while the listener is up. The embedded WAL stats are `{}`
+        when the WAL is not running on this node (a `:claim_check`-only node).
+      responses:
+        '200':
+          description: The listener is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /stats:
+    get:
+      operationId: getStats
+      tags: [operations]
+      summary: WAL statistics for this node
+      responses:
+        '200':
+          description: This node's own WAL stats.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Stats'
+components:
+  parameters:
+    SourceId:
+      name: source_id
+      in: path
+      required: true
+      description: |
+        A declared `Ankusa.Source` id. An undeclared id is a `404
+        unknown_source`, not an auto-created source.
+      schema:
+        type: string
+        minLength: 1
+    TenantId:
+      name: tenant_id
+      in: path
+      required: true
+      description: |
+        Any non-empty UTF-8 string. Percent-encoded in the path.
+      schema:
+        type: string
+        minLength: 1
+  headers:
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+        minimum: 1
+  schemas:
+    Accepted:
+      type: object
+      description: The hook is durably committed.
+      required: [status, id, seq]
+      properties:
+        status:
+          const: accepted
+        id:
+          type: string
+          description: The envelope id, echoed for correlation with the provider's event.
+        seq:
+          type: integer
+          minimum: 1
+          description: WAL sequence number, strictly increasing across commits.
+    Duplicate:
+      type: object
+      description: |
+        The dedup key was already committed. Nothing extra was stored, and the
+        sender is told `2xx` so it stops retrying.
+      required: [status, id, seq]
+      properties:
+        status:
+          const: duplicate
+        id:
+          type: string
+        seq:
+          type: integer
+          minimum: 1
+          description: Sequence number of the record that owns the dedup key.
+    Quarantined:
+      type: object
+      required: [status, reason]
+      properties:
+        status:
+          const: quarantined
+        reason:
+          type: string
+          description: |
+            `inspect/1` of the verifier's failure reason, e.g. `:no_match`.
+      description: |
+        Verification failed and the source's `on_verify_failure` is
+        `quarantine`.
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum:
+            - unknown_source
+            - verification_failed
+            - payload_too_large
+            - body_read_failed
+            - not_found
+            - overload
+            - store_unavailable
+        reason:
+          type: string
+          description: Present on `verification_failed` and `body_read_failed`.
+        limit:
+          type: integer
+          description: Present on `payload_too_large`; the configured `max_body_bytes`.
+    Health:
+      type: object
+      required: [status, instance, wal]
+      properties:
+        status:
+          const: ok
+        instance:
+          type: string
+        wal:
+          type: object
+          description: Adapter-defined WAL stats, `{}` when no WAL runs on this node.
+    Stats:
+      type: object
+      required: [instance, wal]
+      properties:
+        instance:
+          type: string
+        wal:
+          type: object
+  responses:
+    Accepted:
+      description: '`201`. Committed and durably stored.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Accepted'
+    Duplicate:
+      description: '`200`. Absorbed by dedup; the original is already committed.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Duplicate'
+    Quarantined:
+      description: '`202`. Held for an operator; see the source''s `on_verify_failure`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Quarantined'
+    BadRequest:
+      description: '`400`. `body_read_failed`: the body could not be read at all (client disconnect, read timeout). Retry.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    VerificationFailed:
+      description: '`401`. `verification_failed`. Permanent for this body — do not retry unchanged.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnknownSource:
+      description: '`404`. `unknown_source`. Permanent; the catch URL names no declared source.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooLarge:
+      description: '`413`. `payload_too_large`. Permanent; body exceeds `max_body_bytes`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Overloaded:
+      description: |
+        '`503`. `overload` (batcher queue full: the edge sheds load rather than
+        growing without bound) or `store_unavailable` (WAL write failed).
+        Transient — retry after the `Retry-After` seconds.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

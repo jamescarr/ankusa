@@ -41,7 +41,8 @@ defmodule Ankusa.Instance do
         edge_children(config, opts) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
-        claim_check_children(config, opts)
+        claim_check_children(config, opts) ++
+        admin_children(config, opts)
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -108,5 +109,30 @@ defmodule Ankusa.Instance do
 
   defp sweeper_children(config, opts) do
     if config.claim_check.retention_days, do: [{Ankusa.ClaimCheck.Sweeper, opts}], else: []
+  end
+
+  # The operator API and its Prometheus reporter. The reporter goes first: it
+  # registers its event handlers synchronously (`start_async: false`), so
+  # nothing emitted by a later child is missed.
+  defp admin_children(config, opts) do
+    if config.admin.enabled do
+      Logger.warning(
+        "[ankusa] admin API on :#{config.admin.port} is unauthenticated; do not expose it " <>
+          "publicly, front it with your own proxy or network policy"
+      )
+
+      [
+        {Ankusa.Metrics, opts},
+        Supervisor.child_spec(
+          {Bandit,
+           plug: {Ankusa.Admin.Router, [instance: config.instance]},
+           scheme: :http,
+           port: config.admin.port},
+          id: Ankusa.Admin.Router
+        )
+      ]
+    else
+      []
+    end
   end
 end
