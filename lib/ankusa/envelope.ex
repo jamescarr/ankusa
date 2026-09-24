@@ -79,12 +79,13 @@ end
 defmodule Ankusa.Verification do
   @moduledoc "Result of running a `Ankusa.Verifier` against an envelope."
 
-  defstruct status: :skipped, provider: nil, reason: nil, flagged: false
+  defstruct status: :skipped, provider: nil, scheme: nil, reason: nil, flagged: false
 
   @type status :: :ok | :failed | :skipped
   @type t :: %__MODULE__{
           status: status(),
           provider: module() | nil,
+          scheme: String.t() | nil,
           reason: term(),
           flagged: boolean()
         }

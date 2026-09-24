@@ -19,6 +19,7 @@ defmodule Ankusa.Verifier do
     * `:no_match` — nothing matched the expected digest
     * `:timestamp_out_of_tolerance` — outside the replay window
     * `:bad_secret` — the configured secret can't be used as a key
+    * `:bad_scheme` — an unknown or missing scheme name (`Verifier.Hmac`)
   """
 
   alias Ankusa.Envelope
@@ -30,6 +31,15 @@ defmodule Ankusa.Verifier do
   the source's `on_verify_failure` policy (`:reject | :quarantine | :accept_flag`).
   """
   @callback verify(Envelope.t(), opts :: keyword()) :: :ok | {:error, term()}
+
+  @doc """
+  Human name of the scheme for telemetry; `nil` when the verifier has no named
+  scheme. Optional — verifiers that only implement `verify/2` are attributed by
+  their module name instead.
+  """
+  @callback scheme_name(opts :: keyword()) :: String.t() | nil
+
+  @optional_callbacks scheme_name: 1
 
   @doc "Constant-time compare of two binaries of equal length."
   @spec secure_compare(binary(), binary()) :: boolean()

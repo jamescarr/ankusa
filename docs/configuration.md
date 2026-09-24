@@ -76,10 +76,50 @@ One source per provider endpoint; the key is the catch-URL segment
 | Key | Meaning |
 | --- | --- |
 | `tenant` | The dedup/storage/retention scope. With `routing: tenant_path` the URL wins. Default `default` — see [`multi-tenancy.md`](multi-tenancy.md). |
-| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks`. The last three require `secret`; `stripe` and `standard_webhooks` also take `tolerance_seconds` (default 300). |
+| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300). `hmac` takes the descriptor keys below. |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag` — what happens when verification fails. |
 | `dedup.type` | `rules` \| `stripe` \| `github`. `rules` takes `header` and/or `json_path` (a dot path into the JSON body); with neither it tries the `webhook-id` header, then the JSON `id`. |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
+
+### Custom HMAC schemes
+
+The five named verifier types (`stripe`, `github`, `standard_webhooks`, `shopify`,
+`slack`) are presets for the same engine. Any other body-HMAC provider is
+described inline with `type: hmac` and the descriptor keys:
+
+```yaml
+sources:
+  acme:
+    verify:
+      type: hmac
+      secret: "${ACME_WEBHOOK_SECRET}"
+      signature_header: "X-Acme-Signature"   # required — where the signature lives
+      signed: "{body}"                        # template over {body}, {header:NAME}, {ts}
+      hash: sha256                            # sha256 | sha512 | sha1
+      encoding: hex                           # hex | base64
+      sig_prefix: "sha256="                   # optional — stripped from the header value
+      timestamp_header: "X-Acme-Timestamp"    # optional — also signs {ts} + replay window
+      tolerance_seconds: 300
+    sinks: [{type: log}]
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `signature_header` | — | Required. The header carrying the signature(s). |
+| `signed` | `"{body}"` | Template over `{body}`, `{header:NAME}` (another header's value), and `{ts}` (the timestamp below). Quoted — `{...}` would otherwise parse as a YAML flow map. |
+| `parse` | `whole` | `whole` (value is one signature) \| `csv_pairs` (`k=v,k=v`; `sig_key` names the signature pair) \| `space_versions` (space-separated `v1,<sig>` tokens; `version` is the token prefix). |
+| `sig_prefix` | — | Literal prefix stripped from a `whole` header value, e.g. `sha256=`. |
+| `sig_key` | — | With `parse: csv_pairs`, the key whose value is a signature, e.g. `v1`. |
+| `version` | — | With `parse: space_versions`, the token prefix, e.g. `v1,`. |
+| `hash` | `sha256` | `sha256` \| `sha512` \| `sha1`. |
+| `encoding` | `hex` | `hex` (lowercase) \| `base64`. |
+| `secret_decode` | `raw` | `raw` (use `secret` as the key) \| `whsec_base64` (strip `whsec_` then Base64-decode). |
+| `timestamp_header` | — | Header carrying the Unix-seconds timestamp, both signed as `{ts}` and checked against `tolerance_seconds`. |
+
+Providers that are not body-HMAC — Twilio (SHA1 over the full request URL plus
+sorted form params) and PayPal (RSA over a certificate fetched from a provider
+URL) — cannot be described by this engine. They need a bespoke
+`Ankusa.Verifier` module.
 
 ### Sinks
 
@@ -229,7 +269,7 @@ config :ankusa,
   sources: %{
     "stripe" => [
       tenant_id: "acme",                                       # default: "default"
-      verifier: {Ankusa.Verifier.Stripe, secret: System.get_env("STRIPE_WHSEC")},
+      verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
       dedup: {Ankusa.DedupKey.Stripe, []},
       on_verify_failure: :quarantine,                           # :reject | :quarantine | :accept_flag
       sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
@@ -262,7 +302,7 @@ the map.
 | --- | --- | --- | --- |
 | `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
 | `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | `WAL.Postgres` (shared, multi-node — `ankusa_postgres` package) |
-| `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `StandardWebhooks`, `Stripe`, `GitHub` |
+| `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack) |
 | `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce — `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish — `ankusa_nats` package) |

@@ -26,7 +26,7 @@ defmodule Ankusa.MetricsTest do
                sinks: [{Ankusa.Sink.Log, []}]
              ],
              "strict" => [
-               verifier: {Ankusa.Verifier.Stripe, secret: "whsec_x"},
+               verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
                on_verify_failure: :quarantine
              ]
            }}
@@ -63,7 +63,8 @@ defmodule Ankusa.MetricsTest do
     scrape = Ankusa.Metrics.scrape(config.instance)
 
     assert scrape =~ "ankusa_verify_failures_total{"
-    assert scrape =~ ~s(provider="Ankusa.Verifier.Stripe")
+    assert scrape =~ ~s(provider="Ankusa.Verifier.Hmac")
+    assert scrape =~ ~s(scheme="stripe")
     # ...and the successful verification above left no series at all: only
     # `status: :failed` events are kept.
     refute scrape =~ ~s(provider="Ankusa.Verifier.None")

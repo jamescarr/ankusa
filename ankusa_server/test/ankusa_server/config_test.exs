@@ -60,9 +60,10 @@ defmodule AnkusaServer.ConfigTest do
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) |> Enum.sort() == ["github", "open", "standard", "stripe"]
 
-    %{verifier: {Ankusa.Verifier.Stripe, stripe_opts}, sinks: sinks} =
+    %{verifier: {Ankusa.Verifier.Hmac, stripe_opts}, sinks: sinks} =
       source_from(config, "stripe")
 
+    assert stripe_opts[:scheme] == :stripe
     assert stripe_opts[:secret] == @fixture_env["STRIPE_WHSEC"]
     assert stripe_opts[:tolerance] == 300
 
@@ -351,7 +352,8 @@ defmodule AnkusaServer.ConfigTest do
     assert source.on_verify_failure == :accept_flag
 
     assert source.verifier ==
-             {Ankusa.Verifier.StandardWebhooks, [secret: "whsec_abc", tolerance: 60]}
+             {Ankusa.Verifier.Hmac,
+              [scheme: :standard_webhooks, secret: "whsec_abc", tolerance: 60]}
 
     assert source.dedup ==
              {Ankusa.DedupKey.Rules, [header: "x-event-id", json: ["data", "meta", "id"]]}
@@ -413,6 +415,102 @@ defmodule AnkusaServer.ConfigTest do
     refute printed =~ "SUAseed"
     assert printed =~ "eyJacc"
     assert printed =~ "[REDACTED]"
+  end
+
+  test "named hmac schemes shopify and slack resolve to the engine preset" do
+    path =
+      tmp_config("""
+      sources:
+        shop:
+          verify: {type: shopify, secret: "shpss_abc"}
+          sinks: [{type: log}]
+        slack:
+          verify: {type: slack, secret: "slack-secret", tolerance_seconds: 30}
+          sinks: [{type: log}]
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert source_from(config, "shop").verifier ==
+             {Ankusa.Verifier.Hmac, [scheme: :shopify, secret: "shpss_abc"]}
+
+    assert source_from(config, "slack").verifier ==
+             {Ankusa.Verifier.Hmac, [scheme: :slack, secret: "slack-secret", tolerance: 30]}
+  end
+
+  test "type hmac builds an inline scheme from the descriptor keys" do
+    path =
+      tmp_config("""
+      sources:
+        custom:
+          verify:
+            type: hmac
+            secret: "custom-secret"
+            signature_header: "X-Custom-Sig"
+            sig_prefix: "sha256="
+            signed: "{body}"
+            hash: sha256
+            encoding: hex
+            tolerance_seconds: 120
+          sinks: [{type: log}]
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert source_from(config, "custom").verifier ==
+             {Ankusa.Verifier.Hmac,
+              [
+                scheme: %Ankusa.Verifier.Hmac.Scheme{
+                  signature_header: "X-Custom-Sig",
+                  parse: :whole,
+                  sig_prefix: "sha256=",
+                  sig_key: nil,
+                  version: nil,
+                  signed: "{body}",
+                  hash: :sha256,
+                  encoding: :hex,
+                  secret_decode: :raw,
+                  timestamp: nil
+                },
+                secret: "custom-secret",
+                tolerance: 120
+              ]}
+  end
+
+  test "type hmac maps timestamp_header and rejects a bad enum" do
+    path =
+      tmp_config("""
+      sources:
+        custom:
+          verify:
+            type: hmac
+            secret: "custom-secret"
+            signature_header: "X-Custom-Sig"
+            timestamp_header: "X-Timestamp"
+            signed: "{body}.{ts}"
+          sinks: [{type: log}]
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert {Ankusa.Verifier.Hmac, opts} = source_from(config, "custom").verifier
+    assert opts[:scheme].timestamp == {:header, "X-Timestamp"}
+    assert opts[:scheme].signed == "{body}.{ts}"
+
+    bad =
+      tmp_config("""
+      sources:
+        custom:
+          verify:
+            type: hmac
+            secret: "custom-secret"
+            signature_header: "X-Custom-Sig"
+            parse: bogus
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: bad, env: %{}) end
+    assert error.message =~ ~s(sources.custom.verify.parse: unknown value "bogus")
   end
 
   test "routing tenant_path uses the tenant resolver" do

@@ -62,7 +62,7 @@ defmodule AnkusaExample.Ingest.Application do
 
   # A single zero-config `demo` source, matching the root project's own
   # quickstart — this example is about the pipeline, not verification, so
-  # `Verifier.None` here. Swap in `Verifier.Stripe`/`StandardWebhooks` etc.
+  # `Verifier.None` here. Swap in `{Ankusa.Verifier.Hmac, scheme: :stripe}` etc.
   # for a real provider exactly as documented in the root README.
   defp source do
     [

@@ -14,7 +14,7 @@ defmodule Ankusa.Telemetry do
   | Event | Measurements | Metadata |
   | --- | --- | --- |
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome` |
-  | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:status` |
+  | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
   | `[:ankusa, :dedup, :hit]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |

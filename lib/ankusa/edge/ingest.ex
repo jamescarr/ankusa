@@ -57,18 +57,21 @@ defmodule Ankusa.Edge.Ingest do
   # ── verification + policy ─────────────────────────────────────────────────
 
   defp verify(instance, %Source{verifier: {mod, opts}} = source, env) do
+    scheme = verifier_scheme(mod, opts)
+
     outcome =
       Ankusa.Telemetry.span([:verify], %{instance: instance, source_id: source.id}, fn ->
         result = mod.verify(env, opts)
-        {result, %{provider: mod, status: verify_status(result)}}
+        {result, %{provider: mod, scheme: scheme, status: verify_status(result)}}
       end)
 
     case outcome do
       :ok ->
-        {:accept, %{env | verification: %Verification{status: :ok, provider: mod}}}
+        {:accept,
+         %{env | verification: %Verification{status: :ok, provider: mod, scheme: scheme}}}
 
       {:error, reason} ->
-        v = %Verification{status: :failed, provider: mod, reason: reason}
+        v = %Verification{status: :failed, provider: mod, scheme: scheme, reason: reason}
 
         case source.on_verify_failure do
           :reject -> {:reject, reason}
@@ -76,6 +79,10 @@ defmodule Ankusa.Edge.Ingest do
           :accept_flag -> {:accept, %{env | verification: %{v | flagged: true}}}
         end
     end
+  end
+
+  defp verifier_scheme(mod, opts) do
+    if function_exported?(mod, :scheme_name, 1), do: mod.scheme_name(opts), else: inspect(mod)
   end
 
   defp verify_status(:ok), do: :ok
