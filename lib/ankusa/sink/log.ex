@@ -11,4 +11,9 @@ defmodule Ankusa.Sink.Log do
 
     :ok
   end
+
+  # A log line has no ordering guarantee to preserve (interleaved lines are
+  # fine), so it imposes none on dispatch either.
+  @impl true
+  def ordering_key(_env, _opts), do: nil
 end

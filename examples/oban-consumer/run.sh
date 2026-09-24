@@ -3,13 +3,13 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 # Env knobs (override by exporting before invoking this script).
-# RATE default is half the measured single-instance dispatch drain rate
-# (~125 envelopes/s on the reference machine, see docs/testing.md) —
-# Ankusa.Dispatch.Pipeline delivers one envelope at a time (see
-# docs/deployment.md#dispatch-throughput), so a steady rate above that
-# ceiling builds a backlog the verify timeout won't wait out.
+# RATE defaults to 300/s. The old single-envelope dispatch ceiling (~125/s on
+# the reference machine) is gone: Ankusa.Dispatch.Pipeline delivers
+# concurrently (dispatch.concurrency, 32 by default), so the steady phase is
+# bounded by the consumer fleet, not by sink latency. Measured numbers on the
+# reference machine are recorded in docs/testing.md.
 : "${CLUSTER:=ankusa-e2e}"
-: "${RATE:=60}"
+: "${RATE:=300}"
 : "${DURATION:=60}"
 : "${BURST_SECONDS:=15}"
 : "${CONCURRENCY:=64}"

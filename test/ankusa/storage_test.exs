@@ -204,4 +204,46 @@ defmodule Ankusa.StorageTest do
     assert stats.records == 1
     assert stats.min_seq == last_seq
   end
+
+  test "roll_bytes caps segment size: a backlog compacts into several segments" do
+    inst = :"t#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    config =
+      Config.new(
+        instance: inst,
+        data_dir: dir,
+        roles: [:edge, :dispatch, :storage],
+        source_store: {Ankusa.SourceStore.Static, sources: %{"acme" => %{}}},
+        # a byte budget of 1 forces one record per segment
+        storage: %{interval_ms: 0, roll_bytes: 1}
+      )
+
+    Ankusa.put_config(config)
+    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
+    start_supervised!({Compactor, instance: inst, config: config})
+
+    originals =
+      commit!(inst, [
+        envelope("acme", "one"),
+        envelope("acme", "two"),
+        envelope("acme", "three")
+      ])
+
+    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, originals |> List.last() |> Map.fetch!(:seq))
+
+    # one tick writes every segment the backlog needs, not one segment holding
+    # the whole backlog
+    assert {:ok, 3} == Compactor.tick(inst)
+    assert length(Ankusa.BlobStore.list(inst, "seg")) == 3
+
+    for original <- originals do
+      assert {:ok, fetched} = Storage.fetch(inst, original.id)
+      assert fetched.body == original.body
+    end
+
+    # everything was compacted, so the WAL is fully reclaimed
+    assert Ankusa.WAL.stats(inst).records == 0
+  end
 end

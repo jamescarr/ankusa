@@ -80,6 +80,12 @@ defmodule Ankusa.Sink.Kafka do
     end
   end
 
+  # The record key *is* the ordering scope: Kafka delivers records with equal
+  # keys in produced order. Saying so lets dispatch run different keys
+  # concurrently instead of serializing the whole topic.
+  @impl true
+  def ordering_key(env, opts), do: key(env, opts)
+
   # Not `:brod.produce/5` with the `:hash` partitioner: that path looks the
   # partition count up with auto-creation allowed, regardless of the client's
   # `allow_topic_auto_creation: false`. `get_partitions_count_safe/2` never

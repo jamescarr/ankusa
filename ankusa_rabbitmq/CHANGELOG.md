@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `c:Ankusa.Sink.ordering_key/2`, implemented by this sink as the routing key:
+  RabbitMQ orders per queue, and the routing key decides the queue. Dispatch
+  now serializes deliveries sharing a key and runs different keys concurrently.
+
 ## [0.1.0] - 2026-09-23
 
 ### Added

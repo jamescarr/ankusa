@@ -5,21 +5,56 @@
 `Ankusa.Dispatch.Pipeline` is a `GenServer`, one per instance, that polls the
 WAL every `dispatch.poll_ms` (default 200ms) for records past its own
 durable cursor (up to `dispatch.batch` at a time, default 128). For each
-envelope, it looks the source up via `Ankusa.SourceStore` and delivers to
-every one of its `sinks`, in order.
+envelope it looks the source up via `Ankusa.SourceStore` and enqueues one
+delivery job per sink.
 
-Retries happen **inline**: `deliver_with_retry/4` calls the sink, and on
-`{:error, reason}` asks the source's `Ankusa.RetryPolicy` for a backoff,
-`Process.sleep`s that long, and retries — all within the same dispatch
-GenServer call. A sink that's persistently slow to fail therefore delays
-*that batch's* dispatch, not just that one record; this is a deliberate
-simplicity trade-off (one poller, no separate per-record retry scheduler)
-that's fine at the framework's target scale (`dispatch.batch` records per
-poll) and matches "boring" over "clever."
+Jobs run concurrently — up to `dispatch.concurrency` (default 32) at a time,
+each in a `Task.Supervisor` task — so a slow or retrying sink only delays what
+actually has to wait for it. What has to wait is decided by the **ordering
+key**: deliveries to the same sink with an equal
+`c:Ankusa.Sink.ordering_key/2` never overlap and run in `seq` order; different
+keys are independent. `nil` means no constraint.
 
-On `:give_up` from the retry policy, the envelope is written to the DLQ and
-dispatch moves on — one failing sink never blocks delivery to the others,
-and never blocks the next envelope.
+The cursor is a **watermark**, not a per-envelope save point: it sits at the
+last seq read when nothing is in flight, and one below the lowest
+admitted-but-unfinished seq otherwise. An envelope dispatch has already
+finished can therefore sit behind the watermark until an earlier one finishes
+— if the node dies first it is redelivered, which at-least-once permits. The
+WAL's contract (seq order *is* commit order) is what makes advancing past
+finished work safe at all.
+
+Two windows bound memory and keep a stalled destination from walking the
+pipeline into an OOM: `dispatch.max_inflight` (default 4096 envelopes) and
+`dispatch.max_inflight_bytes` (default 128 MiB of body bytes). Dispatch simply
+stops reading until something completes.
+
+On `:give_up` from the retry policy, the envelope is written to the DLQ — in
+the pipeline process, so DLQ appends stay serialized — and its jobs stop. One
+failing sink never blocks delivery to the others, and never blocks the next
+envelope. A sink that **raises, throws, or exits** is treated exactly like one
+returning `{:error, reason}`: the retry policy still applies, and the pipeline
+keeps running.
+
+### Ordering keys
+
+```elixir
+@callback ordering_key(Envelope.t(), opts :: keyword()) :: term() | nil
+
+@optional_callbacks ordering_key: 2
+```
+
+A sink's ordering key must be at least as narrow as the ordering its
+destination actually guarantees — claiming a wider scope than the destination
+provides is a correctness bug, not a throughput knob:
+
+| Sink | Key | Why |
+| --- | --- | --- |
+| `Sink.Http` | `{tenant_id, source_id}` when `ordered: true`, else `nil` | An arbitrary HTTP endpoint promises nothing about concurrent requests; opt in when yours does. |
+| `Sink.Kafka` | the record key (default `"#{tenant_id}/#{source_id}"`) | The key picks the partition, and a partition is Kafka's ordering scope. |
+| `Sink.RabbitMQ` | the routing key (default `"ankusa.#{source_id}"`) | RabbitMQ orders per queue, and the routing key decides the queue. |
+| `Sink.NATS` | the subject | Within a subject, the order is the order the stream received it. |
+| `Sink.Log` | `nil` | Interleaved log lines are fine. |
+| any sink that doesn't implement `ordering_key/2` | `{tenant_id, source_id}` | Conservative default: serialize per source rather than silently interleave. |
 
 ## `Ankusa.Sink`
 
@@ -29,12 +64,17 @@ and never blocks the next envelope.
 
 `ctx` is `%{instance:, source_id:, tenant_id:, attempt:}`. Delivery is
 at-least-once — return `:ok` only once you're certain the hook was actually
-handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`.
+handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`. A
+raised exception, throw, or exit is treated as `{:error, ...}` too.
+
+Sinks may also implement the optional `ordering_key/2` callback, which tells
+dispatch which deliveries may run concurrently — see
+[Ordering keys](#ordering-keys) above.
 
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. `ordered: true` serializes per `{tenant_id, source_id}`. |
 | `Sink.RabbitMQ` | `:amqp` — separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF) — separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat` — separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -129,10 +169,11 @@ sinks: [
 ```
 
 **The record key is the ordering scope.** The same key lands on the same
-partition, and a retried record never overtakes a later one from that key
-(inline retries block the dispatch batch). Order is *not* preserved across a
-DLQ replay, across a fleet sharing a `WAL.Postgres`, or after the topic's
-partition count changes. Keys are hashed with brod's `:hash`
+partition, and dispatch serializes deliveries sharing that key — one delivery
+per key at a time, in `seq` order (Kafka's `ordering_key/2` returns exactly
+the record key). Different keys are delivered concurrently. Order is *not*
+preserved across a DLQ replay, across a fleet sharing a `WAL.Postgres`, or
+after the topic's partition count changes. Keys are hashed with brod's `:hash`
 (`erlang:phash2/1`), not the Java client's murmur2, so the same key can land
 on a different partition than a Java producer would choose.
 
@@ -243,9 +284,10 @@ per-source override (see [`configuration.md`](configuration.md)).
 
 `Ankusa.Dispatch.DLQ` is a durable, append-only, length-prefixed log
 (`<data_dir>/<instance>/dlq/dlq.log`) — one record per give-up:
-`%{envelope:, reason:, at:}`. Reads tolerate a torn trailing record (a
-partial append) and just drop it, same discipline as the WAL and the
-quarantine log.
+`%{envelope:, reason:, at:}`. Each append is fsynced before dispatch advances
+its cursor past the hook, so a dead letter can't be lost to a power failure.
+Reads tolerate a torn trailing record (a partial append) and just drop it, same
+discipline as the WAL and the quarantine log.
 
 `Ankusa.Dispatch.replay/2` re-delivers dead-lettered hooks through their
 source's current sinks:

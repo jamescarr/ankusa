@@ -33,6 +33,11 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   provider. The `shopify` and `slack` `verify.type` values are new.
 - `scheme_name/1` optional callback on `Ankusa.Verifier`, a `scheme` field on
   `Ankusa.Verification`, and a `scheme` label on `ankusa.verify.failures.total`.
+- `c:Ankusa.Sink.ordering_key/2`: optional sink callback naming the ordering
+  scope of a delivery. Deliveries to the same sink with an equal key run one at
+  a time in `seq` order, different keys run concurrently. `Sink.Http` takes
+  `ordered: true` to opt in (off by default); `Sink.Kafka` uses its record key,
+  `Sink.RabbitMQ` its routing key, `Sink.Log` none.
 
 ### Removed
 
@@ -42,6 +47,31 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 
 ### Changed
 
+- Dispatch is **concurrent**: up to `dispatch.concurrency` (default `32`) sink
+  deliveries run at once, serialized per `c:Ankusa.Sink.ordering_key/2`, and the
+  durable cursor is a watermark that never advances past an unfinished
+  envelope. A slow or retrying sink no longer blocks the whole instance, and
+  `dispatch.max_inflight` (4096) / `dispatch.max_inflight_bytes` (128 MiB) bound
+  how much admitted-but-unfinished work it can hold. A sink that raises,
+  throws, or exits is retried and dead-lettered instead of crashing the
+  pipeline. `dispatch.batch` (128) now bounds one WAL read rather than one
+  tick's delivery.
+- `batcher.max_delay_ms` defaults to `0` and `batcher.partitions` to `2`: the
+  WAL append runs in a task, so commits pipeline naturally and extra partitions
+  only add contention. `max_queue` bounds buffered *and* in-flight records. A
+  failed WAL append now replies `{:error, :store_unavailable}` (→ `503`) to
+  every caller in the batch instead of crashing the batcher.
+- `WAL.DiskLog` truncation is logical first: `truncate_through/2` records a
+  durable seq floor (`<name>.truncated`) and drops index entries, and only
+  rewrites the file once the dead prefix passes `:rewrite_min_bytes` (default
+  64 MiB) and is as large as the live suffix. `.cursors`, `.dedup`, and
+  `.truncated` are fsynced before their rename, and `read/3` walks the index
+  with `:ets.next/2` instead of a full `:ets.select/3` scan per read.
+- `Ankusa.Storage.Compactor` honours `storage.roll_bytes`: a backlog is written
+  as several bounded segments per tick (256-record reads) instead of one
+  unbounded segment, so memory stays flat after a storage outage.
+- `storage.roll_ms` remains unimplemented; `storage.roll_bytes` is now the
+  segment bound it always claimed to be.
 - `claim_check.api_tokens` is optional. Empty (the default) leaves the
   claim-check gateway open, with authentication delegated to whatever fronts
   the port; a `:claim_check`-role node no longer fails to boot without
@@ -51,6 +81,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 - `Ankusa.Admin.Redact` also redacts `nkey_seed`, the private key a
   `Sink.NATS` deployment authenticates with, so `GET /v1/config` cannot print
   it.
+
+### Fixed
+
+- `WAL.DiskLog`: a restart after a full truncation resumed at `seq` 1 while the
+  persisted cursors were far ahead, so every new hook was skipped by dispatch
+  and then deleted by the next truncation. Seq allocation now continues from
+  the truncation floor, the persisted cursors, and the last replayed frame.
+- DLQ appends and storage-index appends are fsynced: a dispatch cursor could
+  advance past a dead letter (or a compaction cursor past index rows) that a
+  power loss then dropped, leaving the hook in neither place.
+- `Ankusa.Dispatch` no longer copies the whole pipeline state into every
+  delivery task, and `WAL.DiskLog` no longer scans its whole index per read —
+  together those two were the dispatch throughput ceiling (see
+  [`docs/testing.md`](docs/testing.md#core-bench--benchcore_benchexs)).
 
 ## [0.1.0] - 2026-09-23
 

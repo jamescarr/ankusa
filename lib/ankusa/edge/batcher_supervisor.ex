@@ -1,8 +1,10 @@
 defmodule Ankusa.Edge.BatcherSupervisor do
   @moduledoc """
-  A fixed pool of `Ankusa.Edge.Batcher` processes, one per partition (defaults to
-  one per scheduler). A single commit process would be a throughput ceiling and a
-  single point of failure; partitioning removes both.
+  A fixed pool of `Ankusa.Edge.Batcher` processes, one per partition (two by
+  default). Both WALs serialize commits on their own — the DiskLog GenServer,
+  and Postgres's per-instance advisory lock — so extra partitions mostly add
+  contention rather than throughput. What the pool still buys is fault
+  isolation: one wedged partition leaves the others committing.
   """
 
   use Supervisor

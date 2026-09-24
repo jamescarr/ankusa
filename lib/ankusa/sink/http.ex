@@ -9,6 +9,10 @@ defmodule Ankusa.Sink.Http do
     * `:method`     — HTTP method (default `:post`)
     * `:headers`    — extra request headers as `[{key, value}]` strings
     * `:timeout_ms` — request/connect timeout (default `5000`)
+    * `:ordered`    — when `true`, deliveries to this sink for the same
+                      `{tenant_id, source_id}` run one at a time in `seq` order
+                      (default `false`: deliveries have no ordering constraint
+                      and run concurrently)
     * `:req_options` — transport options for the HTTP client (custom Finch pool,
                        proxy, or `plug:` for `Req.Test` in tests). See
                        `Ankusa.HttpClient` for the accepted keys
@@ -53,6 +57,13 @@ defmodule Ankusa.Sink.Http do
       {:ok, status, _body} -> {:error, {:status, status}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # HTTP endpoints are not guaranteed to process concurrent requests in order,
+  # so ordering is opt-in: `ordered: true` serializes per {tenant, source}.
+  @impl true
+  def ordering_key(env, opts) do
+    if Keyword.get(opts, :ordered, false), do: {env.tenant_id, env.source_id}, else: nil
   end
 
   defp tenant_header(tenant_id) when is_binary(tenant_id), do: [{"x-ankusa-tenant", tenant_id}]

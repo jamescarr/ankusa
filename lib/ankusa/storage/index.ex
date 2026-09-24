@@ -82,7 +82,10 @@ defmodule Ankusa.Storage.Index do
         :ok
     end
 
-    DurableLog.append(path(config), rows)
+    # Synced: the compactor advances its cursor and truncates the WAL right
+    # after this, so an index row still in the page cache when power is lost
+    # would leave compacted records unreachable.
+    DurableLog.append(path(config), rows, sync: true)
   end
 
   @doc "Every row in the index file, in append order."

@@ -8,25 +8,31 @@ NATS).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 123 tests, no external infra needed
+mix test                              # 152 tests, no external infra needed
 mix test --include integration        # +8 tests, needs floci running (see below)
 ```
 
-The 123 always-on tests cover:
+The 152 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
-  crash-replay (torn-frame handling), truncation, and the measurements
-  `[:commit, :stop]` reports.
+  crash-replay (torn-frame handling), truncation, that a restart after a full
+  truncation does **not** reuse seqs, and the measurements `[:commit, :stop]`
+  reports.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; `Sink.Http` forwarding, status mapping, and the
   rule that a redirect is reported rather than followed; the shared
   `Ankusa.HttpClient` allowlist.
-- **Edge**: accept/duplicate/verify/quarantine/load-shed/oversize, pluggable
+- **Edge**: accept/duplicate/verify/quarantine/load-shed/oversize, shedding with
+  `503` once the batcher's queue fills while a commit is in flight, pluggable
   route resolvers (`Path` and `TenantPath`), tenant-scoped dedup end to end
   through the HTTP layer.
-- **Dispatch**: retry, DLQ.
-- **Storage**: compaction round-trip, and the live index — a lookup after a
+- **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
+  instead of killing the pipeline, and ordering — a blocked delivery holds the
+  cursor while another ordering key proceeds, and same-key deliveries stay in
+  `seq` order.
+- **Storage**: compaction round-trip, `roll_bytes` splitting a backlog into
+  several segments in one tick, and the live index — a lookup after a
   later compaction sees every row, and one taken while the compactor is down
   falls back to the file and is correct again after its restart.
 - **Claim Check** (`test/ankusa/claim_check/`): ticket validation and
@@ -64,7 +70,7 @@ whole suite just requires the container:
 ```sh
 cd ankusa_postgres
 docker compose up -d --wait   # Postgres on :5433
-mix test                      # 10 tests
+mix test                      # 11 tests
 docker compose down -v
 ```
 
@@ -84,6 +90,12 @@ Notably covers, against the *real* database (not a mock):
   `:duplicate` at the original seq. This caught a real bug during
   development (the dedup ledger originally joined back to the truncated
   table); see the adapter's own moduledoc.
+- **Commit order equals seq order** — a statement trigger sleeps inside every
+  insert, widening the allocation→commit window, while 8 writers append
+  concurrently and a reader follows the cursor. Every committed seq must be
+  seen by the reader. Before the per-instance advisory lock, this lost ~10-20%
+  of commits (34 seqs in one run); it is the chaos-phase loss, reproduced as a
+  test.
 - Two instances sharing one database never cross-contaminate seq or dedup.
 
 ## `ankusa_rabbitmq` — `mix test`
@@ -202,6 +214,51 @@ talks to external infrastructure is tested against a real instance of that
 infrastructure, not a stand-in for it — that standard applies to new
 adapters too.
 
+## Core bench — `bench/core_bench.exs`
+
+An in-process ingest → dispatch bench for core alone: no HTTP hop, no consumer,
+no Kubernetes.
+
+```sh
+MIX_ENV=test N=20000 CONCURRENCY=256 SINK_LATENCY_MS=5 mix run bench/core_bench.exs
+```
+
+It ingests `N` hooks through `Ankusa.Edge.Ingest` at `CONCURRENCY` workers, then
+waits for a sink that sleeps `SINK_LATENCY_MS` per delivery to receive every
+acked envelope. One JSON line plus a table; exit code is non-zero if anything
+acked never arrived. `MIX_ENV=test` because `config/config.exs` autostarts the
+default instance on :4000 outside `:test`.
+
+On the reference machine (Apple M4 Pro, macOS), before and after the
+reliability/perf pass:
+
+| | `end_to_end_per_s` | `drain_s` | `ingest_per_s` | `missing` |
+| --- | --- | --- | --- | --- |
+| before (sequential dispatch) | 120–123 | 162–165 | 15k–53k¹ | 0 |
+| after (concurrent dispatch) | 4.1k–4.7k | 3.9–4.6 | 66k–78k | 0 |
+
+¹ The two baseline runs differ (52.8k with the machine idle, 15.2k while builds
+and tests ran concurrently on the same host); dispatch was the ceiling either
+way, and `end_to_end_per_s` was unaffected. The "after" range is across repeated
+runs (the high end on an idle host, the low end with other work in flight).
+
+Dispatch *was* that ceiling: one envelope at a time, cursor written after each.
+`drain_s` is now ~40× lower, and the theoretical ceiling at
+`dispatch.concurrency` 32 with a 5 ms sink is 6.4k/s — the bench lands at
+4.1–4.7k/s, with the pipeline idle most of the time.
+
+Profiling this bench also surfaced two bottlenecks unrelated to the pipeline's
+shape, both fixed in this pass:
+
+- `WAL.DiskLog.read/3` used `:ets.select/3` with a `>` guard, which makes ETS
+  scan the `ordered_set` from the front on every read: 371 µs per call with the
+  cursor at the tail of a 20k-record log, versus 0.05 µs for the keyed
+  `:ets.next/2` walk it uses now.
+- the dispatch task closure reached into `state.instance`/`state.config`, which
+  captures the *whole* pipeline state — so every spawn copied `runnable`
+  (thousands of admitted envelopes) into the new process: ~580 µs per spawn,
+  46 µs once the fields are bound before the closure.
+
 ## Load and end-to-end (kind + Oban)
 
 [`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh)
@@ -215,9 +272,9 @@ through three phases against it:
 2. **chaos** — the same load, with `kubectl delete pod` against one `ankusa-edge`
    pod, `ankusa-worker-0`, and one `consumer` pod at +10s/+20s/+30s.
 3. **burst** — closed-loop at `CONCURRENCY` workers, no rate cap, for
-   `BURST_SECONDS`; the drain time this reports is the dispatch throughput
-   ceiling referenced in [`deployment.md`](deployment.md#dispatch-throughput)
-   (`Ankusa.Dispatch.Pipeline` delivers one envelope at a time).
+   `BURST_SECONDS`; the drain time it reports is how long the pipeline needed
+   after ingest stopped, so it is the dispatch throughput ceiling referenced in
+   [`deployment.md`](deployment.md#dispatch-throughput).
 
 `mix loadgen.verify` polls `processed_webhooks` (the consumer's ground truth,
 written by the idempotent `WebhookWorker.perform/1` upsert) until every acked
@@ -225,49 +282,76 @@ id shows up or its timeout expires, and fails the run on any `missing > 0` or
 `sha_mismatches > 0`.
 
 Run it yourself: `cd examples/oban-consumer && ./run.sh` (needs `kind`,
-`kubectl`, `docker`, `mix`; `brew install kind` if missing). `RATE` defaults
-to 60 — a first pass at `RATE=100` built a growing backlog under load on a
-resource-constrained laptop `kind` cluster (`drain_s` hit the verify timeout
-with `missing > 0` while dispatch was still progressing, not a loss); halving
-it against the measured burst drain rate cleared that up entirely. Results
-from a verification run, `kind` cluster otherwise idle:
+`kubectl`, `docker`, `mix`; `brew install kind` if missing). `RATE` defaults to
+300.
 
-| Machine | `RATE` | `DURATION` | Phase | accepted/s | p50 | p95 | p99 | shed | errors | missing | extra deliveries | `drain_s` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Apple M4 Pro, macOS, OrbStack | 60 | 60s | steady | 23.6 | 32.9 | 42.4 | 46.4 | 0 | 0 | **0** | 0 | 0.04 |
-| Apple M4 Pro, macOS, OrbStack | 60 | 60s | chaos | 23.5 | 32.9 | 43.6 | 49.5 | 0 | 4 | **12 (of 1581)** | 0 | 301.7 (timeout) |
-| Apple M4 Pro, macOS, OrbStack | — (burst, 64 concurrency) | 15s | burst | 3296.0 | 17.6 | 29.7 | 37.0 | 0 | 0 | **0** | 0 | 325.1 |
+Results from `RATE=60` and `RATE=300` verification runs, `kind` cluster
+otherwise idle (`RATE=60` is the same load the pre-fix numbers below used, so
+the two tables are directly comparable):
 
-(Latencies in ms.) This is the same machine every other number in this doc
-was measured on, not a production-scale claim.
+| Machine | `RATE` | Phase | accepted/s | p50 | p95 | p99 | shed | errors | missing | extra deliveries | `drain_s` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Apple M4 Pro, macOS, OrbStack | 60 | steady | 56.0 | 5.3 | 9.6 | 13.5 | 0 | 0 | **0** | 0 | 0.04 |
+| Apple M4 Pro, macOS, OrbStack | 60 | chaos | 56.1 | 5.3 | 9.5 | 14.3 | 0 | 0 | **0** | 0 | 0.04 |
+| Apple M4 Pro, macOS, OrbStack | 60 | burst (64 workers) | 1496.5 | 39.0 | 69.7 | 89.7 | 0 | 0 | **0** | 0 | 0.05 |
+| Apple M4 Pro, macOS, OrbStack | 300 | steady | 283.5 | 3.8 | 9.2 | 34.5 | 0 | 0 | **0** | 0 | 0.08 |
+| Apple M4 Pro, macOS, OrbStack | 300 | chaos | 283.5 | 4.1 | 48.0 | 165.0 | 0 | 0 | **0** | 0 | 0.09 |
+| Apple M4 Pro, macOS, OrbStack | 300 | burst (64 workers) | 1236.5 | 43.0 | 88.7 | 282.8 | 0 | 0 | **0** | 0 | 0.09 |
 
-### Known issue: chaos-phase loss under an `ankusa-worker` pod kill
+(Latencies in ms. `drain_s` is the time from the end of ingest to the last ack
+being visible in the consumer, measured on the verify poll; the burst generator
+is closed-loop, so its `accepted/s` is what 64 workers and a 40 ms round trip
+sustain, not a dispatch ceiling.) Every phase, including chaos, reports
+`missing: 0` and `sha_mismatches: 0`. This is the same machine every other
+number in this doc was measured on, not a production-scale claim.
 
-**`steady` and `burst` are clean (`missing: 0`) every run once the `kind`
-cluster isn't resource-starved by other work on the host — see the `RATE`
-note above.** `chaos` is not: it reproduces a small (~0.5–1.5%, single- to
-low-double-digit envelope) permanent loss, isolated by bisection to killing
-`ankusa-worker-0` alone (killing only `ankusa-edge` and/or `consumer` does
-not reproduce it). After the loss, the affected envelope id is absent from
-`ankusa_wal`, `oban_jobs`, and `processed_webhooks` alike, the dispatch
-cursor has already advanced past its seq, and
-`Ankusa.Dispatch.DLQ`'s log file was never created — so dispatch believes it
-delivered successfully, but no receiver ever recorded it, and it never
-entered the give-up path either.
+Re-verified after rebasing onto `main` (NATS JetStream adapter, HMAC verifier
+engine): `RATE=300` again reported `missing: 0` and `sha_mismatches: 0` in all
+three phases — steady 284.0/s, chaos 284.0/s, burst 1360.2/s, `shed: 0`, and
+`drain_s` 0.05–0.07 s.
 
-A preStop hook (`sleep 5` before SIGTERM, giving `kube-proxy` time to drain
-Service endpoints — see `k8s/20-consumer.yaml`/`k8s/30-ankusa.yaml`) does not
-fix it, which rules out the ordinary "new connection routed to a terminating
-pod" class of Kubernetes race. Code review of `Ankusa.Dispatch.Pipeline`
-(`drain/1`, `deliver_with_retry/4`), `Ankusa.WAL.Postgres` (`read/2`,
-`get_cursor/2`, `put_cursor/3`), and `Ankusa.Storage.Compactor`'s
-never-truncate-past-dispatch guard did not turn up the mechanism — the
-cursor-then-deliver ordering looks self-healing by construction. Root cause
-is **not isolated**; reproducing and fixing it needs deeper live tracing of
-`ankusa-worker` across a real kill (a debugger attached to the pod, or
-telemetry spanning the crash) that's out of scope for this change, and
-`Ankusa.Dispatch.Pipeline` is explicitly off-limits to modify here (see
-`plans/prepare-release.md`'s critical files list). Filed as a known issue
-for 0.1.0 rather than silently reported as passing: **the chaos-phase
-acceptance criterion (`missing: 0`) is not met** by the current `ankusa`
-core, only the infrastructure and example wiring around it.
+`drain_s` in the tenths of a second with `shed: 0` at both rates is what makes
+`RATE=300` the default: dispatch keeps up with ingest in real time, so the
+paced phases never build a backlog for the burst phase to inherit.
+
+### The chaos-phase loss: root cause and fix
+
+Killing an `ankusa-worker` pod used to drop ~0.5–1.5% of acked hooks
+permanently. The mechanism was not in the dispatch pipeline: `WAL.Postgres`
+allocates `seq` at INSERT time (`BIGSERIAL`) but a row only becomes visible at
+COMMIT, so two writers could allocate 100 and 101 and commit in the opposite
+order. A reader following the log with `seq > cursor` read 101, advanced its
+cursor past it, and never saw 100 when it landed — and the compactor, whose
+truncation is bounded by that same cursor, then deleted the row. The hook was
+in `ankusa_wal` no longer, in no `oban_jobs` row, no `processed_webhooks` row,
+no DLQ — exactly the observed signature, with the cursor already advanced. It
+took killing the *worker* to reproduce because that bursts the catch-up load
+onto the shared Postgres and widens the allocation→commit window.
+
+`WAL.Postgres.append/2` now takes a per-instance advisory lock
+(`pg_advisory_xact_lock`) before allocating seqs and holds it until COMMIT, so
+seq order *is* commit order; fleet-wide serialized commits per instance is the
+accepted cost. The regression test (`ankusa_postgres`) widens the window with a
+sleeping statement trigger and, on the pre-fix code, fails with ~34 seqs a
+cursor-following reader never sees. The chaos phase now reports `missing: 0`.
+
+Pre-fix code, same machine, same harness — `RATE=60`, `POOL_SIZE=30`, and the
+fixed loadgen, so this isolates the core change:
+
+| Phase | accepted/s | p50 | p95 | p99 | missing | `drain_s` |
+| --- | --- | --- | --- | --- | --- | --- |
+| steady | 56.3 | 11.1 | 13.5 | 15.6 | 0 | 0.04 |
+| chaos | 56.3 | 11.2 | 15.4 | 18.7 | 0 | 0.04 |
+| burst (64 workers) | 3168.1 | 18.0 | 31.7 | 40.7 | 0 | **320.6** |
+
+The paced phases were fine: 60/s is far below the ~150/s the old
+one-envelope-at-a-time dispatch could sustain. The burst phase is where the
+ceiling shows — 47,632 accepted envelopes took **320.6 seconds** to drain after
+ingest stopped (≈149/s), against 0.05–0.09 s now.
+
+That run's chaos phase came back clean, which is honest but not reassuring:
+the old loss was a race, and it needs the allocation→commit window to be wide
+enough at the exact moment a cursor reader passes the tail. The earlier
+documented run of the same harness did lose 12 of 1581 acked hooks in chaos
+(with a 301.7 s verify timeout), and the `ankusa_postgres` regression test
+reproduces the mechanism deterministically rather than by luck.

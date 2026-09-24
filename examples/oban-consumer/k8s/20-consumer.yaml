@@ -34,6 +34,11 @@ spec:
               value: "ecto://ankusa:ankusa@postgres:5432/consumer"
             - name: PORT
               value: "4200"
+            # The Repo pool is shared by the HTTP ingest path and the Oban
+            # workers; at the default 10 the 20 workers starve it and the
+            # backlog never drains.
+            - name: POOL_SIZE
+              value: "30"
           ports:
             - containerPort: 4200
           readinessProbe:

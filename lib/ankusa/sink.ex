@@ -19,4 +19,40 @@ defmodule Ankusa.Sink do
         }
 
   @callback deliver(Envelope.t(), ctx(), opts :: keyword()) :: :ok | {:error, term()}
+
+  @doc """
+  The ordering scope for this delivery, or `nil` for "no constraint".
+
+  Deliveries to the same sink with an equal `ordering_key/2` are **never in
+  flight at the same time**, and they run in `seq` order. Different keys run
+  concurrently, which is what lets dispatch fan out without giving up per-key
+  ordering. `nil` opts the delivery out of ordering entirely.
+
+  A sink's ordering key must be at least as narrow as the ordering its
+  destination actually guarantees — a Kafka topic partition key, an AMQP
+  routing key, a downstream row id. Claiming a wider scope than the key
+  guarantees (nothing) is a correctness bug, not a perf knob.
+  """
+  @callback ordering_key(Envelope.t(), opts :: keyword()) :: term() | nil
+
+  @optional_callbacks ordering_key: 2
+
+  @doc """
+  Resolve the ordering key for `mod` with `opts`.
+
+  Sinks that don't implement `ordering_key/2` get the conservative default
+  `{tenant_id, source_id}`: a sink that has not reasoned about its own ordering
+  guarantees gets serialization per source rather than silently interleaved
+  deliveries.
+  """
+  @spec ordering_key(module(), Envelope.t(), keyword()) :: term() | nil
+  def ordering_key(mod, env, opts) do
+    Code.ensure_loaded(mod)
+
+    if function_exported?(mod, :ordering_key, 2) do
+      mod.ordering_key(env, opts)
+    else
+      {env.tenant_id, env.source_id}
+    end
+  end
 end

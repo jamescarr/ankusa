@@ -56,8 +56,8 @@ Every top-level section, with its keys and defaults:
 | `log` | `level` (`info`) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002) |
-| `batcher` | `partitions` (the scheduler count), `max_batch` (256), `max_delay_ms` (5), `max_queue` (10000) |
-| `dispatch` | `poll_ms` (200), `batch` (128), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
+| `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000) |
+| `dispatch` | `poll_ms` (200), `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
 | `wal` | `type` (`disk` \| `postgres`), `postgres.url` (or the discrete `host`/`port`/`username`/`password`/`database` keys, never both), `pool_size` (10), `ssl` (false), `migrate` (true) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `max_bytes` (8000000), `retention_days` (null disables the sweeper), optional `tokens`, optional `remote` |
@@ -126,7 +126,7 @@ URL) — cannot be described by this engine. They need a bespoke
 | `type` | Keys |
 | --- | --- |
 | `log` | — |
-| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
+| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `ordered` (`false`; `true` serializes deliveries per `{tenant_id, source_id}`, in `seq` order). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (8192). |
 | `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (8192), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
 | `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (8192), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist — see [`delivery.md`](delivery.md#sinknats--subject-delivery). |
@@ -196,8 +196,15 @@ config :ankusa,
   route_resolver: {Ankusa.RouteResolver.Path, []},
   source_store: {Ankusa.SourceStore.Static, sources: %{}},
   wal: {Ankusa.WAL.DiskLog, []},
-  batcher: %{partitions: System.schedulers_online(), max_batch: 256, max_delay_ms: 5, max_queue: 10_000},
-  dispatch: %{poll_ms: 200, batch: 128, retry: {Ankusa.RetryPolicy.Exponential, []}},
+  batcher: %{partitions: 2, max_batch: 256, max_delay_ms: 0, max_queue: 10_000},
+  dispatch: %{
+    poll_ms: 200,
+    batch: 128,
+    concurrency: 32,
+    max_inflight: 4096,
+    max_inflight_bytes: 134_217_728,
+    retry: {Ankusa.RetryPolicy.Exponential, []}
+  },
   storage: %{
     blob_store: {Ankusa.BlobStore.LocalFS, []},
     codec: {Ankusa.Codec.Raw, []},
@@ -226,12 +233,15 @@ config :ankusa,
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver` — catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. |
 | `wal` | `{Ankusa.WAL.DiskLog, []}` | `{module, opts}` implementing `Ankusa.WAL`. See [`storage.md`](storage.md). |
-| `batcher.partitions` | `System.schedulers_online()` | One group-commit `GenServer` per partition; a single commit process is a throughput ceiling. |
+| `batcher.partitions` | `2` | One group-commit `GenServer` per partition. Both WALs serialize commits themselves (the DiskLog GenServer, Postgres's per-instance advisory lock), so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
-| `batcher.max_delay_ms` | `5` | Flush at least this often even under low load. |
-| `batcher.max_queue` | `10_000` | Bound per partition; full means `{:error, :overload}` → `503`. |
+| `batcher.max_delay_ms` | `0` | Commit immediately — the WAL append runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
+| `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
 | `dispatch.poll_ms` | `200` | How often the dispatch pipeline polls the WAL past its cursor. |
-| `dispatch.batch` | `128` | Max envelopes read per poll. |
+| `dispatch.batch` | `128` | Max envelopes read per WAL read. |
+| `dispatch.concurrency` | `32` | Max sink deliveries in flight at once. Keep Req's Finch pool (default 50) at least this large for `Sink.Http`. |
+| `dispatch.max_inflight` | `4096` | Max admitted-but-unfinished envelopes — bounds how much a stalled destination can hold. |
+| `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their body bytes. |
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy` — the **default**, overridable per source (see below). |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec` — segment record framing. |
