@@ -1,0 +1,25 @@
+# Ankusa + a worker you own, wired together by one HTTP sink.
+#   docker compose up -d --wait
+#   curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
+#   docker compose logs worker
+services:
+  ankusa:
+    image: ${ANKUSA_IMAGE:-jamescarr/ankusa:edge}
+    ports:
+      - "4000:4000"            # ingest: the only port providers need
+      - "127.0.0.1:4002:4002"  # admin API: health, metrics, dead letters, replay
+    volumes:
+      - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
+      - ankusa-data:/var/lib/ankusa
+    depends_on:
+      - worker
+
+  worker:
+    image: python:3.13-alpine
+    init: true                 # tini as PID 1, so `docker compose stop worker` is instant
+    command: ["python", "/app/worker.py"]
+    volumes:
+      - ./worker.py:/app/worker.py:ro
+
+volumes:
+  ankusa-data:
