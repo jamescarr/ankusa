@@ -85,7 +85,7 @@ defmodule Ankusa.ClaimCheck do
         {:ok, ticket}
       end
 
-    emit(:check_in, started, byte_size(bin), meta, mod, result)
+    emit(instance, :check_in, started, byte_size(bin), meta, mod, result)
     result
   end
 
@@ -108,6 +108,7 @@ defmodule Ankusa.ClaimCheck do
       end
 
     emit(
+      instance,
       :redeem,
       started,
       ticket.size,
@@ -201,13 +202,13 @@ defmodule Ankusa.ClaimCheck do
     end
   end
 
-  defp emit(op, started, size, meta, adapter, result) do
+  defp emit(instance, op, started, size, meta, adapter, result) do
     duration = System.monotonic_time() - started
 
     Telemetry.emit(
       [:claim_check, op],
       %{duration: duration, size: size},
-      Map.merge(meta, %{adapter: adapter, result: result_tag(result)})
+      Map.merge(meta, %{instance: instance, adapter: adapter, result: result_tag(result)})
     )
   end
 

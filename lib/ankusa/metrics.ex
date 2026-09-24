@@ -8,10 +8,13 @@ defmodule Ankusa.Metrics do
   named `:"ankusa_metrics_\#{instance}"` (bounded — one atom per configured
   instance) and scraped by the admin API's `GET /metrics`.
 
-  A reporter only covers the events its own node emits, so an edge node's
-  scrape has ingest series and a dispatch node's has delivery series. There is
-  no cross-node aggregation here; point Prometheus at every node, or at every
-  node's admin port through a proxy.
+  `:telemetry` handlers are global to the VM, so a reporter sees only its own
+  instance: every definition keeps just the events whose `:instance` metadata
+  is the reporter's, and two instances in one VM never count each other's
+  traffic. A reporter also covers only the events its own node emits, so an
+  edge node's scrape has ingest series and a dispatch node's has delivery
+  series. There is no cross-node aggregation here; point Prometheus at every
+  node, or at every node's admin port through a proxy.
 
   ## Unit conversion
 
@@ -40,8 +43,9 @@ defmodule Ankusa.Metrics do
   @doc """
   Child spec for this instance's metrics reporter.
 
-  `start_async: false` matters: metrics are registered synchronously so the
-  reporter can't miss the events a sibling child emits while starting.
+  `start_async: false` registers the metrics before the reporter's
+  `start_link/1` returns, and `Ankusa.Instance` starts this child before any
+  other, so no sibling's events are missed.
   """
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -49,7 +53,7 @@ defmodule Ankusa.Metrics do
 
     Supervisor.child_spec(
       {TelemetryMetricsPrometheus.Core,
-       name: reporter_name(instance), metrics: metrics(), start_async: false},
+       name: reporter_name(instance), metrics: metrics(instance), start_async: false},
       id: {__MODULE__, instance}
     )
   end
@@ -62,92 +66,137 @@ defmodule Ankusa.Metrics do
   @spec scrape(atom()) :: String.t()
   def scrape(instance), do: TelemetryMetricsPrometheus.Core.scrape(reporter_name(instance))
 
-  @doc "The metric definitions registered for every instance."
-  @spec metrics() :: [Telemetry.Metrics.t()]
-  def metrics do
+  @doc """
+  The metric definitions for `instance`'s reporter. Each keeps only events whose
+  `:instance` metadata is `instance`.
+  """
+  @spec metrics(atom()) :: [Telemetry.Metrics.t()]
+  def metrics(instance) do
+    own = &(&1[:instance] == instance)
+
     [
-      counter("ankusa.ingest.requests.total",
-        event_name: [:ankusa, :ingest, :stop],
-        tags: [:instance, :source_id, :outcome],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.ingest.requests.total",
+        scoped(own,
+          event_name: [:ankusa, :ingest, :stop],
+          tags: [:instance, :source_id, :outcome]
+        )
       ),
-      distribution("ankusa.ingest.duration.seconds",
-        event_name: [:ankusa, :ingest, :stop],
-        measurement: &duration_seconds/1,
-        unit: :second,
-        tags: [:instance, :source_id],
-        tag_values: &normalize/1,
-        reporter_options: [buckets: @seconds_buckets]
+      distribution(
+        "ankusa.ingest.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :ingest, :stop],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance, :source_id],
+          reporter_options: [buckets: @seconds_buckets]
+        )
       ),
-      counter("ankusa.verify.failures.total",
-        event_name: [:ankusa, :verify, :stop],
-        tags: [:instance, :source_id, :provider],
-        keep: &(&1.status == :failed),
-        tag_values: &normalize/1
+      counter(
+        "ankusa.verify.failures.total",
+        scoped(own,
+          event_name: [:ankusa, :verify, :stop],
+          keep: &(&1.status == :failed),
+          tags: [:instance, :source_id, :provider]
+        )
       ),
-      distribution("ankusa.wal.commit.duration.seconds",
-        event_name: [:ankusa, :commit, :stop],
-        measurement: &duration_seconds/1,
-        unit: :second,
-        tags: [:instance],
-        tag_values: &normalize/1,
-        reporter_options: [buckets: @seconds_buckets]
+      distribution(
+        "ankusa.wal.commit.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :commit, :stop],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance],
+          reporter_options: [buckets: @seconds_buckets]
+        )
       ),
-      sum("ankusa.wal.commit.batch.size",
-        event_name: [:ankusa, :commit, :stop],
-        measurement: :batch_size,
-        tags: [:instance],
-        tag_values: &normalize/1
+      sum(
+        "ankusa.wal.commit.batch.size",
+        scoped(own,
+          event_name: [:ankusa, :commit, :stop],
+          measurement: :batch_size,
+          tags: [:instance]
+        )
       ),
-      counter("ankusa.dedup.hits.total",
-        event_name: [:ankusa, :dedup, :hit],
-        tags: [:instance, :source_id],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.dedup.hits.total",
+        scoped(own,
+          event_name: [:ankusa, :dedup, :hit],
+          tags: [:instance, :source_id]
+        )
       ),
-      counter("ankusa.load_shed.total",
-        event_name: [:ankusa, :load_shed],
-        tags: [:instance],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.load_shed.total",
+        scoped(own,
+          event_name: [:ankusa, :load_shed],
+          tags: [:instance]
+        )
       ),
-      counter("ankusa.quarantine.rate_limited.total",
-        event_name: [:ankusa, :quarantine, :rate_limited],
-        tags: [:instance, :source_id],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.quarantine.rate_limited.total",
+        scoped(own,
+          event_name: [:ankusa, :quarantine, :rate_limited],
+          tags: [:instance, :source_id]
+        )
       ),
-      counter("ankusa.dispatch.deliveries.total",
-        event_name: [:ankusa, :dispatch, :stop],
-        tags: [:result],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.dispatch.deliveries.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :stop],
+          tags: [:instance, :result]
+        )
       ),
-      counter("ankusa.dispatch.dead_lettered.total",
-        event_name: [:ankusa, :dispatch, :dlq],
-        tags: [:source_id, :sink],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.dispatch.dead_lettered.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :dlq],
+          tags: [:instance, :source_id, :sink]
+        )
       ),
-      sum("ankusa.compact.records.total",
-        event_name: [:ankusa, :compact, :stop],
-        measurement: :records,
-        tags: [:instance],
-        tag_values: &normalize/1
+      sum(
+        "ankusa.compact.records.total",
+        scoped(own,
+          event_name: [:ankusa, :compact, :stop],
+          measurement: :records,
+          tags: [:instance]
+        )
       ),
-      sum("ankusa.compact.bytes.total",
-        event_name: [:ankusa, :compact, :stop],
-        measurement: :bytes,
-        unit: :byte,
-        tags: [:instance],
-        tag_values: &normalize/1
+      sum(
+        "ankusa.compact.bytes.total",
+        scoped(own,
+          event_name: [:ankusa, :compact, :stop],
+          measurement: :bytes,
+          unit: :byte,
+          tags: [:instance]
+        )
       ),
-      counter("ankusa.claim_check.operations.total",
-        event_name: [:ankusa, :claim_check, :check_in],
-        tags: [:adapter, :result],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.claim_check.operations.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :check_in],
+          tags: [:instance, :adapter, :result]
+        )
       ),
-      counter("ankusa.claim_check.redeems.total",
-        event_name: [:ankusa, :claim_check, :redeem],
-        tags: [:adapter, :result],
-        tag_values: &normalize/1
+      counter(
+        "ankusa.claim_check.redeems.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :redeem],
+          tags: [:instance, :adapter, :result]
+        )
       )
     ]
+  end
+
+  # What every definition shares: only this instance's events (ANDed with a
+  # metric's own `:keep`), and bounded label values.
+  defp scoped(own, opts) do
+    keep =
+      case opts[:keep] do
+        nil -> own
+        keep -> &(own.(&1) and keep.(&1))
+      end
+
+    Keyword.merge(opts, keep: keep, tag_values: &normalize/1)
   end
 
   # `Telemetry.Metrics` calls this with the whole metadata map.

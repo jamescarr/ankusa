@@ -7,8 +7,10 @@ defmodule Ankusa.ClaimCheck.Router do
   this is internal-network-only, and the edge's catch-all `POST` would
   swallow these routes anyway.
 
-  Every `/v1/claims/*` request needs `authorization: Bearer <token>`, checked
-  against `config.claim_check.api_tokens` — see `authenticate/2`. The server
+  When `config.claim_check.api_tokens` is non-empty, every `/v1/claims/*`
+  request needs `authorization: Bearer <token>` matching one of them — see
+  `authenticate/2`. With no tokens configured the gateway is open, and
+  authentication is delegated to whatever fronts the port. The server
   always calls `Ankusa.ClaimCheck` with `adapter: {Ankusa.ClaimCheck.Direct,
   opts}`, regardless of the instance's own configured adapter, so a
   `:claim_check` node never proxies to itself (`ClaimCheck.validate_config!/1`

@@ -105,9 +105,9 @@ defmodule Ankusa.Admin.RouterTest do
     refute conn.resp_body =~ "top-secret-payload"
   end
 
-  test "GET /v1/dlq lists newest first and caps limit", %{inst: inst, config: config} do
-    old = envelope("a", "{}", %{received_at: 1})
-    new = envelope("a", "{}", %{received_at: 2})
+  test "GET /v1/dlq returns the newest write first, up to limit", %{inst: inst, config: config} do
+    old = envelope("a", "{}")
+    new = envelope("a", "{}")
     DLQ.write(config, old, :first)
     DLQ.write(config, new, :second)
 
@@ -123,6 +123,15 @@ defmodule Ankusa.Admin.RouterTest do
     assert second["id"] == old.id
   end
 
+  test "GET /v1/dlq clamps limit to 1000", %{inst: inst, config: config} do
+    for _ <- 1..1001, do: DLQ.write(config, envelope("a", "{}"), :timeout)
+
+    assert %{"total" => 1001, "entries" => entries} =
+             JSON.decode!(call(inst, :get, "/v1/dlq?limit=5000").resp_body)
+
+    assert length(entries) == 1000
+  end
+
   test "a non-integer since or limit is 400 invalid_filter", %{inst: inst} do
     assert %{"error" => "invalid_filter", "field" => "since"} =
              JSON.decode!(call(inst, :get, "/v1/dlq?since=tuesday").resp_body)
@@ -134,12 +143,10 @@ defmodule Ankusa.Admin.RouterTest do
 
   test "POST /v1/dlq/replay re-delivers the matching entry through its sink" do
     {:ok, capture} = Agent.start_link(fn -> [] end)
-    test_pid = self()
 
     Req.Test.stub(__MODULE__, fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)
       Agent.update(capture, &[body | &1])
-      send(test_pid, {:sink_called, conn.request_path})
       Plug.Conn.send_resp(conn, 200, "ok")
     end)
 
@@ -248,6 +255,53 @@ defmodule Ankusa.Admin.RouterTest do
 
     assert decoded["source_store"]["opts"]["sources"]["stripe"]["verifier"]["opts"]["secret"] ==
              "[REDACTED]"
+  end
+
+  test "GET /v1/config shows a {module, fun, args} callback without its args" do
+    config =
+      test_config(
+        roles: [:dispatch],
+        admin: %{enabled: true},
+        storage: %{
+          blob_store:
+            {Ankusa.BlobStore.GCS,
+             bucket: "hooks", token_provider: {Function, :identity, [{:ok, "ya29.leakhunter"}]}}
+        }
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+
+    refute conn.resp_body =~ "leakhunter"
+
+    assert JSON.decode!(conn.resp_body)["storage"]["blob_store"]["opts"]["token_provider"] ==
+             "Function.identity/1"
+  end
+
+  test "GET /v1/config keeps header names and redacts every header value" do
+    sink =
+      {Ankusa.Sink.Http,
+       url: "https://sink.example/hook",
+       headers: [{"authorization", "Bearer leakhunter"}, {"x-team", "payments"}]}
+
+    config =
+      test_config(
+        roles: [:dispatch],
+        admin: %{enabled: true},
+        source_store: {Ankusa.SourceStore.Static, sources: %{"a" => [sinks: [sink]]}}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+
+    refute conn.resp_body =~ "leakhunter"
+
+    assert [%{"opts" => %{"headers" => headers}}] =
+             JSON.decode!(conn.resp_body)["source_store"]["opts"]["sources"]["a"]["sinks"]
+
+    assert headers == %{"authorization" => "[REDACTED]", "x-team" => "[REDACTED]"}
   end
 
   test "Config.new/1 rejects an unknown admin key like any other section" do

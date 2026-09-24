@@ -3,14 +3,20 @@ defmodule Ankusa.Admin.Redact do
   Turn a `%Ankusa.Config{}` into a JSON-encodable map safe to hand to anyone
   who can reach the admin API.
 
-  Redaction is by key name, because Ankusa does not know which of a source's
-  opts are secret — a deployment does. Any key named `secret`, `password`,
-  `secret_access_key`, `token`, `api_tokens`, or `sasl` becomes `"[REDACTED]"`,
-  and any string that parses as a URI with `user:pass` userinfo keeps the user
-  and loses the password. A botched hook could take a deployment down over a
-  leaked Stripe secret or a Postgres password, so the default for these names
-  is "never serialized", and a new secret-shaped opt is covered by adding its
-  key here.
+  Redaction is by key name and by URI shape, since nothing in the config marks
+  an opt as secret:
+
+    * a key named `secret`, `password`, `secret_access_key`, `token`,
+      `api_tokens`, or `sasl` becomes `"[REDACTED]"`;
+    * a string that parses as a URI with `user:pass` userinfo keeps the user
+      and loses the password.
+
+  Two more things are hidden. Under a `headers` key every header value becomes
+  `"[REDACTED]"` and the names stay, because headers are where a sink's
+  credentials live. A `{module, fun, args}` callback, such as a GCS
+  `token_provider`, becomes `"Module.fun/arity"`, never its args.
+
+  A new secret-shaped opt is covered by adding its key to `@secret_keys`.
 
   The shape matches the config's own nesting, so no reading logic is needed to
   find a field:
@@ -40,13 +46,36 @@ defmodule Ankusa.Admin.Redact do
   defp redact_map(map), do: Map.new(map, fn {k, v} -> {to_string(k), redact(to_string(k), v)} end)
 
   defp redact(key, value) do
-    if key in @secret_keys, do: @redacted, else: convert(value)
+    cond do
+      key in @secret_keys -> @redacted
+      key == "headers" -> redact_headers(value)
+      true -> convert(value)
+    end
   end
+
+  # Header names are kept, so an operator can see a sink sends `authorization`
+  # without seeing the credential. Anything that isn't name/value pairs is
+  # hidden whole.
+  defp redact_headers(headers) when is_list(headers) or is_map(headers) do
+    if Enum.all?(headers, &match?({_name, _value}, &1)) do
+      Map.new(headers, fn {name, _value} -> {to_string(name), @redacted} end)
+    else
+      @redacted
+    end
+  end
+
+  defp redact_headers(_headers), do: @redacted
 
   # The framework's `{module, opts}` pair, everywhere it appears: the WAL,
   # route resolver, source store, verifiers, dedup keys, and sinks.
   defp convert({module, opts}) when is_atom(module) do
     %{"module" => inspect(module), "opts" => convert_opts(opts)}
+  end
+
+  # A callback's args can be the credential itself (a static GCS token), so
+  # only the function it names is shown.
+  defp convert({module, fun, args}) when is_atom(module) and is_atom(fun) and is_list(args) do
+    Exception.format_mfa(module, fun, length(args))
   end
 
   defp convert(%_{} = struct), do: struct |> Map.from_struct() |> redact_map()

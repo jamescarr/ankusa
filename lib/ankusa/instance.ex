@@ -37,7 +37,8 @@ defmodule Ankusa.Instance do
     opts = [instance: config.instance, config: config]
 
     children =
-      wal_children(config, opts) ++
+      metrics_children(config, opts) ++
+        wal_children(config, opts) ++
         edge_children(config, opts) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
@@ -45,6 +46,14 @@ defmodule Ankusa.Instance do
         admin_children(config, opts)
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  # The admin API's Prometheus reporter, first of all: it attaches its handlers
+  # synchronously (`start_async: false`), so the events every later child emits
+  # while starting — boot-time dispatch of the WAL backlog, ingest the edge
+  # accepts before the rest of the tree is up — are counted.
+  defp metrics_children(config, opts) do
+    if config.admin.enabled, do: [{Ankusa.Metrics, opts}], else: []
   end
 
   # The WAL only matters to roles that actually read or write it. A node
@@ -111,10 +120,9 @@ defmodule Ankusa.Instance do
     if config.claim_check.retention_days, do: [{Ankusa.ClaimCheck.Sweeper, opts}], else: []
   end
 
-  # The operator API and its Prometheus reporter. The reporter goes first: it
-  # registers its event handlers synchronously (`start_async: false`), so
-  # nothing emitted by a later child is missed.
-  defp admin_children(config, opts) do
+  # The operator API, last, so it only listens once everything it reports on
+  # has started.
+  defp admin_children(config, _opts) do
     if config.admin.enabled do
       Logger.warning(
         "[ankusa] admin API on :#{config.admin.port} is unauthenticated; do not expose it " <>
@@ -122,7 +130,6 @@ defmodule Ankusa.Instance do
       )
 
       [
-        {Ankusa.Metrics, opts},
         Supervisor.child_spec(
           {Bandit,
            plug: {Ankusa.Admin.Router, [instance: config.instance]},

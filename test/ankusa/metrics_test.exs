@@ -13,25 +13,23 @@ defmodule Ankusa.MetricsTest do
 
   alias Ankusa.SourceStore.Static
 
-  defp start_instance(extra \\ []) do
+  defp start_instance do
     config =
       test_config(
-        [
-          roles: [:edge],
-          admin: %{enabled: true, port: 0},
-          source_store:
-            {Static,
-             sources: %{
-               "demo" => [
-                 verifier: {Ankusa.Verifier.None, []},
-                 sinks: [{Ankusa.Sink.Log, []}]
-               ],
-               "strict" => [
-                 verifier: {Ankusa.Verifier.Stripe, secret: "whsec_x"},
-                 on_verify_failure: :quarantine
-               ]
-             }}
-        ] ++ extra
+        roles: [:edge],
+        admin: %{enabled: true, port: 0},
+        source_store:
+          {Static,
+           sources: %{
+             "demo" => [
+               verifier: {Ankusa.Verifier.None, []},
+               sinks: [{Ankusa.Sink.Log, []}]
+             ],
+             "strict" => [
+               verifier: {Ankusa.Verifier.Stripe, secret: "whsec_x"},
+               on_verify_failure: :quarantine
+             ]
+           }}
       )
 
     put_config(config)
@@ -66,8 +64,8 @@ defmodule Ankusa.MetricsTest do
 
     assert scrape =~ "ankusa_verify_failures_total{"
     assert scrape =~ ~s(provider="Ankusa.Verifier.Stripe")
-    # ...and the successful verification above left no series at all, which is
-    # what `keep: &(&1.status == :failed)` means.
+    # ...and the successful verification above left no series at all: only
+    # `status: :failed` events are kept.
     refute scrape =~ ~s(provider="Ankusa.Verifier.None")
   end
 
@@ -87,5 +85,19 @@ defmodule Ankusa.MetricsTest do
     # A local commit is milliseconds; native (nanosecond) units would be ~1e6.
     assert seconds < 60
     assert seconds >= 0
+  end
+
+  test "two instances in one VM each scrape only their own series" do
+    a = start_instance()
+    b = start_instance()
+
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(a.instance, request("demo", ~s({"id":"a1"})))
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(b.instance, request("demo", ~s({"id":"b1"})))
+
+    scrape_a = Ankusa.Metrics.scrape(a.instance)
+
+    assert scrape_a =~ ~s(instance="#{a.instance}")
+    refute scrape_a =~ ~s(instance="#{b.instance}")
+    assert Ankusa.Metrics.scrape(b.instance) =~ ~s(instance="#{b.instance}")
   end
 end

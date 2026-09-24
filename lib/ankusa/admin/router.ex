@@ -56,7 +56,7 @@ defmodule Ankusa.Admin.Router do
     # Prometheus's text exposition format version is a parameter, not a
     # charset: the header is written verbatim.
     |> Plug.Conn.put_resp_header("content-type", "text/plain; version=0.0.4")
-    |> Plug.Conn.send_resp(200, Ankusa.Metrics.scrape(config(conn).instance))
+    |> Plug.Conn.send_resp(200, Ankusa.Metrics.scrape(instance(conn)))
   end
 
   get "/v1/config" do
@@ -123,7 +123,8 @@ defmodule Ankusa.Admin.Router do
 
     with {:ok, limit} <- int_param(params, "limit", @default_limit) do
       entries =
-        config(conn).instance
+        conn
+        |> instance()
         |> Ankusa.Edge.Quarantine.recent()
         |> Enum.take(clamp_limit(limit))
         |> Enum.map(&quarantine_entry/1)
@@ -151,7 +152,7 @@ defmodule Ankusa.Admin.Router do
         |> put_present(:id, id)
         |> put_present(:since, since)
 
-      replayed = Ankusa.Dispatch.replay(config(conn).instance, filter)
+      replayed = Ankusa.Dispatch.replay(instance(conn), filter)
       send_json(conn, 200, %{replayed: replayed})
     else
       {:error, field} -> invalid_filter(conn, field)
@@ -238,11 +239,10 @@ defmodule Ankusa.Admin.Router do
   defp invalid_filter(conn, field),
     do: send_json(conn, 400, %{error: "invalid_filter", field: field})
 
-  defp config(%Plug.Conn{} = conn) do
-    conn.assigns[:ankusa_opts]
-    |> Kernel.||([])
-    |> Keyword.get(:instance, :default)
-    |> Ankusa.config()
+  defp config(%Plug.Conn{} = conn), do: Ankusa.config(instance(conn))
+
+  defp instance(%Plug.Conn{} = conn) do
+    Keyword.get(conn.assigns[:ankusa_opts] || [], :instance, :default)
   end
 
   defp send_json(conn, status, payload), do: Ankusa.Http.send_json(conn, status, payload)
