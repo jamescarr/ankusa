@@ -8,11 +8,11 @@ NATS).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 179 tests, no external infra needed
+mix test                              # 185 tests, no external infra needed
 mix test --include integration        # +16 tests, needs floci running (see below)
 ```
 
-The 179 always-on tests cover:
+The 185 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
   crash-replay (torn-frame handling), truncation, that a restart after a full
@@ -24,8 +24,9 @@ The 179 always-on tests cover:
   `BlobStore.OCI` puts on the wire, pinned against OCI's published reference
   signature (computed with OpenSSL) and reconstructed from captured requests;
   the `BlobStore.Azure` request plumbing (Put Blob headers, SAS appending vs.
-  bearer `:token_provider`, `get_range` windows, `list` XML, `:not_found`);
-  `Sink.Http` forwarding, status mapping, and the
+  bearer `:token_provider`, `get_range` windows, `list` XML, `:not_found`); the
+  `Ankusa.BlobStore.Azure.ManagedIdentity` token provider (IMDS fetch shape,
+  caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
   rule that a redirect is reported rather than followed; the shared
   `Ankusa.HttpClient` allowlist.
 - **Edge**: accept/duplicate/verify/quarantine/load-shed/oversize, shedding with

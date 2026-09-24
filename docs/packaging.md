@@ -98,10 +98,12 @@ sent" rule.
 
 `Ankusa.BlobStore.OCI` signs its own requests, which *looks* like a regression
 to the hand-rolling the S3 note above removed. It isn't the same call: OCI has
-no Elixir signing library to take (unlike `aws_signature` for SigV4), and no
-bearer/SAS shortcut an Object Storage adapter could ride instead. So the rule
-becomes "hand-roll only when there is no library and no credential-free path,
-and pin it against the provider's own reference vectors" — which is what
+no *mature, focused* Elixir signing library to take (unlike `aws_signature` for
+SigV4). `ex_oci_sdk` exists but is a whole SDK at v0.2 with ~700 downloads,
+not the proven, single-purpose signing dependency `aws_signature` is, and OCI
+offers no bearer/SAS shortcut an Object Storage adapter could ride instead. So
+the rule becomes "hand-roll only when there is no library and no credential-free
+path, and pin it against the provider's own reference vectors" — which is what
 `test/ankusa/blob_store_oci_signing_test.exs` does, reproducing the RSA-SHA256
 signature of OCI's published test string (computed independently with OpenSSL)
 and reconstructing the signing string from a captured request.

@@ -148,8 +148,8 @@ too — see [`claim-check.md#retention`](claim-check.md#retention).
 | `BlobStore.LocalFS` | none | Default. Atomic writes (temp file + rename). `get_range` uses `:file.pread/3`, never slurps the whole segment. |
 | `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature) — the implementation behind the official aws-elixir SDK — with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
 | `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS — the adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
-| `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: it appends a pre-generated `:sas_token` (Shared Access Signature) or a `:token_provider` MFA (Entra ID bearer) to every request, and does no Shared-Key signing of its own — a SAS is the least-privilege credential Azure recommends anyway. Unauthenticated against the `floci-az` emulator. |
-| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests — OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list` — using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
+| `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA — including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
+| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests — OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list` — using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
 
 ```elixir
 # S3 / MinIO / R2
@@ -169,7 +169,7 @@ config :ankusa,
     blob_store: {Ankusa.BlobStore.GCS, bucket: "ankusa-segments", token_provider: {MyApp.Auth, :gcs_token, []}}
   }
 
-# Azure Blob Storage — either a pre-generated SAS or an Entra ID token provider
+# Azure Blob Storage — a pre-generated SAS ...
 config :ankusa,
   storage: %{
     blob_store:
@@ -178,6 +178,17 @@ config :ankusa,
        container: "ankusa-segments",
        sas_token: System.get_env("AZURE_BLOB_SAS")}
        # endpoint: "http://localhost:4577/devstoreaccount1"  # only for floci-az; omit for real Azure
+  }
+
+# ... or, on Azure, the managed identity (system-assigned — no secret at all)
+config :ankusa,
+  storage: %{
+    blob_store:
+      {Ankusa.BlobStore.Azure,
+       account_name: "myaccount",
+       container: "ankusa-segments",
+       # user-assigned? add: client_id: System.get_env("AZURE_CLIENT_ID")
+       token_provider: {Ankusa.BlobStore.Azure.ManagedIdentity, :token, []}}
   }
 
 # OCI Object Storage — signs its own requests with an API signing key
@@ -192,6 +203,19 @@ config :ankusa,
        user_ocid: System.get_env("OCI_USER"),
        key_fingerprint: System.get_env("OCI_KEY_FINGERPRINT"),
        private_key: File.read!(System.fetch_env!("OCI_KEY_FILE"))}
+  }
+
+# ... or, on OCI compute/OKE, the instance principal (the OCI SDK does the
+# IMDS → x509 federation; feed its output back here)
+config :ankusa,
+  storage: %{
+    blob_store:
+      {Ankusa.BlobStore.OCI,
+       region: "us-ashburn-1",
+       namespace: System.get_env("OCI_NAMESPACE"),
+       bucket: "ankusa-segments",
+       key_id: System.get_env("OCI_SESSION_TOKEN_ID"),   # "ST$<token>"
+       private_key: File.read!(System.fetch_env!("OCI_SESSION_KEY_FILE"))}
   }
 ```
 

@@ -13,8 +13,9 @@ defmodule Ankusa.BlobStore.Azure do
       generated out-of-band with the Azure CLI, SDK, or portal. The adapter
       appends it to every request and never sees the account key.
     * `:token_provider` — `{module, fun, args}`, applied per request, must
-      return `{:ok, bearer_token} | :error`. Wire up whatever your deployment
-      already uses for an Entra ID (Azure AD) access token.
+      return `{:ok, bearer_token} | :error`. For a service running on Azure,
+      use the built-in `Ankusa.BlobStore.Azure.ManagedIdentity` (system- or
+      user-assigned) rather than wiring your own Entra ID token source.
 
   Shared Key signing (the `Authorization: SharedKey ...` HMAC) is deliberately
   not implemented — it is the kind of security-sensitive canonicalization this

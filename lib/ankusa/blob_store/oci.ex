@@ -17,14 +17,31 @@ defmodule Ankusa.BlobStore.OCI do
     * `:region`          — required, e.g. `"us-ashburn-1"`
     * `:namespace`       — required; the OCI namespace (see the tenancy page)
     * `:bucket`          — required
-    * `:tenancy_ocid`    — required
-    * `:user_ocid`       — required
-    * `:key_fingerprint` — required; the fingerprint of the API signing key
+    * `:key_id`          — optional; overrides the `tenancy/user/fingerprint` key
+                           id the API-key opts derive. Instance principals and
+                           session tokens sign with a `ST$<token>` key id — pass
+                           that here alongside `:private_key`.
+    * `:tenancy_ocid`    — required for API-key auth
+    * `:user_ocid`       — required for API-key auth
+    * `:key_fingerprint` — required for API-key auth; the signing key fingerprint
     * `:private_key`     — required; the PEM private key (PKCS#1 or PKCS#8)
     * `:endpoint`        — default `"https://objectstorage.\#{region}.oraclecloud.com"`
     * `:timeout_ms`      — default `10_000`, for both connect and response
     * `:req_options`     — transport options for the HTTP client. See
                            `Ankusa.HttpClient` for the accepted keys
+
+  ## Identity
+
+  Two credential shapes:
+
+    * **API key** — `:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`,
+      the default. The right shape off-OCI (CI, laptops, another cloud).
+    * **Instance principal / session token** — on OCI compute or OKE, the best
+      credential is the instance's own identity. That flow is a two-stage cert
+      federation the OCI SDK owns — IMDS leaf cert → `auth.<region>.oraclecloud.com/v1/x509`
+      → a short-lived `ST$` session token plus a session key — and this adapter
+      does not re-implement it by hand. Feed it the SDK's output instead:
+      `key_id: "ST$<token>"` with the session key as `:private_key`.
 
   ## Local dev
 
@@ -41,9 +58,10 @@ defmodule Ankusa.BlobStore.OCI do
              private_key: File.read!(System.fetch_env!("OCI_KEY_FILE"))}
         }
 
-  OCI publishes no Object Storage emulator, so unlike S3/GCS/Azure there is no
-  local `docker compose` path here; the signing is proven by the reference
-  vectors instead (see the test named above).
+  The `floci-oci` emulator in `docker-compose.yml` (:4599) parses but never
+  verifies the signature, so local integration testing works with any locally
+  generated key; the signing itself is proven by the reference vectors in
+  `test/ankusa/blob_store_oci_signing_test.exs`.
   """
 
   @behaviour Ankusa.BlobStore
@@ -172,8 +190,10 @@ defmodule Ankusa.BlobStore.OCI do
   end
 
   defp key_id(opts) do
-    "#{Keyword.fetch!(opts, :tenancy_ocid)}/#{Keyword.fetch!(opts, :user_ocid)}/" <>
-      Keyword.fetch!(opts, :key_fingerprint)
+    Keyword.get_lazy(opts, :key_id, fn ->
+      "#{Keyword.fetch!(opts, :tenancy_ocid)}/#{Keyword.fetch!(opts, :user_ocid)}/" <>
+        Keyword.fetch!(opts, :key_fingerprint)
+    end)
   end
 
   defp private_key!(opts) do

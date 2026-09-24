@@ -107,4 +107,16 @@ defmodule Ankusa.BlobStore.OCITest do
     opts = Keyword.delete(opts, :private_key)
     assert_raise ArgumentError, ~r/private_key/, fn -> OCI.get(:i, "seg/x", opts) end
   end
+
+  test "a :key_id override replaces the derived tenancy/user/fingerprint key id", %{
+    capture: capture,
+    opts: opts
+  } do
+    # instance principals / session tokens sign with a `ST$<token>` key id
+    opts = Keyword.put(opts, :key_id, "ST$session-token")
+    assert {:ok, "ok"} = OCI.get(:i, "seg/x.seg", opts)
+
+    assert [{"GET", _path, _query, headers}] = Agent.get(capture, & &1)
+    assert Map.new(headers)["authorization"] =~ ~r{keyId="ST\$session-token"}
+  end
 end
