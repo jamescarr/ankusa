@@ -18,17 +18,30 @@ defmodule Ankusa.Config do
             source_store: {Ankusa.SourceStore.Static, sources: %{}},
             # {module, opts} implementing Ankusa.WAL
             wal: {Ankusa.WAL.DiskLog, []},
-            # group-commit batcher
+            # group-commit batcher. Both WALs serialize commits themselves (the
+            # DiskLog GenServer, Postgres's per-instance advisory lock), so more
+            # partitions only add contention now that a partition commits
+            # asynchronously instead of holding the caller's message queue.
             batcher: %{
-              partitions: System.schedulers_online(),
+              partitions: 2,
               max_batch: 256,
-              max_delay_ms: 5,
+              # 0 = commit as soon as the batch fills, no linger: the WAL
+              # append is a Task, so waiting costs a scheduling hop, not
+              # head-of-line blocking.
+              max_delay_ms: 0,
               max_queue: 10_000
             },
             # dispatch pipeline
             dispatch: %{
               poll_ms: 200,
+              # bounds one WAL read's worth of memory
               batch: 128,
+              # max sink deliveries in flight at once
+              concurrency: 32,
+              # max admitted (not yet fully handled) envelopes...
+              max_inflight: 4096,
+              # ...and the max sum of their body bytes
+              max_inflight_bytes: 134_217_728,
               retry: {Ankusa.RetryPolicy.Exponential, []}
             },
             # segment compaction

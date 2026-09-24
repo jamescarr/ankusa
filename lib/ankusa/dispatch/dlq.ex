@@ -11,11 +11,17 @@ defmodule Ankusa.Dispatch.DLQ do
 
   @spec write(Config.t(), Ankusa.Envelope.t(), term()) :: :ok
   def write(config, env, reason) do
-    DurableLog.append(path(config), %{
-      envelope: env,
-      reason: reason,
-      at: System.system_time(:millisecond)
-    })
+    # Synced: dispatch advances its cursor past a dead letter immediately, so a
+    # hook in neither the DLQ nor the (truncated) WAL is lost for good.
+    DurableLog.append(
+      path(config),
+      %{
+        envelope: env,
+        reason: reason,
+        at: System.system_time(:millisecond)
+      },
+      sync: true
+    )
   end
 
   @spec entries(Config.t()) :: [map()]

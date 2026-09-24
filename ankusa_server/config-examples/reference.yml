@@ -45,16 +45,27 @@ admin:
   port: 4002
 
 batcher:
-  # Default: System.schedulers_online().
-  partitions: 8
+  # Both WALs serialize commits themselves, so partitions beyond a couple only
+  # add contention.
+  partitions: 2
   max_batch: 256
-  max_delay_ms: 5
-  # Full queue = shed load with 503 rather than grow without bound.
+  # 0 = commit as soon as a batch is ready; the WAL append runs in a task, so
+  # raising this trades a little ack latency for larger batches.
+  max_delay_ms: 0
+  # Full queue = shed load with 503 rather than grow without bound. Counts
+  # buffered *and* in-flight records.
   max_queue: 10000
 
 dispatch:
   poll_ms: 200
   batch: 128
+  # Max sink deliveries in flight at once. Keep Req's Finch pool (default 50)
+  # at least this large when using the http sink.
+  concurrency: 32
+  # Admitted-but-unfinished envelopes, and the max sum of their body bytes:
+  # bounds what a stalled destination can hold.
+  max_inflight: 4096
+  max_inflight_bytes: 134217728
   retry:
     base_ms: 100
     max_ms: 30000
@@ -155,6 +166,9 @@ sources:
         # post | put | patch
         method: post
         timeout_ms: 5000
+        # true = one delivery at a time per {tenant_id, source_id}, in seq
+        # order. Default false: deliveries to this sink run concurrently.
+        # ordered: false
         headers:
           x-ankusa-env: prod
       - type: rabbitmq

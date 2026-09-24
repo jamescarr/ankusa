@@ -99,6 +99,7 @@ defmodule Ankusa.Edge.Ingest do
         {:committed, committed} -> {:ok, committed}
         {:duplicate, seq} -> {:duplicate, %{env | seq: seq}}
         {:error, :overload} -> {:error, :overload}
+        {:error, :store_unavailable} -> {:error, :store_unavailable}
       end
     catch
       :exit, _ -> {:error, :store_unavailable}

@@ -14,8 +14,10 @@ defmodule Ankusa.WAL do
       record whose `dedup_key` collides with an already-committed one is returned
       as `{:duplicate, existing_seq}` and is *not* written — but the caller still
       acks `2xx` (the provider retried; dedup absorbed it).
-    * A committed record is assigned a strictly increasing `seq`. `seq` values are
-      dense and monotonic; readers use them as a cursor.
+    * A committed record is assigned a strictly increasing `seq`, and seq order
+      is **commit order**: once a reader has observed seq `N`, no record with
+      seq ≤ `N` may become visible later. `seq` values may have gaps; readers
+      use them only as a cursor.
     * After a crash, replay MUST drop a torn trailing record (a commit that never
       `fsync`'d) so no un-acked write is ever surfaced.
 

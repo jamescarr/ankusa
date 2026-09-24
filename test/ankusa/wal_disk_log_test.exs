@@ -132,4 +132,31 @@ defmodule Ankusa.WAL.DiskLogTest do
     assert is_integer(measurements.duration)
     assert meta.instance == inst
   end
+
+  test "seq keeps increasing after a full truncation and restart" do
+    # `rewrite_min_bytes: 0` forces the physical rewrite, so this covers the
+    # worst case: the file is emptied while the seq floor lives on.
+    config = test_config(wal: {Ankusa.WAL.DiskLog, rewrite_min_bytes: 0})
+    put_config(config)
+    inst = config.instance
+
+    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
+
+    {:ok, results} = WAL.append(inst, for(n <- 1..3, do: %{envelope: env("s", "#{n}")}))
+    assert [1, 2, 3] == for({:committed, e} <- results, do: e.seq)
+
+    :ok = WAL.truncate_through(inst, 3)
+    assert WAL.stats(inst).records == 0
+
+    :ok = stop_supervised({Ankusa.WAL.DiskLog, inst})
+    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
+
+    # Restarting a caught-up node must not restart its seqs at 1: dispatch's
+    # cursor is already 3, so a seq 1 would be skipped and then deleted.
+    {:ok, [{:committed, next}]} = WAL.append(inst, [%{envelope: env("s", "four")}])
+    assert next.seq == 4
+    assert [read] = WAL.read(inst, 3, 10)
+    assert read.seq == 4
+    assert read.body == "four"
+  end
 end

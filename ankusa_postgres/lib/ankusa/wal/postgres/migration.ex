@@ -4,9 +4,12 @@ defmodule Ankusa.WAL.Postgres.Migration do
   startup. Three tables:
 
     * `ankusa_wal`        — the log. `seq` is a `BIGSERIAL`; may have small gaps
-      (a deduped or rolled-back row consumes a sequence value it never keeps)
-      — harmless, since the contract only needs strictly-increasing seqs
-      usable as a cursor, not perfect density.
+      (a deduped or rolled-back row consumes a sequence value it never keeps).
+      Strictly increasing *allocation* alone is not enough to make it usable as
+      a cursor — commits can land out of allocation order and a reader would
+      skip the lower seq — so `c:Ankusa.WAL.append/2` holds a per-instance
+      advisory lock from before the insert until COMMIT, making commit order
+      equal allocation order. See `Ankusa.WAL.Postgres`'s `## Seq order`.
     * `ankusa_wal_dedup`  — a **permanent** ledger, separate from `ankusa_wal` and
       never touched by `truncate_through/2`. This is what makes dedup survive
       WAL truncation: `ankusa_wal` rows get deleted once compacted to a segment,

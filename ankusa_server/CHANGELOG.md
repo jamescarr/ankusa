@@ -15,6 +15,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   to exist — the sink never creates one.
 - [`config-examples/nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml),
   and a `nats` sink in `reference.yml`.
+- `dispatch.concurrency` (default 32), `dispatch.max_inflight` (4096) and
+  `dispatch.max_inflight_bytes` (134217728), for the now-concurrent dispatch
+  pipeline.
+- `ordered` on `http` sinks, mapping to `Ankusa.Sink.Http`'s `:ordered` option
+  (per-`{tenant, source}` serialization; off by default).
+
+### Changed
+
+- `batcher.partitions` defaults to 2 and `batcher.max_delay_ms` to 0;
+  `reference.yml` reflects both, and documents that `max_queue` counts buffered
+  *and* in-flight records.
 
 ## [0.1.0]
 

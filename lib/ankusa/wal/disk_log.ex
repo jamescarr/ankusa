@@ -28,6 +28,26 @@ defmodule Ankusa.WAL.DiskLog do
   the log is truncated after compaction, a snapshot of the dedup set is persisted
   to `<name>.dedup` at truncation time and reloaded before replay, so dedup stays
   correct across compaction *and* restart.
+
+  ## Truncation
+
+  Truncation is **logical first**: `truncate_through/2` writes the seq floor to
+  `<name>.truncated` (fsynced, then renamed into place) and drops the affected
+  entries from the in-memory index. Dropping a prefix never has to touch the
+  file, so a compaction tick that reclaims a few records costs a few ETS
+  deletes, not a rewrite of the whole log — and never blocks appends.
+
+  That floor is also what keeps seqs from being reused: after a restart,
+  `next_seq` is the maximum of the last replayed frame, **the truncation floor**,
+  and every persisted cursor. A node that restarts with a fully reclaimed log
+  therefore continues at the floor, instead of restarting at 1 while dispatch's
+  cursor sits in the thousands.
+
+  The file itself is rewritten only when the dead prefix reaches
+  `:rewrite_min_bytes` (default 64 MiB) *and* is at least as large as the live
+  suffix it would have to copy — at which point the snapshot, a chunked copy of
+  the live suffix, and an index re-offset are worth it.
+
   """
 
   @behaviour Ankusa.WAL
@@ -39,6 +59,9 @@ defmodule Ankusa.WAL.DiskLog do
   @magic 0x484B
   @version 1
   @header_bytes 20
+  # Copy buffer for a physical rewrite. Bounds peak memory during a rewrite
+  # regardless of how large the live suffix is.
+  @rewrite_chunk 8 * 1024 * 1024
 
   # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -64,12 +87,25 @@ defmodule Ankusa.WAL.DiskLog do
     # dedup snapshot survives truncation; load it before replaying live frames
     load_dedup_snapshot(path <> ".dedup", dedup)
 
+    # Load the persisted state that bounds `next_seq` before replaying, so a
+    # reclaimed (or fully rewritten) log still continues where it left off.
+    truncated_through = load_truncated_through(path <> ".truncated")
+    cursors = load_cursors(path <> ".cursors")
+
     {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
-    {valid_end, next_seq} = replay(fd, index, dedup)
+    {valid_end, replay_next} = replay(fd, index, dedup, truncated_through)
     {:ok, _} = :file.position(fd, valid_end)
     :ok = :file.truncate(fd)
 
-    cursors = load_cursors(path <> ".cursors")
+    # Never hand out a seq that was already handed out: take the maximum over
+    # the last replayed frame, the truncation floor, and every persisted cursor
+    # (`cursor + 1` is the next unconsumed seq). The floor covers a log whose
+    # frames were all physically reclaimed; the cursors cover a deployment
+    # upgraded from a pre-fix empty log.
+    next_seq =
+      Enum.max([replay_next, truncated_through + 1 | Enum.map(Map.values(cursors), &(&1 + 1))])
+
+    rewrite_min_bytes = Keyword.get(elem(config.wal, 1), :rewrite_min_bytes, 64 * 1024 * 1024)
 
     Logger.info(
       "[ankusa] DiskLog WAL at #{path}: recovered #{:ets.info(index, :size)} record(s), " <>
@@ -85,7 +121,9 @@ defmodule Ankusa.WAL.DiskLog do
        next_seq: next_seq,
        dedup: dedup,
        index: index,
-       cursors: cursors
+       cursors: cursors,
+       truncated_through: truncated_through,
+       rewrite_min_bytes: rewrite_min_bytes
      }}
   end
 
@@ -159,8 +197,18 @@ defmodule Ankusa.WAL.DiskLog do
     {:reply, :ok, %{state | cursors: cursors}}
   end
 
+  def handle_call({:truncate_through, seq}, _from, %{truncated_through: floor} = state)
+      when seq <= floor do
+    {:reply, :ok, state}
+  end
+
   def handle_call({:truncate_through, seq}, _from, state) do
-    {:reply, :ok, do_truncate(state, seq)}
+    # Durably record the floor *before* dropping anything: a crash between the
+    # two must not let a restarted node reuse seqs it already handed out.
+    persist_term(state.path <> ".truncated", seq)
+    :ets.select_delete(state.index, [{{:"$1", :_}, [{:"=<", :"$1", seq}], [true]}])
+
+    {:reply, :ok, maybe_rewrite(%{state | truncated_through: seq})}
   end
 
   def handle_call(:stats, _from, state) do
@@ -238,59 +286,106 @@ defmodule Ankusa.WAL.DiskLog do
 
   # ── truncation ────────────────────────────────────────────────────────────
 
-  defp do_truncate(state, cutoff) do
-    # snapshot dedup first so its coverage survives dropping the frames
-    persist_dedup_snapshot(state.path <> ".dedup", state.dedup)
+  # Logical truncation (the floor above) is already done; this only decides
+  # whether the file itself is worth rewriting. A rewrite copies the live
+  # suffix, so it pays off exactly when the dead prefix is both large in
+  # absolute terms and at least as large as what would be copied. A log that is
+  # compacted every tick therefore never rewrites: the dead prefix stays small.
+  defp maybe_rewrite(state) do
+    dead = dead_prefix(state)
+    live = state.write_pos - dead
 
-    survivors = select_after(state.index, cutoff, :infinity)
+    if dead > 0 and dead >= state.rewrite_min_bytes and dead >= live do
+      rewrite(state, dead, live)
+    else
+      state
+    end
+  end
+
+  # Header offset of the first live frame. Live frames are always a contiguous
+  # file suffix — truncation only ever drops a prefix — so everything before
+  # this offset is dead bytes. An empty index means every frame is dead.
+  defp dead_prefix(%{index: index, write_pos: write_pos}) do
+    case :ets.first(index) do
+      :"$end_of_table" ->
+        write_pos
+
+      first ->
+        [{_seq, {off, _len}}] = :ets.lookup(index, first)
+        off - @header_bytes
+    end
+  end
+
+  defp rewrite(state, dead, live) do
+    # Frames about to be dropped carry dedup keys that must outlive them; the
+    # snapshot is the same durability step the old per-frame truncation took.
+    persist_dedup_snapshot(state.path <> ".dedup", state.dedup)
 
     tmp = state.path <> ".compact"
     {:ok, tfd} = :file.open(tmp, [:read, :write, :raw, :binary])
-
-    {new_index, new_pos} =
-      Enum.reduce(survivors, {[], 0}, fn {seq, {off, len}}, {acc, pos} ->
-        {:ok, payload} = :file.pread(state.fd, off, len)
-        :ok = :file.pwrite(tfd, pos, frame(seq, payload))
-        {[{seq, {pos + @header_bytes, len}} | acc], pos + @header_bytes + len}
-      end)
-
+    :ok = copy_range(state.fd, tfd, dead, live, 0)
     :ok = :file.datasync(tfd)
     :file.close(tfd)
+
     :file.close(state.fd)
     :ok = :file.rename(tmp, state.path)
 
     {:ok, fd} = :file.open(state.path, [:read, :write, :raw, :binary])
-    :ets.delete_all_objects(state.index)
-    if new_index != [], do: :ets.insert(state.index, new_index)
 
-    %{state | fd: fd, write_pos: new_pos}
+    # Re-offset every live frame by the bytes now in front of them.
+    entries = for {seq, {off, len}} <- :ets.tab2list(state.index), do: {seq, {off - dead, len}}
+    :ets.delete_all_objects(state.index)
+    if entries != [], do: :ets.insert(state.index, entries)
+
+    %{state | fd: fd, write_pos: live}
+  end
+
+  defp copy_range(_src, _dst, _from, 0, _pos), do: :ok
+
+  defp copy_range(src, dst, from, remaining, pos) do
+    chunk = min(remaining, @rewrite_chunk)
+    {:ok, data} = :file.pread(src, from + pos, chunk)
+    :ok = :file.pwrite(dst, pos, data)
+    copy_range(src, dst, from, remaining - chunk, pos + chunk)
   end
 
   # ── replay ────────────────────────────────────────────────────────────────
 
-  defp replay(fd, index, dedup) do
+  defp replay(fd, index, dedup, truncated_through) do
     {:ok, size} = :file.position(fd, :eof)
     :file.position(fd, :bof)
     data = if size > 0, do: elem(:file.pread(fd, 0, size), 1), else: <<>>
     # 1-based seqs: cursor 0 means "nothing consumed", and read/2 (strictly `>`)
     # surfaces seq 1 onward. Empty log => next_seq starts at 1.
-    parse(data, 0, index, dedup, 1)
+    parse(data, 0, index, dedup, 1, truncated_through)
   end
 
-  defp parse(bin, pos, index, dedup, next_seq) do
+  defp parse(bin, pos, index, dedup, next_seq, truncated_through) do
     case bin do
       <<@magic::16, @version::8, _flags::8, seq::64, crc::32, len::32, rest::binary>> ->
         case rest do
           <<payload::binary-size(^len), tail::binary>> ->
             if :erlang.crc32(payload) == crc do
-              :ets.insert(index, {seq, {pos + @header_bytes, len}})
+              # Frames below the floor are still physically present (the file is
+              # only rewritten once it is worth it) but logically gone; they
+              # must not be readable again. Their dedup keys still count.
+              if seq > truncated_through do
+                :ets.insert(index, {seq, {pos + @header_bytes, len}})
+              end
 
               case dedup_key_of(payload) do
                 nil -> :ok
                 key -> :ets.insert(dedup, {key, seq})
               end
 
-              parse(tail, pos + @header_bytes + len, index, dedup, seq + 1)
+              parse(
+                tail,
+                pos + @header_bytes + len,
+                index,
+                dedup,
+                seq + 1,
+                truncated_through
+              )
             else
               # torn/corrupt payload — stop; this write was never acked
               {pos, next_seq}
@@ -318,25 +413,37 @@ defmodule Ankusa.WAL.DiskLog do
     <<@magic::16, @version::8, 0::8, seq::64, crc::32, len::32, payload::binary>>
   end
 
+  # Walk with `:ets.next/2` from the first live key rather than
+  # `:ets.select/3` with a `>` guard: the match spec makes ETS scan the whole
+  # ordered_set from the front, so one read became O(WAL) — measured 371µs per
+  # call with the cursor at the tail of a 20k-record log, against 0.05µs for
+  # this keyed walk. That scan, run once per WAL read, was the dispatch
+  # pipeline's ceiling.
   defp select_after(index, after_seq, limit) do
-    ms = [{{:"$1", :"$2"}, [{:>, :"$1", after_seq}], [{{:"$1", :"$2"}}]}]
+    collect_after(index, :ets.next(index, after_seq), limit, [])
+  end
 
-    case limit do
-      :infinity ->
-        :ets.select(index, ms)
+  defp collect_after(_index, :"$end_of_table", _remaining, acc), do: Enum.reverse(acc)
 
-      n when is_integer(n) ->
-        case :ets.select(index, ms, n) do
-          {rows, _cont} -> rows
-          :"$end_of_table" -> []
-        end
-    end
+  defp collect_after(_index, _key, 0, acc), do: Enum.reverse(acc)
+
+  defp collect_after(index, key, remaining, acc) do
+    entry = {key, :ets.lookup_element(index, key, 2)}
+    remaining = if remaining == :infinity, do: :infinity, else: remaining - 1
+    collect_after(index, :ets.next(index, key), remaining, [entry | acc])
   end
 
   defp seq_bounds(index) do
     case :ets.first(index) do
       :"$end_of_table" -> {nil, nil}
       first -> {first, :ets.last(index)}
+    end
+  end
+
+  defp load_truncated_through(path) do
+    case File.read(path) do
+      {:ok, bin} -> :erlang.binary_to_term(bin, [:safe])
+      {:error, _} -> 0
     end
   end
 
@@ -347,10 +454,22 @@ defmodule Ankusa.WAL.DiskLog do
     end
   end
 
+  # Write-then-rename, with the data fsynced *before* the rename: after power
+  # loss the destination is either the whole new term or the whole old one, so
+  # `binary_to_term/2` at boot can never see a truncated file. `File.write!/2`
+  # would leave the rename ordered ahead of the data.
   defp persist_term(path, term) do
     tmp = path <> ".tmp"
-    File.write!(tmp, :erlang.term_to_binary(term))
-    File.rename!(tmp, path)
+    {:ok, fd} = :file.open(tmp, [:write, :raw, :binary])
+
+    try do
+      :ok = :file.write(fd, :erlang.term_to_binary(term))
+      :ok = :file.datasync(fd)
+    after
+      :file.close(fd)
+    end
+
+    :ok = :file.rename(tmp, path)
   end
 
   defp load_dedup_snapshot(path, dedup) do

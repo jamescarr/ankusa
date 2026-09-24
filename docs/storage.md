@@ -38,18 +38,29 @@ No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
   hooks, one fsync.
 - Replay validates every frame's CRC and truncates the file at the first
   torn/invalid one.
+- Truncation is **logical first**: `truncate_through/2` records a durable seq
+  floor in `<name>.truncated` and drops the affected index entries, so
+  reclaiming a few records costs a few ETS deletes and never blocks appends.
+  The file is rewritten only once the dead prefix passes `:rewrite_min_bytes`
+  (default 64 MiB) and is at least as large as the live suffix it would copy.
+  The floor is also what keeps `seq` from being reused: after a restart,
+  allocation resumes at the floor, the persisted cursors, or the last replayed
+  frame — whichever is highest — never at 1.
 - Committed dedup keys live in an in-memory ETS set, keyed by `{tenant_id,
   source_id, dedup_key}`, rebuilt from the log on start. Because the log
   itself gets truncated after compaction, a **snapshot** of the dedup set is
-  persisted to `<name>.dedup` at truncation time and reloaded before replay
-  — dedup correctness survives compaction *and* restart even though the
-  original records are long gone from disk.
+  persisted to `<name>.dedup` before frames are dropped and reloaded before
+  replay — dedup correctness survives compaction *and* restart even though the
+  original records are long gone from disk. Cursors, the dedup snapshot, and
+  the truncation floor are all written to a temp file, fsynced, then renamed,
+  so a power loss leaves the old or the new file, never a torn one.
 - Durable to process crash and power loss **on that box**, not to losing
   the box — it's one local file. See "Shared Postgres WAL" below for the
   fleet case.
 
 ```elixir
-config :ankusa, wal: {Ankusa.WAL.DiskLog, []}   # the default; no opts
+config :ankusa, wal: {Ankusa.WAL.DiskLog, []}   # the default; no opts required
+# wal: {Ankusa.WAL.DiskLog, rewrite_min_bytes: 64 * 1024 * 1024}  # that IS the default
 ```
 
 ### Shared Postgres WAL
@@ -180,14 +191,19 @@ the `get_range` callback needs.
 
 One tick (default every `storage.interval_ms`, 1s):
 
-1. Read every WAL record past the compactor's own cursor.
-2. Encode them all into one segment via the configured `Codec`.
+1. Read WAL records past the compactor's own cursor in bounded chunks (256
+   records per read), accumulating until their payloads reach
+   `storage.roll_bytes` (default 16 MiB) or the WAL has nothing more to give.
+   A long backlog therefore produces **several segments in one tick**, not one
+   unbounded segment — peak memory is a chunk plus a segment, however far
+   behind a storage node fell.
+2. Encode those records into one segment via the configured `Codec`.
 3. `PUT` the segment to the blob store under a deterministic key:
    `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
 4. Append one index row per record to `Ankusa.Storage.Index` (durable,
-   append-only, on local disk regardless of which `BlobStore` is
-   configured) — `event_id`, `tenant_id`, `source_id`, `seq`,
-   `segment_key`, `offset`, `length`.
+   append-only, fsynced before the cursor moves, on local disk regardless of
+   which `BlobStore` is configured) — `event_id`, `tenant_id`, `source_id`,
+   `seq`, `segment_key`, `offset`, `length`.
 5. Advance the compactor's durable cursor.
 6. Truncate the WAL through `min(compactor_seq, dispatch_seq)` — **never**
    past what dispatch has consumed yet, so at-least-once delivery survives

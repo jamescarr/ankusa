@@ -152,4 +152,92 @@ defmodule Ankusa.WAL.PostgresTest do
     assert length(WAL.read(inst_a, -1, 10)) == 1
     assert length(WAL.read(inst_b, -1, 10)) == 1
   end
+
+  test "a cursor-following reader never skips a commit that lands behind it", %{instance: inst} do
+    conn = Ankusa.via(inst, :wal)
+
+    # Widen the allocation → COMMIT window: `seq` is allocated by the INSERT,
+    # but the statement trigger sleeps *after* it, inside the still-open
+    # transaction. That is what lets writer B allocate a higher seq and commit
+    # before writer A's lower one lands — the exact race a cursor reader
+    # (`seq > cursor`) must not lose to.
+    try do
+      Postgrex.query!(
+        conn,
+        """
+        CREATE OR REPLACE FUNCTION ankusa_test_slow_commit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          PERFORM pg_sleep(random() * 0.02);
+          RETURN NULL;
+        END
+        $$
+        """,
+        []
+      )
+
+      Postgrex.query!(
+        conn,
+        """
+        CREATE TRIGGER ankusa_test_slow_commit AFTER INSERT ON ankusa_wal
+        FOR EACH STATEMENT EXECUTE FUNCTION ankusa_test_slow_commit()
+        """,
+        []
+      )
+
+      advance = fn cursor, seen, envelopes ->
+        Enum.reduce(envelopes, {cursor, seen}, fn env, {c, s} ->
+          {max(c, env.seq), MapSet.put(s, env.seq)}
+        end)
+      end
+
+      reader =
+        Task.async(fn ->
+          drain = fn drain, cursor, seen ->
+            case WAL.read(inst, cursor, 1000) do
+              [] ->
+                seen
+
+              envelopes ->
+                {cursor, seen} = advance.(cursor, seen, envelopes)
+                drain.(drain, cursor, seen)
+            end
+          end
+
+          poll = fn poll, cursor, seen ->
+            receive do
+              :stop ->
+                drain.(drain, cursor, seen)
+            after
+              0 ->
+                {cursor, seen} = advance.(cursor, seen, WAL.read(inst, cursor, 1000))
+                Process.sleep(1)
+                poll.(poll, cursor, seen)
+            end
+          end
+
+          poll.(poll, 0, MapSet.new())
+        end)
+
+      writers =
+        for _ <- 1..8 do
+          Task.async(fn ->
+            for _ <- 1..25 do
+              {:ok, [{:committed, env}]} = WAL.append(inst, [entry()])
+              env.seq
+            end
+          end)
+        end
+
+      committed = writers |> Task.await_many(30_000) |> List.flatten() |> MapSet.new()
+
+      send(reader.pid, :stop)
+      seen = Task.await(reader, 30_000)
+
+      assert MapSet.difference(committed, seen) == MapSet.new()
+    after
+      Postgrex.query!(conn, "DROP TRIGGER IF EXISTS ankusa_test_slow_commit ON ankusa_wal", [])
+      Postgrex.query!(conn, "DROP FUNCTION IF EXISTS ankusa_test_slow_commit()", [])
+    end
+  end
 end

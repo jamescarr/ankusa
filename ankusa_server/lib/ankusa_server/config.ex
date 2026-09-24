@@ -62,7 +62,7 @@ defmodule AnkusaServer.Config do
   @http_keys ~w(port max_body_bytes routing prefix)
   @admin_keys ~w(enabled port)
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
-  @dispatch_keys ~w(poll_ms batch retry)
+  @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type postgres)
   @postgres_keys ~w(url host port username password database pool_size ssl migrate)
@@ -78,7 +78,7 @@ defmodule AnkusaServer.Config do
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @dedup_keys ~w(type header json_path)
   @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms)
+  @http_sink_keys ~w(type url method headers timeout_ms ordered)
   @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes)
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes ssl sasl)
   @sasl_keys ~w(mechanism username password)
@@ -381,6 +381,9 @@ defmodule AnkusaServer.Config do
         []
         |> put_opt(:poll_ms, int_opt(dispatch, "poll_ms", ["dispatch"]))
         |> put_opt(:batch, int_opt(dispatch, "batch", ["dispatch"]))
+        |> put_opt(:concurrency, int_opt(dispatch, "concurrency", ["dispatch"]))
+        |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
+        |> put_opt(:max_inflight_bytes, int_opt(dispatch, "max_inflight_bytes", ["dispatch"]))
         |> put_opt(:retry, retry_policy(retry))
     ]
   end
@@ -800,7 +803,8 @@ defmodule AnkusaServer.Config do
          [url: required_string!(sink, "url", path)]
          |> put_opt(:method, atom_enum_opt(sink, "method", ~w(post put patch), path))
          |> put_opt(:headers, headers(sink["headers"], path ++ ["headers"]))
-         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))}
+         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+         |> put_opt(:ordered, bool_opt(sink, "ordered", path))}
 
       "rabbitmq" ->
         check_keys!(sink, @rabbitmq_sink_keys, path)

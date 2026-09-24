@@ -32,12 +32,13 @@ from ingest/dispatch/storage exactly like any other role. See
 `examples/rabbitmq-consumer/` deployment (an `ingest` service plus a
 separate `claim-check` service, same image, different `ANKUSA_ROLES`).
 
-**Important constraint:** splitting roles across different *processes on
-one host* works with any WAL, because they can share a local disk path.
-Splitting roles across different *machines* requires a WAL every role can
-reach over the network — that's `WAL.Postgres` (see
-[`storage.md`](storage.md)), not `WAL.DiskLog`. This constraint doesn't
-apply to `:claim_check`, which never touches the WAL at all.
+**Important constraint:** `WAL.DiskLog` keeps its record index in-process and
+reclaims space by renaming the log file, so **every role that touches the WAL
+must run in one BEAM node** — that is the topology a single container or
+`mix run` gets you. Splitting `edge`, `dispatch`, and `storage` across
+processes, containers, or hosts requires a WAL they can all reach over the
+network: `WAL.Postgres` (see [`storage.md`](storage.md)). The constraint does
+not apply to `:claim_check`, which never touches the WAL at all.
 
 **`:dispatch` and `:storage` are singletons per instance.** Neither cursor
 has a lease. Two `:dispatch` nodes on one `WAL.Postgres` deliver every hook
@@ -113,16 +114,22 @@ a deployment concern the framework doesn't solve for you (nothing in
 
 ### Dispatch throughput
 
-`Ankusa.Dispatch.Pipeline` delivers one envelope at a time and writes the
-cursor after each (`drain/1`, `deliver_with_retry/4`). A retrying sink
-therefore blocks the instance's whole pipeline, and throughput is bounded by
-sink latency — there's no concurrent dispatch (see
-[`delivery.md`](delivery.md)).
-Measured numbers from a full ingest → dispatch → consumer run are recorded
-in [`testing.md`](testing.md#load-and-end-to-end-kind--oban), including an
-open finding: killing the singleton `:dispatch`/`:storage` node mid-load can
-rarely drop a hook permanently — see that section's "Known issue" for what's
-been ruled out and what hasn't.
+`Ankusa.Dispatch.Pipeline` delivers up to `dispatch.concurrency` envelopes at
+once (default 32), each in its own task, and moves its durable cursor as a
+**watermark**: it never advances past an envelope that isn't fully handled.
+Deliveries to the same sink with an equal `c:Ankusa.Sink.ordering_key/2` run one
+at a time, in `seq` order; different keys run concurrently, so one slow
+destination or one retrying envelope no longer stalls the whole instance.
+
+Throughput is therefore bounded by `dispatch.concurrency`, not by sink
+latency, and `dispatch.max_inflight` / `dispatch.max_inflight_bytes` bound how
+much admitted-but-unfinished work a stalled destination can hold. Raise
+`concurrency` to push more requests at the destination — for `Sink.Http`, keep
+Req's Finch pool (default 50 connections) at least that large, or deliveries
+queue on pool checkout.
+
+Measured numbers from a full ingest → dispatch → consumer run are recorded in
+[`testing.md`](testing.md#load-and-end-to-end-kind--oban).
 
 ## Worked examples
 

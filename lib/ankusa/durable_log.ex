@@ -39,22 +39,46 @@ defmodule Ankusa.DurableLog do
   """
 
   @type opts :: [safe: boolean()]
+  @type append_opts :: [sync: boolean()]
 
   @doc """
   Append one record, or several in a single write.
 
-  Creates the parent directory if needed. The frames are flushed by the OS;
-  callers that need a durability barrier before acknowledging own that decision
-  (`Ankusa.Edge.Quarantine` calls `:file.datasync/1`, the DLQ does not).
+  Creates the parent directory if needed. The frames are flushed by the OS
+  unless `sync: true`, which adds an `fsync` before returning — callers that
+  acknowledge on the strength of the append (the DLQ, the storage index) pass
+  it, because a write that is only in the page cache is a write a power loss
+  can drop. `Ankusa.Edge.Quarantine` keeps its own descriptor and always
+  `:file.datasync/1`s its puts.
   """
-  @spec append(Path.t(), term() | [term()]) :: :ok
-  def append(path, records) when is_list(records) do
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, frame(records), [:append, :binary])
-    :ok
+  @spec append(Path.t(), term() | [term()], append_opts()) :: :ok
+  def append(path, records, opts \\ [])
+
+  def append(path, records, opts) when is_list(records) do
+    if Keyword.get(opts, :sync, false) do
+      append_synced(path, records)
+    else
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, frame(records), [:append, :binary])
+      :ok
+    end
   end
 
-  def append(path, record), do: append(path, [record])
+  def append(path, record, opts), do: append(path, [record], opts)
+
+  defp append_synced(path, records) do
+    File.mkdir_p!(Path.dirname(path))
+    {:ok, fd} = :file.open(path, [:append, :raw, :binary])
+
+    try do
+      :ok = :file.write(fd, frame(records))
+      :ok = :file.datasync(fd)
+    after
+      :file.close(fd)
+    end
+
+    :ok
+  end
 
   @doc """
   Frame records as iodata for a single write.

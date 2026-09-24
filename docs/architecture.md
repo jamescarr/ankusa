@@ -70,14 +70,15 @@ a `WAL.Postgres` database (see [`storage.md`](storage.md)).
    after — the WAL's uniqueness constraint on `(tenant_id, source_id,
    dedup_key)` is what actually enforces idempotency; the extractor just
    supplies the key.
-4. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default one per
-   scheduler) receives the envelope and **blocks the caller** until the
-   batch it lands in commits. Every `max_delay_ms` (default 5ms) or once
-   `max_batch` (default 256) envelopes accumulate, the batcher flushes the
-   whole buffer to the WAL in **one `append/2` call — one `fsync` for
-   however many hooks were in the batch**. Every blocked caller is replied
-   to only after that commit returns; that's what makes the ack honest.
-   The queue is bounded (`max_queue`, default 10,000): full means `503` with
+4. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default two)
+   receives the envelope and **blocks the caller** until the batch it lands
+   in commits. The flush to the WAL runs in a `Task`, so the batcher keeps
+   accepting while a commit is in flight — the next batch accumulates behind
+   it and commits the instant the previous one returns. `max_batch`
+   (default 256) bounds one batch, `max_delay_ms` (default 0) adds no linger.
+   Every blocked caller is replied to only after that commit returns; that's
+   what makes the ack honest. The queue is bounded (`max_queue`, default
+   10,000, counting buffered *and* in-flight records): full means `503` with
    `Retry-After`, never a promise the store can't back.
 5. **`Ankusa.WAL`** commits durably and returns `{:committed, envelope}` (with
    `seq` assigned) or `{:duplicate, existing_seq}` per record, in the
@@ -94,8 +95,10 @@ From here, ingest is done. Two independent consumers tail the WAL by `seq`:
   hasn't consumed yet are never dropped, at-least-once delivery survives
   compaction. Detail in [`storage.md`](storage.md).
 - **`Ankusa.Dispatch.Pipeline`** reads everything past its cursor and delivers
-  each envelope to every one of the source's `Ankusa.Sink`s, retrying per the
-  source's `Ankusa.RetryPolicy` and dead-lettering on give-up. Detail in
+  each envelope to every one of the source's `Ankusa.Sink`s, up to
+  `dispatch.concurrency` deliveries at a time and serialized per
+  `c:Ankusa.Sink.ordering_key/2`, retrying per the source's
+  `Ankusa.RetryPolicy` and dead-lettering on give-up. Detail in
   [`delivery.md`](delivery.md).
 
 ## Guarantees, by component
@@ -103,10 +106,10 @@ From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 | Component | Guarantee |
 | --- | --- |
 | `WAL.DiskLog` | Append-only, length-prefixed, CRC32-per-record log. Replay validates every CRC and **drops a torn trailing frame** — a write that started but never `fsync`'d, so it was never acked either. No un-acked write is ever surfaced as if it were durable. |
-| Group-commit batcher | One process per partition; callers block until commit; bounded queue sheds load as `503` rather than queuing unboundedly. |
+| Group-commit batcher | One process per partition; the WAL append runs in a task, so commits pipeline while callers block until their own commit returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. |
 | Idempotent receiver | A duplicate still gets a `2xx` (`{"status":"duplicate"}`) — the provider's retry contract is honored even though nothing new was written. |
 | Compactor | Never writes one object per hook — packs many WAL records into one immutable segment. Truncates only through `min(compactor, dispatch)`. |
-| Dispatch | At-least-once to every sink, exponential backoff with jitter, dead-letter on give-up, durable cursor survives restart. |
+| Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and serialized per `c:Ankusa.Sink.ordering_key/2`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal, durable watermark cursor survives restart. |
 | Quarantine | Token-bucket rate-limited (100 burst, 20/s refill) durable pen — a bad secret rotation can't silently eat real events, and a flood of forged requests can't fill the disk. |
 
 ## Instance model
@@ -162,25 +165,31 @@ flowchart LR
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/). Durable to
 process crash and power loss on that box; not to losing the box.
 
-### 2. Role-split processes, one host
+### 2. Multiple roles, one node
 
-`ANKUSA_ROLES=edge` / `ANKUSA_ROLES=dispatch` / `ANKUSA_ROLES=storage` as separate
-OS processes or containers sharing one volume. Still `WAL.DiskLog` — it's a
-local file, so every role reading/writing it must be able to see the same
-disk. Useful for isolating edge CPU/memory from compaction, without standing
-up a database yet.
+`ANKUSA_ROLES=edge` / `ANKUSA_ROLES=dispatch` / `ANKUSA_ROLES=storage` as
+separate containers on one host, all pointing at the **same** `WAL.Postgres`
+and blob store. Use it to give edge CPU/memory its own limits, or to put
+`:claim_check` (which never touches the WAL) on its own node.
 
 ```mermaid
 flowchart LR
-    P[Provider] --> E["edge process\nANKUSA_ROLES=edge"]
-    subgraph Host["one host, shared volume"]
-        E --> WAL[("WAL.DiskLog\nshared volume")]
-        D["dispatch process\nANKUSA_ROLES=dispatch"] --> WAL
-        S["storage process\nANKUSA_ROLES=storage"] --> WAL
+    P[Provider] --> E["edge container\nANKUSA_ROLES=edge"]
+    subgraph Host["one host"]
+        E --> PG[("WAL.Postgres")]
+        D["dispatch container\nANKUSA_ROLES=dispatch"] --> PG
+        S["storage container\nANKUSA_ROLES=storage"] --> PG
         S --> BS[(segments)]
     end
     D --> SK[Sinks]
 ```
+
+`WAL.DiskLog` cannot be split this way: it keeps its record index in-process
+and reclaims space by renaming the log file, so a second OS process would
+never see writes it didn't make and would rewrite the file under the first
+one. Every role that touches a DiskLog WAL must live in **one BEAM node** —
+which is what topology 1 does. Splitting roles across processes, containers
+or hosts is exactly what `WAL.Postgres` is for.
 
 ### 3. Multi-node fleet, shared Postgres WAL
 

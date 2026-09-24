@@ -41,6 +41,35 @@ defmodule Ankusa.DispatchTest do
     def deliver(_env, _ctx, _opts), do: {:error, :always}
   end
 
+  defmodule RaisingSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: raise("boom")
+  end
+
+  # Blocks inside the delivery task until the test releases it, and orders per
+  # tenant — so two envelopes of the same tenant must not overlap, while a
+  # different tenant proceeds.
+  defmodule GateSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:started, env.id, self()})
+      id = env.id
+
+      receive do
+        {:go, ^id} -> :ok
+      after
+        5_000 -> {:error, :gate_timeout}
+      end
+    end
+
+    @impl true
+    def ordering_key(env, _opts), do: env.tenant_id
+  end
+
   # ── helpers ────────────────────────────────────────────────────────────────
 
   defp build_env(source_id) do
@@ -162,5 +191,81 @@ defmodule Ankusa.DispatchTest do
     assert Ankusa.Dispatch.replay(inst, source_id: "src1") == 1
     assert_receive {:delivered, id, 1}
     assert id == env.id
+  end
+
+  test "a slow envelope holds the cursor while other ordering keys proceed, and same-key deliveries stay in seq order" do
+    %{inst: inst} = start([{GateSink, pid: self()}], dispatch: %{poll_ms: 10, concurrency: 8})
+
+    e1 = %{build_env("src1") | tenant_id: "a"}
+    e2 = %{build_env("src1") | tenant_id: "a"}
+    e3 = %{build_env("src1") | tenant_id: "b"}
+
+    {:ok, results} = WAL.append(inst, for(e <- [e1, e2, e3], do: %{envelope: e}))
+    [c1, c2, c3] = for {:committed, env} <- results, do: env
+
+    # "a" and "b" are independent keys: both start at once.
+    assert_receive {:started, id1, p1}, 2_000
+    assert id1 == c1.id
+    assert_receive {:started, id3, p3}, 2_000
+    assert id3 == c3.id
+
+    # ...but the second "a" must wait for the first, in seq order.
+    c2_id = c2.id
+    refute_receive {:started, ^c2_id, _}, 100
+
+    # e3 finishes while e1 is still stuck: the cursor must not move past e1.
+    send(p3, {:go, c3.id})
+    Process.sleep(50)
+    assert WAL.get_cursor(inst, :dispatch) < c1.seq
+
+    send(p1, {:go, c1.id})
+    assert_receive {:started, id2b, p2}, 2_000
+    assert id2b == c2.id
+
+    send(p2, {:go, c2.id})
+    eventually(fn -> WAL.get_cursor(inst, :dispatch) == c3.seq end)
+  end
+
+  test "a sink that raises is retried and dead-lettered instead of crashing dispatch" do
+    %{inst: inst, config: config} =
+      start([{RaisingSink, []}],
+        max_sleep_ms: 5,
+        dispatch: %{retry: {Ankusa.RetryPolicy.Exponential, max_attempts: 2}}
+      )
+
+    env = build_env("src1")
+    {:ok, [{:committed, committed}]} = WAL.append(inst, [%{envelope: env}])
+
+    assert {:ok, 1} = Pipeline.tick(inst)
+
+    assert [%{envelope: dead, reason: {:sink, RaisingSink, {:raised, %RuntimeError{}}}}] =
+             DLQ.entries(config)
+
+    assert dead.id == env.id
+    # the pipeline is still up and has advanced past the dead letter
+    assert Process.alive?(Ankusa.whereis(inst, :dispatch))
+    assert WAL.get_cursor(inst, :dispatch) == committed.seq
+  end
+
+  defp eventually(fun, timeout_ms \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    unless do_eventually(fun, deadline) do
+      flunk("condition was never met within #{timeout_ms}ms")
+    end
+  end
+
+  defp do_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        Process.sleep(20)
+        do_eventually(fun, deadline)
+    end
   end
 end

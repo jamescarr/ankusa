@@ -133,6 +133,68 @@ defmodule Ankusa.EdgeTest do
     assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
   end
 
+  test "sheds with 503 once max_queue is reached while a commit is in flight" do
+    # A WAL whose commit takes long enough that the queue fills behind it. Each
+    # commit also makes progress (2 records leave the queue per 300 ms), so the
+    # queue cannot simply fill once and stay full.
+    defmodule SlowWAL do
+      @behaviour Ankusa.WAL
+
+      def child_spec(opts), do: Ankusa.WAL.DiskLog.child_spec(opts)
+
+      def start_link(opts), do: Ankusa.WAL.DiskLog.start_link(opts)
+
+      @impl Ankusa.WAL
+      def append(server, records) do
+        Process.sleep(300)
+        Ankusa.WAL.DiskLog.append(server, records)
+      end
+
+      @impl Ankusa.WAL
+      def read(server, after_seq, limit), do: Ankusa.WAL.DiskLog.read(server, after_seq, limit)
+
+      @impl Ankusa.WAL
+      def get_cursor(server, name), do: Ankusa.WAL.DiskLog.get_cursor(server, name)
+
+      @impl Ankusa.WAL
+      def put_cursor(server, name, seq), do: Ankusa.WAL.DiskLog.put_cursor(server, name, seq)
+
+      @impl Ankusa.WAL
+      def truncate_through(server, seq), do: Ankusa.WAL.DiskLog.truncate_through(server, seq)
+
+      @impl Ankusa.WAL
+      def stats(server), do: Ankusa.WAL.DiskLog.stats(server)
+    end
+
+    config =
+      test_config(
+        roles: [:edge],
+        wal: {SlowWAL, []},
+        source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => []}},
+        batcher: %{partitions: 1, max_batch: 2, max_queue: 4, max_delay_ms: 0}
+      )
+
+    start_supervised!({Ankusa.Instance, config})
+    inst = config.instance
+
+    results =
+      1..20
+      |> Enum.map(fn _ -> Task.async(fn -> Ingest.ingest(inst, request("demo", "x")) end) end)
+      |> Enum.map(&Task.await(&1, 30_000))
+
+    overloads = Enum.count(results, &(&1 == {:error, :overload}))
+    committed = for {:ok, env} <- results, do: env
+
+    # The bound has to bite: with 20 concurrent callers and a queue that holds
+    # 4, most of them never get in.
+    assert overloads >= 10
+    assert length(committed) + overloads == 20
+
+    # ...and everything that *was* acked is durably in the WAL.
+    in_wal = inst |> WAL.read(-1, 100) |> MapSet.new(& &1.id)
+    assert Enum.all?(committed, &MapSet.member?(in_wal, &1.id))
+  end
+
   test "oversize payload is refused with 413" do
     config =
       test_config(
