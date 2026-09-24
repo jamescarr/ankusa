@@ -130,6 +130,32 @@ jobs:
         working-directory: ankusa_kafka
         run: docker compose down -v
 
+  # The server image's project. It path-depends on core and all three adapters,
+  # so its compile pulls in brod's crc32cer NIF — the runner's CMake handles
+  # that, same as the kafka job. No services: nothing in this project's suite
+  # talks to Postgres, RabbitMQ, or Redpanda, and `mix test` starts no instance
+  # (config/config.exs turns autostart off in :test).
+  ankusa_server:
+    name: ankusa_server
+    needs: ankusa
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_server
+        run: mix deps.get --check-locked
+      - working-directory: ankusa_server
+        run: mix deps.unlock --check-unused
+      - working-directory: ankusa_server
+        run: mix format --check-formatted
+      - working-directory: ankusa_server
+        run: mix compile --warnings-as-errors
+      - working-directory: ankusa_server
+        run: mix test
+
   # The examples are the deployable wrappers: path-dep consumers of core and an
   # adapter, plus the TypeScript workers. They are where a lockfile goes stale
   # without anyone noticing, so they assert their locks and compile too — the
