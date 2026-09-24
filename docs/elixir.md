@@ -119,8 +119,8 @@ The ingest listener serves the catch URL, plus two read-only endpoints:
 | `GET` | `/stats` | WAL stats. |
 
 The operator API on its own port — `/metrics`, the dead-letter queue, replay,
-quarantine — is `admin.enabled: true`; see
-[`configuration.md#the-admin-api`](configuration.md#the-admin-api).
+quarantine — is `admin.enabled: true`; see the admin API section in
+[`configuration.md`](configuration.md#ankusa-config).
 
 ## Roles from code
 
