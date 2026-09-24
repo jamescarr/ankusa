@@ -11,11 +11,11 @@ flowchart LR
     I -->|WAL fsync, then ack| P
     I -->|"small body (base64)"| X((ankusa.events\nexchange))
     I -.fat body: Direct check-in.-> S[(S3 / floci)]
-    I -->|"fat body → message carries a ticket"| X
+    I -->|"fat body → message carries a claim ref"| X
     X -->|ankusa.# binding, owned by consumer| Q[worker's queue]
     Q --> W[TypeScript worker\nno S3 credentials]
-    W -->|GET /v1/claims/... Bearer token| CC[claim-check\n:claim_check role]
-    CC -.Direct.-> S
+    W -->|GET /v1/claims/...| CC[claim-check\n:claim_check role]
+    CC --> S
 ```
 
 **What each piece is doing:**
@@ -28,27 +28,33 @@ flowchart LR
   sink's fat-payload claim check (`claims/...` keys) — same bucket, same
   credentials, no separate storage code.
 - `claim-check` — the **same image**, `ANKUSA_ROLES=claim_check` is the only
-  difference. Its own listener (`:4001`), its own bearer token. It's the
-  only piece besides `ingest` that ever holds S3 credentials.
+  difference. Its own listener (`:4001`), open — no bearer token; auth goes
+  in front of it. It's the only piece besides `ingest` that ever holds S3
+  credentials.
 - `worker/` — a minimal TypeScript consumer with **no S3 credentials at
   all**. It declares and binds its own queue (`ankusa.#` against the
   exchange) — the ingest framework never touches a queue, only the
-  exchange — and redeems fat-payload tickets through `claim-check`'s HTTP
-  API instead of talking to the object store directly.
+  exchange — and redeems fat-payload claim refs through `claim-check`'s HTTP
+  API, using a client generated straight from
+  [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+  (`npm run generate:types`) instead of a hand-maintained ref type —
+  see ["Redeem a claim"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeem-a-claim).
 - `floci` — local S3-compatible emulator (see the root README's "Object
   store adapters" section); stands in for real S3/R2/MinIO.
 
 ## Small vs. fat payloads
 
-`Ankusa.Sink.RabbitMQ` inlines a body under `INLINE_MAX_BYTES` (default 8 KiB,
-base64-encoded in the message). Anything larger is checked in through
-`Ankusa.ClaimCheck` and the message carries a ticket instead —
-`{"claim": {"tenant_id": ..., "id": ..., "size": ..., "sha256": ...}}`.
+`Ankusa.Sink.RabbitMQ` inlines a body under `INLINE_MAX_BYTES` — 64 KiB by
+default, 8 KiB in this example so the demo's fat hook takes the claim path.
+It's base64-encoded in the message; anything larger is checked in through
+`Ankusa.ClaimCheck` and the message carries a claim ref URN instead —
+`{"claim": "urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>"}`.
 RabbitMQ throughput and memory stay flat regardless of how large a webhook
-payload is. The worker redeems the claim (a `GET` against `claim-check`,
-verified end to end against the ticket's `sha256`) only when one is present;
-otherwise it just decodes the inline body. Try both — the commands below
-send one of each.
+payload is. The worker redeems the claim (a
+`GET /v1/claims/<tenant>/<object_id>/<offset>/<length>` against
+`claim-check`, verified end to end against the ref's `sha256`) only when one
+is present; otherwise it just decodes the inline body. Try both — the
+commands below send one of each.
 
 ## Run it
 
@@ -81,14 +87,13 @@ Watch the worker print both:
 docker compose logs -f worker
 ```
 
-You'll see `via=inline` for the first and `via=claim:<id>` for the second,
-followed by the actual decoded payload in each case — proof the ticket
-round-trips through the real gateway and the real object store, not just
-that a message arrived. You can also redeem a ticket by hand:
+You'll see `via=inline` for the first and `via=claim:<object_id>` for the
+second, followed by the actual decoded payload in each case — proof the
+claim ref round-trips through the real gateway and the real object store,
+not just that a message arrived. You can also redeem a claim by hand:
 
 ```sh
-curl -H 'authorization: Bearer dev-claim-check-token' \
-  http://localhost:4001/v1/claims/default/<id>
+curl http://localhost:4001/v1/claims/<tenant>/<object_id>/<offset>/<length>
 ```
 
 Tear down:

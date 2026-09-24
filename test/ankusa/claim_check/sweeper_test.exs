@@ -23,48 +23,46 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
     %{inst: inst}
   end
 
-  defp id_at(ms), do: UUIDv7.generate(ms)
+  # A one-claim pack whose object id — and so its dt partition — dates from `ms`.
+  defp claim_at(inst, ms, body) do
+    object_id = UUIDv7.generate(ms)
+    id = UUIDv7.generate()
+    {:ok, refs} = ClaimCheck.check_in(inst, "acme", [%{id: id, body: body}], object_id: object_id)
+    refs[id]
+  end
 
-  test "sweep deletes claims older than retention_days and keeps newer ones", %{inst: inst} do
-    now = System.system_time(:millisecond)
-    old_ms = now - 10 * 86_400_000
-    fresh_ms = now - 1 * 86_400_000
+  defp days_ago(n), do: System.system_time(:millisecond) - n * 86_400_000
 
-    old_id = id_at(old_ms)
-    fresh_id = id_at(fresh_ms)
-
-    {:ok, old_ticket} = ClaimCheck.check_in(inst, "old", %{tenant_id: "acme", id: old_id})
-    {:ok, fresh_ticket} = ClaimCheck.check_in(inst, "fresh", %{tenant_id: "acme", id: fresh_id})
+  test "deletes day partitions past retention_days and keeps newer ones", %{inst: inst} do
+    old = claim_at(inst, days_ago(10), "old")
+    fresh = claim_at(inst, days_ago(1), "fresh")
 
     assert {1, 2} = Sweeper.sweep(inst)
 
-    assert {:error, :not_found} = ClaimCheck.redeem(inst, old_ticket)
-    assert {:ok, "fresh"} = ClaimCheck.redeem(inst, fresh_ticket)
+    assert {:error, :not_found} = ClaimCheck.redeem(inst, old)
+    assert {:ok, "fresh"} = ClaimCheck.redeem(inst, fresh)
   end
 
-  test "sweep never touches compaction segments under seg/", %{inst: inst} do
-    now = System.system_time(:millisecond)
-    old_id = id_at(now - 30 * 86_400_000)
+  test "keeps a claim for at least retention_days: the partition exactly on the cutoff day stays",
+       %{inst: inst} do
+    boundary = claim_at(inst, days_ago(7), "boundary")
 
-    :ok =
-      Ankusa.BlobStore.put(
-        inst,
-        "seg/00000000000000000001-00000000000000000002.seg",
-        "segment bytes"
-      )
+    assert {0, 1} = Sweeper.sweep(inst)
+    assert {:ok, "boundary"} = ClaimCheck.redeem(inst, boundary)
+  end
 
-    {:ok, _ticket} = ClaimCheck.check_in(inst, "old claim", %{tenant_id: "acme", id: old_id})
+  test "never touches compaction segments under seg/", %{inst: inst} do
+    key = "seg/00000000000000000001-00000000000000000002.seg"
+    :ok = Ankusa.BlobStore.put(inst, key, "segment bytes")
+    _old = claim_at(inst, days_ago(30), "old claim")
 
     assert {1, 1} = Sweeper.sweep(inst)
-
-    assert {:ok, "segment bytes"} =
-             Ankusa.BlobStore.get(inst, "seg/00000000000000000001-00000000000000000002.seg")
+    assert {:ok, "segment bytes"} = Ankusa.BlobStore.get(inst, key)
   end
 
   test "a second sweep with nothing expired deletes nothing", %{inst: inst} do
-    fresh_id = id_at(System.system_time(:millisecond))
-    {:ok, _ticket} = ClaimCheck.check_in(inst, "x", %{tenant_id: "acme", id: fresh_id})
-
+    _fresh = claim_at(inst, days_ago(0), "x")
+    assert {0, 1} = Sweeper.sweep(inst)
     assert {0, 1} = Sweeper.sweep(inst)
   end
 end

@@ -3,22 +3,22 @@ defmodule Ankusa.ClaimCheck.Sweeper do
   Retention for `LocalFS`-backed claims. Only ever started (in the `:storage`
   role) when `claim_check.retention_days` is set —
   `Ankusa.ClaimCheck.validate_config!/1` already rejects that setting against
-  any other claim store at boot, so this process only ever runs against
+  any other blob store at boot, so this process only ever runs against
   `BlobStore.LocalFS`.
 
-  Each tick lists every key under the fixed `claims/` prefix, reads the
-  UUIDv7 embedded in each claim's own id (`claims/<tenant>/<id>`) for its
-  creation time — no extra metadata or `stat` call needed — and deletes
-  claims older than `retention_days`. S3/GCS-backed claim stores are never
-  covered here; use a bucket lifecycle rule on the `claims/` prefix instead
-  (see `docs/claim-check.md`).
+  Claim objects live in day partitions, `claims/tenant=<t>/dt=<yyyy-mm-dd>/`,
+  so each tick removes whole partition directories: a day is deleted once every
+  object in it is older than `retention_days`, which means a claim is always
+  kept for at least that long. Nothing is listed object by object. A directory
+  that isn't a well-formed partition is left alone rather than guessed at.
+  S3/GCS-backed claims are never covered here; use a bucket lifecycle rule on
+  the `claims/` prefix instead (see `docs/claim-check.md`).
   """
 
   use GenServer
 
-  alias Ankusa.{BlobStore, Config, Telemetry, UUIDv7}
-
-  @claims_prefix "claims/"
+  alias Ankusa.{Config, Telemetry}
+  alias Ankusa.ClaimCheck.Ref
 
   # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -31,7 +31,7 @@ defmodule Ankusa.ClaimCheck.Sweeper do
     %{id: {__MODULE__, Keyword.fetch!(opts, :instance)}, start: {__MODULE__, :start_link, [opts]}}
   end
 
-  @doc "Run one sweep synchronously; returns `{deleted, scanned}`."
+  @doc "Run one sweep synchronously; returns `{deleted, scanned}` day partitions."
   @spec sweep(atom()) :: {non_neg_integer(), non_neg_integer()}
   def sweep(instance),
     do: GenServer.call(Ankusa.via(instance, :claim_check_sweeper), :sweep, :infinity)
@@ -62,38 +62,47 @@ defmodule Ankusa.ClaimCheck.Sweeper do
 
   # ── sweep ─────────────────────────────────────────────────────────────────
 
-  defp run_sweep(%{instance: instance, config: config}) do
+  defp run_sweep(%{config: config} = state) do
     started = System.monotonic_time()
-    cutoff_ms = System.system_time(:millisecond) - config.claim_check.retention_days * 86_400_000
 
-    keys = BlobStore.list(instance, @claims_prefix)
-    expired = Enum.filter(keys, &expired?(&1, cutoff_ms))
+    # A day strictly before this date holds only objects past retention.
+    cutoff =
+      (System.system_time(:millisecond) - config.claim_check.retention_days * 86_400_000)
+      |> DateTime.from_unix!(:millisecond)
+      |> DateTime.to_date()
 
-    Enum.each(expired, &BlobStore.delete(instance, &1))
+    partitions = partitions(config)
+    expired = Enum.filter(partitions, fn {_dir, date} -> Date.compare(date, cutoff) == :lt end)
+
+    Enum.each(expired, fn {dir, _date} -> File.rm_rf!(dir) end)
 
     Telemetry.emit(
       [:claim_check, :sweep],
       %{
         deleted: length(expired),
-        scanned: length(keys),
+        scanned: length(partitions),
         duration: System.monotonic_time() - started
       },
-      %{instance: instance}
+      %{instance: state.instance}
     )
 
-    {length(expired), length(keys)}
+    {length(expired), length(partitions)}
   end
 
-  # A key that isn't a well-formed `claims/<tenant>/<uuidv7>` (or whose id
-  # doesn't parse as UUIDv7) is left alone rather than guessed at — retention
-  # only ever removes what it can positively date.
-  defp expired?(key, cutoff_ms) do
-    with [id] <- key |> String.trim_leading(@claims_prefix) |> String.split("/") |> Enum.take(-1),
-         {:ok, ms} <- UUIDv7.timestamp_ms(id) do
-      ms < cutoff_ms
-    else
-      _ -> false
-    end
+  # Every `claims/tenant=*/dt=*` directory under the LocalFS root, with its date.
+  defp partitions(config) do
+    [Config.path(config, "segments"), Ref.claims_prefix(), "tenant=*", "dt=*"]
+    |> Path.join()
+    |> Path.wildcard()
+    |> Enum.filter(&File.dir?/1)
+    |> Enum.flat_map(fn dir ->
+      with "dt=" <> date <- Path.basename(dir),
+           {:ok, date} <- Date.from_iso8601(date) do
+        [{dir, date}]
+      else
+        _ -> []
+      end
+    end)
   end
 
   defp schedule(interval) when is_integer(interval) and interval > 0 do

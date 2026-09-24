@@ -6,7 +6,7 @@ defmodule Ankusa.Sink.RabbitMQ do
   ownership: producers own exchanges, consumers own their own queues.
 
   Messages are small on purpose: the body rides inline up to
-  `:inline_max_bytes` (default 8 KiB) and is checked in through
+  `:inline_max_bytes` (default 64 KiB) and is checked in through
   `Ankusa.ClaimCheck` above that, so RabbitMQ throughput and memory stay flat
   regardless of payload size, and any consumer — BEAM or not — redeems the
   ticket without blob-store credentials of its own. The message is
@@ -19,7 +19,7 @@ defmodule Ankusa.Sink.RabbitMQ do
     * `:url`                — AMQP URL, default `"amqp://guest:guest@localhost:5672"`
     * `:routing_key`       — a static string, or a 1-arity fun `(Envelope.t() -> String.t())`;
                               default `"ankusa.\#{source_id}"`
-    * `:inline_max_bytes`  — default `8_192`
+    * `:inline_max_bytes`  — default 64 KiB (65,536), configurable
     * `:retry_ms`          — reconnect backoff, default `5_000`
     * `:confirm_timeout_ms` — publisher-confirm wait, default `5_000`
   """
@@ -33,7 +33,7 @@ defmodule Ankusa.Sink.RabbitMQ do
   @impl true
   def deliver(%Envelope{} = env, ctx, opts) do
     exchange = Keyword.fetch!(opts, :exchange)
-    inline_max_bytes = Keyword.get(opts, :inline_max_bytes, 8_192)
+    inline_max_bytes = Message.inline_max_bytes(opts)
 
     with {:ok, name} <- ensure_started(ctx.instance, exchange, opts),
          {:ok, payload} <- Message.encode(env, ctx, inline_max_bytes) do
@@ -45,6 +45,9 @@ defmodule Ankusa.Sink.RabbitMQ do
   # the routing key — so that is the ordering scope.
   @impl true
   def ordering_key(env, opts), do: routing_key(env, opts)
+
+  @impl true
+  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 
   # ── connection lifecycle ────────────────────────────────────────────────
 

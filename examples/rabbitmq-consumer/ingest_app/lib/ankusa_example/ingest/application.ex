@@ -19,10 +19,10 @@ defmodule AnkusaExample.Ingest.Application do
   The same image also runs as the standalone `:claim_check`-role gateway
   (`ANKUSA_ROLES=claim_check` — see `docker-compose.yml`'s `claim-check`
   service): both containers point `storage.blob_store` at the same S3
-  bucket, so a ticket checked in by the ingest node (through `Direct`, using
-  its own S3 credentials) redeems through the claim-check node's HTTP API —
-  the surface the worker actually calls, since the worker holds no S3
-  credentials of its own.
+  bucket, so a claim ref checked in by the ingest node (using its own S3
+  credentials) redeems through the claim-check node's HTTP API — the surface
+  the worker actually calls, since the worker holds no S3 credentials of its
+  own.
   """
 
   use Application
@@ -50,8 +50,7 @@ defmodule AnkusaExample.Ingest.Application do
       storage: %{blob_store: {Ankusa.BlobStore.S3, s3_opts()}},
       source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}},
       claim_check: %{
-        port: env_int("CLAIM_CHECK_PORT", 4001),
-        api_tokens: %{env("CLAIM_CHECK_TOKEN", "dev-claim-check-token") => :all}
+        port: env_int("CLAIM_CHECK_PORT", 4001)
       }
     )
   end

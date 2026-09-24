@@ -63,7 +63,9 @@ defmodule Ankusa.RouteResolver.TenantPath do
   Multi-tenant resolver: the tenant is carried in the URL. `POST
   /webhooks/:tenant_id/:source_id` maps to `%Route{tenant_id: t, source_id: s}`, so
   one instance serves many tenants and the tenant is authoritative from the path
-  rather than inferred from the source.
+  rather than inferred from the source. A tenant outside `[A-Za-z0-9_-]{1,64}`
+  doesn't resolve (a `404`): it names a storage partition and a claim-check
+  path segment, so it is refused before anything is written.
 
   Opts:
 
@@ -83,7 +85,7 @@ defmodule Ankusa.RouteResolver.TenantPath do
       segments when length(segments) == plen + 2 ->
         {head, [tenant_id, source_id]} = Enum.split(segments, plen)
 
-        if head == prefix,
+        if head == prefix and Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id),
           do: {:ok, %Route{source_id: source_id, tenant_id: tenant_id}},
           else: :error
 

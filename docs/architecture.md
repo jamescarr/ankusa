@@ -222,8 +222,8 @@ Ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
 `ankusa_rabbitmq` package), a Kafka topic (`Sink.Kafka`, separate
 `ankusa_kafka` package), or a NATS JetStream subject (`Sink.NATS`, separate
 `ankusa_nats` package); either way fat payloads are checked in through
-`Ankusa.ClaimCheck` with only a ticket on the queue, and the message itself
-is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its
+`Ankusa.ClaimCheck` with only a claim reference on the queue, and the message
+itself is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its
 **own** queue and binding — the framework never declares one, so adding a
 fifth consumer later is a change on the consumer side only, not a config
 change here. Kafka has no bindings: the consumer side owns a consumer group
@@ -236,23 +236,22 @@ flowchart LR
     P --> E2[Ingest node N]
     E1 & E2 --> WAL[("WAL\nper-node or shared")]
     E1 & E2 -->|small: inline body| X(("ankusa.events\nexchange"))
-    E1 & E2 -.fat: Direct check-in.-> Obj[("Object store")]
-    E1 & E2 -->|"fat: message carries a ticket"| X
+    E1 & E2 -.fat: write packed claims.-> Obj[("Object store")]
+    E1 & E2 -->|"fat: message carries a claim ref"| X
     X --> QA[queue A\nowned by consumer A]
     X --> QB[queue B\nowned by consumer B]
     QA --> CA[Worker A\nno store credentials]
     QB --> CB[Worker B\nno store credentials]
-    CA & CB -->|GET /v1/claims/...\nBearer token| CC["claim-check\n:claim_check role"]
-    CC -.Direct.-> Obj
+    CA & CB -->|GET /v1/claims/...| CC["claim-check\n:claim_check role\nread-only, no auth"]
+    CC --> Obj
 ```
 
-A consumer that shouldn't hold object-store credentials (a non-BEAM worker,
-a third party) redeems through a `:claim_check`-role node's HTTP API
-instead of the object store directly — see [`claim-check.md`](claim-check.md)
-for the full contract, the trust-boundary table for picking `Direct` vs.
-`Remote`, and why `Remote` (an RPC dependency) is allowed only downstream of
-the WAL — dispatch sinks and external consumers, never the edge's pre-ack
-path.
+A consumer that shouldn't hold object-store credentials (any worker, in any
+language, or a third party) redeems the reference with `GET /v1/claims/...`
+against a `claim_check`-role node instead of reading the object store — the
+gateway is read-only and does no authentication; whatever fronts it decides
+who may read what. See [`claim-check.md`](claim-check.md) for the API and the
+reference format.
 
 Worked end to end, dockerized, in
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/).

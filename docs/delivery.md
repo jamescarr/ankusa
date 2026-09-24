@@ -69,7 +69,20 @@ raised exception, throw, or exit is treated as `{:error, ...}` too.
 
 Sinks may also implement the optional `ordering_key/2` callback, which tells
 dispatch which deliveries may run concurrently — see
-[Ordering keys](#ordering-keys) above.
+[Ordering keys](#ordering-keys) above — and the optional `inline_max_bytes/1`
+callback, which tells dispatch how large a body this sink sends inline:
+
+```elixir
+@callback inline_max_bytes(opts :: keyword()) :: pos_integer() | nil
+@optional_callbacks ordering_key: 2, inline_max_bytes: 1
+```
+
+A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`) returns its
+`inline_max_bytes` (default 64 KiB). Dispatch checks a body in **once**, before
+any sink runs, when it is larger than at least one of its source's sinks'
+thresholds, and hands the resulting claim reference to every sink and every
+retry in `ctx.claim`. A sink that returns `nil` never uses the claim check.
+See [`claim-check.md`](claim-check.md).
 
 | Adapter | Deps | What it does |
 | --- | --- | --- |
@@ -97,13 +110,13 @@ own their own queues. Adding a fifth consumer later never touches ingest
 config.
 
 **Messages stay small on purpose.** A body under `:inline_max_bytes`
-(default 8 KiB) rides along base64-encoded in the message; anything larger
+(default 64 KiB) rides along base64-encoded in the message; anything larger
 is checked in through `Ankusa.ClaimCheck` (see
-[`claim-check.md`](claim-check.md)) and the message carries a ticket
+[`claim-check.md`](claim-check.md)) and the message carries a claim reference
 instead. This extends the WAL/segment design's "small hot path, big
 payloads elsewhere" principle to the queue: RabbitMQ throughput and memory
 stay flat regardless of how large a webhook payload is, and any consumer —
-BEAM or not — redeems the ticket without needing blob-store credentials of
+BEAM or not — redeems the reference without needing blob-store credentials of
 its own.
 
 ```elixir
@@ -111,7 +124,7 @@ sinks: [
   {Ankusa.Sink.RabbitMQ,
    exchange: "ankusa.events",
    url: "amqp://guest:guest@localhost:5672",
-   inline_max_bytes: 8_192,
+   inline_max_bytes: 65_536,
    routing_key: fn env -> "ankusa.#{env.tenant_id}.#{env.source_id}" end}  # or a static string; default "ankusa.<source_id>"
 ]
 ```
@@ -126,17 +139,16 @@ Message shape (`Ankusa.Sink.Message` — byte-identical for `Sink.Kafka`):
 // fat payload
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728,
- "claim": {"v": 1, "tenant_id": "acme", "id": "01a0...", "size": 3145728,
-           "sha256": "9f86d0...", "content_type": "application/octet-stream"}}
+ "claim": "urn:ankusa:claim:v1:acme:0199a1c2-...:66:3145728:sha256-9f86d0..."}
 ```
 
 `"v"` changes only when an existing field changes meaning or disappears;
 consumers must ignore keys they don't know.
 
-A consumer decodes `claim` back into a `Ankusa.ClaimCheck.Ticket` and calls
-`Ankusa.ClaimCheck.redeem/3` (or, for a non-BEAM consumer, `GET
-/v1/claims/:tenant_id/:id` against a `:claim_check`-role node — see
-[`claim-check.md`](claim-check.md)).
+A consumer redeems `claim` with `GET /v1/claims/:tenant/:object_id/:offset/:length`
+against the claim-check gateway and checks the bytes against the reference's
+sha256 — see [`claim-check.md`](claim-check.md#redeem-a-claim). (An Elixir
+consumer can call `Ankusa.ClaimCheck.redeem/2`, which does both.)
 
 **Connection lifecycle**: one supervised connection + confirm-mode channel
 per `(instance, exchange)`, started on demand by the first `deliver/3` call,
@@ -163,7 +175,7 @@ sinks: [
   {Ankusa.Sink.Kafka,
    brokers: ["localhost:9092"],
    topic: "ankusa.events",
-   inline_max_bytes: 8_192,
+   inline_max_bytes: 65_536,
    key: fn env -> "#{env.tenant_id}/#{env.source_id}" end}  # or a static string; this is the default
 ]
 ```
@@ -211,7 +223,7 @@ sinks: [
   {Ankusa.Sink.NATS,
    servers: ["localhost:4222"],
    subject: "ankusa.events",                     # or a 1-arity fun: &"ankusa.#{&1.source_id}"
-   inline_max_bytes: 8_192,                      # above this the message carries a claim ticket
+   inline_max_bytes: 65_536,                     # above this the message carries a claim reference
    auth: [username: "ankusa", password: "..."],  # or token:, or nkey_seed: + jwt:
    publish_timeout_ms: 5_000}
 ]

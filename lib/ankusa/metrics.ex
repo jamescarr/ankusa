@@ -26,10 +26,10 @@ defmodule Ankusa.Metrics do
   ## Bounded labels
 
   Label values come from telemetry metadata the framework controls, but failure
-  reasons are terms (`{:unavailable, {:status, 503, body}}`) and adapters are
+  reasons are terms (`{:unavailable, {:status, 503, body}}`) and some tags are
   modules. Both would be an unbounded or unusable label, so every tag value goes
   through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
-  modules become strings (`"Ankusa.ClaimCheck.Direct"`), and anything else
+  modules become strings (`"Ankusa.Sink.Http"`), and anything else
   becomes `:other`. `:outcome` on ingest is already one of a fixed set —
   `:committed | :duplicate | :quarantined | :rejected`, or an `{:error, reason}`
   tag — because `Ankusa.Edge.Ingest` tags it before emitting.
@@ -174,14 +174,14 @@ defmodule Ankusa.Metrics do
         "ankusa.claim_check.operations.total",
         scoped(own,
           event_name: [:ankusa, :claim_check, :check_in],
-          tags: [:instance, :adapter, :result]
+          tags: [:instance, :result]
         )
       ),
       counter(
         "ankusa.claim_check.redeems.total",
         scoped(own,
           event_name: [:ankusa, :claim_check, :redeem],
-          tags: [:instance, :adapter, :result]
+          tags: [:instance, :result]
         )
       )
     ]

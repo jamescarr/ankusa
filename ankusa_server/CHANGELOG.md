@@ -26,6 +26,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - `batcher.partitions` defaults to 2 and `batcher.max_delay_ms` to 0;
   `reference.yml` reflects both, and documents that `max_queue` counts buffered
   *and* in-flight records.
+- `claim_check` auth (`tokens`) removed — the gateway is open, so put your
+  proxy/mesh/network policy in front; `pack_max_bytes` added (default 16 MiB in
+  core), and `remote`/`max_bytes` removed.
 
 ## [0.1.0]
 

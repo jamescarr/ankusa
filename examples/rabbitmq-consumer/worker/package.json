@@ -4,14 +4,17 @@
   "type": "module",
   "version": "0.1.0",
   "scripts": {
-    "start": "tsx src/worker.ts"
+    "start": "tsx src/worker.ts",
+    "generate:types": "openapi-typescript ../../../priv/openapi/claim_check.v1.yaml -o src/claim-check-schema.d.ts"
   },
   "dependencies": {
-    "amqplib": "^0.10.4"
+    "amqplib": "^0.10.4",
+    "openapi-fetch": "^0.13.0"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.5",
     "@types/node": "^22.7.4",
+    "openapi-typescript": "^7.13.0",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2"
   }

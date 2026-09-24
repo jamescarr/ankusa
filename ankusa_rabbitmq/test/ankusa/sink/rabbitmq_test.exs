@@ -108,13 +108,8 @@ defmodule Ankusa.Sink.RabbitMQTest do
     decoded = JSON.decode!(payload)
     assert decoded["v"] == 1
     refute Map.has_key?(decoded, "body_base64")
-    assert %{"claim" => claim_map} = decoded
-    assert claim_map["tenant_id"] == "t1"
-    assert claim_map["id"] == env.id
-    assert claim_map["size"] == 20_000
-
-    assert {:ok, ticket} = Ankusa.ClaimCheck.Ticket.from_map(claim_map)
-    assert {:ok, ^body} = Ankusa.ClaimCheck.redeem(inst, ticket)
+    assert "urn:ankusa:claim:v1:" <> _ = decoded["claim"]
+    assert {:ok, ^body} = Ankusa.ClaimCheck.redeem(inst, decoded["claim"])
   end
 
   test "routing_key accepts a static string or a 1-arity function", %{

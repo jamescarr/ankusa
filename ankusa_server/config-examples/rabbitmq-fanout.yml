@@ -6,15 +6,14 @@
 #   sink     : RABBITMQ_URL ("amqp://user:pass@host:5672"), exchange
 #              RABBITMQ_EXCHANGE (created durable if missing; queues are the
 #              consumer's business, not this sink's)
-#   secrets  : STANDARD_WEBHOOKS_SECRET, CLAIM_CHECK_TOKEN
+#   secrets  : STANDARD_WEBHOOKS_SECRET
 #
 # Messages are `Ankusa.Sink.Message`, byte-identical to what the Kafka sink
 # produces, so one consumer can read either. Bodies above `inline_max_bytes`
 # become a claim ticket, redeemed at the gateway on port 4001.
 #
-# The claim-check gateway's tokens are OPTIONAL: drop the `tokens:` block (and
-# CLAIM_CHECK_TOKEN) and the gateway is open, with auth delegated to whatever
-# fronts port 4001.
+# The claim-check gateway performs no authentication: keep port 4001 internal
+# and put your proxy, mesh, or network policy in front of it.
 
 node:
   roles: [edge, dispatch, storage, claim_check]
@@ -25,11 +24,9 @@ admin:
 
 claim_check:
   port: 4001
-  max_bytes: 8000000
-  tokens:
-    - token: "${CLAIM_CHECK_TOKEN}"
-      # Scope a token to the tenants it may read/write, or `all`.
-      tenants: all
+  # Target size of one pack object; a body larger than this still gets a pack
+  # of its own. Core defaults this to 16 MiB.
+  pack_max_bytes: 16777216
 
 sources:
   shopify:

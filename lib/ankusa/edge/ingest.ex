@@ -45,6 +45,19 @@ defmodule Ankusa.Edge.Ingest do
 
   defp do_ingest(instance, %Source{} = source, req) do
     tenant_id = Map.get(req, :tenant_id) || source.tenant_id
+
+    # The tenant names a storage partition and a gateway path segment, so it is
+    # checked here, before anything is written: a bad one from any
+    # RouteResolver is a 404, like an unknown source, not a dispatch failure
+    # after the provider was already acked.
+    if Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
+      accept(instance, source, tenant_id, req)
+    else
+      {:error, :unknown_source}
+    end
+  end
+
+  defp accept(instance, source, tenant_id, req) do
     env = build_envelope(source, tenant_id, req)
 
     case verify(instance, source, env) do

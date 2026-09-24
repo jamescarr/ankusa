@@ -1,14 +1,22 @@
 // Example webhook consumer. Owns its own queue and binding — the ingest
 // framework only ever publishes to the exchange, it never knows this queue
-// exists. Redeems the claim check ticket for "fat" hooks through the
+// exists. Redeems the claim-check ref for "fat" hooks through the
 // claim-check gateway's HTTP API instead of talking to S3 directly — this
 // worker holds no cloud storage credentials at all, on purpose: that's the
 // whole point of putting a Claim Check gateway in front of the object
 // store. Prints everything out; not production processing logic — swap the
 // body of `handleHook` for that.
+//
+// The claim-check client is generated from the framework's own OpenAPI
+// contract (`priv/openapi/claim_check.v1.yaml`, `npm run generate:types` ->
+// `src/claim-check-schema.d.ts`) instead of a hand-maintained ref type
+// and URL-building — see "Redeem a claim" in
+// docs/claim-check.md.
 
 import amqp from "amqplib";
 import { createHash } from "node:crypto";
+import createClient from "openapi-fetch";
+import type { paths } from "./claim-check-schema.d.ts";
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://guest:guest@localhost:5672";
 const EXCHANGE = process.env.RABBITMQ_EXCHANGE ?? "ankusa.events";
@@ -16,17 +24,13 @@ const ROUTING_PATTERN = process.env.ROUTING_PATTERN ?? "ankusa.#";
 const QUEUE_NAME = process.env.QUEUE_NAME ?? "ankusa-example-worker";
 
 const CLAIM_CHECK_URL = process.env.CLAIM_CHECK_URL ?? "http://localhost:4001";
-const CLAIM_CHECK_TOKEN = process.env.CLAIM_CHECK_TOKEN ?? "dev-claim-check-token";
 
-type Claim = {
-  v: 1;
-  tenant_id: string;
-  id: string;
-  size: number;
-  sha256: string;
-  content_type: string | null;
-};
+// The gateway is open: no bearer token. Auth belongs in front of it.
+const claimCheck = createClient<paths>({ baseUrl: CLAIM_CHECK_URL });
 
+// The message `claim` field is a single claim-check ref URN, not a ticket
+// object:
+//   urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>
 type HookMessage = {
   id: string;
   source_id: string;
@@ -35,45 +39,77 @@ type HookMessage = {
   content_type: string | null;
   size: number;
   body_base64?: string;
-  claim?: Claim;
+  claim?: string;
+};
+
+type ClaimRef = {
+  tenant_id: string;
+  object_id: string;
+  offset: string;
+  length: string;
+  digest: string;
 };
 
 // Permanent redeem failures (the claim is gone, or the bytes we got back
-// don't match the ticket) should dead-letter, not loop forever. Anything
+// don't match the ref) should dead-letter, not loop forever. Anything
 // else (gateway down, network hiccup) is worth retrying.
 class PermanentRedeemError extends Error {}
 
-async function redeemClaim(claim: Claim): Promise<Buffer> {
-  const url = `${CLAIM_CHECK_URL}/v1/claims/${encodeURIComponent(claim.tenant_id)}/${claim.id}`;
+// Split the ref on ":" — nine parts. The sha256 digest is the hex after
+// `sha256-`; it's never sent to the gateway, only used to check the bytes.
+function parseClaimRef(claim: string): ClaimRef {
+  const parts = claim.split(":");
+  if (parts.length !== 9 || !claim.startsWith("urn:ankusa:claim:v1:")) {
+    throw new PermanentRedeemError(`invalid claim ref: ${claim}`);
+  }
+  return {
+    tenant_id: parts[4],
+    object_id: parts[5],
+    offset: parts[6],
+    length: parts[7],
+    digest: parts[8].slice("sha256-".length),
+  };
+}
 
-  let res: Response;
+async function redeemClaim(claim: string): Promise<Buffer> {
+  const { tenant_id, object_id, offset, length, digest } = parseClaimRef(claim);
+
+  let data: ArrayBuffer | undefined;
+  let status: number;
+  let errorBody: unknown;
   try {
-    res = await fetch(url, { headers: { authorization: `Bearer ${CLAIM_CHECK_TOKEN}` } });
+    const result = await claimCheck.GET("/v1/claims/{tenant_id}/{object_id}/{offset}/{length}", {
+      params: { path: { tenant_id, object_id, offset, length } },
+      parseAs: "arrayBuffer",
+    });
+    data = result.data as ArrayBuffer | undefined;
+    status = result.response.status;
+    errorBody = result.error;
   } catch (err) {
     throw new Error(`claim-check gateway unreachable: ${(err as Error).message}`);
   }
 
-  if (res.status === 404) {
-    throw new PermanentRedeemError(`claim not found: ${claim.tenant_id}/${claim.id}`);
+  if (status === 404) {
+    throw new PermanentRedeemError(`claim not found: ${tenant_id}/${object_id}`);
   }
-  if (res.status >= 400 && res.status < 500) {
-    throw new PermanentRedeemError(`claim-check rejected redeem (${res.status}): ${await res.text()}`);
+  if (status >= 400 && status < 500) {
+    throw new PermanentRedeemError(`claim-check rejected redeem (${status}): ${JSON.stringify(errorBody)}`);
   }
-  if (!res.ok) {
-    throw new Error(`claim-check gateway error: ${res.status}`);
+  if (data === undefined) {
+    throw new Error(`claim-check gateway error: ${status}`);
   }
 
-  const body = Buffer.from(await res.arrayBuffer());
+  const body = Buffer.from(data);
 
   // Integrity is verified here, end to end, by the actual redeemer — never
-  // trusted from the gateway. Same discipline `Ankusa.ClaimCheck.redeem/3`
+  // trusted from the gateway. Same discipline `Ankusa.ClaimCheck.redeem/2`
   // applies on the Elixir side.
-  if (body.length !== claim.size) {
-    throw new PermanentRedeemError(`claim size mismatch: expected ${claim.size}, got ${body.length}`);
+  if (body.length !== Number(length)) {
+    throw new PermanentRedeemError(`claim size mismatch: expected ${length}, got ${body.length}`);
   }
   const sha256 = createHash("sha256").update(body).digest("hex");
-  if (sha256 !== claim.sha256) {
-    throw new PermanentRedeemError(`claim sha256 mismatch for ${claim.tenant_id}/${claim.id}`);
+  if (sha256 !== digest) {
+    throw new PermanentRedeemError(`claim sha256 mismatch for ${tenant_id}/${object_id}`);
   }
 
   return body;
@@ -81,7 +117,8 @@ async function redeemClaim(claim: Claim): Promise<Buffer> {
 
 async function resolveBody(msg: HookMessage): Promise<{ body: Buffer; via: string }> {
   if (msg.claim) {
-    return { body: await redeemClaim(msg.claim), via: `claim:${msg.claim.id}` };
+    const { object_id } = parseClaimRef(msg.claim);
+    return { body: await redeemClaim(msg.claim), via: `claim:${object_id}` };
   }
   return { body: Buffer.from(msg.body_base64 ?? "", "base64"), via: "inline" };
 }

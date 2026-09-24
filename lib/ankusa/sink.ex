@@ -15,6 +15,9 @@ defmodule Ankusa.Sink do
           required(:source_id) => String.t(),
           required(:tenant_id) => String.t() | nil,
           required(:attempt) => pos_integer(),
+          # the envelope's claim-check ref, when dispatch already checked its
+          # body in (see `c:inline_max_bytes/1`)
+          optional(:claim) => Ankusa.ClaimCheck.Ref.t(),
           optional(atom()) => term()
         }
 
@@ -35,7 +38,29 @@ defmodule Ankusa.Sink do
   """
   @callback ordering_key(Envelope.t(), opts :: keyword()) :: term() | nil
 
-  @optional_callbacks ordering_key: 2
+  @doc """
+  The largest body this sink sends inline, or `nil` if it never uses the claim
+  check.
+
+  Dispatch checks a body in **once**, before any sink runs, when it is larger
+  than at least one of its source's sinks' thresholds, and hands the resulting
+  ref to every sink and every retry in `ctx.claim`. A sink that declares a
+  threshold must use that ref rather than checking the body in itself.
+  """
+  @callback inline_max_bytes(opts :: keyword()) :: pos_integer() | nil
+
+  @optional_callbacks ordering_key: 2, inline_max_bytes: 1
+
+  @doc """
+  Resolve the inline threshold for `mod` with `opts`; `nil` for sinks that
+  don't implement `c:inline_max_bytes/1`.
+  """
+  @spec inline_max_bytes(module(), keyword()) :: pos_integer() | nil
+  def inline_max_bytes(mod, opts) do
+    Code.ensure_loaded(mod)
+
+    if function_exported?(mod, :inline_max_bytes, 1), do: mod.inline_max_bytes(opts), else: nil
+  end
 
   @doc """
   Resolve the ordering key for `mod` with `opts`.

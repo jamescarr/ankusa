@@ -36,8 +36,9 @@ flowchart LR
   (`claims/...` keys) — same bucket, same credentials, no separate storage
   code.
 - `claim-check` — the **same image**, `ANKUSA_ROLES=claim_check` is the only
-  difference. Its own listener (`:4001`), its own bearer token. Besides
-  `ingest`, it's the only piece holding S3 credentials.
+  difference. Its own listener (`:4001`), open — no bearer token; auth goes
+  in front of it. Besides `ingest`, it's the only piece holding S3
+  credentials.
 
 ### Bridge
 
@@ -60,15 +61,19 @@ flowchart LR
 flowchart LR
     Q[("ankusa-worker.fifo")] --> W[TypeScript worker]
     W -->|inline body| H[handleHook]
-    W -->|"ticket: GET /v1/claims/... Bearer"| CC[claim-check :4001]
+    W -->|"claim ref: GET /v1/claims/..."| CC[claim-check :4001]
     CC -.-> S[(S3 / floci)]
-    CC -->|"bytes; worker checks size + sha256"| H
+    CC -->|"bytes; worker checks length + sha256"| H
     W -->|permanent failure| D[("ankusa-worker-dlq.fifo")]
 ```
 
 - `worker/` — a minimal TypeScript consumer with **no S3 credentials at
-  all**: SQS only, redeeming tickets over HTTP. It moves permanent failures
-  to the DLQ explicitly and backs off transient ones.
+  all**: SQS only, redeeming claim refs over HTTP through a client generated
+  from [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+  (`npm run generate:types`) — see
+  ["Redeem a claim"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeem-a-claim).
+  It moves permanent failures to the DLQ explicitly and backs off
+  transient ones.
 
 ### Supporting services
 
@@ -87,13 +92,13 @@ flowchart LR
 
 Same contract as the RabbitMQ example, because it's the same message
 (`Ankusa.Sink.Message`): the worker prints `via=inline` or
-`via=claim:<id>`.
+`via=claim:<object_id>`.
 
 - **Small** (≤ `INLINE_MAX_BYTES`, 8 KiB here): base64 in the record value.
-- **Fat**: checked in to S3, ticket in the record value. The worker GETs
-  `/v1/claims/:tenant/:id` with a bearer token, then verifies `size` and
-  `sha256` itself — integrity is checked where the bytes are used, never
-  trusted from the gateway.
+- **Fat**: checked in to S3, claim ref URN in the record value. The worker
+  GETs `/v1/claims/<tenant>/<object_id>/<offset>/<length>` (no auth — the
+  gateway is open), then verifies the length and `sha256` itself — integrity
+  is checked where the bytes are used, never trusted from the gateway.
 
 ## Ordering and delivery, honestly
 
@@ -156,8 +161,8 @@ Each proves one thing. They're worth running by hand at least once.
 2. **Worker down** — `docker compose stop worker`, send hooks, and watch
    `ApproximateNumberOfMessages` on the main queue grow. Start the worker
    and it drains. *Proves SQS holds the backlog while the consumer is gone.*
-3. **Poison claim** — send a fat hook, delete its `claims/...` object from
-   the bucket, then let the worker try it. The redeem 404s, the worker moves
+3. **Poison claim** — send a fat hook, delete its claim pack from the
+   bucket, then let the worker try it. The redeem 404s, the worker moves
    the message to the DLQ, and later messages from the same source keep
    flowing. *Proves a bad message doesn't wedge its FIFO group for the
    redrive policy's five receives.*
@@ -165,14 +170,16 @@ Each proves one thing. They're worth running by hand at least once.
 ```sh
 # drill 3, in full
 docker compose stop worker
-FAT_ID=$(python3 -c "import json;print(json.dumps({'id':'poison','pad':'x'*20000}))" \
-  | curl -s -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @- \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+python3 -c "import json;print(json.dumps({'id':'poison','pad':'x'*20000}))" \
+  | curl -s -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @-
 curl -s -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"after_poison"}'
 
-# delete the claim object out from under the worker, then let it try
+# Delete the claim pack out from under the worker, then let it try. Claims
+# are packed per tenant, so the object lives at claims/tenant=default/dt=*/...;
+# `after_poison` is small and rides inline, so the poison hook is the only
+# claim under tenant=default.
 docker compose run --rm --entrypoint sh aws-bootstrap -c \
-  "aws s3 rm s3://ankusa-example/claims/default/$FAT_ID"
+  "aws s3 rm --recursive s3://ankusa-example/claims/tenant=default/"
 
 docker compose start worker
 docker compose logs worker | grep -E "permanent|after_poison"

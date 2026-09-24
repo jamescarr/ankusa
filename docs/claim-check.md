@@ -1,296 +1,310 @@
-# Claim Check: `Ankusa.ClaimCheck`
+# Claim check
 
-One contract for every producer and consumer in the system, Elixir or not:
-**check bytes in, get a ticket; present the ticket, get the bytes back.**
-The storage engine (LocalFS/S3/GCS, via `Ankusa.BlobStore`) and the network
-topology (in-process vs. an HTTP hop) stay hidden behind it.
+Webhook bodies can be megabytes; queue messages shouldn't be. When a RabbitMQ,
+Kafka, or NATS sink gets a body larger than its `inline_max_bytes` (64 KiB by
+default), Ankusa writes the body to the object store and publishes a small
+**reference** in its place. Your worker turns the reference into an HTTP GET
+and gets the exact bytes back — with an HTTP client and nothing else: no
+Elixir, no cloud SDK, no object-store credentials.
 
-The queue sinks' fat-payload offload (`Sink.RabbitMQ`, `Sink.Kafka`,
-`Sink.NATS`) is the
-shipped user of this — see
-[`delivery.md`](delivery.md#sinkrabbitmq--queue-delivery) — but it's a
-general-purpose gateway, usable anywhere a payload is too big to carry
-inline.
-
-## The contract
-
-```elixir
-@callback store(instance :: atom(), Ticket.t(), data :: iodata(), opts :: keyword()) ::
-            :ok | {:error, reason()}
-@callback fetch(instance :: atom(), Ticket.t(), opts :: keyword()) ::
-            {:ok, binary()} | {:error, reason()}
-
-@spec check_in(atom(), iodata(), meta(), keyword()) :: {:ok, Ticket.t()} | {:error, reason()}
-@spec redeem(atom(), Ticket.t(), keyword()) :: {:ok, binary()} | {:error, reason()}
+```mermaid
+flowchart LR
+    P[Provider] -->|POST /webhooks/stripe| A[Ankusa]
+    A -->|body over inline_max_bytes| S[(object store)]
+    A -->|message + claim ref| Q[(queue)]
+    Q --> W[your worker]
+    W --> F[your auth layer<br/>mesh, Envoy, API gateway]
+    F -->|GET /v1/claims/...| G[claim-check gateway :4001]
+    G --> S
 ```
 
-`Ankusa.ClaimCheck` is both the behaviour and the instance-scoped facade
-(same pattern as `Ankusa.BlobStore`). **The facade is smart; adapters are
-dumb transport.** `check_in/4` builds and validates the ticket, enforces the
-size cap, and stores it; `redeem/3` fetches the bytes and verifies them
-end-to-end against the ticket — every adapter (`Direct`, `Remote`) only
-moves bytes.
+The machine-readable contract is
+[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+(OpenAPI 3.1). Generate your client from it; this page explains how to use it.
 
-```elixir
-{:ok, ticket} = Ankusa.ClaimCheck.check_in(:default, body, %{tenant_id: "acme", id: env.id})
-{:ok, ^body} = Ankusa.ClaimCheck.redeem(:default, ticket)
-```
+## The reference
 
-### Errors
-
-| Reason | Meaning | Retry? |
-| --- | --- | --- |
-| `:not_found` | no claim at that key | No — dead-letter |
-| `:integrity_mismatch` | bytes don't match the ticket's `size`/`sha256` | No — dead-letter |
-| `:invalid_tenant` / `:invalid_id` | malformed input | No — caller bug |
-| `:too_large` | over `claim_check.max_bytes` | No — caller bug |
-| `:forbidden` | token valid, tenant out of scope | No — misconfiguration, alert |
-| `:unsupported_ticket_version` | a ticket from a future format version | No — upgrade the reader |
-| `:unauthorized` | missing/bad bearer token | No — misconfiguration, alert |
-| `{:unavailable, reason}` | transport/store hiccup | Yes |
-
-## The ticket
-
-The canonical, versioned value that crosses every boundary — process, HTTP,
-and non-BEAM consumers alike:
-
-```json
-{"v": 1, "tenant_id": "acme", "id": "0199a1c2-...-7...",
- "size": 3145728, "sha256": "9f86d0...", "content_type": "application/json"}
-```
-
-- **`v`** — format indicator. A reader that doesn't recognize it fails
-  closed (`:unsupported_ticket_version`), never guesses.
-- **`id`** — caller-supplied, and must be a UUIDv7 (the same id type as
-  `Ankusa.Envelope.id`). Three reasons it's required, not generated:
-  1. **Idempotent retries.** A dispatch retry reuses `env.id`, hitting the
-     same key — no orphan object from a retried check-in.
-  2. **Free retention.** The creation time is embedded in the id, so
-     `Ankusa.ClaimCheck.Sweeper` needs no extra metadata or `stat` call.
-  3. **Unguessable.** 74 random bits per id.
-- **`tenant_id`** — any non-empty UTF-8 string up to 256 bytes. Not
-  restricted to a safe character set: a resolver-provided tenant
-  (`multi-tenancy.md`) shouldn't become a permanent dispatch failure. It's
-  percent-encoded into the storage key instead (see below).
-- **`size`, `sha256`** — computed by the facade from the actual bytes,
-  **never** trusted from a caller or a remote server.
-- **`content_type`** — advisory only. Never stored as object metadata
-  (`BlobStore` has no metadata API); carried only in the ticket.
-- **Not signed.** Ids are unguessable, the storage key is always *derived*
-  (never client-supplied — see below), and integrity is end-to-end via
-  `sha256`. Revisit signing only if tickets are ever handed to parties
-  outside the token-authenticated trust boundary (see "Open decisions").
-
-## Storage key
+A queue message carries either `body_base64` or a `claim` — one reference
+string ([full message format](delivery.md#sinkrabbitmq--queue-delivery)):
 
 ```
-claims/<percent-encoded tenant_id>/<id>
+urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-3bea8a9a07c1e8dcaa4c1b816815c35a29b4fb585ba6ecc70ea44840a794cfb3
+                    └tenant┘└────────── object id ───────────┘└offset┘└length┘└───────────────────────── sha256 ────────────────────────────┘
 ```
 
-- `claims/` is a fixed constant — never configurable. A producer and the
-  gateway disagreeing on a prefix would only surface as a production 404.
-- `Ankusa.ClaimCheck.Ticket.key/1` percent-encodes every byte outside
-  `[A-Za-z0-9_-]` (including `.`, so `.`/`..` can never appear) — injective,
-  traversal-proof on `BlobStore.LocalFS`, and it's the *only* function that
-  builds this key. A ticket never carries the key itself, so redeeming a
-  ticket can never be steered at an arbitrary object (a compaction segment,
-  or another tenant's claim).
-- Flat per-tenant directories double as the retention/deletion boundary:
-  deleting a tenant's data is a prefix delete of `claims/<enc(tenant)>/`.
-- Claims and segments (`seg/...`) share a bucket by default and never
-  collide; lifecycle rules and the sweeper only ever target `claims/`.
+| Segment | Meaning |
+| --- | --- |
+| `tenant` | `[A-Za-z0-9_-]{1,64}`. The same string in the reference, the URL, and the storage key — no encoding anywhere. |
+| `object id` | The id of the object holding the claim. Several claims share one object (see [Write cost](#write-cost)). |
+| `offset`, `length` | Where the claim's bytes sit inside that object. |
+| `sha256` | Lowercase hex digest of the claim's bytes. Always present; the reader checks it. |
 
-## Modes: pick by trust boundary, not by fleet size
+A reference grants nothing and names no bucket or URL. You turn it into a
+request by dropping the prefix and the digest:
 
-| Caller | Adapter | Why |
-| --- | --- | --- |
-| Ankusa node with blob-store credentials (any fleet size) | `Direct` | No extra network hop — a shared bucket is already a working distributed claim check |
-| Ankusa node deliberately *without* blob-store credentials | `Remote` | Credential isolation |
-| Non-BEAM consumer (a worker, a third-party service) | HTTP API (`Remote` or a plain HTTP client) | No cloud SDK, no credentials, tenant-scoped authz |
-| Anything, when the store is `LocalFS` on another host | HTTP API | `LocalFS` isn't network-reachable any other way |
-
-A ticket issued through `Direct` redeems through `Remote` and vice versa —
-that's the testable form of "the code doesn't notice the difference"
-(`test/ankusa/claim_check/cross_mode_test.exs`).
-
-### `Ankusa.ClaimCheck.Direct`
-
-Calls the instance's configured `Ankusa.BlobStore` in-process.
-
-```elixir
-config :ankusa, claim_check: %{adapter: {Ankusa.ClaimCheck.Direct, []}}  # the default
+```
+urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-...
+                                   → GET /v1/claims/acme/0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10/66/3145728
 ```
 
-opts: `:blob_store` — `{module, opts}`; default: the instance's
-`storage.blob_store`.
+## Run the gateway
 
-### `Ankusa.ClaimCheck.Remote`
+The gateway is the `claim_check` role of the same image, and it is read-only:
+no writes, no listing, no delete. It reads the same `storage` block as the
+nodes that write claims, and needs no WAL:
 
-HTTP client (via `Req` — mirrors `Ankusa.Sink.Http`)
-against a `:claim_check`-role `Ankusa.ClaimCheck.Router`.
+```yaml
+node:
+  roles: [claim_check]
 
-```elixir
-config :ankusa,
-  claim_check: %{adapter: {Ankusa.ClaimCheck.Remote, url: "http://claim-check.internal:4001", token: "..."}}
+storage:
+  type: s3
+  s3:
+    bucket: "${S3_BUCKET}"
+    region: "${S3_REGION}"
+
+claim_check:
+  port: 4001            # [env ANKUSA_CLAIM_CHECK_PORT]
+  pack_max_bytes: 16777216
 ```
 
-opts: `:url` (required), `:token` (optional; omit it when the gateway has no
-`api_tokens`), `:timeout_ms` (default `10_000`).
-
-**Architecture rule: RPC only downstream of the WAL.** Per
-[`architecture.md`](architecture.md)'s "no component may require another to
-be reachable at runtime," `Remote` is an RPC dependency and belongs only on
-retryable paths after a hook is already durably committed — dispatch sinks,
-external consumers. A gateway outage there means delayed delivery, not
-loss, because the WAL/queue still hold the work. **The edge's pre-ack path
-must never check in via `Remote`.** Nothing ships an edge-time check-in
-today; if one is ever added, it must be `Direct`-only.
-
-## The `:claim_check` role
-
-Off by default (`roles` defaults to `[:edge, :dispatch, :storage]`) — it
-opens a port that serves stored payloads. Enable with
-`ANKUSA_ROLES=claim_check` or `roles: [:claim_check]`. Its own `Bandit`
-listener (`claim_check.port`, default `4001`), separate from the edge on
-purpose: the edge is internet-facing and the claim API is internal-network
-only.
-
-A node running only `:claim_check` needs no WAL — `Ankusa.Instance` boots
-the configured `Ankusa.WAL` only when `:edge`, `:dispatch`, or `:storage` is
-enabled, so a claim-check-only fleet needs nothing but blob-store
-credentials.
-
-### HTTP API (v1)
-
-With `api_tokens` configured, every `/v1/claims/*` request requires
-`authorization: Bearer <token>`. With none, the gateway is open (see below).
-
-| Request | Success | Errors |
-| --- | --- | --- |
-| `PUT /v1/claims/:tenant_id/:id` — raw body, optional `content-type`/`x-ankusa-sha256` | `201 {"ticket": {...}}` | `400 invalid_tenant\|invalid_id`, `401 unauthorized`, `403 forbidden_tenant`, `413 payload_too_large`, `422 integrity_mismatch`, `503` + `Retry-After: 1` |
-| `GET /v1/claims/:tenant_id/:id` | `200`, raw bytes, `content-type: application/octet-stream` | `400`, `401`, `403`, `404 not_found`, `503` + `Retry-After: 1` |
-| `GET /health` (unauthenticated) | `200 {"status":"ok"}` | — |
-
-The client supplies the id and uses `PUT` (not a server-generated id), so a
-retried check-in is idempotent under plain HTTP semantics. There is no
-`DELETE` and no list endpoint in v1.
-
-The server-side `GET` handler is pure byte transport — it has no
-ground-truth ticket for an inbound request (the URL carries only
-`tenant_id`/`id`, never `size`/`sha256`), so it never runs an integrity
-check itself. Integrity is verified end-to-end by the actual redeemer, in
-`Ankusa.ClaimCheck.redeem/3`, against the real ticket it holds.
-
-### Authentication and tenant authorization
-
-```elixir
-config :ankusa, claim_check: %{api_tokens: %{"<token>" => :all | ["acme", "globex"]}}
+```sh
+docker run -p 127.0.0.1:4001:4001 -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml" \
+  -e S3_BUCKET -e S3_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  jamescarr/ankusa:edge
+curl localhost:4001/health    # {"status":"ok"}
 ```
 
-Tokens are optional. With `api_tokens` configured, they are stored
-`sha256(token) => scope`; a request hashes the presented token and does one
-map lookup — raw tokens are never compared byte-by-byte. `:all` authorizes
-every tenant; a list scopes to exactly those. With no `api_tokens`, the
-gateway is open: every request is authorized for every tenant, and
-authentication is delegated to whatever fronts the port (a proxy, SSO,
-network policy) — the same stance as the admin API.
+A single container can run it next to the other roles
+(`roles: [edge, dispatch, storage, claim_check]`), as
+[`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml)
+does. Either way, keep port 4001 on your internal network: it serves webhook
+payloads.
 
-Static config is enough today. Dynamic, per-tenant tokens depend on the
-same missing control plane as `SourceStore.Ecto` — see
-[`multi-tenancy.md`](multi-tenancy.md#what-isnt-built-yet).
+**The gateway does no authentication or authorization.** Who may read what is
+decided in front of it — a service mesh, Envoy, an API gateway, a cloud load
+balancer with OIDC. It logs a warning saying so at startup, the same as the
+admin API.
 
-## Configuration
+## Redeem a claim
 
-```elixir
-config :ankusa,
-  claim_check: %{
-    adapter: {Ankusa.ClaimCheck.Direct, []},
-    max_bytes: 8_000_000,
-    # :claim_check role only
-    port: 4001,
-    api_tokens: %{},
-    # LocalFS retention only
-    retention_days: nil,
-    sweep_interval_ms: 3_600_000
+```
+GET /v1/claims/{tenant}/{object_id}/{offset}/{length}
+```
+
+A `200` returns exactly `length` bytes at `offset`, as
+`application/octet-stream`, with `cache-control: public, max-age=31536000,
+immutable` — objects are written once and never rewritten, so they're safe to
+cache forever.
+
+**The gateway doesn't check integrity** — the path carries no digest, so only
+the holder of the reference can. Compare the bytes' sha256 against the
+reference's before you use them, and treat a mismatch as permanent.
+
+```sh
+curl -fsS http://claim-check:4001/v1/claims/acme/0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10/66/3145728 -o body.bin
+shasum -a 256 body.bin    # must equal the sha256 in the reference
+```
+
+### Responses
+
+Errors are JSON: `{"error": "not_found"}`.
+
+| Status | `error` | Cause | Retry? |
+| --- | --- | --- | --- |
+| `200` | — | the bytes, cacheable forever | — |
+| `400` | `invalid_tenant`, `invalid_id`, `invalid_range` | tenant outside `[A-Za-z0-9_-]{1,64}`; id not a lowercase UUIDv7; a malformed offset or length | No — a bug |
+| `404` | `not_found` | no such object: expired by retention, or never written | No — dead-letter |
+| `416` | `invalid_range` | the range runs past the end of a real object | No — a bug |
+| `503` | `store_unavailable` | the object store is unreachable; `Retry-After: 1` | Yes |
+| — | — | bytes don't match the reference's sha256 (your check) | No — dead-letter |
+
+Redeeming doesn't delete. Several consumers can redeem one claim — every queue
+bound to a fanout exchange, say — and claims go away only through
+[retention](#retention).
+
+### What a front layer needs
+
+The whole integration surface for auth is one method and one path shape:
+
+```
+^/v1/claims/[A-Za-z0-9_-]{1,64}/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/(0|[1-9][0-9]{0,11})/[1-9][0-9]{0,11}$
+```
+
+Anything else can be refused at the edge. The tenant is a path segment, so an
+authorizer compares it to the caller's identity without reading a body. One
+rule matters more than the rest: **a shared cache must sit behind the
+authorizer, never in front of it** — a cache in front would serve one tenant's
+payload to another tenant's request.
+
+### From TypeScript, with a generated client
+
+Generate the types from the spec, and let `openapi-fetch` build the request:
+
+```sh
+npx openapi-typescript claim_check.v1.yaml -o src/claim-check-schema.d.ts
+npm install openapi-fetch
+```
+
+```typescript
+import createClient from "openapi-fetch";
+import { createHash } from "node:crypto";
+import type { paths } from "./claim-check-schema.d.ts";
+
+const claimCheck = createClient<paths>({ baseUrl: process.env.CLAIM_CHECK_URL ?? "http://localhost:4001" });
+
+// claim is the URN from the queue message: 9 colon-separated segments.
+function parseClaimRef(claim: string) {
+  const parts = claim.split(":");
+  if (parts.length !== 9 || !claim.startsWith("urn:ankusa:claim:v1:")) throw new Error("bad ref");
+  return {
+    tenant_id: parts[4],
+    object_id: parts[5],
+    offset: parts[6],
+    length: parts[7],
+    digest: parts[8].slice("sha256-".length),
+  };
+}
+
+async function redeemClaim(claim: string): Promise<Buffer> {
+  const { tenant_id, object_id, offset, length, digest } = parseClaimRef(claim);
+  const { data, error, response } = await claimCheck.GET("/v1/claims/{tenant_id}/{object_id}/{offset}/{length}", {
+    params: { path: { tenant_id, object_id, offset, length } },
+    parseAs: "arrayBuffer",
+  });
+  if (error) throw new Error(`redeem failed (${response.status}): ${JSON.stringify(error)}`);
+
+  const body = Buffer.from(data as ArrayBuffer);
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  if (body.length !== Number(length) || sha256 !== digest) {
+    throw new Error(`integrity mismatch for ${tenant_id}/${object_id}`);
   }
+  return body;
+}
 ```
 
-| Key | Default | Meaning |
+The workers in
+[`rabbitmq-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/worker)
+and
+[`kafka-sqs-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/worker)
+are complete versions: `npm run generate:types` regenerates the client, and
+`redeemClaim` sorts failures into dead-letter (`404`, other `4xx`, integrity)
+and retry (`5xx`, network). Any other OpenAPI generator — `openapi-generator`,
+`openapi-python-client` — works against the same file.
+
+## Write cost
+
+Object stores bill per write: S3 Standard and GCS regional Standard both charge
+around $0.005 per 1,000 writes, and reads are $0.0004 per 1,000. Only bodies
+over a sink's `inline_max_bytes` become claims at all, and dispatch writes them
+**once per envelope** (it used to write per sink and per retry). Two more
+levers keep writes cheap:
+
+- **The threshold is configurable per sink.** The 64 KiB default is chosen so
+  most webhook bodies ride inline — base64 turns it into about 88 KiB, under
+  Kafka's 1 MiB `max.message.bytes` and SQS's 256 KiB. Raise or lower
+  `inline_max_bytes` per sink; the cost moves to broker bytes.
+- **Claims are packed.** Dispatch holds up to `dispatch.batch` (128) hooks per
+  WAL read, checks each batch's claims in per tenant as one object, and gives
+  every hook a byte range inside it — one `PUT` per tenant per batch instead of
+  one per hook, with no added latency (the batch is already in hand). A group
+  bigger than `claim_check.pack_max_bytes` (16 MiB default) splits into several
+  objects; a body bigger than that gets an object of its own.
+
+| Fat hooks/day | One object per claim | 32 claims per object |
 | --- | --- | --- |
-| `claim_check.adapter` | `{Ankusa.ClaimCheck.Direct, []}` | `{module, opts}` implementing `Ankusa.ClaimCheck`. |
-| `claim_check.max_bytes` | `8_000_000` | Hard cap on a checked-in body. `Ankusa.ClaimCheck.validate_config!/1` fails boot if this is smaller than `max_body_bytes` on a `:dispatch` node — that combination would dead-letter hooks the edge already accepted. |
-| `claim_check.port` | `4001` | The `:claim_check` role's Bandit port. |
-| `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`. Optional; empty leaves the gateway open, with authentication delegated to whatever fronts the port. |
-| `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
-| `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
+| 100k | ~$15/month | ~$0.47/month |
+| 1M | ~$150/month | ~$4.69/month |
+| 10M | ~$1,500/month | ~$46.88/month |
 
-`Ankusa.ClaimCheck.validate_config!/1` runs at instance boot and fails fast
-(raises, doesn't just log) on:
+### Pack format
 
-- `claim_check.adapter` set to `Remote` on a `:claim_check`-role node — it
-  would proxy the API to itself.
-- `claim_check.max_bytes` smaller than `max_body_bytes` on a `:dispatch`
-  node.
-- `claim_check.retention_days` set against a non-`LocalFS` claim store —
-  the sweeper only ever covers `LocalFS`; use a bucket lifecycle rule
-  instead.
+Every claim object is an uncompressed ZIP: one entry per claim, named by the
+claim's id, plus a `manifest.json` listing each claim's offset, length, digest,
+content type, and receive time. The gateway never parses it — a reference's
+offset points straight at one entry's bytes — but `unzip`, Python's `zipfile`,
+Java, Go, and Erlang all read the pack with no Ankusa code. It's the same
+end-of-file index Parquet uses. Entries stay uncompressed because a compressed
+entry has no raw byte range to serve.
+
+## Storage layout
+
+Claims live at
+
+```
+claims/tenant=acme/dt=2026-09-24/0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10
+```
+
+in the storage bucket, beside the `seg/` segments. `dt` is the UTC date inside
+the object id's UUIDv7 timestamp, so the key is computable from the reference.
+Hive-style `key=value` folders are what Spark and Databricks partition
+discovery, BigQuery, and Athena read without configuration.
 
 ## Retention
 
-- **S3/GCS: a bucket lifecycle rule on the `claims/` prefix.** Documented,
-  not automated — `BlobStore.S3`/`BlobStore.GCS`'s `list/3` doesn't page, so
-  an in-process sweep over a large bucket would silently miss keys.
-- **LocalFS: `Ankusa.ClaimCheck.Sweeper`**, started in the `:storage` role
-  only when `claim_check.retention_days` is set. Each tick lists everything
-  under `claims/`, reads the UUIDv7 embedded in each claim's own id for its
-  creation time (no extra metadata or `stat` call), and deletes claims older
-  than the cutoff. A key it can't positively date (malformed, non-UUIDv7 id)
-  is left alone rather than guessed at.
-- **Retention must cover the longest time a message can sit in any consumer
-  queue, plus DLQ replay windows.** This is the one way a claim check loses
-  data: the claim expires before its message is redeemed. Size retention
-  generously relative to `Ankusa.Dispatch.RetryPolicy`'s `max_attempts`
-  and any manual `Ankusa.Dispatch.replay/2` window you expect to use.
+**Retention has to outlast your slowest consumer.** A claim that expires before
+it's redeemed is the one way a claim check loses data: the worker gets `404`.
+Cover the longest a message can sit in any queue, plus however long you might
+wait before replaying a dead letter.
 
-## Semantics
+- **S3 or GCS:** add a lifecycle rule on the `claims/` prefix. Ankusa doesn't
+  expire these for you.
 
-- **Idempotency**: check-in is `PUT`-by-`(tenant_id, id)`. Re-checking in
-  the same id with the *same* bytes returns the same ticket. Checking in
-  *different* bytes under the same id is a caller bug — not prevented at
-  write time (no `BlobStore` adapter supports conditional puts), but
-  *detected* at redeem time: the earlier ticket's `sha256` no longer
-  matches, so it fails loudly as `:integrity_mismatch` rather than silently
-  serving stale bytes.
-- **Durability**: the ticket returns only after the adapter reports a
-  durable write. Never publish a message carrying a ticket before
-  `check_in/4` returns `{:ok, _}` — the queue sinks already order it
-  this way.
-- **No delete on redeem.** A fan-out exchange means multiple independent
-  consumers redeem the same claim. Removal is purely time-based (retention,
-  above).
+  ```sh
+  aws s3api put-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
+    --lifecycle-configuration '{"Rules":[{"ID":"ankusa-claims","Status":"Enabled",
+      "Filter":{"Prefix":"claims/"},"Expiration":{"Days":14}}]}'
+  ```
 
-## Telemetry
+- **Local storage:** set `claim_check.retention_days` on the node running the
+  `storage` role. It deletes whole `dt=` day directories once everything in them
+  is past retention, every hour.
 
-Emitted by the facade — covers every adapter and every caller, Direct or
-Remote:
+## Reading claims from a data platform
 
-- `[:ankusa, :claim_check, :check_in]` — measurements `%{duration, size}`;
-  meta `%{instance, tenant_id, id, adapter, result}`, plus `content_type`
-  when the caller passes one
-- `[:ankusa, :claim_check, :redeem]` — measurements `%{duration, size}`;
-  meta `%{instance, tenant_id, id, adapter, result}`
-- `[:ankusa, :claim_check, :sweep]` — measurements `%{deleted, scanned, duration}`
+A claim is read two ways, and both work without Ankusa code on the reading
+side:
 
-## Open decisions (deferred, each with a trigger)
+- **Application services** use the gateway (above).
+- **Databricks, Snowflake, BigQuery, Athena** read the bucket directly under
+  their own governance — Unity Catalog external locations, Snowflake external
+  stages, BigQuery object tables. Pulling each claim through an HTTP call per
+  row from Spark executors is slow, and Databricks serverless compute needs
+  private connectivity set up to reach an internal endpoint at all.
 
-- **Presigned-URL redemption** for S3/GCS (`GET` → `302` to a short-lived
-  signed URL), to take the gateway out of the byte path. Trigger: gateway
-  egress cost or latency shows up in telemetry.
-- **Streaming/multipart** above `max_bytes`. Trigger: a source that
-  legitimately needs bodies larger than `max_body_bytes`.
-- **Signed tickets.** Trigger: tickets handed to parties outside the
-  token-authenticated boundary.
-- **Dynamic tenant tokens.** Trigger: `SourceStore.Ecto` and the control
-  plane land.
-- **Edge-time size tiering** (checking a fat body in before the WAL ack).
-  Would need its own plan; `Direct`-only per the RPC rule above.
+Those platforms need three things:
+
+- **The key layout as a second, documented read contract** — Hive-style folders,
+  no encoding.
+- **Hex digests.** Spark and Snowflake `sha2(x, 256)`, `sha256sum`, and
+  `hashlib.hexdigest()` all produce hex, so a reader compares directly.
+- **A flat `claim` string** in the message, plus the offset and length for a
+  packed claim (Spark's `binaryFile` source plus Python's `zipfile` in a UDF, or
+  slice with `substring(content, offset + 1, length)`).
+
+No connectors or per-platform guides ship with Ankusa; this is the contract they
+read.
+
+## Not supported yet
+
+- **Presigned URLs.** Every redeemed byte passes through the gateway.
+- **Bodies over `max_body_bytes`.** No streaming or multipart.
+- **A write API.** Ankusa's dispatch nodes are the only writers. A standalone
+  claim-check service with a `PUT` for other producers is possible — the
+  reference, layout, and read route already don't depend on the webhook
+  pipeline — but it's a separate piece of work.
+- **Listing or deleting claims** over the API.
+
+## From Elixir
+
+Embedding the library? `Ankusa.ClaimCheck.check_in/4` checks a batch's claims in
+for one tenant, `check_in_batch/2` groups many tenants and splits packs, and
+`redeem/2` fetches a reference's bytes and runs the sha256 check for you:
+
+```elixir
+{:ok, refs} = Ankusa.ClaimCheck.check_in(:default, "acme", [%{id: id, body: body}])
+{:ok, ^body} = Ankusa.ClaimCheck.redeem(:default, refs[id])
+```
+
+Config keys: [`configuration.md`](configuration.md#library-configuration-elixir).
+Callbacks, error reasons, and telemetry events: [HexDocs](https://hexdocs.pm/ankusa).

@@ -39,13 +39,50 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   `ordered: true` to opt in (off by default); `Sink.Kafka` uses its record key,
   `Sink.RabbitMQ` its routing key, `Sink.Log` none.
 
+- `c:Ankusa.Sink.inline_max_bytes/1`: optional sink callback naming the
+  largest body the sink sends inline. Dispatch checks a body in once, before
+  any sink runs, and hands the claim reference to every sink and retry in
+  `ctx.claim`.
+
 ### Removed
 
 - `Ankusa.Verifier.Stripe`, `Ankusa.Verifier.GitHub`, and
   `Ankusa.Verifier.StandardWebhooks` — replaced by `Ankusa.Verifier.Hmac`
   presets. Elixir embedders use `{Ankusa.Verifier.Hmac, scheme: :stripe, …}`.
+- Claim-check authentication: `claim_check.api_tokens` (and the YAML
+  `claim_check.tokens`), tenant scopes, and the `401`/`403` responses. The
+  gateway does no auth or authorization; put a proxy, mesh, or network policy
+  in front of it.
+- `Ankusa.ClaimCheck.Ticket`, `Ankusa.ClaimCheck.Direct`, and
+  `Ankusa.ClaimCheck.Remote`, plus `claim_check.adapter`, `claim_check.remote`,
+  and `claim_check.max_bytes`. Dispatch nodes write directly to the object
+  store; a public write API and a credential-less write path are no longer
+  supported.
 
 ### Changed
+
+- The claim reference is now one URN string in a queue message's `claim`
+  field — `urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>`
+  — instead of a nested ticket object. Message `v` stays `1`. Consumers
+  redeem it with `GET /v1/claims/:tenant/:object_id/:offset/:length` and check
+  the sha256 themselves. Breaking for consumers of the old ticket object.
+- Claims are **packed**: dispatch checks each WAL read batch's claims in per
+  tenant as one uncompressed-ZIP object (plus a `manifest.json`), one `PUT`
+  per tenant per batch, sized by `claim_check.pack_max_bytes` (default
+  16 MiB). Previously each sink wrote each claim on every attempt.
+- The default `inline_max_bytes` for the queue sinks is now 64 KiB (was
+  8 KiB), and `Sink.Message.inline_max_bytes/1` is the single source of that
+  default.
+- Claim storage layout is now Hive-style: `claims/tenant=<t>/dt=<yyyy-mm-dd>/<object_id>`
+  (was `claims/<percent-encoded tenant>/<id>`). Tenants are validated as
+  `[A-Za-z0-9_-]{1,64}` at ingest and config time; a bad URL tenant is a `404`
+  before anything is written.
+- The claim-check gateway is read-only and cacheable: `GET` responses carry
+  `cache-control: public, max-age=31536000, immutable`, and `416` is returned
+  for a range past the end of an object. `PUT` is gone.
+- `Ankusa.ClaimCheck.redeem/2` takes a `%Ankusa.ClaimCheck.Ref{}` or its URN
+  string; `check_in/4` and `check_in_batch/2` replace the old per-ticket
+  `check_in/4`.
 
 - Dispatch is **concurrent**: up to `dispatch.concurrency` (default `32`) sink
   deliveries run at once, serialized per `c:Ankusa.Sink.ordering_key/2`, and the

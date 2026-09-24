@@ -25,9 +25,9 @@ inside your own supervision tree.
 **`:claim_check` is a fourth, opt-in role**, absent from the default
 `roles` list (`[:edge, :dispatch, :storage]`) because it opens a port that
 serves stored payloads. A node running it alone needs no WAL — only
-blob-store credentials, plus `claim_check.api_tokens` if you want bearer
-tokens rather than your own proxy in front — and can be scaled independently
-from ingest/dispatch/storage exactly like any other role. See
+blob-store credentials — and can be scaled independently
+from ingest/dispatch/storage exactly like any other role. It does no
+authentication: put a proxy, mesh, or network policy in front of it. See
 [`claim-check.md`](claim-check.md) for the full contract and the worked
 `examples/rabbitmq-consumer/` deployment (an `ingest` service plus a
 separate `claim-check` service, same image, different `ANKUSA_ROLES`).

@@ -132,15 +132,16 @@ one record's bytes back out.
 
 **`:not_found` is part of the contract for every adapter**: `get/3` and
 `get_range/5` return `{:error, :not_found}` for a missing key, never a
-store-specific error (`:enoent`, an HTTP status). `Ankusa.ClaimCheck.Direct`
+store-specific error (`:enoent`, an HTTP status). `Ankusa.ClaimCheck`
 (see [`claim-check.md`](claim-check.md)) depends on this to map a missing
 claim consistently regardless of which store is configured.
 
 Two independent namespaces share one `BlobStore` by default and never
 collide: `seg/...` (compaction, written by `Ankusa.Storage.Compactor`, every
-hook) and `claims/...` (`Ankusa.ClaimCheck`, only when something checks a
-payload in). Retention differs per namespace too — see
-[`claim-check.md#retention`](claim-check.md#retention).
+hook) and `claims/...` (`Ankusa.ClaimCheck`, packed per tenant per dispatch
+batch, one object holding many claims under
+`claims/tenant=<t>/dt=<day>/<object_id>`). Retention differs per namespace
+too — see [`claim-check.md#retention`](claim-check.md#retention).
 
 | Adapter | Deps | Notes |
 | --- | --- | --- |

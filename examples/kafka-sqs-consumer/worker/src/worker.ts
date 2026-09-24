@@ -4,6 +4,12 @@
 // claim-check gateway's HTTP API: this worker holds SQS credentials only,
 // never object-store credentials. Prints everything; swap `handleHook` for
 // real processing.
+//
+// The claim-check client is generated from the framework's own OpenAPI
+// contract (`priv/openapi/claim_check.v1.yaml`, `npm run generate:types` ->
+// `src/claim-check-schema.d.ts`) instead of a hand-maintained ref type
+// and URL-building — see "Redeem a claim" in
+// docs/claim-check.md.
 
 import {
   ChangeMessageVisibilityCommand,
@@ -14,26 +20,24 @@ import {
   type Message,
 } from "@aws-sdk/client-sqs";
 import { createHash } from "node:crypto";
+import createClient from "openapi-fetch";
+import type { paths } from "./claim-check-schema.d.ts";
 
 const QUEUE_URL = required("SQS_QUEUE_URL");
 const DLQ_URL = required("SQS_DLQ_URL");
 const CLAIM_CHECK_URL = process.env.CLAIM_CHECK_URL ?? "http://localhost:4001";
-const CLAIM_CHECK_TOKEN = process.env.CLAIM_CHECK_TOKEN ?? "dev-claim-check-token";
 
 const sqs = new SQSClient({
   region: process.env.AWS_REGION ?? "us-east-1",
   endpoint: process.env.SQS_ENDPOINT,
 });
 
-type Claim = {
-  v: 1;
-  tenant_id: string;
-  id: string;
-  size: number;
-  sha256: string;
-  content_type: string | null;
-};
+// The gateway is open: no bearer token. Auth belongs in front of it.
+const claimCheck = createClient<paths>({ baseUrl: CLAIM_CHECK_URL });
 
+// The message `claim` field is a single claim-check ref URN, not a ticket
+// object:
+//   urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>
 type HookMessage = {
   v: number;
   id: string;
@@ -43,7 +47,15 @@ type HookMessage = {
   content_type: string | null;
   size: number;
   body_base64?: string;
-  claim?: Claim;
+  claim?: string;
+};
+
+type ClaimRef = {
+  tenant_id: string;
+  object_id: string;
+  offset: string;
+  length: string;
+  digest: string;
 };
 
 // Retrying won't help: dead-letter now so the rest of the FIFO group moves.
@@ -66,41 +78,69 @@ function parse(body: string | undefined): HookMessage {
   return msg;
 }
 
-async function redeemClaim(claim: Claim): Promise<Buffer> {
-  const url = `${CLAIM_CHECK_URL}/v1/claims/${encodeURIComponent(claim.tenant_id)}/${claim.id}`;
+// Split the ref on ":" — nine parts. The sha256 digest is the hex after
+// `sha256-`; it's never sent to the gateway, only used to check the bytes.
+function parseClaimRef(claim: string): ClaimRef {
+  const parts = claim.split(":");
+  if (parts.length !== 9 || !claim.startsWith("urn:ankusa:claim:v1:")) {
+    throw new PermanentError(`invalid claim ref: ${claim}`);
+  }
+  return {
+    tenant_id: parts[4],
+    object_id: parts[5],
+    offset: parts[6],
+    length: parts[7],
+    digest: parts[8].slice("sha256-".length),
+  };
+}
 
-  let res: Response;
+async function redeemClaim(claim: string): Promise<Buffer> {
+  const { tenant_id, object_id, offset, length, digest } = parseClaimRef(claim);
+
+  let data: ArrayBuffer | undefined;
+  let status: number;
+  let errorBody: unknown;
   try {
-    res = await fetch(url, { headers: { authorization: `Bearer ${CLAIM_CHECK_TOKEN}` } });
+    const result = await claimCheck.GET("/v1/claims/{tenant_id}/{object_id}/{offset}/{length}", {
+      params: { path: { tenant_id, object_id, offset, length } },
+      parseAs: "arrayBuffer",
+    });
+    data = result.data as ArrayBuffer | undefined;
+    status = result.response.status;
+    errorBody = result.error;
   } catch (err) {
     throw new Error(`claim-check gateway unreachable: ${(err as Error).message}`);
   }
 
-  if (res.status === 404) {
-    throw new PermanentError(`claim not found: ${claim.tenant_id}/${claim.id}`);
+  if (status === 404) {
+    throw new PermanentError(`claim not found: ${tenant_id}/${object_id}`);
   }
-  if (res.status >= 400 && res.status < 500) {
-    throw new PermanentError(`claim-check rejected redeem (${res.status}): ${await res.text()}`);
+  if (status >= 400 && status < 500) {
+    throw new PermanentError(`claim-check rejected redeem (${status}): ${JSON.stringify(errorBody)}`);
   }
-  if (!res.ok) {
-    throw new Error(`claim-check gateway error: ${res.status}`);
+  if (data === undefined) {
+    throw new Error(`claim-check gateway error: ${status}`);
   }
 
-  const body = Buffer.from(await res.arrayBuffer());
+  const body = Buffer.from(data);
 
   // Integrity is verified by the redeemer, never trusted from the gateway.
-  if (body.length !== claim.size) {
-    throw new PermanentError(`claim size mismatch: expected ${claim.size}, got ${body.length}`);
+  if (body.length !== Number(length)) {
+    throw new PermanentError(`claim size mismatch: expected ${length}, got ${body.length}`);
   }
-  if (createHash("sha256").update(body).digest("hex") !== claim.sha256) {
-    throw new PermanentError(`claim sha256 mismatch for ${claim.tenant_id}/${claim.id}`);
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  if (sha256 !== digest) {
+    throw new PermanentError(`claim sha256 mismatch for ${tenant_id}/${object_id}`);
   }
 
   return body;
 }
 
 async function resolveBody(msg: HookMessage): Promise<{ body: Buffer; via: string }> {
-  if (msg.claim) return { body: await redeemClaim(msg.claim), via: `claim:${msg.claim.id}` };
+  if (msg.claim) {
+    const { object_id } = parseClaimRef(msg.claim);
+    return { body: await redeemClaim(msg.claim), via: `claim:${object_id}` };
+  }
   return { body: Buffer.from(msg.body_base64 ?? "", "base64"), via: "inline" };
 }
 

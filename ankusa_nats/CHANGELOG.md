@@ -22,3 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Supervised, self-reconnecting gnat connection per
   `{instance, connection}`; `deliver/3` returns `{:error, :not_connected}`
   while one is down, which the source's retry policy already handles.
+
+### Changed
+
+- The message `claim` field is now a claim-check ref URN string instead of a
+  nested ticket object — breaking for consumers; the message `v` stays `1`.

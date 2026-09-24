@@ -3,7 +3,7 @@ name: ankusa-rabbitmq-example
 # Full deployed topology: N ingest servers (here, one) checking fat payloads
 # in to S3 through the Claim Check gateway and publishing small messages to
 # a RabbitMQ exchange, with a TypeScript consumer that owns its own
-# queue/binding, redeems claim tickets over HTTP (no S3 credentials of its
+# queue/binding, redeems claim refs over HTTP (no S3 credentials of its
 # own), and prints what it receives.
 #
 #   docker compose up --build
@@ -71,6 +71,7 @@ services:
       S3_ENDPOINT: http://floci:4566
       S3_ACCESS_KEY_ID: test
       S3_SECRET_ACCESS_KEY: test
+      # Deliberately low so the demo's ~25 KB fat hook takes the claim path.
       INLINE_MAX_BYTES: "8192"
 
   # The standalone `:claim_check`-role gateway — same image, `ANKUSA_ROLES`
@@ -89,7 +90,6 @@ services:
     environment:
       ANKUSA_ROLES: claim_check
       CLAIM_CHECK_PORT: "4001"
-      CLAIM_CHECK_TOKEN: dev-claim-check-token
       S3_BUCKET: ankusa-example
       S3_REGION: us-east-1
       S3_ENDPOINT: http://floci:4566
@@ -115,4 +115,3 @@ services:
       ROUTING_PATTERN: "ankusa.#"
       QUEUE_NAME: ankusa-example-worker
       CLAIM_CHECK_URL: http://claim-check:4001
-      CLAIM_CHECK_TOKEN: dev-claim-check-token
