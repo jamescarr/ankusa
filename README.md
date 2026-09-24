@@ -109,7 +109,7 @@ flowchart LR
 - Delivery over HTTP, RabbitMQ, Kafka, and NATS JetStream, with retries,
   backoff, a dead letter queue, and replay
 - Quarantine for hooks that fail verification, so nothing is silently dropped
-- Archiving to S3, GCS, Cloudflare R2, or MinIO
+- Archiving to S3, GCS, Azure Blob Storage, OCI Object Storage, Cloudflare R2, or MinIO
 - Telemetry on every stage of the pipeline
 - A clean handoff to job frameworks like Oban and Celery
 
@@ -119,7 +119,7 @@ replace that piece and keep the rest.
 ## Grow into a fleet
 
 When one box is not enough, put edge nodes behind a load balancer on a shared
-Postgres log, archive to S3 or GCS, and fan out to Kafka, NATS, or RabbitMQ. Ingest,
+Postgres log, archive to S3, GCS, Azure, or OCI, and fan out to Kafka, NATS, or RabbitMQ. Ingest,
 delivery, and archiving each scale on their own, so you add capacity where the
 traffic is.
 

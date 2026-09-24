@@ -8,11 +8,11 @@ NATS).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 152 tests, no external infra needed
-mix test --include integration        # +8 tests, needs floci running (see below)
+mix test                              # 185 tests, no external infra needed
+mix test --include integration        # +16 tests, needs floci running (see below)
 ```
 
-The 152 always-on tests cover:
+The 185 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
   crash-replay (torn-frame handling), truncation, that a restart after a full
@@ -20,7 +20,13 @@ The 152 always-on tests cover:
   reports.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
-  request `Req.Test` captures; `Sink.Http` forwarding, status mapping, and the
+  request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing
+  `BlobStore.OCI` puts on the wire, pinned against OCI's published reference
+  signature (computed with OpenSSL) and reconstructed from captured requests;
+  the `BlobStore.Azure` request plumbing (Put Blob headers, SAS appending vs.
+  bearer `:token_provider`, `get_range` windows, `list` XML, `:not_found`); the
+  `Ankusa.BlobStore.Azure.ManagedIdentity` token provider (IMDS fetch shape,
+  caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
   rule that a redirect is reported rather than followed; the shared
   `Ankusa.HttpClient` allowlist.
 - **Edge**: accept/duplicate/verify/quarantine/load-shed/oversize, shedding with
@@ -50,15 +56,16 @@ The 152 always-on tests cover:
   tolerance — this is the test that actually backs the core invariant claim
   in [`architecture.md`](architecture.md), not just the description of it.
 
-The 8 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
-`blob_store_gcs_test.exs`) exercise `BlobStore.S3`/`BlobStore.GCS` against
-real running emulators — put/get round-trip, `get_range` byte-slicing,
+The 16 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+`blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
+`blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
+against real running emulators — put/get round-trip, `get_range` byte-slicing,
 `:not_found`, `list`+`delete`. Excluded by default
 (`test_helper.exs`:`ExUnit.start(exclude: [:integration])`) because they
 need live infra:
 
 ```sh
-docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588)
+docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599)
 mix test --include integration
 docker compose down -v
 ```

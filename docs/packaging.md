@@ -37,7 +37,7 @@ bandit_example/            ankusa — core. mix.exs deps: {bandit, plug, req,
   lib/ankusa/…                behaviours, envelope, config, registry, telemetry,
                               edge/dispatch/storage machinery, and every
                               zero-external-dep default adapter
-                              (WAL.DiskLog, BlobStore.{LocalFS,S3,GCS},
+                              (WAL.DiskLog, BlobStore.{LocalFS,S3,GCS,Azure,OCI},
                               Codec.Raw, all Verifiers, DedupKey.*,
                               Sink.{Log,Http}, RetryPolicy.Exponential,
                               RouteResolver.{Path,TenantPath})
@@ -59,17 +59,22 @@ Application); none needs any config to get it, since Ankusa.Application's
 built-in default instance is off (`autostart: false`) by default and only the
 root project's own `config/config.exs` turns it on.
 
-## Why S3/GCS stayed in-tree but Postgres/RabbitMQ/Kafka/NATS didn't
+## Why S3/GCS/Azure/OCI stayed in-tree but Postgres/RabbitMQ/Kafka/NATS didn't
 
 This is a dependency-weight split, not a position on hand-rolling.
 
-`Ankusa.BlobStore.S3` and `Ankusa.BlobStore.GCS` are in core rather than in
-their own packages because their dependencies are small and focused:
+`Ankusa.BlobStore.{S3,GCS,Azure,OCI}` are in core rather than in their own
+packages because their dependencies are small and focused:
 `aws_signature` (signing only) and `Req` (HTTP, with its own Finch pool).
 Neither drags a credential stack or a framework along, so a `LocalFS` user's
-`deps.get` stays cheap. GCS bundles nothing credential-shaped at all — it takes
-a `:token_provider` callback and leaves token acquisition (Goth, ADC) to the
-deployment.
+`deps.get` stays cheap. GCS and Azure bundle nothing credential-shaped at all —
+each takes a pre-obtained credential (`:token_provider`, or Azure's
+`:sas_token`) and leaves acquisition (Goth, ADC, the Azure CLI) to the
+deployment. OCI carries **no dependency at all**: its RSA-SHA256 *Signature
+version 1* signing is implemented with OTP's own `:public_key`, pinned against
+OCI's reference vectors (see the `### Resolved` note below for why that's an
+exception to the no-hand-rolling rule, and `test/ankusa/blob_store_oci_signing_test.exs`
+for the proof).
 
 ### Resolved: the hand-rolled SigV4 signing is gone
 
@@ -88,6 +93,20 @@ bogus signature, no signature at all, and a wrong-secret signature all return
 reproduces AWS's published reference signatures, and it reconstructs the
 adapter's own signing call from a captured request to pin S3's "sign the path as
 sent" rule.
+
+### The OCI exception: signing with no library to lean on
+
+`Ankusa.BlobStore.OCI` signs its own requests, which *looks* like a regression
+to the hand-rolling the S3 note above removed. It isn't the same call: OCI has
+no *mature, focused* Elixir signing library to take (unlike `aws_signature` for
+SigV4). `ex_oci_sdk` exists but is a whole SDK at v0.2 with ~700 downloads,
+not the proven, single-purpose signing dependency `aws_signature` is, and OCI
+offers no bearer/SAS shortcut an Object Storage adapter could ride instead. So
+the rule becomes "hand-roll only when there is no library and no credential-free
+path, and pin it against the provider's own reference vectors" — which is what
+`test/ankusa/blob_store_oci_signing_test.exs` does, reproducing the RSA-SHA256
+signature of OCI's published test string (computed independently with OpenSSL)
+and reconstructing the signing string from a captured request.
 
 `Ankusa.WAL.Postgres` needs `postgrex` (which pulls `db_connection`,
 `decimal`). `Ankusa.Sink.RabbitMQ` needs `amqp` (which pulls `amqp_client`,
