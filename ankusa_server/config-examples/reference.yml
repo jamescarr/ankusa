@@ -162,6 +162,8 @@ sources:
         routing_key: "ankusa.stripe"
         inline_max_bytes: 8192
       - type: kafka
+        # A list of host:port, or one comma-separated string — so
+        # `brokers: "${KAFKA_BROKERS}"` takes "host:port,host:port" from env.
         brokers: ["${KAFKA_BROKERS}"]
         topic: "${KAFKA_TOPIC}"
         # Static string only (a fun is an embedding API, not a config surface).

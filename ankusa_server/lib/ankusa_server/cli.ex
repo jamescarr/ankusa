@@ -15,7 +15,7 @@ defmodule AnkusaServer.CLI do
   # Not `alias AnkusaServer.Application`: that would shadow `Elixir.Application`
   # inside this module, and `Application.ensure_all_started/1` below would
   # silently become a call to the server's own application module.
-  alias AnkusaServer.{Config, ConfigError}
+  alias AnkusaServer.Config
 
   @doc "Validate the config, print a one-line summary, exit 0. Exit 78 on error."
   @spec check_config() :: no_return()
@@ -46,7 +46,6 @@ defmodule AnkusaServer.CLI do
   @doc "Print the server and core versions, exit 0."
   @spec version() :: no_return()
   def version do
-    ensure_yaml()
     IO.puts("ankusa_server #{AnkusaServer.Application.version()}")
     IO.puts("ankusa #{AnkusaServer.Application.core_version()}")
     halt(0)
@@ -54,12 +53,7 @@ defmodule AnkusaServer.CLI do
 
   defp config! do
     ensure_yaml()
-
-    Config.load!().config
-  rescue
-    error in ConfigError ->
-      IO.write(:stderr, "ankusa: invalid configuration\n  " <> error.message <> "\n")
-      halt(78)
+    Config.load_or_halt!().config
   end
 
   # `YamlElixir` reads through `yamerl`, whose application must be up. Under

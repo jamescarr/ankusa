@@ -60,7 +60,13 @@ defmodule AnkusaServer.ConfigTest do
 
     assert stripe_opts[:secret] == @fixture_env["STRIPE_WHSEC"]
     assert stripe_opts[:tolerance] == 300
-    assert Enum.map(sinks, &elem(&1, 0)) == http_kafka_rabbitmq_log()
+
+    assert Enum.map(sinks, &elem(&1, 0)) == [
+             Ankusa.Sink.Log,
+             Ankusa.Sink.Http,
+             Ankusa.Sink.RabbitMQ,
+             Ankusa.Sink.Kafka
+           ]
   end
 
   test "the baked image config is the demo: admin on, one open source" do
@@ -122,6 +128,12 @@ defmodule AnkusaServer.ConfigTest do
     assert Config.load!(path: path, env: %{"DATA_DIR" => ""}).config.data_dir == ""
   end
 
+  test "an empty default makes a variable optional" do
+    path = tmp_config("node: {data_dir: \"${DATA_DIR:-}\"}\n")
+
+    assert Config.load!(path: path, env: %{}).config.data_dir == ""
+  end
+
   # ── env overrides ───────────────────────────────────────────────────────────
 
   test "ANKUSA_HTTP_PORT beats PORT beats the file" do
@@ -135,6 +147,12 @@ defmodule AnkusaServer.ConfigTest do
 
     assert Config.load!(path: path, env: %{"PORT" => "6000", "ANKUSA_HTTP_PORT" => "7000"}).config.port ==
              7000
+  end
+
+  test "an env override fills a section the file left empty" do
+    path = tmp_config("http:\n  # port: 4000\n")
+
+    assert Config.load!(path: path, env: %{"PORT" => "6000"}).config.port == 6000
   end
 
   test "the env override table wins, and is coerced from strings" do
@@ -358,12 +376,7 @@ defmodule AnkusaServer.ConfigTest do
 
   test "no fixture secret survives printing the loaded config" do
     for path <- shipped_configs() do
-      printed =
-        path
-        |> then(&Config.load!(path: &1, env: @fixture_env))
-        |> Map.fetch!(:config)
-        |> Ankusa.Admin.Redact.config()
-        |> JSON.encode!()
+      printed = print_config(path, @fixture_env)
 
       for secret <- @fixture_secrets do
         refute printed =~ secret, "#{path} leaked #{inspect(secret)}"
@@ -371,6 +384,25 @@ defmodule AnkusaServer.ConfigTest do
 
       assert printed =~ "[REDACTED]"
     end
+  end
+
+  test "a static GCS token does not survive printing" do
+    printed = print_config(tmp_config(storage_gcs(%{auth: "token", token: "ya29.leak"})))
+
+    refute printed =~ "ya29.leak"
+  end
+
+  test "http sink header values do not survive printing" do
+    path =
+      tmp_config("""
+      sources:
+        a:
+          verify: {type: none}
+          sinks:
+            - {type: http, url: "http://sink.invalid", headers: {authorization: "Bearer leak"}}
+      """)
+
+    refute print_config(path) =~ "Bearer leak"
   end
 
   # ── helpers ─────────────────────────────────────────────────────────────────
@@ -384,8 +416,11 @@ defmodule AnkusaServer.ConfigTest do
     Ankusa.Source.new(id, store[:sources][id])
   end
 
-  defp http_kafka_rabbitmq_log,
-    do: [Ankusa.Sink.Log, Ankusa.Sink.Http, Ankusa.Sink.RabbitMQ, Ankusa.Sink.Kafka]
+  defp print_config(path, env \\ %{}) do
+    Config.load!(path: path, env: env).config
+    |> Ankusa.Admin.Redact.config()
+    |> JSON.encode!()
+  end
 
   defp tmp_config(yaml) do
     path = Path.join(System.tmp_dir!(), "ankusa_config_#{System.unique_integer([:positive])}.yml")

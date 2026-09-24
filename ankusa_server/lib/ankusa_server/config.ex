@@ -11,7 +11,7 @@ defmodule AnkusaServer.Config do
        `${NAME:-default}` replaced from the environment. This is how secrets get
        in: the file holds `${STRIPE_WHSEC}`, not the secret. An unset variable
        with no default is a startup failure naming the dotted key, not a
-       silently empty secret.
+       silently empty secret; `${NAME:-}` is how a file asks for empty.
     3. **Env overrides.** A fixed set of `ANKUSA_*` variables (below) override
        the file — env wins, because that is how containers get reconfigured
        without a new image.
@@ -20,9 +20,10 @@ defmodule AnkusaServer.Config do
        enum value, with the dotted path in the message. Then it builds the
        `Ankusa.Config` the framework runs on and runs core's own validation.
 
-  Every failure raises `AnkusaServer.ConfigError`, which the application turns
-  into an exit-78 (`EX_CONFIG`) instead of a crash dump — `docker run
-  ankusa/ankusa check-config` prints the same message without starting anything.
+  Every failure raises `AnkusaServer.ConfigError`, which `load_or_halt!/0` turns
+  into an exit-78 (`EX_CONFIG`) instead of a crash dump, on boot and in
+  `docker run ankusa/ankusa check-config` alike — the latter prints the same
+  message without starting anything.
 
   ## Env overrides
 
@@ -81,23 +82,19 @@ defmodule AnkusaServer.Config do
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes ssl sasl)
   @sasl_keys ~w(mechanism username password)
 
+  @roles ~w(edge dispatch storage claim_check)
   @verify_types ~w(none stripe github standard_webhooks)
   @dedup_types ~w(rules stripe github)
   @sink_types ~w(log http rabbitmq kafka)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
-  @sasl_mechanisms %{
-    "plain" => :plain,
-    "scram_sha_256" => :scram_sha_256,
-    "scram_sha_512" => :scram_sha_512
-  }
   @exchange_types ~w(topic direct fanout headers)
 
   @typedoc "A loaded config plus the log level the file asked for."
   @type loaded :: %{config: Ankusa.Config.t(), log_level: Logger.level()}
 
-  @var_re ~r/\$\{([A-Z0-9_]+)(?::-([^}]*))?\}/
+  @var_re ~r/\$\{([A-Z0-9_]+)(:-([^}]*))?\}/
 
   @doc """
   Read, interpolate, validate, and translate the config file.
@@ -108,14 +105,29 @@ defmodule AnkusaServer.Config do
   @spec load!(keyword()) :: loaded()
   def load!(opts \\ []) do
     env = Keyword.get(opts, :env, System.get_env())
-    {path, raw} = read!(Keyword.get(opts, :path), env)
+    raw = read!(Keyword.get(opts, :path), env)
 
     doc =
       raw
       |> interpolate(env, [])
       |> apply_env_overrides(env)
 
-    %{config: config!(doc, path), log_level: log_level!(doc)}
+    %{config: config!(doc), log_level: log_level!(doc)}
+  end
+
+  @doc """
+  `load!/0` for the callers that run on the file: boot, and the `check-config`
+  and `print-config` commands. A `ConfigError` is printed to stderr as
+  `ankusa: invalid configuration` plus the message, and the VM halts with 78
+  (`EX_CONFIG`), so every entry point fails the same way.
+  """
+  @spec load_or_halt!() :: loaded()
+  def load_or_halt! do
+    load!()
+  rescue
+    error in ConfigError ->
+      IO.write(:stderr, "ankusa: invalid configuration\n  " <> error.message <> "\n")
+      System.halt(78)
   end
 
   # ── 1. locate + parse ───────────────────────────────────────────────────────
@@ -123,21 +135,21 @@ defmodule AnkusaServer.Config do
   defp read!(path_override, env) do
     case path_override || env["ANKUSA_CONFIG"] do
       nil -> read_any!(env)
-      path -> {path, read_yaml!(path, env)}
+      path -> read_yaml!(path, env)
     end
   end
 
   defp read_any!(env) do
     cond do
       File.exists?(@default_path) ->
-        {@default_path, read_yaml!(@default_path, env)}
+        read_yaml!(@default_path, env)
 
       File.exists?(@fallback_path) ->
-        {@fallback_path, read_yaml!(@fallback_path, env)}
+        read_yaml!(@fallback_path, env)
 
       true ->
         Logger.warning("[ankusa] no config file found; starting with defaults and no sources")
-        {nil, %{}}
+        %{}
     end
   end
 
@@ -178,12 +190,13 @@ defmodule AnkusaServer.Config do
   end
 
   defp interpolate(value, env, path) when is_binary(value) do
-    Regex.replace(@var_re, value, fn _match, name, default ->
+    Regex.replace(@var_re, value, fn _match, name, marker, default ->
       case Map.fetch(env, name) do
         {:ok, replacement} ->
           replacement
 
-        :error when default != "" ->
+        # The marker, not the default, decides: `${NAME:-}` has an empty one.
+        :error when marker != "" ->
           default
 
         :error ->
@@ -230,18 +243,26 @@ defmodule AnkusaServer.Config do
     end
   end
 
-  defp put_path(doc, path, value), do: put_in(doc, Enum.map(path, &Access.key(&1, %{})), value)
+  # A section that is present but empty (`http:` with every child commented
+  # out) parses as nil and takes the override like a missing one. Any other
+  # non-map is left alone for the walker to reject with its type error.
+  defp put_path(nil, path, value), do: put_path(%{}, path, value)
+  defp put_path(doc, [key], value) when is_map(doc), do: Map.put(doc, key, value)
+
+  defp put_path(doc, [key | rest], value) when is_map(doc),
+    do: Map.put(doc, key, put_path(doc[key], rest, value))
+
+  defp put_path(doc, _path, _value), do: doc
 
   # ── 4. validate + translate ─────────────────────────────────────────────────
 
   defp log_level!(doc) do
-    log = expect_map(doc["log"], ["log"])
-    check_keys!(log, @log_keys, ["log"])
+    log = section!(doc, "log", @log_keys, [])
     level = enum!(log["level"] || "info", @log_levels, ["log", "level"])
     String.to_existing_atom(level)
   end
 
-  defp config!(doc, _path) do
+  defp config!(doc) do
     check_keys!(doc, @root_keys, [])
 
     opts =
@@ -267,8 +288,7 @@ defmodule AnkusaServer.Config do
   # ── node / http / admin ─────────────────────────────────────────────────────
 
   defp node_section(doc) do
-    node = expect_map(doc["node"], ["node"])
-    check_keys!(node, @node_keys, ["node"])
+    node = section!(doc, "node", @node_keys, [])
 
     []
     |> put_opt(:roles, node["roles"] && roles!(node["roles"], ["node", "roles"]))
@@ -278,25 +298,16 @@ defmodule AnkusaServer.Config do
     )
   end
 
+  # `to_atom` after `enum!`, not `to_existing_atom`: under `bin/ankusa eval`
+  # (check-config) modules load on demand, so `:edge` may not exist yet.
   defp roles!(value, path) do
-    names =
-      case value do
-        list when is_list(list) -> Enum.map(list, &expect_string(&1, path))
-        string when is_binary(string) -> String.split(string, ",", trim: true)
-        other -> raise ConfigError, message: type_error(path, "a list of roles", other)
-      end
-
-    try do
-      Ankusa.Config.parse_roles!(Enum.join(names, ","))
-    rescue
-      error in ArgumentError ->
-        raise ConfigError, message: "#{render_path(path)}: #{error.message}"
-    end
+    value
+    |> string_list!(path)
+    |> Enum.map(&String.to_atom(enum!(&1, @roles, path)))
   end
 
   defp http_section(doc) do
-    http = expect_map(doc["http"], ["http"])
-    check_keys!(http, @http_keys, ["http"])
+    http = section!(doc, "http", @http_keys, [])
 
     []
     |> put_opt(:port, int_opt(http, "port", ["http"]))
@@ -327,25 +338,22 @@ defmodule AnkusaServer.Config do
   end
 
   defp admin_section(doc) do
-    admin = expect_map(doc["admin"], ["admin"])
-    check_keys!(admin, @admin_keys, ["admin"])
+    admin = section!(doc, "admin", @admin_keys, [])
 
     # The image's whole point is being operable, so the admin API is on unless
     # an operator turns it off — the opposite of core's default, which must not
     # bind a port behind an embedded user's back.
     [
-      admin: [
-        enabled: bool!(Map.get(admin, "enabled", true), ["admin", "enabled"]),
-        port: int_opt(admin, "port", ["admin"]) || 4002
-      ]
+      admin:
+        [enabled: bool!(Map.get(admin, "enabled", true), ["admin", "enabled"])]
+        |> put_opt(:port, int_opt(admin, "port", ["admin"]))
     ]
   end
 
   # ── batcher / dispatch ──────────────────────────────────────────────────────
 
   defp batcher_section(doc) do
-    batcher = expect_map(doc["batcher"], ["batcher"])
-    check_keys!(batcher, @batcher_keys, ["batcher"])
+    batcher = section!(doc, "batcher", @batcher_keys, [])
 
     [
       batcher:
@@ -358,10 +366,8 @@ defmodule AnkusaServer.Config do
   end
 
   defp dispatch_section(doc) do
-    dispatch = expect_map(doc["dispatch"], ["dispatch"])
-    check_keys!(dispatch, @dispatch_keys, ["dispatch"])
-    retry = expect_map(dispatch["retry"], ["dispatch", "retry"])
-    check_keys!(retry, @retry_keys, ["dispatch", "retry"])
+    dispatch = section!(doc, "dispatch", @dispatch_keys, [])
+    retry = section!(dispatch, "retry", @retry_keys, ["dispatch"])
 
     [
       dispatch:
@@ -373,25 +379,25 @@ defmodule AnkusaServer.Config do
   end
 
   defp retry_policy(retry) do
+    path = ["dispatch", "retry"]
+
     if retry == %{} do
       nil
     else
       {Ankusa.RetryPolicy.Exponential,
        []
-       |> put_opt(:base_ms, int_opt(retry, "base_ms", ["dispatch", "retry"]))
-       |> put_opt(:max_ms, int_opt(retry, "max_ms", ["dispatch", "retry"]))
-       |> put_opt(:max_attempts, int_opt(retry, "max_attempts", ["dispatch", "retry"]))
-       |> put_opt(:jitter, bool_opt(retry, "jitter", ["dispatch", "retry"]))}
+       |> put_opt(:base_ms, int_opt(retry, "base_ms", path))
+       |> put_opt(:max_ms, int_opt(retry, "max_ms", path))
+       |> put_opt(:max_attempts, int_opt(retry, "max_attempts", path))
+       |> put_opt(:jitter, bool_opt(retry, "jitter", path))}
     end
   end
 
   # ── wal ─────────────────────────────────────────────────────────────────────
 
   defp wal_section(doc) do
-    wal = expect_map(doc["wal"], ["wal"])
-    check_keys!(wal, @wal_keys, ["wal"])
-    postgres = expect_map(wal["postgres"], ["wal", "postgres"])
-    check_keys!(postgres, @postgres_keys, ["wal", "postgres"])
+    wal = section!(doc, "wal", @wal_keys, [])
+    postgres = section!(wal, "postgres", @postgres_keys, ["wal"])
 
     case enum!(wal["type"] || "disk", ~w(disk postgres), ["wal", "type"]) do
       "disk" ->
@@ -418,8 +424,12 @@ defmodule AnkusaServer.Config do
 
     url_opts =
       case postgres["url"] do
-        nil -> []
-        url -> postgres_url_opts!(expect_string(url, path ++ ["url"]), path ++ ["url"])
+        nil ->
+          []
+
+        url ->
+          url_path = path ++ ["url"]
+          postgres_url_opts!(expect_string(url, url_path), url_path)
       end
 
     url_opts
@@ -476,12 +486,9 @@ defmodule AnkusaServer.Config do
   # ── storage ─────────────────────────────────────────────────────────────────
 
   defp storage_section(doc) do
-    storage = expect_map(doc["storage"], ["storage"])
-    check_keys!(storage, @storage_keys, ["storage"])
-    s3 = expect_map(storage["s3"], ["storage", "s3"])
-    check_keys!(s3, @s3_keys, ["storage", "s3"])
-    gcs = expect_map(storage["gcs"], ["storage", "gcs"])
-    check_keys!(gcs, @gcs_keys, ["storage", "gcs"])
+    storage = section!(doc, "storage", @storage_keys, [])
+    s3 = section!(storage, "s3", @s3_keys, ["storage"])
+    gcs = section!(storage, "gcs", @gcs_keys, ["storage"])
 
     blob_store =
       case enum!(storage["type"] || "local", ~w(local s3 gcs), ["storage", "type"]) do
@@ -516,7 +523,7 @@ defmodule AnkusaServer.Config do
 
     opts = [bucket: bucket] |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))
 
-    case enum!(gcs["auth"] || "none", ~w(metadata token none), path ++ ["auth"]) do
+    case enum!(gcs["auth"] || "metadata", ~w(metadata token none), path ++ ["auth"]) do
       "none" ->
         opts
 
@@ -532,18 +539,14 @@ defmodule AnkusaServer.Config do
   # ── claim check ─────────────────────────────────────────────────────────────
 
   defp claim_check_section(doc) do
-    claim_check = expect_map(doc["claim_check"], ["claim_check"])
-    check_keys!(claim_check, @claim_check_keys, ["claim_check"])
+    claim_check = section!(doc, "claim_check", @claim_check_keys, [])
 
     [
       claim_check:
         []
         |> put_opt(:port, int_opt(claim_check, "port", ["claim_check"]))
         |> put_opt(:max_bytes, int_opt(claim_check, "max_bytes", ["claim_check"]))
-        |> put_opt(
-          :retention_days,
-          nullable_int_opt(claim_check, "retention_days", ["claim_check"])
-        )
+        |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
         |> put_opt(:api_tokens, api_tokens(claim_check))
         |> put_opt(:adapter, claim_check_adapter(claim_check))
     ]
@@ -559,8 +562,7 @@ defmodule AnkusaServer.Config do
         |> Enum.with_index()
         |> Map.new(fn {token, index} ->
           path = ["claim_check", "tokens", index]
-          token = expect_map(token, path)
-          check_keys!(token, @token_keys, path)
+          token = section!(token, @token_keys, path)
 
           {required_string!(token, "token", path), token_scope(token["tenants"], path)}
         end)
@@ -589,8 +591,7 @@ defmodule AnkusaServer.Config do
 
       remote ->
         path = ["claim_check", "remote"]
-        remote = expect_map(remote, path)
-        check_keys!(remote, @remote_keys, path)
+        remote = section!(remote, @remote_keys, path)
 
         {Ankusa.ClaimCheck.Remote,
          [url: required_string!(remote, "url", path)]
@@ -626,40 +627,32 @@ defmodule AnkusaServer.Config do
     do: Logger.warning("[ankusa] no sources configured; every POST will return 404")
 
   defp source_opts!(source, path) do
-    source = expect_map(source, path)
-    check_keys!(source, @source_keys, path)
+    source = section!(source, @source_keys, path)
 
     []
     |> put_opt(:tenant_id, string_opt(source, "tenant", path))
-    |> put_opt(:on_verify_failure, policy(source, path))
+    |> put_opt(:on_verify_failure, atom_enum_opt(source, "on_verify_failure", @policies, path))
     |> put_opt(:verifier, verifier(source, path))
     |> put_opt(:dedup, dedup_key(source, path))
     |> Keyword.put(:sinks, sinks!(source, path))
   end
 
-  defp policy(source, path) do
-    case source["on_verify_failure"] do
-      nil -> nil
-      value -> String.to_atom(enum!(value, @policies, path ++ ["on_verify_failure"]))
-    end
-  end
-
   defp verifier(source, path) do
-    case expect_map(source["verify"], path ++ ["verify"]) do
+    path = path ++ ["verify"]
+
+    case section!(source["verify"], @verify_keys, path) do
       verify when map_size(verify) == 0 ->
         nil
 
       verify ->
-        check_keys!(verify, @verify_keys, path ++ ["verify"])
-        vpath = path ++ ["verify"]
-        type = enum!(required_string!(verify, "type", vpath), @verify_types, vpath ++ ["type"])
+        type = enum!(required_string!(verify, "type", path), @verify_types, path ++ ["type"])
 
         opts =
           []
-          |> put_opt(:secret, string_opt(verify, "secret", vpath))
-          |> put_opt(:tolerance, int_opt(verify, "tolerance_seconds", vpath))
+          |> put_opt(:secret, string_opt(verify, "secret", path))
+          |> put_opt(:tolerance, int_opt(verify, "tolerance_seconds", path))
 
-        {verifier_module(type, verify, vpath), opts}
+        {verifier_module(type, verify, path), opts}
     end
   end
 
@@ -678,21 +671,21 @@ defmodule AnkusaServer.Config do
   end
 
   defp dedup_key(source, path) do
-    case expect_map(source["dedup"], path ++ ["dedup"]) do
+    path = path ++ ["dedup"]
+
+    case section!(source["dedup"], @dedup_keys, path) do
       dedup when map_size(dedup) == 0 ->
         nil
 
       dedup ->
-        check_keys!(dedup, @dedup_keys, path ++ ["dedup"])
-        dpath = path ++ ["dedup"]
-        type = enum!(dedup["type"] || "rules", @dedup_types, dpath ++ ["type"])
+        type = enum!(dedup["type"] || "rules", @dedup_types, path ++ ["type"])
 
         case type do
           "rules" ->
             {Ankusa.DedupKey.Rules,
              []
-             |> put_opt(:header, string_opt(dedup, "header", dpath))
-             |> put_opt(:json, json_path(dedup, dpath))}
+             |> put_opt(:header, string_opt(dedup, "header", path))
+             |> put_opt(:json, json_path(dedup, path))}
 
           "stripe" ->
             {Ankusa.DedupKey.Stripe, []}
@@ -743,7 +736,7 @@ defmodule AnkusaServer.Config do
 
         {Ankusa.Sink.Http,
          [url: required_string!(sink, "url", path)]
-         |> put_opt(:method, method(sink, path))
+         |> put_opt(:method, atom_enum_opt(sink, "method", ~w(post put patch), path))
          |> put_opt(:headers, headers(sink["headers"], path ++ ["headers"]))
          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))}
 
@@ -753,7 +746,7 @@ defmodule AnkusaServer.Config do
         {Ankusa.Sink.RabbitMQ,
          [exchange: required_string!(sink, "exchange", path)]
          |> put_opt(:url, string_opt(sink, "url", path))
-         |> put_opt(:exchange_type, exchange_type(sink, path))
+         |> put_opt(:exchange_type, atom_enum_opt(sink, "exchange_type", @exchange_types, path))
          |> put_opt(:routing_key, string_opt(sink, "routing_key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))}
 
@@ -761,18 +754,14 @@ defmodule AnkusaServer.Config do
         check_keys!(sink, @kafka_sink_keys, path)
 
         {Ankusa.Sink.Kafka,
-         [brokers: brokers!(sink, path), topic: required_string!(sink, "topic", path)]
+         [
+           brokers: string_list!(sink["brokers"], path ++ ["brokers"]),
+           topic: required_string!(sink, "topic", path)
+         ]
          |> put_opt(:key, string_opt(sink, "key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
          |> put_opt(:ssl, bool_opt(sink, "ssl", path))
          |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))}
-    end
-  end
-
-  defp method(sink, path) do
-    case sink["method"] do
-      nil -> nil
-      value -> String.to_atom(enum!(value, ~w(post put patch), path ++ ["method"]))
     end
   end
 
@@ -784,44 +773,27 @@ defmodule AnkusaServer.Config do
 
   defp headers(other, path), do: raise(ConfigError, message: type_error(path, "a mapping", other))
 
-  defp exchange_type(sink, path) do
-    case sink["exchange_type"] do
-      nil -> nil
-      value -> String.to_atom(enum!(value, @exchange_types, path ++ ["exchange_type"]))
-    end
-  end
-
-  defp brokers!(sink, path) do
-    case sink["brokers"] do
-      list when is_list(list) and list != [] ->
-        Enum.map(list, &expect_string(&1, path))
-
-      other ->
-        raise ConfigError, message: type_error(path ++ ["brokers"], "a non-empty list", other)
-    end
-  end
-
   defp sasl(nil, _path), do: nil
 
   defp sasl(sasl, path) do
-    sasl = expect_map(sasl, path)
-    check_keys!(sasl, @sasl_keys, path)
+    sasl = section!(sasl, @sasl_keys, path)
+    required_string!(sasl, "mechanism", path)
 
-    mechanism = required_string!(sasl, "mechanism", path)
-
-    case Map.fetch(@sasl_mechanisms, mechanism) do
-      {:ok, atom} ->
-        {atom, required_string!(sasl, "username", path), required_string!(sasl, "password", path)}
-
-      :error ->
-        raise ConfigError,
-          message:
-            "#{render_path(path ++ ["mechanism"])}: unknown value #{inspect(mechanism)}; " <>
-              "expected one of #{Enum.join(Map.keys(@sasl_mechanisms), ", ")}"
-    end
+    {atom_enum_opt(sasl, "mechanism", ~w(plain scram_sha_256 scram_sha_512), path),
+     required_string!(sasl, "username", path), required_string!(sasl, "password", path)}
   end
 
   # ── schema helpers ──────────────────────────────────────────────────────────
+
+  # A nested mapping of known keys. nil — absent, or present with every child
+  # commented out — is an empty section.
+  defp section!(parent, key, allowed, path), do: section!(parent[key], allowed, path ++ [key])
+
+  defp section!(value, allowed, path) do
+    section = expect_map(value, path)
+    check_keys!(section, allowed, path)
+    section
+  end
 
   defp check_keys!(map, allowed, path) do
     Enum.each(map, fn {key, _value} ->
@@ -870,15 +842,6 @@ defmodule AnkusaServer.Config do
     end
   end
 
-  defp nullable_int_opt(map, key, path) do
-    case Map.fetch(map, key) do
-      :error -> nil
-      {:ok, nil} -> nil
-      {:ok, value} when is_integer(value) -> value
-      {:ok, value} -> parse_int!(value, path ++ [key])
-    end
-  end
-
   defp parse_int!(value, path) do
     case Integer.parse(value) do
       {int, ""} -> int
@@ -914,6 +877,33 @@ defmodule AnkusaServer.Config do
           "#{render_path(path)}: unknown value #{inspect(value)}; " <>
             "expected one of #{Enum.join(allowed, ", ")}"
     end
+  end
+
+  defp atom_enum_opt(map, key, allowed, path) do
+    case map[key] do
+      nil -> nil
+      value -> String.to_atom(enum!(value, allowed, path ++ [key]))
+    end
+  end
+
+  # A list of strings, or one comma-separated string: the form a single env var
+  # (`ANKUSA_ROLES`, `"${KAFKA_BROKERS}"`) can carry.
+  defp string_list!(value, path) do
+    strings =
+      case value do
+        list when is_list(list) ->
+          Enum.map(list, &expect_string(&1, path))
+
+        string when is_binary(string) ->
+          string |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+        other ->
+          raise ConfigError,
+            message: type_error(path, "a list or a comma-separated string", other)
+      end
+
+    if strings == [], do: raise(ConfigError, message: "#{render_path(path)}: must not be empty")
+    strings
   end
 
   defp type_error(path, expected, value) do

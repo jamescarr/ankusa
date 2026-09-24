@@ -31,7 +31,7 @@ defmodule AnkusaServer.Application do
   end
 
   defp start_instance do
-    loaded = load_config!()
+    loaded = AnkusaServer.Config.load_or_halt!()
 
     Logger.configure(level: loaded.log_level)
     config = loaded.config
@@ -69,14 +69,6 @@ defmodule AnkusaServer.Application do
   end
 
   def sources(_config), do: "?"
-
-  defp load_config! do
-    AnkusaServer.Config.load!()
-  rescue
-    error in AnkusaServer.ConfigError ->
-      IO.write(:stderr, "ankusa: invalid configuration\n  " <> error.message <> "\n")
-      System.halt(78)
-  end
 
   defp admin(%{admin: %{enabled: true, port: port}}), do: to_string(port)
   defp admin(_config), do: "off"
