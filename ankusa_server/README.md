@@ -78,7 +78,7 @@ Starting points, all loadable as-is:
 | [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
 | [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
 | [`config-examples/fleet-postgres-s3.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/fleet-postgres-s3.yml) | edge replicas on a shared Postgres WAL, segments in S3 |
-| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
+| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
 | [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
 
 ### Check it before you run it

@@ -9,7 +9,8 @@
 #   AWS_ACCESS_KEY_ID         AWS_SECRET_ACCESS_KEY  GCS_BUCKET
 #   CLAIM_CHECK_TOKEN         STRIPE_WHSEC  SINK_URL  RABBITMQ_URL
 #   RABBITMQ_EXCHANGE         KAFKA_BROKERS  KAFKA_TOPIC  KAFKA_USERNAME
-#   KAFKA_SASL_PASSWORD       STANDARD_WEBHOOKS_SECRET   GITHUB_WEBHOOK_SECRET
+#   KAFKA_SASL_PASSWORD       NATS_SERVERS  NATS_SUBJECT  NATS_USERNAME
+#   NATS_PASSWORD             STANDARD_WEBHOOKS_SECRET   GITHUB_WEBHOOK_SECRET
 #
 # Anything you can also set with an ANKUSA_* env var is marked [env]; env wins
 # over this file, which is how a container gets reconfigured without a rebuild.
@@ -176,6 +177,23 @@ sources:
           mechanism: plain
           username: "${KAFKA_USERNAME}"
           password: "${KAFKA_SASL_PASSWORD}"
+      - type: nats
+        # A list of host:port, or one comma-separated string — so
+        # `servers: "${NATS_SERVERS}"` takes "host:port,host:port" from env.
+        # More than one is failover order, not fan-out.
+        servers: ["${NATS_SERVERS}"]
+        # A subject, not a stream: the sink never creates one, so a stream that
+        # covers this subject has to exist.
+        subject: "${NATS_SUBJECT}"
+        inline_max_bytes: 8192
+        # How long to wait for JetStream's publish ack.
+        publish_timeout_ms: 5000
+        tls: false
+        # Exactly one scheme: username/password, token, or nkey_seed (+ jwt).
+        # Omit the block for a server that needs no credentials.
+        auth:
+          username: "${NATS_USERNAME}"
+          password: "${NATS_PASSWORD}"
 
   # A second source, showing the other verifier and the quarantine policy.
   standard:

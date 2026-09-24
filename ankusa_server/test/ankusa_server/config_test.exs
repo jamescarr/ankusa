@@ -30,13 +30,18 @@ defmodule AnkusaServer.ConfigTest do
     "KAFKA_TOPIC" => "ankusa.hooks",
     "KAFKA_USERNAME" => "ankusa",
     "KAFKA_SASL_PASSWORD" => "fixture-kafka-password",
+    "NATS_SERVERS" => "nats:4222",
+    "NATS_SUBJECT" => "ankusa.hooks",
+    "NATS_USERNAME" => "ankusa",
+    "NATS_PASSWORD" => "fixture-nats-password",
     "STANDARD_WEBHOOKS_SECRET" => "whsec_Zml4dHVyZQ==",
     "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret"
   }
 
   @fixture_secrets ~w(fixture-pg-password fixture-s3-secret fixture-claim-token
                       whsec_fixture-stripe-secret fixture-rabbit-password
-                      fixture-kafka-password fixture-github-secret whsec_Zml4dHVyZQ==)
+                      fixture-kafka-password fixture-nats-password fixture-github-secret
+                      whsec_Zml4dHVyZQ==)
 
   # ── the shipped configs ─────────────────────────────────────────────────────
 
@@ -65,7 +70,8 @@ defmodule AnkusaServer.ConfigTest do
              Ankusa.Sink.Log,
              Ankusa.Sink.Http,
              Ankusa.Sink.RabbitMQ,
-             Ankusa.Sink.Kafka
+             Ankusa.Sink.Kafka,
+             Ankusa.Sink.NATS
            ]
   end
 
@@ -330,9 +336,14 @@ defmodule AnkusaServer.ConfigTest do
                headers: {x-one: "1"}}
             - {type: kafka, brokers: ["b:9092"], topic: t, ssl: true,
                sasl: {mechanism: scram_sha_512, username: u, password: p}}
+            - {type: nats, servers: "${NATS_SERVERS}", subject: "ankusa.full",
+               inline_max_bytes: 4096, publish_timeout_ms: 250,
+               auth: {username: nu, password: np}}
       """)
 
-    config = Config.load!(path: path, env: %{}).config
+    env = %{"NATS_SERVERS" => "n1:4222,n2:4222"}
+
+    config = Config.load!(path: path, env: env).config
     {Ankusa.SourceStore.Static, store} = config.source_store
     source = Ankusa.Source.new("full", store[:sources]["full"])
 
@@ -353,12 +364,55 @@ defmodule AnkusaServer.ConfigTest do
                 headers: [{"x-one", "1"}],
                 timeout_ms: 250
               ]},
-             {Ankusa.Sink.Kafka, kafka}
+             {Ankusa.Sink.Kafka, kafka},
+             {Ankusa.Sink.NATS, nats}
            ] = source.sinks
 
     assert kafka[:brokers] == ["b:9092"]
     assert kafka[:ssl] == true
     assert kafka[:sasl] == {:scram_sha_512, "u", "p"}
+
+    # The comma-separated env var form of `servers` too.
+    assert nats[:servers] == ["n1:4222", "n2:4222"]
+    assert nats[:subject] == "ankusa.full"
+    assert nats[:inline_max_bytes] == 4096
+    assert nats[:publish_timeout_ms] == 250
+    assert nats[:username] == "nu"
+    assert nats[:password] == "np"
+  end
+
+  test "a NATS auth block takes exactly one scheme, and only whole ones" do
+    assert {Ankusa.Sink.NATS, opts} = nats_opts("")
+    refute Keyword.has_key?(opts, :username)
+
+    assert {Ankusa.Sink.NATS, opts} = nats_opts("auth: {token: t0ken}")
+    assert opts[:token] == "t0ken"
+
+    # Operator mode: a seed signs the server's nonce, the jwt vouches for the
+    # account. gnat needs both.
+    assert {Ankusa.Sink.NATS, opts} = nats_opts("auth: {nkey_seed: SUAseed, jwt: eyJacc}")
+    assert opts[:nkey_seed] == "SUAseed"
+    assert opts[:jwt] == "eyJacc"
+
+    error = nats_error("auth: {token: t0ken, username: u, password: p}")
+    assert error.message =~ "sources.a.sinks[0].auth"
+    assert error.message =~ "username/password, token are mutually exclusive"
+
+    assert nats_error("auth: {username: u}").message ==
+             "sources.a.sinks[0].auth: username and password go together"
+
+    assert nats_error("auth: {jwt: eyJacc}").message ==
+             "sources.a.sinks[0].auth: jwt requires nkey_seed"
+  end
+
+  # The seed is the private key half of the pair; it must not print. The jwt
+  # beside it is a signed, public statement about the account, so it stays.
+  test "a NATS nkey_seed does not survive printing the config" do
+    printed = print_config(tmp_config(nats_sink("auth: {nkey_seed: SUAseed, jwt: eyJacc}")))
+
+    refute printed =~ "SUAseed"
+    assert printed =~ "eyJacc"
+    assert printed =~ "[REDACTED]"
   end
 
   test "routing tenant_path uses the tenant resolver" do
@@ -451,6 +505,35 @@ defmodule AnkusaServer.ConfigTest do
       gcs:
     #{indent(Map.put(gcs, :bucket, "fixture-bucket"))}
     sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+    """
+  end
+
+  defp nats_opts(auth) do
+    config = Config.load!(path: tmp_config(nats_sink(auth)), env: %{}).config
+    {Ankusa.SourceStore.Static, store} = config.source_store
+    source = Ankusa.Source.new("a", store[:sources]["a"])
+    [sink] = source.sinks
+    sink
+  end
+
+  defp nats_error(auth) do
+    assert_raise ConfigError, fn -> Config.load!(path: tmp_config(nats_sink(auth)), env: %{}) end
+  end
+
+  # One source whose only sink is NATS, with the auth block spliced in beside
+  # the sink's own keys (an empty string for "no auth block at all"). The
+  # interpolation sits at the same static indentation as `servers:` so the
+  # heredoc's dedent leaves it under `sinks`, not at the root.
+  defp nats_sink(auth) do
+    """
+    sources:
+      a:
+        verify: {type: none}
+        sinks:
+          - type: nats
+            servers: ["n1:4222"]
+            subject: ankusa.a
+            #{auth}
     """
   end
 
