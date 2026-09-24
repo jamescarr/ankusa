@@ -67,8 +67,12 @@ flowchart LR
 ```
 
 - `worker/` — a minimal TypeScript consumer with **no S3 credentials at
-  all**: SQS only, redeeming tickets over HTTP. It moves permanent failures
-  to the DLQ explicitly and backs off transient ones.
+  all**: SQS only, redeeming tickets over HTTP through a client generated
+  from [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+  (`npm run generate:types`) — see
+  ["Redeeming a claim from any language"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeeming-a-claim-from-any-language).
+  It moves permanent failures to the DLQ explicitly and backs off
+  transient ones.
 
 ### Supporting services
 

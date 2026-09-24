@@ -12,6 +12,15 @@ shipped user of this — see
 general-purpose gateway, usable anywhere a payload is too big to carry
 inline.
 
+**Not embedding Ankusa as an Elixir library?** The sections through "The
+`:claim_check` role" below cover the two Elixir-only adapters
+(`Direct`/`Remote`) and are only useful if you're calling this from inside
+a BEAM node. Everything else — a queue worker, a Lambda, a service in any
+other language — wants
+["Redeeming a claim from any language"](#redeeming-a-claim-from-any-language):
+the HTTP API is the actual cross-language contract, and it's what both
+worked TypeScript examples use.
+
 ## The contract
 
 ```elixir
@@ -178,8 +187,79 @@ retried check-in is idempotent under plain HTTP semantics. There is no
 The server-side `GET` handler is pure byte transport — it has no
 ground-truth ticket for an inbound request (the URL carries only
 `tenant_id`/`id`, never `size`/`sha256`), so it never runs an integrity
-check itself. Integrity is verified end-to-end by the actual redeemer, in
-`Ankusa.ClaimCheck.redeem/3`, against the real ticket it holds.
+check itself. Integrity is verified end-to-end by the actual redeemer
+against the real ticket it holds — `Ankusa.ClaimCheck.redeem/3` for an
+in-process BEAM caller, or the client-side `size`/`sha256` check below for
+an HTTP caller. Never trust the gateway's bytes without it.
+
+### Redeeming a claim from any language
+
+The [OpenAPI document](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+is the cross-language contract — "the Elixir code conforms to it, not the
+reverse" (its own words). A running node also serves its own copy at
+`GET /v1/openapi.yaml`, so a client can pin against exactly the version
+it's talking to. Anything that speaks HTTP can redeem a claim; you don't
+need Elixir, a cloud SDK, or blob-store credentials.
+
+**curl**, for a quick check:
+
+```sh
+curl -H 'authorization: Bearer <token>' \
+  http://claim-check.internal:4001/v1/claims/acme/0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10 \
+  -o payload.bin
+```
+
+**TypeScript, with a client generated from the spec.** Hand-writing a
+`fetch` call and a duplicate `Ticket` type per consumer is exactly the kind
+of drift the OpenAPI document exists to prevent — generate both instead:
+
+```sh
+npx openapi-typescript priv/openapi/claim_check.v1.yaml -o src/claim-check-schema.d.ts
+npm install openapi-fetch
+```
+
+```typescript
+import createClient from "openapi-fetch";
+import { createHash } from "node:crypto";
+import type { components, paths } from "./claim-check-schema.d.ts";
+
+const claimCheck = createClient<paths>({
+  baseUrl: process.env.CLAIM_CHECK_URL ?? "http://localhost:4001",
+  headers: { authorization: `Bearer ${process.env.CLAIM_CHECK_TOKEN}` },
+});
+
+// `Ticket` here is generated straight from components.schemas.Ticket —
+// the same type the gateway itself validates against, never hand-typed.
+async function redeemClaim(claim: components["schemas"]["Ticket"]): Promise<Buffer> {
+  const { data, error, response } = await claimCheck.GET("/v1/claims/{tenant_id}/{id}", {
+    params: { path: { tenant_id: claim.tenant_id, id: claim.id } },
+    parseAs: "arrayBuffer",
+  });
+  if (error) throw new Error(`redeem failed (${response.status}): ${JSON.stringify(error)}`);
+
+  const body = Buffer.from(data as ArrayBuffer);
+  // Same discipline as Ankusa.ClaimCheck.redeem/3: the gateway is pure byte
+  // transport, so the redeemer verifies size/sha256 against the ticket, not
+  // the other way around.
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  if (body.length !== claim.size || sha256 !== claim.sha256) {
+    throw new Error(`integrity mismatch for ${claim.tenant_id}/${claim.id}`);
+  }
+  return body;
+}
+```
+
+Both worked deployments in
+[`examples/`](https://github.com/jamescarr/ankusa/tree/main/examples/) use
+exactly this — a TypeScript worker with a `generate:types` script over the
+committed spec, redeeming the `claim` ticket carried in the queue message
+(see [`delivery.md`](delivery.md#sinkrabbitmq--queue-delivery)):
+[`rabbitmq-consumer/worker`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/worker)
+and
+[`kafka-sqs-consumer/worker`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/worker).
+Any other OpenAPI-3.1-compatible generator (`openapi-generator`,
+`openapi-python-client`, ...) works the same way against the same
+document — the spec is the contract, not the Elixir implementation.
 
 ### Authentication and tenant authorization
 

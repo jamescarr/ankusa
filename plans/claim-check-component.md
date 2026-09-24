@@ -770,8 +770,14 @@ This follows `docs/testing.md`: real infrastructure, no mocks.
 - [ ] **AsyncAPI document for the RabbitMQ message**, `$ref`-ing the
   OpenAPI `Ticket` schema. Redocly lints AsyncAPI too. Trigger: a second
   channel adapter (not RabbitMQ) starts emitting tickets.
-- [ ] **Generated clients from the spec** (for example, TS types for the
-  worker). Trigger: more than one non-Elixir consumer.
+- [x] **Generated clients from the spec** (for example, TS types for the
+  worker). Trigger: more than one non-Elixir consumer — fired once both
+  `rabbitmq-consumer` and `kafka-sqs-consumer` shipped TypeScript workers.
+  Both now generate `paths`/`components` from
+  `priv/openapi/claim_check.v1.yaml` via `openapi-typescript`
+  (`npm run generate:types`, output committed) and redeem through
+  `openapi-fetch` instead of a hand-typed `Ticket` and raw `fetch`. See
+  "Redeeming a claim from any language" in `docs/claim-check.md`.
 - [ ] **OpenApiSpex adoption.** Trigger: it supports 3.1+ *and* the API
   grows past trivially hand-validated inputs.
 - [ ] **Presigned-URL redemption** for S3/GCS (`GET` → `302` to a

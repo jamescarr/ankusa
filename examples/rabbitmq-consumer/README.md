@@ -34,7 +34,10 @@ flowchart LR
   all**. It declares and binds its own queue (`ankusa.#` against the
   exchange) — the ingest framework never touches a queue, only the
   exchange — and redeems fat-payload tickets through `claim-check`'s HTTP
-  API instead of talking to the object store directly.
+  API, using a client generated straight from
+  [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+  (`npm run generate:types`) instead of a hand-maintained ticket type —
+  see ["Redeeming a claim from any language"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeeming-a-claim-from-any-language).
 - `floci` — local S3-compatible emulator (see the root README's "Object
   store adapters" section); stands in for real S3/R2/MinIO.
 

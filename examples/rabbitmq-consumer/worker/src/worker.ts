@@ -6,9 +6,17 @@
 // whole point of putting a Claim Check gateway in front of the object
 // store. Prints everything out; not production processing logic — swap the
 // body of `handleHook` for that.
+//
+// The claim-check client is generated from the framework's own OpenAPI
+// contract (`priv/openapi/claim_check.v1.yaml`, `npm run generate:types` ->
+// `src/claim-check-schema.d.ts`) instead of a hand-maintained ticket type
+// and URL-building — see "Redeeming a claim from any language" in
+// docs/claim-check.md.
 
 import amqp from "amqplib";
 import { createHash } from "node:crypto";
+import createClient from "openapi-fetch";
+import type { components, paths } from "./claim-check-schema.d.ts";
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://guest:guest@localhost:5672";
 const EXCHANGE = process.env.RABBITMQ_EXCHANGE ?? "ankusa.events";
@@ -18,14 +26,14 @@ const QUEUE_NAME = process.env.QUEUE_NAME ?? "ankusa-example-worker";
 const CLAIM_CHECK_URL = process.env.CLAIM_CHECK_URL ?? "http://localhost:4001";
 const CLAIM_CHECK_TOKEN = process.env.CLAIM_CHECK_TOKEN ?? "dev-claim-check-token";
 
-type Claim = {
-  v: 1;
-  tenant_id: string;
-  id: string;
-  size: number;
-  sha256: string;
-  content_type: string | null;
-};
+const claimCheck = createClient<paths>({
+  baseUrl: CLAIM_CHECK_URL,
+  headers: { authorization: `Bearer ${CLAIM_CHECK_TOKEN}` },
+});
+
+// The ticket schema, straight from the spec's `components.schemas.Ticket` —
+// no separately hand-typed duplicate to drift from the gateway.
+type Claim = components["schemas"]["Ticket"];
 
 type HookMessage = {
   id: string;
@@ -44,26 +52,32 @@ type HookMessage = {
 class PermanentRedeemError extends Error {}
 
 async function redeemClaim(claim: Claim): Promise<Buffer> {
-  const url = `${CLAIM_CHECK_URL}/v1/claims/${encodeURIComponent(claim.tenant_id)}/${claim.id}`;
-
-  let res: Response;
+  let data: ArrayBuffer | undefined;
+  let status: number;
+  let errorBody: unknown;
   try {
-    res = await fetch(url, { headers: { authorization: `Bearer ${CLAIM_CHECK_TOKEN}` } });
+    const result = await claimCheck.GET("/v1/claims/{tenant_id}/{id}", {
+      params: { path: { tenant_id: claim.tenant_id, id: claim.id } },
+      parseAs: "arrayBuffer",
+    });
+    data = result.data as ArrayBuffer | undefined;
+    status = result.response.status;
+    errorBody = result.error;
   } catch (err) {
     throw new Error(`claim-check gateway unreachable: ${(err as Error).message}`);
   }
 
-  if (res.status === 404) {
+  if (status === 404) {
     throw new PermanentRedeemError(`claim not found: ${claim.tenant_id}/${claim.id}`);
   }
-  if (res.status >= 400 && res.status < 500) {
-    throw new PermanentRedeemError(`claim-check rejected redeem (${res.status}): ${await res.text()}`);
+  if (status >= 400 && status < 500) {
+    throw new PermanentRedeemError(`claim-check rejected redeem (${status}): ${JSON.stringify(errorBody)}`);
   }
-  if (!res.ok) {
-    throw new Error(`claim-check gateway error: ${res.status}`);
+  if (data === undefined) {
+    throw new Error(`claim-check gateway error: ${status}`);
   }
 
-  const body = Buffer.from(await res.arrayBuffer());
+  const body = Buffer.from(data);
 
   // Integrity is verified here, end to end, by the actual redeemer — never
   // trusted from the gateway. Same discipline `Ankusa.ClaimCheck.redeem/3`
