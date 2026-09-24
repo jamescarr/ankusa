@@ -141,3 +141,53 @@ release, many roles, config decides what boots. See
    [`configuration.md`](configuration.md), and a section in
    [`storage.md`](storage.md) or [`delivery.md`](delivery.md) depending on
    which behaviour it implements.
+
+## Building an app against the path deps
+
+Because `ankusa_postgres`/`ankusa_rabbitmq` are path-dependencies during local
+development, a Dockerfile building an app that depends on them needs a
+build **context** wide enough to see the whole slice, with the relative
+paths preserved so the same `mix.exs` files resolve identically inside the
+container as they do on disk:
+
+```dockerfile
+# examples/rabbitmq-consumer/ingest_app/Dockerfile
+WORKDIR /repo
+COPY mix.exs mix.lock ./          # ankusa core
+COPY lib ./lib
+COPY config ./config
+COPY ankusa_rabbitmq ./ankusa_rabbitmq
+COPY examples/rabbitmq-consumer/ingest_app ./examples/rabbitmq-consumer/ingest_app
+WORKDIR /repo/examples/rabbitmq-consumer/ingest_app
+RUN mix deps.get && mix compile
+```
+
+```yaml
+# docker-compose.yml
+services:
+  ingest:
+    build:
+      context: ../..                                            # repo root
+      dockerfile: examples/rabbitmq-consumer/ingest_app/Dockerfile
+```
+
+**Depending on `ankusa` directly *and* transitively through an adapter
+package needs `override: true`.** `ankusa_postgres`/`ankusa_rabbitmq`'s own
+`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.1`) whenever Mix
+evaluates it as a nested dependency — Mix builds dependencies under `:prod`
+by default regardless of *your* project's `Mix.env()`, so the adapter
+package's dev/test-only path-dep branch never gets hit there. A wrapper app
+like `ingest_app` that depends on both `ankusa` (path) and
+`ankusa_rabbitmq` (path, which transitively wants `ankusa` from Hex) hits a
+real conflict — `mix deps.get` refuses with "the dependency ankusa in
+mix.exs is overriding a child dependency." Fix: mark your direct entry
+`override: true` so Mix uses it everywhere in the tree:
+
+```elixir
+defp deps do
+  [
+    {:ankusa, path: "../../..", override: true},
+    {:ankusa_rabbitmq, path: "../../../ankusa_rabbitmq"}
+  ]
+end
+```

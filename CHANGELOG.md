@@ -7,7 +7,7 @@ follows [Semantic Versioning](https://semver.org/).
 Release process: bump `version` in the package's `mix.exs` and move the
 relevant `[Unreleased]` entries under a new dated heading in the same PR, in
 accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
-[`docs/deployment.md`](docs/deployment.md#releasing) for the mechanics.
+[`docs/releasing.md`](docs/releasing.md) for the mechanics.
 
 ## [Unreleased]
 

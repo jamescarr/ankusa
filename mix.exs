@@ -47,24 +47,40 @@ defmodule Ankusa.MixProject do
 
   defp docs do
     [
-      main: "readme",
+      main: "elixir",
       source_ref: "ankusa-v#{@version}",
       extras: [
+        "docs/elixir.md",
         "README.md",
         "docs/quickstart.md",
-        "docs/architecture.md",
         "docs/configuration.md",
-        "docs/multi-tenancy.md",
+        "docs/deployment.md",
+        "docs/architecture.md",
+        "docs/delivery.md",
         "docs/integrations.md",
         "docs/storage.md",
-        "docs/delivery.md",
         "docs/claim-check.md",
-        "docs/deployment.md",
+        "docs/multi-tenancy.md",
         "docs/packaging.md",
         "docs/testing.md",
+        "docs/releasing.md",
         "CHANGELOG.md"
       ],
-      groups_for_extras: [Guides: ~r{^docs/}],
+      groups_for_extras: [
+        Guides: [
+          "docs/elixir.md",
+          "docs/quickstart.md",
+          "docs/configuration.md",
+          "docs/deployment.md",
+          "docs/architecture.md",
+          "docs/delivery.md",
+          "docs/integrations.md",
+          "docs/storage.md",
+          "docs/claim-check.md",
+          "docs/multi-tenancy.md"
+        ],
+        Contributing: ["docs/packaging.md", "docs/testing.md", "docs/releasing.md"]
+      ],
       groups_for_modules: [
         "Internals (no stability guarantee)": [
           Ankusa.Edge.Router,

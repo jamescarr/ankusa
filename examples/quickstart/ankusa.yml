@@ -1,0 +1,27 @@
+# The quickstart config: one open `demo` source delivering to the worker.
+# Every key, at its default: https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml
+
+node:
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+  port: 4002
+
+# Short on purpose, so the dead-letter drill takes seconds, not minutes:
+# 6 attempts over roughly 8-15s. The default is 12 attempts, backing off to 30s.
+dispatch:
+  retry:
+    base_ms: 1000
+    max_ms: 4000
+    max_attempts: 6
+
+sources:
+  demo:
+    # Accepts anything, so it works before you have provider credentials.
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks:
+      - type: http
+        url: http://worker:8080/hooks
+        timeout_ms: 5000

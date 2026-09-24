@@ -1,4 +1,4 @@
-# Example: ingest fleet → Kafka → SQS FIFO → claim-check gateway → worker
+# Example: Kafka → SQS FIFO → worker
 
 A complete deployed topology over Kafka, including the hop the RabbitMQ
 example doesn't need: a **Messaging Bridge**, for when the consumer doesn't
@@ -10,20 +10,22 @@ credentials of its own.
 
 ```mermaid
 flowchart LR
-    P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
-    I -->|WAL fsync, then ack| P
-    I -->|"produce, acks=all\nkey tenant/source"| K[("Redpanda\ntopic ankusa.events")]
-    I -.fat body: Direct check-in.-> S[(S3 / floci)]
-    K -->|"consumer group\nankusa-sqs-bridge"| B[Redpanda Connect bridge]
-    B -->|"SendMessageBatch\nGroupId = key, DedupId = id"| Q[("SQS FIFO\nankusa-worker.fifo")]
-    Q --> W[TypeScript worker\nno S3 credentials]
-    W -->|permanent failure| D[("ankusa-worker-dlq.fifo")]
-    Q -.maxReceiveCount 5.-> D
-    W -->|GET /v1/claims/... Bearer token| CC[claim-check\n:claim_check role]
-    CC -.Direct.-> S
+    P[Provider] --> I[Ankusa ingest]
+    I --> K[(Kafka topic)]
+    K --> B[Bridge]
+    B --> Q[(SQS FIFO)]
+    Q --> W[Worker]
 ```
 
-**What each piece is doing:**
+### Ingest
+
+```mermaid
+flowchart LR
+    P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest]
+    I -->|WAL fsync, then 201| P
+    I -->|"produce, acks=all\nkey tenant/source"| K[("topic ankusa.events")]
+    I -.->|"body > 8 KiB: check in"| S[(S3 / floci)]
+```
 
 - `ingest/` — a real `Ankusa.Instance` (`ANKUSA_ROLES=edge,dispatch,storage`,
   the default) configured entirely from environment variables.
@@ -36,14 +38,40 @@ flowchart LR
 - `claim-check` — the **same image**, `ANKUSA_ROLES=claim_check` is the only
   difference. Its own listener (`:4001`), its own bearer token. Besides
   `ingest`, it's the only piece holding S3 credentials.
+
+### Bridge
+
+```mermaid
+flowchart LR
+    K[("topic ankusa.events")] -->|consumer group ankusa-sqs-bridge| B[Redpanda Connect]
+    B -->|"SendMessageBatch\nGroupId = key, DedupId = id"| Q[("ankusa-worker.fifo")]
+    Q -.->|maxReceiveCount 5| D[("ankusa-worker-dlq.fifo")]
+```
+
 - `bridge/` — Redpanda Connect: `redpanda` input → metadata whitelist →
   `aws_sqs` output. It owns the consumer group (`ankusa-sqs-bridge`) and the
   queue URL; ingest knows neither exists. A Kafka topic has no bindings —
   the consumer side owns a consumer *group* instead, which is why this hop
   is a process and not a config line.
+
+### Worker
+
+```mermaid
+flowchart LR
+    Q[("ankusa-worker.fifo")] --> W[TypeScript worker]
+    W -->|inline body| H[handleHook]
+    W -->|"ticket: GET /v1/claims/... Bearer"| CC[claim-check :4001]
+    CC -.-> S[(S3 / floci)]
+    CC -->|"bytes; worker checks size + sha256"| H
+    W -->|permanent failure| D[("ankusa-worker-dlq.fifo")]
+```
+
 - `worker/` — a minimal TypeScript consumer with **no S3 credentials at
   all**: SQS only, redeeming tickets over HTTP. It moves permanent failures
   to the DLQ explicitly and backs off transient ones.
+
+### Supporting services
+
 - `redpanda` / `redpanda-console` — the broker and a UI on `:8080` showing
   the topic, messages, and consumer-group lag (the RabbitMQ example's
   management-UI equivalent).

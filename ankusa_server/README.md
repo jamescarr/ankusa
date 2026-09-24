@@ -21,7 +21,10 @@ duplicate or genuinely never arrived.
 docker run -d --name ankusa \
   -p 4000:4000 -p 127.0.0.1:4002:4002 \
   -v ankusa-data:/var/lib/ankusa \
-  jamescarr/ankusa
+  jamescarr/ankusa:edge
+
+# the image ships a healthcheck: wait for it rather than racing the listener
+until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy ]; do sleep 1; done
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
@@ -47,7 +50,7 @@ docker run -d --name ankusa \
   -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -v ankusa-data:/var/lib/ankusa \
   -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
-  jamescarr/ankusa
+  jamescarr/ankusa:edge
 ```
 
 ```yaml
@@ -82,11 +85,11 @@ Starting points, all loadable as-is:
 
 ```sh
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
-  -e STRIPE_WHSEC jamescarr/ankusa check-config
+  -e STRIPE_WHSEC jamescarr/ankusa:edge check-config
 # => config OK: roles=[:edge, :dispatch, :storage] sources=stripe wal=Ankusa.WAL.DiskLog storage=Ankusa.BlobStore.LocalFS
 
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
-  -e STRIPE_WHSEC jamescarr/ankusa print-config
+  -e STRIPE_WHSEC jamescarr/ankusa:edge print-config
 # => the effective config as JSON, with every secret redacted
 ```
 
@@ -115,6 +118,31 @@ reconfigured without a new file. Env wins over the file.
 
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are read by the S3 adapter
 directly when the config does not name static keys.
+
+## Deliver to your worker
+
+An HTTP sink forwards every hook to your own service, raw body and all:
+
+```yaml
+sources:
+  demo:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks:
+      - type: http
+        url: http://worker:8080/hooks
+        timeout_ms: 5000
+```
+
+- The raw body verbatim, with the provider's `content-type`.
+- `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-seq`, and `x-ankusa-tenant` when set.
+- `2xx` means delivered. Anything else, a timeout, or a redirect is retried, then dead-lettered.
+- Dedupe on `x-ankusa-id`: delivery is at-least-once.
+
+A runnable version — the image plus a Python worker, one `docker compose up` — is
+[`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/);
+the walkthrough with outages, dead letters, and replay is
+[`docs/quickstart.md`](https://github.com/jamescarr/ankusa/blob/main/docs/quickstart.md).
 
 ## Ports
 
@@ -214,11 +242,13 @@ curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entri
 
 The image is the framework; the documentation covers what it does and how it
 scales — [quickstart](https://github.com/jamescarr/ankusa/blob/main/docs/quickstart.md),
+[configuration](https://github.com/jamescarr/ankusa/blob/main/docs/configuration.md),
 [architecture](https://github.com/jamescarr/ankusa/blob/main/docs/architecture.md),
 [deployment](https://github.com/jamescarr/ankusa/blob/main/docs/deployment.md),
 [storage](https://github.com/jamescarr/ankusa/blob/main/docs/storage.md),
 [delivery](https://github.com/jamescarr/ankusa/blob/main/docs/delivery.md),
 [multi-tenancy](https://github.com/jamescarr/ankusa/blob/main/docs/multi-tenancy.md),
-[claim check](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md).
+[claim check](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md),
+[examples](https://github.com/jamescarr/ankusa/blob/main/examples/README.md).
 
 Apache 2.0. See [LICENSE](https://github.com/jamescarr/ankusa/blob/main/LICENSE).

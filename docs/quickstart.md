@@ -1,97 +1,172 @@
 # Quickstart
 
-Requires Elixir 1.20+ / OTP 29 (`elixir --version`).
+Run Ankusa and a worker you own, send webhooks, then break the worker and watch
+nothing get lost. All you need is Docker with Compose v2.
 
-## 1. Install deps and start the server
-
-```sh
-mix deps.get
-iex -S mix               # or: mix run --no-halt
-```
-
-You'll see the durability banner and the listener come up:
-
-```
-[ankusa] starting instance default roles=[:edge, :dispatch, :storage] port=4000 data_dir=./data
-[ankusa] DiskLog WAL at ./data/default/wal/ankusa.wal: recovered 0 record(s), next_seq=1. Durable to power loss on THIS host only.
-Running Ankusa.Edge.Router with Bandit 1.12.5 at 0.0.0.0:4000 (http)
-```
-
-A zero-config `demo` source is preconfigured (accepts anything, logs it).
-Override the port with `PORT=4055 iex -S mix` or `config :ankusa, port: <n>`.
-
-## 2. Ingest a webhook
-
-From another terminal:
+## 1. Start Ankusa and a worker
 
 ```sh
-curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' \
-  -d '{"id":"evt_1","event":"push"}'
+git clone https://github.com/jamescarr/ankusa
+cd ankusa/examples/quickstart
+docker compose up -d --wait
+```
+
+```mermaid
+flowchart LR
+    P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
+    A -->|written to disk, then 201| P
+    A -->|POST /hooks + x-ankusa-id| W[worker.py]
+    O[You] -->|/health /metrics /v1/dlq :4002| A
+```
+
+[`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml)
+declares one source (`demo`) with one HTTP sink pointed at the worker;
+[`worker.py`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
+is a standard-library HTTP server that prints what it receives.
+
+## 2. Send a webhook
+
+```sh
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 # => {"id":"01a0...","status":"accepted","seq":1}
+
+sleep 1 && docker compose logs worker
+# received id=01a0... source=demo seq=1 bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-The `201` returns only *after* the payload is `fsync`'d to the WAL — that's
-the [core invariant](architecture.md#the-core-invariant), not a formality.
-The dispatch pipeline then delivers it, visible in the server log:
+The `201` returns only after the hook is on disk — that is
+[the core invariant](architecture.md#the-core-invariant), not a formality.
 
-```
-[info] hook delivered id=01a0... source=demo attempt=1
-```
+## 3. Provider retries are absorbed
 
-## 3. Idempotency
-
-Replay the same event id — it's absorbed but still gets a `2xx`:
+Providers retry. Send the identical request again:
 
 ```sh
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 # => {"id":"01a0...","status":"duplicate","seq":1}
 ```
 
-## 4. Inspect state
+The worker log gains nothing, because Ankusa deduped on the body's `id` before
+delivery. The provider still gets a `2xx`, so it stops retrying.
+
+## 4. When your worker goes down
+
+### Short outage — retried until it comes back
 
 ```sh
-curl localhost:4000/health
-# => {"status":"ok","instance":"default","wal":{"records":..,"cursors":{"dispatch":..}}}
-
-curl localhost:4000/stats
+docker compose stop worker
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_2"}'
+docker compose start worker
+sleep 10 && docker compose logs worker | grep evt_2
 ```
 
-Durable state on disk (the WAL is truncated as the compactor rolls
-segments):
+The provider still got its `201`: Ankusa holds the hook and retries delivery
+until the worker answers or the retry budget runs out.
+
+### Long outage — dead-lettered, then replayed
 
 ```sh
-find data/default -type f
-# data/default/wal/ankusa.wal        data/default/segments/index.log
-# data/default/segments/seg/00000000000000000001-...seg
+docker compose stop worker
+curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_3"}'
+sleep 20
+curl -s localhost:4002/v1/dlq
+# => {"total":1,"entries":[{"id":"01a0...","source_id":"demo",...}]}
+docker compose start worker
+sleep 1
+curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"demo"}'
+# => {"replayed":1}
+sleep 1 && docker compose logs worker | grep evt_3
 ```
 
-State lives under `./data/<instance>/` (`wal/`, `segments/`, `quarantine/`,
-`dlq/`).
+`ankusa.yml` caps retries at 6 attempts (roughly 8–15s, jitter included) so this
+drill takes seconds; the default is 12 attempts backing off to 30s.
 
-## 5. Point a real provider at it
+### Replay is safe
 
-Expose the port with any tunnel, then set the provider's webhook URL to
-`<tunnel>/webhooks/<source_id>` and configure that source (see
-[`configuration.md`](configuration.md#configuring-a-source)). Verification
-runs inline, before the ack.
+Run the replay call again:
 
 ```sh
-ngrok http 4000     # or cloudflared / tailscale funnel / etc.
+curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"demo"}'
+# => {"replayed":1}
+sleep 1 && docker compose logs worker | grep 'duplicate id='
+# duplicate id=01a0... source=demo (already handled)
 ```
 
-## Endpoints
+Entries stay in the dead-letter queue after a replay, so replaying twice is
+normal. Redelivery is harmless because the worker dedupes on `x-ankusa-id` —
+here with an in-memory set, which a real worker replaces with a unique key in
+its database.
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
-| `GET` | `/health` | Liveness + WAL stats. |
-| `GET` | `/stats` | WAL stats. |
+## 5. Look inside
+
+```sh
+curl localhost:4002/health
+# => {"status":"ok","instance":"default","roles":["dispatch","edge","storage"]}
+curl -s localhost:4002/metrics | grep ankusa_ingest_requests_total
+curl localhost:4002/v1/config      # the effective config, secrets redacted
+curl localhost:4002/v1/quarantine  # hooks held after a failed verification
+```
+
+Port 4002 is unauthenticated, so never publish it — the compose file binds it to
+`127.0.0.1` only.
+
+## 6. Point a real provider at it
+
+Add the provider as a second source under `sources:` in `ankusa.yml`:
+
+```yaml
+  stripe:
+    verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
+    dedup: {type: stripe}
+    on_verify_failure: quarantine
+    sinks:
+      - {type: http, url: "http://worker:8080/hooks"}
+```
+
+Pass the secret in as an environment variable by adding `environment:
+[STRIPE_WHSEC]` to the `ankusa` service, then check the file before starting:
+
+```sh
+STRIPE_WHSEC=whsec_... docker compose run --rm ankusa check-config
+# config OK: roles=[:edge, :dispatch, :storage] sources=demo,stripe ...
+STRIPE_WHSEC=whsec_... docker compose up -d
+```
+
+A bad file exits `78` and names the field. Expose ingest with a tunnel, then set
+the provider's endpoint to `<tunnel>/webhooks/stripe`:
+
+```sh
+ngrok http 4000     # or cloudflared / tailscale funnel
+```
+
+GitHub and Standard Webhooks sources are the same shape with a different
+`verify.type`: [`configuration.md`](configuration.md#sources).
+
+## Ingest responses
+
+- `201` — accepted, durably stored
+- `200` — duplicate, already stored
+- `202` — quarantined after a failed verification
+- `400` — body unreadable
+- `401` — verification failed
+- `404` — unknown source
+- `413` — body over `max_body_bytes`
+- `503` — overloaded; retry later
+
+The catch URL is `/webhooks/:source_id` by default; a tenant-in-the-URL scheme
+is one config line away — see [`multi-tenancy.md`](multi-tenancy.md).
+
+## Clean up
+
+```sh
+docker compose down -v
+```
 
 ## Where next
 
-- Configure a real provider (Stripe, GitHub, Standard Webhooks): [`configuration.md`](configuration.md).
-- Multi-tenant catch URLs: [`multi-tenancy.md`](multi-tenancy.md).
-- Object storage / shared Postgres WAL for a fleet: [`storage.md`](storage.md).
-- Forward to HTTP or publish to RabbitMQ: [`delivery.md`](delivery.md).
-- See a full deployed example (Docker + RabbitMQ + S3 + a TypeScript
-  consumer): [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/).
+- Every YAML key: [`configuration.md`](configuration.md)
+- Roles, fleets, the container: [`deployment.md`](deployment.md)
+- Sinks, retries, the dead-letter queue, quarantine: [`delivery.md`](delivery.md)
+- Oban, Celery, and queue handoff: [`integrations.md`](integrations.md)
+- All the examples: [examples/README.md](https://github.com/jamescarr/ankusa/blob/main/examples/README.md)
+- Embedding in an Elixir app instead: [`elixir.md`](elixir.md)
