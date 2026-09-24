@@ -75,7 +75,7 @@ Starting points, all loadable as-is:
 | [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
 | [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
 | [`config-examples/fleet-postgres-s3.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/fleet-postgres-s3.yml) | edge replicas on a shared Postgres WAL, segments in S3 |
-| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml) | queue fan-out, with the claim-check gateway |
+| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
 | [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
 
 ### Check it before you run it
@@ -83,7 +83,7 @@ Starting points, all loadable as-is:
 ```sh
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -e STRIPE_WHSEC ankusa/ankusa check-config
-# => config OK: roles=[:edge, :dispatch, :storage] sources=demo wal=Ankusa.WAL.DiskLog storage=Ankusa.BlobStore.LocalFS
+# => config OK: roles=[:edge, :dispatch, :storage] sources=stripe wal=Ankusa.WAL.DiskLog storage=Ankusa.BlobStore.LocalFS
 
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -e STRIPE_WHSEC ankusa/ankusa print-config
@@ -132,8 +132,9 @@ Operating Ankusa without a shell:
 
 ```sh
 curl localhost:4002/v1/config                 # the effective config, secrets redacted
-curl localhost:4002/v1/dlq?limit=10           # dead-lettered hooks (metadata only)
-curl -XPOST localhost:4002/v1/dlq/replay -d '{"id":"evt_123"}'
+curl 'localhost:4002/v1/dlq?limit=10'         # dead-lettered hooks (metadata only)
+curl -XPOST localhost:4002/v1/dlq/replay -d '{"id":"<id from GET /v1/dlq>"}'
+curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"stripe"}'
 curl localhost:4002/v1/quarantine             # hooks held after a failed verification
 curl localhost:4002/metrics                   # Prometheus
 ```
@@ -202,7 +203,8 @@ curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entri
 | Tag | Means |
 | --- | --- |
 | `X.Y.Z` | an exact release (`ankusa_server-vX.Y.Z` in the repo) |
-| `X.Y`, `X` | the newest release in that line |
+| `X.Y` | the newest release in that minor line |
+| `X` | the newest release in that major line (from 1.0 on) |
 | `latest` | the newest release |
 | `edge` | the tip of `main`; not a release, may be broken |
 

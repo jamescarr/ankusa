@@ -110,11 +110,9 @@ paths:
         - name: limit
           in: query
           required: false
-          description: Maximum entries returned. Capped at 1000.
+          description: Maximum entries returned. Values outside 0..1000 are clamped to that range.
           schema:
             type: integer
-            minimum: 0
-            maximum: 1000
             default: 100
       responses:
         '200':
@@ -170,11 +168,9 @@ paths:
         - name: limit
           in: query
           required: false
-          description: Maximum entries returned. Capped at 1000.
+          description: Maximum entries returned. Values outside 0..1000 are clamped to that range.
           schema:
             type: integer
-            minimum: 0
-            maximum: 1000
             default: 100
       responses:
         '200':
@@ -275,7 +271,6 @@ components:
             $ref: '#/components/schemas/QuarantineEntry'
     ReplayFilter:
       type: object
-      additionalProperties: false
       properties:
         source_id:
           type: string
@@ -311,7 +306,7 @@ components:
           description: Present on `role_not_enabled`; the role this node does not run.
   responses:
     InvalidFilter:
-      description: '`400`. `invalid_filter`: a non-integer `since`/`limit`, or a replay body that is not a JSON object.'
+      description: '`400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter, or `body`.'
       content:
         application/json:
           schema:

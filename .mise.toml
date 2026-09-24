@@ -319,9 +319,7 @@ local_sha=$(git rev-parse HEAD)
 remote_sha=$(git rev-parse origin/main)
 [ "$local_sha" = "$remote_sha" ] || fail "HEAD ($local_sha) != origin/main ($remote_sha); merge and push first"
 
-gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
-
-printf '  clean tree, HEAD == origin/main, HEX_API_KEY present\n'
+printf '  clean tree, HEAD == origin/main\n'
 '''
 
 [tasks."release:preflight-core"]
@@ -333,6 +331,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
 
 VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
 [ -n "$VERSION" ] || fail "could not read @version from mix.exs"
@@ -358,6 +358,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
 
 # Core must be on Hex first: the adapters' :prod deps resolve
 # {:ankusa, "~> 0.1"} from Hex, not the path dep, so an early tag dies at
@@ -468,8 +470,8 @@ done
 #
 # A separate tag (`ankusa_server-vX.Y.Z`) and a separate lifecycle from the Hex
 # packages: the image is built from this checkout, so it does not wait on core
-# being published to Hex — but it does ride the same clean-tree/HEAD==origin/main
-# guard, because a tag is a promise about a commit.
+# being published to Hex and needs no HEX_API_KEY — but it does ride the same
+# clean-tree/HEAD==origin/main guard, because a tag is a promise about a commit.
 
 [tasks."release:preflight-server"]
 description = "Checks before tagging the server image (needs DOCKERHUB_* secrets)"
@@ -548,5 +550,10 @@ for tag in "$VERSION" latest; do
 done
 
 # Both architectures, or the tag is not really usable.
-docker buildx imagetools inspect "ankusa/ankusa:$VERSION" | grep -E 'Platform|Manifest'
+manifest=$(docker buildx imagetools inspect "ankusa/ankusa:$VERSION")
+grep -E 'Platform|Manifest' <<<"$manifest"
+for platform in linux/amd64 linux/arm64; do
+  grep -qE "Platform:[[:space:]]+$platform(/v[0-9]+)?\$" <<<"$manifest" || \
+    { echo "  ^ $platform missing from ankusa/ankusa:$VERSION" >&2; exit 1; }
+done
 '''

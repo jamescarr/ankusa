@@ -1,6 +1,9 @@
 # A reference fleet, and the reference answer to "where does authentication go?"
 #
-#   docker compose -f ankusa_server/compose/docker-compose.fleet.yml up -d --build
+#   docker compose -f ankusa_server/compose/docker-compose.fleet.yml up -d --wait
+#
+# The image is the published one; to run a local build, set
+# ANKUSA_IMAGE=ankusa/ankusa:dev (built by `mise run docker:build`).
 #
 #   topology : two `edge` replicas in front, one `dispatch,storage` worker
 #              behind, one Postgres WAL shared by all of them
@@ -23,8 +26,8 @@
 x-ankusa: &ankusa
   image: ${ANKUSA_IMAGE:-ankusa/ankusa:latest}
   volumes:
-    # The whole point of this file: the demo needs no bucket and no provider
-    # credentials.
+    # The fleet config: shared Postgres WAL plus the credential-free demo
+    # source.
     - ../config-examples/fleet-postgres-s3.yml:/etc/ankusa/ankusa.yml:ro
   environment: &ankusa-env
     ANKUSA_WAL_POSTGRES_URL: postgres://ankusa:ankusa@postgres:5432/ankusa

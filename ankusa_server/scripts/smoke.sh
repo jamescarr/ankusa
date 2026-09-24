@@ -18,20 +18,25 @@ ADMIN_URL=http://127.0.0.1:4002
 WORK="$(mktemp -d)"
 
 cleanup() {
-  status=$?
-  if [ "$status" -ne 0 ]; then
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     echo "--- container logs ($NAME) ---" >&2
     docker logs "$NAME" >&2 || true
   fi
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   rm -rf "$WORK"
-  exit "$status"
+  exit "$rc"
 }
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-status() { curl -s -o "$2" -w '%{http_code}' "${@:3}"; }
+# http_code OUT CURL_ARGS... — body to OUT, status code to stdout.
+http_code() {
+  local out=$1
+  shift
+  curl -s -o "$out" -w '%{http_code}' "$@"
+}
 
 # A leftover container from an interrupted run would make every check below lie.
 docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -42,7 +47,7 @@ docker run -d --name "$NAME" -p 127.0.0.1:4000:4000 -p 127.0.0.1:4002:4002 "$IMA
 echo "==> waiting for the admin API"
 ready=false
 for _ in $(seq 1 30); do
-  if [ "$(status get "$WORK/health" "$ADMIN_URL/health")" = "200" ]; then
+  if [ "$(http_code "$WORK/health" "$ADMIN_URL/health")" = "200" ]; then
     ready=true
     break
   fi
@@ -59,11 +64,11 @@ done
 echo "==> ingest: accepted once, deduped the second time"
 hook='{"id":"evt_smoke"}'
 
-code=$(status post "$WORK/first" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
+code=$(http_code "$WORK/first" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
 [ "$code" = "201" ] || fail "first POST returned $code: $(cat "$WORK/first")"
 grep -q '"status":"accepted"' "$WORK/first" || fail "first POST was not accepted: $(cat "$WORK/first")"
 
-code=$(status post "$WORK/second" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
+code=$(http_code "$WORK/second" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
 [ "$code" = "200" ] || fail "duplicate POST returned $code: $(cat "$WORK/second")"
 grep -q '"status":"duplicate"' "$WORK/second" ||
   fail "duplicate POST was not deduped: $(cat "$WORK/second")"
@@ -74,7 +79,7 @@ grep -q 'ankusa_ingest_requests_total' "$WORK/metrics" ||
   fail "/metrics has no ingest counter"
 
 echo "==> config, with no credentials at all"
-code=$(status get "$WORK/config" "$ADMIN_URL/v1/config")
+code=$(http_code "$WORK/config" "$ADMIN_URL/v1/config")
 [ "$code" = "200" ] || fail "/v1/config returned $code: $(cat "$WORK/config")"
 grep -q '"demo"' "$WORK/config" || fail "/v1/config does not mention the demo source"
 

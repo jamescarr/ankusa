@@ -10,7 +10,7 @@ never `Application.get_env/2` scattered through call sites:
 
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
-`:dispatch`, `:storage`, and `:claim_check` are maps and get **deep-merged**
+`:dispatch`, `:storage`, `:claim_check`, and `:admin` are maps and get **deep-merged**
 over the defaults — pass only the keys you want to change.
 
 ```elixir
@@ -39,7 +39,8 @@ config :ankusa,
     api_tokens: %{},
     retention_days: nil,
     sweep_interval_ms: 3_600_000
-  }
+  },
+  admin: %{enabled: false, port: 4002}
 ```
 
 | Key | Default | Meaning |
@@ -67,9 +68,21 @@ config :ankusa,
 | `claim_check.adapter` | `{Ankusa.ClaimCheck.Direct, []}` | `{module, opts}` implementing `Ankusa.ClaimCheck`. See [`claim-check.md`](claim-check.md). |
 | `claim_check.max_bytes` | `8_000_000` | Hard cap on a checked-in body. |
 | `claim_check.port` | `4001` | The `:claim_check` role's Bandit port. |
-| `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`; required (non-empty) on a `:claim_check`-role node. |
+| `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`. Optional: empty leaves the gateway open, with authentication delegated to whatever fronts the port. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
+| `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `ankusa/ankusa` image turns it on. |
+| `admin.port` | `4002` | The admin API's Bandit port. |
+
+### The admin API
+
+With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
+(Prometheus text), `GET /v1/config` (the effective config, secrets redacted),
+`GET /v1/dlq` and `POST /v1/dlq/replay` (`:dispatch` role), and
+`GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the node's
+roles. It is **unauthenticated by design**: put it behind your own proxy, SSO,
+or network policy. The HTTP contract is
+[`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/admin.v1.yaml).
 
 ## Configuring a source
 

@@ -29,9 +29,10 @@ whatever `config.exs` sets — see
 [`configuration.md#runtime-environment-overrides`](configuration.md#runtime-environment-overrides).
 
 **`:claim_check` is a fourth, opt-in role**, absent from the default
-`roles` list (`[:edge, :dispatch, :storage]`) because it opens an
-authenticated port. A node running it alone needs no WAL — only blob-store
-credentials and `claim_check.api_tokens` — and can be scaled independently
+`roles` list (`[:edge, :dispatch, :storage]`) because it opens a port that
+serves stored payloads. A node running it alone needs no WAL — only
+blob-store credentials, plus `claim_check.api_tokens` if you want bearer
+tokens rather than your own proxy in front — and can be scaled independently
 from ingest/dispatch/storage exactly like any other role. See
 [`claim-check.md`](claim-check.md) for the full contract and the worked
 `examples/rabbitmq-consumer/` deployment (an `ingest` service plus a

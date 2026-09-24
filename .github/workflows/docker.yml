@@ -8,8 +8,7 @@ name: Docker image
 #
 # Note on the filters below: path filters are not evaluated for tag pushes, so
 # `ankusa_server-v*` always builds regardless of which files the tagged commit
-# touched — which is what a release needs, and what a `paths:` filter would have
-# quietly broken.
+# touched — which is what a release needs.
 
 on:
   push:
@@ -182,7 +181,9 @@ jobs:
   merge:
     name: Merge digests into tags
     needs: [resolve, build]
-    if: ${{ needs.resolve.outputs.push == 'true' }}
+    # `ci` is skipped on non-tag runs, and a skipped ancestor fails the implied
+    # `success()` even when `build` succeeded — hence the explicit condition.
+    if: ${{ always() && needs.build.result == 'success' && needs.resolve.outputs.push == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -211,8 +212,9 @@ jobs:
             args+=("-t" "${IMAGE}:${tag}")
           done
 
-          for digest in *; do
-            args+=("${IMAGE}@sha256:${digest}")
+          # Each file holds one `sha256:...` digest written by `build`.
+          for f in *; do
+            args+=("${IMAGE}@$(cat "$f")")
           done
 
           docker buildx imagetools create "${args[@]}"

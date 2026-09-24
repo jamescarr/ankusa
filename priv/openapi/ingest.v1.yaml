@@ -109,7 +109,7 @@ paths:
       summary: Liveness probe
       description: |
         Always `200` while the listener is up. The embedded WAL stats are `{}`
-        when the WAL is not running on this node (a `:claim_check`-only node).
+        when the WAL is unreachable.
       responses:
         '200':
           description: The listener is up.
@@ -166,7 +166,9 @@ components:
           const: accepted
         id:
           type: string
-          description: The envelope id, echoed for correlation with the provider's event.
+          description: |
+            The envelope id Ankusa assigned to this hook (a UUIDv7), generated
+            on receipt. Unrelated to the provider's own event id.
         seq:
           type: integer
           minimum: 1
@@ -182,10 +184,13 @@ components:
           const: duplicate
         id:
           type: string
+          description: |
+            A fresh envelope id assigned to this request. It is not stored and
+            does not identify the original record; use `seq` for that.
         seq:
           type: integer
           minimum: 1
-          description: Sequence number of the record that owns the dedup key.
+          description: Sequence number of the stored record that owns the dedup key.
     Quarantined:
       type: object
       required: [status, reason]
@@ -229,7 +234,7 @@ components:
           type: string
         wal:
           type: object
-          description: Adapter-defined WAL stats, `{}` when no WAL runs on this node.
+          description: Adapter-defined WAL stats, `{}` when the WAL is unreachable.
     Stats:
       type: object
       required: [instance, wal]
@@ -264,7 +269,12 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     VerificationFailed:
-      description: '`401`. `verification_failed`. Permanent for this body — do not retry unchanged.'
+      description: |
+        `401`. `verification_failed`. When `reason` starts with
+        `{:quarantine_rate_limited,`, the source's policy would have quarantined
+        the hook but the quarantine rate limit was hit: transient, retry later.
+        Any other `reason` is a failed signature verification — permanent for
+        this body, do not retry unchanged.
       content:
         application/json:
           schema:
@@ -283,7 +293,7 @@ components:
             $ref: '#/components/schemas/Error'
     Overloaded:
       description: |
-        '`503`. `overload` (batcher queue full: the edge sheds load rather than
+        `503`. `overload` (batcher queue full: the edge sheds load rather than
         growing without bound) or `store_unavailable` (WAL write failed).
         Transient — retry after the `Retry-After` seconds.
       headers:
