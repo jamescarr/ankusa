@@ -3,7 +3,7 @@
 #   docker compose -f ankusa_server/compose/docker-compose.fleet.yml up -d --wait
 #
 # The image is the published one; to run a local build, set
-# ANKUSA_IMAGE=ankusa/ankusa:dev (built by `mise run docker:build`).
+# ANKUSA_IMAGE=jamescarr/ankusa:dev (built by `mise run docker:build`).
 #
 #   topology : two `edge` replicas in front, one `dispatch,storage` worker
 #              behind, one Postgres WAL shared by all of them
@@ -24,7 +24,7 @@
 #   docker run --rm httpd:2.4-alpine htpasswd -nbB admin 'your-password'
 
 x-ankusa: &ankusa
-  image: ${ANKUSA_IMAGE:-ankusa/ankusa:latest}
+  image: ${ANKUSA_IMAGE:-jamescarr/ankusa:latest}
   volumes:
     # The fleet config: shared Postgres WAL plus the credential-free demo
     # source.

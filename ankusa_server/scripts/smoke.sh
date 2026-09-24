@@ -4,7 +4,7 @@
 # first minute — the demo hook round-trips (accepted, then deduped), metrics and
 # config answer, and a broken config exits 78 instead of crash-looping.
 #
-#   ankusa_server/scripts/smoke.sh ankusa/ankusa:dev
+#   ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
 #
 # Used by both `mise run docker:smoke` and .github/workflows/docker.yml, so it
 # depends on nothing but docker, curl, and bash.

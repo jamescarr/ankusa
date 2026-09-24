@@ -1,4 +1,4 @@
-# The config baked into the ankusa/ankusa image.
+# The config baked into the jamescarr/ankusa image.
 #
 # This is a working demo, not a deployment: one `demo` source that accepts
 # anything and logs it, so the quick start works before you have provider

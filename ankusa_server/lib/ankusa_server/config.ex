@@ -22,7 +22,7 @@ defmodule AnkusaServer.Config do
 
   Every failure raises `AnkusaServer.ConfigError`, which `load_or_halt!/0` turns
   into an exit-78 (`EX_CONFIG`) instead of a crash dump, on boot and in
-  `docker run ankusa/ankusa check-config` alike — the latter prints the same
+  `docker run jamescarr/ankusa check-config` alike — the latter prints the same
   message without starting anything.
 
   ## Env overrides

@@ -6,7 +6,7 @@
 #   print-config  print the effective, redacted config as JSON
 #   version       print the server and core versions
 #
-# Anything else is executed as-is, so `docker run ankusa/ankusa sh` works.
+# Anything else is executed as-is, so `docker run jamescarr/ankusa sh` works.
 set -e
 
 case "${1:-start}" in

@@ -200,12 +200,12 @@ echo "==> tools/loadgen"
 # ── server image ──────────────────────────────────────────────────────────
 
 [tasks."docker:build"]
-description = "Build the ankusa/ankusa image (context is the repo root)"
+description = "Build the jamescarr/ankusa image (context is the repo root)"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-docker build -f ankusa_server/Dockerfile -t ankusa/ankusa:dev .
+docker build -f ankusa_server/Dockerfile -t jamescarr/ankusa:dev .
 '''
 
 [tasks."docker:smoke"]
@@ -215,7 +215,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-exec ankusa_server/scripts/smoke.sh ankusa/ankusa:dev
+exec ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
 '''
 
 # ── aggregate ─────────────────────────────────────────────────────────────
@@ -498,10 +498,10 @@ gh secret list | grep -q '^DOCKERHUB_USERNAME' || fail "repo secret DOCKERHUB_US
 gh secret list | grep -q '^DOCKERHUB_TOKEN' || fail "repo secret DOCKERHUB_TOKEN is not set"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' \
-  "https://hub.docker.com/v2/namespaces/ankusa/repositories/ankusa/tags/$VERSION")
-[ "$code" = "404" ] || fail "ankusa/ankusa:$VERSION already on Docker Hub (HTTP $code) — bump @version and the CHANGELOG"
+  "https://hub.docker.com/v2/namespaces/jamescarr/repositories/ankusa/tags/$VERSION")
+[ "$code" = "404" ] || fail "jamescarr/ankusa:$VERSION already on Docker Hub (HTTP $code) — bump @version and the CHANGELOG"
 
-printf '  ankusa/ankusa %s -> %s, not yet on Docker Hub\n' "$VERSION" "$TAG"
+printf '  jamescarr/ankusa %s -> %s, not yet on Docker Hub\n' "$VERSION" "$TAG"
 printf '\nNext: mise run release:tag-server\n'
 '''
 
@@ -550,10 +550,10 @@ for tag in "$VERSION" latest; do
 done
 
 # Both architectures, or the tag is not really usable.
-manifest=$(docker buildx imagetools inspect "ankusa/ankusa:$VERSION")
+manifest=$(docker buildx imagetools inspect "jamescarr/ankusa:$VERSION")
 grep -E 'Platform|Manifest' <<<"$manifest"
 for platform in linux/amd64 linux/arm64; do
   grep -qE "Platform:[[:space:]]+$platform(/v[0-9]+)?\$" <<<"$manifest" || \
-    { echo "  ^ $platform missing from ankusa/ankusa:$VERSION" >&2; exit 1; }
+    { echo "  ^ $platform missing from jamescarr/ankusa:$VERSION" >&2; exit 1; }
 done
 '''

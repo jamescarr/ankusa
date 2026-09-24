@@ -71,7 +71,7 @@ config :ankusa,
 | `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`. Optional: empty leaves the gateway open, with authentication delegated to whatever fronts the port. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
-| `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `ankusa/ankusa` image turns it on. |
+| `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 
 ### The admin API

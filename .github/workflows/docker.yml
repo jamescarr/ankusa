@@ -1,6 +1,6 @@
 name: Docker image
 
-# Builds and smoke-tests the ankusa/ankusa image on every relevant change, and
+# Builds and smoke-tests the jamescarr/ankusa image on every relevant change, and
 # publishes it on a server tag. The tag is the release: `ankusa_server-vX.Y.Z`
 # is cut by `mise run release:tag-server`, which runs the same preflight checks
 # this workflow's `resolve` job repeats (a tag can be pushed by anyone, so the
@@ -38,7 +38,7 @@ permissions:
   contents: write
 
 env:
-  IMAGE: ankusa/ankusa
+  IMAGE: jamescarr/ankusa
 
 jobs:
   resolve:

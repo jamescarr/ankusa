@@ -4,7 +4,7 @@
   <img src="https://raw.githubusercontent.com/jamescarr/ankusa/main/static/ankusa.png" alt="Ankusa" width="280">
 </p>
 
-[![Docker pulls](https://img.shields.io/docker/pulls/ankusa/ankusa.svg)](https://hub.docker.com/r/ankusa/ankusa)
+[![Docker pulls](https://img.shields.io/docker/pulls/jamescarr/ankusa.svg)](https://hub.docker.com/r/jamescarr/ankusa)
 [![CI](https://github.com/jamescarr/ankusa/actions/workflows/ci.yml/badge.svg)](https://github.com/jamescarr/ankusa/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/hexpm/l/ankusa.svg)](https://github.com/jamescarr/ankusa/blob/main/LICENSE)
 
@@ -21,7 +21,7 @@ duplicate or genuinely never arrived.
 docker run -d --name ankusa \
   -p 4000:4000 -p 127.0.0.1:4002:4002 \
   -v ankusa-data:/var/lib/ankusa \
-  ankusa/ankusa
+  jamescarr/ankusa
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
@@ -47,7 +47,7 @@ docker run -d --name ankusa \
   -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -v ankusa-data:/var/lib/ankusa \
   -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
-  ankusa/ankusa
+  jamescarr/ankusa
 ```
 
 ```yaml
@@ -82,11 +82,11 @@ Starting points, all loadable as-is:
 
 ```sh
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
-  -e STRIPE_WHSEC ankusa/ankusa check-config
+  -e STRIPE_WHSEC jamescarr/ankusa check-config
 # => config OK: roles=[:edge, :dispatch, :storage] sources=stripe wal=Ankusa.WAL.DiskLog storage=Ankusa.BlobStore.LocalFS
 
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
-  -e STRIPE_WHSEC ankusa/ankusa print-config
+  -e STRIPE_WHSEC jamescarr/ankusa print-config
 # => the effective config as JSON, with every secret redacted
 ```
 

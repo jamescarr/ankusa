@@ -3,10 +3,10 @@
 #   docker compose -f ankusa_server/compose/docker-compose.yml up -d
 #
 # The image is the published one; to run a local build, either tag it
-# (`docker tag ankusa/ankusa:dev ankusa/ankusa:latest`) or set ANKUSA_IMAGE.
+# (`docker tag jamescarr/ankusa:dev jamescarr/ankusa:latest`) or set ANKUSA_IMAGE.
 services:
   ankusa:
-    image: ${ANKUSA_IMAGE:-ankusa/ankusa:latest}
+    image: ${ANKUSA_IMAGE:-jamescarr/ankusa:latest}
     ports:
       # Ingest. Safe to publish: providers authenticate with their own
       # signatures (that is what a verifier is for).

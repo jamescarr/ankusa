@@ -12,7 +12,7 @@
 #     -v "$PWD/single-node.yml:/etc/ankusa/ankusa.yml" \
 #     -v ankusa-data:/var/lib/ankusa \
 #     -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
-#     ankusa/ankusa
+#     jamescarr/ankusa
 
 node:
   roles: [edge, dispatch, storage]
