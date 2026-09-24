@@ -1,8 +1,9 @@
 # Testing
 
 Every package's test suite is run from its own directory — there's no
-top-level test runner spanning all three, because each has a genuinely
-different infrastructure dependency (none, Postgres, RabbitMQ).
+top-level test runner spanning all five, because each has a genuinely
+different infrastructure dependency (none, Postgres, RabbitMQ, Redpanda,
+NATS).
 
 ## `ankusa` core — `mix test`
 
@@ -127,6 +128,41 @@ needs a C toolchain and CMake ≥ 3.16 (`apk add build-base cmake` on Alpine,
 `brew install cmake` on macOS) — or run the suite in a container, see
 [`AGENTS.md`](https://github.com/jamescarr/ankusa/blob/main/AGENTS.md).
 
+## `ankusa_nats` — `mix test`
+
+Same pattern, against NATS with JetStream enabled:
+
+```sh
+cd ankusa_nats
+docker compose up -d --wait   # NATS on :4223 (client), :8223 (monitoring)
+mix test                      # 6 tests
+docker compose down -v
+```
+
+`NATS_SERVERS` (default `localhost:4223`) points the suite at another server.
+Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
+(`subjects: ["ankusa.test.<n>.>"]`, memory storage) and deletes it in
+`on_exit`, so nothing depends on a stream being pre-provisioned. Covers:
+
+- an inline message: the subject it landed on, the five headers, the
+  `Ankusa.Sink.Message` body — **and** `Gnat.Jetstream.API.Stream.info` reporting
+  the message as stored, which is what proves the `:ok` came from JetStream's
+  publish ack rather than from a successful socket write;
+- a fat payload checked in through `ClaimCheck`, the message carrying a
+  ticket that redeems to the original bytes;
+- `:subject` as a static string and as a 1-arity fun;
+- a subject **no stream covers** being `{:error, :no_stream}`, with
+  `Gnat.Jetstream.API.Stream.list` confirming no stream was created for it —
+  the sink never creates one;
+- a publish the stream itself refuses (`max_msg_size` exceeded) being an
+  error, not a stored hook. JetStream answers that with `"seq": 0` *and* an
+  `"error"` in the same ack, so this test is the one that pins the sink's
+  error-first ack parsing;
+- an unreachable server failing fast (`:econnrefused`, not a hang).
+
+gnat is pure Elixir, so unlike `ankusa_kafka` this suite needs no C toolchain
+and no container.
+
 ## Verifying the worked example
 
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) isn't a Mix
@@ -156,7 +192,7 @@ docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```
 
-Follow `ankusa_postgres`/`ankusa_rabbitmq`/`ankusa_kafka`: a
+Follow `ankusa_postgres`/`ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats`: a
 `docker-compose.yml` for the real
 dependency, and tests that
 hit the real thing. A mock proves your code calls a mock correctly; it

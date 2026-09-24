@@ -15,6 +15,7 @@ on:
       - "ankusa_postgres-v*"
       - "ankusa_rabbitmq-v*"
       - "ankusa_kafka-v*"
+      - "ankusa_nats-v*"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -38,7 +39,7 @@ jobs:
           TAG="$GITHUB_REF_NAME"; PKG="${TAG%-v*}"; VERSION="${TAG##*-v}"
           case "$PKG" in
             ankusa) DIR=. ;;
-            ankusa_postgres|ankusa_rabbitmq|ankusa_kafka) DIR="$PKG" ;;
+            ankusa_postgres|ankusa_rabbitmq|ankusa_kafka|ankusa_nats) DIR="$PKG" ;;
             *) echo "::error::unknown package in tag $TAG"; exit 1 ;;
           esac
 

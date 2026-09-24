@@ -130,11 +130,43 @@ jobs:
         working-directory: ankusa_kafka
         run: docker compose down -v
 
-  # The server image's project. It path-depends on core and all three adapters,
+  ankusa_nats:
+    name: ankusa_nats
+    needs: ankusa
+    runs-on: ubuntu-latest
+    # Not a `services:` container: the server needs the `-js` (JetStream) flag,
+    # which `services:` can't pass. `ankusa_nats/docker-compose.yml` is the same
+    # compose file local dev uses. gnat is pure Elixir, so unlike the kafka job
+    # there is no NIF to build and no CMake requirement.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_nats
+        run: docker compose up -d --wait
+      - working-directory: ankusa_nats
+        run: mix deps.get --check-locked
+      - working-directory: ankusa_nats
+        run: mix deps.unlock --check-unused
+      - working-directory: ankusa_nats
+        run: mix format --check-formatted
+      - working-directory: ankusa_nats
+        run: mix compile --warnings-as-errors
+      - working-directory: ankusa_nats
+        run: mix test
+      - working-directory: ankusa_nats
+        run: mix docs --warnings-as-errors
+      - if: always()
+        working-directory: ankusa_nats
+        run: docker compose down -v
+
+  # The server image's project. It path-depends on core and all four adapters,
   # so its compile pulls in brod's crc32cer NIF — the runner's CMake handles
   # that, same as the kafka job. No services: nothing in this project's suite
-  # talks to Postgres, RabbitMQ, or Redpanda, and `mix test` starts no instance
-  # (config/config.exs turns autostart off in :test).
+  # talks to Postgres, RabbitMQ, Redpanda, or NATS, and `mix test` starts no
+  # instance (config/config.exs turns autostart off in :test).
   ankusa_server:
     name: ankusa_server
     needs: ankusa

@@ -210,8 +210,9 @@ run on any node that can reach Postgres and the object store. See
 ### 4. Queue fan-out to independent consumers
 
 Ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
-`ankusa_rabbitmq` package) or a Kafka topic (`Sink.Kafka`, separate
-`ankusa_kafka` package); either way fat payloads are checked in through
+`ankusa_rabbitmq` package), a Kafka topic (`Sink.Kafka`, separate
+`ankusa_kafka` package), or a NATS JetStream subject (`Sink.NATS`, separate
+`ankusa_nats` package); either way fat payloads are checked in through
 `Ankusa.ClaimCheck` with only a ticket on the queue, and the message itself
 is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its
 **own** queue and binding — the framework never declares one, so adding a

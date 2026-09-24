@@ -81,11 +81,13 @@ defmodule AnkusaServer.Config do
   @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes)
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes ssl sasl)
   @sasl_keys ~w(mechanism username password)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
+  @nats_auth_keys ~w(username password token nkey_seed jwt)
 
   @roles ~w(edge dispatch storage claim_check)
   @verify_types ~w(none stripe github standard_webhooks)
   @dedup_types ~w(rules stripe github)
-  @sink_types ~w(log http rabbitmq kafka)
+  @sink_types ~w(log http rabbitmq kafka nats)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
@@ -762,6 +764,20 @@ defmodule AnkusaServer.Config do
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
          |> put_opt(:ssl, bool_opt(sink, "ssl", path))
          |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))}
+
+      "nats" ->
+        check_keys!(sink, @nats_sink_keys, path)
+
+        connection =
+          [
+            servers: string_list!(sink["servers"], path ++ ["servers"]),
+            subject: required_string!(sink, "subject", path)
+          ]
+          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+          |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
+          |> put_opt(:tls, bool_opt(sink, "tls", path))
+
+        {Ankusa.Sink.NATS, connection ++ nats_auth(sink["auth"], path ++ ["auth"])}
     end
   end
 
@@ -781,6 +797,57 @@ defmodule AnkusaServer.Config do
 
     {atom_enum_opt(sasl, "mechanism", ~w(plain scram_sha_256 scram_sha_512), path),
      required_string!(sasl, "username", path), required_string!(sasl, "password", path)}
+  end
+
+  defp nats_auth(nil, _path), do: []
+
+  defp nats_auth(auth, path) do
+    auth = section!(auth, @nats_auth_keys, path)
+
+    opts =
+      []
+      |> put_opt(:username, string_opt(auth, "username", path))
+      |> put_opt(:password, string_opt(auth, "password", path))
+      |> put_opt(:token, string_opt(auth, "token", path))
+      |> put_opt(:nkey_seed, string_opt(auth, "nkey_seed", path))
+      |> put_opt(:jwt, string_opt(auth, "jwt", path))
+
+    validate_nats_auth!(opts, path)
+    opts
+  end
+
+  # gnat sends exactly one scheme, picking username/password, then token, then
+  # nkey_seed(+jwt). A file that declares two gets one silently ignored; a lone
+  # `username` or a lone `jwt` is ignored outright and connects as nobody. Both
+  # would surface as "authorization violation" on the first hook, so they are
+  # boot errors instead.
+  defp validate_nats_auth!(opts, path) do
+    declared =
+      [
+        {Keyword.has_key?(opts, :username) or Keyword.has_key?(opts, :password),
+         "username/password"},
+        {Keyword.has_key?(opts, :token), "token"},
+        {Keyword.has_key?(opts, :nkey_seed), "nkey_seed"}
+      ]
+      |> Enum.filter(&elem(&1, 0))
+      |> Enum.map(&elem(&1, 1))
+
+    cond do
+      length(declared) > 1 ->
+        raise ConfigError,
+          message:
+            "#{render_path(path)}: #{Enum.join(declared, ", ")} are mutually exclusive; " <>
+              "declare one scheme"
+
+      Keyword.has_key?(opts, :username) != Keyword.has_key?(opts, :password) ->
+        raise ConfigError, message: "#{render_path(path)}: username and password go together"
+
+      Keyword.has_key?(opts, :jwt) and not Keyword.has_key?(opts, :nkey_seed) ->
+        raise ConfigError, message: "#{render_path(path)}: jwt requires nkey_seed"
+
+      true ->
+        :ok
+    end
   end
 
   # ── schema helpers ──────────────────────────────────────────────────────────

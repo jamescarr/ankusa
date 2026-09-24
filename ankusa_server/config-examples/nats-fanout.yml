@@ -1,0 +1,62 @@
+# Fan out every accepted hook to a NATS JetStream subject, with large bodies
+# offloaded to the claim-check gateway.
+#
+#   topology : all roles in one container, the claim-check gateway included
+#              (port 4001)
+#   sink     : NATS_SERVERS ("host:port,host:port"), subject NATS_SUBJECT
+#   secrets  : STRIPE_WHSEC, NATS_USERNAME, NATS_PASSWORD, CLAIM_CHECK_TOKEN
+#
+# Messages are `Ankusa.Sink.Message`, byte-identical to what the Kafka and
+# RabbitMQ sinks produce, so one consumer reads any of them. Bodies above
+# `inline_max_bytes` become a claim ticket, redeemed at the gateway on port
+# 4001 without blob-store credentials of the consumer's own.
+#
+# The stream is the operator's, not this sink's: it publishes to `subject` and
+# never creates or updates a stream. The subject must be covered by a stream
+# that already exists, or the publish is refused:
+#
+#   nats stream add ANKUSA --subjects="ankusa.>"
+#
+# `auth` takes exactly one scheme — username/password, token, or nkey_seed
+# (with a jwt for operator-mode accounts). Drop the block entirely for a server
+# that needs no credentials.
+#
+# The claim-check gateway's tokens are OPTIONAL: drop the `tokens:` block (and
+# CLAIM_CHECK_TOKEN) and the gateway is open, with auth delegated to whatever
+# fronts port 4001.
+
+node:
+  roles: [edge, dispatch, storage, claim_check]
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+
+claim_check:
+  port: 4001
+  max_bytes: 8000000
+  tokens:
+    - token: "${CLAIM_CHECK_TOKEN}"
+      tenants: all
+
+sources:
+  stripe:
+    verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
+    dedup: {type: stripe}
+    on_verify_failure: quarantine
+    sinks:
+      - type: nats
+        # A list of host:port, or one comma-separated string — so
+        # `servers: "${NATS_SERVERS}"` takes "host:port,host:port" from env.
+        # More than one is failover order, not fan-out.
+        servers: "${NATS_SERVERS}"
+        # Subject, not stream: the stream that covers it already exists.
+        subject: "${NATS_SUBJECT:-ankusa.stripe}"
+        # Above this, the body becomes a claim ticket.
+        inline_max_bytes: 8192
+        # How long to wait for JetStream's publish ack (default 5000).
+        publish_timeout_ms: 5000
+        tls: false
+        auth:
+          username: "${NATS_USERNAME}"
+          password: "${NATS_PASSWORD}"

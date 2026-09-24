@@ -35,6 +35,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   tokens.
 - `Ankusa.ClaimCheck.Remote`'s `:token` is optional; omit it when the gateway
   has no `api_tokens`.
+- `Ankusa.Admin.Redact` also redacts `nkey_seed`, the private key a
+  `Sink.NATS` deployment authenticates with, so `GET /v1/config` cannot print
+  it.
 
 ## [0.1.0] - 2026-09-23
 

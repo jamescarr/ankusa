@@ -31,7 +31,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-for d in . ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_server \
+for d in . ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats ankusa_server \
          examples/rabbitmq-consumer/ingest_app \
          examples/kafka-sqs-consumer/ingest_app \
          examples/oban-consumer/ingest_app \
@@ -45,12 +45,12 @@ done
 # ── adapter test infrastructure ───────────────────────────────────────────
 
 [tasks."infra:up"]
-description = "Start Postgres / RabbitMQ / Redpanda for the adapter suites"
+description = "Start Postgres / RabbitMQ / Redpanda / NATS for the adapter suites"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   echo "==> $p"
   (cd "$p" && docker compose up -d --wait)
 done
@@ -63,7 +63,7 @@ run = '''
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 rc=0
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   (cd "$p" && docker compose down -v) || rc=1
 done
 exit $rc
@@ -137,6 +137,20 @@ docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
   -w /repo/examples/kafka-sqs-consumer/ingest_app elixir:1.20.4-alpine \
   sh -c 'mix local.hex --force >/dev/null && apk add --no-cache -q build-base cmake git >/dev/null \
          && mix deps.get --check-locked && MIX_ENV=prod mix compile --warnings-as-errors'
+'''
+
+[tasks."check:nats"]
+description = "ankusa_nats: format + compile + test + docs (needs infra:up)"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)/ankusa_nats"
+mix deps.get --check-locked
+mix deps.unlock --check-unused
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix test
+mix docs --warnings-as-errors
 '''
 
 [tasks."check:server"]
@@ -232,6 +246,7 @@ mise run check:core
 mise run check:postgres
 mise run check:rabbitmq
 mise run check:kafka
+mise run check:nats
 mise run check:examples
 mise run check:oban
 mise run check:server
@@ -269,7 +284,7 @@ cd "$(git rev-parse --show-toplevel)"
 rm -rf ankusa-0.1.0
 mix hex.build --unpack
 rm -rf ankusa-0.1.0
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   echo "==> $p (MIX_ENV=prod: must resolve ankusa from Hex, not the path dep)"
   (cd "$p" && MIX_ENV=prod mix hex.build)
   rm -f "$p"/*.tar
@@ -369,7 +384,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/ankus
 [ "$code" = "200" ] || fail "ankusa $core is not on Hex yet (HTTP $code) — run release:tag-core first"
 printf '  ankusa %s is live on Hex\n' "$core"
 
-for pkg in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+for pkg in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$pkg/mix.exs")
   [ -n "$v" ] || fail "$pkg: could not read @version from $pkg/mix.exs"
   tag="$pkg-v$v"
@@ -422,7 +437,7 @@ echo "  mise run release:watch"
 '''
 
 [tasks."release:tag-adapters"]
-description = "Tag + push the three adapter packages (only after core is live on Hex)"
+description = "Tag + push the four adapter packages (only after core is live on Hex)"
 depends = ["release:preflight-adapters"]
 run = '''
 #!/usr/bin/env bash
@@ -430,7 +445,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 # Core-is-live and tag-free checks live in release:preflight-adapters above.
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$p/mix.exs")
   tag="$p-v$v"
   git tag "$tag"
@@ -455,11 +470,11 @@ id=$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].d
 '''
 
 [tasks."release:verify"]
-description = "Confirm all four packages are live on Hex"
+description = "Confirm all five packages are live on Hex"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
-for p in ankusa ankusa_postgres ankusa_rabbitmq ankusa_kafka; do
+for p in ankusa ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/$p")
   printf '  %-18s %s\n' "$p" "$code"
   [ "$code" = "200" ] || { echo "  ^ not published" >&2; exit 1; }

@@ -44,6 +44,7 @@ bandit_example/            ankusa — core. mix.exs deps: {bandit, plug, req,
   ankusa_postgres/            path-dep on ankusa + postgrex. Ankusa.WAL.Postgres.
   ankusa_rabbitmq/            path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
   ankusa_kafka/               path-dep on ankusa + brod. Ankusa.Sink.Kafka.
+  ankusa_nats/                path-dep on ankusa + gnat. Ankusa.Sink.NATS.
   examples/                 deployable demos; not published packages
 ```
 
@@ -51,13 +52,14 @@ bandit_example/            ankusa — core. mix.exs deps: {bandit, plug, req,
 ".."}` for local development, and would become normal Hex dependencies once
 published. Each ships its **own** `docker-compose.yml` for local dev/test
 infra (`ankusa_postgres/` → Postgres on `:5433`; `ankusa_rabbitmq/` → RabbitMQ
-on `:5673`/`:15673`; `ankusa_kafka/` → Redpanda on `:19092`). Every adapter
+on `:5673`/`:15673`; `ankusa_kafka/` → Redpanda on `:19092`; `ankusa_nats/` →
+NATS with JetStream on `:4223`/`:8223`). Every adapter
 package test suite needs `Ankusa.Registry` running (started by `ankusa`'s own
 Application); none needs any config to get it, since Ankusa.Application's
 built-in default instance is off (`autostart: false`) by default and only the
 root project's own `config/config.exs` turns it on.
 
-## Why S3/GCS stayed in-tree but Postgres/RabbitMQ/Kafka didn't
+## Why S3/GCS stayed in-tree but Postgres/RabbitMQ/Kafka/NATS didn't
 
 This is a dependency-weight split, not a position on hand-rolling.
 
@@ -93,7 +95,11 @@ sent" rule.
 `Ankusa.Sink.Kafka` needs `brod`, which pulls `crc32cer`: a C++ NIF that
 compiles from source on every `mix deps.compile`, so that package carries a
 build-toolchain requirement (CMake ≥ 3.16 plus a C++ compiler) that no
-`ankusa` core user should be forced to satisfy. Those are
+`ankusa` core user should be forced to satisfy. `Ankusa.Sink.NATS` needs
+`gnat`, which pulls `jason`, `nkeys` (+ `ed25519`/`kcl`), `nimble_parsec`, and
+`connection` — pure Elixir, but four libraries nobody running an HTTP-,
+Kafka-, or RabbitMQ-only deployment has any use for, which is the same test
+with a lighter dependency. Those are
 genuine external dependencies the laptop/standalone user shouldn't pay to
 compile, so each got its own package the moment it was built — not before.
 `ankusa_postgres` didn't exist until the Postgres WAL adapter was actually

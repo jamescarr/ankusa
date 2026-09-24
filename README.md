@@ -14,8 +14,9 @@ _**Don't fight the traffic. Steer it.**_
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
 at it: every hook is written to a durable log before Ankusa answers `2xx`,
 provider retries are absorbed as duplicates, and each hook is delivered to your
-own worker over HTTP, RabbitMQ, or Kafka, with retries, a dead-letter queue, and
-replay. Start with one container. Grow into a fleet by changing config, not code.
+own worker over HTTP, RabbitMQ, Kafka, or NATS JetStream, with retries, a
+dead-letter queue, and replay. Start with one container. Grow into a fleet by
+changing config, not code.
 
 ## Quickstart
 
@@ -105,8 +106,8 @@ flowchart LR
 - Signature verification for Stripe, GitHub, and Standard Webhooks
 - Deduplication by provider event id
 - Multi-tenant catch URLs, including ones your product mints at runtime
-- Delivery over HTTP, RabbitMQ, and Kafka, with retries, backoff, a dead
-  letter queue, and replay
+- Delivery over HTTP, RabbitMQ, Kafka, and NATS JetStream, with retries,
+  backoff, a dead letter queue, and replay
 - Quarantine for hooks that fail verification, so nothing is silently dropped
 - Archiving to S3, GCS, Cloudflare R2, or MinIO
 - Telemetry on every stage of the pipeline
@@ -118,7 +119,7 @@ replace that piece and keep the rest.
 ## Grow into a fleet
 
 When one box is not enough, put edge nodes behind a load balancer on a shared
-Postgres log, archive to S3 or GCS, and fan out to Kafka or RabbitMQ. Ingest,
+Postgres log, archive to S3 or GCS, and fan out to Kafka, NATS, or RabbitMQ. Ingest,
 delivery, and archiving each scale on their own, so you add capacity where the
 traffic is.
 
@@ -129,7 +130,7 @@ flowchart LR
     LB --> E2[Ankusa node]
     LB --> E3[Ankusa node]
     E1 & E2 & E3 --> WAL[(Durable log)]
-    WAL --> Q[Kafka / RabbitMQ / HTTP]
+    WAL --> Q[Kafka / NATS / RabbitMQ / HTTP]
     WAL --> S[(S3 / GCS)]
     Q --> W[Your workers]
 ```

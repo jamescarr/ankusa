@@ -32,6 +32,7 @@ defmodule AnkusaServer.MixProject do
       {:ankusa_postgres, path: "../ankusa_postgres"},
       {:ankusa_rabbitmq, path: "../ankusa_rabbitmq"},
       {:ankusa_kafka, path: "../ankusa_kafka"},
+      {:ankusa_nats, path: "../ankusa_nats"},
       {:yaml_elixir, "~> 2.12"}
     ]
   end

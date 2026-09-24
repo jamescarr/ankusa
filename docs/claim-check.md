@@ -5,7 +5,8 @@ One contract for every producer and consumer in the system, Elixir or not:
 The storage engine (LocalFS/S3/GCS, via `Ankusa.BlobStore`) and the network
 topology (in-process vs. an HTTP hop) stay hidden behind it.
 
-The queue sinks' fat-payload offload (`Sink.RabbitMQ`, `Sink.Kafka`) is the
+The queue sinks' fat-payload offload (`Sink.RabbitMQ`, `Sink.Kafka`,
+`Sink.NATS`) is the
 shipped user of this — see
 [`delivery.md`](delivery.md#sinkrabbitmq--queue-delivery) — but it's a
 general-purpose gateway, usable anywhere a payload is too big to carry

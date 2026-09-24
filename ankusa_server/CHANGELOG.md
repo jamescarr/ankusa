@@ -6,6 +6,16 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Added
+
+- `type: nats` sink: publishes delivered hooks to a NATS JetStream subject,
+  with `servers`, `subject`, `inline_max_bytes` (`8192`),
+  `publish_timeout_ms` (`5000`), `tls`, and an `auth` block taking one scheme
+  (`username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream has
+  to exist — the sink never creates one.
+- [`config-examples/nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml),
+  and a `nats` sink in `reference.yml`.
+
 ## [0.1.0]
 
 ### Added
