@@ -246,13 +246,13 @@ flowchart LR
     CC -.Direct.-> Obj
 ```
 
-A consumer that shouldn't hold object-store credentials (a non-BEAM worker,
-a third party) redeems through a `:claim_check`-role node's HTTP API
-instead of the object store directly — see [`claim-check.md`](claim-check.md)
-for the full contract, the trust-boundary table for picking `Direct` vs.
-`Remote`, and why `Remote` (an RPC dependency) is allowed only downstream of
-the WAL — dispatch sinks and external consumers, never the edge's pre-ack
-path.
+A consumer that shouldn't hold object-store credentials (any worker, in any
+language, or a third party) redeems the ticket with `GET /v1/claims/...`
+against a `claim_check`-role node instead of reading the object store —
+see [`claim-check.md`](claim-check.md) for the API, and for sending an
+ingest node's own check-ins through the gateway (`claim_check.remote`),
+which is allowed only downstream of the WAL: dispatch sinks and external
+consumers, never the edge's pre-ack path.
 
 Worked end to end, dockerized, in
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/).

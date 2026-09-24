@@ -133,10 +133,10 @@ Message shape (`Ankusa.Sink.Message` — byte-identical for `Sink.Kafka`):
 `"v"` changes only when an existing field changes meaning or disappears;
 consumers must ignore keys they don't know.
 
-A consumer decodes `claim` back into a `Ankusa.ClaimCheck.Ticket` and calls
-`Ankusa.ClaimCheck.redeem/3` (or, for a non-BEAM consumer, `GET
-/v1/claims/:tenant_id/:id` against a `:claim_check`-role node — see
-[`claim-check.md`](claim-check.md)).
+A consumer redeems `claim` with `GET /v1/claims/:tenant_id/:id` against the
+claim-check gateway and checks the bytes against the ticket's `size` and
+`sha256` — see [`claim-check.md`](claim-check.md#redeem-a-claim). (An Elixir
+consumer can call `Ankusa.ClaimCheck.redeem/3`, which does both.)
 
 **Connection lifecycle**: one supervised connection + confirm-mode channel
 per `(instance, exchange)`, started on demand by the first `deliver/3` call,

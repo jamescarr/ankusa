@@ -37,7 +37,7 @@ flowchart LR
   API, using a client generated straight from
   [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
   (`npm run generate:types`) instead of a hand-maintained ticket type —
-  see ["Redeeming a claim from any language"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeeming-a-claim-from-any-language).
+  see ["Redeem a claim"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeem-a-claim).
 - `floci` — local S3-compatible emulator (see the root README's "Object
   store adapters" section); stands in for real S3/R2/MinIO.
 

@@ -8,7 +8,7 @@
 // The claim-check client is generated from the framework's own OpenAPI
 // contract (`priv/openapi/claim_check.v1.yaml`, `npm run generate:types` ->
 // `src/claim-check-schema.d.ts`) instead of a hand-maintained ticket type
-// and URL-building — see "Redeeming a claim from any language" in
+// and URL-building — see "Redeem a claim" in
 // docs/claim-check.md.
 
 import {

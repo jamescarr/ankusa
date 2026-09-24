@@ -777,7 +777,7 @@ This follows `docs/testing.md`: real infrastructure, no mocks.
   `priv/openapi/claim_check.v1.yaml` via `openapi-typescript`
   (`npm run generate:types`, output committed) and redeem through
   `openapi-fetch` instead of a hand-typed `Ticket` and raw `fetch`. See
-  "Redeeming a claim from any language" in `docs/claim-check.md`.
+  "Redeem a claim" in `docs/claim-check.md`.
 - [ ] **OpenApiSpex adoption.** Trigger: it supports 3.1+ *and* the API
   grows past trivially hand-validated inputs.
 - [ ] **Presigned-URL redemption** for S3/GCS (`GET` → `302` to a
