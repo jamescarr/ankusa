@@ -67,7 +67,7 @@ defmodule Ankusa.EdgeTest do
   test "valid Standard Webhooks signature is accepted; a bad one is rejected (401)" do
     sources = %{
       "swh" => [
-        verifier: {Ankusa.Verifier.StandardWebhooks, secret: @secret},
+        verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: @secret},
         on_verify_failure: :reject
       ]
     }
@@ -99,7 +99,7 @@ defmodule Ankusa.EdgeTest do
   test "quarantine policy durably holds a failed hook and returns 202" do
     sources = %{
       "q" => [
-        verifier: {Ankusa.Verifier.StandardWebhooks, secret: @secret},
+        verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: @secret},
         on_verify_failure: :quarantine
       ]
     }

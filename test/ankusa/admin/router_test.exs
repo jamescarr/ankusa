@@ -197,7 +197,7 @@ defmodule Ankusa.Admin.RouterTest do
   test "GET /v1/quarantine lists this node's recent entries without bodies" do
     sources = %{
       "strict" => [
-        verifier: {Ankusa.Verifier.Stripe, secret: "whsec_x"},
+        verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
         on_verify_failure: :quarantine
       ]
     }
@@ -235,7 +235,9 @@ defmodule Ankusa.Admin.RouterTest do
         source_store:
           {Ankusa.SourceStore.Static,
            sources: %{
-             "stripe" => [verifier: {Ankusa.Verifier.Stripe, secret: "whsec_leakhunter"}]
+             "stripe" => [
+               verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_leakhunter"}
+             ]
            }}
       )
 
@@ -248,7 +250,7 @@ defmodule Ankusa.Admin.RouterTest do
     assert conn.resp_body =~ "postgres://ankusa:[REDACTED]@db:5432/ankusa"
     # sources, module pairs, and booleans all survive as themselves
     assert conn.resp_body =~ "stripe"
-    assert conn.resp_body =~ ~s("module":"Ankusa.Verifier.Stripe")
+    assert conn.resp_body =~ ~s("module":"Ankusa.Verifier.Hmac")
 
     decoded = JSON.decode!(conn.resp_body)
     assert decoded["admin"]["enabled"] == true

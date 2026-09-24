@@ -102,7 +102,7 @@ flowchart LR
 
 ## What you get
 
-- Signature verification for Stripe, GitHub, and Standard Webhooks
+- Signature verification via a configurable HMAC engine — named schemes for Stripe, GitHub, Standard Webhooks, Shopify, and Slack, plus any body-HMAC scheme you describe in config
 - Deduplication by provider event id
 - Multi-tenant catch URLs, including ones your product mints at runtime
 - Delivery over HTTP, RabbitMQ, and Kafka, with retries, backoff, a dead

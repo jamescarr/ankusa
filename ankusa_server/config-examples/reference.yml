@@ -131,8 +131,10 @@ sources:
     tenant: default
     # reject | quarantine | accept_flag (what happens when verification fails)
     on_verify_failure: reject
-    # none | stripe | github | standard_webhooks. The last three require secret;
-    # stripe and standard_webhooks also take tolerance_seconds (default 300).
+    # none | stripe | github | standard_webhooks | shopify | slack | hmac.
+    # Every type except none requires secret; stripe, standard_webhooks, and
+    # slack also take tolerance_seconds (default 300). hmac takes the
+    # descriptor keys shown on the `custom` source below.
     verify:
       type: stripe
       secret: "${STRIPE_WHSEC}"
@@ -196,3 +198,18 @@ sources:
     verify: {type: none}
     on_verify_failure: accept_flag
     sinks: [{type: log}]
+
+  # Any other body-HMAC provider, described inline instead of named. `signed`
+  # is quoted — unquoted `{body}` would parse as a YAML flow map.
+  # custom:
+  #   verify:
+  #     type: hmac
+  #     secret: "${CUSTOM_WEBHOOK_SECRET}"
+  #     signature_header: "X-Custom-Signature"
+  #     signed: "{body}"
+  #     hash: sha256            # sha256 | sha512 | sha1
+  #     encoding: hex           # hex | base64
+  #     sig_prefix: "sha256="
+  #     timestamp_header: "X-Custom-Timestamp"
+  #     tolerance_seconds: 300
+  #   sinks: [{type: log}]

@@ -75,6 +75,7 @@ defmodule AnkusaServer.Config do
   @remote_keys ~w(url token)
   @source_keys ~w(tenant on_verify_failure verify dedup sinks)
   @verify_keys ~w(type secret tolerance_seconds)
+  @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @dedup_keys ~w(type header json_path)
   @log_sink_keys ~w(type)
   @http_sink_keys ~w(type url method headers timeout_ms)
@@ -83,7 +84,11 @@ defmodule AnkusaServer.Config do
   @sasl_keys ~w(mechanism username password)
 
   @roles ~w(edge dispatch storage claim_check)
-  @verify_types ~w(none stripe github standard_webhooks)
+  @verify_types ~w(none stripe github standard_webhooks shopify slack hmac)
+  @scheme_parses ~w(whole csv_pairs space_versions)
+  @scheme_hashes ~w(sha256 sha512 sha1)
+  @scheme_encodings ~w(hex base64)
+  @scheme_secret_decodes ~w(raw whsec_base64)
   @dedup_types ~w(rules stripe github)
   @sink_types ~w(log http rabbitmq kafka)
   @policies ~w(reject quarantine accept_flag)
@@ -640,34 +645,89 @@ defmodule AnkusaServer.Config do
   defp verifier(source, path) do
     path = path ++ ["verify"]
 
-    case section!(source["verify"], @verify_keys, path) do
+    case expect_map(source["verify"], path) do
       verify when map_size(verify) == 0 ->
         nil
 
       verify ->
         type = enum!(required_string!(verify, "type", path), @verify_types, path ++ ["type"])
 
+        # Typo rejection: the key set is fixed per type (named schemes take
+        # only `secret`/`tolerance_seconds`; `hmac` takes the descriptor keys).
+        check_keys!(verify, verify_keys(type), path)
+
         opts =
           []
           |> put_opt(:secret, string_opt(verify, "secret", path))
           |> put_opt(:tolerance, int_opt(verify, "tolerance_seconds", path))
 
-        {verifier_module(type, verify, path), opts}
+        {verify_module(type), verify_opts(type, verify, path, opts)}
     end
   end
 
-  defp verifier_module("none", _verify, _path), do: Ankusa.Verifier.None
+  defp verify_keys("hmac"), do: @verify_hmac_keys
+  defp verify_keys(_), do: @verify_keys
 
-  defp verifier_module(type, verify, path) do
-    # The three signature verifiers are useless without a secret, and a
-    # silently-empty HMAC key would accept everything an attacker signs.
+  defp verify_module("none"), do: Ankusa.Verifier.None
+  defp verify_module(_), do: Ankusa.Verifier.Hmac
+
+  defp verify_opts("none", _verify, _path, opts), do: opts
+
+  defp verify_opts(type, verify, path, opts) do
+    # The signature verifiers are useless without a secret, and a silently-empty
+    # HMAC key would accept everything an attacker signs.
     required_string!(verify, "secret", path)
 
-    case type do
-      "stripe" -> Ankusa.Verifier.Stripe
-      "github" -> Ankusa.Verifier.GitHub
-      "standard_webhooks" -> Ankusa.Verifier.StandardWebhooks
-    end
+    scheme =
+      case type do
+        "hmac" -> hmac_scheme(verify, path)
+        _ -> String.to_atom(type)
+      end
+
+    [{:scheme, scheme} | opts]
+  end
+
+  defp hmac_scheme(verify, path) do
+    timestamp_header = string_opt(verify, "timestamp_header", path)
+
+    scheme = %Ankusa.Verifier.Hmac.Scheme{
+      signature_header: required_string!(verify, "signature_header", path),
+      parse:
+        String.to_atom(
+          enum!(string_opt(verify, "parse", path) || "whole", @scheme_parses, path ++ ["parse"])
+        ),
+      sig_prefix: string_opt(verify, "sig_prefix", path),
+      sig_key: string_opt(verify, "sig_key", path),
+      version: string_opt(verify, "version", path),
+      signed: string_opt(verify, "signed", path) || "{body}",
+      hash:
+        String.to_atom(
+          enum!(
+            string_opt(verify, "hash", path) || "sha256",
+            @scheme_hashes,
+            path ++ ["hash"]
+          )
+        ),
+      encoding:
+        String.to_atom(
+          enum!(
+            string_opt(verify, "encoding", path) || "hex",
+            @scheme_encodings,
+            path ++ ["encoding"]
+          )
+        ),
+      secret_decode:
+        String.to_atom(
+          enum!(
+            string_opt(verify, "secret_decode", path) || "raw",
+            @scheme_secret_decodes,
+            path ++ ["secret_decode"]
+          )
+        ),
+      timestamp: (timestamp_header && {:header, timestamp_header}) || nil
+    }
+
+    Ankusa.Verifier.Schemes.validate!(scheme)
   end
 
   defp dedup_key(source, path) do

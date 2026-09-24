@@ -26,6 +26,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 - `:instance` in the metadata of `[:ankusa, :dispatch, :stop]`,
   `[:ankusa, :dispatch, :dlq]`, `[:ankusa, :claim_check, :check_in]`, and
   `[:ankusa, :claim_check, :redeem]`.
+- `Ankusa.Verifier.Hmac`: a configurable HMAC signature engine driven by a
+  `%Ankusa.Verifier.Hmac.Scheme{}` descriptor, with named presets in
+  `Ankusa.Verifier.Schemes` for Stripe, GitHub, Standard Webhooks, Shopify,
+  and Slack, and an inline `type: hmac` YAML surface for any other body-HMAC
+  provider. The `shopify` and `slack` `verify.type` values are new.
+- `scheme_name/1` optional callback on `Ankusa.Verifier`, a `scheme` field on
+  `Ankusa.Verification`, and a `scheme` label on `ankusa.verify.failures.total`.
+
+### Removed
+
+- `Ankusa.Verifier.Stripe`, `Ankusa.Verifier.GitHub`, and
+  `Ankusa.Verifier.StandardWebhooks` — replaced by `Ankusa.Verifier.Hmac`
+  presets. Elixir embedders use `{Ankusa.Verifier.Hmac, scheme: :stripe, …}`.
 
 ### Changed
 

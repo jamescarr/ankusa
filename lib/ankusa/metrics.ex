@@ -97,7 +97,7 @@ defmodule Ankusa.Metrics do
         scoped(own,
           event_name: [:ankusa, :verify, :stop],
           keep: &(&1.status == :failed),
-          tags: [:instance, :source_id, :provider]
+          tags: [:instance, :source_id, :provider, :scheme]
         )
       ),
       distribution(

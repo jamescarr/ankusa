@@ -28,7 +28,7 @@ config :ankusa,
     {Ankusa.SourceStore.Static,
      sources: %{
        "stripe" => [
-         verifier: {Ankusa.Verifier.Stripe, secret: System.get_env("STRIPE_WHSEC")},
+         verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
          dedup: {Ankusa.DedupKey.Stripe, []},
          sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
        ]
