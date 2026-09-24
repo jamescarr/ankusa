@@ -29,6 +29,9 @@ defmodule Ankusa.Telemetry do
   `:outcome` on `:ingest` is `:committed | :duplicate | :quarantined | :rejected`,
   or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,
   independent of what the source's `on_verify_failure` policy then decides.
+
+  `Ankusa.Metrics` is the built-in Prometheus mapping of these events, served by
+  the admin API's `GET /metrics`.
   """
 
   @doc "Emit a telemetry event."
