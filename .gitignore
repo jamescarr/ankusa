@@ -29,6 +29,7 @@ ankusa-*.tar
 ankusa_postgres-*.tar
 ankusa_rabbitmq-*.tar
 ankusa_kafka-*.tar
+ankusa_nats-*.tar
 
 # Node (examples/*/worker).
 **/node_modules/
