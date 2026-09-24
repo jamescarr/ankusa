@@ -35,14 +35,16 @@ The 152 always-on tests cover:
   several segments in one tick, and the live index — a lookup after a
   later compaction sees every row, and one taken while the compactor is down
   falls back to the file and is correct again after its restart.
-- **Claim Check** (`test/ankusa/claim_check/`): ticket validation and
-  traversal-safe key derivation; `Direct` round-trip over `LocalFS`;
-  idempotent re-check-in; tampered-object integrity detection;
-  `validate_config!/1` boot-time rejections; the `:claim_check` role's HTTP
-  API (auth, tenant scoping, size cap, status-code mapping); a **real**
-  cross-mode proof — a ticket checked in via `Direct` redeems via `Remote`
-  over an actual HTTP hop (`ThousandIsland.listener_info/1` resolves the
-  live port), and back; the `LocalFS` retention sweeper.
+- **Claim Check** (`test/ankusa/claim_check/`, `test/ankusa/dispatch/claim_check_test.exs`):
+  reference parsing (URN grammar, tenant/id/range/digest rejection, date
+  partitions from the object id's timestamp); pack building (ZIP offsets,
+  manifest, standard-reader round-trip); pack/redeem round-trips over
+  `LocalFS`; tampered-object integrity detection; ranged reads (`416` past the
+  end); packing per tenant per batch with `pack_max_bytes` splitting and
+  failure isolation; check-in-once (a fat hook on two sinks and a failing
+  retry writes one object); `validate_config!/1` boot-time rejections; the
+  `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
+  deleting whole `dt=` day partitions.
 - **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
   mid-flight, and proves every acked id survives replay from the WAL. Zero
   tolerance — this is the test that actually backs the core invariant claim
@@ -110,7 +112,7 @@ docker compose down -v
 ```
 
 Covers: inline-payload publish + decode, fat-payload claim check-in (message
-carries a ticket, the claim round-trips through `Ankusa.ClaimCheck.redeem/3`
+carries a claim reference, the claim round-trips through `Ankusa.ClaimCheck.redeem/2`
 against a real `BlobStore`), routing key as both a static string and a
 function, and a fast-fail check (`:econnrefused`, not a hang) against an
 unreachable broker.
@@ -161,7 +163,7 @@ Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
   the message as stored, which is what proves the `:ok` came from JetStream's
   publish ack rather than from a successful socket write;
 - a fat payload checked in through `ClaimCheck`, the message carrying a
-  ticket that redeems to the original bytes;
+  claim reference that redeems to the original bytes;
 - `:subject` as a static string and as a 1-arity fun;
 - a subject **no stream covers** being `{:error, :no_stream}`, with
   `Gnat.Jetstream.API.Stream.list` confirming no stream was created for it —

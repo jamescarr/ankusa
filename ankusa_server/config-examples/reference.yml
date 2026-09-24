@@ -7,7 +7,7 @@
 #
 #   ANKUSA_WAL_POSTGRES_URL   S3_BUCKET  S3_REGION  S3_ENDPOINT
 #   AWS_ACCESS_KEY_ID         AWS_SECRET_ACCESS_KEY  GCS_BUCKET
-#   CLAIM_CHECK_TOKEN         STRIPE_WHSEC  SINK_URL  RABBITMQ_URL
+#   STRIPE_WHSEC  SINK_URL  RABBITMQ_URL
 #   RABBITMQ_EXCHANGE         KAFKA_BROKERS  KAFKA_TOPIC  KAFKA_USERNAME
 #   KAFKA_SASL_PASSWORD       NATS_SERVERS  NATS_SUBJECT  NATS_USERNAME
 #   NATS_PASSWORD             STANDARD_WEBHOOKS_SECRET   GITHUB_WEBHOOK_SECRET
@@ -121,19 +121,14 @@ storage:
 claim_check:
   # [env ANKUSA_CLAIM_CHECK_PORT] the gateway listener (:claim_check role).
   port: 4001
-  max_bytes: 8000000
+  # Target size of one pack object; a body larger than this still gets a pack
+  # of its own. Core defaults this to 16 MiB.
+  pack_max_bytes: 16777216
   # LocalFS retention only. nil disables the sweeper; use a bucket lifecycle
   # rule for S3/GCS.
   retention_days: null
-  # OPTIONAL. Omit the whole block for an open gateway — auth is then whatever
-  # fronts the port.
-  tokens:
-    - token: "${CLAIM_CHECK_TOKEN}"
-      # all | [tenant, ...]
-      tenants: all
-  # Talk to a remote gateway instead of holding blob-store credentials here.
-  # The token is optional: omit it when the target gateway has no tokens.
-  # remote: {url: "http://claim-check.internal:4001", token: "${CLAIM_CHECK_TOKEN}"}
+  # The gateway performs no authentication. Keep 4001 internal and put your
+  # proxy, mesh, or network policy in front of it, the same as 4002.
 
 sources:
   # One source per provider endpoint. The id is the catch-URL segment:

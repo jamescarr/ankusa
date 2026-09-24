@@ -42,8 +42,9 @@ flowchart LR
 
 Ingest publishes to a RabbitMQ exchange and a TypeScript worker declares and
 binds its own queue — the consumer owns topology, the framework never touches a
-queue. Bodies over 8 KiB are checked in to S3 and the message carries a ticket,
-which the worker redeems through the claim-check gateway.
+queue. Bodies over the sink's `inline_max_bytes` are checked in to S3 and the
+message carries a claim ref URN, which the worker redeems through the
+claim-check gateway.
 
 ```mermaid
 flowchart LR
@@ -51,7 +52,7 @@ flowchart LR
     I -->|publish| X((exchange ankusa.events))
     X -->|ankusa.# binding| Q[worker's queue]
     Q --> W[TypeScript worker]
-    W -.->|ticket| CC[claim-check :4001]
+    W -.->|claim ref| CC[claim-check :4001]
     CC -.-> S[(S3 / floci)]
 ```
 

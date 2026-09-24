@@ -72,8 +72,8 @@ paths:
       description: |
         The whole `Ankusa.Config` as the node resolved it: defaults, then the
         YAML file, then env overrides. Secrets are redacted by key name
-        (`secret`, `password`, `secret_access_key`, `token`, `api_tokens`,
-        `sasl`) and by shape (a URI password becomes `user:[REDACTED]`), so this
+        (`secret`, `password`, `secret_access_key`, `token`, `sasl`, `nkey_seed`)
+        and by shape (a URI password becomes `user:[REDACTED]`), so this
         is safe to hand to anyone who can reach the port.
       responses:
         '200':

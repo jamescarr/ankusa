@@ -53,7 +53,7 @@ defmodule Ankusa.Sink.Kafka do
     * `:topic`              — required
     * `:key`                — a string, or `(Envelope.t() -> String.t())`;
                               default `"\#{tenant_id}/\#{source_id}"`
-    * `:inline_max_bytes`   — default `8_192`
+    * `:inline_max_bytes`   — default 64 KiB (65,536), configurable
     * `:produce_timeout_ms` — broker ack timeout and the longest `deliver/3`
                               waits for it; default `5_000`
     * `:client`             — atom naming the brod client; default `:default`
@@ -72,7 +72,7 @@ defmodule Ankusa.Sink.Kafka do
     client = client_id(ctx.instance, Keyword.get(opts, :client, :default))
 
     with :ok <- ensure_client(client, opts, timeout),
-         {:ok, payload} <- Message.encode(env, ctx, Keyword.get(opts, :inline_max_bytes, 8_192)),
+         {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
          key = key(env, opts),
          {:ok, partition} <- partition(client, topic, key),
          {:ok, call_ref} <- :brod.produce(client, topic, partition, key, record(env, payload)) do
@@ -85,6 +85,9 @@ defmodule Ankusa.Sink.Kafka do
   # concurrently instead of serializing the whole topic.
   @impl true
   def ordering_key(env, opts), do: key(env, opts)
+
+  @impl true
+  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 
   # Not `:brod.produce/5` with the `:hash` partitioner: that path looks the
   # partition count up with auto-creation allowed, regardless of the client's

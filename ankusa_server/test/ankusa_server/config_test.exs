@@ -21,7 +21,6 @@ defmodule AnkusaServer.ConfigTest do
     "AWS_ACCESS_KEY_ID" => "fixture-key-id",
     "AWS_SECRET_ACCESS_KEY" => "fixture-s3-secret",
     "GCS_BUCKET" => "fixture-gcs-bucket",
-    "CLAIM_CHECK_TOKEN" => "fixture-claim-token",
     "STRIPE_WHSEC" => "whsec_fixture-stripe-secret",
     "SINK_URL" => "http://sink.fixture.invalid/hooks",
     "RABBITMQ_URL" => "amqp://ankusa:fixture-rabbit-password@rabbitmq:5672",
@@ -38,7 +37,7 @@ defmodule AnkusaServer.ConfigTest do
     "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret"
   }
 
-  @fixture_secrets ~w(fixture-pg-password fixture-s3-secret fixture-claim-token
+  @fixture_secrets ~w(fixture-pg-password fixture-s3-secret
                       whsec_fixture-stripe-secret fixture-rabbit-password
                       fixture-kafka-password fixture-nats-password fixture-github-secret
                       whsec_Zml4dHVyZQ==)
@@ -196,6 +195,19 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "sources.a.sinks[0]"
     assert error.message =~ ~s(unknown key "urll")
+  end
+
+  test "the removed claim-check keys tokens/remote/max_bytes are rejected by name" do
+    for key <- ["tokens", "remote", "max_bytes"] do
+      path =
+        tmp_config("""
+        claim_check: {#{key}: null}
+        sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == ~s(claim_check: unknown key "#{key}")
+    end
   end
 
   test "an unknown verifier type lists the valid ones" do
@@ -534,7 +546,12 @@ defmodule AnkusaServer.ConfigTest do
         refute printed =~ secret, "#{path} leaked #{inspect(secret)}"
       end
 
-      assert printed =~ "[REDACTED]"
+      # Every shipped example config redacts at least one secret, so the refute
+      # above is not vacuous. The baked demo config (`rel/ankusa.yml`) is
+      # deliberately secret-free.
+      if path != "rel/ankusa.yml" do
+        assert printed =~ "[REDACTED]", "#{path} should redact at least one secret"
+      end
     end
   end
 

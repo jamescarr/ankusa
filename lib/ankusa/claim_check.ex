@@ -1,216 +1,298 @@
 defmodule Ankusa.ClaimCheck do
   @moduledoc """
-  Claim Check gateway: check bytes in, get a `Ankusa.ClaimCheck.Ticket` back;
-  present the ticket, get the bytes back. Every producer and consumer in the
-  system — Elixir or not — shares this one contract; the storage engine and
-  the network topology (in-process `BlobStore` access vs. an HTTP hop to a
-  `:claim_check`-role node) stay hidden behind it.
+  Claim check: store payloads too large to ride inline in a queue message, and
+  hand each one back by reference.
 
-  This module is both the behaviour and the instance-scoped facade, mirroring
-  `Ankusa.BlobStore`. **The facade is smart; adapters are dumb transport.**
-  `check_in/4`/`redeem/3` build/validate the ticket, enforce the size cap,
-  verify end-to-end integrity, and emit telemetry — every adapter only moves
-  bytes.
+  Ankusa's dispatch pipeline is the only writer. It writes directly to the
+  instance's `Ankusa.BlobStore`, packing every claim a WAL read batch needs for
+  one tenant into one object (`Ankusa.ClaimCheck.Pack`), so one `PUT` covers
+  many claims. Each claim gets an `Ankusa.ClaimCheck.Ref`: a single URN naming
+  the object, the claim's byte range inside it, and its sha256.
 
-  Adapters:
+  Readers either call `redeem/2` in-process, fetch
+  `GET /v1/claims/<tenant>/<object_id>/<offset>/<length>` from a
+  `:claim_check`-role node (`Ankusa.ClaimCheck.Router`), or read the objects
+  straight from the bucket. This module does no authentication or
+  authorization; whatever fronts the gateway decides who may read what.
 
-    * `Ankusa.ClaimCheck.Direct` — calls the instance's configured `BlobStore`
-      in-process. The right choice for any Ankusa node that already holds
-      blob-store credentials, regardless of fleet size.
-    * `Ankusa.ClaimCheck.Remote` — HTTP client against a `:claim_check`-role
-      node. For callers that must not hold blob-store credentials (a non-BEAM
-      consumer, or an Ankusa node deliberately isolated from them).
+  Objects are written once under a freshly minted id and never rewritten, so
+  every read is safe to cache forever.
 
-  Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_tenant`,
-  `:invalid_id`, `:too_large`, `:forbidden`, `:unsupported_ticket_version`)
-  mean retrying won't help — callers should dead-letter. Transient errors
-  (`{:unavailable, reason}`) should be retried. `:unauthorized` is a
-  misconfiguration; treat it as permanent and alert.
+  Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
+  `:invalid_tenant`, `:invalid_id`, `:invalid_range`) mean retrying won't help —
+  callers should dead-letter. `{:unavailable, reason}` is transient.
   """
 
-  alias Ankusa.ClaimCheck.Ticket
-  alias Ankusa.{Config, Telemetry}
+  alias Ankusa.ClaimCheck.{Pack, Ref}
+  alias Ankusa.{BlobStore, Config, Telemetry, UUIDv7}
 
-  @type meta :: %{
-          required(:tenant_id) => String.t(),
+  # ZIP without ZIP64 caps an archive at 65,535 entries (one is the manifest)
+  # and 4 GiB. Packs split well inside both regardless of pack_max_bytes.
+  @max_pack_claims 65_000
+  @max_pack_bytes 0xFFFFFFFF - 16 * 1024 * 1024
+
+  @type item :: %{
           required(:id) => String.t(),
-          optional(:content_type) => String.t() | nil
+          required(:body) => binary(),
+          optional(:tenant_id) => String.t(),
+          optional(:content_type) => String.t() | nil,
+          optional(:received_at) => integer() | nil
         }
 
   @type reason ::
-          :invalid_tenant
+          :invalid_ref
+          | :invalid_tenant
           | :invalid_id
-          | :too_large
+          | :invalid_range
           | :not_found
           | :integrity_mismatch
-          | :unauthorized
-          | :forbidden
-          | :unsupported_ticket_version
           | {:unavailable, term()}
 
-  @doc "Adapter callback: durably store the checked-in bytes under this ticket."
-  @callback store(instance :: atom(), Ticket.t(), data :: iodata(), opts :: keyword()) ::
-              :ok | {:error, reason()}
+  # Uploads are network-bound, so more than the scheduler count is fine; the
+  # cap exists so one huge batch can't open an unbounded number of sockets.
+  @upload_concurrency 16
 
-  @doc "Adapter callback: fetch the raw bytes for this ticket."
-  @callback fetch(instance :: atom(), Ticket.t(), opts :: keyword()) ::
-              {:ok, binary()} | {:error, reason()}
+  # A manifest row per claim: its id, digest, JSON keys, and numbers. The
+  # content type is added on top. Only used to size packs against the cap.
+  @manifest_row_bytes 200
 
   @doc """
-  Check bytes in. Builds and validates the ticket, enforces
-  `claim_check.max_bytes`, stores via the configured (or `:adapter`-overridden)
-  adapter, and returns the ticket only once the adapter reports a durable
-  write.
+  Store `items` for one tenant as a single pack object, with one `PUT`.
 
-  opts:
+  Returns a ref per item id once the write is durable. opts:
 
-    * `:adapter`         — `{module, opts}`, overrides `config.claim_check.adapter`
-    * `:expect_sha256`   — fail with `:integrity_mismatch` unless the computed
-                            digest matches (used by `ClaimCheck.Router` to
-                            verify an `x-ankusa-sha256` header against the body
-                            it actually received)
+    * `:object_id` — the pack's UUIDv7; default a freshly minted one. A
+      one-claim pack can reuse its envelope id so a retried check-in rewrites
+      the same object instead of orphaning one.
   """
-  @spec check_in(atom(), iodata(), meta(), keyword()) :: {:ok, Ticket.t()} | {:error, reason()}
-  def check_in(instance, data, meta, opts \\ []) do
-    %Config{claim_check: cc} = Ankusa.config(instance)
-    {mod, adapter_opts} = Keyword.get(opts, :adapter, cc.adapter)
-    bin = IO.iodata_to_binary(data)
+  @spec check_in(atom(), String.t(), [item()], keyword()) ::
+          {:ok, %{String.t() => Ref.t()}} | {:error, reason()}
+  def check_in(instance, tenant_id, [_ | _] = items, opts \\ []) do
+    object_id = Keyword.get_lazy(opts, :object_id, &UUIDv7.generate/0)
     started = System.monotonic_time()
 
     result =
-      with {:ok, ticket} <- Ticket.new(meta, bin),
-           :ok <- check_size(ticket, cc.max_bytes),
-           :ok <- check_expected_sha(ticket, opts),
-           :ok <- mod.store(instance, ticket, bin, adapter_opts) do
-        {:ok, ticket}
+      with :ok <- Ref.validate_tenant(tenant_id),
+           :ok <- Ref.validate_object_id(object_id) do
+        claims = Enum.map(items, &claim/1)
+        {data, placements} = Pack.build(claims)
+        key = Ref.object_key(tenant_id, object_id)
+
+        case put(instance, key, data) do
+          :ok ->
+            {:ok, refs(tenant_id, object_id, claims, placements)}
+
+          {:error, reason} ->
+            {:error, {:unavailable, reason}}
+        end
       end
 
-    emit(instance, :check_in, started, byte_size(bin), meta, mod, result)
-    result
-  end
-
-  @doc """
-  Redeem a ticket for its bytes. Fetches via the configured (or
-  `:adapter`-overridden) adapter, then verifies `size` and `sha256`
-  end-to-end — integrity is never trusted from the adapter or a remote
-  server, only checked here at the redeemer.
-  """
-  @spec redeem(atom(), Ticket.t(), keyword()) :: {:ok, binary()} | {:error, reason()}
-  def redeem(instance, %Ticket{} = ticket, opts \\ []) do
-    %Config{claim_check: cc} = Ankusa.config(instance)
-    {mod, adapter_opts} = Keyword.get(opts, :adapter, cc.adapter)
-    started = System.monotonic_time()
-
-    result =
-      with {:ok, bin} <- mod.fetch(instance, ticket, adapter_opts),
-           :ok <- verify_integrity(ticket, bin) do
-        {:ok, bin}
-      end
-
-    emit(
-      instance,
-      :redeem,
-      started,
-      ticket.size,
-      %{tenant_id: ticket.tenant_id, id: ticket.id},
-      mod,
-      result
+    Telemetry.emit(
+      [:claim_check, :check_in],
+      %{
+        duration: System.monotonic_time() - started,
+        size: Enum.reduce(items, 0, &(byte_size(&1.body) + &2)),
+        claims: length(items)
+      },
+      %{
+        instance: instance,
+        tenant_id: tenant_id,
+        object_id: object_id,
+        result: result_tag(result)
+      }
     )
 
     result
   end
 
   @doc """
-  Validate `config.claim_check` at boot. Raises (fails boot fast) rather than
-  surfacing a misconfiguration as a runtime 503/401 storm:
+  Store many items, possibly for many tenants: group them by tenant, split each
+  group into packs of at most `claim_check.pack_max_bytes`, and upload the
+  packs concurrently. A body larger than the cap gets a pack of its own.
 
-    * a `:claim_check`-role node configured with the `Remote` adapter (it
-      would proxy to itself)
-    * `claim_check.max_bytes < max_body_bytes` on a `:dispatch` node (would
-      dead-letter hooks the edge legitimately accepted)
-    * `claim_check.retention_days` set with a non-`LocalFS` claim store (the
+  Returns a result per item id. A failed pack fails only its own items.
+  """
+  @spec check_in_batch(atom(), [item()]) :: %{String.t() => {:ok, Ref.t()} | {:error, reason()}}
+  def check_in_batch(_instance, []), do: %{}
+
+  def check_in_batch(instance, items) do
+    %Config{claim_check: %{pack_max_bytes: cap}} = Ankusa.config(instance)
+
+    items
+    |> Enum.group_by(& &1.tenant_id)
+    |> Enum.flat_map(fn {tenant_id, group} ->
+      group |> split(cap) |> Enum.map(&{tenant_id, &1})
+    end)
+    |> Task.async_stream(
+      fn {tenant_id, pack} -> {pack, check_in(instance, tenant_id, pack)} end,
+      max_concurrency: @upload_concurrency,
+      timeout: :infinity
+    )
+    |> Enum.reduce(%{}, fn {:ok, {pack, result}}, acc ->
+      Enum.reduce(pack, acc, fn item, acc ->
+        Map.put(acc, item.id, item_result(result, item.id))
+      end)
+    end)
+  end
+
+  @doc """
+  Redeem a ref (a `%Ref{}` or its URN) for its bytes: one ranged read, then an
+  end-to-end sha256 check. Integrity is never trusted from the store.
+  """
+  @spec redeem(atom(), Ref.t() | String.t()) :: {:ok, binary()} | {:error, reason()}
+  def redeem(instance, urn) when is_binary(urn) do
+    with {:ok, ref} <- Ref.parse(urn), do: redeem(instance, ref)
+  end
+
+  def redeem(instance, %Ref{} = ref) do
+    started = System.monotonic_time()
+
+    result =
+      with {:ok, bin} <- read(instance, ref.tenant_id, ref.object_id, ref.offset, ref.length) do
+        if sha256(bin) == ref.sha256, do: {:ok, bin}, else: {:error, :integrity_mismatch}
+      end
+
+    Telemetry.emit(
+      [:claim_check, :redeem],
+      %{duration: System.monotonic_time() - started, size: ref.length},
+      %{
+        instance: instance,
+        tenant_id: ref.tenant_id,
+        object_id: ref.object_id,
+        result: result_tag(result)
+      }
+    )
+
+    result
+  end
+
+  @doc """
+  Read `length` bytes at `offset` in an object, with no digest check: the
+  gateway's byte transport. A range that runs past the end of the object is
+  `:invalid_range`; a missing object is `:not_found`.
+  """
+  @spec read(atom(), String.t(), String.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, binary()} | {:error, reason()}
+  def read(instance, tenant_id, object_id, offset, length) do
+    with :ok <- Ref.validate_tenant(tenant_id),
+         :ok <- Ref.validate_object_id(object_id) do
+      key = Ref.object_key(tenant_id, object_id)
+
+      case BlobStore.get_range(instance, key, offset, length) do
+        {:ok, bin} when byte_size(bin) == length -> {:ok, bin}
+        {:ok, _short} -> {:error, :invalid_range}
+        {:error, :not_found} -> {:error, :not_found}
+        # LocalFS reads past the end as :eof; S3 and GCS answer 416.
+        {:error, :eof} -> {:error, :invalid_range}
+        {:error, {:status, 416, _body}} -> {:error, :invalid_range}
+        {:error, reason} -> {:error, {:unavailable, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Validate `config.claim_check` at boot. Raises rather than surfacing a
+  misconfiguration at runtime:
+
+    * `claim_check.pack_max_bytes` must be a positive integer
+    * `claim_check.retention_days` set with a non-`LocalFS` blob store (the
       sweeper only ever covers `LocalFS`; S3/GCS need a bucket lifecycle rule)
+    * `max_body_bytes` of 4 GiB or more: a pack can't hold a body that large
   """
   @spec validate_config!(Config.t()) :: :ok
   def validate_config!(%Config{claim_check: cc} = config) do
-    if Config.role?(config, :claim_check) do
-      case cc.adapter do
-        {Ankusa.ClaimCheck.Remote, _} ->
-          raise ArgumentError,
-                "claim_check.adapter must not be Ankusa.ClaimCheck.Remote on a :claim_check-role node " <>
-                  "(it would proxy the API to itself) — use Ankusa.ClaimCheck.Direct"
-
-        _ ->
-          :ok
-      end
+    unless is_integer(cc.pack_max_bytes) and cc.pack_max_bytes > 0 do
+      raise ArgumentError,
+            "claim_check.pack_max_bytes must be a positive integer, got #{inspect(cc.pack_max_bytes)}"
     end
 
-    if Config.role?(config, :dispatch) and cc.max_bytes < config.max_body_bytes do
+    if config.max_body_bytes >= 0xFFFFFFFF do
       raise ArgumentError,
-            "claim_check.max_bytes (#{cc.max_bytes}) is smaller than max_body_bytes " <>
-              "(#{config.max_body_bytes}) — a dispatch node would dead-letter hooks the edge " <>
-              "already accepted"
+            "max_body_bytes must be under 4 GiB: a claim pack can't hold a larger body"
     end
 
     if cc.retention_days != nil do
-      case cc.adapter do
-        {Ankusa.ClaimCheck.Direct, direct_opts} ->
-          blob_store = Keyword.get(direct_opts, :blob_store, config.storage.blob_store)
-
-          case blob_store do
-            {Ankusa.BlobStore.LocalFS, _} ->
-              :ok
-
-            {other, _} ->
-              raise ArgumentError,
-                    "claim_check.retention_days is set but the claim store is #{inspect(other)} — " <>
-                      "the LocalFS sweeper doesn't cover it. Use a bucket lifecycle rule on the " <>
-                      "claims/ prefix instead, and leave retention_days nil."
-          end
+      case config.storage.blob_store do
+        {Ankusa.BlobStore.LocalFS, _} ->
+          :ok
 
         {other, _} ->
           raise ArgumentError,
-                "claim_check.retention_days is set but claim_check.adapter is #{inspect(other)}, " <>
-                  "not Direct — the sweeper only runs against a directly-held BlobStore"
+                "claim_check.retention_days is set but the blob store is #{inspect(other)} — " <>
+                  "the LocalFS sweeper doesn't cover it. Use a bucket lifecycle rule on the " <>
+                  "claims/ prefix instead, and leave retention_days nil."
       end
     end
 
     :ok
   end
 
-  defp check_size(%Ticket{size: size}, max_bytes) when size > max_bytes, do: {:error, :too_large}
-  defp check_size(_ticket, _max_bytes), do: :ok
+  # ── internals ─────────────────────────────────────────────────────────────
 
-  defp check_expected_sha(%Ticket{sha256: sha256}, opts) do
-    case Keyword.get(opts, :expect_sha256) do
-      nil -> :ok
-      ^sha256 -> :ok
-      _mismatch -> {:error, :integrity_mismatch}
-    end
+  defp claim(item) do
+    %{
+      id: item.id,
+      body: item.body,
+      sha256: sha256(item.body),
+      content_type: Map.get(item, :content_type),
+      received_at: Map.get(item, :received_at)
+    }
   end
 
-  defp verify_integrity(%Ticket{} = ticket, bin) do
-    cond do
-      byte_size(bin) != ticket.size ->
-        {:error, :integrity_mismatch}
-
-      Base.encode16(:crypto.hash(:sha256, bin), case: :lower) != ticket.sha256 ->
-        {:error, :integrity_mismatch}
-
-      true ->
-        :ok
-    end
+  defp refs(tenant_id, object_id, claims, placements) do
+    claims
+    |> Enum.zip(placements)
+    |> Map.new(fn {claim, placement} ->
+      {claim.id,
+       %Ref{
+         tenant_id: tenant_id,
+         object_id: object_id,
+         offset: placement.offset,
+         length: placement.length,
+         sha256: claim.sha256
+       }}
+    end)
   end
 
-  defp emit(instance, op, started, size, meta, adapter, result) do
-    duration = System.monotonic_time() - started
+  # Greedy, order-preserving: start a new pack when the next item would push
+  # this one past the cap (or past what a ZIP can hold). A single oversized
+  # item still gets a pack of its own.
+  defp split(items, cap) do
+    cap = min(cap, @max_pack_bytes)
 
-    Telemetry.emit(
-      [:claim_check, op],
-      %{duration: duration, size: size},
-      Map.merge(meta, %{instance: instance, adapter: adapter, result: result_tag(result)})
-    )
+    {packs, current, _size, _count} =
+      Enum.reduce(items, {[], [], 0, 0}, fn item, {packs, current, size, count} ->
+        cost = cost(item)
+
+        if current != [] and (size + cost > cap or count == @max_pack_claims) do
+          {[Enum.reverse(current) | packs], [item], cost, 1}
+        else
+          {packs, [item | current], size + cost, count + 1}
+        end
+      end)
+
+    Enum.reverse([Enum.reverse(current) | packs])
   end
+
+  defp cost(item) do
+    content_type = Map.get(item, :content_type) || ""
+
+    byte_size(item.body) + Pack.entry_overhead(item.id) + @manifest_row_bytes +
+      byte_size(content_type)
+  end
+
+  # A blob store is external code: a crash in its write is an unavailable
+  # store, not a crashed caller.
+  defp put(instance, key, data) do
+    BlobStore.put(instance, key, data)
+  rescue
+    error -> {:error, error}
+  end
+
+  defp item_result({:ok, refs}, id), do: {:ok, Map.fetch!(refs, id)}
+  defp item_result({:error, reason}, _id), do: {:error, reason}
+
+  defp sha256(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
 
   defp result_tag({:ok, _}), do: :ok
   defp result_tag({:error, reason}), do: reason

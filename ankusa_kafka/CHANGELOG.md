@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serializes deliveries sharing a key and runs different keys concurrently —
   "per-key ordering" is stated to the pipeline instead of assumed.
 
+### Changed
+
+- The message `claim` field is now a claim-check ref URN string instead of a
+  nested ticket object — breaking for consumers; the message `v` stays `1`.
+
 ## [0.1.0] - 2026-09-23
 
 ### Added

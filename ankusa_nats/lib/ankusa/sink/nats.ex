@@ -76,7 +76,7 @@ defmodule Ankusa.Sink.NATS do
                                failover, not fan-out: one connection to one
                                server at a time.
     * `:subject`             — required; a string, or `(Envelope.t() -> String.t())`
-    * `:inline_max_bytes`    — default `8_192`
+    * `:inline_max_bytes`    — default 64 KiB (65,536), configurable
     * `:publish_timeout_ms`  — how long `deliver/3` waits for the JetStream
                                publish ack; default `5_000`
     * `:connection`          — atom naming the gnat connection; default `:default`
@@ -99,7 +99,6 @@ defmodule Ankusa.Sink.NATS do
   alias Ankusa.Envelope
   alias Ankusa.Sink.Message
 
-  @default_inline_max_bytes 8_192
   @default_publish_timeout_ms 5_000
 
   # gnat's connection_settings, minus the `:host`/`:port` this sink derives from
@@ -113,12 +112,7 @@ defmodule Ankusa.Sink.NATS do
     conn = connection(ctx.instance, Keyword.get(opts, :connection, :default))
 
     with :ok <- ensure_connection(conn, opts),
-         {:ok, payload} <-
-           Message.encode(
-             env,
-             ctx,
-             Keyword.get(opts, :inline_max_bytes, @default_inline_max_bytes)
-           ) do
+         {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
       publish(conn, subject, payload, headers(env), timeout)
     end
   end
@@ -128,6 +122,9 @@ defmodule Ankusa.Sink.NATS do
   # minus the partition indirection.
   @impl true
   def ordering_key(env, opts), do: subject(env, opts)
+
+  @impl true
+  def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 
   # The publish is a request, not a `Gnat.pub/3`: `pub/3` returns once the bytes
   # are handed to the socket, while the whole point here is to wait for

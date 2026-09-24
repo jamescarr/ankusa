@@ -4,7 +4,7 @@
 #   topology : all roles in one container, the claim-check gateway included
 #              (port 4001)
 #   sink     : NATS_SERVERS ("host:port,host:port"), subject NATS_SUBJECT
-#   secrets  : STRIPE_WHSEC, NATS_USERNAME, NATS_PASSWORD, CLAIM_CHECK_TOKEN
+#   secrets  : STRIPE_WHSEC, NATS_USERNAME, NATS_PASSWORD
 #
 # Messages are `Ankusa.Sink.Message`, byte-identical to what the Kafka and
 # RabbitMQ sinks produce, so one consumer reads any of them. Bodies above
@@ -21,9 +21,8 @@
 # (with a jwt for operator-mode accounts). Drop the block entirely for a server
 # that needs no credentials.
 #
-# The claim-check gateway's tokens are OPTIONAL: drop the `tokens:` block (and
-# CLAIM_CHECK_TOKEN) and the gateway is open, with auth delegated to whatever
-# fronts port 4001.
+# The claim-check gateway performs no authentication: keep port 4001 internal
+# and put your proxy, mesh, or network policy in front of it.
 
 node:
   roles: [edge, dispatch, storage, claim_check]
@@ -34,10 +33,9 @@ admin:
 
 claim_check:
   port: 4001
-  max_bytes: 8000000
-  tokens:
-    - token: "${CLAIM_CHECK_TOKEN}"
-      tenants: all
+  # Target size of one pack object; a body larger than this still gets a pack
+  # of its own. Core defaults this to 16 MiB.
+  pack_max_bytes: 16777216
 
 sources:
   stripe:

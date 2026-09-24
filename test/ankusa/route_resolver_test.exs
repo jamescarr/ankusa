@@ -103,5 +103,21 @@ defmodule Ankusa.RouteResolverTest do
       config = start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => []})
       assert post(config, "/webhooks/stripe", "x").status == 404
     end
+
+    test "a URL tenant outside the grammar is a 404 and nothing reaches the WAL" do
+      config = start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => []})
+
+      for tenant <- ["ac.me", "ac%2Fme", String.duplicate("a", 65)] do
+        assert post(config, "/webhooks/#{tenant}/stripe", "x").status == 404, tenant
+      end
+
+      assert WAL.read(config.instance, -1, 10) == []
+    end
+  end
+
+  test "a source whose static tenant is outside the grammar fails when it is built" do
+    assert_raise ArgumentError, ~r/must match \[A-Za-z0-9_-\]\{1,64\}/, fn ->
+      Ankusa.Source.new("stripe", tenant_id: "acme corp")
+    end
   end
 end

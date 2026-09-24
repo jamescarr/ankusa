@@ -52,13 +52,13 @@ defmodule Ankusa.Config do
               roll_ms: 30_000,
               interval_ms: 1_000
             },
-            # claim check gateway — check bytes in, get a ticket back
+            # claim check: payloads too large to ride inline in a queue message
             claim_check: %{
-              adapter: {Ankusa.ClaimCheck.Direct, []},
-              max_bytes: 8_000_000,
               # :claim_check role only
               port: 4001,
-              api_tokens: %{},
+              # target size of one pack object; a body larger than this still
+              # gets a pack of its own
+              pack_max_bytes: 16 * 1024 * 1024,
               # LocalFS retention only; nil disables the sweeper
               retention_days: nil,
               sweep_interval_ms: 3_600_000

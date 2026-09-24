@@ -12,6 +12,11 @@ follows [Semantic Versioning](https://semver.org/).
   RabbitMQ orders per queue, and the routing key decides the queue. Dispatch
   now serializes deliveries sharing a key and runs different keys concurrently.
 
+### Changed
+
+- The message `claim` field is now a claim-check ref URN string instead of a
+  nested ticket object — breaking for consumers; the message `v` stays `1`.
+
 ## [0.1.0] - 2026-09-23
 
 ### Added

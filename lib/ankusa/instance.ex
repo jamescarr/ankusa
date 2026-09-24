@@ -83,12 +83,10 @@ defmodule Ankusa.Instance do
 
   defp claim_check_children(config, _opts) do
     if Config.role?(config, :claim_check) do
-      if config.claim_check.api_tokens == %{} do
-        Logger.warning(
-          "[ankusa] claim-check API on :#{config.claim_check.port} has no api_tokens and is " <>
-            "unauthenticated; protect it with your own proxy or network policy"
-        )
-      end
+      Logger.warning(
+        "[ankusa] claim-check API on :#{config.claim_check.port} performs no authentication; " <>
+          "front it with your own proxy, mesh, or network policy"
+      )
 
       [
         Supervisor.child_spec(

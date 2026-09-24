@@ -130,8 +130,7 @@ defmodule Ankusa.Sink.NATSTest do
     decoded = JSON.decode!(payload)
     refute Map.has_key?(decoded, "body_base64")
 
-    assert {:ok, ticket} = ClaimCheck.Ticket.from_map(decoded["claim"])
-    assert {:ok, ^body} = ClaimCheck.redeem(inst, ticket)
+    assert {:ok, ^body} = ClaimCheck.redeem(inst, decoded["claim"])
   end
 
   test "subject accepts a static string or a 1-arity function", %{

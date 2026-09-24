@@ -60,7 +60,7 @@ Every top-level section, with its keys and defaults:
 | `dispatch` | `poll_ms` (200), `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
 | `wal` | `type` (`disk` \| `postgres`), `postgres.url` (or the discrete `host`/`port`/`username`/`password`/`database` keys, never both), `pool_size` (10), `ssl` (false), `migrate` (true) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
-| `claim_check` | `port` (4001), `max_bytes` (8000000), `retention_days` (null disables the sweeper), optional `tokens`, optional `remote` |
+| `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
 | `sources` | One entry per catch-URL source — see below |
 
 `wal.postgres` and `storage.s3`/`storage.gcs` are read only when the matching
@@ -127,12 +127,12 @@ URL) — cannot be described by this engine. They need a bespoke
 | --- | --- |
 | `log` | — |
 | `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `ordered` (`false`; `true` serializes deliveries per `{tenant_id, source_id}`, in `seq` order). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
-| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (8192). |
-| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (8192), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
-| `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (8192), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist — see [`delivery.md`](delivery.md#sinknats--subject-delivery). |
+| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536). |
+| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
+| `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist — see [`delivery.md`](delivery.md#sinknats--subject-delivery). |
 
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
-the message carries a ticket — see [`claim-check.md`](claim-check.md).
+the message carries a claim reference — see [`claim-check.md`](claim-check.md).
 
 ### Environment overrides
 
@@ -213,10 +213,8 @@ config :ankusa,
     interval_ms: 1_000
   },
   claim_check: %{
-    adapter: {Ankusa.ClaimCheck.Direct, []},
-    max_bytes: 8_000_000,
     port: 4001,
-    api_tokens: %{},
+    pack_max_bytes: 16_777_216,
     retention_days: nil,
     sweep_interval_ms: 3_600_000
   },
@@ -248,10 +246,8 @@ config :ankusa,
 | `storage.roll_bytes` | `16 MiB` | Roll a new segment past this size. |
 | `storage.roll_ms` | `30_000` | ...or after this long, whichever comes first. |
 | `storage.interval_ms` | `1_000` | Compactor tick interval. |
-| `claim_check.adapter` | `{Ankusa.ClaimCheck.Direct, []}` | `{module, opts}` implementing `Ankusa.ClaimCheck`. See [`claim-check.md`](claim-check.md). |
-| `claim_check.max_bytes` | `8_000_000` | Hard cap on a checked-in body. |
 | `claim_check.port` | `4001` | The `:claim_check` role's Bandit port. |
-| `claim_check.api_tokens` | `%{}` | `%{token => :all \| [tenant_id, ...]}`. Optional: empty leaves the gateway open, with authentication delegated to whatever fronts the port. |
+| `claim_check.pack_max_bytes` | `16_777_216` | Target size of one claim pack; a body larger than this still gets a pack of its own. Must be a positive integer. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
@@ -318,7 +314,7 @@ the map.
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce — `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish — `ankusa_nats` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
-| `Ankusa.ClaimCheck` | Check bytes in, redeem by ticket | `ClaimCheck.Direct` (in-process `BlobStore`) | `ClaimCheck.Remote` (HTTP, `:claim_check` role) |
+| `Ankusa.ClaimCheck` | Pack claims into the object store, redeem by reference | — (the instance's `BlobStore`) | — |
 | `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | — |
 
 Swapping any of these is a one-line config change — `wal: {Ankusa.WAL.Postgres,

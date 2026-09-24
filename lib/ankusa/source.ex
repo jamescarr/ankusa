@@ -33,14 +33,24 @@ defmodule Ankusa.Source do
           sinks: [{module(), keyword()}]
         }
 
-  @doc "Build a source from a keyword list / map, applying defaults."
+  @doc """
+  Build a source from a keyword list / map, applying defaults. Raises if
+  `:tenant_id` isn't `[A-Za-z0-9_-]{1,64}`: the tenant names a storage
+  partition and a claim-check path segment, so a bad one fails at boot.
+  """
   @spec new(String.t(), keyword() | map()) :: t()
   def new(id, opts) do
     opts = Map.new(opts)
+    tenant_id = Map.get(opts, :tenant_id, "default")
+
+    unless Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
+      raise ArgumentError,
+            "source #{inspect(id)}: tenant_id #{inspect(tenant_id)} must match [A-Za-z0-9_-]{1,64}"
+    end
 
     %__MODULE__{
       id: id,
-      tenant_id: Map.get(opts, :tenant_id, "default"),
+      tenant_id: tenant_id,
       verifier: Map.get(opts, :verifier, {Ankusa.Verifier.None, []}),
       dedup: Map.get(opts, :dedup, {Ankusa.DedupKey.Rules, []}),
       on_verify_failure: Map.get(opts, :on_verify_failure, :reject),

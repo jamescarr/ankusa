@@ -24,14 +24,26 @@ defmodule Ankusa.Dispatch.Pipeline do
   bounds admitted-but-unfinished work, so a dead sink cannot walk the pipeline
   into an OOM.
 
+  ## Claim check
+
+  A body larger than one of its sinks' `c:Ankusa.Sink.inline_max_bytes/1` is
+  checked in **once**, before any of its sinks run. Each WAL read batch's
+  claims are packed per tenant and uploaded together
+  (`Ankusa.ClaimCheck.check_in_batch/2`) in a task, while the batch's jobs wait
+  in a FIFO of staged batches. Batches release in read order, so per-lane
+  `seq` order holds. The ref rides to every sink and every retry in
+  `ctx.claim`. If a pack fails, its jobs still run: the first attempt checks the
+  body in on its own, and the ref is reused across that job's retries.
+
   `start_link/1` opts: `:instance`, `:config`, and optional `:max_sleep_ms`
   which clamps every backoff sleep (so deterministic tests don't hang).
   """
 
   use GenServer
 
-  alias Ankusa.{Sink, SourceStore, Telemetry, WAL}
+  alias Ankusa.{ClaimCheck, Sink, SourceStore, Telemetry, WAL}
   alias Ankusa.Dispatch.DLQ
+  alias Ankusa.Sink.Message
 
   # ── public API ────────────────────────────────────────────────────────────
 
@@ -93,7 +105,12 @@ defmodule Ankusa.Dispatch.Pipeline do
       running: %{},
       completed: 0,
       waiters: [],
-      window_full?: false
+      window_full?: false,
+      # read batches admitted but held back until their claims are packed, in
+      # read order: %{ref: pack task ref | nil, jobs: [job]}
+      staged: :queue.new(),
+      # pack task ref => true
+      packing: %{}
     }
 
     {:ok, schedule(state)}
@@ -109,6 +126,26 @@ defmodule Ankusa.Dispatch.Pipeline do
   def handle_info(:poll, state) do
     state = state |> fill() |> start_jobs() |> persist_cursor()
     {:noreply, schedule(state)}
+  end
+
+  def handle_info({ref, {:packed, results}}, %{packing: packing} = state)
+      when is_map_key(packing, ref) do
+    Process.demonitor(ref, [:flush])
+
+    state
+    |> packed(ref, results)
+    |> start_jobs()
+    |> maybe_reply_waiters()
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{packing: packing} = state)
+      when is_map_key(packing, ref) do
+    # The pack task died without a result: its jobs fall back to checking
+    # their bodies in one at a time.
+    state
+    |> packed(ref, %{})
+    |> start_jobs()
+    |> maybe_reply_waiters()
   end
 
   def handle_info({ref, result}, %{running: running} = state) when is_map_key(running, ref) do
@@ -184,7 +221,8 @@ defmodule Ankusa.Dispatch.Pipeline do
     else
       requested = min(dispatch.batch, dispatch.max_inflight - map_size(state.remaining))
       envelopes = WAL.read(state.instance, state.read_seq, requested)
-      {state, memo} = Enum.reduce(envelopes, {state, memo}, &admit/2)
+      {state, memo, jobs} = Enum.reduce(envelopes, {state, memo, []}, &admit/2)
+      state = stage(state, Enum.reverse(jobs))
 
       # A full read means there is likely more; a short one means the WAL has no
       # more to give right now.
@@ -196,12 +234,12 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp admit(env, {state, memo}) do
+  defp admit(env, {state, memo, jobs}) do
     {sinks, memo} = sinks_for(state.instance, env.source_id, memo)
 
     if sinks == [] do
       # Nothing to deliver: handled, and it does not enter the window at all.
-      {%{state | read_seq: env.seq, completed: state.completed + 1}, memo}
+      {%{state | read_seq: env.seq, completed: state.completed + 1}, memo, jobs}
     else
       bytes = byte_size(env.body)
 
@@ -213,17 +251,105 @@ defmodule Ankusa.Dispatch.Pipeline do
           inflight_bytes: state.inflight_bytes + bytes
       }
 
-      state =
-        Enum.reduce(sinks, state, fn {mod, opts} = sink, st ->
-          enqueue_job(st, %{
-            seq: env.seq,
-            env: env,
-            sink: sink,
-            lane: lane(mod, env, opts)
-          })
+      jobs =
+        Enum.reduce(sinks, jobs, fn {mod, opts} = sink, jobs ->
+          [
+            %{
+              seq: env.seq,
+              env: env,
+              sink: sink,
+              lane: lane(mod, env, opts),
+              needs_claim: needs_claim?(mod, opts, env),
+              claim: nil
+            }
+            | jobs
+          ]
         end)
 
-      {state, memo}
+      {state, memo, jobs}
+    end
+  end
+
+  defp needs_claim?(mod, opts, env) do
+    case Sink.inline_max_bytes(mod, opts) do
+      nil -> false
+      max -> env.size > max
+    end
+  end
+
+  # ── claim check staging ───────────────────────────────────────────────────
+
+  # A batch with no claims and nothing staged ahead of it goes straight to the
+  # lanes. Anything else joins the FIFO, so no job is ever enqueued ahead of a
+  # lower seq still waiting on its pack.
+  defp stage(state, []), do: state
+
+  defp stage(state, jobs) do
+    items =
+      jobs
+      |> Enum.filter(& &1.needs_claim)
+      |> Enum.uniq_by(& &1.env.id)
+      |> Enum.map(&Message.claim_item(&1.env))
+
+    cond do
+      items == [] and :queue.is_empty(state.staged) ->
+        Enum.reduce(jobs, state, &enqueue_job(&2, &1))
+
+      items == [] ->
+        %{state | staged: :queue.in(%{ref: nil, jobs: jobs}, state.staged)}
+
+      true ->
+        instance = state.instance
+
+        task =
+          Task.Supervisor.async_nolink(state.task_sup, fn ->
+            {:packed, ClaimCheck.check_in_batch(instance, items)}
+          end)
+
+        %{
+          state
+          | staged: :queue.in(%{ref: task.ref, jobs: jobs}, state.staged),
+            packing: Map.put(state.packing, task.ref, true)
+        }
+    end
+  end
+
+  # Attach each job's ref (a failed pack leaves it nil, so the job checks its
+  # body in itself), mark the batch ready, and release every ready batch at the
+  # head of the FIFO.
+  defp packed(state, ref, results) do
+    staged =
+      :queue.filter(
+        fn
+          %{ref: ^ref, jobs: jobs} ->
+            [%{ref: nil, jobs: Enum.map(jobs, &attach_claim(&1, results))}]
+
+          batch ->
+            [batch]
+        end,
+        state.staged
+      )
+
+    release_staged(%{state | staged: staged, packing: Map.delete(state.packing, ref)})
+  end
+
+  defp attach_claim(%{needs_claim: true, env: env} = job, results) do
+    case Map.get(results, env.id) do
+      {:ok, ref} -> %{job | claim: ref}
+      _ -> job
+    end
+  end
+
+  defp attach_claim(job, _results), do: job
+
+  defp release_staged(state) do
+    case :queue.peek(state.staged) do
+      {:value, %{ref: nil, jobs: jobs}} ->
+        state = Enum.reduce(jobs, state, &enqueue_job(&2, &1))
+        release_staged(%{state | staged: :queue.drop(state.staged)})
+
+      _ ->
+        state
     end
   end
 
@@ -309,14 +435,15 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp deliver(%{env: env, sink: {mod, opts}} = job, instance, config, max_sleep, attempt) do
-    ctx = %{
-      instance: instance,
-      source_id: env.source_id,
-      tenant_id: env.tenant_id,
-      attempt: attempt
-    }
+    # A job whose pack failed checks its body in here, once; the ref then rides
+    # along to every retry.
+    {job, result} =
+      case ensure_claim(job, instance) do
+        {:ok, job} -> {job, safe_deliver(mod, env, ctx(job, instance, attempt), opts)}
+        {:error, reason} -> {job, {:error, {:claim_check, reason}}}
+      end
 
-    case safe_deliver(mod, env, ctx, opts) do
+    case result do
       :ok ->
         Telemetry.emit([:dispatch, :stop], %{}, %{
           instance: instance,
@@ -345,6 +472,23 @@ defmodule Ankusa.Dispatch.Pipeline do
             {:dead, {:sink, mod, reason}}
         end
     end
+  end
+
+  defp ensure_claim(%{needs_claim: true, claim: nil, env: env} = job, instance) do
+    with {:ok, ref} <- Message.check_in(instance, env), do: {:ok, %{job | claim: ref}}
+  end
+
+  defp ensure_claim(job, _instance), do: {:ok, job}
+
+  defp ctx(%{env: env, claim: claim}, instance, attempt) do
+    ctx = %{
+      instance: instance,
+      source_id: env.source_id,
+      tenant_id: env.tenant_id,
+      attempt: attempt
+    }
+
+    if claim, do: Map.put(ctx, :claim, claim), else: ctx
   end
 
   # A sink is user code: it may raise, throw, or exit (a `GenServer.call` into a
@@ -451,7 +595,8 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   defp idle?(state) do
     map_size(state.running) == 0 and :queue.is_empty(state.runnable) and
-      :gb_sets.is_empty(state.pending)
+      :gb_sets.is_empty(state.pending) and :queue.is_empty(state.staged) and
+      map_size(state.packing) == 0
   end
 
   # ── scheduling ────────────────────────────────────────────────────────────

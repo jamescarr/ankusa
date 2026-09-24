@@ -1,11 +1,11 @@
 defmodule Ankusa.HttpClient do
   @moduledoc """
   The one place the outbound adapters issue HTTP requests: `Ankusa.BlobStore.S3`,
-  `Ankusa.BlobStore.GCS`, `Ankusa.ClaimCheck.Remote` and `Ankusa.Sink.Http`.
+  `Ankusa.BlobStore.GCS`, and `Ankusa.Sink.Http`.
 
-  Those four share more than a client. Every request they send is a *function of
-  its own bytes* — a signed S3 URL, a claim ticket, a forwarded hook body — which
-  makes four options part of each adapter's contract rather than a preference:
+  Those three share more than a client. Every request they send is a *function of
+  its own bytes* — a signed S3 URL, a forwarded hook body — which makes four
+  options part of each adapter's contract rather than a preference:
 
     * `retry: false` — retries belong to the framework's own loops
       (`Ankusa.RetryPolicy`, the batcher's backoff). Req's default retry would

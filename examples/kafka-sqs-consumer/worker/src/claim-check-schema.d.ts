@@ -4,51 +4,30 @@
  */
 
 export interface paths {
-    "/v1/claims/{tenant_id}/{id}": {
+    "/v1/claims/{tenant_id}/{object_id}/{offset}/{length}": {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description Any non-empty UTF-8 string, percent-encoded in the path. The server
-                 *     enforces a 256-byte limit on the decoded value (JSON Schema
-                 *     `maxLength` counts characters, not bytes).
-                 */
+                /** @description The claim's tenant. Never needs encoding. */
                 tenant_id: components["parameters"]["TenantId"];
-                /** @description Caller-supplied RFC 9562 UUIDv7, lowercase and hyphenated. */
-                id: components["parameters"]["ClaimId"];
+                /** @description The pack object's id, an RFC 9562 UUIDv7, lowercase and hyphenated. */
+                object_id: components["parameters"]["ObjectId"];
+                /** @description Byte offset of the claim inside the object. Decimal, no leading zeros. */
+                offset: components["parameters"]["Offset"];
+                /** @description Length of the claim in bytes. Decimal, no leading zeros, at least 1. */
+                length: components["parameters"]["Length"];
             };
             cookie?: never;
         };
         /**
-         * Redeem a claim
-         * @description Returns the stored bytes. The server does not verify integrity. The
-         *     redeemer MUST check `size` and `sha256` against its ticket.
+         * Read a claim's bytes
+         * @description Returns exactly `length` bytes starting at `offset` in the object.
+         *     Objects are written once and never rewritten, so a response is
+         *     cacheable forever. The server does not verify integrity: the reader
+         *     MUST check the bytes against the sha256 in its ref.
          */
-        get: operations["redeemClaim"];
-        /**
-         * Check in a claim
-         * @description Stores the raw request body under a key derived from `tenant_id` and
-         *     `id`. Idempotent: repeating the same request overwrites the same
-         *     object. The ticket is returned only after a durable write.
-         */
-        put: operations["checkInClaim"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/openapi.yaml": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** This document */
-        get: operations["getOpenApiDocument"];
+        get: operations["readClaim"];
         put?: never;
         post?: never;
         delete?: never;
@@ -78,40 +57,20 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @example acme */
+        TenantId: string;
         /** @example 0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10 */
         UUIDv7: string;
-        Sha256: string;
         /**
-         * @description Canonical, versioned claim ticket. Shared by the HTTP API, the
-         *     RabbitMQ `claim` field, and every redeemer. Carries no storage key.
-         * @example {
-         *       "v": 1,
-         *       "tenant_id": "acme",
-         *       "id": "0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10",
-         *       "size": 3145728,
-         *       "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-         *       "content_type": "application/json"
-         *     }
+         * @description A claim-check ref, as carried in a queue message's `claim` field.
+         *     Segments: tenant, object id, offset, length, and the claim's sha256
+         *     (lowercase hex).
+         * @example urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-3bea8a9a07c1e8dcaa4c1b816815c35a29b4fb585ba6ecc70ea44840a794cfb3
          */
-        Ticket: {
-            /**
-             * @description Format indicator. Redeemers reject any other value.
-             * @constant
-             */
-            v: 1;
-            tenant_id: string;
-            id: components["schemas"]["UUIDv7"];
-            size: number;
-            sha256: components["schemas"]["Sha256"];
-            /** @description Advisory only. Never stored as object metadata. */
-            content_type?: string | null;
-        };
-        TicketEnvelope: {
-            ticket: components["schemas"]["Ticket"];
-        };
+        Ref: string;
         Error: {
             /** @enum {string} */
-            error: "invalid_tenant" | "invalid_id" | "not_found" | "too_large" | "integrity_mismatch" | "store_unavailable";
+            error: "invalid_tenant" | "invalid_id" | "invalid_range" | "not_found" | "store_unavailable";
         };
         Health: {
             /** @constant */
@@ -119,7 +78,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description `invalid_tenant` or `invalid_id`. Permanent. */
+        /** @description `invalid_tenant`, `invalid_id`, or `invalid_range` (a malformed offset or length). Permanent. */
         BadRequest: {
             headers: {
                 [name: string]: unknown;
@@ -128,7 +87,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `not_found`. Permanent. Dead-letter, do not requeue. */
+        /** @description `not_found`: no such object, or no such route. Permanent. Dead-letter, do not requeue. */
         NotFound: {
             headers: {
                 [name: string]: unknown;
@@ -137,17 +96,8 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `too_large`. Body exceeds `claim_check.max_bytes`. Permanent. */
-        TooLarge: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["Error"];
-            };
-        };
-        /** @description `integrity_mismatch`. Body does not match `x-ankusa-sha256`. Permanent. */
-        IntegrityMismatch: {
+        /** @description `invalid_range`: the range runs past the end of the object. Permanent. */
+        RangeNotSatisfiable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -158,7 +108,8 @@ export interface components {
         /** @description `store_unavailable`. Transient. Retry. */
         StoreUnavailable: {
             headers: {
-                "Retry-After": components["headers"]["RetryAfter"];
+                /** @description Seconds to wait before retrying. */
+                "Retry-After"?: number;
                 [name: string]: unknown;
             };
             content: {
@@ -167,37 +118,34 @@ export interface components {
         };
     };
     parameters: {
-        /**
-         * @description Any non-empty UTF-8 string, percent-encoded in the path. The server
-         *     enforces a 256-byte limit on the decoded value (JSON Schema
-         *     `maxLength` counts characters, not bytes).
-         */
-        TenantId: string;
-        /** @description Caller-supplied RFC 9562 UUIDv7, lowercase and hyphenated. */
-        ClaimId: components["schemas"]["UUIDv7"];
+        /** @description The claim's tenant. Never needs encoding. */
+        TenantId: components["schemas"]["TenantId"];
+        /** @description The pack object's id, an RFC 9562 UUIDv7, lowercase and hyphenated. */
+        ObjectId: components["schemas"]["UUIDv7"];
+        /** @description Byte offset of the claim inside the object. Decimal, no leading zeros. */
+        Offset: string;
+        /** @description Length of the claim in bytes. Decimal, no leading zeros, at least 1. */
+        Length: string;
     };
     requestBodies: never;
-    headers: {
-        /** @description Seconds to wait before retrying. */
-        RetryAfter: number;
-    };
+    headers: never;
     pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    redeemClaim: {
+    readClaim: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /**
-                 * @description Any non-empty UTF-8 string, percent-encoded in the path. The server
-                 *     enforces a 256-byte limit on the decoded value (JSON Schema
-                 *     `maxLength` counts characters, not bytes).
-                 */
+                /** @description The claim's tenant. Never needs encoding. */
                 tenant_id: components["parameters"]["TenantId"];
-                /** @description Caller-supplied RFC 9562 UUIDv7, lowercase and hyphenated. */
-                id: components["parameters"]["ClaimId"];
+                /** @description The pack object's id, an RFC 9562 UUIDv7, lowercase and hyphenated. */
+                object_id: components["parameters"]["ObjectId"];
+                /** @description Byte offset of the claim inside the object. Decimal, no leading zeros. */
+                offset: components["parameters"]["Offset"];
+                /** @description Length of the claim in bytes. Decimal, no leading zeros, at least 1. */
+                length: components["parameters"]["Length"];
             };
             cookie?: never;
         };
@@ -206,80 +154,18 @@ export interface operations {
             /** @description The claim's bytes. */
             200: {
                 headers: {
+                    /** @description Always `public, max-age=31536000, immutable`. */
+                    "Cache-Control"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/octet-stream": unknown;
+                    "application/octet-stream": string;
                 };
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
+            416: components["responses"]["RangeNotSatisfiable"];
             503: components["responses"]["StoreUnavailable"];
-        };
-    };
-    checkInClaim: {
-        parameters: {
-            query?: never;
-            header?: {
-                /** @description Expected lowercase hex SHA-256 of the body. A mismatch returns 422. */
-                "x-ankusa-sha256"?: components["schemas"]["Sha256"];
-            };
-            path: {
-                /**
-                 * @description Any non-empty UTF-8 string, percent-encoded in the path. The server
-                 *     enforces a 256-byte limit on the decoded value (JSON Schema
-                 *     `maxLength` counts characters, not bytes).
-                 */
-                tenant_id: components["parameters"]["TenantId"];
-                /** @description Caller-supplied RFC 9562 UUIDv7, lowercase and hyphenated. */
-                id: components["parameters"]["ClaimId"];
-            };
-            cookie?: never;
-        };
-        /**
-         * @description Raw bytes, at most `claim_check.max_bytes`. The request
-         *     `content-type`, if any, is recorded in the ticket as advisory
-         *     metadata only.
-         */
-        requestBody: {
-            content: {
-                "*/*": unknown;
-            };
-        };
-        responses: {
-            /** @description Claim stored. */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TicketEnvelope"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            413: components["responses"]["TooLarge"];
-            422: components["responses"]["IntegrityMismatch"];
-            503: components["responses"]["StoreUnavailable"];
-        };
-    };
-    getOpenApiDocument: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The OpenAPI document served by this node. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/yaml": unknown;
-                };
-            };
         };
     };
     getHealth: {

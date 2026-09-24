@@ -70,9 +70,7 @@ defmodule AnkusaServer.Config do
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
-  @claim_check_keys ~w(port max_bytes retention_days tokens remote)
-  @token_keys ~w(token tenants)
-  @remote_keys ~w(url token)
+  @claim_check_keys ~w(port retention_days pack_max_bytes)
   @source_keys ~w(tenant on_verify_failure verify dedup sinks)
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
@@ -555,58 +553,9 @@ defmodule AnkusaServer.Config do
       claim_check:
         []
         |> put_opt(:port, int_opt(claim_check, "port", ["claim_check"]))
-        |> put_opt(:max_bytes, int_opt(claim_check, "max_bytes", ["claim_check"]))
+        |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", ["claim_check"]))
         |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
-        |> put_opt(:api_tokens, api_tokens(claim_check))
-        |> put_opt(:adapter, claim_check_adapter(claim_check))
     ]
-  end
-
-  defp api_tokens(claim_check) do
-    case claim_check["tokens"] do
-      nil ->
-        nil
-
-      tokens when is_list(tokens) ->
-        tokens
-        |> Enum.with_index()
-        |> Map.new(fn {token, index} ->
-          path = ["claim_check", "tokens", index]
-          token = section!(token, @token_keys, path)
-
-          {required_string!(token, "token", path), token_scope(token["tenants"], path)}
-        end)
-
-      other ->
-        raise ConfigError, message: type_error(["claim_check", "tokens"], "a list", other)
-    end
-  end
-
-  defp token_scope(nil, _path), do: :all
-  defp token_scope("all", _path), do: :all
-
-  defp token_scope(tenants, path) when is_list(tenants) do
-    Enum.map(tenants, &expect_string(&1, path ++ ["tenants"]))
-  end
-
-  defp token_scope(other, path) do
-    raise ConfigError,
-      message: type_error(path ++ ["tenants"], "a list of tenants or \"all\"", other)
-  end
-
-  defp claim_check_adapter(claim_check) do
-    case claim_check["remote"] do
-      nil ->
-        nil
-
-      remote ->
-        path = ["claim_check", "remote"]
-        remote = section!(remote, @remote_keys, path)
-
-        {Ankusa.ClaimCheck.Remote,
-         [url: required_string!(remote, "url", path)]
-         |> put_opt(:token, string_opt(remote, "token", path))}
-    end
   end
 
   # ── sources ─────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ defmodule Ankusa.Sink.MessageTest do
   use ExUnit.Case, async: true
 
   alias Ankusa.{ClaimCheck, Envelope, UUIDv7}
+  alias Ankusa.ClaimCheck.Ref
   alias Ankusa.Sink.Message
 
   setup do
@@ -43,7 +44,8 @@ defmodule Ankusa.Sink.MessageTest do
     refute Map.has_key?(decoded, "claim")
   end
 
-  test "one byte over inline_max_bytes is claim-checked and redeems to the body", %{ctx: ctx} do
+  test "one byte over inline_max_bytes carries a claim ref string that redeems to the body",
+       %{ctx: ctx} do
     body = :crypto.strong_rand_bytes(101)
     env = envelope(body)
 
@@ -54,8 +56,24 @@ defmodule Ankusa.Sink.MessageTest do
     assert decoded["size"] == 101
     refute Map.has_key?(decoded, "body_base64")
 
-    assert {:ok, ticket} = ClaimCheck.Ticket.from_map(decoded["claim"])
-    assert {:ok, ^body} = ClaimCheck.redeem(ctx.instance, ticket)
+    assert "urn:ankusa:claim:v1:t1:" <> _ = decoded["claim"]
+    assert {:ok, ^body} = ClaimCheck.redeem(ctx.instance, decoded["claim"])
+  end
+
+  test "a ref dispatch already checked in is used as-is, with no second write", %{ctx: ctx} do
+    ref = %Ref{
+      tenant_id: "t1",
+      object_id: UUIDv7.generate(),
+      offset: 66,
+      length: 101,
+      sha256: String.duplicate("0", 64)
+    }
+
+    env = envelope(:crypto.strong_rand_bytes(101))
+
+    assert {:ok, json} = Message.encode(env, Map.put(ctx, :claim, ref), 100)
+    assert JSON.decode!(json)["claim"] == Ref.to_string(ref)
+    assert Ankusa.BlobStore.list(ctx.instance, "claims/") == []
   end
 
   test "a failed check-in is tagged :claim_check", %{ctx: ctx} do

@@ -194,9 +194,11 @@ So:
   ships unauthenticated on purpose: it cannot know your identity provider, and a
   half-authentication scheme is worse than none. `GET /v1/config` is redacted
   anyway, because a proxy may let many people read it.
-- **Put 4001 (claim check) behind the same.** It exists so non-BEAM consumers
-  can fetch large payloads without holding storage credentials; bearer tokens
-  are optional and only worth configuring if your setup wants them.
+- **Put 4001 (claim check) behind your proxy, mesh, or network policy, the
+  same as 4002.** The claim-check API performs no authentication of its own:
+  it exists so non-BEAM consumers can fetch large payloads without holding
+  storage credentials. Keep it internal and decide who may read what in the
+  layer in front of it.
 - **Point Prometheus at 4002 through your proxy, with read-only credentials.**
 
 The fleet compose file is the worked example:

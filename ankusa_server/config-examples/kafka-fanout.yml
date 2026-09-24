@@ -4,17 +4,15 @@
 #   topology : all roles in one container, the claim-check gateway included
 #              (port 4001)
 #   sink     : KAFKA_BROKERS ("host:port,host:port"), topic KAFKA_TOPIC
-#   secrets  : STRIPE_WHSEC, KAFKA_USERNAME, KAFKA_SASL_PASSWORD,
-#              CLAIM_CHECK_TOKEN
+#   secrets  : STRIPE_WHSEC, KAFKA_USERNAME, KAFKA_SASL_PASSWORD
 #
 # Messages are `Ankusa.Sink.Message`: the body rides inline up to
 # `inline_max_bytes`, and above that it is checked in to the claim check and
 # the message carries a ticket instead. Consumers redeem the ticket at the
 # gateway on port 4001, with no blob-store credentials of their own.
 #
-# The claim-check gateway's tokens are OPTIONAL: drop the `tokens:` block (and
-# CLAIM_CHECK_TOKEN) and the gateway is open, with auth delegated to whatever
-# fronts port 4001.
+# The claim-check gateway performs no authentication: keep port 4001 internal
+# and put your proxy, mesh, or network policy in front of it.
 
 node:
   roles: [edge, dispatch, storage, claim_check]
@@ -25,10 +23,9 @@ admin:
 
 claim_check:
   port: 4001
-  max_bytes: 8000000
-  tokens:
-    - token: "${CLAIM_CHECK_TOKEN}"
-      tenants: all
+  # Target size of one pack object; a body larger than this still gets a pack
+  # of its own. Core defaults this to 16 MiB.
+  pack_max_bytes: 16777216
 
 sources:
   stripe:

@@ -9,8 +9,9 @@ defmodule AnkusaExample.Ingest.Application do
 
   The same image runs the `:claim_check`-role gateway
   (`ANKUSA_ROLES=claim_check`, see `docker-compose.yml`): both point
-  `storage.blob_store` at the same bucket, so a ticket checked in by ingest
-  redeems through the gateway's HTTP API, which is all the worker can reach.
+  `storage.blob_store` at the same bucket, so a claim ref checked in by
+  ingest redeems through the gateway's HTTP API, which is all the worker can
+  reach.
   """
 
   use Application
@@ -38,8 +39,7 @@ defmodule AnkusaExample.Ingest.Application do
       storage: %{blob_store: {Ankusa.BlobStore.S3, s3_opts()}},
       source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}},
       claim_check: %{
-        port: env_int("CLAIM_CHECK_PORT", 4001),
-        api_tokens: %{env("CLAIM_CHECK_TOKEN", "dev-claim-check-token") => :all}
+        port: env_int("CLAIM_CHECK_PORT", 4001)
       }
     )
   end
