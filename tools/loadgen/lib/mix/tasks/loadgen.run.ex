@@ -77,6 +77,7 @@ defmodule Mix.Tasks.Loadgen.Run do
 
     sorted_latencies = Enum.sort(merged.latencies)
     accepted_per_s = if duration_s > 0, do: merged.accepted / duration_s, else: 0.0
+    sent_per_s = if duration_s > 0, do: merged.sent / duration_s, else: 0.0
 
     report = %{
       sent: merged.sent,
@@ -85,6 +86,7 @@ defmodule Mix.Tasks.Loadgen.Run do
       shed: merged.shed,
       errors: merged.errors,
       duration_s: duration_s,
+      sent_per_s: sent_per_s,
       accepted_per_s: accepted_per_s,
       latency_ms: %{
         p50: percentile_ms(sorted_latencies, 0.50),
@@ -97,6 +99,14 @@ defmodule Mix.Tasks.Loadgen.Run do
     File.write!(report_path, JSON.encode!(report))
 
     print_report(report)
+
+    if is_integer(rate) and rate > 0 and sent_per_s < 0.95 * rate do
+      IO.write(
+        :stderr,
+        "loadgen: generator fell behind (sent_per_s=#{Float.round(sent_per_s * 1.0, 2)} < " <>
+          "rate=#{rate}); raise --concurrency\n"
+      )
+    end
 
     if merged.accepted == 0 do
       Mix.raise("loadgen: zero requests were accepted (201) -- refusing to report success")
@@ -125,34 +135,44 @@ defmodule Mix.Tasks.Loadgen.Run do
     if now >= deadline_ms do
       acc
     else
-      maybe_pace(opts.rate, opts.concurrency, i, acc.k, t0_ms)
+      # Open-loop pacing: request number `n = k*C + i` is *scheduled* at
+      # `t0 + n/rate`, so the offered rate is flat from the first request
+      # instead of ramping up as each worker takes its own staggered start.
+      intended_start_us = maybe_pace(opts.rate, opts.concurrency, i, acc.k, t0_ms)
 
       if System.monotonic_time(:millisecond) >= deadline_ms do
         acc
       else
         acc
-        |> perform_request(opts)
+        |> perform_request(opts, intended_start_us)
         |> then(&worker_loop(i, opts, t0_ms, deadline_ms, &1))
       end
     end
   end
 
-  defp maybe_pace(nil, _concurrency, _i, _k, _t0_ms), do: :ok
+  # Returns the µs timestamp this request was *scheduled* to start at, or `nil`
+  # when unpaced (closed loop), so latency is never measured from a late send.
+  defp maybe_pace(nil, _concurrency, _i, _k, _t0_ms), do: nil
 
   defp maybe_pace(rate, concurrency, i, k, t0_ms) when is_integer(rate) and rate > 0 do
-    target_ms = t0_ms + round((i + k) * (concurrency / rate) * 1000)
+    n = k * concurrency + i
+    intended_start_us = t0_ms * 1000 + div(n * 1_000_000, rate)
+    target_ms = t0_ms + round(n * 1000 / rate)
     sleep_ms = target_ms - System.monotonic_time(:millisecond)
     if sleep_ms > 0, do: Process.sleep(sleep_ms)
-    :ok
+    intended_start_us
   end
 
-  defp perform_request(acc, opts) do
+  defp perform_request(acc, opts, intended_start_us) do
     {kind, body} = build_body(acc, opts.dup_ratio, opts.body_bytes)
 
     t_start = System.monotonic_time(:microsecond)
     result = send_one(opts.url, body)
     t_end = System.monotonic_time(:microsecond)
-    latency_us = t_end - t_start
+
+    # Coordinated omission: when paced, the clock starts at the scheduled send
+    # time, so a stalled generator shows up as latency instead of vanishing.
+    latency_us = if intended_start_us, do: t_end - intended_start_us, else: t_end - t_start
 
     acc = %{acc | sent: acc.sent + 1, k: acc.k + 1, latencies: [latency_us | acc.latencies]}
 
@@ -192,7 +212,9 @@ defmodule Mix.Tasks.Loadgen.Run do
     %{
       acc
       | accepted: acc.accepted + 1,
-        bodies: [req_body | acc.bodies],
+        # Bounded pool: only the 1024 most recent acked bodies are dedup sources,
+        # so a long run can't grow this list without limit.
+        bodies: Enum.take([req_body | acc.bodies], 1024),
         accepted_list: [{id, sha} | acc.accepted_list]
     }
   end
@@ -297,6 +319,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     shed            #{report.shed}
     errors          #{report.errors}
     duration_s      #{Float.round(report.duration_s * 1.0, 3)}
+    sent_per_s      #{Float.round(report.sent_per_s * 1.0, 2)}
     accepted_per_s  #{Float.round(report.accepted_per_s * 1.0, 2)}
     latency p50 ms  #{report.latency_ms.p50}
     latency p95 ms  #{report.latency_ms.p95}
