@@ -11,7 +11,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-24
+
 ### Added
+
+- `Ankusa.BlobStore.Azure`: Azure Blob Storage. Carries no credential
+  dependency — a pre-generated `:sas_token` (Shared Access Signature) or a
+  `:token_provider` MFA (Entra ID bearer token) is appended to each request;
+  the adapter does no Shared-Key signing of its own. Local testing against the
+  `floci-az` emulator in `docker-compose.yml`.
+- `Ankusa.BlobStore.OCI`: Oracle Cloud Infrastructure Object Storage. OCI has
+  no bearer/SAS shortcut, so this adapter signs its own requests
+  (RSA-SHA256 *Signature version 1*) with OTP's `:public_key` — no dependency
+  — pinned against OCI's published reference signature (computed independently
+  with OpenSSL) in `test/ankusa/blob_store_oci_signing_test.exs`. Local
+  testing against the `floci-oci` emulator in `docker-compose.yml`.
 
 - Admin API (`Ankusa.Admin.Router`), started when `admin.enabled` is true
   (default `false`, port `4002`): `GET /health`, `GET /metrics`,
@@ -182,5 +196,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   defaults to `false`, so depending on `ankusa` never binds a port as a side
   effect.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.1.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.0...HEAD
+[0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.1.0...ankusa-v0.2.0
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa-v0.1.0

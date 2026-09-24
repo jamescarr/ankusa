@@ -1,15 +1,15 @@
 name: ankusa
 
-# Local S3 + GCS emulators for developing/testing the object-store blob
-# adapters (`Ankusa.BlobStore.S3`, `Ankusa.BlobStore.GCS`) without a cloud
-# account. See https://floci.io.
+# Local emulators for developing/testing the object-store blob adapters
+# (`Ankusa.BlobStore.{S3,GCS,Azure,OCI}`) without a cloud account. See
+# https://floci.io.
 #
-#   docker compose up -d          # start both emulators + bucket bootstrap
+#   docker compose up -d          # start the emulators + bucket/container bootstrap
 #   mix test --include integration
 #   docker compose down -v        # tear down (drops emulator state)
 #
-# Endpoints/buckets match the defaults `Ankusa.BlobStore.S3`/`Ankusa.BlobStore.GCS`
-# expect in test/ankusa/blob_store_*_test.exs and the README examples.
+# Endpoints/buckets match the defaults the adapters expect in
+# test/ankusa/blob_store_*_test.exs and the README examples.
 
 services:
   # S3-compatible object store (AWS emulator; also fronts SQS/Kafka/etc if
@@ -60,3 +60,45 @@ services:
           -H 'Content-Type: application/json' \
           -d "{\"name\":\"$$ANKUSA_GCS_BUCKET\"}" || true
         echo "gcs bucket $$ANKUSA_GCS_BUCKET ready"
+
+  # Azure Blob emulator. `dev` auth mode: credentials are not validated, so
+  # the adapter's unauthenticated requests work against it unchanged.
+  floci-az:
+    image: floci/floci-az:latest
+    ports:
+      - "4577:4577"
+
+  # Creates the Blob container once floci-az is answering requests.
+  azure-bootstrap:
+    image: curlimages/curl:8.10.1
+    depends_on: [floci-az]
+    environment:
+      ANKUSA_AZURE_CONTAINER: ankusa-segments-dev
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until curl -sf http://floci-az:4577/health >/dev/null 2>&1; do echo "waiting for floci-az..."; sleep 1; done
+        curl -sf -X PUT "http://floci-az:4577/devstoreaccount1/$$ANKUSA_AZURE_CONTAINER?restype=container" || true
+        echo "azure container $$ANKUSA_AZURE_CONTAINER ready"
+
+  # OCI Object Storage emulator. Request signatures are parsed for tenancy
+  # context but never verified, so any locally generated RSA key works.
+  floci-oci:
+    image: floci/floci-oci:latest
+    ports:
+      - "4599:4599"
+
+  # Creates the Object Storage bucket once floci-oci is answering requests.
+  oci-bootstrap:
+    image: curlimages/curl:8.10.1
+    depends_on: [floci-oci]
+    environment:
+      ANKUSA_OCI_BUCKET: ankusa-segments-dev
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until curl -sf http://floci-oci:4599/_floci-oci/health >/dev/null 2>&1; do echo "waiting for floci-oci..."; sleep 1; done
+        curl -sf -X POST "http://floci-oci:4599/n/floci-local/b/" \
+          -H 'Content-Type: application/json' \
+          -d "{\"name\":\"$$ANKUSA_OCI_BUCKET\",\"compartmentId\":\"ocid1.tenancy.oc1..flocilocaltenancy0000000000000000000000000000000000000000\"}" || true
+        echo "oci bucket $$ANKUSA_OCI_BUCKET ready"

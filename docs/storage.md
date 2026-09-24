@@ -148,6 +148,8 @@ too — see [`claim-check.md#retention`](claim-check.md#retention).
 | `BlobStore.LocalFS` | none | Default. Atomic writes (temp file + rename). `get_range` uses `:file.pread/3`, never slurps the whole segment. |
 | `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature) — the implementation behind the official aws-elixir SDK — with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
 | `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS — the adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
+| `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: it appends a pre-generated `:sas_token` (Shared Access Signature) or a `:token_provider` MFA (Entra ID bearer) to every request, and does no Shared-Key signing of its own — a SAS is the least-privilege credential Azure recommends anyway. Unauthenticated against the `floci-az` emulator. |
+| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests — OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list` — using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
 
 ```elixir
 # S3 / MinIO / R2
@@ -166,12 +168,37 @@ config :ankusa,
   storage: %{
     blob_store: {Ankusa.BlobStore.GCS, bucket: "ankusa-segments", token_provider: {MyApp.Auth, :gcs_token, []}}
   }
+
+# Azure Blob Storage — either a pre-generated SAS or an Entra ID token provider
+config :ankusa,
+  storage: %{
+    blob_store:
+      {Ankusa.BlobStore.Azure,
+       account_name: "myaccount",
+       container: "ankusa-segments",
+       sas_token: System.get_env("AZURE_BLOB_SAS")}
+       # endpoint: "http://localhost:4577/devstoreaccount1"  # only for floci-az; omit for real Azure
+  }
+
+# OCI Object Storage — signs its own requests with an API signing key
+config :ankusa,
+  storage: %{
+    blob_store:
+      {Ankusa.BlobStore.OCI,
+       region: "us-ashburn-1",
+       namespace: System.get_env("OCI_NAMESPACE"),
+       bucket: "ankusa-segments",
+       tenancy_ocid: System.get_env("OCI_TENANCY"),
+       user_ocid: System.get_env("OCI_USER"),
+       key_fingerprint: System.get_env("OCI_KEY_FINGERPRINT"),
+       private_key: File.read!(System.fetch_env!("OCI_KEY_FILE"))}
+  }
 ```
 
 Local dev/test emulators via [floci](https://floci.io) (no cloud account):
 
 ```sh
-docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588), buckets auto-created
+docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599), buckets/containers auto-created
 mix test --include integration
 docker compose down -v
 ```
