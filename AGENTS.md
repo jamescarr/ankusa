@@ -3,7 +3,7 @@
 ## Run the checks before calling work done
 
 Format, warnings-as-errors, and tests — for **every** package the change
-touches, not just the one you edited. All three adapter packages depend on
+touches, not just the one you edited. All four adapter packages depend on
 `ankusa` core, so a core change isn't finished until they pass too.
 
 | Package | Run from its directory |
@@ -12,6 +12,7 @@ touches, not just the one you edited. All three adapter packages depend on
 | `ankusa_postgres` | the same three, in `ankusa_postgres/` (after `docker compose up -d --wait`) |
 | `ankusa_rabbitmq` | the same three, in `ankusa_rabbitmq/` (after `docker compose up -d --wait`) |
 | `ankusa_kafka` | the same three, in `ankusa_kafka/` (after `docker compose up -d --wait`) |
+| `ankusa_nats` | the same three, in `ankusa_nats/` (after `docker compose up -d --wait`) |
 | `examples/*/ingest_app` | `mix compile --warnings-as-errors` |
 | `examples/*/worker` | `npx tsc --noEmit` |
 | `examples/oban-consumer/ingest_app` | `mix compile --warnings-as-errors` |

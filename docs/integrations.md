@@ -18,8 +18,8 @@ constructed in memory doesn't. `{:error, reason}` triggers the source's
 `Ankusa.RetryPolicy`: Ankusa retries, then dead-letters (see
 [`delivery.md`](delivery.md)). A sink never talks to a job framework's SDK
 directly unless it's your own in-process sink (see the Oban section below);
-the shipped sinks (`Sink.Log`, `Sink.Http`, `Sink.RabbitMQ`, `Sink.Kafka`) are
-all framework-neutral.
+the shipped sinks (`Sink.Log`, `Sink.Http`, `Sink.RabbitMQ`, `Sink.Kafka`,
+`Sink.NATS`) are all framework-neutral.
 
 ## HTTP handoff (any language)
 
@@ -215,10 +215,11 @@ applies to every sink on this page.
 
 ## Queue handoff
 
-Consumers already on RabbitMQ or Kafka don't need an HTTP hop at all —
-`Ankusa.Sink.RabbitMQ` and `Ankusa.Sink.Kafka` publish `Ankusa.Sink.Message`
-(the same wire format on both transports) directly to a broker your worker
-fleet already consumes from. See [`delivery.md`](delivery.md) for the full
+Consumers already on RabbitMQ, Kafka, or NATS JetStream don't need an HTTP hop
+at all — `Ankusa.Sink.RabbitMQ`, `Ankusa.Sink.Kafka`, and `Ankusa.Sink.NATS`
+publish `Ankusa.Sink.Message` (the same wire format on all three transports)
+directly to a broker your worker fleet already consumes from. See
+[`delivery.md`](delivery.md) for the full
 message contract and reconnection/confirm semantics, and the two existing
 worked examples —
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/)

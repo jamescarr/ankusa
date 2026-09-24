@@ -37,6 +37,7 @@ handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`.
 | `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
 | `Sink.RabbitMQ` | `:amqp` — separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF) — separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
+| `Sink.NATS` | `:gnat` — separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
 
 ```elixir
 sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
@@ -156,6 +157,68 @@ registered atom, so it is `:"ankusa_kafka.<instance>.<client>"` — both parts
 come from config, so the number of atoms is bounded and two instances never
 collide. Unreachable brokers, unknown topics, timeouts, and oversized
 messages all surface as `{:error, reason}`.
+
+### `Sink.NATS` — subject delivery
+
+The same story into NATS JetStream, publishing the identical
+`Ankusa.Sink.Message`: an ingest fleet produces to a subject on a stream the
+operator owns, and a consumer — BEAM or not — reads with the JetStream
+client of its language.
+
+```elixir
+sinks: [
+  {Ankusa.Sink.NATS,
+   servers: ["localhost:4222"],
+   subject: "ankusa.events",                     # or a 1-arity fun: &"ankusa.#{&1.source_id}"
+   inline_max_bytes: 8_192,                      # above this the message carries a claim ticket
+   auth: [username: "ankusa", password: "..."],  # or token:, or nkey_seed: + jwt:
+   publish_timeout_ms: 5_000}
+]
+```
+
+**It never creates the stream.** A stream's storage, retention, replicas, and
+— the part that matters here — its set of subjects are one operator's capacity
+and ordering contract, the same way a Kafka topic's partition count is. So the
+sink publishes to a subject and stops there; a subject no stream covers is
+`{:error, :no_stream}`, straight into `Ankusa.RetryPolicy`, never a silently
+auto-created stream with someone else's retention policy. Create it yourself,
+once, where your topology lives:
+
+```sh
+nats stream add ANKUSA --subjects="ankusa.>"
+```
+
+**`deliver/3` returns `:ok` only once the stream has it.** The publish is a
+NATS request with a reply inbox, and the reply is JetStream's own publish
+acknowledgement — `{"stream":"ANKUSA","seq":42}` — awaited up to
+`:publish_timeout_ms` (default 5s). A timeout, a rejected message
+(`{"error":{"code":400,"description":"message size exceeds maximum allowed"}}`),
+a permission violation, or no answering stream all come back as
+`{:error, reason}`. Note that an error ack carries `"seq": 0` *and* an
+`"error"` in the same body, so a sink that only checks for a stream name and a
+sequence would report a refused hook as delivered.
+
+**The subject is the address, the headers are the metadata.** Each message
+carries the same five headers the Kafka sink sets (`ankusa_id`,
+`ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`,
+`content_type`), so a consumer parses one set of fields regardless of
+transport. Unlike Kafka, there is no separate record key: NATS has no
+partition-ordering contract to lean on and no partition count to change under
+you. Order within a subject is the order the stream received it.
+
+**Connection lifecycle**: one gnat connection per `(instance, connection)`,
+started on demand by the first `deliver/3` under `ankusa_nats`'s own
+`DynamicSupervisor` (`ankusa` core unchanged). gnat completes the handshake
+before the start returns, so a `deliver/3` either has a live connection or a
+concrete reason it doesn't (`:econnrefused`, `:timeout`, an authorization
+error). A lost socket stops that connection — the child is `:temporary`, so
+nothing crash-loops, and the next `deliver/3` reconnects inside the source's
+retry policy. Server names are tried in the order given.
+
+**At-least-once, as everywhere else.** A publish whose ack is lost can still
+have been stored, so consumers dedupe on `id`. JetStream's own
+`Nats-Msg-Id` duplicate window is the consumer's tool, deliberately not set
+here: a hook replayed from the DLQ is a *new*, intended publish.
 
 ## `Ankusa.RetryPolicy`
 

@@ -4,7 +4,7 @@
 
 `mise run check` runs every check CI runs, across every package and example.
 Format, warnings-as-errors, and tests for **every** package the change touches —
-all three adapter packages depend on `ankusa` core, so a core change isn't
+all four adapter packages depend on `ankusa` core, so a core change isn't
 finished until they pass too.
 
 The per-package matrix is in [`AGENTS.md`](AGENTS.md) (which also has the
