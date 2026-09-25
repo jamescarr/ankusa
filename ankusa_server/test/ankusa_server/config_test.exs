@@ -343,7 +343,7 @@ defmodule AnkusaServer.ConfigTest do
           tenant: acme
           on_verify_failure: accept_flag
           verify: {type: standard_webhooks, secret: "whsec_abc", tolerance_seconds: 60}
-          dedup: {type: rules, header: "x-event-id", json_path: "data.meta.id"}
+          dedup_key: {type: rules, header: "x-event-id", json_path: "data.meta.id"}
           sinks:
             - {type: http, url: "http://sink.invalid/h", method: put, timeout_ms: 250,
                headers: {x-one: "1"}}
@@ -367,7 +367,9 @@ defmodule AnkusaServer.ConfigTest do
              {Ankusa.Verifier.Hmac,
               [scheme: :standard_webhooks, secret: "whsec_abc", tolerance: 60]}
 
-    assert source.dedup ==
+    assert source.dedup == :auto
+
+    assert source.dedup_key ==
              {Ankusa.DedupKey.Rules, [header: "x-event-id", json: ["data", "meta", "id"]]}
 
     assert [

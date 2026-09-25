@@ -45,6 +45,15 @@ defmodule Ankusa.Config do
               # ...and the max sum of their body bytes
               max_inflight_bytes: 134_217_728,
               retry: {Ankusa.RetryPolicy.Exponential, []},
+              # the idempotent receiver: how long a dedup key stays remembered,
+              # measured between the commit timestamps of the records involved
+              # rather than against the wall clock at dispatch time
+              dedup_ttl_ms: 7 * 24 * 60 * 60 * 1000,
+              dedup_store: {Ankusa.DedupStore.ETS, []},
+              # logical dispatch partitions. One receiver per partition and one
+              # consumer per partition, so an event's copies are never split
+              # between two consumers: raise this only with more dispatchers.
+              partitions: 1,
               # dispatch lease TTL; the pipeline renews every `ttl_ms / 3`
               lease_ttl_ms: 15_000,
               # stop (or, for a standby, wait) this long before the lease's

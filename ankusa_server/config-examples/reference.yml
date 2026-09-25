@@ -146,10 +146,14 @@ sources:
       type: stripe
       secret: "${STRIPE_WHSEC}"
       tolerance_seconds: 300
+    # What dispatch does with a provider's retry: `auto` dedups on the key
+    # `dedup_key` extracts, `none` delivers every copy (and without this key,
+    # `auto` is the default).
+    dedup: auto
     # rules | stripe | github. rules takes header and/or json_path
     # (a dot path into the JSON body); with neither, it tries the `webhook-id`
     # header then JSON `id`.
-    dedup:
+    dedup_key:
       type: rules
       header: webhook-id
       json_path: data.id
@@ -209,13 +213,13 @@ sources:
   # A second source, showing the other verifier and the quarantine policy.
   standard:
     verify: {type: standard_webhooks, secret: "${STANDARD_WEBHOOKS_SECRET}"}
-    dedup: {type: rules}
+    dedup_key: {type: rules}
     on_verify_failure: quarantine
     sinks: [{type: log}]
 
   github:
     verify: {type: github, secret: "${GITHUB_WEBHOOK_SECRET}"}
-    dedup: {type: github}
+    dedup_key: {type: github}
     on_verify_failure: accept_flag
     sinks: [{type: log}]
 

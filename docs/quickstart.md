@@ -117,7 +117,7 @@ Add the provider as a second source under `sources:` in `ankusa.yml`:
 ```yaml
   stripe:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
-    dedup: {type: stripe}
+    dedup_key: {type: stripe}
     on_verify_failure: quarantine
     sinks:
       - {type: http, url: "http://worker:8080/hooks"}

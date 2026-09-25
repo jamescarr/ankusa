@@ -335,7 +335,7 @@ defmodule Ankusa.WAL.DiskLog do
              seen}
 
           true ->
-            env = %{env | seq: seq}
+            env = Ankusa.WAL.stamp_commit(%{env | seq: seq})
             payload = Envelope.to_binary(env)
             frame = frame(seq, payload)
             plen = byte_size(payload)

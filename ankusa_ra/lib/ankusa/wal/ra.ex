@@ -476,6 +476,8 @@ defmodule Ankusa.WAL.Ra do
   end
 
   defp record(%Envelope{} = env) do
+    env = Ankusa.WAL.stamp_commit(env)
+
     {env.id, env.tenant_id || "", env.source_id, env.dedup_key,
      Envelope.to_binary(%{env | seq: nil})}
   end

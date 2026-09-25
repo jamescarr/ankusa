@@ -42,7 +42,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   use GenServer
 
   alias Ankusa.{ClaimCheck, Sink, SourceStore, Telemetry, WAL}
-  alias Ankusa.Dispatch.DLQ
+  alias Ankusa.Dispatch.{DLQ, Receiver}
   alias Ankusa.Sink.Message
   alias Ankusa.WAL.LeaseHelpers
 
@@ -119,6 +119,12 @@ defmodule Ankusa.Dispatch.Pipeline do
       runnable: :queue.new(),
       running: %{},
       completed: 0,
+      # the idempotent receiver, one per partition, opened on first use. Each
+      # holds its own dedup ledger, so a partition's copies are decided by
+      # exactly one consumer.
+      receivers: %{},
+      # records dropped as duplicates of an event already delivered
+      deduplicated: 0,
       waiters: [],
       window_full?: false,
       # read batches admitted but held back until their claims are packed, in
@@ -294,39 +300,84 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp admit(env, {state, memo, jobs}) do
-    {sinks, memo} = sinks_for(state.instance, env.source_id, memo)
+    {source, memo} = source_for(state.instance, env.source_id, memo)
+    sinks = if source, do: source.sinks, else: []
+    {drop?, state} = receiver_decision(state, source, env)
 
-    if sinks == [] do
-      # Nothing to deliver: handled, and it does not enter the window at all.
-      {%{state | read_seq: env.seq, completed: state.completed + 1}, memo, jobs}
-    else
-      bytes = byte_size(env.body)
+    cond do
+      sinks == [] ->
+        # Nothing to deliver: handled, and it does not enter the window at all.
+        {handled(state, env), memo, jobs}
 
-      state = %{
-        state
-        | read_seq: env.seq,
-          pending: :gb_sets.add(env.seq, state.pending),
-          remaining: Map.put(state.remaining, env.seq, {length(sinks), bytes}),
-          inflight_bytes: state.inflight_bytes + bytes
-      }
+      drop? ->
+        # A copy of an event the receiver has already delivered. Handled, and
+        # like the sinkless case it never enters the window.
+        Telemetry.emit([:dispatch, :dedup], %{}, %{
+          instance: state.instance,
+          source_id: env.source_id,
+          seq: env.seq
+        })
 
-      jobs =
-        Enum.reduce(sinks, jobs, fn {mod, opts} = sink, jobs ->
-          [
-            %{
-              seq: env.seq,
-              env: env,
-              sink: sink,
-              lane: lane(mod, env, opts),
-              needs_claim: needs_claim?(mod, opts, env),
-              claim: nil
-            }
-            | jobs
-          ]
-        end)
+        {handled(%{state | deduplicated: state.deduplicated + 1}, env), memo, jobs}
 
-      {state, memo, jobs}
+      true ->
+        bytes = byte_size(env.body)
+
+        state = %{
+          state
+          | read_seq: env.seq,
+            pending: :gb_sets.add(env.seq, state.pending),
+            remaining: Map.put(state.remaining, env.seq, {length(sinks), bytes}),
+            inflight_bytes: state.inflight_bytes + bytes
+        }
+
+        jobs =
+          Enum.reduce(sinks, jobs, fn {mod, opts} = sink, jobs ->
+            [
+              %{
+                seq: env.seq,
+                env: env,
+                sink: sink,
+                lane: lane(mod, env, opts),
+                needs_claim: needs_claim?(mod, opts, env),
+                claim: nil
+              }
+              | jobs
+            ]
+          end)
+
+        {state, memo, jobs}
     end
+  end
+
+  # Read past, fully handled, and delivered to nobody.
+  defp handled(state, env), do: %{state | read_seq: env.seq, completed: state.completed + 1}
+
+  # Ask the idempotent receiver for this record's partition, opening that
+  # receiver on first use. Its store is opened here too, so an in-process ledger
+  # lives exactly as long as this process consumes the partition.
+  defp receiver_decision(state, nil, _env), do: {false, state}
+
+  defp receiver_decision(state, source, env) do
+    dispatch = state.config.dispatch
+    partition = Receiver.partition(Receiver.scope(env), dispatch.partitions)
+
+    {receiver, receivers} =
+      case Map.fetch(state.receivers, partition) do
+        {:ok, receiver} ->
+          {receiver, state.receivers}
+
+        :error ->
+          receiver =
+            Receiver.new(partition,
+              store: dispatch.dedup_store,
+              ttl_ms: dispatch.dedup_ttl_ms
+            )
+
+          {receiver, Map.put(state.receivers, partition, receiver)}
+      end
+
+    {Receiver.duplicate?(receiver, source, env), %{state | receivers: receivers}}
   end
 
   defp needs_claim?(mod, opts, env) do
@@ -412,19 +463,19 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp sinks_for(instance, source_id, memo) do
+  defp source_for(instance, source_id, memo) do
     case Map.fetch(memo, source_id) do
-      {:ok, sinks} ->
-        {sinks, memo}
+      {:ok, source} ->
+        {source, memo}
 
       :error ->
-        sinks =
+        source =
           case SourceStore.fetch(instance, source_id) do
-            {:ok, source} -> source.sinks
-            :error -> []
+            {:ok, source} -> source
+            :error -> nil
           end
 
-        {sinks, Map.put(memo, source_id, sinks)}
+        {source, Map.put(memo, source_id, source)}
     end
   end
 

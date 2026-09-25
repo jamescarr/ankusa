@@ -122,12 +122,16 @@ defmodule Ankusa.Edge.Ingest do
   # The source was already resolved at the top of the request; fetching it again
   # here was a second store lookup per hook (a DB round trip, for a dynamic
   # store) for a value we are already holding.
-  defp dedup_key(%Source{dedup: {mod, opts}}, env) do
+  defp dedup_key(%Source{dedup: :none}, _env), do: nil
+
+  defp dedup_key(%Source{dedup_key: {mod, opts}}, env) do
     case mod.extract(env, opts) do
       {:ok, key} when is_binary(key) -> key
       _ -> nil
     end
   end
+
+  defp dedup_key(%Source{}, _env), do: nil
 
   # ── quarantine ────────────────────────────────────────────────────────────
 

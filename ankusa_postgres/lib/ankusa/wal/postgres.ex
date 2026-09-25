@@ -407,7 +407,7 @@ defmodule Ankusa.WAL.Postgres do
       # `seq` isn't known until Postgres assigns it; the stored payload's own
       # `seq` field is irrelevant — `read/3` always overwrites it from the
       # `seq` column.
-      envelope: Envelope.to_binary(%{env | seq: nil})
+      envelope: env |> Ankusa.WAL.stamp_commit() |> Map.put(:seq, nil) |> Envelope.to_binary()
     }
   end
 

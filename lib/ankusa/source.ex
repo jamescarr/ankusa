@@ -1,7 +1,13 @@
 defmodule Ankusa.Source do
   @moduledoc """
-  Per-source configuration: how to verify, how to dedup, what to do on a
+  Per-source configuration: how to verify, how dispatch dedups, what to do on a
   verification failure, and where delivered hooks go.
+
+  Dedup is a dispatch decision, so it is configured as two things: `dedup`
+  (`:auto` to dedup on the key `dedup_key` extracts, `:none` to deliver every
+  copy) and `dedup_key`, the `Ankusa.DedupKey` module that pulls the provider's
+  event id out of a record. A source with `dedup: :auto` and no `dedup_key` has
+  nothing to dedup on, so it delivers every copy and says so at boot.
 
   A `Ankusa.SourceStore` returns one of these for a given `source_id`.
   """
@@ -15,8 +21,12 @@ defmodule Ankusa.Source do
     tenant_id: "default",
     # {module, opts} implementing Ankusa.Verifier; opts carry the secret
     verifier: {Ankusa.Verifier.None, []},
-    # {module, opts} implementing Ankusa.DedupKey
-    dedup: {Ankusa.DedupKey.Rules, []},
+    # what dispatch does with a provider's retry: :auto dedups on the key
+    # `dedup_key` extracts, :none delivers every copy
+    dedup: :auto,
+    # {module, opts} implementing Ankusa.DedupKey, or nil when the source has no
+    # provider event id to key on
+    dedup_key: nil,
     # what to do when verification fails: :reject | :quarantine | :accept_flag
     on_verify_failure: :reject,
     # [{module, opts}] implementing Ankusa.Sink
@@ -24,11 +34,13 @@ defmodule Ankusa.Source do
   ]
 
   @type policy :: :reject | :quarantine | :accept_flag
+  @type dedup_mode :: :auto | :none
   @type t :: %__MODULE__{
           id: String.t(),
           tenant_id: String.t(),
           verifier: {module(), keyword()},
-          dedup: {module(), keyword()},
+          dedup: dedup_mode(),
+          dedup_key: {module(), keyword()} | nil,
           on_verify_failure: policy(),
           sinks: [{module(), keyword()}]
         }
@@ -52,9 +64,26 @@ defmodule Ankusa.Source do
       id: id,
       tenant_id: tenant_id,
       verifier: Map.get(opts, :verifier, {Ankusa.Verifier.None, []}),
-      dedup: Map.get(opts, :dedup, {Ankusa.DedupKey.Rules, []}),
+      dedup: dedup_mode!(id, Map.get(opts, :dedup, :auto)),
+      dedup_key: dedup_key!(id, Map.get(opts, :dedup_key)),
       on_verify_failure: Map.get(opts, :on_verify_failure, :reject),
       sinks: Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}])
     }
+  end
+
+  defp dedup_mode!(_id, mode) when mode in [:auto, :none], do: mode
+
+  defp dedup_mode!(id, other) do
+    raise ArgumentError,
+          "source #{inspect(id)}: dedup must be :auto or :none, got #{inspect(other)}"
+  end
+
+  defp dedup_key!(_id, nil), do: nil
+
+  defp dedup_key!(_id, {mod, opts}) when is_atom(mod) and is_list(opts), do: {mod, opts}
+
+  defp dedup_key!(id, other) do
+    raise ArgumentError,
+          "source #{inspect(id)}: dedup_key must be {module, opts} or nil, got #{inspect(other)}"
   end
 end

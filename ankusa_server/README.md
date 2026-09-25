@@ -60,7 +60,7 @@ node:
 sources:
   stripe:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
-    dedup: {type: stripe}
+    dedup_key: {type: stripe}
     on_verify_failure: quarantine
     sinks:
       - {type: http, url: "${SINK_URL}", method: post, timeout_ms: 5000}

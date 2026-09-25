@@ -109,6 +109,20 @@ defmodule Ankusa.WAL do
   def release_lease(instance, lease), do: apply_mod(instance, :release_lease, [lease])
 
   @doc """
+  Stamp a record with the time the WAL took it for commit.
+
+  Every adapter does this as it encodes the record, so the value travels with
+  the payload and a reader gets the commit time the writer saw without the log
+  having to store it twice. `Ankusa.DedupStore` measures expiry between these
+  values rather than against the wall clock at read time, which is what lets a
+  dispatcher that has fallen behind still dedupe correctly.
+  """
+  @spec stamp_commit(Envelope.t()) :: Envelope.t()
+  def stamp_commit(%Envelope{} = env) do
+    %{env | committed_at: System.system_time(:millisecond)}
+  end
+
+  @doc """
   The lease name that fences a given cursor.
 
   `:compactor` is the storage role's cursor, so it is fenced by the `:storage`

@@ -276,7 +276,7 @@ config :ankusa,
     "stripe" => [
       tenant_id: "acme",                                       # default: "default"
       verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
-      dedup: {Ankusa.DedupKey.Stripe, []},
+      dedup_key: {Ankusa.DedupKey.Stripe, []},
       on_verify_failure: :quarantine,                           # :reject | :quarantine | :accept_flag
       sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
     ]

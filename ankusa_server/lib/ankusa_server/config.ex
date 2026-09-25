@@ -77,7 +77,7 @@ defmodule AnkusaServer.Config do
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes)
-  @source_keys ~w(tenant on_verify_failure verify dedup sinks)
+  @source_keys ~w(tenant on_verify_failure verify dedup dedup_key sinks)
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @dedup_keys ~w(type header json_path)
@@ -96,6 +96,7 @@ defmodule AnkusaServer.Config do
   @scheme_encodings ~w(hex base64)
   @scheme_secret_decodes ~w(raw whsec_base64)
   @dedup_types ~w(rules stripe github)
+  @dedup_modes ~w(auto none)
   @sink_types ~w(log http rabbitmq kafka nats)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
@@ -639,7 +640,8 @@ defmodule AnkusaServer.Config do
     |> put_opt(:tenant_id, string_opt(source, "tenant", path))
     |> put_opt(:on_verify_failure, atom_enum_opt(source, "on_verify_failure", @policies, path))
     |> put_opt(:verifier, verifier(source, path))
-    |> put_opt(:dedup, dedup_key(source, path))
+    |> put_opt(:dedup, dedup_mode(source, path))
+    |> put_opt(:dedup_key, dedup_key(source, path))
     |> Keyword.put(:sinks, sinks!(source, path))
   end
 
@@ -731,10 +733,21 @@ defmodule AnkusaServer.Config do
     Ankusa.Verifier.Schemes.validate!(scheme)
   end
 
-  defp dedup_key(source, path) do
-    path = path ++ ["dedup"]
+  # `dedup:` says what dispatch does with a provider's retry: `auto` dedups on
+  # the key `dedup_key` extracts, `none` delivers every copy. Absent means
+  # `auto` — and a source with no `dedup_key` then has nothing to dedup on, so
+  # boot warns about it (see `Ankusa.Instance`).
+  defp dedup_mode(source, path) do
+    case enum!(source["dedup"] || "auto", @dedup_modes, path ++ ["dedup"]) do
+      "auto" -> :auto
+      "none" -> :none
+    end
+  end
 
-    case section!(source["dedup"], @dedup_keys, path) do
+  defp dedup_key(source, path) do
+    path = path ++ ["dedup_key"]
+
+    case section!(source["dedup_key"], @dedup_keys, path) do
       dedup when map_size(dedup) == 0 ->
         nil
 

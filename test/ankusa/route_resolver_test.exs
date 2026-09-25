@@ -65,7 +65,7 @@ defmodule Ankusa.RouteResolverTest do
     test "the URL tenant is threaded onto the envelope and scopes dedup" do
       config =
         start({Ankusa.RouteResolver.TenantPath, []}, %{
-          "stripe" => [dedup: {Ankusa.DedupKey.Stripe, []}]
+          "stripe" => [dedup_key: {Ankusa.DedupKey.Stripe, []}]
         })
 
       body = ~s({"id":"evt_1","type":"x"})

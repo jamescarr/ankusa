@@ -133,7 +133,7 @@ defmodule AnkusaExample.Ingest.Application do
   defp source do
     [
       verifier: {Ankusa.Verifier.None, []},
-      dedup: {Ankusa.DedupKey.Rules, json: ["id"]},
+      dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]},
       on_verify_failure: :accept_flag,
       sinks: [
         {Ankusa.Sink.Http,

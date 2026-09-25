@@ -23,6 +23,9 @@ defmodule Ankusa.Envelope do
     :dedup_key,
     # assigned by the WAL at commit time; nil until durably stored
     :seq,
+    # when the WAL took this record for commit, in ms since the epoch. Dedup
+    # expiry is measured between these, never against the wall clock at read.
+    :committed_at,
     # %Ankusa.Verification{}
     :verification,
     size: 0
@@ -40,6 +43,7 @@ defmodule Ankusa.Envelope do
           body: binary(),
           dedup_key: String.t() | nil,
           seq: non_neg_integer() | nil,
+          committed_at: integer() | nil,
           verification: Ankusa.Verification.t() | nil,
           size: non_neg_integer()
         }

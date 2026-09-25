@@ -29,7 +29,7 @@ config :ankusa,
      sources: %{
        "stripe" => [
          verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
-         dedup: {Ankusa.DedupKey.Stripe, []},
+         dedup_key: {Ankusa.DedupKey.Stripe, []},
          sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
        ]
      }}

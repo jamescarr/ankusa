@@ -48,7 +48,7 @@ defmodule Ankusa.EdgeTest do
     sources = %{
       "stripe" => [
         verifier: {Ankusa.Verifier.None, []},
-        dedup: {Ankusa.DedupKey.Rules, json: ["id"]}
+        dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]}
       ]
     }
 
