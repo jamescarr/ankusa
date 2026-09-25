@@ -237,9 +237,11 @@ defmodule Ankusa.Storage.Compactor do
   # so lookups served locally do not miss records it never itself compacted.
   defp repair(state) do
     Index.repair(state.config)
+    state
   rescue
     e ->
       Logger.warning("index repair failed: " <> Exception.message(e))
+      state
   end
 
   defp safe_get_cursor(instance, name) do
