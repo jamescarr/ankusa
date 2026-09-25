@@ -30,6 +30,10 @@ defmodule Ankusa.WAL.RaPropertyTest do
   # node: one acquires, the other steals it once the first stops renewing.
   @holders [:holder_a, :holder_b]
   @ttl 5_000
+  # Matches `Ankusa.WAL.Ra.Machine`'s `@batch_retention_ms`: the reply cache
+  # drops batches older than this, and the model must prune the same way or a
+  # script whose synthetic time advances past it will disagree.
+  @batch_retention_ms 600_000
   # Records repeated within and across batches, which is what a provider's
   # retries look like to the log: it appends every copy.
 
@@ -81,7 +85,7 @@ defmodule Ankusa.WAL.RaPropertyTest do
 
     {machine, reply, []} = Machine.apply(meta, {:append, batch_id, records}, machine)
 
-    case model_append(model, batch_id, records, by_seq) do
+    case model_append(model, batch_id, records, by_seq, meta.system_time) do
       {:ok, results, model, by_seq} ->
         assert reply == {:ok, results}, "append: #{inspect(reply)} vs #{inspect(results)}"
         assert agree(machine, model)
@@ -191,16 +195,17 @@ defmodule Ankusa.WAL.RaPropertyTest do
       floor: 0,
       bytes: 0,
       # `batch_id` memoisation: a retry of a command whose reply was lost must
-      # return the stored results and allocate nothing. The machine also prunes
-      # this table (1000s of entries, or ten minutes old); a script is far
-      # shorter than that, so the model does not.
-      batches: %{}
+      # return the stored results and allocate nothing. The machine prunes this
+      # cache by age (`@batch_retention_ms`), so the model does too, with the
+      # same FIFO of `{now, batch_id}` timestamps.
+      batches: %{},
+      batch_order: :queue.new()
     }
   end
 
   defp new_machine, do: Machine.init(%{})
 
-  defp model_append(model, batch_id, records, by_seq) do
+  defp model_append(model, batch_id, records, by_seq, now) do
     case Map.fetch(model.batches, batch_id) do
       {:ok, results} when length(results) == length(records) ->
         {:ok, results, model, by_seq}
@@ -211,7 +216,34 @@ defmodule Ankusa.WAL.RaPropertyTest do
       :error ->
         {results, model, by_seq} = model_commit(model, records, by_seq)
 
-        {:ok, results, %{model | batches: Map.put(model.batches, batch_id, results)}, by_seq}
+        model = %{
+          model
+          | batches: Map.put(model.batches, batch_id, results),
+            batch_order: :queue.in({now, batch_id}, model.batch_order)
+        }
+
+        {:ok, results, prune_batches(model, now), by_seq}
+    end
+  end
+
+  # The same age-only pruning as the machine: drop the oldest cached replies
+  # once they are old enough that a client can no longer be retrying them.
+  defp prune_batches(model, now) do
+    case :queue.peek(model.batch_order) do
+      {:value, {ts, _batch_id}} when now - ts > @batch_retention_ms ->
+        case :queue.out(model.batch_order) do
+          {{:value, {_ts, batch_id}}, order} ->
+            prune_batches(
+              %{model | batches: Map.delete(model.batches, batch_id), batch_order: order},
+              now
+            )
+
+          {:empty, _order} ->
+            model
+        end
+
+      _ ->
+        model
     end
   end
 
