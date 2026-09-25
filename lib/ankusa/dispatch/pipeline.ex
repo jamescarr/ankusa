@@ -292,19 +292,23 @@ defmodule Ankusa.Dispatch.Pipeline do
          state.inflight_bytes >= dispatch.max_inflight_bytes do
       %{state | window_full?: true}
     else
-      requested = min(dispatch.batch, dispatch.max_inflight - map_size(state.remaining))
-      envelopes = WAL.read(state.instance, state.read_seq, requested)
-      {state, memo, jobs} = Enum.reduce_while(envelopes, {state, memo, []}, &admit/2)
-      state = stage(state, Enum.reverse(jobs))
+      if mono_ms() >= state.lease_renew_at do
+        %{state | window_full?: false}
+      else
+        requested = min(dispatch.batch, dispatch.max_inflight - map_size(state.remaining))
+        envelopes = WAL.read(state.instance, state.read_seq, requested)
+        {state, memo, jobs} = Enum.reduce_while(envelopes, {state, memo, []}, &admit/2)
+        state = stage(state, Enum.reverse(jobs))
 
-      # A full read means there is likely more; a short one means the WAL has no
-      # more to give right now. A stalled one means the ledger could not answer
-      # for a record, so nothing past it may be admitted either: the next copy
-      # of that event has to be decided after the copy before it was.
-      cond do
-        state.stalled? -> %{state | window_full?: false}
-        length(envelopes) == requested -> fill(state, memo)
-        true -> %{state | window_full?: false}
+        # A full read means there is likely more; a short one means the WAL has no
+        # more to give right now. A stalled one means the ledger could not answer
+        # for a record, so nothing past it may be admitted either: the next copy
+        # of that event has to be decided after the copy before it was.
+        cond do
+          state.stalled? -> %{state | window_full?: false}
+          length(envelopes) == requested -> fill(state, memo)
+          true -> %{state | window_full?: false}
+        end
       end
     end
   end
