@@ -6,8 +6,9 @@ defmodule Ankusa.Source do
   Dedup is a dispatch decision, so it is configured as two things: `dedup`
   (`:auto` to dedup on the key `dedup_key` extracts, `:none` to deliver every
   copy) and `dedup_key`, the `Ankusa.DedupKey` module that pulls the provider's
-  event id out of a record. A source with `dedup: :auto` and no `dedup_key` has
-  nothing to dedup on, so it delivers every copy and says so at boot.
+  event id out of a record. `dedup_key` defaults to `{Ankusa.DedupKey.Rules,
+  []}`; a source that has no provider event id to key on sets it to `nil`, and
+  with `dedup: :auto` that delivers every copy and says so at boot.
 
   A `Ankusa.SourceStore` returns one of these for a given `source_id`.
   """
@@ -26,7 +27,7 @@ defmodule Ankusa.Source do
     dedup: :auto,
     # {module, opts} implementing Ankusa.DedupKey, or nil when the source has no
     # provider event id to key on
-    dedup_key: nil,
+    dedup_key: {Ankusa.DedupKey.Rules, []},
     # what to do when verification fails: :reject | :quarantine | :accept_flag
     on_verify_failure: :reject,
     # [{module, opts}] implementing Ankusa.Sink
@@ -65,7 +66,7 @@ defmodule Ankusa.Source do
       tenant_id: tenant_id,
       verifier: Map.get(opts, :verifier, {Ankusa.Verifier.None, []}),
       dedup: dedup_mode!(id, Map.get(opts, :dedup, :auto)),
-      dedup_key: dedup_key!(id, Map.get(opts, :dedup_key)),
+      dedup_key: dedup_key!(id, Map.get(opts, :dedup_key, {Ankusa.DedupKey.Rules, []})),
       on_verify_failure: Map.get(opts, :on_verify_failure, :reject),
       sinks: Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}])
     }

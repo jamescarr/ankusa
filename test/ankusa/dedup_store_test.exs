@@ -197,14 +197,16 @@ defmodule Ankusa.DedupStoreTest do
   # ── boot ──────────────────────────────────────────────────────────────────
 
   # A source set to dedup with nothing to dedup on would deliver every copy of
-  # every event without saying so. Boot is where an operator finds out.
+  # every event without saying so. Boot is where an operator finds out. The
+  # default dedup_key is the Rules extractor, so "nothing to dedup on" is now
+  # an explicit `dedup_key: nil`.
   test "a source that cannot compute a key warns at boot" do
     config =
       Ankusa.TestHelpers.test_config(
         roles: [:dispatch],
         source_store:
           {Ankusa.SourceStore.Static,
-           sources: %{"unlabelled" => [sinks: [{Ankusa.Sink.Log, []}]]}}
+           sources: %{"unlabelled" => [dedup_key: nil, sinks: [{Ankusa.Sink.Log, []}]]}}
       )
 
     log = ExUnit.CaptureLog.capture_log(fn -> start_supervised!({Ankusa.Instance, config}) end)
