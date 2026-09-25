@@ -214,6 +214,22 @@ defmodule AnkusaServer.ConfigTest do
            ]
   end
 
+  test "a wal.ra member with an empty name or host is rejected" do
+    for member <- ["@wal-0", "ankusa_wal_default@", "@"] do
+      path =
+        tmp_config("""
+        wal:
+          type: ra
+          ra:
+            members: [#{member}]
+        sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "expected name@host"
+    end
+  end
+
   test "ANKUSA_DISPATCH_DEDUP_STORE overrides the file, like every other key" do
     path =
       tmp_config("""

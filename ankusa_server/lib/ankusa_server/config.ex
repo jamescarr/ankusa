@@ -509,10 +509,10 @@ defmodule AnkusaServer.Config do
     |> string_list!(path)
     |> Enum.map(fn entry ->
       case String.split(entry, "@", parts: 2) do
-        [name, host] ->
+        [name, host] when name != "" and host != "" ->
           {cluster, String.to_atom("#{name}@#{host}")}
 
-        [_] ->
+        _ ->
           raise ConfigError,
             message: "#{render_path(path)}: expected name@host, got #{inspect(entry)}"
       end
