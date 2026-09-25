@@ -1,18 +1,13 @@
-defmodule Ankusa.WAL.Ra.MachineV3 do
+defmodule Ankusa.WAL.Ra.MachineV2 do
   @moduledoc """
   A later machine version, for the machine-upgrade drill: the *only* difference
-  is the version it advertises, so `which_module/1` must map the version the
-  cluster recorded (2, the real machine's) to the real machine and this
-  module's own version to this module.
+  is the version it advertises, so `which_module/1` maps the version the cluster
+  recorded (`1`, the real machine's) to the real machine and this module's own
+  version (`2`) to this module.
 
   Ra's default `machine_upgrade_strategy` is `all`: a member that does not
   support the newer version will not apply its commands, which is what makes a
   rolling upgrade safe — and what the drill proves.
-
-  It is one version above `Ankusa.WAL.Ra.Machine`, not a fixed 2: the real
-  machine bumps its version when its state changes shape, and a fake "next"
-  version that collides with the current one would make the drill assert
-  nothing.
   """
 
   @behaviour :ra_machine
@@ -21,6 +16,10 @@ defmodule Ankusa.WAL.Ra.MachineV3 do
 
   @impl true
   def init(config), do: Machine.init(config)
+
+  # A command only this version understands, for the upgrade drill: it must not
+  # be applied until every member supports version 2.
+  def apply(_meta, {:v2_ping}, state), do: {state, :pong, []}
 
   @impl true
   def apply(meta, command, state), do: Machine.apply(meta, command, state)
@@ -40,9 +39,9 @@ defmodule Ankusa.WAL.Ra.MachineV3 do
   end
 
   @impl true
-  def version, do: 3
+  def version, do: 2
 
   @impl true
-  def which_module(2), do: Machine
-  def which_module(_version), do: __MODULE__
+  def which_module(2), do: __MODULE__
+  def which_module(version) when version in [0, 1], do: Machine
 end

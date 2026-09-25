@@ -94,6 +94,10 @@ defmodule Ankusa.WAL.Ra do
   # Room for Ra's own framing and the machine's per-record bookkeeping inside
   # one command.
   @command_overhead_bytes 65_536
+  # A GenServer.call into this adapter can legitimately block for one append
+  # timeout plus one read timeout (rediscovering a leader after a change), so
+  # the call timeout allows both, plus this slack.
+  @call_slack_ms 5_000
 
   # Retry pacing while a leader is being elected. Short enough that failover is
   # not the bottleneck, long enough not to spin a scheduler.
@@ -221,6 +225,11 @@ defmodule Ankusa.WAL.Ra do
           campaign(server_id)
           :ok
 
+        {:error, {:already_started, _pid}} ->
+          # A race: the member is already up. Nothing to recover, just campaign.
+          campaign(server_id)
+          :ok
+
         {:error, reason} when reason in [:not_found, :name_not_registered] ->
           start_fresh(system, cluster, server_id, wal_opts)
 
@@ -242,7 +251,10 @@ defmodule Ankusa.WAL.Ra do
 
   defp start_fresh(system, cluster, server_id, wal_opts) do
     members = Keyword.fetch!(wal_opts, :members)
-    machine = {:module, Machine, machine_config(wal_opts)}
+
+    # `:machine` lets a test (or an upgrade) boot a later machine version on a
+    # fresh member; it defaults to the real machine.
+    machine = {:module, Keyword.get(wal_opts, :machine, Machine), machine_config(wal_opts)}
 
     case :ra.start_server(system, cluster, server_id, machine, members) do
       :ok ->
@@ -333,31 +345,59 @@ defmodule Ankusa.WAL.Ra do
   def append(server, records), do: GenServer.call(server, {:append, records}, :infinity)
 
   @impl Ankusa.WAL
-  def read(server, after_seq, limit), do: GenServer.call(server, {:read, after_seq, limit})
+  def read(server, after_seq, limit),
+    do: GenServer.call(server, {:read, after_seq, limit}, call_timeout(server))
 
   @impl Ankusa.WAL
-  def get_cursor(server, name), do: GenServer.call(server, {:get_cursor, name})
+  def get_cursor(server, name) do
+    case GenServer.call(server, {:get_cursor, name}, call_timeout(server)) do
+      {:ok, v} -> v
+      {:error, r} -> raise RuntimeError, "Ankusa.WAL.Ra get_cursor failed: #{inspect(r)}"
+    end
+  end
 
   @impl Ankusa.WAL
   def put_cursor(server, name, seq, token),
-    do: GenServer.call(server, {:put_cursor, name, seq, token})
+    do: GenServer.call(server, {:put_cursor, name, seq, token}, call_timeout(server))
 
   @impl Ankusa.WAL
   def truncate_through(server, seq, token),
-    do: GenServer.call(server, {:truncate_through, seq, token})
+    do: GenServer.call(server, {:truncate_through, seq, token}, call_timeout(server))
 
   @impl Ankusa.WAL
-  def stats(server), do: GenServer.call(server, :stats)
+  def stats(server) do
+    case GenServer.call(server, :stats, call_timeout(server)) do
+      {:ok, v} -> v
+      {:error, r} -> raise RuntimeError, "Ankusa.WAL.Ra stats failed: #{inspect(r)}"
+    end
+  end
 
   @impl Ankusa.WAL
   def acquire_lease(server, name, holder, ttl_ms),
-    do: GenServer.call(server, {:acquire_lease, name, holder, ttl_ms})
+    do: GenServer.call(server, {:acquire_lease, name, holder, ttl_ms}, call_timeout(server))
 
   @impl Ankusa.WAL
-  def renew_lease(server, lease), do: GenServer.call(server, {:renew_lease, lease})
+  def renew_lease(server, lease),
+    do: GenServer.call(server, {:renew_lease, lease}, call_timeout(server))
 
   @impl Ankusa.WAL
-  def release_lease(server, lease), do: GenServer.call(server, {:release_lease, lease})
+  def release_lease(server, lease),
+    do: GenServer.call(server, {:release_lease, lease}, call_timeout(server))
+
+  # The adapter's own calls can block for one append timeout plus one read
+  # timeout, so `call_timeout/1` allows both (plus slack), reading the
+  # instance's configured values when they are set.
+  defp call_timeout({:via, Registry, {_, {instance, _}}}) do
+    configured(instance, :append_timeout_ms, @default_append_timeout_ms) +
+      configured(instance, :read_timeout_ms, @default_read_timeout_ms) + @call_slack_ms
+  end
+
+  defp configured(instance, key, default) do
+    %Config{wal: {_mod, wal_opts}} = Ankusa.config(instance)
+    Keyword.get(wal_opts, key, default)
+  rescue
+    _ -> default
+  end
 
   # ── server ────────────────────────────────────────────────────────────────
 
@@ -373,7 +413,7 @@ defmodule Ankusa.WAL.Ra do
   end
 
   def handle_call({:get_cursor, name}, _from, state) do
-    {reply, state} = aux!(state, {:cursor, name})
+    {reply, state} = aux_reply(state, {:cursor, name})
     {:reply, reply, state}
   end
 
@@ -388,11 +428,28 @@ defmodule Ankusa.WAL.Ra do
   end
 
   def handle_call(:stats, _from, state) do
-    {reply, state} = aux!(state, :overview)
+    {reply, state} = aux_reply(state, :overview)
 
-    {:reply,
-     Map.take(reply, [:records, :bytes, :next_seq, :min_seq, :max_seq, :cursors, :floor, :leases]),
-     state}
+    reply =
+      case reply do
+        {:ok, overview} ->
+          {:ok,
+           Map.take(overview, [
+             :records,
+             :bytes,
+             :next_seq,
+             :min_seq,
+             :max_seq,
+             :cursors,
+             :floor,
+             :leases
+           ])}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:acquire_lease, name, holder, ttl_ms}, _from, state) do
@@ -443,8 +500,10 @@ defmodule Ankusa.WAL.Ra do
   defp do_append(records, state) do
     # One id for the whole call, and a distinct command id per chunk: a retry of
     # a chunk after a timeout or a leader change returns the results it already
-    # committed instead of allocating again.
-    batch_id = {node(), System.unique_integer([:positive])}
+    # committed instead of allocating again. Random, not a counter: a counter
+    # restarts at 0 on boot, so a retry after a node restart could collide with
+    # an unrelated earlier append.
+    batch_id = :crypto.strong_rand_bytes(16)
     rows = Enum.map(records, &record(&1.envelope))
 
     {results, state} =
@@ -628,7 +687,7 @@ defmodule Ankusa.WAL.Ra do
         retry(command, state, deadline, :no_leader)
 
       leader ->
-        case :ra.process_command(leader, command, state.append_timeout_ms) do
+        case :ra.process_command(leader, command, remaining(state.append_timeout_ms, deadline)) do
           {:ok, reply, _leader} ->
             {:ok, reply, state}
 
@@ -672,16 +731,14 @@ defmodule Ankusa.WAL.Ra do
     kind, reason -> {:error, {kind, reason}, forget_leader(state)}
   end
 
-  defp aux!(state, command) do
+  # Convert `aux/2`'s reply into the `{:ok, reply} | {:error, reason}` shape the
+  # client functions expect, without raising inside the server: the raise is
+  # the *client's* job (a wrong cursor is worse than no cursor, but a query
+  # error must not take the whole WAL process down).
+  defp aux_reply(state, command) do
     case aux(state, command) do
-      {:ok, reply, state} ->
-        {reply, state}
-
-      {:error, reason, _state} ->
-        # Cursors and stats are read right after a successful lease acquisition
-        # or from an operator: a wrong answer (0 for a cursor) is worse than no
-        # answer, so this raises and the caller retries.
-        raise "Ra WAL query #{inspect(command)} failed: #{inspect(reason)}"
+      {:ok, reply, state} -> {{:ok, reply}, state}
+      {:error, reason, state} -> {{:error, reason}, state}
     end
   end
 
@@ -723,12 +780,19 @@ defmodule Ankusa.WAL.Ra do
   end
 
   defp remote_command(members, command, read_timeout, deadline) do
-    case find_leader(members, read_timeout) do
+    case find_remote_leader(members, read_timeout) do
       {:ok, leader} ->
-        case :ra.process_command(leader, command, read_timeout) do
-          {:ok, reply, _leader} -> {:ok, reply}
-          {:error, reason} -> remote_retry(members, command, read_timeout, deadline, reason)
-          {:timeout, _server} -> remote_retry(members, command, read_timeout, deadline, :timeout)
+        case :ra.process_command(leader, command, remaining(read_timeout, deadline)) do
+          {:ok, reply, leader} ->
+            remember_leader(members, leader)
+            {:ok, reply}
+
+          {:error, reason} ->
+            forget_leader_cache(members)
+            remote_retry(members, command, read_timeout, deadline, reason)
+
+          {:timeout, _server} ->
+            remote_retry(members, command, read_timeout, deadline, :timeout)
         end
 
       :error ->
@@ -736,6 +800,27 @@ defmodule Ankusa.WAL.Ra do
     end
   catch
     kind, reason -> remote_retry(members, command, read_timeout, deadline, {kind, reason})
+  end
+
+  # A per-members cached leader: `Ankusa.DedupStore.Ra` sends one command per
+  # record, so rediscovering the leader on every call is a wasted round trip.
+  defp find_remote_leader(members, read_timeout) do
+    case :persistent_term.get({__MODULE__, :leader, members}, nil) do
+      nil -> find_leader(members, read_timeout)
+      leader -> {:ok, leader}
+    end
+  end
+
+  defp remember_leader(members, leader) do
+    case :persistent_term.get({__MODULE__, :leader, members}, nil) do
+      ^leader -> :ok
+      _ -> :persistent_term.put({__MODULE__, :leader, members}, leader)
+    end
+  end
+
+  defp forget_leader_cache(members) do
+    :persistent_term.erase({__MODULE__, :leader, members})
+    :ok
   end
 
   defp remote_retry(members, command, read_timeout, deadline, reason) do
@@ -775,4 +860,11 @@ defmodule Ankusa.WAL.Ra do
   end
 
   defp mono_ms, do: System.monotonic_time(:millisecond)
+
+  # A Ra call's timeout, capped at `timeout` but never longer than what is left
+  # before the caller's deadline (and never zero: a zero timeout is not a
+  # meaningful bound for Ra).
+  defp remaining(timeout, deadline) do
+    min(timeout, max(deadline - mono_ms(), 1))
+  end
 end

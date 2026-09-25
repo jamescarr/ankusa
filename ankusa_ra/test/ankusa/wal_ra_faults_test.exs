@@ -428,26 +428,62 @@ defmodule Ankusa.WAL.RaFaultsTest do
   test "9. a machine-version upgrade is not applied until every member supports it", %{
     cluster: cluster
   } do
-    # The next version is a test-only module (`Ankusa.WAL.Ra.MachineV3`); its
-    # commands are only applied once every member supports it, which is Ra's
-    # default `machine_upgrade_strategy: :all`.
-    assert :ra_machine.version(Ankusa.WAL.Ra.Machine) == 2
-    assert :ra_machine.version(Ankusa.WAL.Ra.MachineV3) == 3
-    assert Ankusa.WAL.Ra.MachineV3.which_module(2) == Ankusa.WAL.Ra.Machine
-    assert Ankusa.WAL.Ra.MachineV3.which_module(3) == Ankusa.WAL.Ra.MachineV3
+    alias Ankusa.WAL.Ra.MachineV2
 
-    # A rolling restart onto the new code loses nothing: the cluster keeps its
-    # seqs and cursors across every member restart.
+    assert :ra_machine.version(Ankusa.WAL.Ra.Machine) == 1
+    assert :ra_machine.version(MachineV2) == 2
+    assert MachineV2.which_module(1) == Ankusa.WAL.Ra.Machine
+    assert MachineV2.which_module(2) == MachineV2
+
     assert {:ok, [{:committed, before}]} = WAL.append(cluster.instance, [entry("pre-upgrade")])
 
+    # A rolling restart onto the next machine version: every member boots
+    # `MachineV2` in turn — its log is discarded so it re-initializes on the new
+    # machine and catches up — and until they all support it the cluster's
+    # effective version stays 1, so the v2-only command is refused.
+    [n1, n2, n3] = cluster.member_nodes
+
+    cluster = %{cluster | wal_opts: Keyword.put(cluster.wal_opts, :machine, MachineV2)}
+
+    restart_on_v2 = fn node, acc ->
+      :ok = ClusterCase.kill_member(acc, node)
+      File.rm_rf!(Path.join([acc.dir, Atom.to_string(node), Atom.to_string(acc.instance)]))
+      ClusterCase.restart_member(acc, node)
+    end
+
     cluster =
-      Enum.reduce(cluster.member_nodes, cluster, fn node, acc ->
-        :ok = ClusterCase.kill_member(acc, node)
-        ClusterCase.restart_member(acc, node)
+      Enum.reduce([n1, n2], cluster, fn node, acc ->
+        restart_on_v2.(node, acc)
       end)
 
     ClusterCase.wait_for_leader(cluster.members)
 
+    assert {:ok, {:error, :unsupported}} =
+             Ra.remote_command(cluster.members, {:v2_ping}, timeout: 10_000)
+
+    # The last member restarts. The upgrade is only evaluated after a fresh
+    # election, so force one by killing the current leader, then wait for the
+    # v2 command to be applied.
+    cluster = restart_on_v2.(n3, cluster)
+    ClusterCase.wait_for_leader(cluster.members)
+
+    leader = ClusterCase.wait_for_leader(cluster.members)
+    :ok = ClusterCase.kill_member(cluster, elem(leader, 1))
+    _ = :erlang.disconnect_node(elem(leader, 1))
+    cluster = ClusterCase.restart_member(cluster, elem(leader, 1))
+    ClusterCase.wait_for_leader(cluster.members)
+
+    assert wait_until(
+             fn ->
+               case Ra.remote_command(cluster.members, {:v2_ping}, timeout: 5_000) do
+                 {:ok, :pong} -> true
+                 _ -> false
+               end
+             end,
+             30_000
+           )
+
+    # Nothing was lost across the upgrade.
     assert {:ok, [{:committed, after_upgrade}]} =
              WAL.append(cluster.instance, [entry("post-upgrade")])
 

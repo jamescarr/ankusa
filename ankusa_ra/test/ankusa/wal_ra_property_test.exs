@@ -65,17 +65,24 @@ defmodule Ankusa.WAL.RaPropertyTest do
     meta = meta(meta.index + 1, meta.system_time + 1)
     records = records(tenant, count, size, meta.index)
     # A retry of the same `batch_id` returns the stored results by design, so
-    # its seqs are expected to be ones the machine already reported.
+    # its seqs are expected to be ones the machine already reported. A *reused*
+    # id with a different record count is refused outright.
     fresh? = not Map.has_key?(model.batches, batch_id)
 
-    {expected, model, by_seq} = model_append(model, batch_id, records, by_seq)
-
     {machine, reply, []} = Machine.apply(meta, {:append, batch_id, records}, machine)
-    assert reply == {:ok, expected}, "append: #{inspect(reply)} vs #{inspect(expected)}"
-    assert agree(machine, model)
-    by_seq = record_seqs(records, expected, by_seq, fresh?)
 
-    {machine, model, by_seq, meta}
+    case model_append(model, batch_id, records, by_seq) do
+      {:ok, results, model, by_seq} ->
+        assert reply == {:ok, results}, "append: #{inspect(reply)} vs #{inspect(results)}"
+        assert agree(machine, model)
+        by_seq = record_seqs(records, results, by_seq, fresh?)
+        {machine, model, by_seq, meta}
+
+      {:conflict, model, by_seq} ->
+        assert reply == {:error, :batch_id_conflict}
+        assert agree(machine, model)
+        {machine, model, by_seq, meta}
+    end
   end
 
   defp step({:put_cursor, name, seq_choice, stale?}, {machine, model, by_seq, meta}) do
@@ -192,13 +199,16 @@ defmodule Ankusa.WAL.RaPropertyTest do
 
   defp model_append(model, batch_id, records, by_seq) do
     case Map.fetch(model.batches, batch_id) do
-      {:ok, results} ->
-        {results, model, by_seq}
+      {:ok, results} when length(results) == length(records) ->
+        {:ok, results, model, by_seq}
+
+      {:ok, _results} ->
+        {:conflict, model, by_seq}
 
       :error ->
         {results, model, by_seq} = model_commit(model, records, by_seq)
 
-        {results, %{model | batches: Map.put(model.batches, batch_id, results)}, by_seq}
+        {:ok, results, %{model | batches: Map.put(model.batches, batch_id, results)}, by_seq}
     end
   end
 

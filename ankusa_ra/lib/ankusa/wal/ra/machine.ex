@@ -84,7 +84,6 @@ defmodule Ankusa.WAL.Ra.Machine do
   alias Ankusa.WAL
 
   @batch_retention_ms 600_000
-  @max_batches 1024
   # How far the truncation floor must advance before the machine asks Ra to take
   # a snapshot and drop log segments. Small enough that a long run reclaims disk
   # steadily, large enough that it is not happening on every truncate.
@@ -117,17 +116,15 @@ defmodule Ankusa.WAL.Ra.Machine do
     }
   end
 
-  # v2 added the receiver's ledger. A member restoring a v1 snapshot has no
-  # `dedup` key at all, which is what the upgrade clause below and
-  # `dedup_state/1` are for.
   @impl true
-  def version, do: 2
+  def version, do: 1
 
   # Ra asks for a machine version before one has been recorded on a fresh log
-  # (`0`), and for the latest version afterwards. This module implements both:
-  # there is one machine, and `version/0` is what advertises it.
+  # (`0`), and for the latest version (`1`) afterwards. This module implements
+  # both: there is one machine, and `version/0` is what advertises it.
   @impl true
-  def which_module(_version), do: __MODULE__
+  def which_module(0), do: __MODULE__
+  def which_module(1), do: __MODULE__
 
   @impl true
   def live_indexes(state), do: :ra_seq.from_list(Map.keys(state.live))
@@ -135,7 +132,6 @@ defmodule Ankusa.WAL.Ra.Machine do
   @impl true
   def overview(state) do
     {min_seq, max_seq} = seq_bounds(state.entries)
-    state = dedup_state(state)
 
     %{
       records: :gb_trees.size(state.entries),
@@ -182,10 +178,16 @@ defmodule Ankusa.WAL.Ra.Machine do
   @impl true
   def apply(meta, {:append, batch_id, records}, state) do
     case Map.fetch(state.batches, batch_id) do
-      {:ok, results} ->
+      {:ok, results} when length(results) == length(records) ->
         # A retry of a command whose reply was lost. Return the recorded
         # results; allocate nothing, apply nothing.
         {state, {:ok, results}, []}
+
+      {:ok, _results} ->
+        # The same batch_id with a *different* record count is a collision (a
+        # restarted node reusing an id), not a retry: return an error rather
+        # than results that do not match what was asked.
+        {state, {:error, :batch_id_conflict}, []}
 
       :error ->
         append(meta, batch_id, records, state)
@@ -196,16 +198,16 @@ defmodule Ankusa.WAL.Ra.Machine do
   # (`{machine_version, From, To}`), so it must be handled even though it carries
   # no WAL meaning: an unhandled command takes the whole Raft server down, and
   # this one is applied by the first `noop` a new leader writes.
-  def apply(_meta, {:machine_version, 1, 2}, state) do
-    {dedup_state(state), :ok, []}
-  end
-
   def apply(_meta, {:machine_version, _from, _to}, state), do: {state, :ok, []}
+
+  # A command a later machine version understands, but this one does not: refuse
+  # cleanly rather than crash, so a rolling upgrade never takes the Raft server
+  # down with an unhandled command.
+  def apply(_meta, {:v2_ping}, state), do: {state, {:error, :unsupported}, []}
 
   # The idempotent receiver's ledger: `Ankusa.DedupStore.Ra` sends one of these
   # per record it has to decide, and the decision comes back in the reply.
   def apply(_meta, {:dedup_record, tenant, source, key, seq, committed_at, ttl_ms}, state) do
-    state = dedup_state(state)
     ledger_key = {tenant, source, key}
 
     {decision, entry} =
@@ -290,14 +292,20 @@ defmodule Ankusa.WAL.Ra.Machine do
   end
 
   def apply(_meta, {:import, floor, cursors}, state) do
-    state = %{state | next_seq: floor + 1, floor: floor, released_floor: floor}
+    if state.next_seq != 1 or :gb_trees.size(state.entries) != 0 do
+      # An import is a one-time bootstrap of an empty log: refuse to clobber a
+      # machine that already has records.
+      {state, {:error, :not_empty}, []}
+    else
+      state = %{state | next_seq: floor + 1, floor: floor, released_floor: floor}
 
-    cursors =
-      Enum.reduce(cursors, state.cursors, fn {name, seq}, acc ->
-        Map.update(acc, name, seq, &max(&1, seq))
-      end)
+      cursors =
+        Enum.reduce(cursors, state.cursors, fn {name, seq}, acc ->
+          Map.update(acc, name, seq, &max(&1, seq))
+        end)
 
-    {%{state | cursors: cursors}, :ok, []}
+      {%{state | cursors: cursors}, :ok, []}
+    end
   end
 
   # ── append ────────────────────────────────────────────────────────────────
@@ -338,19 +346,6 @@ defmodule Ankusa.WAL.Ra.Machine do
     {{:committed, seq}, state}
   end
 
-  # The batch table is a cache of replies, not state: drop the oldest entries
-  # once it is large, or once they are old enough that a client can no longer be
-  # retrying.
-  # A v1 snapshot has no ledger keys at all, so every path that touches them
-  # goes through here first.
-  defp dedup_state(state) do
-    state
-    |> Map.put_new(:dedup, %{})
-    |> Map.put_new(:dedup_newest_at, 0)
-    |> Map.put_new(:dedup_max_ttl_ms, 0)
-    |> Map.put_new(:dedup_since_sweep, 0)
-  end
-
   # Drop only what the decision rule would ignore anyway: an entry whose commit
   # time is already outside the window measured from the newest record this
   # ledger has seen. The edge comes from the records' own timestamps, never from
@@ -366,8 +361,12 @@ defmodule Ankusa.WAL.Ra.Machine do
     %{state | dedup: dedup, dedup_since_sweep: 0}
   end
 
+  # The batch table is a cache of replies, not state: drop the oldest entries
+  # once they are old enough that a client can no longer be retrying. Age alone
+  # bounds it — `@batch_retention_ms` far exceeds `append_timeout_ms`, so a
+  # retry can never outlive its stored reply.
   defp prune_batches(state, now) do
-    if map_size(state.batches) > @max_batches or expired_head?(state.batch_order, now) do
+    if expired_head?(state.batch_order, now) do
       case :queue.out(state.batch_order) do
         {{:value, {_ts, batch_id}}, order} ->
           state = %{state | batches: Map.delete(state.batches, batch_id), batch_order: order}

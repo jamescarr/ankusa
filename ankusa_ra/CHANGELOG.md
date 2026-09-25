@@ -26,11 +26,10 @@ follows [Semantic Versioning](https://semver.org/).
   undecided and retries from its seq — because neither guessing would do:
   delivering it unrecorded would forfeit the guarantee for that event, and
   dropping it could lose a first delivery.
-- `Ankusa.WAL.Ra.Machine`'s `{:dedup_record, …}` command, the machine's second
-  version (a member restoring a v1 snapshot gets the empty ledger through the
-  version-upgrade command). The ledger is swept in the same units as the
-  in-process store — entries the rule would already ignore — because replicated
-  state, unlike a process, does not go away on its own.
+- `Ankusa.WAL.Ra.Machine`'s `{:dedup_record, …}` command. The ledger is swept in
+  the same units as the in-process store — entries the rule would already
+  ignore — because replicated state, unlike a process, does not go away on its
+  own.
 - `mix ankusa.wal.migrate` for an offline cutover from a Postgres WAL.
 
 ### Changed
