@@ -8,23 +8,24 @@ NATS).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 198 tests, no external infra needed
+mix test                              # 213 tests, no external infra needed
 mix test --include integration        # +16 tests, needs floci running (see below)
 ```
 
-The 198 always-on tests cover:
+The 213 always-on tests cover:
 
-- **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
-  crash-replay (torn-frame handling), truncation, that a restart after a full
-  truncation does **not** reuse seqs, and the measurements `[:commit, :stop]`
-  reports.
+- **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
+  truncation, that a restart after a full truncation does **not** reuse seqs,
+  and the measurements `[:commit, :stop]` reports.
 - **The WAL contract itself** (`Ankusa.WAL.ConformanceCase`): 13 cases every
-  adapter must pass — commit order and byte-exact reads, pagination, dedup
-  within a batch / across batches / after truncation, cursor persistence,
-  idempotent truncation, fenced writes without a lease, the lease lifecycle
-  (renew, contention, expiry, release), stale-token fencing, restart durability,
-  the `stats/1` shape, and two concurrency cases (8 writers racing one dedup key;
-  a cursor-following reader that must miss nothing). `WAL.DiskLog`,
+  adapter must pass — commit order and byte-exact reads, pagination, cursor
+  persistence, idempotent truncation, fenced writes without a lease, the lease
+  lifecycle (renew, contention, expiry, release), stale-token fencing, restart
+  durability, the `stats/1` shape, and two concurrency cases (8 writers racing
+  the same event — all of them commit, with distinct seqs; a cursor-following
+  reader that must miss nothing). One case is the contract in miniature:
+  **appending the same event again appends it again**, with its own seq, because
+  the log has no uniqueness constraint to refuse it. `WAL.DiskLog`,
   `WAL.Postgres` (in `ankusa_postgres`) and `WAL.Ra` (in `ankusa_ra`) each run
   it, so an adapter that drifts from the contract fails on the contract, not on
   whichever suite happened to exercise that path.
@@ -39,10 +40,9 @@ The 198 always-on tests cover:
   caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
   rule that a redirect is reported rather than followed; the shared
   `Ankusa.HttpClient` allowlist.
-- **Edge**: accept/duplicate/verify/quarantine/load-shed/oversize, shedding with
-  `503` once the batcher's queue fills while a commit is in flight, pluggable
-  route resolvers (`Path` and `TenantPath`), tenant-scoped dedup end to end
-  through the HTTP layer.
+- **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with `503`
+  once the batcher's queue fills while a commit is in flight, and pluggable
+  route resolvers (`Path` and `TenantPath`).
 - **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
   instead of killing the pipeline, and ordering — a blocked delivery holds the
   cursor while another ordering key proceeds, and same-key deliveries stay in
@@ -89,33 +89,65 @@ whole suite just requires the container:
 ```sh
 cd ankusa_postgres
 docker compose up -d --wait   # Postgres on :5433
-mix test                      # 11 tests
+mix test                      # 22 tests
 docker compose down -v
 ```
 
 Notably covers, against the *real* database (not a mock):
 
 - Put/get round-trip via `append` + `read`.
-- Intra-batch duplicate collapse (two records in one `append/2` call sharing
-  a dedup key).
-- Cross-batch duplicate (separate `append/2` calls).
-- Nil dedup keys never colliding.
-- **Concurrent writers racing the same dedup key** — 8 `Task`s calling
-  `append/2` simultaneously with the same key; exactly one commits, seven
-  come back `:duplicate` pointing at the same `seq`. This is the test that
-  backs the "many ingest servers share one WAL safely" claim.
-- **Truncation preserves dedup** — append, truncate through that seq
-  (physically deleting the row), re-append the same dedup key, still get
-  `:duplicate` at the original seq. This caught a real bug during
-  development (the dedup ledger originally joined back to the truncated
-  table); see the adapter's own moduledoc.
+- Two copies of one event are two rows with two seqs — the same event appended
+  twice commits twice, which is what the fleet needs: no node's ack waits on a
+  uniqueness check.
 - **Commit order equals seq order** — a statement trigger sleeps inside every
   insert, widening the allocation→commit window, while 8 writers append
   concurrently and a reader follows the cursor. Every committed seq must be
   seen by the reader. Before the per-instance advisory lock, this lost ~10-20%
   of commits (34 seqs in one run); it is the chaos-phase loss, reproduced as a
   test.
-- Two instances sharing one database never cross-contaminate seq or dedup.
+- Lease lifecycle and fencing, and a restart that keeps every acked record
+  readable without reusing a seq (through the shared conformance suite).
+- Two instances sharing one database never cross-contaminate rows, cursors or
+  leases.
+
+## `ankusa_server` — `mix test`
+
+No services: the suite is the operator's side of the config file.
+
+```sh
+cd ankusa_server
+mix test                      # 39 tests
+```
+
+Every shipped YAML (`rel/ankusa.yml` and `config-examples/*.yml`) is loaded, so a
+config file that documents a key the loader does not know fails here instead of
+in a container; `${VAR}` interpolation, the `ANKUSA_*` override table and the
+validation errors are all pinned by name — including `dispatch.dedup_store`,
+which names its implementation (`ets`, or `ra` for the ledger in the WAL
+cluster's replicated state; `ra` refuses to load without `wal.type: ra`).
+
+Its compile pulls in `ankusa_kafka`, so where the C toolchain is broken, run it
+with the container recipe in `AGENTS.md`.
+
+## `ankusa_ra` — `mix test`
+
+No services and no Docker: the suite starts real `:peer` VMs and talks to them
+over Erlang distribution.
+
+```sh
+cd ankusa_ra
+mix test                                  # 49 tests + 2 properties
+MAX_RUNS=5000 mix test test/wal_ra_property_test.exs
+```
+
+Where distribution does not work — a sandbox that blocks loopback distribution,
+a runner without `epmd` — `test_helper.exs` probes it once and excludes the
+suites tagged `:dist` (the multi-node cluster, fault and chaos suites) with a
+message saying so, rather than hanging until the timeouts. The single-node
+conformance suite and the model-based property suite need none of it and always
+run. `Ankusa.DedupStore.Ra`'s suite is one of those: it drives a real one-member
+cluster in-process, includes stopping and restarting the member to prove the
+ledger outlives the process, and needs no peers.
 
 ## `ankusa_rabbitmq` — `mix test`
 

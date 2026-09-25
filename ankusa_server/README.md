@@ -12,8 +12,8 @@ _**Don't fight the traffic. Steer it.** Durable webhook ingestion for any volume
 
 Run Ankusa without knowing Elixir, the way you run Elasticsearch without knowing
 Java. One image, one YAML file, HTTP in and HTTP out. Every hook is written to a
-durable log before it is acked, so a provider retry is either absorbed as a
-duplicate or genuinely never arrived.
+durable log before it is acked, so a provider retry is appended like any other
+copy and dropped in front of your sinks instead of being delivered twice.
 
 ## Quick start
 
@@ -29,7 +29,7 @@ until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"status":"duplicate",...}                     (the retry is absorbed, not stored twice)
+# => {"id":"01a1...","status":"accepted","seq":2}   (its own copy; dispatch drops it)
 ```
 
 That is a complete, durable webhook receiver. The `demo` source accepts anything
@@ -104,7 +104,7 @@ reconfigured without a new file. Env wins over the file.
 
 | Variable | Field |
 | --- | --- |
-| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
+| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`, `wal`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
@@ -222,7 +222,7 @@ problem anymore.
 
 ```sh
 docker compose -f docker-compose.fleet.yml up -d --wait
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 201
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 202
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 200 duplicate
 curl localhost:4002/v1/dlq                                   # 401 (nginx)
 curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]}

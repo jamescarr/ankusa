@@ -151,7 +151,7 @@ SINGLE=1 RATE=40 DURATION=60 FAULT_WINDOW_S=30 ./run.sh power-loss
 SINGLE=1 ./run.sh all        # power-loss, then rolling-restart
 ```
 
-Everything the gate is made of runs for real: the load generator's `201`s and
+Everything the gate is made of runs for real: the load generator's `202`s and
 `503`s, the observer, the final scan, `Ankusa.WAL.Checker`, and both verifiers.
 The scenarios are limited to the two that make sense with one member
 (`power-loss`, `rolling-restart`) — a drill that kills a member and leaves it

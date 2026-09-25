@@ -70,7 +70,7 @@ curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' \
 # => {"id":"01a0...","status":"accepted","seq":1}
 ```
 
-The `201` returns only *after* the payload is `fsync`'d to the WAL — that's
+The `202` returns only *after* the payload is `fsync`'d to the WAL — that's
 the [core invariant](architecture.md#the-core-invariant), not a formality.
 The dispatch pipeline then delivers it, visible in the server log:
 
@@ -80,11 +80,13 @@ The dispatch pipeline then delivers it, visible in the server log:
 
 ### 3. Idempotency
 
-Replay the same event id — it's absorbed but still gets a `2xx`:
+Replay the same event id: the copy is appended like any other, so the provider
+gets its own `202` — and your sink still sees the event once, because the
+receiver in front of dispatch is what recognises it:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"duplicate","seq":1}
+# => {"id":"01a1...","status":"accepted","seq":2}
 ```
 
 ### 4. Inspect state
@@ -114,7 +116,7 @@ The ingest listener serves the catch URL, plus two read-only endpoints:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified, then committed before ack; deduplicated at dispatch rather than on the ack path. `202` accepted (or `202` quarantined, told apart by `status`) / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
 | `GET` | `/health` | Liveness + WAL stats. |
 | `GET` | `/stats` | WAL stats. |
 

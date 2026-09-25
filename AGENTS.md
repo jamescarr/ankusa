@@ -10,9 +10,11 @@ touches, not just the one you edited. All four adapter packages depend on
 | --- | --- |
 | `ankusa` (core) | `mix format --check-formatted && mix compile --warnings-as-errors && mix test` |
 | `ankusa_postgres` | the same three, in `ankusa_postgres/` (after `docker compose up -d --wait`) |
+| `ankusa_ra` | the same three, in `ankusa_ra/` (no services; the multi-node suites are tagged `:dist` and excluded where Erlang distribution between nodes does not work) |
 | `ankusa_rabbitmq` | the same three, in `ankusa_rabbitmq/` (after `docker compose up -d --wait`) |
 | `ankusa_kafka` | the same three, in `ankusa_kafka/` (after `docker compose up -d --wait`) |
 | `ankusa_nats` | the same three, in `ankusa_nats/` (after `docker compose up -d --wait`) |
+| `ankusa_server` | the same three, in `ankusa_server/` (path-depends on `ankusa_kafka`, so the container recipe below applies wherever the C toolchain is broken) |
 | `examples/*/ingest_app` | `mix compile --warnings-as-errors` |
 | `examples/*/worker` | `npx tsc --noEmit` |
 | `examples/oban-consumer/ingest_app` | `mix compile --warnings-as-errors` |

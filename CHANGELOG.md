@@ -13,6 +13,25 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 
 ### Added
 
+- **The idempotent receiver**: dispatch's dedup is a stage of its own, in front
+  of the sinks (`Ankusa.Dispatch.Receiver` + the `Ankusa.DedupStore` behaviour).
+  It keeps `dedup_key -> first_seq` per `(tenant_id, source_id)` scope and drops
+  a copy only when a *strictly earlier* copy inside `dispatch.dedup_ttl_ms` has
+  already been delivered, so a re-read after a crash is delivered rather than
+  dropped, and expiry is measured between the records' commit timestamps rather
+  than against the clock at read. Configured by `dispatch.dedup_store`
+  (`Ankusa.DedupStore.ETS`, in-process, by default), `dispatch.dedup_ttl_ms` and
+  `dispatch.partitions`. `Ankusa.DedupStore.Ra`, in `ankusa_ra`, keeps the
+  ledger in the WAL cluster's replicated state so it survives a failover.
+- `[:ankusa, :dispatch, :dedup]` telemetry and the
+  `ankusa.dispatch.deduplicated.total` metric. They replace
+  `[:ankusa, :dedup, :hit]` / `ankusa.dedup.hits.total`, which the WAL used to
+  emit on the ack path and nothing has emitted since dedup moved off it.
+- `mix loadgen.run` records the provider's own event key alongside the id and
+  the body hash (`id,sha256,event_key`), and `mix loadgen.verify` reports
+  `deduplicated` and `duplicate_deliveries`. An acked id that is missing because
+  dispatch dropped it as a duplicate is no longer counted as loss, and an event
+  that was delivered twice now fails the run.
 - `mix loadgen.run --events <path>` writes a per-request JSONL of what each
   request got back (`{"op":{"tag":"edge","0":<status>,"1":<id>}}` with
   epoch-millisecond timings), in the shape `Ankusa.WAL.Checker` reads. The
@@ -43,6 +62,12 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 
 ### Changed
 
+- **The ack no longer waits on dedup.** The WAL appends every record it is given
+  and the edge acks every copy it committed, with the envelope's own id, its own
+  `seq` and a `202`. Dedup used to sit between the two: the edge extracted a key
+  and the WAL refused a record whose key it had already accepted, which made the
+  ack depend on a uniqueness check. A provider's retry is now stored again, and
+  the receiver in front of dispatch is what keeps it from being delivered twice.
 - `Ankusa.WAL`'s `put_cursor/3` and `truncate_through/2` are replaced by
   `put_cursor/4` and `truncate_through/3` (both take a lease token). Callers
   outside the framework must move to the fenced arities.
@@ -57,6 +82,15 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   `put segment → put .idx sidecar → Index.append → hwm → put_cursor → truncate`,
   so a crash anywhere leaves the cursor behind and the work is redone rather
   than skipped.
+
+### Removed
+
+- `{:duplicate, seq}` from the `Ankusa.WAL` contract: `append/2` now answers
+  `{:committed, env}` for every record it is handed, and no adapter keeps a
+  ledger to refuse one.
+- The `200 duplicate` response and the `"status":"duplicate"` body. The edge has
+  no duplicate outcome: a copy is accepted, committed and acked like any other,
+  and whether it reaches a sink is dispatch's decision.
 
 ## [0.2.0] - 2026-09-24
 

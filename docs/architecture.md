@@ -8,9 +8,10 @@ decision in this framework is downstream of that one sentence.
 - **Crash before commit:** no `2xx` was sent. The provider retries. Nothing
   was lost because nothing was promised.
 - **Crash after commit, before the HTTP response leaves:** the provider
-  retries anyway (it never saw the `2xx`). Dedup absorbs the retry — same
-  event, same `(tenant_id, source_id, dedup_key)`, so it comes back as
-  `{"status":"duplicate"}` with the original `seq`, not a second row.
+  retries anyway (it never saw the `2xx`). The retry is *appended* like any
+  other copy — the log has no uniqueness constraint, and the edge does not look
+  for duplicates — and the idempotent receiver in front of dispatch drops it, so
+  the event reaches a sink once while every copy was acked.
 - **Store slow or down:** `503` with `Retry-After`. Never ack what wasn't
   saved, ever, under any load condition.
 
@@ -30,15 +31,16 @@ be quietly stronger than what's actually true. `WAL.Postgres` (see
 flowchart LR
     P[Provider] -->|POST catch URL| E[Edge: Bandit + Router]
     E --> RR[RouteResolver]
-    RR --> IG[Ingest: verify, dedup key]
+    RR --> IG[Ingest: verify]
     IG --> B[Group-commit Batcher]
     B -->|one fsync per batch| W[(WAL)]
     W -->|ack| P
     W -->|seq cursor| C[Compactor]
     W -->|seq cursor| D[Dispatch Pipeline]
     C --> S[(Object store\nsegments)]
-    D --> SK[Sinks]
-    D -->|give up| DLQ[(Dead letter)]
+    D --> R[Idempotent Receiver\ndedup per partition]
+    R --> SK[Sinks]
+    R -->|give up| DLQ[(Dead letter)]
 ```
 
 Ingest and dispatch are **fully decoupled**. Compaction and dispatch are
@@ -66,10 +68,12 @@ a `WAL.Postgres` database (see [`storage.md`](storage.md)).
      `:reject` (`401`, nothing stored), `:quarantine` (`202`, held in a
      rate-limited durable pen — see [`delivery.md`](delivery.md)), or
      `:accept_flag` (commits anyway, envelope marked `flagged: true`).
-3. **Dedup key extraction** (`Ankusa.DedupKey`) runs before the commit, not
-   after — the WAL's uniqueness constraint on `(tenant_id, source_id,
-   dedup_key)` is what actually enforces idempotency; the extractor just
-   supplies the key.
+3. **No dedup on the ack path.** The edge commits and acks every copy a
+   provider sends: the WAL is a durable, ordered, append-only log with no
+   uniqueness constraint, so the ack never waits on a ledger lookup and a
+   provider's retry cannot be answered "already seen" by a node that has not
+   committed it. Telling a retry from a new event is the idempotent receiver's
+   job, in front of dispatch (step 6).
 4. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default two)
    receives the envelope and **blocks the caller** until the batch it lands
    in commits. The flush to the WAL runs in a `Task`, so the batcher keeps
@@ -81,10 +85,10 @@ a `WAL.Postgres` database (see [`storage.md`](storage.md)).
    10,000, counting buffered *and* in-flight records): full means `503` with
    `Retry-After`, never a promise the store can't back.
 5. **`Ankusa.WAL`** commits durably and returns `{:committed, envelope}` (with
-   `seq` assigned) or `{:duplicate, existing_seq}` per record, in the
-   original order. The edge maps this to `201`/`200`/`202`/`401`/`404`/`413`/`503`;
-   a body it cannot read at all (client disconnect, read timeout) is `400`, kept
-   distinct from `413` rather than reported as "too large".
+   `seq` assigned) per record, in the original order. The edge maps this to
+   `202`/`401`/`404`/`413`/`503`; a body it cannot read at all (client
+   disconnect, read timeout) is `400`, kept distinct from `413` rather than
+   reported as "too large".
 
 From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 
@@ -107,7 +111,7 @@ From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 | --- | --- |
 | `WAL.DiskLog` | Append-only, length-prefixed, CRC32-per-record log. Replay validates every CRC and **drops a torn trailing frame** — a write that started but never `fsync`'d, so it was never acked either. No un-acked write is ever surfaced as if it were durable. |
 | Group-commit batcher | One process per partition; the WAL append runs in a task, so commits pipeline while callers block until their own commit returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. |
-| Idempotent receiver | A duplicate still gets a `2xx` (`{"status":"duplicate"}`) — the provider's retry contract is honored even though nothing new was written. |
+| Idempotent receiver | One delivery per event, whatever the provider retries: it keeps `dedup_key -> first_seq` and drops a copy only when a strictly earlier copy was delivered, so a re-read after a crash is delivered rather than dropped. Expiry is measured between the records' commit timestamps, never against the wall clock at read, so a dispatcher that has fallen behind still dedupes correctly. |
 | Compactor | Never writes one object per hook — packs many WAL records into one immutable segment. Truncates only through `min(compactor, dispatch)`. |
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and serialized per `c:Ankusa.Sink.ordering_key/2`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal, durable watermark cursor survives restart. |
 | Quarantine | Token-bucket rate-limited (100 burst, 20/s refill) durable pen — a bad secret rotation can't silently eat real events, and a flood of forged requests can't fill the disk. |
@@ -264,7 +268,7 @@ to the same instance, not a different architecture.
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix —
 `ingest`, `commit`, `verify`, `dedup`, `load_shed`, `dispatch`, `compact`,
-`quarantine`, `claim_check`. Components emit events; they never call each
+`quarantine`, `claim_check`, `lease`, `storage`. Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
 code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for
 the full event list and measurement/metadata shapes.

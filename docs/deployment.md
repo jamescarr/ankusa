@@ -81,8 +81,8 @@ Both compose files are worked examples:
 
 ```sh
 docker compose -f docker-compose.fleet.yml up -d --wait
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 201
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 200 duplicate
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 202
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 202 (a copy; dispatch drops it)
 curl localhost:4002/v1/dlq                                   # 401 (nginx)
 curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]}
 ```
@@ -107,7 +107,12 @@ docker compose -f ankusa_server/compose/docker-compose.fleet.yml up -d --wait
 
 Two `edge` replicas on a shared Postgres WAL, plus a `dispatch,storage`
 worker. Add `edge` replicas for ingest capacity — any replica can absorb any
-hook, because dedup lives in the shared WAL, not in a node's memory. Run
+hook, because the ack depends only on the shared WAL — deciding that a copy was
+already delivered is dispatch's job, off the ack path. That decision is
+per-dispatcher unless you move the ledger into replicated state:
+`Ankusa.DedupStore.Ra` (see [`delivery.md`](delivery.md#the-idempotent-receiver))
+keeps it with the log, so a dispatch failover does not hand the same provider
+retry to two different nodes. Run
 `dispatch` and `storage` at two replicas so each has a standby (see above). For
 a shared WAL across ingest nodes instead of N independent local ones, that is
 the `WAL.Postgres` config in [`storage.md`](storage.md).

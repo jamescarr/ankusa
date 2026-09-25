@@ -39,8 +39,8 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
   in-transaction insert commits, not before.
 - A non-`2xx` response or a timeout is retried per `dispatch.retry`, then
   dead-lettered (see [`delivery.md`](delivery.md)).
-- Dedupe on `x-ankusa-id` — Ankusa's own dedup already collapsed provider
-  retries upstream of dispatch, but at-least-once delivery means your
+- Dedupe on `x-ankusa-id` — the receiver in front of dispatch already
+  collapsed provider retries, but at-least-once delivery means your
   endpoint can still see the same `x-ankusa-id` twice (a `2xx` that was lost
   in transit, a dispatch retry after a timeout that actually succeeded).
   Your enqueue MUST be idempotent on this id — see the worked examples below

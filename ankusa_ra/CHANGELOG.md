@@ -18,9 +18,26 @@ follows [Semantic Versioning](https://semver.org/).
   track payload bytes; `live_indexes/1` keeps the entries still holding live
   records and Ra reclaims the rest.
 - `mix ankusa.wal.members` for membership changes and leadership transfer.
-- `mix ankusa.wal.migrate` for an offline cutover from a Postgres WAL,
-  including the dedup ledger — without which a provider's retry of an
-  already-delivered event would be accepted a second time.
+- `Ankusa.DedupStore.Ra`: the idempotent receiver's ledger kept by the WAL
+  cluster's replicated state, so two dispatchers that fail over to each other
+  share what they have seen. One consensus round trip per record, which is why
+  `Ankusa.DedupStore.ETS` is still the default; a decision the cluster cannot
+  answer delivers the record rather than dropping it unrecorded.
+- `Ankusa.WAL.Ra.Machine`'s `{:dedup_record, …}` command, the machine's second
+  version (a member restoring a v1 snapshot gets the empty ledger through the
+  version-upgrade command). The ledger is swept in the same units as the
+  in-process store — entries the rule would already ignore — because replicated
+  state, unlike a process, does not go away on its own.
+- `mix ankusa.wal.migrate` for an offline cutover from a Postgres WAL.
+
+### Changed
+
+- `mix ankusa.wal.migrate` no longer copies the old WAL's dedup ledger. The
+  commands are absolute, so a re-run is still safe on a cluster that has taken
+  no traffic. The ledger is not migrated because nothing reads it any more, and
+  importing it would hand the receiver a stale reason to drop a record: it
+  recorded what the old WAL had *accepted*, not what had been *delivered*, and
+  those are not the same set.
 
 ### Fixed
 
@@ -90,12 +107,13 @@ follows [Semantic Versioning](https://semver.org/).
   opens before the fault is applied and closes after a once-a-second poll
   notices a leader again). A violation in the first or last second of an outage
   is therefore unreported; that is the right way for a nightly gate to be wrong.
-- **The readiness probe could never be satisfied again.** `wait_for_stack`
-  POSTed the same `{"id":"probe"}` until it got a `201`, but the edge dedups: the
-  first probe is acked and every later one is a `200` duplicate, so if the leader
-  check happened to race on that first iteration the loop waited out its three
-  minutes against a stack that was serving correctly. Each attempt now uses a
-  fresh id.
+- **The readiness probe could wait three minutes against a healthy stack.**
+  `wait_for_stack` POSTed the same `{"id":"probe"}` until it got a `2xx`. While
+  the edge deduplicated, the first probe was acked and every later one came back
+  `200`, so a leader check that raced on that first iteration waited out its
+  three minutes against a stack that was serving correctly. Each attempt now
+  uses a fresh id — which the edge no longer needs, now that it acks every copy,
+  and which is one less thing for the probe to depend on.
 - **I8 demanded a 503 that the invariant does not require.** The bound only says
   anything when the outage *outlasts* it: quorum returning before the deadline is
   I8's own second sentence ("after quorum returns, `2xx` resumes within 2 × the

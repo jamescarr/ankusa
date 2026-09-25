@@ -16,6 +16,7 @@ replaces all three:
 | Survives loss of one node | only with Postgres replication | yes, majority replicated |
 | Cursor ownership | single replica, unenforced | `:dispatch`/`:storage` leases with fencing tokens |
 | Log reclamation | `DELETE` + `pg_total_relation_size` churn | Raft snapshot + segment spool |
+| Dispatch's dedup ledger across a failover | per-dispatcher, lost with the process | `Ankusa.DedupStore.Ra`, replicated with the log |
 
 ## Installation
 
@@ -67,6 +68,28 @@ A one-member cluster is a real Raft cluster: it elects itself and commits
 immediately. It is not fault tolerant — it is the same promise as
 `Ankusa.WAL.DiskLog`, with the same API as the fleet shape, which is what makes
 local development honest.
+
+## Dispatch dedup across a failover
+
+`Ankusa.Dispatch`'s idempotent receiver remembers which events it has already
+delivered, so a provider's retry does not reach a sink twice. Its default store
+(`Ankusa.DedupStore.ETS`) lives in the dispatcher process: when a partition
+moves to another node, the new owner starts with an empty ledger and re-delivers
+copies the old one had already handled. That is at-least-once — never a loss —
+and fine on one node; in a fleet where the same retry can meet two dispatchers,
+point dispatch at the replicated ledger instead:
+
+```elixir
+config :ankusa,
+  wal: {Ankusa.WAL.Ra, members: [{:"ankusa_wal_default", :"ankusa@wal-0"}, ...]},
+  dispatch: %{
+    dedup_store: {Ankusa.DedupStore.Ra, members: [{:"ankusa_wal_default", :"ankusa@wal-0"}, ...]}
+  }
+```
+
+`:members` is the WAL cluster's list: the ledger is applied by
+`Ankusa.WAL.Ra.Machine`, so it needs no cluster of its own. Each decision is one
+consensus round trip, which is the price of the ledger surviving the dispatcher.
 
 ## Operations
 

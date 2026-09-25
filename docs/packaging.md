@@ -156,12 +156,12 @@ release, many roles, config decides what boots. See
    your adapter without `ankusa` core knowing your package exists.
 4. **Verify against real infrastructure, not mocks.** Both `ankusa_postgres`
    and `ankusa_rabbitmq` are tested against real Postgres/RabbitMQ containers
-   — a hand-rolled protocol implementation (SigV4 signing, a SQL dedup
-   ledger, AMQP publisher confirms) that "looks right" is exactly the kind
+   — a hand-rolled protocol implementation (SigV4 signing, an append-only SQL
+   log, AMQP publisher confirms) that "looks right" is exactly the kind
    of thing that's subtly wrong until proven against the real thing. Both
-   adapters in this repo caught genuine bugs this way during development
-   (see `ankusa_postgres`'s moduledoc on why the dedup ledger carries its own
-   `seq` instead of joining back to `ankusa_wal`).
+   adapters in this repo caught genuine bugs this way during development —
+   `ankusa_postgres`'s commit-order test is one (see its moduledoc on the
+   per-instance advisory lock).
 5. Document it: a row in the behaviour table in
    [`configuration.md`](configuration.md), and a section in
    [`storage.md`](storage.md) or [`delivery.md`](delivery.md) depending on
