@@ -207,7 +207,8 @@ The fleet compose file is the worked example:
 runs two edge replicas and a worker with no published ports, and an nginx in
 front that leaves ingest open and puts HTTP basic auth on the admin API. It also
 demonstrates the guarantee the shared WAL buys: post the same hook twice, land on
-different replicas, and the second is absorbed as a duplicate.
+different replicas, and both are acked (202) while the duplicate is dropped at
+dispatch — one delivery reaches the sink.
 
 ## Data
 
@@ -224,7 +225,7 @@ problem anymore.
 ```sh
 docker compose -f docker-compose.fleet.yml up -d --wait
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 202
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 200 duplicate
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 202 (dropped at dispatch)
 curl localhost:4002/v1/dlq                                   # 401 (nginx)
 curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]}
 ```

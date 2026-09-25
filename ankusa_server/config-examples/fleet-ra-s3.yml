@@ -8,15 +8,20 @@
 #   storage  : S3 (S3_BUCKET / S3_REGION / S3_ENDPOINT)
 #   secrets  : RELEASE_COOKIE (Erlang distribution)
 #
-# Dedup lives in the replicated log, so a retry that lands on a different edge
-# replica is still absorbed — that is the point of a shared WAL. What Ra adds
-# over the Postgres fleet is that there is no single box to lose: the WAL is a
-# majority-replicated cluster of its own, and losing any one of its members
-# loses nothing.
+# Dedup is decided at dispatch, not in the log — the WAL has no uniqueness
+# constraint, so a retry that lands on a different edge replica is absorbed by
+# the idempotent receiver (`dispatch.dedup_store`). Setting it to `ra` keeps that
+# ledger in the WAL cluster's replicated state, so it survives a dispatch
+# failover. What Ra adds over the Postgres fleet is that there is no single box
+# to lose: the WAL is a majority-replicated cluster of its own, and losing any
+# one of its members loses nothing.
 #
-# Every Ankusa node that shares a WAL must have the same cookie, and the `wal`
-# nodes must be reachable at the names below. This is the config an *edge* node
-# runs; a `wal` node runs the same `wal:` block with `node.roles: [wal]`.
+# Erlang distribution is required for the Ra fleet: every node sets
+# `RELEASE_DISTRIBUTION=name`, a unique `RELEASE_NODE` (`ankusa@<pod>.<svc>`),
+# and the shared `RELEASE_COOKIE`. The `wal` nodes listen on the pinned
+# distribution ports (4370-4372, via `ERL_AFLAGS`) and must be reachable at the
+# names below. This is the config an *edge* node runs; a `wal` node runs the
+# same `wal:` block with `node.roles: [wal]`.
 
 node:
   roles: [edge]
@@ -25,6 +30,11 @@ node:
 admin:
   enabled: true
   port: 4002
+
+dispatch:
+  # The idempotent receiver's ledger in the WAL cluster's replicated state, so
+  # a dispatch failover does not re-deliver what the previous holder had seen.
+  dedup_store: ra
 
 wal:
   type: ra

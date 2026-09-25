@@ -17,7 +17,8 @@
 
 node:
   # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
-  # to start with; split for scale (edge in front, dispatch+storage behind).
+  # to start with; split for scale (edge in front, dispatch+storage behind, and
+  # a `wal` tier that hosts the Raft cluster when wal.type: ra).
   roles: [edge, dispatch, storage]
   # [env ANKUSA_DATA_DIR] WAL, quarantine, DLQ, and local segments land here.
   data_dir: /var/lib/ankusa
@@ -86,10 +87,13 @@ dispatch:
   dedup_store: ets
 
 wal:
-  # [env ANKUSA_WAL_TYPE] disk | postgres
+  # [env ANKUSA_WAL_TYPE] disk | postgres | ra
   #   disk     — local append-only log; survives process crash and power loss on
   #              this host, not the loss of the host.
   #   postgres — shared log; the same WAL for a whole fleet of edge nodes.
+  #   ra       — a majority-replicated Raft cluster of its own: losing any one
+  #              member loses nothing. The cluster name derives from the
+  #              instance, so only the member nodes are named.
   type: disk
   postgres:
     # A connection URL, or the discrete keys below — never both.
@@ -104,6 +108,19 @@ wal:
     # Run the adapter's DDL bootstrap on boot. Set false if you migrate
     # separately.
     migrate: true
+  ra:
+    # name@host for each member, in every node's config, verbatim. Each member
+    # is an Erlang node running the `wal` role; its own data (the Raft log and
+    # snapshot) lives under `node.data_dir`.
+    members:
+      - ankusa@wal-0
+      - ankusa@wal-1
+      - ankusa@wal-2
+    # How long a command may retry across a leader change before it fails.
+    append_timeout_ms: 10000
+    # The largest command body accepted; guards the Raft command buffer. Must
+    # stay below `http.max_body_bytes`.
+    max_command_bytes: 16777216
 
 storage:
   # [env ANKUSA_STORAGE_TYPE] local | s3 | gcs
