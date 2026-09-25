@@ -286,12 +286,23 @@ defmodule Ankusa.WAL.CheckerTest do
     assert report.violations == []
   end
 
-  test "a readable record nobody acked is extra" do
+  test "a readable record nobody acked is unattributed" do
     events = [observe([1], 1_000)]
 
     report = Checker.check(events, %{"id1" => "id1"}, readable(@three))
 
-    assert Enum.sort(report.extra) == ["id2", "id3"]
+    assert report.extra == []
+    assert Enum.sort(report.unattributed) == ["id2", "id3"]
+  end
+
+  test "a readable record nobody acked, committed inside a fault window, is ambiguous" do
+    events = [observe([1], 1_000), edge("2xx", "id2", 15_000, 15_020)]
+
+    report =
+      Checker.check(events, %{"id1" => "id1"}, readable(@three), quorum_down: [{10_000, 20_000}])
+
+    assert report.extra == ["id2"]
+    assert report.unattributed == ["id3"]
   end
 
   test "an ack with no readable record is missing" do
@@ -301,5 +312,107 @@ defmodule Ankusa.WAL.CheckerTest do
 
     assert report.missing == ["id9"]
     assert Enum.any?(report.violations, &match?({:i1, _}, &1))
+  end
+
+  # ── I6, I7, I9 ────────────────────────────────────────────────────────────
+
+  defp put_cursor(name, seq, token, at, result \\ :ok) do
+    %{
+      client: "pipeline",
+      op: {:put_cursor, name, seq, token},
+      invoked_at: at,
+      completed_at: at,
+      result: result
+    }
+  end
+
+  defp truncate(seq, token, at) do
+    %{
+      client: "compactor",
+      op: {:truncate, seq, token},
+      invoked_at: at,
+      completed_at: at,
+      result: :ok
+    }
+  end
+
+  defp append(id, seq, at) do
+    meta = %{tenant: "t", source: "s", sha256: id, batch_id: "b"}
+
+    %{
+      client: "edge",
+      op: {:append, id, meta},
+      invoked_at: at,
+      completed_at: at,
+      result: {:ok, seq}
+    }
+  end
+
+  defp acquire(name, holder, token, at) do
+    %{
+      client: "c",
+      op: {:acquire_lease, name, holder},
+      invoked_at: at,
+      completed_at: at,
+      result: {:ok, token}
+    }
+  end
+
+  test "a cursor that goes backwards trips I6" do
+    events = [put_cursor(:dispatch, 3, 1, 1_000), put_cursor(:dispatch, 1, 2, 2_000)]
+
+    report = Checker.check(events, MapSet.new(), readable(@three))
+
+    assert {:i6, {:cursor_went_backwards, :dispatch, 1, 3}} in report.violations
+  end
+
+  test "a cursor past the highest committed seq trips I6" do
+    events = [put_cursor(:dispatch, 7, 1, 1_000)]
+
+    report = Checker.check(events, MapSet.new(), readable(@three))
+
+    assert {:i6, {:cursor_past_max_acked, :dispatch, 7, 3}} in report.violations
+  end
+
+  test "a cursor that only advances reports nothing for I6" do
+    events = [put_cursor(:dispatch, 2, 1, 1_000), put_cursor(:dispatch, 3, 2, 2_000)]
+
+    report = Checker.check(events, MapSet.new(), readable(@three))
+
+    refute Enum.any?(report.violations, &match?({:i6, _}, &1))
+  end
+
+  test "a truncate past a reader with no cursor event is a truncation past 0" do
+    events = [truncate(2, 1, 1_000)]
+
+    report = Checker.check(events, MapSet.new(), readable(@three))
+
+    assert {:i7, {:truncated_past_a_reader, 2, 0}} in report.violations
+  end
+
+  test "a truncate that removes a committed record above it trips I7" do
+    events = [
+      append("id1", 1, 900),
+      append("id2", 3, 950),
+      put_cursor(:dispatch, 3, 1, 960),
+      truncate(2, 1, 1_000)
+    ]
+
+    # id2 (seq 3) was committed but is not readable: the truncate dropped it.
+    report = Checker.check(events, MapSet.new(), readable([{"id1", 1}]))
+
+    assert {:i7, {:truncated_above_records, 2, [3]}} in report.violations
+  end
+
+  test "a stale-token cursor write trips I9" do
+    events = [
+      acquire(:dispatch, "a", 1, 1_000),
+      acquire(:dispatch, "b", 2, 1_100),
+      put_cursor(:dispatch, 5, 1, 1_200)
+    ]
+
+    report = Checker.check(events, MapSet.new(), readable(@three))
+
+    assert {:i9, {:accepted_stale_token, {:put_cursor, :dispatch}, 1, 2}} in report.violations
   end
 end

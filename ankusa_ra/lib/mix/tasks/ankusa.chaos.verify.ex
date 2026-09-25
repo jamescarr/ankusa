@@ -62,12 +62,20 @@ defmodule Mix.Tasks.Ankusa.Chaos.Verify do
     not_exercised =
       for {invariant, count} <- report.evaluated, count == 0, do: to_string(invariant)
 
+    # A fault window with zero I8 evidence means I8 checked nothing: the run
+    # cannot claim to have verified shedding during the outage. And an
+    # unattributed readable record — one no client operation accounts for — is a
+    # failure by itself, independent of the violation list.
+    fault_window_given = not is_nil(opts[:fault])
+    i8_unexercised = fault_window_given and report.evaluated[:i8] == 0
+
     out = %{
       "events" => length(events),
       "acked" => map_size(acked),
       "readable" => length(final),
       "missing" => report.missing,
       "extra" => report.extra,
+      "unattributed" => report.unattributed,
       "violations" =>
         Enum.map(report.violations, fn {invariant, detail} ->
           %{"invariant" => to_string(invariant), "detail" => inspect(detail)}
@@ -77,7 +85,11 @@ defmodule Mix.Tasks.Ankusa.Chaos.Verify do
           {to_string(invariant), count}
         end),
       "not_exercised" => not_exercised,
-      "passed" => report.missing == [] and report.violations == []
+      "passed" =>
+        report.missing == [] and
+          report.violations == [] and
+          report.unattributed == [] and
+          not i8_unexercised
     }
 
     if path = opts[:report] do
@@ -91,6 +103,8 @@ defmodule Mix.Tasks.Ankusa.Chaos.Verify do
       acked         #{out["acked"]}
       readable      #{out["readable"]}
       missing       #{length(out["missing"])}
+      extra         #{length(out["extra"])}
+      unattributed  #{length(out["unattributed"])}
       violations    #{length(out["violations"])}
       not exercised #{if not_exercised == [], do: "none", else: Enum.join(not_exercised, ", ")}
     """)

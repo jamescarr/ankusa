@@ -69,6 +69,7 @@ defmodule Ankusa.WAL.Checker do
   @type report :: %{
           missing: [String.t()],
           extra: [String.t()],
+          unattributed: [String.t()],
           violations: [{atom(), term()}],
           evaluated: %{atom() => non_neg_integer()}
         }
@@ -113,12 +114,14 @@ defmodule Ankusa.WAL.Checker do
     # event, because that is the caller's own account of the payload.
     sent = Map.merge(acked_digests, sent_by_id(events))
 
+    {extra, unattributed} = extra_records(events, readable, sent, acked_ids, opts)
+
     violations =
       i1(acked_ids, readable) ++
         i2(events, readable, sent) ++
         i3(events, readable) ++
         i4(events) ++
-        i6(events, opts) ++
+        i6(events, readable, opts) ++
         i7(events, readable) ++
         i8(events, opts) ++
         i9(events) ++
@@ -126,7 +129,8 @@ defmodule Ankusa.WAL.Checker do
 
     %{
       missing: Enum.reject(MapSet.to_list(acked_ids), &Map.has_key?(readable, &1)),
-      extra: extra_records(readable, sent),
+      extra: extra,
+      unattributed: unattributed,
       violations: Enum.uniq(violations),
       evaluated:
         evaluated(
@@ -334,7 +338,15 @@ defmodule Ankusa.WAL.Checker do
   # folding with `max` reproduces the stored value; comparing it with what was
   # actually stored at the end catches a write that took effect when it should
   # not have.
-  defp i6(events, opts) do
+  #
+  # The replay also watches the observations themselves: a cursor that goes
+  # backwards (an `:ok` write below the value already stored) or past the
+  # highest committed seq (a cursor pointing beyond the end of the log) is a
+  # violation even when the drift check is silent, because neither can be a
+  # faithful account of what the pipeline consumed.
+  defp i6(events, readable, opts) do
+    max_acked = readable |> Enum.map(fn {_id, row} -> row.seq end) |> Enum.max(fn -> 0 end)
+
     {stored, violations} =
       events
       |> Enum.filter(&match?(%{op: {:put_cursor, _, _, _}}, &1))
@@ -342,6 +354,18 @@ defmodule Ankusa.WAL.Checker do
       |> Enum.reduce({%{}, []}, fn %{op: {:put_cursor, name, seq, _token}, result: result},
                                    {stored, violations} ->
         current = Map.get(stored, name, 0)
+
+        violations =
+          case result do
+            :ok when seq > max_acked ->
+              [{:i6, {:cursor_past_max_acked, name, seq, max_acked}} | violations]
+
+            :ok when seq < current ->
+              [{:i6, {:cursor_went_backwards, name, seq, current}} | violations]
+
+            _ ->
+              violations
+          end
 
         next = if result == :ok, do: max(current, seq), else: current
         {Map.put(stored, name, next), violations}
@@ -365,8 +389,23 @@ defmodule Ankusa.WAL.Checker do
 
   # Truncation is a prefix operation, and the compactor only ever truncates
   # through `min(dispatch, compactor)`: a truncate past what dispatch has
-  # consumed would drop a record nobody has delivered yet.
-  defp i7(events, _readable) do
+  # consumed would drop a record nobody has delivered yet. A cursor name that
+  # never appears in the history is a reader that has not advanced — its cursor
+  # is 0, so a truncation past it is a violation too.
+  #
+  # `readable` is the surviving log (WAL plus segments). After a
+  # `truncate_through(n)`, every committed record above `n` must still be
+  # readable; one that is not was removed by a truncation that promised to
+  # remove nothing above `n`.
+  defp i7(events, readable) do
+    committed_above =
+      for %{op: {:append, _id, _meta}, result: {:ok, seq}} <- events,
+          seq > 0,
+          into: MapSet.new(),
+          do: seq
+
+    readable_seqs = MapSet.new(readable, fn {_id, row} -> row.seq end)
+
     events
     |> Enum.sort_by(& &1.invoked_at)
     |> Enum.reduce({%{}, []}, fn event, {cursors, violations} ->
@@ -375,13 +414,26 @@ defmodule Ankusa.WAL.Checker do
           {Map.put(cursors, name, max(Map.get(cursors, name, 0), seq)), violations}
 
         %{op: {:truncate, seq, _token}, result: :ok} ->
-          floor = cursors |> Map.values() |> Enum.min(fn -> :infinity end)
+          floor = cursors |> Map.values() |> Enum.min(fn -> 0 end)
+
+          removed_above =
+            committed_above
+            |> Enum.filter(&(&1 > seq))
+            |> Enum.reject(&MapSet.member?(readable_seqs, &1))
 
           violations =
-            if floor == :infinity or seq <= floor do
-              violations
-            else
-              [{:i7, {:truncated_past_a_reader, seq, floor}} | violations]
+            cond do
+              seq > floor ->
+                [{:i7, {:truncated_past_a_reader, seq, floor}} | violations]
+
+              removed_above != [] ->
+                [
+                  {:i7, {:truncated_above_records, seq, Enum.take(removed_above, 20)}}
+                  | violations
+                ]
+
+              true ->
+                violations
             end
 
           {cursors, violations}
@@ -528,8 +580,38 @@ defmodule Ankusa.WAL.Checker do
 
   # ── I10 ───────────────────────────────────────────────────────────────────
 
-  defp extra_records(readable, sent) do
-    for {id, _row} <- readable, not Map.has_key?(sent, id), do: id
+  # A readable record nobody sent and nobody acked is `extra`. It splits two
+  # ways. A record the edge answered `2xx` for *inside* an outage window is an
+  # ambiguous commit: the ack may simply have been lost when quorum went away,
+  # so it is reported but not held against the run. Anything else — a record
+  # that appeared with no client operation at all, inside no outage — is
+  # unattributed, and that fails the gate.
+  defp extra_records(events, readable, sent, acked_ids, opts) do
+    windows = windows(opts)
+
+    {ambiguous, unattributed} =
+      for {id, _row} <- readable,
+          not Map.has_key?(sent, id),
+          not MapSet.member?(acked_ids, id),
+          reduce: {[], []} do
+        {ambiguous, unattributed} ->
+          if committed_in_window?(id, events, windows) do
+            {[id | ambiguous], unattributed}
+          else
+            {ambiguous, [id | unattributed]}
+          end
+      end
+
+    {Enum.sort(ambiguous), Enum.sort(unattributed)}
+  end
+
+  defp committed_in_window?(_id, _events, []), do: false
+
+  defp committed_in_window?(id, events, windows) do
+    Enum.any?(events, fn
+      %{op: {:edge, "2xx", ^id}, completed_at: done} -> in_window?(done, windows)
+      _ -> false
+    end)
   end
 
   # ── shared ────────────────────────────────────────────────────────────────
