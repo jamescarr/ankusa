@@ -17,11 +17,30 @@ defmodule Ankusa.WAL.Chaos do
   @doc """
   Every live record as a list of `%{"id" =>, "seq" =>, "sha256" =>}` maps.
 
-  Reads through `Ankusa.WAL`, so it sees exactly what a reader sees — including
-  that a truncated record is gone, which is the point.
+  Reads through `Ankusa.WAL` *and* the compacted segments — a record the
+  compactor has already truncated lives in a segment, not the WAL, so a scan
+  that read only the WAL would report it missing.
   """
   @spec scan(atom()) :: [map()]
   def scan(instance \\ :default) do
+    config = Ankusa.config(instance)
+
+    # Fold the segments the compactor wrote into the local index first, so the
+    # segment side of the scan sees them without a running compactor.
+    Ankusa.Storage.Index.repair(config)
+
+    wal_rows = scan_wal(instance)
+    segment_rows = scan_segments(instance, config)
+
+    # A record is in the WAL *or* a segment, never both: the compactor truncates
+    # the WAL only after indexing. Dedupe by seq so a record caught mid-compaction
+    # in both places is reported once.
+    (wal_rows ++ segment_rows)
+    |> Enum.uniq_by(& &1["seq"])
+    |> Enum.sort_by(& &1["seq"])
+  end
+
+  defp scan_wal(instance) do
     before = instance |> Ankusa.WAL.stats() |> Map.get(:records, 0)
     rows = scan(instance, 0, [])
     after_live = instance |> Ankusa.WAL.stats() |> Map.get(:records, 0)
@@ -42,6 +61,17 @@ defmodule Ankusa.WAL.Chaos do
     end
 
     rows
+  end
+
+  defp scan_segments(instance, config) do
+    config
+    |> Ankusa.Storage.Index.all()
+    |> Enum.flat_map(fn %{event_id: id} ->
+      case Ankusa.Storage.fetch(instance, id) do
+        {:ok, env} -> [row(env)]
+        :error -> []
+      end
+    end)
   end
 
   defp scan(instance, cursor, acc) do
