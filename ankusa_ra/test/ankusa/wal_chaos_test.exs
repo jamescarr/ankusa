@@ -95,4 +95,21 @@ defmodule Ankusa.WAL.ChaosTest do
     assert row["seq"] == 1
     assert row["sha256"] == Chaos.sha256("one")
   end
+
+  # `wait_for_stack` POSTs a readiness probe whose body id is `probe-…`; it is
+  # real traffic to the edge (committed and delivered) but not part of the
+  # measured load, so the scan skips it rather than let it read as unattributed.
+  test "a readiness probe is skipped, everything else stays", %{instance: instance} do
+    bodies = [
+      ~s({"id":"probe-1-42","pad":""}),
+      ~s({"id":"real","pad":"x"}),
+      ~s({"id":"probe-2-43","pad":""})
+    ]
+
+    seqs = append(instance, bodies)
+    rows = Chaos.scan(instance)
+
+    assert Enum.map(rows, & &1["seq"]) == [Enum.at(seqs, 1)]
+    assert Enum.map(rows, & &1["sha256"]) == [Chaos.sha256(Enum.at(bodies, 1))]
+  end
 end
