@@ -211,7 +211,7 @@ defmodule Ankusa.BlobStore.S3 do
 
     truncated? =
       case :xmerl_xpath.string(~c"//IsTruncated/text()", doc) do
-        [{:xmlText, _p, _pos, _lang, "true", _t}] -> true
+        [{:xmlText, _p, _pos, _lang, value, _t}] -> List.to_string(value) == "true"
         _ -> false
       end
 
