@@ -9,5 +9,6 @@ while [ "$SECONDS" -lt "$end" ]; do
   victim="${WAL_NODES[$((RANDOM % ${#WAL_NODES[@]}))]}"
   kill_container "$victim"
   sleep "$INTERVAL"
+  revive "$victim"
 done
 log "kill-random done"

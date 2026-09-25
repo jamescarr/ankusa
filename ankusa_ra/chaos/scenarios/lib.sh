@@ -148,6 +148,17 @@ restart_container() {
   docker restart "$id" >/dev/null
 }
 
+# Bring a killed service back up. A `kill -9` with `restart: "no"` leaves the
+# container down; a kill scenario revives its victim once its hold time ends so
+# the next round kills a *recovered* member, not an already-dead one.
+revive() {
+  local id
+  id="$(docker ps -aq -f "label=com.docker.compose.project=${PROJECT}" -f "label=com.docker.compose.service=$1" | head -1)"
+  [ -n "$id" ] || { log "$1 not found to revive"; return 0; }
+  log "revive $1"
+  docker start "$id" >/dev/null || true
+}
+
 # The wal members in the order the cluster reports them.
 wal_members() {
   docker exec "$(container_name wal-0)" /app/bin/ingest rpc \
@@ -161,14 +172,24 @@ wal_members() {
 # addressed by IP because iptables does not resolve compose service names.
 ip_of() { getent hosts "$1" | awk '{print $1}' | head -1; }
 
+# Inject into a target's network namespace from a *sidecar* that shares that
+# namespace: the target image has no iptables/tc, so the fault is applied from
+# a throwaway `netshoot` container with NET_ADMIN over the target's namespace.
+# A failed inject must fail the scenario (no `|| true` here) — a partition that
+# never took would let the run pass on false evidence.
+netshoot() {
+  local id="$1" command="$2"
+  docker run --rm --net "container:$id" --cap-add NET_ADMIN nicolaka/netshoot sh -c "$command"
+}
+
 partition() {
   local a="$1" b="$2"
   local aid bid
   aid="$(container_id "$a")"
   bid="$(ip_of "$b")"
   log "partition $a <-> $b"
-  docker exec "$aid" iptables -A INPUT -s "$bid" -j DROP || true
-  docker exec "$aid" iptables -A OUTPUT -d "$bid" -j DROP || true
+  netshoot "$aid" "iptables -A INPUT -s $bid -j DROP"
+  netshoot "$aid" "iptables -A OUTPUT -d $bid -j DROP"
 }
 
 heal() {
@@ -177,8 +198,7 @@ heal() {
   aid="$(container_id "$a")"
   bid="$(ip_of "$b")"
   log "heal $a <-> $b"
-  docker exec "$aid" iptables -D INPUT -s "$bid" -j DROP 2>/dev/null || true
-  docker exec "$aid" iptables -D OUTPUT -d "$bid" -j DROP 2>/dev/null || true
+  netshoot "$aid" "iptables -D INPUT -s $bid -j DROP 2>/dev/null; iptables -D OUTPUT -d $bid -j DROP 2>/dev/null" || true
 }
 
 heal_all() {
@@ -186,7 +206,7 @@ heal_all() {
     local id
     id="$(container_id "$c")"
     [ -n "$id" ] || continue
-    docker exec "$id" iptables -F 2>/dev/null || true
+    netshoot "$id" "iptables -F" || true
   done
 }
 
@@ -195,11 +215,11 @@ latency() {
   local id
   id="$(container_id "$c")"
   log "netem on $c: delay $delay jitter $jitter loss $loss"
-  docker exec "$id" tc qdisc replace dev eth0 root netem delay "$delay" "$jitter" loss "$loss" || true
+  netshoot "$id" "tc qdisc replace dev eth0 root netem delay $delay $jitter loss $loss"
 }
 
 clear_latency() {
   local id
   id="$(container_id "$1")"
-  docker exec "$id" tc qdisc del dev eth0 root 2>/dev/null || true
+  netshoot "$id" "tc qdisc del dev eth0 root 2>/dev/null" || true
 }

@@ -7,7 +7,9 @@ INTERVAL="${INTERVAL:-20}"
 WINDOW="${FAULT_WINDOW_S:-120}"
 end=$((SECONDS + WINDOW))
 while [ "$SECONDS" -lt "$end" ]; do
-  kill_container "$(wal_leader_container)"
+  victim="$(wal_leader_container)"
+  kill_container "$victim"
   sleep "$INTERVAL"
+  revive "$victim"
 done
 log "kill-leader done"

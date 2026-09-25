@@ -42,11 +42,9 @@ SCENARIOS=(
 
 # `SINGLE=1` runs the whole gate against one WAL node — the documented laptop
 # shape, and a *one-member* Raft cluster, which elects itself and commits
-# immediately. It needs no Erlang distribution between containers, so the gate
-# can run where three-node distribution does not work (a sandbox, a laptop), and
-# it still exercises everything the gate is made of: the load generator, the
-# edge's 503-when-there-is-no-quorum path, the observer, the final scan, the
-# checker and the two verifiers.
+# immediately. It still exercises everything the gate is made of: the load
+# generator, the edge's 503-when-there-is-no-quorum path, the observer, the
+# final scan, the checker and the two verifiers.
 #
 # What it does *not* exercise: replication itself — a majority surviving one
 # member's loss. The scenarios that only make sense with peers (electing a new
@@ -111,6 +109,16 @@ run_scenario() {
 
   rm -f "$OUT/${scenario}.csv"
 
+  # Two scenarios kill the compactor mid-write, so they need segments to
+  # actually exist (a 1s tick means there is always something in flight); every
+  # other run keeps the hourly tick so the final scan sees the WAL, not empty
+  # segments.
+  if [ "$scenario" = "kill-storage-active" ] || [ "$scenario" = "replace-member" ]; then
+    export ANKUSA_STORAGE_INTERVAL_MS=1000
+  else
+    export ANKUSA_STORAGE_INTERVAL_MS=3600000
+  fi
+
   "${COMPOSE[@]}" up -d --build >/dev/null
 
   # `rolling-upgrade` rolls onto a second image tag. Tag the freshly built image
@@ -137,11 +145,17 @@ run_scenario() {
     bash -c "SAMPLER_WINDOW_S=$((DURATION + FAULT_WINDOW_S + 120)) /scenarios/stats-sampler.sh /out/${scenario}-stats.jsonl" &
   sampler_pid=$!
 
-  # The fault runs concurrently with the load: that is the whole point.
-  docker exec "$("${COMPOSE[@]}" ps -q nemesis)" \
-    bash -c "WAL_NODES='$WAL_NODES' FAULT_WINDOW_S=$FAULT_WINDOW_S /scenarios/${scenario}.sh" \
-    > "$OUT/${scenario}-fault.log" 2>&1 &
-  fault_pid=$!
+  # The load starts first and warms up before the fault lands: a fault on an
+  # idle cluster proves nothing about steady-state traffic. `WARMUP_S` seconds
+  # of load (at `$RATE` requests/s) must flow before the fault script begins.
+  : "${WARMUP_S:=10}"
+
+  # `big-bodies` runs with multi-megabyte bodies (1–8 MiB, a fifth at the top of
+  # the range); every other scenario uses the default 512-byte pad.
+  LOADGEN_BODY_ARGS=()
+  if [ "$scenario" = "big-bodies" ]; then
+    LOADGEN_BODY_ARGS=(--body-bytes 1048576..8388608 --big-ratio 0.2)
+  fi
 
   (cd "$ROOT/tools/loadgen" && mix loadgen.run \
     --url http://localhost:8080/webhooks/demo \
@@ -149,11 +163,30 @@ run_scenario() {
     --duration "$DURATION" \
     --dup-ratio 0.1 \
     --nil-key-ratio 0.2 \
+    "${LOADGEN_BODY_ARGS[@]+"${LOADGEN_BODY_ARGS[@]}"}" \
     --out "$OUT_ABS/${scenario}.csv" \
     --report "$OUT_ABS/${scenario}-loadgen.json" \
-    --events "$OUT_ABS/${scenario}-loadgen-events.jsonl")
+    --events "$OUT_ABS/${scenario}-loadgen-events.jsonl") > "$OUT/${scenario}-loadgen.log" 2>&1 &
+  load_pid=$!
 
-  wait "$fault_pid" || true
+  sleep "$WARMUP_S"
+
+  # The fault runs concurrently with the load: that is the whole point.
+  docker exec "$("${COMPOSE[@]}" ps -q nemesis)" \
+    bash -c "WAL_NODES='$WAL_NODES' FAULT_WINDOW_S=$FAULT_WINDOW_S /scenarios/${scenario}.sh" \
+    > "$OUT/${scenario}-fault.log" 2>&1 &
+  fault_pid=$!
+
+  wait "$load_pid" || true
+
+  # The fault script's exit status matters: a fault that could not be applied
+  # (no leader to kill, a partition that never took) must fail the run, not
+  # pass because the evidence happened to be clean. `wait` under `set -e` would
+  # abort before the verify step could even read the evidence, so capture it.
+  set +e
+  wait "$fault_pid"
+  fault_status=$?
+  set -e
   kill "$observer_pid" "$sampler_pid" 2>/dev/null || true
   wait "$observer_pid" "$sampler_pid" 2>/dev/null || true
 
@@ -196,6 +229,11 @@ run_scenario() {
     --final "$OUT_ABS/${scenario}-final.json" \
     "${FAULT_ARG[@]+"${FAULT_ARG[@]}"}" \
     --report "$OUT_ABS/${scenario}-report.json")
+
+  if [ "$fault_status" -ne 0 ]; then
+    echo "error: the fault script failed (status $fault_status); see $OUT/${scenario}-fault.log" >&2
+    exit 1
+  fi
 
   echo "    $scenario: passed"
 }

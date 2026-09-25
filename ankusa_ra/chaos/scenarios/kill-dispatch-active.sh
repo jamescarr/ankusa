@@ -6,7 +6,9 @@ INTERVAL="${INTERVAL:-25}"
 WINDOW="${FAULT_WINDOW_S:-120}"
 end=$((SECONDS + WINDOW))
 while [ "$SECONDS" -lt "$end" ]; do
-  kill_container "$(active_worker_container)"
+  victim="$(active_worker_container)"
+  kill_container "$victim"
   sleep "$INTERVAL"
+  revive "$victim"
 done
 log "kill-dispatch-active done"

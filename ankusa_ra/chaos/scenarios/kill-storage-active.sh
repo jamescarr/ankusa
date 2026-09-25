@@ -12,5 +12,6 @@ while [ "$SECONDS" -lt "$end" ]; do
     2>/dev/null | sed -n 's/.*\(worker-[0-9]\).*/\1/p' | head -1 || true)"
   kill_container "${holder:-worker-0}"
   sleep "$INTERVAL"
+  revive "${holder:-worker-0}"
 done
 log "kill-storage-active done"
