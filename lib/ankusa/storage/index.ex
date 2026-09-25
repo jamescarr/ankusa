@@ -50,8 +50,6 @@ defmodule Ankusa.Storage.Index do
 
   alias Ankusa.{Config, DurableLog}
 
-  require Logger
-
   @type row :: %{
           event_id: String.t(),
           source_id: String.t(),
@@ -148,7 +146,7 @@ defmodule Ankusa.Storage.Index do
 
   Idempotent and cheap when nothing changed: an empty delta touches nothing.
   """
-  @spec repair(Config.t()) :: :ok
+  @spec repair(Config.t()) :: :ok | {:error, {String.t(), term()}}
   def repair(%Config{} = config) do
     # A node that was compacting before its hwm file existed already has a local
     # index; seed the hwm from it so it does not re-fold every segment.
@@ -179,8 +177,7 @@ defmodule Ankusa.Storage.Index do
         end
 
       {key, reason} ->
-        Logger.error("index repair stopped at #{key}: #{inspect(reason)}")
-        :ok
+        {:error, {key, reason}}
     end
   end
 
@@ -259,7 +256,7 @@ defmodule Ankusa.Storage.Index do
   defp segment_rows(config, key) do
     case Ankusa.BlobStore.get(config.instance, key) do
       {:ok, segment} -> walk(segment, key, 0, [])
-      {:error, _} -> []
+      {:error, reason} -> raise "segment #{key} GET failed: #{inspect(reason)}"
     end
   end
 

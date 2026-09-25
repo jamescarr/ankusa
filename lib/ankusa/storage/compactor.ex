@@ -144,8 +144,14 @@ defmodule Ankusa.Storage.Compactor do
   def handle_info(:acquire_lease, %{lease: nil} = state) do
     case try_acquire(state) do
       # The tick loop is already running (from `init`), so no second schedule.
-      {:ok, state} -> {:noreply, activate(state)}
-      {:standby, state} -> {:noreply, state |> repair() |> standby()}
+      {:ok, state} ->
+        {:noreply, activate(state)}
+
+      {:standby, state} ->
+        # Best-effort fold while standing by; a failed repair is retried (and
+        # stepped down on) when this node next activates.
+        _ = repair(state)
+        {:noreply, standby(state)}
     end
   end
 
@@ -225,8 +231,14 @@ defmodule Ankusa.Storage.Compactor do
   defp activate(state) do
     case safe_get_cursor(state.instance, :compactor) do
       {:ok, cursor} ->
-        repair(state)
-        %{state | cursor: cursor}
+        case repair(state) do
+          :ok ->
+            %{state | cursor: cursor}
+
+          {:error, reason} ->
+            Logger.warning("index repair failed: #{inspect(reason)}")
+            step_down(state)
+        end
 
       :error ->
         step_down(state)
@@ -237,11 +249,9 @@ defmodule Ankusa.Storage.Compactor do
   # so lookups served locally do not miss records it never itself compacted.
   defp repair(state) do
     Index.repair(state.config)
-    state
   rescue
     e ->
-      Logger.warning("index repair failed: " <> Exception.message(e))
-      state
+      {:error, e}
   end
 
   defp safe_get_cursor(instance, name) do
