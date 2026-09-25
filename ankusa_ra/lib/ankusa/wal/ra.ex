@@ -222,23 +222,35 @@ defmodule Ankusa.WAL.Ra do
           :ok
 
         {:error, reason} when reason in [:not_found, :name_not_registered] ->
-          members = Keyword.fetch!(wal_opts, :members)
-          machine = {:module, Machine, machine_config(wal_opts)}
-
-          case :ra.start_server(system, cluster, server_id, machine, members) do
-            :ok ->
-              campaign(server_id)
-              :ok
-
-            {:error, reason} ->
-              {:error, reason}
-          end
+          start_fresh(system, cluster, server_id, wal_opts)
 
         {:error, reason} ->
-          {:error, reason}
+          # A member whose log cannot be recovered (a torn or corrupted WAL)
+          # must not stay down: discard its local copy and re-initialize, then
+          # catch up from the other members.
+          Logger.warning(
+            "[ankusa] Ra WAL #{inspect(server_id)} failed to recover: #{inspect(reason)}; re-initializing"
+          )
+
+          _ = :ra.force_delete_server(system, server_id)
+          start_fresh(system, cluster, server_id, wal_opts)
       end
     else
       :ok
+    end
+  end
+
+  defp start_fresh(system, cluster, server_id, wal_opts) do
+    members = Keyword.fetch!(wal_opts, :members)
+    machine = {:module, Machine, machine_config(wal_opts)}
+
+    case :ra.start_server(system, cluster, server_id, machine, members) do
+      :ok ->
+        campaign(server_id)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -475,7 +487,8 @@ defmodule Ankusa.WAL.Ra do
   # The command carries the encoded envelopes and nothing else: the machine
   # records *where* each one sits in the log, so every other field would be
   # state it has to carry and never reads.
-  defp record(%Envelope{} = env) do
+  @doc false
+  def record(%Envelope{} = env) do
     env = Ankusa.WAL.stamp_commit(env)
 
     Envelope.to_binary(%{env | seq: nil})
