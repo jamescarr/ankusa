@@ -157,13 +157,25 @@ defmodule Ankusa.EdgeTest do
       def get_cursor(server, name), do: Ankusa.WAL.DiskLog.get_cursor(server, name)
 
       @impl Ankusa.WAL
-      def put_cursor(server, name, seq), do: Ankusa.WAL.DiskLog.put_cursor(server, name, seq)
+      def put_cursor(server, name, seq, token),
+        do: Ankusa.WAL.DiskLog.put_cursor(server, name, seq, token)
 
       @impl Ankusa.WAL
-      def truncate_through(server, seq), do: Ankusa.WAL.DiskLog.truncate_through(server, seq)
+      def truncate_through(server, seq, token),
+        do: Ankusa.WAL.DiskLog.truncate_through(server, seq, token)
 
       @impl Ankusa.WAL
       def stats(server), do: Ankusa.WAL.DiskLog.stats(server)
+
+      @impl Ankusa.WAL
+      def acquire_lease(server, name, holder, ttl_ms),
+        do: Ankusa.WAL.DiskLog.acquire_lease(server, name, holder, ttl_ms)
+
+      @impl Ankusa.WAL
+      def renew_lease(server, lease), do: Ankusa.WAL.DiskLog.renew_lease(server, lease)
+
+      @impl Ankusa.WAL
+      def release_lease(server, lease), do: Ankusa.WAL.DiskLog.release_lease(server, lease)
     end
 
     config =

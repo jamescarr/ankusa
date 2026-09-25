@@ -44,6 +44,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   alias Ankusa.{ClaimCheck, Sink, SourceStore, Telemetry, WAL}
   alias Ankusa.Dispatch.DLQ
   alias Ankusa.Sink.Message
+  alias Ankusa.WAL.LeaseHelpers
 
   # ── public API ────────────────────────────────────────────────────────────
 
@@ -62,7 +63,11 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   @doc """
-  Drain until caught up; returns envelopes fully handled during the call.
+  Drain the WAL and deliver everything dispatchable.
+
+  Only a node that holds the dispatch lease drains: on a standby this is a
+  no-op returning `{:ok, 0}`, because another node owns the cursor. The return
+  is the number of envelopes fully handled during the call.
   """
   @spec tick(atom()) :: {:ok, non_neg_integer()}
   def tick(instance) do
@@ -76,6 +81,7 @@ defmodule Ankusa.Dispatch.Pipeline do
     instance = Keyword.fetch!(opts, :instance)
     config = Keyword.fetch!(opts, :config)
     max_sleep = Keyword.get(opts, :max_sleep_ms, nil)
+    dispatch = config.dispatch
 
     # Linked to us on purpose: nobody else knows about it, and it must not
     # outlive the pipeline. Tests that start the Pipeline alone still get it.
@@ -83,17 +89,26 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     Process.flag(:trap_exit, true)
 
-    cursor = WAL.get_cursor(instance, :dispatch)
+    ttl_ms = dispatch.lease_ttl_ms
 
     state = %{
       instance: instance,
       config: config,
       max_sleep: max_sleep,
       task_sup: task_sup,
+      # the dispatch lease: only its holder may read/advance the cursor
+      lease: nil,
+      holder: "#{node()}/#{inspect(self())}",
+      ttl_ms: ttl_ms,
+      renew_ms: div(ttl_ms, 3),
+      safety_margin_ms: dispatch.lease_safety_margin_ms,
+      # monotonic ms; renew by `lease_renew_at`, step down past `lease_deadline`
+      lease_renew_at: 0,
+      lease_deadline: 0,
       # last durably persisted dispatch cursor
-      cursor: cursor,
+      cursor: 0,
       # last seq read out of the WAL (may be ahead of `cursor`)
-      read_seq: cursor,
+      read_seq: 0,
       # admitted, not yet fully handled
       pending: :gb_sets.empty(),
       # seq => {jobs outstanding, body bytes}
@@ -113,20 +128,63 @@ defmodule Ankusa.Dispatch.Pipeline do
       packing: %{}
     }
 
-    {:ok, schedule(state)}
+    case try_acquire(state) do
+      {:ok, state} ->
+        # This node owns the dispatch cursor: resume where it left off.
+        cursor = WAL.get_cursor(instance, :dispatch)
+        {:ok, schedule(%{state | cursor: cursor, read_seq: cursor})}
+
+      {:standby, state} ->
+        {:ok, schedule(standby(state))}
+    end
   end
 
   @impl true
+  def handle_call(:tick, _from, %{lease: nil} = state) do
+    # Standby: another node owns the dispatch cursor. Nothing to drain here.
+    {:reply, {:ok, 0}, state}
+  end
+
   def handle_call(:tick, from, state) do
     state = state |> fill() |> start_jobs()
     maybe_reply_waiters(%{state | waiters: state.waiters ++ [{from, state.completed}]})
   end
 
   @impl true
-  def handle_info(:poll, state) do
-    state = state |> fill() |> start_jobs() |> persist_cursor()
+  def handle_info(:poll, %{lease: nil} = state) do
     {:noreply, schedule(state)}
   end
+
+  def handle_info(:poll, state) do
+    cond do
+      # The lease is about to expire and could not be confirmed: stop now, so
+      # no write is attempted on a lease someone else may have taken.
+      mono_ms() > state.lease_deadline ->
+        {:noreply, schedule(step_down(state))}
+
+      mono_ms() >= state.lease_renew_at ->
+        {:noreply, schedule(renew(state))}
+
+      true ->
+        state = state |> fill() |> start_jobs() |> persist_cursor()
+        {:noreply, schedule(state)}
+    end
+  end
+
+  def handle_info(:acquire_lease, %{lease: nil} = state) do
+    case try_acquire(state) do
+      {:ok, state} ->
+        # A new holder never resumes from a stale in-memory cursor: re-read the
+        # durable one, which is leader-consistent.
+        cursor = WAL.get_cursor(state.instance, :dispatch)
+        {:noreply, schedule(%{state | cursor: cursor, read_seq: cursor})}
+
+      {:standby, state} ->
+        {:noreply, schedule(standby(state))}
+    end
+  end
+
+  def handle_info(:acquire_lease, state), do: {:noreply, state}
 
   def handle_info({ref, {:packed, results}}, %{packing: packing} = state)
       when is_map_key(packing, ref) do
@@ -201,6 +259,7 @@ defmodule Ankusa.Dispatch.Pipeline do
     # Best effort: the WAL may already be gone during a shutdown.
     try do
       persist_cursor(state)
+      if state.lease, do: WAL.release_lease(state.instance, state.lease)
     catch
       :exit, _ -> :ok
     end
@@ -545,16 +604,89 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
+  defp persist_cursor(%{lease: nil} = state), do: state
+
   defp persist_cursor(state) do
     mark = watermark(state)
 
     if mark > state.cursor do
-      WAL.put_cursor(state.instance, :dispatch, mark)
-      %{state | cursor: mark}
+      case WAL.put_cursor(state.instance, :dispatch, mark, state.lease.token) do
+        :ok -> %{state | cursor: mark}
+        # The lease moved on without us: stop being the dispatcher.
+        {:error, :fenced} -> step_down(state)
+      end
     else
       state
     end
   end
+
+  # ── lease ─────────────────────────────────────────────────────────────────
+
+  # Try to take the dispatch lease. `{:ok, state}` means this node is active;
+  # `{:standby, state}` means another node holds it and this one only waits.
+  defp try_acquire(state) do
+    case WAL.acquire_lease(state.instance, :dispatch, state.holder, state.ttl_ms) do
+      {:ok, lease} ->
+        lease = Map.put(lease, :instance, state.instance)
+        LeaseHelpers.emit(:acquired, lease)
+        {:ok, arm(%{state | lease: lease})}
+
+      {:error, {:held, _holder}} ->
+        {:standby, %{state | lease: nil}}
+    end
+  end
+
+  defp renew(state) do
+    case WAL.renew_lease(state.instance, state.lease) do
+      {:ok, lease} ->
+        lease = Map.put(lease, :instance, state.instance)
+        LeaseHelpers.emit(:renewed, lease)
+        arm(%{state | lease: lease})
+
+      {:error, :lost} ->
+        LeaseHelpers.emit(:lost, state.lease)
+        step_down(state)
+    end
+  end
+
+  # Timestamps are monotonic, so a wall-clock jump cannot extend a lease.
+  defp arm(state) do
+    %{
+      state
+      | lease_deadline: mono_ms() + state.ttl_ms - state.safety_margin_ms,
+        lease_renew_at: mono_ms() + state.renew_ms
+    }
+  end
+
+  defp standby(state) do
+    Process.send_after(self(), :acquire_lease, state.renew_ms)
+    state
+  end
+
+  # Lose the lease: drop everything admitted but not finished, keep no cursor,
+  # and wait to acquire again. In-flight delivery tasks are NOT killed — they
+  # complete or fail on their own and their result messages are ignored, which
+  # is at-least-once (a redelivery, never a loss).
+  defp step_down(state) do
+    Enum.each(state.running, fn {ref, _job} -> Process.demonitor(ref, [:flush]) end)
+
+    state
+    |> Map.merge(%{
+      lease: nil,
+      pending: :gb_sets.empty(),
+      remaining: %{},
+      inflight_bytes: 0,
+      lanes: %{},
+      runnable: :queue.new(),
+      running: %{},
+      staged: :queue.new(),
+      packing: %{},
+      window_full?: false
+    })
+    |> standby()
+  end
+
+  defp mono_ms, do: System.monotonic_time(:millisecond)
 
   # ── waiters ───────────────────────────────────────────────────────────────
 

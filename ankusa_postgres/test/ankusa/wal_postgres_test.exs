@@ -25,7 +25,11 @@ defmodule Ankusa.WAL.PostgresTest do
   end
 
   setup do
-    %{instance: boot(:"pg_#{System.unique_integer([:positive])}")}
+    # Not just `unique_integer/1`: that is unique within a VM, not across
+    # restarts, and this adapter keeps its cursors and leases in a database that
+    # outlives the test run.
+    suffix = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+    %{instance: boot(:"pg_#{System.unique_integer([:positive])}#{suffix}")}
   end
 
   defp envelope(overrides \\ %{}) do
@@ -117,7 +121,10 @@ defmodule Ankusa.WAL.PostgresTest do
     id = "evt-#{System.unique_integer([:positive])}"
     {:ok, [{:committed, first}]} = WAL.append(inst, [entry(%{dedup_key: id})])
 
-    :ok = WAL.truncate_through(inst, first.seq)
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :storage, fn lease ->
+      :ok = WAL.truncate_through(inst, first.seq, lease.token)
+    end)
+
     assert WAL.read(inst, -1, 10) == []
 
     # the row is physically gone, but the dedup ledger is permanent
@@ -127,17 +134,26 @@ defmodule Ankusa.WAL.PostgresTest do
 
   test "cursors default to 0 and persist", %{instance: inst} do
     assert WAL.get_cursor(inst, :dispatch) == 0
-    assert :ok = WAL.put_cursor(inst, :dispatch, 42)
+
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :dispatch, fn lease ->
+      assert :ok = WAL.put_cursor(inst, :dispatch, 42, lease.token)
+    end)
+
     assert WAL.get_cursor(inst, :dispatch) == 42
   end
 
   test "stats reflect committed records and cursors", %{instance: inst} do
     {:ok, _} = WAL.append(inst, [entry(), entry()])
-    :ok = WAL.put_cursor(inst, :dispatch, 1)
+
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :dispatch, fn lease ->
+      :ok = WAL.put_cursor(inst, :dispatch, 1, lease.token)
+    end)
 
     stats = WAL.stats(inst)
     assert stats.records == 2
-    assert stats.next_seq == stats.max_seq + 1
+    # the sequence is shared by every instance in the database, so it only ever
+    # runs ahead of this instance's own rows
+    assert stats.next_seq > stats.max_seq
     assert stats.cursors["dispatch"] == 1
   end
 

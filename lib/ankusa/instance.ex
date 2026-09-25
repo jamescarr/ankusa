@@ -59,8 +59,11 @@ defmodule Ankusa.Instance do
   # The WAL only matters to roles that actually read or write it. A node
   # running only `:claim_check` needs blob-store credentials, never WAL
   # credentials (e.g. a Postgres connection) — so it shouldn't open one.
+  # A `:wal` node starts the adapter too: with Ra that is also where the local
+  # Raft member lives, so a dedicated WAL-only StatefulSet boots exactly this
+  # child.
   defp wal_children(config, opts) do
-    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
+    if Enum.any?([:edge, :dispatch, :storage, :wal], &Config.role?(config, &1)) do
       {wal_mod, _} = config.wal
       [{wal_mod, opts}]
     else

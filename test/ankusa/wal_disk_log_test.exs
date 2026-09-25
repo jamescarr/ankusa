@@ -97,7 +97,10 @@ defmodule Ankusa.WAL.DiskLogTest do
       %{envelope: env("s", "c", "kc")}
     ])
 
-    :ok = WAL.truncate_through(inst, 1)
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :storage, fn lease ->
+      :ok = WAL.truncate_through(inst, 1, lease.token)
+    end)
+
     assert WAL.read(inst, -1, 100) |> Enum.map(& &1.seq) == [2, 3]
 
     # a duplicate of a truncated record is still rejected (dedup survived)
@@ -145,7 +148,10 @@ defmodule Ankusa.WAL.DiskLogTest do
     {:ok, results} = WAL.append(inst, for(n <- 1..3, do: %{envelope: env("s", "#{n}")}))
     assert [1, 2, 3] == for({:committed, e} <- results, do: e.seq)
 
-    :ok = WAL.truncate_through(inst, 3)
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :storage, fn lease ->
+      :ok = WAL.truncate_through(inst, 3, lease.token)
+    end)
+
     assert WAL.stats(inst).records == 0
 
     :ok = stop_supervised({Ankusa.WAL.DiskLog, inst})

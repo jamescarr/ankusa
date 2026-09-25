@@ -33,6 +33,7 @@ mix loadgen.run --url http://localhost:4000/webhooks/some-source \
 | `--body-bytes`    | integer | `512`                    | Size in bytes of the `"pad"` field in each freshly generated JSON body.                     |
 | `--out`           | string  | `acked.csv`              | Path to write the "acked" CSV (`id,sha256hex` per accepted delivery, no header).             |
 | `--report`        | string  | `loadgen-report.json`    | Path to write the JSON run report.                                                          |
+| `--events`        | string  | *(absent = not written)* | Path to write a JSONL event per request — `{"client":"loadgen","op":{"tag":"edge","0":<status>,"1":<id>},"invoked_at":<epoch ms>,"completed_at":<epoch ms>}` — in the shape `Ankusa.WAL.Checker` reads. The aggregate report cannot answer *when* a request was shed; only a per-request stream can. |
 
 ### Response classification
 
@@ -91,6 +92,12 @@ mix loadgen.verify --acked acked.csv \
 Polling happens every 2 seconds, querying `processed_webhooks` in chunks of
 5,000 ids per `SELECT ... WHERE ankusa_id = ANY($1)`, until every acked id
 has appeared or the timeout elapses.
+
+The verifier runs while the sink is still being written to, so it connects with a
+four-connection pool and a generous queue timeout, and retries a transient
+`DBConnection.ConnectionError` instead of failing: a pool that is momentarily
+saturated is not evidence that a delivery was lost. The poll deadline — not a
+single query — is what decides whether a record is missing.
 
 ### Report
 

@@ -6,6 +6,35 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ankusa_wal_leases`, one row per lease name and instance, resolved against the
+  *database* clock (`now()`) so every node agrees on whether a lease is live
+  regardless of its own clock. A cursor write or truncation carries the live
+  token for the row it touches, checked and applied in one transaction, and a
+  write carrying anything else is refused with `{:error, :fenced}`.
+- The 13-case `Ankusa.WAL.ConformanceCase` suite, run against a live Postgres.
+
+### Changed
+
+- `put_cursor/4` and `truncate_through/3` are fenced by a lease token, and
+  cursor writes are a maximum (`GREATEST(ankusa_wal_cursors.seq, EXCLUDED.seq)`)
+  rather than an assignment — a stale writer can no longer move a cursor
+  backwards, and truncation is computed from those cursors.
+- `stats/1`'s `next_seq` is read from the sequence itself, not from
+  `max(seq) + 1`. After a full truncation `max(seq)` is NULL, so the old
+  answer was `1` — a seq every cursor is already past, which would make the
+  next append invisible to every reader. The sequence is shared by every
+  instance in the database, so `next_seq` is "the next seq the next append will
+  get", not a per-instance count.
+- Releasing a lease marks it expired rather than deleting the row: the token
+  counter must only ever climb, so the next holder cannot reuse a released one's
+  token.
+- Two moduledoc corrections: the loser lookup reads `ankusa_wal_dedup.seq`
+  directly (it does not join back to `ankusa_wal`), and the advisory lock is
+  taken in `insert_winners/3` *after* `claim_dedup/2`, so it covers seq
+  allocation and the COMMIT but not the dedup claim itself.
+
 ### Changed
 
 - `append/2` takes a per-instance advisory lock

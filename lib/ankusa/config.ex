@@ -18,10 +18,12 @@ defmodule Ankusa.Config do
             source_store: {Ankusa.SourceStore.Static, sources: %{}},
             # {module, opts} implementing Ankusa.WAL
             wal: {Ankusa.WAL.DiskLog, []},
-            # group-commit batcher. Both WALs serialize commits themselves (the
-            # DiskLog GenServer, Postgres's per-instance advisory lock), so more
-            # partitions only add contention now that a partition commits
-            # asynchronously instead of holding the caller's message queue.
+            # group-commit batcher. Every remaining adapter serializes commits
+            # itself — the DiskLog GenServer, Postgres's per-instance advisory
+            # lock — and the Ra leader batches the commands it applies on its
+            # own, so more partitions only add contention now that a partition
+            # commits asynchronously instead of holding the caller's message
+            # queue.
             batcher: %{
               partitions: 2,
               max_batch: 256,
@@ -42,7 +44,12 @@ defmodule Ankusa.Config do
               max_inflight: 4096,
               # ...and the max sum of their body bytes
               max_inflight_bytes: 134_217_728,
-              retry: {Ankusa.RetryPolicy.Exponential, []}
+              retry: {Ankusa.RetryPolicy.Exponential, []},
+              # dispatch lease TTL; the pipeline renews every `ttl_ms / 3`
+              lease_ttl_ms: 15_000,
+              # stop (or, for a standby, wait) this long before the lease's
+              # real expiry, so a slow renew never races the deadline
+              lease_safety_margin_ms: 3_000
             },
             # segment compaction
             storage: %{
@@ -50,7 +57,10 @@ defmodule Ankusa.Config do
               codec: {Ankusa.Codec.Raw, []},
               roll_bytes: 16 * 1024 * 1024,
               roll_ms: 30_000,
-              interval_ms: 1_000
+              interval_ms: 1_000,
+              # storage lease TTL; the compactor renews every `ttl_ms / 3`
+              lease_ttl_ms: 15_000,
+              lease_safety_margin_ms: 3_000
             },
             # claim check: payloads too large to ride inline in a queue message
             claim_check: %{
@@ -69,19 +79,20 @@ defmodule Ankusa.Config do
 
   @type t :: %__MODULE__{}
 
-  @roles [:edge, :dispatch, :storage, :claim_check]
+  @roles [:edge, :dispatch, :storage, :claim_check, :wal]
 
   @role_names %{
     "edge" => :edge,
     "dispatch" => :dispatch,
     "storage" => :storage,
-    "claim_check" => :claim_check
+    "claim_check" => :claim_check,
+    "wal" => :wal
   }
 
   @doc """
   Parse a comma-separated `ANKUSA_ROLES`-shaped string into role atoms.
   Never calls `String.to_atom/1` — each part must name one of the fixed
-  roles (`edge`, `dispatch`, `storage`, `claim_check`).
+  roles (`edge`, `dispatch`, `storage`, `claim_check`, `wal`).
   """
   @spec parse_roles!(String.t()) :: [atom()]
   def parse_roles!(value) do
@@ -93,7 +104,7 @@ defmodule Ankusa.Config do
       |> Enum.map(fn name ->
         Map.get(@role_names, name) ||
           raise ArgumentError,
-                "unknown Ankusa role #{inspect(name)}; expected one of: edge, dispatch, storage, claim_check"
+                "unknown Ankusa role #{inspect(name)}; expected one of: edge, dispatch, storage, claim_check, wal"
       end)
 
     if roles == [] do

@@ -27,6 +27,13 @@ spec:
               # connections here before the listener actually closes.
               exec:
                 command: ["sleep", "5"]
+          envFrom:
+            # WAL=ra|postgres, WAL_RA_MEMBERS. run.sh writes this ConfigMap
+            # before applying this file; `optional` keeps the manifest usable
+            # on its own.
+            - configMapRef:
+                name: ankusa-wal
+                optional: true
           env:
             - name: ANKUSA_ROLES
               value: "edge"
@@ -46,6 +53,23 @@ spec:
               value: "ankusa"
             - name: CONSUMER_URL
               value: "http://consumer/deliveries"
+            # Erlang distribution, for the Ra WAL. An edge's node name only has
+            # to be unique and reachable for the reply — the WAL nodes are the
+            # ones others dial by name — so the pod IP is enough.
+            - name: RELEASE_DISTRIBUTION
+              value: "name"
+            - name: RELEASE_NODE
+              value: "ankusa@$(POD_IP)"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: RELEASE_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: ankusa-cookie
+                  key: cookie
+                  optional: true
           ports:
             - containerPort: 4000
           volumeMounts:
@@ -81,6 +105,21 @@ spec:
       targetPort: 4000
       nodePort: 30080
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankusa-worker
+  namespace: ankusa-e2e
+spec:
+  # Headless, so ankusa-worker-N.ankusa-worker resolves — the worker's
+  # distribution name (and, with the Ra WAL, its membership identity).
+  clusterIP: None
+  selector:
+    app: ankusa-worker
+  ports:
+    - port: 4370
+      targetPort: 4370
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -88,9 +127,11 @@ metadata:
   namespace: ankusa-e2e
 spec:
   serviceName: ankusa-worker
-  # Singleton by design: the :dispatch/:storage roles hold no lease and are
-  # not safe to run with more than one replica — see docs/deployment.md.
-  replicas: 1
+  # Two replicas: dispatch and storage each hold a lease on the cursor they own
+  # (`:dispatch`, `:storage`), so all but one replica is a hot standby rather
+  # than a second writer. With the Postgres WAL the lease contract is enforced
+  # there too; with Ra it is replicated state.
+  replicas: 2
   selector:
     matchLabels:
       app: ankusa-worker
@@ -99,10 +140,15 @@ spec:
       labels:
         app: ankusa-worker
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: ankusa-worker
           image: ankusa-oban-ingest:e2e
           imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: ankusa-wal
+                optional: true
           env:
             - name: ANKUSA_ROLES
               value: "dispatch,storage"
@@ -120,6 +166,23 @@ spec:
               value: "ankusa"
             - name: CONSUMER_URL
               value: "http://consumer/deliveries"
+            - name: RELEASE_DISTRIBUTION
+              value: "name"
+            - name: RELEASE_NODE
+              value: "ankusa@$(POD_NAME).ankusa-worker"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RELEASE_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: ankusa-cookie
+                  key: cookie
+                  optional: true
+          ports:
+            - name: dist
+              containerPort: 4370
           volumeMounts:
             - name: data
               mountPath: /data

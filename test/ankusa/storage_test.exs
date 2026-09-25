@@ -93,6 +93,17 @@ defmodule Ankusa.StorageTest do
     for {:committed, env} <- results, do: env
   end
 
+  # Advancing a cursor needs a live lease: this is the dispatch role's.
+  defp dispatch_cursor!(inst, seq) do
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :dispatch, fn lease ->
+      :ok = Ankusa.WAL.put_cursor(inst, :dispatch, seq, lease.token)
+    end)
+  end
+
+  defp segment_keys(inst) do
+    inst |> Ankusa.BlobStore.list("seg") |> Enum.filter(&String.ends_with?(&1, ".seg"))
+  end
+
   test "tick compacts WAL records into one segment, indexes them, and truncates",
        %{inst: inst, config: config} do
     originals =
@@ -107,15 +118,18 @@ defmodule Ankusa.StorageTest do
     last_seq = originals |> List.last() |> Map.fetch!(:seq)
 
     # dispatch has consumed everything, so the compactor may truncate fully
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, last_seq)
+    dispatch_cursor!(inst, last_seq)
     assert Ankusa.WAL.stats(inst).records == 4
 
     assert {:ok, 1} == Compactor.tick(inst)
 
-    # exactly one immutable segment written
-    assert [segment_key] = Ankusa.BlobStore.list(inst, "seg")
+    # exactly one immutable segment written, plus its index sidecar
+    assert [segment_key] = segment_keys(inst)
     assert String.starts_with?(segment_key, "seg/")
     assert String.ends_with?(segment_key, ".seg")
+
+    sidecar = String.replace_suffix(segment_key, ".seg", ".idx")
+    assert sidecar in Ankusa.BlobStore.list(inst, "seg")
 
     # one durable index row per committed record
     rows = Index.all(config)
@@ -146,13 +160,13 @@ defmodule Ankusa.StorageTest do
   test "a lookup after a later compaction sees the rows that tick just wrote",
        %{inst: inst, config: config} do
     [first] = commit!(inst, [envelope("acme", ~s({"n":1}))])
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, first.seq)
+    dispatch_cursor!(inst, first.seq)
     assert {:ok, 1} == Compactor.tick(inst)
 
     assert {:ok, _row} = Index.lookup(config, first.id)
 
     [second] = commit!(inst, [envelope("acme", ~s({"n":2}))])
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, second.seq)
+    dispatch_cursor!(inst, second.seq)
     assert {:ok, 1} == Compactor.tick(inst)
 
     # the row appended by that earlier read's tick must still be there, and the
@@ -168,7 +182,7 @@ defmodule Ankusa.StorageTest do
   test "a lookup works while the compactor is down, and the restart reloads the index",
        %{inst: inst, config: config} do
     [env] = commit!(inst, [envelope("acme", ~s({"n":1}))])
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, env.seq)
+    dispatch_cursor!(inst, env.seq)
     assert {:ok, 1} == Compactor.tick(inst)
 
     assert {:ok, row} = Index.lookup(config, env.id)
@@ -193,7 +207,7 @@ defmodule Ankusa.StorageTest do
     [first_seq, last_seq] = Enum.map(originals, & &1.seq)
 
     # dispatch has only consumed the first record
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, first_seq)
+    dispatch_cursor!(inst, first_seq)
 
     assert {:ok, 1} == Compactor.tick(inst)
 
@@ -231,12 +245,12 @@ defmodule Ankusa.StorageTest do
         envelope("acme", "three")
       ])
 
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, originals |> List.last() |> Map.fetch!(:seq))
+    dispatch_cursor!(inst, originals |> List.last() |> Map.fetch!(:seq))
 
     # one tick writes every segment the backlog needs, not one segment holding
     # the whole backlog
     assert {:ok, 3} == Compactor.tick(inst)
-    assert length(Ankusa.BlobStore.list(inst, "seg")) == 3
+    assert length(segment_keys(inst)) == 3
 
     for original <- originals do
       assert {:ok, fetched} = Storage.fetch(inst, original.id)

@@ -1,0 +1,195 @@
+# The chaos harness: a real fleet, real containers, real faults.
+#
+# Everything the Level-1/2 suites test in-process, this tests end to end:
+# a three-member Ra WAL cluster, edges behind a load balancer, two workers
+# sharing the dispatch and storage leases, segments in an S3-compatible store,
+# a sink that records what it actually received, a load generator, and a
+# `nemesis` container with NET_ADMIN that injects the faults.
+#
+# `run.sh` drives it: `./run.sh kill-leader`, `./run.sh all`, `./run.sh mixed`.
+name: ankusa-chaos
+
+x-ankusa-env: &ankusa-env
+  ANKUSA_ROLES: "edge"
+  DATA_DIR: /data
+  WAL: "ra"
+  WAL_RA_MEMBERS: "${WAL_RA_MEMBERS:-ankusa@wal-0,ankusa@wal-1,ankusa@wal-2}"
+  # A wrong clock on one member, in ms. Set by the `clock-skew` scenario when it
+  # recreates a member; every other run leaves it at 0.
+  WAL_RA_TIME_OFFSET_MS: "${WAL_RA_TIME_OFFSET_MS:-0}"
+  # The compactor ticks hourly, not every second: with dispatch keeping up in
+  # real time, a 1s tick reclaims every record the run just wrote, and the final
+  # scan has nothing to check the acks against. (It is correct behaviour — the
+  # log is not an archive — but it makes I1 unreadable.)
+  ANKUSA_STORAGE_INTERVAL_MS: "3600000"
+  RELEASE_DISTRIBUTION: "sname"
+  RELEASE_COOKIE: "chaos-cookie"
+  ANKUSA_STORAGE_TYPE: "s3"
+  S3_BUCKET: ankusa-chaos
+  S3_REGION: us-east-1
+  S3_ENDPOINT: "http://floci:4566"
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  CONSUMER_URL: "http://sink:4200/deliveries"
+
+x-wal-env: &wal-env
+  ANKUSA_ROLES: "wal"
+  DATA_DIR: /data
+  WAL: "ra"
+  WAL_RA_MEMBERS: "${WAL_RA_MEMBERS:-ankusa@wal-0,ankusa@wal-1,ankusa@wal-2}"
+  WAL_RA_TIME_OFFSET_MS: "${WAL_RA_TIME_OFFSET_MS:-0}"
+  RELEASE_DISTRIBUTION: "sname"
+  RELEASE_COOKIE: "chaos-cookie"
+
+x-ankusa-image: &ankusa-image
+  image: ankusa-oban-ingest:chaos
+  build:
+    context: ../..
+    dockerfile: examples/oban-consumer/ingest_app/Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ankusa
+      POSTGRES_PASSWORD: ankusa
+      POSTGRES_DB: chaos
+    # 5434, not 5433: a developer's `ankusa_postgres` compose stack owns that one.
+    ports: ["5434:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ankusa -d chaos"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  floci:
+    image: floci/floci:latest
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+
+  s3-bootstrap:
+    image: amazon/aws-cli:2.17.62
+    depends_on: [floci]
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://floci:4566
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws s3 ls >/dev/null 2>&1; do sleep 1; done
+        aws s3 mb s3://ankusa-chaos || true
+
+  # The sink records what it actually received, so "missing deliveries: 0" is
+  # a statement about the consumer side, not about the WAL's own bookkeeping.
+  sink:
+    build: ./sink
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgres://ankusa:ankusa@postgres/chaos
+      PORT: "4200"
+    ports: ["4200:4200"]
+
+  wal-0:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *wal-env
+      RELEASE_NODE: "ankusa@wal-0"
+    volumes: ["wal-0-data:/data"]
+  wal-1:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *wal-env
+      RELEASE_NODE: "ankusa@wal-1"
+    volumes: ["wal-1-data:/data"]
+  wal-2:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *wal-env
+      RELEASE_NODE: "ankusa@wal-2"
+    volumes: ["wal-2-data:/data"]
+
+  # Two workers, one lease each for dispatch and storage: one is active, the
+  # other is a hot standby that takes over on failure.
+  worker-0:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *ankusa-env
+      ANKUSA_ROLES: "dispatch,storage"
+      RELEASE_NODE: "ankusa@worker-0"
+    volumes: ["worker-0-data:/data"]
+  worker-1:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *ankusa-env
+      ANKUSA_ROLES: "dispatch,storage"
+      RELEASE_NODE: "ankusa@worker-1"
+    volumes: ["worker-1-data:/data"]
+
+  edge-1:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *ankusa-env
+      RELEASE_NODE: "ankusa@edge-1"
+      PORT: "4000"
+    volumes: ["edge-data:/data"]
+  edge-2:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *ankusa-env
+      RELEASE_NODE: "ankusa@edge-2"
+      PORT: "4000"
+    volumes: ["edge-data:/data"]
+  edge-3:
+    <<: *ankusa-image
+    command: ["/app/bin/ingest", "start"]
+    environment:
+      <<: *ankusa-env
+      RELEASE_NODE: "ankusa@edge-3"
+      PORT: "4000"
+    volumes: ["edge-data:/data"]
+
+  edge-lb:
+    image: nginx:1.27-alpine
+    depends_on: [edge-1, edge-2, edge-3]
+    volumes: ["./nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["8080:80"]
+
+  # The nemesis has NET_ADMIN so it can iptables/tc the other containers, and
+  # the Docker socket so it can kill containers outright.
+  nemesis:
+    build: ./nemesis
+    depends_on: [postgres]
+    cap_add: ["NET_ADMIN", "NET_RAW", "SYS_ADMIN"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scenarios:/scenarios:ro
+      # The compose file itself, read-only: a scenario that has to *recreate* a
+      # container (a fresh volume, a bumped clock offset) needs it, and the
+      # nemesis's own directory only holds the scripts. Its relative paths
+      # resolve inside /chaos, so recreating a wal/worker service is safe.
+      - ./:/chaos:ro
+      # Observer output, stats series and the final scan land here.
+      - ./out:/out
+    environment:
+      PGHOST: postgres
+      PGUSER: ankusa
+      PGPASSWORD: ankusa
+      PGDATABASE: chaos
+
+volumes:
+  wal-0-data:
+  wal-1-data:
+  wal-2-data:
+  worker-0-data:
+  worker-1-data:
+  edge-data:

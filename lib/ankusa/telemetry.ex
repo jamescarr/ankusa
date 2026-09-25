@@ -22,6 +22,10 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
+  | `[:ankusa, :lease, :acquired]` | — | `:instance`, `:name`, `:holder`, `:token` |
+  | `[:ankusa, :lease, :renewed]` | — | `:instance`, `:name`, `:holder`, `:token` |
+  | `[:ankusa, :lease, :lost]` | — | `:instance`, `:name`, `:holder`, `:token` |
+  | `[:ankusa, :storage, :index_repaired]` | — | `:instance`, `:segment`, `:reason` |
   | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |

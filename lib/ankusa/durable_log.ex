@@ -99,10 +99,20 @@ defmodule Ankusa.DurableLog do
   @spec read(Path.t(), opts()) :: [term()]
   def read(path, opts \\ []) do
     case File.read(path) do
-      {:ok, bin} -> parse(bin, [], Keyword.get(opts, :safe, true))
+      {:ok, bin} -> decode(bin, opts)
       {:error, _} -> []
     end
   end
+
+  @doc """
+  Decode a binary already in the on-disk format (what `frame/1` produces).
+
+  Lets a caller read records that arrived over the wire — e.g. an
+  `Ankusa.Storage.Index` sidecar fetched from the blob store — with the same
+  framing rules, including dropping a torn trailing record, as `read/2`.
+  """
+  @spec decode(binary(), opts()) :: [term()]
+  def decode(bin, opts \\ []), do: parse(bin, [], Keyword.get(opts, :safe, true))
 
   defp frame_record(record) do
     bin = :erlang.term_to_binary(record)
@@ -111,11 +121,11 @@ defmodule Ankusa.DurableLog do
 
   defp parse(<<len::32, rest::binary>>, acc, safe) when byte_size(rest) >= len do
     <<record::binary-size(^len), tail::binary>> = rest
-    parse(tail, [decode(record, safe) | acc], safe)
+    parse(tail, [decode_term(record, safe) | acc], safe)
   end
 
   defp parse(_torn_or_empty, acc, _safe), do: Enum.reverse(acc)
 
-  defp decode(record, true), do: :erlang.binary_to_term(record, [:safe])
-  defp decode(record, false), do: :erlang.binary_to_term(record)
+  defp decode_term(record, true), do: :erlang.binary_to_term(record, [:safe])
+  defp decode_term(record, false), do: :erlang.binary_to_term(record)
 end

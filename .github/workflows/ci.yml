@@ -66,6 +66,31 @@ jobs:
       - working-directory: ankusa_postgres
         run: mix docs --warnings-as-errors
 
+  # No `services:`: the Ra suite needs no external server. It starts real
+  # `:peer` VMs on the runner and elects through real Raft — the test node
+  # turns distribution on in test_helper.exs, which is all that takes.
+  ankusa_ra:
+    name: ankusa_ra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - working-directory: ankusa_ra
+        run: mix deps.get --check-locked
+      - working-directory: ankusa_ra
+        run: mix deps.unlock --check-unused
+      - working-directory: ankusa_ra
+        run: mix format --check-formatted
+      - working-directory: ankusa_ra
+        run: mix compile --warnings-as-errors
+      - working-directory: ankusa_ra
+        run: mix test
+      - working-directory: ankusa_ra
+        run: mix docs --warnings-as-errors
+
   ankusa_rabbitmq:
     name: ankusa_rabbitmq
     runs-on: ubuntu-latest

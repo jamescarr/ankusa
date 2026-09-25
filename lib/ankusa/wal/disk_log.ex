@@ -31,11 +31,22 @@ defmodule Ankusa.WAL.DiskLog do
 
   ## Truncation
 
-  Truncation is **logical first**: `truncate_through/2` writes the seq floor to
+  Truncation is **logical first**: `truncate_through/3` writes the seq floor to
   `<name>.truncated` (fsynced, then renamed into place) and drops the affected
   entries from the in-memory index. Dropping a prefix never has to touch the
   file, so a compaction tick that reclaims a few records costs a few ETS
   deletes, not a rewrite of the whole log — and never blocks appends.
+
+  ## Leases and fencing
+
+  Cursors are owned by leases (see `Ankusa.WAL`'s `## Leases`), kept in this
+  GenServer's state and persisted to `<name>.leases` through the same fsynced
+  write-then-rename path as the cursors. A lease cannot outlive the process that
+  held it — the file is the *token counter*, not a lock: on load every lease is
+  expired (`expires_at: 0`) but its token is kept, so the next acquisition still
+  gets a strictly higher token and a restarted holder can never reuse a stale
+  one. A cursor write or truncation carrying any other token is refused with
+  `{:error, :fenced}`.
 
   That floor is also what keeps seqs from being reused: after a restart,
   `next_seq` is the maximum of the last replayed frame, **the truncation floor**,
@@ -91,6 +102,7 @@ defmodule Ankusa.WAL.DiskLog do
     # reclaimed (or fully rewritten) log still continues where it left off.
     truncated_through = load_truncated_through(path <> ".truncated")
     cursors = load_cursors(path <> ".cursors")
+    leases = load_leases(path <> ".leases")
 
     {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
     {valid_end, replay_next} = replay(fd, index, dedup, truncated_through)
@@ -122,6 +134,7 @@ defmodule Ankusa.WAL.DiskLog do
        dedup: dedup,
        index: index,
        cursors: cursors,
+       leases: leases,
        truncated_through: truncated_through,
        rewrite_min_bytes: rewrite_min_bytes
      }}
@@ -142,13 +155,25 @@ defmodule Ankusa.WAL.DiskLog do
   def get_cursor(server, name), do: GenServer.call(server, {:get_cursor, name})
 
   @impl Ankusa.WAL
-  def put_cursor(server, name, seq), do: GenServer.call(server, {:put_cursor, name, seq})
+  def put_cursor(server, name, seq, token),
+    do: GenServer.call(server, {:put_cursor, name, seq, token})
 
   @impl Ankusa.WAL
-  def truncate_through(server, seq), do: GenServer.call(server, {:truncate_through, seq})
+  def truncate_through(server, seq, token),
+    do: GenServer.call(server, {:truncate_through, seq, token})
 
   @impl Ankusa.WAL
   def stats(server), do: GenServer.call(server, :stats)
+
+  @impl Ankusa.WAL
+  def acquire_lease(server, name, holder, ttl_ms),
+    do: GenServer.call(server, {:acquire_lease, name, holder, ttl_ms})
+
+  @impl Ankusa.WAL
+  def renew_lease(server, lease), do: GenServer.call(server, {:renew_lease, lease})
+
+  @impl Ankusa.WAL
+  def release_lease(server, lease), do: GenServer.call(server, {:release_lease, lease})
 
   # ── group commit ──────────────────────────────────────────────────────────
 
@@ -191,24 +216,87 @@ defmodule Ankusa.WAL.DiskLog do
     {:reply, Map.get(state.cursors, name, 0), state}
   end
 
-  def handle_call({:put_cursor, name, seq}, _from, state) do
-    cursors = Map.put(state.cursors, name, seq)
-    persist_term(state.path <> ".cursors", cursors)
-    {:reply, :ok, %{state | cursors: cursors}}
+  def handle_call({:put_cursor, name, seq, token}, _from, state) do
+    case fence(state, Ankusa.WAL.lease_for_cursor(name), token) do
+      :ok ->
+        # Monotonic: a stale write can never move a cursor backwards.
+        cursors = Map.update(state.cursors, name, seq, &max(&1, seq))
+        persist_term(state.path <> ".cursors", cursors)
+        {:reply, :ok, %{state | cursors: cursors}}
+
+      {:error, :fenced} = error ->
+        {:reply, error, state}
+    end
   end
 
-  def handle_call({:truncate_through, seq}, _from, %{truncated_through: floor} = state)
-      when seq <= floor do
-    {:reply, :ok, state}
+  def handle_call({:truncate_through, seq, token}, _from, state) do
+    case fence(state, :storage, token) do
+      :ok -> do_truncate(seq, state)
+      {:error, :fenced} = error -> {:reply, error, state}
+    end
   end
 
-  def handle_call({:truncate_through, seq}, _from, state) do
-    # Durably record the floor *before* dropping anything: a crash between the
-    # two must not let a restarted node reuse seqs it already handed out.
-    persist_term(state.path <> ".truncated", seq)
-    :ets.select_delete(state.index, [{{:"$1", :_}, [{:"=<", :"$1", seq}], [true]}])
+  def handle_call({:acquire_lease, name, holder, ttl_ms}, _from, state) do
+    now = now_ms()
 
-    {:reply, :ok, maybe_rewrite(%{state | truncated_through: seq})}
+    case Map.get(state.leases, name) do
+      %{expires_at: expires_at, holder: existing}
+      when is_integer(expires_at) and expires_at > now and existing != holder ->
+        {:reply, {:error, {:held, existing}}, state}
+
+      existing ->
+        # Acquiring always allocates a new token, even for the same holder and
+        # even for a released (expired) lease: the counter only climbs.
+        token = ((existing && existing.token) || 0) + 1
+
+        lease = %{
+          name: name,
+          holder: holder,
+          token: token,
+          ttl_ms: ttl_ms,
+          expires_at: now + ttl_ms
+        }
+
+        leases = Map.put(state.leases, name, lease)
+        persist_term(state.path <> ".leases", leases)
+        {:reply, {:ok, wire(lease)}, %{state | leases: leases}}
+    end
+  end
+
+  def handle_call(
+        {:renew_lease, %{name: name, holder: holder, token: token} = lease},
+        _from,
+        state
+      ) do
+    now = now_ms()
+    ttl_ms = lease.ttl_ms
+
+    case Map.get(state.leases, name) do
+      %{holder: ^holder, token: ^token, expires_at: expires_at}
+      when is_integer(expires_at) and expires_at > now ->
+        renewed = %{lease | expires_at: now + ttl_ms}
+        leases = Map.put(state.leases, name, renewed)
+        persist_term(state.path <> ".leases", leases)
+        {:reply, {:ok, wire(renewed)}, %{state | leases: leases}}
+
+      _ ->
+        {:reply, {:error, :lost}, state}
+    end
+  end
+
+  def handle_call({:release_lease, %{name: name, holder: holder, token: token}}, _from, state) do
+    case Map.get(state.leases, name) do
+      %{holder: ^holder, token: ^token} = lease ->
+        # Keep the entry, expired, rather than deleting it: the token counter
+        # must only ever climb, so handing the name to a new holder allocates a
+        # token the old one can never reuse.
+        leases = Map.put(state.leases, name, %{lease | expires_at: nil})
+        persist_term(state.path <> ".leases", leases)
+        {:reply, :ok, %{state | leases: leases}}
+
+      _ ->
+        {:reply, :ok, state}
+    end
   end
 
   def handle_call(:stats, _from, state) do
@@ -285,6 +373,40 @@ defmodule Ankusa.WAL.DiskLog do
   end
 
   # ── truncation ────────────────────────────────────────────────────────────
+
+  defp do_truncate(seq, %{truncated_through: floor} = state) when seq <= floor do
+    {:reply, :ok, state}
+  end
+
+  defp do_truncate(seq, state) do
+    # Durably record the floor *before* dropping anything: a crash between the
+    # two must not let a restarted node reuse seqs it already handed out.
+    persist_term(state.path <> ".truncated", seq)
+    :ets.select_delete(state.index, [{{:"$1", :_}, [{:"=<", :"$1", seq}], [true]}])
+
+    {:reply, :ok, maybe_rewrite(%{state | truncated_through: seq})}
+  end
+
+  # ── leases ────────────────────────────────────────────────────────────────
+
+  # Fencing uses the monotonic clock, which cannot jump; the lease handed back
+  # to a caller carries a wall-clock expiry, so every adapter reports the same
+  # kind of number.
+  defp wire(lease), do: %{lease | expires_at: System.system_time(:millisecond) + lease.ttl_ms}
+
+  defp fence(state, lease_name, token) do
+    now = now_ms()
+
+    case Map.get(state.leases, lease_name) do
+      %{token: ^token, expires_at: expires_at} when is_integer(expires_at) and expires_at > now ->
+        :ok
+
+      _ ->
+        {:error, :fenced}
+    end
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   # Logical truncation (the floor above) is already done; this only decides
   # whether the file itself is worth rewriting. A rewrite copies the live
@@ -451,6 +573,23 @@ defmodule Ankusa.WAL.DiskLog do
     case File.read(path) do
       {:ok, bin} -> :erlang.binary_to_term(bin, [:safe])
       {:error, _} -> %{}
+    end
+  end
+
+  # A lease cannot outlive the process that held it: on load every lease is
+  # expired, but its token is kept so the next acquisition still climbs. The
+  # file is the token counter, not a lock. `nil` (rather than a timestamp) is
+  # what "expired" means here — `System.monotonic_time/1` is negative on most
+  # systems, so no numeric sentinel is reliably in the past.
+  defp load_leases(path) do
+    case File.read(path) do
+      {:ok, bin} ->
+        for {name, lease} <- :erlang.binary_to_term(bin, [:safe]), into: %{} do
+          {name, %{lease | expires_at: nil}}
+        end
+
+      {:error, _} ->
+        %{}
     end
   end
 

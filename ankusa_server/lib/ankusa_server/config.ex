@@ -56,6 +56,11 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
+  # The server runs one instance (the framework default), so the Ra cluster
+  # every member must agree on is a fixed name rather than something an
+  # operator can typo.
+  @instance :default
+
   @root_keys ~w(node log http admin batcher dispatch wal storage claim_check sources)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
@@ -64,9 +69,10 @@ defmodule AnkusaServer.Config do
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
   @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
-  @wal_keys ~w(type postgres)
+  @wal_keys ~w(type postgres ra)
   @postgres_keys ~w(url host port username password database pool_size ssl migrate)
   @postgres_discrete_keys ~w(host port username password database)
+  @ra_wal_keys ~w(members append_timeout_ms max_command_bytes)
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
@@ -83,7 +89,7 @@ defmodule AnkusaServer.Config do
   @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
 
-  @roles ~w(edge dispatch storage claim_check)
+  @roles ~w(edge dispatch storage claim_check wal)
   @verify_types ~w(none stripe github standard_webhooks shopify slack hmac)
   @scheme_parses ~w(whole csv_pairs space_versions)
   @scheme_hashes ~w(sha256 sha512 sha1)
@@ -406,8 +412,9 @@ defmodule AnkusaServer.Config do
   defp wal_section(doc) do
     wal = section!(doc, "wal", @wal_keys, [])
     postgres = section!(wal, "postgres", @postgres_keys, ["wal"])
+    ra = section!(wal, "ra", @ra_wal_keys, ["wal"])
 
-    case enum!(wal["type"] || "disk", ~w(disk postgres), ["wal", "type"]) do
+    case enum!(wal["type"] || "disk", ~w(disk postgres ra), ["wal", "type"]) do
       "disk" ->
         [wal: {Ankusa.WAL.DiskLog, []}]
 
@@ -418,7 +425,47 @@ defmodule AnkusaServer.Config do
         end
 
         [wal: {Ankusa.WAL.Postgres, postgres_opts!(postgres)}]
+
+      "ra" ->
+        if ra == %{} do
+          raise ConfigError, message: "wal.ra: required when wal.type is \"ra\""
+        end
+
+        [wal: {Ankusa.WAL.Ra, ra_wal_opts!(ra)}]
     end
+  end
+
+  # The server runs one instance, so every member's cluster name is the same
+  # fixed atom; an operator names nodes, never clusters. A Ra member bootstraps
+  # from the list, so each entry has to be `name@host`.
+  defp ra_wal_opts!(ra) do
+    path = ["wal", "ra"]
+
+    []
+    |> put_opt(:members, members!(ra["members"], path ++ ["members"]))
+    |> put_opt(:append_timeout_ms, int_opt(ra, "append_timeout_ms", path))
+    |> put_opt(:max_command_bytes, int_opt(ra, "max_command_bytes", path))
+  end
+
+  defp members!(nil, path) do
+    raise ConfigError, message: "#{render_path(path)}: required when wal.type is \"ra\""
+  end
+
+  defp members!(value, path) do
+    cluster = :"ankusa_wal_#{@instance}"
+
+    value
+    |> string_list!(path)
+    |> Enum.map(fn entry ->
+      case String.split(entry, "@", parts: 2) do
+        [name, host] ->
+          {cluster, String.to_atom("#{name}@#{host}")}
+
+        [_] ->
+          raise ConfigError,
+            message: "#{render_path(path)}: expected name@host, got #{inspect(entry)}"
+      end
+    end)
   end
 
   defp postgres_opts!(postgres) do

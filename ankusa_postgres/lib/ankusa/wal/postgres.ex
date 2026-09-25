@@ -28,8 +28,10 @@ defmodule Ankusa.WAL.Postgres do
        insert the transaction takes the instance's advisory lock (see
        `## Seq order`).
     3. **Resolve losers' seq.** For rows that lost their dedup claim, one
-       lookup joins `ankusa_wal_dedup` back to `ankusa_wal` by `event_id` to find
-       the seq of the row that already owns that key.
+       lookup reads the owning seq straight from `ankusa_wal_dedup.seq` — the
+       ledger carries its own `seq` column, filled by the transaction that wrote
+       the winning `ankusa_wal` row, so this works even after that row has been
+       truncated.
 
   Every row is correlated by the envelope's own `id` (a UUIDv7, always unique
   per envelope regardless of dedup key), never by array position — positional
@@ -55,7 +57,9 @@ defmodule Ankusa.WAL.Postgres do
   (rolled-back transactions consume values).
 
   The cost is real and deliberate: appends for one instance serialize
-  fleet-wide, and the lock covers the whole `claim_dedup` → `COMMIT` window. Two
+  fleet-wide from the moment a transaction has winners to insert — the lock is
+  taken in `insert_winners/3`, *after* `claim_dedup/2` has already run, so it
+  covers the seq allocation and the COMMIT but not the dedup claim itself. Two
   instance names that hash to the same lock value simply share a lock — correct,
   marginally slower. Cross-instance appends are unaffected. Because Postgres
   allocates from the sequence *inside* the critical section, an allocation is
@@ -65,6 +69,21 @@ defmodule Ankusa.WAL.Postgres do
   holder's only writes are rows it owns — fresh WAL rows and dedup rows it
   claimed itself. It never waits on rows a non-holder holds, so there is no
   cycle to break.
+
+  ## Cursors, leases and fencing
+
+  A cursor write must carry the token of a live lease for that cursor's lease
+  name (`:dispatch`'s cursor by the `:dispatch` lease, `:compactor`'s by the
+  `:storage` lease — see `Ankusa.WAL.lease_for_cursor/1`). The check and the
+  write happen in one transaction, against the *database* clock (`now()`), so a
+  zombie writer on any node is fenced the moment its lease expires:
+
+      SELECT 1 FROM ankusa_wal_leases
+       WHERE instance = $1 AND name = $2 AND token = $3 AND expires_at > now()
+
+  Cursor writes are a maximum, not an assignment
+  (`GREATEST(ankusa_wal_cursors.seq, EXCLUDED.seq)`), so even a fenced write
+  that slipped through could not move a cursor backwards.
 
   ## Config
 
@@ -113,6 +132,8 @@ defmodule Ankusa.WAL.Postgres do
     instance = instance_key(server)
     rows = Enum.map(records, &row(&1.envelope, instance))
 
+    # `Postgrex.transaction/2` returns `{:ok, value}`, which is exactly the
+    # `{:ok, [result]}` shape `append/2` reports — no unwrapping here.
     Postgrex.transaction(server, fn conn ->
       claimed = claim_dedup(conn, rows)
 
@@ -162,31 +183,130 @@ defmodule Ankusa.WAL.Postgres do
   end
 
   @impl Ankusa.WAL
-  def put_cursor(server, name, seq) do
+  def put_cursor(server, name, seq, token) do
     instance = instance_key(server)
 
-    Postgrex.query!(
-      server,
-      """
-      INSERT INTO ankusa_wal_cursors (instance, name, seq) VALUES ($1, $2, $3)
-      ON CONFLICT (instance, name) DO UPDATE SET seq = EXCLUDED.seq
-      """,
-      [instance, to_string(name), seq]
-    )
+    transaction(server, fn conn ->
+      if live_lease?(conn, instance, Ankusa.WAL.lease_for_cursor(name), token) do
+        # GREATEST: cursors are monotonic, never assigned.
+        Postgrex.query!(
+          conn,
+          """
+          INSERT INTO ankusa_wal_cursors (instance, name, seq) VALUES ($1, $2, $3)
+          ON CONFLICT (instance, name)
+            DO UPDATE SET seq = GREATEST(ankusa_wal_cursors.seq, EXCLUDED.seq)
+          """,
+          [instance, to_string(name), seq]
+        )
 
-    :ok
+        :ok
+      else
+        {:error, :fenced}
+      end
+    end)
   end
 
   @impl Ankusa.WAL
-  def truncate_through(server, seq) do
+  def truncate_through(server, seq, token) do
     instance = instance_key(server)
     # `ankusa_wal_dedup` is untouched — dedup keys survive truncation.
-    Postgrex.query!(server, "DELETE FROM ankusa_wal WHERE instance = $1 AND seq <= $2", [
-      instance,
-      seq
-    ])
+    transaction(server, fn conn ->
+      if live_lease?(conn, instance, :storage, token) do
+        Postgrex.query!(conn, "DELETE FROM ankusa_wal WHERE instance = $1 AND seq <= $2", [
+          instance,
+          seq
+        ])
 
-    :ok
+        :ok
+      else
+        {:error, :fenced}
+      end
+    end)
+  end
+
+  @impl Ankusa.WAL
+  def acquire_lease(server, name, holder, ttl_ms) do
+    instance = instance_key(server)
+
+    transaction(server, fn conn ->
+      %Postgrex.Result{rows: rows} =
+        Postgrex.query!(
+          conn,
+          """
+          INSERT INTO ankusa_wal_leases (instance, name, holder, token, expires_at)
+          VALUES ($1, $2, $3, 1, now() + ($4 || ' milliseconds')::interval)
+          ON CONFLICT (instance, name) DO UPDATE
+            SET holder = EXCLUDED.holder,
+                token = ankusa_wal_leases.token + 1,
+                expires_at = EXCLUDED.expires_at
+            WHERE ankusa_wal_leases.expires_at <= now()
+               OR ankusa_wal_leases.holder = EXCLUDED.holder
+          RETURNING token, (extract(epoch FROM expires_at) * 1000)::bigint
+          """,
+          [instance, to_string(name), holder, Integer.to_string(ttl_ms)]
+        )
+
+      case rows do
+        [[token, expires_at]] ->
+          {:ok, lease(name, holder, token, ttl_ms, expires_at)}
+
+        [] ->
+          %Postgrex.Result{rows: [[existing]]} =
+            Postgrex.query!(
+              conn,
+              "SELECT holder FROM ankusa_wal_leases WHERE instance = $1 AND name = $2",
+              [instance, to_string(name)]
+            )
+
+          {:error, {:held, existing}}
+      end
+    end)
+  end
+
+  @impl Ankusa.WAL
+  def renew_lease(server, %{name: name, holder: holder, token: token, ttl_ms: ttl_ms}) do
+    instance = instance_key(server)
+
+    transaction(server, fn conn ->
+      %Postgrex.Result{rows: rows} =
+        Postgrex.query!(
+          conn,
+          """
+          UPDATE ankusa_wal_leases
+             SET expires_at = now() + ($5 || ' milliseconds')::interval
+           WHERE instance = $1 AND name = $2 AND holder = $3 AND token = $4
+             AND expires_at > now()
+          RETURNING (extract(epoch FROM expires_at) * 1000)::bigint
+          """,
+          [instance, to_string(name), holder, token, Integer.to_string(ttl_ms)]
+        )
+
+      case rows do
+        [[expires_at]] -> {:ok, lease(name, holder, token, ttl_ms, expires_at)}
+        [] -> {:error, :lost}
+      end
+    end)
+  end
+
+  @impl Ankusa.WAL
+  def release_lease(server, %{name: name, holder: holder, token: token}) do
+    instance = instance_key(server)
+
+    transaction(server, fn conn ->
+      # Expire, never delete: the token counter must only climb, so the next
+      # holder gets a token the released one can never reuse.
+      Postgrex.query!(
+        conn,
+        """
+        UPDATE ankusa_wal_leases
+           SET expires_at = to_timestamp(0)
+         WHERE instance = $1 AND name = $2 AND holder = $3 AND token = $4
+        """,
+        [instance, to_string(name), holder, token]
+      )
+
+      :ok
+    end)
   end
 
   @impl Ankusa.WAL
@@ -211,11 +331,66 @@ defmodule Ankusa.WAL.Postgres do
     %{
       records: records,
       bytes: bytes,
-      next_seq: (max_seq || 0) + 1,
+      next_seq: next_seq(server),
       min_seq: min_seq,
       max_seq: max_seq,
       cursors: Map.new(cursor_rows, fn [name, seq] -> {name, seq} end)
     }
+  end
+
+  # The next seq the next append will get, read from the sequence itself rather
+  # than from `max(seq) + 1`: after a full truncation `max(seq)` is NULL, and
+  # "1" would be a seq every cursor is already past — the next append would be
+  # invisible to every reader. The sequence is shared by *every instance* in the
+  # database, so this is "the next seq the next append will get", not a
+  # per-instance record count.
+  defp next_seq(server) do
+    # Resolved through the catalog rather than hard-coding `ankusa_wal_seq_seq`:
+    # the name is derived from the table and column names, and asking is cheap.
+    %Postgrex.Result{rows: [[sequence]]} =
+      Postgrex.query!(server, "SELECT pg_get_serial_sequence('ankusa_wal', 'seq')", [])
+
+    case sequence do
+      nil ->
+        1
+
+      name ->
+        %Postgrex.Result{rows: rows} =
+          Postgrex.query!(server, "SELECT last_value, is_called FROM #{name}", [])
+
+        case rows do
+          [[last_value, true]] -> last_value + 1
+          _ -> 1
+        end
+    end
+  end
+
+  defp live_lease?(conn, instance, name, token) do
+    %Postgrex.Result{rows: rows} =
+      Postgrex.query!(
+        conn,
+        """
+        SELECT 1 FROM ankusa_wal_leases
+         WHERE instance = $1 AND name = $2 AND token = $3 AND expires_at > now()
+        """,
+        [instance, to_string(name), token]
+      )
+
+    rows != []
+  end
+
+  defp lease(name, holder, token, ttl_ms, expires_at) do
+    %{name: name, holder: holder, token: token, ttl_ms: ttl_ms, expires_at: expires_at}
+  end
+
+  # `DBConnection.transaction/2` wraps the function's value in `{:ok, _}` (and
+  # replaces it with `{:error, _}` when the transaction itself fails). The lease
+  # and cursor callbacks report their own result, so unwrap.
+  defp transaction(server, fun) do
+    case Postgrex.transaction(server, fun) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   # ── append internals ───────────────────────────────────────────────────

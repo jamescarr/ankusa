@@ -40,13 +40,17 @@ processes, containers, or hosts requires a WAL they can all reach over the
 network: `WAL.Postgres` (see [`storage.md`](storage.md)). The constraint does
 not apply to `:claim_check`, which never touches the WAL at all.
 
-**`:dispatch` and `:storage` are singletons per instance.** Neither cursor
-has a lease. Two `:dispatch` nodes on one `WAL.Postgres` deliver every hook
-twice, and two `:storage` nodes compact the same ranges and write duplicate
-index rows. Scale `:edge` horizontally; run `:dispatch` and `:storage` as
-exactly one replica each (in Kubernetes, a 1-replica StatefulSet). Also note
-that `Ankusa.Storage.Index` lives on the `:storage` node's local disk
-(`segments/index.log`), which needs a persistent volume.
+**`:dispatch` and `:storage` run as active/standby pairs.** Each cursor is
+owned by a **lease**: `:dispatch`'s cursor by the `:dispatch` lease,
+`:compactor`'s by the `:storage` lease, and only the holder of a live lease may
+advance it or truncate the log (see `Ankusa.WAL`'s `## Leases`). A second
+replica acquires nothing, delivers nothing and compacts nothing while the first
+is healthy — it takes over on the TTL when the holder dies, and a
+paused-then-resumed zombie is fenced by its stale token. So scale `:dispatch`
+and `:storage` to two replicas for failover, not for throughput: one of them is
+always idle. Every storage replica also needs a persistent volume for its own
+copy of `segments/index.log` (and `index.hwm`), and catches up its index from
+the blob-store sidecars when it takes the lease over.
 
 ## Running the container
 
@@ -101,12 +105,18 @@ Image tags:
 docker compose -f ankusa_server/compose/docker-compose.fleet.yml up -d --wait
 ```
 
-Two `edge` replicas on a shared Postgres WAL, plus one `dispatch,storage`
+Two `edge` replicas on a shared Postgres WAL, plus a `dispatch,storage`
 worker. Add `edge` replicas for ingest capacity — any replica can absorb any
-hook, because dedup lives in the shared WAL, not in a node's memory. `dispatch`
-and `storage` stay at one replica each (see above): they are singletons. For a
-shared WAL across ingest nodes instead of N independent local ones, that is the
-`WAL.Postgres` config in [`storage.md`](storage.md).
+hook, because dedup lives in the shared WAL, not in a node's memory. Run
+`dispatch` and `storage` at two replicas so each has a standby (see above). For
+a shared WAL across ingest nodes instead of N independent local ones, that is
+the `WAL.Postgres` config in [`storage.md`](storage.md).
+
+A third shape is worth knowing about: `WAL.Ra`, in the `ankusa_ra` package,
+replaces the shared database with a replicated log — a small Raft cluster of
+its own, which is what the fleet config in
+`ankusa_server/config-examples/fleet-ra-s3.yml` describes. Nodes whose role list
+contains `wal` host a member; every other node only talks to the cluster.
 
 You'd need a load balancer in front of the ingest port at that point; that's
 a deployment concern the framework doesn't solve for you (nothing in

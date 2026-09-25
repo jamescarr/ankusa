@@ -8,16 +8,26 @@ NATS).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 185 tests, no external infra needed
+mix test                              # 198 tests, no external infra needed
 mix test --include integration        # +16 tests, needs floci running (see below)
 ```
 
-The 185 always-on tests cover:
+The 198 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
   crash-replay (torn-frame handling), truncation, that a restart after a full
   truncation does **not** reuse seqs, and the measurements `[:commit, :stop]`
   reports.
+- **The WAL contract itself** (`Ankusa.WAL.ConformanceCase`): 13 cases every
+  adapter must pass — commit order and byte-exact reads, pagination, dedup
+  within a batch / across batches / after truncation, cursor persistence,
+  idempotent truncation, fenced writes without a lease, the lease lifecycle
+  (renew, contention, expiry, release), stale-token fencing, restart durability,
+  the `stats/1` shape, and two concurrency cases (8 writers racing one dedup key;
+  a cursor-following reader that must miss nothing). `WAL.DiskLog`,
+  `WAL.Postgres` (in `ankusa_postgres`) and `WAL.Ra` (in `ankusa_ra`) each run
+  it, so an adapter that drifts from the contract fails on the contract, not on
+  whichever suite happened to exercise that path.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing

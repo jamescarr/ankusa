@@ -11,6 +11,53 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 
 ## [Unreleased]
 
+### Added
+
+- `mix loadgen.run --events <path>` writes a per-request JSONL of what each
+  request got back (`{"op":{"tag":"edge","0":<status>,"1":<id>}}` with
+  epoch-millisecond timings), in the shape `Ankusa.WAL.Checker` reads. The
+  aggregate report cannot answer *when* a request was shed; only a per-request
+  stream can, and without it the checker's I8 had nothing to look at.
+- **Leases, with fencing tokens, on every WAL.** A cursor is now owned by a
+  lease: `:dispatch`'s cursor by the `:dispatch` lease, `:compactor`'s by the
+  `:storage` lease (`Ankusa.WAL.lease_for_cursor/1`). Only the holder of a live
+  lease may advance a cursor or truncate the log, and every acquisition
+  allocates a strictly increasing token, so a paused-then-resumed zombie cannot
+  move a cursor backwards or drop records a new holder still needs. Cursors are
+  monotonic everywhere (`put_cursor` is a maximum, never an assignment) and a
+  write carrying a stale token is refused with `{:error, :fenced}`. This is what
+  lets `:dispatch` and `:storage` run as active/standby pairs instead of as
+  singletons.
+- `Ankusa.WAL.LeaseHelpers` — acquire/run/release around a lease, and the one
+  place `[:ankusa, :lease, :acquired | :renewed | :lost]` telemetry is emitted
+  from.
+- `Ankusa.WAL.ConformanceCase` + `Ankusa.WAL.Conformance.Adapter`: one shared
+  suite of 13 cases that every adapter runs, so the contract is tested once
+  instead of once per adapter.
+- A new `:wal` role, so a node can run *only* a shared WAL — the shape a
+  dedicated Ra StatefulSet takes.
+- `Ankusa.Storage.Index` sidecars and `repair/1`: each segment gets a `.idx`
+  object holding its rows, and any storage node folds everything above its
+  local high-water mark into its own index. That is what lets a standby storage
+  replica serve `Ankusa.Storage.fetch/2` for segments it never compacted.
+
+### Changed
+
+- `Ankusa.WAL`'s `put_cursor/3` and `truncate_through/2` are replaced by
+  `put_cursor/4` and `truncate_through/3` (both take a lease token). Callers
+  outside the framework must move to the fenced arities.
+- `Ankusa.Dispatch.Pipeline` and `Ankusa.Storage.Compactor` acquire, renew and
+  release their lease, and are no-ops while on standby. A step-down drops
+  everything admitted but unfinished and re-reads no cursor: in-flight
+  deliveries complete on their own, which is at-least-once, never a loss.
+- `Ankusa.WAL.DiskLog`'s lease tokens survive a restart (persisted to
+  `<name>.leases`) while every lease is expired on load, so a restarted process
+  can never reuse a token it held before.
+- The compactor's write order is now
+  `put segment → put .idx sidecar → Index.append → hwm → put_cursor → truncate`,
+  so a crash anywhere leaves the cursor behind and the work is redone rather
+  than skipped.
+
 ## [0.2.0] - 2026-09-24
 
 ### Added
@@ -146,6 +193,12 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   delivery task, and `WAL.DiskLog` no longer scans its whole index per read —
   together those two were the dispatch throughput ceiling (see
   [`docs/testing.md`](docs/testing.md#core-bench--benchcore_benchexs)).
+- `mix loadgen.verify` sized its Postgres pool at one connection and treated a
+  pool timeout as fatal. The sink is still being upserted while the ack set is
+  polled, so on a busy run the verifier crashed with `connection not available`
+  and failed a gate whose run had lost nothing. The pool is now four
+  connections, waits longer to hand one out, and retries a transient timeout —
+  the poll deadline is what decides whether a record is missing.
 
 ## [0.1.0] - 2026-09-23
 

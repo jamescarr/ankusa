@@ -11,8 +11,14 @@ roll off the WAL asynchronously, never blocking an ack. See
 @callback append(server(), [entry()]) :: {:ok, [result()]}
 @callback read(server(), after_seq :: non_neg_integer(), limit :: pos_integer()) :: [Envelope.t()]
 @callback get_cursor(server(), name :: atom()) :: non_neg_integer()
-@callback put_cursor(server(), name :: atom(), seq :: non_neg_integer()) :: :ok
-@callback truncate_through(server(), seq :: non_neg_integer()) :: :ok
+@callback put_cursor(server(), name :: atom(), seq :: non_neg_integer(), token :: pos_integer()) ::
+            :ok | {:error, :fenced}
+@callback truncate_through(server(), seq :: non_neg_integer(), token :: pos_integer()) ::
+            :ok | {:error, :fenced}
+@callback acquire_lease(server(), name :: atom(), holder :: String.t(), ttl_ms :: pos_integer()) ::
+            {:ok, lease()} | {:error, {:held, String.t()}}
+@callback renew_lease(server(), lease()) :: {:ok, lease()} | {:error, :lost}
+@callback release_lease(server(), lease()) :: :ok
 @callback stats(server()) :: map()
 ```
 
@@ -38,7 +44,7 @@ No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
   hooks, one fsync.
 - Replay validates every frame's CRC and truncates the file at the first
   torn/invalid one.
-- Truncation is **logical first**: `truncate_through/2` records a durable seq
+- Truncation is **logical first** and lease-fenced: `truncate_through/3` records a durable seq
   floor in `<name>.truncated` and drops the affected index entries, so
   reclaiming a few records costs a few ETS deletes and never blocks appends.
   The file is rewritten only once the dead prefix passes `:rewrite_min_bytes`
@@ -95,7 +101,7 @@ per batch):
 3. **Resolve losers' seq** — one lookup against `ankusa_wal_dedup`, which
    carries its own `seq` column (backfilled right after step 2) rather than
    joining back to `ankusa_wal`. That's deliberate: `ankusa_wal` rows get
-   deleted by `truncate_through/2` once compacted, and a lookup that
+   deleted by `truncate_through/3` once compacted, and a lookup that
    depended on the data row still existing would stop catching duplicates
    of an already-truncated event. The dedup ledger is **never** truncated —
    this is `WAL.DiskLog`'s persisted `.dedup` snapshot, just durable in the
@@ -252,14 +258,25 @@ One tick (default every `storage.interval_ms`, 1s):
 2. Encode those records into one segment via the configured `Codec`.
 3. `PUT` the segment to the blob store under a deterministic key:
    `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
-4. Append one index row per record to `Ankusa.Storage.Index` (durable,
+4. `PUT` its **sidecar**, `seg/<first>-<last>.idx`, holding the same rows in the
+   index file's framed format. This is what lets another storage replica — a
+   standby taking the lease over, or a fresh one — build its own index for
+   segments it never compacted (`Ankusa.Storage.Index.repair/1`).
+5. Append one index row per record to `Ankusa.Storage.Index` (durable,
    append-only, fsynced before the cursor moves, on local disk regardless of
    which `BlobStore` is configured) — `event_id`, `tenant_id`, `source_id`,
-   `seq`, `segment_key`, `offset`, `length`.
-5. Advance the compactor's durable cursor.
-6. Truncate the WAL through `min(compactor_seq, dispatch_seq)` — **never**
+   `seq`, `segment_key`, `offset`, `length` — and record the segment key as the
+   local high-water mark (`segments/index.hwm`).
+6. Advance the compactor's durable cursor, with the token of the `:storage`
+   lease.
+7. Truncate the WAL through `min(compactor_seq, dispatch_seq)` — **never**
    past what dispatch has consumed yet, so at-least-once delivery survives
-   compaction even if dispatch is lagging or down.
+   compaction even if dispatch is lagging or down — also with the lease token.
+   A `{:error, :fenced}` at either step means the lease moved on: the node steps
+   down after the segment it is writing. Segments are deterministic and
+   idempotent, so re-writing one after a step-down is harmless, and the
+   `put segment → sidecar → index → hwm → cursor` order is what makes a crash
+   anywhere in there redo the work instead of skipping it.
 
 This is why segments are never one-object-per-hook: PUT cost amortizes over
 however many records landed in one tick, and archive-tier storage (which

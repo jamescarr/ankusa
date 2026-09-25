@@ -31,7 +31,10 @@ defmodule AnkusaExample.Ingest.MixProject do
       # Mix to use ours everywhere in the tree, which is exactly what a
       # monorepo example wiring both path-dependent packages together needs.
       {:ankusa, path: "../../..", override: true},
-      {:ankusa_postgres, path: "../../../ankusa_postgres"}
+      {:ankusa_postgres, path: "../../../ankusa_postgres"},
+      # `WAL=ra`: the replicated WAL, alongside the Postgres one. Both are real
+      # options for this example — see run.sh's WAL switch.
+      {:ankusa_ra, path: "../../../ankusa_ra"}
     ]
   end
 

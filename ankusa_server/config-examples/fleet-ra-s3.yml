@@ -1,0 +1,58 @@
+# The Ra fleet: several edge nodes sharing a replicated WAL, dispatching to a
+# worker, with segments in object storage.
+#
+#   topology : `edge` nodes in front (ANKUSA_ROLES=edge, replicas >= 2)
+#              a `dispatch,storage` worker behind (2 replicas — dispatch and
+#              storage each hold a lease, so an active/standby pair is safe)
+#              3 `wal` nodes (ANKUSA_ROLES=wal), one volume each
+#   storage  : S3 (S3_BUCKET / S3_REGION / S3_ENDPOINT)
+#   secrets  : RELEASE_COOKIE (Erlang distribution)
+#
+# Dedup lives in the replicated log, so a retry that lands on a different edge
+# replica is still absorbed — that is the point of a shared WAL. What Ra adds
+# over the Postgres fleet is that there is no single box to lose: the WAL is a
+# majority-replicated cluster of its own, and losing any one of its members
+# loses nothing.
+#
+# Every Ankusa node that shares a WAL must have the same cookie, and the `wal`
+# nodes must be reachable at the names below. This is the config an *edge* node
+# runs; a `wal` node runs the same `wal:` block with `node.roles: [wal]`.
+
+node:
+  roles: [edge]
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+  port: 4002
+
+wal:
+  type: ra
+  ra:
+    # name@host; every node agrees on these, and the cluster name is derived
+    # from the instance, so only the nodes are named here.
+    members:
+      - ankusa@ankusa-wal-0.ankusa-wal
+      - ankusa@ankusa-wal-1.ankusa-wal
+      - ankusa@ankusa-wal-2.ankusa-wal
+    # how long a command may retry across a leader change before it fails
+    append_timeout_ms: 10000
+    max_command_bytes: 16777216
+
+storage:
+  type: s3
+  s3:
+    bucket: "${S3_BUCKET:-ankusa-segments}"
+    region: "${S3_REGION:-us-east-1}"
+    endpoint: "${S3_ENDPOINT:-https://s3.us-east-1.amazonaws.com}"
+    # Explicit credentials for an endpoint that is not AWS's own (an S3-compatible
+    # store, or a local emulator). Both are `[REDACTED]` when the loaded config is
+    # printed, which is the point of putting them here rather than in the image.
+    access_key_id: "${S3_ACCESS_KEY_ID:-}"
+    secret_access_key: "${S3_SECRET_ACCESS_KEY:-}"
+
+sources:
+  demo:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks: [{type: log}]

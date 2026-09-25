@@ -1,0 +1,59 @@
+name: Chaos
+
+# The chaos harness is minutes-to-hours long and needs a real container runtime,
+# so it is not a per-PR gate: it runs nightly, and it fails loudly when an
+# invariant breaks. `ankusa_ra/chaos/run.sh` is the same entry point a developer
+# runs locally (`./run.sh all`, `./run.sh kill-leader`).
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Scenario to run (a name from ankusa_ra/chaos/run.sh, or `all`)
+        required: false
+        default: mixed
+      single:
+        description: One WAL node (fast, exercises the harness but not replication)
+        type: boolean
+        required: false
+        default: false
+
+env:
+  OTP_VERSION: "29.0"
+  ELIXIR_VERSION: "1.20.4"
+
+jobs:
+  chaos:
+    name: chaos (${{ github.event.inputs.scenario || 'mixed' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MAX_RUNS: "5000"
+      SCENARIO: ${{ github.event.inputs.scenario || 'mixed' }}
+      # `SINGLE=1` runs the same gate against a one-member cluster: no
+      # container-to-container distribution, no replication. Useful as a quick
+      # check that the harness itself still works end to end.
+      SINGLE: ${{ github.event.inputs.single == 'true' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - run: mix deps.get
+        working-directory: ankusa_ra
+      # The harness starts its own compose stack (wal members, edges, workers,
+      # a sink, loadgen and a nemesis container) and verifies every scenario
+      # against the checker, exiting non-zero on any violated invariant.
+      - run: ./run.sh "$SCENARIO"
+        working-directory: ankusa_ra/chaos
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-reports
+          path: ankusa_ra/chaos/out/
+          if-no-files-found: warn
+      - if: always()
+        working-directory: ankusa_ra/chaos
+        run: docker compose -f docker-compose.yml down -v || true

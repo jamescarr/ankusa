@@ -126,7 +126,7 @@ supervision tree at start (`Ankusa.Instance`'s `init/1`), then cached in
 buried in call sites, and instance-scoped config falls out of the struct for
 free.
 
-**Roles** (`:edge`, `:dispatch`, `:storage`) boot independently based on
+**Roles** (`:edge`, `:dispatch`, `:storage`, `:claim_check`, `:wal`) boot independently based on
 `config.roles`. The same release runs all three on a laptop, or as split
 fleets via `ANKUSA_ROLES=edge,dispatch` — see
 [`deployment.md`](deployment.md#roles-and-topologies). No component may

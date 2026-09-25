@@ -1,7 +1,7 @@
 defmodule Ankusa.WAL.Postgres.Migration do
   @moduledoc """
   Idempotent DDL bootstrap for `Ankusa.WAL.Postgres`, run once at connection
-  startup. Three tables:
+  startup. Four tables:
 
     * `ankusa_wal`        — the log. `seq` is a `BIGSERIAL`; may have small gaps
       (a deduped or rolled-back row consumes a sequence value it never keeps).
@@ -20,6 +20,11 @@ defmodule Ankusa.WAL.Postgres.Migration do
       finding a key once its owning row gets truncated.
     * `ankusa_wal_cursors` — one row per named reader cursor (`:dispatch`,
       `:compactor`), scoped by instance.
+    * `ankusa_wal_leases`  — one row per lease name (`:dispatch`, `:storage`),
+      scoped by instance. `token` climbs on every acquisition; `expires_at` is
+      compared against the database clock (`now()`), so every node agrees on
+      whether a lease is live regardless of its own wall clock. A cursor write
+      or truncation must carry the live token for the row it touches.
 
   Every table is scoped by an `instance` column so one Postgres database can
   back multiple `Ankusa.Instance`s — including the same instance name running on
@@ -65,9 +70,20 @@ defmodule Ankusa.WAL.Postgres.Migration do
   );
   """
 
+  @leases_ddl """
+  CREATE TABLE IF NOT EXISTS ankusa_wal_leases (
+    instance TEXT NOT NULL,
+    name TEXT NOT NULL,
+    holder TEXT NOT NULL,
+    token BIGINT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (instance, name)
+  );
+  """
+
   @spec run!(GenServer.server()) :: :ok
   def run!(conn) do
-    for stmt <- [@ddl, @wal_index, @dedup_ddl, @cursors_ddl] do
+    for stmt <- [@ddl, @wal_index, @dedup_ddl, @cursors_ddl, @leases_ddl] do
       Postgrex.query!(conn, stmt, [])
     end
 

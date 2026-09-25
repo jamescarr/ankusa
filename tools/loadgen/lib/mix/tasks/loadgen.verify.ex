@@ -41,7 +41,13 @@ defmodule Mix.Tasks.Loadgen.Verify do
     timeout_s = Keyword.get(parsed, :timeout, 300)
     report_path = Keyword.get(parsed, :report, "verify-report.json")
 
-    connect_opts = parse_database_url(database_url)
+    # The sink is still being written to while this runs — the consumer is
+    # upserting the very rows being polled for — so the pool must tolerate a
+    # busy database rather than drop the request: a pool timeout is not evidence
+    # of loss, and crashing on one fails a run that lost nothing.
+    connect_opts =
+      parse_database_url(database_url) ++
+        [pool_size: 4, queue_target: 15_000, queue_interval: 30_000]
 
     {:ok, conn} = Postgrex.start_link(connect_opts)
 
@@ -151,7 +157,24 @@ defmodule Mix.Tasks.Loadgen.Verify do
     end
   end
 
-  defp query_found(conn, acked_ids) do
+  # And if the pool still cannot answer, wait for it: the poll has a deadline of
+  # its own, and that deadline is the one that decides whether a record is
+  # missing.
+  @query_attempts 10
+
+  defp query_found(conn, acked_ids, attempts \\ @query_attempts) do
+    do_query_found(conn, acked_ids)
+  rescue
+    e in DBConnection.ConnectionError ->
+      if attempts > 1 do
+        Process.sleep(500)
+        query_found(conn, acked_ids, attempts - 1)
+      else
+        reraise e, __STACKTRACE__
+      end
+  end
+
+  defp do_query_found(conn, acked_ids) do
     acked_ids
     |> Enum.chunk_every(@chunk_size)
     |> Enum.reduce(%{}, fn chunk, acc ->

@@ -14,4 +14,16 @@ defmodule AnkusaExample.Ingest.Release do
     {:ok, conn} = Postgrex.start_link(AnkusaExample.Ingest.Application.wal_opts())
     Ankusa.WAL.Postgres.Migration.run!(conn)
   end
+
+  @doc """
+  Boots this node's Raft member on a `wal` node before the fleet starts, so the
+  cluster elects a leader once instead of racing every client's first append.
+
+  Safe to call on every node: it is the same bootstrap `Ankusa.WAL.Ra` does at
+  startup, and a member that is already running is left alone.
+  """
+  def wal_members do
+    config = AnkusaExample.Ingest.Application.build_config()
+    Ankusa.WAL.Ra.start_link(instance: config.instance, config: config)
+  end
 end
