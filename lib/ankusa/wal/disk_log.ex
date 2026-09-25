@@ -43,7 +43,7 @@ defmodule Ankusa.WAL.DiskLog do
   GenServer's state and persisted to `<name>.leases` through the same fsynced
   write-then-rename path as the cursors. A lease cannot outlive the process that
   held it — the file is the *token counter*, not a lock: on load every lease is
-  expired (`expires_at: 0`) but its token is kept, so the next acquisition still
+  expired (`expires_at: nil`) but its token is kept, so the next acquisition still
   gets a strictly higher token and a restarted holder can never reuse a stale
   one. A cursor write or truncation carrying any other token is refused with
   `{:error, :fenced}`.

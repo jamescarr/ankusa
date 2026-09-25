@@ -62,6 +62,7 @@ defmodule Ankusa.WAL.Postgres do
 
       SELECT 1 FROM ankusa_wal_leases
        WHERE instance = $1 AND name = $2 AND token = $3 AND expires_at > now()
+         FOR SHARE
 
   Cursor writes are a maximum, not an assignment
   (`GREATEST(ankusa_wal_cursors.seq, EXCLUDED.seq)`), so even a fenced write
@@ -336,6 +337,12 @@ defmodule Ankusa.WAL.Postgres do
     end
   end
 
+  # `FOR SHARE` is what makes check-then-write one step. Under READ COMMITTED a
+  # plain SELECT takes no lock, so an `acquire_lease` committing between this
+  # check and the write would let the old holder's write land after the new
+  # token exists. With the row share-locked, a concurrent acquire waits for this
+  # transaction to commit; and if the acquire got there first, this SELECT waits
+  # for it and re-evaluates the WHERE against the new token, which fences it.
   defp live_lease?(conn, instance, name, token) do
     %Postgrex.Result{rows: rows} =
       Postgrex.query!(
@@ -343,6 +350,7 @@ defmodule Ankusa.WAL.Postgres do
         """
         SELECT 1 FROM ankusa_wal_leases
          WHERE instance = $1 AND name = $2 AND token = $3 AND expires_at > now()
+           FOR SHARE
         """,
         [instance, to_string(name), token]
       )

@@ -257,6 +257,9 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
 
           # release, then a new holder acquires with the next token
           assert :ok = WAL.release_lease(inst, l1)
+
+          # a released lease fences its own holder, not only a successor
+          assert {:error, :fenced} = WAL.put_cursor(inst, :dispatch, 1, l1.token)
           {:ok, l2} = LeaseHelpers.hold_lease(inst, :dispatch, holder: "second", ttl_ms: 5_000)
           assert l2.token == l1.token + 1
 
@@ -270,6 +273,11 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
                    WAL.acquire_lease(inst, :dispatch, "next", 5_000)
 
           Process.sleep(250)
+
+          # expired: the holder's own token no longer writes, even with no
+          # successor yet — expiry, not a takeover, is what fences it
+          assert {:error, :fenced} = WAL.put_cursor(inst, :dispatch, 1, short.token)
+          assert WAL.get_cursor(inst, :dispatch) == 0
 
           {:ok, after_expiry} =
             LeaseHelpers.hold_lease(inst, :dispatch, holder: "next", ttl_ms: 5_000)
@@ -304,7 +312,7 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
 
         # ── 10 ──────────────────────────────────────────────────────────────
 
-        test "a restart reuses no seq and keeps every acked record readable", %{
+        test "a restart reuses no seq or token and keeps every acked record readable", %{
           instance: inst,
           config: config
         } do
@@ -314,7 +322,14 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
           acked = Enum.map(committed, fn {:committed, env} -> env end)
           max_seq = acked |> Enum.map(& &1.seq) |> Enum.max()
 
+          # A short lease, so it has lapsed by the time the restart is over
+          # whether or not the adapter keeps leases across one (a shared WAL
+          # must: the holder may be on another node).
+          {:ok, before} =
+            LeaseHelpers.hold_lease(inst, :dispatch, holder: "before", ttl_ms: 200)
+
           restart(config)
+          Process.sleep(250)
 
           assert {:ok, [{:committed, fresh}]} = WAL.append(inst, [%{envelope: envelope(%{})}])
           assert fresh.seq > max_seq
@@ -323,6 +338,13 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
           ids = MapSet.new(readable, & &1.id)
           assert Enum.all?(acked, fn env -> MapSet.member?(ids, env.id) end)
           assert Enum.uniq_by(readable, & &1.seq) == readable
+
+          # Tokens keep climbing across the restart, so the pre-restart holder
+          # can neither write nor renew its way back in.
+          {:ok, next} = LeaseHelpers.hold_lease(inst, :dispatch, holder: "after", ttl_ms: 5_000)
+          assert next.token > before.token
+          assert {:error, :fenced} = WAL.put_cursor(inst, :dispatch, fresh.seq, before.token)
+          assert {:error, :lost} = WAL.renew_lease(inst, before)
         end
 
         # ── 11 ──────────────────────────────────────────────────────────────
