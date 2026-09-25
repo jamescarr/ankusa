@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
   One-shot, **offline** cutover from `Ankusa.WAL.Postgres` to `Ankusa.WAL.Ra`.
 
       mix ankusa.wal.migrate --from-postgres postgres://… --instance default \
-        --members ankusa_wal_default@wal-0,ankusa_wal_default@wal-1,ankusa_wal_default@wal-2
+        --members ankusa@wal-0,ankusa@wal-1,ankusa@wal-2
 
   ## What is copied, and what is deliberately not
 
@@ -182,20 +182,16 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
 
   # ── ra side ───────────────────────────────────────────────────────────────
 
-  defp parse_members(value, instance) do
+  @doc false
+  def parse_members(value, instance) do
     cluster = :"ankusa_wal_#{instance}"
 
     value
     |> String.split(",", trim: true)
-    |> Enum.map(&String.trim/1)
     |> Enum.map(fn entry ->
-      # A node name is `name@host`, and the host itself may contain dots (a
-      # longname like `ankusa@wal-0.svc.cluster.local`), so only the first `@`
-      # separates the parts.
-      case String.split(entry, "@", parts: 2) do
-        [node] -> {cluster, String.to_atom(node)}
-        [_name, node] -> {cluster, String.to_atom(node)}
-      end
+      # Each entry is a full node name (`name@host`): the cluster name comes
+      # from `instance`, never from the entry.
+      {cluster, String.to_atom(String.trim(entry))}
     end)
   end
 
