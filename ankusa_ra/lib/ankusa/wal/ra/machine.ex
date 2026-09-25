@@ -127,7 +127,7 @@ defmodule Ankusa.WAL.Ra.Machine do
   def which_module(1), do: __MODULE__
 
   @impl true
-  def live_indexes(state), do: :ra_seq.from_list(Map.keys(state.live))
+  def live_indexes(state), do: {:ra_seq, :ra_seq.from_list(Map.keys(state.live))}
 
   @impl true
   def overview(state) do

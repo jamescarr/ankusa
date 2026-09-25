@@ -52,4 +52,11 @@ defmodule Ankusa.WAL.Ra.MachineTest do
     {_state2, reply2, []} = Machine.apply(meta(2), {:import, 5, %{}}, state)
     assert reply2 == {:error, :not_empty}
   end
+
+  test "live_indexes returns an encoded ra_seq" do
+    state = %{Machine.init(%{}) | live: %{5 => 1, 6 => 2, 7 => 1, 9 => 1}}
+    assert {:ra_seq, seq} = Machine.live_indexes(state)
+    # `ra_seq` orders high -> low, so compare as a set.
+    assert :ra_seq.expand(seq) |> Enum.sort() == [5, 6, 7, 9]
+  end
 end
