@@ -50,6 +50,8 @@ defmodule Ankusa.Storage.Index do
 
   alias Ankusa.{Config, DurableLog}
 
+  require Logger
+
   @type row :: %{
           event_id: String.t(),
           source_id: String.t(),
@@ -148,7 +150,9 @@ defmodule Ankusa.Storage.Index do
   """
   @spec repair(Config.t()) :: :ok
   def repair(%Config{} = config) do
-    watermark = hwm(config)
+    # A node that was compacting before its hwm file existed already has a local
+    # index; seed the hwm from it so it does not re-fold every segment.
+    watermark = hwm(config) || seeded_hwm(config)
 
     pending =
       config.instance
@@ -157,39 +161,95 @@ defmodule Ankusa.Storage.Index do
       |> Enum.sort()
       |> Enum.reject(&(watermark != nil and &1 <= watermark))
 
-    Enum.each(pending, &fold(config, &1))
+    failed =
+      Enum.reduce_while(pending, nil, fn key, _failed ->
+        case fold(config, key) do
+          :ok -> {:cont, nil}
+          {:error, reason} -> {:halt, {key, reason}}
+        end
+      end)
 
-    case List.last(pending) do
-      nil -> :ok
-      key -> put_hwm(config, key)
+    # Stop before the segment that failed: its hwm must not advance past it, so
+    # the next repair retries it.
+    case failed do
+      nil ->
+        case List.last(pending) do
+          nil -> :ok
+          key -> put_hwm(config, key)
+        end
+
+      {key, reason} ->
+        Logger.error("index repair stopped at #{key}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  # The local index's highest segment key, when the file exists and is non-empty;
+  # `nil` means "nothing folded locally".
+  defp seeded_hwm(config) do
+    case DurableLog.read(path(config)) do
+      [] -> nil
+      rows -> rows |> Enum.map(& &1.segment_key) |> Enum.max()
     end
   end
 
   defp fold(config, key) do
-    case sidecar_rows(config, key) do
-      {:ok, rows} ->
-        append(config, rows)
+    rows =
+      case sidecar_rows(config, key) do
+        {:ok, rows} ->
+          rows
 
-      :error ->
-        Ankusa.Telemetry.emit([:storage, :index_repaired], %{}, %{
-          instance: config.instance,
-          segment: key,
-          reason: :missing_sidecar
-        })
+        :error ->
+          Ankusa.Telemetry.emit([:storage, :index_repaired], %{}, %{
+            instance: config.instance,
+            segment: key,
+            reason: :missing_sidecar
+          })
 
-        append(config, segment_rows(config, key))
-    end
+          segment_rows(config, key)
+      end
+
+    append(config, rows)
+    :ok
+  rescue
+    e ->
+      Ankusa.Telemetry.emit([:index, :repair_failed], %{}, %{instance: config.instance, key: key})
+      {:error, e}
   end
 
   defp sidecar_rows(config, key) do
-    with {:ok, bin} <- Ankusa.BlobStore.get(config.instance, sidecar_key(key)) do
-      {:ok, DurableLog.decode(bin)}
+    with {:ok, bin} <- Ankusa.BlobStore.get(config.instance, sidecar_key(key)),
+         rows when is_list(rows) <- DurableLog.decode(bin),
+         expected <- segment_count(key),
+         true <- expected == nil or length(rows) == expected do
+      {:ok, rows}
     else
       _ -> :error
     end
   rescue
     # A corrupt sidecar must not fail the repair: fall back to the segment.
     _ -> :error
+  end
+
+  # The segment key is `seg/<padded-first>-<padded-last>.seg`; records are
+  # contiguous, so the record count is `last - first + 1`. A key that does not
+  # match has no count, so the sidecar is trusted.
+  defp segment_count(key) do
+    base = Path.basename(key, ".seg")
+
+    case String.split(base, "-", parts: 2) do
+      [first, last] ->
+        with {f, ""} <- Integer.parse(first),
+             {l, ""} <- Integer.parse(last),
+             true <- l >= f do
+          l - f + 1
+        else
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
   end
 
   # Walk the segment's self-delimiting records. This is `Ankusa.Codec.Raw`'s
@@ -203,7 +263,11 @@ defmodule Ankusa.Storage.Index do
     end
   end
 
-  defp walk(<<len::32, _crc::32, payload::binary-size(len), tail::binary>>, key, offset, acc) do
+  defp walk(<<len::32, crc::32, payload::binary-size(len), tail::binary>>, key, offset, acc) do
+    if :erlang.crc32(payload) != crc do
+      raise "segment #{key}: CRC mismatch at offset #{offset}"
+    end
+
     env = Ankusa.Envelope.from_binary(payload)
 
     row = %{

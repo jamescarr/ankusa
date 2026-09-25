@@ -41,6 +41,8 @@ defmodule Ankusa.Storage.Compactor do
 
   use GenServer
 
+  require Logger
+
   alias Ankusa.{Config, DurableLog, Envelope}
   alias Ankusa.Storage.Index
   alias Ankusa.WAL.LeaseHelpers
@@ -102,7 +104,9 @@ defmodule Ankusa.Storage.Compactor do
         {:ok, schedule(state)}
 
       {:standby, state} ->
-        {:ok, standby(state)}
+        # A standby still runs the tick loop (to repair its index and re-try the
+        # lease); schedule it so the loop exists from init in both branches.
+        {:ok, schedule(standby(state))}
     end
   end
 
@@ -139,8 +143,9 @@ defmodule Ankusa.Storage.Compactor do
 
   def handle_info(:acquire_lease, %{lease: nil} = state) do
     case try_acquire(state) do
-      {:ok, state} -> {:noreply, schedule(activate(state))}
-      {:standby, state} -> {:noreply, standby(state)}
+      # The tick loop is already running (from `init`), so no second schedule.
+      {:ok, state} -> {:noreply, activate(state)}
+      {:standby, state} -> {:noreply, state |> repair() |> standby()}
     end
   end
 
@@ -164,12 +169,14 @@ defmodule Ankusa.Storage.Compactor do
   # ── lease ─────────────────────────────────────────────────────────────────
 
   defp try_acquire(state) do
+    sent = mono_ms()
+
     try do
       case Ankusa.WAL.acquire_lease(state.instance, :storage, state.holder, state.ttl_ms) do
         {:ok, lease} ->
           lease = Map.put(lease, :instance, state.instance)
           LeaseHelpers.emit(:acquired, lease)
-          {:ok, arm(%{state | lease: lease})}
+          {:ok, arm(%{state | lease: lease}, sent)}
 
         {:error, {:held, _holder}} ->
           {:standby, %{state | lease: nil}}
@@ -181,29 +188,29 @@ defmodule Ankusa.Storage.Compactor do
   end
 
   defp renew(state) do
+    sent = mono_ms()
+
     try do
       case Ankusa.WAL.renew_lease(state.instance, state.lease) do
         {:ok, lease} ->
           lease = Map.put(lease, :instance, state.instance)
           LeaseHelpers.emit(:renewed, lease)
-          arm(%{state | lease: lease})
+          arm(%{state | lease: lease}, sent)
 
         {:error, :lost} ->
-          LeaseHelpers.emit(:lost, state.lease)
           step_down(state)
       end
     catch
       :exit, _ ->
-        LeaseHelpers.emit(:lost, state.lease)
         step_down(state)
     end
   end
 
-  defp arm(state) do
+  defp arm(state, sent) do
     %{
       state
-      | lease_deadline: mono_ms() + state.ttl_ms - state.safety_margin_ms,
-        lease_renew_at: mono_ms() + state.renew_ms
+      | lease_deadline: sent + state.ttl_ms - state.safety_margin_ms,
+        lease_renew_at: sent + state.renew_ms
     }
   end
 
@@ -218,12 +225,21 @@ defmodule Ankusa.Storage.Compactor do
   defp activate(state) do
     case safe_get_cursor(state.instance, :compactor) do
       {:ok, cursor} ->
-        Index.repair(state.config)
+        repair(state)
         %{state | cursor: cursor}
 
       :error ->
         step_down(state)
     end
+  end
+
+  # Fold any sidecars written while this node was a standby into the live index,
+  # so lookups served locally do not miss records it never itself compacted.
+  defp repair(state) do
+    Index.repair(state.config)
+  rescue
+    e ->
+      Logger.warning("index repair failed: " <> Exception.message(e))
   end
 
   defp safe_get_cursor(instance, name) do
@@ -236,6 +252,7 @@ defmodule Ankusa.Storage.Compactor do
   end
 
   defp step_down(state) do
+    if state.lease != nil, do: LeaseHelpers.emit(:lost, state.lease)
     Map.put(state, :lease, nil) |> standby()
   end
 

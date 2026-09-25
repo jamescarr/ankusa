@@ -260,4 +260,106 @@ defmodule Ankusa.StorageTest do
     # everything was compacted, so the WAL is fully reclaimed
     assert Ankusa.WAL.stats(inst).records == 0
   end
+
+  # ── tick-loop leak + standby repair ───────────────────────────────────────
+
+  test "the compactor's auto-tick loop does not accumulate messages" do
+    inst = :"t#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    config =
+      Config.new(
+        instance: inst,
+        data_dir: dir,
+        roles: [:edge, :dispatch, :storage],
+        source_store: {Ankusa.SourceStore.Static, sources: %{"acme" => %{}}},
+        # a real interval, so the tick loop runs on its own
+        storage: %{interval_ms: 40}
+      )
+
+    Ankusa.put_config(config)
+    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
+    start_supervised!({Compactor, instance: inst, config: config})
+
+    Process.sleep(2_000)
+
+    # The tick loop must stay a single message in flight, not one accumulating
+    # per interval.
+    assert {:message_queue_len, n} =
+             Process.info(Ankusa.whereis(inst, :compactor), :message_queue_len)
+
+    assert n < 5
+  end
+
+  test "Index.repair folds a sidecar, walks a missing one, and skips below the hwm" do
+    inst = :"t#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    config =
+      Config.new(
+        instance: inst,
+        data_dir: dir,
+        roles: [:storage],
+        source_store: {Ankusa.SourceStore.Static, sources: %{"acme" => %{}}}
+      )
+
+    Ankusa.put_config(config)
+    Index.open(config)
+
+    # Segment 1..2 with a sidecar; segment 3..3 with no sidecar.
+    {_key1, _rows1} = put_segment(inst, 1, 2, sidecar?: true)
+    {key2, _rows2} = put_segment(inst, 3, 3, sidecar?: false)
+
+    Index.repair(config)
+
+    assert {:ok, _} = Index.lookup(config, "evt-1")
+    assert {:ok, _} = Index.lookup(config, "evt-2")
+    assert {:ok, _} = Index.lookup(config, "evt-3")
+
+    # Segment 2 (below nothing) is folded; a repair that already folded it must
+    # not re-fold: putting an hwm at key2 and repairing again touches nothing
+    # above it.
+    Index.put_hwm(config, key2)
+    Index.repair(config)
+  end
+
+  defp pad(seq), do: seq |> Integer.to_string() |> String.pad_leading(20, "0")
+
+  defp put_segment(inst, first, last, opts) do
+    envs =
+      for seq <- first..last do
+        %{envelope("acme", "r#{seq}") | id: "evt-#{seq}", seq: seq}
+      end
+
+    records = Enum.map(envs, &%{key: &1.id, payload: Envelope.to_binary(&1)})
+    {segment, index} = Ankusa.Codec.Raw.encode(records)
+    key = "seg/#{pad(first)}-#{pad(last)}.seg"
+
+    rows =
+      envs
+      |> Enum.zip(index)
+      |> Enum.map(fn {env, entry} ->
+        %{
+          event_id: env.id,
+          source_id: env.source_id,
+          tenant_id: env.tenant_id,
+          received_at: env.received_at,
+          seq: env.seq,
+          segment_key: key,
+          offset: entry.offset,
+          length: entry.length
+        }
+      end)
+
+    :ok = Ankusa.BlobStore.put(inst, key, segment)
+
+    if Keyword.get(opts, :sidecar?, true) do
+      sidecar = String.replace_suffix(key, ".seg", ".idx")
+      :ok = Ankusa.BlobStore.put(inst, sidecar, Ankusa.DurableLog.frame(rows))
+    end
+
+    {key, rows}
+  end
 end
