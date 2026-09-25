@@ -34,21 +34,37 @@ FAILED=0
 
 # Which worker pod currently holds the dispatch lease. Both workers report it
 # through the WAL: with Ra the lease lives in replicated state, so any wal pod
-# can answer. Falls back to ankusa-worker-0 when the answer cannot be read —
-# the lease makes killing the standby safe either way, it just proves less.
+# can answer; with Postgres it is a row in `ankusa_wal_leases`. Falls back to
+# ankusa-worker-0 when the answer cannot be read — the lease makes killing the
+# standby safe either way, it just proves less.
 active_worker_pod() {
-  local holder
-  # `rpc` runs one expression on the *running* node and prints only what that
-  # expression prints — it does not echo the value. So the expression prints it.
-  holder="$(kubectl -n ankusa-e2e exec ankusa-wal-0 -- /app/bin/ingest rpc \
-    'IO.inspect(elem(:ra.consistent_aux({:ankusa_wal_default, node()}, :overview, 5000), 1).leases[:dispatch].holder)' \
-    2>/dev/null | sed -n 's/.*\(ankusa-worker-[0-9]\).*/\1/p' | head -1 || true)"
+  # Retry up to 30s: after a failover the lease may be unreadable for a moment,
+  # and killing a *standby* would prove nothing.
+  local deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local holder
+    if [ "$WAL" = "ra" ]; then
+      # `rpc` runs one expression on the *running* node and prints only what that
+      # expression prints — it does not echo the value. So the expression prints it.
+      holder="$(kubectl -n ankusa-e2e exec ankusa-wal-0 -- /app/bin/ingest rpc \
+        'IO.inspect(elem(:ra.consistent_aux({:ankusa_wal_default, node()}, :overview, 5000), 1).leases[:dispatch].holder)' \
+        2>/dev/null | sed -n 's/.*\(ankusa-worker-[0-9]\).*/\1/p' | head -1 || true)"
+    else
+      # The Postgres lease: the live row is the one whose expiry has not passed.
+      holder="$(kubectl -n ankusa-e2e exec postgres-0 -- \
+        psql -U ankusa -d ankusa -t -A -c \
+        "SELECT holder FROM ankusa_wal_leases WHERE instance='default' AND name='dispatch' AND expires_at > now() LIMIT 1" \
+        2>/dev/null | head -1 || true)"
+    fi
 
-  if [ -n "$holder" ]; then
-    echo "$holder"
-  else
-    echo "ankusa-worker-0"
-  fi
+    if [ -n "$holder" ]; then
+      echo "$holder"
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "ankusa-worker-0"
 }
 
 # The wal pod that is currently Raft leader. `:ra.members/2` answers
@@ -61,7 +77,12 @@ wal_leader_pod() {
     2>/dev/null | tail -1 || true)"
 
   case "$node" in
-    *@ankusa-wal-*) echo "${node##*@}" ;;
+    *@ankusa-wal-*)
+      name="${node##*@}"
+      # The leader's distribution name is `ankusa@ankusa-wal-N.ankusa-wal`; the
+      # pod is `ankusa-wal-N`, so strip the service suffix.
+      echo "${name%%.*}"
+      ;;
     *) echo "" ;;
   esac
 }

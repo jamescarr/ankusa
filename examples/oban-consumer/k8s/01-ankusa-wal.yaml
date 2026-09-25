@@ -28,8 +28,11 @@ metadata:
   name: ankusa-wal
   namespace: ankusa-e2e
 spec:
-  # Headless: no virtual IP, one DNS A record per pod.
+  # Headless: no virtual IP, one DNS A record per pod. A pod must be reachable
+  # before it is ready — a follower still catching up is a valid distribution
+  # peer — so the service publishes its not-ready addresses.
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     app: ankusa-wal
   ports:
@@ -39,25 +42,6 @@ spec:
     - name: dist
       port: 4370
       targetPort: 4370
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ankusa-wal-external
-  namespace: ankusa-e2e
-spec:
-  type: NodePort
-  selector:
-    app: ankusa-wal
-  ports:
-    - name: epmd
-      port: 4369
-      targetPort: 4369
-      nodePort: 30369
-    - name: dist
-      port: 4370
-      targetPort: 4370
-      nodePort: 30370
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -88,19 +72,32 @@ spec:
               value: "wal"
             - name: DATA_DIR
               value: "/data"
-            - name: RELEASE_DISTRIBUTION
-              value: "name"
-            - name: RELEASE_NODE
-              value: "ankusa@$(POD_NAME).ankusa-wal"
+            - name: WAL
+              value: "ra"
+            # The pod name and IP are what the node name and distribution host
+            # are built from, so they are defined before RELEASE_NODE refers to
+            # them.
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: RELEASE_DISTRIBUTION
+              value: "name"
+            - name: RELEASE_NODE
+              value: "ankusa@$(POD_NAME).ankusa-wal"
             - name: RELEASE_COOKIE
               valueFrom:
                 secretKeyRef:
                   name: ankusa-cookie
                   key: cookie
+            # Pin the distribution port range so the Service and NetworkPolicy
+            # can allow exactly 4370-4372.
+            - name: ERL_AFLAGS
+              value: "-kernel inet_dist_listen_min 4370 inet_dist_listen_max 4372"
             # A `wal` node's own members list; each pod resolves the others by
             # their stable DNS names.
             - name: WAL_RA_MEMBERS
@@ -110,13 +107,17 @@ spec:
               containerPort: 4369
             - name: dist
               containerPort: 4370
+            - name: dist-1
+              containerPort: 4371
+            - name: dist-2
+              containerPort: 4372
           readinessProbe:
             exec:
               command:
                 - /app/bin/ingest
                 - rpc
                 - "1"
-                - ':ra.members({:ankusa_wal_default, node()})'
+                - 'Ankusa.WAL.stats(:default)'
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 10

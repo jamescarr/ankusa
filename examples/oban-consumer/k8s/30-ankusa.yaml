@@ -58,12 +58,12 @@ spec:
             # ones others dial by name — so the pod IP is enough.
             - name: RELEASE_DISTRIBUTION
               value: "name"
-            - name: RELEASE_NODE
-              value: "ankusa@$(POD_IP)"
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: RELEASE_NODE
+              value: "ankusa@$(POD_IP)"
             - name: RELEASE_COOKIE
               valueFrom:
                 secretKeyRef:
@@ -168,12 +168,12 @@ spec:
               value: "http://consumer/deliveries"
             - name: RELEASE_DISTRIBUTION
               value: "name"
-            - name: RELEASE_NODE
-              value: "ankusa@$(POD_NAME).ankusa-worker"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: RELEASE_NODE
+              value: "ankusa@$(POD_NAME).ankusa-worker"
             - name: RELEASE_COOKIE
               valueFrom:
                 secretKeyRef:
