@@ -104,7 +104,7 @@ services:
     environment:
       <<: *wal-env
       RELEASE_NODE: "ankusa@wal-0"
-    tmpfs: ["/data:size=512m"]
+    volumes: ["wal-0-data:/data"]
     restart: "no"
   wal-1:
     <<: *ankusa-image
@@ -112,7 +112,7 @@ services:
     environment:
       <<: *wal-env
       RELEASE_NODE: "ankusa@wal-1"
-    tmpfs: ["/data:size=512m"]
+    volumes: ["wal-1-data:/data"]
     restart: "no"
   wal-2:
     <<: *ankusa-image
@@ -120,7 +120,7 @@ services:
     environment:
       <<: *wal-env
       RELEASE_NODE: "ankusa@wal-2"
-    tmpfs: ["/data:size=512m"]
+    volumes: ["wal-2-data:/data"]
     restart: "no"
 
   # Two workers, one lease each for dispatch and storage: one is active, the
@@ -207,6 +207,9 @@ services:
       PGDATABASE: chaos
 
 volumes:
+  wal-0-data:
+  wal-1-data:
+  wal-2-data:
   worker-0-data:
   worker-1-data:
   edge-data:

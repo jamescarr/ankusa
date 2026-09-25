@@ -119,7 +119,9 @@ run_scenario() {
     export ANKUSA_STORAGE_INTERVAL_MS=3600000
   fi
 
-  "${COMPOSE[@]}" up -d --build >/dev/null
+  compose_files=(-f docker-compose.yml)
+  if [ "$scenario" = "disk-full" ]; then compose_files+=(-f docker-compose.diskfull.yml); fi
+  docker compose "${compose_files[@]}" up -d --build >/dev/null
 
   # `rolling-upgrade` rolls onto a second image tag. Tag the freshly built image
   # as that tag so the roll is a real image change (a new image id on the
@@ -150,16 +152,23 @@ run_scenario() {
   # of load (at `$RATE` requests/s) must flow before the fault script begins.
   : "${WARMUP_S:=10}"
 
-  # `big-bodies` runs with multi-megabyte bodies (1–8 MiB, a fifth at the top of
-  # the range); every other scenario uses the default 512-byte pad.
+  # `big-bodies` runs with multi-megabyte bodies (1–7 MiB, a fifth at the top of
+  # the range); every other scenario uses the default 512-byte pad. 7 MiB stays
+  # under the edge's `max_body_bytes` (8 MiB); `--dup-ratio 0` keeps the
+  # per-worker dup pool from blowing memory with multi-MiB bodies.
   LOADGEN_BODY_ARGS=()
   if [ "$scenario" = "big-bodies" ]; then
-    LOADGEN_BODY_ARGS=(--body-bytes 1048576..8388608 --big-ratio 0.2)
+    LOADGEN_BODY_ARGS=(--body-bytes 1048576..7000000 --big-ratio 0.2 --concurrency 4 --dup-ratio 0)
   fi
+
+  # Big bodies move far fewer records per second than 512-byte pads; a 200/s
+  # rate against 7 MiB bodies would back up the edge instead of flowing.
+  rate="$RATE"
+  if [ "$scenario" = "big-bodies" ]; then rate=20; fi
 
   (cd "$ROOT/tools/loadgen" && mix loadgen.run \
     --url http://localhost:8080/webhooks/demo \
-    --rate "$RATE" \
+    --rate "$rate" \
     --duration "$DURATION" \
     --dup-ratio 0.1 \
     --nil-key-ratio 0.2 \
@@ -177,13 +186,14 @@ run_scenario() {
     > "$OUT/${scenario}-fault.log" 2>&1 &
   fault_pid=$!
 
-  wait "$load_pid" || true
-
-  # The fault script's exit status matters: a fault that could not be applied
-  # (no leader to kill, a partition that never took) must fail the run, not
-  # pass because the evidence happened to be clean. `wait` under `set -e` would
-  # abort before the verify step could even read the evidence, so capture it.
+  # Both the load and the fault scripts' exit statuses matter: a fault that
+  # could not be applied (no leader to kill, a partition that never took) must
+  # fail the run, and so must a loadgen that died before its duration — neither
+  # may pass because the evidence happened to be clean. `wait` under `set -e`
+  # would abort before the verify step could read the evidence, so capture both.
   set +e
+  wait "$load_pid"
+  load_status=$?
   wait "$fault_pid"
   fault_status=$?
   set -e
@@ -230,8 +240,8 @@ run_scenario() {
     "${FAULT_ARG[@]+"${FAULT_ARG[@]}"}" \
     --report "$OUT_ABS/${scenario}-report.json")
 
-  if [ "$fault_status" -ne 0 ]; then
-    echo "error: the fault script failed (status $fault_status); see $OUT/${scenario}-fault.log" >&2
+  if [ "$fault_status" -ne 0 ] || [ "$load_status" -ne 0 ]; then
+    echo "error: fault=$fault_status load=$load_status; see $OUT/${scenario}-fault.log and $OUT/${scenario}-loadgen.log" >&2
     exit 1
   fi
 

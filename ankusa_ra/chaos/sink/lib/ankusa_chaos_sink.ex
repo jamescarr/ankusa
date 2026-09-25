@@ -40,7 +40,8 @@ defmodule AnkusaChaosSink do
       port: uri.port || 5432,
       username: user,
       password: password,
-      database: String.trim_leading(uri.path || "", "/")
+      database: String.trim_leading(uri.path || "", "/"),
+      pool_size: 32
     ]
   end
 
@@ -71,22 +72,29 @@ defmodule AnkusaChaosSink do
   end
 
   defmodule Router do
-    @moduledoc "One route: record the delivery, always answer `202`."
+    @moduledoc "One route: record the delivery, answer `202`; `500` if the record failed."
 
     import Plug.Conn
 
     def init(opts), do: opts
 
     def call(conn, _opts) do
-      {:ok, body, conn} = read_body(conn)
-      id = header(conn, "x-ankusa-id") || "unknown-#{System.unique_integer([:positive])}"
-      seq = header(conn, "x-ankusa-seq")
+      try do
+        {:ok, body, conn} = read_body(conn)
+        id = header(conn, "x-ankusa-id") || "unknown-#{System.unique_integer([:positive])}"
+        seq = header(conn, "x-ankusa-seq")
 
-      record(id, body, seq)
+        record(id, body, seq)
 
-      conn
-      |> put_resp_content_type("application/json")
-      |> send_resp(202, ~s({"ok":true}))
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(202, ~s({"ok":true}))
+      rescue
+        _ ->
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(500, ~s({"ok":false}))
+      end
     end
 
     defp header(conn, name) do
@@ -111,10 +119,6 @@ defmodule AnkusaChaosSink do
         """,
         [id, sha, seq]
       )
-    rescue
-      # The sink must stay up: a database hiccup is not a delivery failure the
-      # WAL should retry forever.
-      _ -> :ok
     end
   end
 end

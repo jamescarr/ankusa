@@ -15,19 +15,23 @@ SKEW_MS="${SKEW_MS:-5000}"
 
 leader="$(wal_leader_container)"
 log "skewing $leader by +${SKEW_MS}ms"
+SKEW_S=$((SKEW_MS / 1000))
 
 # Recreate only the leader with a faked clock. `recreate_service` passes the
 # FAKETIME/LD_PRELOAD environment through the compose file (see x-wal-env).
 # The Alpine package installs the library under /usr/lib/faketime, which is not
-# on the loader's default path, so the full path is given.
-FAKETIME="+${SKEW_MS}ms" LD_PRELOAD="/usr/lib/faketime/libfaketime.so.1" recreate_service "$leader"
+# on the loader's default path, so the full path is given. libfaketime's
+# FAKETIME offset is whole seconds, so the skew is rounded down.
+FAKETIME="+${SKEW_S}" LD_PRELOAD="/usr/lib/faketime/libfaketime.so.1" recreate_service "$leader"
 
 # The skew must be observable or the fault never took: fail rather than pass on
-# a member whose clock is actually right.
+# a member whose clock is actually right. The offset is applied in whole
+# seconds, so the observed delta must be in that band — neither unobserved nor
+# wildly larger than asked.
 skewed="$(docker exec "$(container_name "$leader")" date +%s%3N)"
 reference="$(date +%s%3N)"
 delta=$((skewed - reference))
-if [ "$delta" -lt "$((SKEW_MS / 2))" ]; then
+if [ "$delta" -lt "$((SKEW_MS / 2))" ] || [ "$delta" -gt "$((SKEW_MS * 2))" ]; then
   log "clock skew not observed (delta ${delta}ms); aborting"
   exit 1
 fi

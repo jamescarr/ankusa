@@ -6,9 +6,13 @@ WINDOW="${FAULT_WINDOW_S:-120}"
 fill() {
   local c="$1"
   log "filling the volume of $c"
-  # The wal data dir is a 512m tmpfs (see docker-compose.yml); fallocate fills
-  # it so a fsync fails, which is the disk-full fault.
-  docker exec "$(container_id "$c")" sh -c 'fallocate -l 512M /data/fill 2>/dev/null || true' || true
+  # Write until ENOSPC; `dd` keeps what it wrote (fallocate rolls back on failure).
+  docker exec "$(container_id "$c")" sh -c 'dd if=/dev/zero of=/data/fill bs=1M 2>/dev/null' || true
+  avail="$(docker exec "$(container_id "$c")" df -P /data | awk 'NR==2 {print $4}')"
+  if [ "$avail" -gt 1024 ]; then
+    log "disk fill did not take on $c (${avail}KiB free); aborting"
+    exit 1
+  fi
 }
 clean() {
   local c="$1"
