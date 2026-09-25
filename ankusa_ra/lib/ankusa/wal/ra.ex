@@ -234,15 +234,11 @@ defmodule Ankusa.WAL.Ra do
           start_fresh(system, cluster, server_id, wal_opts)
 
         {:error, reason} ->
-          # A member whose log cannot be recovered (a torn or corrupted WAL)
-          # must not stay down: discard its local copy and re-initialize, then
-          # catch up from the other members.
-          Logger.warning(
-            "[ankusa] Ra WAL #{inspect(server_id)} failed to recover: #{inspect(reason)}; re-initializing"
+          Logger.error(
+            "[ankusa] Ra WAL #{inspect(server_id)} failed to recover: #{inspect(reason)}"
           )
 
-          _ = :ra.force_delete_server(system, server_id)
-          start_fresh(system, cluster, server_id, wal_opts)
+          {:error, reason}
       end
     else
       :ok
@@ -792,6 +788,7 @@ defmodule Ankusa.WAL.Ra do
             remote_retry(members, command, read_timeout, deadline, reason)
 
           {:timeout, _server} ->
+            forget_leader_cache(members)
             remote_retry(members, command, read_timeout, deadline, :timeout)
         end
 
@@ -799,7 +796,9 @@ defmodule Ankusa.WAL.Ra do
         remote_retry(members, command, read_timeout, deadline, :no_leader)
     end
   catch
-    kind, reason -> remote_retry(members, command, read_timeout, deadline, {kind, reason})
+    kind, reason ->
+      forget_leader_cache(members)
+      remote_retry(members, command, read_timeout, deadline, {kind, reason})
   end
 
   # A per-members cached leader: `Ankusa.DedupStore.Ra` sends one command per
