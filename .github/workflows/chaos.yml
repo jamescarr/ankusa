@@ -31,9 +31,9 @@ jobs:
     env:
       MAX_RUNS: "5000"
       SCENARIO: ${{ github.event.inputs.scenario || 'mixed' }}
-      # `SINGLE=1` runs the same gate against a one-member cluster: no
-      # container-to-container distribution, no replication. Useful as a quick
-      # check that the harness itself still works end to end.
+      # `SINGLE=1` runs the same gate against a one-member cluster: the
+      # documented laptop shape, useful as a quick check that the harness still
+      # works end to end.
       SINGLE: ${{ github.event.inputs.single == 'true' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +43,16 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
       - run: mix deps.get
         working-directory: ankusa_ra
+      - run: mix deps.get
+        working-directory: tools/loadgen
+      - run: mix deps.get
+        working-directory: ankusa_ra/chaos/sink
+      # The Level-3 property: the machine agrees with a reference model after
+      # every command, at the full nightly run count, in-process.
+      - run: MAX_RUNS=5000 mix test test/ankusa/wal_ra_property_test.exs
+        working-directory: ankusa_ra
+        env:
+          MAX_RUNS: "5000"
       # The harness starts its own compose stack (wal members, edges, workers,
       # a sink, loadgen and a nemesis container) and verifies every scenario
       # against the checker, exiting non-zero on any violated invariant.

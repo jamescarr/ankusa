@@ -100,9 +100,14 @@ it leaves nothing for the final scan to check the acks against. Holding the tick
 off makes the run's records still present at the end, so "every ack is readable"
 is a claim the evidence can support; the sink-side check
 (`mix loadgen.verify`) is unaffected and remains the end-to-end proof that every
-acked body reached the consumer byte-exact. `rolling-upgrade`,
-`kill-storage-active` and the other storage-role scenarios still boot, lease and
-kill the storage pipeline — only the periodic compaction pass is held back.
+acked body reached the consumer byte-exact.
+
+Two scenarios — `kill-storage-active` and `replace-member` — need segments to
+*actually exist*, because they kill the compactor mid-write; they override the
+interval to 1s (`ANKUSA_STORAGE_INTERVAL_MS=1000` in `run.sh`). The final scan
+reads the WAL *and* the compacted segments (`Ankusa.Storage.Index` plus
+`Ankusa.Storage.fetch`), so those runs still have something to check the acks
+against.
 
 The window opens *before* the fault is applied (the nemesis has to kill the
 container after stamping the time), so the checker ignores the first second of
