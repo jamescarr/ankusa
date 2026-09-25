@@ -18,7 +18,9 @@ log "skewing $leader by +${SKEW_MS}ms"
 
 # Recreate only the leader with a faked clock. `recreate_service` passes the
 # FAKETIME/LD_PRELOAD environment through the compose file (see x-wal-env).
-FAKETIME="+${SKEW_MS}ms" LD_PRELOAD="libfaketime.so.1" recreate_service "$leader"
+# The Alpine package installs the library under /usr/lib/faketime, which is not
+# on the loader's default path, so the full path is given.
+FAKETIME="+${SKEW_MS}ms" LD_PRELOAD="/usr/lib/faketime/libfaketime.so.1" recreate_service "$leader"
 
 # The skew must be observable or the fault never took: fail rather than pass on
 # a member whose clock is actually right.
