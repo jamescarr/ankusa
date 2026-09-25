@@ -22,21 +22,115 @@ defmodule AnkusaExample.Ingest.Application do
 
     Logger.info(
       "[ankusa-example] starting: roles=#{inspect(config.roles)} port=#{config.port} " <>
-        "wal_host=#{env("WAL_DB_HOST", "localhost")} consumer_url=#{env("CONSUMER_URL", "http://localhost:4200/deliveries")}"
+        "wal=#{elem(config.wal, 0)} consumer_url=#{env("CONSUMER_URL", "http://localhost:4200/deliveries")}"
     )
 
     Supervisor.start_link([{Ankusa.Instance, config}], strategy: :one_for_one, name: __MODULE__)
   end
 
-  defp build_config do
+  # Public: the release helpers (`AnkusaExample.Ingest.Release`) need the same
+  # config the application runs on — same WAL, same members, same data dir.
+  @doc false
+  def build_config do
     Ankusa.Config.new(
       instance: :default,
       port: env_int("PORT", 4000),
       data_dir: env("DATA_DIR", "./data"),
       roles: Ankusa.Config.parse_roles!(env("ANKUSA_ROLES", "edge,dispatch,storage")),
-      wal: {Ankusa.WAL.Postgres, wal_opts() ++ [migrate: false]},
+      wal: wal(),
+      dispatch: dispatch(),
+      storage: storage(),
       source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}}
     )
+  end
+
+  # `ANKUSA_STORAGE_TYPE=s3` points segments at an S3-compatible endpoint — the
+  # chaos harness's `floci`, or MinIO, or S3 itself. Default stays local disk,
+  # so the laptop shape needs no bucket.
+  defp storage do
+    # How often the compactor may tick — roll a segment, upload it, and truncate
+    # behind the readers. The chaos harness sets this far out so that a run's
+    # records are all still in the log when it takes its final scan; left alone,
+    # a compactor that keeps up with dispatch reclaims them within seconds, which
+    # is correct behaviour and an unreadable log to check an ack against.
+    interval_ms = env_int("ANKUSA_STORAGE_INTERVAL_MS", 1_000)
+
+    roll_and_retention = [interval_ms: interval_ms]
+
+    case env("ANKUSA_STORAGE_TYPE", "local") do
+      "s3" ->
+        roll_and_retention ++
+          [
+            blob_store:
+              {Ankusa.BlobStore.S3,
+               [
+                 bucket: env("S3_BUCKET", "ankusa-segments"),
+                 region: env("S3_REGION", "us-east-1"),
+                 endpoint: env("S3_ENDPOINT", "https://s3.us-east-1.amazonaws.com"),
+                 access_key_id: env("AWS_ACCESS_KEY_ID", ""),
+                 secret_access_key: env("AWS_SECRET_ACCESS_KEY", "")
+               ]}
+          ]
+
+      _ ->
+        roll_and_retention ++ [blob_store: {Ankusa.BlobStore.LocalFS, []}]
+    end
+  end
+
+  # `WAL=ra` selects the replicated WAL: this node runs the roles it was told
+  # to, and talks to the Ra cluster named by `WAL_RA_MEMBERS` (a node with
+  # `ANKUSA_ROLES` containing `wal` also hosts a member). Everything else —
+  # the roles, the source, the sink — is identical, which is the point of the
+  # adapter being a WAL and not a fork.
+  defp wal do
+    case env("WAL", "postgres") do
+      "ra" -> {Ankusa.WAL.Ra, ra_opts()}
+      _ -> {Ankusa.WAL.Postgres, wal_opts() ++ [migrate: false]}
+    end
+  end
+
+  defp ra_opts do
+    opts = [members: ra_members()]
+
+    # `WAL_RA_TIME_OFFSET_MS` shifts the machine's own view of the clock, which
+    # is how the chaos harness's `clock-skew` scenario makes a member's clock
+    # wrong for real: fencing decisions must not depend on it.
+    case env_int("WAL_RA_TIME_OFFSET_MS", 0) do
+      0 -> opts
+      offset -> Keyword.put(opts, :time_offset_ms, offset)
+    end
+  end
+
+  # `ANKUSA_DISPATCH_DEDUP_STORE=ra` keeps `Ankusa.Dispatch`'s idempotent
+  # receiver ledger in the WAL cluster's replicated state instead of in the
+  # dispatcher process, so it survives losing the node that held it. The chaos
+  # harness sets it: it kills dispatchers, an in-process ledger dies with them,
+  # and a copy of an event whose earlier copy had already been delivered goes
+  # out a second time on a run that lost nothing — which is exactly what the
+  # gate's `duplicate_deliveries` check catches. The members are the WAL
+  # cluster's: the ledger is applied by that cluster's machine.
+  defp dispatch do
+    case env("ANKUSA_DISPATCH_DEDUP_STORE", "ets") do
+      "ra" -> [dedup_store: {Ankusa.DedupStore.Ra, members: ra_members()}]
+      _ -> []
+    end
+  end
+
+  # The members this node talks to, as `{cluster, node}`. Shared by the WAL and
+  # the dispatch ledger, because there is one cluster and it is the WAL's.
+  defp ra_members do
+    cluster = :ankusa_wal_default
+
+    members =
+      env("WAL_RA_MEMBERS", "")
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&{cluster, String.to_atom(&1)})
+
+    # A single node with no members configured is the laptop shape: one member,
+    # the node itself.
+    if members == [], do: [{cluster, node()}], else: members
   end
 
   # Public: the release task (`AnkusaExample.Ingest.Release.migrate/0`) reuses
@@ -61,7 +155,7 @@ defmodule AnkusaExample.Ingest.Application do
   defp source do
     [
       verifier: {Ankusa.Verifier.None, []},
-      dedup: {Ankusa.DedupKey.Rules, json: ["id"]},
+      dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]},
       on_verify_failure: :accept_flag,
       sinks: [
         {Ankusa.Sink.Http,

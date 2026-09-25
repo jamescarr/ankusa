@@ -12,8 +12,8 @@ _**Don't fight the traffic. Steer it.** Durable webhook ingestion for any volume
 
 Run Ankusa without knowing Elixir, the way you run Elasticsearch without knowing
 Java. One image, one YAML file, HTTP in and HTTP out. Every hook is written to a
-durable log before it is acked, so a provider retry is either absorbed as a
-duplicate or genuinely never arrived.
+durable log before it is acked, so a provider retry is appended like any other
+copy and dropped in front of your sinks instead of being delivered twice.
 
 ## Quick start
 
@@ -29,7 +29,7 @@ until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"status":"duplicate",...}                     (the retry is absorbed, not stored twice)
+# => {"id":"01a1...","status":"accepted","seq":2}   (its own copy; dispatch drops it)
 ```
 
 That is a complete, durable webhook receiver. The `demo` source accepts anything
@@ -60,7 +60,7 @@ node:
 sources:
   stripe:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
-    dedup: {type: stripe}
+    dedup_key: {type: stripe}
     on_verify_failure: quarantine
     sinks:
       - {type: http, url: "${SINK_URL}", method: post, timeout_ms: 5000}
@@ -104,13 +104,14 @@ reconfigured without a new file. Env wins over the file.
 
 | Variable | Field |
 | --- | --- |
-| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
+| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`, `wal`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` or `postgres`) |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `postgres` or `ra`) |
+| `ANKUSA_DISPATCH_DEDUP_STORE` | `dispatch.dedup_store` (`ets`, or `ra` for the ledger in the WAL cluster's replicated state) |
 | `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
@@ -206,7 +207,8 @@ The fleet compose file is the worked example:
 runs two edge replicas and a worker with no published ports, and an nginx in
 front that leaves ingest open and puts HTTP basic auth on the admin API. It also
 demonstrates the guarantee the shared WAL buys: post the same hook twice, land on
-different replicas, and the second is absorbed as a duplicate.
+different replicas, and both are acked (202) while the duplicate is dropped at
+dispatch — one delivery reaches the sink.
 
 ## Data
 
@@ -222,8 +224,8 @@ problem anymore.
 
 ```sh
 docker compose -f docker-compose.fleet.yml up -d --wait
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 201
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 200 duplicate
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 202
+curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 202 (dropped at dispatch)
 curl localhost:4002/v1/dlq                                   # 401 (nginx)
 curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]}
 ```

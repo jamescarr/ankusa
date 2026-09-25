@@ -35,6 +35,72 @@ envelope. A sink that **raises, throws, or exits** is treated exactly like one
 returning `{:error, reason}`: the retry policy still applies, and the pipeline
 keeps running.
 
+### The idempotent receiver
+
+A provider's retry is *appended* like any other record — the log has no
+uniqueness constraint — so the same event can be in the WAL several times, each
+copy with its own `seq` and its own `202`. Deciding that a copy has already been
+delivered is the receiver's job, and it happens here, in front of dispatch,
+never on the ack path.
+
+The receiver keeps `dedup_key -> {first_seq, committed_at}` per **scope**
+(`tenant_id`, `source_id`) and applies one rule: deliver, unless the store
+already holds a *strictly earlier* copy of the same event inside the window —
+that is, unless this record's `seq` is higher than the earliest copy that has
+gone through. The rule itself is `Ankusa.DedupStore.decide/4`, written once and
+shared by every store.
+
+Two consequences fall out of "strictly earlier", and both matter:
+
+- A **re-read** of a record whose own copy already went through (`first_seq ==
+  seq`) is delivered, not dropped. The dispatcher resumes from its durable
+  cursor, so a crash re-reads records, and dropping those would lose them.
+- A copy with a *lower* `seq` than the earliest one known — a cursor that moved
+  backwards, a record that only now became readable — is delivered too, and
+  becomes the new earliest. Only a copy that is *later* than one already
+  delivered is a duplicate.
+
+Expiry is measured between the records' `committed_at` timestamps, never against
+the wall clock at read: a stored key stops matching once the copy it holds is
+more than `dispatch.dedup_ttl_ms` older — in *commit* time — than the record
+being decided. A dispatcher that has fallen hours behind therefore still dedupes
+correctly instead of treating everything it re-reads as new.
+
+- **One consumer per partition**, and an event's copies are never split between
+  two of them: the partition is `hash(tenant_id, source_id)` of the *scope*, so
+  every copy lands in front of one consumer whatever keys the events have.
+  `dispatch.partitions` is therefore a knob for "how many dispatchers", not a
+  throughput dial: a copy that lands in another partition's queue is delivered
+  by that partition's consumer.
+- **Where the ledger lives** is `dispatch.dedup_store`, and it decides how much
+  of the guarantee a deployment actually has: the replicated store is the only
+  one under which "one delivery per event" survives a dispatcher failover. It is
+  also the only one that can be *unavailable*, and then it says so rather than
+  guessing — dispatch stops at that record and retries from its seq once the
+  ledger answers again. A stalled dispatcher costs throughput; an unrecorded
+  delivery would cost the guarantee for that event, and a dropped one could lose
+  it outright. A deployment taking any of this seriously should say so in its
+  load tests: `mix loadgen.verify --dedup-store ra` fails on a duplicate, while
+  the default (in-process) reports them, because a killed dispatcher re-delivers
+  copies on purpose rather than losing them. The default,
+  `Ankusa.DedupStore.ETS`, is in-process: it dies with the process that owned
+  the partition, so a failover re-delivers what that dispatcher had not — never
+  a loss, and never a hole. That is the right trade for one node, and the wrong
+  one for a fleet where the same provider retry can meet two different
+  dispatchers: `Ankusa.DedupStore.Ra` (in `ankusa_ra`) keeps the ledger in the
+  WAL cluster's replicated state, so whoever is dispatching reads what the
+  previous owner had already seen. It costs a consensus round trip per record,
+  which is why it is not the default.
+- **A source can opt out**: `dedup: :none` delivers every copy (its key is
+  `nil`, and `nil` is never a key). `dedup: :auto` with no `dedup_key`
+  configured has nothing to dedup on and delivers every copy too, saying so at
+  boot.
+
+A store is a handle, not a config tuple: the receiver opens it when it starts,
+so the store's lifetime follows the process that owns the partition —
+except for a store that outlives it on purpose, which is the whole point of the
+Ra-backed one.
+
 ### Ordering keys
 
 ```elixir

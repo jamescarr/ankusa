@@ -10,7 +10,7 @@ published package.
 ## `mix loadgen.run`
 
 Fires concurrent HTTP POSTs at a webhook ingest endpoint for a fixed wall
-clock duration, then writes a CSV of every accepted (`201`) delivery plus a
+clock duration, then writes a CSV of every accepted (`202`) delivery plus a
 JSON report of the run.
 
 ```
@@ -29,23 +29,29 @@ mix loadgen.run --url http://localhost:4000/webhooks/some-source \
 | `--concurrency`   | integer | `64`                     | Number of concurrent worker processes.                                                      |
 | `--duration`      | integer | `60`                     | Wall clock seconds each worker runs for.                                                    |
 | `--rate`          | integer | *(absent = closed loop)* | Target aggregate requests/second. Pacing is **open-loop**: request number `n` is *scheduled* at `n/rate` seconds after start, so a generator that falls behind does not lower the offered rate — it shows up as latency. Omit for closed-loop firing (each worker sends its next request immediately after the previous one completes). |
-| `--dup-ratio`     | float   | `0.05`                   | Probability that a given request resends a body this worker previously got a `201` for (proves idempotent dedup). |
+| `--dup-ratio`     | float   | `0.05`                   | Probability that a given request resends a body this worker previously got a `202` for. The resend is committed too — the log has no uniqueness constraint — and dispatch is what keeps it from being delivered twice. |
+| `--dedup-store`   | `ets` \| `ra` | `ets`            | What this run *assumes* about the deployment: which ledger `Ankusa.Dispatch`'s receiver is backed by (`dispatch.dedup_store`). `ra` means the ledger is replicated — reachable through a failover, and dispatch retries a record it cannot decide — so a duplicate fails the run. `ets` means it dies with its dispatcher, so a run that kills one re-delivers copies legitimately, and they are reported rather than failed. The tool cannot read the deployed config, so it repeats what it was told in `dedup_store_assumed`, to be checked against the real thing. |
 | `--body-bytes`    | integer | `512`                    | Size in bytes of the `"pad"` field in each freshly generated JSON body.                     |
 | `--out`           | string  | `acked.csv`              | Path to write the "acked" CSV (`id,sha256hex` per accepted delivery, no header).             |
 | `--report`        | string  | `loadgen-report.json`    | Path to write the JSON run report.                                                          |
+| `--events`        | string  | *(absent = not written)* | Path to write a JSONL event per request — `{"client":"loadgen","op":{"tag":"edge","0":<status>,"1":<id>},"invoked_at":<epoch ms>,"completed_at":<epoch ms>}` — in the shape `Ankusa.WAL.Checker` reads. The aggregate report cannot answer *when* a request was shed; only a per-request stream can. |
 
 ### Response classification
 
-- `201` → accepted; the response body's `"id"` and the SHA-256 of the sent
-  body are recorded to `--out` and kept as one of this worker's own
-  dedup-source bodies.
-- `200` with JSON `"status": "duplicate"` → counted as a duplicate.
+- `202` → accepted; the response body's `"id"` and the SHA-256 of the sent body
+  are recorded to `--out` and kept as one of this worker's own dedup-source
+  bodies. The CSV also carries the provider event id the body declared (`--out`
+  is `id,sha256,event_key`), which is what lets `mix loadgen.verify` recognise a
+  copy that dispatch deduplicated.
+- `202` with JSON `"status": "quarantined"` → accepted, but held back from
+  delivery by the source's `on_verify_failure`: counted separately, and *not*
+  written to `--out`, because no consumer will ever see it.
 - `503` → counted as shed (backpressure).
 - Anything else, including transport errors/timeouts → counted as an error.
 
 ### Report
 
-`--report` is JSON with `sent`, `accepted`, `duplicates`, `shed`, `errors`,
+`--report` is JSON with `sent`, `accepted`, `quarantined`, `shed`, `errors`,
 `duration_s`, `sent_per_s`, `accepted_per_s`, and `latency_ms: {p50, p95, p99,
 max}` (all percentiles over every attempted request, in milliseconds). The same
 numbers are also printed to stdout as a table.
@@ -92,19 +98,42 @@ Polling happens every 2 seconds, querying `processed_webhooks` in chunks of
 5,000 ids per `SELECT ... WHERE ankusa_id = ANY($1)`, until every acked id
 has appeared or the timeout elapses.
 
+The verifier runs while the sink is still being written to, so it connects with a
+four-connection pool and a generous queue timeout, and retries a transient
+`DBConnection.ConnectionError` instead of failing: a pool that is momentarily
+saturated is not evidence that a delivery was lost. The poll deadline — not a
+single query — is what decides whether a record is missing.
+
 ### Report
 
 `--report` is JSON with:
 
 - `acked` — number of ids read from `--acked`.
 - `processed` — number of those ids found in `processed_webhooks`.
-- `missing` — up to 10 example acked ids never found in the table (the
-  console summary prints the *full* missing count; the JSON list is
-  truncated to 10 examples).
+- `missing` — up to 10 example acked ids that are not in the table *and* whose
+  provider event id never reached it either (the console summary prints the
+  *full* missing count; the JSON list is truncated to 10 examples).
+- `deduplicated` — acked copies that are not in the table because dispatch
+  dropped them as duplicates of an event it had already delivered. Expected
+  whenever a run resends bodies (`--dup-ratio`), and never a failure: the edge
+  commits every copy, and the idempotent receiver is what stops the second one
+  reaching a sink.
+- `duplicate_deliveries` — events delivered more than once, counted per provider
+  event id. With `--dedup-store ra` it must be 0: the ledger is replicated, so
+  this is the dedup guarantee checked end to end. With the default `ets` store,
+  a run that kills a dispatcher re-delivers copies whose earlier copy the dead
+  dispatcher had delivered, so the number is reported and does not fail the run
+  — it is why the chaos and e2e gates that kill nodes configure the replicated
+  ledger.
 - `sha_mismatches` — count of found rows whose `body_sha256` doesn't match
   the SHA-256 recorded for that id in the acked CSV.
-- `extra_deliveries` — sum of `deliveries - 1` over every found row (0 means
-  every accepted webhook was processed exactly once).
+- `extra_deliveries` — sum of `deliveries - 1` over every found row: a *record*
+  that reached a sink more than once. Informational, and never a failure:
+  delivery is at-least-once, so a dispatch retry or a dead-letter replay can
+  legitimately deliver the same record twice, and the sink dedupes it like any
+  other repeat. `duplicate_deliveries` is the field that has to be 0 — two
+  *different* records of the same event is the guarantee, not two deliveries of
+  one record.
 - `drain_s` — approximate wall-clock seconds from the start of polling until
   the missing set first became empty (each poll re-queries the full acked
   set, so this is the poll-iteration timestamp where the count first hit
@@ -114,8 +143,11 @@ has appeared or the timeout elapses.
 
 ### Exit code
 
-- `0` — every acked id was found in `processed_webhooks` before the timeout,
-  with no SHA-256 mismatches. Zero loss proven.
+- `0` — every acked id was found in `processed_webhooks`, or was deduplicated
+  against one that was, before the timeout, with no SHA-256 mismatches and — on
+  a replicated ledger — no event delivered twice. Zero loss proven either way.
 - non-zero (`Mix.raise`) — `--acked`/`--database-url` missing, or after the
-  timeout at least one acked id is still `missing` and/or `sha_mismatches >
-  0`. Check the printed summary and `--report` for the offending ids.
+  timeout an acked id is still `missing`, or `sha_mismatches > 0`, or
+  `duplicate_deliveries > 0` under `--dedup-store ra`. Check the summary and
+  `--report` for the
+  offending ids.

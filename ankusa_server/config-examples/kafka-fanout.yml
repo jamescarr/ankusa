@@ -30,7 +30,7 @@ claim_check:
 sources:
   stripe:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
-    dedup: {type: stripe}
+    dedup_key: {type: stripe}
     on_verify_failure: quarantine
     sinks:
       - type: kafka

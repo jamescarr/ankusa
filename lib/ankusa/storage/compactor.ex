@@ -15,12 +15,37 @@ defmodule Ankusa.Storage.Compactor do
   The WAL is then truncated through `min(compactor_seq, dispatch_seq)`: records
   the dispatch pipeline has not yet consumed are never dropped, preserving
   at-least-once delivery.
+
+  ## The storage lease
+
+  Compaction is single-writer, but *serving* `Ankusa.Storage.fetch/2` is not: any
+  storage node may answer a lookup. So a storage node runs `Index.open/1`
+  unconditionally and compacts only while it holds the `:storage` lease. A
+  standby keeps serving lookups from its local index, and catches up by folding
+  segment sidecars out of the blob store the moment it takes the lease over
+  (`Index.repair/1`). Losing the lease (an expired one, or a `{:error, :fenced}`
+  write) steps the node down after the segment it is writing — segments are
+  deterministic and idempotent, so re-writing one is harmless.
+
+  ## Write order and crash safety
+
+  One segment is made durable in this order:
+
+      encode → put segment → put .idx sidecar → Index.append → hwm → put_cursor → truncate
+
+  A crash anywhere in there leaves the cursor behind the segment, so the same
+  seqs are re-encoded, re-`PUT` (same deterministic key) and the sidecar is
+  written again. That is why the sidecar needs no cleanup pass, and why the
+  cursor is advanced only once the sidecar and the local rows exist.
   """
 
   use GenServer
 
-  alias Ankusa.{Config, Envelope}
+  require Logger
+
+  alias Ankusa.{Config, DurableLog, Envelope}
   alias Ankusa.Storage.Index
+  alias Ankusa.WAL.LeaseHelpers
 
   # Read granularity: bounds one read's memory, and how much the roll check can
   # overshoot `roll_bytes` by at most.
@@ -37,7 +62,12 @@ defmodule Ankusa.Storage.Compactor do
     %{id: {__MODULE__, Keyword.fetch!(opts, :instance)}, start: {__MODULE__, :start_link, [opts]}}
   end
 
-  @doc "Run one compaction synchronously; returns the number of segments written."
+  @doc """
+  Run one compaction synchronously; returns the number of segments written.
+
+  A standby (a node that does not hold the storage lease) writes nothing and
+  returns `{:ok, 0}` — another node owns the compactor cursor.
+  """
   @spec tick(atom()) :: {:ok, non_neg_integer()}
   def tick(instance), do: GenServer.call(Ankusa.via(instance, :compactor), :tick)
 
@@ -45,31 +75,200 @@ defmodule Ankusa.Storage.Compactor do
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
     %Config{} = config = Keyword.fetch!(opts, :config)
-    cursor = Ankusa.WAL.get_cursor(instance, :compactor)
-    interval = config.storage.interval_ms
+    storage = config.storage
+    ttl_ms = storage.lease_ttl_ms
 
     # This process owns the live index: it is the only writer, it reloads the
     # table from the file whenever it (re)starts, and lookups elsewhere read it.
+    # Every storage node opens it — serving lookups is not lease-gated, only
+    # compacting is.
     Index.open(config)
 
-    schedule(interval)
-    {:ok, %{instance: instance, config: config, cursor: cursor, interval: interval}}
+    state = %{
+      instance: instance,
+      config: config,
+      cursor: 0,
+      interval: storage.interval_ms,
+      lease: nil,
+      holder: "#{node()}/#{inspect(self())}",
+      ttl_ms: ttl_ms,
+      renew_ms: div(ttl_ms, 3),
+      safety_margin_ms: storage.lease_safety_margin_ms,
+      lease_renew_at: 0,
+      lease_deadline: 0
+    }
+
+    case try_acquire(state) do
+      {:ok, state} ->
+        state = activate(state)
+        {:ok, schedule(state)}
+
+      {:standby, state} ->
+        # A standby still runs the tick loop (to repair its index and re-try the
+        # lease); schedule it so the loop exists from init in both branches.
+        {:ok, schedule(standby(state))}
+    end
   end
 
   # ── ticks ─────────────────────────────────────────────────────────────────
 
   @impl true
+  def handle_call(:tick, _from, %{lease: nil} = state) do
+    {:reply, {:ok, 0}, state}
+  end
+
   def handle_call(:tick, _from, state) do
     {n, state} = compact(state)
     {:reply, {:ok, n}, state}
   end
 
   @impl true
-  def handle_info(:tick, state) do
-    {_n, state} = compact(state)
-    schedule(state.interval)
-    {:noreply, state}
+  def handle_info(:tick, %{lease: nil} = state) do
+    {:noreply, schedule(state)}
   end
+
+  def handle_info(:tick, state) do
+    cond do
+      mono_ms() > state.lease_deadline ->
+        {:noreply, schedule(step_down(state))}
+
+      mono_ms() >= state.lease_renew_at ->
+        {:noreply, schedule(renew(state))}
+
+      true ->
+        {_n, state} = compact(state)
+        {:noreply, schedule(state)}
+    end
+  end
+
+  def handle_info(:acquire_lease, %{lease: nil} = state) do
+    case try_acquire(state) do
+      # The tick loop is already running (from `init`), so no second schedule.
+      {:ok, state} ->
+        {:noreply, activate(state)}
+
+      {:standby, state} ->
+        # Best-effort fold while standing by; a failed repair is retried (and
+        # stepped down on) when this node next activates.
+        _ = repair(state)
+        {:noreply, standby(state)}
+    end
+  end
+
+  def handle_info(:acquire_lease, state), do: {:noreply, state}
+
+  def handle_info(_message, state), do: {:noreply, state}
+
+  # Best effort: releasing the lease on the way out makes a rolling restart hand
+  # over immediately instead of leaving the standby waiting out the TTL. The WAL
+  # may already be gone during a shutdown, hence the catch.
+  @impl true
+  def terminate(_reason, %{lease: nil}), do: :ok
+
+  def terminate(_reason, state) do
+    Ankusa.WAL.release_lease(state.instance, state.lease)
+    :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # ── lease ─────────────────────────────────────────────────────────────────
+
+  defp try_acquire(state) do
+    sent = mono_ms()
+
+    try do
+      case Ankusa.WAL.acquire_lease(state.instance, :storage, state.holder, state.ttl_ms) do
+        {:ok, lease} ->
+          lease = Map.put(lease, :instance, state.instance)
+          LeaseHelpers.emit(:acquired, lease)
+          {:ok, arm(%{state | lease: lease}, sent)}
+
+        {:error, {:held, _holder}} ->
+          {:standby, %{state | lease: nil}}
+      end
+    catch
+      # The WAL is unreachable: same as "someone else holds the lease".
+      :exit, _ -> {:standby, %{state | lease: nil}}
+    end
+  end
+
+  defp renew(state) do
+    sent = mono_ms()
+
+    try do
+      case Ankusa.WAL.renew_lease(state.instance, state.lease) do
+        {:ok, lease} ->
+          lease = Map.put(lease, :instance, state.instance)
+          LeaseHelpers.emit(:renewed, lease)
+          arm(%{state | lease: lease}, sent)
+
+        {:error, :lost} ->
+          step_down(state)
+      end
+    catch
+      :exit, _ ->
+        step_down(state)
+    end
+  end
+
+  defp arm(state, sent) do
+    %{
+      state
+      | lease_deadline: sent + state.ttl_ms - state.safety_margin_ms,
+        lease_renew_at: sent + state.renew_ms
+    }
+  end
+
+  defp standby(state) do
+    Process.send_after(self(), :acquire_lease, state.renew_ms)
+    state
+  end
+
+  # A new holder never resumes from a stale in-memory cursor: re-read the
+  # durable one (leader-consistent), then fold the segments written while this
+  # node was a standby.
+  defp activate(state) do
+    case safe_get_cursor(state.instance, :compactor) do
+      {:ok, cursor} ->
+        case repair(state) do
+          :ok ->
+            %{state | cursor: cursor}
+
+          {:error, reason} ->
+            Logger.warning("index repair failed: #{inspect(reason)}")
+            step_down(state)
+        end
+
+      :error ->
+        step_down(state)
+    end
+  end
+
+  # Fold any sidecars written while this node was a standby into the live index,
+  # so lookups served locally do not miss records it never itself compacted.
+  defp repair(state) do
+    Index.repair(state.config)
+  rescue
+    e ->
+      {:error, e}
+  end
+
+  defp safe_get_cursor(instance, name) do
+    try do
+      {:ok, Ankusa.WAL.get_cursor(instance, name)}
+    catch
+      :exit, _ -> :error
+      :error, _ -> :error
+    end
+  end
+
+  defp step_down(state) do
+    if state.lease != nil, do: LeaseHelpers.emit(:lost, state.lease)
+    Map.put(state, :lease, nil) |> standby()
+  end
+
+  defp mono_ms, do: System.monotonic_time(:millisecond)
 
   # ── compaction ────────────────────────────────────────────────────────────
 
@@ -84,13 +283,20 @@ defmodule Ankusa.Storage.Compactor do
         {written, state}
 
       entries ->
-        write_segment(state, entries)
-        state = %{state | cursor: next_cursor}
+        case write_segment(state, entries) do
+          :ok ->
+            state = %{state | cursor: next_cursor}
 
-        if more? do
-          compact(state, written + 1)
-        else
-          {written + 1, state}
+            if more? do
+              compact(state, written + 1)
+            else
+              {written + 1, state}
+            end
+
+          :fenced ->
+            # The lease moved on. Stop after this segment; the new holder
+            # re-encodes the same seqs into the same deterministic keys.
+            {written + 1, step_down(state)}
         end
     end
   end
@@ -180,30 +386,60 @@ defmodule Ankusa.Storage.Compactor do
         }
       end)
 
+    # The sidecar is what a standby storage replica folds to serve lookups it
+    # never itself compacted. Written before the cursor moves, so a crash
+    # re-writes both (same key, same bytes).
+    :ok = Ankusa.BlobStore.put(instance, sidecar_key(key), DurableLog.frame(rows))
     :ok = Index.append(config, rows)
+    :ok = Index.put_hwm(config, key)
 
-    :ok = Ankusa.WAL.put_cursor(instance, :compactor, last_seq)
+    try do
+      case Ankusa.WAL.put_cursor(instance, :compactor, last_seq, state.lease.token) do
+        :ok ->
+          # never truncate past what dispatch has consumed — at-least-once
+          dispatch_seq = Ankusa.WAL.get_cursor(instance, :dispatch)
 
-    # never truncate past what dispatch has consumed — at-least-once
-    dispatch_seq = Ankusa.WAL.get_cursor(instance, :dispatch)
-    :ok = Ankusa.WAL.truncate_through(instance, min(last_seq, dispatch_seq))
+          case Ankusa.WAL.truncate_through(
+                 instance,
+                 min(last_seq, dispatch_seq),
+                 state.lease.token
+               ) do
+            :ok ->
+              Ankusa.Telemetry.emit(
+                [:compact, :stop],
+                %{
+                  records: length(entries),
+                  bytes: byte_size(segment),
+                  duration: System.monotonic_time() - started
+                },
+                %{instance: instance}
+              )
 
-    Ankusa.Telemetry.emit(
-      [:compact, :stop],
-      %{
-        records: length(entries),
-        bytes: byte_size(segment),
-        duration: System.monotonic_time() - started
-      },
-      %{instance: instance}
-    )
+              :ok
+
+            {:error, :fenced} ->
+              :fenced
+          end
+
+        {:error, :fenced} ->
+          :fenced
+      end
+    catch
+      # The WAL went away mid-compaction: same as being fenced, the new holder
+      # re-encodes the same seqs into the same keys.
+      :exit, _ -> :fenced
+      :error, _ -> :fenced
+    end
   end
 
-  defp schedule(interval) when is_integer(interval) and interval > 0 do
+  defp schedule(%{interval: interval} = state) when is_integer(interval) and interval > 0 do
     Process.send_after(self(), :tick, interval)
+    state
   end
 
-  defp schedule(_), do: :ok
+  defp schedule(state), do: state
 
   defp pad(seq), do: seq |> Integer.to_string() |> String.pad_leading(20, "0")
+
+  defp sidecar_key(key), do: String.replace_suffix(key, ".seg", ".idx")
 end

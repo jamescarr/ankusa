@@ -16,18 +16,29 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome` |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
-  | `[:ankusa, :dedup, :hit]` | — | `:instance`, `:source_id` |
+  | `[:ankusa, :dispatch, :dedup]` | — | `:instance`, `:source_id`, `:seq` |
+  | `[:ankusa, :dispatch, :dedup_unavailable]` | — | `:instance`, `:source_id`, `:seq`, `:reason` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
+  | `[:ankusa, :lease, :acquired]` | — | `:instance`, `:name`, `:holder`, `:token` |
+  | `[:ankusa, :lease, :renewed]` | — | `:instance`, `:name`, `:holder`, `:token` |
+  | `[:ankusa, :lease, :lost]` | — | `:instance`, `:name`, `:holder`, `:token` |
+  | `[:ankusa, :storage, :index_repaired]` | — | `:instance`, `:segment`, `:reason` |
   | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
 
-  `:outcome` on `:ingest` is `:committed | :duplicate | :quarantined | :rejected`,
-  or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,
+  `:outcome` on `:ingest` is `:committed | :quarantined | :rejected`, or the
+  `{:error, reason}` tag: a copy of an event the receiver will drop is still
+  `:committed` here, because from the edge's side it is.
+
+  `[:ankusa, :dispatch, :dedup_unavailable]` is the one dispatch event that
+  means *nothing happened*: the receiver could not consult its ledger, so that
+  record is undecided and the poll stopped at its seq. A run of these is a
+  dispatcher waiting for its ledger, not a dispatcher losing records. `:status` on `:verify` is `:ok` or `:failed`,
   independent of what the source's `on_verify_failure` policy then decides.
 
   `Ankusa.Metrics` is the built-in Prometheus mapping of these events, served by

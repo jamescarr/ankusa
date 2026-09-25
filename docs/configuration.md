@@ -141,13 +141,14 @@ reconfigured without a new file. Env wins over the file.
 
 | Variable | Field |
 | --- | --- |
-| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
+| `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`, `wal`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` or `postgres`) |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `postgres` or `ra`) |
+| `ANKUSA_DISPATCH_DEDUP_STORE` | `dispatch.dedup_store` (`ets`, or `ra` for the ledger in the WAL cluster's replicated state) |
 | `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
@@ -241,6 +242,9 @@ config :ankusa,
 | `dispatch.max_inflight` | `4096` | Max admitted-but-unfinished envelopes — bounds how much a stalled destination can hold. |
 | `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their body bytes. |
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy` — the **default**, overridable per source (see below). |
+| `dispatch.partitions` | `1` | Logical dispatch partitions: one receiver and one consumer per partition, so an event's copies are never split between two consumers. Raise it only when you also raise the number of dispatchers. |
+| `dispatch.dedup_ttl_ms` | `604_800_000` (7 days) | How long the receiver remembers an event's key. Measured between the records' commit timestamps, never against the wall clock at read. |
+| `dispatch.dedup_store` | `{Ankusa.DedupStore.ETS, []}` | `{module, opts}` implementing `Ankusa.DedupStore`. ETS is per-dispatcher; `{Ankusa.DedupStore.Ra, members: […]}` (in `ankusa_ra`) keeps the ledger in the WAL cluster's replicated state, so it survives a failover — and, being remote, it can be unreachable, in which case dispatch stops at the record it cannot decide and retries rather than guessing. See [`delivery.md`](delivery.md#the-idempotent-receiver). |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec` — segment record framing. |
 | `storage.roll_bytes` | `16 MiB` | Roll a new segment past this size. |
@@ -276,7 +280,7 @@ config :ankusa,
     "stripe" => [
       tenant_id: "acme",                                       # default: "default"
       verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
-      dedup: {Ankusa.DedupKey.Stripe, []},
+      dedup_key: {Ankusa.DedupKey.Stripe, []},
       on_verify_failure: :quarantine,                           # :reject | :quarantine | :accept_flag
       sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
     ]
@@ -285,9 +289,10 @@ config :ankusa,
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `tenant_id` | `"default"` | The dedup/storage/retention scope — `(tenant_id, source_id, dedup_key)` is the uniqueness triple. See [`multi-tenancy.md`](multi-tenancy.md). |
+| `tenant_id` | `"default"` | The dedup/storage/retention scope: the receiver's ledger is keyed by `(tenant_id, source_id)`, and segments carry it for per-tenant retention. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. |
-| `dedup` | `{Ankusa.DedupKey.Rules, []}` | `{module, opts}` implementing `Ankusa.DedupKey`. |
+| `dedup` | `:auto` | `:auto` deduplicates on the key `dedup_key` extracts; `:none` delivers every copy. |
+| `dedup_key` | `nil` | `{module, opts}` implementing `Ankusa.DedupKey`. `nil` with `dedup: :auto` has nothing to dedup on, so every copy is delivered — boot says so. |
 | `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen) / `:accept_flag` (commits, envelope flagged). |
 | `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`, delivered to in order, independently retried. |
 
@@ -330,8 +335,8 @@ vars on top of whatever `config.exs` sets:
 - `ANKUSA_ROLES` — comma-separated, overrides `config.roles` (e.g.
   `ANKUSA_ROLES=edge,dispatch`). Parsed with `Ankusa.Config.parse_roles!/1`:
   an unknown role name (anything other than `edge`, `dispatch`, `storage`,
-  `claim_check`) raises `ArgumentError` and fails boot rather than silently
-  starting with the wrong roles.
+  `claim_check`, `wal`) raises `ArgumentError` and fails boot rather than
+  silently starting with the wrong roles.
 
 `autostart` (application env, default `false`) gates whether
 Ankusa.Application boots its built-in default instance at all — a library

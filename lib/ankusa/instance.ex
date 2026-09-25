@@ -14,7 +14,7 @@ defmodule Ankusa.Instance do
 
   require Logger
 
-  alias Ankusa.Config
+  alias Ankusa.{Config, Source, SourceStore}
 
   @spec start_link(Config.t()) :: Supervisor.on_start()
   def start_link(%Config{} = config) do
@@ -33,6 +33,9 @@ defmodule Ankusa.Instance do
   def init(%Config{} = config) do
     # read-mostly config for every call site, no Application.get_env buried deep
     Ankusa.put_config(config)
+    # ...and only now: the check reads the sources through the source store,
+    # which resolves the instance config the same way every other call site does.
+    warn_on_undedupable_sources(config)
     Ankusa.ClaimCheck.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
@@ -48,6 +51,29 @@ defmodule Ankusa.Instance do
     Supervisor.init(children, strategy: :one_for_one)
   end
 
+  # A source configured to dedup with no way to compute a key will deliver every
+  # copy of every event, silently. Say so once at boot rather than leaving an
+  # operator to discover it from duplicated deliveries; `dedup: :none` is how a
+  # source says that is what it wants.
+  #
+  # Only the dispatch role needs to hear it: that is the stage where dedup
+  # happens, so it is where a missing key would matter.
+  defp warn_on_undedupable_sources(%Config{} = config) do
+    if Config.role?(config, :dispatch) do
+      for source_id <- SourceStore.list(config.instance),
+          {:ok, %Source{dedup: :auto, dedup_key: nil}} <-
+            [SourceStore.fetch(config.instance, source_id)] do
+        Logger.warning(
+          "source #{inspect(source_id)}: dedup: :auto but no dedup_key configured, " <>
+            "so every copy of every event will be delivered; set dedup: :none to say " <>
+            "that is intended"
+        )
+      end
+    end
+
+    :ok
+  end
+
   # The admin API's Prometheus reporter, first of all: it attaches its handlers
   # synchronously (`start_async: false`), so the events every later child emits
   # while starting — boot-time dispatch of the WAL backlog, ingest the edge
@@ -59,8 +85,11 @@ defmodule Ankusa.Instance do
   # The WAL only matters to roles that actually read or write it. A node
   # running only `:claim_check` needs blob-store credentials, never WAL
   # credentials (e.g. a Postgres connection) — so it shouldn't open one.
+  # A `:wal` node starts the adapter too: with Ra that is also where the local
+  # Raft member lives, so a dedicated WAL-only StatefulSet boots exactly this
+  # child.
   defp wal_children(config, opts) do
-    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
+    if Enum.any?([:edge, :dispatch, :storage, :wal], &Config.role?(config, &1)) do
       {wal_mod, _} = config.wal
       [{wal_mod, opts}]
     else

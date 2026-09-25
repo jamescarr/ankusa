@@ -119,9 +119,16 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
-        "ankusa.dedup.hits.total",
+        "ankusa.dispatch.deduplicated.total",
         scoped(own,
-          event_name: [:ankusa, :dedup, :hit],
+          event_name: [:ankusa, :dispatch, :dedup],
+          tags: [:instance, :source_id]
+        )
+      ),
+      counter(
+        "ankusa.dispatch.dedup_unavailable.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :dedup_unavailable],
           tags: [:instance, :source_id]
         )
       ),

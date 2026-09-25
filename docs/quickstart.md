@@ -14,7 +14,7 @@ docker compose up -d --wait
 ```mermaid
 flowchart LR
     P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
-    A -->|written to disk, then 201| P
+    A -->|written to disk, then 202| P
     A -->|POST /hooks + x-ankusa-id| W[worker.py]
     O[You] -->|/health /metrics /v1/dlq :4002| A
 ```
@@ -34,7 +34,7 @@ sleep 1 && docker compose logs worker
 # received id=01a0... source=demo seq=1 bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-The `201` returns only after the hook is on disk — that is
+The `202` returns only after the hook is on disk — that is
 [the core invariant](architecture.md#the-core-invariant), not a formality.
 
 ## 3. Provider retries are absorbed
@@ -43,11 +43,13 @@ Providers retry. Send the identical request again:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
-# => {"id":"01a0...","status":"duplicate","seq":1}
+# => {"id":"01a1...","status":"accepted","seq":2}
 ```
 
-The worker log gains nothing, because Ankusa deduped on the body's `id` before
-delivery. The provider still gets a `2xx`, so it stops retrying.
+The copy is appended — the log has no uniqueness constraint, and the ack never
+waits on a lookup for one — so the provider gets its own `202` and stops
+retrying. The worker log still gains nothing: the receiver in front of dispatch
+sees that it already delivered `evt_1` and drops the copy.
 
 ## 4. When your worker goes down
 
@@ -60,7 +62,7 @@ docker compose start worker
 sleep 10 && docker compose logs worker | grep evt_2
 ```
 
-The provider still got its `201`: Ankusa holds the hook and retries delivery
+The provider still got its `202`: Ankusa holds the hook and retries delivery
 until the worker answers or the retry budget runs out.
 
 ### Long outage — dead-lettered, then replayed
@@ -117,7 +119,7 @@ Add the provider as a second source under `sources:` in `ankusa.yml`:
 ```yaml
   stripe:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
-    dedup: {type: stripe}
+    dedup_key: {type: stripe}
     on_verify_failure: quarantine
     sinks:
       - {type: http, url: "http://worker:8080/hooks"}
@@ -144,9 +146,8 @@ GitHub and Standard Webhooks sources are the same shape with a different
 
 ## Ingest responses
 
-- `201` — accepted, durably stored
-- `200` — duplicate, already stored
-- `202` — quarantined after a failed verification
+- `202` — accepted, durably stored (`"status":"accepted"`), or held for an
+  operator after a failed verification (`"status":"quarantined"`)
 - `400` — body unreadable
 - `401` — verification failed
 - `404` — unknown source

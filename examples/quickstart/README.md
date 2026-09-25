@@ -6,7 +6,7 @@ The published Ankusa image receives webhooks and POSTs each one to a
 ```mermaid
 flowchart LR
     P[Provider / curl] -->|POST /webhooks/demo :4000| A[ankusa]
-    A -->|written to disk, then 201| P
+    A -->|written to disk, then 202| P
     A -->|POST /hooks + x-ankusa-id| W[worker.py]
     O[You] -->|/health /metrics /v1/dlq :4002| A
 ```

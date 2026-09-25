@@ -11,18 +11,26 @@ roll off the WAL asynchronously, never blocking an ack. See
 @callback append(server(), [entry()]) :: {:ok, [result()]}
 @callback read(server(), after_seq :: non_neg_integer(), limit :: pos_integer()) :: [Envelope.t()]
 @callback get_cursor(server(), name :: atom()) :: non_neg_integer()
-@callback put_cursor(server(), name :: atom(), seq :: non_neg_integer()) :: :ok
-@callback truncate_through(server(), seq :: non_neg_integer()) :: :ok
+@callback put_cursor(server(), name :: atom(), seq :: non_neg_integer(), token :: pos_integer()) ::
+            :ok | {:error, :fenced}
+@callback truncate_through(server(), seq :: non_neg_integer(), token :: pos_integer()) ::
+            :ok | {:error, :fenced}
+@callback acquire_lease(server(), name :: atom(), holder :: String.t(), ttl_ms :: pos_integer()) ::
+            {:ok, lease()} | {:error, {:held, String.t()}}
+@callback renew_lease(server(), lease()) :: {:ok, lease()} | {:error, :lost}
+@callback release_lease(server(), lease()) :: :ok
 @callback stats(server()) :: map()
 ```
 
 Contract every adapter must uphold:
 
 - `append/2` is a **group commit**: given a list of records, write them all
-  and issue a *single* commit, then return per-record results in order. A
-  record whose `(tenant_id, source_id, dedup_key)` collides with an
-  already-committed one comes back as `{:duplicate, existing_seq}` and is
-  **not written** — the caller still acks `2xx`.
+  and issue a *single* commit, then return per-record results in order. Every
+  record is written — the log has **no uniqueness constraint**. Two copies of
+  the same event are two committed records with two `seq`s, each acked
+  independently. Collapsing them is the idempotent receiver's job
+  ([`delivery.md`](delivery.md)), not the log's, so nothing on the ack path has
+  to read the log before it can write to it.
 - A committed record gets a strictly increasing `seq`. Readers use it as a
   cursor; `0` means "nothing consumed yet."
 - After a crash, replay must drop a torn trailing record (a write that
@@ -38,7 +46,7 @@ No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
   hooks, one fsync.
 - Replay validates every frame's CRC and truncates the file at the first
   torn/invalid one.
-- Truncation is **logical first**: `truncate_through/2` records a durable seq
+- Truncation is **logical first** and lease-fenced: `truncate_through/3` records a durable seq
   floor in `<name>.truncated` and drops the affected index entries, so
   reclaiming a few records costs a few ETS deletes and never blocks appends.
   The file is rewritten only once the dead prefix passes `:rewrite_min_bytes`
@@ -46,14 +54,11 @@ No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
   The floor is also what keeps `seq` from being reused: after a restart,
   allocation resumes at the floor, the persisted cursors, or the last replayed
   frame — whichever is highest — never at 1.
-- Committed dedup keys live in an in-memory ETS set, keyed by `{tenant_id,
-  source_id, dedup_key}`, rebuilt from the log on start. Because the log
-  itself gets truncated after compaction, a **snapshot** of the dedup set is
-  persisted to `<name>.dedup` before frames are dropped and reloaded before
-  replay — dedup correctness survives compaction *and* restart even though the
-  original records are long gone from disk. Cursors, the dedup snapshot, and
-  the truncation floor are all written to a temp file, fsynced, then renamed,
-  so a power loss leaves the old or the new file, never a torn one.
+- Cursors and the truncation floor are written to a temp file, fsynced, then
+  renamed, so a power loss leaves the old or the new file, never a torn one.
+  The log keeps no dedup state at all: with no uniqueness constraint to
+  enforce there is nothing to rebuild on start, and nothing to snapshot before
+  truncation.
 - Durable to process crash and power loss **on that box**, not to losing
   the box — it's one local file. See "Shared Postgres WAL" below for the
   fleet case.
@@ -84,37 +89,43 @@ config :ankusa,
 `Postgrex.transaction/2` (still exactly one `COMMIT`, one fsync-equivalent,
 per batch):
 
-1. **Claim dedup keys** — one `INSERT ... ON CONFLICT DO NOTHING` against a
-   permanent `ankusa_wal_dedup` ledger table, batched via `unnest/1`. Postgres
-   takes a row lock on the conflicting index entry and blocks until the
-   other writer's transaction resolves, so two nodes racing the same dedup
-   key never double-claim it.
-2. **Insert winners** — rows that had no dedup key, or won their claim, go
-   into `ankusa_wal` (`RETURNING event_id, seq`). A losing row is never
-   written here at all.
-3. **Resolve losers' seq** — one lookup against `ankusa_wal_dedup`, which
-   carries its own `seq` column (backfilled right after step 2) rather than
-   joining back to `ankusa_wal`. That's deliberate: `ankusa_wal` rows get
-   deleted by `truncate_through/2` once compacted, and a lookup that
-   depended on the data row still existing would stop catching duplicates
-   of an already-truncated event. The dedup ledger is **never** truncated —
-   this is `WAL.DiskLog`'s persisted `.dedup` snapshot, just durable in the
-   same database instead of a sidecar file.
+1. **Take the instance's advisory lock** — `pg_advisory_xact_lock(hashtext(…))`
+   for the instance, held to `COMMIT`, so commits land in the same order as the
+   seqs they allocate (see `## Seq order`).
+2. **Allocate the seqs before the insert** — one `nextval` per row, so each
+   row's seq is known in advance and the results can be paired with the input
+   *by position*. No `RETURNING`: Postgres does not promise its order for a
+   multi-row statement, and with no uniqueness constraint two rows of one batch
+   may be the same event with the same id, so the id cannot identify them
+   either.
+3. **Insert every row** — one `INSERT ... SELECT FROM unnest(...)`, all of it
+   into `ankusa_wal`. Nothing is claimed, looked up or skipped.
 
-Every row is correlated by the envelope's own `id` (a UUIDv7, always unique
-regardless of dedup key), never by array/result position — Postgres doesn't
-guarantee `RETURNING` order for a multi-row statement.
+A rolled-back transaction consumes sequence values it never keeps, which is one
+reason `seq` may have small gaps.
+
+Every row carries the envelope, and the envelope is the record: there is no
+side table whose loss would change what a reader sees.
 
 Every table carries an `instance` column, so one Postgres database can back
 multiple `Ankusa.Instance`s — including the *same* instance name running on
-many independent BEAM nodes, which is the actual point: `seq` may have
-small gaps (a deduped row still consumes a sequence value) and is **not**
-reset per instance, but it's still strictly increasing and safe as a
+many independent BEAM nodes, which is the actual point: coordination happens
+through this shared, durable state, never through BEAM distribution. `seq` is
+**not** reset per instance, but it's still strictly increasing and safe as a
 cursor.
 
+`WAL.Postgres` keeps no dedup state, deliberately — see
+[`delivery.md`](delivery.md) for where idempotency lives instead. A database
+migrated from the ledger-era schema keeps its `ankusa_wal_dedup` table and
+`dedup_key` column (nothing here reads or writes them, and dropping a table an
+operator's database holds is not the bootstrap's call), while the uniqueness
+that era put on `ankusa_wal.event_id` is dropped on every boot: both halves of
+that constraint say the same event cannot be appended twice, which is now
+exactly what must work.
+
 Local dev/test: `cd ankusa_postgres && docker compose up -d --wait && mix test`
-(10 tests, including concurrent-writer dedup races — N tasks racing the same
-key, exactly one commits — and a truncation-survives-dedup regression).
+(22 tests: the shared conformance suite, the commit-order test, lease fencing,
+and the copy-appends-again contract).
 
 ## `Ankusa.BlobStore`
 
@@ -252,14 +263,25 @@ One tick (default every `storage.interval_ms`, 1s):
 2. Encode those records into one segment via the configured `Codec`.
 3. `PUT` the segment to the blob store under a deterministic key:
    `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
-4. Append one index row per record to `Ankusa.Storage.Index` (durable,
+4. `PUT` its **sidecar**, `seg/<first>-<last>.idx`, holding the same rows in the
+   index file's framed format. This is what lets another storage replica — a
+   standby taking the lease over, or a fresh one — build its own index for
+   segments it never compacted (`Ankusa.Storage.Index.repair/1`).
+5. Append one index row per record to `Ankusa.Storage.Index` (durable,
    append-only, fsynced before the cursor moves, on local disk regardless of
    which `BlobStore` is configured) — `event_id`, `tenant_id`, `source_id`,
-   `seq`, `segment_key`, `offset`, `length`.
-5. Advance the compactor's durable cursor.
-6. Truncate the WAL through `min(compactor_seq, dispatch_seq)` — **never**
+   `seq`, `segment_key`, `offset`, `length` — and record the segment key as the
+   local high-water mark (`segments/index.hwm`).
+6. Advance the compactor's durable cursor, with the token of the `:storage`
+   lease.
+7. Truncate the WAL through `min(compactor_seq, dispatch_seq)` — **never**
    past what dispatch has consumed yet, so at-least-once delivery survives
-   compaction even if dispatch is lagging or down.
+   compaction even if dispatch is lagging or down — also with the lease token.
+   A `{:error, :fenced}` at either step means the lease moved on: the node steps
+   down after the segment it is writing. Segments are deterministic and
+   idempotent, so re-writing one after a step-down is harmless, and the
+   `put segment → sidecar → index → hwm → cursor` order is what makes a crash
+   anywhere in there redo the work instead of skipping it.
 
 This is why segments are never one-object-per-hook: PUT cost amortizes over
 however many records landed in one tick, and archive-tier storage (which

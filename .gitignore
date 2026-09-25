@@ -36,3 +36,9 @@ ankusa_nats-*.tar
 
 # Load-generator output from examples/oban-consumer/run.sh (CSVs + JSON reports).
 examples/oban-consumer/.e2e-out/
+
+# Chaos harness evidence: event histories, final scans, per-scenario reports.
+ankusa_ra/chaos/out/
+
+# Build caches written by language-server tooling.
+**/.expert/

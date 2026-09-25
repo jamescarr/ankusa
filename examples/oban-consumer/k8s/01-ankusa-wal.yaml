@@ -1,0 +1,167 @@
+# The Ra WAL cluster: three members, one volume each.
+#
+#   `wal` StatefulSet  — 3 replicas, each hosting one Raft member. A majority
+#                        (2 of 3) must have an entry before an append is acked,
+#                        so losing one pod loses nothing.
+#   headless Service   — gives every pod a stable DNS name
+#                        (ankusa-wal-N.ankusa-wal) that the other Ankusa nodes
+#                        dial over Erlang distribution.
+#   NetworkPolicy      — EPMD and distribution ports are open only between
+#                        Ankusa pods; nothing else can join the cluster.
+#
+# Apply this *before* 30-ankusa.yaml: clients retry until a leader exists, but
+# starting the WAL first means they find one immediately.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ankusa-cookie
+  namespace: ankusa-e2e
+type: Opaque
+stringData:
+  # A shared cookie is what makes the members one Erlang cluster. In production
+  # this comes from the platform's secret store, never from a manifest in git.
+  cookie: "ankusa-e2e-cookie"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankusa-wal
+  namespace: ankusa-e2e
+spec:
+  # Headless: no virtual IP, one DNS A record per pod. A pod must be reachable
+  # before it is ready — a follower still catching up is a valid distribution
+  # peer — so the service publishes its not-ready addresses.
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: ankusa-wal
+  ports:
+    - name: epmd
+      port: 4369
+      targetPort: 4369
+    - name: dist
+      port: 4370
+      targetPort: 4370
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ankusa-wal
+  namespace: ankusa-e2e
+spec:
+  serviceName: ankusa-wal
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: ankusa-wal
+  template:
+    metadata:
+      labels:
+        app: ankusa-wal
+    spec:
+      # The pod name *is* the node name, so a restarted pod rejoins as itself
+      # and recovers its own log instead of introducing a fourth member.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: ankusa-wal
+          image: ankusa-oban-ingest:e2e
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ANKUSA_ROLES
+              value: "wal"
+            - name: DATA_DIR
+              value: "/data"
+            - name: WAL
+              value: "ra"
+            # The pod name and IP are what the node name and distribution host
+            # are built from, so they are defined before RELEASE_NODE refers to
+            # them.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: RELEASE_DISTRIBUTION
+              value: "name"
+            - name: RELEASE_NODE
+              value: "ankusa@$(POD_NAME).ankusa-wal"
+            - name: RELEASE_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: ankusa-cookie
+                  key: cookie
+            # Pin the distribution port range so the Service and NetworkPolicy
+            # can allow exactly 4370-4372.
+            - name: ERL_AFLAGS
+              value: "-kernel inet_dist_listen_min 4370 inet_dist_listen_max 4372"
+            # A `wal` node's own members list; each pod resolves the others by
+            # their stable DNS names.
+            - name: WAL_RA_MEMBERS
+              value: "ankusa@ankusa-wal-0.ankusa-wal,ankusa@ankusa-wal-1.ankusa-wal,ankusa@ankusa-wal-2.ankusa-wal"
+          ports:
+            - name: epmd
+              containerPort: 4369
+            - name: dist
+              containerPort: 4370
+            - name: dist-1
+              containerPort: 4371
+            - name: dist-2
+              containerPort: 4372
+          readinessProbe:
+            exec:
+              command:
+                - /app/bin/ingest
+                - rpc
+                - "1"
+                - 'Ankusa.WAL.stats(:default)'
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ankusa-wal-distribution
+  namespace: ankusa-e2e
+spec:
+  podSelector:
+    matchLabels:
+      app: ankusa-wal
+  policyTypes: ["Ingress"]
+  ingress:
+    # EPMD (4369) and the distribution range (4370-4372) are reachable only
+    # from Ankusa pods — the WAL set itself, the edges, and the workers.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: ankusa-wal
+        - podSelector:
+            matchLabels:
+              app: ankusa-edge
+        - podSelector:
+            matchLabels:
+              app: ankusa-worker
+      ports:
+        - protocol: TCP
+          port: 4369
+        - protocol: TCP
+          port: 4370
+        - protocol: TCP
+          port: 4371
+        - protocol: TCP
+          port: 4372

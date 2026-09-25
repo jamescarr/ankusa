@@ -32,7 +32,7 @@ sources:
     # Overridden per request by the tenant in the path.
     tenant: default
     verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
-    dedup: {type: stripe}
+    dedup_key: {type: stripe}
     on_verify_failure: reject
     sinks:
       - type: http

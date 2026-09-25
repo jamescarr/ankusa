@@ -22,20 +22,31 @@ defmodule Ankusa.WAL.DiskLog do
   `append/2` writes every record in one `:file.pwrite`, then a single
   `:file.datasync` (fsync) covers the whole batch. Hundreds of hooks, one fsync.
 
-  ## Dedup durability
+  ## No uniqueness constraint
 
-  Committed `dedup_key`s live in an in-memory ETS set rebuilt on start. Because
-  the log is truncated after compaction, a snapshot of the dedup set is persisted
-  to `<name>.dedup` at truncation time and reloaded before replay, so dedup stays
-  correct across compaction *and* restart.
+  Appending the same event twice appends it twice. This is a durable, ordered,
+  append-only log: telling a provider's retry from a new event is dispatch's
+  job (`Ankusa.Dispatch.Receiver`), not the log's, and the edge acks every copy
+  it committed.
 
   ## Truncation
 
-  Truncation is **logical first**: `truncate_through/2` writes the seq floor to
+  Truncation is **logical first**: `truncate_through/3` writes the seq floor to
   `<name>.truncated` (fsynced, then renamed into place) and drops the affected
   entries from the in-memory index. Dropping a prefix never has to touch the
   file, so a compaction tick that reclaims a few records costs a few ETS
   deletes, not a rewrite of the whole log — and never blocks appends.
+
+  ## Leases and fencing
+
+  Cursors are owned by leases (see `Ankusa.WAL`'s `## Leases`), kept in this
+  GenServer's state and persisted to `<name>.leases` through the same fsynced
+  write-then-rename path as the cursors. A lease cannot outlive the process that
+  held it — the file is the *token counter*, not a lock: on load every lease is
+  expired (`expires_at: nil`) but its token is kept, so the next acquisition still
+  gets a strictly higher token and a restarted holder can never reuse a stale
+  one. A cursor write or truncation carrying any other token is refused with
+  `{:error, :fenced}`.
 
   That floor is also what keeps seqs from being reused: after a restart,
   `next_seq` is the maximum of the last replayed frame, **the truncation floor**,
@@ -81,19 +92,16 @@ defmodule Ankusa.WAL.DiskLog do
     File.mkdir_p!(dir)
     path = Path.join(dir, "ankusa.wal")
 
-    dedup = :ets.new(:ankusa_wal_dedup, [:set, :protected, read_concurrency: true])
     index = :ets.new(:ankusa_wal_index, [:ordered_set, :protected])
-
-    # dedup snapshot survives truncation; load it before replaying live frames
-    load_dedup_snapshot(path <> ".dedup", dedup)
 
     # Load the persisted state that bounds `next_seq` before replaying, so a
     # reclaimed (or fully rewritten) log still continues where it left off.
     truncated_through = load_truncated_through(path <> ".truncated")
     cursors = load_cursors(path <> ".cursors")
+    leases = load_leases(path <> ".leases")
 
     {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
-    {valid_end, replay_next} = replay(fd, index, dedup, truncated_through)
+    {valid_end, replay_next} = replay(fd, index, truncated_through)
     {:ok, _} = :file.position(fd, valid_end)
     :ok = :file.truncate(fd)
 
@@ -119,9 +127,9 @@ defmodule Ankusa.WAL.DiskLog do
        fd: fd,
        write_pos: valid_end,
        next_seq: next_seq,
-       dedup: dedup,
        index: index,
        cursors: cursors,
+       leases: leases,
        truncated_through: truncated_through,
        rewrite_min_bytes: rewrite_min_bytes
      }}
@@ -142,37 +150,42 @@ defmodule Ankusa.WAL.DiskLog do
   def get_cursor(server, name), do: GenServer.call(server, {:get_cursor, name})
 
   @impl Ankusa.WAL
-  def put_cursor(server, name, seq), do: GenServer.call(server, {:put_cursor, name, seq})
+  def put_cursor(server, name, seq, token),
+    do: GenServer.call(server, {:put_cursor, name, seq, token})
 
   @impl Ankusa.WAL
-  def truncate_through(server, seq), do: GenServer.call(server, {:truncate_through, seq})
+  def truncate_through(server, seq, token),
+    do: GenServer.call(server, {:truncate_through, seq, token})
 
   @impl Ankusa.WAL
   def stats(server), do: GenServer.call(server, :stats)
+
+  @impl Ankusa.WAL
+  def acquire_lease(server, name, holder, ttl_ms),
+    do: GenServer.call(server, {:acquire_lease, name, holder, ttl_ms})
+
+  @impl Ankusa.WAL
+  def renew_lease(server, lease), do: GenServer.call(server, {:renew_lease, lease})
+
+  @impl Ankusa.WAL
+  def release_lease(server, lease), do: GenServer.call(server, {:release_lease, lease})
 
   # ── group commit ──────────────────────────────────────────────────────────
 
   @impl true
   def handle_call({:append, records}, _from, state) do
-    {results, iodata, inserts, dedup_inserts, next_seq, bytes, pos} =
-      build_batch(records, state)
+    {results, iodata, inserts, next_seq, bytes, pos} = build_batch(records, state)
 
-    if iodata == [] do
-      # all duplicates — nothing to write, no fsync
-      {:reply, {:ok, results}, state}
-    else
-      Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
-        :ok = :file.pwrite(state.fd, state.write_pos, iodata)
-        :ok = :file.datasync(state.fd)
-        # measurements, then metadata: `:duration` is added by the span itself.
-        {:ok, %{batch_size: length(inserts), bytes: bytes}, %{}}
-      end)
+    Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
+      :ok = :file.pwrite(state.fd, state.write_pos, iodata)
+      :ok = :file.datasync(state.fd)
+      # measurements, then metadata: `:duration` is added by the span itself.
+      {:ok, %{batch_size: length(inserts), bytes: bytes}, %{}}
+    end)
 
-      :ets.insert(state.index, inserts)
-      if dedup_inserts != [], do: :ets.insert(state.dedup, dedup_inserts)
+    :ets.insert(state.index, inserts)
 
-      {:reply, {:ok, results}, %{state | write_pos: pos, next_seq: next_seq}}
-    end
+    {:reply, {:ok, results}, %{state | write_pos: pos, next_seq: next_seq}}
   end
 
   def handle_call({:read, after_seq, limit}, _from, state) do
@@ -191,24 +204,87 @@ defmodule Ankusa.WAL.DiskLog do
     {:reply, Map.get(state.cursors, name, 0), state}
   end
 
-  def handle_call({:put_cursor, name, seq}, _from, state) do
-    cursors = Map.put(state.cursors, name, seq)
-    persist_term(state.path <> ".cursors", cursors)
-    {:reply, :ok, %{state | cursors: cursors}}
+  def handle_call({:put_cursor, name, seq, token}, _from, state) do
+    case fence(state, Ankusa.WAL.lease_for_cursor(name), token) do
+      :ok ->
+        # Monotonic: a stale write can never move a cursor backwards.
+        cursors = Map.update(state.cursors, name, seq, &max(&1, seq))
+        persist_term(state.path <> ".cursors", cursors)
+        {:reply, :ok, %{state | cursors: cursors}}
+
+      {:error, :fenced} = error ->
+        {:reply, error, state}
+    end
   end
 
-  def handle_call({:truncate_through, seq}, _from, %{truncated_through: floor} = state)
-      when seq <= floor do
-    {:reply, :ok, state}
+  def handle_call({:truncate_through, seq, token}, _from, state) do
+    case fence(state, :storage, token) do
+      :ok -> do_truncate(seq, state)
+      {:error, :fenced} = error -> {:reply, error, state}
+    end
   end
 
-  def handle_call({:truncate_through, seq}, _from, state) do
-    # Durably record the floor *before* dropping anything: a crash between the
-    # two must not let a restarted node reuse seqs it already handed out.
-    persist_term(state.path <> ".truncated", seq)
-    :ets.select_delete(state.index, [{{:"$1", :_}, [{:"=<", :"$1", seq}], [true]}])
+  def handle_call({:acquire_lease, name, holder, ttl_ms}, _from, state) do
+    now = now_ms()
 
-    {:reply, :ok, maybe_rewrite(%{state | truncated_through: seq})}
+    case Map.get(state.leases, name) do
+      %{expires_at: expires_at, holder: existing}
+      when is_integer(expires_at) and expires_at > now and existing != holder ->
+        {:reply, {:error, {:held, existing}}, state}
+
+      existing ->
+        # Acquiring always allocates a new token, even for the same holder and
+        # even for a released (expired) lease: the counter only climbs.
+        token = ((existing && existing.token) || 0) + 1
+
+        lease = %{
+          name: name,
+          holder: holder,
+          token: token,
+          ttl_ms: ttl_ms,
+          expires_at: now + ttl_ms
+        }
+
+        leases = Map.put(state.leases, name, lease)
+        persist_term(state.path <> ".leases", leases)
+        {:reply, {:ok, wire(lease)}, %{state | leases: leases}}
+    end
+  end
+
+  def handle_call(
+        {:renew_lease, %{name: name, holder: holder, token: token} = lease},
+        _from,
+        state
+      ) do
+    now = now_ms()
+    ttl_ms = lease.ttl_ms
+
+    case Map.get(state.leases, name) do
+      %{holder: ^holder, token: ^token, expires_at: expires_at}
+      when is_integer(expires_at) and expires_at > now ->
+        renewed = %{lease | expires_at: now + ttl_ms}
+        leases = Map.put(state.leases, name, renewed)
+        persist_term(state.path <> ".leases", leases)
+        {:reply, {:ok, wire(renewed)}, %{state | leases: leases}}
+
+      _ ->
+        {:reply, {:error, :lost}, state}
+    end
+  end
+
+  def handle_call({:release_lease, %{name: name, holder: holder, token: token}}, _from, state) do
+    case Map.get(state.leases, name) do
+      %{holder: ^holder, token: ^token} = lease ->
+        # Keep the entry, expired, rather than deleting it: the token counter
+        # must only ever climb, so handing the name to a new holder allocates a
+        # token the old one can never reuse.
+        leases = Map.put(state.leases, name, %{lease | expires_at: nil})
+        persist_term(state.path <> ".leases", leases)
+        {:reply, :ok, %{state | leases: leases}}
+
+      _ ->
+        {:reply, :ok, state}
+    end
   end
 
   def handle_call(:stats, _from, state) do
@@ -228,63 +304,61 @@ defmodule Ankusa.WAL.DiskLog do
   # ── batch building ────────────────────────────────────────────────────────
 
   defp build_batch(records, state) do
-    init = {[], [], [], [], state.next_seq, 0, state.write_pos, %{}}
+    init = {[], [], [], state.next_seq, 0, state.write_pos}
 
-    {results, iodata, inserts, dedup_inserts, next_seq, bytes, pos, _seen} =
+    {results, iodata, inserts, next_seq, bytes, pos} =
       Enum.reduce(records, init, fn %{envelope: env}, acc ->
-        {results, iodata, inserts, dedup_inserts, seq, bytes, pos, seen} = acc
-        key = dedup_lookup_key(env)
-        existing = if key, do: committed_seq(state.dedup, seen, key), else: nil
+        {results, iodata, inserts, seq, bytes, pos} = acc
 
-        cond do
-          existing != nil ->
-            Ankusa.Telemetry.emit([:dedup, :hit], %{}, %{
-              source_id: env.source_id,
-              instance: state.instance
-            })
+        env = Ankusa.WAL.stamp_commit(%{env | seq: seq})
+        payload = Envelope.to_binary(env)
+        frame = frame(seq, payload)
+        plen = byte_size(payload)
+        entry = {seq, {pos + @header_bytes, plen}}
+        fsize = @header_bytes + plen
 
-            {[{:duplicate, existing} | results], iodata, inserts, dedup_inserts, seq, bytes, pos,
-             seen}
-
-          true ->
-            env = %{env | seq: seq}
-            payload = Envelope.to_binary(env)
-            frame = frame(seq, payload)
-            plen = byte_size(payload)
-            entry = {seq, {pos + @header_bytes, plen}}
-            fsize = @header_bytes + plen
-
-            {seen, dedup_inserts} =
-              if key,
-                do: {Map.put(seen, key, seq), [{key, seq} | dedup_inserts]},
-                else: {seen, dedup_inserts}
-
-            {[{:committed, env} | results], [iodata, frame], [entry | inserts], dedup_inserts,
-             seq + 1, bytes + fsize, pos + fsize, seen}
-        end
+        {[{:committed, env} | results], [iodata, frame], [entry | inserts], seq + 1,
+         bytes + fsize, pos + fsize}
       end)
 
-    {Enum.reverse(results), iodata, inserts, dedup_inserts, next_seq, bytes, pos}
-  end
-
-  # `nil` dedup_key means "no idempotency key" — always accept.
-  defp dedup_lookup_key(%Envelope{dedup_key: nil}), do: nil
-  defp dedup_lookup_key(%Envelope{tenant_id: t, source_id: s, dedup_key: k}), do: {t, s, k}
-
-  defp committed_seq(dedup, seen, key) do
-    case Map.get(seen, key) do
-      nil ->
-        case :ets.lookup(dedup, key) do
-          [{^key, seq}] -> seq
-          [] -> nil
-        end
-
-      seq ->
-        seq
-    end
+    {Enum.reverse(results), iodata, inserts, next_seq, bytes, pos}
   end
 
   # ── truncation ────────────────────────────────────────────────────────────
+
+  defp do_truncate(seq, %{truncated_through: floor} = state) when seq <= floor do
+    {:reply, :ok, state}
+  end
+
+  defp do_truncate(seq, state) do
+    # Durably record the floor *before* dropping anything: a crash between the
+    # two must not let a restarted node reuse seqs it already handed out.
+    persist_term(state.path <> ".truncated", seq)
+    :ets.select_delete(state.index, [{{:"$1", :_}, [{:"=<", :"$1", seq}], [true]}])
+
+    {:reply, :ok, maybe_rewrite(%{state | truncated_through: seq})}
+  end
+
+  # ── leases ────────────────────────────────────────────────────────────────
+
+  # Fencing uses the monotonic clock, which cannot jump; the lease handed back
+  # to a caller carries a wall-clock expiry, so every adapter reports the same
+  # kind of number.
+  defp wire(lease), do: %{lease | expires_at: System.system_time(:millisecond) + lease.ttl_ms}
+
+  defp fence(state, lease_name, token) do
+    now = now_ms()
+
+    case Map.get(state.leases, lease_name) do
+      %{token: ^token, expires_at: expires_at} when is_integer(expires_at) and expires_at > now ->
+        :ok
+
+      _ ->
+        {:error, :fenced}
+    end
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   # Logical truncation (the floor above) is already done; this only decides
   # whether the file itself is worth rewriting. A rewrite copies the live
@@ -317,10 +391,6 @@ defmodule Ankusa.WAL.DiskLog do
   end
 
   defp rewrite(state, dead, live) do
-    # Frames about to be dropped carry dedup keys that must outlive them; the
-    # snapshot is the same durability step the old per-frame truncation took.
-    persist_dedup_snapshot(state.path <> ".dedup", state.dedup)
-
     tmp = state.path <> ".compact"
     {:ok, tfd} = :file.open(tmp, [:read, :write, :raw, :binary])
     :ok = copy_range(state.fd, tfd, dead, live, 0)
@@ -351,16 +421,16 @@ defmodule Ankusa.WAL.DiskLog do
 
   # ── replay ────────────────────────────────────────────────────────────────
 
-  defp replay(fd, index, dedup, truncated_through) do
+  defp replay(fd, index, truncated_through) do
     {:ok, size} = :file.position(fd, :eof)
     :file.position(fd, :bof)
     data = if size > 0, do: elem(:file.pread(fd, 0, size), 1), else: <<>>
     # 1-based seqs: cursor 0 means "nothing consumed", and read/2 (strictly `>`)
     # surfaces seq 1 onward. Empty log => next_seq starts at 1.
-    parse(data, 0, index, dedup, 1, truncated_through)
+    parse(data, 0, index, 1, truncated_through)
   end
 
-  defp parse(bin, pos, index, dedup, next_seq, truncated_through) do
+  defp parse(bin, pos, index, next_seq, truncated_through) do
     case bin do
       <<@magic::16, @version::8, _flags::8, seq::64, crc::32, len::32, rest::binary>> ->
         case rest do
@@ -368,24 +438,12 @@ defmodule Ankusa.WAL.DiskLog do
             if :erlang.crc32(payload) == crc do
               # Frames below the floor are still physically present (the file is
               # only rewritten once it is worth it) but logically gone; they
-              # must not be readable again. Their dedup keys still count.
+              # must not be readable again.
               if seq > truncated_through do
                 :ets.insert(index, {seq, {pos + @header_bytes, len}})
               end
 
-              case dedup_key_of(payload) do
-                nil -> :ok
-                key -> :ets.insert(dedup, {key, seq})
-              end
-
-              parse(
-                tail,
-                pos + @header_bytes + len,
-                index,
-                dedup,
-                seq + 1,
-                truncated_through
-              )
+              parse(tail, pos + @header_bytes + len, index, seq + 1, truncated_through)
             else
               # torn/corrupt payload — stop; this write was never acked
               {pos, next_seq}
@@ -398,11 +456,6 @@ defmodule Ankusa.WAL.DiskLog do
       _ ->
         {pos, next_seq}
     end
-  end
-
-  defp dedup_key_of(payload) do
-    env = Envelope.from_binary(payload)
-    dedup_lookup_key(env)
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────
@@ -454,6 +507,23 @@ defmodule Ankusa.WAL.DiskLog do
     end
   end
 
+  # A lease cannot outlive the process that held it: on load every lease is
+  # expired, but its token is kept so the next acquisition still climbs. The
+  # file is the token counter, not a lock. `nil` (rather than a timestamp) is
+  # what "expired" means here — `System.monotonic_time/1` is negative on most
+  # systems, so no numeric sentinel is reliably in the past.
+  defp load_leases(path) do
+    case File.read(path) do
+      {:ok, bin} ->
+        for {name, lease} <- :erlang.binary_to_term(bin, [:safe]), into: %{} do
+          {name, %{lease | expires_at: nil}}
+        end
+
+      {:error, _} ->
+        %{}
+    end
+  end
+
   # Write-then-rename, with the data fsynced *before* the rename: after power
   # loss the destination is either the whole new term or the whole old one, so
   # `binary_to_term/2` at boot can never see a truncated file. `File.write!/2`
@@ -470,20 +540,5 @@ defmodule Ankusa.WAL.DiskLog do
     end
 
     :ok = :file.rename(tmp, path)
-  end
-
-  defp load_dedup_snapshot(path, dedup) do
-    case File.read(path) do
-      {:ok, bin} ->
-        for {key, seq} <- :erlang.binary_to_term(bin, [:safe]), do: :ets.insert(dedup, {key, seq})
-        :ok
-
-      {:error, _} ->
-        :ok
-    end
-  end
-
-  defp persist_dedup_snapshot(path, dedup) do
-    persist_term(path, :ets.tab2list(dedup))
   end
 end

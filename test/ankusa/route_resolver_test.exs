@@ -65,7 +65,7 @@ defmodule Ankusa.RouteResolverTest do
     test "the URL tenant is threaded onto the envelope and scopes dedup" do
       config =
         start({Ankusa.RouteResolver.TenantPath, []}, %{
-          "stripe" => [dedup: {Ankusa.DedupKey.Stripe, []}]
+          "stripe" => [dedup_key: {Ankusa.DedupKey.Stripe, []}]
         })
 
       body = ~s({"id":"evt_1","type":"x"})
@@ -74,17 +74,20 @@ defmodule Ankusa.RouteResolverTest do
       globex = post(config, "/webhooks/globex/stripe", body)
       acme_again = post(config, "/webhooks/acme/stripe", body)
 
-      # same source_id + same event id, but two different tenants → both commit
-      assert acme_first.status == 201
-      assert globex.status == 201
-      # same tenant + same event id → duplicate absorbed, still 2xx
-      assert acme_again.status == 200
-      assert %{"status" => "duplicate"} = JSON.decode!(acme_again.resp_body)
+      # Same source and same event id, three times: the edge commits and acks
+      # every copy, because the log has no uniqueness constraint.
+      assert acme_first.status == 202
+      assert globex.status == 202
+      assert acme_again.status == 202
 
       envs = WAL.read(config.instance, -1, 10)
-      assert length(envs) == 2
-      assert Enum.map(envs, & &1.tenant_id) |> Enum.sort() == ["acme", "globex"]
+      assert Enum.map(envs, & &1.tenant_id) == ["acme", "globex", "acme"]
       assert Enum.all?(envs, &(&1.source_id == "stripe"))
+
+      # What the tenant decides is the *dedup scope* dispatch partitions and
+      # keys on: the same event id under two tenants is two events.
+      scopes = envs |> Enum.map(&Ankusa.Dispatch.Receiver.scope/1) |> Enum.uniq()
+      assert scopes == [{"acme", "stripe"}, {"globex", "stripe"}]
     end
 
     test "a source's own tenant_id is used when the resolver doesn't carry one" do
@@ -93,7 +96,7 @@ defmodule Ankusa.RouteResolverTest do
           "demo" => [tenant_id: "customer-42"]
         })
 
-      assert post(config, "/webhooks/demo", ~s({"hi":1})).status == 201
+      assert post(config, "/webhooks/demo", ~s({"hi":1})).status == 202
       assert [env] = WAL.read(config.instance, -1, 10)
       assert env.tenant_id == "customer-42"
       assert env.source_id == "demo"

@@ -12,10 +12,10 @@
 _**Don't fight the traffic. Steer it.**_
 
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
-at it: every hook is written to a durable log before Ankusa answers `2xx`,
-provider retries are absorbed as duplicates, and each hook is delivered to your
-own worker over HTTP, RabbitMQ, Kafka, or NATS JetStream, with retries, a
-dead-letter queue, and replay. Start with one container. Grow into a fleet by
+at it: every hook is written to a durable log before Ankusa answers `2xx`, a
+provider's retry is dropped in front of your worker rather than delivered
+twice, and each hook is delivered over HTTP, RabbitMQ, Kafka, or NATS
+JetStream, with retries, a dead-letter queue, and replay. Start with one container. Grow into a fleet by
 changing config, not code.
 
 ## Quickstart
@@ -34,7 +34,7 @@ until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"duplicate","seq":1}  (the retry is absorbed, not stored twice)
+# => {"id":"01a1...","status":"accepted","seq":2}   (its own copy; dispatch drops it)
 ```
 
 Done? `docker rm -f ankusa`
@@ -81,7 +81,8 @@ walks through outages, dead letters, replay, and pointing a real provider at it.
 
 Ankusa writes every hook to a durable log before it answers `2xx`. If a node
 dies before the write, the provider never got an ack and retries. If it dies
-after, dedup recognizes the retry and absorbs it. When storage slows down,
+after, the retry is a new copy of an event dispatch has already delivered, and
+the receiver in front of the sinks drops it. When storage slows down,
 Ankusa answers `503` with `Retry-After`, so providers back off and try again
 instead of losing events. You get that guarantee on day one, on one machine,
 and you keep it when you run a hundred.

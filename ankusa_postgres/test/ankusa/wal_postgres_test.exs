@@ -8,14 +8,27 @@ defmodule Ankusa.WAL.PostgresTest do
   alias Ankusa.{Envelope, UUIDv7, WAL}
   alias Ankusa.WAL.Postgres
 
+  # 12, not 4: the concurrency tests open one transaction per writer and eight
+  # of them race, so a pool smaller than the writer count turns "which commit
+  # lands first" into "which writer got a connection", and the losers fail with
+  # a `queue_timeout` instead of an assertion.
   @pg_opts [
     hostname: "localhost",
     port: 5433,
     username: "ankusa",
     password: "ankusa",
     database: "ankusa_dev",
-    pool_size: 4
+    pool_size: 12
   ]
+
+  # Not just `unique_integer/1`: that is unique within a VM, not across
+  # restarts, and this adapter keeps its rows, cursors and leases in a database
+  # that outlives the test run. A run that reuses a name reads the previous
+  # run's rows.
+  defp uniq(prefix) do
+    suffix = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+    :"#{prefix}_#{System.unique_integer([:positive])}#{suffix}"
+  end
 
   defp boot(instance) do
     config = Ankusa.Config.new(instance: instance, wal: {Postgres, @pg_opts})
@@ -25,7 +38,7 @@ defmodule Ankusa.WAL.PostgresTest do
   end
 
   setup do
-    %{instance: boot(:"pg_#{System.unique_integer([:positive])}")}
+    %{instance: boot(uniq("pg"))}
   end
 
   defp envelope(overrides \\ %{}) do
@@ -65,89 +78,81 @@ defmodule Ankusa.WAL.PostgresTest do
     assert committed.seq
   end
 
-  test "intra-batch duplicates collapse to one commit", %{instance: inst} do
-    id = "evt-#{System.unique_integer([:positive])}"
-    a = entry(%{dedup_key: id})
-    b = entry(%{dedup_key: id})
+  # The log has no uniqueness constraint: a provider's retry is appended again,
+  # and dispatch decides whether it is a duplicate (see `Ankusa.DedupStoreTest`).
+  test "the same event appended again is a new row with its own seq", %{instance: inst} do
+    {:ok, [{:committed, first}]} = WAL.append(inst, [entry()])
+    {:ok, [{:committed, second}]} = WAL.append(inst, [entry()])
 
-    assert {:ok, [{:committed, committed}, {:duplicate, dup_seq}]} = WAL.append(inst, [a, b])
-    assert dup_seq == committed.seq
-    assert length(WAL.read(inst, -1, 10)) == 1
+    assert second.seq > first.seq
+    assert length(WAL.read(inst, -1, 10)) == 2
+
+    # Two copies in one batch are two rows as well.
+    assert {:ok, [{:committed, third}, {:committed, fourth}]} =
+             WAL.append(inst, [entry(), entry()])
+
+    assert third.seq == second.seq + 1
+    assert fourth.seq == third.seq + 1
   end
 
-  test "cross-batch duplicate returns the original seq without writing again", %{instance: inst} do
-    id = "evt-#{System.unique_integer([:positive])}"
-    {:ok, [{:committed, first}]} = WAL.append(inst, [entry(%{dedup_key: id})])
-    assert {:ok, [{:duplicate, dup_seq}]} = WAL.append(inst, [entry(%{dedup_key: id})])
-    assert dup_seq == first.seq
-    assert length(WAL.read(inst, -1, 10)) == 1
-  end
-
-  test "nil dedup_key never collides, even across otherwise-identical envelopes", %{
+  test "concurrent writers appending the same event all commit, with distinct seqs", %{
     instance: inst
   } do
-    assert {:ok, [{:committed, a}]} = WAL.append(inst, [entry()])
-    assert {:ok, [{:committed, b}]} = WAL.append(inst, [entry()])
-    assert a.seq != b.seq
-    assert length(WAL.read(inst, -1, 10)) == 2
-  end
-
-  test "concurrent writers racing the same dedup key: exactly one wins", %{instance: inst} do
-    id = "evt-#{System.unique_integer([:positive])}"
-
     results =
       1..8
-      |> Enum.map(fn _ -> Task.async(fn -> WAL.append(inst, [entry(%{dedup_key: id})]) end) end)
+      |> Enum.map(fn _ -> Task.async(fn -> WAL.append(inst, [entry()]) end) end)
       |> Enum.map(&Task.await(&1, 5_000))
-      |> Enum.map(fn {:ok, [result]} -> result end)
+      |> Enum.map(fn {:ok, [{:committed, env}]} -> env.seq end)
 
-    committed = Enum.filter(results, &match?({:committed, _}, &1))
-    duplicates = Enum.filter(results, &match?({:duplicate, _}, &1))
-
-    assert length(committed) == 1
-    assert length(duplicates) == 7
-    [{:committed, winner}] = committed
-    assert Enum.all?(duplicates, fn {:duplicate, seq} -> seq == winner.seq end)
-    assert length(WAL.read(inst, -1, 10)) == 1
+    assert length(Enum.uniq(results)) == 8
+    assert length(WAL.read(inst, -1, 10)) == 8
   end
 
-  test "truncate_through deletes WAL rows but dedup keys still block a re-send", %{
-    instance: inst
-  } do
-    id = "evt-#{System.unique_integer([:positive])}"
-    {:ok, [{:committed, first}]} = WAL.append(inst, [entry(%{dedup_key: id})])
+  test "truncate_through removes rows, and a later copy is still appended", %{instance: inst} do
+    {:ok, [{:committed, first}]} = WAL.append(inst, [entry()])
 
-    :ok = WAL.truncate_through(inst, first.seq)
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :storage, fn lease ->
+      :ok = WAL.truncate_through(inst, first.seq, lease.token)
+    end)
+
     assert WAL.read(inst, -1, 10) == []
 
-    # the row is physically gone, but the dedup ledger is permanent
-    assert {:ok, [{:duplicate, dup_seq}]} = WAL.append(inst, [entry(%{dedup_key: id})])
-    assert dup_seq == first.seq
+    {:ok, [{:committed, again}]} = WAL.append(inst, [entry()])
+    assert again.seq > first.seq
+    assert [%{seq: seq}] = WAL.read(inst, -1, 10)
+    assert seq == again.seq
   end
 
   test "cursors default to 0 and persist", %{instance: inst} do
     assert WAL.get_cursor(inst, :dispatch) == 0
-    assert :ok = WAL.put_cursor(inst, :dispatch, 42)
+
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :dispatch, fn lease ->
+      assert :ok = WAL.put_cursor(inst, :dispatch, 42, lease.token)
+    end)
+
     assert WAL.get_cursor(inst, :dispatch) == 42
   end
 
   test "stats reflect committed records and cursors", %{instance: inst} do
     {:ok, _} = WAL.append(inst, [entry(), entry()])
-    :ok = WAL.put_cursor(inst, :dispatch, 1)
+
+    Ankusa.WAL.LeaseHelpers.with_lease(inst, :dispatch, fn lease ->
+      :ok = WAL.put_cursor(inst, :dispatch, 1, lease.token)
+    end)
 
     stats = WAL.stats(inst)
     assert stats.records == 2
-    assert stats.next_seq == stats.max_seq + 1
+    # the sequence is shared by every instance in the database, so it only ever
+    # runs ahead of this instance's own rows
+    assert stats.next_seq > stats.max_seq
     assert stats.cursors["dispatch"] == 1
   end
 
-  test "two instances sharing one database never see each other's rows or dedup keys" do
-    inst_a = boot(:"pg_iso_a_#{System.unique_integer([:positive])}")
-    inst_b = boot(:"pg_iso_b_#{System.unique_integer([:positive])}")
-    id = "evt-#{System.unique_integer([:positive])}"
-    assert {:ok, [{:committed, _}]} = WAL.append(inst_a, [entry(%{dedup_key: id})])
-    # same dedup key, different instance — must commit independently, not dedupe
-    assert {:ok, [{:committed, _}]} = WAL.append(inst_b, [entry(%{dedup_key: id})])
+  test "two instances sharing one database never see each other's rows" do
+    inst_a = boot(uniq("pg_iso_a"))
+    inst_b = boot(uniq("pg_iso_b"))
+    assert {:ok, [{:committed, _}]} = WAL.append(inst_a, [entry()])
+    assert {:ok, [{:committed, _}]} = WAL.append(inst_b, [entry()])
 
     assert length(WAL.read(inst_a, -1, 10)) == 1
     assert length(WAL.read(inst_b, -1, 10)) == 1
@@ -175,6 +180,11 @@ defmodule Ankusa.WAL.PostgresTest do
         """,
         []
       )
+
+      # Two calls: Postgrex prepares statements, so one call can carry only one
+      # command. Dropping first keeps a run that died mid-test from poisoning
+      # every later run.
+      Postgrex.query!(conn, "DROP TRIGGER IF EXISTS ankusa_test_slow_commit ON ankusa_wal", [])
 
       Postgrex.query!(
         conn,

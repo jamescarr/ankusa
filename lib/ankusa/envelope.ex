@@ -20,9 +20,11 @@ defmodule Ankusa.Envelope do
     :headers,
     :content_type,
     :body,
-    :dedup_key,
     # assigned by the WAL at commit time; nil until durably stored
     :seq,
+    # when the WAL took this record for commit, in ms since the epoch. Dedup
+    # expiry is measured between these, never against the wall clock at read.
+    :committed_at,
     # %Ankusa.Verification{}
     :verification,
     size: 0
@@ -38,8 +40,8 @@ defmodule Ankusa.Envelope do
           headers: [{String.t(), String.t()}],
           content_type: String.t() | nil,
           body: binary(),
-          dedup_key: String.t() | nil,
           seq: non_neg_integer() | nil,
+          committed_at: integer() | nil,
           verification: Ankusa.Verification.t() | nil,
           size: non_neg_integer()
         }
@@ -72,7 +74,10 @@ defmodule Ankusa.Envelope do
     # module atoms (e.g. `verification.provider`) that a fresh decoding node may
     # not have interned yet — `:safe` would reject them and crash replay/fetch.
     map = :erlang.binary_to_term(bin)
-    struct(__MODULE__, map)
+    env = struct(__MODULE__, map)
+    # Envelopes written before `committed_at` existed decode with it `nil`;
+    # fall back to `received_at` so dedup expiry arithmetic never sees `nil`.
+    %{env | committed_at: env.committed_at || env.received_at}
   end
 end
 

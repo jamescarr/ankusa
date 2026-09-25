@@ -56,22 +56,28 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
+  # The server runs one instance (the framework default), so the Ra cluster
+  # every member must agree on is a fixed name rather than something an
+  # operator can typo.
+  @instance :default
+
   @root_keys ~w(node log http admin batcher dispatch wal storage claim_check sources)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
   @admin_keys ~w(enabled port)
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
-  @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry)
+  @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry partitions dedup_ttl_ms dedup_store)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
-  @wal_keys ~w(type postgres)
+  @wal_keys ~w(type postgres ra)
   @postgres_keys ~w(url host port username password database pool_size ssl migrate)
   @postgres_discrete_keys ~w(host port username password database)
+  @ra_wal_keys ~w(members append_timeout_ms max_command_bytes)
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes)
-  @source_keys ~w(tenant on_verify_failure verify dedup sinks)
+  @source_keys ~w(tenant on_verify_failure verify dedup dedup_key sinks)
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @dedup_keys ~w(type header json_path)
@@ -83,13 +89,14 @@ defmodule AnkusaServer.Config do
   @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
 
-  @roles ~w(edge dispatch storage claim_check)
+  @roles ~w(edge dispatch storage claim_check wal)
   @verify_types ~w(none stripe github standard_webhooks shopify slack hmac)
   @scheme_parses ~w(whole csv_pairs space_versions)
   @scheme_hashes ~w(sha256 sha512 sha1)
   @scheme_encodings ~w(hex base64)
   @scheme_secret_decodes ~w(raw whsec_base64)
   @dedup_types ~w(rules stripe github)
+  @dedup_modes ~w(auto none)
   @sink_types ~w(log http rabbitmq kafka nats)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
@@ -221,6 +228,7 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
+    {"ANKUSA_DISPATCH_DEDUP_STORE", ["dispatch", "dedup_store"]},
     {"ANKUSA_WAL_POSTGRES_URL", ["wal", "postgres", "url"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
@@ -382,8 +390,57 @@ defmodule AnkusaServer.Config do
         |> put_opt(:concurrency, int_opt(dispatch, "concurrency", ["dispatch"]))
         |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
         |> put_opt(:max_inflight_bytes, int_opt(dispatch, "max_inflight_bytes", ["dispatch"]))
+        |> put_opt(:partitions, int_opt(dispatch, "partitions", ["dispatch"]))
+        |> put_opt(:dedup_ttl_ms, int_opt(dispatch, "dedup_ttl_ms", ["dispatch"]))
+        |> put_opt(:dedup_store, dedup_store(doc, dispatch))
         |> put_opt(:retry, retry_policy(retry))
     ]
+  end
+
+  # The idempotent receiver's ledger, named rather than spelled out: `ets` is
+  # the in-process default, and `ra` keeps it in the WAL cluster's replicated
+  # state, so it has no members of its own to name.
+  defp dedup_store(doc, dispatch) do
+    path = ["dispatch", "dedup_store"]
+
+    case dispatch["dedup_store"] do
+      nil ->
+        nil
+
+      value when is_binary(value) ->
+        case String.downcase(value) do
+          "ets" ->
+            {Ankusa.DedupStore.ETS, []}
+
+          "ra" ->
+            {Ankusa.DedupStore.Ra, [members: wal_members!(doc)]}
+
+          other ->
+            raise ConfigError,
+              message: "#{render_path(path)}: expected ets or ra, got #{inspect(other)}"
+        end
+
+      other ->
+        raise ConfigError,
+          message: "#{render_path(path)}: expected a string, got #{inspect(other)}"
+    end
+  end
+
+  # The Ra ledger is applied by the WAL cluster's machine, so it needs that
+  # cluster's members — and the WAL has to be Ra for there to be one.
+  defp wal_members!(doc) do
+    wal = section!(doc, "wal", @wal_keys, [])
+    ra = section!(wal, "ra", @ra_wal_keys, ["wal"])
+
+    case enum!(wal["type"] || "disk", ~w(disk postgres ra), ["wal", "type"]) do
+      "ra" ->
+        members!(ra["members"], ["wal", "ra", "members"])
+
+      _ ->
+        raise ConfigError,
+          message:
+            "dispatch.dedup_store: \"ra\" needs wal.type \"ra\" — its members are the WAL cluster's"
+    end
   end
 
   defp retry_policy(retry) do
@@ -406,8 +463,9 @@ defmodule AnkusaServer.Config do
   defp wal_section(doc) do
     wal = section!(doc, "wal", @wal_keys, [])
     postgres = section!(wal, "postgres", @postgres_keys, ["wal"])
+    ra = section!(wal, "ra", @ra_wal_keys, ["wal"])
 
-    case enum!(wal["type"] || "disk", ~w(disk postgres), ["wal", "type"]) do
+    case enum!(wal["type"] || "disk", ~w(disk postgres ra), ["wal", "type"]) do
       "disk" ->
         [wal: {Ankusa.WAL.DiskLog, []}]
 
@@ -418,7 +476,47 @@ defmodule AnkusaServer.Config do
         end
 
         [wal: {Ankusa.WAL.Postgres, postgres_opts!(postgres)}]
+
+      "ra" ->
+        if ra == %{} do
+          raise ConfigError, message: "wal.ra: required when wal.type is \"ra\""
+        end
+
+        [wal: {Ankusa.WAL.Ra, ra_wal_opts!(ra)}]
     end
+  end
+
+  # The server runs one instance, so every member's cluster name is the same
+  # fixed atom; an operator names nodes, never clusters. A Ra member bootstraps
+  # from the list, so each entry has to be `name@host`.
+  defp ra_wal_opts!(ra) do
+    path = ["wal", "ra"]
+
+    []
+    |> put_opt(:members, members!(ra["members"], path ++ ["members"]))
+    |> put_opt(:append_timeout_ms, int_opt(ra, "append_timeout_ms", path))
+    |> put_opt(:max_command_bytes, int_opt(ra, "max_command_bytes", path))
+  end
+
+  defp members!(nil, path) do
+    raise ConfigError, message: "#{render_path(path)}: required when wal.type is \"ra\""
+  end
+
+  defp members!(value, path) do
+    cluster = :"ankusa_wal_#{@instance}"
+
+    value
+    |> string_list!(path)
+    |> Enum.map(fn entry ->
+      case String.split(entry, "@", parts: 2) do
+        [name, host] when name != "" and host != "" ->
+          {cluster, String.to_atom("#{name}@#{host}")}
+
+        _ ->
+          raise ConfigError,
+            message: "#{render_path(path)}: expected name@host, got #{inspect(entry)}"
+      end
+    end)
   end
 
   defp postgres_opts!(postgres) do
@@ -592,7 +690,8 @@ defmodule AnkusaServer.Config do
     |> put_opt(:tenant_id, string_opt(source, "tenant", path))
     |> put_opt(:on_verify_failure, atom_enum_opt(source, "on_verify_failure", @policies, path))
     |> put_opt(:verifier, verifier(source, path))
-    |> put_opt(:dedup, dedup_key(source, path))
+    |> put_opt(:dedup, dedup_mode(source, path))
+    |> put_opt(:dedup_key, dedup_key(source, path))
     |> Keyword.put(:sinks, sinks!(source, path))
   end
 
@@ -684,10 +783,21 @@ defmodule AnkusaServer.Config do
     Ankusa.Verifier.Schemes.validate!(scheme)
   end
 
-  defp dedup_key(source, path) do
-    path = path ++ ["dedup"]
+  # `dedup:` says what dispatch does with a provider's retry: `auto` dedups on
+  # the key `dedup_key` extracts, `none` delivers every copy. Absent means
+  # `auto` — and a source with no `dedup_key` then has nothing to dedup on, so
+  # boot warns about it (see `Ankusa.Instance`).
+  defp dedup_mode(source, path) do
+    case enum!(source["dedup"] || "auto", @dedup_modes, path ++ ["dedup"]) do
+      "auto" -> :auto
+      "none" -> :none
+    end
+  end
 
-    case section!(source["dedup"], @dedup_keys, path) do
+  defp dedup_key(source, path) do
+    path = path ++ ["dedup_key"]
+
+    case section!(source["dedup_key"], @dedup_keys, path) do
       dedup when map_size(dedup) == 0 ->
         nil
 

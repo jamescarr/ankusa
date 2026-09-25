@@ -10,9 +10,10 @@
 #   auth     : nginx. Ingest (4000) is open — providers sign their own hooks.
 #              The admin API (4002) is behind basic auth, which is the whole
 #              point of this file.
-#   proof    : POST /webhooks/demo twice. The second returns 200 duplicate even
-#              though it may land on the other edge replica — dedup lives in the
-#              shared Postgres WAL, not in either node's memory.
+#   proof    : POST /webhooks/demo twice. Both are accepted — each copy gets its
+#              own envelope id and seq, even when the second lands on the other
+#              edge replica, because the ack depends only on the shared Postgres
+#              WAL. Deciding that the second is a duplicate happens at dispatch.
 #
 # Only nginx publishes ports. The Ankusa services are reachable on the compose
 # network and nowhere else, so there is no way to reach an admin API by

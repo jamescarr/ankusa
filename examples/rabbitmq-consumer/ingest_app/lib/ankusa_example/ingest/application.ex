@@ -66,7 +66,7 @@ defmodule AnkusaExample.Ingest.Application do
   defp source do
     [
       verifier: {Ankusa.Verifier.None, []},
-      dedup: {Ankusa.DedupKey.Rules, []},
+      dedup_key: {Ankusa.DedupKey.Rules, []},
       on_verify_failure: :accept_flag,
       sinks: [
         {Ankusa.Sink.RabbitMQ,

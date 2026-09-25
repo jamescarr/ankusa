@@ -21,9 +21,12 @@ defmodule Mix.Tasks.Loadgen.Run do
           duration: :integer,
           rate: :integer,
           dup_ratio: :float,
-          body_bytes: :integer,
+          nil_key_ratio: :float,
+          body_bytes: :string,
+          big_ratio: :float,
           out: :string,
-          report: :string
+          report: :string,
+          events: :string
         ]
       )
 
@@ -37,9 +40,13 @@ defmodule Mix.Tasks.Loadgen.Run do
     duration = Keyword.get(parsed, :duration, 60)
     rate = Keyword.get(parsed, :rate)
     dup_ratio = Keyword.get(parsed, :dup_ratio, 0.05)
-    body_bytes = Keyword.get(parsed, :body_bytes, 512)
+    nil_key_ratio = Keyword.get(parsed, :nil_key_ratio, 0.2)
+    body_bytes = Keyword.get(parsed, :body_bytes, "512")
+    {body_min, body_max} = parse_body_bytes(body_bytes)
+    big_ratio = Keyword.get(parsed, :big_ratio, 0.0)
     out_path = Keyword.get(parsed, :out, "acked.csv")
     report_path = Keyword.get(parsed, :report, "loadgen-report.json")
+    events_path = Keyword.get(parsed, :events)
 
     case Finch.start_link(name: Loadgen.Finch, pools: %{default: [size: concurrency]}) do
       {:ok, _pid} -> :ok
@@ -53,7 +60,14 @@ defmodule Mix.Tasks.Loadgen.Run do
       duration: duration,
       rate: rate,
       dup_ratio: dup_ratio,
-      body_bytes: body_bytes
+      nil_key_ratio: nil_key_ratio,
+      body_min: body_min,
+      body_max: body_max,
+      big_ratio: big_ratio,
+      # Per-request edge events in `Ankusa.WAL.Checker`'s shape. The aggregate
+      # report cannot answer "did any edge ack while there was no quorum?" —
+      # only a per-request status and timing can.
+      events_path: events_path
     }
 
     wall_start = System.monotonic_time(:millisecond)
@@ -82,7 +96,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     report = %{
       sent: merged.sent,
       accepted: merged.accepted,
-      duplicates: merged.duplicates,
+      quarantined: merged.quarantined,
       shed: merged.shed,
       errors: merged.errors,
       duration_s: duration_s,
@@ -98,6 +112,12 @@ defmodule Mix.Tasks.Loadgen.Run do
 
     File.write!(report_path, JSON.encode!(report))
 
+    if events_path do
+      # Oldest first: the events are accumulated newest-first per worker.
+      lines = merged.events |> Enum.reverse() |> Enum.map(&JSON.encode!/1)
+      File.write!(events_path, Enum.map(lines, &[&1, "\n"]))
+    end
+
     print_report(report)
 
     if is_integer(rate) and rate > 0 and sent_per_s < 0.95 * rate do
@@ -109,7 +129,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     end
 
     if merged.accepted == 0 do
-      Mix.raise("loadgen: zero requests were accepted (201) -- refusing to report success")
+      Mix.raise("loadgen: zero requests were accepted (202) -- refusing to report success")
     end
 
     :ok
@@ -119,13 +139,14 @@ defmodule Mix.Tasks.Loadgen.Run do
     %{
       sent: 0,
       accepted: 0,
-      duplicates: 0,
+      quarantined: 0,
       shed: 0,
       errors: 0,
       k: 0,
       bodies: [],
       accepted_list: [],
-      latencies: []
+      latencies: [],
+      events: []
     }
   end
 
@@ -164,31 +185,109 @@ defmodule Mix.Tasks.Loadgen.Run do
   end
 
   defp perform_request(acc, opts, intended_start_us) do
-    {kind, body} = build_body(acc, opts.dup_ratio, opts.body_bytes)
+    {kind, body} =
+      build_body(
+        acc,
+        opts.dup_ratio,
+        opts.nil_key_ratio,
+        opts.body_min,
+        opts.body_max,
+        opts.big_ratio
+      )
 
     t_start = System.monotonic_time(:microsecond)
+    started_ms = System.system_time(:millisecond)
     result = send_one(opts.url, body)
     t_end = System.monotonic_time(:microsecond)
+    ended_ms = System.system_time(:millisecond)
 
     # Coordinated omission: when paced, the clock starts at the scheduled send
     # time, so a stalled generator shows up as latency instead of vanishing.
     latency_us = if intended_start_us, do: t_end - intended_start_us, else: t_end - t_start
 
-    acc = %{acc | sent: acc.sent + 1, k: acc.k + 1, latencies: [latency_us | acc.latencies]}
+    acc = %{
+      acc
+      | sent: acc.sent + 1,
+        k: acc.k + 1,
+        latencies: [latency_us | acc.latencies],
+        events: [edge_event(result, started_ms, ended_ms) | acc.events]
+    }
 
     classify(result, kind, body, acc)
   end
 
-  defp build_body(acc, dup_ratio, body_bytes) do
-    if :rand.uniform() < dup_ratio and acc.bodies != [] do
-      {:dup, Enum.random(acc.bodies)}
-    else
-      id = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+  # One `Ankusa.WAL.Checker` edge event per request. Timestamps are epoch
+  # milliseconds on purpose: the fault windows the nemesis records are epoch
+  # milliseconds too, so I8 can line them up.
+  defp edge_event(result, started_ms, ended_ms) do
+    {status, id} =
+      case result do
+        {:ok, %Req.Response{status: status} = response} when status in 200..299 ->
+          {"2xx", extract_id(response.body)}
 
-      body =
-        JSON.encode!(%{"id" => id, "n" => acc.k, "pad" => String.duplicate("x", body_bytes)})
+        {:ok, %Req.Response{status: status}} ->
+          {to_string(status), nil}
 
-      {:fresh, body}
+        {:error, _reason} ->
+          {"error", nil}
+      end
+
+    %{
+      "client" => "loadgen",
+      "op" => %{"tag" => "edge", "0" => status, "1" => id},
+      "invoked_at" => started_ms,
+      "completed_at" => ended_ms,
+      "result" => nil
+    }
+  end
+
+  # The traffic mix the chaos harness runs: mostly keyed (an `id` the edge turns
+  # into a dedup key), a fifth with *no* key at all — which is a different code
+  # path (`nil` never dedups) and the one a provider that sends no event id takes
+  # — and a tenth a resend of an earlier body, which must be absorbed.
+  defp build_body(acc, dup_ratio, nil_key_ratio, body_min, body_max, big_ratio) do
+    cond do
+      :rand.uniform() < dup_ratio and acc.bodies != [] ->
+        {:dup, Enum.random(acc.bodies)}
+
+      :rand.uniform() < nil_key_ratio ->
+        body =
+          JSON.encode!(%{
+            "n" => acc.k,
+            "pad" => String.duplicate("x", body_size(body_min, body_max, big_ratio))
+          })
+
+        {:nil_key, body}
+
+      true ->
+        id = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+
+        body =
+          JSON.encode!(%{
+            "id" => id,
+            "n" => acc.k,
+            "pad" => String.duplicate("x", body_size(body_min, body_max, big_ratio))
+          })
+
+        {:fresh, body}
+    end
+  end
+
+  # A fraction `big_ratio` of fresh bodies carry the upper end of the body-byte
+  # range; the rest carry the lower end. A single `--body-bytes N` is a range
+  # of one, so behaviour is unchanged without `--big-ratio`.
+  defp body_size(body_min, body_max, big_ratio) do
+    if big_ratio > 0 and :rand.uniform() < big_ratio, do: body_max, else: body_min
+  end
+
+  defp parse_body_bytes(spec) do
+    case String.split(spec, "..") do
+      [single] ->
+        n = String.to_integer(single)
+        {n, n}
+
+      [min, max] ->
+        {String.to_integer(min), String.to_integer(max)}
     end
   end
 
@@ -205,25 +304,30 @@ defmodule Mix.Tasks.Loadgen.Run do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp classify({:ok, %Req.Response{status: 201, body: resp_body}}, _kind, req_body, acc) do
+  # 202 is the durable ack: the record is committed and will be dispatched. The
+  # edge commits *every* copy a provider sends — there is no duplicate reply to
+  # classify — so a resend is counted as accepted like any other copy, and the
+  # event id it carries is what lets `mix loadgen.verify` tell that this
+  # particular ack was deduplicated on the way to a sink.
+  defp classify({:ok, %Req.Response{status: 202, body: resp_body}}, _kind, req_body, acc) do
     id = extract_id(resp_body)
     sha = sha256_hex(req_body)
 
-    %{
-      acc
-      | accepted: acc.accepted + 1,
-        # Bounded pool: only the 1024 most recent acked bodies are dedup sources,
-        # so a long run can't grow this list without limit.
-        bodies: Enum.take([req_body | acc.bodies], 1024),
-        accepted_list: [{id, sha} | acc.accepted_list]
-    }
-  end
+    case resp_body do
+      %{"status" => "quarantined"} ->
+        # Accepted, but held back from delivery: not an ack a sink can be asked
+        # about.
+        %{acc | quarantined: acc.quarantined + 1}
 
-  defp classify({:ok, %Req.Response{status: 200, body: resp_body}}, _kind, _req_body, acc) do
-    if duplicate_response?(resp_body) do
-      %{acc | duplicates: acc.duplicates + 1}
-    else
-      %{acc | errors: acc.errors + 1}
+      _ ->
+        %{
+          acc
+          | accepted: acc.accepted + 1,
+            # Bounded pool: only the 1024 most recent acked bodies are dedup
+            # sources, so a long run can't grow this list without limit.
+            bodies: Enum.take([req_body | acc.bodies], 1024),
+            accepted_list: [{id, sha, event_key(req_body)} | acc.accepted_list]
+        }
     end
   end
 
@@ -252,19 +356,6 @@ defmodule Mix.Tasks.Loadgen.Run do
 
   defp extract_id(_body), do: nil
 
-  defp duplicate_response?(body) when is_map(body) do
-    Map.get(body, "status") == "duplicate"
-  end
-
-  defp duplicate_response?(body) when is_binary(body) do
-    case JSON.decode(body) do
-      {:ok, %{"status" => "duplicate"}} -> true
-      _ -> false
-    end
-  end
-
-  defp duplicate_response?(_body), do: false
-
   defp sha256_hex(body) do
     :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
   end
@@ -275,29 +366,47 @@ defmodule Mix.Tasks.Loadgen.Run do
       %{
         sent: 0,
         accepted: 0,
-        duplicates: 0,
+        quarantined: 0,
         shed: 0,
         errors: 0,
         accepted_list: [],
-        latencies: []
+        latencies: [],
+        events: []
       },
       fn r, acc ->
         %{
           sent: acc.sent + r.sent,
           accepted: acc.accepted + r.accepted,
-          duplicates: acc.duplicates + r.duplicates,
+          quarantined: acc.quarantined + r.quarantined,
           shed: acc.shed + r.shed,
           errors: acc.errors + r.errors,
           accepted_list: r.accepted_list ++ acc.accepted_list,
-          latencies: r.latencies ++ acc.latencies
+          latencies: r.latencies ++ acc.latencies,
+          events: r.events ++ acc.events
         }
       end
     )
   end
 
+  # `id,sha256,event_key`: the third column is the provider's own event id, or
+  # empty for a body that has none. `mix loadgen.verify` needs it to tell an ack
+  # that was deduplicated at dispatch from an ack that was lost.
   defp write_csv(path, accepted_list) do
-    contents = Enum.map_join(accepted_list, "", fn {id, sha} -> "#{id},#{sha}\n" end)
+    contents =
+      Enum.map_join(accepted_list, "", fn {id, sha, key} -> "#{id},#{sha},#{key || ""}\n" end)
+
     File.write!(path, contents)
+  end
+
+  # The provider event id the source's `DedupKey` rule extracts — the `json:
+  # ["id"]` the harness configures. `nil` for a body that carries none.
+  defp event_key(body) do
+    case JSON.decode(body) do
+      {:ok, %{"id" => id}} when is_binary(id) -> id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp percentile_ms([], _p), do: 0.0
@@ -315,7 +424,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     --------------
     sent            #{report.sent}
     accepted        #{report.accepted}
-    duplicates      #{report.duplicates}
+    quarantined     #{report.quarantined}
     shed            #{report.shed}
     errors          #{report.errors}
     duration_s      #{Float.round(report.duration_s * 1.0, 3)}

@@ -37,7 +37,7 @@ flowchart LR
   WAL used by `ankusa-edge`/`ankusa-worker`) and `consumer` (Oban's own
   tables plus `processed_webhooks`).
 - `tools/loadgen` drives three phases against the cluster and, for each,
-  verifies every 201-acknowledged webhook eventually lands exactly once in
+  verifies every 202-acknowledged webhook eventually lands exactly once in
   `processed_webhooks` with a matching body hash — proof of zero loss, not
   just that requests returned 200.
 
@@ -91,12 +91,21 @@ running for inspection.
    `BURST_SECONDS` seconds, no rate limit, to prove the WAL absorbs a spike
    without dropping anything.
 
-Each phase writes `$OUT_DIR/<phase>.csv` (every acknowledged id + its body's
-sha256), `$OUT_DIR/<phase>-report.json` (loadgen's own send-side stats:
-throughput, latency, error counts), and `$OUT_DIR/<phase>-verify.json`
-(loss-verification results: `missing`, `sha_mismatches`,
-`extra_deliveries`, and `drain_s`, the time it took every acked id to show
-up in `processed_webhooks`). A passing run has `missing: 0` and
-`sha_mismatches: 0` in every `*-verify.json`; `run.sh` exits non-zero if any
-phase fails verification, even though it still tears down the cluster on
-the way out (unless `KEEP=1`).
+Each phase writes `$OUT_DIR/<phase>.csv` (every acknowledged id, its body's
+sha256, and the provider event id it carried), `$OUT_DIR/<phase>-report.json`
+(loadgen's own send-side stats: throughput, latency, error counts), and
+`$OUT_DIR/<phase>-verify.json` (loss-verification results: `missing`,
+`deduplicated`, `sha_mismatches`, `duplicate_deliveries`, `extra_deliveries`
+and `drain_s`, the time it took every acked id to show up in
+`processed_webhooks`). A passing run has `missing: 0` and `sha_mismatches: 0`
+in every `*-verify.json`: nothing accepted was lost, and nothing arrived with
+the wrong bytes. `deduplicated` is expected to be non-zero when the run resends
+bodies — those acks are accounted for by the sibling copy that did arrive — and
+`duplicate_deliveries` is expected to be non-zero too, because this example runs
+the default in-process dedup ledger and then kills the worker holding it: the
+copy that a dead dispatcher had already delivered is delivered again. It is
+reported, not failed, and it is why `mix loadgen.verify` only fails on
+duplicates under `--dedup-store ra` — the ledger that survives the kill, which
+is what the chaos harness in `ankusa_ra` runs. `run.sh` exits non-zero if any
+phase fails verification, even though it still tears down the cluster on the
+way out (unless `KEEP=1`).

@@ -22,7 +22,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest]
-    I -->|WAL fsync, then 201| P
+    I -->|WAL fsync, then 202| P
     I -->|"produce, acks=all\nkey tenant/source"| K[("topic ankusa.events")]
     I -.->|"body > 8 KiB: check in"| S[(S3 / floci)]
 ```
@@ -104,7 +104,7 @@ Same contract as the RabbitMQ example, because it's the same message
 
 | Hop | Guarantee | Duplicates | Ordering |
 | --- | --- | --- | --- |
-| Provider → WAL | durable ack | deduped on `(tenant, source, dedup_key)` | — |
+| Provider → WAL | durable ack | every copy appended; duplicates dropped at dispatch | — |
 | WAL → Kafka | at-least-once, `acks=all` | yes, on a retried produce | per key, per dispatch node |
 | Kafka → SQS | at-least-once (offset committed after SQS accepts) | absorbed within 5 minutes by the FIFO dedup id | per key (`max_in_flight: 1`, group = key) |
 | SQS → worker | at-least-once (visibility timeout) | yes, after 5 minutes | per group, while the worker processes each group in order |
@@ -154,7 +154,7 @@ docker compose down -v
 Each proves one thing. They're worth running by hand at least once.
 
 1. **Bridge down** — `docker compose stop bridge`, then send a few hooks.
-   Ingest keeps returning `201` (the ack never depended on the broker), and
+   Ingest keeps returning `202` (the ack never depended on the broker), and
    consumer-group lag grows in the Redpanda Console. `docker compose start
    bridge` and the lag drains; the worker prints everything, in order per
    source. *Proves the queue is a real buffer, not a synchronous hop.*

@@ -65,12 +65,15 @@ defmodule Ankusa.Edge.Router do
 
   # ── response mapping ──────────────────────────────────────────────────────
 
+  # 202: the hook is durably committed and will be dispatched. There is no 201
+  # and no "duplicate": every copy a provider sends is appended and acked with
+  # its own envelope id, and the idempotent receiver in front of dispatch is
+  # what keeps a retry from reaching a sink twice.
   defp respond(conn, {:ok, env}),
-    do: send_json(conn, 201, %{status: "accepted", id: env.id, seq: env.seq})
+    do: send_json(conn, 202, %{status: "accepted", id: env.id, seq: env.seq})
 
-  defp respond(conn, {:duplicate, env}),
-    do: send_json(conn, 200, %{status: "duplicate", id: env.id, seq: env.seq})
-
+  # A quarantined hook is accepted too — just not for delivery — which is what
+  # the `status` field is for.
   defp respond(conn, {:quarantined, reason}),
     do: send_json(conn, 202, %{status: "quarantined", reason: inspect(reason)})
 

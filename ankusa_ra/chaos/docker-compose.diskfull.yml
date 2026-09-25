@@ -1,0 +1,10 @@
+services:
+  wal-0:
+    volumes: !reset []
+    tmpfs: ["/data:size=512m"]
+  wal-1:
+    volumes: !reset []
+    tmpfs: ["/data:size=512m"]
+  wal-2:
+    volumes: !reset []
+    tmpfs: ["/data:size=512m"]

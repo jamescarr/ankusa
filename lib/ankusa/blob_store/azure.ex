@@ -90,14 +90,32 @@ defmodule Ankusa.BlobStore.Azure do
 
   @impl true
   def list(_instance, prefix, opts) do
-    query = [{"restype", "container"}, {"comp", "list"}, {"prefix", prefix}]
+    list_page(prefix, opts, nil, [])
+  end
+
+  defp list_page(prefix, opts, marker, acc) do
+    query =
+      [{"restype", "container"}, {"comp", "list"}, {"prefix", prefix}] ++ marker_query(marker)
+
     url = endpoint(opts) <> "/" <> container(opts) <> query_suffix(query, opts)
 
     case request(opts, :get, url, nil, []) do
-      {:ok, body} -> parse_list_keys(body)
-      {:error, _reason} -> []
+      {:ok, body} ->
+        {keys, next} = parse_list_page(body)
+        acc = acc ++ keys
+
+        case next do
+          nil -> acc
+          marker -> list_page(prefix, opts, marker, acc)
+        end
+
+      {:error, _reason} ->
+        acc
     end
   end
+
+  defp marker_query(nil), do: []
+  defp marker_query(marker), do: [{"marker", marker}]
 
   # ── requests ──────────────────────────────────────────────────────────────
 
@@ -183,14 +201,29 @@ defmodule Ankusa.BlobStore.Azure do
   # emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document,
   # and this runs inside the claim-check sweeper, so a bad body has to read as
   # "no keys" instead of taking that process down.
-  defp parse_list_keys(xml_body) do
+  defp parse_list_page(xml_body) do
     {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
 
-    ~c"//Blob/Name/text()"
-    |> :xmerl_xpath.string(doc)
-    |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
-    |> Enum.sort()
+    keys =
+      ~c"//Blob/Name/text()"
+      |> :xmerl_xpath.string(doc)
+      |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
+      |> Enum.sort()
+
+    next =
+      case :xmerl_xpath.string(~c"//NextMarker/text()", doc) do
+        [{:xmlText, _p, _pos, _lang, value, _t}] ->
+          case List.to_string(value) do
+            "" -> nil
+            marker -> marker
+          end
+
+        _ ->
+          nil
+      end
+
+    {keys, next}
   catch
-    :exit, _not_xml -> []
+    :exit, _not_xml -> {[], nil}
   end
 end

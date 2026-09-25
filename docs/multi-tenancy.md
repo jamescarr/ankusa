@@ -99,12 +99,12 @@ An unresolvable URL shape returns `:error`, which the router turns into a
 `tenant_id` on a `%Ankusa.Source{}` (default `"default"`) is the
 **dedup/storage/retention scope**. Concretely:
 
-- **Dedup**: the WAL's uniqueness constraint is `(tenant_id, source_id,
-  dedup_key)`, not `(source_id, dedup_key)`. Two tenants can both send an
-  event with `dedup_key: "evt_1"` and both commit — they never collide.
-  `WAL.DiskLog`'s dedup key is the tuple `{tenant_id, source_id, dedup_key}`
-  directly; `WAL.Postgres`'s dedup ledger has `tenant_id` as a real column
-  and part of its primary key.
+- **Dedup**: the receiver's scope is `(tenant_id, source_id)`, so two tenants
+  can both send an event with `dedup_key: "evt_1"` and both are delivered —
+  they never collide. The log has no uniqueness constraint to scope: the
+  receiver hashes the scope to choose a partition and keeps its ledger under
+  it, and a partition holds whole scopes, so every copy of one tenant's event
+  queues in front of a single consumer.
 - **Storage**: the segment index row (`Ankusa.Storage.Index`) carries
   `tenant_id`, so per-tenant retention/deletion is a real, queryable
   dimension, not something bolted on after the fact.

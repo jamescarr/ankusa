@@ -1,0 +1,69 @@
+name: Chaos
+
+# The chaos harness is minutes-to-hours long and needs a real container runtime,
+# so it is not a per-PR gate: it runs nightly, and it fails loudly when an
+# invariant breaks. `ankusa_ra/chaos/run.sh` is the same entry point a developer
+# runs locally (`./run.sh all`, `./run.sh kill-leader`).
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Scenario to run (a name from ankusa_ra/chaos/run.sh, or `all`)
+        required: false
+        default: mixed
+      single:
+        description: One WAL node (fast, exercises the harness but not replication)
+        type: boolean
+        required: false
+        default: false
+
+env:
+  OTP_VERSION: "29.0"
+  ELIXIR_VERSION: "1.20.4"
+
+jobs:
+  chaos:
+    name: chaos (${{ github.event.inputs.scenario || 'mixed' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MAX_RUNS: "5000"
+      SCENARIO: ${{ github.event.inputs.scenario || 'mixed' }}
+      # `SINGLE=1` runs the same gate against a one-member cluster: the
+      # documented laptop shape, useful as a quick check that the harness still
+      # works end to end.
+      SINGLE: ${{ github.event.inputs.single == 'true' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - run: mix deps.get
+        working-directory: ankusa_ra
+      - run: mix deps.get
+        working-directory: tools/loadgen
+      - run: mix deps.get
+        working-directory: ankusa_ra/chaos/sink
+      # The Level-3 property: the machine agrees with a reference model after
+      # every command, at the full nightly run count, in-process.
+      - run: MAX_RUNS=5000 mix test test/ankusa/wal_ra_property_test.exs
+        working-directory: ankusa_ra
+        env:
+          MAX_RUNS: "5000"
+      # The harness starts its own compose stack (wal members, edges, workers,
+      # a sink, loadgen and a nemesis container) and verifies every scenario
+      # against the checker, exiting non-zero on any violated invariant.
+      - run: ./run.sh "$SCENARIO"
+        working-directory: ankusa_ra/chaos
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-reports
+          path: ankusa_ra/chaos/out/
+          if-no-files-found: warn
+      - if: always()
+        working-directory: ankusa_ra/chaos
+        run: docker compose -f docker-compose.yml down -v || true

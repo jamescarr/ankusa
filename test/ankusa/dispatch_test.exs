@@ -92,11 +92,13 @@ defmodule Ankusa.DispatchTest do
     dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
     on_exit(fn -> File.rm_rf(dir) end)
 
+    source = Map.merge(Keyword.get(opts, :source, %{}), %{sinks: sinks})
+
     base = [
       instance: inst,
       data_dir: dir,
       roles: [:edge, :dispatch, :storage],
-      source_store: {Ankusa.SourceStore.Static, sources: %{"src1" => %{sinks: sinks}}}
+      source_store: {Ankusa.SourceStore.Static, sources: %{"src1" => source}}
     ]
 
     base =
@@ -127,6 +129,54 @@ defmodule Ankusa.DispatchTest do
     assert_receive {:delivered, id, 1}
     assert id == committed.id
     assert WAL.get_cursor(inst, :dispatch) == committed.seq
+  end
+
+  # The ledger is a decision, not a hint: a record whose dedup key cannot be
+  # looked up has no answer, and guessing "deliver" would send it *without*
+  # recording it — so the next copy of that event would look like a first one.
+  # This is the regression test for a chaos run that lost nothing and yet
+  # delivered 885 events twice, because the ledger was unreachable mid-failover.
+  test "a ledger that cannot answer stalls dispatch, and the record is delivered once it can" do
+    {:ok, up} = Agent.start_link(fn -> false end)
+    on_exit(fn -> if Process.alive?(up), do: Agent.stop(up) end)
+
+    dispatch = %{
+      dedup_store: {Ankusa.DedupStore.Unavailable, up: up},
+      dedup_ttl_ms: 60_000
+    }
+
+    %{inst: inst} =
+      start([{CapturingSink, pid: self()}],
+        dispatch: dispatch,
+        max_sleep_ms: 5,
+        source: %{dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]}}
+      )
+
+    body = ~s({"id":"E1"})
+    first = %{build_env("src1") | body: body}
+    {:ok, [{:committed, committed}]} = WAL.append(inst, [%{envelope: first}])
+
+    assert {:ok, 0} = Pipeline.tick(inst)
+    refute_receive {:delivered, _, _}, 100
+    assert WAL.get_cursor(inst, :dispatch) == 0
+
+    # The ledger comes back: the same record is read again and delivered.
+    :ok = Agent.update(up, fn _ -> true end)
+    assert {:ok, 1} = Pipeline.tick(inst)
+    assert_receive {:delivered, id, 1}
+    assert id == committed.id
+    assert WAL.get_cursor(inst, :dispatch) == committed.seq
+
+    # And now it was recorded: a second copy of the same event is dropped rather
+    # than delivered, which is the guarantee the guessed answer would have cost.
+    second = %{build_env("src1") | body: body}
+    {:ok, [{:committed, second_env}]} = WAL.append(inst, [%{envelope: second}])
+
+    # The tick reports what completed after it started, and a dropped copy is
+    # handled inside the fill, so the cursor — not the count — is the evidence.
+    assert {:ok, _} = Pipeline.tick(inst)
+    refute_receive {:delivered, _, _}, 200
+    assert WAL.get_cursor(inst, :dispatch) == second_env.seq
   end
 
   test "retries a failing sink until it succeeds" do
@@ -245,6 +295,105 @@ defmodule Ankusa.DispatchTest do
     # the pipeline is still up and has advanced past the dead letter
     assert Process.alive?(Ankusa.whereis(inst, :dispatch))
     assert WAL.get_cursor(inst, :dispatch) == committed.seq
+  end
+
+  # ── lease failover (single-node, DiskLog) ─────────────────────────────────
+
+  # Like `start/2`, but the pipeline is left out so a test can hold the lease
+  # (or seed a cursor) before it starts.
+  defp start_wal(opts \\ []) do
+    inst = :"t#{System.unique_integer([:positive])}"
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    base = [
+      instance: inst,
+      data_dir: dir,
+      roles: [:edge, :dispatch, :storage],
+      source_store:
+        {Ankusa.SourceStore.Static,
+         sources: %{"src1" => %{sinks: [{CapturingSink, [pid: self()]}]}}}
+    ]
+
+    base =
+      case Keyword.get(opts, :dispatch) do
+        nil -> base
+        dispatch -> base ++ [dispatch: dispatch]
+      end
+
+    config = Config.new(base)
+    Ankusa.put_config(config)
+    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
+    %{inst: inst, config: config}
+  end
+
+  test "a standby pipeline's tick is a no-op and its poll loop does not grow" do
+    %{inst: inst, config: config} = start_wal(dispatch: %{poll_ms: 50})
+
+    # Another holder owns the lease, so the pipeline stands by.
+    {:ok, _lease} = Ankusa.WAL.LeaseHelpers.hold_lease(inst, :dispatch, holder: "other")
+    start_supervised!({Pipeline, [instance: inst, config: config]})
+
+    assert {:ok, 0} = Pipeline.tick(inst)
+
+    Process.sleep(2_000)
+
+    # The poll loop must be a single message in flight, not one accumulating per
+    # tick.
+    assert {:message_queue_len, n} =
+             Process.info(Ankusa.whereis(inst, :dispatch), :message_queue_len)
+
+    assert n < 5
+  end
+
+  test "releasing the holder's lease lets the pipeline resume the stored cursor" do
+    %{inst: inst, config: config} = start_wal()
+
+    {:ok, lease} = Ankusa.WAL.LeaseHelpers.hold_lease(inst, :dispatch, holder: "other")
+    :ok = WAL.put_cursor(inst, :dispatch, 7, lease.token)
+
+    start_supervised!({Pipeline, [instance: inst, config: config]})
+
+    # Still held: standby, cursor untouched.
+    assert {:ok, 0} = Pipeline.tick(inst)
+
+    :ok = WAL.release_lease(inst, lease)
+
+    eventually(fn -> WAL.get_cursor(inst, :dispatch) == 7 end)
+  end
+
+  test "a fenced cursor write steps the pipeline down and emits :lost" do
+    %{inst: inst, config: config} =
+      start_wal(dispatch: %{lease_ttl_ms: 150, lease_safety_margin_ms: 20})
+
+    {:ok, lost_events} = Agent.start_link(fn -> [] end)
+    handler = make_ref()
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        [[:ankusa, :lease, :lost]],
+        fn event, _m, meta, _cfg ->
+          Agent.update(lost_events, &[{List.last(event), meta} | &1])
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    start_supervised!({Pipeline, [instance: inst, config: config]})
+
+    # The pipeline acquires; steal the lease out from under it with a new
+    # holder once the short TTL lapses.
+    eventually(fn -> :sys.get_state(Ankusa.whereis(inst, :dispatch)).lease != nil end)
+
+    Process.sleep(200)
+
+    {:ok, _stealer} = Ankusa.WAL.LeaseHelpers.hold_lease(inst, :dispatch, holder: "stealer")
+
+    eventually(fn -> :sys.get_state(Ankusa.whereis(inst, :dispatch)).lease == nil end)
+
+    assert Agent.get(lost_events, fn events -> Enum.any?(events, &match?({:lost, _}, &1)) end)
   end
 
   defp eventually(fun, timeout_ms \\ 2_000) do

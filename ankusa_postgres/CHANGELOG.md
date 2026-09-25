@@ -6,18 +6,57 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ankusa_wal_leases`, one row per lease name and instance, resolved against the
+  *database* clock (`now()`) so every node agrees on whether a lease is live
+  regardless of its own clock. A cursor write or truncation carries the live
+  token for the row it touches, checked and applied in one transaction, and a
+  write carrying anything else is refused with `{:error, :fenced}`.
+- The 13-case `Ankusa.WAL.ConformanceCase` suite, run against a live Postgres.
+
 ### Changed
 
+- **No dedup on the ack path.** `append/2` no longer claims dedup keys or
+  resolves losers: the log has no uniqueness constraint, so two copies of one
+  event are two rows with two seqs, and a provider's retry is appended like
+  anything else. Idempotency is `Ankusa.Dispatch.Receiver`'s job now, off the
+  commit path.
+- `append/2` allocates its seqs before the insert (`array_agg(nextval(...))`)
+  and pairs the results with the input by position. The `RETURNING` the old
+  path used does not promise an order for a multi-row statement, and with no
+  uniqueness constraint the envelope id cannot identify a row either: two rows
+  of one batch may be the same event with the same id.
+- `put_cursor/4` and `truncate_through/3` are fenced by a lease token, and
+  cursor writes are a maximum (`GREATEST(ankusa_wal_cursors.seq, EXCLUDED.seq)`)
+  rather than an assignment — a stale writer can no longer move a cursor
+  backwards, and truncation is computed from those cursors.
+- `stats/1`'s `next_seq` is read from the sequence itself, not from
+  `max(seq) + 1`. After a full truncation `max(seq)` is NULL, so the old
+  answer was `1` — a seq every cursor is already past, which would make the
+  next append invisible to every reader. The sequence is shared by every
+  instance in the database, so `next_seq` is "the next seq the next append will
+  get", not a per-instance count.
+- Releasing a lease marks it expired rather than deleting the row: the token
+  counter must only ever climb, so the next holder cannot reuse a released one's
+  token.
 - `append/2` takes a per-instance advisory lock
-  (`pg_advisory_xact_lock(hashtext("ankusa_wal:" <> instance))`) before
-  inserting, and holds it until the transaction commits. `seq` order therefore
-  equals commit order, which is what `Ankusa.WAL` promises readers. Appends for
-  one instance now serialize fleet-wide; that is the cost of a cursor that
-  cannot skip a commit.
-- The dedup-ledger backfill is part of the winning `INSERT` (a data-modifying
-  CTE that keys on `ankusa_wal_dedup`'s primary key) instead of a separate
-  `UPDATE ... WHERE event_id = ...`, which scanned the ever-growing ledger
-  because `event_id` is not indexed.
+  (`pg_advisory_xact_lock(hashtext("ankusa_wal:" <> instance))`) before it
+  allocates seqs, and holds it until the transaction commits. `seq` order
+  therefore equals commit order, which is what `Ankusa.WAL` promises readers.
+  Appends for one instance now serialize fleet-wide; that is the cost of a
+  cursor that cannot skip a commit.
+
+### Removed
+
+- The `ankusa_wal_dedup` ledger table and the `dedup_key` column, from a fresh
+  schema. A database that already has them keeps them: nothing here reads or
+  writes either one, and dropping a table an operator's database holds is not
+  this adapter's call.
+- The `ankusa_wal_event_id_key` uniqueness on `ankusa_wal.event_id`, dropped
+  idempotently on every boot so a deployment that has it loses it. It was the
+  other half of the same constraint: an envelope id is unique per record, but
+  the same event can be appended twice.
 
 ### Fixed
 
