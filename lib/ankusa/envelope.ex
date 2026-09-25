@@ -74,7 +74,10 @@ defmodule Ankusa.Envelope do
     # module atoms (e.g. `verification.provider`) that a fresh decoding node may
     # not have interned yet — `:safe` would reject them and crash replay/fetch.
     map = :erlang.binary_to_term(bin)
-    struct(__MODULE__, map)
+    env = struct(__MODULE__, map)
+    # Envelopes written before `committed_at` existed decode with it `nil`;
+    # fall back to `received_at` so dedup expiry arithmetic never sees `nil`.
+    %{env | committed_at: env.committed_at || env.received_at}
   end
 end
 
