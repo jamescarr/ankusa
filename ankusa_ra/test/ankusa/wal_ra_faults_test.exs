@@ -256,17 +256,23 @@ defmodule Ankusa.WAL.RaFaultsTest do
   end
 
   test "6. a suspended holder comes back fenced and steps down", %{cluster: cluster} do
-    [active_node, standby_node] = Enum.take(cluster.member_nodes, 2)
+    [first_node, second_node] = Enum.take(cluster.member_nodes, 2)
     ttl = cluster.ttl_ms
 
-    :ok = :erpc.cast(active_node, Peer, :start_pipeline, [cluster.instance, cluster.config])
-    :ok = :erpc.cast(standby_node, Peer, :start_pipeline, [cluster.instance, cluster.config])
+    # Both nodes race for the dispatch lease: whichever processes its start
+    # first wins, so the test reads the holder back instead of assuming the
+    # first-cast node is it.
+    :ok = :erpc.cast(first_node, Peer, :start_pipeline, [cluster.instance, cluster.config])
+    :ok = :erpc.cast(second_node, Peer, :start_pipeline, [cluster.instance, cluster.config])
 
-    holder = wait_until_value(fn -> Peer.lease_holder(cluster.instance, :dispatch) end, 15_000)
-    assert holder |> String.split("/") |> hd() |> String.to_atom() == active_node
+    dispatch_holder =
+      wait_until_value(fn -> Peer.lease_holder(cluster.instance, :dispatch) end, 15_000)
+
+    dispatch_active = holder_node(dispatch_holder)
+    dispatch_standby = if dispatch_active == first_node, do: second_node, else: first_node
     old_token = Peer.lease(cluster.instance, :dispatch).token
 
-    pid = peer_pid(cluster, active_node)
+    pid = peer_pid(cluster, dispatch_active)
     :ok = :peer.call(pid, Peer, :suspend_pipeline, [cluster.instance])
 
     # The standby takes the lease: a different holder with a higher token.
@@ -274,8 +280,7 @@ defmodule Ankusa.WAL.RaFaultsTest do
              fn ->
                case Peer.lease(cluster.instance, :dispatch) do
                  %{holder: h, token: t} when is_binary(h) ->
-                   h |> String.split("/") |> hd() |> String.to_atom() == standby_node and
-                     t > old_token
+                   holder_node(h) == dispatch_standby and t > old_token
 
                  _ ->
                    false
@@ -298,23 +303,25 @@ defmodule Ankusa.WAL.RaFaultsTest do
            )
 
     # The same fence holds for the storage role: a stale token cannot truncate.
-    :ok = :erpc.cast(active_node, Peer, :start_compactor, [cluster.instance, cluster.config])
-    :ok = :erpc.cast(standby_node, Peer, :start_compactor, [cluster.instance, cluster.config])
+    # The storage holder is an independent race, so it is read back too.
+    :ok = :erpc.cast(first_node, Peer, :start_compactor, [cluster.instance, cluster.config])
+    :ok = :erpc.cast(second_node, Peer, :start_compactor, [cluster.instance, cluster.config])
 
     storage_holder =
       wait_until_value(fn -> Peer.lease_holder(cluster.instance, :storage) end, 15_000)
 
-    assert storage_holder |> String.split("/") |> hd() |> String.to_atom() == active_node
+    storage_active = holder_node(storage_holder)
+    storage_standby = if storage_active == first_node, do: second_node, else: first_node
     storage_token = Peer.lease(cluster.instance, :storage).token
 
-    :ok = :peer.call(pid, Peer, :suspend_compactor, [cluster.instance])
+    storage_pid = peer_pid(cluster, storage_active)
+    :ok = :peer.call(storage_pid, Peer, :suspend_compactor, [cluster.instance])
 
     assert wait_until(
              fn ->
                case Peer.lease(cluster.instance, :storage) do
                  %{holder: h, token: t} when is_binary(h) ->
-                   h |> String.split("/") |> hd() |> String.to_atom() == standby_node and
-                     t > storage_token
+                   holder_node(h) == storage_standby and t > storage_token
 
                  _ ->
                    false
@@ -323,10 +330,14 @@ defmodule Ankusa.WAL.RaFaultsTest do
              ttl + div(ttl, 3) + 10_000
            )
 
-    :ok = :peer.call(pid, Peer, :resume_compactor, [cluster.instance])
+    :ok = :peer.call(storage_pid, Peer, :resume_compactor, [cluster.instance])
 
     assert {:error, :fenced} =
-             :peer.call(pid, Ankusa.WAL, :truncate_through, [cluster.instance, 0, storage_token])
+             :peer.call(storage_pid, Ankusa.WAL, :truncate_through, [
+               cluster.instance,
+               0,
+               storage_token
+             ])
   end
 
   test "7. a skewed member still fences stale tokens", %{peers: peers} do
@@ -759,6 +770,11 @@ defmodule Ankusa.WAL.RaFaultsTest do
   end
 
   defp peer_pid(cluster, node), do: Map.fetch!(cluster.peers.peers, node)
+
+  # A lease holder string (`"node@host/#PID<…>"`) back to the member node atom.
+  defp holder_node(holder) do
+    holder |> String.split("/") |> hd() |> String.to_atom()
+  end
 
   defp leader_commit_index(cluster) do
     {_cluster, node} = cluster.leader

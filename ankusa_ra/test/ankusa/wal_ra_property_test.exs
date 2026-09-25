@@ -26,6 +26,10 @@ defmodule Ankusa.WAL.RaPropertyTest do
 
   @tenants ["acme", "beta", "gamma"]
   @sources ["github", "stripe", "shopify"]
+  # Two holders fight over each lease, which is what a standby does to an active
+  # node: one acquires, the other steals it once the first stops renewing.
+  @holders [:holder_a, :holder_b]
+  @ttl 5_000
   # Records repeated within and across batches, which is what a provider's
   # retries look like to the log: it appends every copy.
 
@@ -53,8 +57,15 @@ defmodule Ankusa.WAL.RaPropertyTest do
 
   defp run(actions) do
     {machine, model, by_seq, _meta} =
-      Enum.reduce_while(actions, {new_machine(), new_model(), %{}, meta(0, 0)}, fn action, acc ->
-        {:cont, step(action, acc)}
+      Enum.reduce_while(actions, {new_machine(), new_model(), %{}, meta(0, 0)}, fn {action, dt},
+                                                                                   {machine,
+                                                                                    model, by_seq,
+                                                                                    meta} ->
+        # Time advances by a generated step — 0 to 2× the lease TTL — so leases
+        # expire between commands and the fence checks see both sides of the
+        # boundary, not just a world where nothing ever lapses.
+        meta = meta(meta.index + 1, meta.system_time + dt)
+        {:cont, step(action, {machine, model, by_seq, meta})}
       end)
 
     assert agree(machine, model)
@@ -62,7 +73,6 @@ defmodule Ankusa.WAL.RaPropertyTest do
   end
 
   defp step({:append, tenant, count, batch_id, size}, {machine, model, by_seq, meta}) do
-    meta = meta(meta.index + 1, meta.system_time + 1)
     records = records(tenant, count, size, meta.index)
     # A retry of the same `batch_id` returns the stored results by design, so
     # its seqs are expected to be ones the machine already reported. A *reused*
@@ -86,7 +96,6 @@ defmodule Ankusa.WAL.RaPropertyTest do
   end
 
   defp step({:put_cursor, name, seq_choice, stale?}, {machine, model, by_seq, meta}) do
-    meta = meta(meta.index + 1, meta.system_time + 1)
     {seq, token} = cursor_args(model, name, seq_choice, stale?)
     {expected, model} = model_put_cursor(model, name, seq, token, meta)
 
@@ -101,7 +110,6 @@ defmodule Ankusa.WAL.RaPropertyTest do
   end
 
   defp step({:truncate, fraction, stale?}, {machine, model, by_seq, meta}) do
-    meta = meta(meta.index + 1, meta.system_time + 1)
     max_seq = model.committed |> Map.keys() |> Enum.max(fn -> 0 end)
     seq = round(max_seq * fraction)
     token = if stale?, do: stale_token(model, :storage), else: live_token(model, :storage)
@@ -115,11 +123,9 @@ defmodule Ankusa.WAL.RaPropertyTest do
   end
 
   defp step({:acquire, name, holder}, {machine, model, by_seq, meta}) do
-    meta = meta(meta.index + 1, meta.system_time + 1)
-    ttl = 5_000
-    {expected, model} = model_acquire(model, name, holder, ttl, meta)
+    {expected, model} = model_acquire(model, name, holder, @ttl, meta)
 
-    {machine, reply, []} = Machine.apply(meta, {:acquire_lease, name, holder, ttl}, machine)
+    {machine, reply, []} = Machine.apply(meta, {:acquire_lease, name, holder, @ttl}, machine)
 
     assert reply == expected,
            "acquire #{inspect(name)}: #{inspect(reply)} vs #{inspect(expected)}"
@@ -129,12 +135,10 @@ defmodule Ankusa.WAL.RaPropertyTest do
   end
 
   defp step({:renew, name}, {machine, model, by_seq, meta}) do
-    meta = meta(meta.index + 1, meta.system_time + 1)
-    ttl = 5_000
-    token = live_token(model, name)
-    {expected, model} = model_renew(model, name, token, ttl, meta)
+    {holder, token} = live_holder_token(model, name)
+    {expected, model} = model_renew(model, name, holder, token, @ttl, meta)
 
-    {machine, reply, []} = Machine.apply(meta, {:renew_lease, name, :holder, token, ttl}, machine)
+    {machine, reply, []} = Machine.apply(meta, {:renew_lease, name, holder, token, @ttl}, machine)
 
     assert reply == expected, "renew #{inspect(name)}: #{inspect(reply)}"
     assert agree(machine, model)
@@ -142,11 +146,10 @@ defmodule Ankusa.WAL.RaPropertyTest do
   end
 
   defp step({:release, name}, {machine, model, by_seq, meta}) do
-    meta = meta(meta.index + 1, meta.system_time + 1)
-    token = live_token(model, name)
-    {expected, model} = model_release(model, name, token)
+    {holder, token} = live_holder_token(model, name)
+    {expected, model} = model_release(model, name, holder, token)
 
-    {machine, reply, []} = Machine.apply(meta, {:release_lease, name, :holder, token}, machine)
+    {machine, reply, []} = Machine.apply(meta, {:release_lease, name, holder, token}, machine)
 
     assert reply == expected, "release #{inspect(name)}: #{inspect(reply)}"
     assert agree(machine, model)
@@ -277,14 +280,14 @@ defmodule Ankusa.WAL.RaPropertyTest do
     end
   end
 
-  defp model_renew(model, name, token, ttl, meta) do
+  defp model_renew(model, name, holder, token, ttl, meta) do
     now = meta.system_time
 
     case Map.get(model.leases, name) do
-      %{holder: :holder, token: ^token, expires_at: expires_at}
+      %{holder: ^holder, token: ^token, expires_at: expires_at}
       when is_integer(expires_at) and expires_at >= now ->
-        lease = %{holder: :holder, token: token, expires_at: now + ttl}
-        reply = %{name: name, holder: :holder, token: token, ttl_ms: ttl, expires_at: now + ttl}
+        lease = %{holder: holder, token: token, expires_at: now + ttl}
+        reply = %{name: name, holder: holder, token: token, ttl_ms: ttl, expires_at: now + ttl}
 
         {{:ok, reply}, %{model | leases: Map.put(model.leases, name, lease)}}
 
@@ -293,10 +296,10 @@ defmodule Ankusa.WAL.RaPropertyTest do
     end
   end
 
-  defp model_release(model, name, token) do
+  defp model_release(model, name, holder, token) do
     case Map.get(model.leases, name) do
-      %{holder: :holder, token: ^token} ->
-        lease = %{holder: :holder, token: token, expires_at: nil}
+      %{holder: ^holder, token: ^token} ->
+        lease = %{holder: holder, token: token, expires_at: nil}
         {:ok, %{model | leases: Map.put(model.leases, name, lease)}}
 
       _ ->
@@ -355,15 +358,22 @@ defmodule Ankusa.WAL.RaPropertyTest do
   # ── generators ────────────────────────────────────────────────────────────
 
   defp action do
-    StreamData.one_of([
-      append(),
-      cursor_write(),
-      truncate(),
-      acquire(),
-      lease_verb(:renew),
-      lease_verb(:release)
-    ])
+    StreamData.tuple({
+      StreamData.one_of([
+        append(),
+        cursor_write(),
+        truncate(),
+        acquire(),
+        lease_verb(:renew),
+        lease_verb(:release)
+      ]),
+      time_step()
+    })
   end
+
+  # 0 to 2× the lease TTL: a lease may lapse between commands, or not, so the
+  # fence checks see both sides of the expiry boundary.
+  defp time_step, do: StreamData.integer(0..(2 * @ttl))
 
   defp lease_verb(verb) do
     StreamData.map(StreamData.member_of([:dispatch, :storage, :other]), &{verb, &1})
@@ -407,8 +417,10 @@ defmodule Ankusa.WAL.RaPropertyTest do
 
   defp acquire do
     StreamData.map(
-      StreamData.member_of([:dispatch, :storage, :other]),
-      &{:acquire, &1, :holder}
+      StreamData.tuple(
+        {StreamData.member_of([:dispatch, :storage, :other]), StreamData.member_of(@holders)}
+      ),
+      fn {name, holder} -> {:acquire, name, holder} end
     )
   end
 
@@ -446,6 +458,20 @@ defmodule Ankusa.WAL.RaPropertyTest do
     case Map.get(model.leases, name) do
       %{token: token, expires_at: expires_at} when is_integer(expires_at) -> token
       _ -> 999
+    end
+  end
+
+  # The holder the lease is currently *live* under, plus its token. A renew or
+  # release targets whichever holder owns the lease at run time; with no live
+  # lease it targets a default holder and a stale token, so the machine answers
+  # `:lost` / a no-op and the model says the same.
+  defp live_holder_token(model, name) do
+    case Map.get(model.leases, name) do
+      %{holder: holder, token: token, expires_at: expires_at} when is_integer(expires_at) ->
+        {holder, token}
+
+      _ ->
+        {:holder_a, 999}
     end
   end
 
