@@ -21,7 +21,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - `ordered` on `http` sinks, mapping to `Ankusa.Sink.Http`'s `:ordered` option
   (per-`{tenant, source}` serialization; off by default).
 - `dispatch.dedup_store` (`ets`, the in-process default, or `ra`), plus
-  `dispatch.partitions` and `dispatch.dedup_ttl_ms`. `dedup_store: ra` keeps the
+  `dispatch.partitions` and `dispatch.dedup_ttl_ms`, and the
+  `ANKUSA_DISPATCH_DEDUP_STORE` override so the ledger can be chosen per
+  environment rather than only in the file. `dedup_store: ra` keeps the
   idempotent receiver's ledger in the WAL cluster's replicated state; its
   members are that cluster's, so it needs `wal.type: ra`, and it refuses to load
   without one rather than starting with a ledger nobody replicates.

@@ -27,6 +27,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   `ankusa.dispatch.deduplicated.total` metric. They replace
   `[:ankusa, :dedup, :hit]` / `ankusa.dedup.hits.total`, which the WAL used to
   emit on the ack path and nothing has emitted since dedup moved off it.
+- A third answer from `Ankusa.DedupStore.record/6`: `{:error, reason}` for a
+  ledger that cannot be consulted — a replicated one during a failover. Dispatch
+  leaves that record undecided, stops reading at its seq and retries it on the
+  next poll, emitting `[:ankusa, :dispatch, :dedup_unavailable]`. Guessing was
+  the alternative and it was worse than a stall: delivering a record the store
+  never recorded left the *next* copy of that event nothing to be compared
+  against, which is how a chaos run that lost nothing still delivered 885 events
+  twice. `Ankusa.Dispatch.Receiver`'s `duplicate?/3` becomes `decide/3` for the
+  same reason — it has three answers now, not two.
+- `mix loadgen.verify --dedup-store ets|ra`: which ledger the deployment's
+  receiver is backed by, from `dispatch.dedup_store`. `ra` makes
+  `duplicate_deliveries > 0` a failure — the ledger is replicated, so the
+  guarantee holds across a failover and is worth asserting; the default `ets`
+  reports the same number without failing, because an in-process ledger dies
+  with its dispatcher and the gates that kill one re-deliver copies on purpose.
 - `mix loadgen.run` records the provider's own event key alongside the id and
   the body hash (`id,sha256,event_key`), and `mix loadgen.verify` reports
   `deduplicated` and `duplicate_deliveries`. An acked id that is missing because
@@ -91,6 +106,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 - The `200 duplicate` response and the `"status":"duplicate"` body. The edge has
   no duplicate outcome: a copy is accepted, committed and acked like any other,
   and whether it reaches a sink is dispatch's decision.
+
+### Fixed
+
+- The `scheme` on `[:ankusa, :verify, :stop]` — and therefore on
+  `ankusa_verify_failures_total` — was the verifier's module name, not the
+  scheme it resolved, on the first verification after a process started and only
+  then. `Ankusa.Edge.Ingest` asked `function_exported?/3` whether the module
+  implemented `scheme_name/1`, which answers *false* for a module that has not
+  been loaded yet, so the fallback won that race. Worse than a wrong label, it
+  made the metric suite pass or fail depending on what other tests had already
+  loaded; it now loads the module first, like `Ankusa.Sink` already did.
+  (`Ankusa.Sink`'s optional callbacks were already safe for the same reason:
+  `inline_max_bytes/1` and `ordering_key/2` are asked only after
+  `Code.ensure_loaded/1`.)
 
 ## [0.2.0] - 2026-09-24
 

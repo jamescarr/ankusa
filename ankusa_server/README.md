@@ -110,7 +110,8 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` or `postgres`) |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `postgres` or `ra`) |
+| `ANKUSA_DISPATCH_DEDUP_STORE` | `dispatch.dedup_store` (`ets`, or `ra` for the ledger in the WAL cluster's replicated state) |
 | `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |

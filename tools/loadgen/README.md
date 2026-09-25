@@ -30,6 +30,7 @@ mix loadgen.run --url http://localhost:4000/webhooks/some-source \
 | `--duration`      | integer | `60`                     | Wall clock seconds each worker runs for.                                                    |
 | `--rate`          | integer | *(absent = closed loop)* | Target aggregate requests/second. Pacing is **open-loop**: request number `n` is *scheduled* at `n/rate` seconds after start, so a generator that falls behind does not lower the offered rate — it shows up as latency. Omit for closed-loop firing (each worker sends its next request immediately after the previous one completes). |
 | `--dup-ratio`     | float   | `0.05`                   | Probability that a given request resends a body this worker previously got a `202` for. The resend is committed too — the log has no uniqueness constraint — and dispatch is what keeps it from being delivered twice. |
+| `--dedup-store`   | `ets` \| `ra` | `ets`            | What this run *assumes* about the deployment: which ledger `Ankusa.Dispatch`'s receiver is backed by (`dispatch.dedup_store`). `ra` means the ledger is replicated — reachable through a failover, and dispatch retries a record it cannot decide — so a duplicate fails the run. `ets` means it dies with its dispatcher, so a run that kills one re-delivers copies legitimately, and they are reported rather than failed. The tool cannot read the deployed config, so it repeats what it was told in `dedup_store_assumed`, to be checked against the real thing. |
 | `--body-bytes`    | integer | `512`                    | Size in bytes of the `"pad"` field in each freshly generated JSON body.                     |
 | `--out`           | string  | `acked.csv`              | Path to write the "acked" CSV (`id,sha256hex` per accepted delivery, no header).             |
 | `--report`        | string  | `loadgen-report.json`    | Path to write the JSON run report.                                                          |
@@ -118,7 +119,12 @@ single query — is what decides whether a record is missing.
   commits every copy, and the idempotent receiver is what stops the second one
   reaching a sink.
 - `duplicate_deliveries` — events delivered more than once, counted per provider
-  event id. Must be 0: this is the dedup guarantee, checked end to end.
+  event id. With `--dedup-store ra` it must be 0: the ledger is replicated, so
+  this is the dedup guarantee checked end to end. With the default `ets` store,
+  a run that kills a dispatcher re-delivers copies whose earlier copy the dead
+  dispatcher had delivered, so the number is reported and does not fail the run
+  — it is why the chaos and e2e gates that kill nodes configure the replicated
+  ledger.
 - `sha_mismatches` — count of found rows whose `body_sha256` doesn't match
   the SHA-256 recorded for that id in the acked CSV.
 - `extra_deliveries` — sum of `deliveries - 1` over every found row: a *record*
@@ -138,9 +144,10 @@ single query — is what decides whether a record is missing.
 ### Exit code
 
 - `0` — every acked id was found in `processed_webhooks`, or was deduplicated
-  against one that was, before the timeout, with no SHA-256 mismatches and no
-  event delivered twice. Zero loss, and no double delivery, proven.
+  against one that was, before the timeout, with no SHA-256 mismatches and — on
+  a replicated ledger — no event delivered twice. Zero loss proven either way.
 - non-zero (`Mix.raise`) — `--acked`/`--database-url` missing, or after the
   timeout an acked id is still `missing`, or `sha_mismatches > 0`, or
-  `duplicate_deliveries > 0`. Check the printed summary and `--report` for the
+  `duplicate_deliveries > 0` under `--dedup-store ra`. Check the summary and
+  `--report` for the
   offending ids.

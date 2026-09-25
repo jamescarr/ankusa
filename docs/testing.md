@@ -8,11 +8,11 @@ NATS).
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 213 tests, no external infra needed
+mix test                              # 214 tests, no external infra needed
 mix test --include integration        # +16 tests, needs floci running (see below)
 ```
 
-The 213 always-on tests cover:
+The 214 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
   truncation, that a restart after a full truncation does **not** reuse seqs,
@@ -44,8 +44,10 @@ The 213 always-on tests cover:
   once the batcher's queue fills while a commit is in flight, and pluggable
   route resolvers (`Path` and `TenantPath`).
 - **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
-  instead of killing the pipeline, and ordering — a blocked delivery holds the
-  cursor while another ordering key proceeds, and same-key deliveries stay in
+  instead of killing the pipeline, a dedup ledger that cannot answer stalling the
+  poll instead of delivering an unrecorded record, and ordering — a blocked
+  delivery holds the cursor while another ordering key proceeds, and same-key
+  deliveries stay in
   `seq` order.
 - **Storage**: compaction round-trip, `roll_bytes` splitting a backlog into
   several segments in one tick, and the live index — a lookup after a
@@ -116,7 +118,7 @@ No services: the suite is the operator's side of the config file.
 
 ```sh
 cd ankusa_server
-mix test                      # 39 tests
+mix test                      # 40 tests
 ```
 
 Every shipped YAML (`rel/ankusa.yml` and `config-examples/*.yml`) is loaded, so a
@@ -148,6 +150,22 @@ conformance suite and the model-based property suite need none of it and always
 run. `Ankusa.DedupStore.Ra`'s suite is one of those: it drives a real one-member
 cluster in-process, includes stopping and restarting the member to prove the
 ledger outlives the process, and needs no peers.
+
+The end-to-end gate is the chaos harness:
+
+```sh
+cd ankusa_ra/chaos
+./run.sh all          # docker only; kind + kubectl are for examples/oban-consumer
+```
+
+Real containers, a real three-member cluster (one member with `SINGLE=1`), a
+load generator and a nemesis injecting faults, checked afterwards by
+`mix loadgen.verify` and `Ankusa.WAL.Checker`. It runs dispatch on the
+*replicated* dedup ledger (`ANKUSA_DISPATCH_DEDUP_STORE=ra`), which is what makes
+its `duplicate_deliveries` check mean anything: with the in-process default, a
+killed dispatcher forgets what it delivered and the next copy of that event is
+delivered again on a run that lost nothing. See its README for the scenarios and
+which invariants each one exercises.
 
 ## `ankusa_rabbitmq` — `mix test`
 

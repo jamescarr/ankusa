@@ -72,7 +72,17 @@ correctly instead of treating everything it re-reads as new.
   `dispatch.partitions` is therefore a knob for "how many dispatchers", not a
   throughput dial: a copy that lands in another partition's queue is delivered
   by that partition's consumer.
-- **Where the ledger lives** is `dispatch.dedup_store`. The default,
+- **Where the ledger lives** is `dispatch.dedup_store`, and it decides how much
+  of the guarantee a deployment actually has: the replicated store is the only
+  one under which "one delivery per event" survives a dispatcher failover. It is
+  also the only one that can be *unavailable*, and then it says so rather than
+  guessing — dispatch stops at that record and retries from its seq once the
+  ledger answers again. A stalled dispatcher costs throughput; an unrecorded
+  delivery would cost the guarantee for that event, and a dropped one could lose
+  it outright. A deployment taking any of this seriously should say so in its
+  load tests: `mix loadgen.verify --dedup-store ra` fails on a duplicate, while
+  the default (in-process) reports them, because a killed dispatcher re-delivers
+  copies on purpose rather than losing them. The default,
   `Ankusa.DedupStore.ETS`, is in-process: it dies with the process that owned
   the partition, so a failover re-delivers what that dispatcher had not — never
   a loss, and never a hole. That is the right trade for one node, and the wrong

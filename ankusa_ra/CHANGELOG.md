@@ -22,7 +22,10 @@ follows [Semantic Versioning](https://semver.org/).
   cluster's replicated state, so two dispatchers that fail over to each other
   share what they have seen. One consensus round trip per record, which is why
   `Ankusa.DedupStore.ETS` is still the default; a decision the cluster cannot
-  answer delivers the record rather than dropping it unrecorded.
+  answer is reported as `{:error, reason}` — dispatch leaves that record
+  undecided and retries from its seq — because neither guessing would do:
+  delivering it unrecorded would forfeit the guarantee for that event, and
+  dropping it could lose a first delivery.
 - `Ankusa.WAL.Ra.Machine`'s `{:dedup_record, …}` command, the machine's second
   version (a member restoring a v1 snapshot gets the empty ledger through the
   version-upgrade command). The ledger is swept in the same units as the
@@ -32,6 +35,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The chaos harness runs the replicated ledger (`ANKUSA_DISPATCH_DEDUP_STORE: ra`
+  on its worker services, `--dedup-store ra` at verification, and the variable
+  read by `examples/oban-consumer/ingest_app`'s `application.ex`, which is the
+  config loader this stack actually runs). It kills dispatchers, so with the
+  in-process default the next copy of an already delivered event is delivered
+  again — a run that lost nothing failing its own dedup check, with a missing
+  ack count of zero to match. The gate asserts the strong guarantee because it
+  now deploys the thing that provides it, and that is the point of having the
+  store.
 - `mix ankusa.wal.migrate` no longer copies the old WAL's dedup ledger. The
   commands are absolute, so a re-run is still safe on a cluster that has taken
   no traffic. The ledger is not migrated because nothing reads it any more, and

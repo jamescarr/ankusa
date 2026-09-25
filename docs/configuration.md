@@ -148,6 +148,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
 | `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `postgres` or `ra`) |
+| `ANKUSA_DISPATCH_DEDUP_STORE` | `dispatch.dedup_store` (`ets`, or `ra` for the ledger in the WAL cluster's replicated state) |
 | `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
@@ -243,7 +244,7 @@ config :ankusa,
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy` — the **default**, overridable per source (see below). |
 | `dispatch.partitions` | `1` | Logical dispatch partitions: one receiver and one consumer per partition, so an event's copies are never split between two consumers. Raise it only when you also raise the number of dispatchers. |
 | `dispatch.dedup_ttl_ms` | `604_800_000` (7 days) | How long the receiver remembers an event's key. Measured between the records' commit timestamps, never against the wall clock at read. |
-| `dispatch.dedup_store` | `{Ankusa.DedupStore.ETS, []}` | `{module, opts}` implementing `Ankusa.DedupStore`. ETS is per-dispatcher; `{Ankusa.DedupStore.Ra, members: […]}` (in `ankusa_ra`) keeps the ledger in the WAL cluster's replicated state, so it survives a failover. See [`delivery.md`](delivery.md#the-idempotent-receiver). |
+| `dispatch.dedup_store` | `{Ankusa.DedupStore.ETS, []}` | `{module, opts}` implementing `Ankusa.DedupStore`. ETS is per-dispatcher; `{Ankusa.DedupStore.Ra, members: […]}` (in `ankusa_ra`) keeps the ledger in the WAL cluster's replicated state, so it survives a failover — and, being remote, it can be unreachable, in which case dispatch stops at the record it cannot decide and retries rather than guessing. See [`delivery.md`](delivery.md#the-idempotent-receiver). |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec` — segment record framing. |
 | `storage.roll_bytes` | `16 MiB` | Roll a new segment past this size. |

@@ -29,7 +29,15 @@ a 70/20/10 mix (keyed / `nil`-key / resend), injects the fault *concurrently*
 with the load, then checks the evidence:
 
 1. `mix loadgen.verify` — every acked id reached the sink, with the body it was
-   sent (the consumer's own view).
+   sent (the consumer's own view), and no event reached it twice. That second
+   half is only assertable because the harness runs the *replicated* ledger
+   (`ANKUSA_DISPATCH_DEDUP_STORE: ra` on the worker services, and
+   `--dedup-store ra` here; the variable is the ingest app's, read by
+   `examples/oban-consumer/ingest_app`'s `application.ex`): this gate kills
+   dispatchers, and an in-process ledger dies with them, so the next copy of an
+   event whose earlier copy had been delivered would go out again on a run that
+   lost nothing. That is not hypothetical — it is what the gate found, twice,
+   before the app read the variable at all.
 2. `mix ankusa.chaos.verify` — `Ankusa.WAL.Checker` over the event history, the
    acked set and the final scan.
 
