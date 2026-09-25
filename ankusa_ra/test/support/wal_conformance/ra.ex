@@ -5,8 +5,8 @@ defmodule Ankusa.WAL.Conformance.Ra do
 
   `stop/1` tears the GenServer, the Ra member *and* the Ra system down, so the
   suite's `restart/2` genuinely proves durability: the member recovers its seq
-  floor, cursors, dedup ledger and lease tokens from its own log and snapshot,
-  not from memory.
+  floor, cursors, lease tokens and (once `Ankusa.DedupStore.Ra` has been used)
+  the receiver's ledger from its own log and snapshot, not from memory.
   """
 
   @behaviour Ankusa.WAL.Conformance.Adapter

@@ -91,7 +91,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     report = %{
       sent: merged.sent,
       accepted: merged.accepted,
-      duplicates: merged.duplicates,
+      quarantined: merged.quarantined,
       shed: merged.shed,
       errors: merged.errors,
       duration_s: duration_s,
@@ -124,7 +124,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     end
 
     if merged.accepted == 0 do
-      Mix.raise("loadgen: zero requests were accepted (201) -- refusing to report success")
+      Mix.raise("loadgen: zero requests were accepted (202) -- refusing to report success")
     end
 
     :ok
@@ -134,7 +134,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     %{
       sent: 0,
       accepted: 0,
-      duplicates: 0,
+      quarantined: 0,
       shed: 0,
       errors: 0,
       k: 0,
@@ -264,25 +264,30 @@ defmodule Mix.Tasks.Loadgen.Run do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp classify({:ok, %Req.Response{status: 201, body: resp_body}}, _kind, req_body, acc) do
+  # 202 is the durable ack: the record is committed and will be dispatched. The
+  # edge commits *every* copy a provider sends — there is no duplicate reply to
+  # classify — so a resend is counted as accepted like any other copy, and the
+  # event id it carries is what lets `mix loadgen.verify` tell that this
+  # particular ack was deduplicated on the way to a sink.
+  defp classify({:ok, %Req.Response{status: 202, body: resp_body}}, _kind, req_body, acc) do
     id = extract_id(resp_body)
     sha = sha256_hex(req_body)
 
-    %{
-      acc
-      | accepted: acc.accepted + 1,
-        # Bounded pool: only the 1024 most recent acked bodies are dedup sources,
-        # so a long run can't grow this list without limit.
-        bodies: Enum.take([req_body | acc.bodies], 1024),
-        accepted_list: [{id, sha} | acc.accepted_list]
-    }
-  end
+    case resp_body do
+      %{"status" => "quarantined"} ->
+        # Accepted, but held back from delivery: not an ack a sink can be asked
+        # about.
+        %{acc | quarantined: acc.quarantined + 1}
 
-  defp classify({:ok, %Req.Response{status: 200, body: resp_body}}, _kind, _req_body, acc) do
-    if duplicate_response?(resp_body) do
-      %{acc | duplicates: acc.duplicates + 1}
-    else
-      %{acc | errors: acc.errors + 1}
+      _ ->
+        %{
+          acc
+          | accepted: acc.accepted + 1,
+            # Bounded pool: only the 1024 most recent acked bodies are dedup
+            # sources, so a long run can't grow this list without limit.
+            bodies: Enum.take([req_body | acc.bodies], 1024),
+            accepted_list: [{id, sha, event_key(req_body)} | acc.accepted_list]
+        }
     end
   end
 
@@ -311,19 +316,6 @@ defmodule Mix.Tasks.Loadgen.Run do
 
   defp extract_id(_body), do: nil
 
-  defp duplicate_response?(body) when is_map(body) do
-    Map.get(body, "status") == "duplicate"
-  end
-
-  defp duplicate_response?(body) when is_binary(body) do
-    case JSON.decode(body) do
-      {:ok, %{"status" => "duplicate"}} -> true
-      _ -> false
-    end
-  end
-
-  defp duplicate_response?(_body), do: false
-
   defp sha256_hex(body) do
     :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
   end
@@ -334,7 +326,7 @@ defmodule Mix.Tasks.Loadgen.Run do
       %{
         sent: 0,
         accepted: 0,
-        duplicates: 0,
+        quarantined: 0,
         shed: 0,
         errors: 0,
         accepted_list: [],
@@ -345,7 +337,7 @@ defmodule Mix.Tasks.Loadgen.Run do
         %{
           sent: acc.sent + r.sent,
           accepted: acc.accepted + r.accepted,
-          duplicates: acc.duplicates + r.duplicates,
+          quarantined: acc.quarantined + r.quarantined,
           shed: acc.shed + r.shed,
           errors: acc.errors + r.errors,
           accepted_list: r.accepted_list ++ acc.accepted_list,
@@ -356,9 +348,25 @@ defmodule Mix.Tasks.Loadgen.Run do
     )
   end
 
+  # `id,sha256,event_key`: the third column is the provider's own event id, or
+  # empty for a body that has none. `mix loadgen.verify` needs it to tell an ack
+  # that was deduplicated at dispatch from an ack that was lost.
   defp write_csv(path, accepted_list) do
-    contents = Enum.map_join(accepted_list, "", fn {id, sha} -> "#{id},#{sha}\n" end)
+    contents =
+      Enum.map_join(accepted_list, "", fn {id, sha, key} -> "#{id},#{sha},#{key || ""}\n" end)
+
     File.write!(path, contents)
+  end
+
+  # The provider event id the source's `DedupKey` rule extracts — the `json:
+  # ["id"]` the harness configures. `nil` for a body that carries none.
+  defp event_key(body) do
+    case JSON.decode(body) do
+      {:ok, %{"id" => id}} when is_binary(id) -> id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp percentile_ms([], _p), do: 0.0
@@ -376,7 +384,7 @@ defmodule Mix.Tasks.Loadgen.Run do
     --------------
     sent            #{report.sent}
     accepted        #{report.accepted}
-    duplicates      #{report.duplicates}
+    quarantined     #{report.quarantined}
     shed            #{report.shed}
     errors          #{report.errors}
     duration_s      #{Float.round(report.duration_s * 1.0, 3)}

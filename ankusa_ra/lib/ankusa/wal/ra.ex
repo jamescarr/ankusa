@@ -464,22 +464,21 @@ defmodule Ankusa.WAL.Ra do
         paired =
           records
           |> Enum.zip(replies)
-          |> Enum.map(fn {%{envelope: env}, result} ->
-            case result do
-              {:committed, seq} -> {:committed, %{env | seq: seq}}
-              {:duplicate, seq} -> {:duplicate, seq}
-            end
+          |> Enum.map(fn {%{envelope: env}, {:committed, seq}} ->
+            {:committed, %{env | seq: seq}}
           end)
 
         {{:ok, paired}, state}
     end
   end
 
+  # The command carries the encoded envelopes and nothing else: the machine
+  # records *where* each one sits in the log, so every other field would be
+  # state it has to carry and never reads.
   defp record(%Envelope{} = env) do
     env = Ankusa.WAL.stamp_commit(env)
 
-    {env.id, env.tenant_id || "", env.source_id, env.dedup_key,
-     Envelope.to_binary(%{env | seq: nil})}
+    Envelope.to_binary(%{env | seq: nil})
   end
 
   # Consecutive chunks whose summed payload stays within one command; always at
@@ -509,7 +508,7 @@ defmodule Ankusa.WAL.Ra do
     end
   end
 
-  defp size({_id, _tenant, _source, _dedup, envelope}), do: byte_size(envelope)
+  defp size(envelope), do: byte_size(envelope)
 
   # ── reads ─────────────────────────────────────────────────────────────────
 
@@ -591,8 +590,7 @@ defmodule Ankusa.WAL.Ra do
   defp envelope_at(entries, index, pos, seq) do
     case Map.get(entries, index) do
       {^index, _term, {:"$usr", _meta, {:append, _batch_id, records}, _reply_mode}} ->
-        {_id, _tenant, _source, _dedup, envelope} = Enum.at(records, pos - 1)
-        %{Envelope.from_binary(envelope) | seq: seq}
+        %{Envelope.from_binary(Enum.at(records, pos - 1)) | seq: seq}
 
       other ->
         raise "unexpected Ra log entry at index #{index}: #{inspect(other)}"

@@ -7,9 +7,11 @@ defmodule Ankusa.EdgeTest do
 
   @secret "whsec_" <> Base.encode64("supersecret-key")
 
-  defp start_edge(sources) do
+  defp start_edge(sources, opts \\ []) do
+    roles = Keyword.get(opts, :roles, [:edge])
+
     config =
-      test_config(roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: sources})
+      test_config(roles: roles, source_store: {Ankusa.SourceStore.Static, sources: sources})
 
     start_supervised!({Ankusa.Instance, config})
     config
@@ -25,11 +27,11 @@ defmodule Ankusa.EdgeTest do
     Router.call(conn, Router.init(instance: config.instance))
   end
 
-  test "accepts and durably commits a hook, returning 201 with id after commit" do
+  test "accepts and durably commits a hook, returning 202 with id after commit" do
     config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]})
     conn = route(config, request("demo", ~s({"hello":"world"})))
 
-    assert conn.status == 201
+    assert conn.status == 202
     assert %{"status" => "accepted", "id" => id, "seq" => 1} = JSON.decode!(conn.resp_body)
     # durably readable straight after the ack
     assert [env] = WAL.read(config.instance, -1, 10)
@@ -44,24 +46,83 @@ defmodule Ankusa.EdgeTest do
     assert WAL.stats(config.instance).records == 0
   end
 
-  test "idempotent: a repeated dedup key returns 200 duplicate and is stored once" do
+  # The edge never checks for duplicates: every copy a provider sends is
+  # committed and acked, and the idempotent receiver in front of dispatch is
+  # what stops the second copy reaching a sink.
+  test "three copies of one event are all acked, and reach a sink once" do
     sources = %{
       "stripe" => [
         verifier: {Ankusa.Verifier.None, []},
-        dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]}
+        dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]},
+        sinks: [{Ankusa.TestSink, [pid: self()]}]
       ]
     }
 
-    config = start_edge(sources)
-
+    config = start_edge(sources, roles: [:edge, :dispatch])
     body = ~s({"id":"evt_123","type":"x"})
-    first = route(config, request("stripe", body))
-    second = route(config, request("stripe", body))
 
-    assert first.status == 201
-    assert second.status == 200
-    assert %{"status" => "duplicate"} = JSON.decode!(second.resp_body)
-    assert WAL.stats(config.instance).records == 1
+    ids =
+      for _ <- 1..3 do
+        conn = route(config, request("stripe", body))
+        assert conn.status == 202
+        assert %{"status" => "accepted", "id" => id} = JSON.decode!(conn.resp_body)
+        id
+      end
+
+    # Three records: the log has no uniqueness constraint.
+    assert WAL.stats(config.instance).records == 3
+    assert length(Enum.uniq(ids)) == 3
+
+    # One event: the receiver delivered the first copy and dropped the rest.
+    assert_receive {:delivered, first_id}, 2_000
+    assert first_id == hd(ids)
+    refute_receive {:delivered, _}, 500
+  end
+
+  # Two edges receive the same provider event at the same time. Both commit and
+  # ack it; dispatch still delivers it once, because every copy of an event
+  # lands in the same partition and one consumer holds that partition.
+  test "two edges receiving the same event concurrently deliver it once" do
+    sources = %{
+      "stripe" => [
+        verifier: {Ankusa.Verifier.None, []},
+        dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]},
+        sinks: [{Ankusa.TestSink, [pid: self()]}]
+      ]
+    }
+
+    config = start_edge(sources, roles: [:edge, :dispatch])
+    body = ~s({"id":"evt_concurrent","type":"x"})
+
+    statuses =
+      1..2
+      |> Enum.map(fn _ -> Task.async(fn -> route(config, request("stripe", body)).status end) end)
+      |> Task.await_many(5_000)
+
+    assert statuses == [202, 202]
+    assert WAL.stats(config.instance).records == 2
+
+    assert_receive {:delivered, _id}, 2_000
+    refute_receive {:delivered, _}, 500
+  end
+
+  # `dedup: :none` is how a source says every copy is a delivery.
+  test "dedup: :none delivers every copy" do
+    sources = %{
+      "stripe" => [
+        verifier: {Ankusa.Verifier.None, []},
+        dedup: :none,
+        sinks: [{Ankusa.TestSink, [pid: self()]}]
+      ]
+    }
+
+    config = start_edge(sources, roles: [:edge, :dispatch])
+    body = ~s({"id":"evt_none","type":"x"})
+
+    for _ <- 1..3, do: assert(route(config, request("stripe", body)).status == 202)
+
+    for _ <- 1..3, do: assert_receive({:delivered, _id}, 2_000)
+    refute_receive {:delivered, _}, 500
   end
 
   test "valid Standard Webhooks signature is accepted; a bad one is rejected (401)" do
@@ -77,7 +138,7 @@ defmodule Ankusa.EdgeTest do
     headers = standard_webhooks_headers("msg_1", body, @secret)
 
     good = route(config, request("swh", body, headers))
-    assert good.status == 201
+    assert good.status == 202
 
     bad =
       route(

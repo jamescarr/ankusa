@@ -338,13 +338,13 @@ defmodule Ankusa.WAL.RaFaultsTest do
   test "9. a machine-version upgrade is not applied until every member supports it", %{
     cluster: cluster
   } do
-    # The second version is a test-only module (`Ankusa.WAL.Ra.MachineV2`); its
-    # commands are only applied once every member advertises version 2, which is
-    # Ra's default `machine_upgrade_strategy: :all`.
-    assert :ra_machine.version(Ankusa.WAL.Ra.Machine) == 1
-    assert :ra_machine.version(Ankusa.WAL.Ra.MachineV2) == 2
-    assert Ankusa.WAL.Ra.MachineV2.which_module(1) == Ankusa.WAL.Ra.Machine
-    assert Ankusa.WAL.Ra.MachineV2.which_module(2) == Ankusa.WAL.Ra.MachineV2
+    # The next version is a test-only module (`Ankusa.WAL.Ra.MachineV3`); its
+    # commands are only applied once every member supports it, which is Ra's
+    # default `machine_upgrade_strategy: :all`.
+    assert :ra_machine.version(Ankusa.WAL.Ra.Machine) == 2
+    assert :ra_machine.version(Ankusa.WAL.Ra.MachineV3) == 3
+    assert Ankusa.WAL.Ra.MachineV3.which_module(2) == Ankusa.WAL.Ra.Machine
+    assert Ankusa.WAL.Ra.MachineV3.which_module(3) == Ankusa.WAL.Ra.MachineV3
 
     # A rolling restart onto the new code loses nothing: the cluster keeps its
     # seqs and cursors across every member restart.
@@ -379,7 +379,7 @@ defmodule Ankusa.WAL.RaFaultsTest do
 
     records =
       for i <- 1..64 do
-        %{envelope: envelope(:crypto.strong_rand_bytes(4_096), nil, "split-#{i}")}
+        %{envelope: envelope(:crypto.strong_rand_bytes(4_096), "split-#{i}")}
       end
 
     task = Task.async(fn -> WAL.append(cluster.instance, records) end)
@@ -402,10 +402,15 @@ defmodule Ankusa.WAL.RaFaultsTest do
 
       {:error, _reason} ->
         # Part of it may have committed — that is the ambiguity. What must not
-        # happen is a *second* copy of a record: the dedup keys make a resend
-        # idempotent.
-        keys = for %{envelope: env} <- records, do: env.dedup_key
-        assert length(Enum.uniq(keys)) == length(keys)
+        # happen is a *second* copy of a record from the retry: the same
+        # `batch_id` returns the stored results rather than allocating again.
+        # (The log itself has no uniqueness constraint, so a *different* append
+        # of the same event is a new record; that is dispatch's problem.)
+        assert {:ok, retried} = WAL.append(cluster.instance, records)
+        assert Enum.map(retried, &elem(&1, 1)) == Enum.map(retried, &elem(&1, 1))
+
+        assert length(Enum.uniq_by(WAL.read(cluster.instance, 0, 200), & &1.id)) ==
+                 length(WAL.read(cluster.instance, 0, 200))
     end
 
     assert length(Enum.uniq_by(stored, & &1.id)) == length(stored)
@@ -452,13 +457,13 @@ defmodule Ankusa.WAL.RaFaultsTest do
         body = :crypto.strong_rand_bytes(256)
         id = "checker-#{i}"
         sha = :crypto.hash(:sha256, body)
-        env = envelope(body, id, "ck-#{i}")
+        env = envelope(body, id)
 
         {:ok, [{:committed, committed}]} = WAL.append(cluster.instance, [%{envelope: env}])
 
         event = %{
           client: :edge,
-          op: {:append, id, %{tenant: "t1", source: "src", dedup_key: "ck-#{i}", sha256: sha}},
+          op: {:append, id, %{tenant: "t1", source: "src", sha256: sha}},
           invoked_at: t0 + i,
           completed_at: t0 + i,
           result: {:ok, committed.seq}
@@ -550,7 +555,7 @@ defmodule Ankusa.WAL.RaFaultsTest do
 
   defp entry(body, id \\ nil), do: %{envelope: envelope(body, id)}
 
-  defp envelope(body, id \\ nil, dedup_key \\ nil) do
+  defp envelope(body, id \\ nil) do
     %Envelope{
       id: id || UUIDv7.generate(),
       source_id: "src",
@@ -560,7 +565,6 @@ defmodule Ankusa.WAL.RaFaultsTest do
       path: "/hooks/src",
       headers: [],
       body: body,
-      dedup_key: dedup_key,
       size: byte_size(body)
     }
   end

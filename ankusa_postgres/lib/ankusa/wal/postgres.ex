@@ -11,31 +11,19 @@ defmodule Ankusa.WAL.Postgres do
   ## Group commit, translated to SQL
 
   `append/2` runs inside one `Postgrex.transaction/2` (still exactly one
-  `COMMIT`, i.e. one fsync, per batch — matching the core invariant):
+  `COMMIT`, i.e. one fsync, per batch — matching the core invariant): it takes
+  the instance's advisory lock (see `## Seq order`) and inserts every row with a
+  single `INSERT ... SELECT FROM unnest(...) RETURNING event_id, seq`. Every row
+  is correlated by the envelope's own `id` (a UUIDv7, always unique per
+  envelope), never by array position — positional matching against `RETURNING`
+  is not guaranteed to preserve input order.
 
-    1. **Claim dedup keys.** A single `INSERT ... ON CONFLICT DO NOTHING`
-       against `ankusa_wal_dedup`, batched via `unnest/1`. Postgres takes a
-       row lock on the conflicting index entry and blocks until the other
-       writer's transaction resolves, so two nodes racing the same dedup key
-       never double-claim it — the loser reliably sees the winner's committed
-       row afterward.
-    2. **Insert winners under the instance lock.** Rows that either had no
-       dedup key or won their claim are inserted into `ankusa_wal` (again
-       batched via `unnest/1`), `RETURNING event_id, seq`; the same statement
-       backfills those rows' `ankusa_wal_dedup.seq` by primary key. A record
-       whose dedup key collided is never written here — the same "duplicate
-       absorbed, nothing extra stored" contract as `WAL.DiskLog`. Before the
-       insert the transaction takes the instance's advisory lock (see
-       `## Seq order`).
-    3. **Resolve losers' seq.** For rows that lost their dedup claim, one
-       lookup reads the owning seq straight from `ankusa_wal_dedup.seq` — the
-       ledger carries its own `seq` column, filled by the transaction that wrote
-       the winning `ankusa_wal` row, so this works even after that row has been
-       truncated.
-
-  Every row is correlated by the envelope's own `id` (a UUIDv7, always unique
-  per envelope regardless of dedup key), never by array position — positional
-  matching against `RETURNING` is not guaranteed to preserve input order.
+  There is no dedup step: the log has no uniqueness constraint, so a provider's
+  retry is inserted again with its own seq, exactly as `WAL.DiskLog` and
+  `WAL.Ra` append it. Deciding that a copy is a duplicate of an event already
+  delivered happens at dispatch (`Ankusa.Dispatch.Receiver`), off the ack path.
+  A Postgres-era `ankusa_wal_dedup` table in an existing database is left
+  untouched — nothing here reads or writes it.
 
   ## Seq order
 
@@ -57,18 +45,12 @@ defmodule Ankusa.WAL.Postgres do
   (rolled-back transactions consume values).
 
   The cost is real and deliberate: appends for one instance serialize
-  fleet-wide from the moment a transaction has winners to insert — the lock is
-  taken in `insert_winners/3`, *after* `claim_dedup/2` has already run, so it
-  covers the seq allocation and the COMMIT but not the dedup claim itself. Two
-  instance names that hash to the same lock value simply share a lock — correct,
+  fleet-wide from the moment the transaction starts inserting. Two instance
+  names that hash to the same lock value simply share a lock — correct,
   marginally slower. Cross-instance appends are unaffected. Because Postgres
   allocates from the sequence *inside* the critical section, an allocation is
-  never wasted by a lock wait.
-
-  Deadlock-free: the lock is taken before any write to `ankusa_wal`, and the
-  holder's only writes are rows it owns — fresh WAL rows and dedup rows it
-  claimed itself. It never waits on rows a non-holder holds, so there is no
-  cycle to break.
+  never wasted by a lock wait. Deadlock-free: the lock is taken before any write
+  to `ankusa_wal`, and the holder's only writes are rows it owns.
 
   ## Cursors, leases and fencing
 
@@ -135,22 +117,11 @@ defmodule Ankusa.WAL.Postgres do
     # `Postgrex.transaction/2` returns `{:ok, value}`, which is exactly the
     # `{:ok, [result]}` shape `append/2` reports — no unwrapping here.
     Postgrex.transaction(server, fn conn ->
-      claimed = claim_dedup(conn, rows)
+      seqs = insert_rows(conn, instance, rows)
 
-      winners =
-        Enum.filter(rows, fn r -> is_nil(r.dedup_key) or MapSet.member?(claimed, r.event_id) end)
-
-      inserted = insert_winners(conn, instance, winners)
-
-      losers = Enum.reject(rows, fn r -> Map.has_key?(inserted, r.event_id) end)
-      loser_seqs = resolve_losers(conn, losers)
-
-      Enum.map(rows, fn r ->
-        case Map.fetch(inserted, r.event_id) do
-          {:ok, seq} -> {:committed, %{r.env | seq: seq}}
-          :error -> {:duplicate, Map.fetch!(loser_seqs, r.event_id)}
-        end
-      end)
+      rows
+      |> Enum.zip(seqs)
+      |> Enum.map(fn {r, seq} -> {:committed, %{r.env | seq: seq}} end)
     end)
   end
 
@@ -209,7 +180,7 @@ defmodule Ankusa.WAL.Postgres do
   @impl Ankusa.WAL
   def truncate_through(server, seq, token) do
     instance = instance_key(server)
-    # `ankusa_wal_dedup` is untouched — dedup keys survive truncation.
+
     transaction(server, fn conn ->
       if live_lease?(conn, instance, :storage, token) do
         Postgrex.query!(conn, "DELETE FROM ankusa_wal WHERE instance = $1 AND seq <= $2", [
@@ -403,7 +374,6 @@ defmodule Ankusa.WAL.Postgres do
       # NOT NULL at the storage boundary — don't trust an upstream nil.
       tenant_id: env.tenant_id || "",
       source_id: env.source_id,
-      dedup_key: env.dedup_key,
       # `seq` isn't known until Postgres assigns it; the stored payload's own
       # `seq` field is irrelevant — `read/3` always overwrites it from the
       # `seq` column.
@@ -411,37 +381,9 @@ defmodule Ankusa.WAL.Postgres do
     }
   end
 
-  defp claim_dedup(conn, rows) do
-    case Enum.filter(rows, & &1.dedup_key) do
-      [] ->
-        MapSet.new()
+  defp insert_rows(_conn, _instance, []), do: []
 
-      dedup_rows ->
-        %Postgrex.Result{rows: claimed} =
-          Postgrex.query!(
-            conn,
-            """
-            INSERT INTO ankusa_wal_dedup (instance, tenant_id, source_id, dedup_key, event_id)
-            SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-            ON CONFLICT (instance, tenant_id, source_id, dedup_key) DO NOTHING
-            RETURNING event_id
-            """,
-            [
-              Enum.map(dedup_rows, & &1.instance),
-              Enum.map(dedup_rows, & &1.tenant_id),
-              Enum.map(dedup_rows, & &1.source_id),
-              Enum.map(dedup_rows, & &1.dedup_key),
-              Enum.map(dedup_rows, & &1.event_id)
-            ]
-          )
-
-        claimed |> List.flatten() |> MapSet.new()
-    end
-  end
-
-  defp insert_winners(_conn, _instance, []), do: %{}
-
-  defp insert_winners(conn, instance, winners) do
+  defp insert_rows(conn, instance, rows) do
     # One lock per instance, held from before seq allocation until COMMIT (an
     # xact-scoped advisory lock is released when the transaction ends, and the
     # commit is visible by then). Without it `seq` would be *allocation*-ordered
@@ -452,67 +394,45 @@ defmodule Ankusa.WAL.Postgres do
       "ankusa_wal:" <> instance
     ])
 
-    # One statement: insert the winners and backfill their dedup ledger rows in
-    # the same round trip. The backfill keys on `ankusa_wal_dedup`'s primary key
-    # (`event_id` + the dedup tuple) instead of matching on `event_id` alone, so
-    # it is an index lookup, not a scan of the ever-growing ledger.
-    %Postgrex.Result{rows: inserted} =
+    # Allocate the seqs *here* rather than letting the column default do it, so
+    # each row's seq is known before the insert and the results can be paired
+    # with the input by position. The log has no uniqueness constraint, so two
+    # rows of one batch may be the same event with the same id — the id cannot
+    # identify them, and `RETURNING` order is not specified.
+    seqs = allocate_seqs(conn, length(rows))
+
+    %Postgrex.Result{} =
       Postgrex.query!(
         conn,
         """
-        WITH ins AS (
-          INSERT INTO ankusa_wal (event_id, instance, tenant_id, source_id, dedup_key, envelope)
-          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bytea[])
-          RETURNING event_id, instance, tenant_id, source_id, dedup_key, seq
-        ), backfill AS (
-          UPDATE ankusa_wal_dedup d SET seq = ins.seq FROM ins
-          WHERE ins.dedup_key IS NOT NULL
-            AND d.instance = ins.instance AND d.tenant_id = ins.tenant_id
-            AND d.source_id = ins.source_id AND d.dedup_key = ins.dedup_key
-            AND d.event_id = ins.event_id
-        )
-        SELECT event_id, seq FROM ins
+        INSERT INTO ankusa_wal (seq, event_id, instance, tenant_id, source_id, envelope)
+        SELECT * FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bytea[])
         """,
         [
-          Enum.map(winners, & &1.event_id),
-          Enum.map(winners, & &1.instance),
-          Enum.map(winners, & &1.tenant_id),
-          Enum.map(winners, & &1.source_id),
-          Enum.map(winners, & &1.dedup_key),
-          Enum.map(winners, & &1.envelope)
+          seqs,
+          Enum.map(rows, & &1.event_id),
+          Enum.map(rows, & &1.instance),
+          Enum.map(rows, & &1.tenant_id),
+          Enum.map(rows, & &1.source_id),
+          Enum.map(rows, & &1.envelope)
         ]
       )
 
-    Map.new(inserted, fn [event_id, seq] -> {event_id, seq} end)
+    seqs
   end
 
-  defp resolve_losers(_conn, []), do: %{}
-
-  defp resolve_losers(conn, losers) do
-    %Postgrex.Result{rows: found} =
+  # `nextval` is volatile, so it runs once per row of the series; the lock above
+  # is what makes the allocation order the commit order.
+  defp allocate_seqs(conn, count) do
+    %Postgrex.Result{rows: [[seqs]]} =
       Postgrex.query!(
         conn,
-        """
-        SELECT instance, tenant_id, source_id, dedup_key, seq
-        FROM ankusa_wal_dedup
-        WHERE (instance, tenant_id, source_id, dedup_key) IN (
-          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
-        )
-        """,
-        [
-          Enum.map(losers, & &1.instance),
-          Enum.map(losers, & &1.tenant_id),
-          Enum.map(losers, & &1.source_id),
-          Enum.map(losers, & &1.dedup_key)
-        ]
+        "SELECT array_agg(nextval(pg_get_serial_sequence('ankusa_wal', 'seq')::regclass)) " <>
+          "FROM generate_series(1, $1::int)",
+        [count]
       )
 
-    by_tuple =
-      Map.new(found, fn [inst, tenant, src, dkey, seq] -> {{inst, tenant, src, dkey}, seq} end)
-
-    Map.new(losers, fn r ->
-      {r.event_id, Map.fetch!(by_tuple, {r.instance, r.tenant_id, r.source_id, r.dedup_key})}
-    end)
+    seqs
   end
 
   # The facade always calls with `Ankusa.via(instance, :wal)` — pattern-match

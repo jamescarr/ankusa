@@ -19,14 +19,15 @@ defmodule Ankusa.WAL.RaPropertyTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  alias Ankusa.Envelope
   alias Ankusa.WAL.Ra.Machine
 
   @max_runs (System.get_env("MAX_RUNS") || "200") |> String.to_integer()
 
   @tenants ["acme", "beta", "gamma"]
   @sources ["github", "stripe", "shopify"]
-  # A small pool, so collisions — and therefore dedup — actually happen.
-  @dedup_keys ["k1", "k2", "k3", "k4", "k5"]
+  # Records repeated within and across batches, which is what a provider's
+  # retries look like to the log: it appends every copy.
 
   property "the machine agrees with a reference model after every command" do
     check all(actions <- StreamData.list_of(action(), max_length: 150), max_runs: @max_runs) do
@@ -60,9 +61,9 @@ defmodule Ankusa.WAL.RaPropertyTest do
     %{machine: machine, model: model, by_seq: by_seq}
   end
 
-  defp step({:append, tenant, dedup_key, count, batch_id, size}, {machine, model, by_seq, meta}) do
+  defp step({:append, tenant, count, batch_id, size}, {machine, model, by_seq, meta}) do
     meta = meta(meta.index + 1, meta.system_time + 1)
-    records = records(tenant, dedup_key, count, size, meta.index)
+    records = records(tenant, count, size, meta.index)
     # A retry of the same `batch_id` returns the stored results by design, so
     # its seqs are expected to be ones the machine already reported.
     fresh? = not Map.has_key?(model.batches, batch_id)
@@ -152,7 +153,9 @@ defmodule Ankusa.WAL.RaPropertyTest do
   defp record_seqs(records, results, by_seq, fresh?) do
     records
     |> Enum.zip(results)
-    |> Enum.reduce(by_seq, fn {{id, _tenant, _source, _key, _envelope}, result}, acc ->
+    |> Enum.reduce(by_seq, fn {envelope, result}, acc ->
+      id = Envelope.from_binary(envelope).id
+
       case result do
         {:committed, seq} when fresh? ->
           refute Map.has_key?(acc, seq), "seq #{seq} was handed out twice (id #{id})"
@@ -161,12 +164,6 @@ defmodule Ankusa.WAL.RaPropertyTest do
         {:committed, seq} ->
           assert Map.has_key?(acc, seq),
                  "a retry allocated seq #{seq}, which had never been committed"
-
-          acc
-
-        {:duplicate, seq} ->
-          assert Map.has_key?(acc, seq),
-                 "server returned a duplicate of seq #{seq}, which it never committed"
 
           acc
       end
@@ -179,7 +176,6 @@ defmodule Ankusa.WAL.RaPropertyTest do
     %{
       next_seq: 1,
       committed: %{},
-      dedup: %{},
       cursors: %{},
       leases: %{},
       floor: 0,
@@ -206,35 +202,26 @@ defmodule Ankusa.WAL.RaPropertyTest do
     end
   end
 
-  # The model tracks seqs, dedup, cursors, leases and bytes. The *set of seqs
-  # the machine has ever reported* is not the model's business — that is checked
+  # The model tracks seqs, cursors, leases and bytes. The *set of seqs the
+  # machine has ever reported* is not the model's business — that is checked
   # against the machine's replies (`record_seqs/3`), so the model leaves it
-  # alone.
+  # alone. Nothing here dedups: the log appends every record it is given, so
+  # the model's only job per record is to allocate the next seq.
   defp model_commit(model, records, by_seq) do
     {results, model} =
       records
       |> Enum.with_index(1)
-      |> Enum.reduce({[], model}, fn {record, pos}, {acc, model} ->
-        {_id, tenant, source, dedup_key, envelope} = record
-        key = if dedup_key, do: {tenant, source, dedup_key}, else: nil
+      |> Enum.reduce({[], model}, fn {envelope, pos}, {acc, model} ->
+        seq = model.next_seq
 
-        case key && Map.get(model.dedup, key) do
-          nil ->
-            seq = model.next_seq
+        model = %{
+          model
+          | next_seq: seq + 1,
+            committed: Map.put(model.committed, seq, {pos, byte_size(envelope)}),
+            bytes: model.bytes + byte_size(envelope)
+        }
 
-            model = %{
-              model
-              | next_seq: seq + 1,
-                committed: Map.put(model.committed, seq, {pos, byte_size(envelope)}),
-                dedup: if(key, do: Map.put(model.dedup, key, seq), else: model.dedup),
-                bytes: model.bytes + byte_size(envelope)
-            }
-
-            {[{:committed, seq} | acc], model}
-
-          existing ->
-            {[{:duplicate, existing} | acc], model}
-        end
+        {[{:committed, seq} | acc], model}
       end)
 
     {Enum.reverse(results), model, by_seq}
@@ -326,7 +313,6 @@ defmodule Ankusa.WAL.RaPropertyTest do
     machine.next_seq == model.next_seq and
       machine.floor == model.floor and
       machine.bytes == model.bytes and
-      machine.dedup == model.dedup and
       machine.cursors == model.cursors and
       machine.leases == model.leases and
       machine_entries(machine) == model.committed and
@@ -377,15 +363,16 @@ defmodule Ankusa.WAL.RaPropertyTest do
     StreamData.map(
       {
         StreamData.member_of(@tenants),
-        StreamData.one_of([StreamData.member_of(@dedup_keys), StreamData.constant(nil)]),
-        StreamData.integer(0..4),
         StreamData.integer(1..24),
+        # Deliberately repeated payloads: a provider's retry looks exactly like
+        # a repeat to the log, and it appends every copy.
+        StreamData.integer(0..4),
         # A tiny pool on purpose: reusing a batch id is exactly the retry an
         # interrupted client sends, and it must return the stored results.
         StreamData.integer(1..3)
       },
-      fn {tenant, key, count, size, batch} ->
-        {:append, tenant, key, count, {:batch, batch}, size}
+      fn {tenant, count, size, batch} ->
+        {:append, tenant, count, {:batch, batch}, size}
       end
     )
   end
@@ -417,17 +404,27 @@ defmodule Ankusa.WAL.RaPropertyTest do
 
   # ── helpers ───────────────────────────────────────────────────────────────
 
-  defp records(_tenant, _key, count, _size, _index) when count <= 0, do: []
+  defp records(_tenant, count, _size, _index) when count <= 0, do: []
 
-  defp records(tenant, dedup_key, count, size, index) do
+  defp records(tenant, count, size, index) do
     for i <- 1..count do
-      id = "e#{index}-#{i}"
-      # The key is suffixed so a batch can contain both a fresh key and a
-      # collision with an earlier batch.
-      key = if dedup_key, do: "#{dedup_key}-#{rem(index + i, 3)}", else: nil
-      envelope = :erlang.term_to_binary({tenant, key, size, i})
+      # Real envelopes, encoded the way the adapter encodes them: the machine
+      # never decodes a payload, but the property has to (to name a record in a
+      # failure). `size` repeats across actions, which is what makes two records
+      # identical.
+      body = :binary.copy("x", size)
 
-      {id, tenant, Enum.at(@sources, rem(index + i, length(@sources))), key, envelope}
+      Envelope.to_binary(%Envelope{
+        id: "e#{index}-#{i}",
+        source_id: Enum.at(@sources, rem(index + i, length(@sources))),
+        tenant_id: tenant,
+        received_at: 0,
+        method: "POST",
+        path: "/hooks/x",
+        headers: [],
+        body: body,
+        size: byte_size(body)
+      })
     end
   end
 

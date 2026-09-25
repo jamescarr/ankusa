@@ -23,7 +23,7 @@ defmodule Ankusa.WAL.Checker do
 
   | `op` | `result` |
   | --- | --- |
-  | `{:append, id, meta}` | `{:ok, seq}` \\| `{:duplicate, seq}` \\| `{:error, reason}` |
+  | `{:append, id, meta}` | `{:ok, seq}` \\| `{:error, reason}` |
   | `{:read, after_seq, limit}` | `[%{seq: seq, id: id, sha256: sha}]` |
   | `{:observe, seqs}` | — (a cursor observer's own progress, for I3) |
   | `{:put_cursor, name, seq, token}` | `:ok` \\| `{:error, :fenced}` |
@@ -44,8 +44,14 @@ defmodule Ankusa.WAL.Checker do
   | I2 | every record read back matches the sha that was sent, and nothing appears that nobody sent |
   | I3 | a cursor-following reader sees strictly increasing seqs and misses nothing below what it saw |
   | I4 | no seq belongs to two ids; a `batch_id` retry allocates nothing new |
-  | I5 | each `(tenant, source, dedup_key)` has exactly one committed seq |
   | I6 | stored cursors never decrease, and a stale-token write never takes effect |
+
+  There is no I5 any more. It read "each `(tenant, source, dedup_key)` has
+  exactly one committed seq", which stopped being a property of the log when
+  dedup moved off the ack path: the WAL appends every copy it is handed, and
+  deciding that a copy is a duplicate of an event already delivered is the
+  idempotent receiver's job (`Ankusa.Dispatch.Receiver`). That rule is pinned by
+  `Ankusa.DedupStoreTest` and by the deliveries reaching a sink exactly once.
   | I7 | `truncate_through(n)` removes nothing above n |
   | I8 | without quorum, edges answer `503` within `append_timeout_ms + 1000` and never `2xx` |
   | I9 | for each lease name, only the latest token's writes are accepted |
@@ -112,7 +118,6 @@ defmodule Ankusa.WAL.Checker do
         i2(events, readable, sent) ++
         i3(events, readable) ++
         i4(events) ++
-        i5(events) ++
         i6(events, opts) ++
         i7(events, readable) ++
         i8(events, opts) ++
@@ -152,7 +157,7 @@ defmodule Ankusa.WAL.Checker do
   # zero is called `not_exercised` rather than passed off as a clean result.
   #
   # The chaos scenarios do not emit `append` events (they drive the edge over
-  # HTTP), so I4/I5/I7/I9 are legitimately not exercised there; the Level-2
+  # HTTP), so I4/I7/I9 are legitimately not exercised there; the Level-2
   # drills emit them and do exercise them.
   defp evaluated(events, %{acked: acked, sent: sent, readable: readable}, windows, final_cursors) do
     appends = Enum.count(events, &match?(%{op: {:append, _, _}}, &1))
@@ -171,11 +176,6 @@ defmodule Ankusa.WAL.Checker do
           _ -> false
         end),
       i4: appends,
-      i5:
-        Enum.count(events, fn
-          %{op: {:append, _, %{dedup_key: key}}} when is_binary(key) -> true
-          _ -> false
-        end),
       i6:
         Enum.count(events, &match?(%{op: {:put_cursor, _, _, _}}, &1)) +
           map_size(final_cursors || %{}),
@@ -324,36 +324,6 @@ defmodule Ankusa.WAL.Checker do
       end)
 
     shared ++ retried
-  end
-
-  # ── I5 ────────────────────────────────────────────────────────────────────
-
-  defp i5(events) do
-    events
-    |> Enum.filter(fn
-      %{op: {:append, _id, %{dedup_key: key}}} when is_binary(key) -> true
-      _ -> false
-    end)
-    |> Enum.group_by(fn %{op: {:append, _id, meta}} ->
-      {meta.tenant, meta.source, meta.dedup_key}
-    end)
-    |> Enum.flat_map(fn {key, group} ->
-      seqs =
-        group
-        |> Enum.map(& &1.result)
-        |> Enum.flat_map(fn
-          {:ok, seq} -> [seq]
-          {:duplicate, seq} -> [seq]
-          _ -> []
-        end)
-        |> Enum.uniq()
-
-      if length(seqs) > 1 do
-        [{:i5, {:dedup_key_reused, key, seqs}}]
-      else
-        []
-      end
-    end)
   end
 
   # ── I6 ────────────────────────────────────────────────────────────────────

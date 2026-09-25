@@ -22,12 +22,12 @@ defmodule Ankusa.WAL.DiskLog do
   `append/2` writes every record in one `:file.pwrite`, then a single
   `:file.datasync` (fsync) covers the whole batch. Hundreds of hooks, one fsync.
 
-  ## Dedup durability
+  ## No uniqueness constraint
 
-  Committed `dedup_key`s live in an in-memory ETS set rebuilt on start. Because
-  the log is truncated after compaction, a snapshot of the dedup set is persisted
-  to `<name>.dedup` at truncation time and reloaded before replay, so dedup stays
-  correct across compaction *and* restart.
+  Appending the same event twice appends it twice. This is a durable, ordered,
+  append-only log: telling a provider's retry from a new event is dispatch's
+  job (`Ankusa.Dispatch.Receiver`), not the log's, and the edge acks every copy
+  it committed.
 
   ## Truncation
 
@@ -92,11 +92,7 @@ defmodule Ankusa.WAL.DiskLog do
     File.mkdir_p!(dir)
     path = Path.join(dir, "ankusa.wal")
 
-    dedup = :ets.new(:ankusa_wal_dedup, [:set, :protected, read_concurrency: true])
     index = :ets.new(:ankusa_wal_index, [:ordered_set, :protected])
-
-    # dedup snapshot survives truncation; load it before replaying live frames
-    load_dedup_snapshot(path <> ".dedup", dedup)
 
     # Load the persisted state that bounds `next_seq` before replaying, so a
     # reclaimed (or fully rewritten) log still continues where it left off.
@@ -105,7 +101,7 @@ defmodule Ankusa.WAL.DiskLog do
     leases = load_leases(path <> ".leases")
 
     {:ok, fd} = :file.open(path, [:read, :write, :raw, :binary])
-    {valid_end, replay_next} = replay(fd, index, dedup, truncated_through)
+    {valid_end, replay_next} = replay(fd, index, truncated_through)
     {:ok, _} = :file.position(fd, valid_end)
     :ok = :file.truncate(fd)
 
@@ -131,7 +127,6 @@ defmodule Ankusa.WAL.DiskLog do
        fd: fd,
        write_pos: valid_end,
        next_seq: next_seq,
-       dedup: dedup,
        index: index,
        cursors: cursors,
        leases: leases,
@@ -179,25 +174,18 @@ defmodule Ankusa.WAL.DiskLog do
 
   @impl true
   def handle_call({:append, records}, _from, state) do
-    {results, iodata, inserts, dedup_inserts, next_seq, bytes, pos} =
-      build_batch(records, state)
+    {results, iodata, inserts, next_seq, bytes, pos} = build_batch(records, state)
 
-    if iodata == [] do
-      # all duplicates — nothing to write, no fsync
-      {:reply, {:ok, results}, state}
-    else
-      Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
-        :ok = :file.pwrite(state.fd, state.write_pos, iodata)
-        :ok = :file.datasync(state.fd)
-        # measurements, then metadata: `:duration` is added by the span itself.
-        {:ok, %{batch_size: length(inserts), bytes: bytes}, %{}}
-      end)
+    Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
+      :ok = :file.pwrite(state.fd, state.write_pos, iodata)
+      :ok = :file.datasync(state.fd)
+      # measurements, then metadata: `:duration` is added by the span itself.
+      {:ok, %{batch_size: length(inserts), bytes: bytes}, %{}}
+    end)
 
-      :ets.insert(state.index, inserts)
-      if dedup_inserts != [], do: :ets.insert(state.dedup, dedup_inserts)
+    :ets.insert(state.index, inserts)
 
-      {:reply, {:ok, results}, %{state | write_pos: pos, next_seq: next_seq}}
-    end
+    {:reply, {:ok, results}, %{state | write_pos: pos, next_seq: next_seq}}
   end
 
   def handle_call({:read, after_seq, limit}, _from, state) do
@@ -316,60 +304,24 @@ defmodule Ankusa.WAL.DiskLog do
   # ── batch building ────────────────────────────────────────────────────────
 
   defp build_batch(records, state) do
-    init = {[], [], [], [], state.next_seq, 0, state.write_pos, %{}}
+    init = {[], [], [], state.next_seq, 0, state.write_pos}
 
-    {results, iodata, inserts, dedup_inserts, next_seq, bytes, pos, _seen} =
+    {results, iodata, inserts, next_seq, bytes, pos} =
       Enum.reduce(records, init, fn %{envelope: env}, acc ->
-        {results, iodata, inserts, dedup_inserts, seq, bytes, pos, seen} = acc
-        key = dedup_lookup_key(env)
-        existing = if key, do: committed_seq(state.dedup, seen, key), else: nil
+        {results, iodata, inserts, seq, bytes, pos} = acc
 
-        cond do
-          existing != nil ->
-            Ankusa.Telemetry.emit([:dedup, :hit], %{}, %{
-              source_id: env.source_id,
-              instance: state.instance
-            })
+        env = Ankusa.WAL.stamp_commit(%{env | seq: seq})
+        payload = Envelope.to_binary(env)
+        frame = frame(seq, payload)
+        plen = byte_size(payload)
+        entry = {seq, {pos + @header_bytes, plen}}
+        fsize = @header_bytes + plen
 
-            {[{:duplicate, existing} | results], iodata, inserts, dedup_inserts, seq, bytes, pos,
-             seen}
-
-          true ->
-            env = Ankusa.WAL.stamp_commit(%{env | seq: seq})
-            payload = Envelope.to_binary(env)
-            frame = frame(seq, payload)
-            plen = byte_size(payload)
-            entry = {seq, {pos + @header_bytes, plen}}
-            fsize = @header_bytes + plen
-
-            {seen, dedup_inserts} =
-              if key,
-                do: {Map.put(seen, key, seq), [{key, seq} | dedup_inserts]},
-                else: {seen, dedup_inserts}
-
-            {[{:committed, env} | results], [iodata, frame], [entry | inserts], dedup_inserts,
-             seq + 1, bytes + fsize, pos + fsize, seen}
-        end
+        {[{:committed, env} | results], [iodata, frame], [entry | inserts], seq + 1,
+         bytes + fsize, pos + fsize}
       end)
 
-    {Enum.reverse(results), iodata, inserts, dedup_inserts, next_seq, bytes, pos}
-  end
-
-  # `nil` dedup_key means "no idempotency key" — always accept.
-  defp dedup_lookup_key(%Envelope{dedup_key: nil}), do: nil
-  defp dedup_lookup_key(%Envelope{tenant_id: t, source_id: s, dedup_key: k}), do: {t, s, k}
-
-  defp committed_seq(dedup, seen, key) do
-    case Map.get(seen, key) do
-      nil ->
-        case :ets.lookup(dedup, key) do
-          [{^key, seq}] -> seq
-          [] -> nil
-        end
-
-      seq ->
-        seq
-    end
+    {Enum.reverse(results), iodata, inserts, next_seq, bytes, pos}
   end
 
   # ── truncation ────────────────────────────────────────────────────────────
@@ -439,10 +391,6 @@ defmodule Ankusa.WAL.DiskLog do
   end
 
   defp rewrite(state, dead, live) do
-    # Frames about to be dropped carry dedup keys that must outlive them; the
-    # snapshot is the same durability step the old per-frame truncation took.
-    persist_dedup_snapshot(state.path <> ".dedup", state.dedup)
-
     tmp = state.path <> ".compact"
     {:ok, tfd} = :file.open(tmp, [:read, :write, :raw, :binary])
     :ok = copy_range(state.fd, tfd, dead, live, 0)
@@ -473,16 +421,16 @@ defmodule Ankusa.WAL.DiskLog do
 
   # ── replay ────────────────────────────────────────────────────────────────
 
-  defp replay(fd, index, dedup, truncated_through) do
+  defp replay(fd, index, truncated_through) do
     {:ok, size} = :file.position(fd, :eof)
     :file.position(fd, :bof)
     data = if size > 0, do: elem(:file.pread(fd, 0, size), 1), else: <<>>
     # 1-based seqs: cursor 0 means "nothing consumed", and read/2 (strictly `>`)
     # surfaces seq 1 onward. Empty log => next_seq starts at 1.
-    parse(data, 0, index, dedup, 1, truncated_through)
+    parse(data, 0, index, 1, truncated_through)
   end
 
-  defp parse(bin, pos, index, dedup, next_seq, truncated_through) do
+  defp parse(bin, pos, index, next_seq, truncated_through) do
     case bin do
       <<@magic::16, @version::8, _flags::8, seq::64, crc::32, len::32, rest::binary>> ->
         case rest do
@@ -490,24 +438,12 @@ defmodule Ankusa.WAL.DiskLog do
             if :erlang.crc32(payload) == crc do
               # Frames below the floor are still physically present (the file is
               # only rewritten once it is worth it) but logically gone; they
-              # must not be readable again. Their dedup keys still count.
+              # must not be readable again.
               if seq > truncated_through do
                 :ets.insert(index, {seq, {pos + @header_bytes, len}})
               end
 
-              case dedup_key_of(payload) do
-                nil -> :ok
-                key -> :ets.insert(dedup, {key, seq})
-              end
-
-              parse(
-                tail,
-                pos + @header_bytes + len,
-                index,
-                dedup,
-                seq + 1,
-                truncated_through
-              )
+              parse(tail, pos + @header_bytes + len, index, seq + 1, truncated_through)
             else
               # torn/corrupt payload — stop; this write was never acked
               {pos, next_seq}
@@ -520,11 +456,6 @@ defmodule Ankusa.WAL.DiskLog do
       _ ->
         {pos, next_seq}
     end
-  end
-
-  defp dedup_key_of(payload) do
-    env = Envelope.from_binary(payload)
-    dedup_lookup_key(env)
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────
@@ -609,20 +540,5 @@ defmodule Ankusa.WAL.DiskLog do
     end
 
     :ok = :file.rename(tmp, path)
-  end
-
-  defp load_dedup_snapshot(path, dedup) do
-    case File.read(path) do
-      {:ok, bin} ->
-        for {key, seq} <- :erlang.binary_to_term(bin, [:safe]), do: :ets.insert(dedup, {key, seq})
-        :ok
-
-      {:error, _} ->
-        :ok
-    end
-  end
-
-  defp persist_dedup_snapshot(path, dedup) do
-    persist_term(path, :ets.tab2list(dedup))
   end
 end

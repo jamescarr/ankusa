@@ -9,35 +9,40 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
 
   ## What is copied, and what is deliberately not
 
-  Three things move:
+  Two things move:
 
     1. **The seq floor.** `{:import, max_seq, cursors}` sets the new cluster's
        `next_seq` to `max_seq + 1` and seeds the cursors, so no seq is reused and
        a compacted segment key (`seg/<seq>`) can never collide with a new record.
     2. **The cursors.** Dispatch and the compactor resume where they stopped
        instead of replaying the whole log.
-    3. **The dedup ledger.** This is the part that is easy to forget and
-       expensive to omit: `ankusa_wal_dedup` records every
-       `(tenant, source, dedup_key)` the old WAL ever accepted. A provider that
-       retries an event it already sent — which is *normal*, and the reason the
-       ledger exists — would be accepted a second time by a cluster that had
-       never seen the key, violating "one committed seq per dedup key, forever".
 
   The *records* are not copied, and must not be: the Log must be drained
   (`max(seq)` reached by both cursors, so everything is compacted into segments
   and readable through `Ankusa.Storage`) before this runs. The task refuses to
   start otherwise, naming the reader that is behind.
 
-  Re-running is safe — `{:import_dedup, pairs}` ignores keys that already exist —
-  so an interrupted run resumes from the beginning of the ledger without
-  double-counting.
+  The old WAL's **dedup ledger is not copied**, because nothing in the new
+  design reads one. `Ankusa.WAL.Postgres` used to refuse a record whose
+  `(tenant, source, dedup_key)` it had already accepted, and its
+  `ankusa_wal_dedup` table remembered every key it had ever seen for that
+  purpose. `Ankusa.WAL.Ra` appends every record it is handed — it has no
+  uniqueness constraint — and whether a copy is the first one is decided by
+  `Ankusa.Dispatch.Receiver` from what has been *delivered*, not from what was
+  once *accepted*. Importing the old keys would hand the receiver a stale
+  reason to drop a record, including the first copy of an event whose earlier
+  copies the old WAL accepted but never delivered.
+
+  The commands are absolute rather than additive: `{:import, …}` *sets* the
+  floor and the cursors. Re-running an interrupted migration is therefore safe
+  as long as the new cluster has taken no traffic — which is the whole point of
+  an offline cutover.
 
   ## Flags
 
     * `--from-postgres` — the Postgres URL to read from (required).
     * `--instance` — the Ankusa instance name (required).
     * `--members` — comma-separated `node` or `cluster@node` entries (required).
-    * `--chunk` — rows per `{:import_dedup, …}` command (default `10000`).
     * `--timeout` — milliseconds for a Ra command (default `15000`).
   """
 
@@ -49,7 +54,6 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
     from_postgres: :string,
     instance: :string,
     members: :string,
-    chunk: :integer,
     timeout: :integer
   ]
 
@@ -65,7 +69,6 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
     url = opts[:from_postgres] || Mix.raise("--from-postgres is required")
     instance = opts[:instance] || Mix.raise("--instance is required")
     members = parse_members(opts[:members] || Mix.raise("--members is required"), instance)
-    chunk = opts[:chunk] || 10_000
     timeout = opts[:timeout] || 15_000
 
     {:ok, conn} = connect(url)
@@ -89,18 +92,6 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
 
       IO.puts("imported seq floor #{floor} and #{map_size(cursors)} cursor(s)")
 
-      {rows, inserted, skipped} = import_dedup(conn, instance, members, chunk, timeout)
-
-      IO.puts(
-        "dedup ledger: #{rows} row(s) read, #{inserted} imported, #{skipped} already present"
-      )
-
-      expected = ledger_count(conn, instance)
-
-      if rows != expected do
-        Mix.raise("ledger drifted during the copy: read #{rows}, Postgres now has #{expected}")
-      end
-
       overview =
         case leader(members, timeout) do
           {:ok, leader} -> :ra.consistent_aux(leader, :overview, timeout)
@@ -108,7 +99,7 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
         end
 
       IO.puts(
-        "cluster now holds #{inspect(Map.take(elem(overview, 1), [:dedup_keys, :next_seq, :floor]))}"
+        "cluster now holds #{inspect(Map.take(elem(overview, 1), [:next_seq, :floor, :cursors]))}"
       )
 
       :ok
@@ -152,7 +143,7 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
       IO.puts(
         :stderr,
         "warning: #{count} record(s) still in ankusa_wal (max seq #{max_seq}); " <>
-          "the records themselves are not copied, only the floor, cursors and dedup ledger"
+          "the records themselves are not copied, only the floor and the cursors"
       )
     end
 
@@ -186,72 +177,6 @@ defmodule Mix.Tasks.Ankusa.Wal.Migrate do
         IO.puts(:stderr, "#{name} cursor is at #{at}, but the WAL is at seq #{floor}")
         System.halt(1)
       end
-    end
-  end
-
-  defp ledger_count(conn, instance) do
-    %Postgrex.Result{rows: [[count]]} =
-      Postgrex.query!(conn, "SELECT count(*) FROM ankusa_wal_dedup WHERE instance = $1", [
-        instance
-      ])
-
-    count
-  end
-
-  # Keyset pagination over the ledger's primary key. Offsets would be wrong on a
-  # table that may still be receiving rows, and a keyset cursor also makes a
-  # resumed run simply continue rather than re-scan.
-  defp import_dedup(conn, instance, members, chunk, timeout) do
-    stream_dedup(conn, instance, members, chunk, timeout, {"", "", ""}, 0, 0, 0)
-  end
-
-  defp stream_dedup(conn, instance, members, chunk, timeout, after_key, rows, inserted, skipped) do
-    {tenant, source, key} = after_key
-
-    %Postgrex.Result{rows: batch} =
-      Postgrex.query!(
-        conn,
-        """
-        SELECT tenant_id, source_id, dedup_key, COALESCE(seq, 0)
-        FROM ankusa_wal_dedup
-        WHERE instance = $1 AND (tenant_id, source_id, dedup_key) > ($2, $3, $4)
-        ORDER BY tenant_id, source_id, dedup_key
-        LIMIT $5
-        """,
-        [instance, tenant, source, key, chunk]
-      )
-
-    case batch do
-      [] ->
-        {rows, inserted, skipped}
-
-      batch ->
-        pairs =
-          Enum.map(batch, fn [t, s, k, seq] -> {{t, s, k}, seq} end)
-
-        {:ok, {:ok, n}} =
-          Ra.remote_command(members, {:import_dedup, pairs}, timeout: timeout)
-
-        last = List.last(batch)
-        [lt, ls, lk, _] = last
-
-        rows = rows + length(batch)
-        inserted = inserted + n
-        skipped = skipped + (length(batch) - n)
-
-        IO.puts("\r  #{rows} row(s)… (#{inserted} imported)")
-
-        stream_dedup(
-          conn,
-          instance,
-          members,
-          chunk,
-          timeout,
-          {lt, ls, lk},
-          rows,
-          inserted,
-          skipped
-        )
     end
   end
 

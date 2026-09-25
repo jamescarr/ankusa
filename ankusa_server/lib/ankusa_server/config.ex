@@ -67,7 +67,7 @@ defmodule AnkusaServer.Config do
   @http_keys ~w(port max_body_bytes routing prefix)
   @admin_keys ~w(enabled port)
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
-  @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry)
+  @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry partitions dedup_ttl_ms dedup_store)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type postgres ra)
   @postgres_keys ~w(url host port username password database pool_size ssl migrate)
@@ -389,8 +389,57 @@ defmodule AnkusaServer.Config do
         |> put_opt(:concurrency, int_opt(dispatch, "concurrency", ["dispatch"]))
         |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
         |> put_opt(:max_inflight_bytes, int_opt(dispatch, "max_inflight_bytes", ["dispatch"]))
+        |> put_opt(:partitions, int_opt(dispatch, "partitions", ["dispatch"]))
+        |> put_opt(:dedup_ttl_ms, int_opt(dispatch, "dedup_ttl_ms", ["dispatch"]))
+        |> put_opt(:dedup_store, dedup_store(doc, dispatch))
         |> put_opt(:retry, retry_policy(retry))
     ]
+  end
+
+  # The idempotent receiver's ledger, named rather than spelled out: `ets` is
+  # the in-process default, and `ra` keeps it in the WAL cluster's replicated
+  # state, so it has no members of its own to name.
+  defp dedup_store(doc, dispatch) do
+    path = ["dispatch", "dedup_store"]
+
+    case dispatch["dedup_store"] do
+      nil ->
+        nil
+
+      value when is_binary(value) ->
+        case String.downcase(value) do
+          "ets" ->
+            {Ankusa.DedupStore.ETS, []}
+
+          "ra" ->
+            {Ankusa.DedupStore.Ra, [members: wal_members!(doc)]}
+
+          other ->
+            raise ConfigError,
+              message: "#{render_path(path)}: expected ets or ra, got #{inspect(other)}"
+        end
+
+      other ->
+        raise ConfigError,
+          message: "#{render_path(path)}: expected a string, got #{inspect(other)}"
+    end
+  end
+
+  # The Ra ledger is applied by the WAL cluster's machine, so it needs that
+  # cluster's members — and the WAL has to be Ra for there to be one.
+  defp wal_members!(doc) do
+    wal = section!(doc, "wal", @wal_keys, [])
+    ra = section!(wal, "ra", @ra_wal_keys, ["wal"])
+
+    case enum!(wal["type"] || "disk", ~w(disk postgres ra), ["wal", "type"]) do
+      "ra" ->
+        members!(ra["members"], ["wal", "ra", "members"])
+
+      _ ->
+        raise ConfigError,
+          message:
+            "dispatch.dedup_store: \"ra\" needs wal.type \"ra\" — its members are the WAL cluster's"
+    end
   end
 
   defp retry_policy(retry) do

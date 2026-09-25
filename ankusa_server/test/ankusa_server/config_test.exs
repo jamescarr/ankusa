@@ -181,6 +181,61 @@ defmodule AnkusaServer.ConfigTest do
     assert config.wal == {Ankusa.WAL.DiskLog, []}
   end
 
+  # ── the dispatch dedup ledger ───────────────────────────────────────────────
+
+  test "dispatch.dedup_store names its implementation" do
+    path =
+      tmp_config("""
+      dispatch:
+        partitions: 2
+        dedup_ttl_ms: 60000
+        dedup_store: ra
+      wal:
+        type: ra
+        ra:
+          members:
+            - ankusa_wal_default@wal-0
+            - ankusa_wal_default@wal-1
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert config.dispatch.partitions == 2
+    assert config.dispatch.dedup_ttl_ms == 60_000
+
+    # The ledger is the WAL cluster's replicated state, so `ra` takes that
+    # cluster's members rather than a list of its own.
+    assert {Ankusa.DedupStore.Ra, [members: members]} = config.dispatch.dedup_store
+
+    assert members == [
+             {:ankusa_wal_default, :"ankusa_wal_default@wal-0"},
+             {:ankusa_wal_default, :"ankusa_wal_default@wal-1"}
+           ]
+  end
+
+  test "dispatch.dedup_store ets is the in-process ledger" do
+    path = tmp_config("dispatch: {dedup_store: ets}\n")
+
+    assert {Ankusa.DedupStore.ETS, []} =
+             Config.load!(path: path, env: %{}).config.dispatch.dedup_store
+  end
+
+  test "dispatch.dedup_store \"ra\" without a Ra WAL is rejected by name" do
+    path = tmp_config("dispatch: {dedup_store: ra}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "dispatch.dedup_store"
+    assert error.message =~ "wal.type"
+  end
+
+  test "dispatch.dedup_store with an unknown value lists the valid ones" do
+    path = tmp_config("dispatch: {dedup_store: redis}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(expected ets or ra, got "redis")
+  end
+
   # ── validation errors ───────────────────────────────────────────────────────
 
   test "an unknown key names its path, including list indexes" do

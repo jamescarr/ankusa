@@ -72,6 +72,18 @@ dispatch:
     max_attempts: 12
     # Full jitter: delay is multiplied by a random factor in [0.5, 1.0].
     jitter: true
+  # Logical dispatch partitions: one receiver and one consumer each, so every
+  # copy of an event queues in front of a single consumer. Raise it only when
+  # you also raise the number of dispatchers.
+  partitions: 1
+  # How long the idempotent receiver remembers an event it has delivered.
+  # Measured between the records' commit timestamps, never against the wall
+  # clock at dispatch time.
+  dedup_ttl_ms: 604800000
+  # Where that ledger lives. `ets` is per-dispatcher (a failover re-delivers
+  # what it had not); `ra` keeps it in the WAL cluster's replicated state, so it
+  # survives a failover, at one consensus round trip per record.
+  dedup_store: ets
 
 wal:
   # [env ANKUSA_WAL_TYPE] disk | postgres

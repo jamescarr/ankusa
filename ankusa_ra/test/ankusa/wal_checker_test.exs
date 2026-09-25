@@ -227,13 +227,13 @@ defmodule Ankusa.WAL.CheckerTest do
     assert report.evaluated[:i3] == 1
     assert report.evaluated[:i10] == 3
 
-    for invariant <- [:i2, :i4, :i5, :i6, :i7, :i8, :i9] do
+    for invariant <- [:i2, :i4, :i6, :i7, :i8, :i9] do
       assert report.evaluated[invariant] == 0, "#{invariant} should be unexercised here"
     end
   end
 
-  test "an append history exercises I4, I5 and I2" do
-    meta = %{dedup_key: "k", tenant: "t", source: "s", sha256: "id1", batch_id: "b1"}
+  test "an append history exercises I4 and I2" do
+    meta = %{tenant: "t", source: "s", sha256: "id1", batch_id: "b1"}
 
     events = [
       %{
@@ -255,7 +255,6 @@ defmodule Ankusa.WAL.CheckerTest do
     report = Checker.check(events, MapSet.new(["id1"]), readable(@three))
 
     assert report.evaluated[:i4] == 1
-    assert report.evaluated[:i5] == 1
     # I2 inspected two things: the read event's records, and the stored row whose
     # digest it could hold against what the append said was sent.
     assert report.evaluated[:i2] == 2

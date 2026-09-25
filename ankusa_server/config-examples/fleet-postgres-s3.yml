@@ -3,7 +3,7 @@
 #
 #   topology : `edge` nodes in front (ANKUSA_ROLES=edge, replicas >= 2)
 #              one `dispatch,storage` node behind
-#              Postgres as the shared WAL and dedup authority
+#              Postgres as the shared WAL
 #   storage  : S3 (S3_BUCKET / S3_REGION / S3_ENDPOINT); the compose file
 #              overrides ANKUSA_STORAGE_TYPE=local so the demo needs no bucket
 #   secrets  : ANKUSA_WAL_POSTGRES_URL

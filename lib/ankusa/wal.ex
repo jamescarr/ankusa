@@ -10,10 +10,13 @@ defmodule Ankusa.WAL do
   ## Contract
 
     * `append/2` is a **group commit**. Given a list of records it writes them all
-      and issues a *single* `fsync`, then returns per-record results in order. A
-      record whose `dedup_key` collides with an already-committed one is returned
-      as `{:duplicate, existing_seq}` and is *not* written — but the caller still
-      acks `2xx` (the provider retried; dedup absorbed it).
+      and issues a *single* `fsync`, then returns per-record results in order.
+    * The log has **no uniqueness constraint**: every record handed to it is
+      appended, so a provider's retry is stored again and returns its own
+      `{:committed, env}` with its own `seq`. Whether that copy is a duplicate of
+      an event already delivered is dispatch's decision
+      (`Ankusa.Dispatch.Receiver`), made off the ack path; the edge acks every
+      copy the WAL committed.
     * A committed record is assigned a strictly increasing `seq`, and seq order
       is **commit order**: once a reader has observed seq `N`, no record with
       seq ≤ `N` may become visible later. `seq` values may have gaps; readers
@@ -37,15 +40,16 @@ defmodule Ankusa.WAL do
   paused-then-resumed zombie can never move a cursor backwards or truncate
   records a new holder still needs.
 
-  A record is `%{envelope: Ankusa.Envelope.t()}`; the `dedup_key` is read from the
-  envelope. Adapters set `envelope.seq` on the returned committed envelope.
+  A record is `%{envelope: Ankusa.Envelope.t()}`. Adapters set `envelope.seq` —
+  and `envelope.committed_at`, the time the record was taken for commit — on the
+  returned committed envelope.
   """
 
   alias Ankusa.{Config, Envelope}
 
   @type server :: GenServer.server()
   @type entry :: %{envelope: Envelope.t()}
-  @type result :: {:committed, Envelope.t()} | {:duplicate, non_neg_integer()}
+  @type result :: {:committed, Envelope.t()}
 
   @type lease :: %{
           name: atom(),

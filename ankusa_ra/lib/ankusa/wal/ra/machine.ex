@@ -1,14 +1,23 @@
 defmodule Ankusa.WAL.Ra.Machine do
+  # Ledger entries may accumulate this far past the last sweep. Matched to the
+  # in-process store's `:sweep_delta`, so both ledgers are bounded the same way.
+  @dedup_sweep_every 10_000
+
   @moduledoc """
   The `:ra_machine` behind `Ankusa.WAL.Ra`: a replicated, ordered log of
-  envelopes plus the cursors, dedup ledger and leases that make it usable as a
-  shared WAL.
+  envelopes plus the cursors and leases that make it usable as a shared WAL.
 
   Everything that must be identical on every replica lives here: seq
-  allocation, dedup, cursors, the truncation floor and the leases. The adapter
+  allocation, cursors, the truncation floor, the leases and the idempotent
+  receiver's ledger. The adapter
   (`Ankusa.WAL.Ra`) is only bootstrap, command shaping and read plumbing — the
   rules are in this module, and `apply/3` is a pure function of
   `(command, meta, state)`.
+
+  The log has **no uniqueness constraint**: a record is appended whatever its
+  `dedup_key` was, so two copies of an event are two committed records with two
+  `seq`s. Deciding that a copy is one the cluster has already delivered is
+  `Ankusa.Dispatch.Receiver`'s job, off the commit path.
 
   ## Why the log holds no payloads
 
@@ -25,17 +34,18 @@ defmodule Ankusa.WAL.Ra.Machine do
 
   | Command | Reply |
   | --- | --- |
-  | `{:append, batch_id, records}` | `{:ok, [{:committed, seq} \\| {:duplicate, seq}]}` |
+  | `{:append, batch_id, records}` | `{:ok, [{:committed, seq}]}` |
   | `{:put_cursor, name, seq, token}` | `:ok` \\| `{:error, :fenced}` |
   | `{:truncate_through, seq, token}` | `:ok` \\| `{:error, :fenced}` |
   | `{:acquire_lease, name, holder, ttl_ms}` | `{:ok, lease}` \\| `{:error, {:held, holder}}` |
   | `{:renew_lease, name, holder, token, ttl_ms}` | `{:ok, lease}` \\| `{:error, :lost}` |
   | `{:release_lease, name, holder, token}` | `:ok` |
+  | `{:dedup_record, tenant, source, key, seq, committed_at, ttl_ms}` | `:deliver` \| `:drop` |
   | `{:import, floor, cursors}` | `:ok` |
-  | `{:import_dedup, pairs}` | `{:ok, inserted}` |
 
-  `records` are `{event_id, tenant_id, source_id, dedup_key | nil, envelope}`,
-  encoded by the adapter so the machine never has to know the envelope format.
+  `records` are the encoded envelopes themselves, encoded by the adapter so the
+  machine never has to know the envelope format: it stores *where* each one is,
+  never what it says, and needs no more than the bytes to measure them.
 
   ## Idempotent appends
 
@@ -44,6 +54,19 @@ defmodule Ankusa.WAL.Ra.Machine do
   `batch_id` returns the *stored* results and allocates nothing. Without it, a
   leader change or a lost reply would double-allocate seqs for records that were
   already committed.
+
+  ## The receiver's ledger
+
+  `{:dedup_record, …}` is `Ankusa.Dispatch`'s idempotent receiver, kept here so
+  the ledger survives losing the dispatcher that owned it: `Ankusa.DedupStore.Ra`
+  is a thin client of this command. It is **not** a uniqueness constraint on the
+  log — `{:append, …}` never consults it — and the rule it applies is
+  `Ankusa.DedupStore.decide/4`, the same one the in-process store uses.
+
+  The ledger is replicated state, so it must be bounded by the machine rather
+  than by a process's lifetime: every #{@dedup_sweep_every} records it drops the
+  entries the rule would already ignore (older than the newest record seen, less
+  a full TTL). A sweep can re-deliver a record and can never mis-drop one.
 
   ## Determinism and time
 
@@ -57,6 +80,7 @@ defmodule Ankusa.WAL.Ra.Machine do
 
   @behaviour :ra_machine
 
+  alias Ankusa.DedupStore
   alias Ankusa.WAL
 
   @batch_retention_ms 600_000
@@ -78,19 +102,26 @@ defmodule Ankusa.WAL.Ra.Machine do
       live: %{},
       # sum of the payload sizes still live (not the whole log)
       bytes: 0,
-      dedup: %{},
       batches: %{},
       batch_order: :queue.new(),
       cursors: %{},
       leases: %{},
+      # {tenant, source, key} => %{first_seq, committed_at}
+      dedup: %{},
+      dedup_newest_at: 0,
+      dedup_max_ttl_ms: 0,
+      dedup_since_sweep: 0,
       floor: 0,
       released_floor: 0,
       time_offset_ms: Map.get(config, :time_offset_ms, 0)
     }
   end
 
+  # v2 added the receiver's ledger. A member restoring a v1 snapshot has no
+  # `dedup` key at all, which is what the upgrade clause below and
+  # `dedup_state/1` are for.
   @impl true
-  def version, do: 1
+  def version, do: 2
 
   # Ra asks for a machine version before one has been recorded on a fresh log
   # (`0`), and for the latest version afterwards. This module implements both:
@@ -104,6 +135,7 @@ defmodule Ankusa.WAL.Ra.Machine do
   @impl true
   def overview(state) do
     {min_seq, max_seq} = seq_bounds(state.entries)
+    state = dedup_state(state)
 
     %{
       records: :gb_trees.size(state.entries),
@@ -112,9 +144,9 @@ defmodule Ankusa.WAL.Ra.Machine do
       floor: state.floor,
       min_seq: min_seq,
       max_seq: max_seq,
-      dedup_keys: map_size(state.dedup),
       cursors: state.cursors,
-      leases: state.leases
+      leases: state.leases,
+      dedup_keys: map_size(state.dedup)
     }
   end
 
@@ -164,7 +196,34 @@ defmodule Ankusa.WAL.Ra.Machine do
   # (`{machine_version, From, To}`), so it must be handled even though it carries
   # no WAL meaning: an unhandled command takes the whole Raft server down, and
   # this one is applied by the first `noop` a new leader writes.
+  def apply(_meta, {:machine_version, 1, 2}, state) do
+    {dedup_state(state), :ok, []}
+  end
+
   def apply(_meta, {:machine_version, _from, _to}, state), do: {state, :ok, []}
+
+  # The idempotent receiver's ledger: `Ankusa.DedupStore.Ra` sends one of these
+  # per record it has to decide, and the decision comes back in the reply.
+  def apply(_meta, {:dedup_record, tenant, source, key, seq, committed_at, ttl_ms}, state) do
+    state = dedup_state(state)
+    ledger_key = {tenant, source, key}
+
+    {decision, entry} =
+      DedupStore.decide(Map.get(state.dedup, ledger_key, :error), seq, committed_at, ttl_ms)
+
+    state = %{
+      state
+      | dedup: Map.put(state.dedup, ledger_key, entry),
+        dedup_newest_at: max(state.dedup_newest_at, committed_at),
+        dedup_max_ttl_ms: max(state.dedup_max_ttl_ms, ttl_ms),
+        dedup_since_sweep: state.dedup_since_sweep + 1
+    }
+
+    state =
+      if state.dedup_since_sweep >= @dedup_sweep_every, do: sweep_dedup(state), else: state
+
+    {state, decision, []}
+  end
 
   def apply(meta, {:put_cursor, name, seq, token}, state) do
     if fenced?(state, WAL.lease_for_cursor(name), token, meta) do
@@ -241,15 +300,6 @@ defmodule Ankusa.WAL.Ra.Machine do
     {%{state | cursors: cursors}, :ok, []}
   end
 
-  def apply(_meta, {:import_dedup, pairs}, state) do
-    {dedup, inserted} =
-      Enum.reduce(pairs, {state.dedup, 0}, fn {key, seq}, {acc, n} ->
-        if Map.has_key?(acc, key), do: {acc, n}, else: {Map.put(acc, key, seq), n + 1}
-      end)
-
-    {%{state | dedup: dedup}, {:ok, inserted}, []}
-  end
-
   # ── append ────────────────────────────────────────────────────────────────
 
   defp append(meta, batch_id, records, state) do
@@ -273,32 +323,49 @@ defmodule Ankusa.WAL.Ra.Machine do
     {prune_batches(state, now), {:ok, results}, []}
   end
 
-  defp commit({_event_id, tenant_id, source_id, dedup_key, envelope}, index, pos, state) do
-    key = if dedup_key, do: {tenant_id, source_id, dedup_key}, else: nil
+  defp commit(envelope, index, pos, state) do
+    seq = state.next_seq
+    size = byte_size(envelope)
 
-    case key && Map.get(state.dedup, key) do
-      nil ->
-        seq = state.next_seq
+    state = %{
+      state
+      | next_seq: seq + 1,
+        entries: :gb_trees.insert(seq, {index, pos, size}, state.entries),
+        live: Map.update(state.live, index, 1, &(&1 + 1)),
+        bytes: state.bytes + size
+    }
 
-        state = %{
-          state
-          | next_seq: seq + 1,
-            entries: :gb_trees.insert(seq, {index, pos, byte_size(envelope)}, state.entries),
-            live: Map.update(state.live, index, 1, &(&1 + 1)),
-            bytes: state.bytes + byte_size(envelope),
-            dedup: if(key, do: Map.put(state.dedup, key, seq), else: state.dedup)
-        }
-
-        {{:committed, seq}, state}
-
-      existing ->
-        {{:duplicate, existing}, state}
-    end
+    {{:committed, seq}, state}
   end
 
   # The batch table is a cache of replies, not state: drop the oldest entries
   # once it is large, or once they are old enough that a client can no longer be
   # retrying.
+  # A v1 snapshot has no ledger keys at all, so every path that touches them
+  # goes through here first.
+  defp dedup_state(state) do
+    state
+    |> Map.put_new(:dedup, %{})
+    |> Map.put_new(:dedup_newest_at, 0)
+    |> Map.put_new(:dedup_max_ttl_ms, 0)
+    |> Map.put_new(:dedup_since_sweep, 0)
+  end
+
+  # Drop only what the decision rule would ignore anyway: an entry whose commit
+  # time is already outside the window measured from the newest record this
+  # ledger has seen. The edge comes from the records' own timestamps, never from
+  # a wall clock, so every replica sweeps identically.
+  defp sweep_dedup(state) do
+    cutoff = state.dedup_newest_at - state.dedup_max_ttl_ms
+
+    dedup =
+      state.dedup
+      |> Enum.reject(fn {_key, entry} -> entry.committed_at < cutoff end)
+      |> Map.new()
+
+    %{state | dedup: dedup, dedup_since_sweep: 0}
+  end
+
   defp prune_batches(state, now) do
     if map_size(state.batches) > @max_batches or expired_head?(state.batch_order, now) do
       case :queue.out(state.batch_order) do

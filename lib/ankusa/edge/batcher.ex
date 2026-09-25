@@ -41,16 +41,17 @@ defmodule Ankusa.Edge.Batcher do
   end
 
   @doc """
-  Submit a record and block until it is durably committed (or deduped, or shed).
+  Submit a record and block until it is durably committed (or shed).
 
-  Returns `{:committed, env}` | `{:duplicate, seq}` | `{:error, :overload}` |
-  `{:error, :store_unavailable}`. The WAL itself is never allowed to crash the
+  Returns `{:committed, env}` | `{:error, :overload}` |
+  `{:error, :store_unavailable}`. Every copy of an event is committed — the WAL
+  has no uniqueness constraint and does not check for duplicates — so there is
+  no `:duplicate` reply to map. The WAL itself is never allowed to crash the
   call: a failed append (or a dead WAL process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
   """
   @spec commit(atom(), non_neg_integer(), WAL.entry(), timeout()) ::
           {:committed, Ankusa.Envelope.t()}
-          | {:duplicate, non_neg_integer()}
           | {:error, :overload | :store_unavailable}
   def commit(instance, partition, record, timeout \\ 15_000) do
     GenServer.call(Ankusa.via(instance, {:batcher, partition}), {:enqueue, record}, timeout)

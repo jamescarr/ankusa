@@ -16,7 +16,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome` |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
-  | `[:ankusa, :dedup, :hit]` | — | `:instance`, `:source_id` |
+  | `[:ankusa, :dispatch, :dedup]` | — | `:instance`, `:source_id`, `:seq` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
@@ -30,8 +30,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
 
-  `:outcome` on `:ingest` is `:committed | :duplicate | :quarantined | :rejected`,
-  or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,
+  `:outcome` on `:ingest` is `:committed | :quarantined | :rejected`, or the
+  `{:error, reason}` tag: a copy of an event the receiver will drop is still
+  `:committed` here, because from the edge's side it is. `:status` on `:verify` is `:ok` or `:failed`,
   independent of what the source's `on_verify_failure` policy then decides.
 
   `Ankusa.Metrics` is the built-in Prometheus mapping of these events, served by

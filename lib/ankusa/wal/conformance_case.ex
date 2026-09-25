@@ -91,11 +91,10 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
             envelope(%{
               body: "one",
               tenant_id: "acme",
-              source_id: "github",
-              dedup_key: "k1"
+              source_id: "github"
             })
 
-          b = envelope(%{body: "two", tenant_id: "other", source_id: "stripe", dedup_key: "k2"})
+          b = envelope(%{body: "two", tenant_id: "other", source_id: "stripe"})
 
           assert {:ok, [{:committed, ca}, {:committed, cb}]} =
                    WAL.append(inst, [%{envelope: a}, %{envelope: b}])
@@ -131,42 +130,35 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
 
         # ── 3 ───────────────────────────────────────────────────────────────
 
-        test "dedup collapses duplicates within a batch, across batches and past truncation",
-             %{instance: inst} do
-          k = "key-#{System.unique_integer([:positive])}"
+        test "appending the same event again appends it again, with its own seq", %{
+          instance: inst
+        } do
+          # The log has no uniqueness constraint: telling a provider's retry from
+          # a new event is dispatch's job, not the log's.
+          first = envelope(%{body: "the same hook"})
 
-          assert {:ok, [{:committed, c1}, {:duplicate, d1}]} =
-                   WAL.append(inst, [
-                     %{envelope: envelope(%{dedup_key: k})},
-                     %{envelope: envelope(%{dedup_key: k})}
-                   ])
+          assert {:ok, [{:committed, c1}]} = WAL.append(inst, [%{envelope: first}])
+          assert {:ok, [{:committed, c2}]} = WAL.append(inst, [%{envelope: first}])
+          assert c2.seq > c1.seq
 
-          assert d1 == c1.seq
+          assert [r1, r2] = WAL.read(inst, 0, 100)
+          assert r1.id == r2.id
+          assert r1.body == r2.body
+          assert [r1.seq, r2.seq] == [c1.seq, c2.seq]
 
-          assert {:ok, [{:duplicate, d2}]} =
-                   WAL.append(inst, [%{envelope: envelope(%{dedup_key: k})}])
+          # Two copies in one batch are two records as well.
+          assert {:ok, [{:committed, c3}, {:committed, c4}]} =
+                   WAL.append(inst, [%{envelope: first}, %{envelope: first}])
 
-          assert d2 == c1.seq
+          assert c3.seq == c2.seq + 1
+          assert c4.seq == c3.seq + 1
 
-          # nil keys never collide
-          assert {:ok, [{:committed, n1}]} = WAL.append(inst, [%{envelope: envelope(%{})}])
-          assert {:ok, [{:committed, n2}]} = WAL.append(inst, [%{envelope: envelope(%{})}])
-          assert n1.seq != n2.seq
-
-          # keys are tenant-scoped
-          assert {:ok, [{:committed, t1}]} =
-                   WAL.append(inst, [%{envelope: envelope(%{dedup_key: k, tenant_id: "t2"})}])
-
-          assert t1.seq != c1.seq
-
-          # a re-send after truncation still returns the original seq
+          # Truncation does not change that: a copy appended after it is still a
+          # new record, not a collision with the one below the floor.
           lease = hold!(inst, :storage, [])
-          assert :ok = WAL.truncate_through(inst, c1.seq, lease.token)
-
-          assert {:ok, [{:duplicate, d3}]} =
-                   WAL.append(inst, [%{envelope: envelope(%{dedup_key: k})}])
-
-          assert d3 == c1.seq
+          assert :ok = WAL.truncate_through(inst, c2.seq, lease.token)
+          assert {:ok, [{:committed, c5}]} = WAL.append(inst, [%{envelope: first}])
+          assert c5.seq > c4.seq
         end
 
         # ── 4 ───────────────────────────────────────────────────────────────
@@ -177,7 +169,7 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
           {:ok, committed} =
             WAL.append(
               inst,
-              for(i <- 1..5, do: %{envelope: envelope(%{body: "b#{i}", dedup_key: "t#{i}"})})
+              for(i <- 1..5, do: %{envelope: envelope(%{body: "b#{i}"})})
             )
 
           seqs = Enum.map(committed, fn {:committed, env} -> env.seq end)
@@ -363,25 +355,21 @@ if Code.ensure_loaded?(ExUnit.CaseTemplate) do
 
         # ── 12 ──────────────────────────────────────────────────────────────
 
-        test "8 writers racing one dedup key commit exactly once", %{instance: inst} do
-          k = "race-#{System.unique_integer([:positive])}"
+        test "8 writers racing the same event all commit, with distinct seqs", %{
+          instance: inst
+        } do
+          hook = envelope(%{body: "racing"})
 
           results =
             1..8
-            |> Enum.map(fn _ ->
-              Task.async(fn -> WAL.append(inst, [%{envelope: envelope(%{dedup_key: k})}]) end)
-            end)
+            |> Enum.map(fn _ -> Task.async(fn -> WAL.append(inst, [%{envelope: hook}]) end) end)
             |> Task.await_many(30_000)
-            |> Enum.map(fn {:ok, [result]} -> result end)
+            |> Enum.map(fn {:ok, [{:committed, env}]} -> env end)
 
-          committed = for {:committed, env} <- results, do: env
-          duplicates = for {:duplicate, seq} <- results, do: seq
+          seqs = Enum.map(results, & &1.seq)
 
-          assert length(committed) == 1
-          assert length(duplicates) == 7
-          [winner] = committed
-          assert Enum.all?(duplicates, &(&1 == winner.seq))
-          assert length(WAL.read(inst, 0, 100)) == 1
+          assert length(Enum.uniq(seqs)) == 8
+          assert Enum.sort(seqs) == Enum.sort(Enum.map(WAL.read(inst, 0, 100), & &1.seq))
         end
 
         # ── 13 ──────────────────────────────────────────────────────────────

@@ -52,15 +52,31 @@ defmodule Mix.Tasks.Loadgen.Verify do
     {:ok, conn} = Postgrex.start_link(connect_opts)
 
     acked = read_acked_csv(acked_path)
-    acked_ids = Enum.map(acked, fn {id, _sha} -> id end)
-    expected_by_id = Map.new(acked, fn {id, sha} -> {id, sha} end)
+    acked_ids = Enum.map(acked, fn {id, _sha, _key} -> id end)
+    expected_by_id = Map.new(acked, fn {id, sha, _key} -> {id, sha} end)
+    key_by_id = Map.new(acked, fn {id, _sha, key} -> {id, key} end)
 
     start_ms = System.monotonic_time(:millisecond)
     deadline_ms = start_ms + timeout_s * 1000
 
-    {found_by_id, drain_s} = poll_until_drained(conn, acked_ids, start_ms, deadline_ms)
+    {found_by_id, drain_s} = poll_until_drained(conn, acked, start_ms, deadline_ms)
 
-    missing_ids = Enum.reject(acked_ids, &Map.has_key?(found_by_id, &1))
+    # Every ack is either in the sink or was deduplicated on the way there: the
+    # edge commits every copy a provider sends, and the idempotent receiver in
+    # front of dispatch drops the copies that follow one already delivered. So an
+    # ack whose *event* — its provider event id — reached the sink is accounted
+    # for, and an ack with no delivered sibling is missing.
+    delivered_keys =
+      for id <- Map.keys(found_by_id),
+          key = Map.get(key_by_id, id),
+          key not in [nil, ""],
+          into: MapSet.new(),
+          do: key
+
+    {missing_ids, deduplicated_ids} =
+      acked_ids
+      |> Enum.reject(&Map.has_key?(found_by_id, &1))
+      |> Enum.split_with(fn id -> Map.get(key_by_id, id) not in delivered_keys end)
 
     sha_mismatches =
       found_by_id
@@ -71,6 +87,15 @@ defmodule Mix.Tasks.Loadgen.Verify do
       |> Enum.map(fn {_id, {_sha, deliveries}} -> max(deliveries - 1, 0) end)
       |> Enum.sum()
 
+    # The dedup guarantee, checked end to end: one delivery per provider event,
+    # however many copies of it the edge acked.
+    duplicate_deliveries =
+      found_by_id
+      |> Enum.group_by(fn {id, _} -> Map.get(key_by_id, id) end)
+      |> Enum.reject(fn {key, _} -> key in [nil, ""] end)
+      |> Enum.map(fn {_key, ids} -> length(ids) - 1 end)
+      |> Enum.sum()
+
     total_processed = total_processed_count(conn)
     unacked_processed = max(total_processed - map_size(found_by_id), 0)
 
@@ -78,6 +103,8 @@ defmodule Mix.Tasks.Loadgen.Verify do
       acked: length(acked_ids),
       processed: map_size(found_by_id),
       missing: Enum.take(missing_ids, 10),
+      deduplicated: length(deduplicated_ids),
+      duplicate_deliveries: duplicate_deliveries,
       sha_mismatches: sha_mismatches,
       extra_deliveries: extra_deliveries,
       drain_s: drain_s,
@@ -88,9 +115,10 @@ defmodule Mix.Tasks.Loadgen.Verify do
 
     print_report(report, length(missing_ids))
 
-    if length(missing_ids) > 0 or sha_mismatches > 0 do
+    if length(missing_ids) > 0 or sha_mismatches > 0 or duplicate_deliveries > 0 do
       Mix.raise(
-        "loadgen.verify: #{length(missing_ids)} missing, #{sha_mismatches} sha mismatches"
+        "loadgen.verify: #{length(missing_ids)} missing, #{sha_mismatches} sha mismatches, " <>
+          "#{duplicate_deliveries} events delivered more than once"
       )
     end
 
@@ -120,14 +148,17 @@ defmodule Mix.Tasks.Loadgen.Verify do
     end
   end
 
+  # `id,sha256,event_key` — the third column may be empty.
   defp read_acked_csv(path) do
     path
     |> File.stream!()
     |> Stream.map(&String.trim/1)
     |> Stream.reject(&(&1 == ""))
     |> Enum.map(fn line ->
-      [id, sha] = String.split(line, ",", parts: 2)
-      {id, sha}
+      case String.split(line, ",") do
+        [id, sha] -> {id, sha, nil}
+        [id, sha, key] -> {id, sha, key}
+      end
     end)
   end
 
@@ -135,17 +166,16 @@ defmodule Mix.Tasks.Loadgen.Verify do
   # so we can only detect *when* the missing set first became empty, not the exact
   # timestamp any single id was written. That poll-iteration timestamp (minus the
   # start of polling) is used as the drain time.
-  defp poll_until_drained(conn, acked_ids, start_ms, deadline_ms) do
-    do_poll(conn, acked_ids, start_ms, deadline_ms, %{})
+  defp poll_until_drained(conn, acked, start_ms, deadline_ms) do
+    do_poll(conn, acked, start_ms, deadline_ms, %{})
   end
 
-  defp do_poll(conn, acked_ids, start_ms, deadline_ms, _prev_found) do
-    found = query_found(conn, acked_ids)
+  defp do_poll(conn, acked, start_ms, deadline_ms, _prev_found) do
+    found = query_found(conn, Enum.map(acked, fn {id, _sha, _key} -> id end))
     now_ms = System.monotonic_time(:millisecond)
-    all_found? = Enum.all?(acked_ids, &Map.has_key?(found, &1))
 
     cond do
-      all_found? ->
+      drained?(acked, found) ->
         {found, (now_ms - start_ms) / 1000}
 
       now_ms >= deadline_ms ->
@@ -153,8 +183,22 @@ defmodule Mix.Tasks.Loadgen.Verify do
 
       true ->
         Process.sleep(@poll_interval_ms)
-        do_poll(conn, acked_ids, start_ms, deadline_ms, found)
+        do_poll(conn, acked, start_ms, deadline_ms, found)
     end
+  end
+
+  # Polling is done when every ack is either in the sink or shares its event id
+  # with one that is — the copies dispatch deduplicated are never going to
+  # arrive, and waiting for them would burn the whole timeout.
+  defp drained?(acked, found) do
+    delivered_keys =
+      acked
+      |> Enum.filter(fn {id, _sha, _key} -> Map.has_key?(found, id) end)
+      |> MapSet.new(fn {_id, _sha, key} -> key end)
+
+    Enum.all?(acked, fn {id, _sha, key} ->
+      Map.has_key?(found, id) or (key not in [nil, ""] and MapSet.member?(delivered_keys, key))
+    end)
   end
 
   # And if the pool still cannot answer, wait for it: the poll has a deadline of
@@ -199,19 +243,24 @@ defmodule Mix.Tasks.Loadgen.Verify do
   end
 
   defp print_report(report, missing_count) do
-    status = if missing_count > 0 or report.sha_mismatches > 0, do: "FAIL", else: "PASS"
+    status =
+      if missing_count > 0 or report.sha_mismatches > 0 or report.duplicate_deliveries > 0,
+        do: "FAIL",
+        else: "PASS"
 
     IO.puts("""
 
     loadgen verify report [#{status}]
     ---------------------
-    acked             #{report.acked}
-    processed         #{report.processed}
-    missing           #{missing_count} (showing up to 10: #{inspect(report.missing)})
-    sha_mismatches    #{report.sha_mismatches}
-    extra_deliveries  #{report.extra_deliveries}
-    drain_s           #{report.drain_s}
-    unacked_processed #{report.unacked_processed}
+    acked                #{report.acked}
+    processed            #{report.processed}
+    missing              #{missing_count} (showing up to 10: #{inspect(report.missing)})
+    deduplicated         #{report.deduplicated} (acked copies dropped at dispatch)
+    duplicate_deliveries #{report.duplicate_deliveries} (events delivered more than once)
+    sha_mismatches       #{report.sha_mismatches}
+    extra_deliveries     #{report.extra_deliveries}
+    drain_s              #{report.drain_s}
+    unacked_processed    #{report.unacked_processed}
     """)
   end
 end

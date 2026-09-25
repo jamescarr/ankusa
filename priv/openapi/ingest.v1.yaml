@@ -9,10 +9,12 @@ info:
     reverse.
 
     The core invariant is visible in the status codes: a `2xx` is never
-    returned until the hook is durably in the WAL. `201 accepted` means
-    committed, `200 duplicate` means the dedup key was already committed (the
-    provider retried; nothing extra was stored), `202 quarantined` means the
-    source's policy kept a failed-verification hook instead of rejecting it.
+    returned until the hook is durably in the WAL. `202` with
+    `status: accepted` means committed and due for dispatch; `202` with
+    `status: quarantined` means the source's `on_verify_failure` policy kept a
+    failed-verification hook for an operator instead of rejecting it. A copy of
+    an event that was already delivered is filtered out at dispatch, not at the
+    ack, so the sender is not told which of its retries was the duplicate.
 
     There is no request authentication here beyond provider signature
     verification, which is webhook semantics rather than access control: the
@@ -52,12 +54,8 @@ paths:
         content:
           '*/*': {}
       responses:
-        '201':
-          $ref: '#/components/responses/Accepted'
-        '200':
-          $ref: '#/components/responses/Duplicate'
         '202':
-          $ref: '#/components/responses/Quarantined'
+          $ref: '#/components/responses/AcceptedOrQuarantined'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -86,12 +84,8 @@ paths:
         content:
           '*/*': {}
       responses:
-        '201':
-          $ref: '#/components/responses/Accepted'
-        '200':
-          $ref: '#/components/responses/Duplicate'
         '202':
-          $ref: '#/components/responses/Quarantined'
+          $ref: '#/components/responses/AcceptedOrQuarantined'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -159,7 +153,11 @@ components:
   schemas:
     Accepted:
       type: object
-      description: The hook is durably committed.
+      description: |
+        The hook is durably committed and will be dispatched. A copy of an event
+        that was already delivered is dropped by the idempotent receiver in
+        front of dispatch — this response does not tell the sender that.
+      
       required: [status, id, seq]
       properties:
         status:
@@ -173,24 +171,6 @@ components:
           type: integer
           minimum: 1
           description: WAL sequence number, strictly increasing across commits.
-    Duplicate:
-      type: object
-      description: |
-        The dedup key was already committed. Nothing extra was stored, and the
-        sender is told `2xx` so it stops retrying.
-      required: [status, id, seq]
-      properties:
-        status:
-          const: duplicate
-        id:
-          type: string
-          description: |
-            A fresh envelope id assigned to this request. It is not stored and
-            does not identify the original record; use `seq` for that.
-        seq:
-          type: integer
-          minimum: 1
-          description: Sequence number of the stored record that owns the dedup key.
     Quarantined:
       type: object
       required: [status, reason]
@@ -244,24 +224,21 @@ components:
         wal:
           type: object
   responses:
-    Accepted:
-      description: '`201`. Committed and durably stored.'
+    AcceptedOrQuarantined:
+      description: |
+        `202`. Accepted, and durably committed before this response was sent.
+        `status: accepted` means it will be dispatched; `status: quarantined`
+        means the source's `on_verify_failure` policy held it back for an
+        operator. There is no `201` and no `200`/duplicate: every copy a
+        provider sends is appended to the log and acked with its own envelope
+        id, and a provider's retry is filtered out at dispatch rather than at
+        the ack.
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/Accepted'
-    Duplicate:
-      description: '`200`. Absorbed by dedup; the original is already committed.'
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Duplicate'
-    Quarantined:
-      description: '`202`. Held for an operator; see the source''s `on_verify_failure`.'
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Quarantined'
+            oneOf:
+              - $ref: '#/components/schemas/Accepted'
+              - $ref: '#/components/schemas/Quarantined'
     BadRequest:
       description: '`400`. `body_read_failed`: the body could not be read at all (client disconnect, read timeout). Retry.'
       content:

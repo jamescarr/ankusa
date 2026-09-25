@@ -141,7 +141,7 @@ defmodule Ankusa.DedupStoreTest do
     receiver = receiver(store: {ETS, []})
     source = source(dedup_key: {Ankusa.DedupKey.Rules, json: ["event"]})
 
-    first = envelope(dedup_key: nil, body: ~s({"event":"E1"}))
+    first = envelope(body: ~s({"event":"E1"}))
     second = envelope(body: ~s({"event":"E1"}))
 
     refute Receiver.duplicate?(receiver, source, %{first | seq: 1, committed_at: @t0})
@@ -187,7 +187,7 @@ defmodule Ankusa.DedupStoreTest do
 
       # Two copies of the same event, keyed differently by a badly-behaved
       # rule, still agree on the partition.
-      other = %{env | dedup_key: "different", seq: 999, committed_at: @t0 + 5}
+      other = %{env | id: "another-envelope", seq: 999, committed_at: @t0 + 5}
       assert Receiver.partition(Receiver.scope(other), partitions) == partition
     end
   end

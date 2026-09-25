@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # The image gate: start the built image and check what an operator checks in the
-# first minute — the demo hook round-trips (accepted, then deduped), metrics and
-# config answer, and a broken config exits 78 instead of crash-looping.
+# first minute — the demo hook is accepted (twice: the second copy is its own
+# record), metrics and config answer, and a broken config exits 78 instead of
+# crash-looping.
 #
 #   ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
 #
@@ -61,17 +62,24 @@ done
 
 [ "$ready" = "true" ] || fail "/health never returned 200 within 30s"
 
-echo "==> ingest: accepted once, deduped the second time"
+echo "==> ingest: every copy of an event is accepted"
 hook='{"id":"evt_smoke"}'
 
 code=$(http_code "$WORK/first" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
-[ "$code" = "201" ] || fail "first POST returned $code: $(cat "$WORK/first")"
+[ "$code" = "202" ] || fail "first POST returned $code: $(cat "$WORK/first")"
 grep -q '"status":"accepted"' "$WORK/first" || fail "first POST was not accepted: $(cat "$WORK/first")"
 
+# The same hook again. The edge does not dedup — dispatch does, in front of the
+# sinks — so this is accepted as its own copy, with its own envelope id and seq.
 code=$(http_code "$WORK/second" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
-[ "$code" = "200" ] || fail "duplicate POST returned $code: $(cat "$WORK/second")"
-grep -q '"status":"duplicate"' "$WORK/second" ||
-  fail "duplicate POST was not deduped: $(cat "$WORK/second")"
+[ "$code" = "202" ] || fail "second POST returned $code: $(cat "$WORK/second")"
+grep -q '"status":"accepted"' "$WORK/second" ||
+  fail "second POST was not accepted: $(cat "$WORK/second")"
+
+first_id=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$WORK/first")
+second_id=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$WORK/second")
+[ -n "$first_id" ] && [ -n "$second_id" ] && [ "$first_id" != "$second_id" ] ||
+  fail "the two copies were acked under the same envelope id: $first_id / $second_id"
 
 echo "==> metrics"
 curl -s "$ADMIN_URL/metrics" >"$WORK/metrics"

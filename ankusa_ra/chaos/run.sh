@@ -71,21 +71,20 @@ trap cleanup EXIT
 
 wait_for_stack() {
   echo "    waiting for the stack"
-  # A fresh id per attempt, never a fixed one: the edge dedups, so a probe id
-  # that has already been acked comes back `200` (duplicate) forever after and a
-  # loop waiting for `201` can never be satisfied again — which is how this hung
-  # on a stack that was serving perfectly well.
+  # A fresh id per attempt anyway: a probe that is acked under an id used before
+  # would be a second copy of an event, and a readiness check should not depend
+  # on how dispatch treats it. 202 is the durable ack.
   for attempt in $(seq 1 90); do
     code="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/webhooks/demo \
       -H 'content-type: application/json' \
       -d "{\"id\":\"probe-${attempt}-${RANDOM}\",\"pad\":\"\"}" || true)"
-    # A 201 means an append went through, which means quorum and a leader; the
+    # A 202 means an append went through, which means quorum and a leader; the
     # second check just says which half is lagging. `:ra.members/2` answers
     # `{:ok, members, leader}` and the leader is nil until one is elected.
     leader="$(docker exec "$("${COMPOSE[@]}" ps -q wal-0)" /app/bin/ingest rpc \
       'IO.puts(match?({:ok, _, l} when l != nil, :ra.members({:ankusa_wal_default, node()})))' \
       2>/dev/null | tail -1 || true)"
-    if [ "$code" = "201" ] && [ "${leader:-false}" = "true" ]; then
+    if [ "$code" = "202" ] && [ "${leader:-false}" = "true" ]; then
       return 0
     fi
     sleep 2
