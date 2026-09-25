@@ -144,8 +144,10 @@ defmodule Ankusa.DedupStoreTest do
     first = envelope(body: ~s({"event":"E1"}))
     second = envelope(body: ~s({"event":"E1"}))
 
-    refute Receiver.duplicate?(receiver, source, %{first | seq: 1, committed_at: @t0})
-    assert Receiver.duplicate?(receiver, source, %{second | seq: 2, committed_at: @t0 + 1})
+    assert {:ok, false} = Receiver.decide(receiver, source, %{first | seq: 1, committed_at: @t0})
+
+    assert {:ok, true} =
+             Receiver.decide(receiver, source, %{second | seq: 2, committed_at: @t0 + 1})
   end
 
   # `dedup: :none` is how a source says it wants every copy.
@@ -157,7 +159,7 @@ defmodule Ankusa.DedupStoreTest do
 
     for seq <- 1..3 do
       env = envelope(body: ~s({"event":"E1"}), seq: seq, committed_at: @t0 + seq)
-      refute Receiver.duplicate?(receiver, source, env)
+      assert {:ok, false} = Receiver.decide(receiver, source, env)
     end
   end
 
@@ -167,7 +169,7 @@ defmodule Ankusa.DedupStoreTest do
 
     for seq <- 1..3 do
       env = envelope(body: ~s({"event":"E1"}), seq: seq, committed_at: @t0 + seq)
-      refute Receiver.duplicate?(receiver, source, env)
+      assert {:ok, false} = Receiver.decide(receiver, source, env)
     end
   end
 

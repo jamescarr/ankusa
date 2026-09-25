@@ -158,10 +158,14 @@ run_scenario() {
   wait "$observer_pid" "$sampler_pid" 2>/dev/null || true
 
   echo "    verifying"
+  # `--dedup-store ra` because this harness runs the replicated ledger (see the
+  # worker services in docker-compose.yml): it kills dispatchers, so "one
+  # delivery per event" has to survive a failover to be asserted at all.
   (cd "$ROOT/tools/loadgen" && mix loadgen.verify \
     --acked "$OUT_ABS/${scenario}.csv" \
     --database-url "$SINK_DB" \
     --timeout 300 \
+    --dedup-store ra \
     --report "$OUT_ABS/${scenario}-deliveries.json")
 
   docker exec "$("${COMPOSE[@]}" ps -q nemesis)" bash -c "/scenarios/final-scan.sh /out/${scenario}-final.json"

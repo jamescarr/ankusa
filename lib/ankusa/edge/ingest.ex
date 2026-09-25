@@ -96,6 +96,11 @@ defmodule Ankusa.Edge.Ingest do
   end
 
   defp verifier_scheme(mod, opts) do
+    # `function_exported?/3` answers false for a module that has not been loaded
+    # yet, which would report the verifier's own name as its scheme on the first
+    # hook of a process's life — and only then.
+    Code.ensure_loaded(mod)
+
     if function_exported?(mod, :scheme_name, 1), do: mod.scheme_name(opts), else: inspect(mod)
   end
 

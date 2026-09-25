@@ -58,16 +58,21 @@ defmodule Ankusa.Dispatch.Receiver do
   def scope(%Envelope{tenant_id: tenant_id, source_id: source_id}), do: {tenant_id, source_id}
 
   @doc """
-  Has this event already been delivered?
+  Should this copy be dropped as one the receiver has already delivered?
 
   Records the copy either way: the first copy to arrive is the one remembered as
   the event's first commit, which is what later copies are compared against.
+
+  `{:error, reason}` means the ledger could not be consulted. The caller must
+  leave the record undecided — not deliver it, and not skip it — and come back
+  to it: an unrecorded delivery is one the next copy of the same event cannot be
+  compared against, which is the whole guarantee.
   """
-  @spec duplicate?(t(), Source.t(), Envelope.t()) :: boolean()
-  def duplicate?(%__MODULE__{} = receiver, %Source{} = source, %Envelope{} = env) do
+  @spec decide(t(), Source.t(), Envelope.t()) :: {:ok, boolean()} | {:error, term()}
+  def decide(%__MODULE__{} = receiver, %Source{} = source, %Envelope{} = env) do
     case key(source, env) do
       nil ->
-        false
+        {:ok, false}
 
       key ->
         case DedupStore.record(
@@ -78,8 +83,9 @@ defmodule Ankusa.Dispatch.Receiver do
                env.committed_at,
                receiver.ttl_ms
              ) do
-          :deliver -> false
-          :drop -> true
+          :deliver -> {:ok, false}
+          :drop -> {:ok, true}
+          {:error, reason} -> {:error, reason}
         end
     end
   end

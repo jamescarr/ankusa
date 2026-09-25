@@ -17,6 +17,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
   | `[:ankusa, :dispatch, :dedup]` | — | `:instance`, `:source_id`, `:seq` |
+  | `[:ankusa, :dispatch, :dedup_unavailable]` | — | `:instance`, `:source_id`, `:seq`, `:reason` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
@@ -32,7 +33,12 @@ defmodule Ankusa.Telemetry do
 
   `:outcome` on `:ingest` is `:committed | :quarantined | :rejected`, or the
   `{:error, reason}` tag: a copy of an event the receiver will drop is still
-  `:committed` here, because from the edge's side it is. `:status` on `:verify` is `:ok` or `:failed`,
+  `:committed` here, because from the edge's side it is.
+
+  `[:ankusa, :dispatch, :dedup_unavailable]` is the one dispatch event that
+  means *nothing happened*: the receiver could not consult its ledger, so that
+  record is undecided and the poll stopped at its seq. A run of these is a
+  dispatcher waiting for its ledger, not a dispatcher losing records. `:status` on `:verify` is `:ok` or `:failed`,
   independent of what the source's `on_verify_failure` policy then decides.
 
   `Ankusa.Metrics` is the built-in Prometheus mapping of these events, served by

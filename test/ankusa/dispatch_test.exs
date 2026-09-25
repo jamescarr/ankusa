@@ -92,11 +92,13 @@ defmodule Ankusa.DispatchTest do
     dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
     on_exit(fn -> File.rm_rf(dir) end)
 
+    source = Map.merge(Keyword.get(opts, :source, %{}), %{sinks: sinks})
+
     base = [
       instance: inst,
       data_dir: dir,
       roles: [:edge, :dispatch, :storage],
-      source_store: {Ankusa.SourceStore.Static, sources: %{"src1" => %{sinks: sinks}}}
+      source_store: {Ankusa.SourceStore.Static, sources: %{"src1" => source}}
     ]
 
     base =
@@ -127,6 +129,54 @@ defmodule Ankusa.DispatchTest do
     assert_receive {:delivered, id, 1}
     assert id == committed.id
     assert WAL.get_cursor(inst, :dispatch) == committed.seq
+  end
+
+  # The ledger is a decision, not a hint: a record whose dedup key cannot be
+  # looked up has no answer, and guessing "deliver" would send it *without*
+  # recording it — so the next copy of that event would look like a first one.
+  # This is the regression test for a chaos run that lost nothing and yet
+  # delivered 885 events twice, because the ledger was unreachable mid-failover.
+  test "a ledger that cannot answer stalls dispatch, and the record is delivered once it can" do
+    {:ok, up} = Agent.start_link(fn -> false end)
+    on_exit(fn -> if Process.alive?(up), do: Agent.stop(up) end)
+
+    dispatch = %{
+      dedup_store: {Ankusa.DedupStore.Unavailable, up: up},
+      dedup_ttl_ms: 60_000
+    }
+
+    %{inst: inst} =
+      start([{CapturingSink, pid: self()}],
+        dispatch: dispatch,
+        max_sleep_ms: 5,
+        source: %{dedup_key: {Ankusa.DedupKey.Rules, json: ["id"]}}
+      )
+
+    body = ~s({"id":"E1"})
+    first = %{build_env("src1") | body: body}
+    {:ok, [{:committed, committed}]} = WAL.append(inst, [%{envelope: first}])
+
+    assert {:ok, 0} = Pipeline.tick(inst)
+    refute_receive {:delivered, _, _}, 100
+    assert WAL.get_cursor(inst, :dispatch) == 0
+
+    # The ledger comes back: the same record is read again and delivered.
+    :ok = Agent.update(up, fn _ -> true end)
+    assert {:ok, 1} = Pipeline.tick(inst)
+    assert_receive {:delivered, id, 1}
+    assert id == committed.id
+    assert WAL.get_cursor(inst, :dispatch) == committed.seq
+
+    # And now it was recorded: a second copy of the same event is dropped rather
+    # than delivered, which is the guarantee the guessed answer would have cost.
+    second = %{build_env("src1") | body: body}
+    {:ok, [{:committed, second_env}]} = WAL.append(inst, [%{envelope: second}])
+
+    # The tick reports what completed after it started, and a dropped copy is
+    # handled inside the fill, so the cursor — not the count — is the evidence.
+    assert {:ok, _} = Pipeline.tick(inst)
+    refute_receive {:delivered, _, _}, 200
+    assert WAL.get_cursor(inst, :dispatch) == second_env.seq
   end
 
   test "retries a failing sink until it succeeds" do

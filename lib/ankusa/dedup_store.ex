@@ -59,6 +59,13 @@ defmodule Ankusa.DedupStore do
 
   One call rather than a fetch and a put, so a store can make the decision
   atomically: a Raft-backed store must not need two round trips per record.
+
+  `{:error, reason}` is the third answer: a store whose ledger is not reachable
+  — a replicated one during a failover, typically — says so rather than
+  guessing. Guessing *deliver* would deliver the record without recording it,
+  and then the next copy of that event would have nothing to be compared
+  against: one unrecorded copy costs the guarantee for that event, not just for
+  that record. What to do about it is the caller's decision, not the store's.
   """
   @callback record(
               store(),
@@ -67,7 +74,7 @@ defmodule Ankusa.DedupStore do
               seq :: pos_integer(),
               committed_at :: integer(),
               ttl_ms :: pos_integer()
-            ) :: :deliver | :drop
+            ) :: :deliver | :drop | {:error, term()}
 
   @doc """
   Record a copy in `store`, dispatching to its implementation.
@@ -77,7 +84,7 @@ defmodule Ankusa.DedupStore do
   find the implementation behind the handle.
   """
   @spec record(store(), scope(), String.t(), pos_integer(), integer(), pos_integer()) ::
-          :deliver | :drop
+          :deliver | :drop | {:error, term()}
   def record(%mod{} = store, scope, key, seq, committed_at, ttl_ms) do
     mod.record(store, scope, key, seq, committed_at, ttl_ms)
   end

@@ -126,6 +126,13 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
+        "ankusa.dispatch.dedup_unavailable.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :dedup_unavailable],
+          tags: [:instance, :source_id]
+        )
+      ),
+      counter(
         "ankusa.load_shed.total",
         scoped(own,
           event_name: [:ankusa, :load_shed],

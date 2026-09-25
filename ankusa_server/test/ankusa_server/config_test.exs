@@ -214,6 +214,23 @@ defmodule AnkusaServer.ConfigTest do
            ]
   end
 
+  test "ANKUSA_DISPATCH_DEDUP_STORE overrides the file, like every other key" do
+    path =
+      tmp_config("""
+      dispatch: {dedup_store: ets}
+      wal:
+        type: ra
+        ra:
+          members: [ankusa_wal_default@wal-0]
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{"ANKUSA_DISPATCH_DEDUP_STORE" => "ra"}).config
+
+    assert {Ankusa.DedupStore.Ra, [members: [{:ankusa_wal_default, :"ankusa_wal_default@wal-0"}]]} =
+             config.dispatch.dedup_store
+  end
+
   test "dispatch.dedup_store ets is the in-process ledger" do
     path = tmp_config("dispatch: {dedup_store: ets}\n")
 

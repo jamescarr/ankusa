@@ -116,12 +116,20 @@ services:
 
   # Two workers, one lease each for dispatch and storage: one is active, the
   # other is a hot standby that takes over on failure.
+  # `dedup_store: ra` puts the idempotent receiver's ledger in the WAL
+  # cluster's replicated state, which is what this gate needs: it kills dispatch
+  # nodes, the in-process ledger dies with them, and the next copy of an event
+  # whose earlier copy was delivered would go out a second time — failing the
+  # sink's `duplicate_deliveries` check on a run that lost nothing. Replicated,
+  # the standby reads what the previous holder had seen and the guarantee holds
+  # across the kill.
   worker-0:
     <<: *ankusa-image
     command: ["/app/bin/ingest", "start"]
     environment:
       <<: *ankusa-env
       ANKUSA_ROLES: "dispatch,storage"
+      ANKUSA_DISPATCH_DEDUP_STORE: "ra"
       RELEASE_NODE: "ankusa@worker-0"
     volumes: ["worker-0-data:/data"]
   worker-1:
@@ -130,6 +138,7 @@ services:
     environment:
       <<: *ankusa-env
       ANKUSA_ROLES: "dispatch,storage"
+      ANKUSA_DISPATCH_DEDUP_STORE: "ra"
       RELEASE_NODE: "ankusa@worker-1"
     volumes: ["worker-1-data:/data"]
 

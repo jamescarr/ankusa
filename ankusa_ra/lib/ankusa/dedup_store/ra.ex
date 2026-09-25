@@ -38,17 +38,20 @@ defmodule Ankusa.DedupStore.Ra do
   ledger surviving the dispatcher; anything that can live with per-dispatcher
   memory should use the default.
 
-  ## A cluster that cannot answer delivers
+  ## A cluster that cannot answer says so
 
-  `Ankusa.DedupStore.record/6` has two answers, and "I could not record this" is
-  not one of them. A decision that never reached the cluster delivers the record
-  and logs: not recording can only cause a re-delivery, while *dropping* a
-  record whose earlier copy may never have been delivered would lose it.
+  This is the one store that can be *unavailable*: an in-process ledger always
+  answers. When the cluster cannot be reached inside `:timeout_ms`, `record/6`
+  returns `{:error, reason}` and dispatch leaves the record undecided — it stops
+  reading there and retries from that seq — rather than picking an answer.
+  Delivering without recording would be worse than a delay: the ledger would
+  have no entry for that copy, so the *next* copy of the same event would look
+  like a first one, and the guarantee would be gone for that event rather than
+  late for one record. What a stalled dispatcher costs is throughput; what a
+  guessed answer costs is correctness.
   """
 
   @behaviour Ankusa.DedupStore
-
-  require Logger
 
   alias Ankusa.WAL.Ra
 
@@ -81,13 +84,11 @@ defmodule Ankusa.DedupStore.Ra do
       {:ok, :drop} ->
         :drop
 
-      other ->
-        Logger.warning(
-          "ankusa: dedup ledger write failed (#{inspect(other)}); delivering " <>
-            "#{tenant}/#{source} rather than dropping it unrecorded"
-        )
+      {:error, reason} ->
+        {:error, reason}
 
-        :deliver
+      other ->
+        {:error, {:unexpected_reply, other}}
     end
   end
 

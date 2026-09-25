@@ -38,6 +38,7 @@ defmodule AnkusaExample.Ingest.Application do
       data_dir: env("DATA_DIR", "./data"),
       roles: Ankusa.Config.parse_roles!(env("ANKUSA_ROLES", "edge,dispatch,storage")),
       wal: wal(),
+      dispatch: dispatch(),
       storage: storage(),
       source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}}
     )
@@ -89,6 +90,35 @@ defmodule AnkusaExample.Ingest.Application do
   end
 
   defp ra_opts do
+    opts = [members: ra_members()]
+
+    # `WAL_RA_TIME_OFFSET_MS` shifts the machine's own view of the clock, which
+    # is how the chaos harness's `clock-skew` scenario makes a member's clock
+    # wrong for real: fencing decisions must not depend on it.
+    case env_int("WAL_RA_TIME_OFFSET_MS", 0) do
+      0 -> opts
+      offset -> Keyword.put(opts, :time_offset_ms, offset)
+    end
+  end
+
+  # `ANKUSA_DISPATCH_DEDUP_STORE=ra` keeps `Ankusa.Dispatch`'s idempotent
+  # receiver ledger in the WAL cluster's replicated state instead of in the
+  # dispatcher process, so it survives losing the node that held it. The chaos
+  # harness sets it: it kills dispatchers, an in-process ledger dies with them,
+  # and a copy of an event whose earlier copy had already been delivered goes
+  # out a second time on a run that lost nothing — which is exactly what the
+  # gate's `duplicate_deliveries` check catches. The members are the WAL
+  # cluster's: the ledger is applied by that cluster's machine.
+  defp dispatch do
+    case env("ANKUSA_DISPATCH_DEDUP_STORE", "ets") do
+      "ra" -> [dedup_store: {Ankusa.DedupStore.Ra, members: ra_members()}]
+      _ -> []
+    end
+  end
+
+  # The members this node talks to, as `{cluster, node}`. Shared by the WAL and
+  # the dispatch ledger, because there is one cluster and it is the WAL's.
+  defp ra_members do
     cluster = :ankusa_wal_default
 
     members =
@@ -100,15 +130,7 @@ defmodule AnkusaExample.Ingest.Application do
 
     # A single node with no members configured is the laptop shape: one member,
     # the node itself.
-    opts = [members: if(members == [], do: [{cluster, node()}], else: members)]
-
-    # `WAL_RA_TIME_OFFSET_MS` shifts the machine's own view of the clock, which
-    # is how the chaos harness's `clock-skew` scenario makes a member's clock
-    # wrong for real: fencing decisions must not depend on it.
-    case env_int("WAL_RA_TIME_OFFSET_MS", 0) do
-      0 -> opts
-      offset -> Keyword.put(opts, :time_offset_ms, offset)
-    end
+    if members == [], do: [{cluster, node()}], else: members
   end
 
   # Public: the release task (`AnkusaExample.Ingest.Release.migrate/0`) reuses

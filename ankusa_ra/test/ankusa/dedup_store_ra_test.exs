@@ -82,12 +82,14 @@ defmodule Ankusa.DedupStore.RaTest do
       assert :drop = DedupStore.record(store, {"t2", "stripe"}, "evt_4", 2, now + 1, @ttl_ms)
     end
 
-    test "a nil-or-missing cluster delivers rather than dropping", %{} do
-      # The documented fallback: a decision that never reached the cluster is
-      # not a decision to drop. Short timeout, nobody home.
+    test "an unreachable cluster says so instead of guessing", %{} do
+      # Neither `:deliver` nor `:drop`: an unrecorded delivery would leave the
+      # *next* copy of this event nothing to be compared against, and dropping
+      # it would risk losing a first delivery. Dispatch leaves the record
+      # undecided and comes back to it. Short timeout, nobody home.
       store = DedupStore.Ra.new(members: [{:ankusa_wal_nowhere, :nowhere@nohost}], timeout_ms: 50)
 
-      assert :deliver = DedupStore.record(store, scope(), "evt_5", 1, 0, @ttl_ms)
+      assert {:error, _reason} = DedupStore.record(store, scope(), "evt_5", 1, 0, @ttl_ms)
     end
   end
 
@@ -132,8 +134,8 @@ defmodule Ankusa.DedupStore.RaTest do
       first = envelope("evt_7", 1)
       copy = envelope("evt_7", 2)
 
-      refute Ankusa.Dispatch.Receiver.duplicate?(receiver, source, first)
-      assert Ankusa.Dispatch.Receiver.duplicate?(receiver, source, copy)
+      assert {:ok, false} = Ankusa.Dispatch.Receiver.decide(receiver, source, first)
+      assert {:ok, true} = Ankusa.Dispatch.Receiver.decide(receiver, source, copy)
     end
   end
 

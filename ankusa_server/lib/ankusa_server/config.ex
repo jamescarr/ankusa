@@ -228,6 +228,7 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
+    {"ANKUSA_DISPATCH_DEDUP_STORE", ["dispatch", "dedup_store"]},
     {"ANKUSA_WAL_POSTGRES_URL", ["wal", "postgres", "url"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},

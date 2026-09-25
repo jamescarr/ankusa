@@ -22,7 +22,8 @@ defmodule Mix.Tasks.Loadgen.Verify do
           acked: :string,
           database_url: :string,
           timeout: :integer,
-          report: :string
+          report: :string,
+          dedup_store: :string
         ]
       )
 
@@ -40,6 +41,16 @@ defmodule Mix.Tasks.Loadgen.Verify do
 
     timeout_s = Keyword.get(parsed, :timeout, 300)
     report_path = Keyword.get(parsed, :report, "verify-report.json")
+    dedup_store = dedup_store!(Keyword.get(parsed, :dedup_store, "ets"))
+
+    # "One delivery per event" is the receiver's guarantee, and the receiver
+    # keeps it only as far as its ledger lives. `Ankusa.DedupStore.Ra` puts the
+    # ledger in replicated state, so a dispatcher failover keeps it and a
+    # duplicate is a failure. The in-process default dies with its dispatcher,
+    # so a run that kills one — which is exactly what the chaos and e2e gates do
+    # — re-delivers copies legitimately, and they are reported rather than
+    # failed.
+    duplicates_fail? = dedup_store == "ra"
 
     # The sink is still being written to while this runs — the consumer is
     # upserting the very rows being polled for — so the pool must tolerate a
@@ -102,6 +113,10 @@ defmodule Mix.Tasks.Loadgen.Verify do
     report = %{
       acked: length(acked_ids),
       processed: map_size(found_by_id),
+      # What this run *assumed* about the deployment, not what it can see: the
+      # tool has no way to read `dispatch.dedup_store` out of a running node, so
+      # the name says whose claim it is.
+      dedup_store_assumed: dedup_store,
       missing: Enum.take(missing_ids, 10),
       deduplicated: length(deduplicated_ids),
       duplicate_deliveries: duplicate_deliveries,
@@ -113,9 +128,10 @@ defmodule Mix.Tasks.Loadgen.Verify do
 
     File.write!(report_path, JSON.encode!(report))
 
-    print_report(report, length(missing_ids))
+    print_report(report, length(missing_ids), duplicates_fail?)
 
-    if length(missing_ids) > 0 or sha_mismatches > 0 or duplicate_deliveries > 0 do
+    if length(missing_ids) > 0 or sha_mismatches > 0 or
+         (duplicates_fail? and duplicate_deliveries > 0) do
       Mix.raise(
         "loadgen.verify: #{length(missing_ids)} missing, #{sha_mismatches} sha mismatches, " <>
           "#{duplicate_deliveries} events delivered more than once"
@@ -123,6 +139,16 @@ defmodule Mix.Tasks.Loadgen.Verify do
     end
 
     :ok
+  end
+
+  defp dedup_store!(value) do
+    case String.downcase(value) do
+      store when store in ["ets", "ra"] ->
+        store
+
+      other ->
+        Mix.raise("loadgen.verify: --dedup-store expects ets or ra, got #{inspect(other)}")
+    end
   end
 
   defp parse_database_url(url) do
@@ -242,11 +268,20 @@ defmodule Mix.Tasks.Loadgen.Verify do
     count
   end
 
-  defp print_report(report, missing_count) do
+  defp print_report(report, missing_count, duplicates_fail?) do
     status =
-      if missing_count > 0 or report.sha_mismatches > 0 or report.duplicate_deliveries > 0,
-        do: "FAIL",
-        else: "PASS"
+      if missing_count > 0 or report.sha_mismatches > 0 or
+           (duplicates_fail? and report.duplicate_deliveries > 0),
+         do: "FAIL",
+         else: "PASS"
+
+    duplicates =
+      if duplicates_fail? do
+        "events delivered more than once"
+      else
+        "events delivered more than once (expected: the in-process ledger\n" <>
+          "                        dies with its dispatcher)"
+      end
 
     IO.puts("""
 
@@ -256,7 +291,8 @@ defmodule Mix.Tasks.Loadgen.Verify do
     processed            #{report.processed}
     missing              #{missing_count} (showing up to 10: #{inspect(report.missing)})
     deduplicated         #{report.deduplicated} (acked copies dropped at dispatch)
-    duplicate_deliveries #{report.duplicate_deliveries} (events delivered more than once)
+    duplicate_deliveries #{report.duplicate_deliveries} (#{duplicates})
+    dedup_store assumed  #{report.dedup_store_assumed}
     sha_mismatches       #{report.sha_mismatches}
     extra_deliveries     #{report.extra_deliveries}
     drain_s              #{report.drain_s}
