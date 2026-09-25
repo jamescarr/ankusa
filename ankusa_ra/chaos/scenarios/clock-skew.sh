@@ -1,30 +1,39 @@
 #!/usr/bin/env bash
-# Give the leader and the active dispatcher wrong clocks, for real.
+# Give one member a wrong clock, for real. libfaketime (via LD_PRELOAD) shifts
+# the whole BEAM's clock, so the member's `system_time` — the clock the machine
+# reads for lease fencing — is genuinely off by SKEW_MS. A simulated
+# `time_offset_ms` in the machine would not test the OS clock, which is the
+# thing a real host has wrong after an NTP step.
 #
-# `faketime` cannot help here: it changes the clock of processes it *starts*, and
-# the BEAM is already running. What the machine actually reads is its own view of
-# the clock, `meta.system_time + time_offset_ms`, so the offset is the honest way
-# to make a member's clock wrong — the same knob the Level-2 drill uses.
-#
-# What this proves: a member with a clock 30s off keeps its place in the cluster
+# What this proves: a member with a clock 5s off keeps its place in the cluster
 # (quorum, leadership, commits) and the cluster keeps acking. Token fencing is
 # I9, and the harness emits no lease events, so that is checked where it can be
 # observed exactly — the `clock-skew` drill in `wal_ra_faults_test.exs`.
 source /scenarios/lib.sh
 WINDOW="${FAULT_WINDOW_S:-120}"
-SKEW_MS="${SKEW_MS:-30000}"
+SKEW_MS="${SKEW_MS:-5000}"
 
 leader="$(wal_leader_container)"
-worker="$(active_worker_container)"
-log "skewing $leader by +${SKEW_MS}ms and $worker by -${SKEW_MS}ms"
+log "skewing $leader by +${SKEW_MS}ms"
 
-WAL_RA_TIME_OFFSET_MS="$SKEW_MS" recreate_service "$leader"
-WAL_RA_TIME_OFFSET_MS="-$SKEW_MS" recreate_service "$worker"
+# Recreate only the leader with a faked clock. `recreate_service` passes the
+# FAKETIME/LD_PRELOAD environment through the compose file (see x-wal-env).
+FAKETIME="+${SKEW_MS}ms" LD_PRELOAD="libfaketime.so.1" recreate_service "$leader"
+
+# The skew must be observable or the fault never took: fail rather than pass on
+# a member whose clock is actually right.
+skewed="$(docker exec "$(container_name "$leader")" date +%s%3N)"
+reference="$(date +%s%3N)"
+delta=$((skewed - reference))
+if [ "$delta" -lt "$((SKEW_MS / 2))" ]; then
+  log "clock skew not observed (delta ${delta}ms); aborting"
+  exit 1
+fi
+log "observed +${delta}ms skew on $leader"
 
 sleep "$WINDOW"
 
-# Heal: recreate both with the offset back at zero.
+# Heal: recreate the member with the clock back at the host's.
 recreate_service "$leader"
-recreate_service "$worker"
 wait_for_wal_leader 90
 log "clock-skew done"

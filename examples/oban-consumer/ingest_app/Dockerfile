@@ -25,6 +25,12 @@ RUN mix deps.get --only prod && mix release ingest
 
 FROM elixir:1.20.4-alpine
 
+# libfaketime is only used by the chaos harness's clock-skew scenario, which
+# shifts a member's *OS* clock via LD_PRELOAD so its `system_time` — the clock
+# lease fencing reads — is genuinely off. Installed everywhere so the image is
+# the same for edge, worker and wal.
+RUN apk add --no-cache libfaketime
+
 COPY --from=build /repo/examples/oban-consumer/ingest_app/_build/prod/rel/ingest /app
 
 # Distribution is off by default (a Postgres-WAL fleet needs no Erlang

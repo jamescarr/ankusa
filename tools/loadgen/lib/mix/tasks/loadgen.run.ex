@@ -22,7 +22,8 @@ defmodule Mix.Tasks.Loadgen.Run do
           rate: :integer,
           dup_ratio: :float,
           nil_key_ratio: :float,
-          body_bytes: :integer,
+          body_bytes: :string,
+          big_ratio: :float,
           out: :string,
           report: :string,
           events: :string
@@ -40,7 +41,9 @@ defmodule Mix.Tasks.Loadgen.Run do
     rate = Keyword.get(parsed, :rate)
     dup_ratio = Keyword.get(parsed, :dup_ratio, 0.05)
     nil_key_ratio = Keyword.get(parsed, :nil_key_ratio, 0.2)
-    body_bytes = Keyword.get(parsed, :body_bytes, 512)
+    body_bytes = Keyword.get(parsed, :body_bytes, "512")
+    {body_min, body_max} = parse_body_bytes(body_bytes)
+    big_ratio = Keyword.get(parsed, :big_ratio, 0.0)
     out_path = Keyword.get(parsed, :out, "acked.csv")
     report_path = Keyword.get(parsed, :report, "loadgen-report.json")
     events_path = Keyword.get(parsed, :events)
@@ -58,7 +61,9 @@ defmodule Mix.Tasks.Loadgen.Run do
       rate: rate,
       dup_ratio: dup_ratio,
       nil_key_ratio: nil_key_ratio,
-      body_bytes: body_bytes,
+      body_min: body_min,
+      body_max: body_max,
+      big_ratio: big_ratio,
       # Per-request edge events in `Ankusa.WAL.Checker`'s shape. The aggregate
       # report cannot answer "did any edge ack while there was no quorum?" —
       # only a per-request status and timing can.
@@ -180,7 +185,15 @@ defmodule Mix.Tasks.Loadgen.Run do
   end
 
   defp perform_request(acc, opts, intended_start_us) do
-    {kind, body} = build_body(acc, opts.dup_ratio, opts.nil_key_ratio, opts.body_bytes)
+    {kind, body} =
+      build_body(
+        acc,
+        opts.dup_ratio,
+        opts.nil_key_ratio,
+        opts.body_min,
+        opts.body_max,
+        opts.big_ratio
+      )
 
     t_start = System.monotonic_time(:microsecond)
     started_ms = System.system_time(:millisecond)
@@ -232,22 +245,49 @@ defmodule Mix.Tasks.Loadgen.Run do
   # into a dedup key), a fifth with *no* key at all — which is a different code
   # path (`nil` never dedups) and the one a provider that sends no event id takes
   # — and a tenth a resend of an earlier body, which must be absorbed.
-  defp build_body(acc, dup_ratio, nil_key_ratio, body_bytes) do
+  defp build_body(acc, dup_ratio, nil_key_ratio, body_min, body_max, big_ratio) do
     cond do
       :rand.uniform() < dup_ratio and acc.bodies != [] ->
         {:dup, Enum.random(acc.bodies)}
 
       :rand.uniform() < nil_key_ratio ->
-        body = JSON.encode!(%{"n" => acc.k, "pad" => String.duplicate("x", body_bytes)})
+        body =
+          JSON.encode!(%{
+            "n" => acc.k,
+            "pad" => String.duplicate("x", body_size(body_min, body_max, big_ratio))
+          })
+
         {:nil_key, body}
 
       true ->
         id = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
 
         body =
-          JSON.encode!(%{"id" => id, "n" => acc.k, "pad" => String.duplicate("x", body_bytes)})
+          JSON.encode!(%{
+            "id" => id,
+            "n" => acc.k,
+            "pad" => String.duplicate("x", body_size(body_min, body_max, big_ratio))
+          })
 
         {:fresh, body}
+    end
+  end
+
+  # A fraction `big_ratio` of fresh bodies carry the upper end of the body-byte
+  # range; the rest carry the lower end. A single `--body-bytes N` is a range
+  # of one, so behaviour is unchanged without `--big-ratio`.
+  defp body_size(body_min, body_max, big_ratio) do
+    if big_ratio > 0 and :rand.uniform() < big_ratio, do: body_max, else: body_min
+  end
+
+  defp parse_body_bytes(spec) do
+    case String.split(spec, "..") do
+      [single] ->
+        n = String.to_integer(single)
+        {n, n}
+
+      [min, max] ->
+        {String.to_integer(min), String.to_integer(max)}
     end
   end
 

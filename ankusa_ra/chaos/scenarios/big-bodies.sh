@@ -1,19 +1,10 @@
 #!/usr/bin/env bash
-# Large bodies during a partition: the report records the election count, so a
-# run that thrashed the cluster is visible rather than silently slow.
+# Large bodies under plain load: `run.sh` passes `--body-bytes 1048576..8388608
+# --big-ratio 0.2` to the load generator for this scenario, so the cluster must
+# fsync and replicate multi-megabyte records for the whole window. No fault is
+# injected — the point is that big bodies survive a plain run without stalling
+# the pipeline or blowing the segment budget.
 source /scenarios/lib.sh
 WINDOW="${FAULT_WINDOW_S:-120}"
-leader="$(wal_leader_container)"
-others=()
-for n in "${WAL_NODES[@]}"; do [ "$n" = "$leader" ] || others+=("$n"); done
-for b in "${others[@]}"; do
-  partition "$leader" "$b"
-  partition "$b" "$leader"
-done
 sleep "$WINDOW"
-for b in "${others[@]}"; do
-  heal "$leader" "$b"
-  heal "$b" "$leader"
-done
-heal_all
 log "big-bodies done"

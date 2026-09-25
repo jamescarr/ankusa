@@ -20,12 +20,10 @@ docker exec "$(container_name wal-0)" /app/bin/ingest rpc \
   "IO.inspect(:ra.remove_member({:ankusa_wal_default, node()}, {:ankusa_wal_default, :\"ankusa@${victim}\"}, 30000))" \
   >/dev/null 2>&1 || true
 
-# Take the container and its volume away, then let compose bring it back: a new
-# container gets a new volume, and having never seen the log it must be caught
-# up by a snapshot from its peers.
+# Take the container away, then let compose bring it back. The data dir is a
+# tmpfs (see docker-compose.yml), so removing the container wipes it: the
+# newcomer has never seen the log and must be caught up by a snapshot.
 compose_ref rm -sf "$victim" >/dev/null 2>&1 || true
-docker volume rm "${PROJECT}_${victim}-data" >/dev/null 2>&1 ||
-  log "warning: could not remove ${PROJECT}_${victim}-data (still in use?)"
 
 compose_ref up -d --no-deps "$victim" >/dev/null 2>&1 || log "warning: $victim did not come back"
 

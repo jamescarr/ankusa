@@ -20,8 +20,10 @@ x-ankusa-env: &ankusa-env
   # The compactor ticks hourly, not every second: with dispatch keeping up in
   # real time, a 1s tick reclaims every record the run just wrote, and the final
   # scan has nothing to check the acks against. (It is correct behaviour — the
-  # log is not an archive — but it makes I1 unreadable.)
-  ANKUSA_STORAGE_INTERVAL_MS: "3600000"
+  # log is not an archive — but it makes I1 unreadable.) A few scenarios (see
+  # run.sh) override this to 1s because they kill the compactor mid-write and
+  # need segments to actually exist.
+  ANKUSA_STORAGE_INTERVAL_MS: "${ANKUSA_STORAGE_INTERVAL_MS:-3600000}"
   RELEASE_DISTRIBUTION: "sname"
   RELEASE_COOKIE: "chaos-cookie"
   ANKUSA_STORAGE_TYPE: "s3"
@@ -38,6 +40,10 @@ x-wal-env: &wal-env
   WAL: "ra"
   WAL_RA_MEMBERS: "${WAL_RA_MEMBERS:-ankusa@wal-0,ankusa@wal-1,ankusa@wal-2}"
   WAL_RA_TIME_OFFSET_MS: "${WAL_RA_TIME_OFFSET_MS:-0}"
+  # The clock-skew scenario shifts one member's OS clock via libfaketime; every
+  # other run leaves both empty so the clock is the host's.
+  FAKETIME: "${FAKETIME:-}"
+  LD_PRELOAD: "${LD_PRELOAD:-}"
   RELEASE_DISTRIBUTION: "sname"
   RELEASE_COOKIE: "chaos-cookie"
 
@@ -98,21 +104,24 @@ services:
     environment:
       <<: *wal-env
       RELEASE_NODE: "ankusa@wal-0"
-    volumes: ["wal-0-data:/data"]
+    tmpfs: ["/data:size=512m"]
+    restart: "no"
   wal-1:
     <<: *ankusa-image
     command: ["/app/bin/ingest", "start"]
     environment:
       <<: *wal-env
       RELEASE_NODE: "ankusa@wal-1"
-    volumes: ["wal-1-data:/data"]
+    tmpfs: ["/data:size=512m"]
+    restart: "no"
   wal-2:
     <<: *ankusa-image
     command: ["/app/bin/ingest", "start"]
     environment:
       <<: *wal-env
       RELEASE_NODE: "ankusa@wal-2"
-    volumes: ["wal-2-data:/data"]
+    tmpfs: ["/data:size=512m"]
+    restart: "no"
 
   # Two workers, one lease each for dispatch and storage: one is active, the
   # other is a hot standby that takes over on failure.
@@ -132,6 +141,7 @@ services:
       ANKUSA_DISPATCH_DEDUP_STORE: "ra"
       RELEASE_NODE: "ankusa@worker-0"
     volumes: ["worker-0-data:/data"]
+    restart: "no"
   worker-1:
     <<: *ankusa-image
     command: ["/app/bin/ingest", "start"]
@@ -141,6 +151,7 @@ services:
       ANKUSA_DISPATCH_DEDUP_STORE: "ra"
       RELEASE_NODE: "ankusa@worker-1"
     volumes: ["worker-1-data:/data"]
+    restart: "no"
 
   edge-1:
     <<: *ankusa-image
@@ -196,9 +207,6 @@ services:
       PGDATABASE: chaos
 
 volumes:
-  wal-0-data:
-  wal-1-data:
-  wal-2-data:
   worker-0-data:
   worker-1-data:
   edge-data:
