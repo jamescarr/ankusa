@@ -186,14 +186,15 @@ defmodule Ankusa.Dispatch.Pipeline do
     case try_acquire(state) do
       {:ok, state} ->
         # A new holder never resumes from a stale in-memory cursor: re-read the
-        # durable one, which is leader-consistent.
+        # durable one, which is leader-consistent. The poll loop is already
+        # running (from `init`), so this must not schedule a second one.
         case safe_get_cursor(state.instance, :dispatch) do
-          {:ok, cursor} -> {:noreply, schedule(%{state | cursor: cursor, read_seq: cursor})}
-          :error -> {:noreply, schedule(step_down(state))}
+          {:ok, cursor} -> {:noreply, %{state | cursor: cursor, read_seq: cursor}}
+          :error -> {:noreply, step_down(state)}
         end
 
       {:standby, state} ->
-        {:noreply, schedule(standby(state))}
+        {:noreply, standby(state)}
     end
   end
 
@@ -715,12 +716,14 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Try to take the dispatch lease. `{:ok, state}` means this node is active;
   # `{:standby, state}` means another node holds it and this one only waits.
   defp try_acquire(state) do
+    sent = mono_ms()
+
     try do
       case WAL.acquire_lease(state.instance, :dispatch, state.holder, state.ttl_ms) do
         {:ok, lease} ->
           lease = Map.put(lease, :instance, state.instance)
           LeaseHelpers.emit(:acquired, lease)
-          {:ok, arm(%{state | lease: lease})}
+          {:ok, arm(%{state | lease: lease}, sent)}
 
         {:error, {:held, _holder}} ->
           {:standby, %{state | lease: nil}}
@@ -733,30 +736,32 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp renew(state) do
+    sent = mono_ms()
+
     try do
       case WAL.renew_lease(state.instance, state.lease) do
         {:ok, lease} ->
           lease = Map.put(lease, :instance, state.instance)
           LeaseHelpers.emit(:renewed, lease)
-          arm(%{state | lease: lease})
+          arm(%{state | lease: lease}, sent)
 
         {:error, :lost} ->
-          LeaseHelpers.emit(:lost, state.lease)
           step_down(state)
       end
     catch
       :exit, _ ->
-        LeaseHelpers.emit(:lost, state.lease)
         step_down(state)
     end
   end
 
-  # Timestamps are monotonic, so a wall-clock jump cannot extend a lease.
-  defp arm(state) do
+  # Timestamps are monotonic, so a wall-clock jump cannot extend a lease. The
+  # deadline is measured from when the acquire/renew was *sent*, not when its
+  # reply arrived, so a slow call cannot silently shorten the lease.
+  defp arm(state, sent) do
     %{
       state
-      | lease_deadline: mono_ms() + state.ttl_ms - state.safety_margin_ms,
-        lease_renew_at: mono_ms() + state.renew_ms
+      | lease_deadline: sent + state.ttl_ms - state.safety_margin_ms,
+        lease_renew_at: sent + state.renew_ms
     }
   end
 
@@ -770,6 +775,12 @@ defmodule Ankusa.Dispatch.Pipeline do
   # complete or fail on their own and their result messages are ignored, which
   # is at-least-once (a redelivery, never a loss).
   defp step_down(state) do
+    # Report the loss once, then answer every waiter: nothing was durably
+    # committed by this step-down.
+    if state.lease != nil, do: LeaseHelpers.emit(:lost, state.lease)
+
+    Enum.each(state.waiters, fn {from, _c0} -> GenServer.reply(from, {:ok, 0}) end)
+
     Enum.each(state.running, fn {ref, _job} -> Process.demonitor(ref, [:flush]) end)
 
     state
@@ -783,7 +794,8 @@ defmodule Ankusa.Dispatch.Pipeline do
       running: %{},
       staged: :queue.new(),
       packing: %{},
-      window_full?: false
+      window_full?: false,
+      waiters: []
     })
     |> standby()
   end
