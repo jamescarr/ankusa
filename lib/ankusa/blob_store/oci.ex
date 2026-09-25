@@ -104,6 +104,10 @@ defmodule Ankusa.BlobStore.OCI do
 
   @impl true
   def list(_instance, prefix, opts) do
+    list_page(prefix, opts, nil, [])
+  end
+
+  defp list_page(prefix, opts, start, acc) do
     url =
       endpoint(opts) <>
         "/n/" <>
@@ -111,20 +115,33 @@ defmodule Ankusa.BlobStore.OCI do
         "/b/" <>
         bucket(opts) <>
         "/o" <>
-        "?" <> URI.encode_query([{"prefix", prefix}], :rfc3986)
+        "?" <> URI.encode_query([{"prefix", prefix}] ++ start_query(start), :rfc3986)
 
     case request(opts, :get, url, nil, []) do
       {:ok, body} ->
         case JSON.decode(body) do
-          {:ok, %{"objects" => objects}} -> objects |> Enum.map(& &1["name"]) |> Enum.sort()
-          {:ok, _no_objects} -> []
-          {:error, _reason} -> []
+          {:ok, %{"objects" => objects} = page} ->
+            acc = acc ++ Enum.map(objects, & &1["name"])
+
+            case page["nextStartWith"] do
+              nil -> Enum.sort(acc)
+              token -> list_page(prefix, opts, token, acc)
+            end
+
+          {:ok, _no_objects} ->
+            Enum.sort(acc)
+
+          {:error, _reason} ->
+            Enum.sort(acc)
         end
 
       {:error, _reason} ->
-        []
+        Enum.sort(acc)
     end
   end
+
+  defp start_query(nil), do: []
+  defp start_query(start), do: [{"start", start}]
 
   # ── requests ──────────────────────────────────────────────────────────────
 

@@ -22,6 +22,9 @@ defmodule Ankusa.BlobStore do
               opts :: keyword()
             ) :: {:ok, binary()} | {:error, term()}
   @callback delete(instance :: atom(), key :: String.t(), opts :: keyword()) :: :ok
+  # Returns *all* keys under the prefix, not one page: the caller (index repair,
+  # the claim-check sweeper) needs the complete set, and pagination is the
+  # adapter's business.
   @callback list(instance :: atom(), prefix :: String.t(), opts :: keyword()) :: [String.t()]
 
   defp resolve(instance) do

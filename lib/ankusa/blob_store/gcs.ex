@@ -72,20 +72,38 @@ defmodule Ankusa.BlobStore.GCS do
 
   @impl true
   def list(_instance, prefix, opts) do
-    url = media_url(opts, "o", [{"prefix", prefix}])
+    list_page(prefix, opts, nil, [])
+  end
+
+  defp list_page(prefix, opts, page_token, acc) do
+    query = [{"prefix", prefix}] ++ page_query(page_token)
+    url = media_url(opts, "o", query)
 
     case request(opts, :get, url, nil, [], nil) do
       {:ok, body} ->
         case JSON.decode(body) do
-          {:ok, %{"items" => items}} -> items |> Enum.map(& &1["name"]) |> Enum.sort()
-          {:ok, _no_items} -> []
-          {:error, _reason} -> []
+          {:ok, %{"items" => items} = page} ->
+            acc = acc ++ Enum.map(items, & &1["name"])
+
+            case page["nextPageToken"] do
+              nil -> Enum.sort(acc)
+              token -> list_page(prefix, opts, token, acc)
+            end
+
+          {:ok, _no_items} ->
+            Enum.sort(acc)
+
+          {:error, _reason} ->
+            Enum.sort(acc)
         end
 
       {:error, _reason} ->
-        []
+        Enum.sort(acc)
     end
   end
+
+  defp page_query(nil), do: []
+  defp page_query(token), do: [{"pageToken", token}]
 
   # ── internals ──────────────────────────────────────────────────────────
 

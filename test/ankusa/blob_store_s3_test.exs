@@ -50,4 +50,16 @@ defmodule Ankusa.BlobStore.S3Test do
     assert {:error, :not_found} = S3.get(:i, key, @opts)
     refute key in S3.list(:i, "seg/it-listed", @opts)
   end
+
+  test "list returns every key, not one ListObjectsV2 page" do
+    prefix = "seg/it-page-#{System.unique_integer([:positive])}"
+    keys = for i <- 1..1001, do: "#{prefix}/#{String.pad_leading(to_string(i), 4, "0")}.seg"
+
+    for k <- keys, do: S3.put(:i, k, "x", @opts)
+
+    listed = S3.list(:i, prefix, @opts)
+    assert Enum.sort(listed) == Enum.sort(keys)
+
+    for k <- keys, do: S3.delete(:i, k, @opts)
+  end
 end

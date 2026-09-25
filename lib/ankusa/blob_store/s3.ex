@@ -82,13 +82,26 @@ defmodule Ankusa.BlobStore.S3 do
 
   @impl true
   def list(_instance, prefix, opts) do
+    list_page(prefix, opts, nil, [])
+  end
+
+  defp list_page(prefix, opts, token, acc) do
     url =
       endpoint(opts) <>
-        "/" <> bucket(opts) <> "?" <> URI.encode_query(list_query(prefix), :rfc3986)
+        "/" <> bucket(opts) <> "?" <> URI.encode_query(list_query(prefix, token), :rfc3986)
 
     case signed_request(opts, :get, url, nil, []) do
-      {:ok, body} -> parse_list_keys(body)
-      {:error, _reason} -> []
+      {:ok, body} ->
+        {keys, next} = parse_list_page(body)
+        acc = acc ++ keys
+
+        case next do
+          nil -> acc
+          token -> list_page(prefix, opts, token, acc)
+        end
+
+      {:error, _reason} ->
+        acc
     end
   end
 
@@ -155,7 +168,10 @@ defmodule Ankusa.BlobStore.S3 do
     |> Enum.map_join("/", &URI.encode(&1, unreserved))
   end
 
-  defp list_query(prefix), do: [{"list-type", "2"}, {"prefix", prefix}]
+  defp list_query(prefix, nil), do: [{"list-type", "2"}, {"prefix", prefix}]
+
+  defp list_query(prefix, token),
+    do: [{"list-type", "2"}, {"prefix", prefix}, {"continuation-token", token}]
 
   defp authority(url) do
     %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
@@ -184,14 +200,29 @@ defmodule Ankusa.BlobStore.S3 do
   # document declares, so codepoints above 127 read as illegal characters and a
   # listing containing one non-ASCII key would come back empty. Bytes that are not
   # valid UTF-8 in the first place exit the same way.
-  defp parse_list_keys(xml_body) do
+  defp parse_list_page(xml_body) do
     {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
 
-    ~c"//Contents/Key/text()"
-    |> :xmerl_xpath.string(doc)
-    |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
-    |> Enum.sort()
+    keys =
+      ~c"//Contents/Key/text()"
+      |> :xmerl_xpath.string(doc)
+      |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
+      |> Enum.sort()
+
+    truncated? =
+      case :xmerl_xpath.string(~c"//IsTruncated/text()", doc) do
+        [{:xmlText, _p, _pos, _lang, "true", _t}] -> true
+        _ -> false
+      end
+
+    next =
+      case :xmerl_xpath.string(~c"//NextContinuationToken/text()", doc) do
+        [{:xmlText, _p, _pos, _lang, value, _t}] -> List.to_string(value)
+        _ -> nil
+      end
+
+    {keys, if(truncated?, do: next, else: nil)}
   catch
-    :exit, _not_xml -> []
+    :exit, _not_xml -> {[], nil}
   end
 end
