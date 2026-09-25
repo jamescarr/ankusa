@@ -164,25 +164,36 @@ defmodule Ankusa.Storage.Compactor do
   # ── lease ─────────────────────────────────────────────────────────────────
 
   defp try_acquire(state) do
-    case Ankusa.WAL.acquire_lease(state.instance, :storage, state.holder, state.ttl_ms) do
-      {:ok, lease} ->
-        lease = Map.put(lease, :instance, state.instance)
-        LeaseHelpers.emit(:acquired, lease)
-        {:ok, arm(%{state | lease: lease})}
+    try do
+      case Ankusa.WAL.acquire_lease(state.instance, :storage, state.holder, state.ttl_ms) do
+        {:ok, lease} ->
+          lease = Map.put(lease, :instance, state.instance)
+          LeaseHelpers.emit(:acquired, lease)
+          {:ok, arm(%{state | lease: lease})}
 
-      {:error, {:held, _holder}} ->
-        {:standby, %{state | lease: nil}}
+        {:error, {:held, _holder}} ->
+          {:standby, %{state | lease: nil}}
+      end
+    catch
+      # The WAL is unreachable: same as "someone else holds the lease".
+      :exit, _ -> {:standby, %{state | lease: nil}}
     end
   end
 
   defp renew(state) do
-    case Ankusa.WAL.renew_lease(state.instance, state.lease) do
-      {:ok, lease} ->
-        lease = Map.put(lease, :instance, state.instance)
-        LeaseHelpers.emit(:renewed, lease)
-        arm(%{state | lease: lease})
+    try do
+      case Ankusa.WAL.renew_lease(state.instance, state.lease) do
+        {:ok, lease} ->
+          lease = Map.put(lease, :instance, state.instance)
+          LeaseHelpers.emit(:renewed, lease)
+          arm(%{state | lease: lease})
 
-      {:error, :lost} ->
+        {:error, :lost} ->
+          LeaseHelpers.emit(:lost, state.lease)
+          step_down(state)
+      end
+    catch
+      :exit, _ ->
         LeaseHelpers.emit(:lost, state.lease)
         step_down(state)
     end
@@ -205,9 +216,23 @@ defmodule Ankusa.Storage.Compactor do
   # durable one (leader-consistent), then fold the segments written while this
   # node was a standby.
   defp activate(state) do
-    cursor = Ankusa.WAL.get_cursor(state.instance, :compactor)
-    Index.repair(state.config)
-    %{state | cursor: cursor}
+    case safe_get_cursor(state.instance, :compactor) do
+      {:ok, cursor} ->
+        Index.repair(state.config)
+        %{state | cursor: cursor}
+
+      :error ->
+        step_down(state)
+    end
+  end
+
+  defp safe_get_cursor(instance, name) do
+    try do
+      {:ok, Ankusa.WAL.get_cursor(instance, name)}
+    catch
+      :exit, _ -> :error
+      :error, _ -> :error
+    end
   end
 
   defp step_down(state) do
@@ -339,35 +364,42 @@ defmodule Ankusa.Storage.Compactor do
     :ok = Index.append(config, rows)
     :ok = Index.put_hwm(config, key)
 
-    case Ankusa.WAL.put_cursor(instance, :compactor, last_seq, state.lease.token) do
-      :ok ->
-        # never truncate past what dispatch has consumed — at-least-once
-        dispatch_seq = Ankusa.WAL.get_cursor(instance, :dispatch)
+    try do
+      case Ankusa.WAL.put_cursor(instance, :compactor, last_seq, state.lease.token) do
+        :ok ->
+          # never truncate past what dispatch has consumed — at-least-once
+          dispatch_seq = Ankusa.WAL.get_cursor(instance, :dispatch)
 
-        case Ankusa.WAL.truncate_through(
-               instance,
-               min(last_seq, dispatch_seq),
-               state.lease.token
-             ) do
-          :ok ->
-            Ankusa.Telemetry.emit(
-              [:compact, :stop],
-              %{
-                records: length(entries),
-                bytes: byte_size(segment),
-                duration: System.monotonic_time() - started
-              },
-              %{instance: instance}
-            )
+          case Ankusa.WAL.truncate_through(
+                 instance,
+                 min(last_seq, dispatch_seq),
+                 state.lease.token
+               ) do
+            :ok ->
+              Ankusa.Telemetry.emit(
+                [:compact, :stop],
+                %{
+                  records: length(entries),
+                  bytes: byte_size(segment),
+                  duration: System.monotonic_time() - started
+                },
+                %{instance: instance}
+              )
 
-            :ok
+              :ok
 
-          {:error, :fenced} ->
-            :fenced
-        end
+            {:error, :fenced} ->
+              :fenced
+          end
 
-      {:error, :fenced} ->
-        :fenced
+        {:error, :fenced} ->
+          :fenced
+      end
+    catch
+      # The WAL went away mid-compaction: same as being fenced, the new holder
+      # re-encodes the same seqs into the same keys.
+      :exit, _ -> :fenced
+      :error, _ -> :fenced
     end
   end
 

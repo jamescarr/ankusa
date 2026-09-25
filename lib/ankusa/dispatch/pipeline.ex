@@ -140,8 +140,10 @@ defmodule Ankusa.Dispatch.Pipeline do
     case try_acquire(state) do
       {:ok, state} ->
         # This node owns the dispatch cursor: resume where it left off.
-        cursor = WAL.get_cursor(instance, :dispatch)
-        {:ok, schedule(%{state | cursor: cursor, read_seq: cursor})}
+        case safe_get_cursor(instance, :dispatch) do
+          {:ok, cursor} -> {:ok, schedule(%{state | cursor: cursor, read_seq: cursor})}
+          :error -> {:ok, schedule(step_down(state))}
+        end
 
       {:standby, state} ->
         {:ok, schedule(standby(state))}
@@ -185,8 +187,10 @@ defmodule Ankusa.Dispatch.Pipeline do
       {:ok, state} ->
         # A new holder never resumes from a stale in-memory cursor: re-read the
         # durable one, which is leader-consistent.
-        cursor = WAL.get_cursor(state.instance, :dispatch)
-        {:noreply, schedule(%{state | cursor: cursor, read_seq: cursor})}
+        case safe_get_cursor(state.instance, :dispatch) do
+          {:ok, cursor} -> {:noreply, schedule(%{state | cursor: cursor, read_seq: cursor})}
+          :error -> {:noreply, schedule(step_down(state))}
+        end
 
       {:standby, state} ->
         {:noreply, schedule(standby(state))}
@@ -689,7 +693,14 @@ defmodule Ankusa.Dispatch.Pipeline do
     mark = watermark(state)
 
     if mark > state.cursor do
-      case WAL.put_cursor(state.instance, :dispatch, mark, state.lease.token) do
+      result =
+        try do
+          WAL.put_cursor(state.instance, :dispatch, mark, state.lease.token)
+        catch
+          :exit, _ -> {:error, :fenced}
+        end
+
+      case result do
         :ok -> %{state | cursor: mark}
         # The lease moved on without us: stop being the dispatcher.
         {:error, :fenced} -> step_down(state)
@@ -704,25 +715,37 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Try to take the dispatch lease. `{:ok, state}` means this node is active;
   # `{:standby, state}` means another node holds it and this one only waits.
   defp try_acquire(state) do
-    case WAL.acquire_lease(state.instance, :dispatch, state.holder, state.ttl_ms) do
-      {:ok, lease} ->
-        lease = Map.put(lease, :instance, state.instance)
-        LeaseHelpers.emit(:acquired, lease)
-        {:ok, arm(%{state | lease: lease})}
+    try do
+      case WAL.acquire_lease(state.instance, :dispatch, state.holder, state.ttl_ms) do
+        {:ok, lease} ->
+          lease = Map.put(lease, :instance, state.instance)
+          LeaseHelpers.emit(:acquired, lease)
+          {:ok, arm(%{state | lease: lease})}
 
-      {:error, {:held, _holder}} ->
-        {:standby, %{state | lease: nil}}
+        {:error, {:held, _holder}} ->
+          {:standby, %{state | lease: nil}}
+      end
+    catch
+      # The WAL process (or the cluster it talks to) is unreachable: treat it
+      # the same as "someone else holds the lease" — go standby.
+      :exit, _ -> {:standby, %{state | lease: nil}}
     end
   end
 
   defp renew(state) do
-    case WAL.renew_lease(state.instance, state.lease) do
-      {:ok, lease} ->
-        lease = Map.put(lease, :instance, state.instance)
-        LeaseHelpers.emit(:renewed, lease)
-        arm(%{state | lease: lease})
+    try do
+      case WAL.renew_lease(state.instance, state.lease) do
+        {:ok, lease} ->
+          lease = Map.put(lease, :instance, state.instance)
+          LeaseHelpers.emit(:renewed, lease)
+          arm(%{state | lease: lease})
 
-      {:error, :lost} ->
+        {:error, :lost} ->
+          LeaseHelpers.emit(:lost, state.lease)
+          step_down(state)
+      end
+    catch
+      :exit, _ ->
         LeaseHelpers.emit(:lost, state.lease)
         step_down(state)
     end
@@ -766,6 +789,17 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp mono_ms, do: System.monotonic_time(:millisecond)
+
+  # A durable cursor read that cannot crash the pipeline: a WAL process that is
+  # gone (or a cluster without a leader) is a reason to step down, not to crash.
+  defp safe_get_cursor(instance, name) do
+    try do
+      {:ok, WAL.get_cursor(instance, name)}
+    catch
+      :exit, _ -> :error
+      :error, _ -> :error
+    end
+  end
 
   # ── waiters ───────────────────────────────────────────────────────────────
 
