@@ -46,9 +46,16 @@ defmodule Ankusa.WAL.Postgres.Migration do
   """
 
   # The uniqueness that the ledger-era schema put on `event_id` is exactly what
-  # this log must not have. Idempotent, so it runs on every boot.
+  # this log must not have. Idempotent, so it runs on every boot. Guarded so a
+  # boot against an already-migrated schema does not take an ACCESS EXCLUSIVE
+  # lock to run a DROP that would be a no-op.
   @drop_event_id_unique """
-  ALTER TABLE ankusa_wal DROP CONSTRAINT IF EXISTS ankusa_wal_event_id_key;
+  DO $$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ankusa_wal_event_id_key') THEN
+      ALTER TABLE ankusa_wal DROP CONSTRAINT ankusa_wal_event_id_key;
+    END IF;
+  END $$;
   """
 
   @wal_index """
