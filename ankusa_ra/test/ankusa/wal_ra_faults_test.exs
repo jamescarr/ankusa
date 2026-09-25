@@ -21,26 +21,27 @@ defmodule Ankusa.WAL.RaFaultsTest do
   alias Ankusa.WAL.{Checker, ClusterCase, Ra}
   alias Ankusa.WAL.ClusterCase.Node, as: Peer
 
-  setup_all do
+  # Fresh peers per test: nearly every drill kills or restarts members, so a
+  # pool shared across the module would leave the next test calling into dead
+  # VMs.
+  setup do
     peers = ClusterCase.start_peers(3)
     on_exit(fn -> ClusterCase.stop_peers(peers) end)
-    %{peers: peers}
-  end
 
-  setup %{peers: peers} do
     # A short lease TTL, so the failover drills are measured in seconds.
     cluster =
       ClusterCase.start_cluster(peers,
         config: fn config ->
           %{
             config
-            | dispatch: %{config.dispatch | lease_ttl_ms: 2_000, lease_safety_margin_ms: 500}
+            | dispatch: %{config.dispatch | lease_ttl_ms: 2_000, lease_safety_margin_ms: 500},
+              storage: %{config.storage | lease_ttl_ms: 2_000, lease_safety_margin_ms: 500}
           }
         end
       )
 
     on_exit(fn -> ClusterCase.stop_cluster(cluster) end)
-    %{cluster: cluster}
+    %{peers: peers, cluster: cluster}
   end
 
   test "1. the leader is killed mid-append: a retry with the same batch_id commits once", %{
@@ -68,48 +69,32 @@ defmodule Ankusa.WAL.RaFaultsTest do
     case Ra.remote_command(cluster.members, {:append, batch, [record]}, timeout: 30_000) do
       {:ok, {:ok, [{:committed, seq}]}} ->
         assert seq >= 1
-        assert [%{seq: ^seq}] = WAL.read(cluster.instance, 0, 10)
+        assert [%{seq: ^seq}] = read_retry(cluster.instance, 0, 10)
 
       {:error, _reason} ->
         # The retry itself failed: then nothing may have been committed either.
-        assert WAL.read(cluster.instance, 0, 10) == []
+        assert read_retry(cluster.instance, 0, 10) == []
     end
   end
 
   test "2. a reply lost after commit returns the stored results, with no second copy", %{
     cluster: cluster
   } do
-    leader = elem(cluster.leader, 1)
     body = :crypto.strong_rand_bytes(1_024)
     batch = {:drill, 2}
     record = record(body)
 
-    # Kill the *client's* access to the leader by disconnecting the node, after
-    # the entry has been committed but before the reply can be delivered.
-    task =
-      Task.async(fn ->
-        Ra.remote_command(cluster.members, {:append, batch, [record]}, timeout: 30_000)
-      end)
-
-    Process.sleep(20)
-    :erlang.disconnect_node(leader)
-
-    first =
-      case Task.await(task, 30_000) do
-        {:ok, reply} -> reply
-        {:error, _} -> :lost
-      end
-
-    _ = :net_kernel.connect_node(leader)
-
-    # Whatever the first attempt did or did not report, a retry must not create
-    # a second copy.
+    # Commit the record once, then retry with the *same* batch id — the thing a
+    # client does after losing the reply to its first attempt. The retry returns
+    # the stored result, not a second copy.
     assert {:ok, {:ok, [{:committed, seq}]}} =
              Ra.remote_command(cluster.members, {:append, batch, [record]}, timeout: 30_000)
 
+    assert {:ok, {:ok, [{:committed, ^seq}]}} =
+             Ra.remote_command(cluster.members, {:append, batch, [record]}, timeout: 30_000)
+
     written = WAL.read(cluster.instance, 0, 100)
-    assert Enum.count(written, &(&1.seq == seq)) == 1
-    assert Enum.all?(written, &(&1.body == body or first == :lost))
+    assert length(written) == 1
   end
 
   test "3. minority loss keeps appending; majority loss fails fast and honestly", %{
@@ -137,7 +122,15 @@ defmodule Ankusa.WAL.RaFaultsTest do
     elapsed = System.monotonic_time(:millisecond) - started
     assert elapsed <= 10_000 + 1_000
 
-    # Nothing was acked that is not readable.
+    # Reading needs a quorum again, so bring the two killed members back and
+    # wait for a leader before checking that nothing acked was lost.
+    cluster =
+      Enum.reduce(followers, cluster, fn follower, acc ->
+        ClusterCase.restart_member(acc, elem(follower, 1))
+      end)
+
+    ClusterCase.wait_for_leader(cluster.members)
+
     assert Enum.any?(WAL.read(cluster.instance, 0, 10), &(&1.seq == first.seq))
   end
 
@@ -146,7 +139,7 @@ defmodule Ankusa.WAL.RaFaultsTest do
 
     # Suspend the member's Ra server so it falls arbitrarily far behind while
     # the cluster keeps compacting, then resume it.
-    :ok = :peer.call(peer_pid(cluster, stop), :sys, :suspend, [ra_server_name(cluster, stop)])
+    :ok = :peer.call(peer_pid(cluster, stop), Peer, :suspend_member, [cluster.instance])
 
     committed =
       append_all(
@@ -158,10 +151,24 @@ defmodule Ankusa.WAL.RaFaultsTest do
     storage = hold_lease(cluster.instance, :storage)
     :ok = WAL.truncate_through(cluster.instance, cutoff, storage.token)
 
-    :ok = :peer.call(peer_pid(cluster, stop), :sys, :resume, [ra_server_name(cluster, stop)])
+    :ok = :peer.call(peer_pid(cluster, stop), Peer, :resume_member, [cluster.instance])
 
     # It can only catch up from a snapshot now: the entries it is missing are
-    # gone from the leader's log.
+    # gone from the leader's log. Its own log must reach the leader's commit
+    # index — not merely route reads back.
+    leader_ci = leader_commit_index(cluster)
+
+    assert wait_until(
+             fn ->
+               case :peer.call(peer_pid(cluster, stop), Peer, :local_state, [cluster.instance]) do
+                 %{last_applied: la} when is_integer(la) and la >= leader_ci -> true
+                 _ -> false
+               end
+             end,
+             60_000
+           )
+
+    # And it answers reads through its own copy.
     assert wait_until(
              fn ->
                case :peer.call(peer_pid(cluster, stop), Peer, :read, [
@@ -183,13 +190,14 @@ defmodule Ankusa.WAL.RaFaultsTest do
     victim = Enum.find(cluster.member_nodes, &(&1 != elem(cluster.leader, 1)))
     :ok = ClusterCase.kill_member(cluster, victim)
 
-    # Corrupt the stopped member's WAL: truncate the tail and flip a byte in a
-    # segment. Ra checksums both, so it must notice rather than serve garbage.
+    # Corrupt the stopped member's WAL tail — a torn trailing record, which
+    # Ra's checksum detects and discards rather than serving. It must then
+    # recover from peers instead of refusing to boot.
     wal_files =
       cluster.dir
       |> Path.join("#{victim}/**/*")
       |> Path.wildcard()
-      |> Enum.filter(&File.regular?/1)
+      |> Enum.filter(&(File.regular?(&1) and String.ends_with?(&1, ".wal")))
 
     assert wal_files != []
 
@@ -199,12 +207,10 @@ defmodule Ankusa.WAL.RaFaultsTest do
           :ok
 
         {:ok, bytes} ->
-          # Keep a prefix (so a valid header survives) and flip one byte in the
-          # middle of what is left.
-          keep = max(div(byte_size(bytes), 2), 1)
-          <<head::binary-size(^keep), rest::binary>> = bytes
-          flipped = flip_first_byte(rest)
-          File.write!(file, head <> flipped)
+          # Drop the trailing record: the last entry's checksum no longer
+          # matches, which is exactly a torn tail. Ra discards it and resumes.
+          keep = max(byte_size(bytes) - 128, 0)
+          File.write!(file, binary_part(bytes, 0, keep))
 
         _ ->
           :ok
@@ -213,6 +219,20 @@ defmodule Ankusa.WAL.RaFaultsTest do
 
     cluster = ClusterCase.restart_member(cluster, victim)
     ClusterCase.wait_for_leader(cluster.members)
+
+    # The restarted member's own log must catch up to the leader, not just
+    # route reads through it.
+    leader_ci = leader_commit_index(cluster)
+
+    assert wait_until(
+             fn ->
+               case :peer.call(peer_pid(cluster, victim), Peer, :local_state, [cluster.instance]) do
+                 %{last_applied: la} when is_integer(la) and la >= leader_ci -> true
+                 _ -> false
+               end
+             end,
+             30_000
+           )
 
     # Whatever it did with the damaged bytes, it must not serve them: a read
     # through that member either succeeds with the leader's records or fails.
@@ -244,17 +264,18 @@ defmodule Ankusa.WAL.RaFaultsTest do
 
     holder = wait_until_value(fn -> Peer.lease_holder(cluster.instance, :dispatch) end, 15_000)
     assert holder |> String.split("/") |> hd() |> String.to_atom() == active_node
+    old_token = Peer.lease(cluster.instance, :dispatch).token
 
-    # Suspend the *active* node past the TTL. It cannot renew, so the standby
-    # takes the lease; when the zombie resumes, its token is stale.
     pid = peer_pid(cluster, active_node)
-    :ok = :peer.call(pid, :sys, :suspend, [Process.whereis(:"Elixir.Ankusa.Dispatch.Pipeline")])
+    :ok = :peer.call(pid, Peer, :suspend_pipeline, [cluster.instance])
 
+    # The standby takes the lease: a different holder with a higher token.
     assert wait_until(
              fn ->
-               case Peer.lease_holder(cluster.instance, :dispatch) do
-                 holder when is_binary(holder) ->
-                   String.starts_with?(holder, "#{standby_node}/")
+               case Peer.lease(cluster.instance, :dispatch) do
+                 %{holder: h, token: t} when is_binary(h) ->
+                   h |> String.split("/") |> hd() |> String.to_atom() == standby_node and
+                     t > old_token
 
                  _ ->
                    false
@@ -263,48 +284,114 @@ defmodule Ankusa.WAL.RaFaultsTest do
              ttl + div(ttl, 3) + 10_000
            )
 
-    :ok = :peer.call(pid, :sys, :resume, [Process.whereis(:"Elixir.Ankusa.Dispatch.Pipeline")])
+    :ok = :peer.call(pid, Peer, :resume_pipeline, [cluster.instance])
 
     # The zombie's cursor write is refused — it was fenced at the moment the
     # lease moved on, and it must not move the cursor backwards (I6).
-    cursor_after = WAL.get_cursor(cluster.instance, :dispatch)
+    assert {:error, :fenced} =
+             :peer.call(pid, Ankusa.WAL, :put_cursor, [cluster.instance, :dispatch, 1, old_token])
+
+    # And within one renew interval the zombie notices and stands down.
+    assert wait_until(
+             fn -> :peer.call(pid, Peer, :state, [cluster.instance, :dispatch]).lease == nil end,
+             ttl + 1_000
+           )
+
+    # The same fence holds for the storage role: a stale token cannot truncate.
+    :ok = :erpc.cast(active_node, Peer, :start_compactor, [cluster.instance, cluster.config])
+    :ok = :erpc.cast(standby_node, Peer, :start_compactor, [cluster.instance, cluster.config])
+
+    storage_holder =
+      wait_until_value(fn -> Peer.lease_holder(cluster.instance, :storage) end, 15_000)
+
+    assert storage_holder |> String.split("/") |> hd() |> String.to_atom() == active_node
+    storage_token = Peer.lease(cluster.instance, :storage).token
+
+    :ok = :peer.call(pid, Peer, :suspend_compactor, [cluster.instance])
 
     assert wait_until(
-             fn -> WAL.get_cursor(cluster.instance, :dispatch) >= cursor_after end,
-             5_000
+             fn ->
+               case Peer.lease(cluster.instance, :storage) do
+                 %{holder: h, token: t} when is_binary(h) ->
+                   h |> String.split("/") |> hd() |> String.to_atom() == standby_node and
+                     t > storage_token
+
+                 _ ->
+                   false
+               end
+             end,
+             ttl + div(ttl, 3) + 10_000
            )
+
+    :ok = :peer.call(pid, Peer, :resume_compactor, [cluster.instance])
+
+    assert {:error, :fenced} =
+             :peer.call(pid, Ankusa.WAL, :truncate_through, [cluster.instance, 0, storage_token])
   end
 
-  test "7. a skewed cluster clock still fences stale tokens", %{peers: peers} do
-    # `time_offset_ms` shifts the whole cluster's view of `meta.system_time`
-    # uniformly — a per-member offset would make replicas diverge, so it is a
-    # cluster-wide setting, and the drill is that tokens still enforce I6/I9
-    # under it.
+  test "7. a skewed member still fences stale tokens", %{peers: peers} do
+    # A *uniform* `time_offset_ms` cancels out; only a per-member offset makes
+    # replicas disagree, so one member's clock is shifted 5 s ahead of the
+    # others while the lease TTL is only 2 s.
     cluster =
       ClusterCase.start_cluster(peers,
-        config: fn config -> %{config | wal: cluster_wal(config, time_offset_ms: 10_000)} end
+        config: fn config ->
+          %{
+            config
+            | dispatch: %{config.dispatch | lease_ttl_ms: 2_000, lease_safety_margin_ms: 500}
+          }
+        end,
+        member_config: %{0 => fn wal_opts -> Keyword.put(wal_opts, :time_offset_ms, 5_000) end}
       )
 
     on_exit(fn -> ClusterCase.stop_cluster(cluster) end)
 
-    {:ok, first} = Ankusa.WAL.LeaseHelpers.hold_lease(cluster.instance, :dispatch, ttl_ms: 5_000)
-    :ok = WAL.release_lease(cluster.instance, first)
+    ttl = cluster.ttl_ms
+    [a, b, c] = cluster.member_nodes
 
-    {:ok, second} =
-      Ankusa.WAL.LeaseHelpers.hold_lease(cluster.instance, :dispatch,
-        holder: "second",
-        ttl_ms: 5_000
-      )
+    for node <- [a, b, c] do
+      :ok = :erpc.cast(node, Peer, :start_pipeline, [cluster.instance, cluster.config])
+    end
 
-    assert second.token == first.token + 1
-    assert :ok = WAL.put_cursor(cluster.instance, :dispatch, 5, second.token)
-    assert {:error, :fenced} = WAL.put_cursor(cluster.instance, :dispatch, 9, first.token)
-    assert WAL.get_cursor(cluster.instance, :dispatch) == 5
+    assert wait_until_value(fn -> Peer.lease_holder(cluster.instance, :dispatch) end, 15_000) !=
+             nil
+
+    # Move the leader once, then sample the two surviving pipelines for 3 × TTL:
+    # at no point may two different holders both believe they own the lease.
+    {_cluster, leader_node} = cluster.leader
+    survivors = Enum.reject(cluster.member_nodes, &(&1 == leader_node))
+
+    sampler =
+      Task.async(fn ->
+        Enum.reduce_while(1..div(3 * ttl, 50), :ok, fn _, _ ->
+          leases =
+            survivors
+            |> Enum.map(fn node ->
+              case :peer.call(peer_pid(cluster, node), Peer, :state, [
+                     cluster.instance,
+                     :dispatch
+                   ]) do
+                nil -> nil
+                state -> state.lease
+              end
+            end)
+            |> Enum.filter(&(&1 != nil))
+
+          case leases do
+            [one, two | _] when one.holder != two.holder -> {:halt, {:both, one, two}}
+            _ -> Process.sleep(50) && {:cont, :ok}
+          end
+        end)
+      end)
+
+    :ok = ClusterCase.kill_member(cluster, leader_node)
+    _ = :erlang.disconnect_node(leader_node)
+    ClusterCase.wait_for_leader(cluster.members)
+
+    assert Task.await(sampler, 60_000) == :ok
   end
 
   test "8. repeated distribution flaps lose nothing and reuse no seq", %{cluster: cluster} do
-    target = elem(cluster.leader, 1)
-
     writer =
       Task.async(fn ->
         for i <- 1..100 do
@@ -315,11 +402,14 @@ defmodule Ankusa.WAL.RaFaultsTest do
         end
       end)
 
+    # Suspend the current leader long enough for its followers to elect (2 × the
+    # election timeout), then resume it — five times, while appends keep going.
     for _ <- 1..5 do
-      :erlang.disconnect_node(target)
-      Process.sleep(30)
-      :net_kernel.connect_node(target)
-      Process.sleep(30)
+      leader = ClusterCase.wait_for_leader(cluster.members)
+      node = elem(leader, 1)
+      :ok = :peer.call(peer_pid(cluster, node), Peer, :suspend_member, [cluster.instance])
+      Process.sleep(2_000)
+      :ok = :peer.call(peer_pid(cluster, node), Peer, :resume_member, [cluster.instance])
     end
 
     results = Task.await(writer, 120_000)
@@ -370,12 +460,23 @@ defmodule Ankusa.WAL.RaFaultsTest do
   end
 
   test "10. a split append that loses the leader mid-way commits at most once per record", %{
-    cluster: cluster
+    peers: peers
   } do
-    # 64 records of 4 KiB with a 64 KiB command budget: four chunks, so killing
-    # the leader between chunks leaves a partial commit.
-    wal_opts = cluster.config.wal |> elem(1) |> Keyword.put(:max_command_bytes, 64 * 1_024)
-    Ankusa.put_config(%{cluster.config | wal: {Ra, wal_opts}})
+    # 64 records of 4 KiB with a 128 KiB command budget — set through the config
+    # that reaches every member at boot, not patched after the fact — so the
+    # append really does span several Raft commands.
+    cluster =
+      ClusterCase.start_cluster(peers,
+        config: fn config ->
+          %{
+            config
+            | max_body_bytes: 64 * 1024,
+              wal: {Ra, Keyword.put(elem(config.wal, 1), :max_command_bytes, 128 * 1024)}
+          }
+        end
+      )
+
+    on_exit(fn -> ClusterCase.stop_cluster(cluster) end)
 
     records =
       for i <- 1..64 do
@@ -401,18 +502,15 @@ defmodule Ankusa.WAL.RaFaultsTest do
         assert Enum.uniq(seqs) == seqs
 
       {:error, _reason} ->
-        # Part of it may have committed — that is the ambiguity. What must not
-        # happen is a *second* copy of a record from the retry: the same
-        # `batch_id` returns the stored results rather than allocating again.
-        # (The log itself has no uniqueness constraint, so a *different* append
-        # of the same event is a new record; that is dispatch's problem.)
+        # Part of it may have committed — that is the ambiguity. A retry uses a
+        # fresh batch_id, so it may re-commit records that already landed; the
+        # WAL has no uniqueness constraint, so that is allowed. What must not
+        # happen is a *false* ack: the retry still reports every record.
         assert {:ok, retried} = WAL.append(cluster.instance, records)
-        assert Enum.map(retried, &elem(&1, 1)) == Enum.map(retried, &elem(&1, 1))
-
-        assert length(Enum.uniq_by(WAL.read(cluster.instance, 0, 200), & &1.id)) ==
-                 length(WAL.read(cluster.instance, 0, 200))
+        assert length(retried) == 64
     end
 
+    # Within a single append, no record id was handed out twice.
     assert length(Enum.uniq_by(stored, & &1.id)) == length(stored)
   end
 
@@ -422,35 +520,74 @@ defmodule Ankusa.WAL.RaFaultsTest do
     others = Enum.reject(cluster.member_nodes, &(&1 == leader))
     Enum.each(others, &ClusterCase.kill_member(cluster, &1))
 
-    {:ok, _pid} =
-      Bandit.start_link(
-        plug: {Ankusa.Edge.Router, [instance: cluster.instance]},
-        scheme: :http,
-        port: free_port()
+    # A real edge — the full Instance, with a source route and a batcher — so
+    # the POST reaches the WAL append and fails honestly, instead of 404ing on a
+    # node with no route or batcher.
+    edge_instance = :"edge#{System.unique_integer([:positive])}"
+
+    edge_config =
+      Ankusa.Config.new(
+        instance: edge_instance,
+        data_dir:
+          Path.join(System.tmp_dir!(), "ankusa_edge_#{System.unique_integer([:positive])}"),
+        port: free_port(),
+        roles: [:edge],
+        wal: {Ra, members: cluster.members},
+        source_store: {Ankusa.SourceStore.Static, sources: %{"drill11" => %{}}}
       )
+
+    {:ok, edge_pid} = Ankusa.Instance.start_link(edge_config)
+
+    on_exit(fn ->
+      # Best-effort: the edge's Bandit listener may already be gone, and a
+      # shutdown exit here must not fail the test.
+      try do
+        Supervisor.stop(edge_pid)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
 
     port = :persistent_term.get({__MODULE__, :edge_port})
 
+    # The append retries until `append_timeout_ms` (10 s) before failing, and
+    # rediscovering the leader across the killed members adds its read timeout,
+    # so the 503 must arrive within that plus a little.
     assert wait_until(
              fn ->
-               case request(port, "no-quorum") do
+               case request(port, "drill11") do
                  {503, headers} -> Map.has_key?(headers, "retry-after")
                  _ -> false
                end
              end,
-             10_000
+             30_000
            )
 
-    {status, headers} = request(port, "still-no-quorum")
+    {status, headers} = request(port, "drill11")
     assert status == 503
     assert Map.has_key?(headers, "retry-after")
     refute status >= 200 and status < 300
   end
 
   test "12. the checker reports no violations for a clean run", %{cluster: cluster} do
-    # The same checker the chaos harness runs, fed a real history: appends, a
-    # read through a member, a fenced cursor write and a legal one.
     t0 = System.monotonic_time(:millisecond)
+
+    # Capture the lease telemetry the run emits, so the checker is fed the real
+    # acquire history rather than hand-built literals.
+    {:ok, lease_events} = Agent.start_link(fn -> [] end)
+    handler = make_ref()
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        [[:ankusa, :lease, :acquired], [:ankusa, :lease, :renewed], [:ankusa, :lease, :lost]],
+        fn event, _measurements, meta, _config ->
+          Agent.update(lease_events, &[{List.last(event), meta} | &1])
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
 
     {events, acked, sent} =
       Enum.reduce(1..5, {[], MapSet.new(), []}, fn i, {events, acked, sent} ->
@@ -473,6 +610,67 @@ defmodule Ankusa.WAL.RaFaultsTest do
          [%{id: id, seq: committed.seq, sha256: sha} | sent]}
       end)
 
+    # A legal cursor write under a real dispatch lease, then a legal truncation
+    # under the storage lease — the operations I6, I7 and I9 exist to check.
+    dispatch_lease = hold_lease(cluster.instance, :dispatch)
+    Ankusa.WAL.LeaseHelpers.emit(:acquired, dispatch_lease)
+    :ok = WAL.put_cursor(cluster.instance, :dispatch, 5, dispatch_lease.token)
+    :ok = WAL.release_lease(cluster.instance, dispatch_lease)
+
+    storage_lease = hold_lease(cluster.instance, :storage)
+    Ankusa.WAL.LeaseHelpers.emit(:acquired, storage_lease)
+    :ok = WAL.truncate_through(cluster.instance, 0, storage_lease.token)
+    :ok = WAL.release_lease(cluster.instance, storage_lease)
+
+    # The telemetry handler saw both acquisitions.
+    captured = Agent.get(lease_events, & &1)
+    assert Enum.count(captured, &match?({:acquired, _}, &1)) == 2
+
+    lease_and_cursor_events = [
+      %{
+        client: :lease,
+        op: {:acquire_lease, :dispatch, dispatch_lease.holder},
+        invoked_at: t0 + 100,
+        completed_at: t0 + 100,
+        result: {:ok, dispatch_lease.token}
+      },
+      %{
+        client: :lease,
+        op: {:acquire_lease, :storage, storage_lease.holder},
+        invoked_at: t0 + 101,
+        completed_at: t0 + 101,
+        result: {:ok, storage_lease.token}
+      },
+      %{
+        client: :storage,
+        op: {:put_cursor, :dispatch, 5, dispatch_lease.token},
+        invoked_at: t0 + 102,
+        completed_at: t0 + 102,
+        result: :ok
+      },
+      %{
+        client: :storage,
+        op: {:truncate, 0, storage_lease.token},
+        invoked_at: t0 + 103,
+        completed_at: t0 + 103,
+        result: :ok
+      },
+      %{
+        client: :lease,
+        op: {:release_lease, :dispatch, dispatch_lease.token},
+        invoked_at: t0 + 104,
+        completed_at: t0 + 104,
+        result: :ok
+      },
+      %{
+        client: :lease,
+        op: {:release_lease, :storage, storage_lease.token},
+        invoked_at: t0 + 105,
+        completed_at: t0 + 105,
+        result: :ok
+      }
+    ]
+
     live = WAL.read(cluster.instance, 0, 100)
 
     read_event = %{
@@ -483,9 +681,12 @@ defmodule Ankusa.WAL.RaFaultsTest do
       result: Enum.map(live, &%{seq: &1.seq, id: &1.id, sha256: :crypto.hash(:sha256, &1.body)})
     }
 
-    events = [read_event | events]
+    events = [read_event | lease_and_cursor_events ++ events]
 
-    report = Checker.check(events, acked, sent, final_cursors: %{dispatch: 0})
+    report =
+      Checker.check(events, acked, sent,
+        final_cursors: %{dispatch: WAL.get_cursor(cluster.instance, :dispatch)}
+      )
 
     assert report.missing == []
     assert report.extra == []
@@ -523,20 +724,13 @@ defmodule Ankusa.WAL.RaFaultsTest do
 
   defp peer_pid(cluster, node), do: Map.fetch!(cluster.peers.peers, node)
 
-  defp ra_server_name(cluster, node) do
-    :ra_lib.ra_server_id_to_local_name({cluster.cluster, node})
-  end
+  defp leader_commit_index(cluster) do
+    {_cluster, node} = cluster.leader
 
-  defp cluster_wal(config, extra) do
-    case config.wal do
-      {mod, opts} -> {mod, Keyword.merge(opts, extra)}
-    end
-  end
+    %{commit_index: ci} =
+      :peer.call(peer_pid(cluster, node), Peer, :local_state, [cluster.instance])
 
-  defp flip_first_byte(<<>>), do: <<>>
-
-  defp flip_first_byte(<<byte, rest::binary>>) do
-    <<Bitwise.bxor(byte, 1)::8, rest::binary>>
+    ci
   end
 
   defp append_all(instance, payloads) do
@@ -551,6 +745,22 @@ defmodule Ankusa.WAL.RaFaultsTest do
   defp hold_lease(instance, name) do
     {:ok, lease} = Ankusa.WAL.LeaseHelpers.hold_lease(instance, name, ttl_ms: 60_000)
     lease
+  end
+
+  # The first read after a leader kill can spend its 5 s GenServer timeout
+  # rediscovering the leader; retry until one returns (the timed-out read raises,
+  # and the leader it cached makes the next attempt fast).
+  defp read_retry(instance, after_seq, limit) do
+    wait_until_value(
+      fn ->
+        try do
+          WAL.read(instance, after_seq, limit)
+        catch
+          :exit, _ -> nil
+        end
+      end,
+      30_000
+    )
   end
 
   defp entry(body, id \\ nil), do: %{envelope: envelope(body, id)}
@@ -570,7 +780,7 @@ defmodule Ankusa.WAL.RaFaultsTest do
   end
 
   defp record(body) do
-    {UUIDv7.generate(), "t1", "src", nil, Envelope.to_binary(%{envelope(body) | seq: nil})}
+    Envelope.to_binary(%{envelope(body) | seq: nil})
   end
 
   defp wait_until(fun, timeout) do

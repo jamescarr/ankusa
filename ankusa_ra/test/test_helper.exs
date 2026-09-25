@@ -1,16 +1,22 @@
 # The Ra cluster and fault suites start real `:peer` VMs and talk to them over
-# Erlang distribution. That is not available everywhere — a sandbox that blocks
-# loopback distribution, a runner without `epmd` — so it is probed once here and
-# the suites that need it are excluded with a loud message instead of hanging
+# Erlang distribution. That is not available everywhere — a runner without
+# `epmd`, a sandbox that blocks loopback distribution — so it is probed once here
+# and the suites that need it are excluded with a loud message instead of hanging
 # until their timeouts.
+#
+# The probe starts its peer exactly the way `Ankusa.WAL.ClusterCase` does,
+# cookie included: a probe that fails for a reason the suites would not hit
+# excludes them on a host where they would have run.
 #
 # The single-node conformance suite needs none of this: it runs everywhere.
 probe = fn ->
-  {:ok, _pid} = Node.start(:ankusa_ra_test, :shortnames)
-  Node.set_cookie(:ankusa_ra_test)
-
   try do
-    case :peer.start_link(%{name: :ankusa_ra_probe, wait_boot: 3_000}) do
+    {:ok, _pid} = Node.start(:ankusa_ra_test, :shortnames)
+    Node.set_cookie(:ankusa_ra_test)
+
+    config = Map.put(Ankusa.WAL.ClusterCase.peer_config(:ankusa_ra_probe), :wait_boot, 3_000)
+
+    case :peer.start_link(config) do
       {:ok, pid, _name} ->
         :peer.stop(pid)
         :ok
@@ -28,6 +34,10 @@ case probe.() do
     ExUnit.start()
 
   {:error, reason} ->
+    if System.get_env("ANKUSA_REQUIRE_DIST") == "1" do
+      raise "Erlang distribution unavailable; :dist suites would be skipped (#{inspect(reason)})"
+    end
+
     IO.puts(
       :stderr,
       """

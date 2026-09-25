@@ -42,8 +42,13 @@ defmodule Ankusa.WAL.ClusterCase do
   """
   @spec start_peers(pos_integer()) :: map()
   def start_peers(count \\ 3) do
+    # Unique per call: suites start fresh peers for every test (tests kill and
+    # restart members, so a shared pool cannot stay valid), and a name epmd has
+    # not released yet would refuse the next boot.
+    prefix = "ankusa_ra_#{System.unique_integer([:positive])}_node"
+
     Enum.reduce(1..count, %{peers: %{}, configs: %{}}, fn n, acc ->
-      add_peer(acc, :"ankusa_ra_node#{n}")
+      add_peer(acc, :"#{prefix}#{n}")
     end)
   end
 
@@ -65,8 +70,8 @@ defmodule Ankusa.WAL.ClusterCase do
 
   defp add_peer(acc, name) do
     paths = Enum.map(:code.get_path(), &to_charlist/1)
-    config = %{name: name}
-    {:ok, pid} = :peer.start_link(config)
+    config = peer_config(name)
+    pid = start_peer!(config)
     node = :peer.call(pid, :erlang, :node, [])
 
     # The peer runs the same code as this node: the build directory is on the
@@ -115,20 +120,9 @@ defmodule Ankusa.WAL.ClusterCase do
     member_nodes = peers.peers |> Map.keys() |> Enum.sort()
     members = Enum.map(member_nodes, &{cluster, &1})
 
-    for {node, pid} <- peers.peers do
-      # One data directory per node, under the shared root: the members must
-      # not share a log directory any more than two VMs share a disk.
-      node_dir = Path.join(dir, Atom.to_string(node))
-
-      :ok =
-        :peer.call(pid, Ankusa.WAL.ClusterCase.Node, :boot, [
-          instance,
-          cluster,
-          node_dir,
-          members
-        ])
-    end
-
+    # `:config` rewrites the client config before anything boots, and the WAL
+    # options it ends up with are the ones every member boots with too: a
+    # machine setting like `time_offset_ms` only means anything on the members.
     config =
       Ankusa.Config.new(
         instance: instance,
@@ -136,6 +130,36 @@ defmodule Ankusa.WAL.ClusterCase do
         roles: [:edge],
         wal: {Ra, members: members}
       )
+      |> Keyword.get(opts, :config, & &1).()
+
+    {Ra, wal_opts} = config.wal
+    member_config = Keyword.get(opts, :member_config, %{})
+
+    for {node, index} <- Enum.with_index(member_nodes) do
+      pid = Map.fetch!(peers.peers, node)
+
+      # One data directory per node, under the shared root: the members must
+      # not share a log directory any more than two VMs share a disk.
+      node_dir = Path.join(dir, Atom.to_string(node))
+
+      # `:member_config` overrides one member's WAL options (a per-member
+      # `time_offset_ms`, for the clock-skew drill); every other member boots
+      # with the shared options.
+      node_wal_opts =
+        case member_config do
+          %{^index => fun} -> fun.(wal_opts)
+          _ -> wal_opts
+        end
+
+      :ok =
+        :peer.call(pid, Ankusa.WAL.ClusterCase.Node, :boot, [
+          instance,
+          cluster,
+          node_dir,
+          node_wal_opts,
+          config.max_body_bytes
+        ])
+    end
 
     Ankusa.put_config(config)
     {:ok, _pid} = Ra.start_link(instance: instance, config: config)
@@ -149,6 +173,7 @@ defmodule Ankusa.WAL.ClusterCase do
       members: members,
       member_nodes: member_nodes,
       peers: peers,
+      wal_opts: wal_opts,
       config: config,
       leader: leader,
       ttl_ms: config.dispatch.lease_ttl_ms
@@ -208,7 +233,7 @@ defmodule Ankusa.WAL.ClusterCase do
         raise ArgumentError, "no peer config for #{inspect(node)}"
       end)
 
-    {:ok, pid} = :peer.start_link(config)
+    pid = start_peer!(config)
     :peer.call(pid, :code, :add_paths, [Enum.map(:code.get_path(), &to_charlist/1)])
     :peer.call(pid, :application, :ensure_all_started, [:ankusa])
 
@@ -219,10 +244,37 @@ defmodule Ankusa.WAL.ClusterCase do
         cluster.instance,
         cluster.cluster,
         node_dir,
-        cluster.members
+        cluster.wal_opts,
+        cluster.config.max_body_bytes
       ])
 
     put_in(cluster.peers.peers[node], pid)
+  end
+
+  # Two things a peer needs that `:peer` does not give it by default:
+  #
+  #   * this node's cookie — it boots with whatever `~/.erlang.cookie` holds
+  #     otherwise, cannot connect back, and times out, which made every
+  #     multi-node suite look like a host without working distribution;
+  #   * a control connection — `:peer.call/4` goes over it, not over
+  #     distribution, and answers `{:error, :noconnection}` without one.
+  #
+  # The config is kept per node, so a restarted member boots the same way.
+  @doc false
+  def peer_config(name) do
+    %{
+      name: name,
+      connection: :standard_io,
+      args: [~c"-setcookie", Atom.to_charlist(Node.get_cookie())]
+    }
+  end
+
+  # A named (distributed) peer answers `{:ok, pid, node}`, not `{:ok, pid}`.
+  defp start_peer!(config) do
+    case :peer.start_link(config) do
+      {:ok, pid, _node} -> pid
+      {:ok, pid} -> pid
+    end
   end
 
   @doc "The cluster's current leader, or `nil`."
@@ -274,8 +326,16 @@ defmodule Ankusa.WAL.ClusterCase.Node do
 
   alias Ankusa.WAL.Ra
 
-  @doc "Boot this node's Ra system and member, and register the WAL process."
-  def boot(instance, _cluster, data_dir, members) do
+  @doc """
+  Boot this node's Ra system and member, and register the WAL process.
+
+  `wal_opts` are the cluster's `Ankusa.WAL.Ra` options — members and any
+  machine settings — so every member boots with the same machine config.
+  `max_body_bytes` is the client's, so the member validates the same
+  command-fitting constraint the client does (a member that defaults it would
+  reject a small `max_command_bytes` the client legitimately accepted).
+  """
+  def boot(instance, _cluster, data_dir, wal_opts, max_body_bytes) do
     File.mkdir_p!(data_dir)
 
     config =
@@ -285,7 +345,8 @@ defmodule Ankusa.WAL.ClusterCase.Node do
         # `:wal` is what makes this node host a member rather than just talk to
         # the cluster — the same switch a production `wal` StatefulSet sets.
         roles: [:wal],
-        wal: {Ra, members: members}
+        max_body_bytes: max_body_bytes,
+        wal: {Ra, wal_opts}
       )
 
     Ankusa.put_config(config)
@@ -314,7 +375,79 @@ defmodule Ankusa.WAL.ClusterCase.Node do
   """
   def start_pipeline(instance, config) do
     Ankusa.put_config(config)
-    Ankusa.Dispatch.Pipeline.start_link(instance: instance, config: config)
+    {:ok, pid} = Ankusa.Dispatch.Pipeline.start_link(instance: instance, config: config)
+    # Called through `:erpc.cast`, from a process that exits as soon as this
+    # returns. The pipeline traps exits, so a parent's EXIT stops it — and
+    # releases its lease — which would end the failover drill before it began.
+    Process.unlink(pid)
+    :ok
+  end
+
+  @doc """
+  Start a storage compactor on this node — the `:storage` lease half of the
+  fencing drill.
+  """
+  def start_compactor(instance, config) do
+    Ankusa.put_config(config)
+    {:ok, pid} = Ankusa.Storage.Compactor.start_link(instance: instance, config: config)
+    Process.unlink(pid)
+    :ok
+  end
+
+  @doc """
+  Suspend or resume this node's dispatch pipeline — the zombie in the fencing
+  drill. Resolved here, on the peer, where it is registered.
+  """
+  def suspend_pipeline(instance), do: :sys.suspend(Ankusa.whereis(instance, :dispatch))
+  def resume_pipeline(instance), do: :sys.resume(Ankusa.whereis(instance, :dispatch))
+
+  @doc "Suspend or resume this node's storage compactor."
+  def suspend_compactor(instance), do: :sys.suspend(Ankusa.whereis(instance, :compactor))
+  def resume_compactor(instance), do: :sys.resume(Ankusa.whereis(instance, :compactor))
+
+  @doc "The pipeline or compactor's full state, read on this node."
+  def state(instance, name) do
+    case Ankusa.whereis(instance, name) do
+      nil -> nil
+      pid -> :sys.get_state(pid)
+    end
+  end
+
+  @doc """
+  Suspend or resume this node's Ra server — the member itself. Used by the
+  drills that want a member to stop applying (and, while it is the leader, stop
+  heartbeating) without tearing the VM down, so the reply to an in-flight
+  command is lost the way a real network partition loses it.
+  """
+  def suspend_member(instance) do
+    :sys.suspend(:ra_directory.where_is(:"ankusa_ra_#{instance}", :"ankusa_wal_#{instance}"))
+  end
+
+  def resume_member(instance) do
+    :sys.resume(:ra_directory.where_is(:"ankusa_ra_#{instance}", :"ankusa_wal_#{instance}"))
+  end
+
+  @doc """
+  This member's own Ra overview: `last_applied`, `commit_index`, the log's
+  `snapshot_index` and `last_index`. Assertions about a member that caught up
+  (or installed a snapshot) read these rather than routing a read through the
+  leader, which would prove only that the leader can answer.
+  """
+  def local_state(instance) do
+    server_id = {:"ankusa_wal_#{instance}", node()}
+
+    case :ra.member_overview(server_id) do
+      {:ok, overview, _leader} ->
+        %{
+          last_applied: overview.last_applied,
+          commit_index: overview.commit_index,
+          snapshot_index: overview.log.snapshot_index,
+          last_index: overview.log.last_index
+        }
+
+      other ->
+        other
+    end
   end
 
   @doc """
@@ -336,13 +469,30 @@ defmodule Ankusa.WAL.ClusterCase.Node do
            :overview
          ) do
       {:ok, overview} ->
-        case overview |> Map.get(:leases, %{}) |> Map.get(name) do
-          %{holder: holder} -> holder
-          _ -> nil
-        end
+        overview
+        |> Map.get(:leases, %{})
+        |> Map.get(name)
+        |> live_holder(System.system_time(:millisecond))
 
       _ ->
         nil
+    end
+  end
+
+  defp live_holder(%{holder: holder, expires_at: expires_at}, now)
+       when is_integer(expires_at) and expires_at >= now,
+       do: holder
+
+  defp live_holder(_lease, _now), do: nil
+
+  @doc "The full `{holder, token, expires_at}` lease for `name`, or `nil`."
+  def lease(instance, name) do
+    case Ankusa.WAL.Ra.remote_aux(
+           Ankusa.config(instance).wal |> elem(1) |> Keyword.fetch!(:members),
+           :overview
+         ) do
+      {:ok, overview} -> overview |> Map.get(:leases, %{}) |> Map.get(name)
+      _ -> nil
     end
   end
 
@@ -362,5 +512,15 @@ defmodule Ankusa.WAL.ClusterCase.Node do
     segments = Enum.count(files, &String.contains?(&1, "segment"))
 
     {Enum.max([0 | snapshots]), segments}
+  end
+
+  @doc "Sorted basenames of every segment file under `data_dir`."
+  def segments(data_dir) do
+    data_dir
+    |> Path.join("**/*")
+    |> Path.wildcard()
+    |> Enum.filter(&(File.regular?(&1) and String.contains?(&1, ".segment")))
+    |> Enum.map(&Path.basename/1)
+    |> Enum.sort()
   end
 end

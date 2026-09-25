@@ -24,16 +24,14 @@ defmodule Ankusa.WAL.RaClusterTest do
   @records 20_000
   @payload 1_024
 
-  setup_all do
+  # Fresh peers per test: most tests kill or restart members, so a pool shared
+  # across the module would leave the next test calling into dead VMs.
+  setup do
     peers = ClusterCase.start_peers(3)
     on_exit(fn -> ClusterCase.stop_peers(peers) end)
-    %{peers: peers}
-  end
-
-  setup %{peers: peers} do
     cluster = ClusterCase.start_cluster(peers)
     on_exit(fn -> ClusterCase.stop_cluster(cluster) end)
-    %{cluster: cluster}
+    %{peers: peers, cluster: cluster}
   end
 
   test "bootstrap elects a leader, and restarting every member keeps the membership", %{
@@ -64,16 +62,18 @@ defmodule Ankusa.WAL.RaClusterTest do
 
     # A follower accepts the command and redirects it to the leader rather than
     # rejecting it — the property that makes a client's cached leader harmless.
+    # Two records in one command, addressed straight at the follower.
     follower = cluster.members |> Enum.reject(&(&1 == cluster.leader)) |> hd()
 
-    assert {:ok, {:ok, [{:committed, 2}]}} =
-             Ra.remote_command(follower, {:append, {node(), 1}, records("via-follower")},
-               timeout: 10_000
-             )
+    rows = Enum.map([entry("via-follower"), entry("via-follower-2")], &Ra.record(&1.envelope))
 
-    assert [one, two] = WAL.read(cluster.instance, 0, 10)
+    assert {:ok, {:ok, [{:committed, _}, {:committed, _}]}} =
+             Ra.remote_command([follower], {:append, {make_ref(), 1}, rows}, timeout: 10_000)
+
+    assert [one, two, three] = WAL.read(cluster.instance, 0, 10)
     assert one.body == "from-client"
     assert two.body == "via-follower"
+    assert three.body == "via-follower-2"
   end
 
   test "reads are byte-exact and served from a member's own copy too", %{cluster: cluster} do
@@ -131,6 +131,10 @@ defmodule Ankusa.WAL.RaClusterTest do
     committed = append_all(cluster.instance, Enum.map(1..@records, fn _ -> payload end))
     assert length(committed) == @records
 
+    # Every segment that will be truncated away, recorded before the truncate;
+    # the newest one may survive because it still holds live records.
+    before = segment_files(cluster)
+
     cutoff = Enum.at(committed, 11_500).seq
     storage = hold_lease(cluster.instance, :storage)
     assert :ok = WAL.truncate_through(cluster.instance, cutoff, storage.token)
@@ -143,11 +147,17 @@ defmodule Ankusa.WAL.RaClusterTest do
     # (b) and Ra took a snapshot, whose size does not track payload bytes:
     #     20 MB of bodies went in, so a snapshot holding them could not be small.
     assert wait_until(fn -> elem(footprint(cluster), 0) > 0 end, 30_000)
-    {snapshot_bytes, segments} = footprint(cluster)
+    {snapshot_bytes, _segments} = footprint(cluster)
     assert snapshot_bytes < 1_000_000
 
-    # (c) and the log was reclaimed rather than kept forever
-    assert segments < @records
+    # (c) and the log was reclaimed rather than kept forever: every segment
+    # that held only truncated entries is gone, leaving only the newest.
+    old_segments = MapSet.new(Enum.drop(before, -1))
+
+    assert wait_until(
+             fn -> MapSet.disjoint?(old_segments, MapSet.new(segment_files(cluster))) end,
+             30_000
+           )
   end
 
   test "a member added after compaction catches up through snapshot install", %{
@@ -176,12 +186,19 @@ defmodule Ankusa.WAL.RaClusterTest do
           cluster.instance,
           cluster.cluster,
           Path.join(cluster.dir, Atom.to_string(newcomer)),
-          cluster.members ++ [{cluster.cluster, newcomer}]
+          Keyword.put(
+            cluster.wal_opts,
+            :members,
+            cluster.members ++ [{cluster.cluster, newcomer}]
+          ),
+          cluster.config.max_body_bytes
         ]
       )
 
     seed = hd(cluster.members)
-    assert {:ok, _leader} = :ra.add_member(seed, {cluster.cluster, newcomer}, 30_000)
+
+    assert {:ok, _index_term, _leader} =
+             :ra.add_member(seed, {cluster.cluster, newcomer}, 30_000)
 
     assert wait_until(
              fn ->
@@ -205,6 +222,20 @@ defmodule Ankusa.WAL.RaClusterTest do
 
                  _ ->
                    false
+               end
+             end,
+             60_000
+           )
+
+    # And its own log confirms it has caught up to the leader's commit index,
+    # not merely routed reads through the leader.
+    leader_ci = leader_commit_index(cluster)
+
+    assert wait_until(
+             fn ->
+               case :peer.call(newcomer_pid, Peer, :local_state, [cluster.instance]) do
+                 %{last_applied: la} when is_integer(la) and la >= leader_ci -> true
+                 _ -> false
                end
              end,
              60_000
@@ -275,13 +306,23 @@ defmodule Ankusa.WAL.RaClusterTest do
            )
   end
 
-  test "an append larger than one command is split and returns the same results", %{
-    cluster: cluster
-  } do
-    wal_opts =
-      cluster.config.wal |> elem(1) |> Keyword.put(:max_command_bytes, 64 * 1_024)
+  test "an append larger than one command is split and returns the same results", %{peers: peers} do
+    # `max_command_bytes` is captured when the member boots, so it is set here,
+    # through the config that reaches every member — not patched after the fact.
+    cluster =
+      ClusterCase.start_cluster(peers,
+        config: fn c ->
+          %{
+            c
+            | max_body_bytes: 64 * 1024,
+              wal: {Ra, Keyword.put(elem(c.wal, 1), :max_command_bytes, 128 * 1024)}
+          }
+        end
+      )
 
-    Ankusa.put_config(%{cluster.config | wal: {Ra, wal_opts}})
+    on_exit(fn -> ClusterCase.stop_cluster(cluster) end)
+
+    before = leader_last_index(cluster)
 
     records =
       for i <- 1..64 do
@@ -294,6 +335,10 @@ defmodule Ankusa.WAL.RaClusterTest do
 
     seqs = Enum.map(results, fn {:committed, env} -> env.seq end)
     assert Enum.uniq(seqs) == seqs
+
+    # The 64 records do not fit one command, so they arrive as more than one
+    # Raft command: the leader's log index grew by more than one.
+    assert leader_last_index(cluster) - before > 1
   end
 
   test "a config whose bodies cannot fit one command is refused at boot" do
@@ -333,6 +378,26 @@ defmodule Ankusa.WAL.RaClusterTest do
     |> Enum.max_by(&length/1)
   end
 
+  defp peer_pid(cluster, node), do: Map.fetch!(cluster.peers.peers, node)
+
+  defp leader_commit_index(cluster) do
+    {_cluster, node} = cluster.leader
+
+    %{commit_index: ci} =
+      :peer.call(peer_pid(cluster, node), Peer, :local_state, [cluster.instance])
+
+    ci
+  end
+
+  defp leader_last_index(cluster) do
+    {_cluster, node} = cluster.leader
+
+    %{last_index: li} =
+      :peer.call(peer_pid(cluster, node), Peer, :local_state, [cluster.instance])
+
+    li
+  end
+
   defp footprint(cluster) do
     cluster.peers.peers
     |> Map.values()
@@ -342,15 +407,20 @@ defmodule Ankusa.WAL.RaClusterTest do
     end)
   end
 
+  defp segment_files(cluster) do
+    cluster.peers.peers
+    |> Map.values()
+    |> Enum.flat_map(fn pid -> :peer.call(pid, Peer, :segments, [cluster.dir <> "/"]) end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
   defp hold_lease(instance, name) do
     {:ok, lease} = Ankusa.WAL.LeaseHelpers.hold_lease(instance, name, ttl_ms: 60_000)
     lease
   end
 
   defp entry(body, id \\ nil), do: %{envelope: envelope(body, id)}
-
-  defp records(body),
-    do: [{UUIDv7.generate(), "t1", "src", nil, Envelope.to_binary(%{envelope(body) | seq: nil})}]
 
   defp envelope(body, id \\ nil) do
     %Envelope{

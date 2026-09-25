@@ -88,6 +88,8 @@ jobs:
         run: mix compile --warnings-as-errors
       - working-directory: ankusa_ra
         run: mix test
+        env:
+          ANKUSA_REQUIRE_DIST: "1"
       - working-directory: ankusa_ra
         run: mix docs --warnings-as-errors
 
