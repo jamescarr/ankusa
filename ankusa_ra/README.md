@@ -45,14 +45,15 @@ roles: [edge]
 wal:
   type: ra
   members:
-    - ankusa_wal_default@ankusa-wal-0
-    - ankusa_wal_default@ankusa-wal-1
-    - ankusa_wal_default@ankusa-wal-2
+    - ankusa@ankusa-wal-0
+    - ankusa@ankusa-wal-1
+    - ankusa@ankusa-wal-2
 ```
 
 `members` are `{cluster_name, node}`. The cluster name is fixed to
-`:"ankusa_wal_<instance>"`, so in configuration you only name the nodes; a
-single `wal` StatefulSet therefore backs exactly one Ankusa instance.
+`:"ankusa_wal_<instance>"`, so in configuration you only name the nodes (each a
+full `name@host`); a single `wal` StatefulSet therefore backs exactly one Ankusa
+instance.
 
 ## Shape 2 — one node
 
@@ -98,14 +99,14 @@ and catches up on its own. Two things an operator does by hand:
 
 ```sh
 # Membership: add or remove a member, or move the leadership aside
-mix ankusa.wal.members list     --instance default
-mix ankusa.wal.members add      --instance default --node ankusa@wal-3
+mix ankusa.wal.members list     --instance default --node ankusa@wal-0
+mix ankusa.wal.members add      --instance default --node ankusa@wal-3 --seed ankusa@wal-1
 mix ankusa.wal.members remove   --instance default --node ankusa@wal-3
 mix ankusa.wal.members transfer --instance default --node ankusa@wal-1
 
 # Offline cutover from a Postgres WAL
 mix ankusa.wal.migrate --from-postgres $DATABASE_URL --instance default \
-  --members ankusa_wal_default@wal-0,ankusa_wal_default@wal-1,ankusa_wal_default@wal-2
+  --members ankusa@wal-0,ankusa@wal-1,ankusa@wal-2
 ```
 
 ## Testing
