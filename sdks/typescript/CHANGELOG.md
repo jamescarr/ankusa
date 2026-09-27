@@ -17,9 +17,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   Generated from `priv/openapi/claim_check.v1.yaml` via `openapi-typescript`
   + `openapi-fetch`.
 - `parseClaimRef`, exported standalone.
-- A `ClaimCheckError` hierarchy — `InvalidClaimRefError`,
+- A `ClaimCheckError` hierarchy (`InvalidClaimRefError`,
   `ClaimNotFoundError`, `ClaimRejectedError`, `ClaimIntegrityError`,
-  `ClaimCheckUnavailableError` — each carrying a `retryable` boolean, so a
+  `ClaimCheckUnavailableError`), each carrying a `retryable` boolean, so a
   consumer needs exactly one bit to route a failure to dead-letter or retry.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.1.0...HEAD

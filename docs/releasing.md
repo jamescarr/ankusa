@@ -75,8 +75,8 @@ access token with Read & Write.
 
 One independently versioned npm package, `ankusa` (`sdks/typescript/`), with
 its own `package.json` `version` and `CHANGELOG.md`. Same tag-driven shape as
-the Hex packages, but its own tag prefix — `sdk-typescript-vX.Y.Z`, not
-`ankusa-vX.Y.Z` — since the npm package is also named `ankusa` and sharing a
+the Hex packages, but its own tag prefix (`sdk-typescript-vX.Y.Z`, not
+`ankusa-vX.Y.Z`) since the npm package is also named `ankusa` and sharing a
 prefix with the Hex core package would make releases ambiguous. No ordering
 dependency on the Hex packages or the server image.
 
@@ -96,7 +96,7 @@ dependency on the Hex packages or the server image.
    publishes with `npm publish --provenance`, then cuts a GitHub release
    from the CHANGELOG section.
 5. `NPM_TOKEN` is a repository secret: an npmjs.com **Automation** access
-   token (Account → Access Tokens → Generate New Token → Automation — this
+   token (Account → Access Tokens → Generate New Token → Automation: this
    type bypasses 2FA-on-publish, which a personal "Publish" token does not),
    scoped to the `ankusa` package once it exists, or unscoped for the first
    publish. Add it under repo Settings → Secrets and variables → Actions.
