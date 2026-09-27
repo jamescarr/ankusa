@@ -1,4 +1,6 @@
-"""Receive webhooks from Ankusa's HTTP sink. Standard library only.
+"""Receive webhooks from Ankusa's HTTP sink. Uses the `ankusa` SDK
+(sdks/python, a uv path dependency, see pyproject.toml) to parse the
+identity Ankusa attaches to every delivery.
 
 Ankusa POSTs each hook's raw body here, with its identity in headers:
 x-ankusa-id (dedupe on this), x-ankusa-source, x-ankusa-seq, and
@@ -9,6 +11,8 @@ dead-lettered for replay.
 
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from ankusa import MissingHookIdError, parse_headers
 
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -29,17 +33,21 @@ class Hooks(BaseHTTPRequestHandler):
             return
 
         body = self.rfile.read(int(self.headers.get("content-length", "0")))
-        hook_id = self.headers.get("x-ankusa-id", "")
-        source = self.headers.get("x-ankusa-source", "")
+        try:
+            hook = parse_headers(self.headers)
+        except MissingHookIdError:
+            self.send_response(400)
+            self.end_headers()
+            return
 
-        if hook_id in handled:
-            print(f"duplicate id={hook_id} source={source} (already handled)", flush=True)
+        if hook.id in handled:
+            print(f"duplicate id={hook.id} source={hook.source} (already handled)", flush=True)
         else:
-            handle(source, body)
-            handled.add(hook_id)
+            handle(hook.source, body)
+            handled.add(hook.id)
             print(
-                f"received id={hook_id} source={source} "
-                f"seq={self.headers.get('x-ankusa-seq', '')} bytes={len(body)} "
+                f"received id={hook.id} source={hook.source} "
+                f"seq={hook.seq} bytes={len(body)} "
                 f"body={body[:200].decode('utf-8', 'replace')}",
                 flush=True,
             )
