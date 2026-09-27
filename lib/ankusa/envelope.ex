@@ -20,7 +20,6 @@ defmodule Ankusa.Envelope do
     :headers,
     :content_type,
     :body,
-    :dedup_key,
     # assigned by the WAL at commit time; nil until durably stored
     :seq,
     # %Ankusa.Verification{}
@@ -38,7 +37,6 @@ defmodule Ankusa.Envelope do
           headers: [{String.t(), String.t()}],
           content_type: String.t() | nil,
           body: binary(),
-          dedup_key: String.t() | nil,
           seq: non_neg_integer() | nil,
           verification: Ankusa.Verification.t() | nil,
           size: non_neg_integer()

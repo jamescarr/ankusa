@@ -34,7 +34,7 @@ The router (`Ankusa.Edge.Router`) is a catch-all `POST` that does nothing but
 call the configured resolver, then hand the result to `Ankusa.Edge.Ingest`. A
 resolver does **URL-scheme work only** — it never reads the body, verifies a
 signature, or touches storage. It answers "which endpoint is this?" and
-nothing else; policy (verify/dedup/sinks) still comes from `Ankusa.SourceStore`
+nothing else; policy (verify/sinks) still comes from `Ankusa.SourceStore`
 keyed by the returned `source_id`.
 
 ## Shipped resolvers
@@ -97,14 +97,8 @@ An unresolvable URL shape returns `:error`, which the router turns into a
 ## Tenant scoping — what `tenant_id` actually does
 
 `tenant_id` on a `%Ankusa.Source{}` (default `"default"`) is the
-**dedup/storage/retention scope**. Concretely:
+**storage/retention scope**. It also travels with every delivery. Concretely:
 
-- **Dedup**: the WAL's uniqueness constraint is `(tenant_id, source_id,
-  dedup_key)`, not `(source_id, dedup_key)`. Two tenants can both send an
-  event with `dedup_key: "evt_1"` and both commit — they never collide.
-  `WAL.DiskLog`'s dedup key is the tuple `{tenant_id, source_id, dedup_key}`
-  directly; `WAL.Postgres`'s dedup ledger has `tenant_id` as a real column
-  and part of its primary key.
 - **Storage**: the segment index row (`Ankusa.Storage.Index`) carries
   `tenant_id`, so per-tenant retention/deletion is a real, queryable
   dimension, not something bolted on after the fact.

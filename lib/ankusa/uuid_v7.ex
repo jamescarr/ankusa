@@ -8,7 +8,7 @@ defmodule Ankusa.UUIDv7 do
   (NTP correcting) can yield an id that sorts before an earlier one. That is
   sufficient for what ids are used for here — a lexicographically time-sortable
   key (`claims/<tenant>/<id>`, the sweeper's expiry parse) and a unique
-  dedup/index key — and records are ordered by the WAL's `seq`, never by id.
+  index key — and records are ordered by the WAL's `seq`, never by id.
 
   If intra-millisecond ordering is ever genuinely needed (an audit listing sorted
   by id, say), the fix is RFC 9562's counter layout: a 12-bit counter in `rand_a`

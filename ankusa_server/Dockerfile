@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 #
-# Ankusa as a server: the whole framework — core plus the Postgres WAL, RabbitMQ,
-# NATS, and Kafka adapters — in one image, configured by a mounted YAML file.
+# Ankusa as a server: the whole framework — core plus the RabbitMQ, NATS, and
+# Kafka adapters — in one image, configured by a mounted YAML file.
 #
 # The build context is the repo root, not ankusa_server/, for the same reason as
-# examples/oban-consumer/ingest_app: the path deps (`..`, `../ankusa_postgres`,
+# examples/oban-consumer/ingest_app: the path deps (`..`, `../ankusa_rabbitmq`,
 # …) have to resolve to this checkout, or `mix release` would pull the published
 # Hex packages instead of the code being built.
 FROM elixir:1.20.4-alpine AS build
@@ -19,7 +19,6 @@ COPY mix.exs mix.lock ./
 COPY lib ./lib
 COPY config ./config
 COPY priv ./priv
-COPY ankusa_postgres ./ankusa_postgres
 COPY ankusa_rabbitmq ./ankusa_rabbitmq
 COPY ankusa_kafka ./ankusa_kafka
 COPY ankusa_nats ./ankusa_nats

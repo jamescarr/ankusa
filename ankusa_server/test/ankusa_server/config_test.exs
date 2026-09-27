@@ -14,7 +14,6 @@ defmodule AnkusaServer.ConfigTest do
   alias AnkusaServer.{Config, ConfigError}
 
   @fixture_env %{
-    "ANKUSA_WAL_POSTGRES_URL" => "postgres://ankusa:fixture-pg-password@postgres:5432/ankusa",
     "S3_BUCKET" => "fixture-bucket",
     "S3_REGION" => "us-east-1",
     "S3_ENDPOINT" => "https://s3.fixture.invalid",
@@ -37,7 +36,7 @@ defmodule AnkusaServer.ConfigTest do
     "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret"
   }
 
-  @fixture_secrets ~w(fixture-pg-password fixture-s3-secret
+  @fixture_secrets ~w(fixture-s3-secret
                       whsec_fixture-stripe-secret fixture-rabbit-password
                       fixture-kafka-password fixture-nats-password fixture-github-secret
                       whsec_Zml4dHVyZQ==)
@@ -81,17 +80,6 @@ defmodule AnkusaServer.ConfigTest do
     assert config.admin == %{enabled: true, port: 4002}
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) == ["demo"]
-  end
-
-  test "the fleet config needs no S3 variables and takes its WAL from env" do
-    env = %{"ANKUSA_WAL_POSTGRES_URL" => "postgres://ankusa:pw@postgres:5432/ankusa"}
-    config = Config.load!(path: "config-examples/fleet-postgres-s3.yml", env: env).config
-
-    assert {Ankusa.WAL.Postgres, opts} = config.wal
-    assert opts[:hostname] == "postgres"
-    assert opts[:database] == "ankusa"
-    assert {Ankusa.BlobStore.S3, s3} = config.storage.blob_store
-    assert s3[:bucket] == "ankusa-segments"
   end
 
   # ── interpolation ───────────────────────────────────────────────────────────
@@ -210,6 +198,20 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
+  test "a removed dedup key on a source is rejected by name" do
+    path =
+      tmp_config("""
+      sources:
+        demo:
+          verify: {type: none}
+          dedup: {type: stripe}
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(unknown key "dedup")
+  end
+
   test "an unknown verifier type lists the valid ones" do
     path =
       tmp_config("""
@@ -268,51 +270,6 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "line"
   end
 
-  # ── translation: Postgres ───────────────────────────────────────────────────
-
-  test "a Postgres URL becomes Postgrex opts" do
-    config =
-      Config.load!(
-        path: tmp_config(wal(%{url: "postgres://user:pw@db.internal:5433/ankusa"})),
-        env: %{}
-      ).config
-
-    assert {Ankusa.WAL.Postgres, opts} = config.wal
-    assert opts[:hostname] == "db.internal"
-    assert opts[:port] == 5433
-    assert opts[:username] == "user"
-    assert opts[:password] == "pw"
-    assert opts[:database] == "ankusa"
-  end
-
-  test "discrete Postgres keys, and defaults, become Postgrex opts" do
-    config =
-      Config.load!(
-        path: tmp_config(wal(%{host: "db", username: "u", password: "p", database: "d"})),
-        env: %{}
-      ).config
-
-    assert {Ankusa.WAL.Postgres, opts} = config.wal
-    assert opts[:hostname] == "db"
-    refute Keyword.has_key?(opts, :port)
-    assert opts[:database] == "d"
-  end
-
-  test "a Postgres URL and discrete keys together are rejected" do
-    path =
-      tmp_config(wal(%{url: "postgres://user:pw@db:5432/ankusa", host: "db", database: "ankusa"}))
-
-    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
-    assert error.message =~ "mutually exclusive"
-  end
-
-  test "wal.type postgres without a postgres block is rejected" do
-    path = tmp_config("wal: {type: postgres}\n")
-
-    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
-    assert error.message == ~s(wal.postgres: required when wal.type is "postgres")
-  end
-
   # ── translation: storage ────────────────────────────────────────────────────
 
   test "storage.gcs.auth selects the token provider" do
@@ -343,7 +300,6 @@ defmodule AnkusaServer.ConfigTest do
           tenant: acme
           on_verify_failure: accept_flag
           verify: {type: standard_webhooks, secret: "whsec_abc", tolerance_seconds: 60}
-          dedup: {type: rules, header: "x-event-id", json_path: "data.meta.id"}
           sinks:
             - {type: http, url: "http://sink.invalid/h", method: put, timeout_ms: 250,
                headers: {x-one: "1"}}
@@ -366,9 +322,6 @@ defmodule AnkusaServer.ConfigTest do
     assert source.verifier ==
              {Ankusa.Verifier.Hmac,
               [scheme: :standard_webhooks, secret: "whsec_abc", tolerance: 60]}
-
-    assert source.dedup ==
-             {Ankusa.DedupKey.Rules, [header: "x-event-id", json: ["data", "meta", "id"]]}
 
     assert [
              {Ankusa.Sink.Http,
@@ -596,16 +549,6 @@ defmodule AnkusaServer.ConfigTest do
     File.write!(path, yaml)
     on_exit(fn -> File.rm(path) end)
     path
-  end
-
-  defp wal(postgres) do
-    """
-    wal:
-      type: postgres
-      postgres:
-    #{indent(postgres)}
-    sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
-    """
   end
 
   defp gcs_opts(gcs) do

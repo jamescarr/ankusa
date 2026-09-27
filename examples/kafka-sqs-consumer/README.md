@@ -104,7 +104,7 @@ Same contract as the RabbitMQ example, because it's the same message
 
 | Hop | Guarantee | Duplicates | Ordering |
 | --- | --- | --- | --- |
-| Provider → WAL | durable ack | deduped on `(tenant, source, dedup_key)` | — |
+| Provider → WAL | durable ack | yes — every accepted POST is stored and delivered again (at-least-once) | — |
 | WAL → Kafka | at-least-once, `acks=all` | yes, on a retried produce | per key, per dispatch node |
 | Kafka → SQS | at-least-once (offset committed after SQS accepts) | absorbed within 5 minutes by the FIFO dedup id | per key (`max_in_flight: 1`, group = key) |
 | SQS → worker | at-least-once (visibility timeout) | yes, after 5 minutes | per group, while the worker processes each group in order |

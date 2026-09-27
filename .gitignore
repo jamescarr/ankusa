@@ -1,5 +1,5 @@
 # The directory Mix will write compiled artifacts to. Recursive: this repo
-# is a mono-repo of multiple Mix projects (ankusa_postgres/, ankusa_rabbitmq/,
+# is a mono-repo of multiple Mix projects (ankusa_rabbitmq/,
 # examples/*/ingest_app/), each with its own _build/.
 **/_build/
 
@@ -26,7 +26,6 @@ erl_crash.dump
 
 # Ignore package tarballs (built via "mix hex.build").
 ankusa-*.tar
-ankusa_postgres-*.tar
 ankusa_rabbitmq-*.tar
 ankusa_kafka-*.tar
 ankusa_nats-*.tar

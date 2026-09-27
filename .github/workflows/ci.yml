@@ -31,41 +31,6 @@ jobs:
       - run: mix docs --warnings-as-errors
       - run: mix hex.build
 
-  ankusa_postgres:
-    name: ankusa_postgres
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: ankusa
-          POSTGRES_PASSWORD: ankusa
-          POSTGRES_DB: ankusa_dev
-        ports: ["5433:5432"]
-        options: >-
-          --health-cmd "pg_isready -U ankusa -d ankusa_dev"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_postgres
-        run: mix deps.get --check-locked
-      - working-directory: ankusa_postgres
-        run: mix deps.unlock --check-unused
-      - working-directory: ankusa_postgres
-        run: mix format --check-formatted
-      - working-directory: ankusa_postgres
-        run: mix compile --warnings-as-errors
-      - working-directory: ankusa_postgres
-        run: mix test
-      - working-directory: ankusa_postgres
-        run: mix docs --warnings-as-errors
-
   ankusa_rabbitmq:
     name: ankusa_rabbitmq
     runs-on: ubuntu-latest

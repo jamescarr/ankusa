@@ -5,7 +5,7 @@
 # Env vars referenced here (all supplied by config-examples' test fixture, and
 # by you in production):
 #
-#   ANKUSA_WAL_POSTGRES_URL   S3_BUCKET  S3_REGION  S3_ENDPOINT
+#   S3_BUCKET  S3_REGION  S3_ENDPOINT
 #   AWS_ACCESS_KEY_ID         AWS_SECRET_ACCESS_KEY  GCS_BUCKET
 #   STRIPE_WHSEC  SINK_URL  RABBITMQ_URL
 #   RABBITMQ_EXCHANGE         KAFKA_BROKERS  KAFKA_TOPIC  KAFKA_USERNAME
@@ -45,7 +45,7 @@ admin:
   port: 4002
 
 batcher:
-  # Both WALs serialize commits themselves, so partitions beyond a couple only
+  # The WAL serializes commits itself, so partitions beyond a couple only
   # add contention.
   partitions: 2
   max_batch: 256
@@ -74,24 +74,8 @@ dispatch:
     jitter: true
 
 wal:
-  # [env ANKUSA_WAL_TYPE] disk | postgres
-  #   disk     — local append-only log; survives process crash and power loss on
-  #              this host, not the loss of the host.
-  #   postgres — shared log; the same WAL for a whole fleet of edge nodes.
+  # [env ANKUSA_WAL_TYPE] disk — local append-only log; survives process crash and power loss on this host, not the loss of the host.
   type: disk
-  postgres:
-    # A connection URL, or the discrete keys below — never both.
-    url: "${ANKUSA_WAL_POSTGRES_URL}"
-    # host: postgres
-    # port: 5432
-    # username: ankusa
-    # password: "${POSTGRES_PASSWORD}"
-    # database: ankusa
-    pool_size: 10
-    ssl: false
-    # Run the adapter's DDL bootstrap on boot. Set false if you migrate
-    # separately.
-    migrate: true
 
 storage:
   # [env ANKUSA_STORAGE_TYPE] local | s3 | gcs
@@ -134,7 +118,7 @@ sources:
   # One source per provider endpoint. The id is the catch-URL segment:
   # POST /webhooks/stripe here.
   stripe:
-    # Scopes dedup and storage. With routing: tenant_path the URL wins.
+    # Scopes storage. With routing: tenant_path the URL wins.
     tenant: default
     # reject | quarantine | accept_flag (what happens when verification fails)
     on_verify_failure: reject
@@ -146,13 +130,6 @@ sources:
       type: stripe
       secret: "${STRIPE_WHSEC}"
       tolerance_seconds: 300
-    # rules | stripe | github. rules takes header and/or json_path
-    # (a dot path into the JSON body); with neither, it tries the `webhook-id`
-    # header then JSON `id`.
-    dedup:
-      type: rules
-      header: webhook-id
-      json_path: data.id
     # At least one. Every sink is tried on every delivered hook.
     sinks:
       - {type: log}
@@ -209,13 +186,11 @@ sources:
   # A second source, showing the other verifier and the quarantine policy.
   standard:
     verify: {type: standard_webhooks, secret: "${STANDARD_WEBHOOKS_SECRET}"}
-    dedup: {type: rules}
     on_verify_failure: quarantine
     sinks: [{type: log}]
 
   github:
     verify: {type: github, secret: "${GITHUB_WEBHOOK_SECRET}"}
-    dedup: {type: github}
     on_verify_failure: accept_flag
     sinks: [{type: log}]
 

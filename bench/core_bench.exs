@@ -60,7 +60,6 @@ config =
        sources: %{
          "bench" => [
            verifier: {Ankusa.Verifier.None, []},
-           dedup: {Ankusa.DedupKey.Rules, json: ["id"]},
            on_verify_failure: :accept_flag,
            sinks: [{Bench.Sink, latency_ms: latency_ms}]
          ]

@@ -1,10 +1,10 @@
 defmodule AnkusaExample.Ingest.Application do
   @moduledoc """
   A `Ankusa.Instance` configured entirely from environment variables — the
-  same wrapper shape as `examples/rabbitmq-consumer/ingest_app`, with
-  `Ankusa.WAL.Postgres` in place of the default disk-backed WAL and
-  `Ankusa.Sink.Http` handing deliveries straight to `consumer_app`'s
-  `POST /deliveries` endpoint instead of a broker.
+  same wrapper shape as `examples/rabbitmq-consumer/ingest_app`, with the
+  default disk-backed WAL on a per-pod volume and `Ankusa.Sink.Http` handing
+  deliveries straight to `consumer_app`'s `POST /deliveries` endpoint
+  instead of a broker.
 
       curl -> Ankusa (edge/dispatch/storage) -> Ankusa.Sink.Http -> consumer_app
 
@@ -22,7 +22,7 @@ defmodule AnkusaExample.Ingest.Application do
 
     Logger.info(
       "[ankusa-example] starting: roles=#{inspect(config.roles)} port=#{config.port} " <>
-        "wal_host=#{env("WAL_DB_HOST", "localhost")} consumer_url=#{env("CONSUMER_URL", "http://localhost:4200/deliveries")}"
+        "consumer_url=#{env("CONSUMER_URL", "http://localhost:4200/deliveries")}"
     )
 
     Supervisor.start_link([{Ankusa.Instance, config}], strategy: :one_for_one, name: __MODULE__)
@@ -34,24 +34,8 @@ defmodule AnkusaExample.Ingest.Application do
       port: env_int("PORT", 4000),
       data_dir: env("DATA_DIR", "./data"),
       roles: Ankusa.Config.parse_roles!(env("ANKUSA_ROLES", "edge,dispatch,storage")),
-      wal: {Ankusa.WAL.Postgres, wal_opts() ++ [migrate: false]},
       source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}}
     )
-  end
-
-  # Public: the release task (`AnkusaExample.Ingest.Release.migrate/0`) reuses
-  # this exact connection config to run the WAL DDL against the same
-  # database, before the application (and its `migrate: false` pool) starts.
-  @doc false
-  def wal_opts do
-    [
-      hostname: env("WAL_DB_HOST", "localhost"),
-      port: env_int("WAL_DB_PORT", 5432),
-      username: env("WAL_DB_USER", "ankusa"),
-      password: env("WAL_DB_PASSWORD", "ankusa"),
-      database: env("WAL_DB_NAME", "ankusa"),
-      pool_size: env_int("WAL_DB_POOL_SIZE", 10)
-    ]
   end
 
   # A single zero-config `demo` source, matching the root project's own
@@ -61,7 +45,6 @@ defmodule AnkusaExample.Ingest.Application do
   defp source do
     [
       verifier: {Ankusa.Verifier.None, []},
-      dedup: {Ankusa.DedupKey.Rules, json: ["id"]},
       on_verify_failure: :accept_flag,
       sinks: [
         {Ankusa.Sink.Http,

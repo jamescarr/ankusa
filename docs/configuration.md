@@ -58,12 +58,12 @@ Every top-level section, with its keys and defaults:
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000) |
 | `dispatch` | `poll_ms` (200), `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
-| `wal` | `type` (`disk` \| `postgres`), `postgres.url` (or the discrete `host`/`port`/`username`/`password`/`database` keys, never both), `pool_size` (10), `ssl` (false), `migrate` (true) |
+| `wal` | `type` (`disk`) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
 | `sources` | One entry per catch-URL source — see below |
 
-`wal.postgres` and `storage.s3`/`storage.gcs` are read only when the matching
+`storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
 [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml)
 for every key with its comment and the alternatives.
@@ -75,10 +75,9 @@ One source per provider endpoint; the key is the catch-URL segment
 
 | Key | Meaning |
 | --- | --- |
-| `tenant` | The dedup/storage/retention scope. With `routing: tenant_path` the URL wins. Default `default` — see [`multi-tenancy.md`](multi-tenancy.md). |
+| `tenant` | The storage/retention scope. With `routing: tenant_path` the URL wins. Default `default` — see [`multi-tenancy.md`](multi-tenancy.md). |
 | `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300). `hmac` takes the descriptor keys below. |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag` — what happens when verification fails. |
-| `dedup.type` | `rules` \| `stripe` \| `github`. `rules` takes `header` and/or `json_path` (a dot path into the JSON body); with neither it tries the `webhook-id` header, then the JSON `id`. |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
 
 ### Custom HMAC schemes
@@ -147,8 +146,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` or `postgres`) |
-| `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
@@ -167,7 +165,6 @@ All loadable as-is — copy one, delete what you don't use, replace the `${VAR}`
 | --- | --- |
 | [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
 | [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
-| [`config-examples/fleet-postgres-s3.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/fleet-postgres-s3.yml) | edge replicas on a shared Postgres WAL, segments in S3 |
 | [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
 | [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
 
@@ -177,7 +174,7 @@ Two structs, both built once at boot and passed down the supervision tree —
 never `Application.get_env/2` scattered through call sites:
 
 - **`%Ankusa.Config{}`** — instance-wide: roles, ports, adapters, tuning.
-- **`%Ankusa.Source{}`** — per catch-URL: verification, dedup, sinks, tenant.
+- **`%Ankusa.Source{}`** — per catch-URL: verification, sinks, tenant.
 
 ### `%Ankusa.Config{}`
 
@@ -231,7 +228,7 @@ config :ankusa,
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver` — catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. |
 | `wal` | `{Ankusa.WAL.DiskLog, []}` | `{module, opts}` implementing `Ankusa.WAL`. See [`storage.md`](storage.md). |
-| `batcher.partitions` | `2` | One group-commit `GenServer` per partition. Both WALs serialize commits themselves (the DiskLog GenServer, Postgres's per-instance advisory lock), so more partitions only add contention. |
+| `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The DiskLog GenServer serializes commits itself, so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
 | `batcher.max_delay_ms` | `0` | Commit immediately — the WAL append runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
 | `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
@@ -267,7 +264,7 @@ or network policy. The HTTP contract is
 
 Sources are what `Ankusa.SourceStore.Static` (the default store) returns for a
 given `source_id`; every field has a default, so `%{"demo" => []}` is valid
-(everything default: `Verifier.None`, `DedupKey.Rules`, `:reject`,
+(everything default: `Verifier.None`, `:reject`,
 `Sink.Log`, tenant `"default"`).
 
 ```elixir
@@ -276,7 +273,6 @@ config :ankusa,
     "stripe" => [
       tenant_id: "acme",                                       # default: "default"
       verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
-      dedup: {Ankusa.DedupKey.Stripe, []},
       on_verify_failure: :quarantine,                           # :reject | :quarantine | :accept_flag
       sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
     ]
@@ -285,9 +281,8 @@ config :ankusa,
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `tenant_id` | `"default"` | The dedup/storage/retention scope — `(tenant_id, source_id, dedup_key)` is the uniqueness triple. See [`multi-tenancy.md`](multi-tenancy.md). |
+| `tenant_id` | `"default"` | The storage/retention scope. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. |
-| `dedup` | `{Ankusa.DedupKey.Rules, []}` | `{module, opts}` implementing `Ankusa.DedupKey`. |
 | `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen) / `:accept_flag` (commits, envelope flagged). |
 | `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`, delivered to in order, independently retried. |
 
@@ -307,9 +302,8 @@ the map.
 | Behaviour | Job | Default | Also shipped |
 | --- | --- | --- | --- |
 | `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
-| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | `WAL.Postgres` (shared, multi-node — `ankusa_postgres` package) |
+| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | — |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack) |
-| `Ankusa.DedupKey` | Extract provider event id | `DedupKey.Rules` (header/JSON path) | `Stripe`, `GitHub` |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce — `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish — `ankusa_nats` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
@@ -317,8 +311,8 @@ the map.
 | `Ankusa.ClaimCheck` | Pack claims into the object store, redeem by reference | — (the instance's `BlobStore`) | — |
 | `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | — |
 
-Swapping any of these is a one-line config change — `wal: {Ankusa.WAL.Postgres,
-hostname: "...", database: "..."}` — because every layer is a behaviour with
+Swapping any of these is a one-line config change — `route_resolver:
+{Ankusa.RouteResolver.TenantPath, []}` — because every layer is a behaviour with
 `{module, opts}` config, resolved at the call site, never hardcoded.
 
 ### Runtime environment overrides

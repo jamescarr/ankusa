@@ -36,7 +36,6 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
   | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
   | `ANKUSA_WAL_TYPE` | `wal.type` |
-  | `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
   | `ANKUSA_STORAGE_TYPE` | `storage.type` |
   | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
   | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
@@ -64,17 +63,14 @@ defmodule AnkusaServer.Config do
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
   @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
-  @wal_keys ~w(type postgres)
-  @postgres_keys ~w(url host port username password database pool_size ssl migrate)
-  @postgres_discrete_keys ~w(host port username password database)
+  @wal_keys ~w(type)
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes)
-  @source_keys ~w(tenant on_verify_failure verify dedup sinks)
+  @source_keys ~w(tenant on_verify_failure verify sinks)
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
-  @dedup_keys ~w(type header json_path)
   @log_sink_keys ~w(type)
   @http_sink_keys ~w(type url method headers timeout_ms ordered)
   @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes)
@@ -89,7 +85,6 @@ defmodule AnkusaServer.Config do
   @scheme_hashes ~w(sha256 sha512 sha1)
   @scheme_encodings ~w(hex base64)
   @scheme_secret_decodes ~w(raw whsec_base64)
-  @dedup_types ~w(rules stripe github)
   @sink_types ~w(log http rabbitmq kafka nats)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
@@ -221,7 +216,6 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
-    {"ANKUSA_WAL_POSTGRES_URL", ["wal", "postgres", "url"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
     {"ANKUSA_S3_REGION", ["storage", "s3", "region"]},
@@ -405,90 +399,9 @@ defmodule AnkusaServer.Config do
 
   defp wal_section(doc) do
     wal = section!(doc, "wal", @wal_keys, [])
-    postgres = section!(wal, "postgres", @postgres_keys, ["wal"])
+    "disk" = enum!(wal["type"] || "disk", ~w(disk), ["wal", "type"])
 
-    case enum!(wal["type"] || "disk", ~w(disk postgres), ["wal", "type"]) do
-      "disk" ->
-        [wal: {Ankusa.WAL.DiskLog, []}]
-
-      "postgres" ->
-        if postgres == %{} do
-          raise ConfigError,
-            message: "wal.postgres: required when wal.type is \"postgres\""
-        end
-
-        [wal: {Ankusa.WAL.Postgres, postgres_opts!(postgres)}]
-    end
-  end
-
-  defp postgres_opts!(postgres) do
-    path = ["wal", "postgres"]
-
-    if postgres["url"] && Enum.any?(@postgres_discrete_keys, &Map.has_key?(postgres, &1)) do
-      raise ConfigError,
-        message:
-          "#{render_path(path)}: \"url\" and the discrete connection keys are mutually exclusive"
-    end
-
-    url_opts =
-      case postgres["url"] do
-        nil ->
-          []
-
-        url ->
-          url_path = path ++ ["url"]
-          postgres_url_opts!(expect_string(url, url_path), url_path)
-      end
-
-    url_opts
-    |> put_opt(:hostname, string_opt(postgres, "host", path))
-    |> put_opt(:username, string_opt(postgres, "username", path))
-    |> put_opt(:password, string_opt(postgres, "password", path))
-    |> put_opt(:database, string_opt(postgres, "database", path))
-    |> put_opt(:port, int_opt(postgres, "port", path))
-    |> put_opt(:pool_size, int_opt(postgres, "pool_size", path))
-    |> put_opt(:ssl, bool_opt(postgres, "ssl", path))
-    |> put_opt(:migrate, bool_opt(postgres, "migrate", path))
-  end
-
-  # `is_binary/1` is not decoration: it narrows the argument so `URI.parse/1`
-  # has a concrete input type, which keeps the struct fields statically known.
-  defp postgres_url_opts!(url, path) when is_binary(url) do
-    uri = URI.parse(url)
-
-    cond do
-      uri.scheme not in ["postgres", "postgresql"] ->
-        raise ConfigError,
-          message: "#{render_path(path)}: expected a postgres:// URL, got #{inspect(url)}"
-
-      is_nil(uri.host) ->
-        raise ConfigError, message: "#{render_path(path)}: no host in #{inspect(url)}"
-
-      true ->
-        database = uri.path |> to_string() |> String.trim_leading("/")
-        {username, password} = userinfo_parts(uri.userinfo)
-
-        [
-          hostname: uri.host,
-          port: uri.port || 5432,
-          username: username,
-          password: password,
-          database: if(database == "", do: nil, else: database)
-        ]
-        |> Enum.reject(fn {_key, value} -> is_nil(value) end)
-    end
-  end
-
-  # The struct has `userinfo`, not `user`/`password` (`URI.user/1` is a
-  # function). URL-encoded values are decoded here, because Postgrex wants the
-  # password, not its percent-encoding — `p%40ss` is the password `p@ss`.
-  defp userinfo_parts(nil), do: {nil, nil}
-
-  defp userinfo_parts(userinfo) do
-    case String.split(userinfo, ":", parts: 2) do
-      [user] -> {URI.decode(user), nil}
-      [user, password] -> {URI.decode(user), URI.decode(password)}
-    end
+    [wal: {Ankusa.WAL.DiskLog, []}]
   end
 
   # ── storage ─────────────────────────────────────────────────────────────────
@@ -592,7 +505,6 @@ defmodule AnkusaServer.Config do
     |> put_opt(:tenant_id, string_opt(source, "tenant", path))
     |> put_opt(:on_verify_failure, atom_enum_opt(source, "on_verify_failure", @policies, path))
     |> put_opt(:verifier, verifier(source, path))
-    |> put_opt(:dedup, dedup_key(source, path))
     |> Keyword.put(:sinks, sinks!(source, path))
   end
 
@@ -682,39 +594,6 @@ defmodule AnkusaServer.Config do
     }
 
     Ankusa.Verifier.Schemes.validate!(scheme)
-  end
-
-  defp dedup_key(source, path) do
-    path = path ++ ["dedup"]
-
-    case section!(source["dedup"], @dedup_keys, path) do
-      dedup when map_size(dedup) == 0 ->
-        nil
-
-      dedup ->
-        type = enum!(dedup["type"] || "rules", @dedup_types, path ++ ["type"])
-
-        case type do
-          "rules" ->
-            {Ankusa.DedupKey.Rules,
-             []
-             |> put_opt(:header, string_opt(dedup, "header", path))
-             |> put_opt(:json, json_path(dedup, path))}
-
-          "stripe" ->
-            {Ankusa.DedupKey.Stripe, []}
-
-          "github" ->
-            {Ankusa.DedupKey.GitHub, []}
-        end
-    end
-  end
-
-  defp json_path(dedup, path) do
-    case dedup["json_path"] do
-      nil -> nil
-      value -> value |> expect_string(path ++ ["json_path"]) |> String.split(".")
-    end
   end
 
   defp sinks!(source, path) do

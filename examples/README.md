@@ -78,18 +78,16 @@ flowchart LR
 
 ## oban-consumer
 
-A real Kubernetes (`kind`) deployment: three edge replicas on a shared Postgres
-WAL, one dispatch+storage worker calling the consumer over HTTP, and Oban doing
-the actual work. `tools/loadgen` drives three load phases — steady, chaos with
-pods killed mid-run, and a closed-loop burst — and verifies every acknowledged
-hook lands exactly once.
+A real Kubernetes (`kind`) deployment: three self-contained Ankusa nodes, each
+with its own WAL on a persistent volume, calling the consumer over HTTP, with
+Oban doing the actual work. `tools/loadgen` drives three load phases — steady,
+chaos with pods killed mid-run, and a closed-loop burst — and verifies every
+acknowledged hook is delivered and processed.
 
 ```mermaid
 flowchart LR
-    L[load generator] --> E[edge ×3]
-    E <-->|shared WAL| PG[(Postgres)]
-    PG <--> D[dispatch worker]
-    D -->|POST /deliveries| C[consumer]
+    L[load generator] --> N[ankusa ×3 — all-role, own WAL on PVC]
+    N -->|POST /deliveries| C[consumer]
     C --> OJ[Oban]
     OJ --> DB[(processed_webhooks)]
 ```

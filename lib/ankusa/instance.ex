@@ -58,7 +58,7 @@ defmodule Ankusa.Instance do
 
   # The WAL only matters to roles that actually read or write it. A node
   # running only `:claim_check` needs blob-store credentials, never WAL
-  # credentials (e.g. a Postgres connection) — so it shouldn't open one.
+  # credentials — so it shouldn't open one.
   defp wal_children(config, opts) do
     if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
       {wal_mod, _} = config.wal

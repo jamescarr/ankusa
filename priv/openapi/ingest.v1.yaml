@@ -10,9 +10,8 @@ info:
 
     The core invariant is visible in the status codes: a `2xx` is never
     returned until the hook is durably in the WAL. `201 accepted` means
-    committed, `200 duplicate` means the dedup key was already committed (the
-    provider retried; nothing extra was stored), `202 quarantined` means the
-    source's policy kept a failed-verification hook instead of rejecting it.
+    committed; `202 quarantined` means the source's policy kept a
+    failed-verification hook instead of rejecting it.
 
     There is no request authentication here beyond provider signature
     verification, which is webhook semantics rather than access control: the
@@ -54,8 +53,6 @@ paths:
       responses:
         '201':
           $ref: '#/components/responses/Accepted'
-        '200':
-          $ref: '#/components/responses/Duplicate'
         '202':
           $ref: '#/components/responses/Quarantined'
         '400':
@@ -78,8 +75,8 @@ paths:
       summary: Ingest a hook for a tenant's source
       description: |
         The multi-tenant catch URL (`Ankusa.RouteResolver.TenantPath`, prefix
-        `webhooks`). The tenant in the path is authoritative: it scopes dedup
-        and storage, and overrides the source's configured tenant.
+        `webhooks`). The tenant in the path is authoritative: it scopes storage
+        and overrides the source's configured tenant.
       requestBody:
         required: true
         description: The provider's exact raw bytes, at most `max_body_bytes`.
@@ -88,8 +85,6 @@ paths:
       responses:
         '201':
           $ref: '#/components/responses/Accepted'
-        '200':
-          $ref: '#/components/responses/Duplicate'
         '202':
           $ref: '#/components/responses/Quarantined'
         '400':
@@ -173,24 +168,6 @@ components:
           type: integer
           minimum: 1
           description: WAL sequence number, strictly increasing across commits.
-    Duplicate:
-      type: object
-      description: |
-        The dedup key was already committed. Nothing extra was stored, and the
-        sender is told `2xx` so it stops retrying.
-      required: [status, id, seq]
-      properties:
-        status:
-          const: duplicate
-        id:
-          type: string
-          description: |
-            A fresh envelope id assigned to this request. It is not stored and
-            does not identify the original record; use `seq` for that.
-        seq:
-          type: integer
-          minimum: 1
-          description: Sequence number of the stored record that owns the dedup key.
     Quarantined:
       type: object
       required: [status, reason]
@@ -250,12 +227,6 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Accepted'
-    Duplicate:
-      description: '`200`. Absorbed by dedup; the original is already committed.'
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Duplicate'
     Quarantined:
       description: '`202`. Held for an operator; see the source''s `on_verify_failure`.'
       content:

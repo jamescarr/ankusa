@@ -1,23 +1,31 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
-  name: ankusa-edge
+  name: ankusa
   namespace: ankusa-e2e
   labels:
-    app: ankusa-edge
+    app: ankusa
 spec:
+  serviceName: ankusa
+  # Three self-contained nodes: every pod runs all three roles and owns its
+  # WAL on its own PVC, so losing a pod loses no accepted envelope. The
+  # Service round-robins webhooks across them; dispatch is at-least-once, and
+  # the consumer is idempotent on the envelope id.
   replicas: 3
+  # Parallel: bring all three up at once instead of serially — the PVCs are
+  # independent, so there's nothing to order.
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
-      app: ankusa-edge
+      app: ankusa
   template:
     metadata:
       labels:
-        app: ankusa-edge
+        app: ankusa
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: ankusa-edge
+        - name: ankusa
           image: ankusa-oban-ingest:e2e
           imagePullPolicy: IfNotPresent
           lifecycle:
@@ -29,21 +37,11 @@ spec:
                 command: ["sleep", "5"]
           env:
             - name: ANKUSA_ROLES
-              value: "edge"
+              value: "edge,dispatch,storage"
             - name: PORT
               value: "4000"
             - name: DATA_DIR
               value: "/data"
-            - name: WAL_DB_HOST
-              value: "postgres"
-            - name: WAL_DB_PORT
-              value: "5432"
-            - name: WAL_DB_USER
-              value: "ankusa"
-            - name: WAL_DB_PASSWORD
-              value: "ankusa"
-            - name: WAL_DB_NAME
-              value: "ankusa"
             - name: CONSUMER_URL
               value: "http://consumer/deliveries"
           ports:
@@ -63,66 +61,6 @@ spec:
               port: 4000
             initialDelaySeconds: 10
             periodSeconds: 10
-      volumes:
-        - name: data
-          emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ankusa-edge
-  namespace: ankusa-e2e
-spec:
-  type: NodePort
-  selector:
-    app: ankusa-edge
-  ports:
-    - port: 80
-      targetPort: 4000
-      nodePort: 30080
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: ankusa-worker
-  namespace: ankusa-e2e
-spec:
-  serviceName: ankusa-worker
-  # Singleton by design: the :dispatch/:storage roles hold no lease and are
-  # not safe to run with more than one replica — see docs/deployment.md.
-  replicas: 1
-  selector:
-    matchLabels:
-      app: ankusa-worker
-  template:
-    metadata:
-      labels:
-        app: ankusa-worker
-    spec:
-      containers:
-        - name: ankusa-worker
-          image: ankusa-oban-ingest:e2e
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: ANKUSA_ROLES
-              value: "dispatch,storage"
-            - name: DATA_DIR
-              value: "/data"
-            - name: WAL_DB_HOST
-              value: "postgres"
-            - name: WAL_DB_PORT
-              value: "5432"
-            - name: WAL_DB_USER
-              value: "ankusa"
-            - name: WAL_DB_PASSWORD
-              value: "ankusa"
-            - name: WAL_DB_NAME
-              value: "ankusa"
-            - name: CONSUMER_URL
-              value: "http://consumer/deliveries"
-          volumeMounts:
-            - name: data
-              mountPath: /data
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -131,3 +69,17 @@ spec:
         resources:
           requests:
             storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankusa
+  namespace: ankusa-e2e
+spec:
+  type: NodePort
+  selector:
+    app: ankusa
+  ports:
+    - port: 80
+      targetPort: 4000
+      nodePort: 30080

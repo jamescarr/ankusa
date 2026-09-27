@@ -17,7 +17,7 @@ JSON report of the run.
 cd tools/loadgen
 mix loadgen.run --url http://localhost:4000/webhooks/some-source \
   --concurrency 64 --duration 60 --rate 500 \
-  --dup-ratio 0.05 --body-bytes 512 \
+  --body-bytes 512 \
   --out acked.csv --report loadgen-report.json
 ```
 
@@ -29,7 +29,6 @@ mix loadgen.run --url http://localhost:4000/webhooks/some-source \
 | `--concurrency`   | integer | `64`                     | Number of concurrent worker processes.                                                      |
 | `--duration`      | integer | `60`                     | Wall clock seconds each worker runs for.                                                    |
 | `--rate`          | integer | *(absent = closed loop)* | Target aggregate requests/second. Pacing is **open-loop**: request number `n` is *scheduled* at `n/rate` seconds after start, so a generator that falls behind does not lower the offered rate — it shows up as latency. Omit for closed-loop firing (each worker sends its next request immediately after the previous one completes). |
-| `--dup-ratio`     | float   | `0.05`                   | Probability that a given request resends a body this worker previously got a `201` for (proves idempotent dedup). |
 | `--body-bytes`    | integer | `512`                    | Size in bytes of the `"pad"` field in each freshly generated JSON body.                     |
 | `--out`           | string  | `acked.csv`              | Path to write the "acked" CSV (`id,sha256hex` per accepted delivery, no header).             |
 | `--report`        | string  | `loadgen-report.json`    | Path to write the JSON run report.                                                          |
@@ -37,15 +36,15 @@ mix loadgen.run --url http://localhost:4000/webhooks/some-source \
 ### Response classification
 
 - `201` → accepted; the response body's `"id"` and the SHA-256 of the sent
-  body are recorded to `--out` and kept as one of this worker's own
-  dedup-source bodies.
-- `200` with JSON `"status": "duplicate"` → counted as a duplicate.
+  body are recorded to `--out`. Every request now sends a freshly generated
+  body, so a `201` is the only success.
 - `503` → counted as shed (backpressure).
-- Anything else, including transport errors/timeouts → counted as an error.
+- Anything else — including a `200`, transport errors, and timeouts →
+  counted as an error.
 
 ### Report
 
-`--report` is JSON with `sent`, `accepted`, `duplicates`, `shed`, `errors`,
+`--report` is JSON with `sent`, `accepted`, `shed`, `errors`,
 `duration_s`, `sent_per_s`, `accepted_per_s`, and `latency_ms: {p50, p95, p99,
 max}` (all percentiles over every attempted request, in milliseconds). The same
 numbers are also printed to stdout as a table.

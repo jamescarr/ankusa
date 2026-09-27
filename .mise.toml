@@ -31,7 +31,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-for d in . ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats ankusa_server \
+for d in . ankusa_rabbitmq ankusa_kafka ankusa_nats ankusa_server \
          examples/rabbitmq-consumer/ingest_app \
          examples/kafka-sqs-consumer/ingest_app \
          examples/oban-consumer/ingest_app \
@@ -45,12 +45,12 @@ done
 # ── adapter test infrastructure ───────────────────────────────────────────
 
 [tasks."infra:up"]
-description = "Start Postgres / RabbitMQ / Redpanda / NATS for the adapter suites"
+description = "Start RabbitMQ / Redpanda / NATS for the adapter suites"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
+for p in ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   echo "==> $p"
   (cd "$p" && docker compose up -d --wait)
 done
@@ -63,7 +63,7 @@ run = '''
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 rc=0
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
+for p in ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   (cd "$p" && docker compose down -v) || rc=1
 done
 exit $rc
@@ -77,20 +77,6 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-mix deps.get --check-locked
-mix deps.unlock --check-unused
-mix format --check-formatted
-mix compile --warnings-as-errors
-mix test
-mix docs --warnings-as-errors
-'''
-
-[tasks."check:postgres"]
-description = "ankusa_postgres: format + compile + test + docs (needs infra:up)"
-run = '''
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$(git rev-parse --show-toplevel)/ankusa_postgres"
 mix deps.get --check-locked
 mix deps.unlock --check-unused
 mix format --check-formatted
@@ -162,8 +148,8 @@ cd "$(git rev-parse --show-toplevel)"
 
 # A container for the same reason as check:kafka: brod's crc32cer NIF has no
 # prebuilt artifact and needs CMake >= 3.16. Unlike check:kafka there are no
-# services to bring up — the suite never talks to Postgres, RabbitMQ, or
-# Redpanda — so this is only about having the toolchain, and the repo *root* is
+# services to bring up — the suite never talks to RabbitMQ, Redpanda, or
+# NATS — so this is only about having the toolchain, and the repo *root* is
 # the mount because :dev/:test path-depends on `..`. MIX_BUILD_PATH keeps the
 # container's Linux artifacts out of the host `_build`.
 docker run --rm -v "$PWD":/repo \
@@ -243,7 +229,6 @@ cd "$(git rev-parse --show-toplevel)"
 mise run infra:up
 trap 'mise run infra:down' EXIT
 mise run check:core
-mise run check:postgres
 mise run check:rabbitmq
 mise run check:kafka
 mise run check:nats
@@ -284,7 +269,7 @@ cd "$(git rev-parse --show-toplevel)"
 rm -rf ankusa-0.1.0
 mix hex.build --unpack
 rm -rf ankusa-0.1.0
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
+for p in ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   echo "==> $p (MIX_ENV=prod: must resolve ankusa from Hex, not the path dep)"
   (cd "$p" && MIX_ENV=prod mix hex.build)
   rm -f "$p"/*.tar
@@ -384,7 +369,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/ankus
 [ "$code" = "200" ] || fail "ankusa $core is not on Hex yet (HTTP $code) — run release:tag-core first"
 printf '  ankusa %s is live on Hex\n' "$core"
 
-for pkg in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
+for pkg in ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$pkg/mix.exs")
   [ -n "$v" ] || fail "$pkg: could not read @version from $pkg/mix.exs"
   tag="$pkg-v$v"
@@ -445,7 +430,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 # Core-is-live and tag-free checks live in release:preflight-adapters above.
-for p in ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
+for p in ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$p/mix.exs")
   tag="$p-v$v"
   git tag "$tag"
@@ -470,11 +455,11 @@ id=$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].d
 '''
 
 [tasks."release:verify"]
-description = "Confirm all five packages are live on Hex"
+description = "Confirm all four packages are live on Hex"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
-for p in ankusa ankusa_postgres ankusa_rabbitmq ankusa_kafka ankusa_nats; do
+for p in ankusa ankusa_rabbitmq ankusa_kafka ankusa_nats; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/$p")
   printf '  %-18s %s\n' "$p" "$code"
   [ "$code" = "200" ] || { echo "  ^ not published" >&2; exit 1; }

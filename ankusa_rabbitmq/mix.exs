@@ -4,7 +4,7 @@ defmodule AnkusaRabbitmq.MixProject do
   @version "0.1.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
-  # Same forced-split pattern as ankusa_postgres: `ankusa` core stays free of the
+  # Forced split: `ankusa` core stays free of the
   # `:amqp` dependency (and everything it pulls in — amqp_client, rabbit_common
   # NIFs) — this package exists only for deployments that opt into a RabbitMQ
   # sink.
@@ -60,8 +60,12 @@ defmodule AnkusaRabbitmq.MixProject do
     ]
   end
 
-  # See ankusa_postgres/mix.exs for why this exists and why it must be a
-  # single conditional entry rather than duplicate entries with :only.
+  # Path dep for local monorepo development/test; the Hex-published version
+  # is what a consumer installing from Hex.pm actually resolves — Hex
+  # rejects packages with path/git deps, so this "poncho project" split is
+  # required for this package to be publishable at all. Mix rejects two
+  # entries for the same app regardless of :only, so this has to be a
+  # single conditional entry, not a duplicate-with-disjoint-:only pair.
   defp ankusa_dep do
     if Mix.env() in [:dev, :test] do
       {:ankusa, path: ".."}

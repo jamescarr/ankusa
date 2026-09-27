@@ -13,7 +13,6 @@ config :ankusa,
   sources: %{
     "demo" => [
       verifier: {Ankusa.Verifier.None, []},
-      dedup: {Ankusa.DedupKey.Rules, []},
       on_verify_failure: :accept_flag,
       sinks: [{Ankusa.Sink.Log, []}]
     ]

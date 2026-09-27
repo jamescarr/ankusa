@@ -25,7 +25,7 @@ This isn't a stylistic preference — it's the direct consequence of the
 project being library-first (embeds in an existing Phoenix/Bandit app) as
 well as a deployable release. A library embedder pays for every dependency
 their host app compiles, whether they use it or not. A laptop user running
-`mix deps.get` on `ankusa` alone should never fetch `postgrex` or `amqp`
+`mix deps.get` on `ankusa` alone should never fetch `amqp` or `brod`
 because they exist in the ecosystem, only because they were actually
 configured.
 
@@ -38,28 +38,27 @@ bandit_example/            ankusa — core. mix.exs deps: {bandit, plug, req,
                               edge/dispatch/storage machinery, and every
                               zero-external-dep default adapter
                               (WAL.DiskLog, BlobStore.{LocalFS,S3,GCS,Azure,OCI},
-                              Codec.Raw, all Verifiers, DedupKey.*,
+                              Codec.Raw, all Verifiers,
                               Sink.{Log,Http}, RetryPolicy.Exponential,
                               RouteResolver.{Path,TenantPath})
-  ankusa_postgres/            path-dep on ankusa + postgrex. Ankusa.WAL.Postgres.
   ankusa_rabbitmq/            path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
   ankusa_kafka/               path-dep on ankusa + brod. Ankusa.Sink.Kafka.
   ankusa_nats/                path-dep on ankusa + gnat. Ankusa.Sink.NATS.
   examples/                 deployable demos; not published packages
 ```
 
-`ankusa_postgres` and `ankusa_rabbitmq` each depend on `ankusa` via `{:ankusa, path:
-".."}` for local development, and would become normal Hex dependencies once
-published. Each ships its **own** `docker-compose.yml` for local dev/test
-infra (`ankusa_postgres/` → Postgres on `:5433`; `ankusa_rabbitmq/` → RabbitMQ
-on `:5673`/`:15673`; `ankusa_kafka/` → Redpanda on `:19092`; `ankusa_nats/` →
-NATS with JetStream on `:4223`/`:8223`). Every adapter
+`ankusa_rabbitmq`, `ankusa_kafka`, and `ankusa_nats` each depend on `ankusa`
+via `{:ankusa, path: ".."}` for local development, and would become normal Hex
+dependencies once published. Each ships its **own** `docker-compose.yml` for
+local dev/test infra (`ankusa_rabbitmq/` → RabbitMQ on `:5673`/`:15673`;
+`ankusa_kafka/` → Redpanda on `:19092`; `ankusa_nats/` → NATS with JetStream
+on `:4223`/`:8223`). Every adapter
 package test suite needs `Ankusa.Registry` running (started by `ankusa`'s own
 Application); none needs any config to get it, since Ankusa.Application's
 built-in default instance is off (`autostart: false`) by default and only the
 root project's own `config/config.exs` turns it on.
 
-## Why S3/GCS/Azure/OCI stayed in-tree but Postgres/RabbitMQ/Kafka/NATS didn't
+## Why S3/GCS/Azure/OCI stayed in-tree but RabbitMQ/Kafka/NATS didn't
 
 This is a dependency-weight split, not a position on hand-rolling.
 
@@ -108,8 +107,7 @@ path, and pin it against the provider's own reference vectors" — which is what
 signature of OCI's published test string (computed independently with OpenSSL)
 and reconstructing the signing string from a captured request.
 
-`Ankusa.WAL.Postgres` needs `postgrex` (which pulls `db_connection`,
-`decimal`). `Ankusa.Sink.RabbitMQ` needs `amqp` (which pulls `amqp_client`,
+`Ankusa.Sink.RabbitMQ` needs `amqp` (which pulls `amqp_client`,
 `rabbit_common` — real NIF/native-adjacent Erlang libraries).
 `Ankusa.Sink.Kafka` needs `brod`, which pulls `crc32cer`: a C++ NIF that
 compiles from source on every `mix deps.compile`, so that package carries a
@@ -121,8 +119,6 @@ Kafka-, or RabbitMQ-only deployment has any use for, which is the same test
 with a lighter dependency. Those are
 genuine external dependencies the laptop/standalone user shouldn't pay to
 compile, so each got its own package the moment it was built — not before.
-`ankusa_postgres` didn't exist until the Postgres WAL adapter was actually
-written; there was nothing to split prematurely.
 
 ## What deliberately did *not* get split
 
@@ -154,14 +150,11 @@ release, many roles, config decides what boots. See
    framework's own processes do — this is what lets the facade
    (`Ankusa.WAL.append/2`, `Ankusa.Sink`'s `deliver/3` call sites) dispatch to
    your adapter without `ankusa` core knowing your package exists.
-4. **Verify against real infrastructure, not mocks.** Both `ankusa_postgres`
-   and `ankusa_rabbitmq` are tested against real Postgres/RabbitMQ containers
-   — a hand-rolled protocol implementation (SigV4 signing, a SQL dedup
-   ledger, AMQP publisher confirms) that "looks right" is exactly the kind
-   of thing that's subtly wrong until proven against the real thing. Both
-   adapters in this repo caught genuine bugs this way during development
-   (see `ankusa_postgres`'s moduledoc on why the dedup ledger carries its own
-   `seq` instead of joining back to `ankusa_wal`).
+4. **Verify against real infrastructure, not mocks.** `ankusa_rabbitmq`,
+   `ankusa_kafka`, and `ankusa_nats` are tested against real
+   RabbitMQ/Redpanda/NATS containers — a protocol implementation (AMQP
+   publisher confirms, a Kafka produce path) that "looks right" is exactly
+   the kind of thing that's subtly wrong until proven against the real thing.
 5. Document it: a row in the behaviour table in
    [`configuration.md`](configuration.md), and a section in
    [`storage.md`](storage.md) or [`delivery.md`](delivery.md) depending on
@@ -169,9 +162,9 @@ release, many roles, config decides what boots. See
 
 ## Building an app against the path deps
 
-Because `ankusa_postgres`/`ankusa_rabbitmq` are path-dependencies during local
-development, a Dockerfile building an app that depends on them needs a
-build **context** wide enough to see the whole slice, with the relative
+Because `ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats` are path-dependencies
+during local development, a Dockerfile building an app that depends on them
+needs a build **context** wide enough to see the whole slice, with the relative
 paths preserved so the same `mix.exs` files resolve identically inside the
 container as they do on disk:
 
@@ -197,7 +190,7 @@ services:
 ```
 
 **Depending on `ankusa` directly *and* transitively through an adapter
-package needs `override: true`.** `ankusa_postgres`/`ankusa_rabbitmq`'s own
+package needs `override: true`.** Each adapter package's own
 `mix.exs` picks its Hex entry for `:ankusa` (`~> 0.1`) whenever Mix
 evaluates it as a nested dependency — Mix builds dependencies under `:prod`
 by default regardless of *your* project's `Mix.env()`, so the adapter

@@ -44,24 +44,19 @@ defmodule Ankusa.EdgeTest do
     assert WAL.stats(config.instance).records == 0
   end
 
-  test "idempotent: a repeated dedup key returns 200 duplicate and is stored once" do
-    sources = %{
-      "stripe" => [
-        verifier: {Ankusa.Verifier.None, []},
-        dedup: {Ankusa.DedupKey.Rules, json: ["id"]}
-      ]
-    }
+  test "the same body posted twice is stored twice" do
+    config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]})
 
-    config = start_edge(sources)
-
-    body = ~s({"id":"evt_123","type":"x"})
-    first = route(config, request("stripe", body))
-    second = route(config, request("stripe", body))
+    body = ~s({"id":"evt_123"})
+    first = route(config, request("demo", body))
+    second = route(config, request("demo", body))
 
     assert first.status == 201
-    assert second.status == 200
-    assert %{"status" => "duplicate"} = JSON.decode!(second.resp_body)
-    assert WAL.stats(config.instance).records == 1
+    assert second.status == 201
+    assert %{"status" => "accepted", "id" => id1, "seq" => 1} = JSON.decode!(first.resp_body)
+    assert %{"status" => "accepted", "id" => id2, "seq" => 2} = JSON.decode!(second.resp_body)
+    assert id1 != id2
+    assert WAL.stats(config.instance).records == 2
   end
 
   test "valid Standard Webhooks signature is accepted; a bad one is rejected (401)" do

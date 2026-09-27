@@ -231,12 +231,12 @@ defmodule Ankusa.Admin.RouterTest do
       test_config(
         roles: [:edge],
         admin: %{enabled: true},
-        wal: {Ankusa.WAL.Postgres, url: "postgres://ankusa:leakhunter@db:5432/ankusa"},
         source_store:
           {Ankusa.SourceStore.Static,
            sources: %{
              "stripe" => [
-               verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_leakhunter"}
+               verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_leakhunter"},
+               sinks: [{Ankusa.Sink.Http, url: "https://hooks:leakhunter@sink.internal/h"}]
              ]
            }}
       )
@@ -247,7 +247,7 @@ defmodule Ankusa.Admin.RouterTest do
     assert conn.status == 200
 
     refute conn.resp_body =~ "leakhunter"
-    assert conn.resp_body =~ "postgres://ankusa:[REDACTED]@db:5432/ankusa"
+    assert conn.resp_body =~ "https://hooks:[REDACTED]@sink.internal/h"
     # sources, module pairs, and booleans all survive as themselves
     assert conn.resp_body =~ "stripe"
     assert conn.resp_body =~ ~s("module":"Ankusa.Verifier.Hmac")

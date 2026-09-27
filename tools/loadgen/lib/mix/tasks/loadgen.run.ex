@@ -20,7 +20,6 @@ defmodule Mix.Tasks.Loadgen.Run do
           concurrency: :integer,
           duration: :integer,
           rate: :integer,
-          dup_ratio: :float,
           body_bytes: :integer,
           out: :string,
           report: :string
@@ -36,7 +35,6 @@ defmodule Mix.Tasks.Loadgen.Run do
     concurrency = Keyword.get(parsed, :concurrency, 64)
     duration = Keyword.get(parsed, :duration, 60)
     rate = Keyword.get(parsed, :rate)
-    dup_ratio = Keyword.get(parsed, :dup_ratio, 0.05)
     body_bytes = Keyword.get(parsed, :body_bytes, 512)
     out_path = Keyword.get(parsed, :out, "acked.csv")
     report_path = Keyword.get(parsed, :report, "loadgen-report.json")
@@ -52,7 +50,6 @@ defmodule Mix.Tasks.Loadgen.Run do
       concurrency: concurrency,
       duration: duration,
       rate: rate,
-      dup_ratio: dup_ratio,
       body_bytes: body_bytes
     }
 
@@ -82,7 +79,6 @@ defmodule Mix.Tasks.Loadgen.Run do
     report = %{
       sent: merged.sent,
       accepted: merged.accepted,
-      duplicates: merged.duplicates,
       shed: merged.shed,
       errors: merged.errors,
       duration_s: duration_s,
@@ -119,11 +115,9 @@ defmodule Mix.Tasks.Loadgen.Run do
     %{
       sent: 0,
       accepted: 0,
-      duplicates: 0,
       shed: 0,
       errors: 0,
       k: 0,
-      bodies: [],
       accepted_list: [],
       latencies: []
     }
@@ -164,7 +158,7 @@ defmodule Mix.Tasks.Loadgen.Run do
   end
 
   defp perform_request(acc, opts, intended_start_us) do
-    {kind, body} = build_body(acc, opts.dup_ratio, opts.body_bytes)
+    body = build_body(acc, opts.body_bytes)
 
     t_start = System.monotonic_time(:microsecond)
     result = send_one(opts.url, body)
@@ -176,20 +170,13 @@ defmodule Mix.Tasks.Loadgen.Run do
 
     acc = %{acc | sent: acc.sent + 1, k: acc.k + 1, latencies: [latency_us | acc.latencies]}
 
-    classify(result, kind, body, acc)
+    classify(result, body, acc)
   end
 
-  defp build_body(acc, dup_ratio, body_bytes) do
-    if :rand.uniform() < dup_ratio and acc.bodies != [] do
-      {:dup, Enum.random(acc.bodies)}
-    else
-      id = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+  defp build_body(acc, body_bytes) do
+    id = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
 
-      body =
-        JSON.encode!(%{"id" => id, "n" => acc.k, "pad" => String.duplicate("x", body_bytes)})
-
-      {:fresh, body}
-    end
+    JSON.encode!(%{"id" => id, "n" => acc.k, "pad" => String.duplicate("x", body_bytes)})
   end
 
   defp send_one(url, body) do
@@ -205,37 +192,26 @@ defmodule Mix.Tasks.Loadgen.Run do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp classify({:ok, %Req.Response{status: 201, body: resp_body}}, _kind, req_body, acc) do
+  defp classify({:ok, %Req.Response{status: 201, body: resp_body}}, req_body, acc) do
     id = extract_id(resp_body)
     sha = sha256_hex(req_body)
 
     %{
       acc
       | accepted: acc.accepted + 1,
-        # Bounded pool: only the 1024 most recent acked bodies are dedup sources,
-        # so a long run can't grow this list without limit.
-        bodies: Enum.take([req_body | acc.bodies], 1024),
         accepted_list: [{id, sha} | acc.accepted_list]
     }
   end
 
-  defp classify({:ok, %Req.Response{status: 200, body: resp_body}}, _kind, _req_body, acc) do
-    if duplicate_response?(resp_body) do
-      %{acc | duplicates: acc.duplicates + 1}
-    else
-      %{acc | errors: acc.errors + 1}
-    end
-  end
-
-  defp classify({:ok, %Req.Response{status: 503}}, _kind, _req_body, acc) do
+  defp classify({:ok, %Req.Response{status: 503}}, _req_body, acc) do
     %{acc | shed: acc.shed + 1}
   end
 
-  defp classify({:ok, %Req.Response{}}, _kind, _req_body, acc) do
+  defp classify({:ok, %Req.Response{}}, _req_body, acc) do
     %{acc | errors: acc.errors + 1}
   end
 
-  defp classify({:error, _reason}, _kind, _req_body, acc) do
+  defp classify({:error, _reason}, _req_body, acc) do
     %{acc | errors: acc.errors + 1}
   end
 
@@ -252,19 +228,6 @@ defmodule Mix.Tasks.Loadgen.Run do
 
   defp extract_id(_body), do: nil
 
-  defp duplicate_response?(body) when is_map(body) do
-    Map.get(body, "status") == "duplicate"
-  end
-
-  defp duplicate_response?(body) when is_binary(body) do
-    case JSON.decode(body) do
-      {:ok, %{"status" => "duplicate"}} -> true
-      _ -> false
-    end
-  end
-
-  defp duplicate_response?(_body), do: false
-
   defp sha256_hex(body) do
     :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
   end
@@ -275,7 +238,6 @@ defmodule Mix.Tasks.Loadgen.Run do
       %{
         sent: 0,
         accepted: 0,
-        duplicates: 0,
         shed: 0,
         errors: 0,
         accepted_list: [],
@@ -285,7 +247,6 @@ defmodule Mix.Tasks.Loadgen.Run do
         %{
           sent: acc.sent + r.sent,
           accepted: acc.accepted + r.accepted,
-          duplicates: acc.duplicates + r.duplicates,
           shed: acc.shed + r.shed,
           errors: acc.errors + r.errors,
           accepted_list: r.accepted_list ++ acc.accepted_list,
@@ -315,7 +276,6 @@ defmodule Mix.Tasks.Loadgen.Run do
     --------------
     sent            #{report.sent}
     accepted        #{report.accepted}
-    duplicates      #{report.duplicates}
     shed            #{report.shed}
     errors          #{report.errors}
     duration_s      #{Float.round(report.duration_s * 1.0, 3)}

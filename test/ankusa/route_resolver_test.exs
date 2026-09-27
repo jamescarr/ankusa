@@ -62,10 +62,10 @@ defmodule Ankusa.RouteResolverTest do
   end
 
   describe "integration through the edge" do
-    test "the URL tenant is threaded onto the envelope and scopes dedup" do
+    test "the URL tenant is threaded onto the envelope" do
       config =
         start({Ankusa.RouteResolver.TenantPath, []}, %{
-          "stripe" => [dedup: {Ankusa.DedupKey.Stripe, []}]
+          "stripe" => []
         })
 
       body = ~s({"id":"evt_1","type":"x"})
@@ -74,16 +74,13 @@ defmodule Ankusa.RouteResolverTest do
       globex = post(config, "/webhooks/globex/stripe", body)
       acme_again = post(config, "/webhooks/acme/stripe", body)
 
-      # same source_id + same event id, but two different tenants → both commit
       assert acme_first.status == 201
       assert globex.status == 201
-      # same tenant + same event id → duplicate absorbed, still 2xx
-      assert acme_again.status == 200
-      assert %{"status" => "duplicate"} = JSON.decode!(acme_again.resp_body)
+      assert acme_again.status == 201
 
       envs = WAL.read(config.instance, -1, 10)
-      assert length(envs) == 2
-      assert Enum.map(envs, & &1.tenant_id) |> Enum.sort() == ["acme", "globex"]
+      assert length(envs) == 3
+      assert Enum.map(envs, & &1.tenant_id) |> Enum.sort() == ["acme", "acme", "globex"]
       assert Enum.all?(envs, &(&1.source_id == "stripe"))
     end
 

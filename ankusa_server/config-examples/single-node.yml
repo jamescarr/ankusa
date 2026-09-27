@@ -28,7 +28,6 @@ sources:
       type: stripe
       secret: "${STRIPE_WHSEC}"
       tolerance_seconds: 300
-    dedup: {type: stripe}
     # A rotated secret should not silently eat real events: hold them instead.
     on_verify_failure: quarantine
     sinks:
@@ -43,8 +42,6 @@ sources:
     verify:
       type: github
       secret: "${GITHUB_WEBHOOK_SECRET}"
-    # GitHub retries and can deliver the same event twice.
-    dedup: {type: github}
     on_verify_failure: reject
     sinks:
       - type: http

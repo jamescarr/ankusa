@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # The image gate: start the built image and check what an operator checks in the
-# first minute — the demo hook round-trips (accepted, then deduped), metrics and
-# config answer, and a broken config exits 78 instead of crash-looping.
+# first minute — the demo hook is accepted, metrics and config answer, and a
+# broken config exits 78 instead of crash-looping.
 #
 #   ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
 #
@@ -61,17 +61,10 @@ done
 
 [ "$ready" = "true" ] || fail "/health never returned 200 within 30s"
 
-echo "==> ingest: accepted once, deduped the second time"
-hook='{"id":"evt_smoke"}'
-
-code=$(http_code "$WORK/first" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
+echo "==> ingest: accepted"
+code=$(http_code "$WORK/first" -XPOST "$BASE_URL/webhooks/demo" -d '{"id":"evt_smoke"}')
 [ "$code" = "201" ] || fail "first POST returned $code: $(cat "$WORK/first")"
 grep -q '"status":"accepted"' "$WORK/first" || fail "first POST was not accepted: $(cat "$WORK/first")"
-
-code=$(http_code "$WORK/second" -XPOST "$BASE_URL/webhooks/demo" -d "$hook")
-[ "$code" = "200" ] || fail "duplicate POST returned $code: $(cat "$WORK/second")"
-grep -q '"status":"duplicate"' "$WORK/second" ||
-  fail "duplicate POST was not deduped: $(cat "$WORK/second")"
 
 echo "==> metrics"
 curl -s "$ADMIN_URL/metrics" >"$WORK/metrics"
