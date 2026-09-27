@@ -1,0 +1,81 @@
+name: Release (npm)
+
+# Tag-driven npm publish for sdks/typescript (published as the `ankusa`
+# package), the same shape as release.yml's Hex flow — but its own tag
+# prefix, `sdk-typescript-v*`, distinct from the Hex core package's
+# `ankusa-v*`. The npm package is also named `ankusa`; sharing a tag prefix
+# would make the two releases ambiguous.
+#
+# Requires an `NPM_TOKEN` repository secret: an npmjs.com Automation access
+# token (so it isn't blocked by 2FA-on-publish), scoped to publish. See
+# docs/releasing.md.
+
+on:
+  push:
+    tags:
+      - "sdk-typescript-v*"
+
+concurrency:
+  group: release-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write # for npm provenance
+
+jobs:
+  resolve:
+    name: Resolve version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          VERSION="${GITHUB_REF_NAME#sdk-typescript-v}"
+          PKG_VERSION=$(node -p "require('./sdks/typescript/package.json').version")
+          [ "$PKG_VERSION" = "$VERSION" ] || { echo "::error::tag $VERSION != sdks/typescript/package.json $PKG_VERSION"; exit 1; }
+
+          grep -q "^## \[$VERSION\]" sdks/typescript/CHANGELOG.md || { echo "::error::sdks/typescript/CHANGELOG.md has no '## [$VERSION]' heading"; exit 1; }
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to npm + GitHub release
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: npm ci
+        working-directory: sdks/typescript
+        run: npm ci
+
+      - name: npm run build
+        working-directory: sdks/typescript
+        run: npm run build
+
+      - name: Publish package
+        working-directory: sdks/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## \[/ {exit} f' \
+            sdks/typescript/CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

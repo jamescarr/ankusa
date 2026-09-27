@@ -1,6 +1,7 @@
 # Releasing
 
-Two independent release tracks: four Hex packages, and one server image.
+Three independent release tracks: four Hex packages, one server image, and
+one npm package.
 
 ## Hex packages
 
@@ -69,3 +70,33 @@ description and cuts a GitHub release from the CHANGELOG section.
 
 Secrets: `DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN`: a Docker Hub personal
 access token with Read & Write.
+
+## The npm SDK
+
+One independently versioned npm package, `ankusa` (`sdks/typescript/`), with
+its own `package.json` `version` and `CHANGELOG.md`. Same tag-driven shape as
+the Hex packages, but its own tag prefix (`sdk-typescript-vX.Y.Z`, not
+`ankusa-vX.Y.Z`) since the npm package is also named `ankusa` and sharing a
+prefix with the Hex core package would make releases ambiguous. No ordering
+dependency on the Hex packages or the server image.
+
+1. In a PR: bump `version` in `sdks/typescript/package.json` (SemVer) and
+   move the relevant entries from `sdks/typescript/CHANGELOG.md`
+   `[Unreleased]` under a new dated heading.
+2. Merge.
+3. `mise run release:preflight-npm` → `mise run release:tag-npm` → `mise run
+   release:watch-npm` → `mise run release:verify-npm`. Preflight checks the
+   `NPM_TOKEN` secret exists, the tag is free locally and on `origin`, the
+   `CHANGELOG.md` has a matching dated entry, and the version isn't already
+   on npm.
+4. [`.github/workflows/release-npm.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-npm.yml)
+   triggers on the tag, verifies the tag's version against `package.json`
+   and the `CHANGELOG.md` heading, runs the full test suite
+   (`.github/workflows/ci.yml` via `workflow_call`), builds `dist/`, and
+   publishes with `npm publish --provenance`, then cuts a GitHub release
+   from the CHANGELOG section.
+5. `NPM_TOKEN` is a repository secret: an npmjs.com **Automation** access
+   token (Account → Access Tokens → Generate New Token → Automation: this
+   type bypasses 2FA-on-publish, which a personal "Publish" token does not),
+   scoped to the `ankusa` package once it exists, or unscoped for the first
+   publish. Add it under repo Settings → Secrets and variables → Actions.

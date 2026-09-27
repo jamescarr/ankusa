@@ -33,5 +33,9 @@ ankusa_nats-*.tar
 # Node (examples/*/worker).
 **/node_modules/
 
+# TypeScript SDK build output (built via "npm run build" / "npm pack").
+sdks/*/dist/
+*.tgz
+
 # Load-generator output from examples/oban-consumer/run.sh (CSVs + JSON reports).
 examples/oban-consumer/.e2e-out/

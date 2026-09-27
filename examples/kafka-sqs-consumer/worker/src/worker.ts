@@ -5,11 +5,11 @@
 // never object-store credentials. Prints everything; swap `handleHook` for
 // real processing.
 //
-// The claim-check client is generated from the framework's own OpenAPI
-// contract (`priv/openapi/claim_check.v1.yaml`, `npm run generate:types` ->
-// `src/claim-check-schema.d.ts`) instead of a hand-maintained ref type
-// and URL-building — see "Redeem a claim" in
-// docs/claim-check.md.
+// The claim-check client comes from the framework's own `ankusa` SDK
+// package (a `file:` dependency on `../../../sdks/typescript` — see
+// "Redeem a claim" in docs/claim-check.md), generated from
+// `priv/openapi/claim_check.v1.yaml` instead of hand-maintained ref parsing
+// and URL-building.
 
 import {
   ChangeMessageVisibilityCommand,
@@ -19,9 +19,7 @@ import {
   SQSClient,
   type Message,
 } from "@aws-sdk/client-sqs";
-import { createHash } from "node:crypto";
-import createClient from "openapi-fetch";
-import type { paths } from "./claim-check-schema.d.ts";
+import { ClaimCheckError, createClaimCheckClient, parseClaimRef } from "ankusa";
 
 const QUEUE_URL = required("SQS_QUEUE_URL");
 const DLQ_URL = required("SQS_DLQ_URL");
@@ -33,7 +31,7 @@ const sqs = new SQSClient({
 });
 
 // The gateway is open: no bearer token. Auth belongs in front of it.
-const claimCheck = createClient<paths>({ baseUrl: CLAIM_CHECK_URL });
+const claimCheck = createClaimCheckClient({ baseUrl: CLAIM_CHECK_URL });
 
 // The message `claim` field is a single claim-check ref URN, not a ticket
 // object:
@@ -48,14 +46,6 @@ type HookMessage = {
   size: number;
   body_base64?: string;
   claim?: string;
-};
-
-type ClaimRef = {
-  tenant_id: string;
-  object_id: string;
-  offset: string;
-  length: string;
-  digest: string;
 };
 
 // Retrying won't help: dead-letter now so the rest of the FIFO group moves.
@@ -78,68 +68,10 @@ function parse(body: string | undefined): HookMessage {
   return msg;
 }
 
-// Split the ref on ":" — nine parts. The sha256 digest is the hex after
-// `sha256-`; it's never sent to the gateway, only used to check the bytes.
-function parseClaimRef(claim: string): ClaimRef {
-  const parts = claim.split(":");
-  if (parts.length !== 9 || !claim.startsWith("urn:ankusa:claim:v1:")) {
-    throw new PermanentError(`invalid claim ref: ${claim}`);
-  }
-  return {
-    tenant_id: parts[4],
-    object_id: parts[5],
-    offset: parts[6],
-    length: parts[7],
-    digest: parts[8].slice("sha256-".length),
-  };
-}
-
-async function redeemClaim(claim: string): Promise<Buffer> {
-  const { tenant_id, object_id, offset, length, digest } = parseClaimRef(claim);
-
-  let data: ArrayBuffer | undefined;
-  let status: number;
-  let errorBody: unknown;
-  try {
-    const result = await claimCheck.GET("/v1/claims/{tenant_id}/{object_id}/{offset}/{length}", {
-      params: { path: { tenant_id, object_id, offset, length } },
-      parseAs: "arrayBuffer",
-    });
-    data = result.data as ArrayBuffer | undefined;
-    status = result.response.status;
-    errorBody = result.error;
-  } catch (err) {
-    throw new Error(`claim-check gateway unreachable: ${(err as Error).message}`);
-  }
-
-  if (status === 404) {
-    throw new PermanentError(`claim not found: ${tenant_id}/${object_id}`);
-  }
-  if (status >= 400 && status < 500) {
-    throw new PermanentError(`claim-check rejected redeem (${status}): ${JSON.stringify(errorBody)}`);
-  }
-  if (data === undefined) {
-    throw new Error(`claim-check gateway error: ${status}`);
-  }
-
-  const body = Buffer.from(data);
-
-  // Integrity is verified by the redeemer, never trusted from the gateway.
-  if (body.length !== Number(length)) {
-    throw new PermanentError(`claim size mismatch: expected ${length}, got ${body.length}`);
-  }
-  const sha256 = createHash("sha256").update(body).digest("hex");
-  if (sha256 !== digest) {
-    throw new PermanentError(`claim sha256 mismatch for ${tenant_id}/${object_id}`);
-  }
-
-  return body;
-}
-
 async function resolveBody(msg: HookMessage): Promise<{ body: Buffer; via: string }> {
   if (msg.claim) {
-    const { object_id } = parseClaimRef(msg.claim);
-    return { body: await redeemClaim(msg.claim), via: `claim:${object_id}` };
+    const { objectId } = parseClaimRef(msg.claim);
+    return { body: await claimCheck.redeem(msg.claim), via: `claim:${objectId}` };
   }
   return { body: Buffer.from(msg.body_base64 ?? "", "base64"), via: "inline" };
 }
@@ -208,7 +140,7 @@ async function processBatch(messages: Message[]): Promise<void> {
       }
       await remove(m);
     } catch (err) {
-      if (err instanceof PermanentError) {
+      if (err instanceof PermanentError || (err instanceof ClaimCheckError && !err.retryable)) {
         console.error(`[worker] permanent failure, dead-lettering: ${err.message}`);
         await deadLetter(m, err.message);
       } else {

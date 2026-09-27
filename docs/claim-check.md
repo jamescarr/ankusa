@@ -137,60 +137,41 @@ rule matters more than the rest: **a shared cache must sit behind the
 authorizer, never in front of it**. A cache in front would serve one tenant's
 payload to another tenant's request.
 
-### From TypeScript, with a generated client
+### From TypeScript, with the SDK
 
-Generate the types from the spec, and let `openapi-fetch` build the request:
+[`sdks/typescript`](https://github.com/jamescarr/ankusa/tree/main/sdks/typescript)
+(npm package `ankusa`) wraps a client generated from the spec with
+`openapi-typescript` + `openapi-fetch`: it parses a ref, redeems it, and
+verifies the bytes against the ref's own size and sha256 before returning
+them: the gateway does not check this itself. It's the framework's own
+umbrella client package: the claim-check client is the first piece in it.
 
 ```sh
-npx openapi-typescript claim_check.v1.yaml -o src/claim-check-schema.d.ts
-npm install openapi-fetch
+npm install ankusa   # or, before its first npm release, a `file:` path
+                      # dep, see the package README
 ```
 
 ```typescript
-import createClient from "openapi-fetch";
-import { createHash } from "node:crypto";
-import type { paths } from "./claim-check-schema.d.ts";
+import { ClaimCheckError, createClaimCheckClient } from "ankusa";
 
-const claimCheck = createClient<paths>({ baseUrl: process.env.CLAIM_CHECK_URL ?? "http://localhost:4001" });
+const claimCheck = createClaimCheckClient({ baseUrl: process.env.CLAIM_CHECK_URL ?? "http://localhost:4001" });
 
-// claim is the URN from the queue message: 9 colon-separated segments.
-function parseClaimRef(claim: string) {
-  const parts = claim.split(":");
-  if (parts.length !== 9 || !claim.startsWith("urn:ankusa:claim:v1:")) throw new Error("bad ref");
-  return {
-    tenant_id: parts[4],
-    object_id: parts[5],
-    offset: parts[6],
-    length: parts[7],
-    digest: parts[8].slice("sha256-".length),
-  };
-}
-
+// claim is the URN from the queue message.
 async function redeemClaim(claim: string): Promise<Buffer> {
-  const { tenant_id, object_id, offset, length, digest } = parseClaimRef(claim);
-  const { data, error, response } = await claimCheck.GET("/v1/claims/{tenant_id}/{object_id}/{offset}/{length}", {
-    params: { path: { tenant_id, object_id, offset, length } },
-    parseAs: "arrayBuffer",
-  });
-  if (error) throw new Error(`redeem failed (${response.status}): ${JSON.stringify(error)}`);
-
-  const body = Buffer.from(data as ArrayBuffer);
-  const sha256 = createHash("sha256").update(body).digest("hex");
-  if (body.length !== Number(length) || sha256 !== digest) {
-    throw new Error(`integrity mismatch for ${tenant_id}/${object_id}`);
-  }
-  return body;
+  return claimCheck.redeem(claim);
 }
 ```
 
-The workers in
+Every failure is a `ClaimCheckError` with a `retryable` boolean: `false` for
+a malformed ref, `404`, other `4xx`, or an integrity mismatch; `true` for
+`5xx`/`503` or an unreachable gateway. So sorting a redeem failure into
+dead-letter vs. retry needs no status-code knowledge. The workers in
 [`rabbitmq-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/worker)
 and
 [`kafka-sqs-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/worker)
-are complete versions: `npm run generate:types` regenerates the client, and
-`redeemClaim` sorts failures into dead-letter (`404`, other `4xx`, integrity)
-and retry (`5xx`, network). Any other OpenAPI generator, `openapi-generator`,
-`openapi-python-client`, works against the same file.
+depend on it. Any other OpenAPI generator, `openapi-generator`,
+`openapi-python-client`, works against the same
+[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml).
 
 ## Write cost
 

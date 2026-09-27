@@ -161,6 +161,18 @@ docker run --rm -v "$PWD":/repo \
          && mix test'
 '''
 
+[tasks."check:sdk-typescript"]
+description = "ankusa: typecheck + build + test"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)/sdks/typescript"
+npm ci
+npm run typecheck
+npm run build
+npm test
+'''
+
 [tasks."check:examples"]
 description = "The two Docker-Compose examples: rabbitmq ingest_app + both TS workers"
 run = '''
@@ -168,7 +180,9 @@ run = '''
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "==> rabbitmq-consumer/ingest_app"
+echo "==> sdks/typescript (dist must exist: the ankusa dep in each worker is a file: symlink to this source)"
+(cd sdks/typescript && npm ci && npm run build)
+
 (cd examples/rabbitmq-consumer/ingest_app && \
   mix deps.get --check-locked && mix deps.unlock --check-unused && \
   MIX_ENV=prod mix compile --warnings-as-errors)
@@ -232,6 +246,7 @@ mise run check:core
 mise run check:rabbitmq
 mise run check:kafka
 mise run check:nats
+mise run check:sdk-typescript
 mise run check:examples
 mise run check:oban
 mise run check:server
@@ -556,4 +571,78 @@ for platform in linux/amd64 linux/arm64; do
   grep -qE "Platform:[[:space:]]+$platform(/v[0-9]+)?\$" <<<"$manifest" || \
     { echo "  ^ $platform missing from jamescarr/ankusa:$VERSION" >&2; exit 1; }
 done
+'''
+
+# ── release: the npm SDK (sdks/typescript, package `ankusa`) ──────────────
+#
+# A third independent tag namespace (`sdk-typescript-vX.Y.Z`): distinct from
+# both `ankusa-vX.Y.Z` (Hex core — same npm package name, would otherwise be
+# ambiguous) and `ankusa_server-vX.Y.Z`. No ordering dependency on the Hex
+# packages or the server image.
+
+[tasks."release:preflight-npm"]
+description = "Checks before tagging the npm SDK (needs NPM_TOKEN secret)"
+depends = ["release:guard"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+gh secret list | grep -q '^NPM_TOKEN' || fail "repo secret NPM_TOKEN is not set"
+
+VERSION=$(node -p "require('./sdks/typescript/package.json').version")
+[ -n "$VERSION" ] || fail "could not read version from sdks/typescript/package.json"
+TAG="sdk-typescript-v$VERSION"
+
+grep -q "^## \[$VERSION\]" sdks/typescript/CHANGELOG.md || fail "sdks/typescript/CHANGELOG.md has no '## [$VERSION]' heading"
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && fail "tag $TAG already exists locally"
+git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 && fail "tag $TAG already exists on origin"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/ankusa/$VERSION")
+[ "$code" = "404" ] || fail "ankusa $VERSION is already on npm (HTTP $code) — bump the version and the CHANGELOG"
+
+printf '  ankusa %s -> %s, not yet on npm\n' "$VERSION" "$TAG"
+printf '\nNext: mise run release:tag-npm\n'
+'''
+
+[tasks."release:tag-npm"]
+description = "Tag + push sdk-typescript-v<version> (builds and publishes to npm)"
+depends = ["release:preflight-npm"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+VERSION=$(node -p "require('./sdks/typescript/package.json').version")
+TAG="sdk-typescript-v$VERSION"
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && { echo "tag $TAG already exists" >&2; exit 1; }
+git tag "$TAG"
+git push origin "$TAG"
+echo
+echo "pushed $TAG. Watch it: mise run release:watch-npm"
+'''
+
+[tasks."release:watch-npm"]
+description = "Watch the release-npm.yml run that publishes to npm"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+gh run list --workflow=release-npm.yml --limit 5
+echo
+id=$(gh run list --workflow=release-npm.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+[ -n "$id" ] && exec gh run watch "$id"
+'''
+
+[tasks."release:verify-npm"]
+description = "Confirm the npm SDK is live for the current version"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+VERSION=$(node -p "require('./sdks/typescript/package.json').version")
+code=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/ankusa/$VERSION")
+printf '  ankusa %-10s %s\n' "$VERSION" "$code"
+[ "$code" = "200" ] || { echo "  ^ not published" >&2; exit 1; }
 '''
