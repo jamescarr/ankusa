@@ -31,7 +31,7 @@ defmodule Ankusa.Metrics do
   through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
   modules become strings (`"Ankusa.Sink.Http"`), and anything else
   becomes `:other`. `:outcome` on ingest is already one of a fixed set —
-  `:committed | :duplicate | :quarantined | :rejected`, or an `{:error, reason}`
+  `:committed | :quarantined | :rejected`, or an `{:error, reason}`
   tag — because `Ankusa.Edge.Ingest` tags it before emitting.
   """
 
@@ -116,13 +116,6 @@ defmodule Ankusa.Metrics do
           event_name: [:ankusa, :commit, :stop],
           measurement: :batch_size,
           tags: [:instance]
-        )
-      ),
-      counter(
-        "ankusa.dedup.hits.total",
-        scoped(own,
-          event_name: [:ankusa, :dedup, :hit],
-          tags: [:instance, :source_id]
         )
       ),
       counter(

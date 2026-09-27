@@ -29,7 +29,6 @@ defmodule AnkusaServer.MixProject do
   defp deps do
     [
       {:ankusa, path: "..", override: true},
-      {:ankusa_postgres, path: "../ankusa_postgres"},
       {:ankusa_rabbitmq, path: "../ankusa_rabbitmq"},
       {:ankusa_kafka, path: "../ankusa_kafka"},
       {:ankusa_nats, path: "../ankusa_nats"},

@@ -11,7 +11,7 @@ defmodule Ankusa.RouteResolver do
 
   A resolver does URL-scheme work only. It never reads the body, verifies
   signatures, or touches storage: it answers "which endpoint is this?" and hands
-  back a `Ankusa.Route`. Policy (verify/dedup/sinks) still comes from the
+  back a `Ankusa.Route`. Policy (verify/sinks) still comes from the
   `Ankusa.SourceStore` keyed by the returned `source_id`.
   """
 

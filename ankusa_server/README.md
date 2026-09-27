@@ -12,8 +12,9 @@ _**Don't fight the traffic. Steer it.** Durable webhook ingestion for any volume
 
 Run Ankusa without knowing Elixir, the way you run Elasticsearch without knowing
 Java. One image, one YAML file, HTTP in and HTTP out. Every hook is written to a
-durable log before it is acked, so a provider retry is either absorbed as a
-duplicate or genuinely never arrived.
+durable log before it is acked, so a provider retry is either a hook that was
+durably stored (and will be delivered again) or one that genuinely never
+arrived.
 
 ## Quick start
 
@@ -28,8 +29,6 @@ until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
 # => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
-curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"status":"duplicate",...}                     (the retry is absorbed, not stored twice)
 ```
 
 That is a complete, durable webhook receiver. The `demo` source accepts anything
@@ -60,7 +59,6 @@ node:
 sources:
   stripe:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
-    dedup: {type: stripe}
     on_verify_failure: quarantine
     sinks:
       - {type: http, url: "${SINK_URL}", method: post, timeout_ms: 5000}
@@ -77,7 +75,6 @@ Starting points, all loadable as-is:
 | --- | --- |
 | [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
 | [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
-| [`config-examples/fleet-postgres-s3.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/fleet-postgres-s3.yml) | edge replicas on a shared Postgres WAL, segments in S3 |
 | [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
 | [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
 
@@ -110,8 +107,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` or `postgres`) |
-| `ANKUSA_WAL_POSTGRES_URL` | `wal.postgres.url` |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
@@ -137,7 +133,14 @@ sources:
 - The raw body verbatim, with the provider's `content-type`.
 - `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-seq`, and `x-ankusa-tenant` when set.
 - `2xx` means delivered. Anything else, a timeout, or a redirect is retried, then dead-lettered.
-- Dedupe on `x-ankusa-id`: delivery is at-least-once.
+- **Dedupe on `x-ankusa-id`.** Delivery is at-least-once, so consumers are
+  idempotent receivers: `x-ankusa-id` identifies one stored hook, and every
+  redelivery of it — a retry, a DLQ replay, a restart — carries the same id. A
+  provider retry is a *different* stored hook with a different id, because
+  ingest does no deduplication, so dedupe those on the provider's event id in
+  the body (e.g. Stripe's `id`). The original request headers are not
+  forwarded, so header-borne ids like `X-GitHub-Delivery` or `webhook-id` are
+  not available downstream.
 
 A runnable version — the image plus a Python worker, one `docker compose up` — is
 [`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/);
@@ -201,29 +204,25 @@ So:
   layer in front of it.
 - **Point Prometheus at 4002 through your proxy, with read-only credentials.**
 
-The fleet compose file is the worked example:
-[`compose/docker-compose.fleet.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.fleet.yml)
-runs two edge replicas and a worker with no published ports, and an nginx in
-front that leaves ingest open and puts HTTP basic auth on the admin API. It also
-demonstrates the guarantee the shared WAL buys: post the same hook twice, land on
-different replicas, and the second is absorbed as a duplicate.
+The proxy compose file is the worked example:
+[`compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.proxy.yml)
+runs one all-role node with no published ports, and an nginx in front that
+leaves ingest open and puts HTTP basic auth on the admin API.
 
 ## Data
 
 `/var/lib/ankusa` holds the WAL, the quarantine log, the dead-letter queue, and
 local segments. Losing it loses un-dispatched hooks, so give it a volume and back
-it — or move the WAL to Postgres and segments to S3/GCS, where it is not your
-problem anymore.
+it — or move segments to S3/GCS, where they are not your problem anymore.
 
 ## Compose
 
 - Single node: [`compose/docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.yml)
-- Fleet behind nginx basic auth: [`compose/docker-compose.fleet.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.fleet.yml)
+- All-role node behind nginx basic auth: [`compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.proxy.yml)
 
 ```sh
-docker compose -f docker-compose.fleet.yml up -d --wait
+docker compose -f docker-compose.proxy.yml up -d --wait
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 201
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 200 duplicate
 curl localhost:4002/v1/dlq                                   # 401 (nginx)
 curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]}
 ```

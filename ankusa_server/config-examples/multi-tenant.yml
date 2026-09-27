@@ -2,13 +2,13 @@
 #
 #   POST /webhooks/{tenant_id}/{source_id}
 #
-# The path segment is authoritative — it scopes dedup and storage — so one
+# The path segment is authoritative — it scopes storage — so one
 # provider source can serve every customer without a source per customer:
 #
 #   POST /webhooks/acme/stripe
 #   POST /webhooks/globex/stripe
 #
-# are independent dedup scopes. Authorization is your proxy's job: the URL
+# are independent storage scopes. Authorization is your proxy's job: the URL
 # carries the tenant precisely so a policy layer can decide on the route,
 # without reading bodies.
 #
@@ -32,7 +32,6 @@ sources:
     # Overridden per request by the tenant in the path.
     tenant: default
     verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
-    dedup: {type: stripe}
     on_verify_failure: reject
     sinks:
       - type: http

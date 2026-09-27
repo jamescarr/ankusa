@@ -68,7 +68,7 @@ defmodule Ankusa.Admin.Redact do
   defp redact_headers(_headers), do: @redacted
 
   # The framework's `{module, opts}` pair, everywhere it appears: the WAL,
-  # route resolver, source store, verifiers, dedup keys, and sinks.
+  # route resolver, source store, verifiers, and sinks.
   defp convert({module, opts}) when is_atom(module) do
     %{"module" => inspect(module), "opts" => convert_opts(opts)}
   end

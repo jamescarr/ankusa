@@ -96,6 +96,25 @@ See [`claim-check.md`](claim-check.md).
 sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
 ```
 
+### Idempotent receivers
+
+Delivery is at-least-once, so every consumer is an idempotent receiver. Two
+distinct ids can refer to the same provider event, and they are deduped
+differently:
+
+- `x-ankusa-id` — the message `id` on a queue sink — identifies **one stored
+  hook**. Every redelivery of that hook (a retry, a DLQ replay, a dispatch
+  restart) carries the same `id`, so dedupe on it.
+- A provider retry is a **different stored hook** with a different `id`,
+  because ingest does no deduplication. Dedupe those on the provider's own
+  event id in the body (e.g. Stripe's `id`).
+
+The original request headers are **not forwarded**: `Sink.Http` sends only
+`x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq`/`x-ankusa-tenant`, and
+`Sink.Message` carries only `id`, `source_id`, `tenant_id`, `received_at`,
+`content_type`, `size`, and the body (or claim). A header-borne id such as
+`X-GitHub-Delivery` or `webhook-id` is therefore not available downstream.
+
 ### `Sink.RabbitMQ` — queue delivery
 
 The queue-adapter story: an ingest fleet publishing to a broker instead of
@@ -184,8 +203,7 @@ sinks: [
 partition, and dispatch serializes deliveries sharing that key — one delivery
 per key at a time, in `seq` order (Kafka's `ordering_key/2` returns exactly
 the record key). Different keys are delivered concurrently. Order is *not*
-preserved across a DLQ replay, across a fleet sharing a `WAL.Postgres`, or
-after the topic's partition count changes. Keys are hashed with brod's `:hash`
+preserved across a DLQ replay or after the topic's partition count changes. Keys are hashed with brod's `:hash`
 (`erlang:phash2/1`), not the Java client's murmur2, so the same key can land
 on a different partition than a Java producer would choose.
 

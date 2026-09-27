@@ -1,12 +1,12 @@
 defmodule Ankusa.Edge.Ingest do
   @moduledoc """
   Orchestrates one webhook on the hot path: build the envelope, verify inline,
-  apply the per-source failure policy, extract the dedup key, then hand off to the
-  group-commit batcher and block until it commits.
+  apply the per-source failure policy, then hand off to the group-commit batcher
+  and block until it commits.
 
   The only place a `2xx`-worthy result is produced is *after* the batcher's WAL
-  commit returns (`{:committed, _}` / `{:duplicate, _}`), or after a durable
-  quarantine write. Everything else is a non-2xx.
+  commit returns (`{:committed, _}`), or after a durable quarantine write.
+  Everything else is a non-2xx.
   """
 
   alias Ankusa.{Envelope, Source, Verification}
@@ -14,7 +14,6 @@ defmodule Ankusa.Edge.Ingest do
 
   @type result ::
           {:ok, Envelope.t()}
-          | {:duplicate, Envelope.t()}
           | {:quarantined, term()}
           | {:rejected, term()}
           | {:error, :unknown_source | :overload | :store_unavailable}
@@ -61,7 +60,7 @@ defmodule Ankusa.Edge.Ingest do
     env = build_envelope(source, tenant_id, req)
 
     case verify(instance, source, env) do
-      {:accept, env} -> commit(instance, source, env)
+      {:accept, env} -> commit(instance, env)
       {:quarantine, env, reason} -> quarantine(instance, env, reason)
       {:reject, reason} -> {:rejected, reason}
     end
@@ -101,31 +100,19 @@ defmodule Ankusa.Edge.Ingest do
   defp verify_status(:ok), do: :ok
   defp verify_status({:error, _}), do: :failed
 
-  # ── dedup + commit ────────────────────────────────────────────────────────
+  # ── commit ────────────────────────────────────────────────────────────────
 
-  defp commit(instance, source, env) do
-    env = %{env | dedup_key: dedup_key(source, env)}
+  defp commit(instance, env) do
     partition = BatcherSupervisor.partition(instance, env.id)
 
     try do
       case Batcher.commit(instance, partition, %{envelope: env}) do
         {:committed, committed} -> {:ok, committed}
-        {:duplicate, seq} -> {:duplicate, %{env | seq: seq}}
         {:error, :overload} -> {:error, :overload}
         {:error, :store_unavailable} -> {:error, :store_unavailable}
       end
     catch
       :exit, _ -> {:error, :store_unavailable}
-    end
-  end
-
-  # The source was already resolved at the top of the request; fetching it again
-  # here was a second store lookup per hook (a DB round trip, for a dynamic
-  # store) for a value we are already holding.
-  defp dedup_key(%Source{dedup: {mod, opts}}, env) do
-    case mod.extract(env, opts) do
-      {:ok, key} when is_binary(key) -> key
-      _ -> nil
     end
   end
 
@@ -161,7 +148,6 @@ defmodule Ankusa.Edge.Ingest do
   end
 
   defp tag({:ok, _}), do: :committed
-  defp tag({:duplicate, _}), do: :duplicate
   defp tag({:quarantined, _}), do: :quarantined
   defp tag({:rejected, _}), do: :rejected
   defp tag({:error, reason}), do: reason

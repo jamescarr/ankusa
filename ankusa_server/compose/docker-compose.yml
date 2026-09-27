@@ -14,12 +14,12 @@ services:
       # Admin API and /metrics — unauthenticated by design. Bound to loopback so
       # it is reachable from this host (curl, a Prometheus on the same box) and
       # from nowhere else. To read it remotely, front it with your own proxy;
-      # compose/docker-compose.fleet.yml shows nginx basic auth doing exactly
+      # compose/docker-compose.proxy.yml shows nginx basic auth doing exactly
       # that.
       - "127.0.0.1:4002:4002"
     volumes:
       # The data volume: WAL, quarantine log, DLQ, local segments. Losing it
-      # loses un-dispatched hooks, so back it or move the WAL to Postgres.
+      # loses un-dispatched hooks, so back it.
       - ankusa-data:/var/lib/ankusa
       # Your config. The image's baked-in demo config is used until you mount
       # one.

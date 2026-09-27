@@ -31,7 +31,6 @@ claim_check:
 sources:
   shopify:
     verify: {type: standard_webhooks, secret: "${STANDARD_WEBHOOKS_SECRET}"}
-    dedup: {type: rules}
     on_verify_failure: quarantine
     sinks:
       - type: rabbitmq

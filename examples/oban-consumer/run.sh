@@ -56,13 +56,12 @@ kubectl -n ankusa-e2e rollout status statefulset/postgres --timeout=180s
 
 echo "==> running migrations"
 kubectl apply -f examples/oban-consumer/k8s/10-migrate.yaml
-kubectl -n ankusa-e2e wait --for=condition=complete job/ankusa-migrate job/consumer-migrate --timeout=180s
+kubectl -n ankusa-e2e wait --for=condition=complete job/consumer-migrate --timeout=180s
 
 echo "==> applying consumer + ankusa fleet"
 kubectl apply -f examples/oban-consumer/k8s/20-consumer.yaml -f examples/oban-consumer/k8s/30-ankusa.yaml
 kubectl -n ankusa-e2e rollout status deployment/consumer --timeout=180s
-kubectl -n ankusa-e2e rollout status deployment/ankusa-edge --timeout=180s
-kubectl -n ankusa-e2e rollout status statefulset/ankusa-worker --timeout=180s
+kubectl -n ankusa-e2e rollout status statefulset/ankusa --timeout=180s
 
 echo "==> waiting for edge health check on localhost:8080"
 edge_up=0
@@ -105,13 +104,12 @@ echo "==> phase 2/3: chaos"
 chaos_pid=$!
 
 sleep 10
-edge_pod="$(kubectl -n ankusa-e2e get pods -l app=ankusa-edge -o jsonpath='{.items[0].metadata.name}')"
-echo "    killing edge pod $edge_pod"
-kubectl -n ankusa-e2e delete pod "$edge_pod" --wait=false
+echo "    killing ankusa pod ankusa-0"
+kubectl -n ankusa-e2e delete pod ankusa-0 --wait=false
 
 sleep 10
-echo "    killing worker pod ankusa-worker-0"
-kubectl -n ankusa-e2e delete pod ankusa-worker-0 --wait=false
+echo "    killing ankusa pod ankusa-1"
+kubectl -n ankusa-e2e delete pod ankusa-1 --wait=false
 
 sleep 10
 consumer_pod="$(kubectl -n ankusa-e2e get pods -l app=consumer -o jsonpath='{.items[0].metadata.name}')"

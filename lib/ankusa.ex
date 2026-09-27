@@ -11,7 +11,6 @@ defmodule Ankusa do
 
     * `Ankusa.WAL`         — durable, ordered log with fast acks and truncation.
     * `Ankusa.Verifier`    — signature/timestamp checks (Standard Webhooks, Stripe…).
-    * `Ankusa.DedupKey`    — extract the provider event id for idempotency.
     * `Ankusa.SourceStore` — per-source config, secrets, and failure policy.
     * `Ankusa.Sink`        — what happens to a delivered hook.
     * `Ankusa.RetryPolicy` — dispatch backoff and give-up rules.

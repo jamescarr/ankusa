@@ -10,10 +10,7 @@ defmodule Ankusa.WAL do
   ## Contract
 
     * `append/2` is a **group commit**. Given a list of records it writes them all
-      and issues a *single* `fsync`, then returns per-record results in order. A
-      record whose `dedup_key` collides with an already-committed one is returned
-      as `{:duplicate, existing_seq}` and is *not* written — but the caller still
-      acks `2xx` (the provider retried; dedup absorbed it).
+      and issues a *single* `fsync`, then returns per-record results in order.
     * A committed record is assigned a strictly increasing `seq`, and seq order
       is **commit order**: once a reader has observed seq `N`, no record with
       seq ≤ `N` may become visible later. `seq` values may have gaps; readers
@@ -21,15 +18,15 @@ defmodule Ankusa.WAL do
     * After a crash, replay MUST drop a torn trailing record (a commit that never
       `fsync`'d) so no un-acked write is ever surfaced.
 
-  A record is `%{envelope: Ankusa.Envelope.t()}`; the `dedup_key` is read from the
-  envelope. Adapters set `envelope.seq` on the returned committed envelope.
+  A record is `%{envelope: Ankusa.Envelope.t()}`. Adapters set `envelope.seq` on
+  the returned committed envelope.
   """
 
   alias Ankusa.{Config, Envelope}
 
   @type server :: GenServer.server()
   @type entry :: %{envelope: Envelope.t()}
-  @type result :: {:committed, Envelope.t()} | {:duplicate, non_neg_integer()}
+  @type result :: {:committed, Envelope.t()}
 
   @callback append(server(), [entry()]) :: {:ok, [result()]}
   @callback read(server(), after_seq :: non_neg_integer(), limit :: pos_integer()) ::

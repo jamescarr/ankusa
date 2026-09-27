@@ -1,11 +1,11 @@
 # Releasing
 
-Two independent release tracks: five Hex packages, and one server image.
+Two independent release tracks: four Hex packages, and one server image.
 
 ## Hex packages
 
-Five independently versioned Hex packages (`ankusa`, `ankusa_postgres`,
-`ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`), each with its own `mix.exs` `version` and
+Four independently versioned Hex packages (`ankusa`, `ankusa_rabbitmq`,
+`ankusa_kafka`, `ankusa_nats`), each with its own `mix.exs` `version` and
 `CHANGELOG.md`. The release flow is tag-driven — the Elixir/Hex norm — not
 triggered by every push to `main`:
 

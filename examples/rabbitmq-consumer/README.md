@@ -112,8 +112,7 @@ writing to the same bucket. Nothing about `Ankusa.Sink.RabbitMQ` or
 holding here exactly like it does between the edge/dispatch/storage roles
 inside one instance. (You'd need a load balancer in front for the ingest
 port at that point — a deployment concern, not something the framework
-does for you.) For a *shared* WAL across those nodes instead of N
-independent local ones, see `ankusa_postgres/` in the repo root.
+does for you.)
 
 ## What's stubbed on purpose
 

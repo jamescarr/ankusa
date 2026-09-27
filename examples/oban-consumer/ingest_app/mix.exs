@@ -2,8 +2,8 @@ defmodule AnkusaExample.Ingest.MixProject do
   use Mix.Project
 
   # Not a published package — the deployable wrapper for this example. Depends
-  # on `ankusa` (core) and `ankusa_postgres` (the WAL) via path deps, exactly
-  # like a real deployment would depend on them via Hex once published.
+  # on `ankusa` (core) via a path dep, exactly like a real deployment would
+  # depend on the Hex-published package.
   def project do
     [
       app: :ankusa_example_ingest,
@@ -24,14 +24,9 @@ defmodule AnkusaExample.Ingest.MixProject do
 
   defp deps do
     [
-      # `override: true`: ankusa_postgres's own deps() picks its Hex entry for
-      # `:ankusa` when Mix evaluates it as a nested dependency (deps build
-      # under :prod by default, regardless of this project's own Mix.env())
-      # — that conflicts with our direct path entry below. override tells
-      # Mix to use ours everywhere in the tree, which is exactly what a
-      # monorepo example wiring both path-dependent packages together needs.
-      {:ankusa, path: "../../..", override: true},
-      {:ankusa_postgres, path: "../../../ankusa_postgres"}
+      # path dep on core; `override: true` keeps it authoritative over any
+      # Hex resolution
+      {:ankusa, path: "../../..", override: true}
     ]
   end
 

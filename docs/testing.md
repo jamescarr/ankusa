@@ -1,23 +1,21 @@
 # Testing
 
 Every package's test suite is run from its own directory — there's no
-top-level test runner spanning all five, because each has a genuinely
-different infrastructure dependency (none, Postgres, RabbitMQ, Redpanda,
-NATS).
+top-level test runner spanning all four, because each has a genuinely
+different infrastructure dependency (none, RabbitMQ, Redpanda, NATS).
 
 ## `ankusa` core — `mix test`
 
 ```sh
-mix test                              # 185 tests, no external infra needed
+mix test                              # 171 tests, no external infra needed
 mix test --include integration        # +16 tests, needs floci running (see below)
 ```
 
-The 185 always-on tests cover:
+The 171 always-on tests cover:
 
-- **WAL** (`WAL.DiskLog`): group commit, dedup (including tenant-scoped),
-  crash-replay (torn-frame handling), truncation, that a restart after a full
-  truncation does **not** reuse seqs, and the measurements `[:commit, :stop]`
-  reports.
+- **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
+  truncation, that a restart after a full truncation does **not** reuse seqs,
+  and the measurements `[:commit, :stop]` reports.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing
@@ -29,10 +27,10 @@ The 185 always-on tests cover:
   caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
   rule that a redirect is reported rather than followed; the shared
   `Ankusa.HttpClient` allowlist.
-- **Edge**: accept/duplicate/verify/quarantine/load-shed/oversize, shedding with
+- **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with
   `503` once the batcher's queue fills while a commit is in flight, pluggable
-  route resolvers (`Path` and `TenantPath`), tenant-scoped dedup end to end
-  through the HTTP layer.
+  route resolvers (`Path` and `TenantPath`), and that the same body posted
+  twice is stored twice (distinct ids, seqs 1 and 2).
 - **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
   instead of killing the pipeline, and ordering — a blocked delivery holds the
   cursor while another ordering key proceeds, and same-key deliveries stay in
@@ -69,43 +67,6 @@ docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588) + flo
 mix test --include integration
 docker compose down -v
 ```
-
-## `ankusa_postgres` — `mix test`
-
-Every test here inherently needs a live Postgres — there's no meaningful
-"offline" mode for a WAL adapter, so nothing is tagged `:integration`; the
-whole suite just requires the container:
-
-```sh
-cd ankusa_postgres
-docker compose up -d --wait   # Postgres on :5433
-mix test                      # 11 tests
-docker compose down -v
-```
-
-Notably covers, against the *real* database (not a mock):
-
-- Put/get round-trip via `append` + `read`.
-- Intra-batch duplicate collapse (two records in one `append/2` call sharing
-  a dedup key).
-- Cross-batch duplicate (separate `append/2` calls).
-- Nil dedup keys never colliding.
-- **Concurrent writers racing the same dedup key** — 8 `Task`s calling
-  `append/2` simultaneously with the same key; exactly one commits, seven
-  come back `:duplicate` pointing at the same `seq`. This is the test that
-  backs the "many ingest servers share one WAL safely" claim.
-- **Truncation preserves dedup** — append, truncate through that seq
-  (physically deleting the row), re-append the same dedup key, still get
-  `:duplicate` at the original seq. This caught a real bug during
-  development (the dedup ledger originally joined back to the truncated
-  table); see the adapter's own moduledoc.
-- **Commit order equals seq order** — a statement trigger sleeps inside every
-  insert, widening the allocation→commit window, while 8 writers append
-  concurrently and a reader follows the cursor. Every committed seq must be
-  seen by the reader. Before the per-instance advisory lock, this lost ~10-20%
-  of commits (34 seqs in one run); it is the chaos-phase loss, reproduced as a
-  test.
-- Two instances sharing one database never cross-contaminate seq or dedup.
 
 ## `ankusa_rabbitmq` — `mix test`
 
@@ -213,7 +174,7 @@ docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```
 
-Follow `ankusa_postgres`/`ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats`: a
+Follow `ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats`: a
 `docker-compose.yml` for the real
 dependency, and tests that
 hit the real thing. A mock proves your code calls a mock correctly; it
@@ -273,13 +234,14 @@ shape, both fixed in this pass:
 [`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh)
 is the only test in this repo that proves zero loss on a real, multi-node
 Kubernetes deployment rather than in-process. It stands up a `kind` cluster
-(3-replica `ankusa-edge`, a singleton `ankusa-worker` running `dispatch,storage`,
-2-replica `consumer` running Oban), then drives [`tools/loadgen`](https://github.com/jamescarr/ankusa/blob/main/tools/loadgen)
+(a 3-pod `ankusa` StatefulSet — each pod a self-contained all-role node with
+its own WAL on a persistent volume — and a 2-replica `consumer` running Oban),
+then drives [`tools/loadgen`](https://github.com/jamescarr/ankusa/blob/main/tools/loadgen)
 through three phases against it:
 
 1. **steady** — a paced `RATE` req/s for `DURATION` seconds.
-2. **chaos** — the same load, with `kubectl delete pod` against one `ankusa-edge`
-   pod, `ankusa-worker-0`, and one `consumer` pod at +10s/+20s/+30s.
+2. **chaos** — the same load, with `kubectl delete pod` against `ankusa-0`,
+   `ankusa-1`, and one `consumer` pod at +10s/+20s/+30s.
 3. **burst** — closed-loop at `CONCURRENCY` workers, no rate cap, for
    `BURST_SECONDS`; the drain time it reports is how long the pipeline needed
    after ingest stopped, so it is the dispatch throughput ceiling referenced in
@@ -325,9 +287,16 @@ paced phases never build a backlog for the burst phase to inherit.
 
 ### The chaos-phase loss: root cause and fix
 
+> **Historical note.** This bug lived in the `WAL.Postgres` adapter, which has
+> since been removed — Ankusa ships `WAL.DiskLog` only, and the `ankusa_postgres`
+> package with it. The write-up is kept because the failure mode (a reader
+> losing a commit that landed out of `seq` order) is a real hazard for any log
+> adapter, and because the chaos phase below is still the proof that an
+> all-`DiskLog` node loses nothing under pod kills.
+
 Killing an `ankusa-worker` pod used to drop ~0.5–1.5% of acked hooks
 permanently. The mechanism was not in the dispatch pipeline: `WAL.Postgres`
-allocates `seq` at INSERT time (`BIGSERIAL`) but a row only becomes visible at
+allocated `seq` at INSERT time (`BIGSERIAL`) but a row only became visible at
 COMMIT, so two writers could allocate 100 and 101 and commit in the opposite
 order. A reader following the log with `seq > cursor` read 101, advanced its
 cursor past it, and never saw 100 when it landed — and the compactor, whose
@@ -337,12 +306,12 @@ no DLQ — exactly the observed signature, with the cursor already advanced. It
 took killing the *worker* to reproduce because that bursts the catch-up load
 onto the shared Postgres and widens the allocation→commit window.
 
-`WAL.Postgres.append/2` now takes a per-instance advisory lock
-(`pg_advisory_xact_lock`) before allocating seqs and holds it until COMMIT, so
-seq order *is* commit order; fleet-wide serialized commits per instance is the
-accepted cost. The regression test (`ankusa_postgres`) widens the window with a
-sleeping statement trigger and, on the pre-fix code, fails with ~34 seqs a
-cursor-following reader never sees. The chaos phase now reports `missing: 0`.
+`WAL.Postgres.append/2` took a per-instance advisory lock
+(`pg_advisory_xact_lock`) before allocating seqs and held it until COMMIT, so
+seq order *was* commit order; fleet-wide serialized commits per instance was the
+accepted cost. The regression test (`ankusa_postgres`) widened the window with a
+sleeping statement trigger and, on the pre-fix code, failed with ~34 seqs a
+cursor-following reader never saw. The chaos phase reported `missing: 0`.
 
 Pre-fix code, same machine, same harness — `RATE=60`, `POOL_SIZE=30`, and the
 fixed loadgen, so this isolates the core change:
@@ -363,4 +332,4 @@ the old loss was a race, and it needs the allocation→commit window to be wide
 enough at the exact moment a cursor reader passes the tail. The earlier
 documented run of the same harness did lose 12 of 1581 acked hooks in chaos
 (with a 301.7 s verify timeout), and the `ankusa_postgres` regression test
-reproduces the mechanism deterministically rather than by luck.
+reproduced the mechanism deterministically rather than by luck.

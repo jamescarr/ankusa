@@ -18,10 +18,10 @@ defmodule Ankusa.Config do
             source_store: {Ankusa.SourceStore.Static, sources: %{}},
             # {module, opts} implementing Ankusa.WAL
             wal: {Ankusa.WAL.DiskLog, []},
-            # group-commit batcher. Both WALs serialize commits themselves (the
-            # DiskLog GenServer, Postgres's per-instance advisory lock), so more
-            # partitions only add contention now that a partition commits
-            # asynchronously instead of holding the caller's message queue.
+            # group-commit batcher. The DiskLog GenServer serializes commits
+            # itself, so more partitions only add contention now that a
+            # partition commits asynchronously instead of holding the caller's
+            # message queue.
             batcher: %{
               partitions: 2,
               max_batch: 256,

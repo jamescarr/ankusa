@@ -1,4 +1,4 @@
-# Example: ingest fleet → Postgres WAL → Oban worker fleet, on real Kubernetes
+# Example: three-node ankusa fleet → Oban worker fleet, on real Kubernetes
 
 A full `kind` (Kubernetes-in-Docker) deployment proving the framework feeds a
 production job-queue fleet — Oban, backed by Postgres — over plain HTTP,
@@ -7,39 +7,39 @@ under a closed-loop burst.
 
 ```mermaid
 flowchart LR
-    P[Provider / loadgen] -->|POST /webhooks/demo| E[ankusa-edge\n3 replicas]
-    E -->|WAL fsync, then ack| P
-    E <-->|shared WAL| PG[(Postgres\ndb: ankusa)]
-    PG <--> W[ankusa-worker\ndispatch+storage, 1 replica]
-    W -->|Ankusa.Sink.Http\nPOST /deliveries| C[consumer\n2 replicas: Plug + Oban]
+    P[Provider / loadgen] -->|POST /webhooks/demo| A[ankusa\n3 pods, all-role\nStatefulSet]
+    A -->|WAL fsync, then ack| P
+    A -->|"Ankusa.Sink.Http\nPOST /deliveries"| C[consumer\n2 replicas: Plug + Oban]
     C --> OJ[Oban jobs]
     OJ --> DB[(processed_webhooks\ndb: consumer)]
 ```
 
 **What each piece proves:**
 
-- `ankusa-edge` (3 replicas, `ANKUSA_ROLES=edge`) is a stateless HTTP front
-  door: any replica can accept a webhook because the WAL lives in
-  `ankusa_postgres`, not on the pod's local disk.
-- `ankusa-worker` (1 replica, `ANKUSA_ROLES=dispatch,storage`) is a
-  deliberate singleton — dispatch and storage hold no lease, so running more
-  than one would double-deliver or corrupt segment compaction (see
-  `docs/deployment.md`). It reads the shared WAL and calls out through
-  `Ankusa.Sink.Http`, plain HTTP POSTs to `consumer`'s `/deliveries` route.
-  Ankusa and `ingest_app` know nothing about Oban, jobs, or queues; the sink
-  only knows it's making an HTTP call.
+- `ankusa` is a 3-pod StatefulSet running all three roles in every pod
+  (`ANKUSA_ROLES=edge,dispatch,storage`). Each pod is a self-contained node:
+  it accepts webhooks, fsyncs them to its own `Ankusa.WAL.DiskLog` on its own
+  PVC, and dispatches them to `consumer` itself over `Ankusa.Sink.Http`
+  (plain HTTP POSTs to `/deliveries`). A killed pod comes back on the same
+  PVC and drains its own WAL; the surviving pods keep answering throughout.
+  The three pods are independent nodes behind one Service — no shared log,
+  no separate dispatch fleet to keep in sync. Ankusa and `ingest_app` know
+  nothing about Oban, jobs, or queues; the sink only knows it's making an
+  HTTP call.
 - `consumer` (2 replicas) is the only place Oban exists in this whole
   example: a small Plug.Router app whose `/deliveries` handler is the
   handoff point — it records/enqueues an Oban job per delivery, and the job
   writes the idempotent result into `processed_webhooks`, keyed by
-  `ankusa_id`, so a replayed delivery does not double-process.
-- `postgres` is one StatefulSet holding two databases: `ankusa` (the shared
-  WAL used by `ankusa-edge`/`ankusa-worker`) and `consumer` (Oban's own
-  tables plus `processed_webhooks`).
+  `ankusa_id`, so a replayed delivery does not double-process. Dispatch is
+  at-least-once, so this idempotency is what makes the pipeline exactly-once
+  end to end.
+- `postgres` is one StatefulSet holding one database: `consumer` (Oban's own
+  tables plus `processed_webhooks`). The WALs live on the ankusa pods' PVCs,
+  not here.
 - `tools/loadgen` drives three phases against the cluster and, for each,
   verifies every 201-acknowledged webhook eventually lands exactly once in
   `processed_webhooks` with a matching body hash — proof of zero loss, not
-  just that requests returned 200.
+  just that requests returned 201.
 
 **Oban appears only in `consumer_app/`, which talks to Ankusa over plain
 HTTP via `Ankusa.Sink.Http` — Ankusa and `ingest_app` know nothing about
@@ -61,7 +61,7 @@ Oban.**
 
 This creates a `kind` cluster (`ankusa-e2e`), builds and loads both
 application images, applies the manifests in `k8s/` in order, waits for
-Postgres, runs the two migration Jobs, waits for the consumer and Ankusa
+Postgres, runs the consumer migration Job, waits for the consumer and ankusa
 fleets to become ready, waits for `localhost:8080/health`, then runs three
 load phases against `localhost:8080` and verifies each against Postgres at
 `localhost:15432` (both exposed by the kind cluster's `extraPortMappings`).
@@ -84,9 +84,9 @@ running for inspection.
 
 1. **steady** — constant `RATE` req/s for `DURATION` seconds against a
    healthy cluster.
-2. **chaos** — the same load profile, but partway through the run one
-   `ankusa-edge` pod, the `ankusa-worker` pod, and one `consumer` pod are
-   each killed in turn (10s apart) while traffic keeps flowing.
+2. **chaos** — the same load profile, but partway through the run
+   `ankusa-0`, then `ankusa-1`, then one `consumer` pod are each killed in
+   turn (10s apart) while traffic keeps flowing.
 3. **burst** — a closed-loop flood at `CONCURRENCY` concurrent requests for
    `BURST_SECONDS` seconds, no rate limit, to prove the WAL absorbs a spike
    without dropping anything.

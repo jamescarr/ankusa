@@ -1,6 +1,6 @@
 # Ankusa for Elixir
 
-The same pipeline the container runs — durable WAL, verification, dedup,
+The same pipeline the container runs — durable WAL, verification,
 dispatch, sinks — as a library in your own supervision tree. If you would
 rather run Ankusa as a container, or you don't write Elixir, start at the
 [README](../README.md).
@@ -12,7 +12,6 @@ def deps do
   [
     {:ankusa, "~> 0.1"},
     # add these as you scale out:
-    {:ankusa_postgres, "~> 0.1"},  # shared log for a multi-node fleet
     {:ankusa_kafka, "~> 0.1"},     # deliver to Kafka
     {:ankusa_rabbitmq, "~> 0.1"}   # deliver to RabbitMQ
   ]
@@ -29,14 +28,13 @@ config :ankusa,
      sources: %{
        "stripe" => [
          verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
-         dedup: {Ankusa.DedupKey.Stripe, []},
          sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
        ]
      }}
 ```
 
-Stripe now posts to `/webhooks/stripe`, and every verified event lands in your
-service exactly once.
+Stripe now posts to `/webhooks/stripe`, and every accepted hook is delivered
+to your sinks at least once.
 
 ## Try it from a checkout
 
@@ -78,14 +76,19 @@ The dispatch pipeline then delivers it, visible in the server log:
 [info] hook delivered id=01a0... source=demo attempt=1
 ```
 
-### 3. Idempotency
+### 3. Every accepted POST is stored
 
-Replay the same event id — it's absorbed but still gets a `2xx`:
+Ingest does no deduplication, so posting the same body again is a new hook
+with a new `id` and the next `seq`:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"duplicate","seq":1}
+# => {"id":"01b1...","status":"accepted","seq":2}
 ```
+
+A provider retry after a lost ack lands the same way — stored and delivered
+again. Consumers are idempotent receivers, so absorbing the redelivery is
+their job; see [`integrations.md`](integrations.md).
 
 ### 4. Inspect state
 
@@ -114,7 +117,7 @@ The ingest listener serves the catch URL, plus two read-only endpoints:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified + deduped inline; committed before ack. `201` accepted / `200` duplicate / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the WAL fsync — `201 accepted` is the only committed response (there is no `200`). Every accepted POST is a new hook with a new `id`; ingest does no deduplication, so a provider retry after a lost ack is stored and delivered again. `201` accepted / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
 | `GET` | `/health` | Liveness + WAL stats. |
 | `GET` | `/stats` | WAL stats. |
 
@@ -134,13 +137,16 @@ defp claim_check_children(config, opts), do: if Config.role?(config, :claim_chec
 ```
 
 One Mix release, many deployments — the same compiled artifact runs
-all-in-one on a laptop or as split fleets, because *which* children start is
-a runtime config decision, never a build-time one.
+all-in-one on a laptop or as a node in a fleet, because *which* children
+start is a runtime config decision, never a build-time one.
+
+`edge`, `dispatch`, and `storage` share the one local `WAL.DiskLog` file, so
+every WAL role has to run in the **same BEAM node** — you can't split them
+across processes or hosts. `claim_check` is stateless and can run anywhere:
 
 ```sh
-ANKUSA_ROLES=edge,dispatch mix run --no-halt    # this node: edge + dispatch, no compactor
-ANKUSA_ROLES=storage mix run --no-halt          # this node: compactor only
-ANKUSA_ROLES=claim_check mix run --no-halt      # this node: claim-check gateway only
+ANKUSA_ROLES=edge,dispatch,storage mix run --no-halt   # the WAL-bearing shape
+ANKUSA_ROLES=claim_check mix run --no-halt             # claim-check gateway, any node
 ```
 
 Ankusa.Application reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of

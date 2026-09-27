@@ -19,12 +19,13 @@ roll off the WAL asynchronously, never blocking an ack. See
 Contract every adapter must uphold:
 
 - `append/2` is a **group commit**: given a list of records, write them all
-  and issue a *single* commit, then return per-record results in order. A
-  record whose `(tenant_id, source_id, dedup_key)` collides with an
-  already-committed one comes back as `{:duplicate, existing_seq}` and is
-  **not written** — the caller still acks `2xx`.
-- A committed record gets a strictly increasing `seq`. Readers use it as a
-  cursor; `0` means "nothing consumed yet."
+  and issue a *single* commit, then return per-record results in order. Every
+  record is written — ingest does no deduplication, so a provider retry after
+  a lost ack is stored again as its own record.
+- A committed record gets a strictly increasing `seq`, and seq order **is**
+  commit order: once a reader has observed seq `N`, no record with seq `≤ N`
+  becomes visible later. Readers use `seq` only as a cursor; `0` means
+  "nothing consumed yet." Values may have gaps.
 - After a crash, replay must drop a torn trailing record (a write that
   started but never committed) — no un-acked write is ever surfaced as
   durable.
@@ -46,75 +47,27 @@ No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
   The floor is also what keeps `seq` from being reused: after a restart,
   allocation resumes at the floor, the persisted cursors, or the last replayed
   frame — whichever is highest — never at 1.
-- Committed dedup keys live in an in-memory ETS set, keyed by `{tenant_id,
-  source_id, dedup_key}`, rebuilt from the log on start. Because the log
-  itself gets truncated after compaction, a **snapshot** of the dedup set is
-  persisted to `<name>.dedup` before frames are dropped and reloaded before
-  replay — dedup correctness survives compaction *and* restart even though the
-  original records are long gone from disk. Cursors, the dedup snapshot, and
-  the truncation floor are all written to a temp file, fsynced, then renamed,
-  so a power loss leaves the old or the new file, never a torn one.
-- Durable to process crash and power loss **on that box**, not to losing
-  the box — it's one local file. See "Shared Postgres WAL" below for the
-  fleet case.
+- Cursors and the truncation floor are written to a temp file, fsynced, then
+  renamed, so a power loss leaves the old or the new file, never a torn one.
+- Durable to process crash and power loss **on that box**, not to losing the
+  box — it's one local file. Every WAL role (`edge`, `dispatch`, `storage`)
+  reads that same file, so they must all run in **one** BEAM node; splitting
+  them across processes or hosts is not supported. See "Scaling out" below.
 
 ```elixir
 config :ankusa, wal: {Ankusa.WAL.DiskLog, []}   # the default; no opts required
 # wal: {Ankusa.WAL.DiskLog, rewrite_min_bytes: 64 * 1024 * 1024}  # that IS the default
 ```
 
-### Shared Postgres WAL
+## Scaling out
 
-`WAL.Postgres` — the multi-node case.
-
-Ships as the separate `ankusa_postgres` package (see
-[`packaging.md`](packaging.md) for why). This is what a *fleet* of ingest
-servers coordinates through — every node runs its own local `Postgrex` pool
-against the same database; nodes never talk to each other directly.
-
-```elixir
-config :ankusa,
-  wal: {Ankusa.WAL.Postgres,
-        hostname: "localhost", port: 5432,
-        username: "ankusa", password: "ankusa", database: "ankusa_prod",
-        pool_size: 10}
-```
-
-**Group commit, translated to SQL.** `append/2` runs inside one
-`Postgrex.transaction/2` (still exactly one `COMMIT`, one fsync-equivalent,
-per batch):
-
-1. **Claim dedup keys** — one `INSERT ... ON CONFLICT DO NOTHING` against a
-   permanent `ankusa_wal_dedup` ledger table, batched via `unnest/1`. Postgres
-   takes a row lock on the conflicting index entry and blocks until the
-   other writer's transaction resolves, so two nodes racing the same dedup
-   key never double-claim it.
-2. **Insert winners** — rows that had no dedup key, or won their claim, go
-   into `ankusa_wal` (`RETURNING event_id, seq`). A losing row is never
-   written here at all.
-3. **Resolve losers' seq** — one lookup against `ankusa_wal_dedup`, which
-   carries its own `seq` column (backfilled right after step 2) rather than
-   joining back to `ankusa_wal`. That's deliberate: `ankusa_wal` rows get
-   deleted by `truncate_through/2` once compacted, and a lookup that
-   depended on the data row still existing would stop catching duplicates
-   of an already-truncated event. The dedup ledger is **never** truncated —
-   this is `WAL.DiskLog`'s persisted `.dedup` snapshot, just durable in the
-   same database instead of a sidecar file.
-
-Every row is correlated by the envelope's own `id` (a UUIDv7, always unique
-regardless of dedup key), never by array/result position — Postgres doesn't
-guarantee `RETURNING` order for a multi-row statement.
-
-Every table carries an `instance` column, so one Postgres database can back
-multiple `Ankusa.Instance`s — including the *same* instance name running on
-many independent BEAM nodes, which is the actual point: `seq` may have
-small gaps (a deduped row still consumes a sequence value) and is **not**
-reset per instance, but it's still strictly increasing and safe as a
-cursor.
-
-Local dev/test: `cd ankusa_postgres && docker compose up -d --wait && mix test`
-(10 tests, including concurrent-writer dedup races — N tasks racing the same
-key, exactly one commits — and a truncation-survives-dedup regression).
+One node is one `WAL.DiskLog` file. To scale, run **N independent all-role
+nodes behind a load balancer** — each with its own data volume and its own
+DLQ/admin API. Each node also needs **its own bucket** (or its own LocalFS
+root) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg`, which
+name no instance or node, and remote blob stores ignore the `instance`
+argument — so two nodes sharing a bucket silently overwrite each other's
+segments. See [`deployment.md`](deployment.md) for the operational shape.
 
 ## `Ankusa.BlobStore`
 

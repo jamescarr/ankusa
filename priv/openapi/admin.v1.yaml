@@ -52,7 +52,7 @@ paths:
       summary: Prometheus metrics
       description: |
         The node's `Ankusa.Metrics` scrape: ingest, verification, WAL commit,
-        dedup, load shedding, quarantine, dispatch, compaction, and claim-check
+        load shedding, quarantine, dispatch, compaction, and claim-check
         series. Only the events this node emits appear — an edge node has no
         dispatch series, a storage node has no ingest series.
       responses:

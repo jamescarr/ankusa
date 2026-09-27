@@ -37,17 +37,20 @@ sleep 1 && docker compose logs worker
 The `201` returns only after the hook is on disk — that is
 [the core invariant](architecture.md#the-core-invariant), not a formality.
 
-## 3. Provider retries are absorbed
+## 3. Provider retries are stored again
 
-Providers retry. Send the identical request again:
+Ingest does no deduplication. Send the identical request again and it is a new
+hook — new `id`, next `seq` — stored and delivered a second time:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
-# => {"id":"01a0...","status":"duplicate","seq":1}
+# => {"id":"01a0...","status":"accepted","seq":2}
 ```
 
-The worker log gains nothing, because Ankusa deduped on the body's `id` before
-delivery. The provider still gets a `2xx`, so it stops retrying.
+That is at-least-once on purpose: the provider's retry contract is honored
+without an ingest-side dedup table, and your worker is the idempotent receiver
+(see [Replay is safe](#replay-is-safe) below, and
+[`delivery.md`](delivery.md#idempotent-receivers)).
 
 ## 4. When your worker goes down
 
@@ -117,7 +120,6 @@ Add the provider as a second source under `sources:` in `ankusa.yml`:
 ```yaml
   stripe:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
-    dedup: {type: stripe}
     on_verify_failure: quarantine
     sinks:
       - {type: http, url: "http://worker:8080/hooks"}
@@ -145,13 +147,17 @@ GitHub and Standard Webhooks sources are the same shape with a different
 ## Ingest responses
 
 - `201` — accepted, durably stored
-- `200` — duplicate, already stored
 - `202` — quarantined after a failed verification
 - `400` — body unreadable
 - `401` — verification failed
 - `404` — unknown source
 - `413` — body over `max_body_bytes`
 - `503` — overloaded; retry later
+
+`201 accepted` is the only committed response, and it comes back only after the
+WAL fsync; there is no `200`. Every accepted POST is a new hook with a new `id`,
+and a provider retry after a lost ack is stored and delivered again — ingest
+does no deduplication.
 
 The catch URL is `/webhooks/:source_id` by default; a tenant-in-the-URL scheme
 is one config line away — see [`multi-tenancy.md`](multi-tenancy.md).

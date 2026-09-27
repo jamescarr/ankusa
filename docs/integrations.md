@@ -39,22 +39,29 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
   in-transaction insert commits, not before.
 - A non-`2xx` response or a timeout is retried per `dispatch.retry`, then
   dead-lettered (see [`delivery.md`](delivery.md)).
-- Dedupe on `x-ankusa-id` — Ankusa's own dedup already collapsed provider
-  retries upstream of dispatch, but at-least-once delivery means your
-  endpoint can still see the same `x-ankusa-id` twice (a `2xx` that was lost
-  in transit, a dispatch retry after a timeout that actually succeeded).
-  Your enqueue MUST be idempotent on this id — see the worked examples below
-  for how (a unique job key in Oban, `task_id=` in Celery).
+- Dedupe on `x-ankusa-id` — consumers are idempotent receivers. Delivery is
+  at-least-once, so your endpoint can see the same `x-ankusa-id` twice (a
+  `2xx` that was lost in transit, a dispatch retry after a timeout that
+  actually succeeded). `x-ankusa-id` identifies one stored hook; your enqueue
+  MUST be idempotent on it — see the worked examples below for how (a unique
+  job key in Oban, `task_id=` in Celery).
+- Provider retries arrive as **distinct hooks** with distinct `x-ankusa-id`s
+  — ingest does not collapse them. Dedupe those on the provider's own event
+  id in the body (e.g. Stripe's `id`).
+- The original request headers (`X-GitHub-Delivery`, `webhook-id`, …) are
+  **not** forwarded by `Sink.Http` or `Sink.Message`, so header-borne ids are
+  not available downstream.
 
 ## Oban
 
 [`examples/oban-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/)
-is the full worked deployment: a Kubernetes (kind) cluster running an Ankusa
-edge fleet, a singleton dispatch/storage worker, and a two-replica consumer
-service that receives the HTTP handoff and enqueues Oban jobs — proven
-zero-loss under normal load, chaos pod kills, and burst. Ankusa and its
-`ingest_app` wrapper know nothing about Oban; the consumer is the only place
-Oban is imported, and it talks to Ankusa over plain HTTP.
+is the full worked deployment: a Kubernetes (kind) cluster running three
+self-contained all-role Ankusa nodes (each with its own disk WAL on a
+persistent volume) and a two-replica consumer service that receives the HTTP
+handoff and enqueues Oban jobs — proven zero-loss under normal load, chaos pod
+kills, and burst. Ankusa and its `ingest_app` wrapper know nothing about Oban;
+the consumer is the only place Oban is imported, and it talks to Ankusa over
+plain HTTP.
 
 ### `/deliveries` route
 

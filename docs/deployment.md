@@ -1,7 +1,7 @@
 # Deployment
 
 See [`architecture.md#deployment-topologies`](architecture.md#deployment-topologies)
-for the four shapes this section explains how to actually run. Every topology
+for the shapes this section explains how to actually run. Every topology
 below runs the same image, `jamescarr/ankusa:edge`; which parts of the pipeline
 a container runs is decided at startup.
 
@@ -36,16 +36,18 @@ separate `claim-check` service, same image, different `ANKUSA_ROLES`).
 reclaims space by renaming the log file, so **every role that touches the WAL
 must run in one BEAM node** — that is the topology a single container or
 `mix run` gets you. Splitting `edge`, `dispatch`, and `storage` across
-processes, containers, or hosts requires a WAL they can all reach over the
-network: `WAL.Postgres` (see [`storage.md`](storage.md)). The constraint does
-not apply to `:claim_check`, which never touches the WAL at all.
+processes, containers, or hosts is not supported: there is no network-reachable
+WAL to point them at, and a second OS process would never see writes it didn't
+make. The constraint does not apply to `:claim_check`, which never touches the
+WAL at all and can run on its own node.
 
-**`:dispatch` and `:storage` are singletons per instance.** Neither cursor
-has a lease. Two `:dispatch` nodes on one `WAL.Postgres` deliver every hook
-twice, and two `:storage` nodes compact the same ranges and write duplicate
-index rows. Scale `:edge` horizontally; run `:dispatch` and `:storage` as
-exactly one replica each (in Kubernetes, a 1-replica StatefulSet). Also note
-that `Ankusa.Storage.Index` lives on the `:storage` node's local disk
+**`:dispatch` and `:storage` are singletons per node.** Within a node there is
+exactly one `Ankusa.Dispatch.Pipeline` and one `Ankusa.Storage.Compactor`
+reading that node's WAL, each with an unleased cursor. Two dispatch pipelines
+over the same WAL would deliver every hook twice, and two compactors would
+compact the same ranges and write conflicting index rows. Scale out by adding
+whole nodes, not by adding dispatch or storage replicas. Also note that
+`Ankusa.Storage.Index` lives on the `:storage` node's local disk
 (`segments/index.log`), which needs a persistent volume.
 
 ## Running the container
@@ -60,8 +62,7 @@ Every surface is on its own port so it can be firewalled on its own.
 
 `/var/lib/ankusa` holds the WAL, the quarantine log, the dead-letter queue, and
 local segments. Losing it loses un-dispatched hooks, so give it a volume and back
-it — or move the WAL to Postgres and segments to S3/GCS, where it is not your
-problem anymore.
+it — or move segments to S3/GCS, where they are not your problem anymore.
 
 Config lives at `/etc/ankusa/ankusa.yml` (mount yours over it) or wherever
 `ANKUSA_CONFIG` points — every key, plus the env overrides:
@@ -73,12 +74,11 @@ instead of racing the listener.
 Both compose files are worked examples:
 
 - Single node: [`ankusa_server/compose/docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.yml)
-- Fleet behind nginx basic auth: [`ankusa_server/compose/docker-compose.fleet.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.fleet.yml)
+- All-role node behind nginx basic auth: [`ankusa_server/compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.proxy.yml)
 
 ```sh
-docker compose -f docker-compose.fleet.yml up -d --wait
+docker compose -f docker-compose.proxy.yml up -d --wait
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 201
-curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 200 duplicate
 curl localhost:4002/v1/dlq                                   # 401 (nginx)
 curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]}
 ```
@@ -98,15 +98,23 @@ Image tags:
 ## Scaling the ingest fleet
 
 ```sh
-docker compose -f ankusa_server/compose/docker-compose.fleet.yml up -d --wait
+docker compose -f ankusa_server/compose/docker-compose.proxy.yml up -d --wait
 ```
 
-Two `edge` replicas on a shared Postgres WAL, plus one `dispatch,storage`
-worker. Add `edge` replicas for ingest capacity — any replica can absorb any
-hook, because dedup lives in the shared WAL, not in a node's memory. `dispatch`
-and `storage` stay at one replica each (see above): they are singletons. For a
-shared WAL across ingest nodes instead of N independent local ones, that is the
-`WAL.Postgres` config in [`storage.md`](storage.md).
+One all-role node behind nginx, with ingest open and the admin API behind basic
+auth. To scale, run N independent nodes like it behind your load balancer: each
+node runs every role, keeps its own data volume and WAL, and exposes its own
+DLQ/admin API — a hook lands on one node and stays there.
+
+Two things to get right once you run more than one node:
+
+- **Every WAL role in one node.** `WAL.DiskLog` is local to a BEAM node, so
+  `edge`, `dispatch`, and `storage` cannot be split across hosts (see above).
+  `:claim_check` is the exception and can run anywhere.
+- **Its own bucket per node.** Segment keys are `seg/<first_seq>-<last_seq>.seg`
+  and remote blob stores ignore the instance, so nodes sharing one bucket
+  overwrite each other's segments. Give each node its own bucket (or its own
+  LocalFS directory).
 
 You'd need a load balancer in front of the ingest port at that point; that's
 a deployment concern the framework doesn't solve for you (nothing in

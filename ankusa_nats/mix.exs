@@ -59,8 +59,12 @@ defmodule AnkusaNats.MixProject do
     ]
   end
 
-  # See ankusa_postgres/mix.exs for why this exists and why it must be a
-  # single conditional entry rather than duplicate entries with :only.
+  # Path dep for local monorepo development/test; the Hex-published version
+  # is what a consumer installing from Hex.pm actually resolves — Hex
+  # rejects packages with path/git deps, so this "poncho project" split is
+  # required for this package to be publishable at all. Mix rejects two
+  # entries for the same app regardless of :only, so this has to be a
+  # single conditional entry, not a duplicate-with-disjoint-:only pair.
   defp ankusa_dep do
     if Mix.env() in [:dev, :test] do
       {:ankusa, path: ".."}
