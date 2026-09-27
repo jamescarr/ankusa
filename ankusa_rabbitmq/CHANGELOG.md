@@ -15,14 +15,14 @@ follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - The message `claim` field is now a claim-check ref URN string instead of a
-  nested ticket object — breaking for consumers; the message `v` stays `1`.
+  nested ticket object, breaking for consumers; the message `v` stays `1`.
 
 ## [0.1.0] - 2026-09-23
 
 ### Added
 
 - `Ankusa.Sink.RabbitMQ`: publishes delivered hooks to a RabbitMQ exchange
-  (never a queue — consumers own their own queue/binding). Bodies under
+  (never a queue: consumers own their own queue/binding). Bodies under
   `:inline_max_bytes` ride along base64-encoded; larger bodies are checked
   in through `Ankusa.ClaimCheck`, with the message carrying a ticket.
   Publisher-confirmed delivery; supervised, auto-reconnecting connection per

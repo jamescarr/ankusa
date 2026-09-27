@@ -28,7 +28,7 @@ mix loadgen.run --url http://localhost:4000/webhooks/some-source \
 | `--url`           | string  | *(required)*             | Full URL the load generator POSTs JSON bodies to.                                           |
 | `--concurrency`   | integer | `64`                     | Number of concurrent worker processes.                                                      |
 | `--duration`      | integer | `60`                     | Wall clock seconds each worker runs for.                                                    |
-| `--rate`          | integer | *(absent = closed loop)* | Target aggregate requests/second. Pacing is **open-loop**: request number `n` is *scheduled* at `n/rate` seconds after start, so a generator that falls behind does not lower the offered rate — it shows up as latency. Omit for closed-loop firing (each worker sends its next request immediately after the previous one completes). |
+| `--rate`          | integer | *(absent = closed loop)* | Target aggregate requests/second. Pacing is **open-loop**: request number `n` is *scheduled* at `n/rate` seconds after start, so a generator that falls behind does not lower the offered rate. It shows up as latency. Omit for closed-loop firing (each worker sends its next request immediately after the previous one completes). |
 | `--body-bytes`    | integer | `512`                    | Size in bytes of the `"pad"` field in each freshly generated JSON body.                     |
 | `--out`           | string  | `acked.csv`              | Path to write the "acked" CSV (`id,sha256hex` per accepted delivery, no header).             |
 | `--report`        | string  | `loadgen-report.json`    | Path to write the JSON run report.                                                          |
@@ -39,7 +39,7 @@ mix loadgen.run --url http://localhost:4000/webhooks/some-source \
   body are recorded to `--out`. Every request now sends a freshly generated
   body, so a `201` is the only success.
 - `503` → counted as shed (backpressure).
-- Anything else — including a `200`, transport errors, and timeouts →
+- Anything else, including a `200`, transport errors, and timeouts →
   counted as an error.
 
 ### Report
@@ -58,10 +58,10 @@ slowdowns are visible instead of being hidden (coordinated omission).
 
 ### Exit code
 
-- `0` — the run completed and at least one request was accepted. This does
+- `0`: the run completed and at least one request was accepted. This does
   **not** mean every request succeeded; check `errors`/`shed` in the report
   for that.
-- non-zero (`Mix.raise`, surfaced by `mix` as a failing exit code) — `--url`
+- non-zero (`Mix.raise`, surfaced by `mix` as a failing exit code): `--url`
   or another required flag was missing, or `accepted == 0` (nothing to
   verify downstream, treated as a hard failure).
 
@@ -95,26 +95,26 @@ has appeared or the timeout elapses.
 
 `--report` is JSON with:
 
-- `acked` — number of ids read from `--acked`.
-- `processed` — number of those ids found in `processed_webhooks`.
-- `missing` — up to 10 example acked ids never found in the table (the
+- `acked`: number of ids read from `--acked`.
+- `processed`: number of those ids found in `processed_webhooks`.
+- `missing`: up to 10 example acked ids never found in the table (the
   console summary prints the *full* missing count; the JSON list is
   truncated to 10 examples).
-- `sha_mismatches` — count of found rows whose `body_sha256` doesn't match
+- `sha_mismatches`: count of found rows whose `body_sha256` doesn't match
   the SHA-256 recorded for that id in the acked CSV.
-- `extra_deliveries` — sum of `deliveries - 1` over every found row (0 means
+- `extra_deliveries`: sum of `deliveries - 1` over every found row (0 means
   every accepted webhook was processed exactly once).
-- `drain_s` — approximate wall-clock seconds from the start of polling until
+- `drain_s`: approximate wall-clock seconds from the start of polling until
   the missing set first became empty (each poll re-queries the full acked
   set, so this is the poll-iteration timestamp where the count first hit
   zero, not the exact write timestamp of any single row).
-- `unacked_processed` — rows in `processed_webhooks` not accounted for by
+- `unacked_processed`: rows in `processed_webhooks` not accounted for by
   this run's acked set. Informational only; never affects the exit code.
 
 ### Exit code
 
-- `0` — every acked id was found in `processed_webhooks` before the timeout,
+- `0`: every acked id was found in `processed_webhooks` before the timeout,
   with no SHA-256 mismatches. Zero loss proven.
-- non-zero (`Mix.raise`) — `--acked`/`--database-url` missing, or after the
+- non-zero (`Mix.raise`): `--acked`/`--database-url` missing, or after the
   timeout at least one acked id is still `missing` and/or `sha_mismatches >
   0`. Check the printed summary and `--report` for the offending ids.
