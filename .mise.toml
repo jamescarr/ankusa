@@ -161,6 +161,18 @@ docker run --rm -v "$PWD":/repo \
          && mix test'
 '''
 
+[tasks."check:sdk-typescript"]
+description = "ankusa: typecheck + build + test"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)/sdks/typescript"
+npm ci
+npm run typecheck
+npm run build
+npm test
+'''
+
 [tasks."check:examples"]
 description = "The two Docker-Compose examples: rabbitmq ingest_app + both TS workers"
 run = '''
@@ -168,7 +180,9 @@ run = '''
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "==> rabbitmq-consumer/ingest_app"
+echo "==> sdks/typescript (dist must exist: the ankusa dep in each worker is a file: symlink to this source)"
+(cd sdks/typescript && npm ci && npm run build)
+
 (cd examples/rabbitmq-consumer/ingest_app && \
   mix deps.get --check-locked && mix deps.unlock --check-unused && \
   MIX_ENV=prod mix compile --warnings-as-errors)
@@ -232,6 +246,7 @@ mise run check:core
 mise run check:rabbitmq
 mise run check:kafka
 mise run check:nats
+mise run check:sdk-typescript
 mise run check:examples
 mise run check:oban
 mise run check:server

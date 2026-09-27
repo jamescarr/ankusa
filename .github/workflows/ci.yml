@@ -153,6 +153,25 @@ jobs:
       - working-directory: ankusa_server
         run: mix test
 
+  # The claim-check gateway client SDK: source-only TypeScript, consumed by
+  # both example workers as a `file:` path dep. No Elixir toolchain needed.
+  sdk_typescript:
+    name: sdk (typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - working-directory: sdks/typescript
+        run: npm ci
+      - working-directory: sdks/typescript
+        run: npm run typecheck
+      - working-directory: sdks/typescript
+        run: npm run build
+      - working-directory: sdks/typescript
+        run: npm test
+
   # The examples are the deployable wrappers: path-dep consumers of core and an
   # adapter, plus the TypeScript workers. They are where a lockfile goes stale
   # without anyone noticing, so they assert their locks and compile too — the
@@ -179,6 +198,12 @@ jobs:
         run: mix deps.unlock --check-unused
       - working-directory: examples/${{ matrix.example }}/ingest_app
         run: MIX_ENV=prod mix compile --warnings-as-errors
+      # The workers' `ankusa` dependency is a `file:` symlink to sdks/typescript;
+      # its dist/ must exist before `npm ci`/`tsc` there can resolve it.
+      - working-directory: sdks/typescript
+        run: npm ci
+      - working-directory: sdks/typescript
+        run: npm run build
       - working-directory: examples/${{ matrix.example }}/worker
         run: npm ci
       - working-directory: examples/${{ matrix.example }}/worker
