@@ -78,7 +78,7 @@ walks through outages, dead letters, replay, and pointing a real provider at it.
 ## How it works
 
 Ankusa writes every hook to a durable log before it answers `2xx`: the fsync
-lands first, and `201 accepted` is the only committed response — there is no
+lands first, and `201 accepted` is the only committed response. There is no
 `200`. If a node dies before the write, the provider never got an ack and
 retries; that retry is a new hook with a new `id`, stored and delivered again,
 because ingest does no deduplication and delivery is at-least-once. When
@@ -103,8 +103,8 @@ flowchart LR
 
 ## What you get
 
-- Signature verification via a configurable HMAC engine — named schemes for Stripe, GitHub, Standard Webhooks, Shopify, and Slack, plus any body-HMAC scheme you describe in config
-- Multi-tenant catch URLs, including ones your product mints at runtime
+- Signature verification via a configurable HMAC engine, with named schemes for Stripe, GitHub, Standard Webhooks, Shopify, and Slack, plus any body-HMAC scheme you describe in config
+- Multi-tenant catch URLs, with a pluggable resolver for custom schemes
 - Delivery over HTTP, RabbitMQ, Kafka, and NATS JetStream, with retries,
   backoff, a dead letter queue, and replay
 - Quarantine for hooks that fail verification, so nothing is silently dropped
@@ -118,11 +118,11 @@ replace that piece and keep the rest.
 ## Grow into a fleet
 
 When one box is not enough, run N independent all-role nodes behind a load
-balancer — each with its own data volume, its own WAL, and its own DLQ/admin API
-— archive to S3, GCS, Azure, or OCI, and fan out to Kafka, NATS, or RabbitMQ.
+balancer. Each node has its own data volume, its own WAL, and its own DLQ/admin
+API. Archive to S3 or GCS, and fan out to Kafka, NATS, or RabbitMQ.
 `WAL.DiskLog` keeps `edge`, `dispatch`, and `storage` in one BEAM node, so a node
 is the unit of scale: add nodes, not roles. Give each node **its own bucket**
-(or LocalFS) for segments — segment keys are `seg/<first_seq>-<last_seq>.seg`
+(or LocalFS) for segments. Segment keys are `seg/<first_seq>-<last_seq>.seg`,
 and remote blob stores ignore the instance, so nodes sharing a bucket overwrite
 each other's segments.
 

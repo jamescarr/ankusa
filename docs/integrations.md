@@ -1,7 +1,7 @@
 # Using Ankusa with a job framework, without coupling to one
 
 Ankusa never knows your job system. This page is the seam every job
-framework — Oban, Celery, Sidekiq, whatever — hangs off of, and two worked
+framework, Oban, Celery, Sidekiq, whatever, hangs off of, and two worked
 integrations (Oban, Celery) to copy from.
 
 ## The seam
@@ -12,7 +12,7 @@ The handoff is an `Ankusa.Sink`, and delivery is at-least-once:
 @callback deliver(Envelope.t(), ctx(), opts :: keyword()) :: :ok | {:error, term()}
 ```
 
-Return `:ok` only once you're certain the hook was actually handled durably —
+Return `:ok` only once you're certain the hook was actually handled durably:
 a job enqueued in a transaction that's about to commit counts; a job merely
 constructed in memory doesn't. `{:error, reason}` triggers the source's
 `Ankusa.RetryPolicy`: Ankusa retries, then dead-letters (see
@@ -35,18 +35,18 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
 - The raw body, verbatim, exactly as the provider sent it.
 - Headers: `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-tenant` (when the
   source has a tenant), `x-ankusa-seq`, and `content-type`.
-- Respond `2xx` only after the job is durably enqueued — a `202` after an
+- Respond `2xx` only after the job is durably enqueued: a `202` after an
   in-transaction insert commits, not before.
 - A non-`2xx` response or a timeout is retried per `dispatch.retry`, then
   dead-lettered (see [`delivery.md`](delivery.md)).
-- Dedupe on `x-ankusa-id` — consumers are idempotent receivers. Delivery is
+- Dedupe on `x-ankusa-id`: consumers are idempotent receivers. Delivery is
   at-least-once, so your endpoint can see the same `x-ankusa-id` twice (a
   `2xx` that was lost in transit, a dispatch retry after a timeout that
   actually succeeded). `x-ankusa-id` identifies one stored hook; your enqueue
-  MUST be idempotent on it — see the worked examples below for how (a unique
+  MUST be idempotent on it: see the worked examples below for how (a unique
   job key in Oban, `task_id=` in Celery).
-- Provider retries arrive as **distinct hooks** with distinct `x-ankusa-id`s
-  — ingest does not collapse them. Dedupe those on the provider's own event
+- Provider retries arrive as **distinct hooks** with distinct `x-ankusa-id`s:
+  ingest does not collapse them. Dedupe those on the provider's own event
   id in the body (e.g. Stripe's `id`).
 - The original request headers (`X-GitHub-Delivery`, `webhook-id`, …) are
   **not** forwarded by `Sink.Http` or `Sink.Message`, so header-borne ids are
@@ -58,7 +58,7 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
 is the full worked deployment: a Kubernetes (kind) cluster running three
 self-contained all-role Ankusa nodes (each with its own disk WAL on a
 persistent volume) and a two-replica consumer service that receives the HTTP
-handoff and enqueues Oban jobs — proven zero-loss under normal load, chaos pod
+handoff and enqueues Oban jobs, proven zero-loss under normal load, chaos pod
 kills, and burst. Ankusa and its `ingest_app` wrapper know nothing about Oban;
 the consumer is the only place Oban is imported, and it talks to Ankusa over
 plain HTTP.
@@ -89,7 +89,7 @@ defp insert_job(conn, ankusa_id, body) do
     # Oban's `%Oban.Job{}` carries a `conflict?` boolean: when the `unique:`
     # key matches an already-inserted job, `Oban.insert/1` still returns
     # `{:ok, job}`, but `job` is the *existing* row and `conflict?` is
-    # `true` — the documented way to tell "already queued" from "brand new"
+    # `true`, the documented way to tell "already queued" from "brand new"
     # without a second query.
     {:ok, %Oban.Job{id: id, conflict?: conflict?}} ->
       send_resp(conn, 202, JSON.encode!(%{job_id: id, duplicate: conflict?}))
@@ -125,7 +125,7 @@ end
 `unique: [period: :infinity, keys: [:ankusa_id]]` is what makes the `POST`
 idempotent on `x-ankusa-id`: a second enqueue with the same id never creates
 a second job. The `ON CONFLICT ... DO UPDATE SET deliveries = deliveries + 1`
-in `perform/1` is a second, independent idempotency layer — it's what proves
+in `perform/1` is a second, independent idempotency layer: it's what proves
 "processed" against actual attempts rather than just against enqueue, and is
 what the `deliveries` column in `docs/testing.md`'s results table measures.
 Full source: [`examples/oban-consumer/consumer_app`](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/consumer_app).
@@ -163,7 +163,7 @@ sinks: [{MyApp.ObanSink, []}]
 ```
 
 Same idempotency key (`:ankusa_id`), same `Oban.Worker` shape as the HTTP
-example — the only thing that changes is the transport between Ankusa's
+example: the only thing that changes is the transport between Ankusa's
 dispatch pipeline and the enqueue: a function call instead of a socket.
 
 ## Celery
@@ -193,7 +193,7 @@ def deliveries():
             task_id=ankusa_id,
         )
     except Exception:
-        # broker down, etc. — Ankusa retries per dispatch.retry, then DLQs.
+        # broker down, etc. Ankusa retries per dispatch.retry, then DLQs.
         return "", 503
 
     return "", 202
@@ -211,26 +211,26 @@ from the broker rather than silently dropping it; on RabbitMQ, pair that with
 doesn't silently succeed against a broker that never durably queued the
 message.
 
-**Celery does not dedupe on `task_id`** the way Oban's `unique:` does — a
+**Celery does not dedupe on `task_id`** the way Oban's `unique:` does: a
 `task_id` collision with Celery+Redis (the common combination) can raise
 depending on backend, but isn't a documented guarantee across all
 broker/backend pairs. Treat `task_id=ankusa_id` as a debugging/traceability
 aid, not a dedup mechanism, and make `process_webhook`'s body itself
 idempotent on `ankusa_id` (an upsert, same as `WebhookWorker.perform/1`
-above) — the same "at-least-once delivery, idempotent consumer" rule that
+above), the same "at-least-once delivery, idempotent consumer" rule that
 applies to every sink on this page.
 
 ## Queue handoff
 
 Consumers already on RabbitMQ, Kafka, or NATS JetStream don't need an HTTP hop
-at all — `Ankusa.Sink.RabbitMQ`, `Ankusa.Sink.Kafka`, and `Ankusa.Sink.NATS`
+at all: `Ankusa.Sink.RabbitMQ`, `Ankusa.Sink.Kafka`, and `Ankusa.Sink.NATS`
 publish `Ankusa.Sink.Message` (the same wire format on all three transports)
 directly to a broker your worker fleet already consumes from. See
 [`delivery.md`](delivery.md) for the full
 message contract and reconnection/confirm semantics, and the two existing
-worked examples —
+worked examples,
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/)
 and
-[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)
-— for end-to-end deployments where the worker is itself the consumer (rather
+[`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/),
+for end-to-end deployments where the worker is itself the consumer (rather
 than a job-framework broker in between).

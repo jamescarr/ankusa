@@ -1,7 +1,7 @@
 # Example: Ankusa + your own worker
 
 The published Ankusa image receives webhooks and POSTs each one to a
-40-line Python worker — no Elixir, no broker, no object store.
+40-line Python worker: no Elixir, no broker, no object store.
 
 ```mermaid
 flowchart LR
@@ -48,5 +48,5 @@ docker compose down -v
 - Point `url:` at your service. Compose service names resolve; outside compose,
   use a host the container can reach.
 
-Watching what happens when the worker is down — retries, the dead-letter queue,
+Watching what happens when the worker is down: retries, the dead-letter queue,
 and replay: [`../../docs/quickstart.md`](../../docs/quickstart.md).

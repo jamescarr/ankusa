@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ankusa.Sink.NATS`: publishes delivered hooks to a NATS JetStream subject
   on a stream the operator owns (the sink never creates one). Delivery is
   acknowledged by JetStream's publish ack, not by the write to the socket.
-- `c:Ankusa.Sink.ordering_key/2`, implemented by this sink as the subject —
+- `c:Ankusa.Sink.ordering_key/2`, implemented by this sink as the subject:
   the scope order is defined within ("the order the stream received it").
   Dispatch serializes deliveries sharing it and runs different subjects
   concurrently.
@@ -26,4 +26,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The message `claim` field is now a claim-check ref URN string instead of a
-  nested ticket object — breaking for consumers; the message `v` stays `1`.
+  nested ticket object, breaking for consumers; the message `v` stays `1`.

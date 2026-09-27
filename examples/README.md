@@ -25,8 +25,8 @@ flowchart LR
 ## quickstart
 
 The smallest complete deployment: the published image receives a hook and POSTs
-it to a 40-line Python worker. Nothing to build, no broker, no object store —
-read this one first, and keep it as the shape to copy when you write your own
+it to a 40-line Python worker. Nothing to build, no broker, no object store.
+Read this one first, and keep it as the shape to copy when you write your own
 receiving service.
 
 ```mermaid
@@ -41,7 +41,7 @@ flowchart LR
 ## rabbitmq-consumer
 
 Ingest publishes to a RabbitMQ exchange and a TypeScript worker declares and
-binds its own queue — the consumer owns topology, the framework never touches a
+binds its own queue: the consumer owns topology, the framework never touches a
 queue. Bodies over the sink's `inline_max_bytes` are checked in to S3 and the
 message carries a claim ref URN, which the worker redeems through the
 claim-check gateway.
@@ -63,7 +63,7 @@ flowchart LR
 The same topology one transport over, plus the hop RabbitMQ doesn't need: a
 Redpanda Connect bridge carries records from a Kafka topic into an SQS FIFO
 queue, and the FIFO `MessageGroupId` keeps per-source order end to end. Its
-README documents three failure drills — bridge down, worker down, poison claim.
+README documents three failure drills: bridge down, worker down, poison claim.
 
 ```mermaid
 flowchart LR
@@ -80,13 +80,13 @@ flowchart LR
 
 A real Kubernetes (`kind`) deployment: three self-contained Ankusa nodes, each
 with its own WAL on a persistent volume, calling the consumer over HTTP, with
-Oban doing the actual work. `tools/loadgen` drives three load phases — steady,
-chaos with pods killed mid-run, and a closed-loop burst — and verifies every
+Oban doing the actual work. `tools/loadgen` drives three load phases, steady,
+chaos with pods killed mid-run, and a closed-loop burst, and verifies every
 acknowledged hook is delivered and processed.
 
 ```mermaid
 flowchart LR
-    L[load generator] --> N[ankusa ×3 — all-role, own WAL on PVC]
+    L[load generator] --> N[ankusa ×3, all-role, own WAL on PVC]
     N -->|POST /deliveries| C[consumer]
     C --> OJ[Oban]
     OJ --> DB[(processed_webhooks)]

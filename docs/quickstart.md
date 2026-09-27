@@ -34,13 +34,13 @@ sleep 1 && docker compose logs worker
 # received id=01a0... source=demo seq=1 bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-The `201` returns only after the hook is on disk — that is
+The `201` returns only after the hook is on disk, that is
 [the core invariant](architecture.md#the-core-invariant), not a formality.
 
 ## 3. Provider retries are stored again
 
 Ingest does no deduplication. Send the identical request again and it is a new
-hook — new `id`, next `seq` — stored and delivered a second time:
+hook, new `id`, next `seq`, stored and delivered a second time:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
@@ -54,7 +54,7 @@ without an ingest-side dedup table, and your worker is the idempotent receiver
 
 ## 4. When your worker goes down
 
-### Short outage — retried until it comes back
+### Short outage: retried until it comes back
 
 ```sh
 docker compose stop worker
@@ -66,7 +66,7 @@ sleep 10 && docker compose logs worker | grep evt_2
 The provider still got its `201`: Ankusa holds the hook and retries delivery
 until the worker answers or the retry budget runs out.
 
-### Long outage — dead-lettered, then replayed
+### Long outage: dead-lettered, then replayed
 
 ```sh
 docker compose stop worker
@@ -96,7 +96,7 @@ sleep 1 && docker compose logs worker | grep 'duplicate id='
 ```
 
 Entries stay in the dead-letter queue after a replay, so replaying twice is
-normal. Redelivery is harmless because the worker dedupes on `x-ankusa-id` —
+normal. Redelivery is harmless because the worker dedupes on `x-ankusa-id`,
 here with an in-memory set, which a real worker replaces with a unique key in
 its database.
 
@@ -110,7 +110,7 @@ curl localhost:4002/v1/config      # the effective config, secrets redacted
 curl localhost:4002/v1/quarantine  # hooks held after a failed verification
 ```
 
-Port 4002 is unauthenticated, so never publish it — the compose file binds it to
+Port 4002 is unauthenticated, so never publish it: the compose file binds it to
 `127.0.0.1` only.
 
 ## 6. Point a real provider at it
@@ -146,21 +146,21 @@ GitHub and Standard Webhooks sources are the same shape with a different
 
 ## Ingest responses
 
-- `201` — accepted, durably stored
-- `202` — quarantined after a failed verification
-- `400` — body unreadable
-- `401` — verification failed
-- `404` — unknown source
-- `413` — body over `max_body_bytes`
-- `503` — overloaded; retry later
+- `201`: accepted, durably stored
+- `202`: quarantined after a failed verification
+- `400`: body unreadable
+- `401`: verification failed
+- `404`: unknown source
+- `413`: body over `max_body_bytes`
+- `503`: overloaded; retry later
 
 `201 accepted` is the only committed response, and it comes back only after the
 WAL fsync; there is no `200`. Every accepted POST is a new hook with a new `id`,
-and a provider retry after a lost ack is stored and delivered again — ingest
+and a provider retry after a lost ack is stored and delivered again. Ingest
 does no deduplication.
 
 The catch URL is `/webhooks/:source_id` by default; a tenant-in-the-URL scheme
-is one config line away — see [`multi-tenancy.md`](multi-tenancy.md).
+is one config line away, see [`multi-tenancy.md`](multi-tenancy.md).
 
 ## Clean up
 

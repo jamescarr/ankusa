@@ -3,7 +3,7 @@
 ## Before you call a change done
 
 `mise run check` runs every check CI runs, across every package and example.
-Format, warnings-as-errors, and tests for **every** package the change touches —
+Format, warnings-as-errors, and tests for **every** package the change touches:
 all four adapter packages depend on `ankusa` core, so a core change isn't
 finished until they pass too.
 

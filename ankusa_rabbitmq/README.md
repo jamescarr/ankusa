@@ -3,7 +3,7 @@
 RabbitMQ sink adapter for the Ankusa webhook ingestion framework.
 
 This package exists so `ankusa` core stays free of the `:amqp` dependency
-(and everything it pulls in — `amqp_client`, `rabbit_common`). Only
+(and everything it pulls in: `amqp_client`, `rabbit_common`). Only
 deployments that opt into a RabbitMQ sink need this package.
 
 ## Installation

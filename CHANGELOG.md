@@ -6,7 +6,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 Release process: bump `version` in the package's `mix.exs` and move the
 relevant `[Unreleased]` entries under a new dated heading in the same PR, in
-accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
+accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 [`docs/releasing.md`](docs/releasing.md) for the mechanics.
 
 ## [Unreleased]
@@ -16,21 +16,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 ### Added
 
 - `Ankusa.BlobStore.Azure`: Azure Blob Storage. Carries no credential
-  dependency — a pre-generated `:sas_token` (Shared Access Signature) or a
+  dependency: a pre-generated `:sas_token` (Shared Access Signature) or a
   `:token_provider` MFA (Entra ID bearer token) is appended to each request;
   the adapter does no Shared-Key signing of its own. Local testing against the
   `floci-az` emulator in `docker-compose.yml`.
 - `Ankusa.BlobStore.OCI`: Oracle Cloud Infrastructure Object Storage. OCI has
   no bearer/SAS shortcut, so this adapter signs its own requests
-  (RSA-SHA256 *Signature version 1*) with OTP's `:public_key` — no dependency
-  — pinned against OCI's published reference signature (computed independently
+  (RSA-SHA256 *Signature version 1*) with OTP's `:public_key`, no dependency,
+  pinned against OCI's published reference signature (computed independently
   with OpenSSL) in `test/ankusa/blob_store_oci_signing_test.exs`. Local
   testing against the `floci-oci` emulator in `docker-compose.yml`.
 
 - Admin API (`Ankusa.Admin.Router`), started when `admin.enabled` is true
   (default `false`, port `4002`): `GET /health`, `GET /metrics`,
   `GET /v1/config` (redacted), `GET /v1/dlq`, `POST /v1/dlq/replay`,
-  `GET /v1/quarantine`. Unauthenticated by design — front it with your own
+  `GET /v1/quarantine`. Unauthenticated by design; front it with your own
   proxy or network policy. Contract:
   [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/admin.v1.yaml).
 - `Ankusa.Metrics`: a per-instance Prometheus reporter behind `/metrics`,
@@ -61,7 +61,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 ### Removed
 
 - `Ankusa.Verifier.Stripe`, `Ankusa.Verifier.GitHub`, and
-  `Ankusa.Verifier.StandardWebhooks` — replaced by `Ankusa.Verifier.Hmac`
+  `Ankusa.Verifier.StandardWebhooks`, replaced by `Ankusa.Verifier.Hmac`
   presets. Elixir embedders use `{Ankusa.Verifier.Hmac, scheme: :stripe, …}`.
 - Claim-check authentication: `claim_check.api_tokens` (and the YAML
   `claim_check.tokens`), tenant scopes, and the `401`/`403` responses. The
@@ -76,8 +76,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
 ### Changed
 
 - The claim reference is now one URN string in a queue message's `claim`
-  field — `urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>`
-  — instead of a nested ticket object. Message `v` stays `1`. Consumers
+  field, `urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>`,
+  instead of a nested ticket object. Message `v` stays `1`. Consumers
   redeem it with `GET /v1/claims/:tenant/:object_id/:offset/:length` and check
   the sha256 themselves. Breaking for consumers of the old ticket object.
 - Claims are **packed**: dispatch checks each WAL read batch's claims in per
@@ -143,8 +143,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   advance past a dead letter (or a compaction cursor past index rows) that a
   power loss then dropped, leaving the hook in neither place.
 - `Ankusa.Dispatch` no longer copies the whole pipeline state into every
-  delivery task, and `WAL.DiskLog` no longer scans its whole index per read —
-  together those two were the dispatch throughput ceiling (see
+  delivery task, and `WAL.DiskLog` no longer scans its whole index per read.
+  Together those two were the dispatch throughput ceiling (see
   [`docs/testing.md`](docs/testing.md#core-bench--benchcore_benchexs)).
 
 ## [0.1.0] - 2026-09-23
@@ -175,7 +175,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   authenticated and tenant-scoped. See
   [`docs/claim-check.md`](docs/claim-check.md).
 - `Ankusa.Sink.Message`: the wire format every queue-style sink publishes
-  (`Sink.RabbitMQ`, `Sink.Kafka`) — inline base64 up to `inline_max_bytes` or
+  (`Sink.RabbitMQ`, `Sink.Kafka`): inline base64 up to `inline_max_bytes` or
   a claim ticket above it, with an additive `"v": 1` version field.
 - `Sink.Http` adds `x-ankusa-tenant` to its identity headers when the
   envelope has a tenant id.
@@ -185,7 +185,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes — see
   `Ankusa.Config.new/1` rejects an unknown nested key (e.g. `batcher: %{max_queu:
   5}`) and correctly deep-merges a keyword-list section instead of
   replacing the whole defaults map.
-- HTTP is `Req` throughout — the S3 and GCS blob stores, the claim-check
+- HTTP is `Req` throughout: the S3 and GCS blob stores, the claim-check
   `Remote` adapter, and `Sink.Http` no longer hand-roll `:httpc` plumbing
   (and `:inets` is no longer started by this package). Outbound requests go
   through `Ankusa.HttpClient`, which never follows a redirect (a followed one

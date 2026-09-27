@@ -4,7 +4,7 @@ Webhook bodies can be megabytes; queue messages shouldn't be. When a RabbitMQ,
 Kafka, or NATS sink gets a body larger than its `inline_max_bytes` (64 KiB by
 default), Ankusa writes the body to the object store and publishes a small
 **reference** in its place. Your worker turns the reference into an HTTP GET
-and gets the exact bytes back — with an HTTP client and nothing else: no
+and gets the exact bytes back, with an HTTP client and nothing else: no
 Elixir, no cloud SDK, no object-store credentials.
 
 ```mermaid
@@ -24,7 +24,7 @@ The machine-readable contract is
 
 ## The reference
 
-A queue message carries either `body_base64` or a `claim` — one reference
+A queue message carries either `body_base64` or a `claim`: one reference
 string ([full message format](delivery.md#sinkrabbitmq--queue-delivery)):
 
 ```
@@ -34,7 +34,7 @@ urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-
 
 | Segment | Meaning |
 | --- | --- |
-| `tenant` | `[A-Za-z0-9_-]{1,64}`. The same string in the reference, the URL, and the storage key — no encoding anywhere. |
+| `tenant` | `[A-Za-z0-9_-]{1,64}`. The same string in the reference, the URL, and the storage key, no encoding anywhere. |
 | `object id` | The id of the object holding the claim. Several claims share one object (see [Write cost](#write-cost)). |
 | `offset`, `length` | Where the claim's bytes sit inside that object. |
 | `sha256` | Lowercase hex digest of the claim's bytes. Always present; the reader checks it. |
@@ -82,7 +82,7 @@ does. Either way, keep port 4001 on your internal network: it serves webhook
 payloads.
 
 **The gateway does no authentication or authorization.** Who may read what is
-decided in front of it — a service mesh, Envoy, an API gateway, a cloud load
+decided in front of it: a service mesh, Envoy, an API gateway, a cloud load
 balancer with OIDC. It logs a warning saying so at startup, the same as the
 admin API.
 
@@ -94,10 +94,10 @@ GET /v1/claims/{tenant}/{object_id}/{offset}/{length}
 
 A `200` returns exactly `length` bytes at `offset`, as
 `application/octet-stream`, with `cache-control: public, max-age=31536000,
-immutable` — objects are written once and never rewritten, so they're safe to
+immutable`. Objects are written once and never rewritten, so they're safe to
 cache forever.
 
-**The gateway doesn't check integrity** — the path carries no digest, so only
+**The gateway doesn't check integrity**: the path carries no digest, so only
 the holder of the reference can. Compare the bytes' sha256 against the
 reference's before you use them, and treat a mismatch as permanent.
 
@@ -112,15 +112,15 @@ Errors are JSON: `{"error": "not_found"}`.
 
 | Status | `error` | Cause | Retry? |
 | --- | --- | --- | --- |
-| `200` | — | the bytes, cacheable forever | — |
-| `400` | `invalid_tenant`, `invalid_id`, `invalid_range` | tenant outside `[A-Za-z0-9_-]{1,64}`; id not a lowercase UUIDv7; a malformed offset or length | No — a bug |
-| `404` | `not_found` | no such object: expired by retention, or never written | No — dead-letter |
-| `416` | `invalid_range` | the range runs past the end of a real object | No — a bug |
+| `200` |  | the bytes, cacheable forever |  |
+| `400` | `invalid_tenant`, `invalid_id`, `invalid_range` | tenant outside `[A-Za-z0-9_-]{1,64}`; id not a lowercase UUIDv7; a malformed offset or length | No, a bug |
+| `404` | `not_found` | no such object: expired by retention, or never written | No, dead-letter |
+| `416` | `invalid_range` | the range runs past the end of a real object | No, a bug |
 | `503` | `store_unavailable` | the object store is unreachable; `Retry-After: 1` | Yes |
-| — | — | bytes don't match the reference's sha256 (your check) | No — dead-letter |
+|  |  | bytes don't match the reference's sha256 (your check) | No, dead-letter |
 
-Redeeming doesn't delete. Several consumers can redeem one claim — every queue
-bound to a fanout exchange, say — and claims go away only through
+Redeeming doesn't delete. Several consumers can redeem one claim, every queue
+bound to a fanout exchange, say, and claims go away only through
 [retention](#retention).
 
 ### What a front layer needs
@@ -134,7 +134,7 @@ The whole integration surface for auth is one method and one path shape:
 Anything else can be refused at the edge. The tenant is a path segment, so an
 authorizer compares it to the caller's identity without reading a body. One
 rule matters more than the rest: **a shared cache must sit behind the
-authorizer, never in front of it** — a cache in front would serve one tenant's
+authorizer, never in front of it**. A cache in front would serve one tenant's
 payload to another tenant's request.
 
 ### From TypeScript, with the SDK
@@ -143,12 +143,12 @@ payload to another tenant's request.
 (npm package `ankusa`) wraps a client generated from the spec with
 `openapi-typescript` + `openapi-fetch`: it parses a ref, redeems it, and
 verifies the bytes against the ref's own size and sha256 before returning
-them — the gateway does not check this itself. It's the framework's own
+them: the gateway does not check this itself. It's the framework's own
 umbrella client package: the claim-check client is the first piece in it.
 
 ```sh
 npm install ankusa   # or, before its first npm release, a `file:` path
-                      # dep — see the package README
+                      # dep, see the package README
 ```
 
 ```typescript
@@ -162,15 +162,15 @@ async function redeemClaim(claim: string): Promise<Buffer> {
 }
 ```
 
-Every failure is a `ClaimCheckError` with a `retryable` boolean — `false` for
+Every failure is a `ClaimCheckError` with a `retryable` boolean: `false` for
 a malformed ref, `404`, other `4xx`, or an integrity mismatch; `true` for
-`5xx`/`503` or an unreachable gateway — so sorting a redeem failure into
+`5xx`/`503` or an unreachable gateway. So sorting a redeem failure into
 dead-letter vs. retry needs no status-code knowledge. The workers in
 [`rabbitmq-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/worker)
 and
 [`kafka-sqs-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/worker)
-depend on it. Any other OpenAPI generator — `openapi-generator`,
-`openapi-python-client` — works against the same
+depend on it. Any other OpenAPI generator, `openapi-generator`,
+`openapi-python-client`, works against the same
 [`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml).
 
 ## Write cost
@@ -182,12 +182,12 @@ over a sink's `inline_max_bytes` become claims at all, and dispatch writes them
 levers keep writes cheap:
 
 - **The threshold is configurable per sink.** The 64 KiB default is chosen so
-  most webhook bodies ride inline — base64 turns it into about 88 KiB, under
+  most webhook bodies ride inline: base64 turns it into about 88 KiB, under
   Kafka's 1 MiB `max.message.bytes` and SQS's 256 KiB. Raise or lower
   `inline_max_bytes` per sink; the cost moves to broker bytes.
 - **Claims are packed.** Dispatch holds up to `dispatch.batch` (128) hooks per
   WAL read, checks each batch's claims in per tenant as one object, and gives
-  every hook a byte range inside it — one `PUT` per tenant per batch instead of
+  every hook a byte range inside it: one `PUT` per tenant per batch instead of
   one per hook, with no added latency (the batch is already in hand). A group
   bigger than `claim_check.pack_max_bytes` (16 MiB default) splits into several
   objects; a body bigger than that gets an object of its own.
@@ -202,8 +202,8 @@ levers keep writes cheap:
 
 Every claim object is an uncompressed ZIP: one entry per claim, named by the
 claim's id, plus a `manifest.json` listing each claim's offset, length, digest,
-content type, and receive time. The gateway never parses it — a reference's
-offset points straight at one entry's bytes — but `unzip`, Python's `zipfile`,
+content type, and receive time. The gateway never parses it, a reference's
+offset points straight at one entry's bytes, but `unzip`, Python's `zipfile`,
 Java, Go, and Erlang all read the pack with no Ankusa code. It's the same
 end-of-file index Parquet uses. Entries stay uncompressed because a compressed
 entry has no raw byte range to serve.
@@ -248,14 +248,14 @@ side:
 
 - **Application services** use the gateway (above).
 - **Databricks, Snowflake, BigQuery, Athena** read the bucket directly under
-  their own governance — Unity Catalog external locations, Snowflake external
+  their own governance: Unity Catalog external locations, Snowflake external
   stages, BigQuery object tables. Pulling each claim through an HTTP call per
   row from Spark executors is slow, and Databricks serverless compute needs
   private connectivity set up to reach an internal endpoint at all.
 
 Those platforms need three things:
 
-- **The key layout as a second, documented read contract** — Hive-style folders,
+- **The key layout as a second, documented read contract**: Hive-style folders,
   no encoding.
 - **Hex digests.** Spark and Snowflake `sha2(x, 256)`, `sha256sum`, and
   `hashlib.hexdigest()` all produce hex, so a reader compares directly.
@@ -271,9 +271,9 @@ read.
 - **Presigned URLs.** Every redeemed byte passes through the gateway.
 - **Bodies over `max_body_bytes`.** No streaming or multipart.
 - **A write API.** Ankusa's dispatch nodes are the only writers. A standalone
-  claim-check service with a `PUT` for other producers is possible — the
+  claim-check service with a `PUT` for other producers is possible, the
   reference, layout, and read route already don't depend on the webhook
-  pipeline — but it's a separate piece of work.
+  pipeline, but it's a separate piece of work.
 - **Listing or deleting claims** over the API.
 
 ## From Elixir

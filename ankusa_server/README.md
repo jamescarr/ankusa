@@ -66,7 +66,7 @@ sources:
 
 Secrets never go in the file: reference them as `${VAR}` and pass the values as
 environment variables. A `${VAR}` with no value and no default stops the
-container at startup, naming the field — an empty secret would otherwise accept
+container at startup, naming the field: an empty secret would otherwise accept
 everything an attacker signs.
 
 Starting points, all loadable as-is:
@@ -135,14 +135,14 @@ sources:
 - `2xx` means delivered. Anything else, a timeout, or a redirect is retried, then dead-lettered.
 - **Dedupe on `x-ankusa-id`.** Delivery is at-least-once, so consumers are
   idempotent receivers: `x-ankusa-id` identifies one stored hook, and every
-  redelivery of it — a retry, a DLQ replay, a restart — carries the same id. A
+  redelivery of it, a retry, a DLQ replay, a restart, carries the same id. A
   provider retry is a *different* stored hook with a different id, because
   ingest does no deduplication, so dedupe those on the provider's event id in
   the body (e.g. Stripe's `id`). The original request headers are not
   forwarded, so header-borne ids like `X-GitHub-Delivery` or `webhook-id` are
   not available downstream.
 
-A runnable version — the image plus a Python worker, one `docker compose up` — is
+A runnable version, the image plus a Python worker, one `docker compose up`, is
 [`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/);
 the walkthrough with outages, dead letters, and replay is
 [`docs/quickstart.md`](https://github.com/jamescarr/ankusa/blob/main/docs/quickstart.md).
@@ -170,8 +170,8 @@ curl localhost:4002/v1/quarantine             # hooks held after a failed verifi
 curl localhost:4002/metrics                   # Prometheus
 ```
 
-The DLQ and quarantine endpoints are node-local — the DLQ is the dispatch node's
-disk, quarantine is the edge node's memory — and answer
+The DLQ and quarantine endpoints are node-local, the DLQ is the dispatch node's
+disk, quarantine is the edge node's memory, and answer
 `409 role_not_enabled` when you ask the wrong node. Metrics are node-local too:
 an edge node exports ingest series, a worker exports dispatch and compaction
 series. Scrape every node.
@@ -184,8 +184,8 @@ and
 
 ## Security
 
-Ankusa verifies provider signatures on ingest — Stripe, GitHub, and Standard
-Webhooks — and does no other authentication. It does not manage users, API keys,
+Ankusa verifies provider signatures on ingest, Stripe, GitHub, and Standard
+Webhooks, and does no other authentication. It does not manage users, API keys,
 or tokens; that is your identity provider's job, and pretending otherwise would
 be worse.
 
@@ -213,7 +213,7 @@ leaves ingest open and puts HTTP basic auth on the admin API.
 
 `/var/lib/ankusa` holds the WAL, the quarantine log, the dead-letter queue, and
 local segments. Losing it loses un-dispatched hooks, so give it a volume and back
-it — or move segments to S3/GCS, where they are not your problem anymore.
+it, or move segments to S3/GCS, where they are not your problem anymore.
 
 ## Compose
 
@@ -242,7 +242,7 @@ curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entri
 ## Where to read more
 
 The image is the framework; the documentation covers what it does and how it
-scales — [quickstart](https://github.com/jamescarr/ankusa/blob/main/docs/quickstart.md),
+scales: [quickstart](https://github.com/jamescarr/ankusa/blob/main/docs/quickstart.md),
 [configuration](https://github.com/jamescarr/ankusa/blob/main/docs/configuration.md),
 [architecture](https://github.com/jamescarr/ankusa/blob/main/docs/architecture.md),
 [deployment](https://github.com/jamescarr/ankusa/blob/main/docs/deployment.md),

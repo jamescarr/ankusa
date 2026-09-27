@@ -1,7 +1,7 @@
 # Storage: WAL, segments, object stores
 
 Two tiers, on purpose. The WAL is the fast, small, durable tier the ack
-depends on. The object store is the cheap, large, long-term tier — segments
+depends on. The object store is the cheap, large, long-term tier. Segments
 roll off the WAL asynchronously, never blocking an ack. See
 [`architecture.md`](architecture.md) for how this fits the request path.
 
@@ -20,22 +20,22 @@ Contract every adapter must uphold:
 
 - `append/2` is a **group commit**: given a list of records, write them all
   and issue a *single* commit, then return per-record results in order. Every
-  record is written — ingest does no deduplication, so a provider retry after
+  record is written. Ingest does no deduplication, so a provider retry after
   a lost ack is stored again as its own record.
 - A committed record gets a strictly increasing `seq`, and seq order **is**
   commit order: once a reader has observed seq `N`, no record with seq `≤ N`
   becomes visible later. Readers use `seq` only as a cursor; `0` means
   "nothing consumed yet." Values may have gaps.
 - After a crash, replay must drop a torn trailing record (a write that
-  started but never committed) — no un-acked write is ever surfaced as
+  started but never committed). No un-acked write is ever surfaced as
   durable.
 
-### `WAL.DiskLog` — the default, single-node
+### `WAL.DiskLog`: the default, single-node
 
 Append-only, length-prefixed, CRC32-per-record binary log on local disk.
-No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
+No external dependencies: OTP's `:file`, `:ets`, and `:erlang.crc32` only.
 
-- One `:file.pwrite` + one `:file.datasync` (fsync) per batch — hundreds of
+- One `:file.pwrite` + one `:file.datasync` (fsync) per batch: hundreds of
   hooks, one fsync.
 - Replay validates every frame's CRC and truncates the file at the first
   torn/invalid one.
@@ -46,11 +46,11 @@ No external dependencies — OTP's `:file`, `:ets`, and `:erlang.crc32` only.
   (default 64 MiB) and is at least as large as the live suffix it would copy.
   The floor is also what keeps `seq` from being reused: after a restart,
   allocation resumes at the floor, the persisted cursors, or the last replayed
-  frame — whichever is highest — never at 1.
+  frame, whichever is highest, never at 1.
 - Cursors and the truncation floor are written to a temp file, fsynced, then
   renamed, so a power loss leaves the old or the new file, never a torn one.
 - Durable to process crash and power loss **on that box**, not to losing the
-  box — it's one local file. Every WAL role (`edge`, `dispatch`, `storage`)
+  box. It's one local file. Every WAL role (`edge`, `dispatch`, `storage`)
   reads that same file, so they must all run in **one** BEAM node; splitting
   them across processes or hosts is not supported. See "Scaling out" below.
 
@@ -62,11 +62,11 @@ config :ankusa, wal: {Ankusa.WAL.DiskLog, []}   # the default; no opts required
 ## Scaling out
 
 One node is one `WAL.DiskLog` file. To scale, run **N independent all-role
-nodes behind a load balancer** — each with its own data volume and its own
+nodes behind a load balancer**. Each with its own data volume and its own
 DLQ/admin API. Each node also needs **its own bucket** (or its own LocalFS
 root) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg`, which
 name no instance or node, and remote blob stores ignore the `instance`
-argument — so two nodes sharing a bucket silently overwrite each other's
+argument, so two nodes sharing a bucket silently overwrite each other's
 segments. See [`deployment.md`](deployment.md) for the operational shape.
 
 ## `Ankusa.BlobStore`
@@ -80,7 +80,7 @@ segments. See [`deployment.md`](deployment.md) for the operational shape.
 ```
 
 `get_range/5` exists because the compactor never writes one object per
-hook — segments hold many records, and a single range `GET` reads exactly
+hook. Segments hold many records, and a single range `GET` reads exactly
 one record's bytes back out.
 
 **`:not_found` is part of the contract for every adapter**: `get/3` and
@@ -94,15 +94,15 @@ collide: `seg/...` (compaction, written by `Ankusa.Storage.Compactor`, every
 hook) and `claims/...` (`Ankusa.ClaimCheck`, packed per tenant per dispatch
 batch, one object holding many claims under
 `claims/tenant=<t>/dt=<day>/<object_id>`). Retention differs per namespace
-too — see [`claim-check.md#retention`](claim-check.md#retention).
+too. See [`claim-check.md#retention`](claim-check.md#retention).
 
 | Adapter | Deps | Notes |
 | --- | --- | --- |
 | `BlobStore.LocalFS` | none | Default. Atomic writes (temp file + rename). `get_range` uses `:file.pread/3`, never slurps the whole segment. |
-| `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature) — the implementation behind the official aws-elixir SDK — with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
-| `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS — the adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
-| `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA — including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
-| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests — OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list` — using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
+| `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
+| `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS. The adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
+| `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
+| `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
 
 ```elixir
 # S3 / MinIO / R2
@@ -122,7 +122,7 @@ config :ankusa,
     blob_store: {Ankusa.BlobStore.GCS, bucket: "ankusa-segments", token_provider: {MyApp.Auth, :gcs_token, []}}
   }
 
-# Azure Blob Storage — a pre-generated SAS ...
+# Azure Blob Storage: a pre-generated SAS ...
 config :ankusa,
   storage: %{
     blob_store:
@@ -133,7 +133,7 @@ config :ankusa,
        # endpoint: "http://localhost:4577/devstoreaccount1"  # only for floci-az; omit for real Azure
   }
 
-# ... or, on Azure, the managed identity (system-assigned — no secret at all)
+# ... or, on Azure, the managed identity (system-assigned, no secret at all)
 config :ankusa,
   storage: %{
     blob_store:
@@ -144,7 +144,7 @@ config :ankusa,
        token_provider: {Ankusa.BlobStore.Azure.ManagedIdentity, :token, []}}
   }
 
-# OCI Object Storage — signs its own requests with an API signing key
+# OCI Object Storage: signs its own requests with an API signing key
 config :ankusa,
   storage: %{
     blob_store:
@@ -192,7 +192,7 @@ a per-record CRC32; `encode/1` packs many into one segment binary and
 returns the byte offset + length of each, which is exactly what
 the `get_range` callback needs.
 
-## `Ankusa.Storage.Compactor` — how segments get written
+## `Ankusa.Storage.Compactor`: how segments get written
 
 One tick (default every `storage.interval_ms`, 1s):
 
@@ -200,17 +200,17 @@ One tick (default every `storage.interval_ms`, 1s):
    records per read), accumulating until their payloads reach
    `storage.roll_bytes` (default 16 MiB) or the WAL has nothing more to give.
    A long backlog therefore produces **several segments in one tick**, not one
-   unbounded segment — peak memory is a chunk plus a segment, however far
+   unbounded segment. Peak memory is a chunk plus a segment, however far
    behind a storage node fell.
 2. Encode those records into one segment via the configured `Codec`.
 3. `PUT` the segment to the blob store under a deterministic key:
    `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
 4. Append one index row per record to `Ankusa.Storage.Index` (durable,
    append-only, fsynced before the cursor moves, on local disk regardless of
-   which `BlobStore` is configured) — `event_id`, `tenant_id`, `source_id`,
+   which `BlobStore` is configured): `event_id`, `tenant_id`, `source_id`,
    `seq`, `segment_key`, `offset`, `length`.
 5. Advance the compactor's durable cursor.
-6. Truncate the WAL through `min(compactor_seq, dispatch_seq)` — **never**
+6. Truncate the WAL through `min(compactor_seq, dispatch_seq)`. **Never**
    past what dispatch has consumed yet, so at-least-once delivery survives
    compaction even if dispatch is lagging or down.
 
@@ -222,7 +222,7 @@ bills a minimum object size) stays cheap at scale.
 
 `Ankusa.Storage.fetch/2` looks an event id up through the index, range-reads
 exactly its frame from the blob store, and decodes it back into the
-original `%Ankusa.Envelope{}` — the read-side counterpart to compaction,
+original `%Ankusa.Envelope{}`, the read-side counterpart to compaction,
 usable for building a replay/audit API or a dashboard without touching the
 WAL.
 

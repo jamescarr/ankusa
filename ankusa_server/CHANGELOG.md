@@ -12,7 +12,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   with `servers`, `subject`, `inline_max_bytes` (`8192`),
   `publish_timeout_ms` (`5000`), `tls`, and an `auth` block taking one scheme
   (`username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream has
-  to exist — the sink never creates one.
+  to exist: the sink never creates one.
 - [`config-examples/nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml),
   and a `nats` sink in `reference.yml`.
 - `dispatch.concurrency` (default 32), `dispatch.max_inflight` (4096) and
@@ -26,7 +26,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - `batcher.partitions` defaults to 2 and `batcher.max_delay_ms` to 0;
   `reference.yml` reflects both, and documents that `max_queue` counts buffered
   *and* in-flight records.
-- `claim_check` auth (`tokens`) removed — the gateway is open, so put your
+- `claim_check` auth (`tokens`) removed: the gateway is open, so put your
   proxy/mesh/network policy in front; `pack_max_bytes` added (default 16 MiB in
   core), and `remote`/`max_bytes` removed.
 

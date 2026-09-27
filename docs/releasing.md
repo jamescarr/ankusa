@@ -7,7 +7,7 @@ one npm package.
 
 Four independently versioned Hex packages (`ankusa`, `ankusa_rabbitmq`,
 `ankusa_kafka`, `ankusa_nats`), each with its own `mix.exs` `version` and
-`CHANGELOG.md`. The release flow is tag-driven — the Elixir/Hex norm — not
+`CHANGELOG.md`. The release flow is tag-driven, the Elixir/Hex norm, not
 triggered by every push to `main`:
 
 1. In a PR: bump `@version` in the package's `mix.exs` (follow
@@ -26,11 +26,11 @@ triggered by every push to `main`:
    GitHub release from the CHANGELOG section.
 4. The first release is ordered: tag `ankusa-v0.1.0` and wait for its
    publish job to finish green before tagging the adapters. Their `:prod`
-   deps resolve `ankusa` from Hex — an adapter tag pushed before core is
+   deps resolve `ankusa` from Hex: an adapter tag pushed before core is
    live fails at `MIX_ENV=prod mix deps.get` and is re-run from the Actions
    UI once core has landed.
 5. `HEX_API_KEY` is a repository secret from a Hex key scoped to
-   `api:write` — generate one from the Hex.pm dashboard (Keys) and add it
+   `api:write`: generate one from the Hex.pm dashboard (Keys) and add it
    under repo Settings → Secrets and variables → Actions.
 6. The pre-tag gate is
    [`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh)
@@ -39,7 +39,7 @@ triggered by every push to `main`:
 [`.github/workflows/ci.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/ci.yml) runs the same
 tests (plus `mix format --check-formatted` and
 `mix compile --warnings-as-errors`) on every PR and push, independent of
-the release workflow — a red CI check is a merge blocker regardless of
+the release workflow: a red CI check is a merge blocker regardless of
 whether anything's being released.
 
 ## The server image
@@ -51,8 +51,8 @@ smoke-test the image without pushing.
 
 A release is the tag `ankusa_server-vX.Y.Z`, and the gate is:
 
-1. `mise run e2e` — the kind + Oban end-to-end proof, locally.
-2. `mise run release:preflight-server` — checks `@version` in
+1. `mise run e2e`: the kind + Oban end-to-end proof, locally.
+2. `mise run release:preflight-server`: checks `@version` in
    `ankusa_server/mix.exs`, a matching `## [X.Y.Z]` heading in
    `ankusa_server/CHANGELOG.md`, that the tag is free locally and on `origin`,
    that the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repo secrets exist, and
@@ -68,7 +68,7 @@ version publishes its exact tag only, so nobody can pull `latest` and get an rc.
 The same job pushes `ankusa_server/README.md` as the Docker Hub repository
 description and cuts a GitHub release from the CHANGELOG section.
 
-Secrets: `DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN` — a Docker Hub personal
+Secrets: `DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN`: a Docker Hub personal
 access token with Read & Write.
 
 ## The npm SDK
