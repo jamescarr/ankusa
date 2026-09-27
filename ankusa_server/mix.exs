@@ -4,7 +4,7 @@ defmodule AnkusaServer.MixProject do
   # Read by the release tooling: `sed -n 's/^  @version "\(.*\)"$/\1/p'`.
   # Independent of core's version — this project is its own artifact (a Docker
   # image), tagged `ankusa_server-vX.Y.Z`, and is never published to Hex.
-  @version "0.1.0"
+  @version "0.2.0"
 
   def project do
     [
