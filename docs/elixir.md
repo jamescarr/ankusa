@@ -1,7 +1,7 @@
 # Ankusa for Elixir
 
-The same pipeline the container runs — durable WAL, verification,
-dispatch, sinks — as a library in your own supervision tree. If you would
+The same pipeline the container runs, durable WAL, verification,
+dispatch, sinks, as a library in your own supervision tree. If you would
 rather run Ankusa as a container, or you don't write Elixir, start at the
 [README](../README.md).
 
@@ -68,7 +68,7 @@ curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' \
 # => {"id":"01a0...","status":"accepted","seq":1}
 ```
 
-The `201` returns only *after* the payload is `fsync`'d to the WAL — that's
+The `201` returns only *after* the payload is `fsync`'d to the WAL, that's
 the [core invariant](architecture.md#the-core-invariant), not a formality.
 The dispatch pipeline then delivers it, visible in the server log:
 
@@ -86,7 +86,7 @@ curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
 # => {"id":"01b1...","status":"accepted","seq":2}
 ```
 
-A provider retry after a lost ack lands the same way — stored and delivered
+A provider retry after a lost ack lands the same way, stored and delivered
 again. Consumers are idempotent receivers, so absorbing the redelivery is
 their job; see [`integrations.md`](integrations.md).
 
@@ -117,12 +117,12 @@ The ingest listener serves the catch URL, plus two read-only endpoints:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source` — see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the WAL fsync — `201 accepted` is the only committed response (there is no `200`). Every accepted POST is a new hook with a new `id`; ingest does no deduplication, so a provider retry after a lost ack is stored and delivered again. `201` accepted / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source`, see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the WAL fsync: `201 accepted` is the only committed response (there is no `200`). Every accepted POST is a new hook with a new `id`; ingest does no deduplication, so a provider retry after a lost ack is stored and delivered again. `201` accepted / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
 | `GET` | `/health` | Liveness + WAL stats. |
 | `GET` | `/stats` | WAL stats. |
 
-The operator API on its own port — `/metrics`, the dead-letter queue, replay,
-quarantine — is `admin.enabled: true`; see the admin API section in
+The operator API on its own port, `/metrics`, the dead-letter queue, replay,
+quarantine, is `admin.enabled: true`; see the admin API section in
 [`configuration.md`](configuration.md#ankusa-config).
 
 ## Roles from code
@@ -136,12 +136,12 @@ defp storage_children(config, opts), do: if Config.role?(config, :storage), do: 
 defp claim_check_children(config, opts), do: if Config.role?(config, :claim_check), do: [...], else: []
 ```
 
-One Mix release, many deployments — the same compiled artifact runs
+One Mix release, many deployments: the same compiled artifact runs
 all-in-one on a laptop or as a node in a fleet, because *which* children
 start is a runtime config decision, never a build-time one.
 
 `edge`, `dispatch`, and `storage` share the one local `WAL.DiskLog` file, so
-every WAL role has to run in the **same BEAM node** — you can't split them
+every WAL role has to run in the **same BEAM node**: you can't split them
 across processes or hosts. `claim_check` is stateless and can run anywhere:
 
 ```sh
@@ -150,7 +150,7 @@ ANKUSA_ROLES=claim_check mix run --no-halt             # claim-check gateway, an
 ```
 
 Ankusa.Application reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of
-whatever `config.exs` sets — see
+whatever `config.exs` sets, see
 [`configuration.md#runtime-environment-overrides`](configuration.md#runtime-environment-overrides).
 
 ## Deploying your own wrapper app
@@ -165,7 +165,7 @@ shows the pattern rather than prescribing one image for every use case:
   faster to build, right-sized for an example or a low-traffic deployment.
 - **Release image** (what a real production deployment should build
   instead): multi-stage, `mix release` in the build stage, a slim runtime
-  base in the final stage. Not shipped here — the framework doesn't
+  base in the final stage. Not shipped here: the framework doesn't
   prescribe a release config because that's genuinely deployment-specific
   (env-var vs. `runtime.exs`-based config, which roles per image, etc.).
 
@@ -177,7 +177,7 @@ packages it needs), reads its own env vars, and calls `Ankusa.Config.new/1` +
 wrapper is where "how do I actually deploy this" config lives.
 
 If that wrapper depends on `ankusa` directly *and* transitively through an
-adapter package, mark your direct entry `override: true` — the reason, and the
+adapter package, mark your direct entry `override: true`: the reason, and the
 Dockerfile/compose context that goes with it, is in
 [`packaging.md#building-an-app-against-the-path-deps`](packaging.md#building-an-app-against-the-path-deps).
 

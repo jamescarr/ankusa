@@ -17,7 +17,7 @@ or point `ANKUSA_CONFIG` at another path.
 `${VAR}` and `${VAR:-default}` are interpolated from the environment. A
 `${VAR}` with no value and no default stops the container at startup and names
 the field, so an empty secret can never quietly accept everything an attacker
-signs. An invalid file exits `78` (`EX_CONFIG`) — a message, not a crash dump.
+signs. An invalid file exits `78` (`EX_CONFIG`), a message, not a crash dump.
 Check a file before you start the container:
 
 ```sh
@@ -33,7 +33,7 @@ docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
 
 `version` prints the server and core versions.
 
-A minimal file — one open source and one HTTP sink:
+A minimal file, one open source and one HTTP sink:
 
 ```yaml
 sources:
@@ -61,7 +61,7 @@ Every top-level section, with its keys and defaults:
 | `wal` | `type` (`disk`) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
-| `sources` | One entry per catch-URL source — see below |
+| `sources` | One entry per catch-URL source. See below |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -75,9 +75,9 @@ One source per provider endpoint; the key is the catch-URL segment
 
 | Key | Meaning |
 | --- | --- |
-| `tenant` | The storage/retention scope. With `routing: tenant_path` the URL wins. Default `default` — see [`multi-tenancy.md`](multi-tenancy.md). |
+| `tenant` | The storage/retention scope. With `routing: tenant_path` the URL wins. Default `default`. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300). `hmac` takes the descriptor keys below. |
-| `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag` — what happens when verification fails. |
+| `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
 
 ### Custom HMAC schemes
@@ -92,46 +92,46 @@ sources:
     verify:
       type: hmac
       secret: "${ACME_WEBHOOK_SECRET}"
-      signature_header: "X-Acme-Signature"   # required — where the signature lives
+      signature_header: "X-Acme-Signature"   # required. Where the signature lives
       signed: "{body}"                        # template over {body}, {header:NAME}, {ts}
       hash: sha256                            # sha256 | sha512 | sha1
       encoding: hex                           # hex | base64
-      sig_prefix: "sha256="                   # optional — stripped from the header value
-      timestamp_header: "X-Acme-Timestamp"    # optional — also signs {ts} + replay window
+      sig_prefix: "sha256="                   # optional. Stripped from the header value
+      timestamp_header: "X-Acme-Timestamp"    # optional. Also signs {ts} + replay window
       tolerance_seconds: 300
     sinks: [{type: log}]
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `signature_header` | — | Required. The header carrying the signature(s). |
-| `signed` | `"{body}"` | Template over `{body}`, `{header:NAME}` (another header's value), and `{ts}` (the timestamp below). Quoted — `{...}` would otherwise parse as a YAML flow map. |
+| `signature_header` | none | Required. The header carrying the signature(s). |
+| `signed` | `"{body}"` | Template over `{body}`, `{header:NAME}` (another header's value), and `{ts}` (the timestamp below). Quoted: `{...}` would otherwise parse as a YAML flow map. |
 | `parse` | `whole` | `whole` (value is one signature) \| `csv_pairs` (`k=v,k=v`; `sig_key` names the signature pair) \| `space_versions` (space-separated `v1,<sig>` tokens; `version` is the token prefix). |
-| `sig_prefix` | — | Literal prefix stripped from a `whole` header value, e.g. `sha256=`. |
-| `sig_key` | — | With `parse: csv_pairs`, the key whose value is a signature, e.g. `v1`. |
-| `version` | — | With `parse: space_versions`, the token prefix, e.g. `v1,`. |
+| `sig_prefix` | none | Literal prefix stripped from a `whole` header value, e.g. `sha256=`. |
+| `sig_key` | none | With `parse: csv_pairs`, the key whose value is a signature, e.g. `v1`. |
+| `version` | none | With `parse: space_versions`, the token prefix, e.g. `v1,`. |
 | `hash` | `sha256` | `sha256` \| `sha512` \| `sha1`. |
 | `encoding` | `hex` | `hex` (lowercase) \| `base64`. |
 | `secret_decode` | `raw` | `raw` (use `secret` as the key) \| `whsec_base64` (strip `whsec_` then Base64-decode). |
-| `timestamp_header` | — | Header carrying the Unix-seconds timestamp, both signed as `{ts}` and checked against `tolerance_seconds`. |
+| `timestamp_header` | none | Header carrying the Unix-seconds timestamp, both signed as `{ts}` and checked against `tolerance_seconds`. |
 
-Providers that are not body-HMAC — Twilio (SHA1 over the full request URL plus
+Providers that are not body-HMAC, Twilio (SHA1 over the full request URL plus
 sorted form params) and PayPal (RSA over a certificate fetched from a provider
-URL) — cannot be described by this engine. They need a bespoke
+URL), cannot be described by this engine. They need a bespoke
 `Ankusa.Verifier` module.
 
 ### Sinks
 
 | `type` | Keys |
 | --- | --- |
-| `log` | — |
+| `log` | none |
 | `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `ordered` (`false`; `true` serializes deliveries per `{tenant_id, source_id}`, in `seq` order). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536). |
 | `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
-| `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist — see [`delivery.md`](delivery.md#sinknats--subject-delivery). |
+| `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats--subject-delivery). |
 
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
-the message carries a claim reference — see [`claim-check.md`](claim-check.md).
+the message carries a claim reference. See [`claim-check.md`](claim-check.md).
 
 ### Environment overrides
 
@@ -159,7 +159,7 @@ the file, with secrets injected through `${VAR}`.
 
 ### Starting points
 
-All loadable as-is — copy one, delete what you don't use, replace the `${VAR}`s:
+All loadable as-is. Copy one, delete what you don't use, replace the `${VAR}`s:
 
 | File | What it is |
 | --- | --- |
@@ -170,18 +170,18 @@ All loadable as-is — copy one, delete what you don't use, replace the `${VAR}`
 
 ## Library configuration (Elixir)
 
-Two structs, both built once at boot and passed down the supervision tree —
-never `Application.get_env/2` scattered through call sites:
+Two structs, both built once at boot and passed down the supervision tree.
+Never `Application.get_env/2` scattered through call sites:
 
-- **`%Ankusa.Config{}`** — instance-wide: roles, ports, adapters, tuning.
-- **`%Ankusa.Source{}`** — per catch-URL: verification, sinks, tenant.
+- **`%Ankusa.Config{}`**. Instance-wide: roles, ports, adapters, tuning.
+- **`%Ankusa.Source{}`**. Per catch-URL: verification, sinks, tenant.
 
 ### `%Ankusa.Config{}`
 
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
 `:dispatch`, `:storage`, `:claim_check`, and `:admin` are maps and get **deep-merged**
-over the defaults — pass only the keys you want to change.
+over the defaults. Pass only the keys you want to change.
 
 ```elixir
 config :ankusa,
@@ -220,26 +220,26 @@ config :ankusa,
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `instance` | `:default` | Registry namespace — see [`architecture.md#instance-model`](architecture.md#instance-model). Two instances with different names run independently in one VM. |
+| `instance` | `:default` | Registry namespace. See [`architecture.md#instance-model`](architecture.md#instance-model). Two instances with different names run independently in one VM. |
 | `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{wal,segments,quarantine,dlq}`. |
-| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role — see [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. See [`deployment.md`](deployment.md). |
+| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role. See [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. See [`deployment.md`](deployment.md). |
 | `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in the default Ankusa.Application. |
 | `max_body_bytes` | `8_000_000` | Hard cap enforced while streaming the request body; over it is `413` without buffering the whole thing. |
-| `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver` — catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
+| `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. |
 | `wal` | `{Ankusa.WAL.DiskLog, []}` | `{module, opts}` implementing `Ankusa.WAL`. See [`storage.md`](storage.md). |
 | `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The DiskLog GenServer serializes commits itself, so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
-| `batcher.max_delay_ms` | `0` | Commit immediately — the WAL append runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
+| `batcher.max_delay_ms` | `0` | Commit immediately. The WAL append runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
 | `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
 | `dispatch.poll_ms` | `200` | How often the dispatch pipeline polls the WAL past its cursor. |
 | `dispatch.batch` | `128` | Max envelopes read per WAL read. |
 | `dispatch.concurrency` | `32` | Max sink deliveries in flight at once. Keep Req's Finch pool (default 50) at least this large for `Sink.Http`. |
-| `dispatch.max_inflight` | `4096` | Max admitted-but-unfinished envelopes — bounds how much a stalled destination can hold. |
+| `dispatch.max_inflight` | `4096` | Max admitted-but-unfinished envelopes. Bounds how much a stalled destination can hold. |
 | `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their body bytes. |
-| `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy` — the **default**, overridable per source (see below). |
+| `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: the **default**, overridable per source (see below). |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
-| `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec` — segment record framing. |
+| `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec`: segment record framing. |
 | `storage.roll_bytes` | `16 MiB` | Roll a new segment past this size. |
 | `storage.roll_ms` | `30_000` | ...or after this long, whichever comes first. |
 | `storage.interval_ms` | `1_000` | Compactor tick interval. |
@@ -288,7 +288,7 @@ config :ankusa,
 
 A source can override the dispatch-wide retry policy by putting a
 `:retry` opt directly in a sink tuple's opts if that sink's module reads it
-(none of the shipped sinks do — `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka`/`Sink.NATS` retries are all
+(none of the shipped sinks do. `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka`/`Sink.NATS` retries are all
 driven by `config.dispatch.retry`, applied uniformly per source by
 `Ankusa.Dispatch.Pipeline`). Per-source retry policy override is not currently
 supported; it's dispatch-wide.
@@ -302,17 +302,17 @@ the map.
 | Behaviour | Job | Default | Also shipped |
 | --- | --- | --- | --- |
 | `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
-| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | — |
+| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | none |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack) |
-| `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | — |
-| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish — `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce — `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish — `ankusa_nats` package) |
-| `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | — |
+| `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | none |
+| `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package) |
+| `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | none |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
-| `Ankusa.ClaimCheck` | Pack claims into the object store, redeem by reference | — (the instance's `BlobStore`) | — |
-| `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | — |
+| `Ankusa.ClaimCheck` | Pack claims into the object store, redeem by reference | none (the instance's `BlobStore`) | none |
+| `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | none |
 
-Swapping any of these is a one-line config change — `route_resolver:
-{Ankusa.RouteResolver.TenantPath, []}` — because every layer is a behaviour with
+Swapping any of these is a one-line config change, `route_resolver:
+{Ankusa.RouteResolver.TenantPath, []}`, because every layer is a behaviour with
 `{module, opts}` config, resolved at the call site, never hardcoded.
 
 ### Runtime environment overrides
@@ -320,21 +320,21 @@ Swapping any of these is a one-line config change — `route_resolver:
 Ankusa.Application (the default OTP application boot path) reads two env
 vars on top of whatever `config.exs` sets:
 
-- `PORT` — overrides `config.port`.
-- `ANKUSA_ROLES` — comma-separated, overrides `config.roles` (e.g.
+- `PORT`: overrides `config.port`.
+- `ANKUSA_ROLES`: comma-separated, overrides `config.roles` (e.g.
   `ANKUSA_ROLES=edge,dispatch`). Parsed with `Ankusa.Config.parse_roles!/1`:
   an unknown role name (anything other than `edge`, `dispatch`, `storage`,
   `claim_check`) raises `ArgumentError` and fails boot rather than silently
   starting with the wrong roles.
 
 `autostart` (application env, default `false`) gates whether
-Ankusa.Application boots its built-in default instance at all — a library
+Ankusa.Application boots its built-in default instance at all. A library
 must not bind a port just because it's a dependency. Set `config :ankusa,
 autostart: true` in a deployment that wants the zero-config default instance
 (the repo's own `config/config.exs` does this outside `:test`).
 
-This is deliberately the *only* place env vars are read inside `ankusa` core —
-everything else is `%Ankusa.Config{}` passed explicitly. A deployment wrapper
+This is deliberately the *only* place env vars are read inside `ankusa` core.
+Everything else is `%Ankusa.Config{}` passed explicitly. A deployment wrapper
 (like [`examples/rabbitmq-consumer/ingest_app`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/ingest_app))
 is free to read as many env vars as it wants and build the config struct
 itself; that's the intended extension point, not a gap.

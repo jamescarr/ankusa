@@ -7,8 +7,8 @@ a container runs is decided at startup.
 
 ## Roles and topologies
 
-Four roles — `edge` (ingest), `dispatch` (delivery), `storage` (compaction and
-archiving), and `claim_check` (the large-payload gateway) — chosen per container
+Four roles, `edge` (ingest), `dispatch` (delivery), `storage` (compaction and
+archiving), and `claim_check` (the large-payload gateway), chosen per container
 with `ANKUSA_ROLES`:
 
 ```sh
@@ -17,15 +17,15 @@ docker run -e ANKUSA_ROLES=dispatch,storage ...  jamescarr/ankusa:edge   # deliv
 docker run -e ANKUSA_ROLES=claim_check ...       jamescarr/ankusa:edge   # large-payload gateway only
 ```
 
-One image, many deployments — *which* children start is a runtime config
+One image, many deployments: *which* children start is a runtime config
 decision, never a build-time one. Embedding the library instead?
 [`elixir.md#roles-from-code`](elixir.md#roles-from-code) shows the same switch
 inside your own supervision tree.
 
 **`:claim_check` is a fourth, opt-in role**, absent from the default
 `roles` list (`[:edge, :dispatch, :storage]`) because it opens a port that
-serves stored payloads. A node running it alone needs no WAL — only
-blob-store credentials — and can be scaled independently
+serves stored payloads. A node running it alone needs no WAL, only
+blob-store credentials, and can be scaled independently
 from ingest/dispatch/storage exactly like any other role. It does no
 authentication: put a proxy, mesh, or network policy in front of it. See
 [`claim-check.md`](claim-check.md) for the full contract and the worked
@@ -34,7 +34,7 @@ separate `claim-check` service, same image, different `ANKUSA_ROLES`).
 
 **Important constraint:** `WAL.DiskLog` keeps its record index in-process and
 reclaims space by renaming the log file, so **every role that touches the WAL
-must run in one BEAM node** — that is the topology a single container or
+must run in one BEAM node**: that is the topology a single container or
 `mix run` gets you. Splitting `edge`, `dispatch`, and `storage` across
 processes, containers, or hosts is not supported: there is no network-reachable
 WAL to point them at, and a second OS process would never see writes it didn't
@@ -62,10 +62,10 @@ Every surface is on its own port so it can be firewalled on its own.
 
 `/var/lib/ankusa` holds the WAL, the quarantine log, the dead-letter queue, and
 local segments. Losing it loses un-dispatched hooks, so give it a volume and back
-it — or move segments to S3/GCS, where they are not your problem anymore.
+it, or move segments to S3/GCS, where they are not your problem anymore.
 
 Config lives at `/etc/ankusa/ankusa.yml` (mount yours over it) or wherever
-`ANKUSA_CONFIG` points — every key, plus the env overrides:
+`ANKUSA_CONFIG` points. Every key, plus the env overrides:
 [`configuration.md`](configuration.md).
 
 The image reports `healthy` via `:4002/health`, so orchestrators can gate on it
@@ -104,7 +104,7 @@ docker compose -f ankusa_server/compose/docker-compose.proxy.yml up -d --wait
 One all-role node behind nginx, with ingest open and the admin API behind basic
 auth. To scale, run N independent nodes like it behind your load balancer: each
 node runs every role, keeps its own data volume and WAL, and exposes its own
-DLQ/admin API — a hook lands on one node and stays there.
+DLQ/admin API: a hook lands on one node and stays there.
 
 Two things to get right once you run more than one node:
 
@@ -132,7 +132,7 @@ destination or one retrying envelope no longer stalls the whole instance.
 Throughput is therefore bounded by `dispatch.concurrency`, not by sink
 latency, and `dispatch.max_inflight` / `dispatch.max_inflight_bytes` bound how
 much admitted-but-unfinished work a stalled destination can hold. Raise
-`concurrency` to push more requests at the destination — for `Sink.Http`, keep
+`concurrency` to push more requests at the destination: for `Sink.Http`, keep
 Req's Finch pool (default 50 connections) at least that large, or deliveries
 queue on pool checkout.
 
@@ -141,8 +141,8 @@ Measured numbers from a full ingest → dispatch → consumer run are recorded i
 
 ## Worked examples
 
-Four runnable topologies — HTTP, RabbitMQ, Kafka → SQS FIFO, and Oban on
-Kubernetes — each with its own README and failure drills:
+Four runnable topologies, HTTP, RabbitMQ, Kafka → SQS FIFO, and Oban on
+Kubernetes, each with its own README and failure drills:
 [`examples/README.md`](https://github.com/jamescarr/ankusa/blob/main/examples/README.md).
 They are also the fastest way to see how much of a real deployment is Ankusa
 config and how much is your worker.

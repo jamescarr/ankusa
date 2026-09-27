@@ -1,7 +1,7 @@
 # Example: three-node ankusa fleet → Oban worker fleet, on real Kubernetes
 
 A full `kind` (Kubernetes-in-Docker) deployment proving the framework feeds a
-production job-queue fleet — Oban, backed by Postgres — over plain HTTP,
+production job-queue fleet, Oban, backed by Postgres, over plain HTTP,
 with zero loss under normal load, under chaos (pods killed mid-flight), and
 under a closed-loop burst.
 
@@ -22,13 +22,13 @@ flowchart LR
   PVC, and dispatches them to `consumer` itself over `Ankusa.Sink.Http`
   (plain HTTP POSTs to `/deliveries`). A killed pod comes back on the same
   PVC and drains its own WAL; the surviving pods keep answering throughout.
-  The three pods are independent nodes behind one Service — no shared log,
+  The three pods are independent nodes behind one Service: no shared log,
   no separate dispatch fleet to keep in sync. Ankusa and `ingest_app` know
   nothing about Oban, jobs, or queues; the sink only knows it's making an
   HTTP call.
 - `consumer` (2 replicas) is the only place Oban exists in this whole
   example: a small Plug.Router app whose `/deliveries` handler is the
-  handoff point — it records/enqueues an Oban job per delivery, and the job
+  handoff point: it records/enqueues an Oban job per delivery, and the job
   writes the idempotent result into `processed_webhooks`, keyed by
   `ankusa_id`, so a replayed delivery does not double-process. Dispatch is
   at-least-once, so this idempotency is what makes the pipeline exactly-once
@@ -38,17 +38,17 @@ flowchart LR
   not here.
 - `tools/loadgen` drives three phases against the cluster and, for each,
   verifies every 201-acknowledged webhook eventually lands exactly once in
-  `processed_webhooks` with a matching body hash — proof of zero loss, not
+  `processed_webhooks` with a matching body hash: proof of zero loss, not
   just that requests returned 201.
 
 **Oban appears only in `consumer_app/`, which talks to Ankusa over plain
-HTTP via `Ankusa.Sink.Http` — Ankusa and `ingest_app` know nothing about
+HTTP via `Ankusa.Sink.Http`: Ankusa and `ingest_app` know nothing about
 Oban.**
 
 ## Prerequisites
 
 - `docker` (Docker Desktop or equivalent)
-- `kind` — not installed by default: `brew install kind`
+- `kind`: not installed by default: `brew install kind`
 - `kubectl`
 - `mix` / Elixir (to run `tools/loadgen` locally, against the cluster's
   exposed NodePorts)
@@ -82,12 +82,12 @@ running for inspection.
 
 ### The three phases
 
-1. **steady** — constant `RATE` req/s for `DURATION` seconds against a
+1. **steady**: constant `RATE` req/s for `DURATION` seconds against a
    healthy cluster.
-2. **chaos** — the same load profile, but partway through the run
+2. **chaos**: the same load profile, but partway through the run
    `ankusa-0`, then `ankusa-1`, then one `consumer` pod are each killed in
    turn (10s apart) while traffic keeps flowing.
-3. **burst** — a closed-loop flood at `CONCURRENCY` concurrent requests for
+3. **burst**: a closed-loop flood at `CONCURRENCY` concurrent requests for
    `BURST_SECONDS` seconds, no rate limit, to prove the WAL absorbs a spike
    without dropping anything.
 

@@ -1,6 +1,6 @@
 # Example: ingest fleet → RabbitMQ → claim-check gateway → worker
 
-A complete deployed topology, proving the framework isn't just a library —
+A complete deployed topology, proving the framework isn't just a library:
 it's something you run, front real webhooks with, and consume from a queue,
 with a Claim Check gateway (`docs/claim-check.md`) fronting the object store
 for consumers that shouldn't hold storage credentials.
@@ -20,40 +20,40 @@ flowchart LR
 
 **What each piece is doing:**
 
-- `ingest/` — a real `Ankusa.Instance` (`ANKUSA_ROLES=edge,dispatch,storage`,
+- `ingest/`: a real `Ankusa.Instance` (`ANKUSA_ROLES=edge,dispatch,storage`,
   the default), configured entirely from environment variables.
   `Ankusa.Sink.RabbitMQ` publishes every delivered hook to the
   `ankusa.events` exchange; `Ankusa.BlobStore.S3` backs both segment
   compaction (the framework's own async archival, `seg/...` keys) and the
-  sink's fat-payload claim check (`claims/...` keys) — same bucket, same
+  sink's fat-payload claim check (`claims/...` keys): same bucket, same
   credentials, no separate storage code.
-- `claim-check` — the **same image**, `ANKUSA_ROLES=claim_check` is the only
-  difference. Its own listener (`:4001`), open — no bearer token; auth goes
+- `claim-check`: the **same image**, `ANKUSA_ROLES=claim_check` is the only
+  difference. Its own listener (`:4001`), open: no bearer token; auth goes
   in front of it. It's the only piece besides `ingest` that ever holds S3
   credentials.
-- `worker/` — a minimal TypeScript consumer with **no S3 credentials at
+- `worker/`: a minimal TypeScript consumer with **no S3 credentials at
   all**. It declares and binds its own queue (`ankusa.#` against the
-  exchange) — the ingest framework never touches a queue, only the
-  exchange — and redeems fat-payload claim refs through `claim-check`'s HTTP
+  exchange), the ingest framework never touches a queue, only the
+  exchange, and redeems fat-payload claim refs through `claim-check`'s HTTP
   API, using a client generated straight from
   [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
-  (`npm run generate:types`) instead of a hand-maintained ref type —
+  (`npm run generate:types`) instead of a hand-maintained ref type,
   see ["Redeem a claim"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeem-a-claim).
-- `floci` — local S3-compatible emulator (see the root README's "Object
+- `floci`: local S3-compatible emulator (see the root README's "Object
   store adapters" section); stands in for real S3/R2/MinIO.
 
 ## Small vs. fat payloads
 
-`Ankusa.Sink.RabbitMQ` inlines a body under `INLINE_MAX_BYTES` — 64 KiB by
+`Ankusa.Sink.RabbitMQ` inlines a body under `INLINE_MAX_BYTES`: 64 KiB by
 default, 8 KiB in this example so the demo's fat hook takes the claim path.
 It's base64-encoded in the message; anything larger is checked in through
-`Ankusa.ClaimCheck` and the message carries a claim ref URN instead —
+`Ankusa.ClaimCheck` and the message carries a claim ref URN instead:
 `{"claim": "urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>"}`.
 RabbitMQ throughput and memory stay flat regardless of how large a webhook
 payload is. The worker redeems the claim (a
 `GET /v1/claims/<tenant>/<object_id>/<offset>/<length>` against
 `claim-check`, verified end to end against the ref's `sha256`) only when one
-is present; otherwise it just decodes the inline body. Try both — the
+is present; otherwise it just decodes the inline body. Try both: the
 commands below send one of each.
 
 ## Run it
@@ -88,7 +88,7 @@ docker compose logs -f worker
 ```
 
 You'll see `via=inline` for the first and `via=claim:<object_id>` for the
-second, followed by the actual decoded payload in each case — proof the
+second, followed by the actual decoded payload in each case: proof the
 claim ref round-trips through the real gateway and the real object store,
 not just that a message arrived. You can also redeem a claim by hand:
 
@@ -108,16 +108,16 @@ docker compose down -v
 containers, each with its own local WAL, all publishing to the same
 exchange, checking claims in against the same `claim-check` gateway, and
 writing to the same bucket. Nothing about `Ankusa.Sink.RabbitMQ` or
-`Ankusa.BlobStore.S3` changes — that's the "durable state, not RPC" rule
+`Ankusa.BlobStore.S3` changes: that's the "durable state, not RPC" rule
 holding here exactly like it does between the edge/dispatch/storage roles
 inside one instance. (You'd need a load balancer in front for the ingest
-port at that point — a deployment concern, not something the framework
+port at that point, a deployment concern, not something the framework
 does for you.)
 
 ## What's stubbed on purpose
 
 `worker/src/worker.ts`'s `handleHook` just prints. That's the boundary the
 prompt asked for: "queue bound to exchange with client code consuming (we
-won't implement)" — replace it with your real processing; everything above
+won't implement)". Replace it with your real processing; everything above
 it (topology declaration, message decode, claim redemption and integrity
 verification, ack/nack) is real, working code, not a stub.

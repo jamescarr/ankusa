@@ -1,10 +1,10 @@
 # Testing
 
-Every package's test suite is run from its own directory — there's no
+Every package's test suite is run from its own directory, there's no
 top-level test runner spanning all four, because each has a genuinely
 different infrastructure dependency (none, RabbitMQ, Redpanda, NATS).
 
-## `ankusa` core — `mix test`
+## `ankusa` core: `mix test`
 
 ```sh
 mix test                              # 171 tests, no external infra needed
@@ -32,11 +32,11 @@ The 171 always-on tests cover:
   route resolvers (`Path` and `TenantPath`), and that the same body posted
   twice is stored twice (distinct ids, seqs 1 and 2).
 - **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
-  instead of killing the pipeline, and ordering — a blocked delivery holds the
+  instead of killing the pipeline, and ordering: a blocked delivery holds the
   cursor while another ordering key proceeds, and same-key deliveries stay in
   `seq` order.
 - **Storage**: compaction round-trip, `roll_bytes` splitting a backlog into
-  several segments in one tick, and the live index — a lookup after a
+  several segments in one tick, and the live index: a lookup after a
   later compaction sees every row, and one taken while the compactor is down
   falls back to the file and is correct again after its restart.
 - **Claim Check** (`test/ankusa/claim_check/`, `test/ankusa/dispatch/claim_check_test.exs`):
@@ -51,13 +51,13 @@ The 171 always-on tests cover:
   deleting whole `dt=` day partitions.
 - **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
   mid-flight, and proves every acked id survives replay from the WAL. Zero
-  tolerance — this is the test that actually backs the core invariant claim
+  tolerance: this is the test that actually backs the core invariant claim
   in [`architecture.md`](architecture.md), not just the description of it.
 
 The 16 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
-against real running emulators — put/get round-trip, `get_range` byte-slicing,
+against real running emulators: put/get round-trip, `get_range` byte-slicing,
 `:not_found`, `list`+`delete`. Excluded by default
 (`test_helper.exs`:`ExUnit.start(exclude: [:integration])`) because they
 need live infra:
@@ -68,9 +68,9 @@ mix test --include integration
 docker compose down -v
 ```
 
-## `ankusa_rabbitmq` — `mix test`
+## `ankusa_rabbitmq`: `mix test`
 
-Same pattern — every test needs live RabbitMQ:
+Same pattern: every test needs live RabbitMQ:
 
 ```sh
 cd ankusa_rabbitmq
@@ -85,7 +85,7 @@ against a real `BlobStore`), routing key as both a static string and a
 function, and a fast-fail check (`:econnrefused`, not a hang) against an
 unreachable broker.
 
-## `ankusa_kafka` — `mix test`
+## `ankusa_kafka`: `mix test`
 
 Same pattern, against Redpanda:
 
@@ -107,10 +107,10 @@ instead of hanging.
 
 brod's `crc32cer` NIF compiles from source, so the first `mix deps.compile`
 needs a C toolchain and CMake ≥ 3.16 (`apk add build-base cmake` on Alpine,
-`brew install cmake` on macOS) — or run the suite in a container, see
+`brew install cmake` on macOS), or run the suite in a container, see
 [`AGENTS.md`](https://github.com/jamescarr/ankusa/blob/main/AGENTS.md).
 
-## `ankusa_nats` — `mix test`
+## `ankusa_nats`: `mix test`
 
 Same pattern, against NATS with JetStream enabled:
 
@@ -127,14 +127,14 @@ Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
 `on_exit`, so nothing depends on a stream being pre-provisioned. Covers:
 
 - an inline message: the subject it landed on, the five headers, the
-  `Ankusa.Sink.Message` body — **and** `Gnat.Jetstream.API.Stream.info` reporting
+  `Ankusa.Sink.Message` body, **and** `Gnat.Jetstream.API.Stream.info` reporting
   the message as stored, which is what proves the `:ok` came from JetStream's
   publish ack rather than from a successful socket write;
 - a fat payload checked in through `ClaimCheck`, the message carrying a
   claim reference that redeems to the original bytes;
 - `:subject` as a static string and as a 1-arity fun;
 - a subject **no stream covers** being `{:error, :no_stream}`, with
-  `Gnat.Jetstream.API.Stream.list` confirming no stream was created for it —
+  `Gnat.Jetstream.API.Stream.list` confirming no stream was created for it:
   the sink never creates one;
 - a publish the stream itself refuses (`max_msg_size` exceeded) being an
   error, not a stored hook. JetStream answers that with `"seq": 0` *and* an
@@ -148,7 +148,7 @@ and no container.
 ## Verifying the worked example
 
 [`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) isn't a Mix
-test suite — it's verified by actually running it:
+test suite. It's verified by actually running it:
 
 ```sh
 cd examples/rabbitmq-consumer
@@ -160,7 +160,7 @@ docker compose down -v
 
 [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) is verified
 the same way, plus its three failure drills (bridge down, worker down, poison
-claim — each with its own `docker compose` commands and expected output in
+claim, each with its own `docker compose` commands and expected output in
 that example's README). After it's up, one small and one fat hook exercise
 both payload paths end to end:
 
@@ -181,10 +181,10 @@ hit the real thing. A mock proves your code calls a mock correctly; it
 proves nothing about whether a hand-rolled protocol implementation (SQL,
 AMQP, SigV4, whatever) is actually right. Every adapter in this repo that
 talks to external infrastructure is tested against a real instance of that
-infrastructure, not a stand-in for it — that standard applies to new
+infrastructure, not a stand-in for it. That standard applies to new
 adapters too.
 
-## Core bench — `bench/core_bench.exs`
+## Core bench: `bench/core_bench.exs`
 
 An in-process ingest → dispatch bench for core alone: no HTTP hop, no consumer,
 no Kubernetes.
@@ -214,7 +214,7 @@ runs (the high end on an idle host, the low end with other work in flight).
 
 Dispatch *was* that ceiling: one envelope at a time, cursor written after each.
 `drain_s` is now ~40× lower, and the theoretical ceiling at
-`dispatch.concurrency` 32 with a 5 ms sink is 6.4k/s — the bench lands at
+`dispatch.concurrency` 32 with a 5 ms sink is 6.4k/s. The bench lands at
 4.1–4.7k/s, with the pipeline idle most of the time.
 
 Profiling this bench also surfaced two bottlenecks unrelated to the pipeline's
@@ -225,7 +225,7 @@ shape, both fixed in this pass:
   cursor at the tail of a 20k-record log, versus 0.05 µs for the keyed
   `:ets.next/2` walk it uses now.
 - the dispatch task closure reached into `state.instance`/`state.config`, which
-  captures the *whole* pipeline state — so every spawn copied `runnable`
+  captures the *whole* pipeline state, so every spawn copied `runnable`
   (thousands of admitted envelopes) into the new process: ~580 µs per spawn,
   46 µs once the fields are bound before the closure.
 
@@ -234,15 +234,15 @@ shape, both fixed in this pass:
 [`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh)
 is the only test in this repo that proves zero loss on a real, multi-node
 Kubernetes deployment rather than in-process. It stands up a `kind` cluster
-(a 3-pod `ankusa` StatefulSet — each pod a self-contained all-role node with
-its own WAL on a persistent volume — and a 2-replica `consumer` running Oban),
+(a 3-pod `ankusa` StatefulSet, each pod a self-contained all-role node with
+its own WAL on a persistent volume, and a 2-replica `consumer` running Oban),
 then drives [`tools/loadgen`](https://github.com/jamescarr/ankusa/blob/main/tools/loadgen)
 through three phases against it:
 
-1. **steady** — a paced `RATE` req/s for `DURATION` seconds.
-2. **chaos** — the same load, with `kubectl delete pod` against `ankusa-0`,
+1. **steady**: a paced `RATE` req/s for `DURATION` seconds.
+2. **chaos**: the same load, with `kubectl delete pod` against `ankusa-0`,
    `ankusa-1`, and one `consumer` pod at +10s/+20s/+30s.
-3. **burst** — closed-loop at `CONCURRENCY` workers, no rate cap, for
+3. **burst**: closed-loop at `CONCURRENCY` workers, no rate cap, for
    `BURST_SECONDS`; the drain time it reports is how long the pipeline needed
    after ingest stopped, so it is the dispatch throughput ceiling referenced in
    [`deployment.md`](deployment.md#dispatch-throughput).
@@ -278,7 +278,7 @@ number in this doc was measured on, not a production-scale claim.
 
 Re-verified after rebasing onto `main` (NATS JetStream adapter, HMAC verifier
 engine): `RATE=300` again reported `missing: 0` and `sha_mismatches: 0` in all
-three phases — steady 284.0/s, chaos 284.0/s, burst 1360.2/s, `shed: 0`, and
+three phases: steady 284.0/s, chaos 284.0/s, burst 1360.2/s, `shed: 0`, and
 `drain_s` 0.05–0.07 s.
 
 `drain_s` in the tenths of a second with `shed: 0` at both rates is what makes
@@ -288,7 +288,7 @@ paced phases never build a backlog for the burst phase to inherit.
 ### The chaos-phase loss: root cause and fix
 
 > **Historical note.** This bug lived in the `WAL.Postgres` adapter, which has
-> since been removed — Ankusa ships `WAL.DiskLog` only, and the `ankusa_postgres`
+> since been removed, Ankusa ships `WAL.DiskLog` only, and the `ankusa_postgres`
 > package with it. The write-up is kept because the failure mode (a reader
 > losing a commit that landed out of `seq` order) is a real hazard for any log
 > adapter, and because the chaos phase below is still the proof that an
@@ -299,10 +299,10 @@ permanently. The mechanism was not in the dispatch pipeline: `WAL.Postgres`
 allocated `seq` at INSERT time (`BIGSERIAL`) but a row only became visible at
 COMMIT, so two writers could allocate 100 and 101 and commit in the opposite
 order. A reader following the log with `seq > cursor` read 101, advanced its
-cursor past it, and never saw 100 when it landed — and the compactor, whose
+cursor past it, and never saw 100 when it landed, and the compactor, whose
 truncation is bounded by that same cursor, then deleted the row. The hook was
 in `ankusa_wal` no longer, in no `oban_jobs` row, no `processed_webhooks` row,
-no DLQ — exactly the observed signature, with the cursor already advanced. It
+no DLQ, exactly the observed signature, with the cursor already advanced. It
 took killing the *worker* to reproduce because that bursts the catch-up load
 onto the shared Postgres and widens the allocation→commit window.
 
@@ -313,7 +313,7 @@ accepted cost. The regression test (`ankusa_postgres`) widened the window with a
 sleeping statement trigger and, on the pre-fix code, failed with ~34 seqs a
 cursor-following reader never saw. The chaos phase reported `missing: 0`.
 
-Pre-fix code, same machine, same harness — `RATE=60`, `POOL_SIZE=30`, and the
+Pre-fix code, same machine, same harness: `RATE=60`, `POOL_SIZE=30`, and the
 fixed loadgen, so this isolates the core change:
 
 | Phase | accepted/s | p50 | p95 | p99 | missing | `drain_s` |
@@ -324,7 +324,7 @@ fixed loadgen, so this isolates the core change:
 
 The paced phases were fine: 60/s is far below the ~150/s the old
 one-envelope-at-a-time dispatch could sustain. The burst phase is where the
-ceiling shows — 47,632 accepted envelopes took **320.6 seconds** to drain after
+ceiling shows: 47,632 accepted envelopes took **320.6 seconds** to drain after
 ingest stopped (≈149/s), against 0.05–0.09 s now.
 
 That run's chaos phase came back clean, which is honest but not reassuring:
