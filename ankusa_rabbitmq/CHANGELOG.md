@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
 ### Added
 
 - `c:Ankusa.Sink.ordering_key/2`, implemented by this sink as the routing key:
@@ -16,6 +18,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 - The message `claim` field is now a claim-check ref URN string instead of a
   nested ticket object, breaking for consumers; the message `v` stays `1`.
+- `:inline_max_bytes` defaults to 64 KiB (was 8 KiB), read from
+  `Ankusa.Sink.Message.inline_max_bytes/1`.
+- Depends on `ankusa` `~> 0.2`: core 0.1 has neither
+  `Ankusa.Sink.Message.inline_max_bytes/1` nor `c:Ankusa.Sink.ordering_key/2`.
 
 ## [0.1.0] - 2026-09-23
 
@@ -35,5 +41,6 @@ follows [Semantic Versioning](https://semver.org/).
 - The message is built by `Ankusa.Sink.Message` (in `ankusa`), shared
   with `ankusa_kafka`, so both sinks publish byte-identical messages.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.1.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.0...HEAD
+[0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.1.0...ankusa_rabbitmq-v0.2.0
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_rabbitmq-v0.1.0

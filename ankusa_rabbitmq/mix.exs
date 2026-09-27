@@ -70,7 +70,7 @@ defmodule AnkusaRabbitmq.MixProject do
     if Mix.env() in [:dev, :test] do
       {:ankusa, path: ".."}
     else
-      {:ankusa, "~> 0.1"}
+      {:ankusa, "~> 0.2"}
     end
   end
 end

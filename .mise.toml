@@ -377,7 +377,7 @@ fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
 gh secret list | grep -q '^HEX_API_KEY' || fail "repo secret HEX_API_KEY is not set"
 
 # Core must be on Hex first: the adapters' :prod deps resolve
-# {:ankusa, "~> 0.1"} from Hex, not the path dep, so an early tag dies at
+# {:ankusa, "~> 0.2"} from Hex, not the path dep, so an early tag dies at
 # `MIX_ENV=prod mix deps.get`.
 core=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
 code=$(curl -s -o /dev/null -w '%{http_code}' "https://hex.pm/api/packages/ankusa/releases/$core")
@@ -437,7 +437,7 @@ echo "  mise run release:watch"
 '''
 
 [tasks."release:tag-adapters"]
-description = "Tag + push the four adapter packages (only after core is live on Hex)"
+description = "Tag + push the adapter packages (only after core is live on Hex)"
 depends = ["release:preflight-adapters"]
 run = '''
 #!/usr/bin/env bash
