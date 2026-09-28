@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="mix format every Mix project that has a .formatter.exs"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+for d in $(mix_projects); do
+  if [ -f "$d/.formatter.exs" ]; then
+    echo "==> $d"
+    (cd "$d" && mix format)
+  fi
+done

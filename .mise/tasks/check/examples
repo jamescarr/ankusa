@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#MISE description="Every example app: locked deps, format, :prod compile, and the TypeScript workers' typecheck"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+# dist/ must exist: each worker's `ankusa` dependency is a file: link to the
+# SDK source and imports its build output.
+for p in $(pkg_names); do
+  if [ "$(pkg_kind "$p")" = npm ]; then
+    d=$(pkg_dir "$p")
+    echo "==> $d"
+    (cd "$d" && npm ci && npm run build)
+  fi
+done
+
+for f in examples/*/*/mix.exs; do
+  [ -f "$f" ] || continue
+  d="${f%/mix.exs}"
+  echo "==> $d"
+  (
+    cd "$d"
+    mix deps.get --check-locked
+    mix deps.unlock --check-unused
+    if [ -f .formatter.exs ]; then mix format --check-formatted; fi
+    MIX_ENV=prod mix compile --warnings-as-errors
+  )
+done
+
+for f in examples/*/*/package.json; do
+  [ -f "$f" ] || continue
+  d="${f%/package.json}"
+  echo "==> $d"
+  (cd "$d" && npm ci && npx tsc --noEmit)
+done
