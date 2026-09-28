@@ -109,7 +109,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
     assert decoded["v"] == 1
     refute Map.has_key?(decoded, "body_base64")
     assert "urn:ankusa:claim:v1:" <> _ = decoded["claim"]
-    assert {:ok, ^body} = Ankusa.ClaimCheck.redeem(inst, decoded["claim"])
+    assert {:ok, ^body} = Ankusa.ClaimCheck.redeem(inst, decoded["claim"], decoded["sha256"])
   end
 
   test "routing_key accepts a static string or a 1-arity function", %{

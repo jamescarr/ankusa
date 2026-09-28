@@ -5,8 +5,8 @@ consumer, typically) needs exactly one bit -- dead-letter or retry -- and
 nothing here requires it to know the gateway's status codes to get that
 right.
 
-Non-retryable: the ref is malformed, the gateway said ``404``/other ``4xx``,
-or the bytes that came back don't match the ref's declared size/sha256.
+Non-retryable: the ref or expected sha256 is malformed, the gateway said
+``404``/other ``4xx``, or the bytes that came back don't match the sha256.
 Retryable: the gateway said ``5xx``/``503``, or the request never completed
 (network error, timeout).
 """
@@ -23,7 +23,8 @@ class ClaimCheckError(Exception):
 
 
 class InvalidClaimRefError(ClaimCheckError):
-    """The ref string isn't a ``urn:ankusa:claim:v1:...`` claim-check ref."""
+    """The ref string isn't a ``urn:ankusa:claim:v1:<tenant>:<claim_id>``
+    claim-check ref, or the expected sha256 isn't 64-char lowercase hex."""
 
     retryable = False
 
@@ -35,7 +36,7 @@ class ClaimNotFoundError(ClaimCheckError):
 
 
 class ClaimRejectedError(ClaimCheckError):
-    """The gateway rejected the request (``400``, ``416``, or any other non-404 ``4xx``)."""
+    """The gateway rejected the request (``400`` or any other non-404 ``4xx``)."""
 
     retryable = False
 
@@ -46,8 +47,8 @@ class ClaimRejectedError(ClaimCheckError):
 
 
 class ClaimIntegrityError(ClaimCheckError):
-    """The bytes the gateway returned don't match the ref: wrong length, or the
-    sha256 doesn't match. The gateway itself never checks this -- see
+    """The sha256 of the bytes the gateway returned doesn't match the expected
+    sha256 the queue message carries. The gateway itself never checks this -- see
     "Redeem a claim" in docs/claim-check.md -- so this is the reader's own
     end-to-end check, always run before ``redeem()`` returns.
     """

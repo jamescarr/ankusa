@@ -6,6 +6,17 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Claim-check refs are now `urn:ankusa:claim:v1:<tenant>:<claim_id>`, where
+  `claim_id` is a canonical uppercase ULID, redeemed via
+  `GET /v1/claims/{tenant_id}/{claim_id}`. `parseClaimRef` returns
+  `{ tenantId, claimId, path }`.
+- `redeem(ref, sha256)` takes the expected digest (the queue message's
+  `sha256` field, 64 lowercase hex chars) and verifies the fetched bytes
+  against it; a malformed `sha256` raises `InvalidClaimRefError` before any
+  request is made.
+
 ## [0.1.0] - 2026-09-27
 
 ### Added

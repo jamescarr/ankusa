@@ -28,10 +28,10 @@ defmodule Ankusa.ClaimCheck.RouterTest do
   defp check_in(inst, body) do
     id = UUIDv7.generate()
 
-    {:ok, refs} =
-      ClaimCheck.check_in(inst, "acme", [%{id: id, body: body}, %{id: "other", body: "x"}])
+    {:ok, claims} =
+      ClaimCheck.check_in(inst, "acme", [%{id: "other", body: "x"}, %{id: id, body: body}])
 
-    refs[id]
+    claims[id].ref
   end
 
   defp error(conn), do: JSON.decode!(conn.resp_body)["error"]
@@ -57,35 +57,42 @@ defmodule Ankusa.ClaimCheck.RouterTest do
            ]
   end
 
-  test "a malformed tenant, id, or range is 400", %{inst: inst} do
-    id = UUIDv7.generate()
+  test "a malformed tenant or claim id is 400", %{inst: inst} do
+    claim_id = Ref.claim_id(Ref.new_pack_id(), 0)
 
-    assert error(call(inst, :get, "/v1/claims/ac%25me/#{id}/0/1")) == "invalid_tenant"
-    assert error(call(inst, :get, "/v1/claims/acme/not-a-uuid/0/1")) == "invalid_id"
+    assert error(call(inst, :get, "/v1/claims/ac%25me/#{claim_id}")) == "invalid_tenant"
 
-    for range <- ["00/1", "0/0", "0/-1", "x/1"] do
-      conn = call(inst, :get, "/v1/claims/acme/#{id}/#{range}")
-      assert {conn.status, error(conn)} == {400, "invalid_range"}, "range #{range}"
+    for bad <- [UUIDv7.generate(), String.downcase(claim_id), "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"] do
+      conn = call(inst, :get, "/v1/claims/acme/#{bad}")
+      assert {conn.status, error(conn)} == {400, "invalid_id"}, "id #{bad}"
     end
   end
 
-  test "an object that was never written is 404", %{inst: inst} do
-    conn = call(inst, :get, "/v1/claims/acme/#{UUIDv7.generate()}/0/1")
+  test "a pack that was never written is 404", %{inst: inst} do
+    conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
     assert {conn.status, error(conn)} == {404, "not_found"}
   end
 
-  test "a range past the end of a real object is 416", %{inst: inst} do
+  test "a claim id past the end of a real pack is 404", %{inst: inst} do
+    ref = check_in(inst, "small")
+    {:ok, pack_id, 1} = Ref.locate(ref.claim_id)
+
+    for index <- [2, 0xFFFF] do
+      conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(pack_id, index)}")
+      assert {conn.status, error(conn)} == {404, "not_found"}, "index #{index}"
+    end
+  end
+
+  test "the path is exactly two segments", %{inst: inst} do
     ref = check_in(inst, "small")
 
-    past_end = call(inst, :get, "/v1/claims/acme/#{ref.object_id}/#{ref.offset}/100000000")
-    assert {past_end.status, error(past_end)} == {416, "invalid_range"}
-
-    beyond = call(inst, :get, "/v1/claims/acme/#{ref.object_id}/900000000/1")
-    assert {beyond.status, error(beyond)} == {416, "invalid_range"}
+    for path <- [Ref.path(ref) <> "/0/5", "/v1/claims/#{ref.claim_id}"] do
+      assert call(inst, :get, path).status == 404, path
+    end
   end
 
   test "there is no write route: PUT is 404", %{inst: inst} do
-    conn = call(inst, :put, "/v1/claims/acme/#{UUIDv7.generate()}", "body")
+    conn = call(inst, :put, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}", "body")
     assert conn.status == 404
   end
 
@@ -95,7 +102,7 @@ defmodule Ankusa.ClaimCheck.RouterTest do
       | storage: %{config.storage | blob_store: {__MODULE__.DownStore, []}}
     })
 
-    conn = call(inst, :get, "/v1/claims/acme/#{UUIDv7.generate()}/0/1")
+    conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
 
     assert {conn.status, error(conn)} == {503, "store_unavailable"}
     assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]

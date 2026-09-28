@@ -8,8 +8,8 @@ client; more clients (ingest, admin) land here as they're built.
 
 ## Claim-check client
 
-Redeem a claim-check ref, verify the bytes it returns against the ref's own
-declared size and sha256, and classify failures into dead-letter vs. retry,
+Redeem a claim-check ref, verify the bytes it returns against the sha256 the
+queue message carries next to it, and classify failures into dead-letter vs. retry,
 without holding any object-store credentials. Generated from the framework's
 own contract,
 [`priv/openapi/claim_check.v1.yaml`](../ankusa/priv/openapi/claim_check.v1.yaml),
@@ -45,11 +45,12 @@ import { ClaimCheckError, createClaimCheckClient } from "ankusa";
 
 const claimCheck = createClaimCheckClient({ baseUrl: process.env.CLAIM_CHECK_URL ?? "http://localhost:4001" });
 
-// `ref` is the queue message's `claim` field:
-//   urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>
-async function resolveBody(ref: string): Promise<Buffer> {
+// `ref` is the queue message's `claim` field, `sha256` its `sha256` field:
+//   claim:  urn:ankusa:claim:v1:<tenant>:<claim_id>   (claim_id: uppercase ULID)
+//   sha256: 64 lowercase hex chars, the digest of the claim's bytes
+async function resolveBody(ref: string, sha256: string): Promise<Buffer> {
   try {
-    return await claimCheck.redeem(ref);
+    return await claimCheck.redeem(ref, sha256);
   } catch (err) {
     if (err instanceof ClaimCheckError && !err.retryable) {
       // bad ref, 404, or an integrity mismatch: dead-letter, don't requeue
@@ -63,10 +64,11 @@ async function resolveBody(ref: string): Promise<Buffer> {
 
 `redeem()` does three things `GET /v1/claims/...` alone doesn't:
 
-1. Parses the ref into the gateway's path segments (`parseClaimRef`, also
-   exported standalone).
-2. Fetches the bytes.
-3. Verifies them against the ref's declared length and sha256 (the gateway
+1. Parses the ref into its tenant id, claim id, and gateway path
+   (`parseClaimRef`, also exported standalone), and checks `sha256` is 64
+   lowercase hex chars.
+2. Fetches the bytes from `GET /v1/claims/{tenant_id}/{claim_id}`.
+3. Verifies them against `sha256` (the gateway
    itself does not check this, see "Redeem a claim" in
    [`docs/claim-check.md`](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md))
    before ever returning them to you.
@@ -76,10 +78,10 @@ consumer needs exactly one bit to decide dead-letter vs. retry:
 
 | Class | `retryable` | Cause |
 | --- | --- | --- |
-| `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN |
+| `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64 lowercase hex chars |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
 | `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`.status`, `.body`) |
-| `ClaimIntegrityError` | `false` | wrong length, or sha256 doesn't match the ref |
+| `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
 | `ClaimCheckUnavailableError` | `true` | gateway `5xx`/`503`, or unreachable |
 
 `health()` hits `GET /health` for a liveness probe.

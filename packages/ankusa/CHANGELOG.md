@@ -11,6 +11,27 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Changed
+
+- The claim reference is `urn:ankusa:claim:v1:<tenant>:<claim_id>`, where
+  `claim_id` is a canonical (uppercase) ULID: the pack's timestamp and
+  entropy, with the claim's position in its pack in the last 16 bits. The
+  digest moved out of the reference into the queue message's new `sha256`
+  field (lowercase hex). The gateway route is
+  `GET /v1/claims/:tenant_id/:claim_id`; its `416`/`invalid_range` response is
+  gone, and a claim id past the end of its pack is `404`.
+- `Ankusa.ClaimCheck.redeem/3` takes the ref (or its URN) and the expected
+  sha256; `read/3` takes a tenant and a claim id. `check_in/4` and
+  `check_in_batch/2` return `%{ref: %Ref{}, sha256: hex}` per item, which is
+  also what dispatch hands sinks in `ctx.claim`. `check_in/4`'s
+  `:object_id` option is now `:pack_id`.
+- Packs start with an `index.bin` entry (a big-endian `offset`, `length`
+  `uint32` pair per claim) so the gateway can find a claim from its id alone.
+  Claim entries are named by claim id; `manifest.json` rows gain `claim_id`.
+  Pack objects live at `claims/tenant=<t>/dt=<day>/<pack_id>`.
+- `[:ankusa, :claim_check, :check_in]` telemetry metadata carries `:pack_id`,
+  and `:redeem` carries `:claim_id`, instead of `:object_id`.
+
 ## [0.2.0] - 2026-09-24
 
 ### Added
@@ -94,7 +115,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - The claim-check gateway is read-only and cacheable: `GET` responses carry
   `cache-control: public, max-age=31536000, immutable`, and `416` is returned
   for a range past the end of an object. `PUT` is gone.
-- `Ankusa.ClaimCheck.redeem/2` takes a `%Ankusa.ClaimCheck.Ref{}` or its URN
+- `Ankusa.ClaimCheck`'s `redeem/2` takes a `%Ankusa.ClaimCheck.Ref{}` or its URN
   string; `check_in/4` and `check_in_batch/2` replace the old per-ticket
   `check_in/4`.
 

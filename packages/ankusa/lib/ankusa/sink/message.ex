@@ -6,7 +6,8 @@ defmodule Ankusa.Sink.Message do
 
   A body of at most `inline_max_bytes` (default 64 KiB) rides inline,
   base64-encoded. Anything larger lives in the claim check and the message
-  carries its `Ankusa.ClaimCheck.Ref` as one string instead (see
+  carries its `Ankusa.ClaimCheck.Ref` as one string instead, plus the
+  lowercase hex sha256 the reader checks the redeemed bytes against (see
   `docs/claim-check.md`):
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
@@ -15,7 +16,8 @@ defmodule Ankusa.Sink.Message do
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 3145728,
-       "claim": "urn:ankusa:claim:v1:acme:0199a1c2-...:66:3145728:sha256-9f86d0..."}
+       "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+       "sha256": "3bea8a9a07c1e8dc..."}
 
   `v` changes only when an existing field changes meaning or disappears.
   Adding a field keeps `v: 1`; consumers must ignore keys they don't know.
@@ -65,24 +67,29 @@ defmodule Ankusa.Sink.Message do
     if env.size <= inline_max_bytes do
       {:ok, JSON.encode!(Map.put(base, :body_base64, Base.encode64(env.body)))}
     else
-      case ref(ctx, env) do
-        {:ok, ref} -> {:ok, JSON.encode!(Map.put(base, :claim, Ref.to_string(ref)))}
-        {:error, reason} -> {:error, {:claim_check, reason}}
+      case claim(ctx, env) do
+        {:ok, %{ref: ref, sha256: sha256}} ->
+          {:ok, JSON.encode!(Map.merge(base, %{claim: Ref.to_string(ref), sha256: sha256}))}
+
+        {:error, reason} ->
+          {:error, {:claim_check, reason}}
       end
     end
   end
 
   @doc """
-  Check `env`'s body in on its own, as a one-claim pack. The pack reuses the
-  envelope id (a UUIDv7 from the edge), so a retry rewrites the same object
-  instead of orphaning one; an envelope built elsewhere gets a fresh id.
+  Check `env`'s body in on its own, as a one-claim pack. The pack id is
+  derived from the envelope (its receive time and a hash of its id), so a
+  retry rewrites the same object instead of orphaning one.
   """
-  @spec check_in(atom(), Envelope.t()) :: {:ok, Ref.t()} | {:error, ClaimCheck.reason()}
+  @spec check_in(atom(), Envelope.t()) ::
+          {:ok, ClaimCheck.claim()} | {:error, ClaimCheck.reason()}
   def check_in(instance, %Envelope{} = env) do
-    opts = if Ref.validate_object_id(env.id) == :ok, do: [object_id: env.id], else: []
+    <<entropy::binary-8, _::binary>> = :crypto.hash(:sha256, env.id)
+    opts = [pack_id: Ref.pack_id(env.received_at, entropy)]
 
-    with {:ok, refs} <- ClaimCheck.check_in(instance, env.tenant_id, [claim_item(env)], opts) do
-      {:ok, Map.fetch!(refs, env.id)}
+    with {:ok, claims} <- ClaimCheck.check_in(instance, env.tenant_id, [claim_item(env)], opts) do
+      {:ok, Map.fetch!(claims, env.id)}
     end
   end
 
@@ -98,6 +105,6 @@ defmodule Ankusa.Sink.Message do
     }
   end
 
-  defp ref(%{claim: %Ref{} = ref}, _env), do: {:ok, ref}
-  defp ref(ctx, env), do: check_in(ctx.instance, env)
+  defp claim(%{claim: %{ref: %Ref{}} = claim}, _env), do: {:ok, claim}
+  defp claim(ctx, env), do: check_in(ctx.instance, env)
 end

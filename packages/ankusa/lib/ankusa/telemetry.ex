@@ -21,8 +21,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
-  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
-  | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:id`, `:adapter`, `:result` |
+  | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id`, `:result` |
+  | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
 
   `:outcome` on `:ingest` is `:committed | :quarantined | :rejected`,

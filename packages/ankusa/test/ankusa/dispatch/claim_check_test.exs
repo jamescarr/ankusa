@@ -89,6 +89,8 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
 
   defp fat, do: :crypto.strong_rand_bytes(1_000)
 
+  defp redeem(inst, %{ref: ref, sha256: sha256}), do: ClaimCheck.redeem(inst, ref, sha256)
+
   test "a fat hook on two claim sinks is written once, even when a sink fails before succeeding" do
     {:ok, agent} = Agent.start_link(fn -> 2 end)
 
@@ -104,12 +106,12 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
     env = append(inst, "acme", fat())
     assert {:ok, 1} = Pipeline.tick(inst)
 
-    assert_receive {:delivered, :a, id, ref_a}
-    assert_receive {:delivered, :b, ^id, ref_b}
+    assert_receive {:delivered, :a, id, claim_a}
+    assert_receive {:delivered, :b, ^id, claim_b}
     assert id == env.id
-    assert ref_a == ref_b
+    assert claim_a == claim_b
     assert length(puts()) == 1
-    assert {:ok, env.body} == ClaimCheck.redeem(inst, ref_a)
+    assert {:ok, env.body} == redeem(inst, claim_a)
   end
 
   test "a batch packs per tenant: three fat hooks across two tenants take two writes" do
@@ -126,8 +128,8 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
     assert length(puts()) == 2
 
     for env <- envs do
-      assert_receive {:delivered, :a, id, ref} when id == env.id
-      assert {:ok, env.body} == ClaimCheck.redeem(inst, ref)
+      assert_receive {:delivered, :a, id, claim} when id == env.id
+      assert {:ok, env.body} == redeem(inst, claim)
     end
   end
 
@@ -149,9 +151,8 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
     assert {:ok, 2} = Pipeline.tick(inst)
 
     for env <- envs do
-      assert_receive {:delivered, :a, id, ref} when id == env.id
-      assert {:ok, env.body} == ClaimCheck.redeem(inst, ref)
-      assert ref.object_id == env.id
+      assert_receive {:delivered, :a, id, claim} when id == env.id
+      assert {:ok, env.body} == redeem(inst, claim)
     end
 
     # The failed pack, then one write per hook.
@@ -166,7 +167,7 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
     second = append(inst, "acme", "small")
     assert {:ok, 2} = Pipeline.tick(inst)
 
-    assert_receive {:delivered, :a, id1, %Ankusa.ClaimCheck.Ref{}}
+    assert_receive {:delivered, :a, id1, %{ref: %Ankusa.ClaimCheck.Ref{}}}
     assert_receive {:delivered, :a, id2, nil}
     assert [id1, id2] == [first.id, second.id]
   end

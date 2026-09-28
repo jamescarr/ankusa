@@ -115,7 +115,7 @@ defmodule Ankusa.Sink.KafkaTest do
     decoded = JSON.decode!(msg.value)
     refute Map.has_key?(decoded, "body_base64")
 
-    assert {:ok, ^body} = ClaimCheck.redeem(inst, decoded["claim"])
+    assert {:ok, ^body} = ClaimCheck.redeem(inst, decoded["claim"], decoded["sha256"])
   end
 
   test "key accepts a static string or a 1-arity function", %{instance: inst, topic: topic} do
