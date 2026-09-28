@@ -68,7 +68,12 @@ jobs:
       id-token: write # PyPI Trusted Publishing
     steps:
       - uses: actions/checkout@v4
+      # Pinned to .mise.toml's uv, the one `mise run check:package sdk-python`
+      # built and tested with: setup-uv's default floats, which would let the
+      # release be built by a toolchain nothing here ever validated.
       - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.16"
 
       - name: uv build
         working-directory: packages/sdk-python
