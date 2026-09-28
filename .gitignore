@@ -36,7 +36,7 @@ ankusa_nats-*.tar
 # TypeScript SDK build output (built via "npm run build" / "npm pack").
 sdks/*/dist/
 
-# Python (sdks/python, examples/quickstart).
+# Python (packages/sdk-python, examples/quickstart).
 **/.venv/
 **/__pycache__/
 **/*.egg-info/

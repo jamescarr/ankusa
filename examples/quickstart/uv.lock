@@ -5,7 +5,7 @@ requires-python = ">=3.13"
 [[package]]
 name = "ankusa"
 version = "0.1.0"
-source = { directory = "../../sdks/python" }
+source = { directory = "../../packages/sdk-python" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ankusa", directory = "../../sdks/python" }]
+requires-dist = [{ name = "ankusa", directory = "../../packages/sdk-python" }]
 
 [[package]]
 name = "anyio"

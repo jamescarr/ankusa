@@ -17,7 +17,7 @@ services:
   worker:
     build:
       context: ../..                       # repo root: worker.py's pyproject.toml
-      dockerfile: examples/quickstart/Dockerfile  # path-depends on ../../sdks/python
+      dockerfile: examples/quickstart/Dockerfile  # path-depends on ../../packages/sdk-python
     init: true                 # tini as PID 1, so `docker compose stop worker` is instant
 
 volumes:

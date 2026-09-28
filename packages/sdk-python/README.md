@@ -11,8 +11,8 @@ land here as they're built.
 
 Not published yet. Until the first release, depend on it as a local path,
 the same way the Elixir packages in this monorepo depend on `ankusa` core
-before their first Hex release, and `sdks/typescript` depends on itself via
-`file:`.
+before their first Hex release, and `packages/sdk-typescript` depends on
+itself via `file:`.
 
 With [`uv`](https://docs.astral.sh/uv/):
 
@@ -21,13 +21,13 @@ With [`uv`](https://docs.astral.sh/uv/):
 dependencies = ["ankusa"]
 
 [tool.uv.sources]
-ankusa = { path = "../../sdks/python" }
+ankusa = { path = "../../packages/sdk-python" }
 ```
 
 Or with plain `pip`:
 
 ```sh
-pip install -e ../../sdks/python
+pip install -e ../../packages/sdk-python
 ```
 
 ## Claim-check client
@@ -35,7 +35,7 @@ pip install -e ../../sdks/python
 Redeem a claim-check ref, verify the bytes it returns against the ref's own
 declared size and sha256, and classify failures into dead-letter vs. retry,
 without holding any object-store credentials. Conforms to the framework's
-own contract, [`priv/openapi/claim_check.v1.yaml`](../../priv/openapi/claim_check.v1.yaml):
+own contract, [`priv/openapi/claim_check.v1.yaml`](../ankusa/priv/openapi/claim_check.v1.yaml):
 the spec is the source of truth, this package conforms to it, not the
 reverse.
 

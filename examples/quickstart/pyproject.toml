@@ -6,7 +6,7 @@ requires-python = ">=3.13"
 dependencies = ["ankusa"]
 
 [tool.uv.sources]
-ankusa = { path = "../../sdks/python" }
+ankusa = { path = "../../packages/sdk-python" }
 
 [tool.uv]
 package = false

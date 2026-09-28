@@ -10,7 +10,7 @@ dependencies = ["httpx>=0.27"]
 
 [project.urls]
 Repository = "https://github.com/jamescarr/ankusa"
-Homepage = "https://github.com/jamescarr/ankusa/tree/main/sdks/python"
+Homepage = "https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python"
 Issues = "https://github.com/jamescarr/ankusa/issues"
 
 [dependency-groups]

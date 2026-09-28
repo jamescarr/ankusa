@@ -26,8 +26,8 @@ flowchart LR
 
 The smallest complete deployment: the published image receives a hook and POSTs
 it to a small Python worker built with `uv`, using the `ankusa` Python SDK
-([`sdks/python`](../sdks/python)) to parse the delivery's headers. No broker,
-no object store.
+([`packages/sdk-python`](../packages/sdk-python)) to parse the delivery's
+headers. No broker, no object store.
 Read this one first, and keep it as the shape to copy when you write your own
 receiving service.
 
