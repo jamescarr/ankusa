@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-28
+
 ### Added
 
 - `RoutesClient(base_url, headers=None, timeout=10.0)`: the route-management
@@ -56,6 +58,7 @@ this project follows [Semantic Versioning](https://semver.org/).
   `content-type` into a `HookHeaders` dataclass, raising
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...HEAD
+[0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.1.0
