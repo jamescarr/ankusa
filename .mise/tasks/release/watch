@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#MISE description="Follow the publish workflow run for a package's current tag"
+#USAGE arg "<pkg>" help="package whose <pkg>-v<version> run to watch"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+p="$usage_pkg"
+workflow=$(pkg_workflow "$p")
+tag=$(pkg_tag "$p")
+
+# The run shows up a few seconds after the tag push.
+id=""
+tries=0
+while [ $tries -lt 10 ]; do
+  id=$(gh run list --workflow="$workflow" --limit 20 --json databaseId,headBranch \
+    --jq "map(select(.headBranch == \"$tag\")) | .[0].databaseId // empty")
+  if [ -n "$id" ]; then break; fi
+  tries=$((tries + 1))
+  sleep 3
+done
+[ -n "$id" ] || fail "no $workflow run for $tag"
+
+exec gh run watch "$id" --exit-status
