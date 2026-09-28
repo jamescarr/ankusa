@@ -48,6 +48,7 @@ packages/
   ankusa_server               the jamescarr/ankusa Docker image: core + every
                               adapter, configured by YAML. Not on Hex.
   sdk-typescript              the `ankusa` npm client SDK.
+  sdk-python                  the `ankusa` PyPI client SDK.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 ```

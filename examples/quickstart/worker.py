@@ -1,4 +1,6 @@
-"""Receive webhooks from Ankusa's HTTP sink. Standard library only.
+"""Receive webhooks from Ankusa's HTTP sink. Uses the `ankusa` SDK
+(packages/sdk-python, a uv path dependency, see pyproject.toml) to parse the
+identity Ankusa attaches to every delivery.
 
 Ankusa POSTs each hook's raw body here, with its identity in headers:
 x-ankusa-id (dedupe on this), x-ankusa-source, x-ankusa-seq, and
@@ -8,9 +10,14 @@ dead-lettered for replay.
 """
 
 import os
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import uvicorn
+from ankusa import MissingHookIdError, parse_headers
+from fastapi import FastAPI, Request, Response
 
 PORT = int(os.environ.get("PORT", "8080"))
+
+app = FastAPI()
 
 # In memory for the demo. A real worker records handled ids durably (a unique
 # key in its database), so a redelivery is a no-op even across restarts.
@@ -21,36 +28,29 @@ def handle(source: str, body: bytes) -> None:
     """Your business logic goes here."""
 
 
-class Hooks(BaseHTTPRequestHandler):
-    def do_POST(self) -> None:
-        if self.path != "/hooks":
-            self.send_response(404)
-            self.end_headers()
-            return
+@app.post("/hooks")
+async def hooks(request: Request) -> Response:
+    body = await request.body()
+    try:
+        hook = parse_headers(request.headers)
+    except MissingHookIdError:
+        return Response(status_code=400)
 
-        body = self.rfile.read(int(self.headers.get("content-length", "0")))
-        hook_id = self.headers.get("x-ankusa-id", "")
-        source = self.headers.get("x-ankusa-source", "")
+    if hook.id in handled:
+        print(f"duplicate id={hook.id} source={hook.source} (already handled)", flush=True)
+    else:
+        handle(hook.source, body)
+        handled.add(hook.id)
+        print(
+            f"received id={hook.id} source={hook.source} "
+            f"seq={hook.seq} bytes={len(body)} "
+            f"body={body[:200].decode('utf-8', 'replace')}",
+            flush=True,
+        )
 
-        if hook_id in handled:
-            print(f"duplicate id={hook_id} source={source} (already handled)", flush=True)
-        else:
-            handle(source, body)
-            handled.add(hook_id)
-            print(
-                f"received id={hook_id} source={source} "
-                f"seq={self.headers.get('x-ankusa-seq', '')} bytes={len(body)} "
-                f"body={body[:200].decode('utf-8', 'replace')}",
-                flush=True,
-            )
-
-        self.send_response(204)
-        self.end_headers()
-
-    def log_message(self, *args) -> None:
-        pass  # one line per hook, printed above
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
     print(f"worker listening on :{PORT}/hooks", flush=True)
-    ThreadingHTTPServer(("", PORT), Hooks).serve_forever()
+    uvicorn.run(app, host="0.0.0.0", port=PORT, access_log=False, log_level="warning")

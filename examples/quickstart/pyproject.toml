@@ -1,0 +1,16 @@
+[project]
+name = "ankusa-quickstart-worker"
+version = "0.1.0"
+description = "Quickstart example worker: receives Ankusa's HTTP sink deliveries."
+requires-python = ">=3.13"
+dependencies = [
+    "ankusa",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.54.0",
+]
+
+[tool.uv.sources]
+ankusa = { path = "../../packages/sdk-python" }
+
+[tool.uv]
+package = false

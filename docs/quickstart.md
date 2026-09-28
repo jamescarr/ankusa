@@ -8,7 +8,7 @@ nothing get lost. All you need is Docker with Compose v2.
 ```sh
 git clone https://github.com/jamescarr/ankusa
 cd ankusa/examples/quickstart
-docker compose up -d --wait
+docker compose up --build -d --wait
 ```
 
 ```mermaid
@@ -22,7 +22,7 @@ flowchart LR
 [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml)
 declares one source (`demo`) with one HTTP sink pointed at the worker;
 [`worker.py`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
-is a standard-library HTTP server that prints what it receives.
+is a small [FastAPI](https://fastapi.tiangolo.com/) app that prints what it receives.
 
 ## 2. Send a webhook
 

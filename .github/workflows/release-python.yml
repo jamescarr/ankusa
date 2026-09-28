@@ -1,0 +1,78 @@
+name: Release (Python)
+
+# Tag-driven PyPI publish for packages/sdk-python (published as the `ankusa`
+# package on PyPI), the same shape as release-npm.yml's npm flow — its own
+# tag prefix, `sdk-python-v*` (the directory name), distinct from the Hex
+# core package's `ankusa-v*` and the npm SDK's `sdk-typescript-v*`; PyPI's
+# `ankusa` project is unrelated to either. Tagged by
+# `mise run release:tag sdk-python`.
+#
+# Publishes via PyPI Trusted Publishing (OIDC): no long-lived token secret
+# in this repo. One-time setup on pypi.org: the `ankusa` project's
+# "Publishing" settings -> add a trusted publisher for this repo, workflow
+# `release-python.yml`, environment `pypi`. See docs/releasing.md.
+
+on:
+  push:
+    tags:
+      - "sdk-python-v*"
+
+concurrency:
+  group: release-python-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          [ "$(pkg_kind "$PKG")" = python ] || fail "$GITHUB_REF_NAME is not a Python package tag"
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          PKG_VERSION=$(pkg_version "$PKG")
+          [ "$PKG_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/pyproject.toml $PKG_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to PyPI + GitHub release
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: uv build
+        working-directory: packages/sdk-python
+        run: uv build
+
+      - name: Publish package
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/sdk-python/dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh && pkg_notes sdk-python "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

@@ -49,6 +49,8 @@ while [ $i -lt ${#pkgs[@]} ]; do
   elixir .mise/lib/release.exs apply "$dir" "$new" "$p" "$prev_tag" "$today"
   if [ "$(pkg_kind "$p")" = npm ]; then
     (cd "$dir" && npm version "$new" --no-git-tag-version --ignore-scripts >/dev/null)
+  elif [ "$(pkg_kind "$p")" = python ]; then
+    (cd "$dir" && uv version "$new" --frozen >/dev/null)
   fi
   printf '  %-18s -> %s\n' "$p" "$new"
 

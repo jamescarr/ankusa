@@ -40,6 +40,11 @@ case "$kind" in
     npm run build
     npm test
     ;;
+  python)
+    uv sync --locked
+    uv run pytest
+    uv run mypy
+    ;;
 esac
 
 if [ "$kind" = hex ]; then
@@ -52,4 +57,10 @@ if [ "$kind" = hex ]; then
   else
     MIX_ENV=prod mix hex.build --output "$tmp/$pkg.tar"
   fi
+fi
+
+if [ "$kind" = python ]; then
+  # Build the sdist + wheel the way release-python.yml publishes them.
+  tmp=$(mktemp -d)
+  uv build --out-dir "$tmp"
 fi

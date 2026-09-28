@@ -10,4 +10,9 @@ erl_crash.dump
 *.ez
 **/*.tar
 **/node_modules
+**/.venv
+**/__pycache__
+**/*.egg-info
+**/.pytest_cache
+**/.mypy_cache
 packages/sdk-typescript

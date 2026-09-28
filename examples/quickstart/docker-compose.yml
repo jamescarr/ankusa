@@ -1,5 +1,5 @@
 # Ankusa + a worker you own, wired together by one HTTP sink.
-#   docker compose up -d --wait
+#   docker compose up --build -d --wait
 #   curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 #   docker compose logs worker
 services:
@@ -15,11 +15,10 @@ services:
       - worker
 
   worker:
-    image: python:3.13-alpine
+    build:
+      context: ../..                       # repo root: worker.py's pyproject.toml
+      dockerfile: examples/quickstart/Dockerfile  # path-depends on ../../packages/sdk-python
     init: true                 # tini as PID 1, so `docker compose stop worker` is instant
-    command: ["python", "/app/worker.py"]
-    volumes:
-      - ./worker.py:/app/worker.py:ro
 
 volumes:
   ankusa-data:

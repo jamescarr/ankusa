@@ -17,7 +17,7 @@ flowchart LR
 
 | Example | Delivers via | Worker | Needs | Run |
 | --- | --- | --- | --- | --- |
-| [quickstart](quickstart/) | HTTP | Python | docker | `docker compose up -d --wait` |
+| [quickstart](quickstart/) | HTTP | Python (FastAPI, uv) | docker | `docker compose up --build -d --wait` |
 | [rabbitmq-consumer](rabbitmq-consumer/) | RabbitMQ | TypeScript | docker | `docker compose up --build` |
 | [kafka-sqs-consumer](kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | docker | `docker compose up --build -d --wait` |
 | [oban-consumer](oban-consumer/) | HTTP → Oban | Elixir | docker, kind, kubectl | `./run.sh` |
@@ -25,7 +25,9 @@ flowchart LR
 ## quickstart
 
 The smallest complete deployment: the published image receives a hook and POSTs
-it to a 40-line Python worker. Nothing to build, no broker, no object store.
+it to a small [FastAPI](https://fastapi.tiangolo.com/) worker built with `uv`,
+using the `ankusa` Python SDK ([`packages/sdk-python`](../packages/sdk-python))
+to parse the delivery's headers. No broker, no object store.
 Read this one first, and keep it as the shape to copy when you write your own
 receiving service.
 
