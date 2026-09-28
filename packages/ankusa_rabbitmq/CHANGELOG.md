@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-28
+
 ### Added
 
 - A `sha256` field on a claim-checked message: the lowercase hex digest of the
@@ -54,6 +56,7 @@ follows [Semantic Versioning](https://semver.org/).
 - The message is built by `Ankusa.Sink.Message` (in `ankusa`), shared
   with `ankusa_kafka`, so both sinks publish byte-identical messages.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.1...HEAD
+[0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.0...ankusa_rabbitmq-v0.2.1
 [0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.1.0...ankusa_rabbitmq-v0.2.0
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_rabbitmq-v0.1.0
