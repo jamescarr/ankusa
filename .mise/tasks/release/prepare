@@ -19,8 +19,10 @@ if [ "$no_pr" != true ]; then pkg_guard_main; fi
 dirs=()
 news=()
 tags=()
+kinds=()
 for p in "${pkgs[@]}"; do
   dir=$(pkg_dir "$p")
+  kind=$(pkg_kind "$p")
   new=$(elixir .mise/lib/release.exs plan "$dir" "$bump") || fail "$p: cannot prepare a '$bump' release"
   tag=$(pkg_tag "$p" "$new")
   if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then fail "tag $tag already exists locally"; fi
@@ -28,6 +30,7 @@ for p in "${pkgs[@]}"; do
   dirs+=("$dir")
   news+=("$new")
   tags+=("$tag")
+  kinds+=("$kind")
 done
 
 branch="release/${tags[0]}"
@@ -63,7 +66,43 @@ while [ $i -lt ${#pkgs[@]} ]; do
   i=$((i + 1))
 done
 
+# The examples consume the SDKs by path, and their lockfiles record the
+# resolved version, so a bump leaves them stale: `check:examples` on this PR
+# fails at `uv sync --locked`, and the npm locks would sit a version behind.
+# Refresh only the ecosystems this release touched (Elixir path deps are not
+# in mix.lock, so Hex releases need nothing here).
+relocked=()
+has_kind() {
+  local k
+  for k in "${kinds[@]}"; do [ "$k" = "$1" ] && return 0; done
+  return 1
+}
+
+if has_kind python; then
+  for f in examples/*/pyproject.toml; do
+    [ -f "$f" ] || continue
+    d="${f%/pyproject.toml}"
+    echo "==> $d: uv lock"
+    (cd "$d" && uv lock --quiet) || fail "$d: uv lock failed"
+    relocked+=("$d/uv.lock")
+  done
+fi
+
+if has_kind npm; then
+  for f in examples/*/*/package.json; do
+    [ -f "$f" ] || continue
+    d="${f%/package.json}"
+    [ -f "$d/package-lock.json" ] || continue
+    echo "==> $d: npm install --package-lock-only"
+    (cd "$d" && npm install --package-lock-only --ignore-scripts >/dev/null) ||
+      fail "$d: npm install --package-lock-only failed"
+    relocked+=("$d/package-lock.json")
+  done
+fi
+
 git add -- "${dirs[@]}"
+# Bash 3.2 + `set -u`: expanding an empty array is an error, hence the guard.
+if [ ${#relocked[@]} -gt 0 ]; then git add -- "${relocked[@]}"; fi
 git commit -q -m "$subject"
 echo "committed \"$subject\" on $branch"
 
