@@ -270,6 +270,148 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "line"
   end
 
+  # ── translation: routes ─────────────────────────────────────────────────────
+
+  test "routes are off unless the file says otherwise" do
+    path = tmp_config("http: {port: 4000}\n")
+
+    assert Config.load!(path: path, env: %{}).config.routes == %Ankusa.Config{}.routes
+  end
+
+  test "a routes section maps to core's routes config" do
+    path =
+      tmp_config("""
+      routes:
+        enabled: true
+        max_routes: 50
+        log_sample: 0
+        ip_denied_status: 404
+        trusted_proxies: ["10.0.0.0/8", "192.168.0.0/16"]
+        store: {type: ets}
+        cache: {max_size: 100, ttl_ms: 1000, negative_ttl_ms: 500, gc_interval_ms: 10000}
+        ip_rules:
+          default: deny
+          rules:
+            - {action: allow, cidr: "203.0.113.0/24"}
+        admin: {port: 4100, token: s3cret}
+        seed:
+          - {id: seed, path: "/hooks/seed", methods: [POST], metadata: {owner: acme}}
+      """)
+
+    routes = Config.load!(path: path, env: %{}).config.routes
+
+    assert routes.enabled
+    assert routes.max_routes == 50
+    assert routes.log_sample == 0
+    assert routes.ip_denied_status == 404
+    assert routes.trusted_proxies == ["10.0.0.0/8", "192.168.0.0/16"]
+    assert routes.store == {Ankusa.Routes.Store.ETS, []}
+
+    assert routes.cache == %{
+             max_size: 100,
+             ttl_ms: 1000,
+             negative_ttl_ms: 500,
+             gc_interval_ms: 10000
+           }
+
+    assert routes.ip_rules == %{
+             default: :deny,
+             rules: [%{action: :allow, cidr: "203.0.113.0/24"}]
+           }
+
+    assert routes.admin == %{port: 4100, token: "s3cret"}
+
+    assert [%{"id" => "seed", "path" => "/hooks/seed", "metadata" => %{"owner" => "acme"}}] =
+             routes.seed
+  end
+
+  test "a redis store is selected by type, or by a url with no type" do
+    for store <- [
+          "{type: redis, url: redis://cache:6379, namespace: ankusa:routes}",
+          "{url: redis://cache:6379}"
+        ] do
+      path = tmp_config("routes: {enabled: true, admin: {token: t}, store: #{store}}\n")
+
+      routes = Config.load!(path: path, env: %{}).config.routes
+
+      assert {Ankusa.Routes.Store.Redis, opts} = routes.store
+      assert opts[:url] == "redis://cache:6379"
+    end
+
+    path =
+      tmp_config("""
+      routes:
+        enabled: true
+        admin: {token: t}
+        store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes, tick_ms: 5000}
+      """)
+
+    assert {Ankusa.Routes.Store.Redis, opts} =
+             Config.load!(path: path, env: %{}).config.routes.store
+
+    assert opts[:namespace] == "ankusa:routes"
+    assert opts[:tick_ms] == 5000
+  end
+
+  test "the routes env overrides win over the file" do
+    path =
+      tmp_config("""
+      routes:
+        enabled: false
+        admin: {token: from-file}
+        store: {type: redis, url: redis://from-file:6379}
+      """)
+
+    env = %{
+      "ANKUSA_ROUTES_ENABLED" => "true",
+      "ANKUSA_ROUTES_ADMIN_TOKEN" => "from-env",
+      "ANKUSA_ROUTES_STORE_URL" => "redis://from-env:6379"
+    }
+
+    routes = Config.load!(path: path, env: env).config.routes
+
+    assert routes.enabled
+    assert routes.admin.token == "from-env"
+    assert {Ankusa.Routes.Store.Redis, opts} = routes.store
+    assert opts[:url] == "redis://from-env:6379"
+  end
+
+  test "an unknown routes key is rejected by name, at every level" do
+    path = tmp_config("routes: {enabled: true, admin: {token: t}, foo: 1}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(routes: unknown key "foo")
+
+    path = tmp_config("routes: {enabled: true, admin: {token: t}, cache: {ttl: 1}}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(routes.cache: unknown key "ttl")
+
+    path = tmp_config("routes: {enabled: true, admin: {token: t}, seed: [{id: a, pth: /x}]}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(routes.seed[0]: unknown key "pth")
+  end
+
+  test "enabling routes without a token fails at load, naming the key" do
+    path = tmp_config("routes: {enabled: true}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "routes.admin.token"
+  end
+
+  test "core's route validation runs at load, so check-config catches a bad rule" do
+    path =
+      tmp_config("""
+      routes:
+        enabled: true
+        admin: {token: t}
+        ip_rules: {rules: [{action: allow, cidr: "10.0.0.0/33"}]}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+
+    assert error.message =~
+             ~s(routes.ip_rules.rules are invalid: rule 0: invalid cidr "10.0.0.0/33")
+  end
+
   # ── translation: storage ────────────────────────────────────────────────────
 
   test "storage.gcs.auth selects the token provider" do

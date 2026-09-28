@@ -130,6 +130,16 @@ defmodule Ankusa.MixProject do
       # adapter package.
       {:telemetry_metrics, "~> 1.2"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
+      # The route-management decision cache (`Ankusa.Routes.Cache`). Every
+      # deployment that turns routes on wants a decision cache, so it lives in
+      # core rather than an adapter package — the Redis *definitions* store is
+      # the separate `ankusa_redis` package, since only deployments sharing
+      # route definitions across nodes need a network store.
+      {:nebulex, "~> 3.0"},
+      {:nebulex_local, "~> 3.0"},
+      # Property tests for Ankusa.Net.CIDR: parse/to_string round trips, and
+      # `contains?/2` against a naive bit comparison.
+      {:stream_data, "~> 1.1", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
   end
