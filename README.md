@@ -71,7 +71,7 @@ sources:
 ```
 
 The worker is
-[a small Python script](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
+[a small FastAPI app](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
 built with [`uv`](https://docs.astral.sh/uv/), using the `ankusa` Python SDK
 ([`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python));
 replace it with your own service. [The quickstart guide](docs/quickstart.md)
