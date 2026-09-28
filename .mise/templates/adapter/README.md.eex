@@ -1,0 +1,38 @@
+# <%= @app %>
+
+<%= @module %> sink adapter for the Ankusa webhook ingestion framework.
+
+This package exists so `ankusa` core stays free of the <%= @module %> client
+dependency. Only deployments that opt into a <%= @module %> sink need this
+package.
+
+## Installation
+
+```elixir
+def deps do
+  [
+    {:ankusa, "<%= @core_req %>"},
+    {:<%= @app %>, "~> 0.1"}
+  ]
+end
+```
+
+## Usage
+
+See `Ankusa.Sink.<%= @module %>` moduledoc for configuration and semantics.
+
+```elixir
+config :ankusa, :default,
+  sinks: [
+    {Ankusa.Sink.<%= @module %>, []}
+  ]
+```
+
+## Testing
+
+```sh
+mise run check:package <%= @app %>
+```
+
+See [`https://hexdocs.pm/ankusa`](https://hexdocs.pm/ankusa) for the full
+Ankusa documentation.

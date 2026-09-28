@@ -2,9 +2,9 @@ name: Docker image
 
 # Builds and smoke-tests the jamescarr/ankusa image on every relevant change, and
 # publishes it on a server tag. The tag is the release: `ankusa_server-vX.Y.Z`
-# is cut by `mise run release:tag-server`, which runs the same preflight checks
-# this workflow's `resolve` job repeats (a tag can be pushed by anyone, so the
-# workflow verifies rather than trusts).
+# is cut by `mise run release:tag ankusa_server`, which runs the same preflight
+# checks this workflow's `resolve` job repeats (a tag can be pushed by anyone,
+# so the workflow verifies rather than trusts).
 #
 # Note on the filters below: path filters are not evaluated for tag pushes, so
 # `ankusa_server-v*` always builds regardless of which files the tagged commit
@@ -15,18 +15,14 @@ on:
     branches: [main]
     tags: ["ankusa_server-v*"]
     paths:
-      - "lib/**"
-      - "priv/**"
-      - "mix.*"
-      - "ankusa_*/**"
+      - "packages/ankusa*/**"
+      - ".dockerignore"
       - ".github/workflows/docker.yml"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
-      - "lib/**"
-      - "priv/**"
-      - "mix.*"
-      - "ankusa_*/**"
+      - "packages/ankusa*/**"
+      - ".dockerignore"
       - ".github/workflows/docker.yml"
       - ".github/workflows/ci.yml"
 
@@ -56,14 +52,14 @@ jobs:
           set -euo pipefail
 
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            VERSION="${GITHUB_REF_NAME#ankusa_server-v}"
-            MIX_VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' ankusa_server/mix.exs)
-            [ "$MIX_VERSION" = "$VERSION" ] || {
-              echo "::error::tag ${VERSION} != ankusa_server/mix.exs ${MIX_VERSION}"; exit 1;
-            }
-            grep -q "^## \[$VERSION\]" ankusa_server/CHANGELOG.md || {
-              echo "::error::ankusa_server/CHANGELOG.md has no '## [$VERSION]' heading"; exit 1;
-            }
+            source .mise/lib/pkg.sh
+            PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+            [ "$(pkg_kind "$PKG")" = docker ] || fail "$GITHUB_REF_NAME is not a Docker image tag"
+            VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+            MIX_VERSION=$(pkg_version "$PKG")
+            [ "$MIX_VERSION" = "$VERSION" ] || fail "tag ${VERSION} != $(pkg_dir "$PKG")/mix.exs ${MIX_VERSION}"
+            pkg_has_heading "$PKG" "$VERSION" ||
+              fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
 
             if [ "${VERSION}" != "${VERSION#*-}" ]; then
               # A prerelease gets only its exact tag: nothing should be able to
@@ -130,7 +126,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ankusa_server/Dockerfile
+          file: packages/ankusa_server/Dockerfile
           platforms: ${{ matrix.platform }}
           load: true
           tags: ${{ env.IMAGE }}:test
@@ -141,7 +137,7 @@ jobs:
       # deduped, metrics, config with no credentials, and exit 78 on a bad
       # config. An image that fails this never reaches Docker Hub.
       - name: Smoke test
-        run: ankusa_server/scripts/smoke.sh ${{ env.IMAGE }}:test
+        run: packages/ankusa_server/scripts/smoke.sh ${{ env.IMAGE }}:test
 
       - name: Log in to Docker Hub
         if: ${{ needs.resolve.outputs.push == 'true' }}
@@ -159,7 +155,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ankusa_server/Dockerfile
+          file: packages/ankusa_server/Dockerfile
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -242,7 +238,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.IMAGE }}
-          readme-filepath: ankusa_server/README.md
+          readme-filepath: packages/ankusa_server/README.md
 
       - name: Create GitHub release
         env:
@@ -250,6 +246,5 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## \[/ {exit} f' \
-            ankusa_server/CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          source .mise/lib/pkg.sh && pkg_notes ankusa_server "$VERSION" > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

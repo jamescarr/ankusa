@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="ankusa core throughput benchmark (N, CONCURRENCY, ... pass through from the environment)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT/packages/ankusa"
+
+# MIX_ENV=test: config/config.exs autostarts the default instance on :4000
+# outside :test.
+MIX_ENV=test exec mix run bench/core_bench.exs

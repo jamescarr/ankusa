@@ -1,0 +1,18 @@
+defmodule Ankusa.Sink.<%= @module %>.Application do
+  @moduledoc """
+  Boots a bare `DynamicSupervisor` that owns the connections
+  `Ankusa.Sink.<%= @module %>` starts on demand from `deliver/3`. `ankusa` core
+  doesn't know this package exists.
+  """
+
+  use Application
+
+  @impl true
+  def start(_type, _args) do
+    children = [
+      {DynamicSupervisor, name: Ankusa.Sink.<%= @module %>.Supervisor, strategy: :one_for_one}
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.<%= @module %>.TopSup)
+  end
+end

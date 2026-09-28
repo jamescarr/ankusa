@@ -69,7 +69,7 @@ flowchart LR
 
 - `worker/`: a minimal TypeScript consumer with **no S3 credentials at
   all**: SQS only, redeeming claim refs over HTTP through a client generated
-  from [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+  from [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml)
   (`npm run generate:types`), see
   ["Redeem a claim"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeem-a-claim).
   It moves permanent failures to the DLQ explicitly and backs off

@@ -175,10 +175,14 @@ config :ankusa,
 Local dev/test emulators via [floci](https://floci.io) (no cloud account):
 
 ```sh
-docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599), buckets/containers auto-created
-mix test --include integration
-docker compose down -v
+# floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599),
+# buckets/containers auto-created
+docker compose -f packages/ankusa/docker-compose.integration.yml up -d
+(cd packages/ankusa && mix test --include integration)
+docker compose -f packages/ankusa/docker-compose.integration.yml down -v
 ```
+
+Or `mise run test:integration`, which does all three.
 
 ## `Ankusa.Codec` and segment format
 

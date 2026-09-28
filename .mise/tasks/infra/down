@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#MISE description="Tear down package test infrastructure (default: every package with a docker-compose.yml)"
+#USAGE arg "[pkgs]" var=#true help="packages whose docker-compose.yml to tear down"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+pkgs=()
+eval "pkgs=(${usage_pkgs:-})"
+if [ ${#pkgs[@]} -eq 0 ]; then
+  for p in $(pkg_names); do
+    if [ -f "$(pkg_dir "$p")/docker-compose.yml" ]; then pkgs+=("$p"); fi
+  done
+fi
+
+# Keep going: one failed teardown should not leave the rest running.
+rc=0
+for p in ${pkgs[@]+"${pkgs[@]}"}; do
+  d=$(pkg_dir "$p")
+  echo "==> $p"
+  (cd "$d" && docker compose down -v) || rc=1
+done
+exit $rc

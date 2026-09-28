@@ -1,7 +1,7 @@
 # Build context is the repo root (see run.sh: `docker build -f
 # examples/oban-consumer/ingest_app/Dockerfile ...`), so the mono-repo's
 # relative path deps resolve identically to local dev: this app depends on
-# `../../..` (ankusa core), unmodified.
+# `../../../packages/ankusa` (ankusa core), unmodified.
 #
 # Multi-stage image building a real `mix release` — unlike the dev-mode
 # single-stage images used by the other examples, this one is deployed into
@@ -12,10 +12,7 @@ RUN mix local.hex --force && mix local.rebar --force
 ENV MIX_ENV=prod
 
 WORKDIR /repo
-COPY mix.exs mix.lock ./
-COPY lib ./lib
-COPY config ./config
-COPY priv ./priv
+COPY packages/ankusa ./packages/ankusa
 COPY examples/oban-consumer/ingest_app ./examples/oban-consumer/ingest_app
 
 WORKDIR /repo/examples/oban-consumer/ingest_app

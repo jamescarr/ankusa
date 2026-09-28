@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#MISE description="Scaffold packages/ankusa_<name>: an Ankusa.Sink adapter package"
+#USAGE arg "<name>" help="lowercase adapter name, e.g. sqs -> packages/ankusa_sqs"
+#USAGE flag "--module <module>" help="module suffix, e.g. SQS -> Ankusa.Sink.SQS (default: camelized name)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+name="$usage_name"
+module="${usage_module:-}"
+if [ -z "$module" ]; then
+  module=$(elixir -e 'IO.write Macro.camelize(System.argv |> hd)' "$name")
+fi
+
+printf '%s\n' "$name" | grep -qE '^[a-z][a-z0-9_]*$' ||
+  fail "name '$name' must match ^[a-z][a-z0-9_]*\$"
+[ "$name" != server ] || fail "ankusa_server is the Docker image, not an adapter"
+printf '%s\n' "$module" | grep -qE '^[A-Z][A-Za-z0-9]*$' ||
+  fail "module '$module' must match ^[A-Z][A-Za-z0-9]*\$"
+dir="packages/ankusa_$name"
+[ ! -e "$dir" ] || fail "$dir already exists"
+
+elixir .mise/lib/gen_adapter.exs "$name" "$module" "$(pkg_version ankusa)"
+(cd "$dir" && mix deps.get && mix format)
+
+cat <<EOF
+
+Created $dir (Ankusa.Sink.$module, version 0.0.0). Next:
+
+  1. Implement deliver/3 in $dir/lib/ankusa/sink/$name.ex and add the real
+     client dependency to $dir/mix.exs. Its one test fails with
+     {:error, :not_implemented} until you do.
+  2. If the tests need live infrastructure, add $dir/docker-compose.yml;
+     \`mise run check:package ankusa_$name\` brings it up and down automatically.
+  3. To ship it in the jamescarr/ankusa image: add
+     {:ankusa_$name, path: "../ankusa_$name"} to packages/ankusa_server/mix.exs,
+     and a sink type in AnkusaServer.Config (@sink_types, @${name}_sink_keys,
+     and a sink/2 clause next to "nats").
+  4. Document it in docs/configuration.md and docs/delivery.md.
+  5. First release: mise run release:prepare minor ankusa_$name
+EOF

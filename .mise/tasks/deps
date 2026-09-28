@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#MISE description="Fetch deps for every Mix project and npm package in the repo"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+for d in $(mix_projects); do
+  echo "==> $d"
+  (cd "$d" && mix deps.get)
+done
+
+# Built, not just installed: the example workers' `ankusa` dependency is a
+# file: link to this source, and they import its dist/.
+for p in $(pkg_names); do
+  if [ "$(pkg_kind "$p")" = npm ]; then
+    d=$(pkg_dir "$p")
+    echo "==> $d"
+    (cd "$d" && npm ci && npm run build)
+  fi
+done
+
+for f in examples/*/*/package.json; do
+  [ -f "$f" ] || continue
+  d="${f%/package.json}"
+  echo "==> $d"
+  (cd "$d" && npm ci)
+done

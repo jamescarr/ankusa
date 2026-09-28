@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#MISE description="Preflight, then tag and push <pkg>-v<version> for each package (the push publishes)"
+#USAGE arg "<pkgs>" var=#true help="packages to tag at their current version"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+eval "pkgs=($usage_pkgs)"
+
+mise run release:preflight "${pkgs[@]}"
+
+for p in "${pkgs[@]}"; do
+  tag=$(pkg_tag "$p")
+  git tag "$tag"
+  # One push per tag: GitHub creates no push events (so no workflow runs)
+  # when more than three tags are pushed at once.
+  git push origin "$tag"
+  echo "pushed $tag; watch it: mise run release:watch $p"
+done

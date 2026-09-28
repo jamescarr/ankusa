@@ -1,20 +1,23 @@
 name: Release
 
 # Tag-driven Hex publish, the Elixir norm: a package's own git tag
-# (`<pkg>-vX.Y.Z`) triggers its release, not a push to `main`. See
-# docs/deployment.md#releasing for the full flow, including the ordering
-# constraint (core publishes before the adapters).
+# (`<pkg>-vX.Y.Z`, where <pkg> is its directory under packages/) triggers its
+# release, not a push to `main`. The tag is cut by `mise run release:tag`
+# after `mise run release:prepare` has bumped the version and dated the
+# CHANGELOG in a merged PR; see docs/releasing.md for the full flow, including
+# the ordering constraint (core publishes before the adapters, enforced by
+# release:preflight). This workflow verifies the tag rather than trusting it.
 #
 # Requires a `HEX_API_KEY` repository secret (hex.pm dashboard → API keys,
 # scoped to `api:write`).
 
 on:
   push:
+    # Every Hex package is `ankusa` or `ankusa_<adapter>`, so a new adapter
+    # needs no edit here. The server image has its own workflow (docker.yml).
     tags:
-      - "ankusa-v*"
-      - "ankusa_rabbitmq-v*"
-      - "ankusa_kafka-v*"
-      - "ankusa_nats-v*"
+      - "ankusa*-v*"
+      - "!ankusa_server-v*"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -35,21 +38,18 @@ jobs:
       - uses: actions/checkout@v4
       - id: resolve
         run: |
-          TAG="$GITHUB_REF_NAME"; PKG="${TAG%-v*}"; VERSION="${TAG##*-v}"
-          case "$PKG" in
-            ankusa) DIR=. ;;
-            ankusa_rabbitmq|ankusa_kafka|ankusa_nats) DIR="$PKG" ;;
-            *) echo "::error::unknown package in tag $TAG"; exit 1 ;;
-          esac
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          [ "$(pkg_kind "$PKG")" = hex ] || fail "$GITHUB_REF_NAME is not a Hex package tag"
 
-          MIX_VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$DIR/mix.exs")
-          [ "$MIX_VERSION" = "$VERSION" ] || { echo "::error::tag $VERSION != mix.exs $MIX_VERSION"; exit 1; }
-
-          grep -q "^## \[$VERSION\]" "$DIR/CHANGELOG.md" || { echo "::error::no CHANGELOG entry for $VERSION"; exit 1; }
+          MIX_VERSION=$(pkg_version "$PKG")
+          [ "$MIX_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/mix.exs $MIX_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "no CHANGELOG entry for $VERSION"
 
           {
             echo "pkg=$PKG"
-            echo "dir=$DIR"
+            echo "dir=$(pkg_dir "$PKG")"
             echo "version=$VERSION"
           } >> "$GITHUB_OUTPUT"
 
@@ -62,15 +62,12 @@ jobs:
     name: Publish to Hex + GitHub release
     needs: [resolve, ci]
     runs-on: ubuntu-latest
-    env:
-      OTP_VERSION: "29.0"
-      ELIXIR_VERSION: "1.20.4"
     steps:
       - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: jdx/mise-action@v4
         with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
+          version: 2026.9.11
+      - run: mix local.hex --force && mix local.rebar --force
 
       - name: mix deps.get
         working-directory: ${{ needs.resolve.outputs.dir }}
@@ -93,10 +90,10 @@ jobs:
         run: mix hex.publish docs --yes
 
       - name: Create GitHub release
-        working-directory: ${{ needs.resolve.outputs.dir }}
         env:
           GH_TOKEN: ${{ github.token }}
+          PKG: ${{ needs.resolve.outputs.pkg }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## \[/ {exit} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          source .mise/lib/pkg.sh && pkg_notes "$PKG" "$VERSION" > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

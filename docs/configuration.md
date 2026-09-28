@@ -65,7 +65,7 @@ Every top-level section, with its keys and defaults:
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
-[`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml)
+[`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml)
 for every key with its comment and the alternatives.
 
 ### Sources
@@ -163,10 +163,10 @@ All loadable as-is. Copy one, delete what you don't use, replace the `${VAR}`s:
 
 | File | What it is |
 | --- | --- |
-| [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
-| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
-| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
-| [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
+| [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
+| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
+| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
+| [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
 
 ## Library configuration (Elixir)
 
@@ -258,7 +258,7 @@ With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 `GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the node's
 roles. It is **unauthenticated by design**: put it behind your own proxy, SSO,
 or network policy. The HTTP contract is
-[`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/admin.v1.yaml).
+[`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
 
 ### Configuring a source
 
@@ -331,7 +331,7 @@ vars on top of whatever `config.exs` sets:
 Ankusa.Application boots its built-in default instance at all. A library
 must not bind a port just because it's a dependency. Set `config :ankusa,
 autostart: true` in a deployment that wants the zero-config default instance
-(the repo's own `config/config.exs` does this outside `:test`).
+(core's own `packages/ankusa/config/config.exs` does this outside `:test`).
 
 This is deliberately the *only* place env vars are read inside `ankusa` core.
 Everything else is `%Ankusa.Config{}` passed explicitly. A deployment wrapper

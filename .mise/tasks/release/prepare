@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#MISE description="Bump versions, date the CHANGELOGs, and open the release PR for one or more packages"
+#USAGE arg "<bump>" help="patch, minor, major, or an explicit version"
+#USAGE arg "<pkgs>" var=#true help="packages to release in one PR"
+#USAGE flag "--no-pr" help="commit on a local branch only; no origin/main check, push, or PR"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+bump="$usage_bump"
+no_pr="${usage_no_pr:-false}"
+eval "pkgs=($usage_pkgs)"
+
+[ -z "$(git status --porcelain)" ] || fail "working tree is dirty; commit or stash first"
+if [ "$no_pr" != true ]; then pkg_guard_main; fi
+
+# Validate every package before touching anything, so a bad one leaves no
+# branch and no half-applied edits behind.
+dirs=()
+news=()
+tags=()
+for p in "${pkgs[@]}"; do
+  dir=$(pkg_dir "$p")
+  new=$(elixir .mise/lib/release.exs plan "$dir" "$bump") || fail "$p: cannot prepare a '$bump' release"
+  tag=$(pkg_tag "$p" "$new")
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then fail "tag $tag already exists locally"; fi
+  if git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then fail "tag $tag already exists on origin"; fi
+  dirs+=("$dir")
+  news+=("$new")
+  tags+=("$tag")
+done
+
+branch="release/${tags[0]}"
+if [ ${#tags[@]} -gt 1 ]; then branch="$branch-and-$((${#tags[@]} - 1))-more"; fi
+if git rev-parse -q --verify "refs/heads/$branch" >/dev/null; then fail "branch $branch already exists"; fi
+git switch -c "$branch"
+
+today=$(date -u +%F)
+subject="chore(release):"
+sep=" "
+i=0
+while [ $i -lt ${#pkgs[@]} ]; do
+  p="${pkgs[$i]}"
+  dir="${dirs[$i]}"
+  new="${news[$i]}"
+  prev_tag=$(pkg_tag "$p" "$(pkg_version "$p")")
+  if ! git rev-parse -q --verify "refs/tags/$prev_tag" >/dev/null; then prev_tag=""; fi
+
+  elixir .mise/lib/release.exs apply "$dir" "$new" "$p" "$prev_tag" "$today"
+  if [ "$(pkg_kind "$p")" = npm ]; then
+    (cd "$dir" && npm version "$new" --no-git-tag-version --ignore-scripts >/dev/null)
+  fi
+  printf '  %-18s -> %s\n' "$p" "$new"
+
+  subject="$subject$sep${tags[$i]}"
+  sep=", "
+  i=$((i + 1))
+done
+
+git add -- "${dirs[@]}"
+git commit -q -m "$subject"
+echo "committed \"$subject\" on $branch"
+
+if [ "$no_pr" = true ]; then
+  echo "--no-pr: nothing pushed"
+  exit 0
+fi
+
+body=""
+i=0
+while [ $i -lt ${#pkgs[@]} ]; do
+  body="$body## ${tags[$i]}"$'\n\n'"$(pkg_notes "${pkgs[$i]}" "${news[$i]}")"$'\n\n'
+  i=$((i + 1))
+done
+
+git push -u origin "$branch"
+gh pr create --base main --head "$branch" --title "$subject" --body "$body"
+echo
+echo "after merge: git switch main && git pull && mise run release:tag ${pkgs[*]}"

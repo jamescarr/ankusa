@@ -26,8 +26,8 @@ defmodule AnkusaExample.Ingest.MixProject do
       # `override: true` for the same reason as examples/rabbitmq-consumer:
       # ankusa_kafka's deps() picks the Hex `:ankusa` when built as a nested
       # dependency, which conflicts with this path entry.
-      {:ankusa, path: "../../..", override: true},
-      {:ankusa_kafka, path: "../../../ankusa_kafka"}
+      {:ankusa, path: "../../../packages/ankusa", override: true},
+      {:ankusa_kafka, path: "../../../packages/ankusa_kafka"}
     ]
   end
 end

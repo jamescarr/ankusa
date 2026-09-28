@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Build and smoke-test the image (starts a container on 4000/4002)"
+#MISE depends=["docker:build"]
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+exec packages/ankusa_server/scripts/smoke.sh "$DOCKER_IMAGE:dev"

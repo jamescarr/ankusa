@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#MISE description="Confirm each package's current version is live on its registry (images: both architectures)"
+#USAGE arg "<pkgs>" var=#true help="packages to verify"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+eval "pkgs=($usage_pkgs)"
+
+for p in "${pkgs[@]}"; do
+  v=$(pkg_version "$p")
+  code=$(pkg_registry_code "$p" "$v")
+  printf '  %-18s %-12s %s\n' "$p" "$v" "$code"
+  [ "$code" = 200 ] || fail "$p $v is not published (HTTP $code)"
+
+  if [ "$(pkg_kind "$p")" = docker ]; then
+    # docker.yml never moves `latest` for a prerelease.
+    case "$v" in
+      *-*) ;;
+      *)
+        code=$(pkg_registry_code "$p" latest)
+        printf '  %-18s %-12s %s\n' "$p" latest "$code"
+        [ "$code" = 200 ] || fail "$DOCKER_IMAGE:latest is not published (HTTP $code)"
+        ;;
+    esac
+
+    # Both architectures, or the tag is not really usable.
+    manifest=$(docker buildx imagetools inspect "$DOCKER_IMAGE:$v")
+    grep -E 'Platform|Manifest' <<<"$manifest"
+    for platform in linux/amd64 linux/arm64; do
+      grep -qE "Platform:[[:space:]]+$platform(/v[0-9]+)?\$" <<<"$manifest" ||
+        fail "$platform missing from $DOCKER_IMAGE:$v"
+    done
+  fi
+done

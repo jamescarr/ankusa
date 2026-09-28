@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "amqplib": "^0.10.4",
-    "ankusa": "file:../../../sdks/typescript"
+    "ankusa": "file:../../../packages/sdk-typescript"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.5",

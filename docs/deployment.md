@@ -73,8 +73,8 @@ instead of racing the listener.
 
 Both compose files are worked examples:
 
-- Single node: [`ankusa_server/compose/docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.yml)
-- All-role node behind nginx basic auth: [`ankusa_server/compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.proxy.yml)
+- Single node: [`packages/ankusa_server/compose/docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/compose/docker-compose.yml)
+- All-role node behind nginx basic auth: [`packages/ankusa_server/compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/compose/docker-compose.proxy.yml)
 
 ```sh
 docker compose -f docker-compose.proxy.yml up -d --wait
@@ -98,7 +98,7 @@ Image tags:
 ## Scaling the ingest fleet
 
 ```sh
-docker compose -f ankusa_server/compose/docker-compose.proxy.yml up -d --wait
+docker compose -f packages/ankusa_server/compose/docker-compose.proxy.yml up -d --wait
 ```
 
 One all-role node behind nginx, with ingest open and the admin API behind basic

@@ -1,0 +1,32 @@
+defmodule Ankusa.Sink.<%= @module %>Test do
+  use ExUnit.Case, async: false
+
+  alias Ankusa.{Envelope, UUIDv7}
+  alias Ankusa.Sink.<%= @module %>
+
+  test "deliver/3 publishes an inline hook" do
+    instance = :"<%= @name %>_#{System.unique_integer([:positive])}"
+
+    assert :ok = <%= @module %>.deliver(envelope(), ctx(instance), [])
+  end
+
+  defp envelope(overrides \\ %{}) do
+    struct(
+      %Envelope{
+        id: UUIDv7.generate(),
+        source_id: "src",
+        tenant_id: "t1",
+        received_at: 1_737_500_000_000,
+        method: "POST",
+        path: "/hooks/src",
+        headers: [],
+        content_type: "application/json",
+        body: ~s({"hello":"world"}),
+        size: 17
+      },
+      overrides
+    )
+  end
+
+  defp ctx(instance), do: %{instance: instance, source_id: "src", tenant_id: "t1", attempt: 1}
+end

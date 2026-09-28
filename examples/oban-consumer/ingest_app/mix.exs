@@ -26,7 +26,7 @@ defmodule AnkusaExample.Ingest.MixProject do
     [
       # path dep on core; `override: true` keeps it authoritative over any
       # Hex resolution
-      {:ankusa, path: "../../..", override: true}
+      {:ankusa, path: "../../../packages/ankusa", override: true}
     ]
   end
 

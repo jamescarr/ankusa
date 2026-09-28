@@ -1,0 +1,26 @@
+defmodule Ankusa.Sink.<%= @module %> do
+  @moduledoc """
+  Publishes delivered hooks to **<%= @module %>**. The value is
+  `Ankusa.Sink.Message`: inline up to `:inline_max_bytes`, a claim ticket
+  above it.
+
+  `deliver/3` returns `:ok` only once <%= @module %> has confirmed the publish;
+  anything else is an `{:error, reason}` that the source's
+  `Ankusa.RetryPolicy` retries, then dead-letters.
+
+  ## Options
+
+    * `:inline_max_bytes` — the largest body sent inline; larger bodies go
+      through the claim check. Defaults to `Ankusa.Sink.Message`'s default.
+  """
+
+  @behaviour Ankusa.Sink
+
+  alias Ankusa.Envelope
+
+  @impl true
+  def deliver(%Envelope{}, _ctx, _opts), do: {:error, :not_implemented}
+
+  @impl true
+  def inline_max_bytes(opts), do: Ankusa.Sink.Message.inline_max_bytes(opts)
+end

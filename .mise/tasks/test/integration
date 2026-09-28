@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#MISE description="ankusa core's :integration suite against the floci object-store emulators"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT/packages/ankusa"
+
+compose=(docker compose -f docker-compose.integration.yml)
+"${compose[@]}" up -d
+trap '"${compose[@]}" down -v' EXIT
+# The bootstrap containers create the buckets/containers and exit; the suite
+# needs them finished, not just started.
+"${compose[@]}" wait s3-bootstrap gcs-bootstrap azure-bootstrap oci-bootstrap
+mix test --include integration

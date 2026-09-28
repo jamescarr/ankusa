@@ -1,9 +1,9 @@
 **/_build
 **/deps
-cover/
-doc/
+**/cover
+**/doc
 tmp/
-data/
+**/data
 .elixir_ls/
 .git/
 erl_crash.dump
@@ -15,3 +15,4 @@ erl_crash.dump
 **/*.egg-info
 **/.pytest_cache
 **/.mypy_cache
+packages/sdk-typescript

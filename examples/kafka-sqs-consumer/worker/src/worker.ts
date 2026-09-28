@@ -6,7 +6,7 @@
 // real processing.
 //
 // The claim-check client comes from the framework's own `ankusa` SDK
-// package (a `file:` dependency on `../../../sdks/typescript` — see
+// package (a `file:` dependency on `../../../packages/sdk-typescript` — see
 // "Redeem a claim" in docs/claim-check.md), generated from
 // `priv/openapi/claim_check.v1.yaml` instead of hand-maintained ref parsing
 // and URL-building.

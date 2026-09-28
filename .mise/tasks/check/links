@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Fail if any doc link points at a path outside README.md/docs/*.md (breaks on hexdocs)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+if grep -nE '\]\((\./|\.\./)*(packages|examples|tools|\.github)/|\]\((\.\./)*LICENSE\)' \
+  README.md docs/*.md; then
+  echo "^^ rewrite these to absolute https://github.com/$GITHUB_REPO URLs" >&2
+  exit 1
+fi
+echo "no relative links escaping README.md/docs/"
