@@ -91,6 +91,111 @@ defmodule Ankusa.Routes.Snapshot do
   @spec publish(map()) :: :ok
   def publish(state), do: put(state.instance, build(state))
 
+  @doc """
+  Build the boot-time `routes` and `ip_rules` for a store from `config.routes`,
+  reporting the same failures `Ankusa.Routes.validate_config!/1` already raises
+  as error tuples a store can `{:stop, reason}` on.
+
+  The check order mirrors `validate_seed!`: a non-list seed, then the cap, then
+  per-entry validation, then duplicate ids, then compiled-segment conflicts, then
+  the global rules.
+  """
+  @spec initial_table(map()) ::
+          {:ok,
+           %{
+             routes: %{String.t() => Route.t()},
+             ip_rules: %{default: :allow | :deny, rules: [Route.ip_rule()]}
+           }}
+          | {:error,
+             {:invalid_seed, non_neg_integer(), String.t(), String.t()}
+             | {:duplicate_seed_ids, String.t(), non_neg_integer()}
+             | {:seed_too_large, non_neg_integer(), pos_integer()}
+             | {:seed_conflict, non_neg_integer(), non_neg_integer(), String.t(), String.t()}
+             | {:seed_not_a_list, term()}
+             | {:invalid_ip_rules, String.t()}}
+  def initial_table(%{seed: seed, max_routes: max_routes, ip_rules: ip_rules_config}) do
+    cond do
+      not is_list(seed) ->
+        {:error, {:seed_not_a_list, seed}}
+
+      length(seed) > max_routes ->
+        {:error, {:seed_too_large, length(seed), max_routes}}
+
+      true ->
+        with {:ok, parsed} <- parse_seed(seed),
+             :ok <- unique_seed_ids(parsed),
+             :ok <- no_seed_conflicts(parsed),
+             {:ok, ip_rules} <- parse_global_rules(ip_rules_config) do
+          {:ok,
+           %{
+             routes: Map.new(parsed, fn {route, _index} -> {route.id, route} end),
+             ip_rules: ip_rules
+           }}
+        end
+    end
+  end
+
+  defp parse_seed(seed) do
+    seed
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {attrs, index}, {:ok, acc} ->
+      case Route.from_attrs(attrs) do
+        {:ok, route} ->
+          {:cont, {:ok, [{route, index} | acc]}}
+
+        {:error, {:invalid, field, message}} ->
+          {:halt, {:error, {:invalid_seed, index, field, message}}}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp unique_seed_ids(parsed) do
+    case Enum.find(Enum.group_by(parsed, fn {route, _index} -> route.id end), fn {_id, group} ->
+           length(group) > 1
+         end) do
+      nil ->
+        :ok
+
+      {id, [_first, {_route, index} | _rest]} ->
+        {:error, {:duplicate_seed_ids, id, index}}
+    end
+  end
+
+  defp no_seed_conflicts(parsed) do
+    parsed
+    |> Enum.reduce_while([], fn {route, index}, accepted ->
+      new = Matcher.compile(route)
+
+      case Enum.find(accepted, fn {other, _first_index} ->
+             other.id != route.id and other.enabled and Matcher.compile(other) == new and
+               Enum.any?(other.methods, &(&1 in route.methods))
+           end) do
+        nil ->
+          {:cont, [{route, index} | accepted]}
+
+        {_other, first_index} ->
+          {:halt,
+           {:error,
+            {:seed_conflict, index, first_index, Enum.join(route.methods, "/"), route.path}}}
+      end
+    end)
+    |> case do
+      {:error, _} = err -> err
+      _accepted -> :ok
+    end
+  end
+
+  defp parse_global_rules(%{default: default, rules: rules}) do
+    case Route.parse_rules(rules) do
+      {:ok, parsed} -> {:ok, %{default: default, rules: parsed}}
+      {:error, message} -> {:error, {:invalid_ip_rules, message}}
+    end
+  end
+
   defp trusted_proxies(instance) do
     Enum.flat_map(Ankusa.config(instance).routes.trusted_proxies, fn cidr ->
       case CIDR.parse(cidr) do

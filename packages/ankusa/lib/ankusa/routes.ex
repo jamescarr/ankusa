@@ -524,25 +524,24 @@ defmodule Ankusa.Routes do
     if Map.has_key?(snapshot.by_id, route.id), do: {:error, {:conflict, route.id}}, else: :ok
   end
 
+  # Two *enabled* routes collide when they capture the same request class: the
+  # same compiled pattern and at least one method in common. Disabled routes are
+  # exempt — they capture nothing, so a staging definition may sit next to a live
+  # one. Compiled segments are compared, so an enabled route is never re-parsed.
   defp no_conflict(snapshot, route) do
     if route.enabled do
-      case Enum.find(Map.values(snapshot.by_id), &collides?(&1, route)) do
+      new = Matcher.compile(route)
+
+      case Enum.find(snapshot.patterns, fn %{route: other, segments: other_segments} ->
+             other.id != route.id and other.enabled and other_segments == new and
+               Enum.any?(other.methods, &(&1 in route.methods))
+           end) do
         nil -> :ok
-        other -> {:error, {:conflict, other.id}}
+        %{route: other} -> {:error, {:conflict, other.id}}
       end
     else
       :ok
     end
-  end
-
-  # Two *enabled* routes collide when they capture the same request class: the
-  # same normalized pattern and at least one method in common. Disabled routes
-  # are exempt — they capture nothing, so a staging definition may sit next to a
-  # live one.
-  defp collides?(%Route{} = other, %Route{} = route) do
-    other.id != route.id and other.enabled and
-      Matcher.segments(other.path) == Matcher.segments(route.path) and
-      Enum.any?(other.methods, &(&1 in route.methods))
   end
 
   defp attrs_of(%Route{} = route),
@@ -642,58 +641,33 @@ defmodule Ankusa.Routes do
     end
   end
 
-  defp validate_seed!(%{seed: seed, max_routes: max_routes}) do
-    unless is_list(seed) do
-      raise ArgumentError, "routes.seed must be a list of routes, got #{inspect(seed)}"
-    end
-
-    if length(seed) > max_routes do
-      raise ArgumentError,
-            "routes.seed defines #{length(seed)} routes, more than routes.max_routes " <>
-              "(#{max_routes})"
-    end
-
-    parsed =
-      seed
-      |> Enum.with_index()
-      |> Enum.map(fn {attrs, index} ->
-        case Route.from_attrs(attrs) do
-          {:ok, route} -> {route, index}
-          {:error, {:invalid, field, message}} -> raise invalid_seed(index, field, message)
-        end
-      end)
-
-    parsed
-    |> Enum.group_by(fn {route, _index} -> route.id end)
-    |> Enum.find(fn {_id, group} -> length(group) > 1 end)
-    |> case do
-      nil ->
+  defp validate_seed!(routes) do
+    case Snapshot.initial_table(routes) do
+      {:ok, _table} ->
         :ok
 
-      {id, [_first, {_route, index} | _rest]} ->
+      {:error, {:seed_not_a_list, seed}} ->
+        raise ArgumentError, "routes.seed must be a list of routes, got #{inspect(seed)}"
+
+      {:error, {:seed_too_large, size, max}} ->
+        raise ArgumentError,
+              "routes.seed defines #{size} routes, more than routes.max_routes (#{max})"
+
+      {:error, {:invalid_seed, index, field, message}} ->
+        raise ArgumentError, "routes.seed[#{index}] is invalid: #{field} #{message}"
+
+      {:error, {:duplicate_seed_ids, id, index}} ->
         raise ArgumentError,
               "routes.seed[#{index}] reuses route id #{inspect(id)}; route ids must be unique"
+
+      {:error, {:seed_conflict, index, first_index, methods, path}} ->
+        raise ArgumentError,
+              "routes.seed[#{index}] conflicts with routes.seed[#{first_index}]: both capture " <>
+                "#{methods} #{path}"
+
+      {:error, {:invalid_ip_rules, _message}} ->
+        :ok
     end
-
-    # The same rule the API enforces, so a seed cannot boot into a state the API
-    # would have refused to create.
-    Enum.reduce(parsed, [], fn {route, index}, accepted ->
-      case Enum.find(accepted, fn {other, _index} -> collides?(other, route) end) do
-        nil ->
-          [{route, index} | accepted]
-
-        {_other, first_index} ->
-          raise ArgumentError,
-                "routes.seed[#{index}] conflicts with routes.seed[#{first_index}]: both capture " <>
-                  "#{Enum.join(route.methods, "/")} #{route.path}"
-      end
-    end)
-
-    :ok
-  end
-
-  defp invalid_seed(index, field, message) do
-    ArgumentError.exception("routes.seed[#{index}] is invalid: #{field} #{message}")
   end
 
   defp not_a_cidr(key, cidr) do

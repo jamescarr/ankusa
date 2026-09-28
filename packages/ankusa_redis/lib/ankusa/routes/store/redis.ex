@@ -295,52 +295,29 @@ defmodule Ankusa.Routes.Store.Redis.State do
   end
 
   defp seed(state, routes_config) do
-    with {:ok, routes} <- seed_routes(routes_config.seed, routes_config.max_routes),
-         {:ok, rules} <- global_rules(routes_config.ip_rules) do
-      commands =
-        Enum.map(routes, fn {_id, route} ->
-          ["HSET", routes_key(state), route.id, encode(route)]
-        end) ++
-          [
-            ["SET", ip_rules_key(state), JSON.encode!(Route.rules_json(rules))],
-            ["SET", version_key(state), "1"]
-          ]
+    case Snapshot.initial_table(routes_config) do
+      {:ok, %{routes: routes, ip_rules: rules}} ->
+        commands =
+          Enum.map(routes, fn {_id, route} ->
+            ["HSET", routes_key(state), route.id, encode(route)]
+          end) ++
+            [
+              ["SET", ip_rules_key(state), JSON.encode!(Route.rules_json(rules))],
+              ["SET", version_key(state), "1"]
+            ]
 
-      case Redix.pipeline(state.conn, commands) do
-        {:ok, _results} ->
-          state = %{state | version: 1, routes: routes, ip_rules: rules}
-          Snapshot.publish(state)
-          {:ok, state}
+        case Redix.pipeline(state.conn, commands) do
+          {:ok, _results} ->
+            state = %{state | version: 1, routes: routes, ip_rules: rules}
+            Snapshot.publish(state)
+            {:ok, state}
 
-        {:error, reason} ->
-          {:error, {:redis_unavailable, reason}}
-      end
-    end
-  end
+          {:error, reason} ->
+            {:error, {:redis_unavailable, reason}}
+        end
 
-  defp seed_routes(seed, max_routes) do
-    seed
-    |> Enum.reduce_while({:ok, %{}}, fn attrs, {:ok, acc} ->
-      case Route.from_attrs(attrs) do
-        {:ok, route} -> {:cont, {:ok, Map.put(acc, route.id, route)}}
-        {:error, {:invalid, field, message}} -> {:halt, {:error, {:invalid_seed, field, message}}}
-      end
-    end)
-    |> case do
-      {:ok, routes} when map_size(routes) > max_routes ->
-        {:error, {:seed_too_large, map_size(routes), max_routes}}
-
-      other ->
-        other
-    end
-  end
-
-  # `Ankusa.Routes.validate_config!/1` already parsed these at boot; a failure
-  # here means the store was started without validation.
-  defp global_rules(%{default: default, rules: rules}) do
-    case Route.parse_rules(rules) do
-      {:ok, parsed} -> {:ok, %{default: default, rules: parsed}}
-      {:error, message} -> {:error, {:invalid_ip_rules, message}}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -387,8 +364,11 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
   defp decode_rules(raw) do
     case Route.parse_ip_rules(decode_json(raw)) do
-      {:ok, rules} -> {:ok, rules}
-      {:error, {:invalid, field, message}} -> {:error, {:invalid_stored_ip_rules, "#{field}: #{message}"}}
+      {:ok, rules} ->
+        {:ok, rules}
+
+      {:error, {:invalid, field, message}} ->
+        {:error, {:invalid_stored_ip_rules, "#{field}: #{message}"}}
     end
   end
 

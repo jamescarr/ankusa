@@ -47,20 +47,21 @@ defmodule Ankusa.Routes.Store.ETS do
     instance = Keyword.fetch!(opts, :instance)
     %{routes: routes_config} = Keyword.fetch!(opts, :config)
 
-    with {:ok, routes} <- seeds(routes_config),
-         {:ok, ip_rules} <- global_rules(routes_config) do
-      state = %{
-        instance: instance,
-        max_routes: routes_config.max_routes,
-        routes: routes,
-        ip_rules: ip_rules,
-        version: 1
-      }
+    case Snapshot.initial_table(routes_config) do
+      {:ok, %{routes: routes, ip_rules: ip_rules}} ->
+        state = %{
+          instance: instance,
+          max_routes: routes_config.max_routes,
+          routes: routes,
+          ip_rules: ip_rules,
+          version: 1
+        }
 
-      Snapshot.put(instance, Snapshot.build(state))
-      {:ok, state}
-    else
-      {:error, reason} -> {:stop, reason}
+        Snapshot.put(instance, Snapshot.build(state))
+        {:ok, state}
+
+      {:error, reason} ->
+        {:stop, reason}
     end
   end
 
@@ -102,40 +103,6 @@ defmodule Ankusa.Routes.Store.ETS do
   defp put_route(state, route), do: %{state | routes: Map.put(state.routes, route.id, route)}
 
   defp bump_version(state), do: %{state | version: state.version + 1}
-
-  # ── boot ────────────────────────────────────────────────────────────────────
-
-  # `Ankusa.Routes.validate_config!/1` already rejected an unparseable seed at
-  # boot, so a failure here is a store started without validation — stop rather
-  # than run with a partial table.
-  defp seeds(%{seed: seed, max_routes: max_routes}) do
-    if length(seed) > max_routes do
-      {:error, {:seed_too_large, length(seed), max_routes}}
-    else
-      seed
-      |> Enum.reduce_while({:ok, %{}}, fn attrs, {:ok, acc} ->
-        case Route.from_attrs(attrs) do
-          {:ok, route} ->
-            {:cont, {:ok, Map.put(acc, route.id, route)}}
-
-          {:error, {:invalid, field, message}} ->
-            {:halt, {:error, {:invalid_seed, field, message}}}
-        end
-      end)
-      |> case do
-        {:ok, routes} when map_size(routes) == length(seed) -> {:ok, routes}
-        {:ok, routes} -> {:error, {:duplicate_seed_ids, map_size(routes), length(seed)}}
-        {:error, reason} -> {:error, reason}
-      end
-    end
-  end
-
-  defp global_rules(%{ip_rules: %{default: default, rules: rules}}) do
-    case Route.parse_rules(rules) do
-      {:ok, parsed} -> {:ok, %{default: default, rules: parsed}}
-      {:error, message} -> {:error, {:invalid_ip_rules, message}}
-    end
-  end
 
   defp server(opts), do: server_name(Keyword.fetch!(opts, :instance))
 
