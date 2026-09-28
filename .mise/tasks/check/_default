@@ -9,5 +9,6 @@ mise run check:links
 for p in $(pkg_names); do
   mise run check:package "$p"
 done
+mise run check:conformance
 mise run check:examples
 mise run check:tools

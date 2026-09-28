@@ -51,6 +51,7 @@ packages/
   sdk-python                  the `ankusa` PyPI client SDK.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
+conformance/                  language-neutral SDK conformance vectors + checker
 ```
 
 `ankusa_rabbitmq`, `ankusa_kafka`, and `ankusa_nats` each depend on `ankusa`

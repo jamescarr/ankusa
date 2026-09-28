@@ -10,10 +10,16 @@ arrive twice after a retry.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 __all__ = ["HookHeaders", "MissingHookIdError", "parse_headers"]
+
+# ``str.isdigit()`` accepts non-ASCII digits (``"²".isdigit()`` is True) that
+# ``int()`` then rejects. The header is a sequence number, so only ASCII
+# digits count.
+_SEQ_PATTERN = re.compile(r"[0-9]+")
 
 
 class MissingHookIdError(ValueError):
@@ -56,7 +62,7 @@ def parse_headers(headers: Mapping[str, str]) -> HookHeaders:
         raise MissingHookIdError("missing x-ankusa-id header")
 
     seq_raw = lowered.get("x-ankusa-seq")
-    seq = int(seq_raw) if seq_raw is not None and seq_raw.isdigit() else None
+    seq = int(seq_raw) if seq_raw is not None and _SEQ_PATTERN.fullmatch(seq_raw) else None
 
     return HookHeaders(
         id=hook_id,

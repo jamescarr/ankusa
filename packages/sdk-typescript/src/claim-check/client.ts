@@ -23,6 +23,12 @@ export type ClaimCheckClientOptions = {
    * (service mesh, Envoy, an API gateway) expects in front of it.
    */
   headers?: HeadersInit;
+  /**
+   * Per-request deadline in milliseconds, covering connect through the last
+   * body byte. Defaults to `10_000`, matching the Python client's
+   * `timeout=10.0`. Exceeding it rejects with `ClaimCheckUnavailableError`.
+   */
+  timeoutMs?: number;
   /** Override for testing; defaults to the global `fetch`. */
   fetch?: typeof fetch;
 };
@@ -45,10 +51,14 @@ export type ClaimCheckClient = {
 };
 
 export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimCheckClient {
+  const timeoutMs = options.timeoutMs ?? 10_000;
   const http = createClient<paths>({
     baseUrl: options.baseUrl,
     headers: options.headers,
     fetch: options.fetch,
+    // A 3xx is a gateway error, not a hop: the Python client doesn't follow
+    // redirects either.
+    redirect: "manual",
   });
 
   async function redeem(ref: string, sha256: string): Promise<Buffer> {
@@ -70,6 +80,7 @@ export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimC
       const result = await http.GET("/v1/claims/{tenant_id}/{claim_id}", {
         params: { path: { tenant_id, claim_id } },
         parseAs: "arrayBuffer",
+        signal: AbortSignal.timeout(timeoutMs),
       });
       data = result.data as ArrayBuffer | undefined;
       status = result.response.status;
@@ -81,19 +92,24 @@ export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimC
     if (status === 404) {
       throw new ClaimNotFoundError(`claim not found: ${tenant_id}/${claim_id}`);
     }
+    // An empty error body arrives as `undefined`; the Python client reports it
+    // as "".
+    const body = errorBody === undefined ? "" : errorBody;
     if (status >= 400 && status < 500) {
-      throw new ClaimRejectedError(`claim-check rejected redeem (${status}): ${JSON.stringify(errorBody)}`, status, errorBody);
+      throw new ClaimRejectedError(`claim-check rejected redeem (${status}): ${JSON.stringify(body)}`, status, body);
     }
-    if (data === undefined) {
-      throw new ClaimCheckUnavailableError(`claim-check gateway error (${status}): ${JSON.stringify(errorBody)}`);
+    if (status !== 200) {
+      throw new ClaimCheckUnavailableError(`claim-check gateway error (${status}): ${JSON.stringify(body)}`);
     }
-    return Buffer.from(data);
+    // An empty 200 body is valid bytes, verified against the expected sha256
+    // like any other.
+    return Buffer.from(data ?? new ArrayBuffer(0));
   }
 
   async function health(): Promise<{ status: "ok" }> {
     try {
-      const { data, response } = await http.GET("/health", {});
-      if (!data) {
+      const { data, response } = await http.GET("/health", { signal: AbortSignal.timeout(timeoutMs) });
+      if (response.status !== 200 || data === undefined) {
         throw new ClaimCheckUnavailableError(`claim-check gateway health check failed (${response.status})`);
       }
       return data;

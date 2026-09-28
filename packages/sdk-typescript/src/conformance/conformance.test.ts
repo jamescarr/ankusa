@@ -1,0 +1,244 @@
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import http from "node:http";
+import { describe, test } from "node:test";
+
+import * as sdk from "../index.js";
+
+// The language-neutral vectors live at the repo root; this file sits one
+// directory deep so the `npm test` glob (`src/**/*.test.ts`, expanded by a
+// shell without globstar) matches it. See conformance/README.md.
+
+type Body = { text: string } | { base64: string } | { json: unknown };
+type Client = { headers?: Record<string, string>; timeout_ms?: number; transport?: "injected" };
+type Gateway =
+  | { unreachable: true }
+  | { status: number; headers?: Record<string, string>; body?: Body; delay_ms?: number };
+type ExpectedRequest = { method: string; path: string; headers?: Record<string, string> };
+type Expect = { ok?: unknown; error?: { class: string; [key: string]: unknown }; requests?: ExpectedRequest[] };
+type Case = {
+  id: string;
+  feature: string;
+  operation: string;
+  input: Record<string, unknown>;
+  expect: Expect;
+};
+type Recorded = { method: string; path: string; headers: Record<string, string | string[] | undefined> };
+
+const DIR = new URL("../../../../conformance/", import.meta.url);
+
+const CASES: Case[] = readdirSync(new URL("cases/", DIR))
+  .filter((name) => name.endsWith(".json"))
+  .sort()
+  .flatMap(
+    (name) => (JSON.parse(readFileSync(new URL(`cases/${name}`, DIR), "utf8")) as { cases: Case[] }).cases,
+  );
+
+// A namespace import, so an export that doesn't exist yet reads as `undefined`
+// and fails only its own cases instead of the whole file. This also makes the
+// runner a public-export check.
+const ERROR_CLASSES: Record<string, unknown> = {
+  InvalidClaimRefError: sdk.InvalidClaimRefError,
+  ClaimNotFoundError: sdk.ClaimNotFoundError,
+  ClaimRejectedError: sdk.ClaimRejectedError,
+  ClaimIntegrityError: sdk.ClaimIntegrityError,
+  ClaimCheckUnavailableError: sdk.ClaimCheckUnavailableError,
+  MissingHookIdError: sdk.MissingHookIdError,
+};
+
+function bodyBytes(body: Body | undefined): Buffer {
+  if (body === undefined) return Buffer.alloc(0);
+  if ("text" in body) return Buffer.from(body.text);
+  if ("base64" in body) return Buffer.from(body.base64, "base64");
+  if ("json" in body) return Buffer.from(JSON.stringify(body.json));
+  throw new Error(`unknown Body: ${JSON.stringify(body)}`);
+}
+
+function isUnreachable(spec: Gateway): spec is { unreachable: true } {
+  return "unreachable" in spec;
+}
+
+type Built = { client: sdk.ClaimCheckClient; close: () => Promise<void> };
+
+function makeClient(baseUrl: string, client: Client, fetchImpl?: typeof fetch): sdk.ClaimCheckClient {
+  return sdk.createClaimCheckClient({
+    baseUrl,
+    headers: client.headers,
+    timeoutMs: client.timeout_ms,
+    fetch: fetchImpl,
+  });
+}
+
+/** A real HTTP server standing in for a deployment's gateway: it answers every
+ * request with `spec` and records what it saw.
+ */
+async function startGateway(spec: Gateway, requests: Recorded[]): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  if (isUnreachable(spec)) {
+    return { baseUrl: "http://127.0.0.1:1", close: async () => {} };
+  }
+
+  const bytes = bodyBytes(spec.body);
+  const timers: NodeJS.Timeout[] = [];
+  const server = http.createServer((req, res) => {
+    requests.push({ method: req.method ?? "GET", path: req.url ?? "", headers: req.headers });
+    // A client that has already timed out may have closed the connection.
+    res.on("error", () => {});
+    const respond = () => {
+      res.writeHead(spec.status, { ...(spec.headers ?? {}), "content-length": String(bytes.length) });
+      res.end(bytes);
+    };
+    // A real delay: the `*.client.timeout` vectors need a response that
+    // outlives the client's deadline, which deterministic fake timers can't
+    // drive across a socket.
+    if (spec.delay_ms) timers.push(setTimeout(respond, spec.delay_ms));
+    else respond();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (typeof address !== "object" || address === null) throw new Error("no server address");
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      for (const timer of timers) clearTimeout(timer);
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    },
+  };
+}
+
+/** The injected-transport hook: serves `spec` in-process and records requests,
+ * with no server at all.
+ */
+function injectedFetch(spec: Gateway, requests: Recorded[]): typeof fetch {
+  const bytes = bodyBytes(isUnreachable(spec) ? undefined : spec.body);
+  const status = isUnreachable(spec) ? 200 : spec.status;
+  const headers = isUnreachable(spec) ? undefined : spec.headers;
+  return (async (input: RequestInfo | URL) => {
+    const request = input instanceof Request ? input : new Request(input);
+    requests.push({
+      method: request.method,
+      path: new URL(request.url).pathname,
+      headers: Object.fromEntries(request.headers),
+    });
+    return new Response(bytes, {
+      status,
+      headers: { ...(headers ?? {}), "content-length": String(bytes.length) },
+    });
+  }) as typeof fetch;
+}
+
+async function buildClient(gateway: Gateway, client: Client, requests: Recorded[]): Promise<Built> {
+  if (client.transport === "injected") {
+    return { client: makeClient("http://gateway.invalid", client, injectedFetch(gateway, requests)), close: async () => {} };
+  }
+  const started = await startGateway(gateway, requests);
+  return { client: makeClient(started.baseUrl, client), close: started.close };
+}
+
+async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
+  const input = c.input as {
+    ref?: string;
+    sha256?: string;
+    headers?: Record<string, string>;
+    client?: Client;
+    gateway?: Gateway;
+  };
+  switch (c.operation) {
+    case "parse_claim_ref": {
+      const parsed = sdk.parseClaimRef(input.ref as string);
+      return { tenant_id: parsed.tenantId, claim_id: parsed.claimId, path: parsed.path };
+    }
+    case "parse_headers": {
+      const parsed = sdk.parseHeaders(input.headers ?? {});
+      return {
+        id: parsed.id,
+        source: parsed.source,
+        seq: parsed.seq,
+        tenant: parsed.tenant,
+        content_type: parsed.contentType,
+      };
+    }
+    case "redeem": {
+      const built = await buildClient(input.gateway as Gateway, input.client ?? {}, requests);
+      try {
+        const bytes = await built.client.redeem(input.ref as string, input.sha256 as string);
+        return { body: { base64: bytes.toString("base64") } };
+      } finally {
+        await built.close();
+      }
+    }
+    case "health": {
+      const built = await buildClient(input.gateway as Gateway, input.client ?? {}, requests);
+      try {
+        return await built.client.health();
+      } finally {
+        await built.close();
+      }
+    }
+    default:
+      return assert.fail(`unknown conformance operation ${c.operation}`);
+  }
+}
+
+/** Bytes can't round-trip through JSON: both sides become base64. */
+function expectedOk(c: Case, expected: unknown): unknown {
+  if (c.operation !== "redeem") return expected;
+  const body = (expected as { body?: Body }).body;
+  return { body: { base64: bodyBytes(body).toString("base64") } };
+}
+
+function assertRequests(actual: Recorded[], expected: ExpectedRequest[]): void {
+  assert.equal(
+    actual.length,
+    expected.length,
+    `expected ${expected.length} requests, got ${actual.length}: ${JSON.stringify(actual)}`,
+  );
+  actual.forEach((got, i) => {
+    const want = expected[i];
+    assert.equal(got.method, want.method, `request ${i} method`);
+    assert.equal(got.path, want.path, `request ${i} path`);
+    for (const [name, value] of Object.entries(want.headers ?? {})) {
+      assert.equal(got.headers[name], value, `request ${i} header ${name}`);
+    }
+  });
+}
+
+async function runCase(c: Case): Promise<void> {
+  const requests: Recorded[] = [];
+  let ok: unknown;
+  let error: Record<string, unknown> | undefined;
+  try {
+    ok = await dispatch(c, requests);
+  } catch (err) {
+    const name = Object.keys(ERROR_CLASSES).find(
+      (n) => (err as { constructor?: unknown }).constructor === ERROR_CLASSES[n],
+    );
+    if (name === undefined) throw err;
+    error = { class: name };
+    for (const key of ["retryable", "status", "body"] as const) {
+      if (key in (err as object)) error[key] = (err as Record<string, unknown>)[key];
+    }
+  }
+
+  const expect = c.expect;
+  if ("ok" in expect) {
+    assert.equal(error, undefined, `expected ok, got ${JSON.stringify(error)}`);
+    assert.deepEqual(ok, expectedOk(c, expect.ok));
+  } else {
+    assert.ok(error, `expected error ${JSON.stringify(expect.error)}, got ok ${JSON.stringify(ok)}`);
+    const want = expect.error ?? {};
+    assert.equal(error.class, want.class, `expected ${String(want.class)}, got ${String(error.class)}`);
+    for (const [key, value] of Object.entries(want)) {
+      if (key === "class") continue;
+      assert.deepEqual(error[key], value, `${String(error.class)}.${key}`);
+    }
+  }
+
+  if (expect.requests) assertRequests(requests, expect.requests);
+}
+
+describe("conformance", () => {
+  for (const c of CASES) {
+    test(c.id, async () => runCase(c));
+  }
+});

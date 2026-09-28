@@ -6,6 +6,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `parse_headers` no longer raises `ValueError` for an `x-ankusa-seq` value
+  that `str.isdigit()` accepts but `int()` rejects (e.g. `²`); a sequence
+  number now requires all-ASCII digits and is `None` otherwise.
+
 ## [0.2.1] - 2026-09-28
 
 ### Changed
