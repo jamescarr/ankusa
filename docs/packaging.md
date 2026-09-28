@@ -147,10 +147,13 @@ release, many roles, config decides what boots. See
    ones (`BlobStore.LocalFS`, `WAL.DiskLog`, `Codec.Raw`, the verifiers), not
    because hand-rolling is preferred, but because a dependency that buys nothing
    is a liability.
-2. Scaffold a sibling directory: `mix.exs` with `{:ankusa, path: ".."}` plus
-   the real dependency; a `docker-compose.yml` if the adapter needs live infra
-   to test against. No config is needed to keep `ankusa`'s built-in demo
-   instance from booting: `autostart` defaults to `false`.
+2. Scaffold it: `mise run new:adapter <name> [--module Mod]` creates
+   `packages/ankusa_<name>/` (an `Ankusa.Sink.<Mod>` stub, its mix project
+   path-depending on `../ankusa`, README, CHANGELOG, and one failing test),
+   picked up by `mise run check`, CI, and the release tasks with no further
+   wiring. Add the real dependency, and a `docker-compose.yml` if the adapter
+   needs live infra to test against. No config is needed to keep `ankusa`'s
+   built-in demo instance from booting: `autostart` defaults to `false`.
 3. Implement the behaviour. Register any supervised process (a connection
    pool, a channel) through `Ankusa.Registry`/`Ankusa.via/2` exactly like the
    framework's own processes do: this is what lets the facade
