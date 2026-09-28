@@ -14,7 +14,7 @@
 // and URL-building.
 
 import amqp from "amqplib";
-import { ClaimCheckError, createClaimCheckClient, parseClaimRef } from "ankusa";
+import { ClaimCheckError, createClaimCheckClient, InvalidClaimRefError, parseClaimRef } from "ankusa";
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://guest:guest@localhost:5672";
 const EXCHANGE = process.env.RABBITMQ_EXCHANGE ?? "ankusa.events";
@@ -28,7 +28,9 @@ const claimCheck = createClaimCheckClient({ baseUrl: CLAIM_CHECK_URL });
 
 // The message `claim` field is a single claim-check ref URN, not a ticket
 // object:
-//   urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>
+//   urn:ankusa:claim:v1:<tenant>:<claim_id ULID>
+// and a message carrying `claim` also carries `sha256`, the lowercase hex
+// digest of the claim's bytes, which `redeem` verifies them against.
 type HookMessage = {
   id: string;
   source_id: string;
@@ -38,12 +40,16 @@ type HookMessage = {
   size: number;
   body_base64?: string;
   claim?: string;
+  sha256?: string;
 };
 
 async function resolveBody(msg: HookMessage): Promise<{ body: Buffer; via: string }> {
   if (msg.claim) {
-    const { objectId } = parseClaimRef(msg.claim);
-    return { body: await claimCheck.redeem(msg.claim), via: `claim:${objectId}` };
+    // Malformed: nothing to verify the bytes against. Non-retryable, so the
+    // consume loop dead-letters it like any other bad ref.
+    if (!msg.sha256) throw new InvalidClaimRefError("claim message has no sha256");
+    const { claimId } = parseClaimRef(msg.claim);
+    return { body: await claimCheck.redeem(msg.claim, msg.sha256), via: `claim:${claimId}` };
   }
   return { body: Buffer.from(msg.body_base64 ?? "", "base64"), via: "inline" };
 }

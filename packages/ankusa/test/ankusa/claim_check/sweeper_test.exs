@@ -2,7 +2,7 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
   use ExUnit.Case, async: false
 
   alias Ankusa.{ClaimCheck, Config, UUIDv7}
-  alias Ankusa.ClaimCheck.Sweeper
+  alias Ankusa.ClaimCheck.{Ref, Sweeper}
 
   setup do
     inst = :"sw#{System.unique_integer([:positive])}"
@@ -23,13 +23,15 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
     %{inst: inst}
   end
 
-  # A one-claim pack whose object id — and so its dt partition — dates from `ms`.
+  # A one-claim pack whose id — and so its dt partition — dates from `ms`.
   defp claim_at(inst, ms, body) do
-    object_id = UUIDv7.generate(ms)
+    pack_id = Ref.pack_id(ms, :crypto.strong_rand_bytes(8))
     id = UUIDv7.generate()
-    {:ok, refs} = ClaimCheck.check_in(inst, "acme", [%{id: id, body: body}], object_id: object_id)
-    refs[id]
+    {:ok, claims} = ClaimCheck.check_in(inst, "acme", [%{id: id, body: body}], pack_id: pack_id)
+    claims[id]
   end
+
+  defp redeem(inst, %{ref: ref, sha256: sha256}), do: ClaimCheck.redeem(inst, ref, sha256)
 
   defp days_ago(n), do: System.system_time(:millisecond) - n * 86_400_000
 
@@ -39,8 +41,8 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
 
     assert {1, 2} = Sweeper.sweep(inst)
 
-    assert {:error, :not_found} = ClaimCheck.redeem(inst, old)
-    assert {:ok, "fresh"} = ClaimCheck.redeem(inst, fresh)
+    assert {:error, :not_found} = redeem(inst, old)
+    assert {:ok, "fresh"} = redeem(inst, fresh)
   end
 
   test "keeps a claim for at least retention_days: the partition exactly on the cutoff day stays",
@@ -48,7 +50,7 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
     boundary = claim_at(inst, days_ago(7), "boundary")
 
     assert {0, 1} = Sweeper.sweep(inst)
-    assert {:ok, "boundary"} = ClaimCheck.redeem(inst, boundary)
+    assert {:ok, "boundary"} = redeem(inst, boundary)
   end
 
   test "never touches compaction segments under seg/", %{inst: inst} do

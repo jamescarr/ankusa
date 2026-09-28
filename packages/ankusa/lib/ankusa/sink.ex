@@ -17,7 +17,7 @@ defmodule Ankusa.Sink do
           required(:attempt) => pos_integer(),
           # the envelope's claim-check ref, when dispatch already checked its
           # body in (see `c:inline_max_bytes/1`)
-          optional(:claim) => Ankusa.ClaimCheck.Ref.t(),
+          optional(:claim) => Ankusa.ClaimCheck.claim(),
           optional(atom()) => term()
         }
 

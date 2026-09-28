@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from types import TracebackType
 from typing import Any, Self
@@ -14,10 +15,13 @@ from .errors import (
     ClaimIntegrityError,
     ClaimNotFoundError,
     ClaimRejectedError,
+    InvalidClaimRefError,
 )
 from .ref import ParsedClaimRef, parse_claim_ref
 
 __all__ = ["ClaimCheckClient"]
+
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 class ClaimCheckClient:
@@ -57,9 +61,10 @@ class ClaimCheckClient:
     ) -> None:
         self.close()
 
-    def redeem(self, ref: str) -> bytes:
-        """Redeem a claim-check ref: fetch its bytes and verify them against the
-        ref's own declared size and sha256 before returning. The gateway does
+    def redeem(self, ref: str, sha256: str) -> bytes:
+        """Redeem a claim-check ref: fetch its bytes and verify them against
+        ``sha256`` (the queue message's ``sha256`` field, 64-char lowercase
+        hex) before returning. The gateway does
         not check integrity itself -- see "Redeem a claim" in
         docs/claim-check.md -- so this end-to-end check always runs here.
 
@@ -67,8 +72,10 @@ class ClaimCheckClient:
         into dead-letter (``False``) or retry (``True``).
         """
         parsed = parse_claim_ref(ref)
+        if not isinstance(sha256, str) or _SHA256_PATTERN.fullmatch(sha256) is None:
+            raise InvalidClaimRefError(f"invalid claim sha256: {sha256!r}")
         body = self._fetch_bytes(parsed)
-        _verify_integrity(parsed, body)
+        _verify_integrity(parsed, sha256, body)
         return body
 
     def health(self) -> dict[str, Any]:
@@ -89,15 +96,14 @@ class ClaimCheckClient:
         return data
 
     def _fetch_bytes(self, parsed: ParsedClaimRef) -> bytes:
-        path = f"/v1/claims/{parsed.tenant_id}/{parsed.object_id}/{parsed.offset}/{parsed.length}"
         try:
-            response = self._http.get(path)
+            response = self._http.get(parsed.path)
         except httpx.HTTPError as err:
             raise ClaimCheckUnavailableError(f"claim-check gateway unreachable: {err}", err) from err
 
         status = response.status_code
         if status == 404:
-            raise ClaimNotFoundError(f"claim not found: {parsed.tenant_id}/{parsed.object_id}")
+            raise ClaimNotFoundError(f"claim not found: {parsed.tenant_id}/{parsed.claim_id}")
         if 400 <= status < 500:
             raise ClaimRejectedError(
                 f"claim-check rejected redeem ({status}): {_error_body(response)!r}", status, _error_body(response)
@@ -114,19 +120,10 @@ def _error_body(response: httpx.Response) -> Any:
         return response.text
 
 
-def _verify_integrity(parsed: ParsedClaimRef, body: bytes) -> None:
+def _verify_integrity(parsed: ParsedClaimRef, expected_sha256: str, body: bytes) -> None:
     """Integrity is checked here, end to end, by the actual redeemer -- never
-    trusted from the gateway. Same discipline ``Ankusa.ClaimCheck.redeem/2``
-    applies on the Elixir side.
+    trusted from the gateway. Same discipline ``Ankusa.ClaimCheck.redeem/3``
+    applies on the Elixir side. A matching sha256 implies the size.
     """
-    expected_length = int(parsed.length)
-    if len(body) != expected_length:
-        raise ClaimIntegrityError(
-            f"claim size mismatch for {parsed.tenant_id}/{parsed.object_id}: "
-            f"expected {expected_length}, got {len(body)}"
-        )
-    sha256 = hashlib.sha256(body).hexdigest()
-    if sha256 != parsed.sha256:
-        raise ClaimIntegrityError(f"claim sha256 mismatch for {parsed.tenant_id}/{parsed.object_id}")
-
-
+    if hashlib.sha256(body).hexdigest() != expected_sha256:
+        raise ClaimIntegrityError(f"claim sha256 mismatch for {parsed.tenant_id}/{parsed.claim_id}")

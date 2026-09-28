@@ -57,22 +57,32 @@ defmodule Ankusa.Sink.MessageTest do
     refute Map.has_key?(decoded, "body_base64")
 
     assert "urn:ankusa:claim:v1:t1:" <> _ = decoded["claim"]
-    assert {:ok, ^body} = ClaimCheck.redeem(ctx.instance, decoded["claim"])
+    assert decoded["sha256"] == Base.encode16(:crypto.hash(:sha256, body), case: :lower)
+    assert {:ok, ^body} = ClaimCheck.redeem(ctx.instance, decoded["claim"], decoded["sha256"])
   end
 
-  test "a ref dispatch already checked in is used as-is, with no second write", %{ctx: ctx} do
-    ref = %Ref{
-      tenant_id: "t1",
-      object_id: UUIDv7.generate(),
-      offset: 66,
-      length: 101,
+  test "checking the same envelope in again rewrites its object instead of adding one",
+       %{ctx: ctx} do
+    env = envelope(:crypto.strong_rand_bytes(101))
+
+    assert {:ok, first} = Message.encode(env, ctx, 100)
+    assert {:ok, second} = Message.encode(env, ctx, 100)
+
+    assert JSON.decode!(first)["claim"] == JSON.decode!(second)["claim"]
+    assert [_one] = Ankusa.BlobStore.list(ctx.instance, "claims/")
+  end
+
+  test "a claim dispatch already checked in is used as-is, with no second write", %{ctx: ctx} do
+    claim = %{
+      ref: %Ref{tenant_id: "t1", claim_id: Ref.claim_id(Ref.new_pack_id(), 3)},
       sha256: String.duplicate("0", 64)
     }
 
     env = envelope(:crypto.strong_rand_bytes(101))
 
-    assert {:ok, json} = Message.encode(env, Map.put(ctx, :claim, ref), 100)
-    assert JSON.decode!(json)["claim"] == Ref.to_string(ref)
+    assert {:ok, json} = Message.encode(env, Map.put(ctx, :claim, claim), 100)
+    decoded = JSON.decode!(json)
+    assert {decoded["claim"], decoded["sha256"]} == {Ref.to_string(claim.ref), claim.sha256}
     assert Ankusa.BlobStore.list(ctx.instance, "claims/") == []
   end
 

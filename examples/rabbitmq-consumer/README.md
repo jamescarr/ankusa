@@ -48,11 +48,13 @@ flowchart LR
 default, 8 KiB in this example so the demo's fat hook takes the claim path.
 It's base64-encoded in the message; anything larger is checked in through
 `Ankusa.ClaimCheck` and the message carries a claim ref URN instead:
-`{"claim": "urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>"}`.
+`{"claim": "urn:ankusa:claim:v1:<tenant>:<claim_id>", "sha256": "<hex>"}`,
+where `claim_id` is a ULID and `sha256` is the lowercase hex digest of the
+claim's bytes.
 RabbitMQ throughput and memory stay flat regardless of how large a webhook
 payload is. The worker redeems the claim (a
-`GET /v1/claims/<tenant>/<object_id>/<offset>/<length>` against
-`claim-check`, verified end to end against the ref's `sha256`) only when one
+`GET /v1/claims/<tenant>/<claim_id>` against `claim-check`, verified end
+to end against the message's `sha256`) only when one
 is present; otherwise it just decodes the inline body. Try both: the
 commands below send one of each.
 
@@ -87,13 +89,13 @@ Watch the worker print both:
 docker compose logs -f worker
 ```
 
-You'll see `via=inline` for the first and `via=claim:<object_id>` for the
+You'll see `via=inline` for the first and `via=claim:<claim_id>` for the
 second, followed by the actual decoded payload in each case: proof the
 claim ref round-trips through the real gateway and the real object store,
 not just that a message arrived. You can also redeem a claim by hand:
 
 ```sh
-curl http://localhost:4001/v1/claims/<tenant>/<object_id>/<offset>/<length>
+curl http://localhost:4001/v1/claims/<tenant>/<claim_id>
 ```
 
 Tear down:

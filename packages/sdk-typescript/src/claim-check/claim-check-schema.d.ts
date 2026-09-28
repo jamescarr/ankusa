@@ -4,28 +4,24 @@
  */
 
 export interface paths {
-    "/v1/claims/{tenant_id}/{object_id}/{offset}/{length}": {
+    "/v1/claims/{tenant_id}/{claim_id}": {
         parameters: {
             query?: never;
             header?: never;
             path: {
                 /** @description The claim's tenant. Never needs encoding. */
                 tenant_id: components["parameters"]["TenantId"];
-                /** @description The pack object's id, an RFC 9562 UUIDv7, lowercase and hyphenated. */
-                object_id: components["parameters"]["ObjectId"];
-                /** @description Byte offset of the claim inside the object. Decimal, no leading zeros. */
-                offset: components["parameters"]["Offset"];
-                /** @description Length of the claim in bytes. Decimal, no leading zeros, at least 1. */
-                length: components["parameters"]["Length"];
+                /** @description The claim's id, a canonical (uppercase) ULID. */
+                claim_id: components["parameters"]["ClaimId"];
             };
             cookie?: never;
         };
         /**
          * Read a claim's bytes
-         * @description Returns exactly `length` bytes starting at `offset` in the object.
-         *     Objects are written once and never rewritten, so a response is
-         *     cacheable forever. The server does not verify integrity: the reader
-         *     MUST check the bytes against the sha256 in its ref.
+         * @description Returns exactly the claim's bytes. Claims are written once and never
+         *     rewritten, so a response is cacheable forever. The server does not
+         *     verify integrity: the reader MUST check the bytes against the
+         *     message's `sha256`.
          */
         get: operations["readClaim"];
         put?: never;
@@ -59,18 +55,23 @@ export interface components {
     schemas: {
         /** @example acme */
         TenantId: string;
-        /** @example 0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10 */
-        UUIDv7: string;
+        /**
+         * @description A ULID in canonical form: 26 characters of uppercase Crockford
+         *     base32. The first 48 bits are the pack's creation time in Unix
+         *     milliseconds; the last 16 are the claim's position in its pack.
+         * @example 01M39VMD8RA3C5HR4RBV67Y002
+         */
+        ClaimId: string;
         /**
          * @description A claim-check ref, as carried in a queue message's `claim` field.
-         *     Segments: tenant, object id, offset, length, and the claim's sha256
-         *     (lowercase hex).
-         * @example urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-3bea8a9a07c1e8dcaa4c1b816815c35a29b4fb585ba6ecc70ea44840a794cfb3
+         *     Segments: tenant and claim id. The digest to check the bytes against
+         *     is the message's `sha256` field (lowercase hex), not part of the ref.
+         * @example urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
          */
         Ref: string;
         Error: {
             /** @enum {string} */
-            error: "invalid_tenant" | "invalid_id" | "invalid_range" | "not_found" | "store_unavailable";
+            error: "invalid_tenant" | "invalid_id" | "not_found" | "store_unavailable";
         };
         Health: {
             /** @constant */
@@ -78,7 +79,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description `invalid_tenant`, `invalid_id`, or `invalid_range` (a malformed offset or length). Permanent. */
+        /** @description `invalid_tenant` or `invalid_id` (not a canonical ULID). Permanent. */
         BadRequest: {
             headers: {
                 [name: string]: unknown;
@@ -87,17 +88,8 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `not_found`: no such object, or no such route. Permanent. Dead-letter, do not requeue. */
+        /** @description `not_found`: no such claim (expired by retention, never written, or no such route). Permanent. Dead-letter, do not requeue. */
         NotFound: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["Error"];
-            };
-        };
-        /** @description `invalid_range`: the range runs past the end of the object. Permanent. */
-        RangeNotSatisfiable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -120,12 +112,8 @@ export interface components {
     parameters: {
         /** @description The claim's tenant. Never needs encoding. */
         TenantId: components["schemas"]["TenantId"];
-        /** @description The pack object's id, an RFC 9562 UUIDv7, lowercase and hyphenated. */
-        ObjectId: components["schemas"]["UUIDv7"];
-        /** @description Byte offset of the claim inside the object. Decimal, no leading zeros. */
-        Offset: string;
-        /** @description Length of the claim in bytes. Decimal, no leading zeros, at least 1. */
-        Length: string;
+        /** @description The claim's id, a canonical (uppercase) ULID. */
+        ClaimId: components["schemas"]["ClaimId"];
     };
     requestBodies: never;
     headers: never;
@@ -140,12 +128,8 @@ export interface operations {
             path: {
                 /** @description The claim's tenant. Never needs encoding. */
                 tenant_id: components["parameters"]["TenantId"];
-                /** @description The pack object's id, an RFC 9562 UUIDv7, lowercase and hyphenated. */
-                object_id: components["parameters"]["ObjectId"];
-                /** @description Byte offset of the claim inside the object. Decimal, no leading zeros. */
-                offset: components["parameters"]["Offset"];
-                /** @description Length of the claim in bytes. Decimal, no leading zeros, at least 1. */
-                length: components["parameters"]["Length"];
+                /** @description The claim's id, a canonical (uppercase) ULID. */
+                claim_id: components["parameters"]["ClaimId"];
             };
             cookie?: never;
         };
@@ -164,7 +148,6 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
-            416: components["responses"]["RangeNotSatisfiable"];
             503: components["responses"]["StoreUnavailable"];
         };
     };

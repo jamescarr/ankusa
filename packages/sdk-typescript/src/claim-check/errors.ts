@@ -5,7 +5,7 @@
  * status codes to get that right.
  *
  * Non-retryable: the ref is malformed, the gateway said `404`/other `4xx`, or
- * the bytes that came back don't match the ref's declared size/sha256.
+ * the bytes that came back don't match the expected sha256.
  * Retryable: the gateway said `5xx`/`503`, or the request never completed
  * (network error, timeout).
  */
@@ -13,7 +13,10 @@ export abstract class ClaimCheckError extends Error {
   abstract readonly retryable: boolean;
 }
 
-/** The ref string isn't a `urn:ankusa:claim:v1:...` claim-check ref. */
+/**
+ * The ref string isn't a `urn:ankusa:claim:v1:...` claim-check ref, or the
+ * expected sha256 passed to `redeem()` isn't 64 lowercase hex chars.
+ */
 export class InvalidClaimRefError extends ClaimCheckError {
   readonly retryable = false;
 }
@@ -23,7 +26,7 @@ export class ClaimNotFoundError extends ClaimCheckError {
   readonly retryable = false;
 }
 
-/** The gateway rejected the request (`400`, `416`, or any other non-404 `4xx`). */
+/** The gateway rejected the request (`400` or any other non-404 `4xx`). */
 export class ClaimRejectedError extends ClaimCheckError {
   readonly retryable = false;
 
@@ -37,8 +40,7 @@ export class ClaimRejectedError extends ClaimCheckError {
 }
 
 /**
- * The bytes the gateway returned don't match the ref: wrong length, or the
- * sha256 doesn't match. The gateway itself never checks this — see
+ * The bytes the gateway returned don't match the expected sha256. The gateway itself never checks this — see
  * "Redeem a claim" in docs/claim-check.md — so this is the reader's own
  * end-to-end check, always run before `redeem()` returns.
  */

@@ -24,27 +24,32 @@ The machine-readable contract is
 
 ## The reference
 
-A queue message carries either `body_base64` or a `claim`: one reference
-string ([full message format](delivery.md#sinkrabbitmq--queue-delivery)):
+A queue message carries either `body_base64` or a `claim` plus its `sha256`
+([full message format](delivery.md#sinkrabbitmq--queue-delivery)):
+
+```json
+{"claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+ "sha256": "3bea8a9a07c1e8dcaa4c1b816815c35a29b4fb585ba6ecc70ea44840a794cfb3"}
+```
 
 ```
-urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-3bea8a9a07c1e8dcaa4c1b816815c35a29b4fb585ba6ecc70ea44840a794cfb3
-                    └tenant┘└────────── object id ───────────┘└offset┘└length┘└───────────────────────── sha256 ────────────────────────────┘
+urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
+                    └┬─┘ └─────────┬──────────────┘
+                   tenant       claim id
 ```
 
-| Segment | Meaning |
+| Field | Meaning |
 | --- | --- |
 | `tenant` | `[A-Za-z0-9_-]{1,64}`. The same string in the reference, the URL, and the storage key, no encoding anywhere. |
-| `object id` | The id of the object holding the claim. Several claims share one object (see [Write cost](#write-cost)). |
-| `offset`, `length` | Where the claim's bytes sit inside that object. |
-| `sha256` | Lowercase hex digest of the claim's bytes. Always present; the reader checks it. |
+| `claim id` | A [ULID](https://github.com/ulid/spec) in canonical form: 26 uppercase Crockford base32 characters. The first 48 bits are the time the claim's pack was written; the last 16 are the claim's position in that pack. Several claims share one pack (see [Write cost](#write-cost)). |
+| `sha256` | A message field next to `claim`, not part of the reference: the lowercase hex digest of the claim's bytes. The reader checks it. |
 
 A reference grants nothing and names no bucket or URL. You turn it into a
-request by dropping the prefix and the digest:
+request by dropping the prefix:
 
 ```
-urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-...
-                                   → GET /v1/claims/acme/0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10/66/3145728
+urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
+                    → GET /v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002
 ```
 
 ## Run the gateway
@@ -89,21 +94,20 @@ admin API.
 ## Redeem a claim
 
 ```
-GET /v1/claims/{tenant}/{object_id}/{offset}/{length}
+GET /v1/claims/{tenant}/{claim_id}
 ```
 
-A `200` returns exactly `length` bytes at `offset`, as
-`application/octet-stream`, with `cache-control: public, max-age=31536000,
-immutable`. Objects are written once and never rewritten, so they're safe to
-cache forever.
+A `200` returns exactly the claim's bytes, as `application/octet-stream`,
+with `cache-control: public, max-age=31536000, immutable`. Claims are written
+once and never rewritten, so they're safe to cache forever.
 
 **The gateway doesn't check integrity**: the path carries no digest, so only
-the holder of the reference can. Compare the bytes' sha256 against the
-reference's before you use them, and treat a mismatch as permanent.
+the holder of the message can. Compare the bytes' sha256 against the
+message's `sha256` before you use them, and treat a mismatch as permanent.
 
 ```sh
-curl -fsS http://claim-check:4001/v1/claims/acme/0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10/66/3145728 -o body.bin
-shasum -a 256 body.bin    # must equal the sha256 in the reference
+curl -fsS http://claim-check:4001/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002 -o body.bin
+shasum -a 256 body.bin    # must equal the message's sha256
 ```
 
 ### Responses
@@ -113,11 +117,10 @@ Errors are JSON: `{"error": "not_found"}`.
 | Status | `error` | Cause | Retry? |
 | --- | --- | --- | --- |
 | `200` |  | the bytes, cacheable forever |  |
-| `400` | `invalid_tenant`, `invalid_id`, `invalid_range` | tenant outside `[A-Za-z0-9_-]{1,64}`; id not a lowercase UUIDv7; a malformed offset or length | No, a bug |
-| `404` | `not_found` | no such object: expired by retention, or never written | No, dead-letter |
-| `416` | `invalid_range` | the range runs past the end of a real object | No, a bug |
+| `400` | `invalid_tenant`, `invalid_id` | tenant outside `[A-Za-z0-9_-]{1,64}`; claim id not a canonical ULID | No, a bug |
+| `404` | `not_found` | no such claim: expired by retention, or never written | No, dead-letter |
 | `503` | `store_unavailable` | the object store is unreachable; `Retry-After: 1` | Yes |
-|  |  | bytes don't match the reference's sha256 (your check) | No, dead-letter |
+|  |  | bytes don't match the message's sha256 (your check) | No, dead-letter |
 
 Redeeming doesn't delete. Several consumers can redeem one claim, every queue
 bound to a fanout exchange, say, and claims go away only through
@@ -128,7 +131,7 @@ bound to a fanout exchange, say, and claims go away only through
 The whole integration surface for auth is one method and one path shape:
 
 ```
-^/v1/claims/[A-Za-z0-9_-]{1,64}/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/(0|[1-9][0-9]{0,11})/[1-9][0-9]{0,11}$
+^/v1/claims/[A-Za-z0-9_-]{1,64}/[0-7][0-9A-HJKMNP-TV-Z]{25}$
 ```
 
 Anything else can be refused at the edge. The tenant is a path segment, so an
@@ -142,8 +145,8 @@ payload to another tenant's request.
 [`packages/sdk-typescript`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-typescript)
 (npm package `ankusa`) wraps a client generated from the spec with
 `openapi-typescript` + `openapi-fetch`: it parses a ref, redeems it, and
-verifies the bytes against the ref's own size and sha256 before returning
-them: the gateway does not check this itself. It's the framework's own
+verifies the bytes against the message's sha256 before returning them: the
+gateway does not check this itself. It's the framework's own
 umbrella client package: the claim-check client is the first piece in it.
 
 ```sh
@@ -156,9 +159,9 @@ import { ClaimCheckError, createClaimCheckClient } from "ankusa";
 
 const claimCheck = createClaimCheckClient({ baseUrl: process.env.CLAIM_CHECK_URL ?? "http://localhost:4001" });
 
-// claim is the URN from the queue message.
-async function redeemClaim(claim: string): Promise<Buffer> {
-  return claimCheck.redeem(claim);
+// claim and sha256 are the queue message's fields.
+async function redeemClaim(claim: string, sha256: string): Promise<Buffer> {
+  return claimCheck.redeem(claim, sha256);
 }
 ```
 
@@ -176,9 +179,9 @@ depend on it.
 [`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python)
 (PyPI package `ankusa`) ships a `ClaimCheckClient` built on
 [`httpx`](https://www.python-httpx.org/) against the same contract: it
-parses a ref, redeems it, and verifies the bytes against the ref's own size
-and sha256 before returning them, the same end-to-end check the TypeScript
-client runs and the gateway itself does not. It's the umbrella client
+parses a ref, redeems it, and verifies the bytes against the message's sha256
+before returning them, the same end-to-end check the TypeScript client runs
+and the gateway itself does not. It's the umbrella client
 package for non-Elixir consumers: the claim-check client is the first piece
 in it, alongside a webhook header-parsing helper for the HTTP-sink side.
 
@@ -194,9 +197,9 @@ from ankusa import ClaimCheckClient, ClaimCheckError
 
 claim_check = ClaimCheckClient(os.environ.get("CLAIM_CHECK_URL", "http://localhost:4001"))
 
-# claim is the URN from the queue message.
-def redeem_claim(claim: str) -> bytes:
-    return claim_check.redeem(claim)
+# claim and sha256 are the queue message's fields.
+def redeem_claim(claim: str, sha256: str) -> bytes:
+    return claim_check.redeem(claim, sha256)
 ```
 
 Every failure is a `ClaimCheckError` subclass with a `retryable` attribute:
@@ -229,6 +232,12 @@ levers keep writes cheap:
   bigger than `claim_check.pack_max_bytes` (16 MiB default) splits into several
   objects; a body bigger than that gets an object of its own.
 
+Packs never mix tenants, so the write count is one per *tenant present* in a
+batch. A tenant with thousands of distinct values, an account id say, keeps
+every tenant's claims in objects of its own, which is what lets you delete
+one tenant's data by deleting one prefix; the cost is that a batch spread
+across 128 accounts is 128 writes, the "one object per claim" column below.
+
 | Fat hooks/day | One object per claim | 32 claims per object |
 | --- | --- | --- |
 | 100k | ~$15/month | ~$0.47/month |
@@ -237,24 +246,34 @@ levers keep writes cheap:
 
 ### Pack format
 
-Every claim object is an uncompressed ZIP: one entry per claim, named by the
-claim's id, plus a `manifest.json` listing each claim's offset, length, digest,
-content type, and receive time. The gateway never parses it, a reference's
-offset points straight at one entry's bytes, but `unzip`, Python's `zipfile`,
-Java, Go, and Erlang all read the pack with no Ankusa code. It's the same
-end-of-file index Parquet uses. Entries stay uncompressed because a compressed
-entry has no raw byte range to serve.
+Every claim object is an uncompressed ZIP, in this order:
+
+1. `index.bin`: one 8-byte row per claim, in position order: the byte offset
+   of the claim's bytes in the pack and their length, each a big-endian
+   unsigned 32-bit integer.
+2. One entry per claim, named by its claim id.
+3. `manifest.json`: each claim's claim id, hook id, offset, length, digest,
+   content type, and receive time.
+
+The gateway serves a claim with two ranged reads: the start of the pack
+through the claim's index row, then the claim's bytes. The index comes first
+so no read needs the pack's size. `unzip`, Python's `zipfile`, Java, Go, and
+Erlang all read the pack with no Ankusa code, through the ZIP central
+directory at the end. Entries stay uncompressed because a compressed entry
+has no raw byte range to serve.
 
 ## Storage layout
 
 Claims live at
 
 ```
-claims/tenant=acme/dt=2026-09-24/0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10
+claims/tenant=acme/dt=2026-09-24/01M39VMD8RA3C5HR4RBV67Y000
 ```
 
-in the storage bucket, beside the `seg/` segments. `dt` is the UTC date inside
-the object id's UUIDv7 timestamp, so the key is computable from the reference.
+in the storage bucket, beside the `seg/` segments. The last segment is the
+pack id: any of its claim ids with the position bits (the last three
+characters, plus the lowest bit of the fourth-from-last) zeroed. `dt` is the
+UTC date of the id's timestamp, so the key is computable from the reference.
 Hive-style `key=value` folders are what Spark and Databricks partition
 discovery, BigQuery, and Athena read without configuration.
 
@@ -296,9 +315,10 @@ Those platforms need three things:
   no encoding.
 - **Hex digests.** Spark and Snowflake `sha2(x, 256)`, `sha256sum`, and
   `hashlib.hexdigest()` all produce hex, so a reader compares directly.
-- **A flat `claim` string** in the message, plus the offset and length for a
-  packed claim (Spark's `binaryFile` source plus Python's `zipfile` in a UDF, or
-  slice with `substring(content, offset + 1, length)`).
+- **A flat `claim` string** in the message whose claim id is also the claim's
+  entry name in its pack (Spark's `binaryFile` source plus Python's
+  `zipfile` in a UDF), and a `manifest.json` with each claim's offset and
+  length to slice with `substring(content, offset + 1, length)`.
 
 No connectors or per-platform guides ship with Ankusa; this is the contract they
 read.
@@ -317,11 +337,12 @@ read.
 
 Embedding the library? `Ankusa.ClaimCheck.check_in/4` checks a batch's claims in
 for one tenant, `check_in_batch/2` groups many tenants and splits packs, and
-`redeem/2` fetches a reference's bytes and runs the sha256 check for you:
+`redeem/3` fetches a reference's bytes and runs the sha256 check for you:
 
 ```elixir
-{:ok, refs} = Ankusa.ClaimCheck.check_in(:default, "acme", [%{id: id, body: body}])
-{:ok, ^body} = Ankusa.ClaimCheck.redeem(:default, refs[id])
+{:ok, claims} = Ankusa.ClaimCheck.check_in(:default, "acme", [%{id: id, body: body}])
+%{ref: ref, sha256: sha256} = claims[id]
+{:ok, ^body} = Ankusa.ClaimCheck.redeem(:default, ref, sha256)
 ```
 
 Config keys: [`configuration.md`](configuration.md#library-configuration-elixir).

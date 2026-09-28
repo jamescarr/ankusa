@@ -6,9 +6,13 @@ import {
   ClaimIntegrityError,
   ClaimNotFoundError,
   ClaimRejectedError,
+  InvalidClaimRefError,
 } from "./errors.js";
 import { parseClaimRef, type ParsedClaimRef } from "./ref.js";
 import type { paths } from "./claim-check-schema.d.ts";
+
+/** The `sha256` field of a queue message: 64 lowercase hex chars. */
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 export type ClaimCheckClientOptions = {
   /** The `:claim_check` role's listener, e.g. `http://localhost:4001`. */
@@ -25,15 +29,17 @@ export type ClaimCheckClientOptions = {
 
 export type ClaimCheckClient = {
   /**
-   * Redeem a claim-check ref: fetch its bytes and verify them against the
-   * ref's own declared size and sha256 before returning. The gateway does
+   * Redeem a claim-check ref: fetch its bytes and verify them against
+   * `sha256` (the lowercase hex digest carried next to `claim` on the queue
+   * message) before returning. A malformed ref or sha256 is rejected with
+   * `InvalidClaimRefError` before any request is made. The gateway does
    * not check integrity itself — see "Redeem a claim" in
    * docs/claim-check.md — so this end-to-end check always runs here.
    *
    * Rejects with a `ClaimCheckError`; check `.retryable` to sort a failure
    * into dead-letter (`false`) or retry (`true`).
    */
-  redeem(ref: string): Promise<Buffer>;
+  redeem(ref: string, sha256: string): Promise<Buffer>;
   /** Liveness probe: `GET /health`. */
   health(): Promise<{ status: "ok" }>;
 };
@@ -45,21 +51,24 @@ export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimC
     fetch: options.fetch,
   });
 
-  async function redeem(ref: string): Promise<Buffer> {
+  async function redeem(ref: string, sha256: string): Promise<Buffer> {
     const parsed = parseClaimRef(ref);
+    if (typeof sha256 !== "string" || !SHA256_PATTERN.test(sha256)) {
+      throw new InvalidClaimRefError(`invalid claim sha256: ${sha256}`);
+    }
     const bytes = await fetchBytes(parsed);
-    verifyIntegrity(parsed, bytes);
+    verifyIntegrity(parsed, sha256, bytes);
     return bytes;
   }
 
   async function fetchBytes(parsed: ParsedClaimRef): Promise<Buffer> {
-    const { tenantId: tenant_id, objectId: object_id, offset, length } = parsed;
+    const { tenantId: tenant_id, claimId: claim_id } = parsed;
     let data: ArrayBuffer | undefined;
     let status: number;
     let errorBody: unknown;
     try {
-      const result = await http.GET("/v1/claims/{tenant_id}/{object_id}/{offset}/{length}", {
-        params: { path: { tenant_id, object_id, offset, length } },
+      const result = await http.GET("/v1/claims/{tenant_id}/{claim_id}", {
+        params: { path: { tenant_id, claim_id } },
         parseAs: "arrayBuffer",
       });
       data = result.data as ArrayBuffer | undefined;
@@ -70,7 +79,7 @@ export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimC
     }
 
     if (status === 404) {
-      throw new ClaimNotFoundError(`claim not found: ${tenant_id}/${object_id}`);
+      throw new ClaimNotFoundError(`claim not found: ${tenant_id}/${claim_id}`);
     }
     if (status >= 400 && status < 500) {
       throw new ClaimRejectedError(`claim-check rejected redeem (${status}): ${JSON.stringify(errorBody)}`, status, errorBody);
@@ -99,18 +108,12 @@ export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimC
 
 /**
  * Integrity is checked here, end to end, by the actual redeemer — never
- * trusted from the gateway. Same discipline `Ankusa.ClaimCheck.redeem/2`
+ * trusted from the gateway. Same discipline `Ankusa.ClaimCheck.redeem/3`
  * applies on the Elixir side.
  */
-function verifyIntegrity(parsed: ParsedClaimRef, bytes: Buffer): void {
-  const expectedLength = Number(parsed.length);
-  if (bytes.length !== expectedLength) {
-    throw new ClaimIntegrityError(
-      `claim size mismatch for ${parsed.tenantId}/${parsed.objectId}: expected ${expectedLength}, got ${bytes.length}`,
-    );
-  }
+function verifyIntegrity(parsed: ParsedClaimRef, expectedSha256: string, bytes: Buffer): void {
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  if (sha256 !== parsed.sha256) {
-    throw new ClaimIntegrityError(`claim sha256 mismatch for ${parsed.tenantId}/${parsed.objectId}`);
+  if (sha256 !== expectedSha256) {
+    throw new ClaimIntegrityError(`claim sha256 mismatch for ${parsed.tenantId}/${parsed.claimId}`);
   }
 }

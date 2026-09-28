@@ -93,7 +93,7 @@ Two independent namespaces share one `BlobStore` by default and never
 collide: `seg/...` (compaction, written by `Ankusa.Storage.Compactor`, every
 hook) and `claims/...` (`Ankusa.ClaimCheck`, packed per tenant per dispatch
 batch, one object holding many claims under
-`claims/tenant=<t>/dt=<day>/<object_id>`). Retention differs per namespace
+`claims/tenant=<t>/dt=<day>/<pack_id>`). Retention differs per namespace
 too. See [`claim-check.md#retention`](claim-check.md#retention).
 
 | Adapter | Deps | Notes |

@@ -63,7 +63,7 @@ flowchart LR
     W -->|inline body| H[handleHook]
     W -->|"claim ref: GET /v1/claims/..."| CC[claim-check :4001]
     CC -.-> S[(S3 / floci)]
-    CC -->|"bytes; worker checks length + sha256"| H
+    CC -->|"bytes; worker checks sha256"| H
     W -->|permanent failure| D[("ankusa-worker-dlq.fifo")]
 ```
 
@@ -92,12 +92,13 @@ flowchart LR
 
 Same contract as the RabbitMQ example, because it's the same message
 (`Ankusa.Sink.Message`): the worker prints `via=inline` or
-`via=claim:<object_id>`.
+`via=claim:<claim_id>`.
 
 - **Small** (≤ `INLINE_MAX_BYTES`, 8 KiB here): base64 in the record value.
-- **Fat**: checked in to S3, claim ref URN in the record value. The worker
-  GETs `/v1/claims/<tenant>/<object_id>/<offset>/<length>` (no auth, the
-  gateway is open), then verifies the length and `sha256` itself: integrity
+- **Fat**: checked in to S3; the record value carries a claim ref URN
+  (`urn:ankusa:claim:v1:<tenant>:<claim_id>`, a ULID claim id) plus the
+  bytes' `sha256`. The worker GETs `/v1/claims/<tenant>/<claim_id>` (no
+  auth, the gateway is open), then verifies the `sha256` itself: integrity
   is checked where the bytes are used, never trusted from the gateway.
 
 ## Ordering and delivery, honestly
@@ -140,7 +141,7 @@ Watch it land:
 ```sh
 docker compose logs -f worker
 # hook id=01a0... source=demo tenant=default
-# group=default/demo size=24919 via=claim:01a0...
+# group=default/demo size=24919 via=claim:01M3...
 ```
 
 Tear down (including the topic, queues, and bucket):

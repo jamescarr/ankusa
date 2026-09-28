@@ -9,12 +9,13 @@ info:
 
     A claim-check ref is one string:
 
-        urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>
+        urn:ankusa:claim:v1:<tenant>:<claim_id>
 
     A reader turns it into a request by dropping the `urn:ankusa:claim:v1:`
-    prefix and the `sha256-` digest, and joining the rest with `/` under
-    `/v1/claims/`. The gateway returns the bytes; the reader checks them
-    against the digest, which is never sent to the gateway.
+    prefix and joining the two segments with `/` under `/v1/claims/`. The
+    gateway returns the bytes; the reader checks them against the `sha256`
+    the queue message carries next to the ref, which is never sent to the
+    gateway.
 
     This API performs no authentication or authorization. Deployers secure it
     at their own boundary (a service mesh, Envoy, an API gateway, network
@@ -31,21 +32,19 @@ tags:
   - name: operations
     description: Health.
 paths:
-  /v1/claims/{tenant_id}/{object_id}/{offset}/{length}:
+  /v1/claims/{tenant_id}/{claim_id}:
     parameters:
       - $ref: '#/components/parameters/TenantId'
-      - $ref: '#/components/parameters/ObjectId'
-      - $ref: '#/components/parameters/Offset'
-      - $ref: '#/components/parameters/Length'
+      - $ref: '#/components/parameters/ClaimId'
     get:
       operationId: readClaim
       tags: [claims]
       summary: Read a claim's bytes
       description: |
-        Returns exactly `length` bytes starting at `offset` in the object.
-        Objects are written once and never rewritten, so a response is
-        cacheable forever. The server does not verify integrity: the reader
-        MUST check the bytes against the sha256 in its ref.
+        Returns exactly the claim's bytes. Claims are written once and never
+        rewritten, so a response is cacheable forever. The server does not
+        verify integrity: the reader MUST check the bytes against the
+        message's `sha256`.
       responses:
         '200':
           description: The claim's bytes.
@@ -63,8 +62,6 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
-        '416':
-          $ref: '#/components/responses/RangeNotSatisfiable'
         '503':
           $ref: '#/components/responses/StoreUnavailable'
   /health:
@@ -88,47 +85,35 @@ components:
       description: The claim's tenant. Never needs encoding.
       schema:
         $ref: '#/components/schemas/TenantId'
-    ObjectId:
-      name: object_id
+    ClaimId:
+      name: claim_id
       in: path
       required: true
-      description: The pack object's id, an RFC 9562 UUIDv7, lowercase and hyphenated.
+      description: The claim's id, a canonical (uppercase) ULID.
       schema:
-        $ref: '#/components/schemas/UUIDv7'
-    Offset:
-      name: offset
-      in: path
-      required: true
-      description: Byte offset of the claim inside the object. Decimal, no leading zeros.
-      schema:
-        type: string
-        pattern: '^(0|[1-9][0-9]{0,11})$'
-    Length:
-      name: length
-      in: path
-      required: true
-      description: Length of the claim in bytes. Decimal, no leading zeros, at least 1.
-      schema:
-        type: string
-        pattern: '^[1-9][0-9]{0,11}$'
+        $ref: '#/components/schemas/ClaimId'
   schemas:
     TenantId:
       type: string
       pattern: '^[A-Za-z0-9_-]{1,64}$'
       examples: ['acme']
-    UUIDv7:
+    ClaimId:
       type: string
-      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-      examples: ['0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10']
+      description: |
+        A ULID in canonical form: 26 characters of uppercase Crockford
+        base32. The first 48 bits are the pack's creation time in Unix
+        milliseconds; the last 16 are the claim's position in its pack.
+      pattern: '^[0-7][0-9A-HJKMNP-TV-Z]{25}$'
+      examples: ['01M39VMD8RA3C5HR4RBV67Y002']
     Ref:
       type: string
       description: |
         A claim-check ref, as carried in a queue message's `claim` field.
-        Segments: tenant, object id, offset, length, and the claim's sha256
-        (lowercase hex).
-      pattern: '^urn:ankusa:claim:v1:[A-Za-z0-9_-]{1,64}:[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:(0|[1-9][0-9]{0,11}):[1-9][0-9]{0,11}:sha256-[0-9a-f]{64}$'
+        Segments: tenant and claim id. The digest to check the bytes against
+        is the message's `sha256` field (lowercase hex), not part of the ref.
+      pattern: '^urn:ankusa:claim:v1:[A-Za-z0-9_-]{1,64}:[0-7][0-9A-HJKMNP-TV-Z]{25}$'
       examples:
-        - urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:3145728:sha256-3bea8a9a07c1e8dcaa4c1b816815c35a29b4fb585ba6ecc70ea44840a794cfb3
+        - urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
     Error:
       type: object
       required: [error]
@@ -138,7 +123,6 @@ components:
           enum:
             - invalid_tenant
             - invalid_id
-            - invalid_range
             - not_found
             - store_unavailable
     Health:
@@ -149,19 +133,13 @@ components:
           const: ok
   responses:
     BadRequest:
-      description: '`invalid_tenant`, `invalid_id`, or `invalid_range` (a malformed offset or length). Permanent.'
+      description: '`invalid_tenant` or `invalid_id` (not a canonical ULID). Permanent.'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     NotFound:
-      description: '`not_found`: no such object, or no such route. Permanent. Dead-letter, do not requeue.'
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
-    RangeNotSatisfiable:
-      description: '`invalid_range`: the range runs past the end of the object. Permanent.'
+      description: '`not_found`: no such claim (expired by retention, never written, or no such route). Permanent. Dead-letter, do not requeue.'
       content:
         application/json:
           schema:

@@ -158,16 +158,16 @@ Message shape (`Ankusa.Sink.Message`, byte-identical for `Sink.Kafka`):
 // fat payload
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728,
- "claim": "urn:ankusa:claim:v1:acme:0199a1c2-...:66:3145728:sha256-9f86d0..."}
+ "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002", "sha256": "3bea8a..."}
 ```
 
 `"v"` changes only when an existing field changes meaning or disappears;
 consumers must ignore keys they don't know.
 
-A consumer redeems `claim` with `GET /v1/claims/:tenant/:object_id/:offset/:length`
-against the claim-check gateway and checks the bytes against the reference's
-sha256. See [`claim-check.md`](claim-check.md#redeem-a-claim). (An Elixir
-consumer can call `Ankusa.ClaimCheck.redeem/2`, which does both.)
+A consumer redeems `claim` with `GET /v1/claims/:tenant/:claim_id` against the
+claim-check gateway and checks the bytes against the message's `sha256`. See
+[`claim-check.md`](claim-check.md#redeem-a-claim). (An Elixir consumer can
+call `Ankusa.ClaimCheck.redeem/3`, which does both.)
 
 **Connection lifecycle**: one supervised connection + confirm-mode channel
 per `(instance, exchange)`, started on demand by the first `deliver/3` call,

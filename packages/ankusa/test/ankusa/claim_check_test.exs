@@ -35,49 +35,62 @@ defmodule Ankusa.ClaimCheckTest do
     end
   end
 
-  test "check_in/4 then redeem/2 round-trips every claim in a pack", %{inst: inst} do
+  defp redeem(inst, %{ref: ref, sha256: sha256}), do: ClaimCheck.redeem(inst, ref, sha256)
+
+  test "check_in/4 then redeem/3 round-trips every claim in a pack", %{inst: inst} do
     a = item("acme", :crypto.strong_rand_bytes(100_000))
     b = item("acme", "small")
+    c = item("acme", "")
 
-    assert {:ok, refs} = ClaimCheck.check_in(inst, "acme", [a, b])
+    assert {:ok, claims} = ClaimCheck.check_in(inst, "acme", [a, b, c])
 
-    assert {:ok, a.body} == ClaimCheck.redeem(inst, refs[a.id])
-    assert {:ok, b.body} == ClaimCheck.redeem(inst, refs[b.id])
+    for it <- [a, b, c] do
+      assert {:ok, it.body} == redeem(inst, claims[it.id])
+      assert claims[it.id].sha256 == Base.encode16(:crypto.hash(:sha256, it.body), case: :lower)
+    end
+
     # a ref's URN string redeems the same way
-    assert {:ok, b.body} == ClaimCheck.redeem(inst, Ref.to_string(refs[b.id]))
-    assert refs[a.id].object_id == refs[b.id].object_id
+    assert {:ok, b.body} ==
+             ClaimCheck.redeem(inst, Ref.to_string(claims[b.id].ref), claims[b.id].sha256)
+
+    # one pack, claims numbered in input order
+    pack_ids =
+      for it <- [a, b, c] do
+        {:ok, pack_id, index} = Ref.locate(claims[it.id].ref.claim_id)
+        {pack_id, index}
+      end
+
+    assert [{pack_id, 0}, {pack_id, 1}, {pack_id, 2}] = pack_ids
   end
 
-  test "a tampered object fails redeem with :integrity_mismatch", %{inst: inst} do
+  test "a digest that doesn't match the bytes fails redeem with :integrity_mismatch", %{
+    inst: inst
+  } do
     a = item("acme", "original bytes")
-    {:ok, %{} = refs} = ClaimCheck.check_in(inst, "acme", [a])
-    ref = refs[a.id]
+    {:ok, claims} = ClaimCheck.check_in(inst, "acme", [a])
+    %{ref: ref, sha256: sha256} = claims[a.id]
 
     {:ok, packed} = Ankusa.BlobStore.get(inst, Ref.key(ref))
     tampered = :binary.replace(packed, "original", "ORIGINAL")
     :ok = Ankusa.BlobStore.put(inst, Ref.key(ref), tampered)
 
-    assert {:error, :integrity_mismatch} = ClaimCheck.redeem(inst, ref)
+    assert {:error, :integrity_mismatch} = ClaimCheck.redeem(inst, ref, sha256)
+
+    :ok = Ankusa.BlobStore.put(inst, Ref.key(ref), packed)
+    assert {:error, :integrity_mismatch} = ClaimCheck.redeem(inst, ref, String.upcase(sha256))
   end
 
-  test "redeem/2 of an object that was never written is :not_found", %{inst: inst} do
-    ref = %Ref{
-      tenant_id: "acme",
-      object_id: UUIDv7.generate(),
-      offset: 0,
-      length: 1,
-      sha256: String.duplicate("0", 64)
-    }
+  test "redeem/3 of a pack that was never written is :not_found", %{inst: inst} do
+    ref = %Ref{tenant_id: "acme", claim_id: Ref.claim_id(Ref.new_pack_id(), 0)}
 
-    assert {:error, :not_found} = ClaimCheck.redeem(inst, ref)
+    assert {:error, :not_found} = ClaimCheck.redeem(inst, ref, String.duplicate("0", 64))
   end
 
-  test "redeem/2 of a range past the end of its object is :invalid_range", %{inst: inst} do
-    a = item("acme", "tiny")
-    {:ok, refs} = ClaimCheck.check_in(inst, "acme", [a])
+  test "check_in/4 refuses a pack id with position bits set", %{inst: inst} do
+    claim_id = Ref.claim_id(Ref.new_pack_id(), 1)
 
-    assert {:error, :invalid_range} =
-             ClaimCheck.redeem(inst, %{refs[a.id] | offset: 10_000_000, length: 4})
+    assert {:error, :invalid_id} =
+             ClaimCheck.check_in(inst, "acme", [item("acme", "b")], pack_id: claim_id)
   end
 
   test "check_in/4 refuses a tenant outside the grammar", %{inst: inst} do
@@ -94,9 +107,9 @@ defmodule Ankusa.ClaimCheckTest do
       assert length(puts()) == 2
 
       for it <- items do
-        assert {:ok, ref} = results[it.id]
-        assert ref.tenant_id == it.tenant_id
-        assert {:ok, it.body} == ClaimCheck.redeem(ctx.inst, ref)
+        assert {:ok, claim} = results[it.id]
+        assert claim.ref.tenant_id == it.tenant_id
+        assert {:ok, it.body} == redeem(ctx.inst, claim)
       end
     end
 
@@ -111,11 +124,16 @@ defmodule Ankusa.ClaimCheckTest do
       # 2 KB claims with overhead: two fit under 5 KB, the third starts a pack,
       # and the 20 KB body can't share one.
       assert length(puts()) == 3
-      objects = results |> Map.values() |> Enum.map(fn {:ok, ref} -> ref.object_id end)
-      assert objects |> Enum.uniq() |> length() == 3
+
+      packs =
+        results
+        |> Map.values()
+        |> Enum.map(fn {:ok, claim} -> elem(Ref.locate(claim.ref.claim_id), 1) end)
+
+      assert packs |> Enum.uniq() |> length() == 3
 
       for it <- small ++ [huge] do
-        assert {:ok, it.body} == ClaimCheck.redeem(ctx.inst, elem(results[it.id], 1))
+        assert {:ok, it.body} == redeem(ctx.inst, elem(results[it.id], 1))
       end
     end
 

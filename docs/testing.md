@@ -43,11 +43,12 @@ The 171 always-on tests cover:
   later compaction sees every row, and one taken while the compactor is down
   falls back to the file and is correct again after its restart.
 - **Claim Check** (`test/ankusa/claim_check/`, `test/ankusa/dispatch/claim_check_test.exs`):
-  reference parsing (URN grammar, tenant/id/range/digest rejection, date
-  partitions from the object id's timestamp); pack building (ZIP offsets,
-  manifest, standard-reader round-trip); pack/redeem round-trips over
-  `LocalFS`; tampered-object integrity detection; ranged reads (`416` past the
-  end); packing per tenant per batch with `pack_max_bytes` splitting and
+  reference parsing (URN grammar, tenant and ULID claim-id rejection, date
+  partitions from the pack id's timestamp, claim ids locating their pack and
+  position); pack building (index rows, ZIP offsets, manifest, standard-reader
+  round-trip); pack/redeem round-trips over `LocalFS`; tampered-object
+  integrity detection; `404` for a claim id past the end of its pack's index;
+  packing per tenant per batch with `pack_max_bytes` splitting and
   failure isolation; check-in-once (a fat hook on two sinks and a failing
   retry writes one object); `validate_config!/1` boot-time rejections; the
   `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
@@ -84,7 +85,7 @@ mise run check:package ankusa_rabbitmq   # 4 tests
 ```
 
 Covers: inline-payload publish + decode, fat-payload claim check-in (message
-carries a claim reference, the claim round-trips through `Ankusa.ClaimCheck.redeem/2`
+carries a claim reference and its sha256, the claim round-trips through `Ankusa.ClaimCheck.redeem/3`
 against a real `BlobStore`), routing key as both a static string and a
 function, and a fast-fail check (`:econnrefused`, not a hang) against an
 unreachable broker.

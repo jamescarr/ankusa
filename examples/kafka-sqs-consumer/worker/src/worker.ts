@@ -35,7 +35,9 @@ const claimCheck = createClaimCheckClient({ baseUrl: CLAIM_CHECK_URL });
 
 // The message `claim` field is a single claim-check ref URN, not a ticket
 // object:
-//   urn:ankusa:claim:v1:<tenant>:<object_id>:<offset>:<length>:sha256-<hex>
+//   urn:ankusa:claim:v1:<tenant>:<claim_id ULID>
+// and a message carrying `claim` also carries `sha256`, the lowercase hex
+// digest of the claim's bytes, which `redeem` verifies them against.
 type HookMessage = {
   v: number;
   id: string;
@@ -46,6 +48,7 @@ type HookMessage = {
   size: number;
   body_base64?: string;
   claim?: string;
+  sha256?: string;
 };
 
 // Retrying won't help: dead-letter now so the rest of the FIFO group moves.
@@ -65,13 +68,14 @@ function parse(body: string | undefined): HookMessage {
     throw new PermanentError("message body is not JSON");
   }
   if (msg.v !== 1) throw new PermanentError(`unsupported message version: ${msg.v}`);
+  if (msg.claim && !msg.sha256) throw new PermanentError("claim message has no sha256");
   return msg;
 }
 
 async function resolveBody(msg: HookMessage): Promise<{ body: Buffer; via: string }> {
-  if (msg.claim) {
-    const { objectId } = parseClaimRef(msg.claim);
-    return { body: await claimCheck.redeem(msg.claim), via: `claim:${objectId}` };
+  if (msg.claim && msg.sha256) {
+    const { claimId } = parseClaimRef(msg.claim);
+    return { body: await claimCheck.redeem(msg.claim, msg.sha256), via: `claim:${claimId}` };
   }
   return { body: Buffer.from(msg.body_base64 ?? "", "base64"), via: "inline" };
 }
