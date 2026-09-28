@@ -116,13 +116,7 @@ defmodule Ankusa.Instance do
       )
 
       [
-        Supervisor.child_spec(
-          {Bandit,
-           plug: {Ankusa.Routes.Router, [instance: config.instance]},
-           scheme: :http,
-           port: config.routes.admin.port},
-          id: Ankusa.Routes.Router
-        )
+        bandit_child(Ankusa.Routes.Router, config.instance, config.routes.admin.port)
       ]
     else
       []
@@ -149,13 +143,7 @@ defmodule Ankusa.Instance do
       )
 
       [
-        Supervisor.child_spec(
-          {Bandit,
-           plug: {Ankusa.ClaimCheck.Router, [instance: config.instance]},
-           scheme: :http,
-           port: config.claim_check.port},
-          id: Ankusa.ClaimCheck.Router
-        )
+        bandit_child(Ankusa.ClaimCheck.Router, config.instance, config.claim_check.port)
       ]
     else
       []
@@ -188,16 +176,17 @@ defmodule Ankusa.Instance do
       )
 
       [
-        Supervisor.child_spec(
-          {Bandit,
-           plug: {Ankusa.Admin.Router, [instance: config.instance]},
-           scheme: :http,
-           port: config.admin.port},
-          id: Ankusa.Admin.Router
-        )
+        bandit_child(Ankusa.Admin.Router, config.instance, config.admin.port)
       ]
     else
       []
     end
+  end
+
+  defp bandit_child(plug_module, instance, port) do
+    Supervisor.child_spec(
+      {Bandit, plug: {plug_module, [instance: instance]}, scheme: :http, port: port},
+      id: plug_module
+    )
   end
 end

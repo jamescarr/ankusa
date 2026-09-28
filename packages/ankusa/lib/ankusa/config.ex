@@ -177,23 +177,34 @@ defmodule Ankusa.Config do
   end
 
   defp put_section(acc, k, v) do
-    cond do
-      is_map(v) -> merge_section(acc, k, Map.new(v))
-      Keyword.keyword?(v) -> merge_section(acc, k, Map.new(v))
-      true -> raise ArgumentError, "Ankusa.Config #{k} must be a map or keyword list"
-    end
+    Map.put(acc, k, merge_known!(Map.get(acc, k), v, to_string(k)))
   end
 
-  defp merge_section(acc, k, v) do
-    defaults = Map.get(acc, k)
+  defp merge_known!(defaults, value, dotted_name) do
+    incoming =
+      case value do
+        v when is_map(v) ->
+          Map.new(v)
 
-    Enum.each(Map.keys(v), fn nk ->
-      unless Map.has_key?(defaults, nk) do
-        raise ArgumentError, "unknown Ankusa.Config key: #{k}.#{nk}"
+        v when is_list(v) ->
+          if Keyword.keyword?(v),
+            do: Map.new(v),
+            else:
+              raise(
+                ArgumentError,
+                "Ankusa.Config #{dotted_name} must be a map or keyword list"
+              )
+
+        _ ->
+          raise ArgumentError, "Ankusa.Config #{dotted_name} must be a map or keyword list"
       end
+
+    Enum.each(Map.keys(incoming), fn k ->
+      unless Map.has_key?(defaults, k),
+        do: raise(ArgumentError, "unknown Ankusa.Config key: #{dotted_name}.#{k}")
     end)
 
-    Map.put(acc, k, Map.merge(defaults, v))
+    Map.merge(defaults, incoming)
   end
 
   # Sections of :routes that hold their own keys; everything else is a scalar
@@ -207,25 +218,18 @@ defmodule Ankusa.Config do
     merged =
       Enum.reduce(routes, acc.routes, fn {k, value}, routes ->
         cond do
-          k in @routes_sections -> Map.put(routes, k, merge_routes_section(routes[k], k, value))
-          Map.has_key?(routes, k) -> Map.put(routes, k, value)
-          true -> raise ArgumentError, "unknown Ankusa.Config key: routes.#{k}"
+          k in @routes_sections ->
+            Map.put(routes, k, merge_known!(routes[k], value, "routes.#{k}"))
+
+          Map.has_key?(routes, k) ->
+            Map.put(routes, k, value)
+
+          true ->
+            raise ArgumentError, "unknown Ankusa.Config key: routes.#{k}"
         end
       end)
 
     %{acc | routes: merged}
-  end
-
-  defp merge_routes_section(defaults, key, value) do
-    nested = section_map(value, "routes.#{key}")
-
-    Enum.each(Map.keys(nested), fn nk ->
-      unless Map.has_key?(defaults, nk) do
-        raise ArgumentError, "unknown Ankusa.Config key: routes.#{key}.#{nk}"
-      end
-    end)
-
-    Map.merge(defaults, nested)
   end
 
   defp section_map(value, key) do
