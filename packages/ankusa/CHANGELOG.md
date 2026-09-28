@@ -11,6 +11,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-28
+
 ### Changed
 
 - The claim reference is `urn:ankusa:claim:v1:<tenant>:<claim_id>`, where
@@ -217,6 +219,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   defaults to `false`, so depending on `ankusa` never binds a port as a side
   effect.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.1...HEAD
+[0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.0...ankusa-v0.2.1
 [0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.1.0...ankusa-v0.2.0
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa-v0.1.0

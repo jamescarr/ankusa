@@ -6,6 +6,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-28
+
 ### Added
 
 - `type: nats` sink: publishes delivered hooks to a NATS JetStream subject,
@@ -45,3 +47,6 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - Shipped configs: a baked demo config, a full `reference.yml`, single-node,
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...HEAD
+[0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_server-v0.2.1
