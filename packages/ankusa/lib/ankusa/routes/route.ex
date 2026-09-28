@@ -147,13 +147,32 @@ defmodule Ankusa.Routes.Route do
   @spec new_timestamp() :: DateTime.t()
   def new_timestamp, do: DateTime.utc_now() |> DateTime.truncate(:second)
 
+  @doc """
+  Coerce a map or keyword list into a string-keyed map. `field` names the value
+  in error tuples: a non-keyword list is `"must be a map"` (the stricter
+  `ip_rules` message), anything else non-map is `"must be a map or keyword
+  list"`.
+  """
+  @spec stringify(term(), String.t()) ::
+          {:ok, %{String.t() => term()}} | {:error, {:invalid, String.t(), String.t()}}
+  def stringify(value, field) when is_map(value),
+    do: {:ok, Map.new(value, fn {k, v} -> {to_string(k), v} end)}
+
+  def stringify(value, field) when is_list(value) do
+    if Keyword.keyword?(value) do
+      {:ok, Map.new(value, fn {k, v} -> {to_string(k), v} end)}
+    else
+      {:error, {:invalid, field, "must be a map"}}
+    end
+  end
+
+  def stringify(_value, field), do: {:error, {:invalid, field, "must be a map or keyword list"}}
+
   # ── field validation ────────────────────────────────────────────────────────
 
-  defp attrs(attrs) when is_map(attrs) or is_list(attrs) do
-    if is_list(attrs) and not Keyword.keyword?(attrs) do
-      {:error, {:invalid, "route", "must be a map or keyword list"}}
-    else
-      Enum.reduce_while(Map.new(attrs), {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+  defp attrs(attrs) do
+    with {:ok, attrs} <- stringify(attrs, "route") do
+      Enum.reduce_while(attrs, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
         case field(key) do
           {:ok, name} -> {:cont, {:ok, Map.put(acc, name, value)}}
           :error -> {:halt, {:error, {:invalid, to_string(key), "unknown field"}}}
@@ -161,8 +180,6 @@ defmodule Ankusa.Routes.Route do
       end)
     end
   end
-
-  defp attrs(_other), do: {:error, {:invalid, "route", "must be a map or keyword list"}}
 
   # String keys (JSON, YAML) and atom keys (a keyword list in config) are the
   # same field; anything else — including `inserted_at`/`updated_at` — is not a
@@ -241,28 +258,19 @@ defmodule Ankusa.Routes.Route do
     end
   end
 
-  defp parse_rule(rule) when is_map(rule) or is_list(rule) do
-    if is_list(rule) and not Keyword.keyword?(rule) do
-      {:error, "must be a map"}
-    else
-      rule = Map.new(rule, fn {key, value} -> {rule_key(key), value} end)
+  defp parse_rule(rule) do
+    case stringify(rule, "rule") do
+      {:ok, rule} ->
+        with :ok <- rule_fields(rule),
+             {:ok, action} <- rule_action(rule),
+             {:ok, cidr} <- rule_cidr(rule) do
+          {:ok, %{action: action, cidr: cidr}}
+        end
 
-      with :ok <- rule_fields(rule),
-           {:ok, action} <- rule_action(rule),
-           {:ok, cidr} <- rule_cidr(rule) do
-        {:ok, %{action: action, cidr: cidr}}
-      end
+      {:error, {:invalid, _field, message}} ->
+        {:error, message}
     end
   end
-
-  defp parse_rule(_other), do: {:error, "must be a map"}
-
-  defp rule_key(key) when is_binary(key), do: key
-
-  defp rule_key(key) when is_atom(key) and not is_nil(key) and not is_boolean(key),
-    do: Atom.to_string(key)
-
-  defp rule_key(key), do: key
 
   defp rule_fields(rule) do
     case Enum.find(Map.keys(rule), &(&1 not in ["action", "cidr"])) do
@@ -333,24 +341,29 @@ defmodule Ankusa.Routes.Route do
   end
 
   @doc """
-  Parse `rules_json/1`'s output back into the store form. `{:error, message}` is
-  a stored value that no longer parses — corruption, or a hand-edited value.
+  Parse a global rule list — the admin API's `PUT /admin/ip-rules` body and the
+  Redis store's `ip_rules` value are both this shape — into the store form.
+  `default` is `:allow` when absent.
   """
-  @spec parse_rules_json(term()) ::
-          {:ok, %{default: :allow | :deny, rules: [ip_rule()]}} | {:error, String.t()}
-  def parse_rules_json(%{"rules" => rules} = json) do
-    with {:ok, default} <- rules_default(json["default"]),
-         {:ok, parsed} <- parse_rules(rules) do
-      {:ok, %{default: default, rules: parsed}}
+  @spec parse_ip_rules(term()) ::
+          {:ok, %{default: :allow | :deny, rules: [ip_rule()]}}
+          | {:error, {:invalid, String.t(), String.t()}}
+  def parse_ip_rules(attrs) do
+    with {:ok, attrs} <- stringify(attrs, "ip_rules"),
+         {:ok, default} <- ip_rules_default(attrs["default"]) do
+      case parse_rules(Map.get(attrs, "rules", [])) do
+        {:ok, rules} -> {:ok, %{default: default, rules: rules}}
+        {:error, message} -> {:error, {:invalid, "rules", message}}
+      end
     end
   end
 
-  def parse_rules_json(_other), do: {:error, "must be a JSON object"}
+  defp ip_rules_default(nil), do: {:ok, :allow}
+  defp ip_rules_default(action) when action in [:allow, "allow"], do: {:ok, :allow}
+  defp ip_rules_default(action) when action in [:deny, "deny"], do: {:ok, :deny}
 
-  defp rules_default(nil), do: {:ok, :allow}
-  defp rules_default("allow"), do: {:ok, :allow}
-  defp rules_default("deny"), do: {:ok, :deny}
-  defp rules_default(other), do: {:error, "invalid default #{inspect(other)}"}
+  defp ip_rules_default(action),
+    do: {:error, {:invalid, "default", "must be \"allow\" or \"deny\", got #{inspect(action)}"}}
 
   defp timestamp(value, field) when is_binary(value) do
     case DateTime.from_iso8601(value) do

@@ -171,7 +171,7 @@ defmodule Ankusa.Routes do
          {:ok, snapshot} <- writable_snapshot(instance),
          :ok <- unique_id(snapshot, route),
          :ok <- no_conflict(snapshot, route) do
-      put(instance, route, Store.insert(instance, route))
+      put(route, Store.insert(instance, route))
     end
   end
 
@@ -196,10 +196,10 @@ defmodule Ankusa.Routes do
           # route already had, and the caller has to be told that, not the
           # timestamp this call happened to mint.
           stored = %{route | inserted_at: existing.inserted_at}
-          put(instance, stored, Store.replace(instance, stored))
+          put(stored, Store.replace(instance, stored))
 
         :error ->
-          put(instance, route, Store.insert(instance, route))
+          put(route, Store.insert(instance, route))
       end
     end
   end
@@ -223,7 +223,7 @@ defmodule Ankusa.Routes do
          route = %{route | inserted_at: existing.inserted_at},
          {:ok, snapshot} <- writable_snapshot(instance),
          :ok <- no_conflict(snapshot, route) do
-      put(instance, route, Store.replace(instance, route))
+      put(route, Store.replace(instance, route))
     end
   end
 
@@ -267,11 +267,7 @@ defmodule Ankusa.Routes do
           | {:error, {:invalid, String.t(), String.t()}}
           | {:error, :store_unavailable}
   def put_ip_rules(instance, attrs) do
-    with {:ok, attrs} <- ip_rules_attrs(attrs),
-         {:ok, rules} <- parse_rules(attrs["rules"] || []),
-         {:ok, default} <- default_action(attrs["default"]) do
-      ip_rules = %{default: default, rules: rules}
-
+    with {:ok, ip_rules} <- Route.parse_ip_rules(attrs) do
       case Store.put_ip_rules(instance, ip_rules) do
         :ok -> {:ok, ip_rules}
         {:error, reason} -> {:error, reason}
@@ -371,7 +367,7 @@ defmodule Ankusa.Routes do
   defp route_rule(%Route{ip_rules: []}, _ip), do: {:allow, nil}
 
   defp route_rule(%Route{ip_rules: rules}, ip) do
-    case Enum.find(rules, &contains?(&1.cidr, ip)) do
+    case find_rule(rules, ip) do
       nil -> {:deny, nil}
       rule -> {rule.action, rule}
     end
@@ -433,8 +429,10 @@ defmodule Ankusa.Routes do
   # other, so cross-family comparisons are always false).
   defp contains?(cidr, ip), do: ip >= cidr.first and ip <= cidr.last
 
+  defp find_rule(rules, ip), do: Enum.find(rules, &contains?(&1.cidr, ip))
+
   defp first_rule(%{default: default, rules: rules}, ip) do
-    case Enum.find(rules, &contains?(&1.cidr, ip)) do
+    case find_rule(rules, ip) do
       nil -> {default, nil}
       rule -> {rule.action, rule}
     end
@@ -452,20 +450,14 @@ defmodule Ankusa.Routes do
     %{decision: decision, ip_rule: ip_rule, route_id: route_id} =
       evaluate(instance, method, segments, ip)
 
-    {:ok,
-     %{
-       decision: if(match?(decision), do: :allow, else: :deny),
-       reason: reason(decision),
-       route_id: route_id,
-       ip_rule: ip_rule
-     }}
+    {verdict, reason} =
+      case decision do
+        {:ok, _id} -> {:allow, :matched}
+        {:reject, r} -> {:deny, r}
+      end
+
+    {:ok, %{decision: verdict, reason: reason, route_id: route_id, ip_rule: ip_rule}}
   end
-
-  defp match?({:ok, _id}), do: true
-  defp match?({:reject, _reason}), do: false
-
-  defp reason({:ok, _id}), do: :matched
-  defp reason({:reject, reason}), do: reason
 
   # ── request parsing for the dry run ─────────────────────────────────────────
 
@@ -498,8 +490,8 @@ defmodule Ankusa.Routes do
 
   # A route is only ever reported as persisted once the store said so; on a store
   # error the caller gets the error tuple, not a definition that isn't there.
-  defp put(_instance, route, :ok), do: {:ok, route}
-  defp put(_instance, _route, {:error, reason}), do: {:error, reason}
+  defp put(route, :ok), do: {:ok, route}
+  defp put(_route, {:error, reason}), do: {:error, reason}
 
   # A store that has not published a table cannot be written through: there is no
   # version for the decision cache to key on, and nothing to check a conflict
@@ -556,50 +548,16 @@ defmodule Ankusa.Routes do
   defp attrs_of(%Route{} = route),
     do: Map.drop(Route.to_json(route), ["inserted_at", "updated_at"])
 
-  defp patch_attrs(patch) when is_list(patch) do
-    if Keyword.keyword?(patch) do
-      {:ok, Map.new(patch, fn {key, value} -> {to_string(key), value} end)}
-    else
-      {:error, {:invalid, "route", "must be a map or keyword list"}}
+  defp patch_attrs(patch) do
+    with {:ok, patch} <- Route.stringify(patch, "route") do
+      # Anything else in the patch — a typo, a forged `inserted_at` — is caught by
+      # `Route.from_attrs/2` on the merged attributes.
+      case Enum.find(Map.keys(patch), &(&1 in ["id", "path"])) do
+        nil -> {:ok, patch}
+        key -> {:error, {:invalid, key, "immutable; use PUT"}}
+      end
     end
   end
-
-  defp patch_attrs(patch) when is_map(patch) do
-    patch = Map.new(patch, fn {key, value} -> {to_string(key), value} end)
-
-    # Anything else in the patch — a typo, a forged `inserted_at` — is caught by
-    # `Route.from_attrs/2` on the merged attributes.
-    case Enum.find(Map.keys(patch), &(&1 in ["id", "path"])) do
-      nil -> {:ok, patch}
-      key -> {:error, {:invalid, key, "immutable; use PUT"}}
-    end
-  end
-
-  defp patch_attrs(_patch), do: {:error, {:invalid, "route", "must be a map or keyword list"}}
-
-  defp ip_rules_attrs(attrs) when is_map(attrs) or is_list(attrs) do
-    if is_list(attrs) and not Keyword.keyword?(attrs) do
-      {:error, {:invalid, "ip_rules", "must be a map"}}
-    else
-      {:ok, Map.new(attrs, fn {key, value} -> {to_string(key), value} end)}
-    end
-  end
-
-  defp ip_rules_attrs(_attrs), do: {:error, {:invalid, "ip_rules", "must be a map"}}
-
-  defp parse_rules(rules) do
-    case Route.parse_rules(rules) do
-      {:ok, parsed} -> {:ok, parsed}
-      {:error, message} -> {:error, {:invalid, "rules", message}}
-    end
-  end
-
-  defp default_action(nil), do: {:ok, :allow}
-  defp default_action(action) when action in [:allow, "allow"], do: {:ok, :allow}
-  defp default_action(action) when action in [:deny, "deny"], do: {:ok, :deny}
-
-  defp default_action(action),
-    do: {:error, {:invalid, "default", "must be \"allow\" or \"deny\", got #{inspect(action)}"}}
 
   # ── boot validation internals ───────────────────────────────────────────────
 

@@ -386,9 +386,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
   defp decode_rules(nil), do: {:ok, %{default: :allow, rules: []}}
 
   defp decode_rules(raw) do
-    case Route.parse_rules_json(decode_json(raw)) do
+    case Route.parse_ip_rules(decode_json(raw)) do
       {:ok, rules} -> {:ok, rules}
-      {:error, message} -> {:error, {:invalid_stored_ip_rules, message}}
+      {:error, {:invalid, field, message}} -> {:error, {:invalid_stored_ip_rules, "#{field}: #{message}"}}
     end
   end
 
