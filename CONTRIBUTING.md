@@ -12,7 +12,7 @@ container recipe for `ankusa_kafka`, whose `crc32cer` NIF needs CMake and a C++
 compiler).
 
 Image change? `mise run docker:smoke` builds `jamescarr/ankusa:dev` and runs
-`ankusa_server/scripts/smoke.sh` against it.
+`packages/ankusa_server/scripts/smoke.sh` against it.
 
 ## Where things are documented
 

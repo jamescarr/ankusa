@@ -32,31 +32,37 @@ configured.
 ## Layout
 
 ```
-bandit_example/            ankusa: core. mix.exs deps: {bandit, plug, req,
+packages/
+  ankusa                      core. mix.exs deps: {bandit, plug, req,
                               aws_signature}. No adapter deps.
-  lib/ankusa/…                behaviours, envelope, config, registry, telemetry,
+    lib/ankusa/…              behaviours, envelope, config, registry, telemetry,
                               edge/dispatch/storage machinery, and every
                               zero-external-dep default adapter
                               (WAL.DiskLog, BlobStore.{LocalFS,S3,GCS,Azure,OCI},
                               Codec.Raw, all Verifiers,
                               Sink.{Log,Http}, RetryPolicy.Exponential,
                               RouteResolver.{Path,TenantPath})
-  ankusa_rabbitmq/            path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
-  ankusa_kafka/               path-dep on ankusa + brod. Ankusa.Sink.Kafka.
-  ankusa_nats/                path-dep on ankusa + gnat. Ankusa.Sink.NATS.
-  examples/                 deployable demos; not published packages
+  ankusa_rabbitmq             path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
+  ankusa_kafka                path-dep on ankusa + brod. Ankusa.Sink.Kafka.
+  ankusa_nats                 path-dep on ankusa + gnat. Ankusa.Sink.NATS.
+  ankusa_server               the jamescarr/ankusa Docker image: core + every
+                              adapter, configured by YAML. Not on Hex.
+  sdk-typescript              the `ankusa` npm client SDK.
+examples/                     deployable demos; not published packages
+tools/loadgen/                load generator for the examples
 ```
 
 `ankusa_rabbitmq`, `ankusa_kafka`, and `ankusa_nats` each depend on `ankusa`
-via `{:ankusa, path: ".."}` for local development, and would become normal Hex
-dependencies once published. Each ships its **own** `docker-compose.yml` for
-local dev/test infra (`ankusa_rabbitmq/` → RabbitMQ on `:5673`/`:15673`;
-`ankusa_kafka/` → Redpanda on `:19092`; `ankusa_nats/` → NATS with JetStream
-on `:4223`/`:8223`). Every adapter
-package test suite needs `Ankusa.Registry` running (started by `ankusa`'s own
-Application); none needs any config to get it, since Ankusa.Application's
-built-in default instance is off (`autostart: false`) by default and only the
-root project's own `config/config.exs` turns it on.
+via `{:ankusa, path: "../ankusa"}` for local development, and on the Hex
+package once published. Each ships its **own** `docker-compose.yml` for local
+dev/test infra (`packages/ankusa_rabbitmq/` → RabbitMQ on `:5673`/`:15673`;
+`packages/ankusa_kafka/` → Redpanda on `:19092`; `packages/ankusa_nats/` →
+NATS with JetStream on `:4223`/`:8223`), which `mise run check:package <pkg>`
+brings up and tears down around the suite. Every adapter package test suite
+needs `Ankusa.Registry` running (started by `ankusa`'s own Application); none
+needs any config to get it, since Ankusa.Application's built-in default
+instance is off (`autostart: false`) by default and only the core project's
+own `packages/ankusa/config/config.exs` turns it on.
 
 ## Why S3/GCS/Azure/OCI stayed in-tree but RabbitMQ/Kafka/NATS didn't
 
@@ -171,10 +177,8 @@ container as they do on disk:
 ```dockerfile
 # examples/rabbitmq-consumer/ingest_app/Dockerfile
 WORKDIR /repo
-COPY mix.exs mix.lock ./          # ankusa core
-COPY lib ./lib
-COPY config ./config
-COPY ankusa_rabbitmq ./ankusa_rabbitmq
+COPY packages/ankusa ./packages/ankusa                   # ankusa core
+COPY packages/ankusa_rabbitmq ./packages/ankusa_rabbitmq
 COPY examples/rabbitmq-consumer/ingest_app ./examples/rabbitmq-consumer/ingest_app
 WORKDIR /repo/examples/rabbitmq-consumer/ingest_app
 RUN mix deps.get && mix compile
@@ -204,8 +208,8 @@ mix.exs is overriding a child dependency." Fix: mark your direct entry
 ```elixir
 defp deps do
   [
-    {:ankusa, path: "../../..", override: true},
-    {:ankusa_rabbitmq, path: "../../../ankusa_rabbitmq"}
+    {:ankusa, path: "../../../packages/ankusa", override: true},
+    {:ankusa_rabbitmq, path: "../../../packages/ankusa_rabbitmq"}
   ]
 end
 ```

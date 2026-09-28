@@ -1,6 +1,6 @@
 # Single node: the whole framework in one container.
 #
-#   docker compose -f ankusa_server/compose/docker-compose.yml up -d
+#   docker compose -f packages/ankusa_server/compose/docker-compose.yml up -d
 #
 # The image is the published one; to run a local build, either tag it
 # (`docker tag jamescarr/ankusa:dev jamescarr/ankusa:edge`) or set ANKUSA_IMAGE.

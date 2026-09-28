@@ -107,7 +107,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)/ankusa_kafka"
 docker compose up -d --wait
 
-# The repo *root* is the mount, not ankusa_kafka/: in :dev/:test this package
+# The repo *root* is the mount, not packages/ankusa_kafka/: in :dev/:test this package
 # path-depends on `..`. MIX_BUILD_PATH keeps the container's Linux build —
 # including crc32cer's NIF and its CMake cache — out of the host _build.
 docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
@@ -180,8 +180,8 @@ run = '''
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "==> sdks/typescript (dist must exist: the ankusa dep in each worker is a file: symlink to this source)"
-(cd sdks/typescript && npm ci && npm run build)
+echo "==> packages/sdk-typescript (dist must exist: the ankusa dep in each worker is a file: symlink to this source)"
+(cd packages/sdk-typescript && npm ci && npm run build)
 
 (cd examples/rabbitmq-consumer/ingest_app && \
   mix deps.get --check-locked && mix deps.unlock --check-unused && \
@@ -219,7 +219,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-docker build -f ankusa_server/Dockerfile -t jamescarr/ankusa:dev .
+docker build -f packages/ankusa_server/Dockerfile -t jamescarr/ankusa:dev .
 '''
 
 [tasks."docker:smoke"]
@@ -229,7 +229,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-exec ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
+exec packages/ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
 '''
 
 # ── aggregate ─────────────────────────────────────────────────────────────
@@ -498,12 +498,12 @@ cd "$(git rev-parse --show-toplevel)"
 
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
 
-VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' ankusa_server/mix.exs)
-[ -n "$VERSION" ] || fail "could not read @version from ankusa_server/mix.exs"
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' packages/ankusa_server/mix.exs)
+[ -n "$VERSION" ] || fail "could not read @version from packages/ankusa_server/mix.exs"
 TAG="ankusa_server-v$VERSION"
 
-grep -q "^## \[$VERSION\]" ankusa_server/CHANGELOG.md || \
-  fail "ankusa_server/CHANGELOG.md has no '## [$VERSION]' heading"
+grep -q "^## \[$VERSION\]" packages/ankusa_server/CHANGELOG.md || \
+  fail "packages/ankusa_server/CHANGELOG.md has no '## [$VERSION]' heading"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && fail "tag $TAG already exists locally"
 git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 && fail "tag $TAG already exists on origin"
 
@@ -527,7 +527,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' ankusa_server/mix.exs)
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' packages/ankusa_server/mix.exs)
 TAG="ankusa_server-v$VERSION"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && { echo "tag $TAG already exists" >&2; exit 1; }
 git tag "$TAG"
@@ -555,7 +555,7 @@ run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' ankusa_server/mix.exs)
+VERSION=$(sed -n 's/^  @version "\(.*\)"$/\1/p' packages/ankusa_server/mix.exs)
 
 for tag in "$VERSION" latest; do
   code=$(curl -s -o /dev/null -w '%{http_code}' \
@@ -573,7 +573,7 @@ for platform in linux/amd64 linux/arm64; do
 done
 '''
 
-# ── release: the npm SDK (sdks/typescript, package `ankusa`) ──────────────
+# ── release: the npm SDK (packages/sdk-typescript, package `ankusa`) ──────────────
 #
 # A third independent tag namespace (`sdk-typescript-vX.Y.Z`): distinct from
 # both `ankusa-vX.Y.Z` (Hex core — same npm package name, would otherwise be
@@ -593,10 +593,10 @@ fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
 gh secret list | grep -q '^NPM_TOKEN' || fail "repo secret NPM_TOKEN is not set"
 
 VERSION=$(node -p "require('./sdks/typescript/package.json').version")
-[ -n "$VERSION" ] || fail "could not read version from sdks/typescript/package.json"
+[ -n "$VERSION" ] || fail "could not read version from packages/sdk-typescript/package.json"
 TAG="sdk-typescript-v$VERSION"
 
-grep -q "^## \[$VERSION\]" sdks/typescript/CHANGELOG.md || fail "sdks/typescript/CHANGELOG.md has no '## [$VERSION]' heading"
+grep -q "^## \[$VERSION\]" packages/sdk-typescript/CHANGELOG.md || fail "packages/sdk-typescript/CHANGELOG.md has no '## [$VERSION]' heading"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && fail "tag $TAG already exists locally"
 git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1 && fail "tag $TAG already exists on origin"
 

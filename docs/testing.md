@@ -63,17 +63,20 @@ against real running emulators: put/get round-trip, `get_range` byte-slicing,
 need live infra:
 
 ```sh
-docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599)
-mix test --include integration
-docker compose down -v
+# floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599)
+docker compose -f packages/ankusa/docker-compose.integration.yml up -d
+(cd packages/ankusa && mix test --include integration)
+docker compose -f packages/ankusa/docker-compose.integration.yml down -v
 ```
+
+Or, all three steps in one: `mise run test:integration`.
 
 ## `ankusa_rabbitmq`: `mix test`
 
 Same pattern: every test needs live RabbitMQ:
 
 ```sh
-cd ankusa_rabbitmq
+cd packages/ankusa_rabbitmq
 docker compose up -d --wait   # RabbitMQ on :5673 (AMQP), :15673 (management UI)
 mix test                      # 4 tests
 docker compose down -v
@@ -90,7 +93,7 @@ unreachable broker.
 Same pattern, against Redpanda:
 
 ```sh
-cd ankusa_kafka
+cd packages/ankusa_kafka
 docker compose up -d --wait   # Redpanda on :19092
 mix test                      # 5 tests
 docker compose down -v
@@ -115,7 +118,7 @@ needs a C toolchain and CMake ≥ 3.16 (`apk add build-base cmake` on Alpine,
 Same pattern, against NATS with JetStream enabled:
 
 ```sh
-cd ankusa_nats
+cd packages/ankusa_nats
 docker compose up -d --wait   # NATS on :4223 (client), :8223 (monitoring)
 mix test                      # 6 tests
 docker compose down -v

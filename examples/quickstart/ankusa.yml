@@ -1,5 +1,5 @@
 # The quickstart config: one open `demo` source delivering to the worker.
-# Every key, at its default: https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml
+# Every key, at its default: https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml
 
 node:
   data_dir: /var/lib/ankusa

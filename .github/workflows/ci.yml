@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not a `services:` container: Redpanda needs command-line flags
     # (`--kafka-addr`, `--advertise-kafka-addr`) that `services:` can't pass.
-    # `ankusa_kafka/docker-compose.yml` is the same compose file local dev
+    # `packages/ankusa_kafka/docker-compose.yml` is the same compose file local dev
     # uses. brod's crc32cer NIF builds from source; it needs CMake >= 3.16,
     # which the runner image already has.
     steps:
@@ -100,7 +100,7 @@ jobs:
     needs: ankusa
     runs-on: ubuntu-latest
     # Not a `services:` container: the server needs the `-js` (JetStream) flag,
-    # which `services:` can't pass. `ankusa_nats/docker-compose.yml` is the same
+    # which `services:` can't pass. `packages/ankusa_nats/docker-compose.yml` is the same
     # compose file local dev uses. gnat is pure Elixir, so unlike the kafka job
     # there is no NIF to build and no CMake requirement.
     steps:
@@ -163,13 +163,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - working-directory: sdks/typescript
+      - working-directory: packages/sdk-typescript
         run: npm ci
-      - working-directory: sdks/typescript
+      - working-directory: packages/sdk-typescript
         run: npm run typecheck
-      - working-directory: sdks/typescript
+      - working-directory: packages/sdk-typescript
         run: npm run build
-      - working-directory: sdks/typescript
+      - working-directory: packages/sdk-typescript
         run: npm test
 
   # The examples are the deployable wrappers: path-dep consumers of core and an
@@ -198,11 +198,11 @@ jobs:
         run: mix deps.unlock --check-unused
       - working-directory: examples/${{ matrix.example }}/ingest_app
         run: MIX_ENV=prod mix compile --warnings-as-errors
-      # The workers' `ankusa` dependency is a `file:` symlink to sdks/typescript;
+      # The workers' `ankusa` dependency is a `file:` symlink to packages/sdk-typescript;
       # its dist/ must exist before `npm ci`/`tsc` there can resolve it.
-      - working-directory: sdks/typescript
+      - working-directory: packages/sdk-typescript
         run: npm ci
-      - working-directory: sdks/typescript
+      - working-directory: packages/sdk-typescript
         run: npm run build
       - working-directory: examples/${{ matrix.example }}/worker
         run: npm ci

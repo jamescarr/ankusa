@@ -1,7 +1,7 @@
 # The reference answer to "where does authentication go?" — one node behind
 # nginx.
 #
-#   docker compose -f ankusa_server/compose/docker-compose.proxy.yml up -d --wait
+#   docker compose -f packages/ankusa_server/compose/docker-compose.proxy.yml up -d --wait
 #
 # The image is the published one; to run a local build, set
 # ANKUSA_IMAGE=jamescarr/ankusa:dev (built by `mise run docker:build`).

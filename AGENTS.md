@@ -9,9 +9,9 @@ touches, not just the one you edited. All three adapter packages depend on
 | Package | Run from its directory |
 | --- | --- |
 | `ankusa` (core) | `mix format --check-formatted && mix compile --warnings-as-errors && mix test` |
-| `ankusa_rabbitmq` | the same three, in `ankusa_rabbitmq/` (after `docker compose up -d --wait`) |
-| `ankusa_kafka` | the same three, in `ankusa_kafka/` (after `docker compose up -d --wait`) |
-| `ankusa_nats` | the same three, in `ankusa_nats/` (after `docker compose up -d --wait`) |
+| `ankusa_rabbitmq` | the same three, in `packages/ankusa_rabbitmq/` (after `docker compose up -d --wait`) |
+| `ankusa_kafka` | the same three, in `packages/ankusa_kafka/` (after `docker compose up -d --wait`) |
+| `ankusa_nats` | the same three, in `packages/ankusa_nats/` (after `docker compose up -d --wait`) |
 | `examples/*/ingest_app` | `mix compile --warnings-as-errors` |
 | `examples/*/worker` | `npx tsc --noEmit` |
 | `examples/oban-consumer/ingest_app` | `mix compile --warnings-as-errors` |
@@ -38,9 +38,9 @@ CMake ≥ 3.16 and a C++ compiler. Where those aren't installed, run that
 package's checks in a container instead:
 
 ```sh
-cd ankusa_kafka
+cd packages/ankusa_kafka
 docker compose up -d --wait
-# The repo *root* is the mount, not `ankusa_kafka/`: in :dev/:test this package
+# The repo *root* is the mount, not `packages/ankusa_kafka/`: in :dev/:test this package
 # path-depends on `..`, so mounting only the package leaves `..` with no
 # `mix.exs` and Mix fails before it compiles anything.
 # MIX_BUILD_PATH keeps the container's Linux artifacts out of your `_build` —

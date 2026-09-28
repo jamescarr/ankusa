@@ -73,10 +73,10 @@ Starting points, all loadable as-is:
 
 | File | What it is |
 | --- | --- |
-| [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
-| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
-| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
-| [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
+| [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
+| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
+| [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
+| [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
 
 ### Check it before you run it
 
@@ -177,10 +177,10 @@ an edge node exports ingest series, a worker exports dispatch and compaction
 series. Scrape every node.
 
 The HTTP contracts are in
-[`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/admin.v1.yaml),
-[`priv/openapi/ingest.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/ingest.v1.yaml),
+[`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
+[`priv/openapi/ingest.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/ingest.v1.yaml),
 and
-[`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml).
+[`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml).
 
 ## Security
 
@@ -205,7 +205,7 @@ So:
 - **Point Prometheus at 4002 through your proxy, with read-only credentials.**
 
 The proxy compose file is the worked example:
-[`compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.proxy.yml)
+[`compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/compose/docker-compose.proxy.yml)
 runs one all-role node with no published ports, and an nginx in front that
 leaves ingest open and puts HTTP basic auth on the admin API.
 
@@ -217,8 +217,8 @@ it, or move segments to S3/GCS, where they are not your problem anymore.
 
 ## Compose
 
-- Single node: [`compose/docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.yml)
-- All-role node behind nginx basic auth: [`compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/compose/docker-compose.proxy.yml)
+- Single node: [`compose/docker-compose.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/compose/docker-compose.yml)
+- All-role node behind nginx basic auth: [`compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/compose/docker-compose.proxy.yml)
 
 ```sh
 docker compose -f docker-compose.proxy.yml up -d --wait

@@ -12,7 +12,7 @@ Redeem a claim-check ref, verify the bytes it returns against the ref's own
 declared size and sha256, and classify failures into dead-letter vs. retry,
 without holding any object-store credentials. Generated from the framework's
 own contract,
-[`priv/openapi/claim_check.v1.yaml`](../../priv/openapi/claim_check.v1.yaml),
+[`priv/openapi/claim_check.v1.yaml`](../ankusa/priv/openapi/claim_check.v1.yaml),
 via [`openapi-typescript`](https://openapi-ts.dev/) + [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/).
 The spec is the source of truth; this package conforms to it, not the
 reverse.

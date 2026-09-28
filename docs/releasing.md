@@ -44,7 +44,7 @@ whether anything's being released.
 
 ## The server image
 
-Every push to `main` touching `lib/**`, `priv/**`, `mix.*`, `ankusa_*/**`, or the
+Every push to `main` touching `packages/ankusa*/**`, `.dockerignore`, or the
 docker/ci workflows publishes `jamescarr/ankusa:edge` and `:sha-<short>` for
 `linux/amd64` and `linux/arm64`. Pull requests running the same paths build and
 smoke-test the image without pushing.
@@ -53,19 +53,19 @@ A release is the tag `ankusa_server-vX.Y.Z`, and the gate is:
 
 1. `mise run e2e`: the kind + Oban end-to-end proof, locally.
 2. `mise run release:preflight-server`: checks `@version` in
-   `ankusa_server/mix.exs`, a matching `## [X.Y.Z]` heading in
-   `ankusa_server/CHANGELOG.md`, that the tag is free locally and on `origin`,
+   `packages/ankusa_server/mix.exs`, a matching `## [X.Y.Z]` heading in
+   `packages/ankusa_server/CHANGELOG.md`, that the tag is free locally and on `origin`,
    that the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repo secrets exist, and
    that the version is not already on Docker Hub.
 3. `mise run release:tag-server` → `mise run release:watch-server` → `mise run
    release:verify-server`.
 
 The tag run builds both architectures natively, runs
-[`ankusa_server/scripts/smoke.sh`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/scripts/smoke.sh)
+[`packages/ankusa_server/scripts/smoke.sh`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/scripts/smoke.sh)
 against the built image (the same script as `mise run docker:smoke`), and only
 then publishes `X.Y.Z`, `X.Y`, `latest` (plus `X` from 1.0 on). A prerelease
 version publishes its exact tag only, so nobody can pull `latest` and get an rc.
-The same job pushes `ankusa_server/README.md` as the Docker Hub repository
+The same job pushes `packages/ankusa_server/README.md` as the Docker Hub repository
 description and cuts a GitHub release from the CHANGELOG section.
 
 Secrets: `DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN`: a Docker Hub personal
@@ -73,15 +73,15 @@ access token with Read & Write.
 
 ## The npm SDK
 
-One independently versioned npm package, `ankusa` (`sdks/typescript/`), with
+One independently versioned npm package, `ankusa` (`packages/sdk-typescript/`), with
 its own `package.json` `version` and `CHANGELOG.md`. Same tag-driven shape as
 the Hex packages, but its own tag prefix (`sdk-typescript-vX.Y.Z`, not
 `ankusa-vX.Y.Z`) since the npm package is also named `ankusa` and sharing a
 prefix with the Hex core package would make releases ambiguous. No ordering
 dependency on the Hex packages or the server image.
 
-1. In a PR: bump `version` in `sdks/typescript/package.json` (SemVer) and
-   move the relevant entries from `sdks/typescript/CHANGELOG.md`
+1. In a PR: bump `version` in `packages/sdk-typescript/package.json` (SemVer) and
+   move the relevant entries from `packages/sdk-typescript/CHANGELOG.md`
    `[Unreleased]` under a new dated heading.
 2. Merge.
 3. `mise run release:preflight-npm` → `mise run release:tag-npm` → `mise run

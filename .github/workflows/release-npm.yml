@@ -1,6 +1,6 @@
 name: Release (npm)
 
-# Tag-driven npm publish for sdks/typescript (published as the `ankusa`
+# Tag-driven npm publish for packages/sdk-typescript (published as the `ankusa`
 # package), the same shape as release.yml's Hex flow — but its own tag
 # prefix, `sdk-typescript-v*`, distinct from the Hex core package's
 # `ankusa-v*`. The npm package is also named `ankusa`; sharing a tag prefix
@@ -35,9 +35,9 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#sdk-typescript-v}"
           PKG_VERSION=$(node -p "require('./sdks/typescript/package.json').version")
-          [ "$PKG_VERSION" = "$VERSION" ] || { echo "::error::tag $VERSION != sdks/typescript/package.json $PKG_VERSION"; exit 1; }
+          [ "$PKG_VERSION" = "$VERSION" ] || { echo "::error::tag $VERSION != packages/sdk-typescript/package.json $PKG_VERSION"; exit 1; }
 
-          grep -q "^## \[$VERSION\]" sdks/typescript/CHANGELOG.md || { echo "::error::sdks/typescript/CHANGELOG.md has no '## [$VERSION]' heading"; exit 1; }
+          grep -q "^## \[$VERSION\]" packages/sdk-typescript/CHANGELOG.md || { echo "::error::packages/sdk-typescript/CHANGELOG.md has no '## [$VERSION]' heading"; exit 1; }
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -58,15 +58,15 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: npm ci
-        working-directory: sdks/typescript
+        working-directory: packages/sdk-typescript
         run: npm ci
 
       - name: npm run build
-        working-directory: sdks/typescript
+        working-directory: packages/sdk-typescript
         run: npm run build
 
       - name: Publish package
-        working-directory: sdks/typescript
+        working-directory: packages/sdk-typescript
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public
@@ -77,5 +77,5 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## \[/ {exit} f' \
-            sdks/typescript/CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+            packages/sdk-typescript/CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
