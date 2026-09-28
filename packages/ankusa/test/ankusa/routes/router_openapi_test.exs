@@ -67,21 +67,7 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     %{document: document}
   end
 
-  defp start(routes_opts \\ []) do
-    {admin, routes_opts} = Keyword.pop(routes_opts, :admin, [])
-
-    config =
-      test_config(
-        roles: [:edge],
-        routes:
-          routes_opts
-          |> Keyword.put_new(:enabled, true)
-          |> Keyword.put(:admin, Keyword.merge([port: 0], admin))
-      )
-
-    start_supervised!({Ankusa.Instance, config})
-    config
-  end
+  defp start(routes_opts \\ []), do: start_routes(routes_opts)
 
   defp operations(document) do
     for {path, item} <- document["paths"],

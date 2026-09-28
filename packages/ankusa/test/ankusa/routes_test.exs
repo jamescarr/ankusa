@@ -17,23 +17,7 @@ defmodule Ankusa.RoutesTest do
   alias Ankusa.Routes
   alias Ankusa.Routes.{Matcher, Route}
 
-  defp start(routes_opts) do
-    {admin, routes_opts} = Keyword.pop(routes_opts, :admin, [])
-
-    config =
-      test_config(
-        roles: [:edge],
-        routes:
-          routes_opts
-          |> Keyword.put_new(:enabled, true)
-          # Port 0: the management listener is not under test here, and the
-          # default 4003 would collide between tests in one VM.
-          |> Keyword.put(:admin, Keyword.merge([port: 0], admin))
-      )
-
-    start_supervised!({Ankusa.Instance, config})
-    config
-  end
+  defp start(routes_opts), do: start_routes(routes_opts)
 
   defp seed(routes \\ [{"s", "/hooks/s"}]) do
     Enum.map(routes, fn {id, path} -> %{"id" => id, "path" => path} end)

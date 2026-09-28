@@ -16,17 +16,10 @@ defmodule Ankusa.Edge.RouteGuardTest do
   alias Ankusa.WAL
 
   defp start(routes_opts) do
-    config =
-      test_config(
-        roles: [:edge],
-        source_store:
-          {Ankusa.SourceStore.Static,
-           sources: %{"demo" => [verifier: {Ankusa.Verifier.None, []}]}},
-        routes: Keyword.merge([enabled: true, admin: [port: 0]], routes_opts)
-      )
-
-    start_supervised!({Ankusa.Instance, config})
-    config
+    start_routes(routes_opts,
+      source_store:
+        {Ankusa.SourceStore.Static, sources: %{"demo" => [verifier: {Ankusa.Verifier.None, []}]}}
+    )
   end
 
   defp post(config, path, extra_headers \\ []) do
