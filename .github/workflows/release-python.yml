@@ -8,9 +8,15 @@ name: Release (Python)
 # `mise run release:tag sdk-python`.
 #
 # Publishes via PyPI Trusted Publishing (OIDC): no long-lived token secret
-# in this repo. One-time setup on pypi.org: the `ankusa` project's
-# "Publishing" settings -> add a trusted publisher for this repo, workflow
-# `release-python.yml`, environment `pypi`. See docs/releasing.md.
+# in this repo. One-time setup on pypi.org: until the `ankusa` project exists
+# there is no project settings page to use, so register a *pending* trusted
+# publisher under Account -> Publishing (pypi.org/manage/account/publishing/),
+# with Project Name `ankusa`, Owner `jamescarr`, Repository `ankusa`, Workflow
+# `release-python.yml`, Environment `pypi`. The first successful run creates
+# and binds the project. Until that publisher exists this workflow's publish
+# step fails with `invalid-publisher` (no matching publisher), which leaves
+# the tag pushed and unpublished rather than publishing anything wrong. See
+# docs/releasing.md.
 
 on:
   push:
