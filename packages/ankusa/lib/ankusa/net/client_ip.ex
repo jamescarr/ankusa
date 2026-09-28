@@ -39,7 +39,7 @@ defmodule Ankusa.Net.ClientIP do
   (a test conn with the field cleared). Callers treat that as an IP rejection:
   there is no address to match against rules.
   """
-  @spec resolve(Plug.Conn.t(), [CIDR.t()]) :: {:ok, :inet.ip_address()} | :error
+  @spec resolve(Plug.Conn.t(), [%CIDR{}]) :: {:ok, :inet.ip_address()} | :error
   def resolve(%Plug.Conn{remote_ip: nil}, _trusted_proxies), do: :error
 
   def resolve(%Plug.Conn{remote_ip: peer} = conn, trusted_proxies) do

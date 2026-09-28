@@ -19,8 +19,8 @@ defmodule Ankusa.Routes.Snapshot do
         version: pos_integer(),
         patterns: [%{route: Route.t(), segments: [Matcher.segment()]}],
         by_id: %{String.t() => Route.t()},
-        ip_rules: %{default: :allow | :deny, rules: [%{action: atom(), cidr: CIDR.t()}]},
-        trusted_proxies: [CIDR.t()]
+        ip_rules: %{default: :allow | :deny, rules: [%{action: atom(), cidr: %CIDR{}}]},
+        trusted_proxies: [%CIDR{}]
       }
 
   `patterns` holds **every** route, enabled or not; the guard skips a disabled

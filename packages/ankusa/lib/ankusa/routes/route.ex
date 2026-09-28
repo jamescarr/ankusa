@@ -32,7 +32,7 @@ defmodule Ankusa.Routes.Route do
   alias Ankusa.Routes.Matcher
   alias CIDR
 
-  @type ip_rule :: %{action: :allow | :deny, cidr: CIDR.t()}
+  @type ip_rule :: %{action: :allow | :deny, cidr: %CIDR{}}
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -155,7 +155,7 @@ defmodule Ankusa.Routes.Route do
   """
   @spec stringify(term(), String.t()) ::
           {:ok, %{String.t() => term()}} | {:error, {:invalid, String.t(), String.t()}}
-  def stringify(value, field) when is_map(value),
+  def stringify(value, _field) when is_map(value),
     do: {:ok, Map.new(value, fn {k, v} -> {to_string(k), v} end)}
 
   def stringify(value, field) when is_list(value) do
