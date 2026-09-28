@@ -268,7 +268,6 @@ defmodule Ankusa.Routes.Store.RedisTest do
     config = start_node()
 
     assert is_pid(Ankusa.whereis(config.instance, :routes_store))
-    assert State.snapshot(config.instance) == Routes.snapshot(config.instance)
     assert is_pid(Ankusa.whereis(config.instance, :routes_redis))
     assert is_pid(Ankusa.whereis(config.instance, :routes_redis_pubsub))
   end

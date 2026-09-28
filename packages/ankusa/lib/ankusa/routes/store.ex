@@ -34,10 +34,6 @@ defmodule Ankusa.Routes.Store do
 
   @callback start_link(keyword()) :: GenServer.on_start()
 
-  @callback snapshot(atom()) :: map()
-
-  @callback get(atom(), String.t()) :: {:ok, Route.t()} | :error
-
   @callback insert(atom(), Route.t()) :: :ok | {:error, error()}
 
   @callback replace(atom(), Route.t()) :: :ok | {:error, error()}
@@ -47,12 +43,6 @@ defmodule Ankusa.Routes.Store do
   @callback put_ip_rules(atom(), map()) :: :ok | {:error, error()}
 
   # ── facade ──────────────────────────────────────────────────────────────────
-
-  @spec snapshot(atom()) :: map()
-  def snapshot(instance), do: mod(instance).snapshot(instance)
-
-  @spec get(atom(), String.t()) :: {:ok, Route.t()} | :error
-  def get(instance, id), do: mod(instance).get(instance, id)
 
   @spec insert(atom(), Route.t()) :: :ok | {:error, error()}
   def insert(instance, %Route{} = route), do: mod(instance).insert(instance, route)

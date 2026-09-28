@@ -332,12 +332,6 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     end
 
     @impl true
-    def snapshot(_instance), do: nil
-
-    @impl true
-    def get(_instance, _id), do: :error
-
-    @impl true
     def insert(_instance, _route), do: {:error, :store_unavailable}
 
     @impl true

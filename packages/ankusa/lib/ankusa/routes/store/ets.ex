@@ -26,12 +26,6 @@ defmodule Ankusa.Routes.Store.ETS do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: server(opts))
 
   @impl Ankusa.Routes.Store
-  def snapshot(instance), do: Snapshot.get(instance)
-
-  @impl Ankusa.Routes.Store
-  def get(instance, id), do: GenServer.call(server_name(instance), {:get, id})
-
-  @impl Ankusa.Routes.Store
   def insert(instance, %Route{} = route),
     do: GenServer.call(server_name(instance), {:insert, route})
 
@@ -63,7 +57,7 @@ defmodule Ankusa.Routes.Store.ETS do
         version: 1
       }
 
-      Snapshot.put(instance, build(state))
+      Snapshot.put(instance, Snapshot.build(state))
       {:ok, state}
     else
       {:error, reason} -> {:stop, reason}
@@ -71,25 +65,20 @@ defmodule Ankusa.Routes.Store.ETS do
   end
 
   @impl true
-  def handle_call({:get, id}, _from, state) do
-    case Map.fetch(state.routes, id) do
-      {:ok, route} -> {:reply, {:ok, route}, state}
-      :error -> {:reply, :error, state}
-    end
-  end
-
   def handle_call({:insert, route}, _from, state) do
     # The cap is checked against this call's own state, so concurrent inserts
     # can't both fit in the last slot.
     if map_size(state.routes) >= state.max_routes do
       {:reply, {:error, :too_many_routes}, state}
     else
-      {:reply, :ok, state |> put_route(route) |> changed(:insert, route.id)}
+      {:reply, :ok,
+       state |> put_route(route) |> bump_version() |> Snapshot.publish({:insert, route.id})}
     end
   end
 
   def handle_call({:replace, route}, _from, state) do
-    {:reply, :ok, state |> put_route(route) |> changed(:replace, route.id)}
+    {:reply, :ok,
+     state |> put_route(route) |> bump_version() |> Snapshot.publish({:replace, route.id})}
   end
 
   def handle_call({:delete, id}, _from, state) do
@@ -98,36 +87,21 @@ defmodule Ankusa.Routes.Store.ETS do
         {:reply, {:error, :not_found}, state}
 
       {:ok, _route} ->
-        state = %{state | routes: Map.delete(state.routes, id)}
-        {:reply, :ok, changed(state, :delete, id)}
+        state = %{state | routes: Map.delete(state.routes, id)} |> bump_version()
+        {:reply, :ok, Snapshot.publish(state, {:delete, id})}
     end
   end
 
   def handle_call({:put_ip_rules, ip_rules}, _from, state) do
-    {:reply, :ok, %{state | ip_rules: ip_rules} |> changed(:ip_rules, nil)}
+    state = %{state | ip_rules: ip_rules} |> bump_version()
+    {:reply, :ok, Snapshot.publish(state, {:ip_rules, nil})}
   end
 
   # ── state transitions ───────────────────────────────────────────────────────
 
   defp put_route(state, route), do: %{state | routes: Map.put(state.routes, route.id, route)}
 
-  # One version bump, one snapshot rebuild, one event — a caller never observes
-  # a half-applied change.
-  defp changed(state, action, route_id) do
-    state = %{state | version: state.version + 1}
-    Snapshot.put(state.instance, build(state))
-
-    Ankusa.Telemetry.emit([:routes, :changed], %{}, %{
-      instance: state.instance,
-      action: action,
-      route_id: route_id,
-      version: state.version
-    })
-
-    state
-  end
-
-  defp build(state), do: Snapshot.build(state.routes, state.ip_rules, state.version)
+  defp bump_version(state), do: %{state | version: state.version + 1}
 
   # ── boot ────────────────────────────────────────────────────────────────────
 

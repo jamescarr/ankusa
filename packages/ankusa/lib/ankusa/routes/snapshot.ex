@@ -19,7 +19,8 @@ defmodule Ankusa.Routes.Snapshot do
         version: pos_integer(),
         patterns: [%{route: Route.t(), segments: [Matcher.segment()]}],
         by_id: %{String.t() => Route.t()},
-        ip_rules: %{default: :allow | :deny, rules: [%{action: atom(), cidr: CIDR.t()}]}
+        ip_rules: %{default: :allow | :deny, rules: [%{action: atom(), cidr: CIDR.t()}]},
+        trusted_proxies: [CIDR.t()]
       }
 
   `patterns` holds **every** route, enabled or not; the guard skips a disabled
@@ -42,13 +43,17 @@ defmodule Ankusa.Routes.Snapshot do
   """
 
   alias Ankusa.Routes.{Matcher, Route}
+  alias CIDR
 
   @doc """
-  Compile routes into a snapshot. `routes` is the stores' `%{id => %Route{}}`
-  map, `ip_rules` the global rule list already parsed into CIDRs.
+  Compile a store's state into a snapshot. `state` is the stores'
+  `%{instance:, routes:, ip_rules:, version:}` map; `trusted_proxies` is folded
+  in from the instance's config, so the guard reads them once per request.
   """
-  @spec build(%{String.t() => Route.t()}, map(), pos_integer()) :: map()
-  def build(routes, ip_rules, version) do
+  @spec build(map()) :: map()
+  def build(state) do
+    %{routes: routes, ip_rules: ip_rules, version: version, instance: instance} = state
+
     placed =
       Enum.map(routes, fn {_id, %Route{} = route} ->
         %{route: route, segments: Matcher.compile(route)}
@@ -58,8 +63,41 @@ defmodule Ankusa.Routes.Snapshot do
       version: version,
       patterns: Enum.sort_by(placed, &priority/1),
       by_id: Map.new(routes, fn {id, route} -> {id, route} end),
-      ip_rules: ip_rules
+      ip_rules: ip_rules,
+      trusted_proxies: trusted_proxies(instance)
     }
+  end
+
+  @doc """
+  Rebuild, write, and emit the change telemetry for a mutation. Returns `state`.
+  The caller owns `state.version` — the ETS store bumps it locally, the Redis
+  store takes it from `INCR` — so no bump happens here.
+  """
+  @spec publish(map(), {atom(), String.t() | nil}) :: map()
+  def publish(state, {action, route_id}) do
+    publish(state)
+
+    Ankusa.Telemetry.emit([:routes, :changed], %{}, %{
+      instance: state.instance,
+      action: action,
+      route_id: route_id,
+      version: state.version
+    })
+
+    state
+  end
+
+  @doc "Rebuild and write the snapshot without telemetry (boot, seed, reload)."
+  @spec publish(map()) :: :ok
+  def publish(state), do: put(state.instance, build(state))
+
+  defp trusted_proxies(instance) do
+    Enum.flat_map(Ankusa.config(instance).routes.trusted_proxies, fn cidr ->
+      case CIDR.parse(cidr) do
+        %CIDR{} = parsed -> [parsed]
+        {:error, _} -> []
+      end
+    end)
   end
 
   @doc "Write a snapshot where the guard reads it: instance-scoped `:persistent_term`."

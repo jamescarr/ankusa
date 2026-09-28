@@ -103,12 +103,6 @@ defmodule Ankusa.Routes.Store.Redis do
   # The store's address is the state process, so the facade calls it exactly as
   # it calls the ETS store.
   @impl Ankusa.Routes.Store
-  defdelegate snapshot(instance), to: State
-
-  @impl Ankusa.Routes.Store
-  defdelegate get(instance, id), to: State
-
-  @impl Ankusa.Routes.Store
   defdelegate insert(instance, route), to: State
 
   @impl Ankusa.Routes.Store
@@ -145,12 +139,6 @@ defmodule Ankusa.Routes.Store.Redis.State do
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: server(opts[:instance]))
   end
-
-  @impl Ankusa.Routes.Store
-  def snapshot(instance), do: Snapshot.get(instance)
-
-  @impl Ankusa.Routes.Store
-  def get(instance, id), do: GenServer.call(server(instance), {:get, id})
 
   @impl Ankusa.Routes.Store
   def insert(instance, %Route{} = route), do: GenServer.call(server(instance), {:insert, route})
@@ -205,13 +193,6 @@ defmodule Ankusa.Routes.Store.Redis.State do
   end
 
   @impl true
-  def handle_call({:get, id}, _from, state) do
-    case Map.fetch(state.routes, id) do
-      {:ok, route} -> {:reply, {:ok, route}, state}
-      :error -> {:reply, :error, state}
-    end
-  end
-
   def handle_call({:insert, route}, _from, state) do
     # The cap is checked in Redis, not in the mirror: every node shares the same
     # hash, so a node with a stale mirror must not be able to exceed it.
@@ -327,7 +308,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
       case Redix.pipeline(state.conn, commands) do
         {:ok, _results} ->
-          {:ok, %{state | version: 1, routes: routes, ip_rules: rules} |> republish()}
+          state = %{state | version: 1, routes: routes, ip_rules: rules}
+          Snapshot.publish(state)
+          {:ok, state}
 
         {:error, reason} ->
           {:error, {:redis_unavailable, reason}}
@@ -369,7 +352,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
          {:ok, raw_rules} <- command(state, ["GET", ip_rules_key(state)]),
          {:ok, routes} <- decode_routes(raw_routes),
          {:ok, rules} <- decode_rules(raw_rules) do
-      {:ok, %{state | version: version, routes: routes, ip_rules: rules} |> republish()}
+      state = %{state | version: version, routes: routes, ip_rules: rules}
+      Snapshot.publish(state)
+      {:ok, state}
     end
   end
 
@@ -449,8 +434,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
               state
               |> update.()
               |> Map.put(:version, version)
-              |> republish()
-              |> emit(action, route_id)
+              |> Snapshot.publish({action, route_id})
 
             {:reply, :ok, state}
 
@@ -479,25 +463,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # traffic.
   defp reload(state) do
     case load(state) do
-      {:ok, state} -> emit(state, :reloaded, nil)
+      {:ok, state} -> Snapshot.publish(state, {:reloaded, nil})
       {:error, reason} -> warn_unavailable(reason, state)
     end
-  end
-
-  defp republish(state) do
-    Snapshot.put(state.instance, Snapshot.build(state.routes, state.ip_rules, state.version))
-    state
-  end
-
-  defp emit(state, action, route_id) do
-    Ankusa.Telemetry.emit([:routes, :changed], %{}, %{
-      instance: state.instance,
-      action: action,
-      route_id: route_id,
-      version: state.version
-    })
-
-    state
   end
 
   # ── keys ────────────────────────────────────────────────────────────────────

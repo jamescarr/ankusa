@@ -31,7 +31,7 @@ defmodule Ankusa.Routes do
   """
 
   alias Ankusa.Net
-  alias Ankusa.Routes.{Cache, Matcher, Route, Store}
+  alias Ankusa.Routes.{Cache, Matcher, Route, Snapshot, Store}
   alias CIDR
 
   @type decision :: {:ok, String.t()} | {:reject, :no_route | :method | :ip_denied}
@@ -52,7 +52,7 @@ defmodule Ankusa.Routes do
   isn't loaded means "nothing is allowed", not "everything is".
   """
   @spec snapshot(atom()) :: map() | nil
-  def snapshot(instance), do: Store.snapshot(instance)
+  def snapshot(instance), do: Snapshot.get(instance)
 
   @doc """
   Decide a request against the IP rules and the route table; `segments` are
@@ -140,7 +140,18 @@ defmodule Ankusa.Routes do
 
   @doc "Fetch one route definition."
   @spec get(atom(), String.t()) :: {:ok, Route.t()} | {:error, :not_found}
-  def get(instance, id), do: fetch(instance, id)
+  def get(instance, id) do
+    case snapshot(instance) do
+      nil ->
+        {:error, :not_found}
+
+      snapshot ->
+        case Map.fetch(snapshot.by_id, id) do
+          {:ok, route} -> {:ok, route}
+          :error -> {:error, :not_found}
+        end
+    end
+  end
 
   @doc """
   Create a route.
@@ -205,7 +216,7 @@ defmodule Ankusa.Routes do
           | {:error, {:conflict, String.t()}}
           | {:error, :not_found | :too_many_routes | :store_unavailable}
   def update(instance, id, patch) do
-    with {:ok, existing} <- fetch(instance, id),
+    with {:ok, existing} <- get(instance, id),
          {:ok, patch} <- patch_attrs(patch),
          attrs = Map.merge(attrs_of(existing), patch),
          {:ok, route} <- Route.from_attrs(attrs, id: id),
@@ -497,13 +508,6 @@ defmodule Ankusa.Routes do
     case snapshot(instance) do
       nil -> {:error, :store_unavailable}
       snapshot -> {:ok, snapshot}
-    end
-  end
-
-  defp fetch(instance, id) do
-    case Store.get(instance, id) do
-      {:ok, route} -> {:ok, route}
-      :error -> {:error, :not_found}
     end
   end
 

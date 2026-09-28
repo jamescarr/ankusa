@@ -57,7 +57,6 @@ defmodule Ankusa.Edge.RouteGuard do
   alias Ankusa.Config
   alias Ankusa.Net
   alias Ankusa.Routes
-  alias CIDR
 
   @impl Plug
   def init(opts), do: opts
@@ -87,8 +86,8 @@ defmodule Ankusa.Edge.RouteGuard do
 
         reject(conn, instance, config, :no_route)
 
-      _table ->
-        case client_ip(conn, config) do
+      table ->
+        case client_ip(conn, table) do
           {:ok, ip} ->
             decide(conn, instance, config, ip)
 
@@ -145,19 +144,7 @@ defmodule Ankusa.Edge.RouteGuard do
 
   # ── client address ──────────────────────────────────────────────────────────
 
-  defp client_ip(conn, config), do: Net.ClientIP.resolve(conn, trusted_proxies(config))
-
-  # Parsed per request rather than cached: the list is short, and a config that
-  # skipped `Ankusa.Routes.validate_config!/1` (an embedded caller) must not be
-  # able to turn a typo into a trusted proxy.
-  defp trusted_proxies(config) do
-    Enum.flat_map(config.routes.trusted_proxies, fn cidr ->
-      case CIDR.parse(cidr) do
-        %CIDR{} = parsed -> [parsed]
-        {:error, _} -> []
-      end
-    end)
-  end
+  defp client_ip(conn, table), do: Net.ClientIP.resolve(conn, table.trusted_proxies)
 
   # ── logging ─────────────────────────────────────────────────────────────────
 
