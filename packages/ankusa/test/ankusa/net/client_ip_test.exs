@@ -8,9 +8,17 @@ defmodule Ankusa.Net.ClientIPTest do
   use ExUnit.Case, async: true
 
   alias Ankusa.Net
-  alias Ankusa.Net.{CIDR, ClientIP}
+  alias Ankusa.Net.ClientIP
+  alias CIDR
 
-  defp proxies(cidrs), do: Enum.map(cidrs, &CIDR.parse!/1)
+  defp proxies(cidrs) do
+    Enum.map(cidrs, fn cidr ->
+      case CIDR.parse(cidr) do
+        %CIDR{} = c -> c
+        {:error, _} -> flunk("bad proxy #{cidr}")
+      end
+    end)
+  end
 
   defp conn(peer, headers \\ []) do
     Enum.reduce(headers, Plug.Test.conn(:post, "/hooks/x", "{}"), fn {name, value}, conn ->
@@ -21,34 +29,32 @@ defmodule Ankusa.Net.ClientIPTest do
 
   defp ip(text), do: elem(Net.parse(text), 1)
 
-  defp ipv4_peer(text), do: Net.to_tuple(ip(text))
-
   test "the peer is the client when no proxies are trusted" do
-    conn = conn(ipv4_peer("1.2.3.4"), [{"x-forwarded-for", "9.9.9.9"}])
+    conn = conn(ip("1.2.3.4"), [{"x-forwarded-for", "9.9.9.9"}])
 
     assert ClientIP.resolve(conn, []) == {:ok, ip("1.2.3.4")}
   end
 
   test "an untrusted peer's X-Forwarded-For is ignored entirely" do
-    conn = conn(ipv4_peer("192.168.1.1"), [{"x-forwarded-for", "1.2.3.4"}])
+    conn = conn(ip("192.168.1.1"), [{"x-forwarded-for", "1.2.3.4"}])
 
     assert ClientIP.resolve(conn, proxies(["10.0.0.0/8"])) == {:ok, ip("192.168.1.1")}
   end
 
   test "a trusted peer's chain resolves to the rightmost untrusted entry" do
-    conn = conn(ipv4_peer("10.0.0.9"), [{"x-forwarded-for", "1.2.3.4, 10.0.0.7"}])
+    conn = conn(ip("10.0.0.9"), [{"x-forwarded-for", "1.2.3.4, 10.0.0.7"}])
 
     assert ClientIP.resolve(conn, proxies(["10.0.0.0/8"])) == {:ok, ip("1.2.3.4")}
   end
 
   test "a chain of only trusted entries resolves to the leftmost" do
-    conn = conn(ipv4_peer("10.0.0.9"), [{"x-forwarded-for", "10.0.0.7, 10.0.0.8"}])
+    conn = conn(ip("10.0.0.9"), [{"x-forwarded-for", "10.0.0.7, 10.0.0.8"}])
 
     assert ClientIP.resolve(conn, proxies(["10.0.0.0/8"])) == {:ok, ip("10.0.0.7")}
   end
 
   test "a header with one junk entry is discarded whole" do
-    conn = conn(ipv4_peer("10.0.0.9"), [{"x-forwarded-for", "1.2.3.4, not-an-ip"}])
+    conn = conn(ip("10.0.0.9"), [{"x-forwarded-for", "1.2.3.4, not-an-ip"}])
 
     assert ClientIP.resolve(conn, proxies(["10.0.0.0/8"])) == {:ok, ip("10.0.0.9")}
   end
@@ -56,12 +62,12 @@ defmodule Ankusa.Net.ClientIPTest do
   test "an absent or empty header falls back to the peer" do
     trusted = proxies(["10.0.0.0/8"])
 
-    assert ClientIP.resolve(conn(ipv4_peer("10.0.0.9")), trusted) == {:ok, ip("10.0.0.9")}
+    assert ClientIP.resolve(conn(ip("10.0.0.9")), trusted) == {:ok, ip("10.0.0.9")}
 
-    assert ClientIP.resolve(conn(ipv4_peer("10.0.0.9"), [{"x-forwarded-for", ""}]), trusted) ==
+    assert ClientIP.resolve(conn(ip("10.0.0.9"), [{"x-forwarded-for", ""}]), trusted) ==
              {:ok, ip("10.0.0.9")}
 
-    assert ClientIP.resolve(conn(ipv4_peer("10.0.0.9"), [{"x-forwarded-for", " , "}]), trusted) ==
+    assert ClientIP.resolve(conn(ip("10.0.0.9"), [{"x-forwarded-for", " , "}]), trusted) ==
              {:ok, ip("10.0.0.9")}
   end
 
@@ -69,7 +75,7 @@ defmodule Ankusa.Net.ClientIPTest do
     # `put_req_header/3` replaces, so repeat the header at the tuple level: a
     # proxy in front of Ankusa can hand us a conn that carries it twice.
     conn =
-      conn(ipv4_peer("10.0.0.9"))
+      conn(ip("10.0.0.9"))
       |> Map.put(:req_headers, [
         {"x-forwarded-for", "1.1.1.1"},
         {"x-forwarded-for", "2.2.2.2"}
@@ -79,7 +85,7 @@ defmodule Ankusa.Net.ClientIPTest do
   end
 
   test "an IPv6 peer is matched against an IPv6 proxy range" do
-    conn = conn(Net.to_tuple(ip("2001:db8::9")), [{"x-forwarded-for", "2001:db8::1"}])
+    conn = conn(ip("2001:db8::9"), [{"x-forwarded-for", "2001:db8::1"}])
 
     assert ClientIP.resolve(conn, proxies(["2001:db8::/32"])) == {:ok, ip("2001:db8::1")}
   end
@@ -91,7 +97,7 @@ defmodule Ankusa.Net.ClientIPTest do
   end
 
   test "a header entry with whitespace is trimmed" do
-    conn = conn(ipv4_peer("10.0.0.9"), [{"x-forwarded-for", " 1.2.3.4 ,10.0.0.7"}])
+    conn = conn(ip("10.0.0.9"), [{"x-forwarded-for", " 1.2.3.4 ,10.0.0.7"}])
 
     assert ClientIP.resolve(conn, proxies(["10.0.0.0/8"])) == {:ok, ip("1.2.3.4")}
   end

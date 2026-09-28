@@ -27,7 +27,7 @@ defmodule Ankusa.Net.ClientIP do
   """
 
   alias Ankusa.Net
-  alias Ankusa.Net.CIDR
+  alias CIDR
 
   @forwarded_for "x-forwarded-for"
 
@@ -39,11 +39,11 @@ defmodule Ankusa.Net.ClientIP do
   (a test conn with the field cleared). Callers treat that as an IP rejection:
   there is no address to match against rules.
   """
-  @spec resolve(Plug.Conn.t(), [CIDR.t()]) :: {:ok, Net.ip()} | :error
+  @spec resolve(Plug.Conn.t(), [CIDR.t()]) :: {:ok, :inet.ip_address()} | :error
   def resolve(%Plug.Conn{remote_ip: nil}, _trusted_proxies), do: :error
 
   def resolve(%Plug.Conn{remote_ip: peer} = conn, trusted_proxies) do
-    peer = Net.normalize(Net.from_tuple(peer))
+    peer = Net.normalize(peer)
 
     if forwarded?(peer, trusted_proxies) do
       {:ok, client(conn, peer, trusted_proxies)}
@@ -57,7 +57,9 @@ defmodule Ankusa.Net.ClientIP do
   defp forwarded?(_peer, []), do: false
 
   defp forwarded?(peer, trusted_proxies),
-    do: Enum.any?(trusted_proxies, &CIDR.contains?(&1, peer))
+    do: Enum.any?(trusted_proxies, &contains?(&1, peer))
+
+  defp contains?(cidr, ip), do: ip >= cidr.first and ip <= cidr.last
 
   defp client(conn, peer, trusted_proxies) do
     case chain(conn) do
@@ -116,7 +118,7 @@ defmodule Ankusa.Net.ClientIP do
   # reversed list. All entries trusted leaves nothing to return but the chain's
   # origin, the leftmost.
   defp hop(entries, trusted_proxies) do
-    trusted? = fn entry -> Enum.any?(trusted_proxies, &CIDR.contains?(&1, entry)) end
+    trusted? = fn entry -> Enum.any?(trusted_proxies, &contains?(&1, entry)) end
 
     Enum.reduce(entries, nil, fn entry, acc ->
       if trusted?.(entry), do: acc, else: entry

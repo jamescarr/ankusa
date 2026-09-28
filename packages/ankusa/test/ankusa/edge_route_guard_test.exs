@@ -86,7 +86,7 @@ defmodule Ankusa.Edge.RouteGuardTest do
           "GET",
           ["webhooks", "demo"],
           "/webhooks/demo",
-          {32, 0x7F000001}
+          {127, 0, 0, 1}
         )
 
       assert decision == {:reject, :method}

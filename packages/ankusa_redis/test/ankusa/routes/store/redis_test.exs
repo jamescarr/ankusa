@@ -207,7 +207,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert snapshot.version == before.version
     assert Map.keys(snapshot.by_id) == ["a"]
 
-    assert Routes.authorize(config.instance, "POST", ["hooks", "a"], {32, 0x01020304}) ==
+    assert Routes.authorize(config.instance, "POST", ["hooks", "a"], {1, 2, 3, 4}) ==
              {:ok, "a"}
   end
 

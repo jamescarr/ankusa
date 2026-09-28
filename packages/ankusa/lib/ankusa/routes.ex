@@ -32,6 +32,7 @@ defmodule Ankusa.Routes do
 
   alias Ankusa.Net
   alias Ankusa.Routes.{Cache, Matcher, Route, Store}
+  alias CIDR
 
   @type decision :: {:ok, String.t()} | {:reject, :no_route | :method | :ip_denied}
 
@@ -359,7 +360,7 @@ defmodule Ankusa.Routes do
   defp route_rule(%Route{ip_rules: []}, _ip), do: {:allow, nil}
 
   defp route_rule(%Route{ip_rules: rules}, ip) do
-    case Enum.find(rules, &Ankusa.Net.CIDR.contains?(&1.cidr, ip)) do
+    case Enum.find(rules, &contains?(&1.cidr, ip)) do
       nil -> {:deny, nil}
       rule -> {rule.action, rule}
     end
@@ -415,8 +416,14 @@ defmodule Ankusa.Routes do
   defp ttl(%{ttl_ms: ttl_ms}, {:match, _id}), do: ttl_ms
   defp ttl(%{negative_ttl_ms: ttl_ms}, {:reject, _reason}), do: ttl_ms
 
+  # A CIDR membership test without bit math: `cidr` carries `first`/`last` as
+  # `:inet` tuples, and Erlang term order compares 4-tuples against 4-tuples and
+  # 8-tuples against 8-tuples (a 4-tuple and an 8-tuple are never `>=`/`<=` each
+  # other, so cross-family comparisons are always false).
+  defp contains?(cidr, ip), do: ip >= cidr.first and ip <= cidr.last
+
   defp first_rule(%{default: default, rules: rules}, ip) do
-    case Enum.find(rules, &Ankusa.Net.CIDR.contains?(&1.cidr, ip)) do
+    case Enum.find(rules, &contains?(&1.cidr, ip)) do
       nil -> {default, nil}
       rule -> {rule.action, rule}
     end
@@ -427,7 +434,7 @@ defmodule Ankusa.Routes do
   defp ip_rule(nil, _scope), do: nil
 
   defp ip_rule(rule, scope) do
-    %{action: rule.action, cidr: Ankusa.Net.CIDR.to_string(rule.cidr), scope: scope}
+    %{action: rule.action, cidr: to_string(rule.cidr), scope: scope}
   end
 
   defp do_dry_run(instance, method, segments, ip) do
@@ -645,9 +652,9 @@ defmodule Ankusa.Routes do
     end
 
     Enum.each(proxies, fn cidr ->
-      case Ankusa.Net.CIDR.parse(cidr) do
-        {:ok, _parsed} -> :ok
-        {:error, :invalid_cidr} -> raise ArgumentError, not_a_cidr("trusted_proxies", cidr)
+      case CIDR.parse(cidr) do
+        %CIDR{} -> :ok
+        {:error, _} -> raise ArgumentError, not_a_cidr("trusted_proxies", cidr)
       end
     end)
   end

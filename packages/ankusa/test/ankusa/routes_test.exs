@@ -526,7 +526,7 @@ defmodule Ankusa.RoutesTest do
 
       assert rules.default == :deny
       assert [%{action: :allow, cidr: cidr}] = rules.rules
-      assert Ankusa.Net.CIDR.to_string(cidr) == "10.0.0.0/8"
+      assert to_string(cidr) == "10.0.0.0/8"
       assert Routes.ip_rules(config.instance) == rules
 
       assert authorize(config, "POST", "/hooks/s", "10.1.2.3") == {:ok, "s"}

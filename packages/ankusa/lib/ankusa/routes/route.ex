@@ -29,8 +29,8 @@ defmodule Ankusa.Routes.Route do
   the field is a list, the index.
   """
 
-  alias Ankusa.Net.CIDR
   alias Ankusa.Routes.Matcher
+  alias CIDR
 
   @type ip_rule :: %{action: :allow | :deny, cidr: CIDR.t()}
 
@@ -279,8 +279,8 @@ defmodule Ankusa.Routes.Route do
 
   defp rule_cidr(%{"cidr" => cidr}) do
     case CIDR.parse(cidr) do
-      {:ok, parsed} -> {:ok, parsed}
-      {:error, :invalid_cidr} -> {:error, "invalid cidr #{inspect(cidr)}"}
+      %CIDR{} = parsed -> {:ok, parsed}
+      {:error, _} -> {:error, "invalid cidr #{inspect(cidr)}"}
     end
   end
 
@@ -318,7 +318,7 @@ defmodule Ankusa.Routes.Route do
   @doc "The JSON view of one IP rule, for the admin API."
   @spec rule_json(ip_rule()) :: map()
   def rule_json(%{action: action, cidr: cidr}) do
-    %{"action" => Atom.to_string(action), "cidr" => CIDR.to_string(cidr)}
+    %{"action" => Atom.to_string(action), "cidr" => to_string(cidr)}
   end
 
   @doc """

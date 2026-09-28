@@ -117,6 +117,10 @@ defmodule Ankusa.MixProject do
     [
       {:bandit, "~> 1.12.5"},
       {:plug, "~> 1.18"},
+      # CIDR parse/match/to_string for the route-management IP rules and
+      # trusted proxies. Replaces ~128 lines of hand-rolled prefix bit math in
+      # Ankusa.Net.CIDR.
+      {:cidr, "~> 1.2"},
       # HTTP client for the S3/GCS blob stores, the claim-check Remote adapter,
       # and Sink.Http. Replaces hand-rolled :httpc plumbing (and starts its own
       # Finch pool, so embedders configure nothing).
@@ -137,9 +141,6 @@ defmodule Ankusa.MixProject do
       # route definitions across nodes need a network store.
       {:nebulex, "~> 3.0"},
       {:nebulex_local, "~> 3.0"},
-      # Property tests for Ankusa.Net.CIDR: parse/to_string round trips, and
-      # `contains?/2` against a naive bit comparison.
-      {:stream_data, "~> 1.1", only: :test},
       # The OpenAPI contract test reads priv/openapi/*.yaml and drives the
       # listeners from the examples in it, so the document and the code cannot
       # drift apart.

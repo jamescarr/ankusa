@@ -56,8 +56,8 @@ defmodule Ankusa.Edge.RouteGuard do
 
   alias Ankusa.Config
   alias Ankusa.Net
-  alias Ankusa.Net.CIDR
   alias Ankusa.Routes
+  alias CIDR
 
   @impl Plug
   def init(opts), do: opts
@@ -153,8 +153,8 @@ defmodule Ankusa.Edge.RouteGuard do
   defp trusted_proxies(config) do
     Enum.flat_map(config.routes.trusted_proxies, fn cidr ->
       case CIDR.parse(cidr) do
-        {:ok, parsed} -> [parsed]
-        {:error, :invalid_cidr} -> []
+        %CIDR{} = parsed -> [parsed]
+        {:error, _} -> []
       end
     end)
   end
