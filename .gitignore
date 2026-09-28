@@ -1,6 +1,6 @@
 # The directory Mix will write compiled artifacts to. Recursive: this repo
-# is a mono-repo of multiple Mix projects (ankusa_rabbitmq/,
-# examples/*/ingest_app/), each with its own _build/.
+# is a mono-repo of multiple Mix projects (packages/*, examples/*/*), each
+# with its own _build/.
 **/_build/
 
 # If you run "mix test --cover", coverage assets end up here.
@@ -14,9 +14,10 @@
 
 # Temporary files, for example, from tests.
 /tmp/
+packages/*/tmp/
 
 # Local WAL, segments, quarantine, and DLQ written by the framework at runtime.
-/data/
+packages/*/data/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
@@ -25,16 +26,13 @@ erl_crash.dump
 *.ez
 
 # Ignore package tarballs (built via "mix hex.build").
-ankusa-*.tar
-ankusa_rabbitmq-*.tar
-ankusa_kafka-*.tar
-ankusa_nats-*.tar
+packages/*/*.tar
 
 # Node (examples/*/worker).
 **/node_modules/
 
 # TypeScript SDK build output (built via "npm run build" / "npm pack").
-sdks/*/dist/
+packages/sdk-typescript/dist/
 *.tgz
 
 # Load-generator output from examples/oban-consumer/run.sh (CSVs + JSON reports).

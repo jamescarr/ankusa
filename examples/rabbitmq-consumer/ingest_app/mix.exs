@@ -29,8 +29,8 @@ defmodule AnkusaExample.Ingest.MixProject do
       # — that conflicts with our direct path entry below. override tells
       # Mix to use ours everywhere in the tree, which is exactly what a
       # monorepo example wiring both path-dependent packages together needs.
-      {:ankusa, path: "../../..", override: true},
-      {:ankusa_rabbitmq, path: "../../../ankusa_rabbitmq"}
+      {:ankusa, path: "../../../packages/ankusa", override: true},
+      {:ankusa_rabbitmq, path: "../../../packages/ankusa_rabbitmq"}
     ]
   end
 end

@@ -33,7 +33,7 @@ New here? Start with the [quickstart](quickstart.md).
 | --- | --- |
 | [`testing.md`](testing.md) | running the suites, local infra, what each one covers |
 | [`packaging.md`](packaging.md) | why adapters are separate packages, and how to add one |
-| [`releasing.md`](releasing.md) | tagging a Hex package or the server image |
+| [`releasing.md`](releasing.md) | releasing any package: Hex, the server image, or npm |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | before opening a PR |
 
 Exact callback signatures and options: the module docs on

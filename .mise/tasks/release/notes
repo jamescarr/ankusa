@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Print the GitHub release notes the publish workflow extracts for a version"
+#USAGE arg "<pkg>" help="package under packages/"
+#USAGE arg "[version]" help="defaults to the package's current version"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+p="$usage_pkg"
+v="${usage_version:-}"
+if [ -z "$v" ]; then v=$(pkg_version "$p"); fi
+pkg_notes "$p" "$v"

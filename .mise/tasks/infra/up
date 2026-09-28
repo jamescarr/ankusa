@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#MISE description="Start package test infrastructure (default: every package with a docker-compose.yml)"
+#USAGE arg "[pkgs]" var=#true help="packages whose docker-compose.yml to start"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+pkgs=()
+eval "pkgs=(${usage_pkgs:-})"
+if [ ${#pkgs[@]} -eq 0 ]; then
+  for p in $(pkg_names); do
+    if [ -f "$(pkg_dir "$p")/docker-compose.yml" ]; then pkgs+=("$p"); fi
+  done
+fi
+
+for p in ${pkgs[@]+"${pkgs[@]}"}; do
+  d=$(pkg_dir "$p")
+  [ -f "$d/docker-compose.yml" ] || fail "$d has no docker-compose.yml"
+  echo "==> $p"
+  (cd "$d" && docker compose up -d --wait)
+done

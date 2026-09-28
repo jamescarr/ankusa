@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="actionlint the GitHub Actions workflows"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+actionlint -color .github/workflows/*.yml

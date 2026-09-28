@@ -1,14 +1,17 @@
 # Testing
 
-Every package's test suite is run from its own directory, there's no
-top-level test runner spanning all four, because each has a genuinely
+Every package's test suite runs from its own directory under `packages/`;
+there's no single test runner spanning them, because each has a genuinely
 different infrastructure dependency (none, RabbitMQ, Redpanda, NATS).
+`mise run check:package <pkg>` runs one package's full CI check (format,
+warnings-as-errors, tests, docs), starting and stopping that package's own
+`docker-compose.yml` around the suite; `mise run check` runs all of them.
 
 ## `ankusa` core: `mix test`
 
 ```sh
-mix test                              # 171 tests, no external infra needed
-mix test --include integration        # +16 tests, needs floci running (see below)
+mise run check:package ankusa         # 171 tests, no external infra needed
+mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
 The 171 always-on tests cover:
@@ -63,20 +66,21 @@ against real running emulators: put/get round-trip, `get_range` byte-slicing,
 need live infra:
 
 ```sh
-docker compose up -d          # floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599)
-mix test --include integration
-docker compose down -v
+mise run test:integration
 ```
+
+It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 on
+:4566, floci-gcp on :4588, floci-az on :4577, floci-oci on :4599), waits for
+the bucket/container bootstrap, runs `mix test --include integration` in
+`packages/ankusa`, and tears the emulators down.
 
 ## `ankusa_rabbitmq`: `mix test`
 
-Same pattern: every test needs live RabbitMQ:
+Same pattern: every test needs live RabbitMQ (on :5673 AMQP, :15673
+management UI):
 
 ```sh
-cd ankusa_rabbitmq
-docker compose up -d --wait   # RabbitMQ on :5673 (AMQP), :15673 (management UI)
-mix test                      # 4 tests
-docker compose down -v
+mise run check:package ankusa_rabbitmq   # 4 tests
 ```
 
 Covers: inline-payload publish + decode, fat-payload claim check-in (message
@@ -87,13 +91,10 @@ unreachable broker.
 
 ## `ankusa_kafka`: `mix test`
 
-Same pattern, against Redpanda:
+Same pattern, against Redpanda on :19092:
 
 ```sh
-cd ankusa_kafka
-docker compose up -d --wait   # Redpanda on :19092
-mix test                      # 5 tests
-docker compose down -v
+mise run check:package ankusa_kafka      # 5 tests
 ```
 
 `KAFKA_BROKERS` (default `localhost:19092`) points the suite at another
@@ -106,19 +107,16 @@ auto-created, and an unreachable broker failing within `produce_timeout_ms`
 instead of hanging.
 
 brod's `crc32cer` NIF compiles from source, so the first `mix deps.compile`
-needs a C toolchain and CMake ≥ 3.16 (`apk add build-base cmake` on Alpine,
-`brew install cmake` on macOS), or run the suite in a container, see
-[`AGENTS.md`](https://github.com/jamescarr/ankusa/blob/main/AGENTS.md).
+needs a C toolchain and CMake ≥ 3.16; `.mise.toml` pins CMake, so
+`mise install` covers the second.
 
 ## `ankusa_nats`: `mix test`
 
-Same pattern, against NATS with JetStream enabled:
+Same pattern, against NATS with JetStream enabled (on :4223 client, :8223
+monitoring):
 
 ```sh
-cd ankusa_nats
-docker compose up -d --wait   # NATS on :4223 (client), :8223 (monitoring)
-mix test                      # 6 tests
-docker compose down -v
+mise run check:package ankusa_nats       # 6 tests
 ```
 
 `NATS_SERVERS` (default `localhost:4223`) points the suite at another server.
@@ -142,8 +140,8 @@ Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
   error-first ack parsing;
 - an unreachable server failing fast (`:econnrefused`, not a hang).
 
-gnat is pure Elixir, so unlike `ankusa_kafka` this suite needs no C toolchain
-and no container.
+gnat is pure Elixir, so unlike `ankusa_kafka` this suite needs no C
+toolchain.
 
 ## Verifying the worked example
 
@@ -190,14 +188,14 @@ An in-process ingest → dispatch bench for core alone: no HTTP hop, no consumer
 no Kubernetes.
 
 ```sh
-MIX_ENV=test N=20000 CONCURRENCY=256 SINK_LATENCY_MS=5 mix run bench/core_bench.exs
+N=20000 CONCURRENCY=256 SINK_LATENCY_MS=5 mise run bench
 ```
 
 It ingests `N` hooks through `Ankusa.Edge.Ingest` at `CONCURRENCY` workers, then
 waits for a sink that sleeps `SINK_LATENCY_MS` per delivery to receive every
 acked envelope. One JSON line plus a table; exit code is non-zero if anything
-acked never arrived. `MIX_ENV=test` because `config/config.exs` autostarts the
-default instance on :4000 outside `:test`.
+acked never arrived. It runs under `MIX_ENV=test` because core's
+`config/config.exs` autostarts the default instance on :4000 outside `:test`.
 
 On the reference machine (Apple M4 Pro, macOS), before and after the
 reliability/perf pass:
@@ -252,9 +250,9 @@ written by the idempotent `WebhookWorker.perform/1` upsert) until every acked
 id shows up or its timeout expires, and fails the run on any `missing > 0` or
 `sha_mismatches > 0`.
 
-Run it yourself: `cd examples/oban-consumer && ./run.sh` (needs `kind`,
-`kubectl`, `docker`, `mix`; `brew install kind` if missing). `RATE` defaults to
-300.
+Run it yourself: `mise run e2e` (needs `docker`; `kind`, `kubectl`, and
+Elixir come from `.mise.toml`). `RATE` defaults to 300; `KEEP=1` keeps the
+cluster.
 
 Results from `RATE=60` and `RATE=300` verification runs, `kind` cluster
 otherwise idle (`RATE=60` is the same load the pre-fix numbers below used, so

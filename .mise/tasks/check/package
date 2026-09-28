@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#MISE description="Every CI check for one package; brings its docker-compose.yml up and down around the suite"
+#USAGE arg "<pkg>" help="directory name under packages/"
+#USAGE flag "--keep-infra" help="leave the package's docker-compose services running afterwards"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+pkg="$usage_pkg"
+dir=$(pkg_dir "$pkg")
+kind=$(pkg_kind "$pkg")
+cd "$dir"
+
+tmp=""
+infra=""
+cleanup() {
+  if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
+  if [ -n "$infra" ]; then docker compose down -v; fi
+}
+trap cleanup EXIT
+
+if [ -f docker-compose.yml ]; then
+  echo "==> $pkg: docker compose up"
+  docker compose up -d --wait
+  if [ "${usage_keep_infra:-false}" != true ]; then infra=1; fi
+fi
+
+echo "==> $pkg ($kind)"
+case "$kind" in
+  hex | docker)
+    mix deps.get --check-locked
+    mix deps.unlock --check-unused
+    mix format --check-formatted
+    mix compile --warnings-as-errors
+    mix test
+    ;;
+  npm)
+    npm ci
+    npm run typecheck
+    npm run build
+    npm test
+    ;;
+esac
+
+if [ "$kind" = hex ]; then
+  mix docs --warnings-as-errors
+  # Build the package the way release.yml publishes it. Adapters build under
+  # :prod, where they resolve `ankusa` from Hex rather than the path dep.
+  tmp=$(mktemp -d)
+  if [ "$pkg" = ankusa ]; then
+    mix hex.build --output "$tmp/$pkg.tar"
+  else
+    MIX_ENV=prod mix hex.build --output "$tmp/$pkg.tar"
+  fi
+fi

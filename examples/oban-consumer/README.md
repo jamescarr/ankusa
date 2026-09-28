@@ -48,7 +48,7 @@ Oban.**
 ## Prerequisites
 
 - `docker` (Docker Desktop or equivalent)
-- `kind`: not installed by default: `brew install kind`
+- `kind`: pinned in the repo's `.mise.toml` (`mise install`)
 - `kubectl`
 - `mix` / Elixir (to run `tools/loadgen` locally, against the cluster's
   exposed NodePorts)

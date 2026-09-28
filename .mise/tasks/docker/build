@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Build the jamescarr/ankusa:dev image (context is the repo root)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+docker build -f packages/ankusa_server/Dockerfile -t "$DOCKER_IMAGE:dev" .

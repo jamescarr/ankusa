@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#MISE description="Every package: kind, version, last tag, whether that version is published, commits since the tag"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+row='%-18s %-7s %-12s %-24s %-10s %s\n'
+# shellcheck disable=SC2059
+printf "$row" PACKAGE KIND VERSION "LAST TAG" PUBLISHED CHANGES
+for p in $(pkg_names); do
+  dir=$(pkg_dir "$p")
+  kind=$(pkg_kind "$p")
+  version=$(pkg_version "$p")
+
+  last=$(git tag -l "$p-v*" --sort=-v:refname | sed -n 1p)
+  if [ -n "$last" ]; then
+    changes=$(git rev-list --count "$last..HEAD" -- "$dir")
+  else
+    last="-"
+    changes=all
+  fi
+
+  code=$(pkg_registry_code "$p" "$version")
+  case "$code" in
+    200) published=yes ;;
+    404) published=no ;;
+    *) published="$code" ;;
+  esac
+
+  # shellcheck disable=SC2059
+  printf "$row" "$p" "$kind" "$version" "$last" "$published" "$changes"
+done

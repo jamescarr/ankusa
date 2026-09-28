@@ -3,58 +3,31 @@
 ## Run the checks before calling work done
 
 Format, warnings-as-errors, and tests — for **every** package the change
-touches, not just the one you edited. All three adapter packages depend on
-`ankusa` core, so a core change isn't finished until they pass too.
+touches, not just the one you edited. Every adapter package and
+`ankusa_server` path-depend on `ankusa` core, so a core change isn't finished
+until they pass too. Each check is a mise task (`mise tasks ls`); CI runs the
+same ones.
 
-| Package | Run from its directory |
+| What changed | Run |
 | --- | --- |
-| `ankusa` (core) | `mix format --check-formatted && mix compile --warnings-as-errors && mix test` |
-| `ankusa_rabbitmq` | the same three, in `ankusa_rabbitmq/` (after `docker compose up -d --wait`) |
-| `ankusa_kafka` | the same three, in `ankusa_kafka/` (after `docker compose up -d --wait`) |
-| `ankusa_nats` | the same three, in `ankusa_nats/` (after `docker compose up -d --wait`) |
-| `examples/*/ingest_app` | `mix compile --warnings-as-errors` |
-| `examples/*/worker` | `npx tsc --noEmit` |
-| `examples/oban-consumer/ingest_app` | `mix compile --warnings-as-errors` |
-| `examples/oban-consumer/consumer_app` | `mix compile --warnings-as-errors` |
-| `tools/loadgen` | `mix compile --warnings-as-errors` |
-| `examples/oban-consumer/run.sh` | the e2e gate — must pass locally before tagging any release (needs `kind`, `kubectl`, `docker`) |
+| a package under `packages/` | `mise run check:package <pkg>` for every touched package (all of them for a core change); it starts and stops the package's own `docker-compose.yml` |
+| `examples/*` | `mise run check:examples` |
+| `tools/*` | `mise run check:tools` |
+| core's object-store adapters | `mise run test:integration` (the `:integration` suite against the floci emulators) |
+| anything, before tagging a release | `mise run e2e` — the kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` come from `.mise.toml`) |
+| everything | `mise run check` |
 
-`mix format --check-formatted` is what CI fails on first: run `mix format`
+`mix format --check-formatted` is what CI fails on first: run `mise run format`
 before pushing, not after CI tells you.
 
 Changing core's dependencies touches every package that path-depends on it, so
-after adding or removing one, run `mix deps.get` in each of the packages above
-and commit their `mix.lock` files. CI runs `mix deps.get --check-locked` and
+after adding or removing one, run `mise run deps` and commit every `mix.lock`
+it changes. CI runs `mix deps.get --check-locked` and
 `mix deps.unlock --check-unused` everywhere — including the examples — so a
 `deps.get` that rewrites a stale lock, or a lock entry for a dependency nobody
 declares, fails the build instead of passing quietly.
 
-Core's suite excludes `:integration` tests (S3/GCS against a floci
-emulator); add `--include integration` with the emulator running. What each
-suite covers: [`docs/testing.md`](docs/testing.md).
-
-`ankusa_kafka` compiles a C++ NIF (`crc32cer`, via `brod`), which needs
-CMake ≥ 3.16 and a C++ compiler. Where those aren't installed, run that
-package's checks in a container instead:
-
-```sh
-cd ankusa_kafka
-docker compose up -d --wait
-# The repo *root* is the mount, not `ankusa_kafka/`: in :dev/:test this package
-# path-depends on `..`, so mounting only the package leaves `..` with no
-# `mix.exs` and Mix fails before it compiles anything.
-# MIX_BUILD_PATH keeps the container's Linux artifacts out of your `_build` —
-# a Linux-built `crc32cer` NIF will not load on macOS, and its CMake cache
-# records container paths that break a later local build.
-docker run --rm --network ankusa_kafka_default -v "$PWD/..":/repo \
-  -e KAFKA_BROKERS=redpanda:9092 -e MIX_BUILD_PATH=/tmp/build \
-  -w /repo/ankusa_kafka elixir:1.20.4-alpine \
-  sh -c 'mix local.hex --force >/dev/null && apk add --no-cache -q build-base cmake git >/dev/null \
-         && mix format --check-formatted && mix compile --warnings-as-errors && mix test'
-```
-
-The same applies to `examples/kafka-sqs-consumer/ingest_app`, which path-depends
-on both core and `ankusa_kafka`.
+What each suite covers: [`docs/testing.md`](docs/testing.md).
 
 Working on something that needs a browser or a running system? Exercise the
 real thing (or a throwaway script against it) — see the verification

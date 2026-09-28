@@ -19,7 +19,7 @@ flowchart LR
 ```
 
 The machine-readable contract is
-[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml)
+[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml)
 (OpenAPI 3.1). Generate your client from it; this page explains how to use it.
 
 ## The reference
@@ -77,7 +77,7 @@ curl localhost:4001/health    # {"status":"ok"}
 
 A single container can run it next to the other roles
 (`roles: [edge, dispatch, storage, claim_check]`), as
-[`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/rabbitmq-fanout.yml)
+[`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/rabbitmq-fanout.yml)
 does. Either way, keep port 4001 on your internal network: it serves webhook
 payloads.
 
@@ -139,7 +139,7 @@ payload to another tenant's request.
 
 ### From TypeScript, with the SDK
 
-[`sdks/typescript`](https://github.com/jamescarr/ankusa/tree/main/sdks/typescript)
+[`packages/sdk-typescript`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-typescript)
 (npm package `ankusa`) wraps a client generated from the spec with
 `openapi-typescript` + `openapi-fetch`: it parses a ref, redeems it, and
 verifies the bytes against the ref's own size and sha256 before returning
@@ -171,7 +171,7 @@ and
 [`kafka-sqs-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/worker)
 depend on it. Any other OpenAPI generator, `openapi-generator`,
 `openapi-python-client`, works against the same
-[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/priv/openapi/claim_check.v1.yaml).
+[`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml).
 
 ## Write cost
 

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#MISE description="Every tools/* Mix project: locked deps, format, compile"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+for f in tools/*/mix.exs; do
+  [ -f "$f" ] || continue
+  d="${f%/mix.exs}"
+  echo "==> $d"
+  (
+    cd "$d"
+    mix deps.get --check-locked
+    mix deps.unlock --check-unused
+    if [ -f .formatter.exs ]; then mix format --check-formatted; fi
+    mix compile --warnings-as-errors
+  )
+done

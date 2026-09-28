@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="kind + Oban end-to-end proof (the pre-tag gate). KEEP=1 to keep the cluster"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+exec examples/oban-consumer/run.sh
