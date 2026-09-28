@@ -156,7 +156,7 @@ defmodule Ankusa.Routes do
           | {:error, :too_many_routes | :store_unavailable}
   def create(instance, attrs) do
     with {:ok, route} <- Route.from_attrs(attrs),
-         snapshot = snapshot(instance),
+         {:ok, snapshot} <- writable_snapshot(instance),
          :ok <- unique_id(snapshot, route),
          :ok <- no_conflict(snapshot, route) do
       put(instance, route, Store.insert(instance, route))
@@ -176,7 +176,7 @@ defmodule Ankusa.Routes do
           | {:error, :too_many_routes | :store_unavailable}
   def replace(instance, id, attrs) do
     with {:ok, route} <- Route.from_attrs(attrs, id: id),
-         snapshot = snapshot(instance),
+         {:ok, snapshot} <- writable_snapshot(instance),
          :ok <- no_conflict(snapshot, route) do
       case Map.fetch(snapshot.by_id, id) do
         {:ok, existing} ->
@@ -209,7 +209,7 @@ defmodule Ankusa.Routes do
          attrs = Map.merge(attrs_of(existing), patch),
          {:ok, route} <- Route.from_attrs(attrs, id: id),
          route = %{route | inserted_at: existing.inserted_at},
-         snapshot = snapshot(instance),
+         {:ok, snapshot} <- writable_snapshot(instance),
          :ok <- no_conflict(snapshot, route) do
       put(instance, route, Store.replace(instance, route))
     end
@@ -219,9 +219,29 @@ defmodule Ankusa.Routes do
   @spec delete(atom(), String.t()) :: :ok | {:error, :not_found | :store_unavailable}
   def delete(instance, id), do: Store.delete(instance, id)
 
-  @doc "The global IP rules, parsed."
+  @doc """
+  The global IP rules, parsed.
+
+  Reads the snapshot, falling back to the configured rules when no table is
+  published (a store that has not loaded). The guard is rejecting every request
+  in that state anyway — routes enabled with nothing loaded means nothing is
+  allowed — but the read stays total rather than crashing the API.
+  """
   @spec ip_rules(atom()) :: %{default: :allow | :deny, rules: [Route.ip_rule()]}
-  def ip_rules(instance), do: snapshot(instance).ip_rules
+  def ip_rules(instance) do
+    case snapshot(instance) do
+      nil ->
+        %{default: default, rules: rules} = Ankusa.config(instance).routes.ip_rules
+
+        case Route.parse_rules(rules) do
+          {:ok, parsed} -> %{default: default, rules: parsed}
+          {:error, _message} -> %{default: default, rules: []}
+        end
+
+      snapshot ->
+        snapshot.ip_rules
+    end
+  end
 
   @doc """
   Replace the global IP rules.
@@ -462,6 +482,16 @@ defmodule Ankusa.Routes do
   # error the caller gets the error tuple, not a definition that isn't there.
   defp put(_instance, route, :ok), do: {:ok, route}
   defp put(_instance, _route, {:error, reason}), do: {:error, reason}
+
+  # A store that has not published a table cannot be written through: there is no
+  # version for the decision cache to key on, and nothing to check a conflict
+  # against. That is the transient store error, not a crash.
+  defp writable_snapshot(instance) do
+    case snapshot(instance) do
+      nil -> {:error, :store_unavailable}
+      snapshot -> {:ok, snapshot}
+    end
+  end
 
   defp fetch(instance, id) do
     case Store.get(instance, id) do

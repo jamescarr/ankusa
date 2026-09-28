@@ -12,11 +12,11 @@ suite — `mise run check:conformance`, below.
 ## `ankusa` core: `mix test`
 
 ```sh
-mise run check:package ankusa         # 295 tests, no external infra needed
+mise run check:package ankusa         # 301 tests, no external infra needed
 mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
-The 295 always-on tests cover:
+The 301 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
   truncation, that a restart after a full truncation does **not** reuse seqs,
@@ -66,7 +66,13 @@ The 295 always-on tests cover:
   rules replacing the global list; the dry run's rule and scope reporting; the
   guard's WAL assertions (a rejected request writes **nothing**); and the
   management API over both `Plug.Test.conn` and a real socket, unauthenticated
-  by design like `Ankusa.Admin.Router`.
+  by design like `Ankusa.Admin.Router`. `routes/router_openapi_test.exs` is the
+  contract test for that API: it builds every documented request from the
+  examples in `priv/openapi/admin.v1.yaml`, runs it through the real router, and
+  checks the status, schema, and field names against the document — plus the
+  documented method matrix, 404s for the near-misses of the documented surface,
+  and every example against its own schema, so the spec and the code cannot
+  drift apart.
 - **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
   mid-flight, and proves every acked id survives replay from the WAL. Zero
   tolerance: this is the test that actually backs the core invariant claim

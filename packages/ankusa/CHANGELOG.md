@@ -43,7 +43,24 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - Dependencies: `nebulex` and `nebulex_local` — every deployment that turns
   routes on wants the decision cache, so it lives in core; the Redis
   *definitions* store is the separate `ankusa_redis` package.
-  `stream_data` (`:test` only) backs the CIDR property tests.
+  `stream_data` and `yaml_elixir` (`:test` only) back the CIDR property tests
+  and the OpenAPI contract test.
+- `priv/openapi/admin.v1.yaml` now documents the route-management endpoints too
+  (the `routes` tag: `admin/routes`, `admin/routes/{id}`, `admin/ip-rules`,
+  `admin/routes/test`), with a worked example of every request and response —
+  the examples are a sequence, one route's life. The tag is served on its own
+  listener, so the path items carry a `servers` override and `/health` is
+  documented as a union of the two listeners' bodies.
+- `test/ankusa/routes/router_openapi_test.exs`: the contract test. It builds
+  every documented request from the document's own examples, sends it through
+  the real router, and checks the status, the schema, and the field names
+  against what the document says; it enforces the documented method matrix, 404s
+  the near-misses of the documented surface, and validates every example against
+  its own schema. A rename, a status change, an added or removed endpoint, or a
+  stale example fails the suite instead of shipping.
+- `Ankusa.Routes.ip_rules/1` falls back to the configured rules when no store has
+  published a table, and a write through a store with no table is the documented
+  `{:error, :store_unavailable}` rather than a crash.
 
 ### Changed
 

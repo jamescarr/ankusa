@@ -338,7 +338,12 @@ report `503 store_unavailable`.
 port). **Unauthenticated by design** — the same stance as the operator admin
 API (`admin.port`): Ankusa doesn't know what auth scheme a deployment wants,
 so it doesn't pick one for you. Front this port with your own proxy, mesh, or
-network policy before exposing it:
+network policy before exposing it. The HTTP contract is the `routes` tag of
+[`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
+examples included — and
+[`test/ankusa/routes/router_openapi_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/test/ankusa/routes/router_openapi_test.exs)
+executes those examples against the implementation, so the document and the code
+cannot drift apart:
 
 | Method | Path | Purpose |
 | --- | --- | --- |

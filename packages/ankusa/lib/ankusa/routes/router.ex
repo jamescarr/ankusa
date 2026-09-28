@@ -43,6 +43,15 @@ defmodule Ankusa.Routes.Router do
   `POST /admin/routes/test` is the dry run: it answers "what would happen to
   this request" without capturing anything and without touching the decision
   cache, so an operator can validate a route change before it goes live.
+
+  ## Contract
+
+  `priv/openapi/admin.v1.yaml` is the HTTP contract for these endpoints (the
+  `routes` tag), and it is the source of truth:
+  `test/ankusa/routes/router_openapi_test.exs` builds each documented request
+  from the examples in it and asserts the response against the documented
+  schema and example, so this module answers what the document says or the suite
+  fails. Change one, change the other.
   """
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
