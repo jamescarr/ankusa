@@ -11,7 +11,7 @@ defmodule Ankusa.Edge.Router do
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
 
-  alias Ankusa.Edge.Ingest
+  alias Ankusa.Edge.{Ingest, RouteGuard}
 
   plug(:match)
   plug(:dispatch)
@@ -19,6 +19,33 @@ defmodule Ankusa.Edge.Router do
   match "/*_glob", via: :post do
     instance = instance(conn)
 
+    # The route guard runs before anything else on the capture path: a request it
+    # rejects is never read, verified, or written to the WAL. With routes off it
+    # returns the conn untouched.
+    case RouteGuard.call(conn, instance: instance) do
+      %Plug.Conn{halted: true} = conn -> conn
+      conn -> capture(conn, instance)
+    end
+  end
+
+  get "/health" do
+    instance = instance(conn)
+    stats = safe_stats(instance)
+    send_json(conn, 200, %{status: "ok", instance: to_string(instance), wal: stats})
+  end
+
+  get "/stats" do
+    instance = instance(conn)
+    send_json(conn, 200, %{instance: to_string(instance), wal: safe_stats(instance)})
+  end
+
+  match _ do
+    send_json(conn, 404, %{error: "not_found"})
+  end
+
+  # ── capture ───────────────────────────────────────────────────────────────
+
+  defp capture(conn, instance) do
     case Ankusa.RouteResolver.resolve(instance, conn) do
       {:ok, route} ->
         max = Ankusa.config(instance).max_body_bytes
@@ -46,21 +73,6 @@ defmodule Ankusa.Edge.Router do
       :error ->
         send_json(conn, 404, %{error: "unknown_source"})
     end
-  end
-
-  get "/health" do
-    instance = instance(conn)
-    stats = safe_stats(instance)
-    send_json(conn, 200, %{status: "ok", instance: to_string(instance), wal: stats})
-  end
-
-  get "/stats" do
-    instance = instance(conn)
-    send_json(conn, 200, %{instance: to_string(instance), wal: safe_stats(instance)})
-  end
-
-  match _ do
-    send_json(conn, 404, %{error: "not_found"})
   end
 
   # ── response mapping ──────────────────────────────────────────────────────

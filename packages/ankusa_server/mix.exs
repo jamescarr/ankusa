@@ -32,6 +32,7 @@ defmodule AnkusaServer.MixProject do
       {:ankusa_rabbitmq, path: "../ankusa_rabbitmq"},
       {:ankusa_kafka, path: "../ankusa_kafka"},
       {:ankusa_nats, path: "../ankusa_nats"},
+      {:ankusa_redis, path: "../ankusa_redis"},
       {:yaml_elixir, "~> 2.12"}
     ]
   end

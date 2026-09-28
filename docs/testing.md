@@ -2,7 +2,7 @@
 
 Every package's test suite runs from its own directory under `packages/`;
 there's no single test runner spanning them, because each has a genuinely
-different infrastructure dependency (none, RabbitMQ, Redpanda, NATS).
+different infrastructure dependency (none, RabbitMQ, Redpanda, NATS, Redis).
 `mise run check:package <pkg>` runs one package's full CI check (format,
 warnings-as-errors, tests, docs), starting and stopping that package's own
 `docker-compose.yml` around the suite; `mise run check` runs all of them. The
@@ -12,11 +12,11 @@ suite — `mise run check:conformance`, below.
 ## `ankusa` core: `mix test`
 
 ```sh
-mise run check:package ankusa         # 171 tests, no external infra needed
+mise run check:package ankusa         # 301 tests, no external infra needed
 mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
-The 171 always-on tests cover:
+The 301 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
   truncation, that a restart after a full truncation does **not** reuse seqs,
@@ -55,6 +55,24 @@ The 171 always-on tests cover:
   retry writes one object); `validate_config!/1` boot-time rejections; the
   `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
   deleting whole `dt=` day partitions.
+- **Route management** (`test/ankusa/net_test.exs`, `net/client_ip_test.exs`,
+  `routes*_test.exs`, `edge_route_guard_test.exs`, `routes/router_test.exs`):
+  CIDR parsing and membership with property tests (round-trip, self-containment,
+  agreement with a naive top-bits comparison); client-IP resolution (the header
+  is read only from a trusted peer, and one junk entry discards it whole); the
+  path-pattern grammar and every negative case (`%2F`, `..`, a wildcard that is
+  not last); the ETS store's cap; the decision cache's version-keyed
+  invalidation; `authorize/4`'s full decision matrix, including a route's own
+  rules replacing the global list; the dry run's rule and scope reporting; the
+  guard's WAL assertions (a rejected request writes **nothing**); and the
+  management API over both `Plug.Test.conn` and a real socket, unauthenticated
+  by design like `Ankusa.Admin.Router`. `routes/router_openapi_test.exs` is the
+  contract test for that API: it builds every documented request from the
+  examples in `priv/openapi/admin.v1.yaml`, runs it through the real router, and
+  checks the status, schema, and field names against the document — plus the
+  documented method matrix, 404s for the near-misses of the documented surface,
+  and every example against its own schema, so the spec and the code cannot
+  drift apart.
 - **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
   mid-flight, and proves every acked id survives replay from the WAL. Zero
   tolerance: this is the test that actually backs the core invariant claim
@@ -146,6 +164,23 @@ Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
 gnat is pure Elixir, so unlike `ankusa_kafka` this suite needs no C
 toolchain.
 
+## `ankusa_redis`: `mix test`
+
+Same pattern, against Redis on :6399:
+
+```sh
+mise run check:package ankusa_redis      # 10 tests
+```
+
+`REDIS_URL` (default `redis://localhost:6399`) points the suite at another
+server. Two instances in one VM share one namespace, which is how the suite
+tests multi-node behaviour without a cluster: CRUD round-trips through
+`Ankusa.Routes`, the cap is enforced against the shared hash, a write on one
+node reaches the other over pub/sub **without** waiting for a tick, a raw write
+with no broadcast is still picked up by the tick, a Redis error on a write is
+`:store_unavailable` and leaves the local mirror untouched, and a boot against a
+Redis that is not there (or against a corrupted definition) fails instead of
+starting a node that would deny everything.
 ## SDK conformance: one harness across the SDKs
 
 `packages/sdk-python` and `packages/sdk-typescript` are the two client SDKs.

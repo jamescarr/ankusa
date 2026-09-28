@@ -38,7 +38,8 @@ defmodule AnkusaServer.Application do
 
     Logger.info(
       "[ankusa] ankusa_server #{version()} roles=#{inspect(config.roles)} http=#{config.port} " <>
-        "admin=#{admin(config)} wal=#{inspect(elem(config.wal, 0))} sources=#{sources(config)}"
+        "admin=#{admin(config)} routes=#{routes(config)} wal=#{inspect(elem(config.wal, 0))} " <>
+        "sources=#{sources(config)}"
     )
 
     Supervisor.start_link([{Ankusa.Instance, config}],
@@ -72,6 +73,16 @@ defmodule AnkusaServer.Application do
 
   defp admin(%{admin: %{enabled: true, port: port}}), do: to_string(port)
   defp admin(_config), do: "off"
+
+  # Off, or on and which store the definitions live in: the one thing about
+  # routes an operator needs from the banner is whether an edge is enforcing
+  # anything and where its definitions come from.
+  defp routes(%{routes: %{enabled: false}}), do: "off"
+
+  defp routes(%{routes: %{enabled: true, store: {mod, _opts}}}),
+    do: "on:#{mod |> Module.split() |> List.last()}"
+
+  defp routes(_config), do: "?"
 
   defp app_version(app) do
     # `eval` runs without the applications started, so the spec has to be

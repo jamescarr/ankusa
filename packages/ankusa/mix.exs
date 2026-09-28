@@ -117,6 +117,10 @@ defmodule Ankusa.MixProject do
     [
       {:bandit, "~> 1.12.5"},
       {:plug, "~> 1.18"},
+      # CIDR parse/match/to_string for the route-management IP rules and
+      # trusted proxies. Replaces ~128 lines of hand-rolled prefix bit math in
+      # Ankusa.Net.CIDR.
+      {:cidr, "~> 1.2"},
       # HTTP client for the S3/GCS blob stores, the claim-check Remote adapter,
       # and Sink.Http. Replaces hand-rolled :httpc plumbing (and starts its own
       # Finch pool, so embedders configure nothing).
@@ -130,6 +134,17 @@ defmodule Ankusa.MixProject do
       # adapter package.
       {:telemetry_metrics, "~> 1.2"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
+      # The route-management decision cache (`Ankusa.Routes.Cache`). Every
+      # deployment that turns routes on wants a decision cache, so it lives in
+      # core rather than an adapter package — the Redis *definitions* store is
+      # the separate `ankusa_redis` package, since only deployments sharing
+      # route definitions across nodes need a network store.
+      {:nebulex, "~> 3.0"},
+      {:nebulex_local, "~> 3.0"},
+      # The OpenAPI contract test reads priv/openapi/*.yaml and drives the
+      # listeners from the examples in it, so the document and the code cannot
+      # drift apart.
+      {:yaml_elixir, "~> 2.12", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
   end

@@ -1,0 +1,22 @@
+name: ankusa_redis
+
+# Local Redis for developing/testing Ankusa.Routes.Store.Redis.
+#
+#   docker compose up -d --wait
+#   mix test
+#   docker compose down -v
+#
+# Its own compose file (and its own port) so a developer's Redis on 6379 is
+# never touched, and so `mise run check:package ankusa_redis` brings up exactly
+# what this package's suite needs.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6399:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

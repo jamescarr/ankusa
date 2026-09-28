@@ -44,6 +44,72 @@ admin:
   # [env ANKUSA_ADMIN_PORT] unauthenticated — do not publish it.
   port: 4002
 
+routes:
+  # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
+  # On is deny-by-default: a request is captured only if its method and
+  # normalized path match an enabled route *and* its client IP passes the IP
+  # rules. Everything else is rejected before the WAL is touched.
+  enabled: false
+  # A hard cap on definitions. Creating one past it is a 409; nothing is ever
+  # evicted — an evicted route would start rejecting real webhooks.
+  max_routes: 10000
+  # 1 in this many rejections is logged at :debug. 0 disables the sampling.
+  log_sample: 100
+  # 403, or 404 for uniformity with a path that simply does not exist.
+  ip_denied_status: 403
+  # CIDRs whose peers may set X-Forwarded-For. Empty means the header is never
+  # read: it is client-controlled, and trusting it from an untrusted peer is
+  # the same as letting the sender choose its own IP.
+  trusted_proxies: []
+
+  store:
+    # ets   -> definitions in this node's memory (plus `seed` below)
+    # redis -> definitions in Redis, shared by every edge node (ankusa_redis);
+    #          a `url` with no `type` means redis
+    type: ets
+    # [env ANKUSA_ROUTES_STORE_URL]
+    # url: redis://cache:6379
+    # Share definitions across nodes by giving them the same namespace;
+    # defaults to ankusa:routes:<instance>.
+    # namespace: ankusa:routes
+    # The safety net for a missed pub/sub broadcast: how often a node re-reads
+    # the version. This is the worst-case staleness after a disconnect.
+    # tick_ms: 30000
+
+  cache:
+    # The per-request decision cache. A mutation bumps the version, which
+    # retires every entry at once; these bound memory, not freshness.
+    max_size: 50000
+    # Must stay under gc_interval_ms: the local adapter's garbage collector
+    # drops a whole generation, so a longer TTL can be evicted early.
+    ttl_ms: 30000
+    # Rejections are what a scanner produces, and there are far more of them.
+    negative_ttl_ms: 5000
+    gc_interval_ms: 60000
+
+  ip_rules:
+    # Ordered; the first matching rule wins, and `default` decides the rest.
+    default: allow
+    rules: []
+    # - {action: deny, cidr: "10.0.0.0/8"}
+    # - {action: allow, cidr: "203.0.113.0/24"}
+
+  admin:
+    # Its own listener, unauthenticated by design (same stance as `admin:`
+    # above): front it with your own proxy or network policy before exposing
+    # it.
+    port: 4003
+
+  # Routes an operator cannot wait for the API to create: a standalone node
+  # (no Redis) loses API-created routes on restart, but not these. Loaded only
+  # on a first boot, and only when routes are enabled.
+  seed: []
+  # - id: stripe
+  #   path: /webhooks/stripe
+  #   methods: [POST]
+  #   ip_rules: [{action: allow, cidr: "203.0.113.0/24"}]
+  #   metadata: {owner: payments}
+
 batcher:
   # The WAL serializes commits itself, so partitions beyond a couple only
   # add contention.

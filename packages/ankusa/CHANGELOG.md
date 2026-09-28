@@ -11,6 +11,64 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- Route management: an allowlist in front of capture. With
+  `routes.enabled: true` the edge is deny-by-default — a `POST` is captured
+  only if its method and normalized path match an enabled route *and* its
+  client address passes the IP rules; everything else is answered `404` (`403`
+  for an IP denial, configurable to `404`) and never written to the WAL. Off by
+  default, which is the previous behaviour. `Ankusa.Routes` is the context
+  (`authorize/4`, `authorize_path/5`, `dry_run/2`, CRUD over definitions),
+  `Ankusa.Edge.RouteGuard` the plug `Ankusa.Edge.Router` calls first on the
+  capture path, and `Ankusa.Routes.Store.ETS` the default node-local store with
+  a hard cap (nothing is evicted) and a `routes.seed` loaded at boot.
+- `Ankusa.Routes.Router`: the management API on its own listener
+  (`routes.admin.port`, default 4003), never the ingest port. Unauthenticated
+  by design, the same stance as `Ankusa.Admin.Router` — Ankusa doesn't manage
+  users, tokens, or API keys, so front it with your own proxy or network
+  policy. Route CRUD, `GET`/`PUT /admin/ip-rules`, `GET /health`, and a dry
+  run (`POST /admin/routes/test`) that reports the decision, the reason, the
+  route, and the rule that produced it — without capturing anything.
+- `Ankusa.Net`, `Ankusa.Net.CIDR`, `Ankusa.Net.ClientIP`: IP addresses as a
+  tagged integer, CIDR matching with bit operators only, and client resolution
+  that reads `X-Forwarded-For` **only** from a peer inside
+  `routes.trusted_proxies` (one unparseable entry discards the header whole).
+- `Ankusa.Routes.Cache`: a local decision cache (`nebulex` +
+  `nebulex_local`) keyed by the snapshot version, so a route change retires
+  every cached decision at once.
+- Telemetry: `[:ankusa, :routes, :match]` (with `:cached`),
+  `[:ankusa, :routes, :reject]` (with `:reason`), and
+  `[:ankusa, :routes, :changed]`.
+- Dependencies: `nebulex` and `nebulex_local` — every deployment that turns
+  routes on wants the decision cache, so it lives in core; the Redis
+  *definitions* store is the separate `ankusa_redis` package.
+  `stream_data` and `yaml_elixir` (`:test` only) back the CIDR property tests
+  and the OpenAPI contract test.
+- `priv/openapi/admin.v1.yaml` now documents the route-management endpoints too
+  (the `routes` tag: `admin/routes`, `admin/routes/{id}`, `admin/ip-rules`,
+  `admin/routes/test`), with a worked example of every request and response —
+  the examples are a sequence, one route's life. The tag is served on its own
+  listener, so the path items carry a `servers` override and `/health` is
+  documented as a union of the two listeners' bodies.
+- `test/ankusa/routes/router_openapi_test.exs`: the contract test. It builds
+  every documented request from the document's own examples, sends it through
+  the real router, and checks the status, the schema, and the field names
+  against what the document says; it enforces the documented method matrix, 404s
+  the near-misses of the documented surface, and validates every example against
+  its own schema. A rename, a status change, an added or removed endpoint, or a
+  stale example fails the suite instead of shipping.
+- `Ankusa.Routes.ip_rules/1` falls back to the configured rules when no store has
+  published a table, and a write through a store with no table is the documented
+  `{:error, :store_unavailable}` rather than a crash.
+
+### Changed
+
+- `Ankusa.Config` gained the `:routes` section. It merges one level deeper than
+  the others (`routes.cache`, `routes.ip_rules`, and `routes.admin` merge key by
+  key), because `routes.cache.max_size` replacing the whole section would
+  silently drop the TTLs.
+
 ## [0.2.1] - 2026-09-28
 
 ### Changed

@@ -34,12 +34,15 @@ defmodule Ankusa.Instance do
     # read-mostly config for every call site, no Application.get_env buried deep
     Ankusa.put_config(config)
     Ankusa.ClaimCheck.validate_config!(config)
+    Ankusa.Routes.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =
       metrics_children(config, opts) ++
         wal_children(config, opts) ++
+        routes_children(config, opts) ++
         edge_children(config, opts) ++
+        routes_admin_children(config) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
         claim_check_children(config, opts) ++
@@ -81,6 +84,57 @@ defmodule Ankusa.Instance do
     end
   end
 
+  # The route definitions and the decision cache, before the ingress listener
+  # accepts a request: the guard fails closed, so a store that isn't up yet
+  # would reject every hook.
+  defp routes_children(config, opts) do
+    if routes?(config) do
+      {store_mod, _store_opts} = config.routes.store
+      cache_name = Ankusa.via(config.instance, :routes_cache)
+
+      [
+        {store_mod, opts},
+        {Ankusa.Routes.Cache, [name: cache_name] ++ cache_opts(config)}
+      ]
+    else
+      []
+    end
+  end
+
+  # The route table is node-local, so a node that isn't the edge has nothing to
+  # guard: the definitions it managed would never be read.
+  defp routes?(config), do: config.routes.enabled and Config.role?(config, :edge)
+
+  # The management API, after the ingress listener: it edits the definitions
+  # that listener already enforces, so it must never be the last thing to come
+  # up.
+  defp routes_admin_children(config) do
+    if routes?(config) do
+      Logger.warning(
+        "[ankusa] route management API on :#{config.routes.admin.port} is unauthenticated; " <>
+          "do not expose it publicly, front it with your own proxy or network policy"
+      )
+
+      [
+        bandit_child(Ankusa.Routes.Router, config.instance, config.routes.admin.port)
+      ]
+    else
+      []
+    end
+  end
+
+  # The Local adapter's `:gc_interval` is a generational sweep, not an expiry
+  # timer: a generation older than the sweep interval can be dropped before its
+  # entries' own `:ttl` is up, which is why `routes.cache.ttl_ms` must stay
+  # under `gc_interval_ms` (enforced by `Ankusa.Routes.validate_config!/1`).
+  defp cache_opts(config) do
+    %{max_size: max_size, gc_interval_ms: gc_interval} = config.routes.cache
+
+    # `telemetry: false`: no per-command Nebulex spans on the ingest hot path.
+    # Our own [:ankusa, :routes, *] events are the observability surface.
+    [max_size: max_size, gc_interval: gc_interval, telemetry: false]
+  end
+
   defp claim_check_children(config, _opts) do
     if Config.role?(config, :claim_check) do
       Logger.warning(
@@ -89,13 +143,7 @@ defmodule Ankusa.Instance do
       )
 
       [
-        Supervisor.child_spec(
-          {Bandit,
-           plug: {Ankusa.ClaimCheck.Router, [instance: config.instance]},
-           scheme: :http,
-           port: config.claim_check.port},
-          id: Ankusa.ClaimCheck.Router
-        )
+        bandit_child(Ankusa.ClaimCheck.Router, config.instance, config.claim_check.port)
       ]
     else
       []
@@ -128,16 +176,17 @@ defmodule Ankusa.Instance do
       )
 
       [
-        Supervisor.child_spec(
-          {Bandit,
-           plug: {Ankusa.Admin.Router, [instance: config.instance]},
-           scheme: :http,
-           port: config.admin.port},
-          id: Ankusa.Admin.Router
-        )
+        bandit_child(Ankusa.Admin.Router, config.instance, config.admin.port)
       ]
     else
       []
     end
+  end
+
+  defp bandit_child(plug_module, instance, port) do
+    Supervisor.child_spec(
+      {Bandit, plug: {plug_module, [instance: instance]}, scheme: :http, port: port},
+      id: plug_module
+    )
   end
 end

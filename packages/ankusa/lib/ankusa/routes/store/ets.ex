@@ -1,0 +1,110 @@
+defmodule Ankusa.Routes.Store.ETS do
+  @moduledoc """
+  The default route store: definitions in this node's memory, with a hard cap
+  and a config seed.
+
+  `config.routes.seed` loads at boot, which is what makes a standalone (no
+  Redis) deployment survivable across restarts: a route an operator added
+  *through the API* is gone on restart, but the seed is not. Every mutation
+  rebuilds the snapshot and republishes it to `:persistent_term`, so the guard
+  sees the change on the very next request — no TTL wait, no polling.
+
+  Seeding happens **only at boot** and only into an empty store, so a route
+  deleted through the API stays deleted until the next restart.
+
+  The process registers under `Ankusa.via(instance, :routes_store)`; there is
+  no global name, so two instances in one VM never collide.
+  """
+
+  use GenServer
+
+  @behaviour Ankusa.Routes.Store
+
+  alias Ankusa.Routes.{Route, Snapshot}
+
+  @impl Ankusa.Routes.Store
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: server(opts))
+
+  @impl Ankusa.Routes.Store
+  def insert(instance, %Route{} = route),
+    do: GenServer.call(server_name(instance), {:insert, route})
+
+  @impl Ankusa.Routes.Store
+  def replace(instance, %Route{} = route),
+    do: GenServer.call(server_name(instance), {:replace, route})
+
+  @impl Ankusa.Routes.Store
+  def delete(instance, id), do: GenServer.call(server_name(instance), {:delete, id})
+
+  @impl Ankusa.Routes.Store
+  def put_ip_rules(instance, ip_rules),
+    do: GenServer.call(server_name(instance), {:put_ip_rules, ip_rules})
+
+  # ── GenServer ───────────────────────────────────────────────────────────────
+
+  @impl true
+  def init(opts) do
+    instance = Keyword.fetch!(opts, :instance)
+    %{routes: routes_config} = Keyword.fetch!(opts, :config)
+
+    case Snapshot.initial_table(routes_config) do
+      {:ok, %{routes: routes, ip_rules: ip_rules}} ->
+        state = %{
+          instance: instance,
+          max_routes: routes_config.max_routes,
+          routes: routes,
+          ip_rules: ip_rules,
+          version: 1
+        }
+
+        Snapshot.put(instance, Snapshot.build(state))
+        {:ok, state}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
+  end
+
+  @impl true
+  def handle_call({:insert, route}, _from, state) do
+    # The cap is checked against this call's own state, so concurrent inserts
+    # can't both fit in the last slot.
+    if map_size(state.routes) >= state.max_routes do
+      {:reply, {:error, :too_many_routes}, state}
+    else
+      {:reply, :ok,
+       state |> put_route(route) |> bump_version() |> Snapshot.publish({:insert, route.id})}
+    end
+  end
+
+  def handle_call({:replace, route}, _from, state) do
+    {:reply, :ok,
+     state |> put_route(route) |> bump_version() |> Snapshot.publish({:replace, route.id})}
+  end
+
+  def handle_call({:delete, id}, _from, state) do
+    case Map.fetch(state.routes, id) do
+      :error ->
+        {:reply, {:error, :not_found}, state}
+
+      {:ok, _route} ->
+        state = %{state | routes: Map.delete(state.routes, id)} |> bump_version()
+        {:reply, :ok, Snapshot.publish(state, {:delete, id})}
+    end
+  end
+
+  def handle_call({:put_ip_rules, ip_rules}, _from, state) do
+    state = %{state | ip_rules: ip_rules} |> bump_version()
+    {:reply, :ok, Snapshot.publish(state, {:ip_rules, nil})}
+  end
+
+  # ── state transitions ───────────────────────────────────────────────────────
+
+  defp put_route(state, route), do: %{state | routes: Map.put(state.routes, route.id, route)}
+
+  defp bump_version(state), do: %{state | version: state.version + 1}
+
+  defp server(opts), do: server_name(Keyword.fetch!(opts, :instance))
+
+  defp server_name(instance), do: Ankusa.via(instance, :routes_store)
+end
