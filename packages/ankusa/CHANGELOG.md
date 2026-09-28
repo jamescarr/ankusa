@@ -24,8 +24,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   capture path, and `Ankusa.Routes.Store.ETS` the default node-local store with
   a hard cap (nothing is evicted) and a `routes.seed` loaded at boot.
 - `Ankusa.Routes.Router`: the management API on its own listener
-  (`routes.admin.port`, default 4003), bearer-token authenticated on every
-  route, with route CRUD, `GET`/`PUT /admin/ip-rules`, `GET /health`, and a dry
+  (`routes.admin.port`, default 4003), never the ingest port. Unauthenticated
+  by design, the same stance as `Ankusa.Admin.Router` — Ankusa doesn't manage
+  users, tokens, or API keys, so front it with your own proxy or network
+  policy. Route CRUD, `GET`/`PUT /admin/ip-rules`, `GET /health`, and a dry
   run (`POST /admin/routes/test`) that reports the decision, the reason, the
   route, and the rule that produced it — without capturing anything.
 - `Ankusa.Net`, `Ankusa.Net.CIDR`, `Ankusa.Net.ClientIP`: IP addresses as a

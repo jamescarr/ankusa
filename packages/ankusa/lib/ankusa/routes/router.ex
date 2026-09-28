@@ -5,22 +5,24 @@ defmodule Ankusa.Routes.Router do
 
   It listens on its own port (`routes.admin.port`), never on the ingest port:
   managing routes is an operator action, and mixing it into the capture surface
-  would put an unauthenticated-by-accident endpoint next to the one that accepts
+  would put a second, easily-forgotten endpoint next to the one that accepts
   provider traffic.
 
-  ## Authentication
+  ## No authentication, by design
 
-  Every route here — including `GET /health` — requires
-  `authorization: Bearer <routes.admin.token>`. The comparison is
-  `Plug.Crypto.secure_compare/2`, and a missing token at boot is a startup
-  failure (`Ankusa.Routes.validate_config!/1`): a management API that silently
-  runs unauthenticated is worse than no management API.
+  Same stance as `Ankusa.Admin.Router`: Ankusa does not manage users, tokens, or
+  API keys, and it does not know what auth scheme a deployment wants — mTLS, a
+  gateway's own bearer scheme, a network policy, an operator VPN. Baking in one
+  scheme (a shared token, say) would be the wrong one for most of them. Front
+  this port with whatever your deployment already uses; it carries the same
+  blast radius as `Ankusa.Admin.Router`'s `/v1/dlq/replay`, so it deserves the
+  same treatment.
 
   ## Responding
 
   | Method | Path | Success |
   | --- | --- | --- |
-  | `GET` | `/admin/routes?enabled=&limit=&cursor=` | `200` `{"routes": [...], "next_cursor": id \\| null}` |
+  | `GET` | `/admin/routes?enabled=&limit=&cursor=` | `200` `{"routes": [...], "next_cursor": id \| null}` |
   | `POST` | `/admin/routes` | `201` route |
   | `GET` | `/admin/routes/:id` | `200` route |
   | `PUT` | `/admin/routes/:id` | `200` route (idempotent; creates if absent) |
@@ -34,9 +36,9 @@ defmodule Ankusa.Routes.Router do
   Errors are JSON objects with a stable `error` code:
   `invalid_route` (with `field` and `message`), `duplicate_route` (with
   `conflicting_id`), `too_many_routes` (with `max_routes`), `invalid_query`,
-  `invalid_ip_rules`, `invalid_request`, `invalid_body`, `not_found`,
-  `unauthorized`, and `store_unavailable` (a `503`, meaning the backing store
-  could not be reached — retry).
+  `invalid_ip_rules`, `invalid_request`, `invalid_body`, `not_found`, and
+  `store_unavailable` (a `503`, meaning the backing store could not be reached
+  — retry).
 
   `POST /admin/routes/test` is the dry run: it answers "what would happen to
   this request" without capturing anything and without touching the decision
@@ -52,7 +54,6 @@ defmodule Ankusa.Routes.Router do
   # magnitude more than the largest legitimate one.
   @max_body 65_536
 
-  plug(:authorize)
   plug(:match)
   plug(:dispatch)
 
@@ -165,47 +166,6 @@ defmodule Ankusa.Routes.Router do
     send_json(conn, 404, %{error: "not_found"})
   end
 
-  # ── authentication ──────────────────────────────────────────────────────────
-
-  defp authorize(conn, _opts) do
-    token = config(conn).routes.admin.token
-
-    case presented_token(conn) do
-      {:ok, presented} when is_binary(token) ->
-        if Plug.Crypto.secure_compare(presented, token), do: conn, else: unauthorized(conn)
-
-      _missing_or_absent ->
-        unauthorized(conn)
-    end
-  end
-
-  defp presented_token(conn) do
-    value =
-      Enum.reduce(conn.req_headers, nil, fn
-        {"authorization", value}, _acc -> value
-        _header, acc -> acc
-      end)
-
-    case value do
-      nil ->
-        :error
-
-      value ->
-        case String.split(value, " ", parts: 2) do
-          [scheme, credential] ->
-            # The scheme is case-insensitive (RFC 7235); the token is not.
-            if String.downcase(scheme) == "bearer" and String.trim(credential) != "" do
-              {:ok, String.trim(credential)}
-            else
-              :error
-            end
-
-          _no_credential ->
-            :error
-        end
-    end
-  end
-
   # ── writes ──────────────────────────────────────────────────────────────────
 
   defp write(conn, {:ok, %Route{} = route}, status),
@@ -225,16 +185,6 @@ defmodule Ankusa.Routes.Router do
   defp write(conn, {:error, reason}, _status), do: store_error(conn, reason)
 
   # ── responses ───────────────────────────────────────────────────────────────
-
-  # `www-authenticate` is what makes a 401 actionable: it says which scheme the
-  # caller has to use. `halt/1` is required — without it `:match` and
-  # `:dispatch` still run and the matched route sends a second response.
-  defp unauthorized(conn) do
-    conn
-    |> Plug.Conn.put_resp_header("www-authenticate", "Bearer")
-    |> send_json(401, %{error: "unauthorized"})
-    |> Plug.Conn.halt()
-  end
 
   defp invalid_body(conn), do: send_json(conn, 400, %{error: "invalid_body"})
 

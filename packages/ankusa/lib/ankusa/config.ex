@@ -89,8 +89,10 @@ defmodule Ankusa.Config do
               trusted_proxies: [],
               # global rules: a floor. A route's own ip_rules replace this list
               ip_rules: %{default: :allow, rules: []},
-              # its own listener, bearer-token authenticated
-              admin: %{port: 4003, token: nil},
+              # its own listener; unauthenticated by design, same stance as
+              # the operator admin API — front it with your own proxy or
+              # network policy
+              admin: %{port: 4003},
               # 1 in log_sample rejections is logged at :debug (0 = silent)
               log_sample: 100,
               # 403, or 404 for uniformity with :no_route

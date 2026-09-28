@@ -254,10 +254,10 @@ defmodule Ankusa.Routes do
   as `Ankusa.ClaimCheck.validate_config!/1`, and for the same reason: a
   misconfigured guard rejects real traffic, so it must not boot quietly.
 
-  Configuration that is only meaningful when routes are on (the admin token, the
-  seed) is only checked when `enabled: true`; the rest is always checked, so a
-  typo in a config that is about to be switched on is caught by the same run
-  that loads it.
+  Configuration that is only meaningful when routes are on (the seed) is only
+  checked when `enabled: true`; the rest is always checked, so a typo in a
+  config that is about to be switched on is caught by the same run that
+  loads it.
   """
   @spec validate_config!(Ankusa.Config.t()) :: :ok
   def validate_config!(%Ankusa.Config{routes: routes}) do
@@ -269,7 +269,6 @@ defmodule Ankusa.Routes do
     validate_admin_port!(routes.admin.port)
 
     if routes.enabled do
-      validate_token!(routes.admin.token)
       validate_seed!(routes)
     end
 
@@ -642,14 +641,6 @@ defmodule Ankusa.Routes do
     unless is_integer(port) and port >= 0 and port <= 65_535 do
       raise ArgumentError, "routes.admin.port must be a TCP port, got #{inspect(port)}"
     end
-  end
-
-  defp validate_token!(token) when is_binary(token) and token != "", do: :ok
-
-  defp validate_token!(_token) do
-    raise ArgumentError,
-          "routes.enabled is true but routes.admin.token is empty: the management API " <>
-            "refuses to start without a bearer token"
   end
 
   defp validate_seed!(%{seed: seed, max_routes: max_routes}) do

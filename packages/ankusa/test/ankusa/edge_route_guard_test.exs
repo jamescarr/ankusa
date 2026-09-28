@@ -15,8 +15,6 @@ defmodule Ankusa.Edge.RouteGuardTest do
   alias Ankusa.Routes
   alias Ankusa.WAL
 
-  @token "test-token"
-
   defp start(routes_opts) do
     config =
       test_config(
@@ -24,7 +22,7 @@ defmodule Ankusa.Edge.RouteGuardTest do
         source_store:
           {Ankusa.SourceStore.Static,
            sources: %{"demo" => [verifier: {Ankusa.Verifier.None, []}]}},
-        routes: Keyword.merge([enabled: true, admin: [token: @token, port: 0]], routes_opts)
+        routes: Keyword.merge([enabled: true, admin: [port: 0]], routes_opts)
       )
 
     start_supervised!({Ankusa.Instance, config})

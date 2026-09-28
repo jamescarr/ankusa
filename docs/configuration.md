@@ -61,7 +61,7 @@ Every top-level section, with its keys and defaults:
 | `wal` | `type` (`disk`) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
-| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.token`/`admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
+| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 
 `storage.s3`/`storage.gcs` are read only when the matching
@@ -148,7 +148,6 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
-| `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.token` |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_WAL_TYPE` | `wal.type` (`disk`) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
@@ -227,7 +226,7 @@ config :ankusa,
     cache: %{max_size: 50_000, ttl_ms: 30_000, negative_ttl_ms: 5_000, gc_interval_ms: 60_000},
     trusted_proxies: [],
     ip_rules: %{default: :allow, rules: []},
-    admin: %{port: 4003, token: nil},
+    admin: %{port: 4003},
     log_sample: 100,
     ip_denied_status: 403,
     seed: []
@@ -271,8 +270,7 @@ config :ankusa,
 | `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. `ttl_ms` must stay under `gc_interval_ms`. |
 | `routes.trusted_proxies` | `[]` | CIDRs whose peers may set `X-Forwarded-For`. Empty means the header is never read. |
 | `routes.ip_rules` | `%{default: :allow, rules: []}` | Ordered global rules, first match wins, plus the `default` when none match. |
-| `routes.admin.token` | `nil` | Bearer token for the management API. **Required** when `routes.enabled` is true. |
-| `routes.admin.port` | `4003` | The management API's own Bandit port. |
+| `routes.admin.port` | `4003` | The management API's own Bandit port. Unauthenticated by design, same as `admin.port`; front it with your own proxy or network policy. |
 | `routes.log_sample` | `100` | 1 in N rejections is logged at `:debug`; `0` disables it. |
 | `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. |
 | `routes.seed` | `[]` | Route definitions loaded at boot (see below). |
@@ -327,7 +325,6 @@ restart). To share definitions across edge nodes, use the `ankusa_redis` package
 ```yaml
 routes:
   enabled: true
-  admin: {token: "${ANKUSA_ROUTES_ADMIN_TOKEN}"}
   store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes}
 ```
 
@@ -338,8 +335,10 @@ node keeps serving its in-memory snapshot through a Redis outage; only writes
 report `503 store_unavailable`.
 
 **Management API**, on `routes.admin.port` (its own listener, never the ingest
-port), authenticated with `authorization: Bearer
-<routes.admin.token>` on every route:
+port). **Unauthenticated by design** — the same stance as the operator admin
+API (`admin.port`): Ankusa doesn't know what auth scheme a deployment wants,
+so it doesn't pick one for you. Front this port with your own proxy, mesh, or
+network policy before exposing it:
 
 | Method | Path | Purpose |
 | --- | --- | --- |

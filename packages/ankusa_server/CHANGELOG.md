@@ -10,11 +10,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 - A `routes:` section: `enabled`, `max_routes`, `store` (`type: ets`, or
   `type: redis` with `url`/`namespace`/`tick_ms` — a `url` with no `type` means
-  redis), `cache`, `trusted_proxies`, `ip_rules`, `admin.token`/`admin.port`
-  (4003), `log_sample`, `ip_denied_status`, and `seed`. `reference.yml`
+  redis), `cache`, `trusted_proxies`, `ip_rules`, `admin.port` (4003, its own
+  listener, unauthenticated by design — front it like the operator admin API's
+  `admin.port`), `log_sample`, `ip_denied_status`, and `seed`. `reference.yml`
   documents the whole section, including the retry caveat for senders that
   treat a `4xx` as retryable. Env overrides: `ANKUSA_ROUTES_ENABLED`,
-  `ANKUSA_ROUTES_ADMIN_TOKEN`, `ANKUSA_ROUTES_STORE_URL`.
+  `ANKUSA_ROUTES_STORE_URL`.
 - `ankusa_redis` in the image, so `store: {type: redis, url: ...}` shares route
   definitions across edge nodes without a rebuild.
 - The boot banner reports `routes=off` or `routes=on:<store>`.
@@ -22,10 +23,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 ### Changed
 
 - Config loading now runs core's `Ankusa.Routes.validate_config!/1`, so
-  `check-config` fails on a route config that would refuse to boot — a missing
-  admin token with routes enabled, an unparseable CIDR, a seed that conflicts
-  with itself or exceeds `max_routes` — with the same message the server would
-  exit with.
+  `check-config` fails on a route config that would refuse to boot — an
+  unparseable CIDR, a seed that conflicts with itself or exceeds
+  `max_routes` — with the same message the server would exit with.
 
 ## [0.2.1] - 2026-09-28
 

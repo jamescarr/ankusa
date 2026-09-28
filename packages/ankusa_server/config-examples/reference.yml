@@ -11,7 +11,6 @@
 #   RABBITMQ_EXCHANGE         KAFKA_BROKERS  KAFKA_TOPIC  KAFKA_USERNAME
 #   KAFKA_SASL_PASSWORD       NATS_SERVERS  NATS_SUBJECT  NATS_USERNAME
 #   NATS_PASSWORD             STANDARD_WEBHOOKS_SECRET   GITHUB_WEBHOOK_SECRET
-#   ANKUSA_ROUTES_ADMIN_TOKEN
 #
 # Anything you can also set with an ANKUSA_* env var is marked [env]; env wins
 # over this file, which is how a container gets reconfigured without a rebuild.
@@ -96,10 +95,9 @@ routes:
     # - {action: allow, cidr: "203.0.113.0/24"}
 
   admin:
-    # [env ANKUSA_ROUTES_ADMIN_TOKEN] required when enabled, on its own port:
-    # the same listener never carries ingest traffic.
-    # `${...:-}`: empty is legal while routes are off, and refused when on.
-    token: "${ANKUSA_ROUTES_ADMIN_TOKEN:-}"
+    # Its own listener, unauthenticated by design (same stance as `admin:`
+    # above): front it with your own proxy or network policy before exposing
+    # it.
     port: 4003
 
   # Routes an operator cannot wait for the API to create: a standalone node

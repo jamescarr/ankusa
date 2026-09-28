@@ -17,8 +17,6 @@ defmodule Ankusa.RoutesTest do
   alias Ankusa.Routes
   alias Ankusa.Routes.{Matcher, Route}
 
-  @token "test-token"
-
   defp start(routes_opts) do
     {admin, routes_opts} = Keyword.pop(routes_opts, :admin, [])
 
@@ -30,7 +28,7 @@ defmodule Ankusa.RoutesTest do
           |> Keyword.put_new(:enabled, true)
           # Port 0: the management listener is not under test here, and the
           # default 4003 would collide between tests in one VM.
-          |> Keyword.put(:admin, Keyword.merge([token: @token, port: 0], admin))
+          |> Keyword.put(:admin, Keyword.merge([port: 0], admin))
       )
 
     start_supervised!({Ankusa.Instance, config})

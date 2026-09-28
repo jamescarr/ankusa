@@ -41,7 +41,7 @@ defmodule Ankusa.ConfigTest do
       refute config.routes.enabled
       assert config.routes.store == {Ankusa.Routes.Store.ETS, []}
       assert config.routes.trusted_proxies == []
-      assert config.routes.admin.token == nil
+      assert config.routes.admin == %{port: 4003}
     end
 
     test "merges one nested level, so routes.cache.max_size keeps the other cache keys" do
@@ -68,8 +68,8 @@ defmodule Ankusa.ConfigTest do
         Config.new(routes: %{cache: %{nope: 1}})
       end
 
-      assert_raise ArgumentError, ~r/routes\.admin\.tokn/, fn ->
-        Config.new(routes: [admin: [tokn: "x"]])
+      assert_raise ArgumentError, ~r/routes\.admin\.prt/, fn ->
+        Config.new(routes: [admin: [prt: 4004]])
       end
     end
 
@@ -84,18 +84,6 @@ defmodule Ankusa.ConfigTest do
 
     test "accepts the defaults" do
       assert :ok = Ankusa.Routes.validate_config!(Config.new())
-    end
-
-    test "requires a bearer token when routes are enabled" do
-      assert_raise ArgumentError, ~r/routes\.admin\.token/, fn ->
-        validated(enabled: true, admin: [token: nil])
-      end
-
-      assert_raise ArgumentError, ~r/routes\.admin\.token/, fn ->
-        validated(enabled: true, admin: [token: ""])
-      end
-
-      assert :ok = validated(enabled: true, admin: [token: "t"])
     end
 
     test "rejects a TTL at or past the cache's garbage-collection interval" do
@@ -147,16 +135,16 @@ defmodule Ankusa.ConfigTest do
       assert :ok = validated(bad_seed)
 
       assert_raise ArgumentError, ~r/routes\.seed\[0\] is invalid: path/, fn ->
-        validated([enabled: true, admin: [token: "t"]] ++ bad_seed)
+        validated([enabled: true] ++ bad_seed)
       end
     end
 
     test "rejects seed ids that collide, seeds that collide, and an oversized seed" do
-      token = [enabled: true, admin: [token: "t"]]
+      enabled = [enabled: true]
 
       assert_raise ArgumentError, ~r/routes\.seed\[2\] reuses route id "s"/, fn ->
         validated(
-          token ++
+          enabled ++
             [
               seed: [
                 %{"id" => "s", "path" => "/hooks/a"},
@@ -169,7 +157,7 @@ defmodule Ankusa.ConfigTest do
 
       assert_raise ArgumentError, ~r/routes\.seed\[1\] conflicts with routes\.seed\[0\]/, fn ->
         validated(
-          token ++
+          enabled ++
             [
               seed: [
                 %{"id" => "a", "path" => "/hooks/x"},
@@ -181,7 +169,7 @@ defmodule Ankusa.ConfigTest do
 
       assert_raise ArgumentError, ~r/more than routes\.max_routes/, fn ->
         validated(
-          token ++
+          enabled ++
             [
               max_routes: 1,
               seed: [

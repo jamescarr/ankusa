@@ -33,7 +33,6 @@ config =
   Ankusa.Config.new(
     routes: [
       enabled: true,
-      admin: [token: System.fetch_env!("ANKUSA_ROUTES_ADMIN_TOKEN")],
       store: {Ankusa.Routes.Store.Redis, url: "redis://localhost:6379", namespace: "ankusa:routes"}
     ]
   )

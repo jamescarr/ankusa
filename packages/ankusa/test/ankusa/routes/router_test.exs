@@ -2,7 +2,7 @@ defmodule Ankusa.Routes.RouterTest do
   @moduledoc """
   The management API over `Plug.Test.conn`, plus one test over a real socket:
   the in-process cases pin the contract, and the socket case proves the listener
-  actually binds and authenticates.
+  actually binds.
 
   `async: false` because the socket test binds a port and the API reads the
   instance's `:persistent_term` config.
@@ -13,8 +13,6 @@ defmodule Ankusa.Routes.RouterTest do
   import Ankusa.TestHelpers
 
   alias Ankusa.Routes.Router
-
-  @token "test-token"
 
   defp start(routes_opts) do
     {admin, routes_opts} = Keyword.pop(routes_opts, :admin, [])
@@ -28,7 +26,7 @@ defmodule Ankusa.Routes.RouterTest do
           # Port 0 unless a test asks for a specific one: two instances in one VM
           # would otherwise both want the default and the second would fail to
           # bind.
-          |> Keyword.put(:admin, Keyword.merge([token: @token, port: 0], admin))
+          |> Keyword.put(:admin, Keyword.merge([port: 0], admin))
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -37,70 +35,14 @@ defmodule Ankusa.Routes.RouterTest do
 
   defp call(config, method, path, opts \\ []) do
     body = Keyword.get(opts, :body)
-    # The whole header value, verbatim: the tests that probe the scheme need to
-    # send something other than the canonical "Bearer <token>".
-    authorization = Keyword.get(opts, :authorization, bearer(@token))
-
-    conn =
-      Plug.Test.conn(method, path, body)
-      |> then(fn conn ->
-        case authorization do
-          nil -> conn
-          value -> Plug.Conn.put_req_header(conn, "authorization", value)
-        end
-      end)
-
+    conn = Plug.Test.conn(method, path, body)
     Router.call(conn, Router.init(instance: config.instance))
   end
-
-  defp bearer(token), do: "Bearer " <> token
 
   defp json(conn), do: JSON.decode!(conn.resp_body)
 
   defp dry_run(config, request) do
     call(config, :post, "/admin/routes/test", body: JSON.encode!(request))
-  end
-
-  describe "authentication" do
-    setup do
-      config = start(seed: [%{"id" => "s", "path" => "/hooks/s"}])
-      %{config: config}
-    end
-
-    test "every route requires the token, /health included", %{config: config} do
-      for {method, path} <- [
-            {:get, "/health"},
-            {:get, "/admin/routes"},
-            {:get, "/admin/routes/s"},
-            {:get, "/admin/ip-rules"}
-          ] do
-        conn = call(config, method, path, authorization: nil)
-        assert conn.status == 401
-        assert json(conn) == %{"error" => "unauthorized"}
-        assert Plug.Conn.get_resp_header(conn, "www-authenticate") == ["Bearer"]
-      end
-    end
-
-    test "a wrong token is rejected, the right one accepted", %{config: config} do
-      assert call(config, :get, "/health", authorization: bearer("nope")).status == 401
-
-      assert call(config, :get, "/health", authorization: bearer(@token)).status == 200
-
-      assert json(call(config, :get, "/health", authorization: bearer(@token))) == %{
-               "status" => "ok",
-               "routes" => 1
-             }
-    end
-
-    test "the scheme is case-insensitive and the token is not", %{config: config} do
-      assert call(config, :get, "/health", authorization: "bearer " <> @token).status == 200
-      assert call(config, :get, "/health", authorization: "BEARER " <> @token).status == 200
-
-      assert call(config, :get, "/health", authorization: "Bearer " <> String.upcase(@token)).status ==
-               401
-
-      assert call(config, :get, "/health", authorization: @token).status == 401
-    end
   end
 
   describe "route lifecycle" do
@@ -388,28 +330,19 @@ defmodule Ankusa.Routes.RouterTest do
   end
 
   describe "the listener" do
-    test "binds its own port and authenticates over a socket" do
+    test "binds its own port, unauthenticated by design" do
       port = free_port()
 
-      config = start(admin: [token: @token, port: port])
+      config = start(admin: [port: port])
 
       assert config.routes.admin.port == port
 
-      assert Req.get!("http://127.0.0.1:#{port}/health").status == 401
-
-      response =
-        Req.get!("http://127.0.0.1:#{port}/health",
-          headers: [{"authorization", bearer(@token)}]
-        )
-
+      response = Req.get!("http://127.0.0.1:#{port}/health")
       assert response.status == 200
       assert response.body == %{"status" => "ok", "routes" => 0}
 
       created =
-        Req.post!("http://127.0.0.1:#{port}/admin/routes",
-          headers: [{"authorization", bearer(@token)}],
-          body: ~s({"id":"a","path":"/hooks/a"})
-        )
+        Req.post!("http://127.0.0.1:#{port}/admin/routes", body: ~s({"id":"a","path":"/hooks/a"}))
 
       assert created.status == 201
       assert created.body["id"] == "a"

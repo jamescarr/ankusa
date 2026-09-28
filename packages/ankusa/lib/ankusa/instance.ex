@@ -107,10 +107,14 @@ defmodule Ankusa.Instance do
 
   # The management API, after the ingress listener: it edits the definitions
   # that listener already enforces, so it must never be the last thing to come
-  # up. It carries its own bearer token (required at boot), so unlike the
-  # operator API there is nothing to warn about here.
+  # up.
   defp routes_admin_children(config) do
     if routes?(config) do
+      Logger.warning(
+        "[ankusa] route management API on :#{config.routes.admin.port} is unauthenticated; " <>
+          "do not expose it publicly, front it with your own proxy or network policy"
+      )
+
       [
         Supervisor.child_spec(
           {Bandit,

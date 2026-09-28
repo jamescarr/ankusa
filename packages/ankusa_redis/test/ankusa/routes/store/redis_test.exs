@@ -43,7 +43,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
         roles: [:edge],
         routes:
           routes
-          |> Keyword.merge(enabled: true, admin: [token: "test-token", port: 0])
+          |> Keyword.merge(enabled: true, admin: [port: 0])
           |> Keyword.put(:store, store(tick_ms))
       )
 
@@ -224,7 +224,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
         roles: [:edge],
         routes: [
           enabled: true,
-          admin: [token: "test-token", port: 0],
+          admin: [port: 0],
           store: {Redis, [url: "redis://127.0.0.1:#{port}", namespace: @namespace]}
         ]
       )
@@ -255,7 +255,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
       build_config(
         instance: fresh,
         roles: [:edge],
-        routes: [enabled: true, admin: [token: "test-token", port: 0], store: store(60_000)]
+        routes: [enabled: true, admin: [port: 0], store: store(60_000)]
       )
 
     assert {:error, {:shutdown, {:failed_to_start_child, State, reason}}} =

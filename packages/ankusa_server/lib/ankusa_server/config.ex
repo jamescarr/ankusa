@@ -36,7 +36,6 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
   | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
   | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
-  | `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.token` |
   | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
   | `ANKUSA_WAL_TYPE` | `wal.type` |
   | `ANKUSA_STORAGE_TYPE` | `storage.type` |
@@ -76,7 +75,7 @@ defmodule AnkusaServer.Config do
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
-  @routes_admin_keys ~w(port token)
+  @routes_admin_keys ~w(port)
   @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
   @source_keys ~w(tenant on_verify_failure verify sinks)
   @verify_keys ~w(type secret tolerance_seconds)
@@ -228,7 +227,6 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
     {"ANKUSA_ROUTES_ENABLED", ["routes", "enabled"]},
-    {"ANKUSA_ROUTES_ADMIN_TOKEN", ["routes", "admin", "token"]},
     {"ANKUSA_ROUTES_STORE_URL", ["routes", "store", "url"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
@@ -568,7 +566,6 @@ defmodule AnkusaServer.Config do
 
     []
     |> put_opt(:port, int_opt(admin, "port", path))
-    |> put_opt(:token, string_opt(admin, "token", path))
   end
 
   defp routes_ip_rules(routes, path) do
