@@ -51,7 +51,7 @@ dead-letter queue you can replay with one call.
 ```sh
 git clone https://github.com/jamescarr/ankusa
 cd ankusa/examples/quickstart
-docker compose up -d --wait
+docker compose up --build -d --wait
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 sleep 1 && docker compose logs worker
 # received id=01a0... source=demo seq=1 bytes=36 body={"id":"evt_1","type":"invoice.paid"}
@@ -71,7 +71,9 @@ sources:
 ```
 
 The worker is
-[40 lines of standard-library Python](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py);
+[a small Python script](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
+built with [`uv`](https://docs.astral.sh/uv/), using the `ankusa` Python SDK
+([`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python));
 replace it with your own service. [The quickstart guide](docs/quickstart.md)
 walks through outages, dead letters, replay, and pointing a real provider at it.
 

@@ -3,7 +3,8 @@
 # Sourced only; sets no shell options. Every releasable artifact is a
 # directory under packages/; its name is the git tag prefix (`<name>-vX.Y.Z`)
 # and its kind comes from the files in it:
-#   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex.
+#   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex,
+#   else pyproject.toml -> python.
 #
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
@@ -50,8 +51,10 @@ pkg_kind() {
     echo docker
   elif [ -f "$ROOT/$dir/mix.exs" ]; then
     echo hex
+  elif [ -f "$ROOT/$dir/pyproject.toml" ]; then
+    echo python
   else
-    fail "$dir has no package.json, Dockerfile, or mix.exs"
+    fail "$dir has no package.json, Dockerfile, mix.exs, or pyproject.toml"
   fi
 }
 
@@ -61,7 +64,7 @@ pkg_names() {
   local kind name all
   all=$(_pkg_all)
   if [ -d "$ROOT/packages/ankusa" ]; then echo ankusa; fi
-  for kind in hex docker npm; do
+  for kind in hex docker npm python; do
     for name in $all; do
       if [ "$name" != ankusa ] && [ "$(pkg_kind "$name")" = "$kind" ]; then
         printf '%s\n' "$name"
@@ -88,6 +91,7 @@ pkg_version() {
   case "$kind" in
     hex | docker) v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$ROOT/$dir/mix.exs") ;;
     npm) v=$(node -p "require('$ROOT/$dir/package.json').version") ;;
+    python) v=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/$dir/pyproject.toml") ;;
   esac
   [ -n "$v" ] || fail "could not read the version of $1 from $dir"
   printf '%s\n' "$v"
@@ -124,7 +128,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name
+  local dir kind url npm_name pypi_name
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -133,6 +137,10 @@ pkg_registry_code() {
     npm)
       npm_name=$(node -p "require('$ROOT/$dir/package.json').name")
       url="https://registry.npmjs.org/$npm_name/$2"
+      ;;
+    python)
+      pypi_name=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$ROOT/$dir/pyproject.toml")
+      url="https://pypi.org/pypi/$pypi_name/$2/json"
       ;;
   esac
   # curl prints 000 and exits non-zero when the registry is unreachable; the
@@ -145,6 +153,7 @@ pkg_workflow() {
     hex) echo release.yml ;;
     docker) echo docker.yml ;;
     npm) echo release-npm.yml ;;
+    python) echo release-python.yml ;;
   esac
 }
 
@@ -153,6 +162,8 @@ pkg_secrets() {
     hex) echo HEX_API_KEY ;;
     docker) echo DOCKERHUB_USERNAME DOCKERHUB_TOKEN ;;
     npm) echo NPM_TOKEN ;;
+    # PyPI publishes via Trusted Publishing (OIDC): no repo secret needed.
+    python) : ;;
   esac
 }
 

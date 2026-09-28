@@ -9,10 +9,11 @@ the files in it decide where it publishes:
 | `ankusa`, `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats` | Hex (`mix.exs`) | `<pkg>-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
 | `ankusa_server` | Docker image `jamescarr/ankusa` (`Dockerfile`) | `ankusa_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
 | `sdk-typescript` | npm package `ankusa` (`package.json`) | `sdk-typescript-vX.Y.Z` | [`release-npm.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-npm.yml) |
+| `sdk-python` | PyPI package `ankusa` (`pyproject.toml`) | `sdk-python-vX.Y.Z` | [`release-python.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-python.yml) |
 
-The npm package is also named `ankusa`; its tag prefix is the directory name,
-not the package name, so it can't be confused with the Hex core's
-`ankusa-vX.Y.Z`.
+The npm and PyPI packages are also both named `ankusa`; each one's tag
+prefix is its directory name, not the package name, so neither can be
+confused with the Hex core's `ankusa-vX.Y.Z` or with each other.
 
 ## The flow
 
@@ -31,7 +32,8 @@ mise run release:verify ankusa_nats
 1. **`release:prepare <bump> <pkgs>…`** refuses a dirty tree or a `HEAD` that
    isn't `origin/main`, and refuses a package whose `CHANGELOG.md` has nothing
    under `[Unreleased]`. For each package it sets the version (`@version` in
-   `mix.exs`, or `npm version` for npm), opens a dated `## [X.Y.Z]` heading
+   `mix.exs`, `npm version` for npm, or `uv version` for Python), opens a
+   dated `## [X.Y.Z]` heading
    under `[Unreleased]`, and points the footer compare links at the new tag.
    It commits all of them on `release/<tag>`, pushes, and opens a PR whose
    body is the release notes. `--no-pr` stops after the local commit.
@@ -62,8 +64,9 @@ fails at `MIX_ENV=prod mix deps.get`. `release:preflight` enforces this: an
 adapter's preflight fails until the core version in the tree is on Hex.
 `release:prepare` can still bump core and adapters together in one PR.
 
-The server image and the npm SDK have no ordering constraint: the image builds
-from this checkout, and the SDK depends on nothing here.
+The server image and the npm and Python SDKs have no ordering constraint:
+the image builds from this checkout, and neither SDK depends on anything
+here.
 
 ## The server image
 
@@ -94,3 +97,8 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   Access Tokens → Generate New Token → Automation: this type bypasses
   2FA-on-publish, which a personal "Publish" token does not), scoped to the
   `ankusa` package once it exists, or unscoped for the first publish.
+- **PyPI:** none — publishing uses
+  [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC).
+  One-time setup on the `ankusa` PyPI project's Publishing settings: add a
+  trusted publisher for this repo, workflow `release-python.yml`,
+  environment `pypi`. No repo secret to rotate or leak.

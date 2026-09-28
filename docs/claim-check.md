@@ -169,8 +169,45 @@ dead-letter vs. retry needs no status-code knowledge. The workers in
 [`rabbitmq-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/worker)
 and
 [`kafka-sqs-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/worker)
-depend on it. Any other OpenAPI generator, `openapi-generator`,
-`openapi-python-client`, works against the same
+depend on it.
+
+### From Python, with the SDK
+
+[`packages/sdk-python`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-python)
+(PyPI package `ankusa`) ships a `ClaimCheckClient` built on
+[`httpx`](https://www.python-httpx.org/) against the same contract: it
+parses a ref, redeems it, and verifies the bytes against the ref's own size
+and sha256 before returning them, the same end-to-end check the TypeScript
+client runs and the gateway itself does not. It's the umbrella client
+package for non-Elixir consumers: the claim-check client is the first piece
+in it, alongside a webhook header-parsing helper for the HTTP-sink side.
+
+```sh
+pip install ankusa   # or, before its first PyPI release, a uv/pip local
+                      # path dep, see the package README
+```
+
+```python
+import os
+
+from ankusa import ClaimCheckClient, ClaimCheckError
+
+claim_check = ClaimCheckClient(os.environ.get("CLAIM_CHECK_URL", "http://localhost:4001"))
+
+# claim is the URN from the queue message.
+def redeem_claim(claim: str) -> bytes:
+    return claim_check.redeem(claim)
+```
+
+Every failure is a `ClaimCheckError` subclass with a `retryable` attribute:
+`False` for a malformed ref, `404`, other `4xx`, or an integrity mismatch;
+`True` for `5xx`/`503` or an unreachable gateway, the same dead-letter vs.
+retry split as the TypeScript client.
+
+### Any other language
+
+Any OpenAPI generator, `openapi-generator`, `openapi-python-client`, works
+against the same
 [`claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml).
 
 ## Write cost

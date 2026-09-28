@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Every example app: locked deps, format, :prod compile, and the TypeScript workers' typecheck"
+#MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, and the Python worker's lockfile"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -25,6 +25,13 @@ for f in examples/*/*/mix.exs; do
     if [ -f .formatter.exs ]; then mix format --check-formatted; fi
     MIX_ENV=prod mix compile --warnings-as-errors
   )
+done
+
+for f in examples/*/pyproject.toml; do
+  [ -f "$f" ] || continue
+  d="${f%/pyproject.toml}"
+  echo "==> $d"
+  (cd "$d" && uv sync --locked)
 done
 
 for f in examples/*/*/package.json; do
