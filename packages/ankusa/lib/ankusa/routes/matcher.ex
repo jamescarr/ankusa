@@ -122,12 +122,6 @@ defmodule Ankusa.Routes.Matcher do
     {literals, :wildcard in segments}
   end
 
-  @doc "Render segments back to a path, for telemetry and error messages."
-  @spec segments_to_path([segment()] | [String.t()]) :: String.t()
-  def segments_to_path(segments) do
-    "/" <> Enum.map_join(segments, "/", &segment_to_string/1)
-  end
-
   # ── internals ───────────────────────────────────────────────────────────────
 
   defp compile([], []), do: {:error, "must contain at least one segment"}
@@ -152,9 +146,4 @@ defmodule Ankusa.Routes.Matcher do
   end
 
   defp encoded_slash?(_request_path), do: false
-
-  defp segment_to_string({:literal, literal}), do: literal
-  defp segment_to_string(:param), do: ":param"
-  defp segment_to_string(:wildcard), do: @wildcard
-  defp segment_to_string(segment) when is_binary(segment), do: segment
 end

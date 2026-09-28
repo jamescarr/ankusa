@@ -121,19 +121,29 @@ defmodule Ankusa.Routes do
     routes =
       instance
       |> snapshot()
-      |> routes_after(cursor)
-      |> filter_enabled(enabled)
+      |> then(fn
+        nil -> []
+        s -> Map.values(s.by_id)
+      end)
+      |> then(fn rs ->
+        case cursor do
+          nil -> rs
+          c -> Enum.filter(rs, &(&1.id > c))
+        end
+      end)
+      |> then(fn rs ->
+        case enabled do
+          nil -> rs
+          e -> Enum.filter(rs, &(&1.enabled == e))
+        end
+      end)
       |> Enum.sort_by(& &1.id)
 
     page = Enum.take(routes, limit)
 
-    next_cursor =
-      if length(routes) > limit do
-        case List.last(page) do
-          nil -> nil
-          last -> last.id
-        end
-      end
+    # `clamp_limit/1` guarantees `limit >= 1`, so a non-empty page here is
+    # non-nil: `length(routes) > limit` means there is another page.
+    next_cursor = if length(routes) > limit, do: List.last(page).id
 
     {:ok, %{routes: page, next_cursor: next_cursor}}
   end
@@ -502,20 +512,6 @@ defmodule Ankusa.Routes do
       snapshot -> {:ok, snapshot}
     end
   end
-
-  defp routes_after(nil, _cursor), do: []
-
-  defp routes_after(snapshot, cursor) do
-    routes = Map.values(snapshot.by_id)
-
-    case cursor do
-      nil -> routes
-      cursor -> Enum.filter(routes, &(&1.id > cursor))
-    end
-  end
-
-  defp filter_enabled(routes, nil), do: routes
-  defp filter_enabled(routes, enabled), do: Enum.filter(routes, &(&1.enabled == enabled))
 
   defp clamp_limit(limit) when is_integer(limit), do: limit |> max(1) |> min(@max_limit)
   defp clamp_limit(_limit), do: @default_limit

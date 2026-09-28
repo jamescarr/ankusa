@@ -54,8 +54,6 @@ defmodule Ankusa.Net.ClientIP do
 
   # ── internals ───────────────────────────────────────────────────────────────
 
-  defp forwarded?(_peer, []), do: false
-
   defp forwarded?(peer, trusted_proxies),
     do: Enum.any?(trusted_proxies, &contains?(&1, peer))
 
@@ -70,15 +68,13 @@ defmodule Ankusa.Net.ClientIP do
 
   # ── the forwarded chain ─────────────────────────────────────────────────────
 
-  # The rightmost entry is what the peer itself appended. `Enum.reduce/3` over
-  # the header list keeps the last one when a client sends several, which is
-  # also the one the proxy appended to.
+  # The rightmost entry is what the peer itself appended. `get_req_header/2`
+  # returns the header values in order, so `List.last/1` is the one a client
+  # that sends several ended with — also the one the proxy appended to.
   defp chain(conn) do
-    conn.req_headers
-    |> Enum.reduce(nil, fn
-      {@forwarded_for, value}, _acc -> value
-      _header, acc -> acc
-    end)
+    conn
+    |> Plug.Conn.get_req_header(@forwarded_for)
+    |> List.last()
     |> parse_chain()
   end
 
@@ -99,15 +95,10 @@ defmodule Ankusa.Net.ClientIP do
   end
 
   defp parse_all(entries) do
-    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
-      case Net.parse(entry) do
-        {:ok, ip} -> {:cont, {:ok, [ip | acc]}}
-        :error -> {:halt, :error}
-      end
-    end)
-    |> case do
-      :error -> :error
-      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+    with true <- Enum.all?(entries, fn e -> match?({:ok, _}, Net.parse(e)) end) do
+      {:ok, Enum.map(entries, fn e -> elem(Net.parse(e), 1) end)}
+    else
+      false -> :error
     end
   end
 

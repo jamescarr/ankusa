@@ -106,16 +106,11 @@ defmodule Ankusa.Routes.MatcherTest do
     end
   end
 
-  describe "specificity/1 and segments_to_path/1" do
+  describe "specificity/1" do
     test "counts literal segments and reports a wildcard" do
       assert Matcher.specificity(compile("/hooks/stripe")) == {2, false}
       assert Matcher.specificity(compile("/hooks/:tenant")) == {1, false}
       assert Matcher.specificity(compile("/hooks/*")) == {1, true}
-    end
-
-    test "renders segments back to a path" do
-      assert Matcher.segments_to_path(compile("/hooks/:tenant/*")) == "/hooks/:param/*"
-      assert Matcher.segments_to_path(["hooks", "stripe"]) == "/hooks/stripe"
     end
   end
 

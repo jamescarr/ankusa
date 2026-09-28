@@ -231,9 +231,7 @@ defmodule Ankusa.Routes.Router do
     with {:ok, enabled} <- bool_param(params, "enabled"),
          {:ok, limit} <- int_param(params, "limit"),
          {:ok, cursor} <- string_param(params, "cursor") do
-      {:ok,
-       [enabled: enabled, cursor: cursor]
-       |> put_present(:limit, limit)}
+      {:ok, [enabled: enabled, cursor: cursor, limit: limit]}
     end
   end
 
@@ -267,9 +265,6 @@ defmodule Ankusa.Routes.Router do
     end
   end
 
-  defp put_present(opts, _key, nil), do: opts
-  defp put_present(opts, key, value), do: Keyword.put(opts, key, value)
-
   # ── helpers ─────────────────────────────────────────────────────────────────
 
   defp ip_rules_json(rules), do: Route.rules_json(rules)
@@ -281,9 +276,7 @@ defmodule Ankusa.Routes.Router do
     end
   end
 
-  defp max_routes(conn), do: config(conn).routes.max_routes
-
-  defp config(%Plug.Conn{} = conn), do: Ankusa.config(instance(conn))
+  defp max_routes(%Plug.Conn{} = conn), do: Ankusa.config(instance(conn)).routes.max_routes
 
   defp instance(%Plug.Conn{} = conn) do
     Keyword.get(conn.assigns[:ankusa_opts] || [], :instance, :default)
