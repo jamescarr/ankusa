@@ -1,0 +1,302 @@
+{
+  "cases": [
+    {
+      "id": "claim_ref.ok",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "ok": {
+          "tenant_id": "acme",
+          "claim_id": "01M39VMD8RA3C5HR4RBV67Y002",
+          "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002"
+        }
+      }
+    },
+    {
+      "id": "claim_ref.ok.tenant_charset",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:Acme_co-1:01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "ok": {
+          "tenant_id": "Acme_co-1",
+          "claim_id": "01M39VMD8RA3C5HR4RBV67Y002",
+          "path": "/v1/claims/Acme_co-1/01M39VMD8RA3C5HR4RBV67Y002"
+        }
+      }
+    },
+    {
+      "id": "claim_ref.ok.tenant_64",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "ok": {
+          "tenant_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "claim_id": "01M39VMD8RA3C5HR4RBV67Y002",
+          "path": "/v1/claims/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/01M39VMD8RA3C5HR4RBV67Y002"
+        }
+      }
+    },
+    {
+      "id": "claim_ref.ok.max_first_char",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:7ZZZZZZZZZZZZZZZZZZZZZZZZZ"
+      },
+      "expect": {
+        "ok": {
+          "tenant_id": "acme",
+          "claim_id": "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+          "path": "/v1/claims/acme/7ZZZZZZZZZZZZZZZZZZZZZZZZZ"
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.not_a_ref",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "not-a-ref"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.empty",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": ""
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.lowercase_ulid",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01m39vmd8ra3c5hr4rbv67y002"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.ulid_25",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y00"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.ulid_27",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y0020"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.ulid_first_char_8",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:81M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.forbidden_i",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y00I"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.forbidden_l",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y00L"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.forbidden_o",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y00O"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.forbidden_u",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y00U"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.extra_segment",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002:extra"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.trailing_newline",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\n"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.tenant_dot",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:bad.tenant:01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.tenant_65",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.tenant_empty",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1::01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.wrong_version",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.reject.old_format",
+      "feature": "claim_ref.parse",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v1:acme:0199a1c2-7b3e-7d4a-9c1f-2e5b8a6d4f10:66:17:sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    }
+  ]
+}

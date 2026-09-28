@@ -1,0 +1,184 @@
+{
+  "cases": [
+    {
+      "id": "health.ok",
+      "feature": "claim_check.health",
+      "operation": "health",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "status": "ok"
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": {
+          "status": "ok"
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/health"
+          }
+        ]
+      }
+    },
+    {
+      "id": "health.error.service_unavailable",
+      "feature": "claim_check.health",
+      "operation": "health",
+      "input": {
+        "gateway": {
+          "status": 503,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "status": "unavailable"
+            }
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "health.error.non_json",
+      "feature": "claim_check.health",
+      "operation": "health",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "text/plain"
+          },
+          "body": {
+            "text": "ok"
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "health.error.non_200_success",
+      "feature": "claim_check.health",
+      "operation": "health",
+      "input": {
+        "gateway": {
+          "status": 201,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "status": "ok"
+            }
+          }
+        }
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "health.error.unreachable",
+      "feature": "claim_check.health",
+      "operation": "health",
+      "input": {
+        "gateway": {
+          "unreachable": true
+        }
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "health.client.headers",
+      "feature": "claim_check.client.headers",
+      "operation": "health",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "status": "ok"
+            }
+          }
+        },
+        "client": {
+          "headers": {
+            "authorization": "Bearer t0k3n"
+          }
+        }
+      },
+      "expect": {
+        "ok": {
+          "status": "ok"
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/health",
+            "headers": {
+              "authorization": "Bearer t0k3n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "health.client.timeout",
+      "feature": "claim_check.client.timeout",
+      "operation": "health",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "status": "ok"
+            }
+          },
+          "delay_ms": 1000
+        },
+        "client": {
+          "timeout_ms": 200
+        }
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      }
+    }
+  ]
+}

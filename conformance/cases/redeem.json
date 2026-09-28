@@ -1,0 +1,632 @@
+{
+  "cases": [
+    {
+      "id": "redeem.ok",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "ok": {
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002"
+          }
+        ]
+      },
+      "feature": "claim_check.redeem"
+    },
+    {
+      "id": "redeem.ok.binary",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "base64": "AP8QgAoN"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "e907c711571027ff8d3a8fe2330188727124bf32ba25eccacdb01f32c0a0fda7"
+      },
+      "expect": {
+        "ok": {
+          "body": {
+            "base64": "AP8QgAoN"
+          }
+        }
+      },
+      "feature": "claim_check.redeem"
+    },
+    {
+      "id": "redeem.ok.empty",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "expect": {
+        "ok": {
+          "body": {
+            "base64": ""
+          }
+        }
+      },
+      "feature": "claim_check.redeem"
+    },
+    {
+      "id": "redeem.integrity.mismatch",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "text": "tampered"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimIntegrityError",
+          "retryable": false
+        }
+      },
+      "feature": "claim_check.redeem.integrity"
+    },
+    {
+      "id": "redeem.integrity.truncated",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "text": "hello claim chec"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimIntegrityError",
+          "retryable": false
+        }
+      },
+      "feature": "claim_check.redeem.integrity"
+    },
+    {
+      "id": "redeem.integrity.empty_body",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimIntegrityError",
+          "retryable": false
+        }
+      },
+      "feature": "claim_check.redeem.integrity"
+    },
+    {
+      "id": "redeem.error.not_found",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 404,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "error": "not_found"
+            }
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimNotFoundError",
+          "retryable": false
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.rejected_json",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 400,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "error": "invalid_ref"
+            }
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimRejectedError",
+          "retryable": false,
+          "status": 400,
+          "body": {
+            "error": "invalid_ref"
+          }
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.rejected_text",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 403,
+          "headers": {
+            "content-type": "text/plain"
+          },
+          "body": {
+            "text": "forbidden"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimRejectedError",
+          "retryable": false,
+          "status": 403,
+          "body": "forbidden"
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.rejected_empty",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 429
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimRejectedError",
+          "retryable": false,
+          "status": 429,
+          "body": ""
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.server_error",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 500,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "error": "internal"
+            }
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.service_unavailable",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 503,
+          "headers": {
+            "content-type": "text/plain"
+          },
+          "body": {
+            "text": "busy"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.non_200_success",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 201,
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.redirect_not_followed",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 302,
+          "headers": {
+            "location": "/elsewhere"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002"
+          }
+        ]
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.unreachable",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "unreachable": true
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.invalid.ref",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "not-a-ref",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        },
+        "requests": []
+      },
+      "feature": "claim_check.redeem.input_validation"
+    },
+    {
+      "id": "redeem.invalid.sha256_empty",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": ""
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        },
+        "requests": []
+      },
+      "feature": "claim_check.redeem.input_validation"
+    },
+    {
+      "id": "redeem.invalid.sha256_short",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f0158"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        },
+        "requests": []
+      },
+      "feature": "claim_check.redeem.input_validation"
+    },
+    {
+      "id": "redeem.invalid.sha256_long",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f015810"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        },
+        "requests": []
+      },
+      "feature": "claim_check.redeem.input_validation"
+    },
+    {
+      "id": "redeem.invalid.sha256_uppercase",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8E1BED597394CF01672E49232D9929C8BC6B3D6EA4E2F489517EC88701F01581"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        },
+        "requests": []
+      },
+      "feature": "claim_check.redeem.input_validation"
+    },
+    {
+      "id": "redeem.invalid.sha256_prefixed",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "sha256-8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        },
+        "requests": []
+      },
+      "feature": "claim_check.redeem.input_validation"
+    },
+    {
+      "id": "redeem.invalid.sha256_non_hex",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        },
+        "requests": []
+      },
+      "feature": "claim_check.redeem.input_validation"
+    },
+    {
+      "id": "redeem.client.headers",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581",
+        "client": {
+          "headers": {
+            "authorization": "Bearer t0k3n",
+            "x-tenant": "acme"
+          }
+        }
+      },
+      "expect": {
+        "ok": {
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002",
+            "headers": {
+              "authorization": "Bearer t0k3n",
+              "x-tenant": "acme"
+            }
+          }
+        ]
+      },
+      "feature": "claim_check.client.headers"
+    },
+    {
+      "id": "redeem.client.timeout",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          },
+          "delay_ms": 1000
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581",
+        "client": {
+          "timeout_ms": 200
+        }
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      },
+      "feature": "claim_check.client.timeout"
+    },
+    {
+      "id": "redeem.client.transport",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581",
+        "client": {
+          "transport": "injected"
+        }
+      },
+      "expect": {
+        "ok": {
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002"
+          }
+        ]
+      },
+      "feature": "claim_check.client.transport"
+    }
+  ]
+}

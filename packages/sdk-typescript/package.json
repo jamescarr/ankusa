@@ -35,6 +35,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts",
+    "conformance": "node --import tsx --test src/conformance/conformance.test.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

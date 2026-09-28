@@ -6,6 +6,29 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `parseHeaders(headers)`, plus `HookHeaders`, `HeaderSource`, and
+  `MissingHookIdError`, for receivers of Ankusa's HTTP sink: parses
+  `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-seq`/`x-ankusa-tenant`/
+  `content-type` case-insensitively, raising `MissingHookIdError` when
+  `x-ankusa-id` is absent or empty. Mirrors the Python SDK's `parse_headers`.
+- `createClaimCheckClient({ timeoutMs })`: a per-request deadline in
+  milliseconds (default `10_000`) covering connect through the last body
+  byte; exceeding it rejects with `ClaimCheckUnavailableError`. Mirrors the
+  Python client's `timeout=10.0`.
+
+### Changed
+
+- `redeem` accepts only a `200`: an unfollowed `3xx` (redirects are no longer
+  followed), a `2xx` other than `200`, and any other non-`200` status now
+  reject with `ClaimCheckUnavailableError`, matching the Python client.
+- An empty `200` body is returned as empty bytes and verified against the
+  expected sha256 instead of being rejected as a gateway error. An empty `4xx`
+  body is reported as `ClaimRejectedError.body === ""` rather than
+  `undefined`.
+- `health()` requires exactly a `200`, like the Python client.
+
 ## [0.2.1] - 2026-09-28
 
 ### Changed

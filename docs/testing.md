@@ -5,7 +5,9 @@ there's no single test runner spanning them, because each has a genuinely
 different infrastructure dependency (none, RabbitMQ, Redpanda, NATS).
 `mise run check:package <pkg>` runs one package's full CI check (format,
 warnings-as-errors, tests, docs), starting and stopping that package's own
-`docker-compose.yml` around the suite; `mise run check` runs all of them.
+`docker-compose.yml` around the suite; `mise run check` runs all of them. The
+two client SDKs are also checked against one shared, language-neutral vector
+suite — `mise run check:conformance`, below.
 
 ## `ankusa` core: `mix test`
 
@@ -143,6 +145,27 @@ Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
 
 gnat is pure Elixir, so unlike `ankusa_kafka` this suite needs no C
 toolchain.
+
+## SDK conformance: one harness across the SDKs
+
+`packages/sdk-python` and `packages/sdk-typescript` are the two client SDKs.
+Rather than hand-write each one's edge-case tests, both are checked against the
+same language-neutral vectors in `conformance/`: a feature manifest
+(`features.json`), JSON cases (`cases/*.json`), and a native runner per SDK
+(`packages/sdk-python/tests/test_conformance.py`,
+`packages/sdk-typescript/src/conformance/conformance.test.ts`).
+
+```sh
+mise run check:conformance    # validate conformance/, then run every SDK
+```
+
+The checker (`conformance/check.mjs`) fails if a `packages/sdk-*` directory is
+unregistered, a feature has no cases, or a case names an unknown feature or
+operation; then it runs each SDK's runner in that package's directory. Each
+runner also runs inside its own `mise run check:package <pkg>`. Adding a
+feature to `features.json` makes every SDK fail until it implements the
+feature; the vector format and runner contract are in
+`conformance/README.md`.
 
 ## Verifying the worked example
 

@@ -1,0 +1,4 @@
+{"sdks": {
+  "sdk-python":     {"setup": [["uv", "sync", "--locked"]], "run": ["uv", "run", "pytest", "tests/test_conformance.py"]},
+  "sdk-typescript": {"setup": [["npm", "ci"]],              "run": ["npm", "run", "conformance"]}
+}}
