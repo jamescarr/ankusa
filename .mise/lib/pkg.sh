@@ -11,9 +11,11 @@ ROOT="${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
 GITHUB_REPO=jamescarr/ankusa
 DOCKER_IMAGE=jamescarr/ankusa
 
+# stderr in both cases: a failure inside `x=$(pkg_...)` must still be seen, and
+# the Actions runner picks `::error::` up from stderr as well as stdout.
 fail() {
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    printf '::error::%s\n' "$*"
+    printf '::error::%s\n' "$*" >&2
   else
     printf '\nFAIL: %s\n' "$*" >&2
   fi

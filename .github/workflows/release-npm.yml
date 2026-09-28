@@ -2,9 +2,10 @@ name: Release (npm)
 
 # Tag-driven npm publish for packages/sdk-typescript (published as the `ankusa`
 # package), the same shape as release.yml's Hex flow — but its own tag
-# prefix, `sdk-typescript-v*`, distinct from the Hex core package's
-# `ankusa-v*`. The npm package is also named `ankusa`; sharing a tag prefix
-# would make the two releases ambiguous.
+# prefix, `sdk-typescript-v*` (the directory name), distinct from the Hex core
+# package's `ankusa-v*`. The npm package is also named `ankusa`; sharing a tag
+# prefix would make the two releases ambiguous. Tagged by
+# `mise run release:tag sdk-typescript`.
 #
 # Requires an `NPM_TOKEN` repository secret: an npmjs.com Automation access
 # token (so it isn't blocked by 2FA-on-publish), scoped to publish. See
@@ -33,11 +34,13 @@ jobs:
       - uses: actions/checkout@v4
       - id: resolve
         run: |
-          VERSION="${GITHUB_REF_NAME#sdk-typescript-v}"
-          PKG_VERSION=$(node -p "require('./sdks/typescript/package.json').version")
-          [ "$PKG_VERSION" = "$VERSION" ] || { echo "::error::tag $VERSION != packages/sdk-typescript/package.json $PKG_VERSION"; exit 1; }
-
-          grep -q "^## \[$VERSION\]" packages/sdk-typescript/CHANGELOG.md || { echo "::error::packages/sdk-typescript/CHANGELOG.md has no '## [$VERSION]' heading"; exit 1; }
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          [ "$(pkg_kind "$PKG")" = npm ] || fail "$GITHUB_REF_NAME is not an npm package tag"
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          PKG_VERSION=$(pkg_version "$PKG")
+          [ "$PKG_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/package.json $PKG_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -76,6 +79,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## \[/ {exit} f' \
-            packages/sdk-typescript/CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          source .mise/lib/pkg.sh && pkg_notes sdk-typescript "$VERSION" > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

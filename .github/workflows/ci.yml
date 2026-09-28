@@ -1,242 +1,74 @@
 name: CI
 
+# Every job runs the same `mise run` task you run locally, with the toolchain
+# pinned in .mise.toml. The package matrix is discovered from packages/*, so a
+# new package (`mise run new:adapter`) needs no edit here; packages that need
+# live infrastructure bring up their own docker-compose.yml in check:package.
+
 on:
   push:
     branches: [main]
   pull_request:
   workflow_call:
 
-env:
-  OTP_VERSION: "29.0"
-  ELIXIR_VERSION: "1.20.4"
-
 jobs:
-  ankusa:
-    name: ankusa (core)
+  discover:
+    name: discover packages
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.discover.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: discover
+        run: source .mise/lib/pkg.sh && echo "packages=$(pkg_json)" >> "$GITHUB_OUTPUT"
+
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: jdx/mise-action@v4
         with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      # `--check-locked` rather than a plain `deps.get`: a plain get silently
-      # rewrites a stale lock, which is how the lock drifted out of sync with
-      # the adapters and examples once already.
-      - run: mix deps.get --check-locked
-      - run: mix deps.unlock --check-unused
-      - run: mix format --check-formatted
-      - run: mix compile --warnings-as-errors
-      - run: mix test
-      - run: mix docs --warnings-as-errors
-      - run: mix hex.build
+          version: 2026.9.11
+      - run: mise run lint:workflows
+      - run: mise run check:links
 
-  ankusa_rabbitmq:
-    name: ankusa_rabbitmq
+  package:
+    name: ${{ matrix.package }}
+    needs: discover
     runs-on: ubuntu-latest
-    services:
-      rabbitmq:
-        image: rabbitmq:4-management-alpine
-        ports: ["5673:5672"]
-        options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.discover.outputs.packages) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: jdx/mise-action@v4
         with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_rabbitmq
-        run: mix deps.get --check-locked
-      - working-directory: ankusa_rabbitmq
-        run: mix deps.unlock --check-unused
-      - working-directory: ankusa_rabbitmq
-        run: mix format --check-formatted
-      - working-directory: ankusa_rabbitmq
-        run: mix compile --warnings-as-errors
-      - working-directory: ankusa_rabbitmq
-        run: mix test
-      - working-directory: ankusa_rabbitmq
-        run: mix docs --warnings-as-errors
+          version: 2026.9.11
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mise run check:package ${{ matrix.package }}
 
-  ankusa_kafka:
-    name: ankusa_kafka
-    needs: ankusa
-    runs-on: ubuntu-latest
-    # Not a `services:` container: Redpanda needs command-line flags
-    # (`--kafka-addr`, `--advertise-kafka-addr`) that `services:` can't pass.
-    # `packages/ankusa_kafka/docker-compose.yml` is the same compose file local dev
-    # uses. brod's crc32cer NIF builds from source; it needs CMake >= 3.16,
-    # which the runner image already has.
-    steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_kafka
-        run: docker compose up -d --wait
-      - working-directory: ankusa_kafka
-        run: mix deps.get --check-locked
-      - working-directory: ankusa_kafka
-        run: mix deps.unlock --check-unused
-      - working-directory: ankusa_kafka
-        run: mix format --check-formatted
-      - working-directory: ankusa_kafka
-        run: mix compile --warnings-as-errors
-      - working-directory: ankusa_kafka
-        run: KAFKA_BROKERS=localhost:19092 mix test
-      - working-directory: ankusa_kafka
-        run: mix docs --warnings-as-errors
-      - if: always()
-        working-directory: ankusa_kafka
-        run: docker compose down -v
-
-  ankusa_nats:
-    name: ankusa_nats
-    needs: ankusa
-    runs-on: ubuntu-latest
-    # Not a `services:` container: the server needs the `-js` (JetStream) flag,
-    # which `services:` can't pass. `packages/ankusa_nats/docker-compose.yml` is the same
-    # compose file local dev uses. gnat is pure Elixir, so unlike the kafka job
-    # there is no NIF to build and no CMake requirement.
-    steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_nats
-        run: docker compose up -d --wait
-      - working-directory: ankusa_nats
-        run: mix deps.get --check-locked
-      - working-directory: ankusa_nats
-        run: mix deps.unlock --check-unused
-      - working-directory: ankusa_nats
-        run: mix format --check-formatted
-      - working-directory: ankusa_nats
-        run: mix compile --warnings-as-errors
-      - working-directory: ankusa_nats
-        run: mix test
-      - working-directory: ankusa_nats
-        run: mix docs --warnings-as-errors
-      - if: always()
-        working-directory: ankusa_nats
-        run: docker compose down -v
-
-  # The server image's project. It path-depends on core and all four adapters,
-  # so its compile pulls in brod's crc32cer NIF — the runner's CMake handles
-  # that, same as the kafka job. No services: nothing in this project's suite
-  # talks to Postgres, RabbitMQ, Redpanda, or NATS, and `mix test` starts no
-  # instance (config/config.exs turns autostart off in :test).
-  ankusa_server:
-    name: ankusa_server
-    needs: ankusa
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ankusa_server
-        run: mix deps.get --check-locked
-      - working-directory: ankusa_server
-        run: mix deps.unlock --check-unused
-      - working-directory: ankusa_server
-        run: mix format --check-formatted
-      - working-directory: ankusa_server
-        run: mix compile --warnings-as-errors
-      - working-directory: ankusa_server
-        run: mix test
-
-  # The claim-check gateway client SDK: source-only TypeScript, consumed by
-  # both example workers as a `file:` path dep. No Elixir toolchain needed.
-  sdk_typescript:
-    name: sdk (typescript)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - working-directory: packages/sdk-typescript
-        run: npm ci
-      - working-directory: packages/sdk-typescript
-        run: npm run typecheck
-      - working-directory: packages/sdk-typescript
-        run: npm run build
-      - working-directory: packages/sdk-typescript
-        run: npm test
-
-  # The examples are the deployable wrappers: path-dep consumers of core and an
-  # adapter, plus the TypeScript workers. They are where a lockfile goes stale
-  # without anyone noticing, so they assert their locks and compile too — the
-  # Kafka one pulls in brod's crc32cer NIF, same as the job above.
+  # The deployable wrappers and TypeScript workers: path-dep consumers of the
+  # packages, and where a lockfile goes stale without anyone noticing.
   examples:
     name: examples
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        example: [kafka-sqs-consumer, rabbitmq-consumer]
     steps:
       - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: jdx/mise-action@v4
         with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - working-directory: examples/${{ matrix.example }}/ingest_app
-        run: mix deps.get --check-locked
-      - working-directory: examples/${{ matrix.example }}/ingest_app
-        run: mix deps.unlock --check-unused
-      - working-directory: examples/${{ matrix.example }}/ingest_app
-        run: MIX_ENV=prod mix compile --warnings-as-errors
-      # The workers' `ankusa` dependency is a `file:` symlink to packages/sdk-typescript;
-      # its dist/ must exist before `npm ci`/`tsc` there can resolve it.
-      - working-directory: packages/sdk-typescript
-        run: npm ci
-      - working-directory: packages/sdk-typescript
-        run: npm run build
-      - working-directory: examples/${{ matrix.example }}/worker
-        run: npm ci
-      - working-directory: examples/${{ matrix.example }}/worker
-        run: npx tsc --noEmit
+          version: 2026.9.11
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mise run check:examples
 
-  # examples/oban-consumer's Elixir projects: no external services needed to
-  # compile (the e2e proof against a real kind cluster is a separate local
-  # gate — see AGENTS.md and examples/oban-consumer/run.sh).
-  oban-example:
-    name: oban-example
+  tools:
+    name: tools
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        project:
-          - examples/oban-consumer/ingest_app
-          - examples/oban-consumer/consumer_app
-          - tools/loadgen
     steps:
       - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: jdx/mise-action@v4
         with:
-          otp-version: ${{ env.OTP_VERSION }}
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-      - working-directory: ${{ matrix.project }}
-        run: mix deps.get --check-locked
-      - working-directory: ${{ matrix.project }}
-        run: mix deps.unlock --check-unused
-      - working-directory: ${{ matrix.project }}
-        run: mix format --check-formatted
-      - if: matrix.project != 'tools/loadgen'
-        working-directory: ${{ matrix.project }}
-        run: MIX_ENV=prod mix compile --warnings-as-errors
-      - if: matrix.project == 'tools/loadgen'
-        working-directory: ${{ matrix.project }}
-        run: mix compile --warnings-as-errors
+          version: 2026.9.11
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mise run check:tools
