@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-28
+
 ### Added
 
 - A `sha256` field on a claim-checked message: the lowercase hex digest of the
@@ -49,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Synchronous produce with `acks=all`
 - Kafka headers: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `content_type`
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.1...HEAD
+[0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.0...ankusa_kafka-v0.2.1
 [0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.1.0...ankusa_kafka-v0.2.0
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_kafka-v0.1.0

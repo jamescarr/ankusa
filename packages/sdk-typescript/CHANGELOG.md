@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-28
+
 ### Changed
 
 - Claim-check refs are now `urn:ankusa:claim:v1:<tenant>:<claim_id>`, where
@@ -33,5 +35,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   `ClaimCheckUnavailableError`), each carrying a `retryable` boolean, so a
   consumer needs exactly one bit to route a failure to dead-letter or retry.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.1.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.2.1...HEAD
+[0.2.1]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.1.0...sdk-typescript-v0.2.1
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-typescript-v0.1.0
