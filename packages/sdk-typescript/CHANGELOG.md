@@ -17,6 +17,15 @@ this project follows [Semantic Versioning](https://semver.org/).
   milliseconds (default `10_000`) covering connect through the last body
   byte; exceeding it rejects with `ClaimCheckUnavailableError`. Mirrors the
   Python client's `timeout=10.0`.
+- `createRoutesClient({ baseUrl, headers?, timeoutMs?, fetch? })`: the
+  route-management client (`routes.admin.port`) — `health`, `listRoutes`,
+  `createRoute`, `getRoute`, `replaceRoute`, `updateRoute`, `deleteRoute`,
+  `getIpRules`, `putIpRules`, `testRoute` — with a `RoutesError` hierarchy
+  (`RouteNotFoundError`, `RoutesRejectedError`, `RoutesUnavailableError`).
+- `createAdminClient({ baseUrl, headers?, timeoutMs?, fetch? })`: the operator
+  client (`admin.port`) — `health`, `metrics`, `config`, `listDeadLetters`,
+  `replayDeadLetters`, `listQuarantined` — with an `AdminError` hierarchy
+  (`RoleNotEnabledError`, `AdminRejectedError`, `AdminUnavailableError`).
 
 ### Changed
 

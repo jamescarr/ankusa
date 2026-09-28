@@ -1,5 +1,26 @@
 {
-  "operations": ["parse_claim_ref", "redeem", "health", "parse_headers"],
+  "operations": [
+    "parse_claim_ref",
+    "redeem",
+    "health",
+    "parse_headers",
+    "routes_health",
+    "routes_list",
+    "routes_create",
+    "routes_get",
+    "routes_replace",
+    "routes_update",
+    "routes_delete",
+    "routes_ip_rules_get",
+    "routes_ip_rules_put",
+    "routes_test",
+    "admin_health",
+    "admin_metrics",
+    "admin_config",
+    "admin_dlq_list",
+    "admin_dlq_replay",
+    "admin_quarantine"
+  ],
   "features": [
     {"id": "claim_ref.parse", "description": "Parse urn:ankusa:claim:v1:<tenant>:<claim_id> into tenant_id, claim_id, and the /v1/claims/{tenant_id}/{claim_id} path; anything else raises InvalidClaimRefError."},
     {"id": "claim_check.redeem", "description": "GET /v1/claims/{tenant_id}/{claim_id} and return the body bytes verbatim (text, binary, empty)."},
@@ -10,6 +31,13 @@
     {"id": "claim_check.client.headers", "description": "Client-level headers ride on every request."},
     {"id": "claim_check.client.timeout", "description": "A per-client request timeout; exceeding it raises ClaimCheckUnavailableError."},
     {"id": "claim_check.client.transport", "description": "An injectable transport (Python transport=, TypeScript fetch) replaces the network."},
-    {"id": "webhook.parse_headers", "description": "Parse x-ankusa-id/-source/-seq/-tenant and content-type case-insensitively; a missing or empty x-ankusa-id raises MissingHookIdError; seq is an integer only when it is all ASCII digits."}
+    {"id": "webhook.parse_headers", "description": "Parse x-ankusa-id/-source/-seq/-tenant and content-type case-insensitively; a missing or empty x-ankusa-id raises MissingHookIdError; seq is an integer only when it is all ASCII digits."},
+    {"id": "routes.crud", "description": "Create, list, read, replace, update, and delete route definitions over the route-management listener (routes.admin.port)."},
+    {"id": "routes.ip_rules", "description": "Get and replace the global IP rules."},
+    {"id": "routes.dry_run", "description": "Dry-run a request against the route table and return the decision without capturing anything."},
+    {"id": "routes.errors", "description": "404 -> RouteNotFoundError; 400/409 -> RoutesRejectedError(code, field, message, conflicting_id); 503/5xx/unreachable -> RoutesUnavailableError (retryable)."},
+    {"id": "routes.health", "description": "GET /health on the route-management listener returns {status, routes}."},
+    {"id": "admin.operations", "description": "Operator API: health, Prometheus metrics, redacted config, DLQ list/replay, and quarantine."},
+    {"id": "admin.errors", "description": "409 role_not_enabled -> RoleNotEnabledError(role); other 4xx -> AdminRejectedError; 5xx/unreachable -> AdminUnavailableError (retryable)."}
   ]
 }

@@ -44,6 +44,14 @@ const ERROR_CLASSES: Record<string, unknown> = {
   ClaimIntegrityError: sdk.ClaimIntegrityError,
   ClaimCheckUnavailableError: sdk.ClaimCheckUnavailableError,
   MissingHookIdError: sdk.MissingHookIdError,
+  RoutesError: sdk.RoutesError,
+  RoutesUnavailableError: sdk.RoutesUnavailableError,
+  RouteNotFoundError: sdk.RouteNotFoundError,
+  RoutesRejectedError: sdk.RoutesRejectedError,
+  AdminError: sdk.AdminError,
+  AdminUnavailableError: sdk.AdminUnavailableError,
+  RoleNotEnabledError: sdk.RoleNotEnabledError,
+  AdminRejectedError: sdk.AdminRejectedError,
 };
 
 function bodyBytes(body: Body | undefined): Buffer {
@@ -58,10 +66,30 @@ function isUnreachable(spec: Gateway): spec is { unreachable: true } {
   return "unreachable" in spec;
 }
 
-type Built = { client: sdk.ClaimCheckClient; close: () => Promise<void> };
+type Built = { client: unknown; close: () => Promise<void> };
 
-function makeClient(baseUrl: string, client: Client, fetchImpl?: typeof fetch): sdk.ClaimCheckClient {
+type ClientFactory = (baseUrl: string, client: Client, fetchImpl?: typeof fetch) => unknown;
+
+function makeClaimCheckClient(baseUrl: string, client: Client, fetchImpl?: typeof fetch): sdk.ClaimCheckClient {
   return sdk.createClaimCheckClient({
+    baseUrl,
+    headers: client.headers,
+    timeoutMs: client.timeout_ms,
+    fetch: fetchImpl,
+  });
+}
+
+function makeRoutesClient(baseUrl: string, client: Client, fetchImpl?: typeof fetch): sdk.RoutesClient {
+  return sdk.createRoutesClient({
+    baseUrl,
+    headers: client.headers,
+    timeoutMs: client.timeout_ms,
+    fetch: fetchImpl,
+  });
+}
+
+function makeAdminClient(baseUrl: string, client: Client, fetchImpl?: typeof fetch): sdk.AdminClient {
+  return sdk.createAdminClient({
     baseUrl,
     headers: client.headers,
     timeoutMs: client.timeout_ms,
@@ -127,12 +155,17 @@ function injectedFetch(spec: Gateway, requests: Recorded[]): typeof fetch {
   }) as typeof fetch;
 }
 
-async function buildClient(gateway: Gateway, client: Client, requests: Recorded[]): Promise<Built> {
+async function buildClient(
+  gateway: Gateway,
+  client: Client,
+  requests: Recorded[],
+  make: ClientFactory,
+): Promise<Built> {
   if (client.transport === "injected") {
-    return { client: makeClient("http://gateway.invalid", client, injectedFetch(gateway, requests)), close: async () => {} };
+    return { client: make("http://gateway.invalid", client, injectedFetch(gateway, requests)), close: async () => {} };
   }
   const started = await startGateway(gateway, requests);
-  return { client: makeClient(started.baseUrl, client), close: started.close };
+  return { client: make(started.baseUrl, client), close: started.close };
 }
 
 async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
@@ -142,7 +175,16 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
     headers?: Record<string, string>;
     client?: Client;
     gateway?: Gateway;
+    id?: string;
+    params?: Record<string, unknown>;
+    input?: Record<string, unknown>;
+    patch?: Record<string, unknown>;
+    rules?: Record<string, unknown>;
+    request?: Record<string, unknown>;
+    filter?: Record<string, unknown>;
   };
+  const gateway = input.gateway as Gateway;
+  const client = input.client ?? {};
   switch (c.operation) {
     case "parse_claim_ref": {
       const parsed = sdk.parseClaimRef(input.ref as string);
@@ -159,18 +201,147 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
       };
     }
     case "redeem": {
-      const built = await buildClient(input.gateway as Gateway, input.client ?? {}, requests);
+      const built = await buildClient(gateway, client, requests, makeClaimCheckClient);
       try {
-        const bytes = await built.client.redeem(input.ref as string, input.sha256 as string);
+        const bytes = await (built.client as sdk.ClaimCheckClient).redeem(input.ref as string, input.sha256 as string);
         return { body: { base64: bytes.toString("base64") } };
       } finally {
         await built.close();
       }
     }
     case "health": {
-      const built = await buildClient(input.gateway as Gateway, input.client ?? {}, requests);
+      const built = await buildClient(gateway, client, requests, makeClaimCheckClient);
       try {
-        return await built.client.health();
+        return await (built.client as sdk.ClaimCheckClient).health();
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_health": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).health();
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_list": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).listRoutes(input.params as sdk.ListRoutesParams);
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_create": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).createRoute(input.input as sdk.RouteInput);
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_get": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).getRoute(input.id as string);
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_replace": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).replaceRoute(input.id as string, input.input as sdk.RouteInput);
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_update": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).updateRoute(input.id as string, input.patch as sdk.RoutePatch);
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_delete": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        await (built.client as sdk.RoutesClient).deleteRoute(input.id as string);
+        return null;
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_ip_rules_get": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).getIpRules();
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_ip_rules_put": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).putIpRules(input.rules as sdk.IpRules);
+      } finally {
+        await built.close();
+      }
+    }
+    case "routes_test": {
+      const built = await buildClient(gateway, client, requests, makeRoutesClient);
+      try {
+        return await (built.client as sdk.RoutesClient).testRoute(input.request as sdk.DryRunRequest);
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_health": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).health();
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_metrics": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return { text: await (built.client as sdk.AdminClient).metrics() };
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_config": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).config();
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_dlq_list": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).listDeadLetters(input.params as sdk.ListDeadLettersParams);
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_dlq_replay": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).replayDeadLetters(input.filter as sdk.ReplayFilter);
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_quarantine": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).listQuarantined(input.params as sdk.ListQuarantinedParams);
       } finally {
         await built.close();
       }
@@ -215,7 +386,17 @@ async function runCase(c: Case): Promise<void> {
     );
     if (name === undefined) throw err;
     error = { class: name };
-    for (const key of ["retryable", "status", "body"] as const) {
+    for (const key of [
+      "retryable",
+      "status",
+      "body",
+      "code",
+      "field",
+      "message",
+      "conflicting_id",
+      "max_routes",
+      "role",
+    ] as const) {
       if (key in (err as object)) error[key] = (err as Record<string, unknown>)[key];
     }
   }
@@ -224,7 +405,7 @@ async function runCase(c: Case): Promise<void> {
   if ("ok" in expect) {
     assert.equal(error, undefined, `expected ok, got ${JSON.stringify(error)}`);
     assert.deepEqual(ok, expectedOk(c, expect.ok));
-  } else {
+  } else if ("error" in expect) {
     assert.ok(error, `expected error ${JSON.stringify(expect.error)}, got ok ${JSON.stringify(ok)}`);
     const want = expect.error ?? {};
     assert.equal(error.class, want.class, `expected ${String(want.class)}, got ${String(error.class)}`);
@@ -232,6 +413,10 @@ async function runCase(c: Case): Promise<void> {
       if (key === "class") continue;
       assert.deepEqual(error[key], value, `${String(error.class)}.${key}`);
     }
+  } else {
+    // Only `requests` is asserted: the operation must have completed without
+    // raising a mapped error (an unmapped error is rethrown by `dispatch`).
+    assert.equal(error, undefined, `expected no error, got ${JSON.stringify(error)}`);
   }
 
   if (expect.requests) assertRequests(requests, expect.requests);

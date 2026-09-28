@@ -39,6 +39,14 @@ ERROR_CLASSES: dict[str, type[BaseException]] = {
         "ClaimIntegrityError",
         "ClaimCheckUnavailableError",
         "MissingHookIdError",
+        "RoutesError",
+        "RoutesUnavailableError",
+        "RouteNotFoundError",
+        "RoutesRejectedError",
+        "AdminError",
+        "AdminUnavailableError",
+        "RoleNotEnabledError",
+        "AdminRejectedError",
     )
 }
 
@@ -73,10 +81,10 @@ def _gateway(spec: dict[str, Any], requests: list[RecordedRequest]) -> Iterator[
     delay = spec.get("delay_ms", 0) / 1000
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
+        def _handle(self) -> None:
             requests.append(
                 {
-                    "method": "GET",
+                    "method": self.command,
                     "path": self.path,
                     "headers": {key.lower(): value for key, value in self.headers.items()},
                 }
@@ -92,6 +100,21 @@ def _gateway(spec: dict[str, Any], requests: list[RecordedRequest]) -> Iterator[
                 self.wfile.write(payload)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._handle()
+
+        def do_POST(self) -> None:  # noqa: N802
+            self._handle()
+
+        def do_PUT(self) -> None:  # noqa: N802
+            self._handle()
+
+        def do_PATCH(self) -> None:  # noqa: N802
+            self._handle()
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            self._handle()
 
         def log_message(self, *args: Any) -> None:
             pass
@@ -131,32 +154,46 @@ def _injected_transport(spec: dict[str, Any], requests: list[RecordedRequest]) -
     return httpx.MockTransport(handler)
 
 
+ClientFactory = Callable[..., Any]
+
+
 @contextlib.contextmanager
 def _client(
+    factory: ClientFactory,
     base_url: str,
     client: dict[str, Any],
     transport: httpx.BaseTransport | None,
-) -> Iterator[ankusa.ClaimCheckClient]:
-    with ankusa.ClaimCheckClient(
+) -> Iterator[Any]:
+    with factory(
         base_url,
         headers=client.get("headers"),
         timeout=client["timeout_ms"] / 1000 if "timeout_ms" in client else 10.0,
         transport=transport,
-    ) as claim_check:
-        yield claim_check
+    ) as built:
+        yield built
+
+
+def _connected_with(
+    factory: ClientFactory,
+    gateway: dict[str, Any],
+    client: dict[str, Any],
+    requests: list[RecordedRequest],
+) -> contextlib.AbstractContextManager[Any]:
+    if client.get("transport") == "injected":
+        return _client(factory, "http://gateway.invalid", client, _injected_transport(gateway, requests))
+    return _real_client(factory, gateway, client, requests)
 
 
 @contextlib.contextmanager
-def _connected(
-    gateway: dict[str, Any], client: dict[str, Any], requests: list[RecordedRequest]
-) -> Iterator[ankusa.ClaimCheckClient]:
-    if client.get("transport") == "injected":
-        with _client("http://gateway.invalid", client, _injected_transport(gateway, requests)) as claim_check:
-            yield claim_check
-    else:
-        with _gateway(gateway, requests) as base_url:
-            with _client(base_url, client, None) as claim_check:
-                yield claim_check
+def _real_client(
+    factory: ClientFactory,
+    gateway: dict[str, Any],
+    client: dict[str, Any],
+    requests: list[RecordedRequest],
+) -> Iterator[Any]:
+    with _gateway(gateway, requests) as base_url:
+        with _client(factory, base_url, client, None) as built:
+            yield built
 
 
 def _run_parse_claim_ref(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
@@ -169,15 +206,112 @@ def _run_parse_headers(case: dict[str, Any], requests: list[RecordedRequest]) ->
 
 def _run_redeem(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     inp = case["input"]
-    with _connected(inp["gateway"], inp.get("client") or {}, requests) as claim_check:
+    with _connected_with(ankusa.ClaimCheckClient, inp["gateway"], inp.get("client") or {}, requests) as claim_check:
         body = claim_check.redeem(inp["ref"], inp["sha256"])
     return {"body": {"base64": base64.b64encode(body).decode()}}
 
 
 def _run_health(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     inp = case["input"]
-    with _connected(inp["gateway"], inp.get("client") or {}, requests) as claim_check:
+    with _connected_with(ankusa.ClaimCheckClient, inp["gateway"], inp.get("client") or {}, requests) as claim_check:
         return claim_check.health()
+
+
+def _run_routes_health(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.health()
+
+
+def _run_routes_list(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.list_routes(inp.get("params"))
+
+
+def _run_routes_create(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.create_route(inp["input"])
+
+
+def _run_routes_get(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.get_route(inp["id"])
+
+
+def _run_routes_replace(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.replace_route(inp["id"], inp["input"])
+
+
+def _run_routes_update(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.update_route(inp["id"], inp["patch"])
+
+
+def _run_routes_delete(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        routes.delete_route(inp["id"])
+    return None
+
+
+def _run_routes_ip_rules_get(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.get_ip_rules()
+
+
+def _run_routes_ip_rules_put(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.put_ip_rules(inp["rules"])
+
+
+def _run_routes_test(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.RoutesClient, inp["gateway"], inp.get("client") or {}, requests) as routes:
+        return routes.test_route(inp["request"])
+
+
+def _run_admin_health(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.health()
+
+
+def _run_admin_metrics(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return {"text": admin.metrics()}
+
+
+def _run_admin_config(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.config()
+
+
+def _run_admin_dlq_list(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.list_dead_letters(inp.get("params"))
+
+
+def _run_admin_dlq_replay(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.replay_dead_letters(inp.get("filter"))
+
+
+def _run_admin_quarantine(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.list_quarantined(inp.get("params"))
 
 
 RUNNERS: dict[str, Runner] = {
@@ -185,6 +319,22 @@ RUNNERS: dict[str, Runner] = {
     "parse_headers": _run_parse_headers,
     "redeem": _run_redeem,
     "health": _run_health,
+    "routes_health": _run_routes_health,
+    "routes_list": _run_routes_list,
+    "routes_create": _run_routes_create,
+    "routes_get": _run_routes_get,
+    "routes_replace": _run_routes_replace,
+    "routes_update": _run_routes_update,
+    "routes_delete": _run_routes_delete,
+    "routes_ip_rules_get": _run_routes_ip_rules_get,
+    "routes_ip_rules_put": _run_routes_ip_rules_put,
+    "routes_test": _run_routes_test,
+    "admin_health": _run_admin_health,
+    "admin_metrics": _run_admin_metrics,
+    "admin_config": _run_admin_config,
+    "admin_dlq_list": _run_admin_dlq_list,
+    "admin_dlq_replay": _run_admin_dlq_replay,
+    "admin_quarantine": _run_admin_quarantine,
 }
 
 
@@ -220,13 +370,23 @@ def test_conformance(case: dict[str, Any]) -> None:
         name = next((n for n, cls in ERROR_CLASSES.items() if type(err) is cls), None)
         if name is None:
             raise
-        error = {"class": name, **{k: getattr(err, k) for k in ("retryable", "status", "body") if hasattr(err, k)}}
+        error = {"class": name, **{k: getattr(err, k) for k in (
+            "retryable",
+            "status",
+            "body",
+            "code",
+            "field",
+            "message",
+            "conflicting_id",
+            "max_routes",
+            "role",
+        ) if hasattr(err, k)}}
 
     expect = case["expect"]
     if "ok" in expect:
         assert error is None, f"expected ok, got {error!r}"
         assert ok == _expected_ok(case, expect["ok"]), f"ok: {ok!r} != {_expected_ok(case, expect['ok'])!r}"
-    else:
+    elif "error" in expect:
         assert error is not None, f"expected error {expect['error']!r}, got ok {ok!r}"
         want = expect["error"]
         assert error["class"] == want["class"], f"expected {want['class']}, got {error['class']}"

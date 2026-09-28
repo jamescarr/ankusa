@@ -92,6 +92,52 @@ and
 [`kafka-sqs-consumer`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/worker)
 depend on this package.
 
+## Routes client
+
+Manage route definitions and the global IP rules on the route-management
+listener (`routes.admin.port`, default 4003) — the `routes` tag of
+[`priv/openapi/admin.v1.yaml`](../ankusa/priv/openapi/admin.v1.yaml).
+
+```ts
+import { RouteNotFoundError, createRoutesClient } from "ankusa";
+
+const routes = createRoutesClient({ baseUrl: "http://localhost:4003" });
+
+await routes.createRoute({ id: "stripe", path: "/webhooks/stripe" });
+await routes.getIpRules();   // { default: "allow", rules: [] }
+await routes.testRoute({ method: "POST", path: "/webhooks/stripe", ip: "203.0.113.7" });
+```
+
+Methods: `health()`, `listRoutes()`, `createRoute()`, `getRoute()`,
+`replaceRoute()`, `updateRoute()`, `deleteRoute()`, `getIpRules()`,
+`putIpRules()`, `testRoute()`. Failures are `RoutesError` subclasses with a
+`retryable` boolean: `RouteNotFoundError` (404), `RoutesRejectedError`
+(400/409, carrying `code`, `field`, `message`, `conflicting_id`,
+`max_routes`), and `RoutesUnavailableError` (5xx/unreachable, retryable).
+
+## Admin client
+
+The operator API on `admin.port` (default 4002): health, Prometheus metrics,
+the redacted config, the DLQ, and the quarantine list — the `operations`,
+`dlq`, and `quarantine` tags of `admin.v1.yaml`.
+
+```ts
+import { createAdminClient } from "ankusa";
+
+const admin = createAdminClient({ baseUrl: "http://localhost:4002" });
+
+await admin.health();                        // { status, instance, roles }
+await admin.listDeadLetters({ limit: 10 });
+await admin.replayDeadLetters({ source_id: "demo" });
+await admin.listQuarantined();
+```
+
+Methods: `health()`, `metrics()` (Prometheus text), `config()`,
+`listDeadLetters()`, `replayDeadLetters()`, `listQuarantined()`. Failures are
+`AdminError` subclasses: `RoleNotEnabledError` (409, carrying `role`),
+`AdminRejectedError` (400, carrying `code`), and `AdminUnavailableError`
+(5xx/unreachable, retryable).
+
 ## Layout
 
 ```
@@ -103,6 +149,17 @@ src/
     ref.ts
     errors.ts
     claim-check-schema.d.ts   # generated, see "Develop"
+    client.test.ts
+  routes/              # the route-management client (routes.admin.port)
+    index.ts
+    client.ts
+    errors.ts
+    client.test.ts
+  admin/               # the operator client (admin.port)
+    index.ts
+    client.ts
+    errors.ts
+    admin-schema.d.ts   # generated, see "Develop"
     client.test.ts
 ```
 
