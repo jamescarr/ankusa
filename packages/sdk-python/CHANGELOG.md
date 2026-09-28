@@ -6,6 +6,18 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `RoutesClient(base_url, headers=None, timeout=10.0)`: the route-management
+  client (`routes.admin.port`) — `health`, `list_routes`, `create_route`,
+  `get_route`, `replace_route`, `update_route`, `delete_route`, `get_ip_rules`,
+  `put_ip_rules`, `test_route` — with a `RoutesError` hierarchy
+  (`RouteNotFoundError`, `RoutesRejectedError`, `RoutesUnavailableError`).
+- `AdminClient(base_url, headers=None, timeout=10.0)`: the operator client
+  (`admin.port`) — `health`, `metrics`, `config`, `list_dead_letters`,
+  `replay_dead_letters`, `list_quarantined` — with an `AdminError` hierarchy
+  (`RoleNotEnabledError`, `AdminRejectedError`, `AdminUnavailableError`).
+
 ### Fixed
 
 - `parse_headers` no longer raises `ValueError` for an `x-ankusa-seq` value

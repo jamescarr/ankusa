@@ -119,6 +119,56 @@ case-insensitive, regardless of whether the mapping passed in already is.
 [`examples/quickstart/worker.py`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/worker.py)
 uses this.
 
+## Routes client
+
+Manage route definitions and the global IP rules on the route-management
+listener (`routes.admin.port`, default 4003) — the `routes` tag of
+[`priv/openapi/admin.v1.yaml`](../ankusa/priv/openapi/admin.v1.yaml).
+
+```python
+import os
+
+from ankusa import RoutesClient
+
+routes = RoutesClient(os.environ.get("ROUTES_URL", "http://localhost:4003"))
+
+routes.create_route({"id": "stripe", "path": "/webhooks/stripe"})
+routes.get_ip_rules()   # {"default": "allow", "rules": []}
+routes.test_route({"method": "POST", "path": "/webhooks/stripe", "ip": "203.0.113.7"})
+```
+
+Methods: `health()`, `list_routes()`, `create_route()`, `get_route()`,
+`replace_route()`, `update_route()`, `delete_route()`, `get_ip_rules()`,
+`put_ip_rules()`, `test_route()`. Failures are `RoutesError` subclasses with a
+`retryable` attribute: `RouteNotFoundError` (404), `RoutesRejectedError`
+(400/409, carrying `code`, `field`, `message`, `conflicting_id`,
+`max_routes`), and `RoutesUnavailableError` (5xx/unreachable, retryable).
+
+## Admin client
+
+The operator API on `admin.port` (default 4002): health, Prometheus metrics,
+the redacted config, the DLQ, and the quarantine list — the `operations`,
+`dlq`, and `quarantine` tags of `admin.v1.yaml`.
+
+```python
+import os
+
+from ankusa import AdminClient
+
+admin = AdminClient(os.environ.get("ADMIN_URL", "http://localhost:4002"))
+
+admin.health()                          # {"status": "ok", "instance": ..., "roles": [...]}
+admin.list_dead_letters(limit=10)
+admin.replay_dead_letters({"source_id": "demo"})
+admin.list_quarantined()
+```
+
+Methods: `health()`, `metrics()` (Prometheus text), `config()`,
+`list_dead_letters()`, `replay_dead_letters()`, `list_quarantined()`. Failures
+are `AdminError` subclasses: `RoleNotEnabledError` (409, carrying `role`),
+`AdminRejectedError` (400, carrying `code`), and `AdminUnavailableError`
+(5xx/unreachable, retryable).
+
 ## Layout
 
 ```
@@ -131,10 +181,20 @@ src/ankusa/
     client.py
     ref.py
     errors.py
+  routes/                # the route-management client (routes.admin.port)
+    __init__.py
+    client.py
+    errors.py
+  admin/                 # the operator client (admin.port)
+    __init__.py
+    client.py
+    errors.py
 tests/
   test_client.py
   test_ref.py
   test_webhook.py
+  test_routes.py
+  test_admin.py
 ```
 
 A future client (say, an ingest helper) gets its own `src/ankusa/<name>/`
