@@ -1,6 +1,6 @@
 {
   "name": "ankusa",
-  "version": "0.2.1",
+  "version": "0.2.4",
   "description": "Client SDK for Ankusa deployments: the claim-check gateway client, the operator (admin) client, the route-management client, and a webhook-receiving header helper.",
   "license": "Apache-2.0",
   "type": "module",

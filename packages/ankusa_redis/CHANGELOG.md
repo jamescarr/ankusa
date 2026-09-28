@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-28
+
 ### Added
 
 - `Ankusa.Routes.Store.Redis`: route definitions in Redis, shared across edge
@@ -16,4 +18,5 @@ follows [Semantic Versioning](https://semver.org/).
 - Depends on `ankusa` `~> 0.2`, which introduced `Ankusa.Routes.Store` and
   `Ankusa.Routes.Snapshot`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/commits/main/packages/ankusa_redis
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.2.4...HEAD
+[0.2.4]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_redis-v0.2.4
