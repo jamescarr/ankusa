@@ -1,12 +1,13 @@
 **/_build
 **/deps
-cover/
-doc/
+**/cover
+**/doc
 tmp/
-data/
+**/data
 .elixir_ls/
 .git/
 erl_crash.dump
 *.ez
 **/*.tar
 **/node_modules
+packages/sdk-typescript

@@ -1,8 +1,8 @@
 defmodule Ankusa.BlobStore.AzureIntegrationTest do
   @moduledoc """
   Integration test against the floci-az Azure Blob emulator. Requires
-  `docker compose up -d floci-az azure-bootstrap`; run with
-  `mix test --include integration`.
+  `docker compose -f docker-compose.integration.yml up -d floci-az azure-bootstrap`;
+  run with `mix test --include integration`.
 
   floci-az runs in `dev` auth mode (credentials are not validated), so the
   adapter is exercised unauthenticated — the same way the floci S3/GCS suites

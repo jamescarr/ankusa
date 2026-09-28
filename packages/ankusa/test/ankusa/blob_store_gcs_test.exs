@@ -1,8 +1,8 @@
 defmodule Ankusa.BlobStore.GCSTest do
   @moduledoc """
   Integration test against the floci-gcp GCS emulator. Requires
-  `docker compose up -d floci-gcp gcs-bootstrap`; run with
-  `mix test --include integration`.
+  `docker compose -f docker-compose.integration.yml up -d floci-gcp gcs-bootstrap`;
+  run with `mix test --include integration`.
   """
 
   use ExUnit.Case, async: false

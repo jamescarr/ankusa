@@ -8,10 +8,8 @@ FROM elixir:1.20.4-alpine
 RUN apk add --no-cache build-base cmake && mix local.hex --force && mix local.rebar --force
 
 WORKDIR /repo
-COPY mix.exs mix.lock ./
-COPY lib ./lib
-COPY config ./config
-COPY ankusa_kafka ./ankusa_kafka
+COPY packages/ankusa ./packages/ankusa
+COPY packages/ankusa_kafka ./packages/ankusa_kafka
 COPY examples/kafka-sqs-consumer/ingest_app ./examples/kafka-sqs-consumer/ingest_app
 
 WORKDIR /repo/examples/kafka-sqs-consumer/ingest_app

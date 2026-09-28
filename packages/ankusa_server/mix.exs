@@ -28,7 +28,7 @@ defmodule AnkusaServer.MixProject do
   # project must always run the core in this checkout.
   defp deps do
     [
-      {:ankusa, path: "..", override: true},
+      {:ankusa, path: "../ankusa", override: true},
       {:ankusa_rabbitmq, path: "../ankusa_rabbitmq"},
       {:ankusa_kafka, path: "../ankusa_kafka"},
       {:ankusa_nats, path: "../ankusa_nats"},

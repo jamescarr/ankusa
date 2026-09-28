@@ -1,8 +1,8 @@
 defmodule Ankusa.BlobStore.S3Test do
   @moduledoc """
   Integration test against the floci S3 emulator. Requires
-  `docker compose up -d floci s3-bootstrap`; run with
-  `mix test --include integration`.
+  `docker compose -f docker-compose.integration.yml up -d floci s3-bootstrap`;
+  run with `mix test --include integration`.
   """
 
   use ExUnit.Case, async: false

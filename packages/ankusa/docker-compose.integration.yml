@@ -4,9 +4,11 @@ name: ankusa
 # (`Ankusa.BlobStore.{S3,GCS,Azure,OCI}`) without a cloud account. See
 # https://floci.io.
 #
-#   docker compose up -d          # start the emulators + bucket/container bootstrap
+#   # start the emulators + bucket/container bootstrap
+#   docker compose -f docker-compose.integration.yml up -d
 #   mix test --include integration
-#   docker compose down -v        # tear down (drops emulator state)
+#   # tear down (drops emulator state)
+#   docker compose -f docker-compose.integration.yml down -v
 #
 # Endpoints/buckets match the defaults the adapters expect in
 # test/ankusa/blob_store_*_test.exs and the README examples.

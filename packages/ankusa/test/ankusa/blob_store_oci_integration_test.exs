@@ -1,8 +1,8 @@
 defmodule Ankusa.BlobStore.OCIIntegrationTest do
   @moduledoc """
   Integration test against the floci-oci Object Storage emulator. Requires
-  `docker compose up -d floci-oci oci-bootstrap`; run with
-  `mix test --include integration`.
+  `docker compose -f docker-compose.integration.yml up -d floci-oci oci-bootstrap`;
+  run with `mix test --include integration`.
 
   floci-oci parses the request signature for tenancy context but never verifies
   it, so any locally generated RSA key works — the adapter's real signing path

@@ -39,7 +39,7 @@ defmodule AnkusaNats.MixProject do
       extras: ["README.md", "CHANGELOG.md"],
       source_ref: "ankusa_nats-v#{@version}",
       source_url_pattern:
-        "#{@source_url}/blob/ankusa_nats-v#{@version}/ankusa_nats/%{path}#L%{line}",
+        "#{@source_url}/blob/ankusa_nats-v#{@version}/packages/ankusa_nats/%{path}#L%{line}",
       deps: [ankusa: "https://hexdocs.pm/ankusa"]
     ]
   end
@@ -67,7 +67,7 @@ defmodule AnkusaNats.MixProject do
   # single conditional entry, not a duplicate-with-disjoint-:only pair.
   defp ankusa_dep do
     if Mix.env() in [:dev, :test] do
-      {:ankusa, path: ".."}
+      {:ankusa, path: "../ankusa"}
     else
       {:ankusa, "~> 0.2"}
     end

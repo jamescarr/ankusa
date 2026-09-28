@@ -49,37 +49,43 @@ defmodule Ankusa.MixProject do
     [
       main: "elixir",
       source_ref: "ankusa-v#{@version}",
+      source_url_pattern:
+        "#{@source_url}/blob/ankusa-v#{@version}/packages/ankusa/%{path}#L%{line}",
       extras: [
-        "docs/elixir.md",
-        "README.md",
-        "docs/quickstart.md",
-        "docs/configuration.md",
-        "docs/deployment.md",
-        "docs/architecture.md",
-        "docs/delivery.md",
-        "docs/integrations.md",
-        "docs/storage.md",
-        "docs/claim-check.md",
-        "docs/multi-tenancy.md",
-        "docs/packaging.md",
-        "docs/testing.md",
-        "docs/releasing.md",
+        "../../docs/elixir.md",
+        "../../README.md",
+        "../../docs/quickstart.md",
+        "../../docs/configuration.md",
+        "../../docs/deployment.md",
+        "../../docs/architecture.md",
+        "../../docs/delivery.md",
+        "../../docs/integrations.md",
+        "../../docs/storage.md",
+        "../../docs/claim-check.md",
+        "../../docs/multi-tenancy.md",
+        "../../docs/packaging.md",
+        "../../docs/testing.md",
+        "../../docs/releasing.md",
         "CHANGELOG.md"
       ],
       groups_for_extras: [
         Guides: [
-          "docs/elixir.md",
-          "docs/quickstart.md",
-          "docs/configuration.md",
-          "docs/deployment.md",
-          "docs/architecture.md",
-          "docs/delivery.md",
-          "docs/integrations.md",
-          "docs/storage.md",
-          "docs/claim-check.md",
-          "docs/multi-tenancy.md"
+          "../../docs/elixir.md",
+          "../../docs/quickstart.md",
+          "../../docs/configuration.md",
+          "../../docs/deployment.md",
+          "../../docs/architecture.md",
+          "../../docs/delivery.md",
+          "../../docs/integrations.md",
+          "../../docs/storage.md",
+          "../../docs/claim-check.md",
+          "../../docs/multi-tenancy.md"
         ],
-        Contributing: ["docs/packaging.md", "docs/testing.md", "docs/releasing.md"]
+        Contributing: [
+          "../../docs/packaging.md",
+          "../../docs/testing.md",
+          "../../docs/releasing.md"
+        ]
       ],
       groups_for_modules: [
         "Internals (no stability guarantee)": [

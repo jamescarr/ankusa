@@ -47,8 +47,8 @@ defmodule Ankusa.BlobStore.Azure do
              sas_token: System.get_env("AZURE_BLOB_SAS")}
         }
 
-  `docker compose up -d azurite azure-bootstrap` brings up the emulator and
-  creates the container.
+  `docker compose -f docker-compose.integration.yml up -d azurite azure-bootstrap` brings up
+  the emulator and creates the container.
   """
 
   @behaviour Ankusa.BlobStore

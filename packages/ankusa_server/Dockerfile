@@ -3,10 +3,10 @@
 # Ankusa as a server: the whole framework — core plus the RabbitMQ, NATS, and
 # Kafka adapters — in one image, configured by a mounted YAML file.
 #
-# The build context is the repo root, not ankusa_server/, for the same reason as
-# examples/oban-consumer/ingest_app: the path deps (`..`, `../ankusa_rabbitmq`,
-# …) have to resolve to this checkout, or `mix release` would pull the published
-# Hex packages instead of the code being built.
+# The build context is the repo root, not packages/ankusa_server/, for the same
+# reason as examples/oban-consumer/ingest_app: the path deps (`../ankusa`,
+# `../ankusa_rabbitmq`, …) have to resolve to this checkout, or `mix release`
+# would pull the published Hex packages instead of the code being built.
 FROM elixir:1.20.4-alpine AS build
 
 # build-base/cmake/git are for the C++ NIFs: `crc32cer` (via brod, the Kafka
@@ -15,16 +15,9 @@ RUN apk add --no-cache build-base cmake git && mix local.hex --force && mix loca
 ENV MIX_ENV=prod
 WORKDIR /repo
 
-COPY mix.exs mix.lock ./
-COPY lib ./lib
-COPY config ./config
-COPY priv ./priv
-COPY ankusa_rabbitmq ./ankusa_rabbitmq
-COPY ankusa_kafka ./ankusa_kafka
-COPY ankusa_nats ./ankusa_nats
-COPY ankusa_server ./ankusa_server
+COPY packages ./packages
 
-WORKDIR /repo/ankusa_server
+WORKDIR /repo/packages/ankusa_server
 RUN mix deps.get --only prod && mix release ankusa
 
 # Alpine 3.24 to match the elixir:1.20.4-alpine build stage (3.24.2). The release
@@ -39,9 +32,9 @@ RUN apk add --no-cache libstdc++ libgcc ncurses-libs openssl ca-certificates tin
  && addgroup -S ankusa && adduser -S -G ankusa -h /var/lib/ankusa ankusa \
  && mkdir -p /var/lib/ankusa /etc/ankusa && chown ankusa:ankusa /var/lib/ankusa
 
-COPY --from=build --chown=ankusa:ankusa /repo/ankusa_server/_build/prod/rel/ankusa /opt/ankusa
-COPY ankusa_server/rel/ankusa.yml /etc/ankusa/ankusa.yml
-COPY --chmod=0755 ankusa_server/rel/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+COPY --from=build --chown=ankusa:ankusa /repo/packages/ankusa_server/_build/prod/rel/ankusa /opt/ankusa
+COPY packages/ankusa_server/rel/ankusa.yml /etc/ankusa/ankusa.yml
+COPY --chmod=0755 packages/ankusa_server/rel/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 
 # Never root: the WAL, quarantine log, and DLQ are all written under the data
 # volume, and a container compromise should not own the host.

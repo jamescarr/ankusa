@@ -58,9 +58,9 @@ defmodule Ankusa.BlobStore.OCI do
              private_key: File.read!(System.fetch_env!("OCI_KEY_FILE"))}
         }
 
-  The `floci-oci` emulator in `docker-compose.yml` (:4599) parses but never
-  verifies the signature, so local integration testing works with any locally
-  generated key; the signing itself is proven by the reference vectors in
+  The `floci-oci` emulator in `docker-compose.integration.yml` (:4599) parses
+  but never verifies the signature, so local integration testing works with any
+  locally generated key; the signing itself is proven by the reference vectors in
   `test/ankusa/blob_store_oci_signing_test.exs`.
   """
 

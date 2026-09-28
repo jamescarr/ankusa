@@ -39,7 +39,7 @@ defmodule AnkusaKafka.MixProject do
       extras: ["README.md", "CHANGELOG.md"],
       source_ref: "ankusa_kafka-v#{@version}",
       source_url_pattern:
-        "#{@source_url}/blob/ankusa_kafka-v#{@version}/ankusa_kafka/%{path}#L%{line}",
+        "#{@source_url}/blob/ankusa_kafka-v#{@version}/packages/ankusa_kafka/%{path}#L%{line}",
       deps: [ankusa: "https://hexdocs.pm/ankusa"]
     ]
   end
@@ -67,7 +67,7 @@ defmodule AnkusaKafka.MixProject do
   # single conditional entry, not a duplicate-with-disjoint-:only pair.
   defp ankusa_dep do
     if Mix.env() in [:dev, :test] do
-      {:ankusa, path: ".."}
+      {:ankusa, path: "../ankusa"}
     else
       {:ankusa, "~> 0.2"}
     end

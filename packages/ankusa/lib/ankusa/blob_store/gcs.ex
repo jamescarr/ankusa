@@ -2,7 +2,7 @@ defmodule Ankusa.BlobStore.GCS do
   @moduledoc """
   `Ankusa.BlobStore` backed by Google Cloud Storage's JSON API, via
   [`Req`](https://hex.pm/packages/req). Works against real GCS or the
-  `floci-gcp` emulator in `docker-compose.yml`.
+  `floci-gcp` emulator in `docker-compose.integration.yml`.
 
   This adapter deliberately carries **no credential dependency**: `:token_provider`
   is a callback you point at whatever your deployment already uses (Goth, ADC),
@@ -32,8 +32,8 @@ defmodule Ankusa.BlobStore.GCS do
             {Ankusa.BlobStore.GCS, bucket: "ankusa-segments-dev", endpoint: "http://localhost:4588"}
         }
 
-  `docker compose up -d floci-gcp gcs-bootstrap` brings up the emulator and
-  creates the bucket.
+  `docker compose -f docker-compose.integration.yml up -d floci-gcp gcs-bootstrap` brings up
+  the emulator and creates the bucket.
   """
 
   @behaviour Ankusa.BlobStore

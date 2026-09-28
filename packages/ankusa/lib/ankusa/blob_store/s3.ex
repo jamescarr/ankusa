@@ -1,7 +1,7 @@
 defmodule Ankusa.BlobStore.S3 do
   @moduledoc """
   `Ankusa.BlobStore` backed by S3 or any S3-compatible endpoint (MinIO,
-  Cloudflare R2, or the `floci` emulator in `docker-compose.yml`).
+  Cloudflare R2, or the `floci` emulator in `docker-compose.integration.yml`).
 
   Requests are signed with
   [`aws_signature`](https://hex.pm/packages/aws_signature) — the SigV4
@@ -43,8 +43,8 @@ defmodule Ankusa.BlobStore.S3 do
              secret_access_key: "test"}
         }
 
-  `docker compose up -d floci s3-bootstrap` brings up the emulator and
-  creates the bucket.
+  `docker compose -f docker-compose.integration.yml up -d floci s3-bootstrap` brings up
+  the emulator and creates the bucket.
   """
 
   @behaviour Ankusa.BlobStore
