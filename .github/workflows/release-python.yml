@@ -55,6 +55,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      # Job-level permissions replace the workflow's rather than extending
+      # them, so `contents: write` has to be repeated here or `gh release
+      # create` below gets a 403.
+      contents: write
       id-token: write # PyPI Trusted Publishing
     steps:
       - uses: actions/checkout@v4

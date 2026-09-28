@@ -97,8 +97,77 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   Access Tokens → Generate New Token → Automation: this type bypasses
   2FA-on-publish, which a personal "Publish" token does not), scoped to the
   `ankusa` package once it exists, or unscoped for the first publish.
-- **PyPI:** none — publishing uses
-  [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC).
-  One-time setup on the `ankusa` PyPI project's Publishing settings: add a
-  trusted publisher for this repo, workflow `release-python.yml`,
-  environment `pypi`. No repo secret to rotate or leak.
+- **PyPI:** no repository secret — publishing uses
+  [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC). The
+  one-time setup lives on PyPI, not here: see
+  [Python SDK (PyPI)](#python-sdk-pypi) below.
+
+## Python SDK (PyPI)
+
+`sdk-python` publishes as the `ankusa` project on PyPI. There is no token to
+store or rotate: [`release-python.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-python.yml)
+authenticates with PyPI [Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
+(OIDC), so the only setup is on PyPI itself, and the only manual step in the
+whole flow.
+
+### One-time PyPI setup
+
+`ankusa` does not exist on PyPI yet, so register a **pending** trusted
+publisher: the first successful publish creates the project and binds the
+name to this repo. From the PyPI account that will own the package:
+
+1. Sign in at <https://pypi.org/account/login/>. PyPI requires 2FA before you
+   can manage publishers.
+2. Open <https://pypi.org/manage/account/publishing/> (**Publishing** under
+   your account, not the project settings — there is no project yet).
+3. Under **Add a new pending publisher**, fill in exactly:
+
+   | Field | Value |
+   | --- | --- |
+   | PyPI Project Name | `ankusa` |
+   | Owner | `jamescarr` |
+   | Repository name | `ankusa` |
+   | Workflow name | `release-python.yml` |
+   | Environment name | `pypi` |
+
+4. Save. Nothing else on PyPI is needed: the `pypi` GitHub environment is
+   created on first use, and every later release publishes without further
+   PyPI changes.
+
+The project name has to be free, and PyPI names are first-come. Check before
+the first tag:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://pypi.org/pypi/ankusa/json   # 404 = available
+```
+
+If it is taken, change `[project] name` in
+[`packages/sdk-python/pyproject.toml`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-python/pyproject.toml)
+(and this document) before tagging; `release:preflight` and
+`release:verify` read that field, so nothing else changes.
+
+Optionally add the `pypi` environment under Settings → Environments first if
+you want to gate publishes behind a required reviewer; an environment with no
+protection rules behaves like none.
+
+### Release commands
+
+Same flow as every other package ([above](#the-flow)); only the package name
+differs. With no ordering constraint against the Hex packages:
+
+```sh
+mise run status                            # version, last tag, published?, commits since
+mise run release:prepare minor sdk-python  # or patch | major | 0.2.1
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-python
+mise run release:watch sdk-python          # the tag run builds and publishes
+mise run release:verify sdk-python         # HTTP 200 for the version on PyPI
+```
+
+`release:prepare` runs `uv version`, which rewrites both `pyproject.toml` and
+`uv.lock` (so the release PR keeps `uv sync --locked` passing);
+`release:tag`'s preflight confirms the version is still unpublished on PyPI
+and the tag is free; the tag run builds the sdist and wheel with `uv build`,
+publishes through the pending publisher, and cuts the GitHub release from the
+CHANGELOG section.

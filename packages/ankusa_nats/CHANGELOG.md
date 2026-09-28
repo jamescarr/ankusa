@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A `sha256` field on a claim-checked message: the lowercase hex digest of the
+  payload, for the reader to verify the bytes it redeems against. It used to
+  live inside the claim ref.
+
+### Changed
+
+- The message `claim` field is `urn:ankusa:claim:v1:<tenant>:<claim_id>`: a
+  tenant and a canonical (uppercase) ULID, where it used to carry the pack id,
+  byte offset/length, and digest. The message `v` stays `1`. Both come from
+  `Ankusa.Sink.Message` in `ankusa` 0.2.1.
+
 ## [0.2.0] - 2026-09-27
 
 ### Added
