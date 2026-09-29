@@ -99,6 +99,10 @@ defmodule Ankusa.Admin.Router do
     source_update(conn, tenant, name)
   end
 
+  delete "/v1/tenants/:tenant/sources/:name" do
+    source_delete(conn, tenant, name)
+  end
+
   match _ do
     send_json(conn, 404, %{error: "not_found"})
   end
@@ -221,6 +225,25 @@ defmodule Ankusa.Admin.Router do
           spec = Map.delete(body, "name")
           put_source(conn, 200, Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :update))
         end)
+    end
+  end
+
+  defp source_delete(conn, tenant, name) do
+    cond do
+      not valid_identity?(tenant) ->
+        invalid_tenant(conn)
+
+      not valid_identity?(name) ->
+        invalid_source(conn, invalid_name_message(name))
+
+      true ->
+        case Ankusa.SourceStore.delete(instance(conn), tenant, name) do
+          # 204 carries no body: there is nothing left to describe.
+          :ok -> Plug.Conn.send_resp(conn, 204, "")
+          {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
+          {:error, :invalid, message} -> invalid_source(conn, message)
+          {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
+        end
     end
   end
 

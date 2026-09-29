@@ -8,11 +8,11 @@ defmodule Ankusa.SourceStore do
   ## Reads and writes
 
   `fetch/2` and `list/1` are the ingest-facing, read-only callbacks every store
-  implements. The optional write callbacks (`put/5`, `get/3`, `list_tenant/2`)
-  back the admin API's tenant-scoped source management; a store that only reads
-  (like `Ankusa.SourceStore.Static`) leaves them out and the facade answers
-  `{:error, :read_only}` / `:error` / `[]`. See `Ankusa.SourceStore.Persistent`
-  for the writable implementation.
+  implements. The optional admin callbacks (`put/5`, `get/3`, `list_tenant/2`,
+  `delete/3`) back the admin API's tenant-scoped source management; a store that
+  only reads (like `Ankusa.SourceStore.Static`) leaves them out and the facade
+  answers `{:error, :read_only}` / `:error` / `[]`. See
+  `Ankusa.SourceStore.Persistent` for the writable implementation.
   """
 
   alias Ankusa.{Config, Source}
@@ -48,7 +48,10 @@ defmodule Ankusa.SourceStore do
               {:ok, stored()} | :error
   @callback list_tenant(instance :: atom(), tenant :: String.t()) :: [stored()]
 
-  @optional_callbacks put: 5, get: 3, list_tenant: 2
+  @callback delete(instance :: atom(), tenant :: String.t(), name :: String.t()) ::
+              :ok | {:error, :not_found} | {:error, :invalid, String.t()}
+
+  @optional_callbacks put: 5, get: 3, list_tenant: 2, delete: 3
 
   # Same rule as `Ankusa.ClaimCheck.Ref.valid_tenant?/1`: an identity that names
   # a storage partition and a URL path segment must not need encoding.
@@ -106,6 +109,28 @@ defmodule Ankusa.SourceStore do
     %Config{source_store: {mod, _}} = Ankusa.config(instance)
 
     if exports?(mod, :list_tenant, 2), do: mod.list_tenant(instance, tenant), else: []
+  end
+
+  @doc """
+  Delete one tenant-scoped source.
+
+  `tenant` and `name` are validated here, before the store sees them, so a bad
+  identity is `{:error, :invalid, message}` no matter which store is configured.
+  A store that does not export `delete/3` is read-only: `{:error, :read_only}`.
+  """
+  @spec delete(atom(), String.t(), String.t()) ::
+          :ok | {:error, :not_found} | {:error, :invalid, String.t()} | {:error, :read_only}
+  def delete(instance, tenant, name) do
+    with :ok <- validate_identity(tenant, "tenant"),
+         :ok <- validate_identity(name, "name") do
+      %Config{source_store: {mod, _}} = Ankusa.config(instance)
+
+      if exports?(mod, :delete, 3) do
+        mod.delete(instance, tenant, name)
+      else
+        {:error, :read_only}
+      end
+    end
   end
 
   defp validate_identity(value, label) when is_binary(value) do

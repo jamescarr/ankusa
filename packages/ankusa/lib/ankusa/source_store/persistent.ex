@@ -80,6 +80,11 @@ defmodule Ankusa.SourceStore.Persistent do
     GenServer.call(Ankusa.via(instance, :source_store), {:put, tenant, name, spec, mode})
   end
 
+  @impl true
+  def delete(instance, tenant, name) do
+    GenServer.call(Ankusa.via(instance, :source_store), {:delete, tenant, name})
+  end
+
   # ── GenServer ───────────────────────────────────────────────────────────────
 
   @impl true
@@ -117,6 +122,41 @@ defmodule Ankusa.SourceStore.Persistent do
       end
 
     {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:delete, tenant, name}, _from, state) do
+    source_id = source_id(tenant, name)
+
+    reply =
+      cond do
+        seed?(state.table, source_id) ->
+          {:error, :invalid,
+           "source #{source_id} is seeded from configuration and is read-only"}
+
+        is_nil(lookup_stored(state.table, tenant, name)) ->
+          {:error, :not_found}
+
+        true ->
+          apply_delete(state, tenant, name, source_id)
+      end
+
+    {:reply, reply, state}
+  end
+
+  defp apply_delete(state, tenant, name, source_id) do
+    entries = state.table |> all_stored() |> Enum.reject(&(&1.source_id == source_id))
+
+    case persist(state.config, entries) do
+      :ok ->
+        :ets.delete(state.table, {:source, source_id})
+        :ets.delete(state.table, {:stored, tenant, name})
+        :ok
+
+      {:error, reason} ->
+        Logger.error("[ankusa] could not persist source #{source_id}: #{inspect(reason)}")
+        {:error, :invalid, "could not persist source: #{inspect(reason)}"}
+    end
   end
 
   defp apply_put(state, tenant, name, source_id, spec, mode) do

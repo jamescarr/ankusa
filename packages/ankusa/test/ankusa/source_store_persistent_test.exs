@@ -35,6 +35,7 @@ defmodule Ankusa.SourceStorePersistentTest do
 
       assert SourceStore.get(config.instance, "acme", "billing") == :error
       assert SourceStore.list_tenant(config.instance, "acme") == []
+      assert SourceStore.delete(config.instance, "acme", "billing") == {:error, :read_only}
     end
 
     test "a bad tenant is rejected before the store is consulted", %{config: config} do
@@ -42,6 +43,11 @@ defmodule Ankusa.SourceStorePersistentTest do
                SourceStore.put(config.instance, "bad tenant", "billing", @spec_map, :create)
 
       assert message =~ "tenant"
+
+      assert {:error, :invalid, delete_message} =
+               SourceStore.delete(config.instance, "bad tenant", "billing")
+
+      assert delete_message =~ "tenant"
     end
   end
 
@@ -152,6 +158,83 @@ defmodule Ankusa.SourceStorePersistentTest do
              SourceStore.put(instance, "acme", "billing", rotated, :update)
 
     refute Map.has_key?(rotated_stored.spec["verify"], "secret")
+  end
+
+  # ── delete ──────────────────────────────────────────────────────────────────
+
+  test "delete removes the source from ETS and the list" do
+    {config, _pid} = start_store()
+    instance = config.instance
+
+    assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @spec_map, :create)
+    assert {:ok, _} = SourceStore.put(instance, "acme", "other", @log_spec, :create)
+    assert {:ok, _} = SourceStore.put(instance, "beta", "billing", @log_spec, :create)
+
+    assert SourceStore.delete(instance, "acme", "billing") == :ok
+
+    assert SourceStore.get(instance, "acme", "billing") == :error
+    assert SourceStore.fetch(instance, "acme.billing") == :error
+    assert Enum.sort(SourceStore.list(instance)) == ["acme.other", "beta.billing"]
+    assert Enum.map(SourceStore.list_tenant(instance, "acme"), & &1.name) == ["other"]
+    assert Enum.map(SourceStore.list_tenant(instance, "beta"), & &1.source_id) == ["beta.billing"]
+  end
+
+  test "delete survives a store restart" do
+    {config, pid} = start_store()
+    instance = config.instance
+
+    assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @spec_map, :create)
+    assert {:ok, _} = SourceStore.put(instance, "acme", "other", @log_spec, :create)
+    assert SourceStore.delete(instance, "acme", "billing") == :ok
+
+    GenServer.stop(pid)
+
+    {:ok, pid2} = Persistent.start_link(config)
+    on_exit(fn -> stop(pid2) end)
+
+    assert SourceStore.get(instance, "acme", "billing") == :error
+    assert SourceStore.fetch(instance, "acme.billing") == :error
+    assert Enum.map(SourceStore.list_tenant(instance, "acme"), & &1.name) == ["other"]
+  end
+
+  test "deleting a name that is not there is :not_found" do
+    {config, _pid} = start_store()
+    instance = config.instance
+
+    assert SourceStore.delete(instance, "acme", "nope") == {:error, :not_found}
+
+    assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @spec_map, :create)
+    assert SourceStore.delete(instance, "beta", "billing") == {:error, :not_found}
+    assert {:ok, _} = SourceStore.get(instance, "acme", "billing")
+  end
+
+  test "a seeded source is never deletable" do
+    {config, _pid} =
+      start_store(sources: %{"acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]})
+
+    instance = config.instance
+
+    assert {:error, :invalid, message} = SourceStore.delete(instance, "acme", "billing")
+    assert message =~ "read-only"
+    assert {:ok, %Source{id: "acme.billing"}} = SourceStore.fetch(instance, "acme.billing")
+  end
+
+  test "a bad tenant or name on delete is {:error, :invalid, message}" do
+    {config, _pid} = start_store()
+    instance = config.instance
+
+    assert {:error, :invalid, tenant_msg} =
+             SourceStore.delete(instance, "bad tenant", "billing")
+
+    assert tenant_msg =~ "tenant"
+
+    assert {:error, :invalid, name_msg} = SourceStore.delete(instance, "acme", "bad/name")
+    assert name_msg =~ "name"
+
+    assert {:error, :invalid, long_msg} =
+             SourceStore.delete(instance, "acme", String.duplicate("a", 65))
+
+    assert long_msg =~ "name"
   end
 
   # ── persistence across a restart ────────────────────────────────────────────

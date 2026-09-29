@@ -322,6 +322,10 @@ defmodule Ankusa.Admin.RouterTest do
 
     assert conn.status == 409
     assert %{"error" => "source_store_read_only"} = JSON.decode!(conn.resp_body)
+
+    conn = call(inst, :delete, "/v1/tenants/acme/sources/billing")
+    assert conn.status == 409
+    assert %{"error" => "source_store_read_only"} = JSON.decode!(conn.resp_body)
   end
 
   describe "tenant-scoped sources with a writable store" do
@@ -500,6 +504,67 @@ defmodule Ankusa.Admin.RouterTest do
       conn = call(inst, :put, "/v1/tenants/acme/sources/nope", JSON.encode!(spec()))
       assert conn.status == 404
       assert %{"error" => "source_not_found"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "DELETE removes the source and it disappears from the list", %{inst: inst} do
+      body = JSON.encode!(spec(%{"name" => "billing"}))
+      assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
+      assert call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "other"}))).status == 201
+
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 204
+      assert conn.resp_body in ["", nil]
+
+      assert call(inst, :get, "/v1/tenants/acme/sources/billing").status == 404
+
+      assert %{"entries" => entries} =
+               JSON.decode!(call(inst, :get, "/v1/tenants/acme/sources").resp_body)
+
+      assert Enum.map(entries, & &1["name"]) == ["other"]
+    end
+
+    test "DELETE of a missing source is 404", %{inst: inst} do
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/nope")
+      assert conn.status == 404
+      assert %{"error" => "source_not_found"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a seeded source is not deletable: 400 invalid_source", %{inst: _inst} do
+      config =
+        test_config(
+          roles: [:dispatch],
+          admin: %{enabled: true},
+          source_store:
+            {Ankusa.SourceStore.Persistent,
+             [
+               decoder: &decoder/2,
+               sources: %{
+                 "acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]
+               }
+             ]}
+        )
+
+      put_config(config)
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(config)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      conn = call(config.instance, :delete, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "read-only"
+    end
+
+    test "a bad tenant is 400 invalid_tenant on delete", %{inst: inst} do
+      conn = call(inst, :delete, "/v1/tenants/bad.tenant/sources/billing")
+      assert conn.status == 400
+      assert %{"error" => "invalid_tenant"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a bad name is 400 invalid_source on delete", %{inst: inst} do
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/#{String.duplicate("a", 65)}")
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "name"
     end
 
     test "creating an existing source is 409 source_exists", %{inst: inst} do
