@@ -7,8 +7,8 @@ defmodule Ankusa.Admin.Redact do
   an opt as secret:
 
     * a key named `secret`, `password`, `secret_access_key`, `token`, `sasl`,
-      or `nkey_seed` becomes `"[REDACTED]"` (the last is the NATS sink's private
-      key);
+      `nkey_seed`, or `jwt` becomes `"[REDACTED]"` (the last two are the NATS
+      sink's private key and a JWT);
     * a string that parses as a URI with `user:pass` userinfo keeps the user
       and loses the password.
 
@@ -34,7 +34,7 @@ defmodule Ankusa.Admin.Redact do
 
   @redacted "[REDACTED]"
 
-  @secret_keys ~w(secret password secret_access_key token sasl nkey_seed)
+  @secret_keys ~w(secret password secret_access_key token sasl nkey_seed jwt)
 
   @doc "A redacted, JSON-encodable view of the whole config."
   @spec config(Ankusa.Config.t()) :: map()
@@ -43,6 +43,18 @@ defmodule Ankusa.Admin.Redact do
     |> Map.from_struct()
     |> redact_map()
   end
+
+  @doc """
+  A redacted, JSON-encodable view of one tenant-scoped source entry, the shape
+  the admin API's source routes return.
+
+  The entry is plain JSON (atom keys at the top level, string keys below, plus
+  strings, numbers, maps, and lists), so it takes exactly the same rules as
+  `config/1`: a secret-named key at any depth and a value under a `headers` map
+  become `"[REDACTED]"`, and a URL userinfo password is hidden.
+  """
+  @spec source_entry(map()) :: map()
+  def source_entry(entry) when is_map(entry), do: redact_map(entry)
 
   defp redact_map(map), do: Map.new(map, fn {k, v} -> {to_string(k), redact(to_string(k), v)} end)
 

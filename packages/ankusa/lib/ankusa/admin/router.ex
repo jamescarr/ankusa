@@ -35,8 +35,15 @@ defmodule Ankusa.Admin.Router do
   # A replay body is a filter, not a payload: three optional scalar keys. 64 KiB
   # is already an order of magnitude more than it can legitimately need.
   @max_replay_body 65_536
+  @max_source_body 65_536
   @default_limit 100
   @max_limit 1000
+
+  # Same rule as `Ankusa.SourceStore` (and `ClaimCheck.Ref`): a tenant or source
+  # name is a URL path segment and a storage partition, so it must not need
+  # encoding. Validated here too so a bad tenant is `invalid_tenant`, distinct
+  # from the `invalid_source` a bad name or spec gets.
+  @identity_regex ~r/\A[A-Za-z0-9_-]{1,64}\z/
 
   plug(:match)
   plug(:dispatch)
@@ -47,6 +54,7 @@ defmodule Ankusa.Admin.Router do
     send_json(conn, 200, %{
       status: "ok",
       instance: to_string(config.instance),
+      version: to_string(Application.spec(:ankusa, :vsn)),
       roles: config.roles |> Enum.map(&to_string/1) |> Enum.sort()
     })
   end
@@ -73,6 +81,22 @@ defmodule Ankusa.Admin.Router do
 
   get "/v1/quarantine" do
     require_role(conn, :edge, &quarantine_index/1)
+  end
+
+  get "/v1/tenants/:tenant/sources" do
+    sources_index(conn, tenant)
+  end
+
+  post "/v1/tenants/:tenant/sources" do
+    source_create(conn, tenant)
+  end
+
+  get "/v1/tenants/:tenant/sources/:name" do
+    source_get(conn, tenant, name)
+  end
+
+  put "/v1/tenants/:tenant/sources/:name" do
+    source_update(conn, tenant, name)
   end
 
   match _ do
@@ -134,6 +158,127 @@ defmodule Ankusa.Admin.Router do
       {:error, field} -> invalid_filter(conn, field)
     end
   end
+
+  # ── tenant-scoped sources ───────────────────────────────────────────────────
+
+  # No role gate: source management is not tied to a node role, the same way
+  # `/v1/config` isn't. The store resolves from the instance's config, so this
+  # works on any node running the admin port.
+  defp sources_index(conn, tenant) do
+    if valid_identity?(tenant) do
+      entries =
+        instance(conn)
+        |> Ankusa.SourceStore.list_tenant(tenant)
+        |> Enum.sort_by(& &1.name)
+        |> Enum.map(&source_entry/1)
+
+      send_json(conn, 200, %{tenant: tenant, entries: entries})
+    else
+      invalid_tenant(conn)
+    end
+  end
+
+  defp source_get(conn, tenant, name) do
+    cond do
+      not valid_identity?(tenant) ->
+        invalid_tenant(conn)
+
+      not valid_identity?(name) ->
+        invalid_source(conn, invalid_name_message(name))
+
+      true ->
+        case Ankusa.SourceStore.get(instance(conn), tenant, name) do
+          {:ok, stored} -> send_json(conn, 200, source_entry(stored))
+          :error -> send_json(conn, 404, %{error: "source_not_found"})
+        end
+    end
+  end
+
+  defp source_create(conn, tenant) do
+    if valid_identity?(tenant) do
+      with_source_body(conn, fn body, conn ->
+        name = Map.get(body, "name")
+        spec = Map.delete(body, "name")
+        put_source(conn, 201, Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :create))
+      end)
+    else
+      invalid_tenant(conn)
+    end
+  end
+
+  defp source_update(conn, tenant, name) do
+    cond do
+      not valid_identity?(tenant) ->
+        invalid_tenant(conn)
+
+      not valid_identity?(name) ->
+        invalid_source(conn, invalid_name_message(name))
+
+      true ->
+        with_source_body(conn, fn body, conn ->
+          # Identity lives in the URL, so a `name` key smuggled into the body is
+          # dropped before validation (the store drops `tenant` too).
+          spec = Map.delete(body, "name")
+          put_source(conn, 200, Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :update))
+        end)
+    end
+  end
+
+  # Read the body as a JSON object, then hand it to `fun` along with the conn
+  # that has had its body consumed. A body that is empty, oversized, unparseable,
+  # or not an object is the same `invalid_source`: all mean "the spec isn't a
+  # JSON object".
+  defp with_source_body(conn, fun) do
+    case Ankusa.Http.read_body_limited(conn, @max_source_body) do
+      {:ok, body, conn} ->
+        case JSON.decode(body) do
+          {:ok, map} when is_map(map) -> fun.(map, conn)
+          _ -> invalid_source(conn, "body must be a JSON object")
+        end
+
+      {:too_large, conn} ->
+        invalid_source(conn, "body must be a JSON object")
+
+      {:error, _reason, conn} ->
+        invalid_source(conn, "body must be a JSON object")
+    end
+  end
+
+  defp put_source(conn, ok_status, result) do
+    case result do
+      {:ok, stored} -> send_json(conn, ok_status, source_entry(stored))
+      {:error, :invalid, message} -> invalid_source(conn, message)
+      {:error, :exists} -> send_json(conn, 409, %{error: "source_exists"})
+      {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
+      {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
+    end
+  end
+
+  defp source_entry(stored) do
+    spec = stored.spec
+
+    %{
+      tenant: stored.tenant,
+      name: stored.name,
+      source_id: stored.source_id,
+      ingest_path: "/webhooks/#{stored.source_id}",
+      verify: Map.get(spec, "verify") || %{"type" => "none"},
+      on_verify_failure: Map.get(spec, "on_verify_failure"),
+      sinks: Map.get(spec, "sinks", [])
+    }
+    |> Redact.source_entry()
+  end
+
+  defp valid_identity?(value), do: is_binary(value) and Regex.match?(@identity_regex, value)
+
+  defp invalid_tenant(conn), do: send_json(conn, 400, %{error: "invalid_tenant"})
+
+  defp invalid_source(conn, message),
+    do: send_json(conn, 400, %{error: "invalid_source", message: message})
+
+  # Matches `Ankusa.SourceStore`'s own message for a bad identity.
+  defp invalid_name_message(name),
+    do: "name #{inspect(name)} must match [A-Za-z0-9_-]{1,64}"
 
   # ── replay filter ───────────────────────────────────────────────────────────
 
