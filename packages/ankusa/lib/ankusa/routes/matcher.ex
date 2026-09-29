@@ -23,9 +23,20 @@ defmodule Ankusa.Routes.Matcher do
     * empty segments from `//` or a trailing `/` are dropped, and a path with
       nothing left is a rejection.
 
-  Plug hands the guard an already percent-decoded `path_info`, so `%2F` is
-  detected on the raw `request_path` instead, before it is decoded into a
-  segment boundary it never was.
+  Plug does **not** percent-decode `path_info`: `Plug.Conn.Adapter` only splits
+  the path on `/`, so the segments the guard sees are the raw, still-encoded
+  ones and a `%2F` never turns into a segment boundary here. It is rejected all
+  the same — an encoded slash is never a legitimate route path, and a later stage
+  that did decode it would see a different path than the one that was authorized
+  — and it is detected on the raw `request_path`.
+
+  Because segments are matched raw, a literal in a route pattern is limited to
+  characters that never need percent-encoding (see `segments/1`), so a pattern
+  that no real request could match is refused when the route is written rather
+  than accepted and silently dead. An encoded request segment matches only a
+  `:param` or the wildcard, never a literal: `/hooks/%73tripe` is not
+  `/hooks/stripe`. Encoded dots (`%2e%2e`) are ordinary opaque segments, not
+  `..`; nothing in Ankusa decodes a path, so nothing resolves one.
   """
 
   alias Ankusa.Routes.Route
@@ -39,10 +50,12 @@ defmodule Ankusa.Routes.Matcher do
 
   @wildcard "*"
 
-  # A literal segment is URL-path-safe ASCII with no reserved meaning; `%` is
-  # excluded so an encoded byte has to be decoded by Plug first.
-  @literal_re ~r/^[A-Za-z0-9._~-]+$/
-  @param_re ~r/^:[A-Za-z_][A-Za-z0-9_]*$/
+  # A literal segment is URL-path-safe ASCII with no reserved meaning. `%` is
+  # excluded: request segments are matched still-encoded, so a literal that needed
+  # percent-encoding would be ambiguous between its spellings. Characters that are
+  # their own encoding leave nothing to disagree about.
+  @literal_re ~r/\A[A-Za-z0-9._~-]+\z/
+  @param_re ~r/\A:[A-Za-z_][A-Za-z0-9_]*\z/
 
   @doc """
   Validate a path pattern and compile it to segments.
@@ -142,7 +155,9 @@ defmodule Ankusa.Routes.Matcher do
   defp invalid_segment(segment), do: "invalid segment #{inspect(segment)}"
 
   defp encoded_slash?(request_path) when is_binary(request_path) do
-    String.contains?(String.downcase(request_path), "%2f")
+    # Only two spellings exist (`2` is a digit), so no lowercased copy of an
+    # attacker-sized path is needed to find one.
+    String.contains?(request_path, ["%2F", "%2f"])
   end
 
   defp encoded_slash?(_request_path), do: false

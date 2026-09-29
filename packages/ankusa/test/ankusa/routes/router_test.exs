@@ -2,7 +2,8 @@ defmodule Ankusa.Routes.RouterTest do
   @moduledoc """
   The management API over `Plug.Test.conn`, plus one test over a real socket:
   the in-process cases pin the contract, and the socket case proves the listener
-  actually binds.
+  binds on its own port — with the capture listener on a different one, serving
+  a different surface.
 
   `async: false` because the socket test binds a port and the API reads the
   instance's `:persistent_term` config.
@@ -14,7 +15,7 @@ defmodule Ankusa.Routes.RouterTest do
 
   alias Ankusa.Routes.Router
 
-  defp start(routes_opts), do: start_routes(routes_opts)
+  defp start(routes_opts, extra_opts \\ []), do: start_routes(routes_opts, extra_opts)
 
   defp call(config, method, path, opts \\ []) do
     body = Keyword.get(opts, :body)
@@ -133,7 +134,7 @@ defmodule Ankusa.Routes.RouterTest do
 
       response =
         call(config, :put, "/admin/ip-rules",
-          body: ~s({"rules":[{"action":"allow","cidr":"nope"}]})
+          body: ~s({"default":"allow","rules":[{"action":"allow","cidr":"nope"}]})
         )
 
       assert response.status == 400
@@ -234,9 +235,14 @@ defmodule Ankusa.Routes.RouterTest do
     test "binds its own port, unauthenticated by design" do
       port = free_port()
 
-      config = start(admin: [port: port])
+      # `free_port/0` closes the socket it opened, so the OS can hand the same
+      # number out twice; this test is about two different listeners.
+      ingest_port = Enum.find(Stream.repeatedly(&free_port/0), &(&1 != port))
+
+      config = start([admin: [port: port]], port: ingest_port)
 
       assert config.routes.admin.port == port
+      assert config.port == ingest_port
 
       response = Req.get!("http://127.0.0.1:#{port}/health")
       assert response.status == 200
@@ -248,8 +254,22 @@ defmodule Ankusa.Routes.RouterTest do
       assert created.status == 201
       assert created.body["id"] == "a"
 
-      # The ingest listener is a different port and is untouched by this one.
-      assert config.port != port
+      # The two listeners serve different surfaces, which is the point of the
+      # second port. `/stats` is the edge's own endpoint and 404s here; the
+      # management API is not on the ingest port at all — `/admin/routes` there
+      # goes through the capture guard, so it answers a 404 and no route with it.
+      assert Req.get!("http://127.0.0.1:#{ingest_port}/stats").status == 200
+      assert Req.get!("http://127.0.0.1:#{port}/stats").status == 404
+
+      ingested =
+        Req.post!("http://127.0.0.1:#{ingest_port}/admin/routes",
+          body: ~s({"id":"b","path":"/hooks/b"})
+        )
+
+      assert ingested.status == 404
+
+      listed = Req.get!("http://127.0.0.1:#{port}/admin/routes")
+      assert Enum.map(listed.body["routes"], & &1["id"]) == ["a"]
     end
   end
 end

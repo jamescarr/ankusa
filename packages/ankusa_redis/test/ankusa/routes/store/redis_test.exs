@@ -79,10 +79,51 @@ defmodule Ankusa.Routes.Store.RedisTest do
     end
   end
 
+  # Release every function at the same moment and collect the results in order,
+  # so two writes really do race instead of running one after the other.
+  defp race(funs) do
+    parent = self()
+
+    tasks =
+      for fun <- funs do
+        Task.async(fn ->
+          send(parent, {:ready, self()})
+
+          receive do
+            :go -> fun.()
+          end
+        end)
+      end
+
+    pids =
+      for _ <- funs do
+        assert_receive {:ready, pid}, 5_000
+        pid
+      end
+
+    Enum.each(pids, &send(&1, :go))
+    Task.await_many(tasks, 30_000)
+  end
+
+  # Only this suite's own three keys are ever deleted, never the database: a
+  # developer's Redis, or one a CI job shares between packages, may hold data
+  # that is not ours to flush.
+  @keys ~w(routes ip_rules version)
+
+  defp clean_namespace(conn) do
+    {:ok, _deleted} = Redix.command(conn, ["DEL" | Enum.map(@keys, &"#{@namespace}:#{&1}")])
+    :ok
+  end
+
   setup do
     {:ok, conn} = Redix.start_link(@url)
-    {:ok, _} = Redix.command(conn, ["FLUSHDB"])
-    on_exit(fn -> if Process.alive?(conn), do: Redix.stop(conn) end)
+    clean_namespace(conn)
+
+    on_exit(fn ->
+      {:ok, conn} = Redix.start_link(@url)
+      clean_namespace(conn)
+      Redix.stop(conn)
+    end)
 
     %{conn: conn}
   end
@@ -270,6 +311,163 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert is_pid(Ankusa.whereis(config.instance, :routes_store))
     assert is_pid(Ankusa.whereis(config.instance, :routes_redis))
     assert is_pid(Ankusa.whereis(config.instance, :routes_redis_pubsub))
+  end
+
+  test "a node whose mirror lags cannot overwrite what another node already wrote" do
+    node_a = start_node(tick_ms: 3_600_000)
+    node_b = start_node(tick_ms: 3_600_000)
+    pid_a = Ankusa.whereis(node_a.instance, :routes_store)
+
+    # A is frozen while its write is queued, so B's write and broadcast land AFTER
+    # A's request: when A wakes, its mirror is one write behind Redis at the very
+    # moment it writes. That is the window a lagging pub/sub round trip leaves.
+    :sys.suspend(pid_a)
+
+    writer =
+      Task.async(fn ->
+        Routes.create(node_a.instance, %{"id" => "from-a", "path" => "/hooks/a"})
+      end)
+
+    eventually(fn -> Process.info(pid_a, :message_queue_len) >= {:message_queue_len, 1} end)
+
+    assert {:ok, _} = Routes.create(node_b.instance, %{"id" => "from-b", "path" => "/hooks/b"})
+    :sys.resume(pid_a)
+
+    assert {:ok, %{id: "from-a"}} = Task.await(writer)
+
+    # Neither write was lost. A took Redis's table instead of applying its own
+    # change to a copy that did not have B's, and B hears about A's in turn.
+    assert node_a.instance |> Routes.snapshot() |> Map.fetch!(:by_id) |> Map.keys() |> Enum.sort() ==
+             ["from-a", "from-b"]
+
+    eventually(fn ->
+      node_b.instance |> Routes.snapshot() |> Map.fetch!(:by_id) |> Map.keys() |> Enum.sort() ==
+        ["from-a", "from-b"]
+    end)
+  end
+
+  test "two nodes creating the same id: exactly one wins", %{conn: conn} do
+    node_a = start_node(tick_ms: 3_600_000)
+    node_b = start_node(tick_ms: 3_600_000)
+
+    for round <- 1..5 do
+      id = "same#{round}"
+
+      results =
+        race([
+          fn -> Routes.create(node_a.instance, %{"id" => id, "path" => "/hooks/a#{round}"}) end,
+          fn -> Routes.create(node_b.instance, %{"id" => id, "path" => "/hooks/b#{round}"}) end
+        ])
+
+      assert Enum.count(results, &match?({:ok, %{id: ^id}}, &1)) == 1
+      assert Enum.count(results, &(&1 == {:error, {:conflict, id}})) == 1
+    end
+
+    assert {:ok, 5} = Redix.command(conn, ["HLEN", "#{@namespace}:routes"])
+  end
+
+  test "two nodes creating routes for one path and method: exactly one wins", %{conn: conn} do
+    node_a = start_node(tick_ms: 3_600_000)
+    node_b = start_node(tick_ms: 3_600_000)
+
+    results =
+      race([
+        fn -> Routes.create(node_a.instance, %{"id" => "a", "path" => "/hooks/x"}) end,
+        fn -> Routes.create(node_b.instance, %{"id" => "b", "path" => "/hooks/x"}) end
+      ])
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(results, &match?({:error, {:conflict, _}}, &1)) == 1
+    assert {:ok, 1} = Redix.command(conn, ["HLEN", "#{@namespace}:routes"])
+  end
+
+  test "two nodes racing for the last slot: exactly one create succeeds", %{conn: conn} do
+    seed = [%{"id" => "s", "path" => "/hooks/s"}]
+    node_a = start_node(max_routes: 2, tick_ms: 3_600_000, seed: seed)
+    node_b = start_node(max_routes: 2, tick_ms: 3_600_000)
+
+    results =
+      race([
+        fn -> Routes.create(node_a.instance, %{"id" => "x", "path" => "/hooks/x"}) end,
+        fn -> Routes.create(node_b.instance, %{"id" => "y", "path" => "/hooks/y"}) end
+      ])
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :too_many_routes})) == 1
+    assert {:ok, 2} = Redix.command(conn, ["HLEN", "#{@namespace}:routes"])
+  end
+
+  test "a delete whose version bump fails deletes nothing", %{conn: conn} do
+    config = start_node(seed: [%{"id" => "s", "path" => "/hooks/s"}])
+
+    # A version key of the wrong type makes the bump fail.
+    {:ok, _} = Redix.command(conn, ["DEL", "#{@namespace}:version"])
+    {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:version", "field", "value"])
+
+    assert {:error, :store_unavailable} = Routes.delete(config.instance, "s")
+
+    # Still there in Redis: no half-applied delete for another node to miss, with
+    # the version unmoved so that nothing would ever tell it to reload.
+    assert {:ok, 1} = Redix.command(conn, ["HEXISTS", "#{@namespace}:routes", "s"])
+  end
+
+  test "deleting a route that is not there is not_found and moves nothing", %{conn: conn} do
+    config = start_node(seed: [%{"id" => "s", "path" => "/hooks/s"}])
+    {:ok, version} = Redix.command(conn, ["GET", "#{@namespace}:version"])
+
+    assert {:error, :not_found} = Routes.delete(config.instance, "nope")
+    assert {:ok, ^version} = Redix.command(conn, ["GET", "#{@namespace}:version"])
+  end
+
+  test "a Redis restored to an older version is followed down, not ignored", %{conn: conn} do
+    node = start_node(tick_ms: 100, seed: [%{"id" => "s", "path" => "/hooks/s"}])
+    assert {:ok, _} = Routes.create(node.instance, %{"id" => "a", "path" => "/hooks/a"})
+    assert {:ok, _} = Routes.create(node.instance, %{"id" => "b", "path" => "/hooks/b"})
+    assert Routes.snapshot(node.instance).version == 3
+
+    # A restore from an older backup: a different table at a LOWER version.
+    {:ok, _} = Redix.command(conn, ["DEL", "#{@namespace}:routes"])
+    {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:routes", "old", encoded_route("old")])
+    {:ok, _} = Redix.command(conn, ["SET", "#{@namespace}:version", "1"])
+
+    eventually(fn -> Map.keys(Routes.snapshot(node.instance).by_id) == ["old"] end, 3_000)
+    assert Routes.snapshot(node.instance).version == 1
+  end
+
+  test "a node booting with a different seed leaves an existing namespace alone" do
+    first = start_node(seed: [%{"id" => "s", "path" => "/hooks/s"}])
+    assert {:ok, _} = Routes.create(first.instance, %{"id" => "n", "path" => "/hooks/n"})
+    assert :ok = Routes.delete(first.instance, "s")
+
+    second = start_node(seed: [%{"id" => "t", "path" => "/hooks/t"}])
+
+    # Neither the new seed's route nor the deleted one appears: the namespace
+    # already existed, so the seed was not applied.
+    assert Map.keys(Routes.snapshot(second.instance).by_id) == ["n"]
+  end
+
+  test "a pub/sub connection that dies is replaced and subscribed again" do
+    node_a = start_node(tick_ms: 3_600_000)
+    node_b = start_node(tick_ms: 3_600_000)
+
+    old_state = Ankusa.whereis(node_a.instance, :routes_store)
+    old_pubsub = Ankusa.whereis(node_a.instance, :routes_redis_pubsub)
+    Process.exit(old_pubsub, :kill)
+
+    # Under :rest_for_one the state process goes with it and comes back
+    # subscribed. A store that stayed up would be deaf to broadcasts from here on.
+    eventually(
+      fn ->
+        state = Ankusa.whereis(node_a.instance, :routes_store)
+        pubsub = Ankusa.whereis(node_a.instance, :routes_redis_pubsub)
+        is_pid(state) and is_pid(pubsub) and state != old_state and pubsub != old_pubsub
+      end,
+      5_000
+    )
+
+    # The tick is an hour away: only a live subscription can bring this to A.
+    assert {:ok, _} = Routes.create(node_b.instance, %{"id" => "n", "path" => "/hooks/n"})
+    eventually(fn -> Map.has_key?(Routes.snapshot(node_a.instance).by_id, "n") end)
   end
 
   defp encoded_route(id) do

@@ -11,6 +11,62 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking for custom route stores.** `Ankusa.Routes.Store`'s `insert` and
+  `replace` callbacks take the version of the snapshot the caller validated
+  against — `insert(instance, route, version)`, `replace(instance, route,
+  version)` — and answer `{:error, :stale}`, having changed nothing, when the
+  table has moved on. `Ankusa.Routes` re-reads, re-validates and retries; a
+  write that keeps losing answers `503 store_unavailable`, safe to retry.
+  `delete/2` and `put_ip_rules/2` are unchanged. `ankusa_redis` has to be
+  released with this: an older `Ankusa.Routes.Store.Redis` does not implement the
+  new arities.
+- `PUT /admin/ip-rules` requires both `default` and `rules`. An omitted `default`
+  used to mean `allow`, which quietly turned a deny-by-default list into an open
+  one; it is now `400 invalid_ip_rules` naming the missing field.
+- Client address: `X-Forwarded-For` from a trusted proxy is walked right to
+  left. The first entry outside `routes.trusted_proxies` is the client, entries
+  to its left are never examined, and an entry that cannot be read before that
+  point denies the request. Every `x-forwarded-for` line is joined in order, and
+  `1.2.3.4:5678`, `[::1]` and `[::1]:443` are accepted forms.
+- `Ankusa.Routes.Cache` is keyed by a per-snapshot `epoch`, not the store's
+  `version`, because versions start over (a restarted in-memory store, a flushed
+  Redis) and a decision cached under one could answer for a table it was never
+  made against. Only requests of at most 16 segments and 256 bytes of path are
+  cached, and the cache's memory check runs every second.
+- The IP-rule and trusted-proxy parser is `Ankusa.Net.parse_cidr/1`, which never
+  raises and refuses a range inside `::ffff:0:0/96` (see Fixed).
+
+### Fixed
+
+- Concurrent route writes could overwrite each other. `create` checked the id and
+  the path against a snapshot outside the store's serialized write, so two
+  creates of one id both answered `201` and the second replaced the first, and
+  two enabled routes could take one path and method. A `PATCH` was an unguarded
+  read-modify-write that lost concurrent updates, and one racing a `DELETE`
+  brought the route back.
+- An unreadable `X-Forwarded-For` entry from a trusted proxy resolved the client
+  to the proxy's own address, which an allow rule for the proxy's range then
+  admitted. `Net.parse/1` no longer raises on invalid UTF-8.
+- A range inside `::ffff:0:0/96` as an IP rule or trusted proxy is refused at
+  write time. Addresses are matched as IPv4, so it could never match — and as a
+  deny rule it silently let its own traffic through.
+- A dry run (`POST /admin/routes/test`) no longer reads or fills the decision
+  cache, and a store restart can no longer let a cached decision answer for the
+  new table.
+- A seed with a disabled route after an enabled one for the same path no longer
+  fails boot, and conflict detection is linear in the size of the seed.
+- Route ids and methods refuse a trailing newline; a non-string `id` is a `400`
+  instead of a generated one; `Route.from_json/1` refuses a stored definition
+  with no id instead of minting one per node.
+- The guard's log sampler draws independently per rejection, the warning for a
+  node with no route table loaded is sampled like the rest, and `routes.enabled`
+  must be a boolean. A route store that does not answer is `503` with the reason
+  logged instead of a crash.
+- The release notes below named `Ankusa.Net.CIDR` and `stream_data` property
+  tests; neither ever shipped, and the entry now says what did.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added
@@ -45,21 +101,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   policy. Route CRUD, `GET`/`PUT /admin/ip-rules`, `GET /health`, and a dry
   run (`POST /admin/routes/test`) that reports the decision, the reason, the
   route, and the rule that produced it — without capturing anything.
-- `Ankusa.Net`, `Ankusa.Net.CIDR`, `Ankusa.Net.ClientIP`: IP addresses as a
-  tagged integer, CIDR matching with bit operators only, and client resolution
-  that reads `X-Forwarded-For` **only** from a peer inside
-  `routes.trusted_proxies` (one unparseable entry discards the header whole).
+- `Ankusa.Net` and `Ankusa.Net.ClientIP`: IP addresses as `:inet` tuples, CIDR
+  matching through the `cidr` package, and client resolution that reads
+  `X-Forwarded-For` **only** from a peer inside `routes.trusted_proxies` (one
+  unparseable entry discards the header whole).
 - `Ankusa.Routes.Cache`: a local decision cache (`nebulex` +
   `nebulex_local`) keyed by the snapshot version, so a route change retires
   every cached decision at once.
 - Telemetry: `[:ankusa, :routes, :match]` (with `:cached`),
   `[:ankusa, :routes, :reject]` (with `:reason`), and
   `[:ankusa, :routes, :changed]`.
-- Dependencies: `nebulex` and `nebulex_local` — every deployment that turns
-  routes on wants the decision cache, so it lives in core; the Redis
-  *definitions* store is the separate `ankusa_redis` package.
-  `stream_data` and `yaml_elixir` (`:test` only) back the CIDR property tests
-  and the OpenAPI contract test.
+- Dependencies: `cidr` for CIDR parsing and range membership, and `nebulex` and
+  `nebulex_local` — every deployment that turns routes on wants the decision
+  cache, so it lives in core; the Redis *definitions* store is the separate
+  `ankusa_redis` package. `yaml_elixir` (`:test` only) backs the OpenAPI contract
+  test.
 - `priv/openapi/admin.v1.yaml` now documents the route-management endpoints too
   (the `routes` tag: `admin/routes`, `admin/routes/{id}`, `admin/ip-rules`,
   `admin/routes/test`), with a worked example of every request and response —

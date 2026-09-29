@@ -37,8 +37,13 @@ defmodule Ankusa.Routes.Router do
   `invalid_route` (with `field` and `message`), `duplicate_route` (with
   `conflicting_id`), `too_many_routes` (with `max_routes`), `invalid_query`,
   `invalid_ip_rules`, `invalid_request`, `invalid_body`, `not_found`, and
-  `store_unavailable` (a `503`, meaning the backing store could not be reached
-  — retry).
+  `store_unavailable` (a `503`: the backing store could not be reached, or a
+  write lost every race against concurrent writers — retry).
+
+  Writes are checked against the table they were validated against: two requests
+  creating the same id, or two enabled routes for the same path and method,
+  cannot both succeed however they interleave. `PUT /admin/ip-rules` replaces
+  the whole rule set, so it requires both `default` and `rules`.
 
   `POST /admin/routes/test` is the dry run: it answers "what would happen to
   this request" without capturing anything and without touching the decision
@@ -55,6 +60,8 @@ defmodule Ankusa.Routes.Router do
   """
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
+
+  require Logger
 
   alias Ankusa.Routes
   alias Ankusa.Routes.Route
@@ -205,7 +212,12 @@ defmodule Ankusa.Routes.Router do
 
   defp not_found(conn), do: send_json(conn, 404, %{error: "not_found"})
 
-  defp store_error(conn, _reason), do: send_json(conn, 503, %{error: "store_unavailable"})
+  # The caller only learns "retry"; the reason (Redis down, a write that lost
+  # every race, an unexpected store error) is the operator's to read in the log.
+  defp store_error(conn, reason) do
+    Logger.warning("[ankusa] route management write answered 503: #{inspect(reason)}")
+    send_json(conn, 503, %{error: "store_unavailable"})
+  end
 
   # ── request parsing ─────────────────────────────────────────────────────────
 

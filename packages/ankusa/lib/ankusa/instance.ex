@@ -147,7 +147,16 @@ defmodule Ankusa.Instance do
 
     # `telemetry: false`: no per-command Nebulex spans on the ingest hot path.
     # Our own [:ankusa, :routes, *] events are the observability surface.
-    [max_size: max_size, gc_interval: gc_interval, telemetry: false]
+    #
+    # `gc_memory_check_interval`: the adapter enforces `max_size` in this
+    # periodic check, not on each write, and its default is ten seconds. A
+    # scanner adds a cache entry per new path, so check every second.
+    [
+      max_size: max_size,
+      gc_interval: gc_interval,
+      gc_memory_check_interval: :timer.seconds(1),
+      telemetry: false
+    ]
   end
 
   defp claim_check_children(config, _opts) do

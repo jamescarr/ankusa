@@ -247,13 +247,16 @@ paths:
       description: |
         Runs the same decision the guard runs, and reports it: the global IP
         rules first, then route matching, then the matched route's own rules.
-        Nothing is captured, no counter moves, and the answer is not cached —
-        this is the endpoint that turns "why was my webhook rejected" into one
-        call, and it is worth using before changing any route.
+        Nothing is captured, no counter moves, and the decision cache is
+        neither read nor written — a dry run cannot make a path look hot, and
+        it never answers from an entry another request wrote. This is the
+        endpoint that turns "why was my webhook rejected" into one call, and it
+        is worth using before changing any route.
 
-        A rejection's `ip_rule` is the rule that *decided*, and is `null` when
-        the decision came from a list's `default` (no rule matched) or when the
-        reason is not `ip_denied`.
+        `ip_rule` is the rule that *decided* an IP question, with the list it
+        came from (`scope`); it is `null` whenever no rule decided — a list's
+        `default` (nothing matched), or a reason that is not an IP decision at
+        all.
       requestBody:
         required: true
         content:
@@ -286,12 +289,18 @@ paths:
                   summary: The path matches, but the method does not
                   value: {decision: deny, reason: method, route_id: null, ip_rule: null}
                 ipDeniedByRoute:
-                  summary: The matched route's own rule denied this address
+                  summary: The matched route's own deny rule matched this address
                   value:
                     decision: deny
                     reason: ip_denied
                     route_id: stripe
-                    ip_rule: {action: allow, cidr: '203.0.113.0/24', scope: route}
+                    ip_rule: {action: deny, cidr: '203.0.113.0/24', scope: route}
+                ipDeniedByPinnedRoute:
+                  summary: |
+                    The route declares an allow-only list and this address matches
+                    none of it, so no rule decided and `ip_rule` is `null` — the
+                    route simply is not available to that sender.
+                  value: {decision: deny, reason: ip_denied, route_id: stripe, ip_rule: null}
         '400':
           $ref: '#/components/responses/InvalidRequest'
   /admin/routes:
@@ -367,9 +376,11 @@ paths:
         ever evicted, because an evicted route would start rejecting real
         webhooks.
 
-        Note the id `test` is reserved by `POST /admin/routes/test` (the dry
-        run), so that operation cannot *create* a route with that id — use
-        `PUT /admin/routes/test` for it.
+        The id `test` is **not** reserved: only the `POST /admin/routes/test`
+        *dry run* shadows this path, and it shadows it for `POST` alone. `POST
+        /admin/routes` with `{"id": "test"}` creates that route like any other
+        id, and `GET`/`PUT`/`PATCH`/`DELETE /admin/routes/test` then address it
+        normally.
       requestBody:
         required: true
         content:
@@ -536,9 +547,13 @@ paths:
       summary: Delete a route definition
       description: |
         Immediate: the guard stops capturing the route on the next request, with
-        no cache TTL to wait out (the decision cache is keyed by the route
-        table's version). A `routes.seed` entry is not resurrected by a restart
-        — seeding happens only on a store's first boot.
+        no cache TTL to wait out — the decision cache is keyed by the published
+        snapshot's epoch, so a mutation makes every cached decision unreachable.
+        Whether a restart brings the route back is the store's question: the
+        default ETS store re-seeds from `routes.seed` on **every** boot, so a
+        deleted route that is also in the seed returns — remove it from the seed
+        as well — while the Redis store seeds once per namespace and keeps the
+        deletion.
       responses:
         '204':
           description: Deleted. No body.
@@ -576,9 +591,11 @@ paths:
       summary: Replace the global IP rules
       description: |
         Ordered, first match wins, and `default` decides the case no rule
-        matched. These are a **floor**: a global `deny` always wins, including
-        over a route's own `allow`. CIDRs are parsed at write time, so a typo is
-        a `400` here rather than a silently-never-matching rule on the hot path.
+        matched. Both `default` and `rules` are required — omitting either is a
+        `400`, not a silent default. These are a **floor**: a global `deny`
+        always wins, including over a route's own `allow`. CIDRs are parsed at
+        write time, so a typo is a `400` here rather than a
+        silently-never-matching rule on the hot path.
       requestBody:
         required: true
         content:
@@ -935,8 +952,11 @@ components:
             - $ref: '#/components/schemas/DryRunIpRule'
             - type: 'null'
           description: |
-            The rule that decided an IP question, or `null` when none did (the
-            list's `default` decided) or when the reason is not `ip_denied`.
+            The rule that decided the IP question — the global list's or the
+            matched route's own — or `null` when no rule decided: a list's
+            `default` applied because nothing matched, or the reason is not an
+            IP decision (`no_route`, `method`). A route's own `allow` rule
+            deciding a `matched` decision is reported here too.
     Error:
       type: object
       description: The error shape every endpoint answers with, on every listener.
@@ -995,7 +1015,10 @@ components:
             $ref: '#/components/schemas/Error'
           examples:
             unknownField:
-              value: {error: invalid_route, field: id, message: 'unknown field'}
+              summary: '`inserted_at` is not a route field'
+              value: {error: invalid_route, field: inserted_at, message: 'unknown field'}
+            badId:
+              value: {error: invalid_route, field: id, message: 'must be a lowercase slug of at most 64 characters'}
             unrootedPath:
               value: {error: invalid_route, field: path, message: 'must start with "/"'}
             badSegment:
@@ -1033,12 +1056,24 @@ components:
               summary: '`invalid_body` instead, when the body never parsed'
               value: {error: invalid_body}
     InvalidIpRules:
-      description: '`400`. `invalid_ip_rules`: the rules are not a JSON object, an `action` is not `allow`/`deny`, or a `cidr` does not parse. `field` is `rules` (with the rule index in `message`) or `default`. Also `invalid_body` when the body never parsed.'
+      description: '`400`. `invalid_ip_rules`: both `default` and `rules` are required, `default` is `allow` or `deny`, `rules` is a list, and every rule is an object with an `action` of `allow`/`deny` and a `cidr` that parses. `field` is `default` or `rules`; a bad rule''s `message` names its index (`rule 0: ...`). A body that is not a JSON object is `invalid_body`, not this.'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
           examples:
+            missingDefault:
+              summary: '`default` is required'
+              value: {error: invalid_ip_rules, field: default, message: is required}
+            missingRules:
+              summary: '`rules` is required'
+              value: {error: invalid_ip_rules, field: rules, message: is required}
+            rulesNotAList:
+              value: {error: invalid_ip_rules, field: rules, message: 'must be a list of rules'}
+            unknownRuleField:
+              value: {error: invalid_ip_rules, field: rules, message: 'rule 0: unknown field "cidrs"'}
+            badAction:
+              value: {error: invalid_ip_rules, field: rules, message: 'rule 0: invalid action "maybe"'}
             badCidr:
               value: {error: invalid_ip_rules, field: rules, message: 'rule 0: invalid cidr "10.0.0.0/33"'}
             badDefault:
@@ -1070,7 +1105,7 @@ components:
             noSuchRoute:
               value: {error: not_found}
     StoreUnavailable:
-      description: '`503`. `store_unavailable`: the route store could not be reached (a Redis store with Redis down). The definition was **not** written. Retry; reads keep working from this node''s in-memory snapshot either way.'
+      description: '`503`. `store_unavailable`: nothing was written. Either the route store could not be reached (a Redis store with Redis down), or the write kept losing to concurrent writers and exhausted its retries — the table changed under the snapshot it had validated, every time. Both are transient: retry, and reads keep working from this node''s in-memory snapshot either way.'
       content:
         application/json:
           schema:

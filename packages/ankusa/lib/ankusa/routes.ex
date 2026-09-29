@@ -19,8 +19,8 @@ defmodule Ankusa.Routes do
 
     1. **Global IP rules.** Cheap bitmask scans, no route lookup, so a denied
        sender costs nothing else.
-    2. **Route matching**, via `Ankusa.Routes.Cache` (keyed by the snapshot
-       version) and, on a miss, the compiled pattern list.
+    2. **Route matching**, via `Ankusa.Routes.Cache` (keyed by the snapshot's
+       epoch) and, on a miss, the compiled pattern list.
     3. **The route's own IP rules**, if it declares any: they *replace* the
        global list for that route, and deny when none of them matches. A global
        deny has already won by then.
@@ -30,9 +30,10 @@ defmodule Ankusa.Routes do
   `docs/configuration.md`.
   """
 
+  require Logger
+
   alias Ankusa.Net
   alias Ankusa.Routes.{Cache, Matcher, Route, Snapshot, Store}
-  alias CIDR
 
   @type decision :: {:ok, String.t()} | {:reject, :no_route | :method | :ip_denied}
 
@@ -40,6 +41,12 @@ defmodule Ankusa.Routes do
 
   @default_limit 100
   @max_limit 200
+
+  # A write validates against one snapshot, and the store applies it only if the
+  # table is still at that snapshot's version; losing that race means re-reading
+  # and re-validating. Every loss means another writer made progress, so the
+  # bound only has to outlast the number of concurrent writers.
+  @max_attempts 25
 
   @doc "Are routes enforced on this instance?"
   @spec enabled?(atom()) :: boolean()
@@ -156,10 +163,7 @@ defmodule Ankusa.Routes do
         {:error, :not_found}
 
       snapshot ->
-        case Map.fetch(snapshot.by_id, id) do
-          {:ok, route} -> {:ok, route}
-          :error -> {:error, :not_found}
-        end
+        fetch(snapshot, id)
     end
   end
 
@@ -177,11 +181,14 @@ defmodule Ankusa.Routes do
           | {:error, {:conflict, String.t()}}
           | {:error, :too_many_routes | :store_unavailable}
   def create(instance, attrs) do
-    with {:ok, route} <- Route.from_attrs(attrs),
-         {:ok, snapshot} <- writable_snapshot(instance),
-         :ok <- unique_id(snapshot, route),
-         :ok <- no_conflict(snapshot, route) do
-      put(route, Store.insert(instance, route))
+    with {:ok, route} <- Route.from_attrs(attrs) do
+      write(instance, fn ->
+        with {:ok, snapshot} <- writable_snapshot(instance),
+             :ok <- unique_id(snapshot, route),
+             :ok <- no_conflict(snapshot, route) do
+          put(route, Store.insert(instance, route, snapshot.version))
+        end
+      end)
     end
   end
 
@@ -197,20 +204,23 @@ defmodule Ankusa.Routes do
           | {:error, {:conflict, String.t()}}
           | {:error, :too_many_routes | :store_unavailable}
   def replace(instance, id, attrs) do
-    with {:ok, route} <- Route.from_attrs(attrs, id: id),
-         {:ok, snapshot} <- writable_snapshot(instance),
-         :ok <- no_conflict(snapshot, route) do
-      case Map.fetch(snapshot.by_id, id) do
-        {:ok, existing} ->
-          # The stored route is what gets returned: `inserted_at` is the one the
-          # route already had, and the caller has to be told that, not the
-          # timestamp this call happened to mint.
-          stored = %{route | inserted_at: existing.inserted_at}
-          put(stored, Store.replace(instance, stored))
+    with {:ok, route} <- Route.from_attrs(attrs, id: id) do
+      write(instance, fn ->
+        with {:ok, snapshot} <- writable_snapshot(instance),
+             :ok <- no_conflict(snapshot, route) do
+          case Map.fetch(snapshot.by_id, id) do
+            {:ok, existing} ->
+              # The stored route is what gets returned: `inserted_at` is the one the
+              # route already had, and the caller has to be told that, not the
+              # timestamp this call happened to mint.
+              stored = %{route | inserted_at: existing.inserted_at}
+              put(stored, Store.replace(instance, stored, snapshot.version))
 
-        :error ->
-          put(route, Store.insert(instance, route))
-      end
+            :error ->
+              put(route, Store.insert(instance, route, snapshot.version))
+          end
+        end
+      end)
     end
   end
 
@@ -226,15 +236,20 @@ defmodule Ankusa.Routes do
           | {:error, {:conflict, String.t()}}
           | {:error, :not_found | :too_many_routes | :store_unavailable}
   def update(instance, id, patch) do
-    with {:ok, existing} <- get(instance, id),
-         {:ok, patch} <- patch_attrs(patch),
-         attrs = Map.merge(attrs_of(existing), patch),
-         {:ok, route} <- Route.from_attrs(attrs, id: id),
-         route = %{route | inserted_at: existing.inserted_at},
-         {:ok, snapshot} <- writable_snapshot(instance),
-         :ok <- no_conflict(snapshot, route) do
-      put(route, Store.replace(instance, route))
-    end
+    # The route being patched and the conflict check both come from ONE snapshot:
+    # reading them separately would let a concurrent writer slip between the two
+    # reads and have its change overwritten by this merge.
+    write(instance, fn ->
+      with {:ok, snapshot} <- writable_snapshot(instance),
+           {:ok, existing} <- fetch(snapshot, id),
+           {:ok, patch} <- patch_attrs(patch),
+           attrs = Map.merge(attrs_of(existing), patch),
+           {:ok, route} <- Route.from_attrs(attrs, id: id),
+           route = %{route | inserted_at: existing.inserted_at},
+           :ok <- no_conflict(snapshot, route) do
+        put(route, Store.replace(instance, route, snapshot.version))
+      end
+    end)
   end
 
   @doc "Delete a route definition."
@@ -299,6 +314,7 @@ defmodule Ankusa.Routes do
   """
   @spec validate_config!(Ankusa.Config.t()) :: :ok
   def validate_config!(%Ankusa.Config{routes: routes}) do
+    validate_enabled!(routes.enabled)
     validate_limits!(routes)
     validate_cache!(routes.cache)
     validate_store!(routes.store)
@@ -321,7 +337,7 @@ defmodule Ankusa.Routes do
   # IP question (the dry run's "which rule" answer), and the matched route's id
   # even when its own rules rejected the sender — that is the case an operator
   # most needs named.
-  defp evaluate(instance, method, segments, ip) do
+  defp evaluate(instance, method, segments, ip, cache? \\ true) do
     case snapshot(instance) do
       # No route table loaded: routes are on with nothing to match, so nothing
       # is allowed. The guard logs a warning and rejects the same way.
@@ -342,7 +358,7 @@ defmodule Ankusa.Routes do
 
           {:allow, _rule} ->
             cache_config = Ankusa.config(instance).routes.cache
-            {match, cached} = route_match(instance, table, cache_config, method, segments)
+            {match, cached} = route_match(instance, table, cache_config, method, segments, cache?)
 
             case match do
               {:reject, reason} ->
@@ -383,11 +399,21 @@ defmodule Ankusa.Routes do
     end
   end
 
-  # Route matching only — never IP. The cache key is
-  # `{version, method, segments}`, so a mutation makes every entry unreachable
-  # instead of having to delete them.
-  defp route_match(instance, table, cache_config, method, segments) do
-    case Cache.lookup(instance, table.version, method, segments) do
+  # Route matching only — never IP. The cache key is `{epoch, method, segments}`
+  # and every published snapshot has a fresh epoch, so a mutation makes every
+  # entry unreachable instead of having to delete them. A dry run passes
+  # `cache?: false`: it must not read an answer another request cached, and it
+  # must not spend cache entries on paths only an operator probed.
+  defp route_match(instance, table, cache_config, method, segments, cache?) do
+    if cache? and Cache.cacheable?(segments) do
+      cached_match(instance, table, cache_config, method, segments)
+    else
+      {scan(table.patterns, method, segments), false}
+    end
+  end
+
+  defp cached_match(instance, table, cache_config, method, segments) do
+    case Cache.lookup(instance, table.epoch, method, segments) do
       {:ok, decision} ->
         {decision, true}
 
@@ -396,7 +422,7 @@ defmodule Ankusa.Routes do
 
         Cache.store(
           instance,
-          table.version,
+          table.epoch,
           method,
           segments,
           decision,
@@ -434,9 +460,9 @@ defmodule Ankusa.Routes do
   defp ttl(%{negative_ttl_ms: ttl_ms}, {:reject, _reason}), do: ttl_ms
 
   # A CIDR membership test without bit math: `cidr` carries `first`/`last` as
-  # `:inet` tuples, and Erlang term order compares 4-tuples against 4-tuples and
-  # 8-tuples against 8-tuples (a 4-tuple and an 8-tuple are never `>=`/`<=` each
-  # other, so cross-family comparisons are always false).
+  # `:inet` tuples, and Erlang term order compares tuples by size first, then
+  # element by element. A 4-tuple is therefore below every 8-tuple, so across
+  # families one of the two bounds always fails and the test is always false.
   defp contains?(cidr, ip), do: ip >= cidr.first and ip <= cidr.last
 
   defp find_rule(rules, ip), do: Enum.find(rules, &contains?(&1.cidr, ip))
@@ -458,7 +484,7 @@ defmodule Ankusa.Routes do
 
   defp do_dry_run(instance, method, segments, ip) do
     %{decision: decision, ip_rule: ip_rule, route_id: route_id} =
-      evaluate(instance, method, segments, ip)
+      evaluate(instance, method, segments, ip, false)
 
     {verdict, reason} =
       case decision do
@@ -503,9 +529,30 @@ defmodule Ankusa.Routes do
   defp put(route, :ok), do: {:ok, route}
   defp put(_route, {:error, reason}), do: {:error, reason}
 
+  # Run one validate-then-write attempt, and run it again if the store says the
+  # table moved under it (`:stale`): the store has already published the newer
+  # snapshot by then, so the next attempt validates against what is really there.
+  defp write(instance, attempt \\ 1, fun) do
+    case fun.() do
+      {:error, :stale} when attempt < @max_attempts ->
+        write(instance, attempt + 1, fun)
+
+      {:error, :stale} ->
+        Logger.warning(
+          "[ankusa] a route write lost #{@max_attempts} races in a row; answering " <>
+            "store_unavailable so the caller retries"
+        )
+
+        {:error, :store_unavailable}
+
+      result ->
+        result
+    end
+  end
+
   # A store that has not published a table cannot be written through: there is no
-  # version for the decision cache to key on, and nothing to check a conflict
-  # against. That is the transient store error, not a crash.
+  # version to validate against, and nothing to check a conflict against. That is
+  # the transient store error, not a crash.
   defp writable_snapshot(instance) do
     case snapshot(instance) do
       nil -> {:error, :store_unavailable}
@@ -518,6 +565,13 @@ defmodule Ankusa.Routes do
 
   defp unique_id(snapshot, route) do
     if Map.has_key?(snapshot.by_id, route.id), do: {:error, {:conflict, route.id}}, else: :ok
+  end
+
+  defp fetch(snapshot, id) do
+    case Map.fetch(snapshot.by_id, id) do
+      {:ok, route} -> {:ok, route}
+      :error -> {:error, :not_found}
+    end
   end
 
   # Two *enabled* routes collide when they capture the same request class: the
@@ -555,6 +609,12 @@ defmodule Ankusa.Routes do
   end
 
   # ── boot validation internals ───────────────────────────────────────────────
+
+  defp validate_enabled!(enabled) do
+    unless is_boolean(enabled) do
+      raise ArgumentError, "routes.enabled must be true or false, got #{inspect(enabled)}"
+    end
+  end
 
   defp validate_limits!(routes) do
     unless is_integer(routes.max_routes) and routes.max_routes >= 1 do
@@ -609,9 +669,9 @@ defmodule Ankusa.Routes do
     end
 
     Enum.each(proxies, fn cidr ->
-      case CIDR.parse(cidr) do
-        %CIDR{} -> :ok
-        {:error, _} -> raise ArgumentError, not_a_cidr("trusted_proxies", cidr)
+      case Net.parse_cidr(cidr) do
+        {:ok, _parsed} -> :ok
+        {:error, message} -> raise ArgumentError, not_a_cidr("trusted_proxies", cidr, message)
       end
     end)
   end
@@ -666,7 +726,7 @@ defmodule Ankusa.Routes do
     end
   end
 
-  defp not_a_cidr(key, cidr) do
-    "routes.#{key} entries must be CIDRs, got #{inspect(cidr)}"
+  defp not_a_cidr(key, cidr, message) do
+    "routes.#{key} entries must be CIDRs, got #{inspect(cidr)}: #{message}"
   end
 end
