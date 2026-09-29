@@ -1,9 +1,10 @@
-"""Admin client for Ankusa's tenant-scoped webhook sources.
+"""Client for Ankusa's tenant-scoped webhook sources.
 
 ``Ankusa.Admin.Router`` (its own port, 4002) exposes a small JSON API for
-managing a tenant's ingest sources: list, get, create, update, delete. A tenant is a
-santati team slug and a source id is ``"<tenant>.<name>"`` -- this client
-speaks in those terms and builds the paths for you.
+managing a tenant's ingest sources: list, get, create, update, delete. A
+tenant is the operator's own customer identifier and a source id is
+``"<tenant>.<name>"``; this client speaks in those terms and builds the paths
+for you.
 
 The router does no authentication (by design, like the rest of this port),
 and every source it returns has its secrets redacted (``secret``,
@@ -11,6 +12,10 @@ and every source it returns has its secrets redacted (``secret``,
 ...). So a ``Source`` read back here is never useful for editing: resending
 its ``verify`` map is not the same as resending the stored secret. Callers
 that hold the secret supply it through ``SourceSpec``.
+
+Only ``^[A-Za-z0-9_-]{1,64}$`` tenants and names are accepted, and both are
+checked before any path is built, so a caller-supplied name cannot escape its
+tenant through URL normalization.
 
 ``expected_version`` is an optional safety latch: when set, the first API call
 fetches ``GET /health`` once, compares its ``"version"`` field against the
@@ -22,134 +27,30 @@ cached value without another request.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
 
 import httpx
+
+from .errors import (
+    SourceConflictError,
+    SourceInvalidError,
+    SourceNotFoundError,
+    SourceStoreReadOnlyError,
+    SourcesUnavailableError,
+    VersionMismatchError,
+)
+from .spec import Source, SourceSpec
+
+__all__ = ["SourcesClient"]
 
 # The same rule `Ankusa.ClaimCheck.Ref` uses for its tenant. Anything outside
 # it is rejected before a path is built: httpx normalizes dot segments, so an
 # unvalidated "../" would escape the tenant scope before the server sees it.
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-__all__ = [
-    "AdminClient",
-    "AdminError",
-    "AdminUnavailableError",
-    "Source",
-    "SourceConflictError",
-    "SourceInvalidError",
-    "SourceNotFoundError",
-    "SourceSpec",
-    "SourceStoreReadOnlyError",
-    "VersionMismatchError",
-]
 
-
-class AdminError(Exception):
-    """Base for every error the admin client raises.
-
-    Every subclass carries the HTTP ``status`` and decoded ``body`` of the
-    response that produced it (both ``None`` when no response was involved,
-    e.g. a transport failure).
-    """
-
-    status: int | None = None
-    body: Any = None
-
-    def __init__(self, message: str, status: int | None = None, body: Any = None) -> None:
-        super().__init__(message)
-        self.status = status
-        self.body = body
-
-
-class SourceNotFoundError(AdminError):
-    """``404``: no such source for this tenant."""
-
-
-class SourceConflictError(AdminError):
-    """``409 source_exists``: a source with that name already exists."""
-
-
-class SourceStoreReadOnlyError(AdminError):
-    """``409 source_store_read_only``: the deployment's source store is a
-    static seed, so writes are impossible."""
-
-
-class SourceInvalidError(AdminError):
-    """``400``: bad tenant, bad source name, or a spec the server rejected.
-
-    ``.message`` is the server's own ``message`` (for a bad spec) or the
-    ``error`` code (for a bad tenant/name, which has no message).
-    """
-
-    message: str
-
-    def __init__(self, message: str, status: int | None = None, body: Any = None) -> None:
-        super().__init__(message, status, body)
-        self.message = message
-
-
-class AdminUnavailableError(AdminError):
-    """The admin API is unreachable, timed out, or answered ``5xx``. Safe to retry."""
-
-
-class VersionMismatchError(AdminError):
-    """``GET /health`` reported a version other than ``expected_version``."""
-
-
-@dataclass(frozen=True)
-class SourceSpec:
-    """The writable fields of a source, as submitted to ``POST``/``PUT``.
-
-    ``verify`` is optional (absent means ``{"type": "none"}`` on the server);
-    ``sinks`` is required and must be non-empty -- the server validates all of
-    this exactly as the YAML config does.
-    """
-
-    sinks: list[dict[str, Any]]
-    verify: dict[str, Any] | None = None
-    on_verify_failure: str | None = None
-
-    def to_json(self) -> dict[str, Any]:
-        """The JSON body for a create/update, omitting unset (``None``) fields."""
-        body: dict[str, Any] = {"sinks": self.sinks}
-        if self.verify is not None:
-            body["verify"] = self.verify
-        if self.on_verify_failure is not None:
-            body["on_verify_failure"] = self.on_verify_failure
-        return body
-
-
-@dataclass(frozen=True)
-class Source:
-    """A stored source as the admin API reports it: redacted spec plus the
-    derived identity fields."""
-
-    tenant: str
-    name: str
-    source_id: str
-    ingest_path: str
-    verify: dict[str, Any]
-    on_verify_failure: str | None
-    sinks: list[dict[str, Any]]
-
-    @classmethod
-    def from_json(cls, data: Mapping[str, Any]) -> Source:
-        return cls(
-            tenant=data["tenant"],
-            name=data["name"],
-            source_id=data["source_id"],
-            ingest_path=data["ingest_path"],
-            verify=data.get("verify") or {"type": "none"},
-            on_verify_failure=data.get("on_verify_failure"),
-            sinks=list(data.get("sinks") or []),
-        )
-
-
-class AdminClient:
+class SourcesClient:
     """Manage a deployment's tenant-scoped sources via ``Ankusa.Admin.Router``."""
 
     def __init__(
@@ -268,7 +169,7 @@ class AdminClient:
         response = self._request("GET", "/health")
         status = response.status_code
         if status != 200:
-            raise AdminUnavailableError(
+            raise SourcesUnavailableError(
                 f"ankusa admin API health check failed ({status}): {_error_body(response)!r}",
                 status,
                 _error_body(response),
@@ -276,12 +177,12 @@ class AdminClient:
         try:
             data = response.json()
         except ValueError as err:
-            raise AdminUnavailableError(
+            raise SourcesUnavailableError(
                 f"ankusa admin API health check returned a non-JSON body ({status})"
             ) from err
         version = data.get("version")
         if not isinstance(version, str):
-            raise AdminUnavailableError(
+            raise SourcesUnavailableError(
                 f"ankusa admin API health check returned no version ({status}): {data!r}"
             )
         return version
@@ -296,7 +197,7 @@ class AdminClient:
         try:
             return self._http.request(method, path, json=json)
         except httpx.HTTPError as err:
-            raise AdminUnavailableError(f"ankusa admin API unreachable: {err}") from err
+            raise SourcesUnavailableError(f"ankusa admin API unreachable: {err}") from err
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         status = response.status_code
@@ -313,7 +214,8 @@ class AdminClient:
                     f"source store is read-only ({status}): {body!r}", status, body
                 )
             raise SourceConflictError(f"source already exists ({status}): {body!r}", status, body)
-        raise AdminUnavailableError(f"ankusa admin API error ({status}): {body!r}", status, body)
+        raise SourcesUnavailableError(f"ankusa admin API error ({status}): {body!r}", status, body)
+
 
 
 def _error_body(response: httpx.Response) -> Any:

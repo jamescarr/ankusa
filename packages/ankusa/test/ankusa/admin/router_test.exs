@@ -318,7 +318,8 @@ defmodule Ankusa.Admin.RouterTest do
 
   test "writing a source against a read-only store is 409", %{inst: inst} do
     # The module-level setup configures the default read-only (Static) store.
-    conn = call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
+    conn =
+      call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
 
     assert conn.status == 409
     assert %{"error" => "source_store_read_only"} = JSON.decode!(conn.resp_body)
@@ -345,7 +346,9 @@ defmodule Ankusa.Admin.RouterTest do
     end
 
     test "create, then list, then get one source", %{inst: inst} do
-      conn = call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
+      conn =
+        call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
+
       assert conn.status == 201
       created = JSON.decode!(conn.resp_body)
 
@@ -353,6 +356,7 @@ defmodule Ankusa.Admin.RouterTest do
       assert created["name"] == "billing"
       assert created["source_id"] == "acme.billing"
       assert created["ingest_path"] == "/webhooks/acme.billing"
+
       assert created["verify"] == %{
                "type" => "hmac",
                "secret" => "[REDACTED]",
@@ -375,11 +379,21 @@ defmodule Ankusa.Admin.RouterTest do
 
     test "list is sorted by name and scoped to its tenant", %{inst: inst} do
       for name <- ~w(zebra apple mango) do
-        assert call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => name}))).status ==
+        assert call(
+                 inst,
+                 :post,
+                 "/v1/tenants/acme/sources",
+                 JSON.encode!(spec(%{"name" => name}))
+               ).status ==
                  201
       end
 
-      assert call(inst, :post, "/v1/tenants/beta/sources", JSON.encode!(spec(%{"name" => "apple"}))).status ==
+      assert call(
+               inst,
+               :post,
+               "/v1/tenants/beta/sources",
+               JSON.encode!(spec(%{"name" => "apple"}))
+             ).status ==
                201
 
       assert %{"entries" => entries} =
@@ -509,7 +523,13 @@ defmodule Ankusa.Admin.RouterTest do
     test "DELETE removes the source and it disappears from the list", %{inst: inst} do
       body = JSON.encode!(spec(%{"name" => "billing"}))
       assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
-      assert call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "other"}))).status == 201
+
+      assert call(
+               inst,
+               :post,
+               "/v1/tenants/acme/sources",
+               JSON.encode!(spec(%{"name" => "other"}))
+             ).status == 201
 
       conn = call(inst, :delete, "/v1/tenants/acme/sources/billing")
       assert conn.status == 204
@@ -577,7 +597,8 @@ defmodule Ankusa.Admin.RouterTest do
     end
 
     test "a body over 64 KiB is 400 invalid_source", %{inst: inst} do
-      oversized = JSON.encode!(spec(%{"name" => "billing", "padding" => String.duplicate("x", 70_000)}))
+      oversized =
+        JSON.encode!(spec(%{"name" => "billing", "padding" => String.duplicate("x", 70_000)}))
 
       conn = call(inst, :post, "/v1/tenants/acme/sources", oversized)
       assert conn.status == 400

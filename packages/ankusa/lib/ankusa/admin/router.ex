@@ -223,7 +223,12 @@ defmodule Ankusa.Admin.Router do
           # Identity lives in the URL, so a `name` key smuggled into the body is
           # dropped before validation (the store drops `tenant` too).
           spec = Map.delete(body, "name")
-          put_source(conn, 200, Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :update))
+
+          put_source(
+            conn,
+            200,
+            Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :update)
+          )
         end)
     end
   end

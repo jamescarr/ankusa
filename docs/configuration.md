@@ -61,6 +61,7 @@ Every top-level section, with its keys and defaults:
 | `wal` | `type` (`disk`) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
+| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 
 `storage.s3`/`storage.gcs` are read only when the matching
@@ -146,6 +147,8 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+| `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
+| `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_WAL_TYPE` | `wal.type` (`disk`) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
@@ -215,7 +218,19 @@ config :ankusa,
     retention_days: nil,
     sweep_interval_ms: 3_600_000
   },
-  admin: %{enabled: false, port: 4002}
+  admin: %{enabled: false, port: 4002},
+  routes: %{
+    enabled: false,
+    max_routes: 10_000,
+    store: {Ankusa.Routes.Store.ETS, []},
+    cache: %{max_size: 50_000, ttl_ms: 30_000, negative_ttl_ms: 5_000, gc_interval_ms: 60_000},
+    trusted_proxies: [],
+    ip_rules: %{default: :allow, rules: []},
+    admin: %{port: 4003},
+    log_sample: 100,
+    ip_denied_status: 403,
+    seed: []
+  }
 ```
 
 | Key | Default | Meaning |
@@ -249,6 +264,16 @@ config :ankusa,
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
+| `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
+| `routes.max_routes` | `10_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. |
+| `routes.store` | `{Ankusa.Routes.Store.ETS, []}` | `{module, opts}` implementing `Ankusa.Routes.Store`. `Ankusa.Routes.Store.Redis` (package `ankusa_redis`) shares definitions across nodes. |
+| `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. `ttl_ms` must stay under `gc_interval_ms`. |
+| `routes.trusted_proxies` | `[]` | CIDRs whose peers may set `X-Forwarded-For`. Empty means the header is never read. |
+| `routes.ip_rules` | `%{default: :allow, rules: []}` | Ordered global rules, first match wins, plus the `default` when none match. |
+| `routes.admin.port` | `4003` | The management API's own Bandit port. Unauthenticated by design, same as `admin.port`; front it with your own proxy or network policy. |
+| `routes.log_sample` | `100` | 1 in N rejections is logged at `:debug`; `0` disables it. |
+| `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. |
+| `routes.seed` | `[]` | Route definitions loaded at boot (see below). |
 
 #### The admin API
 
@@ -259,6 +284,90 @@ With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 roles. It is **unauthenticated by design**: put it behind your own proxy, SSO,
 or network policy. The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
+
+#### Route management
+
+**Off by default, and off means "capture everything".** With `routes.enabled:
+true` the edge becomes deny-by-default: a `POST` is captured only if it passes
+the IP rules **and** its method and normalized path match an enabled route.
+Anything else is answered `404` (`403` for an IP denial, unless
+`ip_denied_status: 404`) and never reaches the WAL — no record, no dispatch, no
+delivery.
+
+Path patterns, no regex:
+
+| Pattern | Matches |
+| --- | --- |
+| `/hooks/stripe` | exactly that path |
+| `/hooks/:tenant/github` | one segment in the middle, any value |
+| `/hooks/shopify/*` | one **or more** remaining segments (`/hooks/shopify` itself does not match) |
+
+Requests are normalized before matching, and hardening is part of the contract:
+a percent-encoded slash (`%2F`) and a `.`/`..` segment are rejections, not
+segment boundaries or paths to resolve.
+
+**IP rules.** `routes.ip_rules` is an ordered list (`%{action: :allow | :deny,
+cidr: "10.0.0.0/8"}`) with a `default` for the unmatched case; the first match
+wins. A route may declare its own `ip_rules`, which *replace* the global list for
+that route — that is how one provider is pinned to its published ranges while a
+global ban list still applies everywhere else. A global `deny` always wins.
+
+Client addresses come from the socket peer. `X-Forwarded-For` is read **only**
+when the peer is inside `routes.trusted_proxies`; from anyone else the header is
+ignored, and one unparseable entry discards the whole header. IPv4-mapped IPv6
+addresses (`::ffff:1.2.3.4`) are matched as IPv4.
+
+**Definitions.** `ankusa`'s default store keeps them in this node's memory, which
+is enough for a single node — pair it with `routes.seed`, which loads at boot
+(and only at boot: a route deleted through the API is not resurrected by a
+restart). To share definitions across edge nodes, use the `ankusa_redis` package:
+
+```yaml
+routes:
+  enabled: true
+  store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes}
+```
+
+Every node with the same `namespace` enforces the same routes: writes bump a
+version counter and publish it, each node reloads on the broadcast, and a
+periodic tick (`tick_ms`, default 30s) is the safety net for a missed one. A
+node keeps serving its in-memory snapshot through a Redis outage; only writes
+report `503 store_unavailable`.
+
+**Management API**, on `routes.admin.port` (its own listener, never the ingest
+port). **Unauthenticated by design** — the same stance as the operator admin
+API (`admin.port`): Ankusa doesn't know what auth scheme a deployment wants,
+so it doesn't pick one for you. Front this port with your own proxy, mesh, or
+network policy before exposing it. The HTTP contract is the `routes` tag of
+[`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
+examples included — and
+[`test/ankusa/routes/router_openapi_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/test/ankusa/routes/router_openapi_test.exs)
+executes those examples against the implementation, so the document and the code
+cannot drift apart:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/admin/routes?enabled=&limit=&cursor=` | list, id-ordered, cursor-paginated |
+| `POST` / `PUT` / `PATCH` / `DELETE` | `/admin/routes[/:id]` | create, replace, update, delete |
+| `GET` / `PUT` | `/admin/ip-rules` | the global rules and default |
+| `POST` | `/admin/routes/test` | dry run: `{method, path, ip}` → decision, reason, route id, and the rule that decided it |
+| `GET` | `/health` | `{status, routes}` |
+
+A route is `{id, path, methods: [POST], enabled, ip_rules, metadata,
+inserted_at, updated_at}`. Ids are lowercase slugs, `path`/`id` are immutable
+under `PATCH` (moving a route changes what it captures — that is a `PUT`), and
+two enabled routes may not share a path and method. `POST /admin/routes/test`
+answers "why was this rejected" without capturing anything, so a route change
+can be checked before it goes live.
+
+> **Rejections are not retried by Ankusa.** Some providers retry any `4xx`, some
+> give up, and some disable an endpoint after enough failures — the provider's
+> own policy decides, and `403`/`404` are the only signals it gets. Dry-run the
+> change first.
+
+Rejections are logged at `:debug`, sampled at `routes.log_sample` (1 in N, `0`
+for silent), and emit `[:ankusa, :routes, :reject]`; captures emit
+`[:ankusa, :routes, :match]` with `%{instance, route_id, cached}`.
 
 ### Configuring a source
 

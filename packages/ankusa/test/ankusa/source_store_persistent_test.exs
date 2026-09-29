@@ -210,7 +210,9 @@ defmodule Ankusa.SourceStorePersistentTest do
 
   test "a seeded source is never deletable" do
     {config, _pid} =
-      start_store(sources: %{"acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]})
+      start_store(
+        sources: %{"acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]}
+      )
 
     instance = config.instance
 
@@ -390,7 +392,9 @@ defmodule Ankusa.SourceStorePersistentTest do
 
   test "seeds are readable and listed on list/1 but are read-only and unlisted by tenant" do
     {config, _pid} =
-      start_store(sources: %{"acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]})
+      start_store(
+        sources: %{"acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]}
+      )
 
     instance = config.instance
 
@@ -406,7 +410,9 @@ defmodule Ankusa.SourceStorePersistentTest do
              SourceStore.put(instance, "acme", "billing", @spec_map, :create)
 
     assert message =~ "read-only"
-    assert {:error, :invalid, _} = SourceStore.put(instance, "acme", "billing", @log_spec, :update)
+
+    assert {:error, :invalid, _} =
+             SourceStore.put(instance, "acme", "billing", @log_spec, :update)
   end
 
   # ── validation ──────────────────────────────────────────────────────────────
@@ -448,13 +454,13 @@ defmodule Ankusa.SourceStorePersistentTest do
   # ── helpers ─────────────────────────────────────────────────────────────────
 
   defp start_store(overrides \\ []) do
-    store_opts = Keyword.merge([decoder: &decoder/2], Keyword.take(overrides, [:sources, :decoder]))
+    store_opts =
+      Keyword.merge([decoder: &decoder/2], Keyword.take(overrides, [:sources, :decoder]))
+
     overrides = Keyword.drop(overrides, [:sources, :decoder])
 
     config =
-      test_config(
-        Keyword.merge([source_store: {Persistent, store_opts}], overrides)
-      )
+      test_config(Keyword.merge([source_store: {Persistent, store_opts}], overrides))
 
     put_config(config)
     {:ok, pid} = Persistent.start_link(config)

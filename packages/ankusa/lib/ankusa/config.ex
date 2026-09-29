@@ -65,7 +65,41 @@ defmodule Ankusa.Config do
             },
             # operator HTTP API + Prometheus /metrics, unauthenticated; off by
             # default for embedded use
-            admin: %{enabled: false, port: 4002}
+            admin: %{enabled: false, port: 4002},
+            # route management: the allowlist guard plus its admin API. Off by
+            # default, and off means "capture every POST", as it always has. On
+            # means deny-by-default: a request is captured only if it matches an
+            # enabled route and passes the IP rules.
+            routes: %{
+              enabled: false,
+              # a hard cap on definitions; nothing is ever evicted
+              max_routes: 10_000,
+              # {module, opts} implementing Ankusa.Routes.Store
+              store: {Ankusa.Routes.Store.ETS, []},
+              # the decision cache (see Ankusa.Routes.Cache); gc_interval_ms
+              # must stay above ttl_ms, or the adapter's generational sweep can
+              # evict an entry before its own TTL expires
+              cache: %{
+                max_size: 50_000,
+                ttl_ms: 30_000,
+                negative_ttl_ms: 5_000,
+                gc_interval_ms: 60_000
+              },
+              # CIDRs whose peers may set X-Forwarded-For (see Ankusa.Net.ClientIP)
+              trusted_proxies: [],
+              # global rules: a floor. A route's own ip_rules replace this list
+              ip_rules: %{default: :allow, rules: []},
+              # its own listener; unauthenticated by design, same stance as
+              # the operator admin API — front it with your own proxy or
+              # network policy
+              admin: %{port: 4003},
+              # 1 in log_sample rejections is logged at :debug (0 = silent)
+              log_sample: 100,
+              # 403, or 404 for uniformity with :no_route
+              ip_denied_status: 403,
+              # route attrs (maps or keyword lists) loaded at boot
+              seed: []
+            }
 
   @type t :: %__MODULE__{}
 
@@ -105,8 +139,12 @@ defmodule Ankusa.Config do
 
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
-  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:admin`) over
-  the defaults.
+  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:admin`,
+  `:routes`) over the defaults.
+
+  `:routes` is nested one level deeper than the rest (`:routes` has its own
+  `:cache`, `:ip_rules`, and `:admin` sections), so `put_routes/2` merges those
+  too — `routes.cache.max_size` keeps the other cache keys.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
@@ -123,6 +161,9 @@ defmodule Ankusa.Config do
 
           Map.put(acc, k, v)
 
+        k == :routes ->
+          put_routes(acc, v)
+
         k in [:batcher, :dispatch, :storage, :claim_check, :admin] ->
           put_section(acc, k, v)
 
@@ -136,23 +177,67 @@ defmodule Ankusa.Config do
   end
 
   defp put_section(acc, k, v) do
-    cond do
-      is_map(v) -> merge_section(acc, k, Map.new(v))
-      Keyword.keyword?(v) -> merge_section(acc, k, Map.new(v))
-      true -> raise ArgumentError, "Ankusa.Config #{k} must be a map or keyword list"
-    end
+    Map.put(acc, k, merge_known!(Map.get(acc, k), v, to_string(k)))
   end
 
-  defp merge_section(acc, k, v) do
-    defaults = Map.get(acc, k)
+  defp merge_known!(defaults, value, dotted_name) do
+    incoming =
+      case value do
+        v when is_map(v) ->
+          Map.new(v)
 
-    Enum.each(Map.keys(v), fn nk ->
-      unless Map.has_key?(defaults, nk) do
-        raise ArgumentError, "unknown Ankusa.Config key: #{k}.#{nk}"
+        v when is_list(v) ->
+          if Keyword.keyword?(v),
+            do: Map.new(v),
+            else:
+              raise(
+                ArgumentError,
+                "Ankusa.Config #{dotted_name} must be a map or keyword list"
+              )
+
+        _ ->
+          raise ArgumentError, "Ankusa.Config #{dotted_name} must be a map or keyword list"
       end
+
+    Enum.each(Map.keys(incoming), fn k ->
+      unless Map.has_key?(defaults, k),
+        do: raise(ArgumentError, "unknown Ankusa.Config key: #{dotted_name}.#{k}")
     end)
 
-    Map.put(acc, k, Map.merge(defaults, v))
+    Map.merge(defaults, incoming)
+  end
+
+  # Sections of :routes that hold their own keys; everything else is a scalar
+  # or a list. A single-level merge would let `routes.cache.max_size` replace
+  # the whole cache map, silently dropping the TTLs.
+  @routes_sections [:cache, :ip_rules, :admin]
+
+  defp put_routes(acc, v) do
+    routes = section_map(v, "routes")
+
+    merged =
+      Enum.reduce(routes, acc.routes, fn {k, value}, routes ->
+        cond do
+          k in @routes_sections ->
+            Map.put(routes, k, merge_known!(routes[k], value, "routes.#{k}"))
+
+          Map.has_key?(routes, k) ->
+            Map.put(routes, k, value)
+
+          true ->
+            raise ArgumentError, "unknown Ankusa.Config key: routes.#{k}"
+        end
+      end)
+
+    %{acc | routes: merged}
+  end
+
+  defp section_map(value, key) do
+    cond do
+      is_map(value) -> Map.new(value)
+      Keyword.keyword?(value) -> Map.new(value)
+      true -> raise ArgumentError, "Ankusa.Config #{key} must be a map or keyword list"
+    end
   end
 
   @doc "Absolute path for an instance-scoped data sub-directory."

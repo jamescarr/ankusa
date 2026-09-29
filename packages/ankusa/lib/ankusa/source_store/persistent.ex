@@ -89,7 +89,8 @@ defmodule Ankusa.SourceStore.Persistent do
 
   @impl true
   def init(%Config{source_store: {__MODULE__, opts}} = config) do
-    table = :ets.new(table(config.instance), [:named_table, :protected, :set, read_concurrency: true])
+    table =
+      :ets.new(table(config.instance), [:named_table, :protected, :set, read_concurrency: true])
 
     decoder = Keyword.get(opts, :decoder)
     seeds = Keyword.get(opts, :sources, %{})
@@ -111,8 +112,7 @@ defmodule Ankusa.SourceStore.Persistent do
     reply =
       cond do
         seed?(state.table, source_id) ->
-          {:error, :invalid,
-           "source #{source_id} is seeded from configuration and is read-only"}
+          {:error, :invalid, "source #{source_id} is seeded from configuration and is read-only"}
 
         not is_map(spec) ->
           {:error, :invalid, "spec must be a JSON object"}
@@ -131,8 +131,7 @@ defmodule Ankusa.SourceStore.Persistent do
     reply =
       cond do
         seed?(state.table, source_id) ->
-          {:error, :invalid,
-           "source #{source_id} is seeded from configuration and is read-only"}
+          {:error, :invalid, "source #{source_id} is seeded from configuration and is read-only"}
 
         is_nil(lookup_stored(state.table, tenant, name)) ->
           {:error, :not_found}
@@ -303,7 +302,9 @@ defmodule Ankusa.SourceStore.Persistent do
 
     case File.rename(path, target) do
       :ok ->
-        Logger.error("[ankusa] #{path}: unreadable, unparseable, or wrong shape; moved to #{target}")
+        Logger.error(
+          "[ankusa] #{path}: unreadable, unparseable, or wrong shape; moved to #{target}"
+        )
 
       {:error, reason} ->
         Logger.error(
@@ -348,8 +349,9 @@ defmodule Ankusa.SourceStore.Persistent do
     Enum.reject(orphans, fn orphan -> orphan_id(orphan) == superseded_id end)
   end
 
-  defp orphan_id(%{"tenant" => tenant, "name" => name}) when is_binary(tenant) and is_binary(name),
-    do: source_id(tenant, name)
+  defp orphan_id(%{"tenant" => tenant, "name" => name})
+       when is_binary(tenant) and is_binary(name),
+       do: source_id(tenant, name)
 
   defp orphan_id(_other), do: nil
 

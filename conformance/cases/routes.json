@@ -1,0 +1,371 @@
+{
+  "cases": [
+    {
+      "id": "routes.health.ok",
+      "feature": "routes.health",
+      "operation": "routes_health",
+      "input": {
+        "gateway": {"status": 200, "body": {"json": {"status": "ok", "routes": 3}}}
+      },
+      "expect": {
+        "ok": {"status": "ok", "routes": 3},
+        "requests": [{"method": "GET", "path": "/health"}]
+      }
+    },
+    {
+      "id": "routes.create.ok",
+      "feature": "routes.crud",
+      "operation": "routes_create",
+      "input": {
+        "gateway": {
+          "status": 201,
+          "body": {
+            "json": {
+              "id": "stripe",
+              "path": "/webhooks/stripe",
+              "methods": ["POST"],
+              "enabled": true,
+              "ip_rules": [],
+              "metadata": {},
+              "inserted_at": "2026-09-28T14:16:26Z",
+              "updated_at": "2026-09-28T14:16:26Z"
+            }
+          }
+        },
+        "input": {"path": "/webhooks/stripe"}
+      },
+      "expect": {
+        "ok": {
+          "id": "stripe",
+          "path": "/webhooks/stripe",
+          "methods": ["POST"],
+          "enabled": true,
+          "ip_rules": [],
+          "metadata": {},
+          "inserted_at": "2026-09-28T14:16:26Z",
+          "updated_at": "2026-09-28T14:16:26Z"
+        },
+        "requests": [{"method": "POST", "path": "/admin/routes"}]
+      }
+    },
+    {
+      "id": "routes.create.client_headers",
+      "feature": "routes.crud",
+      "operation": "routes_create",
+      "input": {
+        "client": {"headers": {"authorization": "Bearer t"}},
+        "gateway": {
+          "status": 201,
+          "body": {
+            "json": {
+              "id": "stripe",
+              "path": "/webhooks/stripe",
+              "methods": ["POST"],
+              "enabled": true,
+              "ip_rules": [],
+              "metadata": {},
+              "inserted_at": "2026-09-28T14:16:26Z",
+              "updated_at": "2026-09-28T14:16:26Z"
+            }
+          }
+        },
+        "input": {"path": "/webhooks/stripe"}
+      },
+      "expect": {
+        "ok": {
+          "id": "stripe",
+          "path": "/webhooks/stripe",
+          "methods": ["POST"],
+          "enabled": true,
+          "ip_rules": [],
+          "metadata": {},
+          "inserted_at": "2026-09-28T14:16:26Z",
+          "updated_at": "2026-09-28T14:16:26Z"
+        },
+        "requests": [{"method": "POST", "path": "/admin/routes", "headers": {"authorization": "Bearer t"}}]
+      }
+    },
+    {
+      "id": "routes.list.ok",
+      "feature": "routes.crud",
+      "operation": "routes_list",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "routes": [
+                {
+                  "id": "stripe",
+                  "path": "/webhooks/stripe",
+                  "methods": ["POST"],
+                  "enabled": true,
+                  "ip_rules": [],
+                  "metadata": {},
+                  "inserted_at": "2026-09-28T14:16:26Z",
+                  "updated_at": "2026-09-28T14:16:26Z"
+                }
+              ],
+              "next_cursor": null
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": {
+          "routes": [
+            {
+              "id": "stripe",
+              "path": "/webhooks/stripe",
+              "methods": ["POST"],
+              "enabled": true,
+              "ip_rules": [],
+              "metadata": {},
+              "inserted_at": "2026-09-28T14:16:26Z",
+              "updated_at": "2026-09-28T14:16:26Z"
+            }
+          ],
+          "next_cursor": null
+        },
+        "requests": [{"method": "GET", "path": "/admin/routes"}]
+      }
+    },
+    {
+      "id": "routes.get.ok",
+      "feature": "routes.crud",
+      "operation": "routes_get",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "id": "stripe",
+              "path": "/webhooks/stripe",
+              "methods": ["POST"],
+              "enabled": true,
+              "ip_rules": [],
+              "metadata": {},
+              "inserted_at": "2026-09-28T14:16:26Z",
+              "updated_at": "2026-09-28T14:16:26Z"
+            }
+          }
+        },
+        "id": "stripe"
+      },
+      "expect": {
+        "ok": {
+          "id": "stripe",
+          "path": "/webhooks/stripe",
+          "methods": ["POST"],
+          "enabled": true,
+          "ip_rules": [],
+          "metadata": {},
+          "inserted_at": "2026-09-28T14:16:26Z",
+          "updated_at": "2026-09-28T14:16:26Z"
+        },
+        "requests": [{"method": "GET", "path": "/admin/routes/stripe"}]
+      }
+    },
+    {
+      "id": "routes.replace.ok",
+      "feature": "routes.crud",
+      "operation": "routes_replace",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "id": "stripe",
+              "path": "/webhooks/stripe",
+              "methods": ["POST"],
+              "enabled": false,
+              "ip_rules": [],
+              "metadata": {"owner": "payments"},
+              "inserted_at": "2026-09-28T14:16:26Z",
+              "updated_at": "2026-09-28T14:16:31Z"
+            }
+          }
+        },
+        "id": "stripe",
+        "input": {"path": "/webhooks/stripe", "enabled": false, "metadata": {"owner": "payments"}}
+      },
+      "expect": {
+        "ok": {
+          "id": "stripe",
+          "path": "/webhooks/stripe",
+          "methods": ["POST"],
+          "enabled": false,
+          "ip_rules": [],
+          "metadata": {"owner": "payments"},
+          "inserted_at": "2026-09-28T14:16:26Z",
+          "updated_at": "2026-09-28T14:16:31Z"
+        },
+        "requests": [{"method": "PUT", "path": "/admin/routes/stripe"}]
+      }
+    },
+    {
+      "id": "routes.update.ok",
+      "feature": "routes.crud",
+      "operation": "routes_update",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "id": "stripe",
+              "path": "/webhooks/stripe",
+              "methods": ["POST"],
+              "enabled": true,
+              "ip_rules": [],
+              "metadata": {},
+              "inserted_at": "2026-09-28T14:16:26Z",
+              "updated_at": "2026-09-28T14:16:33Z"
+            }
+          }
+        },
+        "id": "stripe",
+        "patch": {"enabled": true}
+      },
+      "expect": {
+        "ok": {
+          "id": "stripe",
+          "path": "/webhooks/stripe",
+          "methods": ["POST"],
+          "enabled": true,
+          "ip_rules": [],
+          "metadata": {},
+          "inserted_at": "2026-09-28T14:16:26Z",
+          "updated_at": "2026-09-28T14:16:33Z"
+        },
+        "requests": [{"method": "PATCH", "path": "/admin/routes/stripe"}]
+      }
+    },
+    {
+      "id": "routes.delete.ok",
+      "feature": "routes.crud",
+      "operation": "routes_delete",
+      "input": {
+        "gateway": {"status": 204},
+        "id": "stripe"
+      },
+      "expect": {
+        "ok": null,
+        "requests": [{"method": "DELETE", "path": "/admin/routes/stripe"}]
+      }
+    },
+    {
+      "id": "routes.ip_rules.get.ok",
+      "feature": "routes.ip_rules",
+      "operation": "routes_ip_rules_get",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {"json": {"default": "deny", "rules": [{"action": "allow", "cidr": "203.0.113.0/24"}]}}
+        }
+      },
+      "expect": {
+        "ok": {"default": "deny", "rules": [{"action": "allow", "cidr": "203.0.113.0/24"}]},
+        "requests": [{"method": "GET", "path": "/admin/ip-rules"}]
+      }
+    },
+    {
+      "id": "routes.ip_rules.put.ok",
+      "feature": "routes.ip_rules",
+      "operation": "routes_ip_rules_put",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {"json": {"default": "deny", "rules": [{"action": "allow", "cidr": "203.0.113.0/24"}]}}
+        },
+        "rules": {"default": "deny", "rules": [{"action": "allow", "cidr": "203.0.113.0/24"}]}
+      },
+      "expect": {
+        "ok": {"default": "deny", "rules": [{"action": "allow", "cidr": "203.0.113.0/24"}]},
+        "requests": [{"method": "PUT", "path": "/admin/ip-rules"}]
+      }
+    },
+    {
+      "id": "routes.test.ok",
+      "feature": "routes.dry_run",
+      "operation": "routes_test",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "decision": "allow",
+              "reason": "matched",
+              "route_id": "stripe",
+              "ip_rule": null
+            }
+          }
+        },
+        "request": {"method": "POST", "path": "/webhooks/stripe", "ip": "203.0.113.7"}
+      },
+      "expect": {
+        "ok": {"decision": "allow", "reason": "matched", "route_id": "stripe", "ip_rule": null},
+        "requests": [{"method": "POST", "path": "/admin/routes/test"}]
+      }
+    },
+    {
+      "id": "routes.error.not_found",
+      "feature": "routes.errors",
+      "operation": "routes_get",
+      "input": {
+        "gateway": {"status": 404, "body": {"json": {"error": "not_found"}}},
+        "id": "nope"
+      },
+      "expect": {
+        "error": {"class": "RouteNotFoundError", "retryable": false}
+      }
+    },
+    {
+      "id": "routes.error.duplicate",
+      "feature": "routes.errors",
+      "operation": "routes_create",
+      "input": {
+        "gateway": {"status": 409, "body": {"json": {"error": "duplicate_route", "conflicting_id": "stripe"}}},
+        "input": {"id": "other", "path": "/webhooks/stripe"}
+      },
+      "expect": {
+        "error": {"class": "RoutesRejectedError", "retryable": false, "code": "duplicate_route", "conflicting_id": "stripe"}
+      }
+    },
+    {
+      "id": "routes.error.invalid",
+      "feature": "routes.errors",
+      "operation": "routes_create",
+      "input": {
+        "gateway": {"status": 400, "body": {"json": {"error": "invalid_route", "field": "path", "message": "must start with \"/\""}}},
+        "input": {"path": "hooks/x"}
+      },
+      "expect": {
+        "error": {"class": "RoutesRejectedError", "retryable": false, "code": "invalid_route", "field": "path", "message": "must start with \"/\""}
+      }
+    },
+    {
+      "id": "routes.error.store_unavailable",
+      "feature": "routes.errors",
+      "operation": "routes_create",
+      "input": {
+        "gateway": {"status": 503, "body": {"json": {"error": "store_unavailable"}}},
+        "input": {"path": "/hooks/x"}
+      },
+      "expect": {
+        "error": {"class": "RoutesUnavailableError", "retryable": true}
+      }
+    },
+    {
+      "id": "routes.error.unreachable",
+      "feature": "routes.errors",
+      "operation": "routes_create",
+      "input": {
+        "gateway": {"unreachable": true},
+        "input": {"path": "/hooks/x"}
+      },
+      "expect": {
+        "error": {"class": "RoutesUnavailableError", "retryable": true}
+      }
+    }
+  ]
+}

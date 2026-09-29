@@ -1,0 +1,157 @@
+{
+  "cases": [
+    {
+      "id": "admin.health.ok",
+      "feature": "admin.operations",
+      "operation": "admin_health",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {"json": {"status": "ok", "instance": "default", "roles": ["edge", "dispatch", "storage"]}}
+        }
+      },
+      "expect": {
+        "ok": {"status": "ok", "instance": "default", "roles": ["edge", "dispatch", "storage"]},
+        "requests": [{"method": "GET", "path": "/health"}]
+      }
+    },
+    {
+      "id": "admin.metrics.ok",
+      "feature": "admin.operations",
+      "operation": "admin_metrics",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {"content-type": "text/plain; version=0.0.4"},
+          "body": {"text": "ankusa_ingest_requests_total{instance=\"default\"} 1\n"}
+        }
+      },
+      "expect": {
+        "ok": {"text": "ankusa_ingest_requests_total{instance=\"default\"} 1\n"},
+        "requests": [{"method": "GET", "path": "/metrics"}]
+      }
+    },
+    {
+      "id": "admin.config.ok",
+      "feature": "admin.operations",
+      "operation": "admin_config",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {"json": {"instance": "default", "roles": ["edge"], "port": 4000}}
+        }
+      },
+      "expect": {
+        "ok": {"instance": "default", "roles": ["edge"], "port": 4000},
+        "requests": [{"method": "GET", "path": "/v1/config"}]
+      }
+    },
+    {
+      "id": "admin.dlq.list.ok",
+      "feature": "admin.operations",
+      "operation": "admin_dlq_list",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "total": 1,
+              "entries": [
+                {
+                  "id": "0194f4a0-0000-7000-8000-000000000000",
+                  "source_id": "demo",
+                  "tenant_id": null,
+                  "seq": 5,
+                  "received_at": 1720000000000,
+                  "dead_lettered_at": 1720000001000,
+                  "size": 12,
+                  "content_type": "application/json",
+                  "reason": "{:sink, :status, 503}"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": {
+          "total": 1,
+          "entries": [
+            {
+              "id": "0194f4a0-0000-7000-8000-000000000000",
+              "source_id": "demo",
+              "tenant_id": null,
+              "seq": 5,
+              "received_at": 1720000000000,
+              "dead_lettered_at": 1720000001000,
+              "size": 12,
+              "content_type": "application/json",
+              "reason": "{:sink, :status, 503}"
+            }
+          ]
+        },
+        "requests": [{"method": "GET", "path": "/v1/dlq"}]
+      }
+    },
+    {
+      "id": "admin.dlq.replay.ok",
+      "feature": "admin.operations",
+      "operation": "admin_dlq_replay",
+      "input": {
+        "gateway": {"status": 200, "body": {"json": {"replayed": 2}}},
+        "filter": {"source_id": "demo"}
+      },
+      "expect": {
+        "ok": {"replayed": 2},
+        "requests": [{"method": "POST", "path": "/v1/dlq/replay"}]
+      }
+    },
+    {
+      "id": "admin.quarantine.ok",
+      "feature": "admin.operations",
+      "operation": "admin_quarantine",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "entries": [
+                {"id": "0194f4a0-0000-7000-8000-000000000001", "source_id": "demo", "received_at": 1720000000000, "reason": ":no_match"}
+              ]
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": {
+          "entries": [
+            {"id": "0194f4a0-0000-7000-8000-000000000001", "source_id": "demo", "received_at": 1720000000000, "reason": ":no_match"}
+          ]
+        },
+        "requests": [{"method": "GET", "path": "/v1/quarantine"}]
+      }
+    },
+    {
+      "id": "admin.error.role_not_enabled",
+      "feature": "admin.errors",
+      "operation": "admin_dlq_list",
+      "input": {
+        "gateway": {"status": 409, "body": {"json": {"error": "role_not_enabled", "role": "dispatch"}}}
+      },
+      "expect": {
+        "error": {"class": "RoleNotEnabledError", "retryable": false, "role": "dispatch"}
+      }
+    },
+    {
+      "id": "admin.error.unreachable",
+      "feature": "admin.errors",
+      "operation": "admin_health",
+      "input": {
+        "gateway": {"unreachable": true}
+      },
+      "expect": {
+        "error": {"class": "AdminUnavailableError", "retryable": true}
+      }
+    }
+  ]
+}

@@ -35,6 +35,8 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
   | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+  | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
+  | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
   | `ANKUSA_WAL_TYPE` | `wal.type` |
   | `ANKUSA_STORAGE_TYPE` | `storage.type` |
   | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
@@ -55,7 +57,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin batcher dispatch wal storage claim_check sources source_store)
+  @root_keys ~w(node log http admin routes batcher dispatch wal storage claim_check sources source_store)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -69,6 +71,13 @@ defmodule AnkusaServer.Config do
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes)
   @source_store_keys ~w(type)
+  @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
+  @routes_store_keys ~w(type url namespace tick_ms)
+  @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
+  @routes_ip_rules_keys ~w(default rules)
+  @routes_rule_keys ~w(action cidr)
+  @routes_admin_keys ~w(port)
+  @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
   @source_keys ~w(tenant on_verify_failure verify sinks)
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
@@ -81,6 +90,8 @@ defmodule AnkusaServer.Config do
   @nats_auth_keys ~w(username password token nkey_seed jwt)
 
   @roles ~w(edge dispatch storage claim_check)
+  @routes_store_types ~w(ets redis)
+  @ip_rule_actions ~w(allow deny)
   @verify_types ~w(none stripe github standard_webhooks shopify slack hmac)
   @scheme_parses ~w(whole csv_pairs space_versions)
   @scheme_hashes ~w(sha256 sha512 sha1)
@@ -216,6 +227,8 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_LOG_LEVEL", ["log", "level"]},
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
+    {"ANKUSA_ROUTES_ENABLED", ["routes", "enabled"]},
+    {"ANKUSA_ROUTES_STORE_URL", ["routes", "store", "url"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
@@ -269,6 +282,7 @@ defmodule AnkusaServer.Config do
       node_section(doc) ++
         http_section(doc) ++
         admin_section(doc) ++
+        routes_section(doc) ++
         batcher_section(doc) ++
         dispatch_section(doc) ++
         wal_section(doc) ++
@@ -279,6 +293,10 @@ defmodule AnkusaServer.Config do
     try do
       config = Ankusa.Config.new(opts)
       Ankusa.ClaimCheck.validate_config!(config)
+      # The image validates what core validates, at the same moment: a route
+      # config that would refuse to boot must fail `check-config` too, with the
+      # same message.
+      Ankusa.Routes.validate_config!(config)
       config
     rescue
       error in ArgumentError -> raise ConfigError, message: error.message
@@ -470,6 +488,142 @@ defmodule AnkusaServer.Config do
         |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", ["claim_check"]))
         |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
     ]
+  end
+
+  # ── routes ──────────────────────────────────────────────────────────────────
+
+  # Route management is off unless the file says otherwise, and every key is
+  # optional: an enabled section with just a token is a working config (deny
+  # everything, until an operator posts a route).
+  defp routes_section(doc) do
+    path = ["routes"]
+    routes = section!(doc, "routes", @routes_keys, [])
+
+    [
+      routes:
+        []
+        |> put_opt(:enabled, bool_opt(routes, "enabled", path))
+        |> put_opt(:max_routes, int_opt(routes, "max_routes", path))
+        |> put_opt(:log_sample, int_opt(routes, "log_sample", path))
+        |> put_opt(:ip_denied_status, int_opt(routes, "ip_denied_status", path))
+        |> put_opt(:trusted_proxies, trusted_proxies(routes, path))
+        |> put_opt(:store, routes_store(routes, path))
+        |> put_opt(:cache, routes_cache(routes, path))
+        |> put_opt(:ip_rules, routes_ip_rules(routes, path))
+        |> put_opt(:admin, routes_admin(routes, path))
+        |> put_opt(:seed, routes_seed(routes, path))
+    ]
+  end
+
+  # An empty list is "no proxies" — the default — not the empty-list error the
+  # shared helper raises for roles and broker lists.
+  defp trusted_proxies(routes, path) do
+    case Map.get(routes, "trusted_proxies") do
+      nil -> nil
+      [] -> nil
+      value -> string_list!(value, path ++ ["trusted_proxies"])
+    end
+  end
+
+  # A URL with no `type` means Redis: the ETS store has no URL, so a file that
+  # sets one has said what it wants.
+  defp routes_store(routes, path) do
+    store = section!(routes, "store", @routes_store_keys, path)
+    path = path ++ ["store"]
+
+    type =
+      enum!(
+        store["type"] || (store["url"] && "redis") || "ets",
+        @routes_store_types,
+        path ++ ["type"]
+      )
+
+    case type do
+      "ets" ->
+        {Ankusa.Routes.Store.ETS, []}
+
+      "redis" ->
+        {Ankusa.Routes.Store.Redis,
+         [url: required_string!(store, "url", path)]
+         |> put_opt(:namespace, string_opt(store, "namespace", path))
+         |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))}
+    end
+  end
+
+  defp routes_cache(routes, path) do
+    cache = section!(routes, "cache", @routes_cache_keys, path)
+    path = path ++ ["cache"]
+
+    []
+    |> put_opt(:max_size, int_opt(cache, "max_size", path))
+    |> put_opt(:ttl_ms, int_opt(cache, "ttl_ms", path))
+    |> put_opt(:negative_ttl_ms, int_opt(cache, "negative_ttl_ms", path))
+    |> put_opt(:gc_interval_ms, int_opt(cache, "gc_interval_ms", path))
+  end
+
+  defp routes_admin(routes, path) do
+    admin = section!(routes, "admin", @routes_admin_keys, path)
+    path = path ++ ["admin"]
+
+    []
+    |> put_opt(:port, int_opt(admin, "port", path))
+  end
+
+  defp routes_ip_rules(routes, path) do
+    ip_rules = section!(routes, "ip_rules", @routes_ip_rules_keys, path)
+    path = path ++ ["ip_rules"]
+
+    []
+    |> put_opt(:default, atom_enum_opt(ip_rules, "default", @ip_rule_actions, path))
+    |> put_opt(:rules, rules_list(ip_rules, path))
+  end
+
+  defp rules_list(ip_rules, path) do
+    case Map.get(ip_rules, "rules") do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        list
+        |> Enum.with_index()
+        |> Enum.map(fn {rule, index} -> rule!(rule, path ++ ["rules", index]) end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["rules"], "a list of rules", other)
+    end
+  end
+
+  defp rule!(rule, path) do
+    rule = section!(rule, @routes_rule_keys, path)
+
+    %{
+      action:
+        String.to_atom(
+          enum!(required_string!(rule, "action", path), @ip_rule_actions, path ++ ["action"])
+        ),
+      cidr: required_string!(rule, "cidr", path)
+    }
+  end
+
+  # A seed entry is a route definition; its own fields are validated by core
+  # (`Ankusa.Routes.validate_config!/1`), which owns the route grammar. Here it
+  # only has to be a mapping of known keys.
+  defp routes_seed(routes, path) do
+    case Map.get(routes, "seed") do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        list
+        |> Enum.with_index()
+        |> Enum.map(fn {seed, index} ->
+          section!(seed, @routes_seed_keys, path ++ ["seed", index])
+        end)
+
+      other ->
+        raise ConfigError, message: type_error(path ++ ["seed"], "a list of routes", other)
+    end
   end
 
   # ── sources ─────────────────────────────────────────────────────────────────

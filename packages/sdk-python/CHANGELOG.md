@@ -10,17 +10,40 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `admin.AdminClient`, a client for `Ankusa.Admin.Router` (port 4002): the
+- `sources.SourcesClient`, a client for `Ankusa.Admin.Router` (port 4002): the
   tenant-scoped source API's `server_version`, `list_sources`, `get_source`,
-  `create_source`, and `update_source`. Built on `httpx`, with an injectable
-  `transport` for tests.
-- `admin.SourceSpec` (the writable spec, `to_json()` omits unset fields) and
-  `admin.Source` (a stored, redacted source).
-- An `admin.AdminError` hierarchy (`SourceNotFoundError`,
+  `create_source`, `update_source`, and `delete_source`. Built on `httpx`, with
+  an injectable `transport` for tests.
+- `sources.SourceSpec` (the writable spec, `to_json()` omits unset fields) and
+  `sources.Source` (a stored, redacted source).
+- A `sources.SourcesError` hierarchy (`SourceNotFoundError`,
   `SourceConflictError`, `SourceStoreReadOnlyError`, `SourceInvalidError`,
-  `AdminUnavailableError`, `VersionMismatchError`), each carrying `.status`
+  `SourcesUnavailableError`, `VersionMismatchError`), each carrying `.status`
   and `.body`. `expected_version` makes the first API call verify
   `GET /health ["version"]` once and cache it.
+- Tenants and source names are checked against `^[A-Za-z0-9_-]{1,64}$` before
+  any path is built, so a caller-supplied name cannot escape its tenant through
+  URL normalization.
+
+## [0.2.4] - 2026-09-28
+
+### Added
+
+- `RoutesClient(base_url, headers=None, timeout=10.0)`: the route-management
+  client (`routes.admin.port`) — `health`, `list_routes`, `create_route`,
+  `get_route`, `replace_route`, `update_route`, `delete_route`, `get_ip_rules`,
+  `put_ip_rules`, `test_route` — with a `RoutesError` hierarchy
+  (`RouteNotFoundError`, `RoutesRejectedError`, `RoutesUnavailableError`).
+- `AdminClient(base_url, headers=None, timeout=10.0)`: the operator client
+  (`admin.port`) — `health`, `metrics`, `config`, `list_dead_letters`,
+  `replay_dead_letters`, `list_quarantined` — with an `AdminError` hierarchy
+  (`RoleNotEnabledError`, `AdminRejectedError`, `AdminUnavailableError`).
+
+### Fixed
+
+- `parse_headers` no longer raises `ValueError` for an `x-ankusa-seq` value
+  that `str.isdigit()` accepts but `int()` rejects (e.g. `²`); a sequence
+  number now requires all-ASCII digits and is `None` otherwise.
 
 ## [0.2.1] - 2026-09-28
 
@@ -56,5 +79,7 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...HEAD
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.3.0
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...HEAD
+[0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.1.0

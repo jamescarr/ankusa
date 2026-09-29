@@ -21,9 +21,32 @@ info:
     this node does not run answers `409 role_not_enabled` so an operator can
     tell "wrong node" from "nothing there". Scrape every node's admin port to
     see the fleet.
+
+    ## Two listeners
+
+    Everything here is served by `Ankusa.Admin.Router` on `admin.port` (default
+    4002) **except** the `routes` tag, which is `Ankusa.Routes.Router` on its own
+    listener (`routes.admin.port`, default 4003): managing routes is an operator
+    action, and it should share neither the ingest port nor the operator API's
+    port. Both listeners are unauthenticated by design — see above.
+
+    The `routes` endpoints edit the table the *edge* enforces, so they exist only
+    on a node with `routes.enabled: true` and the `:edge` role.
+
+    The `routes` examples in this document are a sequence, not a set: they create
+    one route (`stripe`), check the listener's health, list, read, and dry-run it,
+    replace the global IP rules, then replace, patch, and delete the route.
+    `priv/openapi` is the source of truth — `test/ankusa/routes/router_openapi_test.exs`
+    builds each request from these examples and asserts the response against the
+    documented schema and example, so the code is tested against this document,
+    not the other way round.
 servers:
   - url: http://localhost:4002
     description: Local development listener (default `admin.port`).
+  - url: http://localhost:4003
+    description: |
+      Route-management listener (default `routes.admin.port`). Only the `routes`
+      tag is served here, plus `GET /health`.
 security: []
 tags:
   - name: operations
@@ -32,19 +55,49 @@ tags:
     description: Inspect and replay dead-lettered hooks. `:dispatch` role only.
   - name: quarantine
     description: Recent quarantined hooks. `:edge` role only.
+  - name: routes
+    description: |
+      Route definitions and the global IP rules, on the `routes.admin.port`
+      listener. Requires `routes.enabled: true` and the `:edge` role. A route is
+      a **capture gate**, not an identity: it decides whether a request is
+      captured, while `Ankusa.RouteResolver` and the source store still decide
+      which source and tenant it belongs to.
 paths:
   /health:
+    servers:
+      - url: http://localhost:4002
+        description: Operator API listener (default `admin.port`).
+      - url: http://localhost:4003
+        description: |
+          Route-management listener (default `routes.admin.port`), only with
+          routes enabled.
     get:
       operationId: getHealth
       tags: [operations]
       summary: Liveness probe
+      description: |
+        Both listeners answer this path, with a different body: the operator API
+        reports the instance and the roles this node runs, the route-management
+        API reports the size of the route table it is enforcing.
       responses:
         '200':
-          description: The listener is up.
+          description: |
+            The listener is up. On `admin.port` the body is
+            `{status, instance, roles}`; on `routes.admin.port` it is
+            `{status, routes}`.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Health'
+                oneOf:
+                  - $ref: '#/components/schemas/Health'
+                  - $ref: '#/components/schemas/RoutesHealth'
+              examples:
+                operatorPort:
+                  summary: On `admin.port`
+                  value: {status: ok, instance: default, roles: [edge, dispatch, storage]}
+                routesPort:
+                  summary: On `routes.admin.port`
+                  value: {status: ok, routes: 1}
   /metrics:
     get:
       operationId: getMetrics
@@ -183,6 +236,374 @@ paths:
           $ref: '#/components/responses/InvalidFilter'
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
+  /admin/routes/test:
+    servers:
+      - url: http://localhost:4003
+        description: Route-management listener (default `routes.admin.port`).
+    post:
+      operationId: testRoute
+      tags: [routes]
+      summary: Dry run — what would happen to this request?
+      description: |
+        Runs the same decision the guard runs, and reports it: the global IP
+        rules first, then route matching, then the matched route's own rules.
+        Nothing is captured, no counter moves, and the answer is not cached —
+        this is the endpoint that turns "why was my webhook rejected" into one
+        call, and it is worth using before changing any route.
+
+        A rejection's `ip_rule` is the rule that *decided*, and is `null` when
+        the decision came from a list's `default` (no rule matched) or when the
+        reason is not `ip_denied`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DryRunRequest'
+            example: {method: POST, path: /webhooks/stripe, ip: 203.0.113.7}
+      responses:
+        '200':
+          description: 'The decision, and what produced it: `decision: deny` with the `reason` that denied it.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DryRunResult'
+              examples:
+                matched:
+                  summary: 'An enabled route matched — here, after its own rule allowed the address'
+                  value:
+                    decision: allow
+                    reason: matched
+                    route_id: stripe
+                    ip_rule: {action: allow, cidr: '203.0.113.0/24', scope: route}
+                matchedWithoutRouteRules:
+                  summary: The same decision with no rule behind it (a route whose `ip_rules` are empty)
+                  value: {decision: allow, reason: matched, route_id: stripe, ip_rule: null}
+                noRoute:
+                  summary: No route matches the path
+                  value: {decision: deny, reason: no_route, route_id: null, ip_rule: null}
+                methodMismatch:
+                  summary: The path matches, but the method does not
+                  value: {decision: deny, reason: method, route_id: null, ip_rule: null}
+                ipDeniedByRoute:
+                  summary: The matched route's own rule denied this address
+                  value:
+                    decision: deny
+                    reason: ip_denied
+                    route_id: stripe
+                    ip_rule: {action: allow, cidr: '203.0.113.0/24', scope: route}
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+  /admin/routes:
+    servers:
+      - url: http://localhost:4003
+        description: Route-management listener (default `routes.admin.port`).
+    get:
+      operationId: listRoutes
+      tags: [routes]
+      summary: List route definitions
+      description: |
+        Ordered by id, which is a total order over the slug alphabet and so also
+        a pagination cursor. `next_cursor` is `null` on the last page.
+      parameters:
+        - name: enabled
+          in: query
+          required: false
+          description: Filter by `enabled`. Anything other than `true`/`false` is `400 invalid_query`.
+          schema:
+            type: string
+            enum: ['true', 'false']
+          example: 'true'
+        - name: limit
+          in: query
+          required: false
+          description: Maximum routes per page. Clamped to 1..200.
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 200
+          example: 100
+        - name: cursor
+          in: query
+          required: false
+          description: The `next_cursor` of the previous page; returns ids greater than it.
+          schema:
+            type: string
+          example: checkout
+      responses:
+        '200':
+          description: One page of route definitions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoutePage'
+              examples:
+                oneRoute:
+                  summary: After creating `stripe`
+                  value:
+                    routes:
+                      - id: stripe
+                        path: /webhooks/stripe
+                        methods: [POST]
+                        enabled: true
+                        ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
+                        metadata: {owner: payments}
+                        inserted_at: '2026-09-28T14:16:26Z'
+                        updated_at: '2026-09-28T14:16:26Z'
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/InvalidQuery'
+    post:
+      operationId: createRoute
+      tags: [routes]
+      summary: Create a route definition
+      description: |
+        `id` is optional: without one, a lowercase ULID is generated. A taken id
+        is a `409 duplicate_route`, and an **enabled** route may not capture the
+        same normalized path and any of the same methods as another enabled
+        route (two disabled routes are free to collide — they capture nothing).
+        Past `routes.max_routes` the answer is `409 too_many_routes`; nothing is
+        ever evicted, because an evicted route would start rejecting real
+        webhooks.
+
+        Note the id `test` is reserved by `POST /admin/routes/test` (the dry
+        run), so that operation cannot *create* a route with that id — use
+        `PUT /admin/routes/test` for it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteInput'
+            example:
+              id: stripe
+              path: /webhooks/stripe
+              methods: [POST]
+              ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
+              metadata: {owner: payments}
+      responses:
+        '201':
+          description: The stored route, timestamps included.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                created:
+                  value:
+                    id: stripe
+                    path: /webhooks/stripe
+                    methods: [POST]
+                    enabled: true
+                    ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
+                    metadata: {owner: payments}
+                    inserted_at: '2026-09-28T14:16:26Z'
+                    updated_at: '2026-09-28T14:16:26Z'
+        '400':
+          $ref: '#/components/responses/InvalidRoute'
+        '409':
+          $ref: '#/components/responses/DuplicateRoute'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+  /admin/routes/{id}:
+    servers:
+      - url: http://localhost:4003
+        description: Route-management listener (default `routes.admin.port`).
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The route's id (a lowercase slug).
+        schema:
+          type: string
+        example: stripe
+    get:
+      operationId: getRoute
+      tags: [routes]
+      summary: Fetch one route definition
+      responses:
+        '200':
+          description: The route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                stripe:
+                  value:
+                    id: stripe
+                    path: /webhooks/stripe
+                    methods: [POST]
+                    enabled: true
+                    ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
+                    metadata: {owner: payments}
+                    inserted_at: '2026-09-28T14:16:26Z'
+                    updated_at: '2026-09-28T14:16:26Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: replaceRoute
+      tags: [routes]
+      summary: Replace a route definition
+      description: |
+        A full definition, `PUT`-idempotent: the `id` comes from the path (a body
+        `id` is ignored), `inserted_at` is preserved, and `updated_at` moves. A
+        `PUT` for an id that does not exist yet *creates* it, so the cap applies
+        to that case too.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteInput'
+            example:
+              path: /webhooks/stripe
+              methods: [POST]
+              enabled: false
+              ip_rules: []
+              metadata: {owner: payments, staging: true}
+      responses:
+        '200':
+          description: The stored route, with the `inserted_at` it already had.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                replaced:
+                  value:
+                    id: stripe
+                    path: /webhooks/stripe
+                    methods: [POST]
+                    enabled: false
+                    ip_rules: []
+                    metadata: {owner: payments, staging: true}
+                    inserted_at: '2026-09-28T14:16:26Z'
+                    updated_at: '2026-09-28T14:16:31Z'
+        '400':
+          $ref: '#/components/responses/InvalidRoute'
+        '409':
+          $ref: '#/components/responses/DuplicateRoute'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+    patch:
+      operationId: updateRoute
+      tags: [routes]
+      summary: Patch a route definition
+      description: |
+        Only `enabled`, `methods`, `ip_rules`, and `metadata` are patchable.
+        `path` and `id` are **immutable** here — moving a route changes which
+        requests it captures, which is a `PUT` (a full, reviewable definition),
+        not a patch — and answer `400 invalid_route` with
+        `message: "immutable; use PUT"`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoutePatch'
+            example: {enabled: true}
+      responses:
+        '200':
+          description: The patched route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                reenabled:
+                  value:
+                    id: stripe
+                    path: /webhooks/stripe
+                    methods: [POST]
+                    enabled: true
+                    ip_rules: []
+                    metadata: {owner: payments, staging: true}
+                    inserted_at: '2026-09-28T14:16:26Z'
+                    updated_at: '2026-09-28T14:16:33Z'
+        '400':
+          $ref: '#/components/responses/InvalidRoute'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/DuplicateRoute'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+    delete:
+      operationId: deleteRoute
+      tags: [routes]
+      summary: Delete a route definition
+      description: |
+        Immediate: the guard stops capturing the route on the next request, with
+        no cache TTL to wait out (the decision cache is keyed by the route
+        table's version). A `routes.seed` entry is not resurrected by a restart
+        — seeding happens only on a store's first boot.
+      responses:
+        '204':
+          description: Deleted. No body.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+  /admin/ip-rules:
+    servers:
+      - url: http://localhost:4003
+        description: Route-management listener (default `routes.admin.port`).
+    get:
+      operationId: getIpRules
+      tags: [routes]
+      summary: The global IP rules
+      responses:
+        '200':
+          description: The ordered global rules, and the `default` when none match.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IpRules'
+              examples:
+                empty:
+                  summary: 'The default: allow everything, no rules'
+                  value: {default: allow, rules: []}
+                pinned:
+                  summary: Deny by default, with one allowed range
+                  value:
+                    default: deny
+                    rules: [{action: allow, cidr: '203.0.113.0/24'}]
+    put:
+      operationId: putIpRules
+      tags: [routes]
+      summary: Replace the global IP rules
+      description: |
+        Ordered, first match wins, and `default` decides the case no rule
+        matched. These are a **floor**: a global `deny` always wins, including
+        over a route's own `allow`. CIDRs are parsed at write time, so a typo is
+        a `400` here rather than a silently-never-matching rule on the hot path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IpRules'
+            example:
+              default: deny
+              rules: [{action: allow, cidr: '203.0.113.0/24'}]
+      responses:
+        '200':
+          description: The stored rules, as parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IpRules'
+              examples:
+                pinned:
+                  value:
+                    default: deny
+                    rules: [{action: allow, cidr: '203.0.113.0/24'}]
+        '400':
+          $ref: '#/components/responses/InvalidIpRules'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
 components:
   schemas:
     Health:
@@ -288,8 +709,237 @@ components:
         replayed:
           type: integer
           description: Number of entries re-delivered.
+    RoutesHealth:
+      type: object
+      description: |
+        `GET /health` on the `routes.admin.port` listener: how many route
+        definitions this node is enforcing.
+      required: [status, routes]
+      properties:
+        status:
+          const: ok
+        routes:
+          type: integer
+          description: The number of route definitions in the table, enabled or not.
+          example: 1
+    IpRule:
+      type: object
+      description: One rule. `cidr` is parsed at write time, so an unparseable one is a `400`.
+      required: [action, cidr]
+      properties:
+        action:
+          type: string
+          enum: [allow, deny]
+        cidr:
+          type: string
+          description: |
+            An IPv4 or IPv6 network. A bare address is a full-length prefix
+            (`10.1.2.3` is `/32`). Families never cross: `0.0.0.0/0` matches only
+            IPv4, `::/0` only IPv6, and an IPv4-mapped client (`::ffff:10.1.2.3`)
+            is normalized to IPv4 before matching.
+          example: '203.0.113.0/24'
+    IpRules:
+      type: object
+      description: |
+        The global IP rules: a floor every route inherits. A route's own
+        `ip_rules` replace this list *for that route*, but a global `deny` has
+        already won by then.
+      required: [default, rules]
+      properties:
+        default:
+          type: string
+          description: Applied when no rule in `rules` matched.
+          enum: [allow, deny]
+        rules:
+          type: array
+          description: Ordered; the first match wins.
+          items:
+            $ref: '#/components/schemas/IpRule'
+    Route:
+      type: object
+      description: |
+        A route definition: the capture gate. It decides whether a request is
+        captured, not which source it belongs to.
+      required: [id, path, methods, enabled, ip_rules, metadata, inserted_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: |
+            A lowercase slug, `^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`, supplied
+            by the client or generated (a lowercase ULID). Immutable after
+            creation.
+          example: stripe
+        path:
+          type: string
+          description: |
+            A pattern, not a regex: `/`-separated segments, each a literal, a
+            `:param` (exactly one segment), or a trailing `*` wildcard (one or
+            more segments — `/hooks/shopify/*` does not match `/hooks/shopify`).
+            Requests are normalized before matching, and a percent-encoded slash
+            (`%2F`) or a `.`/`..` segment is a rejection, not a boundary.
+          example: /webhooks/stripe
+        methods:
+          type: array
+          description: The methods this route captures. Defaults to `[POST]`.
+          items:
+            type: string
+            pattern: '^[A-Z]+$'
+          example: [POST]
+        enabled:
+          type: boolean
+          description: |
+            A disabled route captures nothing — and is exempt from the duplicate
+            check, so a staged definition may sit next to a live one.
+        ip_rules:
+          type: array
+          description: |
+            Empty (the default) means the global list applies. Non-empty
+            **replaces** it for this route, and a client matching none of them is
+            denied: the point of pinning a provider's ranges is that anything
+            else is refused.
+          items:
+            $ref: '#/components/schemas/IpRule'
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Free-form JSON for the operator — an owner, a sender name.
+          example: {owner: payments}
+        inserted_at:
+          type: string
+          format: date-time
+          description: Set once, at creation. A `PUT` keeps it; a `PATCH` cannot touch it.
+          example: '2026-09-28T14:16:26Z'
+        updated_at:
+          type: string
+          format: date-time
+          example: '2026-09-28T14:16:26Z'
+    RouteInput:
+      type: object
+      description: |
+        A route definition as written. Unknown keys are a `400 invalid_route`
+        (`"unknown field"`), as are `inserted_at`/`updated_at`: an update cannot
+        forge its own history.
+      required: [path]
+      properties:
+        id:
+          type: string
+          description: Optional on create. On `PUT` the path's `id` wins.
+        path:
+          type: string
+          example: /webhooks/stripe
+        methods:
+          type: array
+          items:
+            type: string
+            pattern: '^[A-Z]+$'
+          default: [POST]
+        enabled:
+          type: boolean
+          default: true
+        ip_rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/IpRule'
+          default: []
+        metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+    RoutePatch:
+      type: object
+      description: |
+        Only these four fields are patchable. `path` and `id` answer
+        `400 invalid_route` with `message: "immutable; use PUT"`.
+      properties:
+        enabled:
+          type: boolean
+        methods:
+          type: array
+          items:
+            type: string
+            pattern: '^[A-Z]+$'
+        ip_rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/IpRule'
+        metadata:
+          type: object
+          additionalProperties: true
+    RoutePage:
+      type: object
+      required: [routes, next_cursor]
+      properties:
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Route'
+        next_cursor:
+          type: [string, 'null']
+          description: |
+            The last id of this page when another page exists — pass it back as
+            `cursor`. `null` on the last page.
+          example: null
+    DryRunRequest:
+      type: object
+      required: [method, path, ip]
+      properties:
+        method:
+          type: string
+          example: POST
+        path:
+          type: string
+          description: The request path as the client would send it, normalization included.
+          example: /webhooks/stripe
+        ip:
+          type: string
+          description: The client address. `X-Forwarded-For` resolution is the guard's job, not the dry run's.
+          example: 203.0.113.7
+    DryRunIpRule:
+      type: object
+      description: The rule that produced an IP decision, and the list it came from.
+      required: [action, cidr, scope]
+      properties:
+        action:
+          type: string
+          enum: [allow, deny]
+        cidr:
+          type: string
+          example: '203.0.113.0/24'
+        scope:
+          type: string
+          enum: [global, route]
+          description: |
+            `global` for `routes.ip_rules`, `route` for the matched route's own
+            list.
+    DryRunResult:
+      type: object
+      required: [decision, reason, route_id, ip_rule]
+      properties:
+        decision:
+          type: string
+          enum: [allow, deny]
+        reason:
+          type: string
+          enum: [matched, no_route, method, ip_denied]
+          description: |
+            `matched` is the only `allow`. `no_route` and `method` are both a
+            `404` to the sender, so a probe cannot learn which paths exist;
+            `ip_denied` is a `403` (or a `404` with
+            `routes.ip_denied_status: 404`).
+        route_id:
+          type: [string, 'null']
+          description: The matched route, when one matched — including when its own rules then denied the address.
+          example: stripe
+        ip_rule:
+          oneOf:
+            - $ref: '#/components/schemas/DryRunIpRule'
+            - type: 'null'
+          description: |
+            The rule that decided an IP question, or `null` when none did (the
+            list's `default` decided) or when the reason is not `ip_denied`.
     Error:
       type: object
+      description: The error shape every endpoint answers with, on every listener.
       required: [error]
       properties:
         error:
@@ -298,12 +948,32 @@ components:
             - not_found
             - invalid_filter
             - role_not_enabled
+            - invalid_route
+            - duplicate_route
+            - too_many_routes
+            - invalid_query
+            - invalid_ip_rules
+            - invalid_request
+            - invalid_body
+            - store_unavailable
         field:
           type: string
-          description: Present on `invalid_filter`; the offending parameter or `body`.
+          description: |
+            The offending field: on `invalid_filter` the parameter or `body`; on
+            the route errors the route field (`path`, `ip_rules`, …), the
+            parameter (`enabled`, `limit`), or the dry-run field.
+        message:
+          type: string
+          description: Human-readable reason, on the `invalid_*` codes that carry one.
         role:
           type: string
           description: Present on `role_not_enabled`; the role this node does not run.
+        conflicting_id:
+          type: string
+          description: Present on `duplicate_route`; the route already holding that path and method.
+        max_routes:
+          type: integer
+          description: Present on `too_many_routes`; the configured cap.
   responses:
     InvalidFilter:
       description: '`400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter, or `body`.'
@@ -317,3 +987,94 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    InvalidRoute:
+      description: '`400`. `invalid_route`: a route definition that would not mean what it says — a path that is not rooted or has an illegal segment, a non-boolean `enabled`, a bad CIDR, unknown fields, or `path`/`id` in a `PATCH`. `field` names it and `message` says why. Also `invalid_body` when the body never parsed.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unknownField:
+              value: {error: invalid_route, field: id, message: 'unknown field'}
+            unrootedPath:
+              value: {error: invalid_route, field: path, message: 'must start with "/"'}
+            badSegment:
+              value: {error: invalid_route, field: path, message: 'invalid segment "*"'}
+            immutablePath:
+              value: {error: invalid_route, field: path, message: 'immutable; use PUT'}
+            notJson:
+              summary: '`invalid_body` instead, when the body never parsed'
+              value: {error: invalid_body}
+    InvalidQuery:
+      description: '`400`. `invalid_query`: a `limit` that is not an integer, or an `enabled` that is neither `true` nor `false`. `field` names it.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            badLimit:
+              value: {error: invalid_query, field: limit}
+            badEnabled:
+              value: {error: invalid_query, field: enabled}
+    InvalidRequest:
+      description: '`400`. `invalid_request`: the dry run''s `method`, `path`, or `ip` is missing or unusable. `field` names it. Also `invalid_body` when the request body never parsed.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            badIp:
+              value: {error: invalid_request, field: ip, message: 'must be an IPv4 or IPv6 address'}
+            unmatchablePath:
+              value: {error: invalid_request, field: path, message: 'is not a matchable request path'}
+            missingMethod:
+              value: {error: invalid_request, field: method, message: 'is required and must be a string'}
+            notJson:
+              summary: '`invalid_body` instead, when the body never parsed'
+              value: {error: invalid_body}
+    InvalidIpRules:
+      description: '`400`. `invalid_ip_rules`: the rules are not a JSON object, an `action` is not `allow`/`deny`, or a `cidr` does not parse. `field` is `rules` (with the rule index in `message`) or `default`. Also `invalid_body` when the body never parsed.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            badCidr:
+              value: {error: invalid_ip_rules, field: rules, message: 'rule 0: invalid cidr "10.0.0.0/33"'}
+            badDefault:
+              value: {error: invalid_ip_rules, field: default, message: 'must be "allow" or "deny", got "maybe"'}
+            notJson:
+              summary: '`invalid_body` instead, when the body never parsed'
+              value: {error: invalid_body}
+    DuplicateRoute:
+      description: '`409`. `duplicate_route`: an enabled route already captures this path and one of these methods, or a `POST` names an id that is taken. `conflicting_id` is the route holding it. Also `too_many_routes`: the store is at `routes.max_routes`, and nothing is evicted to make room — delete a route instead.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            takenId:
+              value: {error: duplicate_route, conflicting_id: stripe}
+            samePathAndMethod:
+              value: {error: duplicate_route, conflicting_id: checkout}
+            atCap:
+              summary: '`too_many_routes` instead, when the cap is reached'
+              value: {error: too_many_routes, max_routes: 10000}
+    NotFound:
+      description: '`404`. `not_found`: no such route, or no such path on this listener. A method the path does not serve is also a `404`, deliberately — a probe cannot tell a missing path from a wrong method.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            noSuchRoute:
+              value: {error: not_found}
+    StoreUnavailable:
+      description: '`503`. `store_unavailable`: the route store could not be reached (a Redis store with Redis down). The definition was **not** written. Retry; reads keep working from this node''s in-memory snapshot either way.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            redisDown:
+              value: {error: store_unavailable}

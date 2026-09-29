@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="SDK feature parity: validate conformance/ and run every packages/sdk-* against its vectors"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+node conformance/check.mjs

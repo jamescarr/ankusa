@@ -14,6 +14,29 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   sources in a writable store and persists the ones created or updated through
   the admin API to `sources.json` on the data volume, so they survive a restart.
 
+## [0.2.4] - 2026-09-28
+
+### Added
+
+- A `routes:` section: `enabled`, `max_routes`, `store` (`type: ets`, or
+  `type: redis` with `url`/`namespace`/`tick_ms` — a `url` with no `type` means
+  redis), `cache`, `trusted_proxies`, `ip_rules`, `admin.port` (4003, its own
+  listener, unauthenticated by design — front it like the operator admin API's
+  `admin.port`), `log_sample`, `ip_denied_status`, and `seed`. `reference.yml`
+  documents the whole section, including the retry caveat for senders that
+  treat a `4xx` as retryable. Env overrides: `ANKUSA_ROUTES_ENABLED`,
+  `ANKUSA_ROUTES_STORE_URL`.
+- `ankusa_redis` in the image, so `store: {type: redis, url: ...}` shares route
+  definitions across edge nodes without a rebuild.
+- The boot banner reports `routes=off` or `routes=on:<store>`.
+
+### Changed
+
+- Config loading now runs core's `Ankusa.Routes.validate_config!/1`, so
+  `check-config` fails on a route config that would refuse to boot — an
+  unparseable CIDR, a seed that conflicts with itself or exceeds
+  `max_routes` — with the same message the server would exit with.
+
 ## [0.2.1] - 2026-09-28
 
 ### Added
@@ -56,5 +79,6 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...HEAD
+[0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...ankusa_server-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_server-v0.2.1

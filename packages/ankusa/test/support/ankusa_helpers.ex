@@ -1,6 +1,8 @@
 defmodule Ankusa.TestHelpers do
   @moduledoc "Shared helpers for framework tests."
 
+  import ExUnit.Callbacks
+
   alias Ankusa.Config
 
   @doc "A unique instance atom for isolation."
@@ -23,6 +25,39 @@ defmodule Ankusa.TestHelpers do
 
   @doc "Put config into persistent_term (needed before starting WAL-facade callers)."
   def put_config(config), do: Ankusa.put_config(config)
+
+  @doc "A free TCP port from a closed listener, for a test that needs one before Bandit binds."
+  def free_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false])
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
+  end
+
+  @doc """
+  Boot a routes-enabled `:edge` instance and return its config.
+
+  `routes_opts` is the keyword under `config.routes` (minus a nested `:admin`
+  list, which is merged over `port: 0`). `extra_opts` is merged into the
+  top-level config, so a caller can pass `source_store:` or the like.
+  """
+  def start_routes(routes_opts \\ [], extra_opts \\ []) do
+    {admin, routes_opts} = Keyword.pop(routes_opts, :admin, [])
+
+    config =
+      test_config(
+        Keyword.merge(extra_opts,
+          roles: [:edge],
+          routes:
+            routes_opts
+            |> Keyword.put_new(:enabled, true)
+            |> Keyword.put(:admin, Keyword.merge([port: 0], admin))
+        )
+      )
+
+    start_supervised!({Ankusa.Instance, config})
+    config
+  end
 
   @doc "Build a raw ingest request map for `Ankusa.Edge.Ingest`/router."
   def request(source_id, body, headers \\ []) do
