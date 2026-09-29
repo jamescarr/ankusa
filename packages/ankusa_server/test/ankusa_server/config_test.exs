@@ -352,6 +352,147 @@ defmodule AnkusaServer.ConfigTest do
     assert opts[:tick_ms] == 5000
   end
 
+  test "a url with type: ets is rejected instead of silently dropped" do
+    path = tmp_config("routes: {enabled: true, store: {type: ets, url: redis://cache:6379}}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(routes.store: "url" is only valid with type: redis)
+    assert error.message =~ "set type: redis or remove it"
+
+    # The env override is a url too, and the shipped reference.yml has
+    # `type: ets` live: setting only ANKUSA_ROUTES_STORE_URL must not look like
+    # it shares definitions with the rest of the fleet.
+    path = tmp_config("routes: {enabled: true, store: {type: ets}}\n")
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: path, env: %{"ANKUSA_ROUTES_STORE_URL" => "redis://from-env:6379"})
+      end
+
+    assert error.message =~ ~s(routes.store: "url" is only valid with type: redis)
+
+    # Absent and explicitly null are the same thing: not set.
+    path = tmp_config("routes: {enabled: true, store: {url: null}}\n")
+
+    assert Config.load!(path: path, env: %{}).config.routes.store ==
+             {Ankusa.Routes.Store.ETS, []}
+  end
+
+  test "namespace and tick_ms with an ets store are rejected, and all keys are named at once" do
+    path = tmp_config("routes: {enabled: true, store: {namespace: ankusa:routes}}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(routes.store: "namespace" is only valid with type: redis)
+
+    path = tmp_config("routes: {enabled: true, store: {tick_ms: 5000}}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(routes.store: "tick_ms" is only valid with type: redis)
+
+    path =
+      tmp_config(
+        "routes: {enabled: true, store: {type: ets, url: redis://cache:6379, tick_ms: 5000}}\n"
+      )
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s("url", "tick_ms" are only valid with type: redis)
+    assert error.message =~ "set type: redis or remove them"
+  end
+
+  test "type: redis without a url is rejected" do
+    path = tmp_config("routes: {enabled: true, store: {type: redis}}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(routes.store: missing required key "url")
+  end
+
+  test "an unknown store type lists the valid ones" do
+    path = tmp_config("routes: {enabled: true, store: {type: cluster}}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(routes.store.type: unknown value "cluster")
+    assert error.message =~ "ets, redis"
+  end
+
+  test "ANKUSA_ROUTES_ENABLED takes true/false in any case and nothing else" do
+    path = tmp_config("routes: {enabled: false}\n")
+
+    for value <- ["true", "TRUE", "True"] do
+      loaded = Config.load!(path: path, env: %{"ANKUSA_ROUTES_ENABLED" => value})
+      assert loaded.config.routes.enabled
+    end
+
+    for value <- ["false", "FALSE", "False"] do
+      loaded = Config.load!(path: path, env: %{"ANKUSA_ROUTES_ENABLED" => value})
+      refute loaded.config.routes.enabled
+    end
+
+    for value <- ["1", ""] do
+      error =
+        assert_raise ConfigError, fn ->
+          Config.load!(path: path, env: %{"ANKUSA_ROUTES_ENABLED" => value})
+        end
+
+      assert error.message == ~s(routes.enabled: expected a boolean, got #{inspect(value)})
+    end
+  end
+
+  test "an unknown ip_rules default or rule action is rejected by name" do
+    path = tmp_config("routes: {enabled: true, ip_rules: {default: block}}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(routes.ip_rules.default: unknown value "block")
+    assert error.message =~ "expected one of allow, deny"
+
+    path =
+      tmp_config("""
+      routes:
+        enabled: true
+        ip_rules:
+          rules:
+            - {action: drop, cidr: "10.0.0.0/8"}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(routes.ip_rules.rules[0].action: unknown value "drop")
+    assert error.message =~ "expected one of allow, deny"
+  end
+
+  test "routes: {enabled: true} keeps every core default" do
+    path = tmp_config("routes: {enabled: true}\n")
+
+    routes = Config.load!(path: path, env: %{}).config.routes
+
+    assert routes.enabled
+    assert routes.max_routes == 10_000
+    assert routes.store == {Ankusa.Routes.Store.ETS, []}
+    assert routes.admin == %{port: 4003}
+    assert routes.ip_denied_status == 403
+    assert routes.log_sample == 100
+    assert routes.trusted_proxies == []
+    assert routes.ip_rules == %{default: :allow, rules: []}
+
+    assert routes.cache == %{
+             max_size: 50_000,
+             ttl_ms: 30_000,
+             negative_ttl_ms: 5_000,
+             gc_interval_ms: 60_000
+           }
+  end
+
+  test "trusted_proxies takes a list or one comma-separated string" do
+    for value <- [~s(["10.0.0.0/8", "192.168.0.0/16"]), ~s("10.0.0.0/8, 192.168.0.0/16")] do
+      path = tmp_config("routes: {enabled: true, trusted_proxies: #{value}}\n")
+
+      assert Config.load!(path: path, env: %{}).config.routes.trusted_proxies ==
+               ["10.0.0.0/8", "192.168.0.0/16"]
+    end
+
+    # An empty list is "no proxies", the default — not the empty-list error.
+    path = tmp_config("routes: {enabled: true, trusted_proxies: []}\n")
+    assert Config.load!(path: path, env: %{}).config.routes.trusted_proxies == []
+  end
+
   test "the routes env overrides win over the file" do
     path =
       tmp_config("""

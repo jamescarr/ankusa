@@ -6,6 +6,23 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Fixed
+
+- `routes.store` no longer silently ignores `url`, `namespace` and `tick_ms`
+  when the resolved store is ETS: they are only valid with `type: redis`, and
+  setting one without it is a config error naming the key. `reference.yml`
+  ships `type: ets` live, so an operator who set only
+  `ANKUSA_ROUTES_STORE_URL` previously got a per-node store while believing the
+  fleet shared its route definitions.
+- The boot banner only prints `routes=on:<store>` when the route machinery
+  actually runs, i.e. `routes.enabled` on an `edge` node; otherwise it prints
+  `off` or `n/a (no edge role)`. It still prints the store type alone, never
+  `store.url`, which can carry a password.
+- The image `EXPOSE`s 4003, the route-management listener, and the README
+  documents that port (it listens only when `routes.enabled` is set on an
+  `edge` node), the two `ANKUSA_ROUTES_*` env overrides, and the store
+  type/url rule.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added

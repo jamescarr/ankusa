@@ -73,6 +73,8 @@ defmodule AnkusaServer.Config do
   @source_store_keys ~w(type)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms)
+  # Keys the Redis store owns; the ETS store must not silently drop them.
+  @routes_redis_only_keys ~w(url namespace tick_ms)
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
@@ -526,7 +528,10 @@ defmodule AnkusaServer.Config do
   end
 
   # A URL with no `type` means Redis: the ETS store has no URL, so a file that
-  # sets one has said what it wants.
+  # sets one has said what it wants. The other way round is a config error, not
+  # a silent drop: with `type: ets` live (as the shipped reference.yml has it) a
+  # fleet that only set a URL would leave every node with its own definitions
+  # while its operator believed they were shared.
   defp routes_store(routes, path) do
     store = section!(routes, "store", @routes_store_keys, path)
     path = path ++ ["store"]
@@ -540,6 +545,7 @@ defmodule AnkusaServer.Config do
 
     case type do
       "ets" ->
+        reject_redis_only_keys!(store, path)
         {Ankusa.Routes.Store.ETS, []}
 
       "redis" ->
@@ -547,6 +553,25 @@ defmodule AnkusaServer.Config do
          [url: required_string!(store, "url", path)]
          |> put_opt(:namespace, string_opt(store, "namespace", path))
          |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))}
+    end
+  end
+
+  defp reject_redis_only_keys!(store, path) do
+    case Enum.filter(@routes_redis_only_keys, &(Map.get(store, &1) != nil)) do
+      [] ->
+        :ok
+
+      [key] ->
+        raise ConfigError,
+          message:
+            "#{render_path(path)}: #{inspect(key)} is only valid with type: redis; " <>
+              "set type: redis or remove it"
+
+      keys ->
+        raise ConfigError,
+          message:
+            "#{render_path(path)}: #{Enum.map_join(keys, ", ", &inspect/1)} are only valid " <>
+              "with type: redis; set type: redis or remove them"
     end
   end
 

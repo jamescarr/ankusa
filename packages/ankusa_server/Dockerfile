@@ -45,10 +45,11 @@ ENV ANKUSA_CONFIG=/etc/ankusa/ankusa.yml ANKUSA_DATA_DIR=/var/lib/ankusa \
 
 VOLUME /var/lib/ankusa
 
-# 4000 ingest, 4001 claim check (:claim_check role), 4002 admin/metrics.
-# Publishing more than 4000 is a deliberate act: 4001 and 4002 are
-# unauthenticated (see README).
-EXPOSE 4000 4001 4002
+# 4000 ingest, 4001 claim check (:claim_check role), 4002 admin/metrics, 4003
+# route management (`routes.enabled` on an `edge` node; it does not listen
+# otherwise). Publishing more than 4000 is a deliberate act: 4001, 4002 and
+# 4003 are unauthenticated (see README).
+EXPOSE 4000 4001 4002 4003
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s \
   CMD curl -fsS "http://127.0.0.1:${ANKUSA_ADMIN_PORT:-4002}/health" || exit 1
