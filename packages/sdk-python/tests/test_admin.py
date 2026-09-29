@@ -291,7 +291,7 @@ def test_400_without_message_carries_the_error_code() -> None:
 
     with make_client(handler) as client:
         with pytest.raises(SourceInvalidError) as exc_info:
-            client.list_sources("bad tenant")
+            client.list_sources("acme")
     assert exc_info.value.status == 400
     assert exc_info.value.message == "invalid_tenant"
 
@@ -328,6 +328,74 @@ def test_every_error_is_an_admin_error() -> None:
         VersionMismatchError,
     ):
         assert issubclass(error, AdminError)
+
+
+# --- input validation ---------------------------------------------------------
+
+INVALID_IDS = ["..", "a/b", "a?b=1", "a#b", "a" * 65, ""]
+
+
+def _exploding_handler(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"a request was sent: {request.method} {request.url}")
+
+
+@pytest.mark.parametrize("value", INVALID_IDS)
+def test_every_method_rejects_an_invalid_tenant_without_a_request(value: str) -> None:
+    calls: list[Callable[[AdminClient], object]] = [
+        lambda client: client.list_sources(value),
+        lambda client: client.get_source(value, "billing"),
+        lambda client: client.create_source(value, "billing", SPEC),
+        lambda client: client.update_source(value, "billing", SPEC),
+        lambda client: client.delete_source(value, "billing"),
+    ]
+
+    for call in calls:
+        requests: list[httpx.Request] = []
+        with make_client(_exploding_handler, requests=requests) as client:
+            with pytest.raises(SourceInvalidError) as exc_info:
+                call(client)
+        assert exc_info.value.status is None
+        assert exc_info.value.body is None
+        assert exc_info.value.message == f"invalid tenant: {value!r}"
+        assert requests == []
+
+
+@pytest.mark.parametrize("value", INVALID_IDS)
+def test_source_methods_reject_an_invalid_name_without_a_request(value: str) -> None:
+    calls: list[Callable[[AdminClient], object]] = [
+        lambda client: client.get_source("acme", value),
+        lambda client: client.create_source("acme", value, SPEC),
+        lambda client: client.update_source("acme", value, SPEC),
+        lambda client: client.delete_source("acme", value),
+    ]
+
+    for call in calls:
+        requests: list[httpx.Request] = []
+        with make_client(_exploding_handler, requests=requests) as client:
+            with pytest.raises(SourceInvalidError) as exc_info:
+                call(client)
+        assert exc_info.value.status is None
+        assert exc_info.value.message == f"invalid source name: {value!r}"
+        assert requests == []
+
+
+def test_valid_identifiers_with_dash_and_underscore_are_sent_as_the_path() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"tenant": "acme-corp", "entries": []})
+
+    with make_client(handler) as client:
+        client.list_sources("acme-corp")
+        client.delete_source("acme-corp", "my_source-1")
+
+    assert paths == [
+        "/v1/tenants/acme-corp/sources",
+        "/v1/tenants/acme-corp/sources/my_source-1",
+    ]
 
 
 # --- lifecycle ----------------------------------------------------------------

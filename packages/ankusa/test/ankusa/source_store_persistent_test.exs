@@ -271,7 +271,7 @@ defmodule Ankusa.SourceStorePersistentTest do
         instance: instance,
         data_dir: config.data_dir,
         port: 0,
-        source_store: {Persistent, [decoder: fn _, _ -> raise "nope" end]}
+        source_store: {Persistent, [decoder: &drifted_decoder/2]}
       )
 
     put_config(clashing)
@@ -280,6 +280,110 @@ defmodule Ankusa.SourceStorePersistentTest do
 
     assert SourceStore.get(instance, "acme", "billing") == :error
     assert SourceStore.list_tenant(instance, "acme") == []
+
+    # A later write must not drop the entry that failed to load.
+    assert {:ok, _} = SourceStore.put(instance, "acme", "other", @log_spec, :create)
+    assert persisted_names(config) == ["billing", "other"]
+  end
+
+  test "an undecodable persisted entry survives a later successful put" do
+    {config, pid} = start_store()
+    instance = config.instance
+    assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @spec_map, :create)
+    GenServer.stop(pid)
+
+    clashing =
+      Ankusa.Config.new(
+        instance: instance,
+        data_dir: config.data_dir,
+        port: 0,
+        source_store: {Persistent, [decoder: &drifted_decoder/2]}
+      )
+
+    put_config(clashing)
+    {:ok, pid2} = Persistent.start_link(clashing)
+    on_exit(fn -> stop(pid2) end)
+
+    assert SourceStore.get(instance, "acme", "billing") == :error
+
+    assert {:ok, _} = SourceStore.put(instance, "acme", "other", @log_spec, :create)
+    assert persisted_names(config) == ["billing", "other"]
+  end
+
+  test "a malformed persisted entry survives a later successful put" do
+    config = test_config(source_store: {Persistent, [decoder: &decoder/2]})
+    put_config(config)
+    instance = config.instance
+
+    path = Ankusa.Config.path(config, "sources.json")
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(
+      path,
+      JSON.encode!(%{"version" => 1, "sources" => ["garbage", %{"tenant" => "acme"}]})
+    )
+
+    {:ok, pid} = Persistent.start_link(config)
+    on_exit(fn -> stop(pid) end)
+
+    assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @log_spec, :create)
+
+    sources = path |> File.read!() |> JSON.decode!() |> Map.fetch!("sources")
+    assert "garbage" in sources
+    assert %{"tenant" => "acme"} in sources
+
+    assert Enum.any?(sources, &(&1["name"] == "billing"))
+  end
+
+  test "a corrupt sources.json is moved aside and the store still accepts a write" do
+    config = test_config(source_store: {Persistent, [decoder: &decoder/2]})
+    put_config(config)
+    instance = config.instance
+
+    path = Ankusa.Config.path(config, "sources.json")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "{ this is not json")
+
+    {:ok, pid} = Persistent.start_link(config)
+    on_exit(fn -> stop(pid) end)
+
+    refute File.exists?(path)
+    assert [_corrupt] = Path.wildcard(path <> ".corrupt-*")
+
+    assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @log_spec, :create)
+    assert File.exists?(path)
+  end
+
+  test "a persisted entry that collides with a seed never shadows it" do
+    seed = %{"acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]}
+    config = test_config(source_store: {Persistent, [decoder: &decoder/2, sources: seed]})
+    put_config(config)
+    instance = config.instance
+
+    path = Ankusa.Config.path(config, "sources.json")
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(
+      path,
+      JSON.encode!(%{
+        "version" => 1,
+        "sources" => [%{"tenant" => "acme", "name" => "billing", "spec" => @log_spec}]
+      })
+    )
+
+    {:ok, pid} = Persistent.start_link(config)
+    on_exit(fn -> stop(pid) end)
+
+    # The seed still wins: unlisted by tenant, read-only, and not deletable.
+    assert SourceStore.get(instance, "acme", "billing") == :error
+    assert SourceStore.list_tenant(instance, "acme") == []
+    assert {:ok, %Source{id: "acme.billing"}} = SourceStore.fetch(instance, "acme.billing")
+    assert {:error, :invalid, message} = SourceStore.delete(instance, "acme", "billing")
+    assert message =~ "read-only"
+
+    # The colliding entry is preserved as an orphan through a later write.
+    assert {:ok, _} = SourceStore.put(instance, "acme", "other", @log_spec, :create)
+    assert "billing" in persisted_names(config)
   end
 
   # ── seeded (YAML) sources ───────────────────────────────────────────────────
@@ -364,6 +468,19 @@ defmodule Ankusa.SourceStorePersistentTest do
     :exit, _ -> :ok
   end
 
+  defp persisted_names(config) do
+    config
+    |> Ankusa.Config.path("sources.json")
+    |> File.read!()
+    |> JSON.decode!()
+    |> Map.fetch!("sources")
+    |> Enum.flat_map(fn
+      %{"name" => name} -> [name]
+      _other -> []
+    end)
+    |> Enum.sort()
+  end
+
   # Stands in for `AnkusaServer.Config.source_from_map!/2`: the store only cares
   # that the decoder returns source options or raises.
   defp decoder(_source_id, spec) do
@@ -372,6 +489,11 @@ defmodule Ankusa.SourceStorePersistentTest do
       _ -> raise ArgumentError, "sinks must be a non-empty list"
     end
   end
+
+  # A decoder that simulates schema drift: it rejects every spec carrying a
+  # `verify` block, but still accepts the plain log specs the tests write.
+  defp drifted_decoder(_source_id, %{"verify" => _}), do: raise(ArgumentError, "schema drift")
+  defp drifted_decoder(source_id, spec), do: decoder(source_id, spec)
 
   defp sink(%{"type" => "log"}), do: {Ankusa.Sink.Log, []}
   defp sink(other), do: raise(ArgumentError, "unknown sink: #{inspect(other)}")

@@ -99,9 +99,9 @@ defmodule Ankusa.SourceStore.Persistent do
       :ets.insert(table, {{:source, source_id}, {nil, source}})
     end)
 
-    load_persisted(config, table, decoder)
+    orphans = load_persisted(config, table, decoder)
 
-    {:ok, %{config: config, table: table, decoder: decoder}}
+    {:ok, %{config: config, table: table, decoder: decoder, orphans: orphans}}
   end
 
   @impl true
@@ -147,7 +147,7 @@ defmodule Ankusa.SourceStore.Persistent do
   defp apply_delete(state, tenant, name, source_id) do
     entries = state.table |> all_stored() |> Enum.reject(&(&1.source_id == source_id))
 
-    case persist(state.config, entries) do
+    case persist(state, entries, source_id) do
       :ok ->
         :ets.delete(state.table, {:source, source_id})
         :ets.delete(state.table, {:stored, tenant, name})
@@ -184,7 +184,7 @@ defmodule Ankusa.SourceStore.Persistent do
         source = Source.new(source_id, Keyword.put(source_opts, :tenant_id, tenant))
         entries = state.table |> all_stored() |> Enum.reject(&(&1.source_id == source_id))
 
-        case persist(state.config, [entry | entries]) do
+        case persist(state, [entry | entries], source_id) do
           :ok ->
             :ets.insert(state.table, [
               {{:source, source_id}, {entry, source}},
@@ -239,68 +239,119 @@ defmodule Ankusa.SourceStore.Persistent do
 
   # ── persistence ─────────────────────────────────────────────────────────────
 
+  # Loads the persisted entries into ETS and returns the raw parsed values it
+  # could not load (`orphans`): entries that no longer decode, malformed ones,
+  # and entries whose id collides with a configured seed. Those are kept in the
+  # GenServer state so a later write re-emits them verbatim instead of silently
+  # dropping them from the file.
   defp load_persisted(config, table, decoder) do
     path = Ankusa.Config.path(config, @filename)
 
     with {:ok, body} <- File.read(path),
          {:ok, %{"version" => @version, "sources" => entries}} when is_list(entries) <-
            JSON.decode(body) do
-      Enum.each(entries, &load_entry(&1, table, decoder))
+      Enum.flat_map(entries, &load_entry(&1, table, decoder))
     else
       {:error, :enoent} ->
-        :ok
+        []
 
-      {:ok, _other} ->
-        Logger.warning("[ankusa] #{path}: unsupported sources.json shape; ignoring")
-
-      {:error, reason} ->
-        Logger.warning("[ankusa] #{path}: #{inspect(reason)}; ignoring")
+      _unreadable_or_bad_shape ->
+        quarantine(path)
+        []
     end
   end
 
-  defp load_entry(%{"tenant" => tenant, "name" => name, "spec" => spec}, table, decoder)
+  defp load_entry(%{"tenant" => tenant, "name" => name, "spec" => spec} = entry, table, decoder)
        when is_binary(tenant) and is_binary(name) and is_map(spec) do
     source_id = source_id(tenant, name)
 
-    case decode(decoder, source_id, spec) do
-      {:ok, source_opts} ->
-        source = Source.new(source_id, Keyword.put(source_opts, :tenant_id, tenant))
-        entry = %{tenant: tenant, name: name, source_id: source_id, spec: spec}
+    cond do
+      seed?(table, source_id) ->
+        Logger.warning(
+          "[ankusa] skipping persisted source #{source_id}: it is seeded from configuration"
+        )
 
-        :ets.insert(table, [
-          {{:source, source_id}, {entry, source}},
-          {{:stored, tenant, name}, entry}
-        ])
+        [entry]
 
-      {:error, :invalid, message} ->
-        Logger.warning("[ankusa] skipping persisted source #{source_id}: #{message}")
+      true ->
+        case decode(decoder, source_id, spec) do
+          {:ok, source_opts} ->
+            source = Source.new(source_id, Keyword.put(source_opts, :tenant_id, tenant))
+            stored = %{tenant: tenant, name: name, source_id: source_id, spec: spec}
+
+            :ets.insert(table, [
+              {{:source, source_id}, {stored, source}},
+              {{:stored, tenant, name}, stored}
+            ])
+
+            []
+
+          {:error, :invalid, message} ->
+            Logger.warning("[ankusa] skipping persisted source #{source_id}: #{message}")
+            [entry]
+        end
     end
   end
 
   defp load_entry(entry, _table, _decoder) do
     Logger.warning("[ankusa] skipping malformed persisted source entry: #{inspect(entry)}")
+    [entry]
   end
 
-  defp persist(config, entries) do
-    path = Ankusa.Config.path(config, @filename)
+  defp quarantine(path) do
+    target = "#{path}.corrupt-#{System.system_time(:second)}"
+
+    case File.rename(path, target) do
+      :ok ->
+        Logger.error("[ankusa] #{path}: unreadable, unparseable, or wrong shape; moved to #{target}")
+
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa] #{path}: unreadable, unparseable, or wrong shape; could not move it aside: " <>
+            inspect(reason)
+        )
+    end
+  end
+
+  defp persist(state, entries, superseded_id) do
+    path = Ankusa.Config.path(state.config, @filename)
     File.mkdir_p!(Path.dirname(path))
 
     body =
       JSON.encode!(%{
         "version" => @version,
         "sources" =>
-          entries
-          |> Enum.sort_by(& &1.source_id)
-          |> Enum.map(&Map.take(&1, [:tenant, :name, :spec]))
+          (entries
+           |> Enum.sort_by(& &1.source_id)
+           |> Enum.map(&to_json_entry/1)) ++ drop_orphan(state.orphans, superseded_id)
       })
 
     tmp = path <> ".tmp.#{System.unique_integer([:positive])}"
 
-    case File.write(tmp, body) do
+    case File.write(tmp, body, [:sync]) do
       :ok -> File.rename(tmp, path)
       error -> error
     end
   end
+
+  # An ETS stored entry (atom keys) becomes the persisted shape; anything else
+  # is an orphan kept exactly as it was parsed.
+  defp to_json_entry(%{tenant: tenant, name: name, spec: spec}) do
+    %{"tenant" => tenant, "name" => name, "spec" => spec}
+  end
+
+  defp to_json_entry(other), do: other
+
+  # The ETS entry supersedes any orphan that held the same id, so it is dropped
+  # from the snapshot. Malformed orphans have no id and are never targeted.
+  defp drop_orphan(orphans, superseded_id) do
+    Enum.reject(orphans, fn orphan -> orphan_id(orphan) == superseded_id end)
+  end
+
+  defp orphan_id(%{"tenant" => tenant, "name" => name}) when is_binary(tenant) and is_binary(name),
+    do: source_id(tenant, name)
+
+  defp orphan_id(_other), do: nil
 
   # ── ETS helpers ─────────────────────────────────────────────────────────────
 

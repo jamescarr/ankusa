@@ -21,12 +21,18 @@ cached value without another request.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
 
 import httpx
+
+# The same rule `Ankusa.ClaimCheck.Ref` uses for its tenant. Anything outside
+# it is rejected before a path is built: httpx normalizes dot segments, so an
+# unvalidated "../" would escape the tenant scope before the server sees it.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 __all__ = [
     "AdminClient",
@@ -186,6 +192,7 @@ class AdminClient:
 
     def list_sources(self, tenant: str) -> list[Source]:
         """List a tenant's sources: ``GET /v1/tenants/<tenant>/sources``."""
+        _validate_tenant(tenant)
         self._ensure_version()
         response = self._request("GET", f"/v1/tenants/{tenant}/sources")
         self._raise_for_status(response)
@@ -194,6 +201,8 @@ class AdminClient:
 
     def get_source(self, tenant: str, name: str) -> Source:
         """Fetch one source: ``GET /v1/tenants/<tenant>/sources/<name>``."""
+        _validate_tenant(tenant)
+        _validate_name(name)
         self._ensure_version()
         response = self._request("GET", f"/v1/tenants/{tenant}/sources/{name}")
         self._raise_for_status(response)
@@ -205,6 +214,8 @@ class AdminClient:
         The source name travels in the body (plus ``name``); the tenant comes
         from the URL and wins over any ``"tenant"`` key inside ``spec``.
         """
+        _validate_tenant(tenant)
+        _validate_name(name)
         self._ensure_version()
         body = spec.to_json()
         body["name"] = name
@@ -218,6 +229,8 @@ class AdminClient:
         The name comes from the URL; a ``"name"`` key inside ``spec`` is never
         sent (``SourceSpec`` has no such field).
         """
+        _validate_tenant(tenant)
+        _validate_name(name)
         self._ensure_version()
         response = self._request("PUT", f"/v1/tenants/{tenant}/sources/{name}", json=spec.to_json())
         self._raise_for_status(response)
@@ -229,6 +242,8 @@ class AdminClient:
         Succeeds with no return value (the server answers ``204`` with an
         empty body); a missing source raises ``SourceNotFoundError``.
         """
+        _validate_tenant(tenant)
+        _validate_name(name)
         self._ensure_version()
         response = self._request("DELETE", f"/v1/tenants/{tenant}/sources/{name}")
         self._raise_for_status(response)
@@ -314,3 +329,15 @@ def _invalid_message(body: Any, status: int) -> str:
         if isinstance(message, str):
             return message
     return f"invalid source ({status}): {body!r}"
+
+
+def _validate_tenant(tenant: str) -> None:
+    """Reject a tenant that is not `^[A-Za-z0-9_-]{1,64}$` before any path is built."""
+    if not isinstance(tenant, str) or _SAFE_ID.fullmatch(tenant) is None:
+        raise SourceInvalidError(f"invalid tenant: {tenant!r}", status=None)
+
+
+def _validate_name(name: str) -> None:
+    """Reject a source name that is not `^[A-Za-z0-9_-]{1,64}$` before any path is built."""
+    if not isinstance(name, str) or _SAFE_ID.fullmatch(name) is None:
+        raise SourceInvalidError(f"invalid source name: {name!r}", status=None)
