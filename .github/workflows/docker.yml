@@ -234,6 +234,10 @@ jobs:
       # The repo description on Docker Hub is the README operators land on when
       # they search for the image.
       - uses: peter-evans/dockerhub-description@v4
+        # Cosmetic (the Docker Hub repo page's README), and known to 403 with
+        # a token that has push-only scope: must not block the GitHub release
+        # below, which carries the actual release notes.
+        continue-on-error: true
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
