@@ -17,8 +17,10 @@ flowchart LR
 
 | Path | What |
 | --- | --- |
-| `packages/ankusa` | Core Mix project: edge/WAL/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `req`, `aws_signature` only). |
+| `packages/ankusa` | Core Mix project: edge/WAL/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `cidr`, `req`, `aws_signature`, `telemetry_metrics`/`telemetry_metrics_prometheus_core`, `nebulex`/`nebulex_local` only). |
 | `packages/ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats` | One sink adapter each (`Sink.RabbitMQ`/`Kafka`/`NATS`), path-depend on `ankusa` + one broker client (`amqp`/`brod`/`gnat`). Own `docker-compose.yml` for local broker infra. |
+| `packages/ankusa_redis` | Route store adapter (`Ankusa.Routes.Store.Redis`): definitions in Redis, shared by every edge node. Path-depends on `ankusa` + one client (`redix`). Own `docker-compose.yml` (Redis on `:6399`). |
+| `conformance/` | Language-neutral SDK vectors (`features.json`, `cases/*.json`) and the checker (`check.mjs`) every `packages/sdk-*` must pass; `mise run check:conformance`. |
 | `packages/ankusa_server` | The `jamescarr/ankusa` Docker image: core + every adapter, driven entirely by YAML (`config.ex` is the loader). Not published to Hex. |
 | `packages/sdk-typescript`, `sdk-python` | Published client SDKs (npm `ankusa`, PyPI `ankusa`) for writing worker consumers. |
 | `examples/*` | Runnable Docker-composed demos, one per delivery transport; see [`examples/README.md`](examples/README.md). |
@@ -33,11 +35,12 @@ Why the package split (and when a new adapter earns its own package):
 
 | Stage | Modules |
 | --- | --- |
-| Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/quarantine.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,none,schemes}.ex` |
+| Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/quarantine.ex`, `edge/route_guard.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,none,schemes}.ex` |
 | WAL | `wal.ex`, `wal/disk_log.ex`, `durable_log.ex` |
 | Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `storage/index.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex` |
 | Dispatch (sinks, retries, DLQ) | `dispatch.ex`, `dispatch/pipeline.ex`, `dispatch/dlq.ex`, `sink.ex`, `sink/{log,http,message}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
 | Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,sweeper}.ex` |
+| Route management | `routes.ex`, `routes/{route,matcher,snapshot,cache,router,store}.ex`, `routes/store/ets.ex`, `net.ex`, `net/client_ip.ex` |
 | Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex`, `source.ex`, `source_store.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex`, `ulid.ex`, `uuid_v7.ex` |
 
 `packages/ankusa_server/lib/ankusa_server`: `application.ex`, `cli.ex`,
@@ -75,6 +78,7 @@ same tasks this table does.
 | `mise run check:package <pkg>` | one package: format, warnings-as-errors, tests, docs; starts/stops that package's own `docker-compose.yml` |
 | `mise run check:examples` | `examples/*` |
 | `mise run check:tools` | `tools/*` |
+| `mise run check:conformance` | validate `conformance/` and run every `packages/sdk-*` against its vectors |
 | `mise run test:integration` | `ankusa` core's object-store adapters vs. the floci emulators |
 | `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`) |
 | `mise run format` | `mix format` across every package — run before pushing, not after CI complains |
@@ -95,6 +99,7 @@ until they pass too.
 | a package under `packages/` | `mise run check:package <pkg>` for every touched package (all of them for a core change) |
 | `examples/*` | `mise run check:examples` |
 | `tools/*` | `mise run check:tools` |
+| an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |
 | anything, before tagging a release | `mise run e2e` |
 | everything | `mise run check` |

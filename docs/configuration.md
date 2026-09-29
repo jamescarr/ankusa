@@ -61,7 +61,7 @@ Every top-level section, with its keys and defaults:
 | `wal` | `type` (`disk`) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
-| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
+| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 
 `storage.s3`/`storage.gcs` are read only when the matching
@@ -267,13 +267,13 @@ config :ankusa,
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
 | `routes.max_routes` | `10_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. |
 | `routes.store` | `{Ankusa.Routes.Store.ETS, []}` | `{module, opts}` implementing `Ankusa.Routes.Store`. `Ankusa.Routes.Store.Redis` (package `ankusa_redis`) shares definitions across nodes. |
-| `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. `ttl_ms` must stay under `gc_interval_ms`. |
+| `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. Entries are keyed by the published snapshot's `epoch`, so publishing a snapshot retires every earlier decision at once. Only short requests are cached — at most 16 path segments and 256 bytes of path; anything longer is matched directly. `max_size` is approximate between the adapter's 1s memory checks, and an eviction only costs a re-scan: it can never change a decision. `ttl_ms` must stay under `gc_interval_ms`. |
 | `routes.trusted_proxies` | `[]` | CIDRs whose peers may set `X-Forwarded-For`. Empty means the header is never read. |
 | `routes.ip_rules` | `%{default: :allow, rules: []}` | Ordered global rules, first match wins, plus the `default` when none match. |
 | `routes.admin.port` | `4003` | The management API's own Bandit port. Unauthenticated by design, same as `admin.port`; front it with your own proxy or network policy. |
 | `routes.log_sample` | `100` | 1 in N rejections is logged at `:debug`; `0` disables it. |
-| `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. |
-| `routes.seed` | `[]` | Route definitions loaded at boot (see below). |
+| `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. With `403` a sender can tell a route that has its own `ip_rules` (which denied it) from a path that does not exist (`404`); `404` removes that distinction. |
+| `routes.seed` | `[]` | Route definitions loaded at boot (see below). With the ETS store they are loaded on **every** boot. |
 
 #### The admin API
 
@@ -310,17 +310,32 @@ segment boundaries or paths to resolve.
 cidr: "10.0.0.0/8"}`) with a `default` for the unmatched case; the first match
 wins. A route may declare its own `ip_rules`, which *replace* the global list for
 that route — that is how one provider is pinned to its published ranges while a
-global ban list still applies everywhere else. A global `deny` always wins.
+global ban list still applies everywhere else. A global `deny` always wins. A
+CIDR is written as IPv4 or IPv6; one inside `::ffff:0:0/96` (`::ffff:10.0.0.0/104`)
+is refused when it is written, because client addresses are matched as IPv4 and
+such a range could never match — as a `deny` rule it would silently let its own
+traffic through. Write `10.0.0.0/8` instead.
 
 Client addresses come from the socket peer. `X-Forwarded-For` is read **only**
 when the peer is inside `routes.trusted_proxies`; from anyone else the header is
-ignored, and one unparseable entry discards the whole header. IPv4-mapped IPv6
-addresses (`::ffff:1.2.3.4`) are matched as IPv4.
+ignored, whatever it says. Every `x-forwarded-for` header value is joined in
+order and the chain is walked right to left, because proxies append: the
+rightmost entries are the ones this node's own proxies wrote. An entry is an
+address with an optional port (`1.2.3.4`, `1.2.3.4:5678`, `::1`, `[::1]`,
+`[::1]:443`), normalized so IPv4-mapped IPv6 (`::ffff:1.2.3.4`) is matched as
+IPv4. The first entry not in the trusted set is the client, and the walk stops
+there — entries to its left are never read. An entry the walk cannot read
+before it finds the client denies the request rather than being skipped: a
+chain that is partly unreadable is not evidence of anything. If every entry is
+trusted, the chain's leftmost entry is the client; no header, or an empty one,
+means the peer.
 
 **Definitions.** `ankusa`'s default store keeps them in this node's memory, which
-is enough for a single node — pair it with `routes.seed`, which loads at boot
-(and only at boot: a route deleted through the API is not resurrected by a
-restart). To share definitions across edge nodes, use the `ankusa_redis` package:
+is enough for a single node — pair it with `routes.seed`. The in-memory store is
+seeded on **every** boot, so a route deleted through the API returns after a
+restart unless it is also removed from the seed: with `store.type: ets` the seed
+is what the node comes up with, not a one-time import. To share definitions
+across edge nodes, use the `ankusa_redis` package:
 
 ```yaml
 routes:
@@ -328,11 +343,16 @@ routes:
   store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes}
 ```
 
+`store.url`, `store.namespace`, and `store.tick_ms` are Redis-store keys: with
+`type: ets` any of them is a config error, not a silently ignored key (a `url`
+with no `type` at all still means Redis).
+
 Every node with the same `namespace` enforces the same routes: writes bump a
 version counter and publish it, each node reloads on the broadcast, and a
 periodic tick (`tick_ms`, default 30s) is the safety net for a missed one. A
 node keeps serving its in-memory snapshot through a Redis outage; only writes
-report `503 store_unavailable`.
+report `503 store_unavailable`. The Redis store seeds a namespace once, on its
+first boot, so a route deleted there is not resurrected by a restart.
 
 **Management API**, on `routes.admin.port` (its own listener, never the ingest
 port). **Unauthenticated by design** — the same stance as the operator admin
@@ -357,8 +377,18 @@ A route is `{id, path, methods: [POST], enabled, ip_rules, metadata,
 inserted_at, updated_at}`. Ids are lowercase slugs, `path`/`id` are immutable
 under `PATCH` (moving a route changes what it captures — that is a `PUT`), and
 two enabled routes may not share a path and method. `POST /admin/routes/test`
-answers "why was this rejected" without capturing anything, so a route change
-can be checked before it goes live.
+answers "why was this rejected" without capturing anything and **without
+reading or writing the decision cache**, so a dry run can never change what
+live requests decide, and a route change can be checked before it goes live.
+
+`PUT /admin/ip-rules` requires both `default` and `rules`. Omitting either is a
+`400 invalid_ip_rules` that names the field, because an omitted `default` used
+to mean `allow`, and a guard's default is not a value to infer.
+
+Writes are serialized against each other: each one is validated against the
+snapshot it read, and a write that keeps losing to a concurrent writer answers
+`503 store_unavailable` instead of overwriting a definition it never saw. That
+response is safe to retry.
 
 > **Rejections are not retried by Ankusa.** Some providers retry any `4xx`, some
 > give up, and some disable an endpoint after enough failures — the provider's

@@ -1,5 +1,41 @@
 # Ankusa Route Management Plan
 
+## Implementation status
+
+This file is the original plan. The shipped feature keeps its behaviour, but
+deviates from the plan in these places — the code, not this document, is the
+source of truth:
+
+- **Definitions store, not a Nebulex multilevel cache.** There is no L1/L2.
+  `Ankusa.Routes.Store` is the behaviour, `Ankusa.Routes.Store.ETS` is the
+  default (definitions in node memory, capped, seeded from `routes.seed` on
+  every boot, nothing evicted), and `Ankusa.Routes.Store.Redis` in the optional
+  `ankusa_redis` package holds them in Redis for multi-node deployments. The
+  decision cache is core's own `Nebulex.Adapters.Local` (`nebulex_local`) — it
+  caches decisions only, and a mutation publishes a new snapshot whose `epoch`
+  retires them all at once.
+- **The guard and the API are core modules.** `Ankusa.Edge.RouteGuard` (a
+  `Plug`, in front of the WAL) and `Ankusa.Routes.Router`, served on
+  `routes.admin.port` — default **4003**, not 4001 — under the paths
+  `/admin/routes` and `/admin/ip-rules`. There is no
+  `AnkusaServer.Plugs.RouteGuard` and no `AnkusaServer.Admin.Router`; the
+  library owns both, so an embedder gets the same guard the image runs.
+- **CIDR is the `cidr` package.** No `Ankusa.Net.CIDR` module exists, and no
+  hand-rolled prefix bit math: `Ankusa.Net` is only the `:inet`-tuple boundary
+  plus the IPv4-mapped-to-IPv4 normalization, and rules carry parsed `%CIDR{}`
+  values.
+- **No bearer token — unauthenticated by design.** The management API is
+  as open as `admin.port`: Ankusa does not know what auth scheme a deployment
+  wants, so it does not pick one, and it logs a warning and asks you to front
+  the port with your own proxy, mesh, or network policy. This is a recorded
+  decision to revisit if the deployment model changes, not an oversight.
+- **Optional file persistence (phase 6) is not implemented.** The ETS store is
+  memory-only; `routes.seed` plus an idempotent external apply is the durability
+  story, or use the Redis store.
+- **CIDR property tests became example tests.** `stream_data` is not a
+  dependency; the suites are example-based over the `cidr` package's own
+  guarantees.
+
 ## Behavior
 
 - Off by default. With no route config, Ankusa captures everything, as it does today.
