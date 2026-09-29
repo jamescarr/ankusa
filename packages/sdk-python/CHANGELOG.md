@@ -6,6 +6,21 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `routes.InvalidRouteIdError` (a `RoutesError`): a route id that isn't a
+  string, is empty, or is exactly `.` or `..` is refused before any request is
+  sent. A URL parser normalizes those away — `..` becomes `/admin/`, an empty
+  id or `.` becomes the collection endpoint — so `get_route("..")` used to hand
+  back the list page as if it were a route. Exported from `ankusa.routes` and
+  from the package root.
+
+### Fixed
+
+- Route ids are percent-encoded as a single path segment, so `/`, `?`, `#`, `%`
+  and space in an id travel as `%2F %3F %23 %25 %20` instead of reshaping the
+  request URL.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added
@@ -78,8 +93,7 @@ this project follows [Semantic Versioning](https://semver.org/).
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...HEAD
-[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.3.0
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...sdk-python-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.1.0

@@ -4,8 +4,9 @@ The client SDK for [Ankusa](https://github.com/jamescarr/ankusa) deployments:
 one PyPI package meant to bundle everything a non-Elixir consumer needs to
 talk to an Ankusa deployment. Today that's the
 [claim-check gateway](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md)
-client and a webhook-receiving header helper; more clients (ingest, admin)
-land here as they're built.
+client, the route-management and operator (admin) clients, the
+source-management client, and a webhook-receiving header helper; more clients
+(ingest) land here as they're built.
 
 ## Install
 
@@ -139,10 +140,16 @@ routes.test_route({"method": "POST", "path": "/webhooks/stripe", "ip": "203.0.11
 
 Methods: `health()`, `list_routes()`, `create_route()`, `get_route()`,
 `replace_route()`, `update_route()`, `delete_route()`, `get_ip_rules()`,
-`put_ip_rules()`, `test_route()`. Failures are `RoutesError` subclasses with a
-`retryable` attribute: `RouteNotFoundError` (404), `RoutesRejectedError`
-(400/409, carrying `code`, `field`, `message`, `conflicting_id`,
-`max_routes`), and `RoutesUnavailableError` (5xx/unreachable, retryable).
+`put_ip_rules()`, `test_route()`. Route ids are percent-encoded as one path
+segment, so `/`, `?`, `#`, `%` and a space in an id can't reshape the URL.
+
+Failures are `RoutesError` subclasses: `InvalidRouteIdError` (an id that isn't
+a string, is empty, or is `.`/`..` — raised before any request, because a URL
+parser would otherwise normalize it into the collection endpoint and hand back
+the list page as if it were a route), `RouteNotFoundError` (404),
+`RoutesRejectedError` (any other 4xx, carrying `code`, `field`, `message`,
+`conflicting_id`, `max_routes`), and `RoutesUnavailableError` (5xx, an
+unfollowed redirect, a non-JSON success body, or unreachable; retryable).
 
 ## Admin client
 
@@ -158,16 +165,62 @@ from ankusa import AdminClient
 admin = AdminClient(os.environ.get("ADMIN_URL", "http://localhost:4002"))
 
 admin.health()                          # {"status": "ok", "instance": ..., "roles": [...]}
-admin.list_dead_letters(limit=10)
+admin.list_dead_letters({"limit": 10})  # {"total": ..., "entries": [...]}
 admin.replay_dead_letters({"source_id": "demo"})
 admin.list_quarantined()
 ```
 
 Methods: `health()`, `metrics()` (Prometheus text), `config()`,
 `list_dead_letters()`, `replay_dead_letters()`, `list_quarantined()`. Failures
-are `AdminError` subclasses: `RoleNotEnabledError` (409, carrying `role`),
-`AdminRejectedError` (400, carrying `code`), and `AdminUnavailableError`
-(5xx/unreachable, retryable).
+are `AdminError` subclasses: `RoleNotEnabledError` (409 `role_not_enabled`,
+carrying `role`), `AdminRejectedError` (any other 4xx, carrying `code`), and
+`AdminUnavailableError` (5xx, an unfollowed redirect, or unreachable;
+retryable).
+
+## Sources client
+
+Ankusa's ingest sources are tenant-scoped: a source is addressed as
+`<tenant>.<name>`, and `Ankusa.Admin.Router` serves their CRUD API on the same
+`admin.port` as the operator API. `SourcesClient` speaks in those terms and
+builds the paths for you.
+
+```python
+import os
+
+from ankusa import SourcesClient, SourceSpec
+
+sources = SourcesClient(os.environ.get("ADMIN_URL", "http://localhost:4002"))
+
+sources.list_sources("acme")                                   # [Source, ...]
+sources.get_source("acme", "billing")                          # Source
+sources.create_source("acme", "billing", SourceSpec(sinks=[{"type": "log"}]))
+sources.update_source(
+    "acme",
+    "billing",
+    SourceSpec(sinks=[{"type": "log"}], on_verify_failure="reject"),
+)
+sources.delete_source("acme", "billing")
+```
+
+Methods: `server_version()`, `list_sources()`, `get_source()`,
+`create_source()`, `update_source()`, `delete_source()`. A write takes the
+whole spec (`SourceSpec`, whose `to_json()` omits unset fields); a read returns
+a `Source`, which is always redacted — resending a read-back `verify` map is
+not the same as resending the stored secret, so supply secrets through
+`SourceSpec`.
+
+`expected_version="0.3.0"` is an optional latch: the first API call fetches
+`GET /health`, compares its `"version"` field, and raises
+`VersionMismatchError` on a mismatch (the version is cached afterwards, so no
+further request checks it). Failures are `SourcesError` subclasses, each
+carrying `.status` and `.body`: `SourceNotFoundError` (404),
+`SourceConflictError` (409), `SourceStoreReadOnlyError` (409 — the
+deployment's source store is a static seed), `SourceInvalidError` (400, or an
+invalid tenant/name caught before any request), `VersionMismatchError`, and
+`SourcesUnavailableError` (unreachable, timed out, or 5xx).
+
+Tenants and source names must match `^[A-Za-z0-9_-]{1,64}$`; anything else
+raises `SourceInvalidError` before a path is built.
 
 ## Layout
 
@@ -189,12 +242,16 @@ src/ankusa/
     __init__.py
     client.py
     errors.py
+  sources/               # the tenant-scoped source-management client (admin.port)
+    __init__.py
+    client.py
+    spec.py
+    errors.py
 tests/
-  test_client.py
-  test_ref.py
-  test_webhook.py
   test_routes.py
   test_admin.py
+  test_sources.py
+  test_conformance.py     # runs the language-neutral vectors in conformance/
 ```
 
 A future client (say, an ingest helper) gets its own `src/ankusa/<name>/`

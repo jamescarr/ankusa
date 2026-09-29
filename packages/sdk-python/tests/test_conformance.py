@@ -40,6 +40,7 @@ ERROR_CLASSES: dict[str, type[BaseException]] = {
         "ClaimCheckUnavailableError",
         "MissingHookIdError",
         "RoutesError",
+        "InvalidRouteIdError",
         "RoutesUnavailableError",
         "RouteNotFoundError",
         "RoutesRejectedError",
@@ -82,11 +83,14 @@ def _gateway(spec: dict[str, Any], requests: list[RecordedRequest]) -> Iterator[
 
     class Handler(BaseHTTPRequestHandler):
         def _handle(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
             requests.append(
                 {
                     "method": self.command,
                     "path": self.path,
                     "headers": {key.lower(): value for key, value in self.headers.items()},
+                    "body": json.loads(body) if body else None,
                 }
             )
             if delay:
@@ -145,8 +149,9 @@ def _injected_transport(spec: dict[str, Any], requests: list[RecordedRequest]) -
         requests.append(
             {
                 "method": request.method,
-                "path": request.url.path,
+                "path": request.url.raw_path.decode(),
                 "headers": {key.lower(): value for key, value in request.headers.items()},
+                "body": json.loads(request.content) if request.content else None,
             }
         )
         return httpx.Response(status, headers=headers, content=payload)
@@ -352,6 +357,8 @@ def _assert_requests(actual: list[RecordedRequest], expected: list[dict[str, Any
         assert got["path"] == want["path"], f"path: {got['path']!r} != {want['path']!r}"
         for name, value in (want.get("headers") or {}).items():
             assert got["headers"].get(name) == value, f"header {name!r}: {got['headers'].get(name)!r} != {value!r}"
+        if "body" in want:
+            assert got["body"] == want["body"], f"body: {got['body']!r} != {want['body']!r}"
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case["id"] for case in CASES])

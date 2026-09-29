@@ -17,5 +17,6 @@ export {
   RoutesError,
   RoutesUnavailableError,
   RouteNotFoundError,
+  InvalidRouteIdError,
   RoutesRejectedError,
 } from "./errors.js";

@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 
 import {
   createRoutesClient,
+  InvalidRouteIdError,
   RouteNotFoundError,
   RoutesRejectedError,
   RoutesUnavailableError,
@@ -84,6 +85,61 @@ describe("createRoutesClient", () => {
     const err = await expectError(client.getRoute("nope"));
     assert.ok(err instanceof RouteNotFoundError);
     assert.equal((err as RouteNotFoundError).retryable, false);
+  });
+
+  test("an id that is not a string, empty, or a dot is rejected before any request", async () => {
+    const { fetch, requests } = mockGateway(200, "{}");
+    const client = createRoutesClient({ baseUrl: "http://gateway", fetch });
+
+    // A JS caller can pass anything; none of these reach the network.
+    for (const id of ["", ".", "..", 42] as Array<string | number>) {
+      const err = await expectError(client.getRoute(id as string));
+      assert.ok(err instanceof InvalidRouteIdError, `${JSON.stringify(id)} should be invalid`);
+      assert.equal((err as InvalidRouteIdError).retryable, false);
+    }
+    assert.equal(requests.length, 0);
+  });
+
+  test("every id-taking method rejects a bad id before sending", async () => {
+    const { fetch, requests } = mockGateway(200, "{}");
+    const client = createRoutesClient({ baseUrl: "http://gateway", fetch });
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ["getRoute", () => client.getRoute("..")],
+      ["replaceRoute", () => client.replaceRoute("..", { path: "/hooks/x" })],
+      ["updateRoute", () => client.updateRoute("..", { enabled: false })],
+      ["deleteRoute", () => client.deleteRoute("..")],
+    ];
+
+    for (const [method, call] of calls) {
+      const err = await expectError(call());
+      assert.ok(err instanceof InvalidRouteIdError, `${method} should reject ".."`);
+      assert.equal((err as InvalidRouteIdError).retryable, false);
+    }
+    assert.equal(requests.length, 0);
+  });
+
+  test("getRoute sends the id as one percent-encoded path segment", async () => {
+    const { fetch, requests } = mockGateway(404, JSON.stringify({ error: "not_found" }));
+    const client = createRoutesClient({ baseUrl: "http://gateway", fetch });
+    const err = await expectError(client.getRoute("a/b?c#d e%"));
+    assert.ok(err instanceof RouteNotFoundError);
+    assert.equal(requests[0].url, "http://gateway/admin/routes/a%2Fb%3Fc%23d%20e%25");
+  });
+
+  test("a 302 redirect maps to a retryable RoutesUnavailableError", async () => {
+    const { fetch } = mockGateway(302, "", "text/html");
+    const client = createRoutesClient({ baseUrl: "http://gateway", fetch });
+    const err = (await expectError(client.listRoutes())) as RoutesUnavailableError;
+    assert.ok(err instanceof RoutesUnavailableError);
+    assert.equal(err.retryable, true);
+  });
+
+  test("a 500 maps to a retryable RoutesUnavailableError", async () => {
+    const { fetch } = mockGateway(500, JSON.stringify({ error: "boom" }));
+    const client = createRoutesClient({ baseUrl: "http://gateway", fetch });
+    const err = (await expectError(client.getIpRules())) as RoutesUnavailableError;
+    assert.ok(err instanceof RoutesUnavailableError);
+    assert.equal(err.retryable, true);
   });
 
   test("createRoute maps 400 to RoutesRejectedError with code, field, and message", async () => {

@@ -28,7 +28,7 @@ then runs every registered SDK's native runner.
     "ok": { /* operation-specific */ },
     "error": { "class": "ExportedErrorName", "retryable": true, "status": 404, "body": "" },
     // optional, both forms:
-    "requests": [{ "method": "GET", "path": "/v1/claims/acme/01...", "headers": { "authorization": "Bearer t" } }]
+    "requests": [{ "method": "GET", "path": "/v1/claims/acme/01...", "headers": { "authorization": "Bearer t" }, "body": null }]
   }
 }
 ```
@@ -39,8 +39,13 @@ then runs every registered SDK's native runner.
   `expect.error` are compared, by deep equality against the error's attribute
   of the same name.
 - `requests`, when present: the recorded requests must match in count and
-  order; `method` and `path` must be equal; `headers` is a subset match
-  (lowercase names). `[]` means no request was made.
+  order; `method` and `path` must be equal (`path` includes the query string
+  exactly as sent: parameter order is input order, booleans go out as
+  `true`/`false`); `headers` is a subset match (lowercase names). `[]` means no
+  request was made.
+- `requests[i].body`, when present, is compared by deep equality against the
+  request body the SDK actually sent, parsed as JSON — so it is `null` when the
+  request had no body. Absent means the body is not asserted.
 
 ### Inputs by operation
 

@@ -103,10 +103,19 @@ def test_error_classification() -> None:
         assert exc.value.status == 400
         assert exc.value.code == "invalid_filter"
 
-    with ankusa.AdminClient("http://gateway.invalid", transport=_transport(500, {}, [])) as client:
-        with pytest.raises(ankusa.AdminUnavailableError) as exc:
-            client.health()
-        assert exc.value.retryable is True
+    body = {"error": "forbidden", "field": "limit", "message": "not allowed"}
+    with ankusa.AdminClient("http://gateway.invalid", transport=_transport(403, body, [])) as client:
+        with pytest.raises(ankusa.AdminRejectedError) as exc:
+            client.list_dead_letters()
+        assert exc.value.retryable is False
+        assert exc.value.status == 403
+        assert exc.value.code == "forbidden"
+
+    for status in (302, 500):
+        with ankusa.AdminClient("http://gateway.invalid", transport=_transport(status, {"error": "boom"}, [])) as client:
+            with pytest.raises(ankusa.AdminUnavailableError) as exc:
+                client.health()
+            assert exc.value.retryable is True
 
 
 def test_unreachable_is_retryable() -> None:

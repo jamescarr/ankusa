@@ -152,6 +152,42 @@
       "expect": {
         "error": {"class": "AdminUnavailableError", "retryable": true}
       }
+    },
+    {
+      "id": "admin.error.rejected",
+      "feature": "admin.errors",
+      "operation": "admin_dlq_list",
+      "input": {
+        "gateway": {
+          "status": 400,
+          "body": {"json": {"error": "invalid_filter", "field": "limit", "message": "must be an integer"}}
+        }
+      },
+      "expect": {
+        "error": {"class": "AdminRejectedError", "retryable": false, "status": 400, "code": "invalid_filter"}
+      }
+    },
+    {
+      "id": "admin.error.server_error",
+      "feature": "admin.errors",
+      "operation": "admin_dlq_list",
+      "input": {
+        "gateway": {"status": 500, "body": {"json": {"error": "internal_error"}}}
+      },
+      "expect": {
+        "error": {"class": "AdminUnavailableError", "retryable": true}
+      }
+    },
+    {
+      "id": "admin.error.redirect",
+      "feature": "admin.errors",
+      "operation": "admin_dlq_list",
+      "input": {
+        "gateway": {"status": 302, "headers": {"location": "http://gateway.invalid/v1/dlq"}}
+      },
+      "expect": {
+        "error": {"class": "AdminUnavailableError", "retryable": true}
+      }
     }
   ]
 }

@@ -45,7 +45,7 @@
           "inserted_at": "2026-09-28T14:16:26Z",
           "updated_at": "2026-09-28T14:16:26Z"
         },
-        "requests": [{"method": "POST", "path": "/admin/routes"}]
+        "requests": [{"method": "POST", "path": "/admin/routes", "body": {"path": "/webhooks/stripe"}}]
       }
     },
     {
@@ -131,6 +131,22 @@
       }
     },
     {
+      "id": "routes.list.query",
+      "feature": "routes.request_shape",
+      "operation": "routes_list",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {"json": {"routes": [], "next_cursor": null}}
+        },
+        "params": {"enabled": true, "limit": 10, "cursor": "stripe"}
+      },
+      "expect": {
+        "ok": {"routes": [], "next_cursor": null},
+        "requests": [{"method": "GET", "path": "/admin/routes?enabled=true&limit=10&cursor=stripe"}]
+      }
+    },
+    {
       "id": "routes.get.ok",
       "feature": "routes.crud",
       "operation": "routes_get",
@@ -167,6 +183,19 @@
       }
     },
     {
+      "id": "routes.get.escapes_id",
+      "feature": "routes.input_validation",
+      "operation": "routes_get",
+      "input": {
+        "gateway": {"status": 404, "body": {"json": {"error": "not_found"}}},
+        "id": "a/b?c#d e%"
+      },
+      "expect": {
+        "error": {"class": "RouteNotFoundError", "retryable": false},
+        "requests": [{"method": "GET", "path": "/admin/routes/a%2Fb%3Fc%23d%20e%25"}]
+      }
+    },
+    {
       "id": "routes.replace.ok",
       "feature": "routes.crud",
       "operation": "routes_replace",
@@ -200,7 +229,13 @@
           "inserted_at": "2026-09-28T14:16:26Z",
           "updated_at": "2026-09-28T14:16:31Z"
         },
-        "requests": [{"method": "PUT", "path": "/admin/routes/stripe"}]
+        "requests": [
+          {
+            "method": "PUT",
+            "path": "/admin/routes/stripe",
+            "body": {"path": "/webhooks/stripe", "enabled": false, "metadata": {"owner": "payments"}}
+          }
+        ]
       }
     },
     {
@@ -237,7 +272,7 @@
           "inserted_at": "2026-09-28T14:16:26Z",
           "updated_at": "2026-09-28T14:16:33Z"
         },
-        "requests": [{"method": "PATCH", "path": "/admin/routes/stripe"}]
+        "requests": [{"method": "PATCH", "path": "/admin/routes/stripe", "body": {"enabled": true}}]
       }
     },
     {
@@ -281,7 +316,13 @@
       },
       "expect": {
         "ok": {"default": "deny", "rules": [{"action": "allow", "cidr": "203.0.113.0/24"}]},
-        "requests": [{"method": "PUT", "path": "/admin/ip-rules"}]
+        "requests": [
+          {
+            "method": "PUT",
+            "path": "/admin/ip-rules",
+            "body": {"default": "deny", "rules": [{"action": "allow", "cidr": "203.0.113.0/24"}]}
+          }
+        ]
       }
     },
     {
@@ -304,7 +345,13 @@
       },
       "expect": {
         "ok": {"decision": "allow", "reason": "matched", "route_id": "stripe", "ip_rule": null},
-        "requests": [{"method": "POST", "path": "/admin/routes/test"}]
+        "requests": [
+          {
+            "method": "POST",
+            "path": "/admin/routes/test",
+            "body": {"method": "POST", "path": "/webhooks/stripe", "ip": "203.0.113.7"}
+          }
+        ]
       }
     },
     {
@@ -365,6 +412,78 @@
       },
       "expect": {
         "error": {"class": "RoutesUnavailableError", "retryable": true}
+      }
+    },
+    {
+      "id": "routes.error.redirect",
+      "feature": "routes.errors",
+      "operation": "routes_list",
+      "input": {
+        "gateway": {"status": 302, "headers": {"location": "http://gateway.invalid/admin/routes"}}
+      },
+      "expect": {
+        "error": {"class": "RoutesUnavailableError", "retryable": true}
+      }
+    },
+    {
+      "id": "routes.error.server_error",
+      "feature": "routes.errors",
+      "operation": "routes_list",
+      "input": {
+        "gateway": {"status": 500, "body": {"json": {"error": "internal_error"}}}
+      },
+      "expect": {
+        "error": {"class": "RoutesUnavailableError", "retryable": true}
+      }
+    },
+    {
+      "id": "routes.error.forbidden",
+      "feature": "routes.errors",
+      "operation": "routes_list",
+      "input": {
+        "gateway": {"status": 403, "body": {"json": {"error": "forbidden"}}}
+      },
+      "expect": {
+        "error": {"class": "RoutesRejectedError", "retryable": false, "status": 403, "code": "forbidden"}
+      }
+    },
+    {
+      "id": "routes.error.invalid_id",
+      "feature": "routes.input_validation",
+      "operation": "routes_get",
+      "input": {
+        "gateway": {"unreachable": true},
+        "id": ".."
+      },
+      "expect": {
+        "error": {"class": "InvalidRouteIdError", "retryable": false},
+        "requests": []
+      }
+    },
+    {
+      "id": "routes.error.dot_id",
+      "feature": "routes.input_validation",
+      "operation": "routes_get",
+      "input": {
+        "gateway": {"unreachable": true},
+        "id": "."
+      },
+      "expect": {
+        "error": {"class": "InvalidRouteIdError", "retryable": false},
+        "requests": []
+      }
+    },
+    {
+      "id": "routes.error.empty_id",
+      "feature": "routes.input_validation",
+      "operation": "routes_get",
+      "input": {
+        "gateway": {"unreachable": true},
+        "id": ""
+      },
+      "expect": {
+        "error": {"class": "InvalidRouteIdError", "retryable": false},
+        "requests": []
       }
     }
   ]

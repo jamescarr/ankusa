@@ -152,13 +152,16 @@ export interface paths {
          * Dry run — what would happen to this request?
          * @description Runs the same decision the guard runs, and reports it: the global IP
          *     rules first, then route matching, then the matched route's own rules.
-         *     Nothing is captured, no counter moves, and the answer is not cached —
-         *     this is the endpoint that turns "why was my webhook rejected" into one
-         *     call, and it is worth using before changing any route.
+         *     Nothing is captured, no counter moves, and the decision cache is
+         *     neither read nor written — a dry run cannot make a path look hot, and
+         *     it never answers from an entry another request wrote. This is the
+         *     endpoint that turns "why was my webhook rejected" into one call, and it
+         *     is worth using before changing any route.
          *
-         *     A rejection's `ip_rule` is the rule that *decided*, and is `null` when
-         *     the decision came from a list's `default` (no rule matched) or when the
-         *     reason is not `ip_denied`.
+         *     `ip_rule` is the rule that *decided* an IP question, with the list it
+         *     came from (`scope`); it is `null` whenever no rule decided — a list's
+         *     `default` (nothing matched), or a reason that is not an IP decision at
+         *     all.
          */
         post: operations["testRoute"];
         delete?: never;
@@ -191,9 +194,11 @@ export interface paths {
          *     ever evicted, because an evicted route would start rejecting real
          *     webhooks.
          *
-         *     Note the id `test` is reserved by `POST /admin/routes/test` (the dry
-         *     run), so that operation cannot *create* a route with that id — use
-         *     `PUT /admin/routes/test` for it.
+         *     The id `test` is **not** reserved: only the `POST /admin/routes/test`
+         *     *dry run* shadows this path, and it shadows it for `POST` alone. `POST
+         *     /admin/routes` with `{"id": "test"}` creates that route like any other
+         *     id, and `GET`/`PUT`/`PATCH`/`DELETE /admin/routes/test` then address it
+         *     normally.
          */
         post: operations["createRoute"];
         delete?: never;
@@ -229,9 +234,13 @@ export interface paths {
         /**
          * Delete a route definition
          * @description Immediate: the guard stops capturing the route on the next request, with
-         *     no cache TTL to wait out (the decision cache is keyed by the route
-         *     table's version). A `routes.seed` entry is not resurrected by a restart
-         *     — seeding happens only on a store's first boot.
+         *     no cache TTL to wait out — the decision cache is keyed by the published
+         *     snapshot's epoch, so a mutation makes every cached decision unreachable.
+         *     Whether a restart brings the route back is the store's question: the
+         *     default ETS store re-seeds from `routes.seed` on **every** boot, so a
+         *     deleted route that is also in the seed returns — remove it from the seed
+         *     as well — while the Redis store seeds once per namespace and keeps the
+         *     deletion.
          */
         delete: operations["deleteRoute"];
         options?: never;
@@ -259,9 +268,11 @@ export interface paths {
         /**
          * Replace the global IP rules
          * @description Ordered, first match wins, and `default` decides the case no rule
-         *     matched. These are a **floor**: a global `deny` always wins, including
-         *     over a route's own `allow`. CIDRs are parsed at write time, so a typo is
-         *     a `400` here rather than a silently-never-matching rule on the hot path.
+         *     matched. Both `default` and `rules` are required — omitting either is a
+         *     `400`, not a silent default. These are a **floor**: a global `deny`
+         *     always wins, including over a route's own `allow`. CIDRs are parsed at
+         *     write time, so a typo is a `400` here rather than a
+         *     silently-never-matching rule on the hot path.
          */
         put: operations["putIpRules"];
         post?: never;
@@ -518,8 +529,11 @@ export interface components {
              */
             route_id: string | null;
             /**
-             * @description The rule that decided an IP question, or `null` when none did (the
-             *     list's `default` decided) or when the reason is not `ip_denied`.
+             * @description The rule that decided the IP question — the global list's or the
+             *     matched route's own — or `null` when no rule decided: a list's
+             *     `default` applied because nothing matched, or the reason is not an
+             *     IP decision (`no_route`, `method`). A route's own `allow` rule
+             *     deciding a `matched` decision is reported here too.
              */
             ip_rule: components["schemas"]["DryRunIpRule"] | null;
         };
@@ -589,7 +603,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `400`. `invalid_ip_rules`: the rules are not a JSON object, an `action` is not `allow`/`deny`, or a `cidr` does not parse. `field` is `rules` (with the rule index in `message`) or `default`. Also `invalid_body` when the body never parsed. */
+        /** @description `400`. `invalid_ip_rules`: both `default` and `rules` are required, `default` is `allow` or `deny`, `rules` is a list, and every rule is an object with an `action` of `allow`/`deny` and a `cidr` that parses. `field` is `default` or `rules`; a bad rule's `message` names its index (`rule 0: ...`). A body that is not a JSON object is `invalid_body`, not this. */
         InvalidIpRules: {
             headers: {
                 [name: string]: unknown;
@@ -616,7 +630,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `503`. `store_unavailable`: the route store could not be reached (a Redis store with Redis down). The definition was **not** written. Retry; reads keep working from this node's in-memory snapshot either way. */
+        /** @description `503`. `store_unavailable`: nothing was written. Either the route store could not be reached (a Redis store with Redis down), or the write kept losing to concurrent writers and exhausted its retries — the table changed under the snapshot it had validated, every time. Both are transient: retry, and reads keep working from this node's in-memory snapshot either way. */
         StoreUnavailable: {
             headers: {
                 [name: string]: unknown;

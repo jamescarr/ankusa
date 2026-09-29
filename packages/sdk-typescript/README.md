@@ -2,9 +2,11 @@
 
 The client SDK for [Ankusa](https://github.com/jamescarr/ankusa) deployments:
 one npm package meant to bundle everything a non-Elixir consumer needs to
-talk to an Ankusa deployment. Today that's the
+talk to an Ankusa deployment — the
 [claim-check gateway](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md)
-client; more clients (ingest, admin) land here as they're built.
+client, the route-management client (`routes.admin.port`), the operator
+(`admin.port`) client, and a helper for receiving Ankusa's HTTP sink
+deliveries.
 
 ## Claim-check client
 
@@ -110,10 +112,17 @@ await routes.testRoute({ method: "POST", path: "/webhooks/stripe", ip: "203.0.11
 
 Methods: `health()`, `listRoutes()`, `createRoute()`, `getRoute()`,
 `replaceRoute()`, `updateRoute()`, `deleteRoute()`, `getIpRules()`,
-`putIpRules()`, `testRoute()`. Failures are `RoutesError` subclasses with a
-`retryable` boolean: `RouteNotFoundError` (404), `RoutesRejectedError`
-(400/409, carrying `code`, `field`, `message`, `conflicting_id`,
-`max_routes`), and `RoutesUnavailableError` (5xx/unreachable, retryable).
+`putIpRules()`, `testRoute()`. The id-taking methods reject an id that is not a
+string, is empty, or is `.`/`..` with `InvalidRouteIdError` before making any
+request: a URL parser normalizes those away, so they'd address the collection
+endpoint instead of a route. Every other id is percent-encoded as one path
+segment.
+
+Failures are `RoutesError` subclasses with a `retryable` boolean:
+`InvalidRouteIdError` and `RouteNotFoundError` (404), `RoutesRejectedError`
+(any other `4xx`, carrying `code`, `field`, `message`, `conflicting_id`,
+`max_routes`), and `RoutesUnavailableError` (`5xx`, an unfollowed `3xx`, or
+unreachable — retryable).
 
 ## Admin client
 
@@ -134,9 +143,37 @@ await admin.listQuarantined();
 
 Methods: `health()`, `metrics()` (Prometheus text), `config()`,
 `listDeadLetters()`, `replayDeadLetters()`, `listQuarantined()`. Failures are
-`AdminError` subclasses: `RoleNotEnabledError` (409, carrying `role`),
-`AdminRejectedError` (400, carrying `code`), and `AdminUnavailableError`
-(5xx/unreachable, retryable).
+`AdminError` subclasses: `RoleNotEnabledError` (409 `role_not_enabled`,
+carrying `role`), `AdminRejectedError` (any other `4xx`, carrying `code`), and
+`AdminUnavailableError` (`5xx`, an unfollowed `3xx`, or unreachable —
+retryable).
+
+## Webhook helper
+
+A worker consuming Ankusa's HTTP sink doesn't need a client — it needs the
+hook's identity, which Ankusa attaches as headers. `parseHeaders` reads them
+case-insensitively from any header mapping: a `Headers`, a plain object, or
+Node's `IncomingHttpHeaders`.
+
+```ts
+import { parseHeaders } from "ankusa";
+
+// `req.headers` is whatever your framework hands you (`http.IncomingHttpHeaders`,
+// an Express `req.headers`, a WHATWG `Headers`, ...).
+const hook = parseHeaders(req.headers);
+// hook = { id, source, seq, tenant, contentType }
+
+// Dedupe on `hook.id`: delivery is at-least-once, so a retried hook arrives twice.
+// `x-ankusa-id` is the identity to dedupe on, so a delivery without it is a
+// framework bug rather than a tolerable request: `parseHeaders` raises
+// `MissingHookIdError` instead of returning a blank id.
+```
+
+Every other header is optional — `seq` is `null` unless it is all ASCII
+digits, `tenant` is `null` unless the source has one, and `source`/`contentType`
+default to `""`/`null`. See "HTTP handoff" in
+[`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)
+for the full contract.
 
 ## Layout
 
@@ -161,6 +198,10 @@ src/
     errors.ts
     admin-schema.d.ts   # generated, see "Develop"
     client.test.ts
+  webhook/             # the helper for receiving HTTP-sink deliveries
+    index.ts
+    headers.ts
+    webhook.test.ts
 ```
 
 A future client (say, an ingest helper) gets its own `src/<name>/` directory
@@ -170,7 +211,10 @@ with the same shape, re-exported from `src/index.ts`.
 
 ```sh
 npm install
-npm run generate:types   # regenerate src/claim-check/claim-check-schema.d.ts from the OpenAPI spec
+npm run generate:types   # regenerate every schema from the OpenAPI specs:
+                         #   claim_check.v1.yaml -> src/claim-check/claim-check-schema.d.ts
+                         #   admin.v1.yaml       -> src/admin/admin-schema.d.ts
+                         # (the routes client is generated from admin.v1.yaml too)
 npm run typecheck
 npm test
 npm run build            # emits dist/, what npm actually publishes ("files": ["dist"])

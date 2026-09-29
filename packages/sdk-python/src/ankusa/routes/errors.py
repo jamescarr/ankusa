@@ -6,7 +6,8 @@ bit -- leave the table alone and retry, or surface the rejection -- and nothing
 here requires it to know the listener's status codes to get that right.
 
 Non-retryable: the listener said ``404`` (no such route) or another ``4xx``
-(a rejected write, a duplicate, the cap). Retryable: the listener said
+(a rejected write, a duplicate, the cap), or the id was unusable before any
+request was sent (``InvalidRouteIdError``). Retryable: the listener said
 ``5xx``/``503 store_unavailable``, or the request never completed (network
 error, timeout).
 """
@@ -20,6 +21,19 @@ class RoutesError(Exception):
     """Base for every error this client raises. See module docstring."""
 
     retryable: bool = False
+
+
+class InvalidRouteIdError(RoutesError):
+    """The route ``id`` cannot be used to build a path.
+
+    Raised before any request is sent. An id that isn't a string, is empty, or
+    is exactly ``.`` or ``..`` is refused: URL parsers normalize those away, so
+    ``get_route("..")`` would quietly hit ``/admin/`` and return the list page
+    as if it were a route. Every other id is percent-encoded as one path
+    segment, never refused.
+    """
+
+    retryable = False
 
 
 class RoutesUnavailableError(RoutesError):

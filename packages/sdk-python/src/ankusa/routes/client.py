@@ -8,6 +8,10 @@ anything.
 Like the claim-check client, the listener itself performs no authentication --
 ``headers`` is for whatever a deployer's own boundary (service mesh, an API
 gateway) expects in front of it.
+
+Route ids are percent-encoded as a single path segment, so ``/``, ``?``, ``#``
+and ``%`` in an id can't reshape the URL; an id that isn't a string, is empty,
+or is ``.``/``..`` raises ``InvalidRouteIdError`` before any request is sent.
 """
 
 from __future__ import annotations
@@ -15,10 +19,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import TracebackType
 from typing import Any, Self
+from urllib.parse import quote
 
 import httpx
 
-from .errors import RouteNotFoundError, RoutesRejectedError, RoutesUnavailableError
+from .errors import (
+    InvalidRouteIdError,
+    RouteNotFoundError,
+    RoutesRejectedError,
+    RoutesUnavailableError,
+)
 
 __all__ = ["RoutesClient"]
 
@@ -75,20 +85,36 @@ class RoutesClient:
         return self._json(self._request("POST", "/admin/routes", json=dict(input)))
 
     def get_route(self, id: str) -> dict[str, Any]:
-        """``GET /admin/routes/{id}`` -> the route."""
-        return self._json(self._request("GET", f"/admin/routes/{id}"))
+        """``GET /admin/routes/{id}`` -> the route.
+
+        ``id`` is percent-encoded as one path segment; an unusable id raises
+        ``InvalidRouteIdError`` before any request.
+        """
+        return self._json(self._request("GET", f"/admin/routes/{_route_path(id)}"))
 
     def replace_route(self, id: str, input: Mapping[str, Any]) -> dict[str, Any]:
-        """``PUT /admin/routes/{id}`` -> the replaced (or created) route."""
-        return self._json(self._request("PUT", f"/admin/routes/{id}", json=dict(input)))
+        """``PUT /admin/routes/{id}`` -> the replaced (or created) route.
+
+        ``id`` is percent-encoded as one path segment; an unusable id raises
+        ``InvalidRouteIdError`` before any request.
+        """
+        return self._json(self._request("PUT", f"/admin/routes/{_route_path(id)}", json=dict(input)))
 
     def update_route(self, id: str, patch: Mapping[str, Any]) -> dict[str, Any]:
-        """``PATCH /admin/routes/{id}`` -> the patched route."""
-        return self._json(self._request("PATCH", f"/admin/routes/{id}", json=dict(patch)))
+        """``PATCH /admin/routes/{id}`` -> the patched route.
+
+        ``id`` is percent-encoded as one path segment; an unusable id raises
+        ``InvalidRouteIdError`` before any request.
+        """
+        return self._json(self._request("PATCH", f"/admin/routes/{_route_path(id)}", json=dict(patch)))
 
     def delete_route(self, id: str) -> None:
-        """``DELETE /admin/routes/{id}`` (``204``, no body)."""
-        self._request("DELETE", f"/admin/routes/{id}")
+        """``DELETE /admin/routes/{id}`` (``204``, no body).
+
+        ``id`` is percent-encoded as one path segment; an unusable id raises
+        ``InvalidRouteIdError`` before any request.
+        """
+        self._request("DELETE", f"/admin/routes/{_route_path(id)}")
 
     def get_ip_rules(self) -> dict[str, Any]:
         """``GET /admin/ip-rules`` -> the global IP rules."""
@@ -135,6 +161,23 @@ def _query(params: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
     return {key: value for key, value in params.items() if value is not None}
 
 
+def _route_path(id: object) -> str:
+    """Validate ``id`` and percent-encode it as ONE path segment.
+
+    ``.`` and ``..`` (and an empty id) are refused rather than encoded: a URL
+    parser normalizes them away before the request is sent, so ``..`` would
+    become ``/admin/`` and an empty id or ``.`` the collection endpoint -- the
+    caller would get the list page back as if it were a route. Everything else
+    is ``quote(id, safe="")``, so ``/``, ``?``, ``#``, ``%`` and space travel
+    as escapes (``%2F %3F %23 %25 %20``) instead of reshaping the URL.
+    """
+    if not isinstance(id, str):
+        raise InvalidRouteIdError(f"route id must be a string, got {id!r}")
+    if id in ("", ".", ".."):
+        raise InvalidRouteIdError(f"invalid route id {id!r}")
+    return quote(id, safe="")
+
+
 def _raise_for_status(response: httpx.Response) -> None:
     status = response.status_code
     if 200 <= status < 300:
@@ -152,6 +195,8 @@ def _raise_for_status(response: httpx.Response) -> None:
             conflicting_id=body.get("conflicting_id") if isinstance(body, dict) else None,
             max_routes=body.get("max_routes") if isinstance(body, dict) else None,
         )
+    # Everything else that isn't 2xx is retryable: 1xx, an unfollowed 3xx
+    # redirect, and 5xx.
     raise RoutesUnavailableError(f"routes listener error ({status}): {_error_body(response)!r}")
 
 
