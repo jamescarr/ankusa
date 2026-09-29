@@ -7,8 +7,8 @@ defmodule Ankusa.Admin.Redact do
   an opt as secret:
 
     * a key named `secret`, `password`, `secret_access_key`, `token`, `sasl`,
-      `nkey_seed`, or `jwt` becomes `"[REDACTED]"` (the last two are the NATS
-      sink's private key and a JWT);
+      or `nkey_seed` becomes `"[REDACTED]"` (the last is the NATS sink's private
+      key);
     * a string that parses as a URI with `user:pass` userinfo keeps the user
       and loses the password.
 
@@ -34,7 +34,7 @@ defmodule Ankusa.Admin.Redact do
 
   @redacted "[REDACTED]"
 
-  @secret_keys ~w(secret password secret_access_key token sasl nkey_seed jwt)
+  @secret_keys ~w(secret password secret_access_key token sasl nkey_seed)
 
   @doc "A redacted, JSON-encodable view of the whole config."
   @spec config(Ankusa.Config.t()) :: map()

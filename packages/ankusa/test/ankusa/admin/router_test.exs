@@ -425,7 +425,7 @@ defmodule Ankusa.Admin.RouterTest do
               "url" => "https://user:leakhunter@example.test/hook",
               "headers" => %{"authorization" => "Bearer leakhunter", "x-team" => "payments"}
             },
-            %{"type" => "log", "jwt" => "leakhunter", "nested" => %{"token" => "leakhunter"}}
+            %{"type" => "log", "password" => "leakhunter", "nested" => %{"token" => "leakhunter"}}
           ]
         })
 
@@ -437,7 +437,7 @@ defmodule Ankusa.Admin.RouterTest do
       assert [http, log] = entry["sinks"]
       assert http["url"] == "https://user:[REDACTED]@example.test/hook"
       assert http["headers"] == %{"authorization" => "[REDACTED]", "x-team" => "[REDACTED]"}
-      assert log["jwt"] == "[REDACTED]"
+      assert log["password"] == "[REDACTED]"
       assert log["nested"]["token"] == "[REDACTED]"
     end
 
