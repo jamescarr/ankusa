@@ -64,12 +64,15 @@ defmodule Ankusa.Routes.Store.Redis do
   is the *worst case* staleness for a node that was disconnected while a route
   was changed.
 
-  The node subscribes *before* it loads, so a write that lands in between is a
-  message waiting in its mailbox rather than one it never hears. The supervisor
-  is `:rest_for_one` with the pub/sub connection ahead of the state process, so a
-  pub/sub connection that dies takes the state process with it and the restart
-  subscribes again, instead of leaving a node that has silently stopped
-  listening.
+  The node subscribes — and waits for Redis to confirm the subscription — *before*
+  it loads. `Redix.PubSub.subscribe/3` returns before Redis has registered
+  anything, and the load runs on another connection, so without the wait a write
+  could land after the load and before the subscription is live, and be in
+  neither. With it, that write is a message waiting in the mailbox. The
+  supervisor is `:rest_for_one` with the pub/sub connection ahead of the state
+  process, so a pub/sub connection that dies takes the state process with it and
+  the restart subscribes again, instead of leaving a node that has silently
+  stopped listening.
 
   A publish failure is not treated as a write failure: the definitions are
   already durable in Redis and this node's mirror is already updated, so the
@@ -267,8 +270,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
       ip_rules: %{default: :allow, rules: []}
     }
 
-    # Subscribe BEFORE loading: a write that lands between the two is then a
-    # message waiting in the mailbox, not one this node never hears.
+    # Subscribe, and wait until Redis has confirmed it, BEFORE loading: a write
+    # that lands after that is a message in the mailbox as well as (maybe) in the
+    # load, never in neither.
     with :ok <- subscribe(state),
          {:ok, state} <- bootstrap(state, config.routes) do
       Process.send_after(self(), :tick, state.tick_ms)
@@ -339,10 +343,21 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
   # ── boot ────────────────────────────────────────────────────────────────────
 
+  # `subscribe/3` returns a reference as soon as the pub/sub connection has the
+  # request. Redis has registered the subscription only when the `:subscribed`
+  # message arrives, and Redix guarantees delivery from that point on. Without the
+  # wait, the load (which runs on another connection) could reach Redis first.
   defp subscribe(state) do
     case Redix.PubSub.subscribe(state.pubsub, state.namespace, self()) do
-      {:ok, _ref} -> :ok
-      {:error, reason} -> {:error, {:pubsub_subscribe_failed, reason}}
+      {:ok, ref} ->
+        receive do
+          {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
+        after
+          @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
+        end
+
+      {:error, reason} ->
+        {:error, {:pubsub_subscribe_failed, reason}}
     end
   end
 

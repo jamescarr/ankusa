@@ -19,10 +19,12 @@ follows [Semantic Versioning](https://semver.org/).
 - A node reloads when Redis's version *differs* from its own, not only when it is
   higher, and reads the version and the definitions in one transaction. A pub/sub
   message is now a nudge to check the version; its payload is ignored.
-- The node subscribes before it loads, seeding is one atomic script, and the
-  supervisor is `:rest_for_one` with the pub/sub connection ahead of the state
-  process. Writes wait up to 20s for the state process (Redis's own timeout is 5s
-  per command) instead of giving up at the 5s `GenServer.call` default.
+- The node subscribes, and waits for Redis to confirm the subscription (Redix's
+  `subscribe/3` returns before Redis has registered anything), before it loads.
+  Seeding is one atomic script, and the supervisor is `:rest_for_one` with the
+  pub/sub connection ahead of the state process. Writes wait up to 20s for the
+  state process (Redis's own timeout is 5s per command) instead of giving up at
+  the 5s `GenServer.call` default.
 - The suite deletes only its own three keys instead of `FLUSHDB`, so it can run
   against a Redis that holds other data.
 

@@ -313,6 +313,15 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert is_pid(Ankusa.whereis(config.instance, :routes_redis_pubsub))
   end
 
+  test "a node that has booted is already subscribed", %{conn: conn} do
+    start_node()
+
+    # Redis itself says so, the instant the node is up: the subscription was
+    # confirmed before the node loaded anything, not merely requested. A node that
+    # loaded first could miss a write made before its subscription was live.
+    assert {:ok, [@namespace, 1]} = Redix.command(conn, ["PUBSUB", "NUMSUB", @namespace])
+  end
+
   test "a node whose mirror lags cannot overwrite what another node already wrote" do
     node_a = start_node(tick_ms: 3_600_000)
     node_b = start_node(tick_ms: 3_600_000)
