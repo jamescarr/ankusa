@@ -489,6 +489,70 @@ defmodule AnkusaServer.ConfigTest do
              {Ankusa.RouteResolver.TenantPath, [prefix: ["hooks"]]}
   end
 
+  # ── source_store ────────────────────────────────────────────────────────────
+
+  test "source_store defaults to the static store" do
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}")
+    config = Config.load!(path: path, env: %{}).config
+
+    assert {Ankusa.SourceStore.Static, opts} = config.source_store
+    assert Map.keys(opts[:sources]) == ["demo"]
+  end
+
+  test "source_store: persistent keeps the seeds and attaches the decoder" do
+    path =
+      tmp_config("""
+      source_store: {type: persistent}
+      sources:
+        "acme.billing":
+          verify: {type: hmac, secret: "s3cr3t", signature_header: X-Sig}
+          sinks: [{type: log}]
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert {Ankusa.SourceStore.Persistent, opts} = config.source_store
+    assert Map.has_key?(opts[:sources], "acme.billing")
+    assert is_function(opts[:decoder], 2)
+  end
+
+  test "source_from_map!/2 is the YAML validation, wrapped" do
+    opts =
+      Config.source_from_map!("acme.new", %{"sinks" => [%{"type" => "log"}]})
+
+    assert opts == [sinks: [{Ankusa.Sink.Log, []}]]
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.source_from_map!("acme.new", %{})
+      end
+
+    assert error.message ==
+             ~s(sources.acme.new.sinks: missing required key "sinks")
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.source_from_map!("acme.new", %{"sinks" => [%{"type" => "bogus"}]})
+      end
+
+    assert error.message =~ "sources.acme.new.sinks[0].type"
+  end
+
+  test "an unknown source_store type is rejected by name" do
+    path = tmp_config("source_store: {type: redis}\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "source_store.type"
+    assert error.message =~ ~s(unknown value "redis")
+  end
+
+  test "an unknown source_store key is rejected" do
+    path = tmp_config("source_store: {type: static, path: /tmp/x}\n")
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(source_store: unknown key "path")
+  end
+
   # ── the whole point of redaction ────────────────────────────────────────────
 
   test "no fixture secret survives printing the loaded config" do

@@ -39,6 +39,7 @@ defmodule Ankusa.Instance do
     children =
       metrics_children(config, opts) ++
         wal_children(config, opts) ++
+        source_store_children(config, opts) ++
         edge_children(config, opts) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
@@ -63,6 +64,20 @@ defmodule Ankusa.Instance do
     if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
       {wal_mod, _} = config.wal
       [{wal_mod, opts}]
+    else
+      []
+    end
+  end
+
+  # A writable store (e.g. `Ankusa.SourceStore.Persistent`) must be up before the
+  # edge accepts a request, since every ingest reads through it. A read-only
+  # store is config-only and has no process: `function_exported?/1` on a module
+  # that may not be loaded yet needs `Code.ensure_loaded/1` first.
+  defp source_store_children(config, _opts) do
+    {store_mod, _store_opts} = config.source_store
+
+    if Code.ensure_loaded?(store_mod) and function_exported?(store_mod, :start_link, 1) do
+      [{store_mod, config}]
     else
       []
     end
