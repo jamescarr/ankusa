@@ -6,8 +6,8 @@
  * Non-retryable: the node answered `409 role_not_enabled` (this node does not
  * run the role that route needs), or rejected the request with any other
  * `4xx`.
- * Retryable: the node answered `5xx`, or the request never completed
- * (network error, timeout).
+ * Retryable: the node answered `5xx` or an unfollowed `3xx`, or the request
+ * never completed (network error, timeout).
  */
 export abstract class AdminError extends Error {
   abstract readonly retryable: boolean;
@@ -41,7 +41,10 @@ export class AdminRejectedError extends AdminError {
   }
 }
 
-/** The node is unreachable, or answered `5xx`. Safe to retry. */
+/**
+ * The node is unreachable, or answered a non-2xx that is not a `4xx` (`5xx`, an
+ * unfollowed `3xx`). Safe to retry.
+ */
 export class AdminUnavailableError extends AdminError {
   readonly retryable = true;
 

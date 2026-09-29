@@ -110,6 +110,22 @@ describe("createAdminClient", () => {
     assert.equal(err.retryable, true);
   });
 
+  test("maps a 302 redirect to a retryable AdminUnavailableError", async () => {
+    const { fetch } = mockGateway(302, "", "text/html");
+    const client = createAdminClient({ baseUrl: "http://gateway", fetch });
+    const err = (await expectError(client.config())) as AdminUnavailableError;
+    assert.ok(err instanceof AdminUnavailableError);
+    assert.equal(err.retryable, true);
+  });
+
+  test("maps a 500 to a retryable AdminUnavailableError", async () => {
+    const { fetch } = mockGateway(500, JSON.stringify({ error: "boom" }));
+    const client = createAdminClient({ baseUrl: "http://gateway", fetch });
+    const err = (await expectError(client.listDeadLetters())) as AdminUnavailableError;
+    assert.ok(err instanceof AdminUnavailableError);
+    assert.equal(err.retryable, true);
+  });
+
   test("a network failure maps to a retryable AdminUnavailableError", async () => {
     const fetch = (async () => {
       throw new Error("ECONNREFUSED");

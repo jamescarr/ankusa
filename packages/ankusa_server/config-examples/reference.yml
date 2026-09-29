@@ -63,10 +63,16 @@ routes:
   trusted_proxies: []
 
   store:
-    # ets   -> definitions in this node's memory (plus `seed` below)
+    # ets   -> definitions in this node's memory (plus `seed` below). Each node
+    #          has its own: two edges with `type: ets` share nothing.
     # redis -> definitions in Redis, shared by every edge node (ankusa_redis);
     #          a `url` with no `type` means redis
     type: ets
+    # The three keys below are only valid with `type: redis`. With `type: ets`
+    # (or no `type` at all, which means ets) setting any of them is a config
+    # error naming the key, not a silent drop: a fleet that set only a url
+    # would otherwise keep every definition to itself while its operator
+    # believed it shared them.
     # [env ANKUSA_ROUTES_STORE_URL]
     # url: redis://cache:6379
     # Share definitions across nodes by giving them the same namespace;

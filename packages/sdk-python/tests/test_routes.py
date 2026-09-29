@@ -80,6 +80,39 @@ def test_list_routes_sends_only_present_query_params() -> None:
     assert queries == ["enabled=true&limit=50&cursor=stripe", "enabled=false", ""]
 
 
+def test_unusable_route_ids_are_refused_before_any_request() -> None:
+    records: list[httpx.Request] = []
+    with ankusa.RoutesClient("http://gateway.invalid", transport=_transport(200, {}, records)) as client:
+        for bad in (None, 7, "", ".", ".."):
+            calls = [
+                lambda: client.get_route(bad),
+                lambda: client.replace_route(bad, {"path": "/x"}),
+                lambda: client.update_route(bad, {"enabled": True}),
+                lambda: client.delete_route(bad),
+            ]
+            for call in calls:
+                with pytest.raises(ankusa.InvalidRouteIdError) as exc:
+                    call()
+                assert exc.value.retryable is False
+                assert repr(bad) in str(exc.value)
+
+    assert records == []
+
+
+def test_route_ids_are_percent_encoded_as_one_path_segment() -> None:
+    records: list[httpx.Request] = []
+    with ankusa.RoutesClient("http://gateway.invalid", transport=_transport(200, {"id": "x"}, records)) as client:
+        client.get_route("a/b c")
+        client.get_route("a/b?c#d e%")
+        client.delete_route("a/b c")
+
+    assert [r.url.raw_path for r in records] == [
+        b"/admin/routes/a%2Fb%20c",
+        b"/admin/routes/a%2Fb%3Fc%23d%20e%25",
+        b"/admin/routes/a%2Fb%20c",
+    ]
+
+
 def test_error_classification() -> None:
     with ankusa.RoutesClient("http://gateway.invalid", transport=_transport(404, {"error": "not_found"}, [])) as client:
         with pytest.raises(ankusa.RouteNotFoundError) as exc:
@@ -103,10 +136,23 @@ def test_error_classification() -> None:
         assert exc.value.code == "duplicate_route"
         assert exc.value.conflicting_id == "stripe"
 
+    with ankusa.RoutesClient("http://gateway.invalid", transport=_transport(403, {"error": "forbidden"}, [])) as client:
+        with pytest.raises(ankusa.RoutesRejectedError) as exc:
+            client.list_routes()
+        assert exc.value.retryable is False
+        assert exc.value.status == 403
+        assert exc.value.code == "forbidden"
+
     with ankusa.RoutesClient("http://gateway.invalid", transport=_transport(503, {"error": "store_unavailable"}, [])) as client:
         with pytest.raises(ankusa.RoutesUnavailableError) as exc:
             client.create_route({"path": "/hooks/x"})
         assert exc.value.retryable is True
+
+    for status in (302, 500):
+        with ankusa.RoutesClient("http://gateway.invalid", transport=_transport(status, {"error": "boom"}, [])) as client:
+            with pytest.raises(ankusa.RoutesUnavailableError) as exc:
+                client.list_routes()
+            assert exc.value.retryable is True
 
 
 def test_unreachable_is_retryable() -> None:

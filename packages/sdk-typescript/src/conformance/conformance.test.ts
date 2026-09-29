@@ -14,7 +14,7 @@ type Client = { headers?: Record<string, string>; timeout_ms?: number; transport
 type Gateway =
   | { unreachable: true }
   | { status: number; headers?: Record<string, string>; body?: Body; delay_ms?: number };
-type ExpectedRequest = { method: string; path: string; headers?: Record<string, string> };
+type ExpectedRequest = { method: string; path: string; headers?: Record<string, string>; body?: unknown };
 type Expect = { ok?: unknown; error?: { class: string; [key: string]: unknown }; requests?: ExpectedRequest[] };
 type Case = {
   id: string;
@@ -23,7 +23,13 @@ type Case = {
   input: Record<string, unknown>;
   expect: Expect;
 };
-type Recorded = { method: string; path: string; headers: Record<string, string | string[] | undefined> };
+type Recorded = {
+  method: string;
+  path: string;
+  headers: Record<string, string | string[] | undefined>;
+  /** The request body parsed as JSON; `null` when there was none. */
+  body: unknown;
+};
 
 const DIR = new URL("../../../../conformance/", import.meta.url);
 
@@ -33,6 +39,10 @@ const CASES: Case[] = readdirSync(new URL("cases/", DIR))
   .flatMap(
     (name) => (JSON.parse(readFileSync(new URL(`cases/${name}`, DIR), "utf8")) as { cases: Case[] }).cases,
   );
+
+// An empty directory, or one this file doesn't resolve to, must fail loudly:
+// zero cases would otherwise report a green run.
+assert.ok(CASES.length > 0, `no conformance cases found under ${DIR.href}`);
 
 // A namespace import, so an export that doesn't exist yet reads as `undefined`
 // and fails only its own cases instead of the whole file. This also makes the
@@ -47,6 +57,7 @@ const ERROR_CLASSES: Record<string, unknown> = {
   RoutesError: sdk.RoutesError,
   RoutesUnavailableError: sdk.RoutesUnavailableError,
   RouteNotFoundError: sdk.RouteNotFoundError,
+  InvalidRouteIdError: sdk.InvalidRouteIdError,
   RoutesRejectedError: sdk.RoutesRejectedError,
   AdminError: sdk.AdminError,
   AdminUnavailableError: sdk.AdminUnavailableError,
@@ -108,7 +119,19 @@ async function startGateway(spec: Gateway, requests: Recorded[]): Promise<{ base
   const bytes = bodyBytes(spec.body);
   const timers: NodeJS.Timeout[] = [];
   const server = http.createServer((req, res) => {
-    requests.push({ method: req.method ?? "GET", path: req.url ?? "", headers: req.headers });
+    const record: Recorded = {
+      method: req.method ?? "GET",
+      path: req.url ?? "",
+      headers: req.headers,
+      body: null,
+    };
+    requests.push(record);
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8");
+      record.body = text === "" ? null : JSON.parse(text);
+    });
     // A client that has already timed out may have closed the connection.
     res.on("error", () => {});
     const respond = () => {
@@ -143,10 +166,18 @@ function injectedFetch(spec: Gateway, requests: Recorded[]): typeof fetch {
   const headers = isUnreachable(spec) ? undefined : spec.headers;
   return (async (input: RequestInfo | URL) => {
     const request = input instanceof Request ? input : new Request(input);
+    // Reading the body does not forward it anywhere: this transport serves the
+    // spec in-process.
+    const text = await request.text();
+    // `path` is the request target as sent, query string included: the same thing
+    // the real-server transport records (`req.url`) and the Python runner records
+    // (`raw_path`), so a vector asserts a query the same way whichever carries it.
+    const url = new URL(request.url);
     requests.push({
       method: request.method,
-      path: new URL(request.url).pathname,
+      path: url.pathname + url.search,
       headers: Object.fromEntries(request.headers),
+      body: text === "" ? null : JSON.parse(text),
     });
     return new Response(bytes, {
       status,
@@ -370,6 +401,10 @@ function assertRequests(actual: Recorded[], expected: ExpectedRequest[]): void {
     assert.equal(got.path, want.path, `request ${i} path`);
     for (const [name, value] of Object.entries(want.headers ?? {})) {
       assert.equal(got.headers[name], value, `request ${i} header ${name}`);
+    }
+    // Absent means "not asserted": vectors don't all pin the body.
+    if ("body" in want) {
+      assert.deepEqual(got.body, want.body, `request ${i} body`);
     }
   });
 }

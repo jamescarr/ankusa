@@ -18,7 +18,14 @@ from .claim_check import (
     ParsedClaimRef,
     parse_claim_ref,
 )
-from .routes import RouteNotFoundError, RoutesClient, RoutesError, RoutesRejectedError, RoutesUnavailableError
+from .routes import (
+    InvalidRouteIdError,
+    RouteNotFoundError,
+    RoutesClient,
+    RoutesError,
+    RoutesRejectedError,
+    RoutesUnavailableError,
+)
 from .sources import (
     Source,
     SourceConflictError,
@@ -50,6 +57,7 @@ __all__ = [
     "parse_claim_ref",
     "RoutesClient",
     "RoutesError",
+    "InvalidRouteIdError",
     "RoutesUnavailableError",
     "RouteNotFoundError",
     "RoutesRejectedError",

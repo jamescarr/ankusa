@@ -80,14 +80,16 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     // An empty error body arrives as `undefined`; the Python client reports it
     // as "".
     const body = error === undefined ? "" : error;
-    if (status >= 500) {
-      throw new AdminUnavailableError(`admin gateway error (${status}): ${JSON.stringify(body)}`);
-    }
     const e = (body && typeof body === "object" ? body : {}) as ErrorBody;
     if (status === 409 && e.error === "role_not_enabled") {
       throw new RoleNotEnabledError(`role not enabled${e.role ? `: ${e.role}` : ""}`, e.role);
     }
-    throw new AdminRejectedError(`admin rejected (${status}): ${JSON.stringify(body)}`, status, e.error);
+    // Only a `4xx` is the node rejecting the request. An unfollowed `3xx` (or a
+    // `1xx`) means the caller never reached the node, same as a `5xx`.
+    if (status >= 400 && status < 500) {
+      throw new AdminRejectedError(`admin rejected (${status}): ${JSON.stringify(body)}`, status, e.error);
+    }
+    throw new AdminUnavailableError(`admin gateway error (${status}): ${JSON.stringify(body)}`);
   }
 
   async function health(): Promise<Health> {

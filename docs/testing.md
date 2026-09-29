@@ -12,11 +12,11 @@ suite — `mise run check:conformance`, below.
 ## `ankusa` core: `mix test`
 
 ```sh
-mise run check:package ankusa         # 301 tests, no external infra needed
+mise run check:package ankusa         # 370 tests, no external infra needed
 mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
-The 301 always-on tests cover:
+The 370 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
   truncation, that a restart after a full truncation does **not** reuse seqs,
@@ -56,23 +56,34 @@ The 301 always-on tests cover:
   `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
   deleting whole `dt=` day partitions.
 - **Route management** (`test/ankusa/net_test.exs`, `net/client_ip_test.exs`,
-  `routes*_test.exs`, `edge_route_guard_test.exs`, `routes/router_test.exs`):
-  CIDR parsing and membership with property tests (round-trip, self-containment,
-  agreement with a naive top-bits comparison); client-IP resolution (the header
-  is read only from a trusted peer, and one junk entry discards it whole); the
-  path-pattern grammar and every negative case (`%2F`, `..`, a wildcard that is
-  not last); the ETS store's cap; the decision cache's version-keyed
-  invalidation; `authorize/4`'s full decision matrix, including a route's own
-  rules replacing the global list; the dry run's rule and scope reporting; the
-  guard's WAL assertions (a rejected request writes **nothing**); and the
-  management API over both `Plug.Test.conn` and a real socket, unauthenticated
-  by design like `Ankusa.Admin.Router`. `routes/router_openapi_test.exs` is the
-  contract test for that API: it builds every documented request from the
-  examples in `priv/openapi/admin.v1.yaml`, runs it through the real router, and
-  checks the status, schema, and field names against the document — plus the
-  documented method matrix, 404s for the near-misses of the documented surface,
-  and every example against its own schema, so the spec and the code cannot
-  drift apart.
+  `routes/matcher_test.exs`, `routes_test.exs`, `edge_route_guard_test.exs`,
+  `routes/router_test.exs`): example-based, no property tests. `cidr` (the
+  dependency) does the prefix bit math, so `net_test.exs` pins the small surface
+  Ankusa keeps on top of `:inet` — address parsing, canonical rendering, the
+  IPv4-mapped-to-IPv4 normalization, and `parse_cidr/1`, where junk is an
+  `:error` rather than a raise and an IPv4-mapped *range* is rejected because a
+  normalized address could never match one.
+  `net/client_ip_test.exs` walks the forwarded chain entry by entry: the header
+  is read only from a trusted peer, every `x-forwarded-for` value is joined in
+  order, the chain is walked right to left, an entry with a port or IPv6 brackets
+  is read, an unreadable entry before the client denies the request, and no
+  header falls back to the peer. `routes/matcher_test.exs` covers the
+  path-pattern grammar and every negative case (`%2F`, `.`/`..`, a wildcard that
+  is not last). `routes_test.exs` covers the ETS store's cap, `authorize/4`'s
+  decision matrix (including a route's own rules replacing the global list, and
+  a global deny beating them), the decision cache, the dry run's rule and scope
+  reporting, telemetry, and CRUD. `edge_route_guard_test.exs` drives the guard
+  with real requests and asserts its WAL effects (a rejected request writes
+  **nothing**); `routes/router_test.exs` drives the management API over both
+  `Plug.Test.conn` and a real socket, unauthenticated by design like
+  `Ankusa.Admin.Router`. `routes/router_openapi_test.exs` is the
+  contract test for that API: it drives every documented operation from the
+  examples in `priv/openapi/admin.v1.yaml` — path parameters, query parameters,
+  and request bodies included — and drives every documented error response with
+  a request that produces it, running each through the real router and checking
+  the status, schema, and field names against the document, plus the documented
+  method matrix, 404s for the near-misses of the documented surface, and every
+  example against its own schema, so the spec and the code cannot drift apart.
 - **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
   mid-flight, and proves every acked id survives replay from the WAL. Zero
   tolerance: this is the test that actually backs the core invariant claim
@@ -169,7 +180,7 @@ toolchain.
 Same pattern, against Redis on :6399:
 
 ```sh
-mise run check:package ankusa_redis      # 10 tests
+mise run check:package ankusa_redis      # 19 tests
 ```
 
 `REDIS_URL` (default `redis://localhost:6399`) points the suite at another
@@ -180,7 +191,9 @@ node reaches the other over pub/sub **without** waiting for a tick, a raw write
 with no broadcast is still picked up by the tick, a Redis error on a write is
 `:store_unavailable` and leaves the local mirror untouched, and a boot against a
 Redis that is not there (or against a corrupted definition) fails instead of
-starting a node that would deny everything.
+starting a node that would deny everything. The suite deletes only the keys under
+its own namespace (`ankusa:routes:test`) between tests — never `FLUSHDB`, which
+would wipe a Redis you happen to share with it.
 ## SDK conformance: one harness across the SDKs
 
 `packages/sdk-python` and `packages/sdk-typescript` are the two client SDKs.

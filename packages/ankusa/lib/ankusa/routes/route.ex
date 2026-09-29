@@ -29,6 +29,7 @@ defmodule Ankusa.Routes.Route do
   the field is a list, the index.
   """
 
+  alias Ankusa.Net
   alias Ankusa.Routes.Matcher
   alias CIDR
 
@@ -48,8 +49,8 @@ defmodule Ankusa.Routes.Route do
   defstruct [:id, :path, :methods, :enabled, :ip_rules, :metadata, :inserted_at, :updated_at]
 
   @fields ~w(id path methods enabled ip_rules metadata)
-  @id_re ~r/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/
-  @method_re ~r/^[A-Z]+$/
+  @id_re ~r/\A[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?\z/
+  @method_re ~r/\A[A-Z]+\z/
 
   @id_message "must be a lowercase slug of at most 64 characters"
   @methods_message "must be a non-empty list of HTTP methods"
@@ -110,12 +111,18 @@ defmodule Ankusa.Routes.Route do
   def from_json(json) when is_map(json) do
     with {:ok, inserted_at} <- timestamp(json["inserted_at"], "inserted_at"),
          {:ok, updated_at} <- timestamp(json["updated_at"], "updated_at"),
+         {:ok, _id} <- stored_id(json),
          {:ok, route} <- from_attrs(Map.drop(json, ["inserted_at", "updated_at"])) do
       {:ok, %{route | inserted_at: inserted_at, updated_at: updated_at}}
     end
   end
 
   def from_json(_other), do: {:error, {:invalid, "route", "must be a JSON object"}}
+
+  # A stored definition always carries its id. One without it is corrupt, and
+  # minting a fresh id on every load would hand each node a different one.
+  defp stored_id(%{"id" => id}) when is_binary(id), do: {:ok, id}
+  defp stored_id(_json), do: {:error, {:invalid, "id", "is required"}}
 
   @doc """
   Parse an ordered rule list into `t:ip_rule/0`s, naming the index of the first
@@ -194,11 +201,16 @@ defmodule Ankusa.Routes.Route do
 
   defp id(attrs, opts) do
     case Keyword.get(opts, :id) || attrs["id"] do
+      nil ->
+        {:ok, generate_id()}
+
       value when is_binary(value) ->
         if Regex.match?(@id_re, value), do: {:ok, value}, else: {:error, invalid("id")}
 
-      _missing ->
-        {:ok, generate_id()}
+      # A number or a map is not "no id": quietly replacing it with a generated
+      # one would answer 201 for a route the caller did not name.
+      _other ->
+        {:error, invalid("id")}
     end
   end
 
@@ -285,10 +297,19 @@ defmodule Ankusa.Routes.Route do
   defp rule_action(%{"action" => action}), do: {:error, "invalid action #{inspect(action)}"}
   defp rule_action(_rule), do: {:error, "action is required"}
 
+  # An ordinary failure keeps its plain message. A mapped range parses fine, so
+  # nothing about it looks wrong to the operator: say why it was refused, in the
+  # message they actually read (an API 400, a boot error).
   defp rule_cidr(%{"cidr" => cidr}) do
-    case CIDR.parse(cidr) do
-      %CIDR{} = parsed -> {:ok, parsed}
-      {:error, _} -> {:error, "invalid cidr #{inspect(cidr)}"}
+    case Net.parse_cidr(cidr) do
+      {:ok, parsed} ->
+        {:ok, parsed}
+
+      {:error, :mapped_range} ->
+        {:error, "invalid cidr #{inspect(cidr)}: #{Net.mapped_range_hint()}"}
+
+      {:error, _message} ->
+        {:error, "invalid cidr #{inspect(cidr)}"}
     end
   end
 
@@ -343,27 +364,38 @@ defmodule Ankusa.Routes.Route do
   @doc """
   Parse a global rule list — the admin API's `PUT /admin/ip-rules` body and the
   Redis store's `ip_rules` value are both this shape — into the store form.
-  `default` is `:allow` when absent.
+
+  `default` and `rules` are both required. This replaces a security control
+  wholesale, so nothing is filled in on the caller's behalf: an omitted `default`
+  used to mean `allow`, which quietly turned a deny-by-default list into an open
+  one.
   """
   @spec parse_ip_rules(term()) ::
           {:ok, %{default: :allow | :deny, rules: [ip_rule()]}}
           | {:error, {:invalid, String.t(), String.t()}}
   def parse_ip_rules(attrs) do
     with {:ok, attrs} <- stringify(attrs, "ip_rules"),
-         {:ok, default} <- ip_rules_default(attrs["default"]) do
-      case parse_rules(Map.get(attrs, "rules", [])) do
-        {:ok, rules} -> {:ok, %{default: default, rules: rules}}
-        {:error, message} -> {:error, {:invalid, "rules", message}}
-      end
+         {:ok, default} <- ip_rules_default(attrs["default"]),
+         {:ok, rules} <- ip_rules_list(attrs["rules"]) do
+      {:ok, %{default: default, rules: rules}}
     end
   end
 
-  defp ip_rules_default(nil), do: {:ok, :allow}
+  defp ip_rules_default(nil), do: {:error, {:invalid, "default", "is required"}}
   defp ip_rules_default(action) when action in [:allow, "allow"], do: {:ok, :allow}
   defp ip_rules_default(action) when action in [:deny, "deny"], do: {:ok, :deny}
 
   defp ip_rules_default(action),
     do: {:error, {:invalid, "default", "must be \"allow\" or \"deny\", got #{inspect(action)}"}}
+
+  defp ip_rules_list(nil), do: {:error, {:invalid, "rules", "is required"}}
+
+  defp ip_rules_list(rules) do
+    case parse_rules(rules) do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, message} -> {:error, {:invalid, "rules", message}}
+    end
+  end
 
   defp timestamp(value, field) when is_binary(value) do
     case DateTime.from_iso8601(value) do

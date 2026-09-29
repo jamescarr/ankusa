@@ -149,6 +149,44 @@ defmodule Ankusa.Edge.RouteGuardTest do
     end
   end
 
+  describe "the match event and the cache's key bound" do
+    test "cacheable: false says a matching path is too long to be cached" do
+      config = start(seed: [%{"id" => "any", "path" => "/hooks/*"}])
+      handler = "routes-cacheable-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :routes, :match],
+        fn _event, _measurements, metadata, _config -> send(test_pid, {:match, metadata}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      guard = fn path ->
+        conn =
+          Plug.Test.conn(:post, path) |> Ankusa.Edge.RouteGuard.call(instance: config.instance)
+
+        refute conn.halted
+      end
+
+      # A path past the key bound is matched by a scan every time: never a hit, and
+      # the event says why, so it isn't mistaken for an ordinary miss.
+      long = "/hooks/" <> String.duplicate("a", 300)
+      guard.(long)
+      assert_receive {:match, %{route_id: "any", cached: false, cacheable: false}}
+      guard.(long)
+      assert_receive {:match, %{cached: false, cacheable: false}}
+
+      # An ordinary path is cacheable, and its second request is a hit.
+      guard.("/hooks/a")
+      assert_receive {:match, %{cached: false, cacheable: true}}
+      guard.("/hooks/a")
+      assert_receive {:match, %{cached: true, cacheable: true}}
+    end
+  end
+
   describe "IP rules" do
     test "a globally denied sender is 403 and writes nothing" do
       config =

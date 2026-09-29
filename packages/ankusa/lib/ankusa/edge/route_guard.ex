@@ -22,6 +22,12 @@ defmodule Ankusa.Edge.RouteGuard do
   which paths exist by comparing status codes. No `www-authenticate` or
   `retry-after` header is sent: there is nothing for the sender to do.
 
+  One exception is the operator's to make. A sender denied by a *route's own*
+  `ip_rules` gets `routes.ip_denied_status` (403 by default) while an unknown path
+  gets `404`, so with the default it can tell that the path it hit is a route. A
+  global IP denial answers every path alike and leaks nothing. Set
+  `routes.ip_denied_status: 404` when that distinction matters.
+
   ## Senders retry on 4xx
 
   Some providers retry any non-2xx, some give up, some disable the endpoint after
@@ -39,15 +45,22 @@ defmodule Ankusa.Edge.RouteGuard do
 
   ## Telemetry
 
-    * `[:ankusa, :routes, :match]` — metadata `%{instance:, route_id:, cached:}`;
-      `:cached` is true when the decision came from `Ankusa.Routes.Cache`.
+    * `[:ankusa, :routes, :match]` — metadata
+      `%{instance:, route_id:, cached:, cacheable:}`. `:cached` is true when the
+      decision came from `Ankusa.Routes.Cache`. `:cacheable` is false when the
+      request path is past the cache's key bound (`Ankusa.Routes.Cache.cacheable?/1`),
+      so every request for it is matched by a scan of the route table and none is
+      ever a `cached: true`: the way to tell "a legitimate path that is too long
+      to cache" from an ordinary miss.
     * `[:ankusa, :routes, :reject]` — metadata
       `%{instance:, reason:, method:, path:}` with `:reason` one of `:no_route`,
       `:method`, `:ip_denied`.
 
   Rejections are also logged at `:debug`, sampled at `routes.log_sample` (0
   disables it): a scanner hitting random paths must not fill a disk, but an
-  operator debugging "why is this one provider failing" needs a line.
+  operator debugging "why is this one provider failing" needs a line. The warning
+  for a node with no route table loaded is sampled the same way, so a store that
+  is slow to come up does not write one line per rejected hook.
   """
 
   @behaviour Plug
@@ -79,10 +92,12 @@ defmodule Ankusa.Edge.RouteGuard do
   defp guard(conn, instance, config) do
     case Routes.snapshot(instance) do
       nil ->
-        Logger.warning(
-          "[ankusa] routes are enabled but no route table is loaded; rejecting " <>
-            "#{conn.method} #{conn.request_path}"
-        )
+        if sampled?(config) do
+          Logger.warning(
+            "[ankusa] routes are enabled but no route table is loaded; rejecting " <>
+              "#{conn.method} #{conn.request_path}"
+          )
+        end
 
         reject(conn, instance, config, :no_route)
 
@@ -108,7 +123,8 @@ defmodule Ankusa.Edge.RouteGuard do
         Ankusa.Telemetry.emit([:routes, :match], %{}, %{
           instance: instance,
           route_id: route_id,
-          cached: cached
+          cached: cached,
+          cacheable: Ankusa.Routes.Cache.cacheable?(conn.path_info)
         })
 
         Plug.Conn.assign(conn, :ankusa_route, route_id)
@@ -149,12 +165,15 @@ defmodule Ankusa.Edge.RouteGuard do
   # ── logging ─────────────────────────────────────────────────────────────────
 
   defp log_reject(config, conn, reason) do
-    sample = config.routes.log_sample
-
-    if sample > 0 and :erlang.phash2({self(), System.monotonic_time(:millisecond)}, sample) == 0 do
+    if sampled?(config) do
       Logger.debug(
         "[ankusa] route_reject reason=#{reason} method=#{conn.method} path=#{conn.request_path}"
       )
     end
   end
+
+  # One in `routes.log_sample`, drawn independently for every call: a scanner must
+  # not fill a disk, but an operator needs a line. `0` never logs.
+  defp sampled?(%Config{routes: %{log_sample: sample}}),
+    do: sample > 0 and :rand.uniform(sample) == 1
 end

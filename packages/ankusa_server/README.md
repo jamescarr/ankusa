@@ -107,10 +107,19 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+| `ANKUSA_ROUTES_ENABLED` | `routes.enabled` (`true`/`false`) |
+| `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_WAL_TYPE` | `wal.type` (`disk`) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
+
+Route definitions live in `routes.store`, chosen by `type`: `ets` (each node's
+own memory, the default) or `redis` (shared by every edge node); a `url` with
+no `type` means `redis`. `url`, `namespace` and `tick_ms` are only valid with
+`type: redis` — setting one alongside `type: ets` stops the container with a
+config error naming the key, instead of leaving every node with its own
+definitions while you believed the fleet shared them.
 
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are read by the S3 adapter
 directly when the config does not name static keys.
@@ -154,8 +163,11 @@ the walkthrough with outages, dead letters, and replay is
 | 4000 | ingest | publish it: providers post here |
 | 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
+| 4003 | route management API (`routes.enabled` on an `edge` node) | your own proxy or network policy |
 
-Every surface is on its own port so it can be firewalled on its own.
+Every surface is on its own port so it can be firewalled on its own. 4003 only
+listens when `routes.enabled` is set and the node runs the `edge` role; without
+both, nothing binds it.
 
 ### What the admin API is for
 
@@ -202,6 +214,10 @@ So:
   it exists so non-BEAM consumers can fetch large payloads without holding
   storage credentials. Keep it internal and decide who may read what in the
   layer in front of it.
+- **Put 4003 (route management) behind your proxy or network policy, the same
+  as 4002.** It edits the route definitions the edge enforces and
+  authenticates nobody, by the same deliberate decision. It only listens when
+  `routes.enabled` is set on an `edge` node, and publishing it is your call.
 - **Point Prometheus at 4002 through your proxy, with read-only credentials.**
 
 The proxy compose file is the worked example:

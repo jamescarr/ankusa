@@ -76,11 +76,22 @@ defmodule AnkusaServer.Application do
 
   # Off, or on and which store the definitions live in: the one thing about
   # routes an operator needs from the banner is whether an edge is enforcing
-  # anything and where its definitions come from.
-  defp routes(%{routes: %{enabled: false}}), do: "off"
+  # anything and where its definitions come from. Core starts the store, the
+  # guard and the management listener only when routes are enabled *and* this
+  # node has the `:edge` role, so a dispatch-only node that set
+  # `routes.enabled: true` enforces nothing and must not claim otherwise.
+  #
+  # Only the store's module name is printed: `store.url` is a connection
+  # string, and it may carry a password.
+  defp routes(%{routes: %{enabled: true, store: {mod, _opts}}} = config) do
+    if Ankusa.Config.role?(config, :edge) do
+      "on:#{mod |> Module.split() |> List.last()}"
+    else
+      "n/a (no edge role)"
+    end
+  end
 
-  defp routes(%{routes: %{enabled: true, store: {mod, _opts}}}),
-    do: "on:#{mod |> Module.split() |> List.last()}"
+  defp routes(%{routes: %{enabled: false}}), do: "off"
 
   defp routes(_config), do: "?"
 

@@ -9,8 +9,10 @@ defmodule Ankusa.Routes.Store.ETS do
   rebuilds the snapshot and republishes it to `:persistent_term`, so the guard
   sees the change on the very next request — no TTL wait, no polling.
 
-  Seeding happens **only at boot** and only into an empty store, so a route
-  deleted through the API stays deleted until the next restart.
+  Seeding happens **only at boot**, into an empty store — and it happens on
+  *every* boot: a seed route deleted through the API returns at the next restart
+  unless it is also removed from `config.routes.seed`. (Only the Redis store
+  seeds once per namespace.)
 
   The process registers under `Ankusa.via(instance, :routes_store)`; there is
   no global name, so two instances in one VM never collide.
@@ -26,12 +28,12 @@ defmodule Ankusa.Routes.Store.ETS do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: server(opts))
 
   @impl Ankusa.Routes.Store
-  def insert(instance, %Route{} = route),
-    do: GenServer.call(server_name(instance), {:insert, route})
+  def insert(instance, %Route{} = route, version),
+    do: GenServer.call(server_name(instance), {:insert, route, version})
 
   @impl Ankusa.Routes.Store
-  def replace(instance, %Route{} = route),
-    do: GenServer.call(server_name(instance), {:replace, route})
+  def replace(instance, %Route{} = route, version),
+    do: GenServer.call(server_name(instance), {:replace, route, version})
 
   @impl Ankusa.Routes.Store
   def delete(instance, id), do: GenServer.call(server_name(instance), {:delete, id})
@@ -66,7 +68,15 @@ defmodule Ankusa.Routes.Store.ETS do
   end
 
   @impl true
-  def handle_call({:insert, route}, _from, state) do
+  def handle_call({operation, _route, version}, _from, %{version: current} = state)
+      when operation in [:insert, :replace] and version != current do
+    # The writer validated against a table that has since changed. The snapshot
+    # it re-reads is already the current one — a mutation publishes it in the same
+    # call — so there is nothing to refresh, only to refuse.
+    {:reply, {:error, :stale}, state}
+  end
+
+  def handle_call({:insert, route, _version}, _from, state) do
     # The cap is checked against this call's own state, so concurrent inserts
     # can't both fit in the last slot.
     if map_size(state.routes) >= state.max_routes do
@@ -77,7 +87,7 @@ defmodule Ankusa.Routes.Store.ETS do
     end
   end
 
-  def handle_call({:replace, route}, _from, state) do
+  def handle_call({:replace, route, _version}, _from, state) do
     {:reply, :ok,
      state |> put_route(route) |> bump_version() |> Snapshot.publish({:replace, route.id})}
   end

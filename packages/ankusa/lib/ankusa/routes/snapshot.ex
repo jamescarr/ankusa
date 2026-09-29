@@ -17,6 +17,7 @@ defmodule Ankusa.Routes.Snapshot do
 
       %{
         version: pos_integer(),
+        epoch: pos_integer(),
         patterns: [%{route: Route.t(), segments: [Matcher.segment()]}],
         by_id: %{String.t() => Route.t()},
         ip_rules: %{default: :allow | :deny, rules: [%{action: atom(), cidr: %CIDR{}}]},
@@ -37,13 +38,18 @@ defmodule Ankusa.Routes.Snapshot do
     3. route id ascending, so the order is total and never depends on map
        iteration.
 
-  `version` is bumped by every mutation. The decision cache
-  (`Ankusa.Routes.Cache`) keys on it, so a change makes every cached decision
-  unreachable without a delete pass.
+  `version` belongs to the store: every mutation bumps it, and a write is only
+  applied if its writer validated against the current one (see
+  `Ankusa.Routes.Store`). `epoch` belongs to the snapshot: a number drawn afresh
+  for every snapshot built and never reused, which the decision cache
+  (`Ankusa.Routes.Cache`) keys on, so publishing a snapshot makes every cached
+  decision unreachable without a delete pass. It is separate from `version`
+  because a store's version can start over (a restarted in-memory store, a
+  flushed Redis) while a cache entry keyed on it would still be alive.
   """
 
+  alias Ankusa.Net
   alias Ankusa.Routes.{Matcher, Route}
-  alias CIDR
 
   @doc """
   Compile a store's state into a snapshot. `state` is the stores'
@@ -61,6 +67,7 @@ defmodule Ankusa.Routes.Snapshot do
 
     %{
       version: version,
+      epoch: System.unique_integer([:positive, :monotonic]),
       patterns: Enum.sort_by(placed, &priority/1),
       by_id: Map.new(routes, fn {id, route} -> {id, route} end),
       ip_rules: ip_rules,
@@ -165,27 +172,35 @@ defmodule Ankusa.Routes.Snapshot do
     end
   end
 
+  # Only enabled routes collide (a disabled one captures nothing), the same rule
+  # `Ankusa.Routes.create/2` applies at runtime, so a seed the API would accept
+  # never fails boot because of the order its entries are listed in. Routes are
+  # indexed by compiled pattern, so this is linear in the size of the seed.
   defp no_seed_conflicts(parsed) do
     parsed
-    |> Enum.reduce_while([], fn {route, index}, accepted ->
-      new = Matcher.compile(route)
+    |> Enum.reduce_while(%{}, fn {route, index}, seen ->
+      if route.enabled do
+        compiled = Matcher.compile(route)
 
-      case Enum.find(accepted, fn {other, _first_index} ->
-             other.id != route.id and other.enabled and Matcher.compile(other) == new and
-               Enum.any?(other.methods, &(&1 in route.methods))
-           end) do
-        nil ->
-          {:cont, [{route, index} | accepted]}
+        case Enum.find(Map.get(seen, compiled, []), fn {methods, _first_index} ->
+               Enum.any?(methods, &(&1 in route.methods))
+             end) do
+          nil ->
+            {:cont,
+             Map.update(seen, compiled, [{route.methods, index}], &[{route.methods, index} | &1])}
 
-        {_other, first_index} ->
-          {:halt,
-           {:error,
-            {:seed_conflict, index, first_index, Enum.join(route.methods, "/"), route.path}}}
+          {_methods, first_index} ->
+            {:halt,
+             {:error,
+              {:seed_conflict, index, first_index, Enum.join(route.methods, "/"), route.path}}}
+        end
+      else
+        {:cont, seen}
       end
     end)
     |> case do
       {:error, _} = err -> err
-      _accepted -> :ok
+      _seen -> :ok
     end
   end
 
@@ -198,9 +213,9 @@ defmodule Ankusa.Routes.Snapshot do
 
   defp trusted_proxies(instance) do
     Enum.flat_map(Ankusa.config(instance).routes.trusted_proxies, fn cidr ->
-      case CIDR.parse(cidr) do
-        %CIDR{} = parsed -> [parsed]
-        {:error, _} -> []
+      case Net.parse_cidr(cidr) do
+        {:ok, parsed} -> [parsed]
+        {:error, _message} -> []
       end
     end)
   end

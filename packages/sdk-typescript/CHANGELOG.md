@@ -6,6 +6,22 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `InvalidRouteIdError` (a `RoutesError`): `getRoute`, `replaceRoute`,
+  `updateRoute`, and `deleteRoute` reject an id that is not a string, is
+  empty, or is exactly `.` or `..` before making any request. A URL parser
+  normalizes those away, so they used to address the collection endpoint and
+  return the route list as if it were one route.
+
+### Fixed
+
+- A `3xx` from the routes or admin listener is now
+  `RoutesUnavailableError`/`AdminUnavailableError` (retryable), like a `5xx`,
+  instead of `RoutesRejectedError`/`AdminRejectedError`. Redirects are not
+  followed, so an unfollowed one means the caller never reached the listener;
+  this matches the Python SDK.
+
 ## [0.2.4] - 2026-09-28
 
 ### Added

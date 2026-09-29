@@ -117,9 +117,10 @@ defmodule Ankusa.MixProject do
     [
       {:bandit, "~> 1.12.5"},
       {:plug, "~> 1.18"},
-      # CIDR parse/match/to_string for the route-management IP rules and
-      # trusted proxies. Replaces ~128 lines of hand-rolled prefix bit math in
-      # Ankusa.Net.CIDR.
+      # CIDR parsing and range membership for the route-management IP rules and
+      # trusted proxies (`Ankusa.Routes`, `Ankusa.Net.ClientIP`). `Ankusa.Net`
+      # keeps the :inet-tuple boundary and the IPv4-mapped normalization on top;
+      # the prefix bit math is the package's.
       {:cidr, "~> 1.2"},
       # HTTP client for the S3/GCS blob stores, the claim-check Remote adapter,
       # and Sink.Http. Replaces hand-rolled :httpc plumbing (and starts its own

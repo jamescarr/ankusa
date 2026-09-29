@@ -35,9 +35,11 @@
     {"id": "routes.crud", "description": "Create, list, read, replace, update, and delete route definitions over the route-management listener (routes.admin.port)."},
     {"id": "routes.ip_rules", "description": "Get and replace the global IP rules."},
     {"id": "routes.dry_run", "description": "Dry-run a request against the route table and return the decision without capturing anything."},
-    {"id": "routes.errors", "description": "404 -> RouteNotFoundError; 400/409 -> RoutesRejectedError(code, field, message, conflicting_id); 503/5xx/unreachable -> RoutesUnavailableError (retryable)."},
+    {"id": "routes.errors", "description": "2xx is success. 404 -> RouteNotFoundError; every other 4xx -> RoutesRejectedError(status, code = the body's error, field, message, conflicting_id, max_routes). Anything else that isn't 2xx (5xx, an unfollowed 3xx redirect, 1xx), a transport failure, or a non-JSON success body -> RoutesUnavailableError (retryable)."},
+    {"id": "routes.input_validation", "description": "Route ids are checked before any request and then percent-encoded as one path segment: an id that isn't a string, is empty, or is exactly `.` or `..` raises InvalidRouteIdError (no request), while every other id travels with `/`, `?`, `#`, `%` and space escaped as %2F %3F %23 %25 %20."},
+    {"id": "routes.request_shape", "description": "Requests match the documented API: JSON bodies carry exactly the caller's input, and query parameters go out in input order with booleans as `true`/`false`."},
     {"id": "routes.health", "description": "GET /health on the route-management listener returns {status, routes}."},
     {"id": "admin.operations", "description": "Operator API: health, Prometheus metrics, redacted config, DLQ list/replay, and quarantine."},
-    {"id": "admin.errors", "description": "409 role_not_enabled -> RoleNotEnabledError(role); other 4xx -> AdminRejectedError; 5xx/unreachable -> AdminUnavailableError (retryable)."}
+    {"id": "admin.errors", "description": "2xx is success. A 409 whose body has error role_not_enabled -> RoleNotEnabledError(role); every other 4xx -> AdminRejectedError(status, code = the body's error). Anything else that isn't 2xx (5xx, an unfollowed 3xx redirect, 1xx) or a transport failure -> AdminUnavailableError (retryable)."}
   ]
 }

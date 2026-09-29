@@ -1,6 +1,11 @@
 import createClient from "openapi-fetch";
 
-import { RouteNotFoundError, RoutesRejectedError, RoutesUnavailableError } from "./errors.js";
+import {
+  InvalidRouteIdError,
+  RouteNotFoundError,
+  RoutesRejectedError,
+  RoutesUnavailableError,
+} from "./errors.js";
 import type { components, paths } from "../admin/admin-schema.d.ts";
 
 export type RoutesClientOptions = {
@@ -52,13 +57,27 @@ export type RoutesClient = {
   listRoutes(params?: ListRoutesParams): Promise<RoutePage>;
   /** Create a route definition. */
   createRoute(input: RouteInput): Promise<Route>;
-  /** Fetch one route definition. */
+  /**
+   * Fetch one route definition. An id that is not a string, is empty, or is
+   * `.`/`..` raises `InvalidRouteIdError` before any request.
+   */
   getRoute(id: string): Promise<Route>;
-  /** Replace a route definition (`PUT`-idempotent; creates if absent). */
+  /**
+   * Replace a route definition (`PUT`-idempotent; creates if absent). An id
+   * that is not a string, is empty, or is `.`/`..` raises
+   * `InvalidRouteIdError` before any request.
+   */
   replaceRoute(id: string, input: RouteInput): Promise<Route>;
-  /** Patch a route definition (`enabled`, `methods`, `ip_rules`, `metadata` only). */
+  /**
+   * Patch a route definition (`enabled`, `methods`, `ip_rules`, `metadata`
+   * only). An id that is not a string, is empty, or is `.`/`..` raises
+   * `InvalidRouteIdError` before any request.
+   */
   updateRoute(id: string, patch: RoutePatch): Promise<Route>;
-  /** Delete a route definition. */
+  /**
+   * Delete a route definition. An id that is not a string, is empty, or is
+   * `.`/`..` raises `InvalidRouteIdError` before any request.
+   */
   deleteRoute(id: string): Promise<void>;
   /** The global IP rules. */
   getIpRules(): Promise<IpRules>;
@@ -77,6 +96,19 @@ type RejectedBody = {
   conflicting_id?: string;
   max_routes?: number;
 };
+
+/**
+ * Ids a URL parser normalizes away: `..` resolves to the collection endpoint,
+ * and an empty id or `.` resolves to it too, so the request would fetch the
+ * route *list* as if it were one route.
+ */
+const INVALID_ROUTE_IDS: Record<string, true> = { "": true, ".": true, "..": true };
+
+function assertRouteId(id: unknown): void {
+  if (typeof id !== "string" || INVALID_ROUTE_IDS[id] === true) {
+    throw new InvalidRouteIdError(id);
+  }
+}
 
 export function createRoutesClient(options: RoutesClientOptions): RoutesClient {
   const timeoutMs = options.timeoutMs ?? 10_000;
@@ -107,10 +139,13 @@ export function createRoutesClient(options: RoutesClientOptions): RoutesClient {
     if (status === 404) {
       throw new RouteNotFoundError("route not found");
     }
-    if (status >= 500) {
-      throw new RoutesUnavailableError(`routes gateway error (${status}): ${JSON.stringify(body)}`);
+    // Only a `4xx` is the listener rejecting the request. An unfollowed `3xx`
+    // (or a `1xx`) means the caller never reached the listener, same as a
+    // `5xx`.
+    if (status >= 400 && status < 500) {
+      throw rejected(status, body);
     }
-    throw rejected(status, body);
+    throw new RoutesUnavailableError(`routes gateway error (${status}): ${JSON.stringify(body)}`);
   }
 
   function rejected(status: number, body: unknown): RoutesRejectedError {
@@ -147,12 +182,14 @@ export function createRoutesClient(options: RoutesClientOptions): RoutesClient {
   }
 
   async function getRoute(id: string): Promise<Route> {
+    assertRouteId(id);
     return request<Route>(() =>
       http.GET("/admin/routes/{id}", { params: { path: { id } }, signal: AbortSignal.timeout(timeoutMs) }),
     );
   }
 
   async function replaceRoute(id: string, input: RouteInput): Promise<Route> {
+    assertRouteId(id);
     return request<Route>(() =>
       http.PUT("/admin/routes/{id}", {
         params: { path: { id } },
@@ -163,6 +200,7 @@ export function createRoutesClient(options: RoutesClientOptions): RoutesClient {
   }
 
   async function updateRoute(id: string, patch: RoutePatch): Promise<Route> {
+    assertRouteId(id);
     return request<Route>(() =>
       http.PATCH("/admin/routes/{id}", {
         params: { path: { id } },
@@ -173,6 +211,7 @@ export function createRoutesClient(options: RoutesClientOptions): RoutesClient {
   }
 
   async function deleteRoute(id: string): Promise<void> {
+    assertRouteId(id);
     await request<void>(() =>
       http.DELETE("/admin/routes/{id}", { params: { path: { id } }, signal: AbortSignal.timeout(timeoutMs) }),
     );
