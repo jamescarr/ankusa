@@ -67,11 +67,13 @@ defmodule Ankusa.Admin.RouterTest do
     assert %{"error" => "not_found"} = JSON.decode!(conn.resp_body)
   end
 
-  test "GET /health reports the instance and its roles", %{inst: inst} do
-    assert %{"status" => "ok", "instance" => inst_name, "roles" => ["dispatch"]} =
+  test "GET /health reports the instance, its roles, and the ankusa version", %{inst: inst} do
+    assert %{"status" => "ok", "instance" => inst_name, "roles" => ["dispatch"], "version" => vsn} =
              JSON.decode!(call(inst, :get, "/health").resp_body)
 
     assert inst_name == to_string(inst)
+    assert is_binary(vsn) and vsn != ""
+    assert vsn == to_string(Application.spec(:ankusa, :vsn))
   end
 
   # ── role gating ────────────────────────────────────────────────────────────
@@ -311,4 +313,322 @@ defmodule Ankusa.Admin.RouterTest do
       Config.new(admin: %{enabled: true, tokens: ["nope"]})
     end
   end
+
+  # ── tenant-scoped sources ──────────────────────────────────────────────────
+
+  test "writing a source against a read-only store is 409", %{inst: inst} do
+    # The module-level setup configures the default read-only (Static) store.
+    conn =
+      call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
+
+    assert conn.status == 409
+    assert %{"error" => "source_store_read_only"} = JSON.decode!(conn.resp_body)
+
+    conn = call(inst, :delete, "/v1/tenants/acme/sources/billing")
+    assert conn.status == 409
+    assert %{"error" => "source_store_read_only"} = JSON.decode!(conn.resp_body)
+  end
+
+  describe "tenant-scoped sources with a writable store" do
+    setup do
+      config =
+        test_config(
+          roles: [:dispatch],
+          admin: %{enabled: true},
+          source_store: {Ankusa.SourceStore.Persistent, decoder: &decoder/2}
+        )
+
+      put_config(config)
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(config)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      %{inst: config.instance, config: config}
+    end
+
+    test "create, then list, then get one source", %{inst: inst} do
+      conn =
+        call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
+
+      assert conn.status == 201
+      created = JSON.decode!(conn.resp_body)
+
+      assert created["tenant"] == "acme"
+      assert created["name"] == "billing"
+      assert created["source_id"] == "acme.billing"
+      assert created["ingest_path"] == "/webhooks/acme.billing"
+
+      assert created["verify"] == %{
+               "type" => "hmac",
+               "secret" => "[REDACTED]",
+               "signature_header" => "X-Sig"
+             }
+
+      assert created["on_verify_failure"] == "reject"
+      assert created["sinks"] == [%{"type" => "log"}]
+      refute conn.resp_body =~ "s3cr3t"
+
+      conn = call(inst, :get, "/v1/tenants/acme/sources")
+      assert conn.status == 200
+      assert %{"tenant" => "acme", "entries" => [listed]} = JSON.decode!(conn.resp_body)
+      assert listed == created
+
+      conn = call(inst, :get, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body) == created
+    end
+
+    test "list is sorted by name and scoped to its tenant", %{inst: inst} do
+      for name <- ~w(zebra apple mango) do
+        assert call(
+                 inst,
+                 :post,
+                 "/v1/tenants/acme/sources",
+                 JSON.encode!(spec(%{"name" => name}))
+               ).status ==
+                 201
+      end
+
+      assert call(
+               inst,
+               :post,
+               "/v1/tenants/beta/sources",
+               JSON.encode!(spec(%{"name" => "apple"}))
+             ).status ==
+               201
+
+      assert %{"entries" => entries} =
+               JSON.decode!(call(inst, :get, "/v1/tenants/acme/sources").resp_body)
+
+      assert Enum.map(entries, & &1["name"]) == ~w(apple mango zebra)
+
+      assert %{"entries" => beta} =
+               JSON.decode!(call(inst, :get, "/v1/tenants/beta/sources").resp_body)
+
+      assert Enum.map(beta, & &1["source_id"]) == ["beta.apple"]
+    end
+
+    test "verify defaults to type none when absent", %{inst: inst} do
+      body = %{"name" => "plain", "sinks" => [%{"type" => "log"}]}
+
+      conn = call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(body))
+      assert conn.status == 201
+
+      entry = JSON.decode!(conn.resp_body)
+      assert entry["verify"] == %{"type" => "none"}
+      assert entry["on_verify_failure"] == nil
+    end
+
+    test "PUT replaces the spec and a name in the body is ignored", %{inst: inst} do
+      call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
+
+      edit = %{"name" => "not-billing", "sinks" => [%{"type" => "log"}]}
+
+      conn = call(inst, :put, "/v1/tenants/acme/sources/billing", JSON.encode!(edit))
+      assert conn.status == 200
+
+      entry = JSON.decode!(conn.resp_body)
+      assert entry["name"] == "billing"
+      assert entry["source_id"] == "acme.billing"
+      assert entry["verify"] == %{"type" => "none"}
+      assert entry["sinks"] == [%{"type" => "log"}]
+    end
+
+    test "redacts secrets at any depth, http headers, and URL passwords", %{inst: inst} do
+      spec =
+        spec(%{
+          "name" => "hooks",
+          "sinks" => [
+            %{
+              "type" => "http",
+              "url" => "https://user:leakhunter@example.test/hook",
+              "headers" => %{"authorization" => "Bearer leakhunter", "x-team" => "payments"}
+            },
+            %{"type" => "log", "password" => "leakhunter", "nested" => %{"token" => "leakhunter"}}
+          ]
+        })
+
+      conn = call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec))
+      assert conn.status == 201
+      refute conn.resp_body =~ "leakhunter"
+
+      entry = JSON.decode!(conn.resp_body)
+      assert [http, log] = entry["sinks"]
+      assert http["url"] == "https://user:[REDACTED]@example.test/hook"
+      assert http["headers"] == %{"authorization" => "[REDACTED]", "x-team" => "[REDACTED]"}
+      assert log["password"] == "[REDACTED]"
+      assert log["nested"]["token"] == "[REDACTED]"
+    end
+
+    test "a bad tenant is 400 invalid_tenant on every route", %{inst: inst} do
+      for {method, path, body} <- [
+            {:get, "/v1/tenants/bad.tenant/sources", ""},
+            {:post, "/v1/tenants/bad.tenant/sources", JSON.encode!(spec(%{"name" => "billing"}))},
+            {:get, "/v1/tenants/bad.tenant/sources/billing", ""},
+            {:put, "/v1/tenants/bad.tenant/sources/billing", JSON.encode!(spec())}
+          ] do
+        conn = call(inst, method, path, body)
+        assert conn.status == 400, "#{method} #{path} returned #{conn.status}"
+        assert %{"error" => "invalid_tenant"} = JSON.decode!(conn.resp_body)
+      end
+    end
+
+    test "a bad name is 400 invalid_source with a message", %{inst: inst} do
+      long = String.duplicate("a", 65)
+
+      conn = call(inst, :get, "/v1/tenants/acme/sources/#{long}")
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "name"
+
+      conn = call(inst, :put, "/v1/tenants/acme/sources/#{long}", JSON.encode!(spec()))
+      assert conn.status == 400
+      assert %{"error" => "invalid_source"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a non-JSON or non-object body is 400 invalid_source", %{inst: inst} do
+      for body <- ["not json", "[]", "", ~s("string")] do
+        conn = call(inst, :post, "/v1/tenants/acme/sources", body)
+        assert conn.status == 400, "body #{inspect(body)} returned #{conn.status}"
+        assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+        assert message =~ "JSON object"
+      end
+    end
+
+    test "a spec the decoder rejects is 400 invalid_source with the decoder's message", %{
+      inst: inst
+    } do
+      conn =
+        call(
+          inst,
+          :post,
+          "/v1/tenants/acme/sources",
+          JSON.encode!(%{"name" => "billing", "sinks" => []})
+        )
+
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "sinks"
+    end
+
+    test "getting or updating a missing source is 404", %{inst: inst} do
+      conn = call(inst, :get, "/v1/tenants/acme/sources/nope")
+      assert conn.status == 404
+      assert %{"error" => "source_not_found"} = JSON.decode!(conn.resp_body)
+
+      conn = call(inst, :put, "/v1/tenants/acme/sources/nope", JSON.encode!(spec()))
+      assert conn.status == 404
+      assert %{"error" => "source_not_found"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "DELETE removes the source and it disappears from the list", %{inst: inst} do
+      body = JSON.encode!(spec(%{"name" => "billing"}))
+      assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
+
+      assert call(
+               inst,
+               :post,
+               "/v1/tenants/acme/sources",
+               JSON.encode!(spec(%{"name" => "other"}))
+             ).status == 201
+
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 204
+      assert conn.resp_body in ["", nil]
+
+      assert call(inst, :get, "/v1/tenants/acme/sources/billing").status == 404
+
+      assert %{"entries" => entries} =
+               JSON.decode!(call(inst, :get, "/v1/tenants/acme/sources").resp_body)
+
+      assert Enum.map(entries, & &1["name"]) == ["other"]
+    end
+
+    test "DELETE of a missing source is 404", %{inst: inst} do
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/nope")
+      assert conn.status == 404
+      assert %{"error" => "source_not_found"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a seeded source is not deletable: 400 invalid_source", %{inst: _inst} do
+      config =
+        test_config(
+          roles: [:dispatch],
+          admin: %{enabled: true},
+          source_store:
+            {Ankusa.SourceStore.Persistent,
+             [
+               decoder: &decoder/2,
+               sources: %{
+                 "acme.billing" => [tenant_id: "acme", sinks: [{Ankusa.Sink.Log, []}]]
+               }
+             ]}
+        )
+
+      put_config(config)
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(config)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      conn = call(config.instance, :delete, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "read-only"
+    end
+
+    test "a bad tenant is 400 invalid_tenant on delete", %{inst: inst} do
+      conn = call(inst, :delete, "/v1/tenants/bad.tenant/sources/billing")
+      assert conn.status == 400
+      assert %{"error" => "invalid_tenant"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a bad name is 400 invalid_source on delete", %{inst: inst} do
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/#{String.duplicate("a", 65)}")
+      assert conn.status == 400
+      assert %{"error" => "invalid_source", "message" => message} = JSON.decode!(conn.resp_body)
+      assert message =~ "name"
+    end
+
+    test "creating an existing source is 409 source_exists", %{inst: inst} do
+      body = JSON.encode!(spec(%{"name" => "billing"}))
+      assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
+
+      conn = call(inst, :post, "/v1/tenants/acme/sources", body)
+      assert conn.status == 409
+      assert %{"error" => "source_exists"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a body over 64 KiB is 400 invalid_source", %{inst: inst} do
+      oversized =
+        JSON.encode!(spec(%{"name" => "billing", "padding" => String.duplicate("x", 70_000)}))
+
+      conn = call(inst, :post, "/v1/tenants/acme/sources", oversized)
+      assert conn.status == 400
+      assert %{"error" => "invalid_source"} = JSON.decode!(conn.resp_body)
+    end
+  end
+
+  # ── source-test helpers ────────────────────────────────────────────────────
+
+  defp spec(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "verify" => %{"type" => "hmac", "secret" => "s3cr3t", "signature_header" => "X-Sig"},
+        "on_verify_failure" => "reject",
+        "sinks" => [%{"type" => "log"}]
+      },
+      overrides
+    )
+  end
+
+  # Stands in for `AnkusaServer.Config.source_from_map!/2`: the store only cares
+  # that the decoder returns source options or raises.
+  defp decoder(_source_id, spec) do
+    case Map.get(spec, "sinks") do
+      [_ | _] = sinks -> [sinks: Enum.map(sinks, &sink/1)]
+      _ -> raise ArgumentError, "sinks must be a non-empty list"
+    end
+  end
+
+  defp sink(%{"type" => "log"}), do: {Ankusa.Sink.Log, []}
+  defp sink(%{"type" => "http"} = spec), do: {Ankusa.Sink.Http, [url: spec["url"] || "http://x"]}
+  defp sink(other), do: raise(ArgumentError, "unknown sink: #{inspect(other)}")
 end

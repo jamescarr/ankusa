@@ -44,6 +44,18 @@ defmodule Ankusa.Admin.Redact do
     |> redact_map()
   end
 
+  @doc """
+  A redacted, JSON-encodable view of one tenant-scoped source entry, the shape
+  the admin API's source routes return.
+
+  The entry is plain JSON (atom keys at the top level, string keys below, plus
+  strings, numbers, maps, and lists), so it takes exactly the same rules as
+  `config/1`: a secret-named key at any depth and a value under a `headers` map
+  become `"[REDACTED]"`, and a URL userinfo password is hidden.
+  """
+  @spec source_entry(map()) :: map()
+  def source_entry(entry) when is_map(entry), do: redact_map(entry)
+
   defp redact_map(map), do: Map.new(map, fn {k, v} -> {to_string(k), redact(to_string(k), v)} end)
 
   defp redact(key, value) do

@@ -6,6 +6,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+### Added
+
+- `source_store: {type: persistent}` in the config file: the server keeps
+  sources in a writable store and persists the ones created or updated through
+  the admin API to `sources.json` on the data volume, so they survive a restart.
+
 ## [0.2.4] - 2026-09-28
 
 ### Added

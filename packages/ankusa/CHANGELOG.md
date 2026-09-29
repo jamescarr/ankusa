@@ -11,6 +11,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+### Added
+
+- `Ankusa.SourceStore` gains optional write callbacks `put/5`, `get/3`, and
+  `list_tenant/2`, plus matching facade functions, and a new
+  `Ankusa.SourceStore.Persistent` adapter that keeps sources in ETS and
+  persists the API-managed ones to `sources.json` under the instance data
+  directory. Sources can now be created, listed, and updated at runtime.
+- The admin API gains `GET`/`POST /v1/tenants/:tenant/sources` and
+  `GET`/`PUT /v1/tenants/:tenant/sources/:name`, and `GET /health` now reports
+  the application version.
+
 ## [0.2.4] - 2026-09-28
 
 ### Added

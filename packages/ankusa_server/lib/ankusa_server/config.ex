@@ -57,7 +57,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes batcher dispatch wal storage claim_check sources)
+  @root_keys ~w(node log http admin routes batcher dispatch wal storage claim_check sources source_store)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -70,6 +70,7 @@ defmodule AnkusaServer.Config do
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes)
+  @source_store_keys ~w(type)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms)
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
@@ -628,20 +629,34 @@ defmodule AnkusaServer.Config do
   # ── sources ─────────────────────────────────────────────────────────────────
 
   defp source_store_section(doc) do
+    sources = sources!(doc)
+    store = section!(doc, "source_store", @source_store_keys, [])
+
+    case enum!(store["type"] || "static", ~w(static persistent), ["source_store", "type"]) do
+      "static" ->
+        [source_store: {Ankusa.SourceStore.Static, sources: sources}]
+
+      "persistent" ->
+        [
+          source_store:
+            {Ankusa.SourceStore.Persistent,
+             sources: sources, decoder: &AnkusaServer.Config.source_from_map!/2}
+        ]
+    end
+  end
+
+  defp sources!(doc) do
     case doc["sources"] do
       nil ->
         warn_no_sources()
-        [source_store: {Ankusa.SourceStore.Static, sources: %{}}]
+        %{}
 
       sources when is_map(sources) ->
         if sources == %{}, do: warn_no_sources()
 
-        translated =
-          Map.new(sources, fn {source_id, source} ->
-            {source_id, source_opts!(source, ["sources", source_id])}
-          end)
-
-        [source_store: {Ankusa.SourceStore.Static, sources: translated}]
+        Map.new(sources, fn {source_id, source} ->
+          {source_id, source_opts!(source, ["sources", source_id])}
+        end)
 
       other ->
         raise ConfigError,
@@ -651,6 +666,19 @@ defmodule AnkusaServer.Config do
 
   defp warn_no_sources,
     do: Logger.warning("[ankusa] no sources configured; every POST will return 404")
+
+  @doc """
+  Translate one source spec — the map an admin API client submits, the same keys
+  as a YAML `sources.<id>` entry — into `Ankusa.Source.new/2` options.
+
+  This is the decoder `Ankusa.SourceStore.Persistent` runs over every write, so
+  validation is identical to the file's: a bad spec raises `AnkusaServer.ConfigError`
+  with the same dotted-path message the YAML walker produces.
+  """
+  @spec source_from_map!(String.t(), map()) :: keyword()
+  def source_from_map!(source_id, spec) do
+    source_opts!(spec, ["sources", source_id])
+  end
 
   defp source_opts!(source, path) do
     source = section!(source, @source_keys, path)

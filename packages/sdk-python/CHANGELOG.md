@@ -6,6 +6,25 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+### Added
+
+- `sources.SourcesClient`, a client for `Ankusa.Admin.Router` (port 4002): the
+  tenant-scoped source API's `server_version`, `list_sources`, `get_source`,
+  `create_source`, `update_source`, and `delete_source`. Built on `httpx`, with
+  an injectable `transport` for tests.
+- `sources.SourceSpec` (the writable spec, `to_json()` omits unset fields) and
+  `sources.Source` (a stored, redacted source).
+- A `sources.SourcesError` hierarchy (`SourceNotFoundError`,
+  `SourceConflictError`, `SourceStoreReadOnlyError`, `SourceInvalidError`,
+  `SourcesUnavailableError`, `VersionMismatchError`), each carrying `.status`
+  and `.body`. `expected_version` makes the first API call verify
+  `GET /health ["version"]` once and cache it.
+- Tenants and source names are checked against `^[A-Za-z0-9_-]{1,64}$` before
+  any path is built, so a caller-supplied name cannot escape its tenant through
+  URL normalization.
+
 ## [0.2.4] - 2026-09-28
 
 ### Added
@@ -58,6 +77,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `content-type` into a `HookHeaders` dataclass, raising
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.3.0
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...HEAD
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1
