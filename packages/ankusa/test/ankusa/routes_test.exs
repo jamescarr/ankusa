@@ -43,30 +43,42 @@ defmodule Ankusa.RoutesTest do
     assert {{:ok, "s"}, true} = decide(config, "POST", "/hooks/s", "1.2.3.4")
   end
 
-  # Run `fun.(i)` for i in 1..count with every worker released at once, so the
-  # writes really contend instead of running one after another.
-  defp race(count, fun) do
-    parent = self()
+  # Freeze the store, start every function, and let the store go only once each of
+  # them is waiting on it. Each writer has then read and validated against the SAME
+  # table — the worst interleaving there is — and nothing about it depends on
+  # scheduler timing: an unguarded store lets every writer win, a version-checked
+  # one lets exactly the right ones, on every run.
+  defp hold_store(config, funs) do
+    store = Ankusa.whereis(config.instance, :routes_store)
+    :sys.suspend(store)
 
-    tasks =
-      for i <- 1..count do
-        Task.async(fn ->
-          send(parent, {:ready, self()})
+    tasks = Enum.map(funs, &Task.async/1)
+    await_queue(store, length(funs))
+    :sys.resume(store)
 
-          receive do
-            :go -> fun.(i)
-          end
-        end)
-      end
-
-    pids =
-      for _ <- 1..count do
-        assert_receive {:ready, pid}, 5_000
-        pid
-      end
-
-    Enum.each(pids, &send(&1, :go))
     Task.await_many(tasks, 30_000)
+  end
+
+  # Wait until `pid` has exactly `count` store calls queued: each writer's one call,
+  # made after it has read the snapshot. Only calls are counted, so an unrelated
+  # message landing in a frozen store's mailbox cannot throw the count off.
+  defp await_queue(pid, count, attempts \\ 500) do
+    cond do
+      queued_calls(pid) == count ->
+        :ok
+
+      attempts == 0 ->
+        flunk("the store never had #{count} calls waiting")
+
+      true ->
+        Process.sleep(10)
+        await_queue(pid, count, attempts - 1)
+    end
+  end
+
+  defp queued_calls(pid) do
+    {:messages, messages} = Process.info(pid, :messages)
+    Enum.count(messages, &match?({:"$gen_call", _from, _request}, &1))
   end
 
   defp await_snapshot_after(instance, epoch, attempts \\ 100) do
@@ -521,9 +533,12 @@ defmodule Ankusa.RoutesTest do
       config = start([])
 
       results =
-        race(20, fn i ->
-          create(config.instance, %{"id" => "same", "path" => "/hooks/p#{i}"})
-        end)
+        hold_store(
+          config,
+          for i <- 1..20 do
+            fn -> create(config.instance, %{"id" => "same", "path" => "/hooks/p#{i}"}) end
+          end
+        )
 
       assert Enum.count(results, &match?({:ok, %Route{id: "same"}}, &1)) == 1
       assert Enum.count(results, &(&1 == {:error, {:conflict, "same"}})) == 19
@@ -534,20 +549,30 @@ defmodule Ankusa.RoutesTest do
       config = start([])
 
       results =
-        race(20, fn i -> create(config.instance, %{"id" => "r#{i}", "path" => "/hooks/x"}) end)
+        hold_store(
+          config,
+          for i <- 1..20 do
+            fn -> create(config.instance, %{"id" => "r#{i}", "path" => "/hooks/x"}) end
+          end
+        )
 
       assert Enum.count(results, &match?({:ok, %Route{}}, &1)) == 1
       assert Enum.count(results, &match?({:error, {:conflict, _}}, &1)) == 19
       assert {:ok, %{routes: [_only]}} = Routes.list(config.instance)
     end
 
-    test "creating distinct ids: every one lands, however the writes interleave" do
+    test "creating distinct ids: every one lands, though all 20 validated against one table" do
       config = start([])
 
+      # The worst case for the retry loop: 19 of the 20 lose the first round and the
+      # last one loses 19 times before it wins. The bound has to outlast that.
       results =
-        race(20, fn i ->
-          create(config.instance, %{"id" => "r#{i}", "path" => "/hooks/r#{i}"})
-        end)
+        hold_store(
+          config,
+          for i <- 1..20 do
+            fn -> create(config.instance, %{"id" => "r#{i}", "path" => "/hooks/r#{i}"}) end
+          end
+        )
 
       assert Enum.all?(results, &match?({:ok, %Route{}}, &1))
       assert {:ok, %{routes: routes}} = Routes.list(config.instance)
@@ -556,41 +581,38 @@ defmodule Ankusa.RoutesTest do
 
     test "two PATCHes of different fields both land" do
       config = start([])
+      assert {:ok, _} = create(config.instance, %{"id" => "r", "path" => "/hooks/r"})
 
-      for i <- 1..15 do
-        id = "r#{i}"
-        assert {:ok, _} = create(config.instance, %{"id" => id, "path" => "/hooks/r#{i}"})
+      results =
+        hold_store(config, [
+          fn -> Routes.update(config.instance, "r", %{"enabled" => false}) end,
+          fn -> Routes.update(config.instance, "r", %{"methods" => ["POST", "PUT"]}) end
+        ])
 
-        results =
-          race(2, fn
-            1 -> Routes.update(config.instance, id, %{"enabled" => false})
-            2 -> Routes.update(config.instance, id, %{"methods" => ["POST", "PUT"]})
-          end)
+      assert Enum.all?(results, &match?({:ok, %Route{}}, &1))
 
-        assert Enum.all?(results, &match?({:ok, %Route{}}, &1))
-
-        assert {:ok, %Route{enabled: false, methods: ["POST", "PUT"]}} =
-                 Routes.get(config.instance, id)
-      end
+      assert {:ok, %Route{enabled: false, methods: ["POST", "PUT"]}} =
+               Routes.get(config.instance, "r")
     end
 
-    test "a PATCH racing a DELETE never brings the route back" do
+    test "a PATCH that read the route before it was deleted never brings it back" do
       config = start([])
+      assert {:ok, _} = create(config.instance, %{"id" => "r", "path" => "/hooks/r"})
+      store = Ankusa.whereis(config.instance, :routes_store)
 
-      for i <- 1..15 do
-        id = "r#{i}"
-        assert {:ok, _} = create(config.instance, %{"id" => id, "path" => "/hooks/r#{i}"})
+      # The DELETE reaches the store first. The PATCH reads the route while the store
+      # is frozen, so the delete has not happened yet, and reaches the store second:
+      # the order in which an unguarded upsert resurrects what was just deleted.
+      :sys.suspend(store)
+      deleter = Task.async(fn -> Routes.delete(config.instance, "r") end)
+      await_queue(store, 1)
+      patcher = Task.async(fn -> Routes.update(config.instance, "r", %{"enabled" => false}) end)
+      await_queue(store, 2)
+      :sys.resume(store)
 
-        [patched, deleted] =
-          race(2, fn
-            1 -> Routes.update(config.instance, id, %{"enabled" => false})
-            2 -> Routes.delete(config.instance, id)
-          end)
-
-        assert deleted == :ok
-        assert patched == {:error, :not_found} or match?({:ok, _}, patched)
-        assert Routes.get(config.instance, id) == {:error, :not_found}
-      end
+      assert Task.await(deleter) == :ok
+      assert Task.await(patcher) == {:error, :not_found}
+      assert Routes.get(config.instance, "r") == {:error, :not_found}
     end
 
     test "a write that keeps losing gives up as store_unavailable instead of spinning" do

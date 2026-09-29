@@ -79,30 +79,30 @@ defmodule Ankusa.Routes.Store.RedisTest do
     end
   end
 
-  # Release every function at the same moment and collect the results in order,
-  # so two writes really do race instead of running one after the other.
-  defp race(funs) do
-    parent = self()
+  # Freeze both nodes, start one write on each, and release them only once each is
+  # waiting on its own node. Both writers have then validated against the table as
+  # it was before EITHER write — the interleaving two real nodes get when their
+  # mirrors lag — and no part of that depends on timing. Redis then serves
+  # whichever script arrives first; the other is the one under test.
+  defp collide(node_a, fun_a, node_b, fun_b) do
+    stores = for node <- [node_a, node_b], do: Ankusa.whereis(node.instance, :routes_store)
+    Enum.each(stores, &:sys.suspend/1)
 
-    tasks =
-      for fun <- funs do
-        Task.async(fn ->
-          send(parent, {:ready, self()})
+    tasks = [Task.async(fun_a), Task.async(fun_b)]
 
-          receive do
-            :go -> fun.()
-          end
-        end)
-      end
+    # Only calls are counted: a pub/sub nudge from an earlier write may land in a
+    # frozen node's mailbox, and it is not the writer we are waiting for.
+    for store <- stores do
+      eventually(fn -> queued_calls(store) == 1 end, 5_000)
+    end
 
-    pids =
-      for _ <- funs do
-        assert_receive {:ready, pid}, 5_000
-        pid
-      end
-
-    Enum.each(pids, &send(&1, :go))
+    Enum.each(stores, &:sys.resume/1)
     Task.await_many(tasks, 30_000)
+  end
+
+  defp queued_calls(pid) do
+    {:messages, messages} = Process.info(pid, :messages)
+    Enum.count(messages, &match?({:"$gen_call", _from, _request}, &1))
   end
 
   # Only this suite's own three keys are ever deleted, never the database: a
@@ -359,20 +359,22 @@ defmodule Ankusa.Routes.Store.RedisTest do
     node_a = start_node(tick_ms: 3_600_000)
     node_b = start_node(tick_ms: 3_600_000)
 
-    for round <- 1..5 do
+    for round <- 1..3 do
       id = "same#{round}"
 
       results =
-        race([
+        collide(
+          node_a,
           fn -> Routes.create(node_a.instance, %{"id" => id, "path" => "/hooks/a#{round}"}) end,
+          node_b,
           fn -> Routes.create(node_b.instance, %{"id" => id, "path" => "/hooks/b#{round}"}) end
-        ])
+        )
 
       assert Enum.count(results, &match?({:ok, %{id: ^id}}, &1)) == 1
       assert Enum.count(results, &(&1 == {:error, {:conflict, id}})) == 1
     end
 
-    assert {:ok, 5} = Redix.command(conn, ["HLEN", "#{@namespace}:routes"])
+    assert {:ok, 3} = Redix.command(conn, ["HLEN", "#{@namespace}:routes"])
   end
 
   test "two nodes creating routes for one path and method: exactly one wins", %{conn: conn} do
@@ -380,10 +382,12 @@ defmodule Ankusa.Routes.Store.RedisTest do
     node_b = start_node(tick_ms: 3_600_000)
 
     results =
-      race([
+      collide(
+        node_a,
         fn -> Routes.create(node_a.instance, %{"id" => "a", "path" => "/hooks/x"}) end,
+        node_b,
         fn -> Routes.create(node_b.instance, %{"id" => "b", "path" => "/hooks/x"}) end
-      ])
+      )
 
     assert Enum.count(results, &match?({:ok, _}, &1)) == 1
     assert Enum.count(results, &match?({:error, {:conflict, _}}, &1)) == 1
@@ -396,10 +400,12 @@ defmodule Ankusa.Routes.Store.RedisTest do
     node_b = start_node(max_routes: 2, tick_ms: 3_600_000)
 
     results =
-      race([
+      collide(
+        node_a,
         fn -> Routes.create(node_a.instance, %{"id" => "x", "path" => "/hooks/x"}) end,
+        node_b,
         fn -> Routes.create(node_b.instance, %{"id" => "y", "path" => "/hooks/y"}) end
-      ])
+      )
 
     assert Enum.count(results, &match?({:ok, _}, &1)) == 1
     assert Enum.count(results, &(&1 == {:error, :too_many_routes})) == 1
