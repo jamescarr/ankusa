@@ -1,9 +1,11 @@
 # Storage: WAL, segments, object stores
 
 Two tiers, on purpose. The WAL is the fast, small, durable tier the ack
-depends on. The object store is the cheap, large, long-term tier. Segments
-roll off the WAL asynchronously, never blocking an ack. See
-[`architecture.md`](architecture.md) for how this fits the request path.
+depends on under the default `wal.type: disk`. The object store is the cheap,
+large, long-term tier. Segments roll off the WAL asynchronously, never blocking
+an ack. See [`architecture.md`](architecture.md) for how this fits the request
+path, and the [`wal: :none`](#none-no-wal-at-all) section below for the mode
+that has none of it.
 
 ## `Ankusa.WAL`
 
@@ -29,6 +31,19 @@ Contract every adapter must uphold:
 - After a crash, replay must drop a torn trailing record (a write that
   started but never committed). No un-acked write is ever surfaced as
   durable.
+
+### `:none`: no WAL at all
+
+`wal: :none` is the other ack path: no log, no batcher, no compactor, no
+dispatch pipeline, no DLQ. Ingest verifies, publishes to the source's sinks
+inside the request (`Ankusa.Edge.Publish`), and answers `201` only once every
+sink has confirmed. `Ankusa.Sink.durable?/2` is the promise that makes a
+sink's `:ok` mean "something that outlives this node accepted it" — true for
+every shipped sink except `Sink.Log`, and boot refuses a `wal: :none` config
+in which a static source has no durable sink. There is no log and no segment on
+this node, so there is nothing to compact: the two-tier story in this document
+does not apply. See [`delivery.md#direct-mode`](delivery.md#direct-mode) and
+[`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 
 ### `WAL.DiskLog`: the default, single-node
 
@@ -68,6 +83,11 @@ root) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg`, which
 name no instance or node, and remote blob stores ignore the `instance`
 argument, so two nodes sharing a bucket silently overwrite each other's
 segments. See [`deployment.md`](deployment.md) for the operational shape.
+
+Under `wal: :none` none of this applies: there is no WAL file, no segment
+story, and no volume — replicas are freely interchangeable, and the broker (or
+whatever answers the sink) is the only shared state. See
+[`architecture.md#4-stateless-ingest-fleet-wal-none`](architecture.md#4-stateless-ingest-fleet-wal-none).
 
 ## `Ankusa.BlobStore`
 

@@ -181,4 +181,64 @@ defmodule Ankusa.ConfigTest do
       end
     end
   end
+
+  describe "wal: :none" do
+    test "drops the WAL's reader roles, keeping the rest" do
+      assert Config.new(wal: :none).roles == [:edge]
+
+      config = Config.new(wal: :none, roles: [:edge, :dispatch, :storage, :claim_check])
+      assert config.roles == [:edge, :claim_check]
+
+      # The default roles only narrow under :none; a disk config is untouched.
+      assert Config.new().roles == [:edge, :dispatch, :storage]
+    end
+
+    test "raises when no role is left to run the edge" do
+      assert_raise ArgumentError, ~r/wal: :none requires the :edge role/, fn ->
+        Config.new(wal: :none, roles: [:dispatch])
+      end
+
+      assert_raise ArgumentError, ~r/wal: :none requires the :edge role/, fn ->
+        Config.new(wal: :none, roles: [:dispatch, :storage])
+      end
+
+      # A role the WAL does not serve survives on its own.
+      assert Config.new(wal: :none, roles: [:claim_check]).roles == [:claim_check]
+    end
+  end
+
+  describe "Ankusa.WAL.validate_config!/1" do
+    defp wal_config(opts), do: Config.new([wal: :none] ++ opts)
+
+    defp source(sinks) do
+      {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: sinks]}}
+    end
+
+    test "is :ok for a disk WAL whatever the sinks" do
+      assert :ok = Ankusa.WAL.validate_config!(Config.new())
+
+      assert :ok =
+               Ankusa.WAL.validate_config!(
+                 Config.new(source_store: source([{Ankusa.Sink.Log, []}]))
+               )
+    end
+
+    test "requires at least one durable sink per static source" do
+      assert_raise ArgumentError, ~r/source "demo": wal: :none acks/, fn ->
+        Ankusa.WAL.validate_config!(wal_config(source_store: source([{Ankusa.Sink.Log, []}])))
+      end
+
+      # A source that names no sinks gets the Log default, which is not durable.
+      assert_raise ArgumentError, ~r/source "demo"/, fn ->
+        Ankusa.WAL.validate_config!(
+          wal_config(source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => []}})
+        )
+      end
+    end
+
+    test "a durable sink anywhere in the list satisfies it" do
+      sinks = [{Ankusa.Sink.Log, []}, {Ankusa.Sink.Http, [url: "http://sink.test"]}]
+      assert :ok = Ankusa.WAL.validate_config!(wal_config(source_store: source(sinks)))
+    end
+  end
 end

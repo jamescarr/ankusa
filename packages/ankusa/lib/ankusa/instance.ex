@@ -35,6 +35,7 @@ defmodule Ankusa.Instance do
     Ankusa.put_config(config)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Routes.validate_config!(config)
+    Ankusa.WAL.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =
@@ -62,7 +63,10 @@ defmodule Ankusa.Instance do
 
   # The WAL only matters to roles that actually read or write it. A node
   # running only `:claim_check` needs blob-store credentials, never WAL
-  # credentials — so it shouldn't open one.
+  # credentials — so it shouldn't open one. Under `wal: :none` there is no log
+  # at all: ingest acks on a sink's confirm and nothing here reads a log.
+  defp wal_children(%Config{wal: :none}, _opts), do: []
+
   defp wal_children(config, opts) do
     if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
       {wal_mod, _} = config.wal
@@ -89,15 +93,24 @@ defmodule Ankusa.Instance do
   defp edge_children(config, opts) do
     if Config.role?(config, :edge) do
       [
-        {Ankusa.Edge.Quarantine, opts},
-        {Ankusa.Edge.BatcherSupervisor, opts},
-        {Bandit,
-         plug: {Ankusa.Edge.Router, [instance: config.instance]}, scheme: :http, port: config.port}
-      ]
+        {Ankusa.Edge.Quarantine, opts}
+      ] ++
+        batcher_children(config, opts) ++
+        [
+          {Bandit,
+           plug: {Ankusa.Edge.Router, [instance: config.instance]},
+           scheme: :http,
+           port: config.port}
+        ]
     else
       []
     end
   end
+
+  # The batcher exists to group WAL commits. `wal: :none` has no log to group:
+  # ingest publishes to the sinks in the request instead.
+  defp batcher_children(%Config{wal: :none}, _opts), do: []
+  defp batcher_children(_config, opts), do: [{Ankusa.Edge.BatcherSupervisor, opts}]
 
   # The route definitions and the decision cache, before the ingress listener
   # accepts a request: the guard fails closed, so a store that isn't up yet

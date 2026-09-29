@@ -255,11 +255,13 @@ defmodule Ankusa.Routes.RouterTest do
       assert created.body["id"] == "a"
 
       # The two listeners serve different surfaces, which is the point of the
-      # second port. `/stats` is the edge's own endpoint and 404s here; the
+      # second port: `/health` answers a different body on each, and the
       # management API is not on the ingest port at all — `/admin/routes` there
       # goes through the capture guard, so it answers a 404 and no route with it.
-      assert Req.get!("http://127.0.0.1:#{ingest_port}/stats").status == 200
-      assert Req.get!("http://127.0.0.1:#{port}/stats").status == 404
+      ingest_health = Req.get!("http://127.0.0.1:#{ingest_port}/health")
+      assert ingest_health.status == 200
+      assert %{"status" => "ok", "instance" => _} = ingest_health.body
+      refute Map.has_key?(ingest_health.body, "routes")
 
       ingested =
         Req.post!("http://127.0.0.1:#{ingest_port}/admin/routes",

@@ -33,7 +33,7 @@ defmodule Ankusa.MixProject do
 
   defp description do
     "A loosely coupled, high-throughput webhook ingestion framework: durable " <>
-      "WAL, pluggable verification/dedup/storage/delivery, multi-tenant " <>
+      "WAL, pluggable verification/storage/delivery, multi-tenant " <>
       "catch-URL routing."
   end
 

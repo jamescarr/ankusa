@@ -34,7 +34,7 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
 
 - The raw body, verbatim, exactly as the provider sent it.
 - Headers: `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-tenant` (when the
-  source has a tenant), `x-ankusa-seq`, and `content-type`.
+  source has a tenant), and `content-type`.
 - Respond `2xx` only after the job is durably enqueued: a `202` after an
   in-transaction insert commits, not before.
 - A non-`2xx` response or a timeout is retried per `dispatch.retry`, then

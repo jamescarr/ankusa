@@ -299,6 +299,7 @@ defmodule AnkusaServer.Config do
       # config that would refuse to boot must fail `check-config` too, with the
       # same message.
       Ankusa.Routes.validate_config!(config)
+      Ankusa.WAL.validate_config!(config)
       config
     rescue
       error in ArgumentError -> raise ConfigError, message: error.message
@@ -420,9 +421,11 @@ defmodule AnkusaServer.Config do
 
   defp wal_section(doc) do
     wal = section!(doc, "wal", @wal_keys, [])
-    "disk" = enum!(wal["type"] || "disk", ~w(disk), ["wal", "type"])
 
-    [wal: {Ankusa.WAL.DiskLog, []}]
+    case enum!(wal["type"] || "disk", ~w(disk none), ["wal", "type"]) do
+      "disk" -> [wal: {Ankusa.WAL.DiskLog, []}]
+      "none" -> [wal: :none]
+    end
   end
 
   # ── storage ─────────────────────────────────────────────────────────────────

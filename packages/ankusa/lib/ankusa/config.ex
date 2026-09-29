@@ -16,7 +16,10 @@ defmodule Ankusa.Config do
             max_body_bytes: 8_000_000,
             # {module, opts} implementing Ankusa.SourceStore
             source_store: {Ankusa.SourceStore.Static, sources: %{}},
-            # {module, opts} implementing Ankusa.WAL
+            # {module, opts} implementing Ankusa.WAL, or :none: no log, ack on
+            # the sink's confirm. With :none, `new/1` drops :dispatch and
+            # :storage from :roles (they read the WAL and nothing else) and
+            # requires :edge to remain.
             wal: {Ankusa.WAL.DiskLog, []},
             # group-commit batcher. The DiskLog GenServer serializes commits
             # itself, so more partitions only add contention now that a
@@ -145,12 +148,16 @@ defmodule Ankusa.Config do
   `:routes` is nested one level deeper than the rest (`:routes` has its own
   `:cache`, `:ip_rules`, and `:admin` sections), so `put_routes/2` merges those
   too — `routes.cache.max_size` keeps the other cache keys.
+
+  `wal: :none` is normalized last: the roles are settled before `normalize_wal/1`
+  drops the WAL's readers (`:dispatch`, `:storage`) from them.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     base = %__MODULE__{}
 
-    Enum.reduce(opts, base, fn {k, v}, acc ->
+    opts
+    |> Enum.reduce(base, fn {k, v}, acc ->
       cond do
         k == :roles ->
           bad = Enum.reject(v, &(&1 in @roles))
@@ -174,7 +181,22 @@ defmodule Ankusa.Config do
           raise ArgumentError, "unknown Ankusa.Config key: #{inspect(k)}"
       end
     end)
+    |> normalize_wal()
   end
+
+  # `:dispatch` and `:storage` read the WAL and nothing else, so with no WAL
+  # they have no work: they are dropped rather than rejected, which lets an
+  # existing `roles: [:edge, :dispatch, :storage]` deployment flip
+  # `wal.type: none` with no other change. The effective roles are visible on
+  # the admin API's `GET /health`.
+  defp normalize_wal(%__MODULE__{wal: :none} = config) do
+    case Enum.reject(config.roles, &(&1 in [:dispatch, :storage])) do
+      [] -> raise ArgumentError, "wal: :none requires the :edge role"
+      roles -> %{config | roles: roles}
+    end
+  end
+
+  defp normalize_wal(config), do: config
 
   defp put_section(acc, k, v) do
     Map.put(acc, k, merge_known!(Map.get(acc, k), v, to_string(k)))

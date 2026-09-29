@@ -52,7 +52,7 @@ then runs every registered SDK's native runner.
 - `parse_claim_ref`: `{"ref": string}` → `ok` is
   `{"tenant_id", "claim_id", "path"}`.
 - `parse_headers`: `{"headers": {string: string}}` → `ok` is
-  `{"id", "source", "seq": int|null, "tenant": string|null, "content_type": string|null}`.
+  `{"id", "source", "tenant": string|null, "content_type": string|null}`.
 - `redeem`: `{"client"?: Client, "gateway": Gateway, "ref": string, "sha256": string}`
   → `ok` is `{"body": Body}`. Runners compare bytes: both the expected `Body`
   and the returned bytes become `{"base64": ...}` before deep-equal.

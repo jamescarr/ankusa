@@ -24,7 +24,7 @@ defmodule AnkusaServer.CLI do
 
     IO.puts(
       "config OK: roles=#{inspect(config.roles)} sources=#{AnkusaServer.Application.sources(config)} " <>
-        "wal=#{inspect(elem(config.wal, 0))} storage=#{inspect(elem(config.storage.blob_store, 0))}"
+        "wal=#{Ankusa.WAL.label(config.wal)} storage=#{inspect(elem(config.storage.blob_store, 0))}"
     )
 
     halt(0)

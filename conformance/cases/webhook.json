@@ -8,7 +8,6 @@
         "headers": {
           "x-ankusa-id": "01a0",
           "x-ankusa-source": "demo",
-          "x-ankusa-seq": "7",
           "x-ankusa-tenant": "acme",
           "content-type": "application/json"
         }
@@ -17,7 +16,6 @@
         "ok": {
           "id": "01a0",
           "source": "demo",
-          "seq": 7,
           "tenant": "acme",
           "content_type": "application/json"
         }
@@ -38,7 +36,6 @@
         "ok": {
           "id": "01a0",
           "source": "demo",
-          "seq": null,
           "tenant": null,
           "content_type": "text/plain"
         }
@@ -57,7 +54,6 @@
         "ok": {
           "id": "01a0",
           "source": "",
-          "seq": null,
           "tenant": null,
           "content_type": null
         }
@@ -90,126 +86,6 @@
       "expect": {
         "error": {
           "class": "MissingHookIdError"
-        }
-      }
-    },
-    {
-      "id": "webhook.seq_leading_zeros",
-      "feature": "webhook.parse_headers",
-      "operation": "parse_headers",
-      "input": {
-        "headers": {
-          "x-ankusa-id": "01a0",
-          "x-ankusa-seq": "007"
-        }
-      },
-      "expect": {
-        "ok": {
-          "id": "01a0",
-          "source": "",
-          "seq": 7,
-          "tenant": null,
-          "content_type": null
-        }
-      }
-    },
-    {
-      "id": "webhook.seq_non_numeric",
-      "feature": "webhook.parse_headers",
-      "operation": "parse_headers",
-      "input": {
-        "headers": {
-          "x-ankusa-id": "01a0",
-          "x-ankusa-seq": "not-a-number"
-        }
-      },
-      "expect": {
-        "ok": {
-          "id": "01a0",
-          "source": "",
-          "seq": null,
-          "tenant": null,
-          "content_type": null
-        }
-      }
-    },
-    {
-      "id": "webhook.seq_negative",
-      "feature": "webhook.parse_headers",
-      "operation": "parse_headers",
-      "input": {
-        "headers": {
-          "x-ankusa-id": "01a0",
-          "x-ankusa-seq": "-1"
-        }
-      },
-      "expect": {
-        "ok": {
-          "id": "01a0",
-          "source": "",
-          "seq": null,
-          "tenant": null,
-          "content_type": null
-        }
-      }
-    },
-    {
-      "id": "webhook.seq_decimal",
-      "feature": "webhook.parse_headers",
-      "operation": "parse_headers",
-      "input": {
-        "headers": {
-          "x-ankusa-id": "01a0",
-          "x-ankusa-seq": "7.0"
-        }
-      },
-      "expect": {
-        "ok": {
-          "id": "01a0",
-          "source": "",
-          "seq": null,
-          "tenant": null,
-          "content_type": null
-        }
-      }
-    },
-    {
-      "id": "webhook.seq_empty",
-      "feature": "webhook.parse_headers",
-      "operation": "parse_headers",
-      "input": {
-        "headers": {
-          "x-ankusa-id": "01a0",
-          "x-ankusa-seq": ""
-        }
-      },
-      "expect": {
-        "ok": {
-          "id": "01a0",
-          "source": "",
-          "seq": null,
-          "tenant": null,
-          "content_type": null
-        }
-      }
-    },
-    {
-      "id": "webhook.seq_non_ascii_digit",
-      "feature": "webhook.parse_headers",
-      "operation": "parse_headers",
-      "input": {
-        "headers": {
-          "x-ankusa-id": "01a0",
-          "x-ankusa-seq": "²"
-        }
-      },
-      "expect": {
-        "ok": {
-          "id": "01a0",
-          "source": "",
-          "seq": null,
-          "tenant": null,
-          "content_type": null
         }
       }
     }

@@ -9,9 +9,10 @@ info:
     reverse.
 
     The core invariant is visible in the status codes: a `2xx` is never
-    returned until the hook is durably in the WAL. `201 accepted` means
-    committed; `202 quarantined` means the source's policy kept a
-    failed-verification hook instead of rejecting it.
+    returned until the hook is durably accepted — by this node's log
+    (`wal.type: disk`) or by the source's sinks (`wal.type: none`). `201
+    accepted` means durably accepted; `202 quarantined` means the source's
+    policy kept a failed-verification hook instead of rejecting it.
 
     There is no request authentication here beyond provider signature
     verification, which is webhook semantics rather than access control: the
@@ -103,8 +104,7 @@ paths:
       tags: [operations]
       summary: Liveness probe
       description: |
-        Always `200` while the listener is up. The embedded WAL stats are `{}`
-        when the WAL is unreachable.
+        Always `200` while the listener is up.
       responses:
         '200':
           description: The listener is up.
@@ -112,18 +112,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
-  /stats:
-    get:
-      operationId: getStats
-      tags: [operations]
-      summary: WAL statistics for this node
-      responses:
-        '200':
-          description: This node's own WAL stats.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Stats'
 components:
   parameters:
     SourceId:
@@ -154,8 +142,8 @@ components:
   schemas:
     Accepted:
       type: object
-      description: The hook is durably committed.
-      required: [status, id, seq]
+      description: The hook is durably accepted.
+      required: [status, id]
       properties:
         status:
           const: accepted
@@ -164,10 +152,6 @@ components:
           description: |
             The envelope id Ankusa assigned to this hook (a UUIDv7), generated
             on receipt. Unrelated to the provider's own event id.
-        seq:
-          type: integer
-          minimum: 1
-          description: WAL sequence number, strictly increasing across commits.
     Quarantined:
       type: object
       required: [status, reason]
@@ -203,26 +187,15 @@ components:
           description: Present on `payload_too_large`; the configured `max_body_bytes`.
     Health:
       type: object
-      required: [status, instance, wal]
+      required: [status, instance]
       properties:
         status:
           const: ok
         instance:
           type: string
-        wal:
-          type: object
-          description: Adapter-defined WAL stats, `{}` when the WAL is unreachable.
-    Stats:
-      type: object
-      required: [instance, wal]
-      properties:
-        instance:
-          type: string
-        wal:
-          type: object
   responses:
     Accepted:
-      description: '`201`. Committed and durably stored.'
+      description: '`201`. Durably accepted; stored before the response.'
       content:
         application/json:
           schema:
@@ -265,8 +238,10 @@ components:
     Overloaded:
       description: |
         `503`. `overload` (batcher queue full: the edge sheds load rather than
-        growing without bound) or `store_unavailable` (WAL write failed).
-        Transient — retry after the `Retry-After` seconds.
+        growing without bound) or `store_unavailable` (no durable destination
+        accepted the hook: the WAL write failed under `wal.type: disk`, or a
+        sink refused under `wal.type: none`). Transient — retry after the
+        `Retry-After` seconds.
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'

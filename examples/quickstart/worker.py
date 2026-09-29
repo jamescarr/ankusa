@@ -3,10 +3,9 @@
 identity Ankusa attaches to every delivery.
 
 Ankusa POSTs each hook's raw body here, with its identity in headers:
-x-ankusa-id (dedupe on this), x-ankusa-source, x-ankusa-seq, and
-x-ankusa-tenant when the source has one. Answer 2xx once the hook is safely
-handled; anything else (or no answer within 5s) is retried, then
-dead-lettered for replay.
+x-ankusa-id (dedupe on this), x-ankusa-source, and x-ankusa-tenant when the
+source has one. Answer 2xx once the hook is safely handled; anything else (or
+no answer within 5s) is retried, then dead-lettered for replay.
 """
 
 import os
@@ -43,7 +42,7 @@ async def hooks(request: Request) -> Response:
         handled.add(hook.id)
         print(
             f"received id={hook.id} source={hook.source} "
-            f"seq={hook.seq} bytes={len(body)} "
+            f"bytes={len(body)} "
             f"body={body[:200].decode('utf-8', 'replace')}",
             flush=True,
         )

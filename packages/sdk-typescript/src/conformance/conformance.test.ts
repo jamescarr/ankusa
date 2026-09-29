@@ -226,7 +226,6 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
       return {
         id: parsed.id,
         source: parsed.source,
-        seq: parsed.seq,
         tenant: parsed.tenant,
         content_type: parsed.contentType,
       };

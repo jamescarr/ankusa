@@ -125,3 +125,12 @@ immediately, no redeploy. That means a DB-backed `SourceStore` (e.g.
 control-plane API to create/revoke endpoints. That's a real gap, not a
 subtlety: `RouteResolver`/`Route`/tenant-scoped storage are the seams that
 make it *possible*; the dynamic store itself isn't shipped yet.
+
+One consequence of that split for `wal.type: none`: its boot check — every
+statically configured source needs at least one sink whose `:ok` means durable
+(`Ankusa.Sink.durable?/2`, enforced by `Ankusa.WAL.validate_config!/1`) — only
+sees sources in the static store. A source created at runtime through the admin
+API is not checked, because the store's decoder has no instance config, so a
+`wal: :none` node with a writable source store can be handed a log-only source
+at runtime. Give runtime-created sources durable sinks, or run `wal.type: disk`
+on the node that serves the admin API's source routes.

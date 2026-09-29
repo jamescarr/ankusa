@@ -107,7 +107,7 @@ def do_POST(self):
         return
 
     body = self.rfile.read(int(self.headers.get("content-length", "0")))
-    # hook.id, hook.source, hook.seq, hook.tenant, hook.content_type
+    # hook.id, hook.source, hook.tenant, hook.content_type
     ...
 ```
 

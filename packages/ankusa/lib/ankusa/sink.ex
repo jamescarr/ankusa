@@ -27,9 +27,13 @@ defmodule Ankusa.Sink do
   The ordering scope for this delivery, or `nil` for "no constraint".
 
   Deliveries to the same sink with an equal `ordering_key/2` are **never in
-  flight at the same time**, and they run in `seq` order. Different keys run
-  concurrently, which is what lets dispatch fan out without giving up per-key
-  ordering. `nil` opts the delivery out of ordering entirely.
+  flight at the same time**, and they run one at a time, in the order dispatch
+  read them from the log. Different keys run concurrently, which is what lets
+  dispatch fan out without giving up per-key ordering. `nil` opts the delivery
+  out of ordering entirely.
+
+  `wal.type: none` publishes inside the request and so imposes no ordering at
+  all — the destination's own keying is the only ordering in that mode.
 
   A sink's ordering key must be at least as narrow as the ordering its
   destination actually guarantees — a Kafka topic partition key, an AMQP
@@ -49,7 +53,17 @@ defmodule Ankusa.Sink do
   """
   @callback inline_max_bytes(opts :: keyword()) :: pos_integer() | nil
 
-  @optional_callbacks ordering_key: 2, inline_max_bytes: 1
+  @doc """
+  Does `:ok` from this sink mean the hook is durably accepted by something that
+  outlives this node — a broker ack, a publisher confirm, an upstream `2xx`?
+
+  Defaults to `true`: every shipped sink except `Ankusa.Sink.Log` confirms
+  durably. `wal.type: none` acks the provider on this promise, so a sink that
+  cannot make it must say so.
+  """
+  @callback durable?(opts :: keyword()) :: boolean()
+
+  @optional_callbacks ordering_key: 2, inline_max_bytes: 1, durable?: 1
 
   @doc """
   Resolve the inline threshold for `mod` with `opts`; `nil` for sinks that
@@ -79,5 +93,35 @@ defmodule Ankusa.Sink do
     else
       {env.tenant_id, env.source_id}
     end
+  end
+
+  @doc """
+  Resolve `durable?/1` for `mod` with `opts`; `true` for sinks that don't
+  implement it — a sink that has not said otherwise is assumed to confirm
+  durably, which is the safe default for an ack path (`wal.type: none`).
+  """
+  @spec durable?(module(), keyword()) :: boolean()
+  def durable?(mod, opts) do
+    Code.ensure_loaded(mod)
+
+    if function_exported?(mod, :durable?, 1), do: mod.durable?(opts), else: true
+  end
+
+  @doc """
+  Call `c:deliver/3`, turning a raise, throw, or exit into `{:error, reason}`.
+
+  A sink is user code: it may raise, throw, or exit (a `GenServer.call` into a
+  dead process). Any of those is a delivery failure, not a caller crash. Both
+  ack paths — `Ankusa.Dispatch.Pipeline` and `Ankusa.Edge.Publish` — deliver
+  through here so they agree on what "the sink failed" means.
+  """
+  @spec safe_deliver(module(), Envelope.t(), ctx(), keyword()) :: :ok | {:error, term()}
+  def safe_deliver(mod, env, ctx, opts) do
+    mod.deliver(env, ctx, opts)
+  rescue
+    error -> {:error, {:raised, error}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+    :throw, value -> {:error, {:throw, value}}
   end
 end

@@ -1,16 +1,21 @@
 defmodule Ankusa.Edge.Ingest do
   @moduledoc """
   Orchestrates one webhook on the hot path: build the envelope, verify inline,
-  apply the per-source failure policy, then hand off to the group-commit batcher
-  and block until it commits.
+  apply the per-source failure policy, then ack once the hook is durable.
 
-  The only place a `2xx`-worthy result is produced is *after* the batcher's WAL
-  commit returns (`{:committed, _}`), or after a durable quarantine write.
-  Everything else is a non-2xx.
+  Which system accepts it is one config key. With `wal.type: disk` (the
+  default) the group-commit batcher commits the hook to this node's WAL and
+  dispatch reads it back later; with `wal.type: none` the hook is published to
+  the source's sinks inside the request and the ack waits for their confirms
+  (`Ankusa.Edge.Publish`).
+
+  The only place a `2xx`-worthy result is produced is *after* one of those
+  durable accepts returns, or after a durable quarantine write. Everything
+  else is a non-2xx.
   """
 
   alias Ankusa.{Envelope, Source, Verification}
-  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Quarantine}
+  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine}
 
   @type result ::
           {:ok, Envelope.t()}
@@ -60,7 +65,7 @@ defmodule Ankusa.Edge.Ingest do
     env = build_envelope(source, tenant_id, req)
 
     case verify(instance, source, env) do
-      {:accept, env} -> commit(instance, env)
+      {:accept, env} -> commit(instance, source, env)
       {:quarantine, env, reason} -> quarantine(instance, env, reason)
       {:reject, reason} -> {:rejected, reason}
     end
@@ -102,7 +107,16 @@ defmodule Ankusa.Edge.Ingest do
 
   # ── commit ────────────────────────────────────────────────────────────────
 
-  defp commit(instance, env) do
+  # `Ankusa.config/1` is a `:persistent_term` read: this branch costs nothing
+  # on the hot path.
+  defp commit(instance, source, env) do
+    case Ankusa.config(instance).wal do
+      :none -> Publish.publish(instance, source, env)
+      _ -> buffered_commit(instance, env)
+    end
+  end
+
+  defp buffered_commit(instance, env) do
     partition = BatcherSupervisor.partition(instance, env.id)
 
     try do

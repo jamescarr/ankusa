@@ -169,6 +169,63 @@ defmodule AnkusaServer.ConfigTest do
     assert config.wal == {Ankusa.WAL.DiskLog, []}
   end
 
+  # ── wal.type: none ──────────────────────────────────────────────────────────
+
+  test "wal: {type: none} keeps only the roles that do not read the log" do
+    path =
+      tmp_config("""
+      node: {roles: [edge, dispatch, storage]}
+      wal: {type: none}
+      sources:
+        demo:
+          verify: {type: none}
+          sinks: [{type: rabbitmq, url: "amqp://guest:guest@rabbitmq:5672", exchange: ankusa.hooks}]
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+    assert config.wal == :none
+    assert config.roles == [:edge]
+  end
+
+  test "ANKUSA_WAL_TYPE=none reaches the same config key" do
+    path =
+      tmp_config("""
+      sources:
+        demo:
+          verify: {type: none}
+          sinks: [{type: http, url: "http://sink.invalid/hooks"}]
+      """)
+
+    config = Config.load!(path: path, env: %{"ANKUSA_WAL_TYPE" => "none"}).config
+    assert config.wal == :none
+    assert config.roles == [:edge]
+  end
+
+  test "wal: {type: none} rejects a source whose only sink keeps nothing" do
+    path =
+      tmp_config("""
+      wal: {type: none}
+      sources:
+        demo:
+          verify: {type: none}
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(source "demo")
+    assert error.message =~ "wal.type: disk"
+  end
+
+  test "an unknown wal.type lists disk and none" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("wal: {type: memory}\n"), env: %{})
+      end
+
+    assert error.message =~ ~s(wal.type: unknown value "memory")
+    assert error.message =~ "disk, none"
+  end
+
   # ── validation errors ───────────────────────────────────────────────────────
 
   test "an unknown key names its path, including list indexes" do

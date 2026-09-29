@@ -15,6 +15,13 @@ this project follows [Semantic Versioning](https://semver.org/).
   back the list page as if it were a route. Exported from `ankusa.routes` and
   from the package root.
 
+### Removed
+
+- `HookHeaders.seq` and the `x-ankusa-seq` header. It was this node's WAL
+  position, not a per-source sequence: in a fleet every node's log starts at
+  1, so two nodes emit `1, 2, 3` for different hooks and any consumer ordering
+  or deduping on it was wrong. Dedupe on `x-ankusa-id`.
+
 ### Fixed
 
 - Route ids are percent-encoded as a single path segment, so `/`, `?`, `#`, `%`

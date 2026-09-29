@@ -29,14 +29,7 @@ defmodule Ankusa.Edge.Router do
   end
 
   get "/health" do
-    instance = instance(conn)
-    stats = safe_stats(instance)
-    send_json(conn, 200, %{status: "ok", instance: to_string(instance), wal: stats})
-  end
-
-  get "/stats" do
-    instance = instance(conn)
-    send_json(conn, 200, %{instance: to_string(instance), wal: safe_stats(instance)})
+    send_json(conn, 200, %{status: "ok", instance: to_string(instance(conn))})
   end
 
   match _ do
@@ -78,7 +71,7 @@ defmodule Ankusa.Edge.Router do
   # ── response mapping ──────────────────────────────────────────────────────
 
   defp respond(conn, {:ok, env}),
-    do: send_json(conn, 201, %{status: "accepted", id: env.id, seq: env.seq})
+    do: send_json(conn, 201, %{status: "accepted", id: env.id})
 
   defp respond(conn, {:quarantined, reason}),
     do: send_json(conn, 202, %{status: "quarantined", reason: inspect(reason)})
@@ -96,14 +89,6 @@ defmodule Ankusa.Edge.Router do
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────
-
-  defp safe_stats(instance) do
-    Ankusa.WAL.stats(instance)
-  rescue
-    _ -> %{}
-  catch
-    :exit, _ -> %{}
-  end
 
   defp instance(%Plug.Conn{} = conn) do
     Keyword.get(conn.assigns[:ankusa_opts] || [], :instance, :default)

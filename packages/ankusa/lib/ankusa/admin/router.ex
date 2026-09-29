@@ -23,8 +23,10 @@ defmodule Ankusa.Admin.Router do
   A route that needs a role this node does not run returns
   `409 role_not_enabled` rather than an empty success: the DLQ is the dispatch
   node's disk, the quarantine list is the edge node's memory, so a wrong-node
-  answer must be distinguishable from "nothing there". Aggregating across nodes
-  is the operator's job (scrape every admin port).
+  answer must be distinguishable from "nothing there". `GET /v1/wal` is the
+  same kind of answer: the WAL stats describe this node's own log, and under
+  `wal.type: none` there is no log to describe (`409 wal_disabled`).
+  Aggregating across nodes is the operator's job (scrape every admin port).
   """
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
@@ -65,6 +67,21 @@ defmodule Ankusa.Admin.Router do
     # charset: the header is written verbatim.
     |> Plug.Conn.put_resp_header("content-type", "text/plain; version=0.0.4")
     |> Plug.Conn.send_resp(200, Ankusa.Metrics.scrape(instance(conn)))
+  end
+
+  get "/v1/wal" do
+    config = config(conn)
+
+    case config.wal do
+      :none ->
+        send_json(conn, 409, %{error: "wal_disabled"})
+
+      _ ->
+        send_json(conn, 200, %{
+          instance: to_string(config.instance),
+          wal: safe_stats(instance(conn))
+        })
+    end
   end
 
   get "/v1/config" do
@@ -408,6 +425,17 @@ defmodule Ankusa.Admin.Router do
   end
 
   defp clamp_limit(limit), do: limit |> max(0) |> min(@max_limit)
+
+  # A `:claim_check`-only node with the admin API on runs no WAL process, and
+  # the WAL is node-local anyway: a missing or unresponsive log is `%{}`, not a
+  # 500.
+  defp safe_stats(instance) do
+    Ankusa.WAL.stats(instance)
+  rescue
+    _ -> %{}
+  catch
+    :exit, _ -> %{}
+  end
 
   defp invalid_filter(conn, field),
     do: send_json(conn, 400, %{error: "invalid_filter", field: field})

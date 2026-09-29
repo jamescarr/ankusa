@@ -32,7 +32,7 @@ docker run -d --name ankusa \
 until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy ]; do sleep 1; done
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
+# => {"id":"01a0...","status":"accepted"}   (returned only after the WAL fsync)
 ```
 
 Done? `docker rm -f ankusa`
@@ -54,7 +54,7 @@ cd ankusa/examples/quickstart
 docker compose up --build -d --wait
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 sleep 1 && docker compose logs worker
-# received id=01a0... source=demo seq=1 bytes=36 body={"id":"evt_1","type":"invoice.paid"}
+# received id=01a0... source=demo bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
 The wiring is one sink in `ankusa.yml`:
@@ -79,14 +79,17 @@ walks through outages, dead letters, replay, and pointing a real provider at it.
 
 ## How it works
 
-Ankusa writes every hook to a durable log before it answers `2xx`: the fsync
-lands first, and `201 accepted` is the only committed response. There is no
-`200`. If a node dies before the write, the provider never got an ack and
-retries; that retry is a new hook with a new `id`, stored and delivered again,
-because ingest does no deduplication and delivery is at-least-once. When
-storage slows down, Ankusa answers `503` with `Retry-After`, so providers back
-off and try again instead of losing events. You get that guarantee on day one,
-on one machine, and you keep it when you run a hundred.
+Ankusa never answers `2xx` until the hook is durably accepted, and which system
+accepts it is one config key. By default (`wal.type: disk`) the fsync lands
+first and `201 accepted` is the only committed response — there is no `200`. If
+a node dies before the write, the provider never got an ack and retries; that
+retry is a new hook with a new `id`, stored and delivered again, because ingest
+does no deduplication and delivery is at-least-once. Under `wal.type: none` the
+node keeps no log at all: it publishes to the source's sinks inside the request
+and acks on the broker's confirm. Either way, when the destination slows down,
+Ankusa answers `503` with `Retry-After`, so providers back off and try again
+instead of losing events. You get that guarantee on day one, on one machine,
+and you keep it when you run a hundred.
 
 [`docs/architecture.md`](docs/architecture.md) walks the full pipeline and shows
 why each guarantee holds.

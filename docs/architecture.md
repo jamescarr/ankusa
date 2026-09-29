@@ -2,18 +2,23 @@
 
 ## The core invariant
 
-**Never return `2xx` until the hook is durably stored.** Every other design
-decision in this framework is downstream of that one sentence.
+**Never return `2xx` until the hook is durably accepted.** Which system accepts
+it is one config key: `wal.type: disk` (the default) commits to this node's log
+and dispatches asynchronously; `wal.type: none` publishes to the source's sinks
+inside the request and acks on their confirm. Neither ever promises what
+nothing stored. Every other design decision in this framework is downstream of
+that one sentence.
 
-- **Crash before commit:** no `2xx` was sent. The provider retries. Nothing
+- **Crash before the accept:** no `2xx` was sent. The provider retries. Nothing
   was lost because nothing was promised.
-- **Crash after commit, before the HTTP response leaves:** the provider
+- **Crash after the accept, before the HTTP response leaves:** the provider
   retries anyway (it never saw the `2xx`). Ingest does no deduplication, so
-  that retry is a new hook: a fresh `id` and the next `seq`, stored and
-  delivered again. Delivery is at-least-once; consumers are idempotent
-  receivers.
-- **Store slow or down:** `503` with `Retry-After`. Never ack what wasn't
-  saved, ever, under any load condition.
+  that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
+  is at-least-once; consumers are idempotent receivers.
+- **Store slow or down:** `503` with `Retry-After`. Under `wal.type: disk` that
+  is the WAL refusing a write; under `wal.type: none` it is a sink refusing the
+  publish — same answer, because in that mode the sink *is* the store. Never
+  ack what wasn't saved, ever, under any load condition.
 
 The one loss window this can't close is a provider that doesn't retry on a
 timeout or `5xx`. That's their contract, not a bug here. Document it to
@@ -26,6 +31,12 @@ be quietly stronger than what's actually true. `WAL.DiskLog` is the only WAL:
 it holds its index in-process and is local to one BEAM node, so run every WAL
 role together and scale out with independent nodes. See
 [Deployment topologies](#deployment-topologies).
+
+`wal.type: none` makes the node stateless instead: no log, no batcher, no
+dispatch pipeline, no compactor, no DLQ, and the only role left is `:edge`. The
+broker's confirm replaces the `fsync`, and "the provider is the retry" replaces
+the retry policy — see [Deployment topologies](#4-stateless-ingest-fleet-wal-none)
+and [`delivery.md`](delivery.md#direct-mode).
 
 ## The pipeline
 
@@ -54,6 +65,26 @@ the "durable state, not RPC" rule and it
 holds at every boundary in the system, including across separate adapter
 packages (see [`packaging.md`](packaging.md)) and across independent nodes,
 which share nothing but the provider's traffic.
+
+`wal.type: none` skips the log entirely — one request, one publish, still one
+honest ack:
+
+```mermaid
+flowchart LR
+    P[Provider] -->|POST catch URL| E[Edge: Bandit + Router]
+    E --> IG[Ingest: verify]
+    IG -->|in the request| SK[Sinks, declaration order]
+    SK -->|every sink confirmed| A[201 accepted]
+    SK -->|first refusal| R[503 + Retry-After]
+```
+
+No batcher, no WAL, no compactor, no dispatch pipeline, no DLQ. The request
+process publishes to each of the source's sinks and answers only once all have
+confirmed (`Kafka` `acks=all`, a publisher confirm, a JetStream ack, an HTTP
+`2xx`); the first refusal is the `503`, and the provider — not a retry policy —
+is the retry. `Ankusa.Sink.durable?/2` is the contract behind that promise, and
+boot refuses a `wal: :none` config in which no sink of a static source can make
+it. Detail in [`delivery.md`](delivery.md#direct-mode).
 
 ## Request path, step by step
 
@@ -86,6 +117,12 @@ which share nothing but the provider's traffic.
    disconnect, read timeout) is `400`, kept distinct from `413` rather than
    reported as "too large".
 
+Under `wal: :none` steps 3 and 4 do not exist: **`Ankusa.Edge.Publish`** asks
+each of the source's `Ankusa.Sink`s, in declaration order, in the request
+process. The status mapping below is unchanged, but the `201` now waits on
+every sink's confirm instead of the WAL commit. A sink refusing — or raising,
+or throwing, or exiting — is the `503`, and nothing is retried here.
+
 From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 
 - **`Ankusa.Storage.Compactor`** reads everything past its cursor, encodes many
@@ -107,7 +144,8 @@ From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 | --- | --- |
 | `WAL.DiskLog` | Append-only, length-prefixed, CRC32-per-record log. Replay validates every CRC and **drops a torn trailing frame**, a write that started but never `fsync`'d, so it was never acked either. No un-acked write is ever surfaced as if it were durable. |
 | Group-commit batcher | One process per partition; the WAL append runs in a task, so commits pipeline while callers block until their own commit returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. |
-| Ingest | Every accepted POST is durably stored and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Ingest does no deduplication, so a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
+| Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the WAL commit; under `wal.type: none` it is every sink's confirm. Ingest does no deduplication, so a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
+| `wal: :none` (direct ack) | Ingest publishes to every sink in the request and answers `201` only after each confirmed; the first refusal is a `503` with `Retry-After`, with no internal retry. No local log, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `Ankusa.Sink.durable?/2` is the per-sink promise, checked at boot for every static source. The quarantine pen is the only local state this mode has at all: an empty log is created at boot, and entries are appended only for a source that asks for it. |
 | Compactor | Never writes one object per hook. Packs many WAL records into one immutable segment. Truncates only through `min(compactor, dispatch)`. |
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and serialized per `c:Ankusa.Sink.ordering_key/2`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal, durable watermark cursor survives restart. |
 | Quarantine | Token-bucket rate-limited (100 burst, 20/s refill) durable pen. A bad secret rotation can't silently eat real events, and a flood of forged requests can't fill the disk. |
@@ -130,9 +168,13 @@ free.
 `config.roles`. The same release runs all three on a laptop, and `roles` is
 still a runtime config decision, but `WAL.DiskLog` is local to one BEAM node,
 so every WAL role must live together in that node; see
-[Deployment topologies](#deployment-topologies). No component may require
-another to be *reachable at runtime*; they only ever hand off through the WAL
-and the object store.
+[Deployment topologies](#deployment-topologies). Under `wal: :none` the roles
+that exist only to read the log have no work, so `Ankusa.Config.new/1` drops
+`:dispatch` and `:storage` from the effective list — the admin API's
+`GET /health` reports what this node actually runs, and an existing
+all-role deployment can flip `wal.type` with no other change. No component may
+require another to be *reachable at runtime*; they only ever hand off through
+the WAL and the object store.
 
 ## Deployment topologies
 
@@ -175,6 +217,9 @@ would rewrite the file under the first one. Every role that touches the WAL,
 running them as separate containers or hosts pointed at one log is not a
 supported topology. The one role you can split off is `:claim_check`, which
 never touches the WAL at all and can run anywhere, its own node included.
+
+This constraint is the WAL's, not the framework's: under `wal.type: none` there
+is no log, only `:edge` runs, and every replica is independent (topology 4).
 
 ### 3. Queue fan-out to independent consumers
 
@@ -226,6 +271,34 @@ Worked end to end, dockerized, in
 These compose: every node runs the full pipeline locally and publishes to the
 broker, so scaling ingest with more nodes and adding queue consumers are two
 independent config changes on the same architecture, not a different one.
+
+### 4. Stateless ingest fleet (`wal: :none`)
+
+N replicas of the same image, no volumes at all: a `Deployment`, not a
+`StatefulSet`. Ingest verifies, publishes to the source's sinks in the request,
+and acks on their confirm. Nothing written here is acked customer data, so a
+replica can be killed, rescheduled, or added mid-storm with nothing to drain
+and nothing to repoint.
+
+```mermaid
+flowchart LR
+    P[Provider] --> LB[Load balancer]
+    LB --> E1[edge replica 1\nno volume]
+    LB --> E2[edge replica N\nno volume]
+    E1 & E2 -->|publish in the request\nack on confirm| Q[Kafka / NATS / RabbitMQ]
+    Q --> W[Your workers]
+```
+
+The trade is the retry: with no log there is no retry policy, no dead-letter
+queue, and no replay — a `503` with `Retry-After` is the whole retry mechanism,
+so the provider must retry and consumers must dedupe on the provider's own
+event id, as they always have. Every statically configured source needs at
+least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`); boot
+refuses the config otherwise, and a source created at runtime through the admin
+API is not checked. The quarantine pen is the only local state this topology
+has: an empty log at boot, entries only for a source that asks for it. See
+[`delivery.md#direct-mode`](delivery.md#direct-mode) and
+[`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 
 ## Telemetry
 

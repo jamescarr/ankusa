@@ -218,8 +218,10 @@ against the same
 Object stores bill per write: S3 Standard and GCS regional Standard both charge
 around $0.005 per 1,000 writes, and reads are $0.0004 per 1,000. Only bodies
 over a sink's `inline_max_bytes` become claims at all, and dispatch writes them
-**once per envelope** (it used to write per sink and per retry). Two more
-levers keep writes cheap:
+**once per envelope** (it used to write per sink and per retry). Under
+`wal.type: none` the request process is the writer (`Ankusa.Edge.Publish`) and
+it keeps the same property: one check-in per envelope, before the first sink
+runs, shared by every sink of that source. Two more levers keep writes cheap:
 
 - **The threshold is configurable per sink.** The 64 KiB default is chosen so
   most webhook bodies ride inline: base64 turns it into about 88 KiB, under

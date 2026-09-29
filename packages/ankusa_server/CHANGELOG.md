@@ -6,6 +6,20 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Added
+
+- `wal: {type: none}` (or `ANKUSA_WAL_TYPE=none`): a stateless edge node. Ingest
+  publishes to the source's sinks inside the request and acks on their confirm;
+  nothing is written to the data volume, so the image runs as a plain
+  `Deployment` — no volume, no `StatefulSet`. `node.roles` may keep naming
+  `edge, dispatch, storage`: the WAL's reader roles are dropped from the
+  effective roles (visible as `roles` on `GET /health`), and `check-config`
+  prints `wal=none`. Boot and `check-config` refuse the config when a source in
+  the file has no sink whose `:ok` means durable
+  (`c:Ankusa.Sink.durable?/1`), naming the source.
+  [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml)
+  is the runnable starting point.
+
 ### Fixed
 
 - `routes.store` no longer silently ignores `url`, `namespace` and `tick_ms`

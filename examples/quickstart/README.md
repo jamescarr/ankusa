@@ -32,7 +32,7 @@ docker compose up --build -d --wait
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
 
 sleep 1 && docker compose logs worker
-# received id=01a0... source=demo seq=1 bytes=36 body={"id":"evt_1","type":"invoice.paid"}
+# received id=01a0... source=demo bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
 Tear down (the `-v` drops the WAL volume too):
@@ -51,7 +51,7 @@ from this directory.
 ## Write your own worker
 
 - Ankusa POSTs the hook's **raw body verbatim**, with the provider's `content-type`.
-- Identity is in headers: `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-seq`, and
+- Identity is in headers: `x-ankusa-id`, `x-ankusa-source`, and
   `x-ankusa-tenant` when the source has one.
 - **`2xx` means delivered.** Anything else, a timeout (default 5s), or a redirect
   is retried per `dispatch.retry`, then dead-lettered.

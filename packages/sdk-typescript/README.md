@@ -161,7 +161,7 @@ import { parseHeaders } from "ankusa";
 // `req.headers` is whatever your framework hands you (`http.IncomingHttpHeaders`,
 // an Express `req.headers`, a WHATWG `Headers`, ...).
 const hook = parseHeaders(req.headers);
-// hook = { id, source, seq, tenant, contentType }
+// hook = { id, source, tenant, contentType }
 
 // Dedupe on `hook.id`: delivery is at-least-once, so a retried hook arrives twice.
 // `x-ankusa-id` is the identity to dedupe on, so a delivery without it is a
@@ -169,9 +169,8 @@ const hook = parseHeaders(req.headers);
 // `MissingHookIdError` instead of returning a blank id.
 ```
 
-Every other header is optional — `seq` is `null` unless it is all ASCII
-digits, `tenant` is `null` unless the source has one, and `source`/`contentType`
-default to `""`/`null`. See "HTTP handoff" in
+Every other header is optional — `tenant` is `null` unless the source has
+one, and `source`/`contentType` default to `""`/`null`. See "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)
 for the full contract.
 

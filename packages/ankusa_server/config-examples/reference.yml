@@ -147,6 +147,9 @@ dispatch:
 
 wal:
   # [env ANKUSA_WAL_TYPE] disk — local append-only log; survives process crash and power loss on this host, not the loss of the host.
+  #                        none — no local log: ingest publishes to the source's sinks in the request and acks on
+  #                               their confirm. The node keeps no state, runs only the `edge` role, and every
+  #                               source must have a durable sink (a broker ack, a publisher confirm, an upstream 2xx).
   type: disk
 
 storage:
