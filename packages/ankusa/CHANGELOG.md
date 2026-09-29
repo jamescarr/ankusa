@@ -34,7 +34,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `version`, because versions start over (a restarted in-memory store, a flushed
   Redis) and a decision cached under one could answer for a table it was never
   made against. Only requests of at most 16 segments and 256 bytes of path are
-  cached, and the cache's memory check runs every second.
+  cached, and the cache's memory check runs every second. A longer path is still
+  decided correctly, by a scan of the route table; `[:ankusa, :routes, :match]`
+  gains `cacheable` (false for such a path) so that cost can be seen.
 - The IP-rule and trusted-proxy parser is `Ankusa.Net.parse_cidr/1`, which never
   raises and refuses a range inside `::ffff:0:0/96` (see Fixed).
 
@@ -50,8 +52,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   to the proxy's own address, which an allow rule for the proxy's range then
   admitted. `Net.parse/1` no longer raises on invalid UTF-8.
 - A range inside `::ffff:0:0/96` as an IP rule or trusted proxy is refused at
-  write time. Addresses are matched as IPv4, so it could never match — and as a
-  deny rule it silently let its own traffic through.
+  write time, and the error says to write the IPv4 CIDR instead. Addresses are
+  matched as IPv4, so it could never match — and as a deny rule it silently let
+  its own traffic through.
 - A dry run (`POST /admin/routes/test`) no longer reads or fills the decision
   cache, and a store restart can no longer let a cached decision answer for the
   new table.

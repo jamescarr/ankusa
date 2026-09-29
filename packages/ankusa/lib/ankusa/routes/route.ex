@@ -297,10 +297,19 @@ defmodule Ankusa.Routes.Route do
   defp rule_action(%{"action" => action}), do: {:error, "invalid action #{inspect(action)}"}
   defp rule_action(_rule), do: {:error, "action is required"}
 
+  # An ordinary failure keeps its plain message. A mapped range parses fine, so
+  # nothing about it looks wrong to the operator: say why it was refused, in the
+  # message they actually read (an API 400, a boot error).
   defp rule_cidr(%{"cidr" => cidr}) do
     case Net.parse_cidr(cidr) do
-      {:ok, parsed} -> {:ok, parsed}
-      {:error, _message} -> {:error, "invalid cidr #{inspect(cidr)}"}
+      {:ok, parsed} ->
+        {:ok, parsed}
+
+      {:error, :mapped_range} ->
+        {:error, "invalid cidr #{inspect(cidr)}: #{Net.mapped_range_hint()}"}
+
+      {:error, _message} ->
+        {:error, "invalid cidr #{inspect(cidr)}"}
     end
   end
 

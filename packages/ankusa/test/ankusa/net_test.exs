@@ -100,12 +100,16 @@ defmodule Ankusa.NetTest do
     end
 
     test "rejects an IPv4-mapped IPv6 range, which could never match" do
-      assert {:error, message} = Net.parse_cidr("::ffff:10.0.0.0/104")
-      assert message =~ "::ffff:10.0.0.0/104"
-      assert message =~ "IPv4"
+      assert {:error, :mapped_range} = Net.parse_cidr("::ffff:10.0.0.0/104")
+      assert {:error, :mapped_range} = Net.parse_cidr("::ffff:0:0/96")
+      assert {:error, :mapped_range} = Net.parse_cidr("::ffff:10.0.0.1")
+    end
 
-      assert {:error, _message} = Net.parse_cidr("::ffff:0:0/96")
-      assert {:error, _message} = Net.parse_cidr("::ffff:10.0.0.1")
+    test "says what to write instead of a mapped range" do
+      hint = Net.mapped_range_hint()
+
+      assert hint =~ "::ffff:0:0/96"
+      assert hint =~ "IPv4 CIDR"
     end
 
     test "accepts a range that merely contains mapped space" do

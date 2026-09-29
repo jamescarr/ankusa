@@ -36,7 +36,10 @@ defmodule Ankusa.Routes.Matcher do
   than accepted and silently dead. An encoded request segment matches only a
   `:param` or the wildcard, never a literal: `/hooks/%73tripe` is not
   `/hooks/stripe`. Encoded dots (`%2e%2e`) are ordinary opaque segments, not
-  `..`; nothing in Ankusa decodes a path, so nothing resolves one.
+  `..`. Nothing in Ankusa decodes a path, so nothing in Ankusa resolves one —
+  but the request path is recorded verbatim in the envelope and reaches whatever
+  consumes it, so a consumer that decodes it owns that step. The guard's job is
+  only that the route it matched is the one the sender addressed.
   """
 
   alias Ankusa.Routes.Route

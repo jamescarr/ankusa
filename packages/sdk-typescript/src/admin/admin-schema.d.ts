@@ -603,7 +603,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `400`. `invalid_ip_rules`: both `default` and `rules` are required, `default` is `allow` or `deny`, `rules` is a list, and every rule is an object with an `action` of `allow`/`deny` and a `cidr` that parses. `field` is `default` or `rules`; a bad rule's `message` names its index (`rule 0: ...`). A body that is not a JSON object is `invalid_body`, not this. */
+        /** @description `400`. `invalid_ip_rules`: both `default` and `rules` are required, `default` is `allow` or `deny`, `rules` is a list, and every rule is an object with an `action` of `allow`/`deny` and a `cidr` that parses. A range inside `::ffff:0:0/96` parses but is refused, because client addresses are matched as IPv4 and such a range could never match; write the equivalent IPv4 CIDR. `field` is `default` or `rules`; a bad rule's `message` names its index (`rule 0: ...`). A body that is not a JSON object is `invalid_body`, not this. */
         InvalidIpRules: {
             headers: {
                 [name: string]: unknown;

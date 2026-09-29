@@ -267,7 +267,7 @@ config :ankusa,
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
 | `routes.max_routes` | `10_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. |
 | `routes.store` | `{Ankusa.Routes.Store.ETS, []}` | `{module, opts}` implementing `Ankusa.Routes.Store`. `Ankusa.Routes.Store.Redis` (package `ankusa_redis`) shares definitions across nodes. |
-| `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. Entries are keyed by the published snapshot's `epoch`, so publishing a snapshot retires every earlier decision at once. Only short requests are cached — at most 16 path segments and 256 bytes of path; anything longer is matched directly. `max_size` is approximate between the adapter's 1s memory checks, and an eviction only costs a re-scan: it can never change a decision. `ttl_ms` must stay under `gc_interval_ms`. |
+| `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. Entries are keyed by the published snapshot's `epoch`, so publishing a snapshot retires every earlier decision at once. Only short requests are cached — at most 16 path segments and 256 bytes of path — because the key is the sender's own path; a longer one is still decided correctly, but by a scan of the whole route table on every request, and its `[:ankusa, :routes, :match]` event carries `cacheable: false` so that cost is visible. `max_size` is approximate between the adapter's 1s memory checks, and an eviction only costs a re-scan: it can never change a decision. `ttl_ms` must stay under `gc_interval_ms`. |
 | `routes.trusted_proxies` | `[]` | CIDRs whose peers may set `X-Forwarded-For`. Empty means the header is never read. |
 | `routes.ip_rules` | `%{default: :allow, rules: []}` | Ordered global rules, first match wins, plus the `default` when none match. |
 | `routes.admin.port` | `4003` | The management API's own Bandit port. Unauthenticated by design, same as `admin.port`; front it with your own proxy or network policy. |
@@ -397,7 +397,7 @@ response is safe to retry.
 
 Rejections are logged at `:debug`, sampled at `routes.log_sample` (1 in N, `0`
 for silent), and emit `[:ankusa, :routes, :reject]`; captures emit
-`[:ankusa, :routes, :match]` with `%{instance, route_id, cached}`.
+`[:ankusa, :routes, :match]` with `%{instance, route_id, cached, cacheable}`.
 
 ### Configuring a source
 

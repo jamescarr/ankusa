@@ -101,6 +101,10 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     "default" => "allow",
     "rules" => [%{"action" => "maybe", "cidr" => "10.0.0.0/8"}]
   }
+  @mapped_range_body %{
+    "default" => "allow",
+    "rules" => [%{"action" => "deny", "cidr" => "::ffff:10.0.0.0/104"}]
+  }
 
   # Every documented error response, with the request that produces it. The
   # status is the one the probe must get; `:query` replaces the documented query
@@ -130,6 +134,7 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     {:putIpRules, 400, [body: %{"default" => "maybe", "rules" => []}]},
     {:putIpRules, 400, [body: %{"default" => "allow", "rules" => "nope"}]},
     {:putIpRules, 400, [body: @bad_cidr_body]},
+    {:putIpRules, 400, [body: @mapped_range_body]},
     {:putIpRules, 400, [body: @bad_action_body]},
     {:putIpRules, 400, [body: @unknown_rule_body]},
     {:createRoute, 503, [body: %{"path" => "/hooks/any"}]},

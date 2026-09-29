@@ -45,8 +45,13 @@ defmodule Ankusa.Edge.RouteGuard do
 
   ## Telemetry
 
-    * `[:ankusa, :routes, :match]` — metadata `%{instance:, route_id:, cached:}`;
-      `:cached` is true when the decision came from `Ankusa.Routes.Cache`.
+    * `[:ankusa, :routes, :match]` — metadata
+      `%{instance:, route_id:, cached:, cacheable:}`. `:cached` is true when the
+      decision came from `Ankusa.Routes.Cache`. `:cacheable` is false when the
+      request path is past the cache's key bound (`Ankusa.Routes.Cache.cacheable?/1`),
+      so every request for it is matched by a scan of the route table and none is
+      ever a `cached: true`: the way to tell "a legitimate path that is too long
+      to cache" from an ordinary miss.
     * `[:ankusa, :routes, :reject]` — metadata
       `%{instance:, reason:, method:, path:}` with `:reason` one of `:no_route`,
       `:method`, `:ip_denied`.
@@ -118,7 +123,8 @@ defmodule Ankusa.Edge.RouteGuard do
         Ankusa.Telemetry.emit([:routes, :match], %{}, %{
           instance: instance,
           route_id: route_id,
-          cached: cached
+          cached: cached,
+          cacheable: Ankusa.Routes.Cache.cacheable?(conn.path_info)
         })
 
         Plug.Conn.assign(conn, :ankusa_route, route_id)

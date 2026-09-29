@@ -670,8 +670,15 @@ defmodule Ankusa.Routes do
 
     Enum.each(proxies, fn cidr ->
       case Net.parse_cidr(cidr) do
-        {:ok, _parsed} -> :ok
-        {:error, message} -> raise ArgumentError, not_a_cidr("trusted_proxies", cidr, message)
+        {:ok, _parsed} ->
+          :ok
+
+        {:error, :mapped_range} ->
+          raise ArgumentError,
+                not_a_cidr("trusted_proxies", cidr) <> ": " <> Net.mapped_range_hint()
+
+        {:error, _message} ->
+          raise ArgumentError, not_a_cidr("trusted_proxies", cidr)
       end
     end)
   end
@@ -726,7 +733,7 @@ defmodule Ankusa.Routes do
     end
   end
 
-  defp not_a_cidr(key, cidr, message) do
-    "routes.#{key} entries must be CIDRs, got #{inspect(cidr)}: #{message}"
+  defp not_a_cidr(key, cidr) do
+    "routes.#{key} entries must be CIDRs, got #{inspect(cidr)}"
   end
 end

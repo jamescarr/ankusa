@@ -986,6 +986,54 @@ defmodule Ankusa.RoutesTest do
     end
   end
 
+  describe "an IPv4-mapped range written as a rule or a trusted proxy" do
+    test "the API refuses it and says what to write instead" do
+      config = start(seed: seed())
+
+      assert {:error, {:invalid, "rules", message}} =
+               Routes.put_ip_rules(config.instance, %{
+                 "default" => "allow",
+                 "rules" => [%{"action" => "deny", "cidr" => "::ffff:10.0.0.0/104"}]
+               })
+
+      # It parses, so nothing about it looks wrong: the message has to explain.
+      assert message =~ ~s(rule 0: invalid cidr "::ffff:10.0.0.0/104")
+      assert message =~ "IPv4 CIDR"
+
+      # The rules that were in force are untouched.
+      assert Routes.ip_rules(config.instance) == %{default: :allow, rules: []}
+    end
+
+    test "a route's own rules refuse it the same way" do
+      assert {:error, {:invalid, "ip_rules", message}} =
+               Route.from_attrs(%{
+                 "path" => "/hooks/x",
+                 "ip_rules" => [%{"action" => "allow", "cidr" => "::ffff:10.0.0.0/104"}]
+               })
+
+      assert message =~ "IPv4 CIDR"
+    end
+
+    test "boot refuses it as a trusted proxy, with the same explanation" do
+      config = test_config(routes: [enabled: true, trusted_proxies: ["::ffff:10.0.0.0/104"]])
+
+      assert_raise ArgumentError,
+                   ~r/must be CIDRs, got "::ffff:10\.0\.0\.0\/104": .*IPv4 CIDR/,
+                   fn ->
+                     Routes.validate_config!(config)
+                   end
+    end
+
+    test "an ordinary bad CIDR keeps its plain message, with no explanation attached" do
+      config = test_config(routes: [enabled: true, trusted_proxies: ["10.0.0.0/33"]])
+
+      error =
+        assert_raise ArgumentError, fn -> Routes.validate_config!(config) end
+
+      assert error.message == ~s(routes.trusted_proxies entries must be CIDRs, got "10.0.0.0/33")
+    end
+  end
+
   describe "the JSON wire form" do
     test "a route survives to_json/from_json, rules and metadata included" do
       {:ok, route} =

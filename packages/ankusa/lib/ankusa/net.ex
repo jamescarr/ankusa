@@ -76,25 +76,26 @@ defmodule Ankusa.Net do
 
   `CIDR.parse/1` is the parser; this wrapper covers what it leaves open:
 
-    * it never raises and its `{:error, message}` is always a string, so a
-      config typo or a bad API payload is something to report rather than a
-      crash (`CIDR.parse/1` sends the address through `String.to_charlist/1`,
-      which raises on a non-UTF-8 binary);
-    * it rejects an IPv4-mapped IPv6 range — any range inside `::ffff:0:0/96`,
+    * it never raises, so a config typo or a bad API payload is something to
+      report rather than a crash (`CIDR.parse/1` sends the address through
+      `String.to_charlist/1`, which raises on a non-UTF-8 binary);
+    * it refuses an IPv4-mapped IPv6 range — any range inside `::ffff:0:0/96`,
       e.g. `::ffff:10.0.0.0/104`. Addresses are normalized to IPv4 before
       matching (`normalize/1`), so such a range can never match one; as a
       *deny* rule it would silently let its own traffic through. Ranges that
       merely contain mapped space (`::/0`, `::/80`) are fine.
 
-  `{:error, message}` for any non-binary, for a string that is not a CIDR, and
-  for a mapped range; the last one's message names the equivalent IPv4 CIDR to
-  write instead. A host whose bits fall outside its mask (`"10.0.0.5/8"`) is
-  masked off, as `CIDR.parse/1` already does.
+  `{:error, message}` for any non-binary and for a string that is not a CIDR.
+  `{:error, :mapped_range}` for a mapped range: it parses fine, so the operator
+  needs telling why it was refused, and `mapped_range_hint/0` is that sentence.
+  Keeping it a distinct reason lets a caller add the explanation only there and
+  leave its ordinary "not a CIDR" message alone. A host whose bits fall outside
+  its mask (`"10.0.0.5/8"`) is masked off, as `CIDR.parse/1` already does.
   """
-  @spec parse_cidr(binary()) :: {:ok, %CIDR{}} | {:error, String.t()}
+  @spec parse_cidr(binary()) :: {:ok, %CIDR{}} | {:error, :mapped_range | String.t()}
   def parse_cidr(cidr) when is_binary(cidr) do
     case parse_cidr_string(cidr) do
-      %CIDR{} = parsed -> reject_mapped(cidr, parsed)
+      %CIDR{} = parsed -> reject_mapped(parsed)
       {:error, reason} -> {:error, invalid_cidr(cidr, reason)}
     end
   end
@@ -107,16 +108,20 @@ defmodule Ankusa.Net do
     _error -> {:error, :einval}
   end
 
-  defp reject_mapped(cidr, %CIDR{first: first, last: last} = parsed) do
+  defp reject_mapped(%CIDR{first: first, last: last} = parsed) do
     if mapped?(first) and mapped?(last) do
-      {:error,
-       "invalid CIDR #{inspect(cidr)}: it is inside ::ffff:0:0/96, and addresses are " <>
-         "normalized to IPv4 before matching, so it can never match — write it as the " <>
-         "equivalent IPv4 CIDR"}
+      {:error, :mapped_range}
     else
       {:ok, parsed}
     end
   end
+
+  @mapped_range_hint "it is inside ::ffff:0:0/96, and client addresses are matched as IPv4, so " <>
+                       "it can never match; write the equivalent IPv4 CIDR instead"
+
+  @doc "What to tell an operator whose CIDR was refused with `{:error, :mapped_range}`."
+  @spec mapped_range_hint() :: String.t()
+  def mapped_range_hint, do: @mapped_range_hint
 
   # Both endpoints mapped means the whole (contiguous) range sits inside the
   # mapped space; a range that merely contains it has an endpoint outside.
