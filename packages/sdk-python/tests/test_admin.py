@@ -187,6 +187,56 @@ def test_update_source_puts_to_the_named_path() -> None:
         assert client.update_source("acme", "billing", SPEC) == Source.from_json(ENTRY)
 
 
+def test_delete_source_returns_none_on_204() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/v1/tenants/acme/sources/billing"
+        assert request.content == b""
+        return httpx.Response(204)
+
+    with make_client(handler) as client:
+        assert client.delete_source("acme", "billing") is None
+
+
+def test_delete_source_404_maps_to_source_not_found_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/v1/tenants/acme/sources/billing"
+        return httpx.Response(404, json={"error": "source_not_found"})
+
+    with make_client(handler) as client:
+        with pytest.raises(SourceNotFoundError) as exc_info:
+            client.delete_source("acme", "billing")
+    assert exc_info.value.status == 404
+    assert exc_info.value.body == {"error": "source_not_found"}
+
+
+def test_delete_source_409_source_store_read_only_maps_to_source_store_read_only_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": "source_store_read_only"})
+
+    with make_client(handler) as client:
+        with pytest.raises(SourceStoreReadOnlyError) as exc_info:
+            client.delete_source("acme", "billing")
+    assert exc_info.value.status == 409
+    assert exc_info.value.body == {"error": "source_store_read_only"}
+
+
+def test_delete_source_400_maps_to_source_invalid_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "invalid_source", "message": "cannot delete a seeded source"})
+
+    with make_client(handler) as client:
+        with pytest.raises(SourceInvalidError) as exc_info:
+            client.delete_source("acme", "billing")
+    assert exc_info.value.status == 400
+    assert exc_info.value.message == "cannot delete a seeded source"
+    assert exc_info.value.body == {
+        "error": "invalid_source",
+        "message": "cannot delete a seeded source",
+    }
+
+
 # --- error mapping ------------------------------------------------------------
 
 

@@ -1,7 +1,7 @@
 """Admin client for Ankusa's tenant-scoped webhook sources.
 
 ``Ankusa.Admin.Router`` (its own port, 4002) exposes a small JSON API for
-managing a tenant's ingest sources: list, get, create, update. A tenant is a
+managing a tenant's ingest sources: list, get, create, update, delete. A tenant is a
 santati team slug and a source id is ``"<tenant>.<name>"`` -- this client
 speaks in those terms and builds the paths for you.
 
@@ -222,6 +222,16 @@ class AdminClient:
         response = self._request("PUT", f"/v1/tenants/{tenant}/sources/{name}", json=spec.to_json())
         self._raise_for_status(response)
         return Source.from_json(response.json())
+
+    def delete_source(self, tenant: str, name: str) -> None:
+        """Delete a source: ``DELETE /v1/tenants/<tenant>/sources/<name>``.
+
+        Succeeds with no return value (the server answers ``204`` with an
+        empty body); a missing source raises ``SourceNotFoundError``.
+        """
+        self._ensure_version()
+        response = self._request("DELETE", f"/v1/tenants/{tenant}/sources/{name}")
+        self._raise_for_status(response)
 
     def _ensure_version(self) -> None:
         """The optional version latch: only when ``expected_version`` is set does
