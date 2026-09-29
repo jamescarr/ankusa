@@ -169,9 +169,13 @@ function injectedFetch(spec: Gateway, requests: Recorded[]): typeof fetch {
     // Reading the body does not forward it anywhere: this transport serves the
     // spec in-process.
     const text = await request.text();
+    // `path` is the request target as sent, query string included: the same thing
+    // the real-server transport records (`req.url`) and the Python runner records
+    // (`raw_path`), so a vector asserts a query the same way whichever carries it.
+    const url = new URL(request.url);
     requests.push({
       method: request.method,
-      path: new URL(request.url).pathname,
+      path: url.pathname + url.search,
       headers: Object.fromEntries(request.headers),
       body: text === "" ? null : JSON.parse(text),
     });

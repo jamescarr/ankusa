@@ -147,6 +147,23 @@
       }
     },
     {
+      "id": "routes.list.query.injected",
+      "feature": "routes.request_shape",
+      "operation": "routes_list",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {"json": {"routes": [], "next_cursor": null}}
+        },
+        "params": {"enabled": true, "limit": 10, "cursor": "stripe"},
+        "client": {"transport": "injected"}
+      },
+      "expect": {
+        "ok": {"routes": [], "next_cursor": null},
+        "requests": [{"method": "GET", "path": "/admin/routes?enabled=true&limit=10&cursor=stripe"}]
+      }
+    },
+    {
       "id": "routes.get.ok",
       "feature": "routes.crud",
       "operation": "routes_get",
