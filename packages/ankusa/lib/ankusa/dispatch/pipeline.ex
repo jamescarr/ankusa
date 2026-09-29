@@ -439,7 +439,7 @@ defmodule Ankusa.Dispatch.Pipeline do
     # along to every retry.
     {job, result} =
       case ensure_claim(job, instance) do
-        {:ok, job} -> {job, safe_deliver(mod, env, ctx(job, instance, attempt), opts)}
+        {:ok, job} -> {job, Sink.safe_deliver(mod, env, ctx(job, instance, attempt), opts)}
         {:error, reason} -> {job, {:error, {:claim_check, reason}}}
       end
 
@@ -489,17 +489,6 @@ defmodule Ankusa.Dispatch.Pipeline do
     }
 
     if claim, do: Map.put(ctx, :claim, claim), else: ctx
-  end
-
-  # A sink is user code: it may raise, throw, or exit (a `GenServer.call` into a
-  # dead process). Any of those is a delivery failure, not a pipeline crash.
-  defp safe_deliver(mod, env, ctx, opts) do
-    mod.deliver(env, ctx, opts)
-  rescue
-    error -> {:error, {:raised, error}}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-    :throw, value -> {:error, {:throw, value}}
   end
 
   # ── bookkeeping ───────────────────────────────────────────────────────────

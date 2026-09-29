@@ -11,8 +11,38 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- `wal: :none`, the stateless ack path. Ingest verifies, then publishes to the
+  source's sinks in the request (`Ankusa.Edge.Publish`) and answers `201` only
+  once every sink has confirmed; a refusal is a `503` with `Retry-After` and the
+  provider retries. No WAL, no batcher, no dispatch pipeline, no compactor, no
+  DLQ: the node runs only the `edge` role (the WAL's reader roles are dropped
+  from `config.roles` rather than rejected). `Ankusa.WAL.validate_config!/1`
+  refuses a `wal: :none` config in which a statically configured source has no
+  sink whose `:ok` means durable — sources created at runtime through the admin
+  API are not checked.
+- `c:Ankusa.Sink.durable?/1`, the per-sink promise `wal: :none` acks on; defaults
+  to `true`, and `Ankusa.Sink.Log` answers `false`. `Ankusa.Sink.safe_deliver/4`
+  (the raise/throw/exit-to-`{:error, reason}` wrapper hidden inside the dispatch
+  pipeline) is now public, so both ack paths deliver through the same function.
+- `GET /v1/wal` on the admin API: this node's `Ankusa.WAL.stats/1`, or
+  `409 wal_disabled` under `wal: :none`. `Ankusa.WAL.label/1` names the
+  configured adapter for boot banners and `check-config`.
+
 ### Changed
 
+- **Breaking: the ingest `201` body is `{"status": "accepted", "id": "…"}`.** The
+  `seq` field is gone: it was this node's WAL position, not a per-source
+  sequence, so two nodes in a fleet both emit `1, 2, 3` and any consumer
+  ordering or deduping on it was wrong. Dedupe on the envelope `id`.
+- **Breaking: ingest `GET /stats` is removed** and `GET /health` is liveness
+  only (`{"status": "ok", "instance": "…"}`). Per-node WAL stats are operator
+  surface, not provider surface: they moved to `GET /v1/wal` on the admin port.
+- **Breaking: `Ankusa.Sink.Http` no longer sends `x-ankusa-seq`.** The delivery
+  contract is `x-ankusa-id`, `x-ankusa-source`, and `x-ankusa-tenant` when set.
+  (The published `ankusa` npm and PyPI SDKs drop `HookHeaders.seq` in the same
+  release; their changelogs say so.)
 - **Breaking for custom route stores.** `Ankusa.Routes.Store`'s `insert` and
   `replace` callbacks take the version of the snapshot the caller validated
   against — `insert(instance, route, version)`, `replace(instance, route,

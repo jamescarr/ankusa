@@ -7,11 +7,10 @@ import { parseHeaders } from "./headers.js";
 // cover the TS-only input shapes a vector can't express.
 describe("parseHeaders", () => {
   test("accepts a Headers instance", () => {
-    assert.deepEqual(parseHeaders(new Headers({ "X-Ankusa-Id": "01a0", "x-ankusa-seq": "3" })), {
+    assert.deepEqual(parseHeaders(new Headers({ "X-Ankusa-Id": "01a0", "X-Ankusa-Tenant": "acme" })), {
       id: "01a0",
       source: "",
-      seq: 3,
-      tenant: null,
+      tenant: "acme",
       contentType: null,
     });
   });

@@ -37,8 +37,7 @@ defmodule Ankusa.Sink.HttpTest do
         headers: [],
         content_type: "application/json",
         body: ~s({"hello":"world"}),
-        size: 17,
-        seq: 42
+        size: 17
       },
       overrides
     )
@@ -61,7 +60,6 @@ defmodule Ankusa.Sink.HttpTest do
     assert body == env.body
     assert h["x-ankusa-id"] == env.id
     assert h["x-ankusa-source"] == "stripe"
-    assert h["x-ankusa-seq"] == "42"
     assert h["x-ankusa-tenant"] == "acme"
     assert h["content-type"] == "application/json"
   end

@@ -3,21 +3,15 @@
  *
  * See "HTTP handoff" in docs/integrations.md for the full contract this
  * mirrors: the raw body arrives verbatim, and identity travels in
- * `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-seq`, `x-ankusa-tenant` (only
- * when the source has a tenant), and `content-type`. A receiver must dedupe on
- * `x-ankusa-id`: delivery is at-least-once, so the same hook can arrive twice
- * after a retry.
+ * `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-tenant` (only when the source
+ * has a tenant), and `content-type`. A receiver must dedupe on `x-ankusa-id`:
+ * delivery is at-least-once, so the same hook can arrive twice after a retry.
  */
 
 /** The identity of one HTTP-sink delivery. */
 export type HookHeaders = {
   id: string;
   source: string;
-  /**
-   * 1-based, monotonically increasing per source. `null` if the header was
-   * absent or not an integer.
-   */
-  seq: number | null;
   /** Only present when the source has a tenant. */
   tenant: string | null;
   contentType: string | null;
@@ -61,11 +55,9 @@ export function parseHeaders(headers: HeaderSource): HookHeaders {
     throw new MissingHookIdError("missing x-ankusa-id header");
   }
 
-  const seqRaw = lowered.get("x-ankusa-seq");
   return {
     id,
     source: lowered.get("x-ankusa-source") ?? "",
-    seq: seqRaw !== undefined && /^[0-9]+$/.test(seqRaw) ? Number(seqRaw) : null,
     tenant: lowered.get("x-ankusa-tenant") ?? null,
     contentType: lowered.get("content-type") ?? null,
   };

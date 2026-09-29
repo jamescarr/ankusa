@@ -12,7 +12,7 @@ suite — `mise run check:conformance`, below.
 ## `ankusa` core: `mix test`
 
 ```sh
-mise run check:package ankusa         # 370 tests, no external infra needed
+mise run check:package ankusa         # 389 tests, no external infra needed
 mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
@@ -35,7 +35,12 @@ The 370 always-on tests cover:
 - **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with
   `503` once the batcher's queue fills while a commit is in flight, pluggable
   route resolvers (`Path` and `TenantPath`), and that the same body posted
-  twice is stored twice (distinct ids, seqs 1 and 2).
+  twice is stored twice (two ids, two WAL records). `edge_direct_test.exs`
+  covers the other ack path (`wal: :none`): the `201` body is exactly
+  `{id, status}`, a sink sees the envelope before the response, a refusing or
+  raising sink is `503` with `Retry-After` and is called exactly once, no WAL
+  process or `wal/` directory exists, and an oversized body reaches the sink
+  with `ctx.claim`.
 - **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
   instead of killing the pipeline, and ordering: a blocked delivery holds the
   cursor while another ordering key proceeds, and same-key deliveries stay in
@@ -86,8 +91,11 @@ The 370 always-on tests cover:
   example against its own schema, so the spec and the code cannot drift apart.
 - **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
   mid-flight, and proves every acked id survives replay from the WAL. Zero
-  tolerance: this is the test that actually backs the core invariant claim
-  in [`architecture.md`](architecture.md), not just the description of it.
+  tolerance: this is the test that actually backs the `wal.type: disk` half of
+  the core invariant claim in [`architecture.md`](architecture.md), not just
+  the description of it. The `wal.type: none` half is backed by
+  `edge_direct_test.exs`, which asserts the response really does wait for the
+  sink's confirm — and is a `503` when that confirm never comes.
 
 The 16 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,

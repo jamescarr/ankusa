@@ -38,7 +38,7 @@ defmodule AnkusaServer.Application do
 
     Logger.info(
       "[ankusa] ankusa_server #{version()} roles=#{inspect(config.roles)} http=#{config.port} " <>
-        "admin=#{admin(config)} routes=#{routes(config)} wal=#{inspect(elem(config.wal, 0))} " <>
+        "admin=#{admin(config)} routes=#{routes(config)} wal=#{Ankusa.WAL.label(config.wal)} " <>
         "sources=#{sources(config)}"
     )
 

@@ -1,0 +1,50 @@
+# A stateless ingest node: no WAL, no local state, no volume.
+#
+#   topology : edge only — the broker is the bus
+#   WAL      : none — the broker's publisher confirm is the ack. Nothing on local
+#              disk; run as a Deployment, not a StatefulSet.
+#   storage  : none — there is nothing to compact
+#   secrets  : STRIPE_WHSEC (injected via ${VAR})
+#   sink     : RABBITMQ_URL / RABBITMQ_EXCHANGE — a broker that confirms durably
+#
+# Ingest verifies the hook, publishes it to the source's sinks *in the request*,
+# and answers 201 only once every sink has confirmed. Anything else is a 503
+# with Retry-After and the provider retries. Scale it out with replicas: they
+# share no state.
+#
+# Run it with:
+#
+#   docker run --rm -p 4000:4000 -p 127.0.0.1:4002:4002 \
+#     -v "$PWD/direct.yml:/etc/ankusa/ankusa.yml" \
+#     -e STRIPE_WHSEC -e RABBITMQ_URL -e RABBITMQ_EXCHANGE \
+#     jamescarr/ankusa
+#
+# `node.roles` may keep saying `[edge, dispatch, storage]`: with `wal.type: none`
+# the WAL's readers are dropped from the effective roles (visible on
+# `GET /health` on the admin port).
+
+node:
+  roles: [edge]
+
+wal:
+  type: none
+
+admin:
+  enabled: true
+
+sources:
+  stripe:
+    tenant: default
+    verify:
+      type: stripe
+      secret: "${STRIPE_WHSEC}"
+      tolerance_seconds: 300
+    # The default, spelled out: a bad signature is rejected, never quarantined.
+    # Under `wal.type: none` a quarantine would be the one thing written to this
+    # node's disk, and it is not acked customer data either way.
+    on_verify_failure: reject
+    sinks:
+      - type: rabbitmq
+        url: "${RABBITMQ_URL}"
+        exchange: "${RABBITMQ_EXCHANGE}"
+        exchange_type: topic

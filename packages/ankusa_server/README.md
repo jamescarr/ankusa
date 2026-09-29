@@ -28,7 +28,7 @@ docker run -d --name ankusa \
 until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy ]; do sleep 1; done
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"accepted","seq":1}   (returned only after the WAL fsync)
+# => {"id":"01a0...","status":"accepted"}   (returned only after the WAL fsync)
 ```
 
 That is a complete, durable webhook receiver. The `demo` source accepts anything
@@ -77,6 +77,7 @@ Starting points, all loadable as-is:
 | [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
 | [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
 | [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
+| [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml) | stateless edge (`wal.type: none`): no volume, broker confirm is the ack |
 
 ### Check it before you run it
 
@@ -109,7 +110,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` (`true`/`false`) |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`) |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk` \| `none`) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
@@ -140,7 +141,7 @@ sources:
 ```
 
 - The raw body verbatim, with the provider's `content-type`.
-- `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-seq`, and `x-ankusa-tenant` when set.
+- `x-ankusa-id`, `x-ankusa-source`, and `x-ankusa-tenant` when set.
 - `2xx` means delivered. Anything else, a timeout, or a redirect is retried, then dead-lettered.
 - **Dedupe on `x-ankusa-id`.** Delivery is at-least-once, so consumers are
   idempotent receivers: `x-ankusa-id` identifies one stored hook, and every
@@ -175,6 +176,7 @@ Operating Ankusa without a shell:
 
 ```sh
 curl localhost:4002/v1/config                 # the effective config, secrets redacted
+curl localhost:4002/v1/wal                    # this node's WAL stats (409 under wal.type: none)
 curl 'localhost:4002/v1/dlq?limit=10'         # dead-lettered hooks (metadata only)
 curl -XPOST localhost:4002/v1/dlq/replay -d '{"id":"<id from GET /v1/dlq>"}'
 curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"stripe"}'
@@ -182,9 +184,10 @@ curl localhost:4002/v1/quarantine             # hooks held after a failed verifi
 curl localhost:4002/metrics                   # Prometheus
 ```
 
-The DLQ and quarantine endpoints are node-local, the DLQ is the dispatch node's
-disk, quarantine is the edge node's memory, and answer
-`409 role_not_enabled` when you ask the wrong node. Metrics are node-local too:
+The DLQ, WAL, and quarantine endpoints are node-local, the DLQ is the dispatch
+node's disk, the WAL is this node's log, quarantine is the edge node's memory,
+and answer `409 role_not_enabled` (or, for the WAL, `409 wal_disabled`) when you
+ask the wrong node. Metrics are node-local too:
 an edge node exports ingest series, a worker exports dispatch and compaction
 series. Scrape every node.
 
@@ -229,7 +232,11 @@ leaves ingest open and puts HTTP basic auth on the admin API.
 
 `/var/lib/ankusa` holds the WAL, the quarantine log, the dead-letter queue, and
 local segments. Losing it loses un-dispatched hooks, so give it a volume and back
-it, or move segments to S3/GCS, where they are not your problem anymore.
+it, or move segments to S3/GCS, where they are not your problem anymore. Under
+`wal.type: none` there is nothing there to lose: mount no volume, run the image
+as a plain `Deployment`, and let the broker hold the durable copy. See
+[`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml)
+and [`docs/delivery.md#direct-mode`](https://github.com/jamescarr/ankusa/blob/main/docs/delivery.md#direct-mode).
 
 ## Compose
 

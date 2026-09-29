@@ -65,7 +65,7 @@ From another terminal:
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' \
   -d '{"id":"evt_1","event":"push"}'
-# => {"id":"01a0...","status":"accepted","seq":1}
+# => {"id":"01a0...","status":"accepted"}
 ```
 
 The `201` returns only *after* the payload is `fsync`'d to the WAL, that's
@@ -76,14 +76,18 @@ The dispatch pipeline then delivers it, visible in the server log:
 [info] hook delivered id=01a0... source=demo attempt=1
 ```
 
+Under `wal.type: none` the same `201` means the sinks confirmed inside the
+request instead: there is no log, no dispatch pipeline, and the provider's
+retry is the retry.
+
 ### 3. Every accepted POST is stored
 
 Ingest does no deduplication, so posting the same body again is a new hook
-with a new `id` and the next `seq`:
+with a new `id`:
 
 ```sh
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"evt_1"}'
-# => {"id":"01b1...","status":"accepted","seq":2}
+# => {"id":"01b1...","status":"accepted"}
 ```
 
 A provider retry after a lost ack lands the same way, stored and delivered
@@ -94,9 +98,10 @@ their job; see [`integrations.md`](integrations.md).
 
 ```sh
 curl localhost:4000/health
-# => {"status":"ok","instance":"default","wal":{"records":..,"cursors":{"dispatch":..}}}
+# => {"status":"ok","instance":"default"}
 
-curl localhost:4000/stats
+curl localhost:4002/v1/wal      # admin.enabled: true
+# => {"instance":"default","wal":{"records":..,"cursors":{"dispatch":..}}}
 ```
 
 Durable state on disk (the WAL is truncated as the compactor rolls
@@ -113,13 +118,12 @@ State lives under `./data/<instance>/` (`wal/`, `segments/`, `quarantine/`,
 
 ## Endpoints
 
-The ingest listener serves the catch URL, plus two read-only endpoints:
+The ingest listener serves the catch URL, plus one read-only endpoint:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source`, see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the WAL fsync: `201 accepted` is the only committed response (there is no `200`). Every accepted POST is a new hook with a new `id`; ingest does no deduplication, so a provider retry after a lost ack is stored and delivered again. `201` accepted / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded. |
-| `GET` | `/health` | Liveness + WAL stats. |
-| `GET` | `/stats` | WAL stats. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source`, see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the durable accept — the WAL fsync, or every sink's confirm under `wal.type: none`: `201 accepted` is the only committed response (there is no `200`). Every accepted POST is a new hook with a new `id`; ingest does no deduplication, so a provider retry after a lost ack is stored and delivered again. `201` accepted / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded or undeliverable. |
+| `GET` | `/health` | Liveness. Always `200` while the listener is up. |
 
 The operator API on its own port, `/metrics`, the dead-letter queue, replay,
 quarantine, is `admin.enabled: true`; see the admin API section in

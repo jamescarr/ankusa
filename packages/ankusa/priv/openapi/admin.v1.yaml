@@ -139,6 +139,27 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+  /v1/wal:
+    servers:
+      - url: http://localhost:4002
+        description: Operator API listener (default `admin.port`).
+    get:
+      operationId: getWal
+      tags: [operations]
+      summary: This node's WAL statistics
+      description: |
+        `Ankusa.WAL.stats/1` from this node's own log, `{}` when the log is
+        unreachable. Node-local, like the DLQ and the quarantine list: ask
+        every node. A node running `wal.type: none` has no log to report.
+      responses:
+        '200':
+          description: This node's WAL stats.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wal'
+        '409':
+          $ref: '#/components/responses/WalDisabled'
   /v1/dlq:
     get:
       operationId: listDeadLetters
@@ -637,6 +658,17 @@ components:
           items:
             type: string
             enum: [claim_check, dispatch, edge, storage]
+    Wal:
+      type: object
+      required: [instance, wal]
+      properties:
+        instance:
+          type: string
+        wal:
+          type: object
+          description: |
+            Adapter-defined WAL stats (`next_seq`, `min_seq`, `max_seq`,
+            `cursors` for the disk log), `{}` when the WAL is unreachable.
     DlqEntry:
       type: object
       description: A dead-lettered hook. The recorded reason is `inspect/1` of a term.
@@ -976,6 +1008,7 @@ components:
             - invalid_request
             - invalid_body
             - store_unavailable
+            - wal_disabled
         field:
           type: string
           description: |
@@ -1007,6 +1040,13 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    WalDisabled:
+      description: '`409`. `wal_disabled`: this node runs `wal.type: none` and has no log to report.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: wal_disabled}
     InvalidRoute:
       description: '`400`. `invalid_route`: a route definition that would not mean what it says — a path that is not rooted or has an illegal segment, a non-boolean `enabled`, a bad CIDR, unknown fields, or `path`/`id` in a `PATCH`. `field` names it and `message` says why. Also `invalid_body` when the body never parsed.'
       content:

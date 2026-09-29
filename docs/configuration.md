@@ -52,13 +52,13 @@ Every top-level section, with its keys and defaults:
 
 | Section | Keys (default) |
 | --- | --- |
-| `node` | `roles` (`[edge, dispatch, storage]`), `data_dir` (`/var/lib/ankusa`) |
+| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the WAL's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
 | `log` | `level` (`info`) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000) |
 | `dispatch` | `poll_ms` (200), `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
-| `wal` | `type` (`disk`) |
+| `wal` | `type` (`disk` \| `none`) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
@@ -126,7 +126,7 @@ URL), cannot be described by this engine. They need a bespoke
 | `type` | Keys |
 | --- | --- |
 | `log` | none |
-| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `ordered` (`false`; `true` serializes deliveries per `{tenant_id, source_id}`, in `seq` order). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
+| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `ordered` (`false`; `true` serializes deliveries per `{tenant_id, source_id}`, one at a time in the order dispatch read them). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536). |
 | `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
 | `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats--subject-delivery). |
@@ -237,12 +237,12 @@ config :ankusa,
 | --- | --- | --- |
 | `instance` | `:default` | Registry namespace. See [`architecture.md#instance-model`](architecture.md#instance-model). Two instances with different names run independently in one VM. |
 | `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{wal,segments,quarantine,dlq}`. |
-| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role. See [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. See [`deployment.md`](deployment.md). |
+| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role. See [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. With `wal: :none` the roles that only read the log (`:dispatch`, `:storage`) are dropped from this list rather than rejected, so an existing all-role deployment can flip `wal.type` with no other change; `GET /health` on the admin port reports the effective roles. See [`deployment.md`](deployment.md). |
 | `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in the default Ankusa.Application. |
 | `max_body_bytes` | `8_000_000` | Hard cap enforced while streaming the request body; over it is `413` without buffering the whole thing. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. |
-| `wal` | `{Ankusa.WAL.DiskLog, []}` | `{module, opts}` implementing `Ankusa.WAL`. See [`storage.md`](storage.md). |
+| `wal` | `{Ankusa.WAL.DiskLog, []}` | `{module, opts}` implementing `Ankusa.WAL`, or `:none`: no log, ack on the sink's confirm. Under `:none` the node runs only `:edge` and every statically configured source needs at least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`); boot refuses a config that cannot make that promise. See [`delivery.md`](delivery.md#direct-mode). |
 | `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The DiskLog GenServer serializes commits itself, so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
 | `batcher.max_delay_ms` | `0` | Commit immediately. The WAL append runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
@@ -279,10 +279,11 @@ config :ankusa,
 
 With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 (Prometheus text), `GET /v1/config` (the effective config, secrets redacted),
-`GET /v1/dlq` and `POST /v1/dlq/replay` (`:dispatch` role), and
-`GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the node's
-roles. It is **unauthenticated by design**: put it behind your own proxy, SSO,
-or network policy. The HTTP contract is
+`GET /v1/wal` (this node's WAL stats; `409 wal_disabled` under
+`wal.type: none`), `GET /v1/dlq` and `POST /v1/dlq/replay` (`:dispatch` role),
+and `GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the
+node's roles. It is **unauthenticated by design**: put it behind your own
+proxy, SSO, or network policy. The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
 
 #### Route management
@@ -441,7 +442,7 @@ the map.
 | Behaviour | Job | Default | Also shipped |
 | --- | --- | --- | --- |
 | `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
-| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | none |
+| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | none (`:none` drops the log entirely: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack) |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | none |
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package) |

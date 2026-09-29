@@ -76,6 +76,27 @@ defmodule Ankusa.Admin.RouterTest do
     assert vsn == to_string(Application.spec(:ankusa, :vsn))
   end
 
+  # ── WAL ────────────────────────────────────────────────────────────────────
+
+  test "GET /v1/wal reports this node's log, 409 when this node has none" do
+    config = test_config(roles: [:edge], admin: %{enabled: true})
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+
+    assert %{"instance" => inst_name, "wal" => wal} =
+             JSON.decode!(call(config.instance, :get, "/v1/wal").resp_body)
+
+    assert inst_name == to_string(config.instance)
+    assert %{"records" => _, "next_seq" => _, "cursors" => _} = wal
+
+    none = test_config(roles: [:edge], admin: %{enabled: true}, wal: :none)
+    put_config(none)
+
+    conn = call(none.instance, :get, "/v1/wal")
+    assert conn.status == 409
+    assert %{"error" => "wal_disabled"} = JSON.decode!(conn.resp_body)
+  end
+
   # ── role gating ────────────────────────────────────────────────────────────
 
   test "a route needing a role this node does not run is 409" do

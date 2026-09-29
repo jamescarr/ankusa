@@ -14,6 +14,13 @@ this project follows [Semantic Versioning](https://semver.org/).
   normalizes those away, so they used to address the collection endpoint and
   return the route list as if it were one route.
 
+### Removed
+
+- `HookHeaders.seq` and the `x-ankusa-seq` header. It was this node's WAL
+  position, not a per-source sequence: in a fleet every node's log starts at
+  1, so two nodes emit `1, 2, 3` for different hooks and any consumer ordering
+  or deduping on it was wrong. Dedupe on `x-ankusa-id`.
+
 ### Fixed
 
 - A `3xx` from the routes or admin listener is now

@@ -1,7 +1,7 @@
 # ankusa
 
 A loosely coupled, high-throughput webhook ingestion framework: durable WAL,
-pluggable verification/dedup/storage/delivery, multi-tenant catch-URL routing.
+pluggable verification/storage/delivery, multi-tenant catch-URL routing.
 
 ## Installation
 

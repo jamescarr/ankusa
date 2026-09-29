@@ -30,7 +30,9 @@ defmodule Ankusa.EdgeTest do
     conn = route(config, request("demo", ~s({"hello":"world"})))
 
     assert conn.status == 201
-    assert %{"status" => "accepted", "id" => id, "seq" => 1} = JSON.decode!(conn.resp_body)
+    assert %{"status" => "accepted", "id" => id} = JSON.decode!(conn.resp_body)
+    # Exactly these two keys: the ingest surface carries no node-local state.
+    assert Map.keys(JSON.decode!(conn.resp_body)) == ["id", "status"]
     # durably readable straight after the ack
     assert [env] = WAL.read(config.instance, -1, 10)
     assert env.id == id
@@ -53,9 +55,10 @@ defmodule Ankusa.EdgeTest do
 
     assert first.status == 201
     assert second.status == 201
-    assert %{"status" => "accepted", "id" => id1, "seq" => 1} = JSON.decode!(first.resp_body)
-    assert %{"status" => "accepted", "id" => id2, "seq" => 2} = JSON.decode!(second.resp_body)
+    assert %{"status" => "accepted", "id" => id1} = JSON.decode!(first.resp_body)
+    assert %{"status" => "accepted", "id" => id2} = JSON.decode!(second.resp_body)
     assert id1 != id2
+    assert WAL.read(config.instance, 0, 10) |> length() == 2
     assert WAL.stats(config.instance).records == 2
   end
 

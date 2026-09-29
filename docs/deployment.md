@@ -41,6 +41,14 @@ WAL to point them at, and a second OS process would never see writes it didn't
 make. The constraint does not apply to `:claim_check`, which never touches the
 WAL at all and can run on its own node.
 
+This whole paragraph is about `wal.type: disk`, the default. Under
+`wal.type: none` there is no log: the node runs only the `edge` role (the WAL's
+readers are dropped from `roles` automatically; `GET /health` on the admin port
+shows the effective list), needs no volume and no `StatefulSet`, and replicas
+are freely interchangeable. See
+[`architecture.md#4-stateless-ingest-fleet-wal-none`](architecture.md#4-stateless-ingest-fleet-wal-none)
+and [`delivery.md#direct-mode`](delivery.md#direct-mode).
+
 **`:dispatch` and `:storage` are singletons per node.** Within a node there is
 exactly one `Ankusa.Dispatch.Pipeline` and one `Ankusa.Storage.Compactor`
 reading that node's WAL, each with an unleased cursor. Two dispatch pipelines
@@ -62,7 +70,11 @@ Every surface is on its own port so it can be firewalled on its own.
 
 `/var/lib/ankusa` holds the WAL, the quarantine log, the dead-letter queue, and
 local segments. Losing it loses un-dispatched hooks, so give it a volume and back
-it, or move segments to S3/GCS, where they are not your problem anymore.
+it, or move segments to S3/GCS, where they are not your problem anymore. Under
+`wal.type: none` there is nothing there to lose: mount no volume, run the
+container as a plain `Deployment`, and let the broker hold the durable copy
+(the quarantine pen still creates its empty log at boot, and only a source that
+opts in ever appends to it).
 
 Config lives at `/etc/ankusa/ankusa.yml` (mount yours over it) or wherever
 `ANKUSA_CONFIG` points. Every key, plus the env overrides:
@@ -116,6 +128,12 @@ Two things to get right once you run more than one node:
   overwrite each other's segments. Give each node its own bucket (or its own
   LocalFS directory).
 
+If per-node state is what you want to get rid of, `wal.type: none` moves the
+durable copy to the broker: replicas then share nothing at all — no volume, no
+bucket, no DLQ — and you scale them like any stateless web app. The costs are
+in [`delivery.md#direct-mode`](delivery.md#direct-mode): no retry policy, no
+replay, and the provider must retry on `503`.
+
 You'd need a load balancer in front of the ingest port at that point; that's
 a deployment concern the framework doesn't solve for you (nothing in
 `ankusa`'s job description is "be a load balancer").
@@ -126,8 +144,9 @@ a deployment concern the framework doesn't solve for you (nothing in
 once (default 32), each in its own task, and moves its durable cursor as a
 **watermark**: it never advances past an envelope that isn't fully handled.
 Deliveries to the same sink with an equal `c:Ankusa.Sink.ordering_key/2` run one
-at a time, in `seq` order; different keys run concurrently, so one slow
-destination or one retrying envelope no longer stalls the whole instance.
+at a time, in the order dispatch read them; different keys run concurrently, so
+one slow destination or one retrying envelope no longer stalls the whole
+instance.
 
 Throughput is therefore bounded by `dispatch.concurrency`, not by sink
 latency, and `dispatch.max_inflight` / `dispatch.max_inflight_bytes` bound how

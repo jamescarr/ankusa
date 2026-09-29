@@ -56,6 +56,55 @@ defmodule Ankusa.WAL do
   @spec stats(atom()) :: map()
   def stats(instance), do: apply_mod(instance, :stats, [])
 
+  @doc """
+  The configured adapter's name, for boot banners and `check-config`: `"none"`
+  under `wal: :none`, otherwise the adapter module.
+  """
+  @spec label({module(), keyword()} | :none) :: String.t()
+  def label(:none), do: "none"
+  def label({mod, _opts}), do: inspect(mod)
+
+  # ── boot validation ─────────────────────────────────────────────────────
+
+  @doc """
+  Reject a configuration that would ack without durability.
+
+  Under `wal: :none` the provider's `2xx` means "a sink confirmed", so every
+  statically configured source must have at least one sink whose `:ok` means the
+  hook is durably accepted by something that outlives this node — see
+  `Ankusa.Sink.durable?/2`. Raises `ArgumentError` naming the first source that
+  cannot make that promise.
+
+  Only sources in `config.source_store` are checked. A source created at
+  runtime through the admin API is not: the store's decoder has no instance
+  config, so `Ankusa.SourceStore.put/5` is the place runtime enforcement would
+  have to live. Use `wal.type: disk` if sources are edited at runtime and a
+  log-only sink cannot be ruled out.
+  """
+  @spec validate_config!(Ankusa.Config.t()) :: :ok
+  def validate_config!(%Ankusa.Config{wal: :none} = config) do
+    Enum.each(static_sources(config), fn {id, %Ankusa.Source{sinks: sinks}} ->
+      unless Enum.any?(sinks, fn {mod, opts} -> Ankusa.Sink.durable?(mod, opts) end) do
+        raise ArgumentError,
+              "source #{inspect(id)}: wal: :none acks the provider on a sink's confirm, " <>
+                "but none of its sinks is durable. Configure a durable sink, or use wal.type: disk."
+      end
+    end)
+  end
+
+  def validate_config!(%Ankusa.Config{}), do: :ok
+
+  defp static_sources(config) do
+    {_mod, opts} = config.source_store
+
+    opts
+    |> Keyword.get(:sources, %{})
+    |> Enum.map(fn
+      {id, %Ankusa.Source{} = source} -> {id, source}
+      {id, source_opts} -> {id, Ankusa.Source.new(id, source_opts)}
+    end)
+  end
+
   defp apply_mod(instance, fun, args) do
     %Config{wal: {mod, _opts}} = Ankusa.config(instance)
     apply(mod, fun, [Ankusa.via(instance, :wal) | args])
