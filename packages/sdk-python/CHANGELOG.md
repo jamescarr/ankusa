@@ -6,6 +6,22 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+### Added
+
+- `admin.AdminClient`, a client for `Ankusa.Admin.Router` (port 4002): the
+  tenant-scoped source API's `server_version`, `list_sources`, `get_source`,
+  `create_source`, and `update_source`. Built on `httpx`, with an injectable
+  `transport` for tests.
+- `admin.SourceSpec` (the writable spec, `to_json()` omits unset fields) and
+  `admin.Source` (a stored, redacted source).
+- An `admin.AdminError` hierarchy (`SourceNotFoundError`,
+  `SourceConflictError`, `SourceStoreReadOnlyError`, `SourceInvalidError`,
+  `AdminUnavailableError`, `VersionMismatchError`), each carrying `.status`
+  and `.body`. `expected_version` makes the first API call verify
+  `GET /health ["version"]` once and cache it.
+
 ## [0.2.1] - 2026-09-28
 
 ### Changed
@@ -38,6 +54,7 @@ this project follows [Semantic Versioning](https://semver.org/).
   `content-type` into a `HookHeaders` dataclass, raising
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.1.0
