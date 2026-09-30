@@ -20,7 +20,7 @@ defmodule Ankusa.LossTest do
         batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
       )
 
-    pid = start_supervised!({Ankusa.Instance, config})
+    pid = start_supervised!({Ankusa.Instance, config}, restart: :temporary)
 
     # Concurrent ingest, exactly like the load generator: record every acked id.
     acked =
@@ -41,10 +41,25 @@ defmodule Ankusa.LossTest do
     assert MapSet.size(acked) == @count
 
     # Hard kill: no clean shutdown, no fd flush beyond what fsync already durably
-    # wrote. This is crash-after-commit.
-    ref = Process.monitor(pid)
+    # wrote. This is crash-after-commit. The instance is `:temporary` because
+    # ExUnit's test supervisor restarts a killed `:permanent` child, and the
+    # restarted instance opens the same log and takes the old WAL's registered
+    # name — exactly what the recovery WAL below collides with.
+    # A killed supervisor's children die after its own DOWN can arrive, and while
+    # the old WAL is still alive its registration fails the recovery `start_link`
+    # with `{:already_started, pid}` (and it still holds the log's fd). So wait
+    # for every process the instance registered, not just the supervisor.
+    assert is_pid(Ankusa.whereis(config.instance, :wal))
+
+    registered =
+      Registry.select(Ankusa.Registry, [{{{config.instance, :_}, :"$1", :_}, [], [:"$1"]}])
+
+    refs = Enum.map([pid | registered], &Process.monitor/1)
     Process.exit(pid, :kill)
-    assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
+
+    for ref <- refs do
+      assert_receive {:DOWN, ^ref, :process, _, _}, 5_000
+    end
 
     # Recover with a fresh WAL over the same data dir and replay.
     start_supervised!({Ankusa.WAL.DiskLog, instance: config.instance, config: config})
