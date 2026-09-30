@@ -187,8 +187,10 @@ defmodule Ankusa.Config do
   # `:dispatch` and `:storage` read the WAL and nothing else, so with no WAL
   # they have no work: they are dropped rather than rejected, which lets an
   # existing `roles: [:edge, :dispatch, :storage]` deployment flip
-  # `wal.type: none` with no other change. The effective roles are visible on
-  # the admin API's `GET /health`.
+  # `wal.type: none` with no other change. The check is "a role is left", not
+  # "`:edge` is left": a `:claim_check`-only node survives, which is a
+  # legitimate standalone deployment. The effective roles are visible on the
+  # admin API's `GET /health`.
   defp normalize_wal(%__MODULE__{wal: :none} = config) do
     case Enum.reject(config.roles, &(&1 in [:dispatch, :storage])) do
       [] -> raise ArgumentError, "wal: :none requires the :edge role"

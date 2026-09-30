@@ -1,9 +1,9 @@
 # Claim check
 
 Webhook bodies can be megabytes; queue messages shouldn't be. When a RabbitMQ,
-Kafka, or NATS sink gets a body larger than its `inline_max_bytes` (64 KiB by
-default), Ankusa writes the body to the object store and publishes a small
-**reference** in its place. Your worker turns the reference into an HTTP GET
+Kafka, NATS, or Redis sink gets a body larger than its `inline_max_bytes` (64
+KiB by default), Ankusa writes the body to the object store and publishes a
+small **reference** in its place. Your worker turns the reference into an HTTP GET
 and gets the exact bytes back, with an HTTP client and nothing else: no
 Elixir, no cloud SDK, no object-store credentials.
 

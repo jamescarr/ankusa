@@ -16,7 +16,7 @@ mise run check:package ankusa         # 389 tests, no external infra needed
 mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
-The 370 always-on tests cover:
+The 389 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
   truncation, that a restart after a full truncation does **not** reuse seqs,
@@ -44,7 +44,7 @@ The 370 always-on tests cover:
 - **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
   instead of killing the pipeline, and ordering: a blocked delivery holds the
   cursor while another ordering key proceeds, and same-key deliveries stay in
-  `seq` order.
+  the order dispatch read them from the log.
 - **Storage**: compaction round-trip, `roll_bytes` splitting a backlog into
   several segments in one tick, and the live index: a lookup after a
   later compaction sees every row, and one taken while the compactor is down
@@ -188,7 +188,7 @@ toolchain.
 Same pattern, against Redis on :6399:
 
 ```sh
-mise run check:package ankusa_redis      # 19 tests
+mise run check:package ankusa_redis      # 27 tests
 ```
 
 `REDIS_URL` (default `redis://localhost:6399`) points the suite at another
@@ -202,6 +202,19 @@ Redis that is not there (or against a corrupted definition) fails instead of
 starting a node that would deny everything. The suite deletes only the keys under
 its own namespace (`ankusa:routes:test`) between tests — never `FLUSHDB`, which
 would wipe a Redis you happen to share with it.
+
+`test/ankusa/sink/redis_test.exs` (7 tests) covers `Ankusa.Sink.Redis` against
+the same server, subscribing with `Redix.PubSub` in the test process: an inline
+message arriving on the channel with the `Ankusa.Sink.Message` body, a fat
+payload checked in through `ClaimCheck` and the message carrying a redeemable
+claim, `:channel` as a static string and as a 1-arity fun, a publish to a
+channel with no subscriber being `{:error, :no_subscribers}`, `ordering_key`
+and `durable?` pinned — including `Ankusa.WAL.validate_config!` refusing a
+`wal: none` source whose only sink is this one — and an unreachable server
+failing fast (`:econnrefused`, not a hang). Every publish in the suite goes to
+a per-test unique channel and instance, so tests never see each other's
+messages.
+
 ## SDK conformance: one harness across the SDKs
 
 `packages/sdk-python` and `packages/sdk-typescript` are the two client SDKs.
@@ -252,7 +265,7 @@ docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```
 
-Follow `ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats`: a
+Follow `ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats`/`ankusa_redis`: a
 `docker-compose.yml` for the real
 dependency, and tests that
 hit the real thing. A mock proves your code calls a mock correctly; it

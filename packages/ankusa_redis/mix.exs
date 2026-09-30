@@ -5,9 +5,11 @@ defmodule AnkusaRedis.MixProject do
   @source_url "https://github.com/jamescarr/ankusa"
 
   # Forced split: `ankusa` core stays free of `:redix`, and every deployment
-  # that does not share route definitions between nodes never compiles it. This
-  # package exists only for the multi-node route store — the decision cache is
-  # core's own (`nebulex_local`), because every deployment wants that.
+  # that needs neither the multi-node route store nor the pub/sub sink never
+  # compiles it. This package carries both `:redix` users — the route store
+  # and `Ankusa.Sink.Redis` — because they share the one dependency. (The
+  # decision cache is core's own `nebulex_local`, because every deployment
+  # wants that.)
   def project do
     [
       app: :ankusa_redis,
@@ -16,7 +18,7 @@ defmodule AnkusaRedis.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
-        "Ankusa route store adapter keeping definitions in Redis, shared across edge nodes.",
+        "Ankusa Redis adapters: a route store shared across edge nodes, and a pub/sub sink.",
       package: package(),
       source_url: @source_url,
       homepage_url: @source_url,
@@ -47,7 +49,7 @@ defmodule AnkusaRedis.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    [extra_applications: [:logger], mod: {Ankusa.Sink.Redis.Application, []}]
   end
 
   defp deps do

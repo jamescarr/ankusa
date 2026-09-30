@@ -20,6 +20,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml)
   is the runnable starting point.
 
+- `- {type: redis, ...}` sinks: each delivered hook is `PUBLISH`ed to a Redis
+  pub/sub channel as an `Ankusa.Sink.Message`, the same value the broker sinks
+  publish. Keys: `url` (credentials and db live in it), `channel` (a static
+  string), `inline_max_bytes`, `publish_timeout_ms`. Pub/sub keeps no copy, so
+  a publish with no live subscriber is an error — retried, then dead-lettered
+  for replay — and the sink never counts as durable when `wal: none` is
+  checked. `reference.yml` documents it. Comes from `ankusa_redis`, already in
+  the image for the Redis route store.
+
 ### Fixed
 
 - `routes.store` no longer silently ignores `url`, `namespace` and `tick_ms`

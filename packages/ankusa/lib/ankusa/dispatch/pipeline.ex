@@ -10,8 +10,8 @@ defmodule Ankusa.Dispatch.Pipeline do
   Deliveries run in `Task.Supervisor` tasks, up to `dispatch.concurrency` at a
   time, so a slow sink (or a retry backoff) holds up only what it must. What it
   must is decided by `c:Ankusa.Sink.ordering_key/2`: deliveries to the same sink
-  with an equal key run one at a time, in `seq` order, while different keys run
-  concurrently. `nil` means no constraint.
+  with an equal key run one at a time, in the order dispatch read them from the
+  log, while different keys run concurrently. `nil` means no constraint.
 
   The cursor is a **watermark**: `read_seq` when nothing is in flight, else one
   below the lowest admitted-but-unfinished seq. It never moves past an envelope

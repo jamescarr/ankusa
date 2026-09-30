@@ -39,10 +39,13 @@ dispatch pipeline, no DLQ. Ingest verifies, publishes to the source's sinks
 inside the request (`Ankusa.Edge.Publish`), and answers `201` only once every
 sink has confirmed. `Ankusa.Sink.durable?/2` is the promise that makes a
 sink's `:ok` mean "something that outlives this node accepted it" — true for
-every shipped sink except `Sink.Log`, and boot refuses a `wal: :none` config
-in which a static source has no durable sink. There is no log and no segment on
-this node, so there is nothing to compact: the two-tier story in this document
-does not apply. See [`delivery.md#direct-mode`](delivery.md#direct-mode) and
+every shipped sink except `Sink.Log` and `Sink.Redis` — and boot refuses a
+`wal: :none` config in which a static source has no durable sink. One durable
+sink is enough to pass that check, but *every* sink still has to confirm, so a
+non-durable sink that cannot (Redis with no subscriber) turns every ingest
+into a `503`. There is no log and no segment on this node, so there is nothing
+to compact: the two-tier story in this document does not apply. See
+[`delivery.md#direct-mode`](delivery.md#direct-mode) and
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 
 ### `WAL.DiskLog`: the default, single-node

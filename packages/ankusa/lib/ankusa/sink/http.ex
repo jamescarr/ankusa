@@ -10,9 +10,12 @@ defmodule Ankusa.Sink.Http do
     * `:headers`    — extra request headers as `[{key, value}]` strings
     * `:timeout_ms` — request/connect timeout (default `5000`)
     * `:ordered`    — when `true`, deliveries to this sink for the same
-                      `{tenant_id, source_id}` run one at a time in `seq` order
-                      (default `false`: deliveries have no ordering constraint
-                      and run concurrently)
+                      `{tenant_id, source_id}` run one at a time, in the order
+                      dispatch read them from the log (default `false`:
+                      deliveries have no ordering constraint and run
+                      concurrently). Not consulted under `wal.type: none`,
+                      where publishes happen inside the request and never
+                      overlap.
     * `:req_options` — transport options for the HTTP client (custom Finch pool,
                        proxy, or `plug:` for `Req.Test` in tests). See
                        `Ankusa.HttpClient` for the accepted keys

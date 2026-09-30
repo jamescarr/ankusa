@@ -257,6 +257,19 @@ sources:
         auth:
           username: "${NATS_USERNAME}"
           password: "${NATS_PASSWORD}"
+      - type: redis
+        # Password and database go in the URL: redis://:password@host:6379/0
+        # (or rediss:// for TLS).
+        url: "${REDIS_SINK_URL}"
+        # Pub/sub: PUBLISH fan-out to live subscribers. Redis keeps no copy, so
+        # a publish that reaches no subscriber is an error (retried, then
+        # dead-lettered), and this sink never counts as durable for
+        # wal.type: none.
+        # Static string only (a fun is an embedding API, not a config surface).
+        channel: "ankusa.stripe"
+        inline_max_bytes: 8192
+        # How long to wait for Redis to answer the PUBLISH.
+        publish_timeout_ms: 5000
 
   # A second source, showing the other verifier and the quarantine policy.
   standard:

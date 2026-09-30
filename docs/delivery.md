@@ -54,6 +54,7 @@ provides is a correctness bug, not a throughput knob:
 | `Sink.Kafka` | the record key (default `"#{tenant_id}/#{source_id}"`) | The key picks the partition, and a partition is Kafka's ordering scope. |
 | `Sink.RabbitMQ` | the routing key (default `"ankusa.#{source_id}"`) | RabbitMQ orders per queue, and the routing key decides the queue. |
 | `Sink.NATS` | the subject | Within a subject, the order is the order the stream received it. |
+| `Sink.Redis` | the channel | Redis delivers one connection's publishes to a channel in order. |
 | `Sink.Log` | `nil` | Interleaved log lines are fine. |
 | any sink that doesn't implement `ordering_key/2` | `{tenant_id, source_id}` | Conservative default: serialize per source rather than silently interleave. |
 
@@ -76,9 +77,20 @@ What still applies is the sink contract below, plus one optional callback:
 `c:Ankusa.Sink.durable?/1`. A sink's `:ok` must mean the hook is accepted by
 something that outlives this node, and boot refuses a `wal: :none` config in
 which no sink of a statically configured source can promise that
-(`Ankusa.WAL.validate_config!/1`). `Sink.Log` returns `false`; every other
-shipped sink confirms durably. A source created at runtime through the admin
-API is not checked, so keep the source store static when you can.
+(`Ankusa.WAL.validate_config!/1`). `Sink.Log` returns `false` — nothing durable
+happened — and so does `Sink.Redis`: pub/sub keeps no copy, so a subscriber
+that disconnects after the publish loses the message. Every other shipped sink
+confirms durably. A source created at runtime through the admin API is not
+checked, so keep the source store static when you can.
+
+The check is "at least one durable sink", not "every sink is durable": a
+non-durable sink is still a required confirmer. A source with `[Kafka, Redis]`
+boots, yet every request is a `503` while Redis has no subscribers — and
+because sinks run in declaration order, Kafka has already stored the hook each
+time, so every provider retry duplicates it there. Put a pub/sub sink in a
+`wal: none` source only where that is what you want (replayable hooks are
+better served by `wal.type: disk`, which keeps the non-durable sink's failures
+in the DLQ instead of in the provider's retry loop).
 
 The one piece of local state this mode has is the quarantine pen: the edge
 creates its log at boot (empty), and entries are appended only for a source
@@ -109,7 +121,7 @@ durably accepted (`wal.type: none` acks on that promise; default `true`):
 @optional_callbacks ordering_key: 2, inline_max_bytes: 1, durable?: 1
 ```
 
-A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`) returns its
+A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`) returns its
 `inline_max_bytes` (default 64 KiB). Dispatch checks a body in **once**, before
 any sink runs, when it is larger than at least one of its source's sinks'
 thresholds, and hands the resulting claim reference to every sink and every
@@ -123,6 +135,7 @@ See [`claim-check.md`](claim-check.md).
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
+| `Sink.Redis` | `:redix`, separate `ankusa_redis` package | Publishes to a Redis pub/sub channel (`PUBLISH`) and reports zero subscribers as an error. Detailed below. |
 
 ```elixir
 sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
@@ -323,6 +336,66 @@ retry policy. Server names are tried in the order given.
 have been stored, so consumers dedupe on `id`. JetStream's own
 `Nats-Msg-Id` duplicate window is the consumer's tool, deliberately not set
 here: a hook replayed from the DLQ is a *new*, intended publish.
+
+### `Sink.Redis`: pub/sub delivery
+
+The same `Ankusa.Sink.Message`, fanned out over Redis pub/sub: an ingest fleet
+`PUBLISH`es each delivered hook to a channel, and any number of live
+subscribers read it with the Redis client of their language. Good for
+in-process caches, dashboards, and internal fan-out to consumers that are
+allowed to miss messages.
+
+```elixir
+sinks: [
+  {Ankusa.Sink.Redis,
+   url: "redis://:password@localhost:6379/0",  # rediss:// for TLS
+   channel: "ankusa.events",                   # or a 1-arity fun: &"ankusa.#{&1.source_id}"
+   inline_max_bytes: 65_536,                   # above this the message carries a claim reference
+   publish_timeout_ms: 5_000}
+]
+```
+
+**Pub/sub keeps no copy, and that is the whole design constraint.** Redis
+stores nothing on a channel: a subscriber that is disconnected — or connects a
+moment later — never sees the message. Two consequences:
+
+- **Zero subscribers is an error.** `PUBLISH`'s reply is the number of
+  subscribers the message was handed to, and `deliver/3` returns
+  `{:error, :no_subscribers}` on `0`, so the hook runs into the retry policy,
+  ends in the DLQ, and can be replayed, rather than being recorded as
+  delivered when nobody heard it. A retry will succeed once a subscriber
+  connects.
+- **The sink is not durable.** `durable?/1` is `false` — see
+  [Direct mode](#direct-mode) — because a subscriber that disconnects after
+  the publish loses the message. Redis that *keeps* messages is a Redis
+  Stream (`XADD`), a different sink than this one. Under `wal: :none` that
+  makes this sink a required confirmer that can never satisfy the ack on its
+  own: boot only needs one durable sink per source, but `{:error,
+  :no_subscribers}` still turns every ingest into a `503`.
+
+**The channel is the address, the JSON is the metadata.** Pub/sub has no
+headers, so the five fields the Kafka and NATS sinks put in headers (`id`,
+`source_id`, `tenant_id`, message version, content type) travel only inside
+the `Ankusa.Sink.Message` body; a consumer decodes it and reads them there.
+The same applies to a claim ticket for a fat payload: redeem it with
+`Ankusa.ClaimCheck.redeem/3` or
+`GET /v1/claims/:tenant/:claim_id`. Nothing else enforces the claim check — a
+Redis consumer that can't reach the claim-check gateway should ask for a
+larger `inline_max_bytes` instead.
+
+**Delivery is at-least-once, as everywhere else**, and a retry or a DLQ replay
+republishes to every live subscriber, so consumers dedupe on `id`.
+
+**Connection lifecycle**: one Redix connection per `(instance, url)`, started
+on demand by the first `deliver/3` under `ankusa_redis`'s own
+`DynamicSupervisor` (`ankusa` core unchanged; the package's route store uses
+the same dependency). The start is synchronous, so a `deliver/3` either has a
+live connection or a concrete reason it doesn't (`{:connection, :econnrefused}`
+for a server that isn't there, `{:connection, :timeout}`, or
+`{:redis, "WRONGPASS ..."}` for a credential the server rejected). Once up,
+Redix reconnects on its own with backoff and a publish sent meanwhile is
+`{:error, {:connection, :closed}}`; the child is `:temporary`, so nothing
+crash-loops against a server that is gone.
 
 ## `Ankusa.RetryPolicy`
 
