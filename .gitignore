@@ -46,3 +46,7 @@ packages/sdk-python/dist/
 
 # Load-generator output from examples/oban-consumer/run.sh (CSVs + JSON reports).
 examples/oban-consumer/.e2e-out/
+
+# Expert (Elixir language server) workspace dirs: a log at the repo root, plus
+# build/index caches inside each Mix project it opens (see .omp/lsp.yaml).
+**/.expert/

@@ -1,0 +1,18 @@
+# omp LSP config (project-scoped; omp reads it when the session cwd is the repo
+# root).
+#
+# omp only starts a language server if the session cwd contains one of its
+# rootMarkers. The built-in expert entry keys on <cwd>/mix.exs, but this
+# monorepo has no root mix.exs (only packages/*/mix.exs), so no server would
+# start here. Expert finds the right Mix project per opened file on its own, so
+# all that is needed is a marker that exists at the repo root.
+#
+# Do NOT set MIX_EXS to pin a package: Expert applies it to every project it
+# opens and will build one package with another's mix.exs (rewriting its
+# mix.lock).
+servers:
+  expert:
+    rootMarkers:
+      - mix.exs
+      - mix.lock
+      - packages/ankusa/mix.exs
