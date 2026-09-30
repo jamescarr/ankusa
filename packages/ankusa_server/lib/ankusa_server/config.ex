@@ -90,6 +90,7 @@ defmodule AnkusaServer.Config do
   @sasl_keys ~w(mechanism username password)
   @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
+  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms)
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -99,7 +100,7 @@ defmodule AnkusaServer.Config do
   @scheme_hashes ~w(sha256 sha512 sha1)
   @scheme_encodings ~w(hex base64)
   @scheme_secret_decodes ~w(raw whsec_base64)
-  @sink_types ~w(log http rabbitmq kafka nats)
+  @sink_types ~w(log http rabbitmq kafka nats redis)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
@@ -880,6 +881,17 @@ defmodule AnkusaServer.Config do
           |> put_opt(:tls, bool_opt(sink, "tls", path))
 
         {Ankusa.Sink.NATS, connection ++ nats_auth(sink["auth"], path ++ ["auth"])}
+
+      "redis" ->
+        check_keys!(sink, @redis_sink_keys, path)
+
+        {Ankusa.Sink.Redis,
+         [
+           url: required_string!(sink, "url", path),
+           channel: required_string!(sink, "channel", path)
+         ]
+         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))}
     end
   end
 

@@ -1,8 +1,8 @@
 defmodule Ankusa.Sink.Message do
   @moduledoc """
   The wire format every queue-style sink publishes (`Sink.RabbitMQ`,
-  `Sink.Kafka`, `Sink.NATS`), so a consumer parses one format regardless of
-  transport.
+  `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`), so a consumer parses one format
+  regardless of transport.
 
   A body of at most `inline_max_bytes` (default 64 KiB) rides inline,
   base64-encoded. Anything larger lives in the claim check and the message

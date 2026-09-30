@@ -225,8 +225,9 @@ is no log, only `:edge` runs, and every replica is independent (topology 4).
 
 An ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
 `ankusa_rabbitmq` package), a Kafka topic (`Sink.Kafka`, separate
-`ankusa_kafka` package), or a NATS JetStream subject (`Sink.NATS`, separate
-`ankusa_nats` package); either way fat payloads are checked in through
+`ankusa_kafka` package), a NATS JetStream subject (`Sink.NATS`, separate
+`ankusa_nats` package), or a Redis pub/sub channel (`Sink.Redis`, separate
+`ankusa_redis` package); either way fat payloads are checked in through
 `Ankusa.ClaimCheck` with only a claim reference on the queue, and the message
 itself is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its
 **own** queue and binding. The framework never declares one, so adding a
@@ -295,8 +296,11 @@ so the provider must retry and consumers must dedupe on the provider's own
 event id, as they always have. Every statically configured source needs at
 least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`); boot
 refuses the config otherwise, and a source created at runtime through the admin
-API is not checked. The quarantine pen is the only local state this topology
-has: an empty log at boot, entries only for a source that asks for it. See
+API is not checked. Every sink in the list still has to confirm, so a
+non-durable one that cannot — Redis pub/sub with no subscriber — is a `503`
+for every request, not a silently skipped hop. The quarantine pen is the only
+local state this topology has: an empty log at boot, entries only for a source
+that asks for it. See
 [`delivery.md#direct-mode`](delivery.md#direct-mode) and
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 

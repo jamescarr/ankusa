@@ -14,9 +14,9 @@ _**Don't fight the traffic. Steer it.**_
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
 at it: every hook is written to a durable log before Ankusa answers `2xx`, every
 accepted POST is stored under a fresh `id`, and each hook is delivered to your
-own worker over HTTP, RabbitMQ, Kafka, or NATS JetStream, with retries, a
-dead-letter queue, and replay. Start with one container. Grow into a fleet by
-changing config, not code.
+own worker over HTTP, RabbitMQ, Kafka, NATS JetStream, or Redis pub/sub, with
+retries, a dead-letter queue, and replay. Start with one container. Grow into a
+fleet by changing config, not code.
 
 ## Quickstart
 
@@ -110,8 +110,8 @@ flowchart LR
 
 - Signature verification via a configurable HMAC engine, with named schemes for Stripe, GitHub, Standard Webhooks, Shopify, and Slack, plus any body-HMAC scheme you describe in config
 - Multi-tenant catch URLs, with a pluggable resolver for custom schemes
-- Delivery over HTTP, RabbitMQ, Kafka, and NATS JetStream, with retries,
-  backoff, a dead letter queue, and replay
+- Delivery over HTTP, RabbitMQ, Kafka, NATS JetStream, and Redis pub/sub, with
+  retries, backoff, a dead letter queue, and replay
 - Quarantine for hooks that fail verification, so nothing is silently dropped
 - Archiving to S3, GCS, Azure Blob Storage, OCI Object Storage, Cloudflare R2, or MinIO
 - Telemetry on every stage of the pipeline
@@ -124,7 +124,8 @@ replace that piece and keep the rest.
 
 When one box is not enough, run N independent all-role nodes behind a load
 balancer. Each node has its own data volume, its own WAL, and its own DLQ/admin
-API. Archive to S3 or GCS, and fan out to Kafka, NATS, or RabbitMQ.
+API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ, or Redis
+pub/sub.
 `WAL.DiskLog` keeps `edge`, `dispatch`, and `storage` in one BEAM node, so a node
 is the unit of scale: add nodes, not roles. Give each node **its own bucket**
 (or LocalFS) for segments. Segment keys are `seg/<first_seq>-<last_seq>.seg`,

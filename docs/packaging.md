@@ -49,7 +49,9 @@ packages/
   ankusa_nats                 path-dep on ankusa + gnat. Ankusa.Sink.NATS.
   ankusa_redis                path-dep on ankusa + redix.
                               Ankusa.Routes.Store.Redis (route definitions in
-                              Redis, shared across edge nodes).
+                              Redis, shared across edge nodes) and
+                              Ankusa.Sink.Redis (delivered hooks published to
+                              a pub/sub channel).
   ankusa_server               the jamescarr/ankusa Docker image: core + every
                               adapter, configured by YAML. Not on Hex.
   sdk-typescript              the `ankusa` npm client SDK.
@@ -130,9 +132,11 @@ build-toolchain requirement (CMake ≥ 3.16 plus a C++ compiler) that no
 `gnat`, which pulls `jason`, `nkeys` (+ `ed25519`/`kcl`), `nimble_parsec`, and
 `connection`, pure Elixir, but four libraries nobody running an HTTP-,
 Kafka-, or RabbitMQ-only deployment has any use for, which is the same test
-with a lighter dependency. Those are
-genuine external dependencies the laptop/standalone user shouldn't pay to
-compile, so each got its own package the moment it was built, not before.
+with a lighter dependency. `ankusa_redis` carries `redix` for its two
+adapters — the shared route store and `Ankusa.Sink.Redis` — so only a
+deployment that configures one of them compiles it. Those are genuine
+external dependencies the laptop/standalone user shouldn't pay to compile,
+so each got its own package the moment it was built, not before.
 
 ## What deliberately did *not* get split
 
@@ -168,8 +172,8 @@ release, many roles, config decides what boots. See
    (`Ankusa.WAL.append/2`, `Ankusa.Sink`'s `deliver/3` call sites) dispatch to
    your adapter without `ankusa` core knowing your package exists.
 4. **Verify against real infrastructure, not mocks.** `ankusa_rabbitmq`,
-   `ankusa_kafka`, and `ankusa_nats` are tested against real
-   RabbitMQ/Redpanda/NATS containers: a protocol implementation (AMQP
+   `ankusa_kafka`, `ankusa_nats`, and `ankusa_redis` are tested against real
+   RabbitMQ/Redpanda/NATS/Redis containers: a protocol implementation (AMQP
    publisher confirms, a Kafka produce path) that "looks right" is exactly
    the kind of thing that's subtly wrong until proven against the real thing.
 5. Document it: a row in the behaviour table in

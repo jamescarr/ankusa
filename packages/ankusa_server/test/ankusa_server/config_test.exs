@@ -32,6 +32,8 @@ defmodule AnkusaServer.ConfigTest do
     "NATS_SUBJECT" => "ankusa.hooks",
     "NATS_USERNAME" => "ankusa",
     "NATS_PASSWORD" => "fixture-nats-password",
+    # A password in the URL userinfo: the printed config must redact it.
+    "REDIS_SINK_URL" => "redis://:fixture-redis-password@redis:6379",
     "STANDARD_WEBHOOKS_SECRET" => "whsec_Zml4dHVyZQ==",
     "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret"
   }
@@ -39,6 +41,7 @@ defmodule AnkusaServer.ConfigTest do
   @fixture_secrets ~w(fixture-s3-secret
                       whsec_fixture-stripe-secret fixture-rabbit-password
                       fixture-kafka-password fixture-nats-password fixture-github-secret
+                      fixture-redis-password
                       whsec_Zml4dHVyZQ==)
 
   # ── the shipped configs ─────────────────────────────────────────────────────
@@ -70,7 +73,8 @@ defmodule AnkusaServer.ConfigTest do
              Ankusa.Sink.Http,
              Ankusa.Sink.RabbitMQ,
              Ankusa.Sink.Kafka,
-             Ankusa.Sink.NATS
+             Ankusa.Sink.NATS,
+             Ankusa.Sink.Redis
            ]
   end
 
@@ -214,6 +218,39 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ ~s(source "demo")
     assert error.message =~ "wal.type: disk"
+  end
+
+  test "wal: {type: none} rejects a source whose only sink is Redis pub/sub" do
+    path =
+      tmp_config("""
+      wal: {type: none}
+      sources:
+        demo:
+          verify: {type: none}
+          sinks: [{type: redis, url: "redis://redis:6379", channel: "ankusa.hooks"}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(source "demo")
+    assert error.message =~ "wal.type: disk"
+  end
+
+  # The check is "at least one durable sink", not "all of them" — but every sink
+  # still has to confirm for a request to be acked. See delivery.md#direct-mode.
+  test "wal: {type: none} accepts a Redis sink next to a durable one" do
+    path =
+      tmp_config("""
+      wal: {type: none}
+      sources:
+        demo:
+          verify: {type: none}
+          sinks:
+            - {type: rabbitmq, url: "amqp://guest:guest@rabbitmq:5672", exchange: ankusa.hooks}
+            - {type: redis, url: "redis://redis:6379", channel: "ankusa.hooks"}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+    assert config.wal == :none
   end
 
   test "an unknown wal.type lists disk and none" do
@@ -640,6 +677,8 @@ defmodule AnkusaServer.ConfigTest do
             - {type: nats, servers: "${NATS_SERVERS}", subject: "ankusa.full",
                inline_max_bytes: 4096, publish_timeout_ms: 250,
                auth: {username: nu, password: np}}
+            - {type: redis, url: "redis://redis:6379", channel: ankusa.full,
+               inline_max_bytes: 2048, publish_timeout_ms: 300}
       """)
 
     env = %{"NATS_SERVERS" => "n1:4222,n2:4222"}
@@ -664,7 +703,8 @@ defmodule AnkusaServer.ConfigTest do
                 timeout_ms: 250
               ]},
              {Ankusa.Sink.Kafka, kafka},
-             {Ankusa.Sink.NATS, nats}
+             {Ankusa.Sink.NATS, nats},
+             {Ankusa.Sink.Redis, redis}
            ] = source.sinks
 
     assert kafka[:brokers] == ["b:9092"]
@@ -678,6 +718,11 @@ defmodule AnkusaServer.ConfigTest do
     assert nats[:publish_timeout_ms] == 250
     assert nats[:username] == "nu"
     assert nats[:password] == "np"
+
+    assert redis[:url] == "redis://redis:6379"
+    assert redis[:channel] == "ankusa.full"
+    assert redis[:inline_max_bytes] == 2048
+    assert redis[:publish_timeout_ms] == 300
   end
 
   test "a NATS auth block takes exactly one scheme, and only whole ones" do

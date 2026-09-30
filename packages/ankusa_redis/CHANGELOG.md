@@ -6,6 +6,17 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.Sink.Redis`: publishes each delivered hook to a Redis pub/sub channel
+  (`PUBLISH`) as the same `Ankusa.Sink.Message` the broker sinks publish, with
+  the claim check above `inline_max_bytes`. Pub/sub keeps no copy, so a publish
+  that reaches zero subscribers is `{:error, :no_subscribers}` — retried, then
+  dead-lettered — and `durable?/1` is `false`, which makes `wal.type: none`
+  refuse a source whose only sink is this one. The package gains its own
+  `Application` to supervise one Redix connection per `{instance, url}`,
+  started on demand.
+
 ### Changed
 
 - **Needs the `ankusa` release that carries the version-checked
