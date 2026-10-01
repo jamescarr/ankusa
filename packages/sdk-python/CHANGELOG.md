@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `routes.InvalidRouteIdError` (a `RoutesError`): a route id that isn't a
@@ -14,24 +16,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   id or `.` becomes the collection endpoint — so `get_route("..")` used to hand
   back the list page as if it were a route. Exported from `ankusa.routes` and
   from the package root.
-
-### Removed
-
-- `HookHeaders.seq` and the `x-ankusa-seq` header. It was this node's WAL
-  position, not a per-source sequence: in a fleet every node's log starts at
-  1, so two nodes emit `1, 2, 3` for different hooks and any consumer ordering
-  or deduping on it was wrong. Dedupe on `x-ankusa-id`.
-
-### Fixed
-
-- Route ids are percent-encoded as a single path segment, so `/`, `?`, `#`, `%`
-  and space in an id travel as `%2F %3F %23 %25 %20` instead of reshaping the
-  request URL.
-
-## [0.3.0] - 2026-09-28
-
-### Added
-
 - `sources.SourcesClient`, a client for `Ankusa.Admin.Router` (port 4002): the
   tenant-scoped source API's `server_version`, `list_sources`, `get_source`,
   `create_source`, `update_source`, and `delete_source`. Built on `httpx`, with
@@ -46,6 +30,19 @@ this project follows [Semantic Versioning](https://semver.org/).
 - Tenants and source names are checked against `^[A-Za-z0-9_-]{1,64}$` before
   any path is built, so a caller-supplied name cannot escape its tenant through
   URL normalization.
+
+### Removed
+
+- `HookHeaders.seq` and the `x-ankusa-seq` header. It was this node's WAL
+  position, not a per-source sequence: in a fleet every node's log starts at
+  1, so two nodes emit `1, 2, 3` for different hooks and any consumer ordering
+  or deduping on it was wrong. Dedupe on `x-ankusa-id`.
+
+### Fixed
+
+- Route ids are percent-encoded as a single path segment, so `/`, `?`, `#`, `%`
+  and space in an id travel as `%2F %3F %23 %25 %20` instead of reshaping the
+  request URL.
 
 ## [0.2.4] - 2026-09-28
 

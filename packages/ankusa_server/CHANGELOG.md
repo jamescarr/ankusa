@@ -6,6 +6,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `wal: {type: none}` (or `ANKUSA_WAL_TYPE=none`): a stateless edge node. Ingest
@@ -41,6 +43,10 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   checked. `reference.yml` documents it. Comes from `ankusa_redis`, already in
   the image for the Redis route store.
 
+- `source_store: {type: persistent}` in the config file: the server keeps
+  sources in a writable store and persists the ones created or updated through
+  the admin API to `sources.json` on the data volume, so they survive a restart.
+
 ### Fixed
 
 - `routes.store` no longer silently ignores `url`, `namespace` and `tick_ms`
@@ -57,14 +63,6 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   documents that port (it listens only when `routes.enabled` is set on an
   `edge` node), the two `ANKUSA_ROUTES_*` env overrides, and the store
   type/url rule.
-
-## [0.3.0] - 2026-09-28
-
-### Added
-
-- `source_store: {type: persistent}` in the config file: the server keeps
-  sources in a writable store and persists the ones created or updated through
-  the admin API to `sources.json` on the data volume, so they survive a restart.
 
 ## [0.2.4] - 2026-09-28
 
@@ -131,6 +129,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...ankusa_server-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_server-v0.2.1

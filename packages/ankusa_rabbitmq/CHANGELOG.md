@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other packages in this release.
+
 ## [0.2.1] - 2026-09-28
 
 ### Added

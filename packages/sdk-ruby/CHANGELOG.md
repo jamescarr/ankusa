@@ -6,7 +6,7 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-01
+## [0.3.0] - 2026-10-01
 
 ### Added
 
@@ -37,5 +37,5 @@ this project follows [Semantic Versioning](https://semver.org/).
   family, which carries `.status` and `.body` instead), so a consumer needs
   exactly one bit to route a failure to dead-letter or retry.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.1.0...HEAD
-[0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-ruby-v0.1.0
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-ruby-v0.3.0

@@ -3,7 +3,6 @@ name = "ankusa"
 # Release tooling reads this line with line regexes (`.mise/lib/pkg.sh`
 # `pkg_version` and `release.exs` `toml_version!`), so keep it the only
 # column-0 `version = "..."` line, with nothing after the closing quote.
-# First release: `mise run release:prepare minor sdk-rust` sets 0.1.0.
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.85"
