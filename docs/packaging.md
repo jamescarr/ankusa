@@ -56,6 +56,7 @@ packages/
                               adapter, configured by YAML. Not on Hex.
   sdk-typescript              the `ankusa` npm client SDK.
   sdk-python                  the `ankusa` PyPI client SDK.
+  sdk-rust                    the `ankusa` crates.io client SDK.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker

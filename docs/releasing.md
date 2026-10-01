@@ -10,10 +10,11 @@ the files in it decide where it publishes:
 | `ankusa_server` | Docker image `jamescarr/ankusa` (`Dockerfile`) | `ankusa_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
 | `sdk-typescript` | npm package `ankusa` (`package.json`) | `sdk-typescript-vX.Y.Z` | [`release-npm.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-npm.yml) |
 | `sdk-python` | PyPI package `ankusa` (`pyproject.toml`) | `sdk-python-vX.Y.Z` | [`release-python.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-python.yml) |
+| `sdk-rust` | crates.io crate `ankusa` (`Cargo.toml`) | `sdk-rust-vX.Y.Z` | [`release-crates.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-crates.yml) |
 
-The npm and PyPI packages are also both named `ankusa`; each one's tag
-prefix is its directory name, not the package name, so neither can be
-confused with the Hex core's `ankusa-vX.Y.Z` or with each other.
+The npm, PyPI, and crates.io packages are all named `ankusa`; each one's tag
+prefix is its directory name, not the package name, so none can be confused
+with the Hex core's `ankusa-vX.Y.Z` or with each other.
 
 ## The flow
 
@@ -64,9 +65,9 @@ fails at `MIX_ENV=prod mix deps.get`. `release:preflight` enforces this: an
 adapter's preflight fails until the core version in the tree is on Hex.
 `release:prepare` can still bump core and adapters together in one PR.
 
-The server image and the npm and Python SDKs have no ordering constraint:
-the image builds from this checkout, and neither SDK depends on anything
-here.
+The server image and the npm, Python, and Rust SDKs have no ordering
+constraint: the image builds from this checkout, and none of the SDKs depends
+on anything here.
 
 ## The server image
 
@@ -101,6 +102,11 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC). The
   one-time setup lives on PyPI, not here: see
   [Python SDK (PyPI)](#python-sdk-pypi) below.
+- **crates.io:** `CARGO_REGISTRY_TOKEN`, a crates.io API token carrying the
+  `publish-new` and `publish-update` scopes, generated at
+  <https://crates.io/settings/tokens> (Account Settings → API Tokens). See
+  [Rust SDK (crates.io)](#rust-sdk-cratesio) below for why it is a token
+  rather than OIDC.
 
 ## Python SDK (PyPI)
 
@@ -170,4 +176,77 @@ mise run release:verify sdk-python         # HTTP 200 for the version on PyPI
 `release:tag`'s preflight confirms the version is still unpublished on PyPI
 and the tag is free; the tag run builds the sdist and wheel with `uv build`,
 publishes through the pending publisher, and cuts the GitHub release from the
+CHANGELOG section.
+
+## Rust SDK (crates.io)
+
+`sdk-rust` publishes as the `ankusa` crate on crates.io, from
+[`release-crates.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-crates.yml),
+authenticated with the `CARGO_REGISTRY_TOKEN` repository secret.
+
+### One-time crates.io setup
+
+The crate name has to be free, and crates.io names are first-come. Check
+before the first tag:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -A 'ankusa-release (https://github.com/jamescarr/ankusa)' \
+  https://crates.io/api/v1/crates/ankusa/0.1.0   # 404 = available
+```
+
+The `-A` is not optional: crates.io answers `403` to curl's own user agent.
+`pkg_registry_code` in `.mise/lib/pkg.sh` (so `mise run status`,
+`release:preflight`, and `release:verify`) sends the same one.
+
+Then create the token at <https://crates.io/settings/tokens> (Account Settings
+→ API Tokens) with two scopes. `publish-new` allows publishing a crate name
+that does not exist yet, so it is needed for the first release only;
+`publish-update` allows a new version of a crate you already own, so it covers
+every release after that. Store it as the `CARGO_REGISTRY_TOKEN` secret.
+
+This is a token rather than crates.io
+[Trusted Publishing](https://crates.io/docs/trusted-publishing) because a
+trusted publisher is configured on the crate's own settings page, so the crate
+has to exist before the OIDC flow can be used — which is what the first
+token-driven release creates. Switching to it afterwards is three changes, not
+one:
+
+1. Register the publisher, on the crate's settings page, for workflow
+   `release-crates.yml`.
+2. Give the `publish` job `id-token: write`, and add a step that fetches the
+   short-lived token —
+   [`rust-lang/crates-io-auth-action@v1`](https://github.com/rust-lang/crates-io-auth-action),
+   whose `token` output becomes `CARGO_REGISTRY_TOKEN` for the `cargo publish`
+   step.
+3. Drop `cargo` from `pkg_secrets` in `.mise/lib/pkg.sh`, or
+   `release:preflight` fails with "repo secret CARGO_REGISTRY_TOKEN is not
+   set".
+
+If the name is taken before the first release, change `[package] name` in
+[`packages/sdk-rust/Cargo.toml`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-rust/Cargo.toml)
+(and this document) before tagging; the directory and the tag prefix stay
+`sdk-rust`.
+
+### Release commands
+
+Same flow as every other package ([above](#the-flow)); only the package name
+differs. With no ordering constraint against the Hex packages:
+
+```sh
+mise run status                            # version, last tag, published?, commits since
+mise run release:prepare minor sdk-rust    # or patch | major | 0.1.0
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-rust
+mise run release:watch sdk-rust            # the tag run builds and publishes
+mise run release:verify sdk-rust           # HTTP 200 for the version on crates.io
+```
+
+`release:prepare` sets `[package] version` in `Cargo.toml` and refreshes
+`Cargo.lock` with `cargo update --workspace` (the lock records the crate's own
+version, so `--locked` fails without it); `release:tag`'s preflight confirms
+the version is still unpublished on crates.io and the tag is free; the tag run
+publishes with `cargo publish --locked` on the same Rust toolchain `.mise.toml`
+pins for `check:package sdk-rust`, and cuts the GitHub release from the
 CHANGELOG section.

@@ -207,6 +207,34 @@ Every failure is a `ClaimCheckError` subclass with a `retryable` attribute:
 `True` for `5xx`/`503` or an unreachable gateway, the same dead-letter vs.
 retry split as the TypeScript client.
 
+### From Rust, with the crate
+
+[`packages/sdk-rust`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-rust)
+(crates.io crate `ankusa`) ships the same client as an async crate on
+[`reqwest`](https://docs.rs/reqwest) and Tokio (every request is bounded by
+`tokio::time::timeout`): it parses a
+ref, redeems it, and verifies the bytes against the message's sha256 before
+returning them. It's the umbrella client crate for Rust consumers, alongside
+the webhook header helper and the route-management and operator clients.
+
+```sh
+cargo add ankusa
+```
+
+```rust
+use ankusa::ClaimCheckClient;
+
+let claim_check = ClaimCheckClient::new("http://localhost:4001")?;
+
+// `claim` and `sha256` are the queue message's fields.
+let bytes = claim_check.redeem(claim, sha256).await?;
+```
+
+Every failure is a `ClaimCheckError`, and `is_retryable()` splits it the same
+way: `false` for a malformed ref, `404`, other `4xx`, or an integrity
+mismatch; `true` for `5xx`/`503`, an unfollowed redirect, or an unreachable
+gateway.
+
 ### Any other language
 
 Any OpenAPI generator, `openapi-generator`, `openapi-python-client`, works

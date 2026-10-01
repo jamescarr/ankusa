@@ -16,3 +16,4 @@ erl_crash.dump
 **/.pytest_cache
 **/.mypy_cache
 packages/sdk-typescript
+packages/sdk-rust

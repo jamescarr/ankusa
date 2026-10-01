@@ -4,7 +4,7 @@
 # directory under packages/; its name is the git tag prefix (`<name>-vX.Y.Z`)
 # and its kind comes from the files in it:
 #   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex,
-#   else pyproject.toml -> python.
+#   else pyproject.toml -> python, else Cargo.toml -> cargo.
 #
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
@@ -53,18 +53,21 @@ pkg_kind() {
     echo hex
   elif [ -f "$ROOT/$dir/pyproject.toml" ]; then
     echo python
+  elif [ -f "$ROOT/$dir/Cargo.toml" ]; then
+    echo cargo
   else
-    fail "$dir has no package.json, Dockerfile, mix.exs, or pyproject.toml"
+    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, or Cargo.toml"
   fi
 }
 
 # `ankusa` first (everything else depends on it), then the other Hex packages,
-# then Docker images, then npm packages; byte order within each group.
+# then Docker images, then npm packages, then Python ones, then Cargo ones;
+# byte order within each group.
 pkg_names() {
   local kind name all
   all=$(_pkg_all)
   if [ -d "$ROOT/packages/ankusa" ]; then echo ankusa; fi
-  for kind in hex docker npm python; do
+  for kind in hex docker npm python cargo; do
     for name in $all; do
       if [ "$name" != ankusa ] && [ "$(pkg_kind "$name")" = "$kind" ]; then
         printf '%s\n' "$name"
@@ -92,6 +95,8 @@ pkg_version() {
     hex | docker) v=$(sed -n 's/^  @version "\(.*\)"$/\1/p' "$ROOT/$dir/mix.exs") ;;
     npm) v=$(node -p "require('$ROOT/$dir/package.json').version") ;;
     python) v=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/$dir/pyproject.toml") ;;
+    # The range matters: `[[test]] name = …` is also a column-0 `name =`.
+    cargo) v=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' "$ROOT/$dir/Cargo.toml") ;;
   esac
   [ -n "$v" ] || fail "could not read the version of $1 from $dir"
   printf '%s\n' "$v"
@@ -128,7 +133,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name
+  local dir kind url npm_name pypi_name crate_name
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -142,10 +147,16 @@ pkg_registry_code() {
       pypi_name=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$ROOT/$dir/pyproject.toml")
       url="https://pypi.org/pypi/$pypi_name/$2/json"
       ;;
+    cargo)
+      # The range matters: the `[[test]]` table's `name` is column-0 too.
+      crate_name=$(sed -n '/^\[package\]/,/^\[/ s/^name = "\(.*\)"$/\1/p' "$ROOT/$dir/Cargo.toml")
+      url="https://crates.io/api/v1/crates/$crate_name/$2"
+      ;;
   esac
   # curl prints 000 and exits non-zero when the registry is unreachable; the
-  # 000 is the useful part.
-  curl -s -o /dev/null -w '%{http_code}' "$url" || true
+  # 000 is the useful part. crates.io answers 403 to curl's own user agent, so
+  # every lookup carries one that names this repo.
+  curl -s -A "ankusa-release (https://github.com/$GITHUB_REPO)" -o /dev/null -w '%{http_code}' "$url" || true
 }
 
 pkg_workflow() {
@@ -154,6 +165,7 @@ pkg_workflow() {
     docker) echo docker.yml ;;
     npm) echo release-npm.yml ;;
     python) echo release-python.yml ;;
+    cargo) echo release-crates.yml ;;
   esac
 }
 
@@ -164,6 +176,10 @@ pkg_secrets() {
     npm) echo NPM_TOKEN ;;
     # PyPI publishes via Trusted Publishing (OIDC): no repo secret needed.
     python) : ;;
+    # crates.io Trusted Publishing needs the crate to exist before a publisher
+    # can be registered for it, so the first publish is token-driven; the
+    # switch afterwards is in docs/releasing.md.
+    cargo) echo CARGO_REGISTRY_TOKEN ;;
   esac
 }
 

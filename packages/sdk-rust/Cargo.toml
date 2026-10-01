@@ -1,0 +1,58 @@
+[package]
+name = "ankusa"
+# Release tooling reads this line with line regexes (`.mise/lib/pkg.sh`
+# `pkg_version` and `release.exs` `toml_version!`), so keep it the only
+# column-0 `version = "..."` line, with nothing after the closing quote.
+# First release: `mise run release:prepare minor sdk-rust` sets 0.1.0.
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Client SDK for Ankusa, the self-hosted webhook receiver: claim-check redemption, webhook header parsing, and the route-management and operator APIs."
+license = "Apache-2.0"
+repository = "https://github.com/jamescarr/ankusa"
+homepage = "https://github.com/jamescarr/ankusa"
+documentation = "https://docs.rs/ankusa"
+readme = "README.md"
+keywords = ["ankusa", "webhook", "claim-check", "sdk", "client"]
+categories = ["api-bindings", "web-programming::http-client"]
+include = ["src/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[features]
+default = ["rustls"]
+rustls = ["reqwest/rustls"]
+
+[dependencies]
+bytes = "1.12.1"
+hex = "0.4.3"
+http = "1.5.0"
+percent-encoding = "2.3.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["http2", "system-proxy"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["time"] }
+
+[dev-dependencies]
+base64 = "0.23.1"
+libtest-mimic = "0.8.2"
+tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+wiremock = "0.6.5"
+
+[[test]]
+name = "conformance"
+harness = false
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
