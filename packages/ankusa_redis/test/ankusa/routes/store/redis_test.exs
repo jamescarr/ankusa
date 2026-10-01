@@ -337,7 +337,10 @@ defmodule Ankusa.Routes.Store.RedisTest do
         Routes.create(node_a.instance, %{"id" => "from-a", "path" => "/hooks/a"})
       end)
 
-    eventually(fn -> Process.info(pid_a, :message_queue_len) >= {:message_queue_len, 1} end)
+    # The writer's call, specifically: this process also receives pub/sub messages
+    # and ticks, and a stray one must not release the wait before A's write is
+    # queued (`queued_calls/1` counts only `GenServer.call`s).
+    eventually(fn -> queued_calls(pid_a) >= 1 end)
 
     assert {:ok, _} = Routes.create(node_b.instance, %{"id" => "from-b", "path" => "/hooks/b"})
     :sys.resume(pid_a)
