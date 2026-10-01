@@ -47,13 +47,13 @@ the spec is the source of truth, this package conforms to it, not the reverse.
 ```ruby
 require "ankusa/sdk"
 
-claim_check = Ankusa::ClaimCheckClient.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
+CLAIM_CHECK = Ankusa::ClaimCheckClient.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
 
 # A queue message that carries a claim also carries its sha256:
 #   "claim":  "urn:ankusa:claim:v1:<tenant>:<claim_id>"  (claim_id: uppercase ULID)
 #   "sha256": 64-char lowercase hex of the claim's bytes
 def resolve_body(message)
-  claim_check.redeem(message["claim"], message["sha256"])
+  CLAIM_CHECK.redeem(message["claim"], message["sha256"])
 rescue Ankusa::ClaimCheckError => e
   # bad ref/sha256, 404, or an integrity mismatch: dead-letter, don't requeue
   raise unless e.retryable?
@@ -91,16 +91,29 @@ default transport opens one connection per request.
 ## Webhook receiver helper
 
 Every receiver of Ankusa's HTTP sink needs the same handful of headers off each
-request; `Ankusa.parse_headers` replaces the hand-rolled `env["HTTP_..."].first`
-lookups with one call and a typed result:
+request; `Ankusa.parse_headers` replaces the hand-rolled
+`env["HTTP_X_ANKUSA_ID"]` lookups with one call and a typed result. Names are
+matched case-insensitively, so it takes anything from a lowercased header hash
+to a Rack env mapped once:
 
 ```ruby
 require "ankusa/sdk"
 
+# Rack carries these as HTTP_X_ANKUSA_* (content-type as CONTENT_TYPE):
+# parse_headers downcases what it is given, but it does not strip Rack's
+# HTTP_ prefix or its underscores.
+def header_map(env)
+  headers = env.filter_map do |key, value|
+    [key.delete_prefix("HTTP_").tr("_", "-"), value] if key.start_with?("HTTP_")
+  end.to_h
+  headers["content-type"] = env["CONTENT_TYPE"] if env["CONTENT_TYPE"]
+  headers
+end
+
 def call(env)
   hook =
     begin
-      Ankusa.parse_headers(env)
+      Ankusa.parse_headers(header_map(env))
     rescue Ankusa::MissingHookIdError
       return [400, {}, []]
     end

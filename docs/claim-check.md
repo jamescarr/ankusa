@@ -253,11 +253,11 @@ gem install ankusa-sdk   # or, before its first RubyGems release, a path dep,
 ```ruby
 require "ankusa/sdk"
 
-claim_check = Ankusa::ClaimCheckClient.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
+CLAIM_CHECK = Ankusa::ClaimCheckClient.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
 
 # claim and sha256 are the queue message's fields.
 def redeem_claim(claim, sha256)
-  claim_check.redeem(claim, sha256)
+  CLAIM_CHECK.redeem(claim, sha256)
 end
 ```
 

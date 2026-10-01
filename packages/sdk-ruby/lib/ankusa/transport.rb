@@ -35,7 +35,10 @@ module Ankusa
 
       def call(request)
         url = request.url
-        http = Net::HTTP.new(url.host, url.port)
+        # hostname, not host: for an IPv6 literal host is "[::1]" with the
+        # brackets still on, and Net::HTTP.addr_port adds them back from the
+        # bare address, so "[::1]" would go to DNS as written.
+        http = Net::HTTP.new(url.hostname, url.port)
         http.use_ssl = url.scheme == "https"
         http.open_timeout = @timeout
         http.read_timeout = @timeout
