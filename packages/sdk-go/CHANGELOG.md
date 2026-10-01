@@ -7,6 +7,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `ParseClaimRef`, parsing `urn:ankusa:claim:v1:<tenant>:<claim_id>` into its
@@ -32,3 +34,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   URL that is not an absolute http(s) URL, or a request body that cannot be
   encoded as JSON (an unencodable `Metadata` value in `CreateRoute`,
   `ReplaceRoute`, or `UpdateRoute`).
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.3.0

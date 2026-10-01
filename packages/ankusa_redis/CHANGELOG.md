@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `Ankusa.Sink.Redis`: publishes each delivered hook to a Redis pub/sub channel
@@ -71,5 +73,6 @@ follows [Semantic Versioning](https://semver.org/).
 - Depends on `ankusa` `~> 0.2`, which introduced `Ankusa.Routes.Store` and
   `Ankusa.Routes.Snapshot`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.2.4...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.2.4...ankusa_redis-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_redis-v0.2.4

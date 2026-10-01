@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "ankusa"
-version = "0.0.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
