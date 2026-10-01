@@ -1,7 +1,7 @@
 defmodule AnkusaSdk.MixProject do
   use Mix.Project
 
-  @version "0.0.0"
+  @version "0.3.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   # A pure HTTP client on purpose: the SDK talks to a deployment's listeners
