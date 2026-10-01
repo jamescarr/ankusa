@@ -41,6 +41,8 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   use GenServer
 
+  require Logger
+
   alias Ankusa.{ClaimCheck, Sink, SourceStore, Telemetry, WAL}
   alias Ankusa.Dispatch.DLQ
   alias Ankusa.Sink.Message
@@ -538,8 +540,19 @@ defmodule Ankusa.Dispatch.Pipeline do
     mark = watermark(state)
 
     if mark > state.cursor do
-      WAL.put_cursor(state.instance, :dispatch, mark)
-      %{state | cursor: mark}
+      case WAL.put_cursor(state.instance, :dispatch, mark) do
+        :ok ->
+          %{state | cursor: mark}
+
+        {:error, reason} ->
+          # Keep the last durable cursor: the next persist (every `:poll`)
+          # retries, and a restart redelivers from there — at-least-once holds.
+          Logger.warning(
+            "[ankusa] dispatch cursor #{mark} not persisted, retrying: #{inspect(reason)}"
+          )
+
+          state
+      end
     else
       state
     end

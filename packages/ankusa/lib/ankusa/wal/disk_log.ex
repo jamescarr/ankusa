@@ -143,16 +143,25 @@ defmodule Ankusa.WAL.DiskLog do
   def handle_call({:append, records}, _from, state) do
     {results, iodata, inserts, next_seq, bytes, pos} = build_batch(records, state)
 
-    Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
-      :ok = :file.pwrite(state.fd, state.write_pos, iodata)
-      :ok = :file.datasync(state.fd)
-      # measurements, then metadata: `:duration` is added by the span itself.
-      {:ok, %{batch_size: length(inserts), bytes: bytes}, %{}}
-    end)
+    case commit(state, iodata, length(inserts), bytes) do
+      :ok ->
+        :ets.insert(state.index, inserts)
 
-    :ets.insert(state.index, inserts)
+        {:reply, {:ok, results}, %{state | write_pos: pos, next_seq: next_seq}}
 
-    {:reply, {:ok, results}, %{state | write_pos: pos, next_seq: next_seq}}
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa] WAL append of #{length(inserts)} record(s) failed, nothing acked: #{inspect(reason)}"
+        )
+
+        case discard_tail(state) do
+          {:ok, state} ->
+            {:reply, {:error, reason}, state}
+
+          {:error, discard_reason} ->
+            {:stop, {:wal_write_failed, reason, discard_reason}, {:error, reason}, state}
+        end
+    end
   end
 
   def handle_call({:read, after_seq, limit}, _from, state) do
@@ -173,8 +182,18 @@ defmodule Ankusa.WAL.DiskLog do
 
   def handle_call({:put_cursor, name, seq}, _from, state) do
     cursors = Map.put(state.cursors, name, seq)
-    persist_term(state.path <> ".cursors", cursors)
-    {:reply, :ok, %{state | cursors: cursors}}
+
+    case persist_term(state.path <> ".cursors", cursors) do
+      :ok ->
+        {:reply, :ok, %{state | cursors: cursors}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[ankusa] WAL could not persist cursor #{inspect(name)}=#{seq}: #{inspect(reason)}"
+        )
+
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:truncate_through, seq}, _from, %{truncated_through: floor} = state)
@@ -185,10 +204,19 @@ defmodule Ankusa.WAL.DiskLog do
   def handle_call({:truncate_through, seq}, _from, state) do
     # Durably record the floor *before* dropping anything: a crash between the
     # two must not let a restarted node reuse seqs it already handed out.
-    persist_term(state.path <> ".truncated", seq)
-    :ets.select_delete(state.index, [{{:"$1", :_}, [{:"=<", :"$1", seq}], [true]}])
+    case persist_term(state.path <> ".truncated", seq) do
+      :ok ->
+        :ets.select_delete(state.index, [{{:"$1", :_}, [{:"=<", :"$1", seq}], [true]}])
 
-    {:reply, :ok, maybe_rewrite(%{state | truncated_through: seq})}
+        {:reply, :ok, maybe_rewrite(%{state | truncated_through: seq})}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[ankusa] WAL could not persist truncation floor #{seq}: #{inspect(reason)}"
+        )
+
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(:stats, _from, state) do
@@ -203,6 +231,56 @@ defmodule Ankusa.WAL.DiskLog do
        max_seq: max_seq,
        cursors: state.cursors
      }, state}
+  end
+
+  # ── commit ────────────────────────────────────────────────────────────────
+
+  # One group commit: a single `pwrite` and a single fsync (`datasync`) cover
+  # the whole batch. Anything but `:ok` from either means the batch is not
+  # durable — the span then emits `[:ankusa, :commit, :exception]` (never a
+  # `:stop`), so the commit duration/batch-size series keep counting only real
+  # commits.
+  defp commit(state, iodata, batch_size, bytes) do
+    Ankusa.Telemetry.span([:commit], %{instance: state.instance}, fn ->
+      with :ok <- :file.pwrite(state.fd, state.write_pos, iodata),
+           :ok <- :file.datasync(state.fd) do
+        # measurements, then metadata: `:duration` is added by the span itself.
+        {:ok, %{batch_size: batch_size, bytes: bytes}, %{}}
+      else
+        {:error, reason} -> throw({:wal_commit_failed, reason})
+      end
+    end)
+  catch
+    :throw, {:wal_commit_failed, reason} -> {:error, reason}
+  end
+
+  # The failed batch's bytes may be partially on disk past `write_pos`; a later
+  # crash must not replay a frame that was never acked, and a next batch that is
+  # shorter would not overwrite all of it. Truncating at `write_pos` drops the
+  # tail. The fresh descriptor is the point: after a failed fsync the old one's
+  # error state is not something to build on. Truncation only frees space, so it
+  # still works on a full disk; if it does not, the disk is genuinely broken and
+  # a restart (which truncates at the replayed end) is the only honest recovery.
+  defp discard_tail(state) do
+    :file.close(state.fd)
+
+    with {:ok, fd} <- :file.open(state.path, [:read, :write, :raw, :binary]) do
+      case truncate_at(fd, state.write_pos) do
+        :ok ->
+          {:ok, %{state | fd: fd}}
+
+        {:error, reason} ->
+          :file.close(fd)
+          {:error, reason}
+      end
+    end
+  end
+
+  defp truncate_at(fd, pos) do
+    with {:ok, _} <- :file.position(fd, pos),
+         :ok <- :file.truncate(fd),
+         :ok <- :file.datasync(fd),
+         do: :ok
   end
 
   # ── batch building ────────────────────────────────────────────────────────
@@ -259,33 +337,76 @@ defmodule Ankusa.WAL.DiskLog do
     end
   end
 
+  # The rewrite is best effort: the logical floor is already durable, so a
+  # rewrite that cannot proceed (a full disk while copying) just leaves the dead
+  # prefix in place, and the next `truncate_through/2` with a higher seq retries
+  # it.
   defp rewrite(state, dead, live) do
     tmp = state.path <> ".compact"
-    {:ok, tfd} = :file.open(tmp, [:read, :write, :raw, :binary])
-    :ok = copy_range(state.fd, tfd, dead, live, 0)
-    :ok = :file.datasync(tfd)
-    :file.close(tfd)
+    # A `.compact` left by a crash mid-rewrite may be longer than `live`, and
+    # opening it does not truncate: its stale tail would follow the copied
+    # frames into the new log.
+    _ = File.rm(tmp)
 
-    :file.close(state.fd)
-    :ok = :file.rename(tmp, state.path)
+    case :file.open(tmp, [:read, :write, :raw, :binary]) do
+      {:ok, tfd} ->
+        # Rename while `state.fd` is still open: the rename is atomic, so a
+        # failure up to here leaves the old file (and every index offset) as it
+        # was. After it, `tfd` *is* the log — same inode — so it is adopted
+        # rather than reopened.
+        with :ok <- copy_range(state.fd, tfd, dead, live, 0),
+             :ok <- :file.datasync(tfd),
+             :ok <- :file.rename(tmp, state.path) do
+          :file.close(state.fd)
 
-    {:ok, fd} = :file.open(state.path, [:read, :write, :raw, :binary])
+          # Re-offset every live frame by the bytes now in front of them.
+          entries =
+            for {seq, {off, len}} <- :ets.tab2list(state.index), do: {seq, {off - dead, len}}
 
-    # Re-offset every live frame by the bytes now in front of them.
-    entries = for {seq, {off, len}} <- :ets.tab2list(state.index), do: {seq, {off - dead, len}}
-    :ets.delete_all_objects(state.index)
-    if entries != [], do: :ets.insert(state.index, entries)
+          :ets.delete_all_objects(state.index)
+          if entries != [], do: :ets.insert(state.index, entries)
 
-    %{state | fd: fd, write_pos: live}
+          %{state | fd: tfd, write_pos: live}
+        else
+          {:error, reason} ->
+            :file.close(tfd)
+            skip_rewrite(state, tmp, reason)
+        end
+
+      {:error, reason} ->
+        skip_rewrite(state, tmp, reason)
+    end
+  end
+
+  defp skip_rewrite(state, tmp, reason) do
+    _ = File.rm(tmp)
+
+    Logger.warning(
+      "[ankusa] WAL rewrite skipped, logical truncation through #{state.truncated_through} " <>
+        "is durable: #{inspect(reason)}"
+    )
+
+    state
   end
 
   defp copy_range(_src, _dst, _from, 0, _pos), do: :ok
 
   defp copy_range(src, dst, from, remaining, pos) do
     chunk = min(remaining, @rewrite_chunk)
-    {:ok, data} = :file.pread(src, from + pos, chunk)
-    :ok = :file.pwrite(dst, pos, data)
-    copy_range(src, dst, from, remaining - chunk, pos + chunk)
+
+    case :file.pread(src, from + pos, chunk) do
+      {:ok, data} ->
+        case :file.pwrite(dst, pos, data) do
+          :ok -> copy_range(src, dst, from, remaining - chunk, pos + chunk)
+          {:error, _} = error -> error
+        end
+
+      :eof ->
+        {:error, :unexpected_eof}
+
+      {:error, _} = error ->
+        error
+    end
   end
 
   # ── replay ────────────────────────────────────────────────────────────────
@@ -380,17 +501,21 @@ defmodule Ankusa.WAL.DiskLog do
   # loss the destination is either the whole new term or the whole old one, so
   # `binary_to_term/2` at boot can never see a truncated file. `File.write!/2`
   # would leave the rename ordered ahead of the data.
+  #
+  # A leftover `.tmp` on failure is harmless: the next attempt opens it with
+  # `:write`, which truncates.
   defp persist_term(path, term) do
     tmp = path <> ".tmp"
-    {:ok, fd} = :file.open(tmp, [:write, :raw, :binary])
 
-    try do
-      :ok = :file.write(fd, :erlang.term_to_binary(term))
-      :ok = :file.datasync(fd)
-    after
-      :file.close(fd)
+    with {:ok, fd} <- :file.open(tmp, [:write, :raw, :binary]) do
+      written =
+        try do
+          with :ok <- :file.write(fd, :erlang.term_to_binary(term)), do: :file.datasync(fd)
+        after
+          :file.close(fd)
+        end
+
+      with :ok <- written, do: :file.rename(tmp, path)
     end
-
-    :ok = :file.rename(tmp, path)
   end
 end

@@ -774,7 +774,10 @@ Done: all of the above observed passing.
 
 Other reliability findings from the scale review, tracked separately:
 
-- ENOSPC raises `MatchError` in the WAL writer (`wal/disk_log.ex:147-148`).
+- ENOSPC in the compactor: `LocalFS.put` (`blob_store/local_fs.ex:20`) and
+  `Index.append` raise, and `write_segment` matches `:ok`, so on a full disk the
+  compactor retries the same records every tick and crash-loops (the WAL itself
+  now reports ENOSPC instead of crashing).
 - File rewrite runs inside the WAL process under 5 s call timeouts → 503 plus a
   duplicate (`disk_log.ex:123-138, 237-280`).
 - WAL init reads the whole file into memory (`disk_log.ex:293-296`).

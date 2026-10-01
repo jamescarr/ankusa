@@ -10,11 +10,11 @@ that has none of it.
 ## `Ankusa.WAL`
 
 ```elixir
-@callback append(server(), [entry()]) :: {:ok, [result()]}
+@callback append(server(), [entry()]) :: {:ok, [result()]} | {:error, term()}
 @callback read(server(), after_seq :: non_neg_integer(), limit :: pos_integer()) :: [Envelope.t()]
 @callback get_cursor(server(), name :: atom()) :: non_neg_integer()
-@callback put_cursor(server(), name :: atom(), seq :: non_neg_integer()) :: :ok
-@callback truncate_through(server(), seq :: non_neg_integer()) :: :ok
+@callback put_cursor(server(), name :: atom(), seq :: non_neg_integer()) :: :ok | {:error, term()}
+@callback truncate_through(server(), seq :: non_neg_integer()) :: :ok | {:error, term()}
 @callback stats(server()) :: map()
 ```
 
@@ -28,6 +28,12 @@ Contract every adapter must uphold:
   commit order: once a reader has observed seq `N`, no record with seq `≤ N`
   becomes visible later. Readers use `seq` only as a cursor; `0` means
   "nothing consumed yet." Values may have gaps.
+- `append/2`, `put_cursor/3` and `truncate_through/2` return `{:error, reason}`
+  when the write could not be made durable — a full disk, say. A failed
+  `append/2` makes none of its records visible and consumes no seqs; a failed
+  `put_cursor/3`/`truncate_through/2` leaves the cursor/floor where it was. The
+  caller retries. Nothing acked is lost; a failed cursor write only widens
+  at-least-once redelivery after a restart.
 - After a crash, replay must drop a torn trailing record (a write that
   started but never committed). No un-acked write is ever surfaced as
   durable.
@@ -67,6 +73,14 @@ No external dependencies: OTP's `:file`, `:ets`, and `:erlang.crc32` only.
   frame, whichever is highest, never at 1.
 - Cursors and the truncation floor are written to a temp file, fsynced, then
   renamed, so a power loss leaves the old or the new file, never a torn one.
+- A failed write — a full disk, a dead device — is reported, not fatal: the
+  WAL process stays up, a failed batch acks nothing and reuses its seqs, a
+  failed cursor/floor write leaves the in-memory value alone, a rewrite that
+  cannot copy is skipped, and the batcher turns the failure into
+  `503 store_unavailable` while dispatch and the compactor retry their cursor
+  writes on the next tick. Ingest resumes on its own once space frees. The
+  compactor's segment and index writes are not covered yet: with the local
+  blob store on the same volume, a full disk can still crash-loop it.
 - Durable to process crash and power loss **on that box**, not to losing the
   box. It's one local file. Every WAL role (`edge`, `dispatch`, `storage`)
   reads that same file, so they must all run in **one** BEAM node; splitting
