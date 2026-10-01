@@ -8,9 +8,10 @@
 #
 #   elixir .mise/lib/release.exs apply DIR NEW TAG_PREFIX PREV_TAG DATE
 #     Sets @version in mix.exs, `version` in Cargo.toml for a Cargo package,
-#     VERSION in lib/**/version.rb for a gem, or `const Version` in version.go
-#     for a Go module (npm versions are `npm version`'s job; pyproject.toml
-#     versions are `uv version`'s job), opens
+#     VERSION in lib/**/version.rb for a gem, `const Version` in version.go
+#     for a Go module, or `VERSION` in src/Version.php for the PHP SDK (npm
+#     versions are `npm version`'s job; pyproject.toml versions are
+#     `uv version`'s job), opens
 #     `## [NEW] - DATE` under [Unreleased] in CHANGELOG.md, and points the
 #     footer compare links at the new tag. PREV_TAG may be "" (first release).
 defmodule Release do
@@ -20,6 +21,7 @@ defmodule Release do
   # [ \t]*, not \s*: in multiline mode \s would swallow preceding newlines.
   @gem_version_re ~r/^([ \t]*)VERSION = "([^"]+)"$/m
   @go_version_re ~r/^const Version = "([^"]+)"$/m
+  @php_version_re ~r/^    public const string VERSION = '([^']+)';$/m
 
   def main(["plan", dir, bump]) do
     current = current_version(dir)
@@ -33,6 +35,16 @@ defmodule Release do
     cargo_toml = Path.join(dir, "Cargo.toml")
 
     cond do
+      File.exists?(Path.join(dir, "composer.json")) ->
+        php = Path.join(dir, "src/Version.php")
+        source = File.read!(php)
+        _ = php_version!(source, php)
+
+        File.write!(
+          php,
+          Regex.replace(@php_version_re, source, "    public const string VERSION = '#{new}';")
+        )
+
       # Their own tools bump these: `npm version` and `uv version`.
       File.exists?(Path.join(dir, "package.json")) or
           File.exists?(Path.join(dir, "pyproject.toml")) ->
@@ -62,7 +74,7 @@ defmodule Release do
         File.write!(file, Regex.replace(@go_version_re, source, ~s(const Version = "#{new}")))
 
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, *.gemspec, or version.go")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, or version.go")
     end
 
     changelog = Path.join(dir, "CHANGELOG.md")
@@ -87,6 +99,7 @@ defmodule Release do
     package_json = Path.join(dir, "package.json")
     pyproject = Path.join(dir, "pyproject.toml")
     cargo_toml = Path.join(dir, "Cargo.toml")
+    composer = Path.join(dir, "composer.json")
     mix = Path.join(dir, "mix.exs")
     version_go = Path.join(dir, "version.go")
 
@@ -103,6 +116,10 @@ defmodule Release do
       File.exists?(cargo_toml) ->
         cargo_toml |> File.read!() |> toml_version!(cargo_toml)
 
+      File.exists?(composer) ->
+        php = Path.join(dir, "src/Version.php")
+        php |> File.read!() |> php_version!(php)
+
       File.exists?(mix) ->
         mix |> File.read!() |> mix_version!(mix)
 
@@ -114,7 +131,7 @@ defmodule Release do
         version_go |> File.read!() |> go_version!(version_go)
 
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, *.gemspec, or version.go")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, or version.go")
     end
   end
 
@@ -158,6 +175,14 @@ defmodule Release do
       [[_, v]] -> v
       [] -> die(~s(#{path} has no `  @version "..."` line))
       _ -> die(~s(#{path} has more than one `  @version "..."` line))
+    end
+  end
+
+  defp php_version!(source, path) do
+    case Regex.scan(@php_version_re, source) do
+      [[_, v]] -> v
+      [] -> die(~s(#{path} has no `    public const string VERSION = '...';` line))
+      _ -> die(~s(#{path} has more than one `    public const string VERSION = '...';` line))
     end
   end
 

@@ -5,7 +5,7 @@
 # and its kind comes from the files in it:
 #   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex,
 #   else pyproject.toml -> python, else Cargo.toml -> cargo, else *.gemspec -> ruby,
-#   else go.mod -> go.
+#   else go.mod -> go, else composer.json -> php.
 #
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
@@ -69,19 +69,21 @@ pkg_kind() {
     echo ruby
   elif [ -f "$ROOT/$dir/go.mod" ]; then
     echo go
+  elif [ -f "$ROOT/$dir/composer.json" ]; then
+    echo php
   else
-    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, or go.mod"
+    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, go.mod, or composer.json"
   fi
 }
 
 # `ankusa` first (everything else depends on it), then the other Hex packages,
 # then Docker images, then npm packages, then Python ones, then Cargo ones, then
-# Ruby gems, then Go modules; byte order within each group.
+# Ruby gems, then Go modules, then PHP ones; byte order within each group.
 pkg_names() {
   local kind name all
   all=$(_pkg_all)
   if [ -d "$ROOT/packages/ankusa" ]; then echo ankusa; fi
-  for kind in hex docker npm python cargo ruby go; do
+  for kind in hex docker npm python cargo ruby go php; do
     for name in $all; do
       if [ "$name" != ankusa ] && [ "$(pkg_kind "$name")" = "$kind" ]; then
         printf '%s\n' "$name"
@@ -113,6 +115,7 @@ pkg_version() {
     cargo) v=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' "$ROOT/$dir/Cargo.toml") ;;
     ruby) v=$(ruby -e 'print Gem::Specification.load(ARGV[0]).version' "$(_pkg_gemspec "$dir")") ;;
     go) v=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' "$ROOT/$dir/version.go") ;;
+    php) v=$(sed -n "s/^    public const string VERSION = '\(.*\)';\$/\1/p" "$ROOT/$dir/src/Version.php") ;;
   esac
   [ -n "$v" ] || fail "could not read the version of $1 from $dir"
   printf '%s\n' "$v"
@@ -153,7 +156,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name crate_name gem_name module
+  local dir kind url npm_name pypi_name crate_name gem_name module composer_name meta code
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -180,6 +183,19 @@ pkg_registry_code() {
       module=$(sed -n 's/^module //p' "$ROOT/$dir/go.mod")
       url="https://proxy.golang.org/$module/@v/v$2.info"
       ;;
+    php)
+      # Packagist has no per-version endpoint: fetch the package's metadata and
+      # look for the version in it.
+      composer_name=$(node -p "require('$ROOT/$dir/composer.json').name")
+      meta=$(mktemp)
+      code=$(curl -s -o "$meta" -w '%{http_code}' "https://repo.packagist.org/p2/$composer_name.json" || true)
+      if [ "$code" = 200 ]; then
+        code=$(node -e 'const [f, n, v] = process.argv.slice(1); const m = JSON.parse(require("fs").readFileSync(f, "utf8")); console.log((m.packages[n] || []).some((e) => String(e.version).replace(/^v/, "") === v) ? 200 : 404)' "$meta" "$composer_name" "$2")
+      fi
+      rm -f "$meta"
+      printf '%s' "$code"
+      return
+      ;;
   esac
   # curl prints 000 and exits non-zero when the registry is unreachable; the
   # 000 is the useful part. crates.io answers 403 to curl's own user agent, so
@@ -196,6 +212,7 @@ pkg_workflow() {
     cargo) echo release-crates.yml ;;
     ruby) echo release-ruby.yml ;;
     go) echo release-go.yml ;;
+    php) echo release-php.yml ;;
   esac
 }
 
@@ -214,6 +231,9 @@ pkg_secrets() {
     ruby) : ;;
     # The Go module proxy reads the git tag: no repo secret needed.
     go) : ;;
+    # Packagist: the deploy key pushes to the read-only split mirror
+    # jamescarr/ankusa-php, then the API token triggers the package update.
+    php) echo SDK_PHP_DEPLOY_KEY PACKAGIST_USERNAME PACKAGIST_TOKEN ;;
   esac
 }
 

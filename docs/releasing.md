@@ -13,6 +13,7 @@ the files in it decide where it publishes:
 | `sdk-rust` | crates.io crate `ankusa` (`Cargo.toml`) | `sdk-rust-vX.Y.Z` | [`release-crates.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-crates.yml) |
 | `sdk-ruby` | RubyGems gem `ankusa-sdk` (`ankusa-sdk.gemspec`) | `sdk-ruby-vX.Y.Z` | [`release-ruby.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-ruby.yml) |
 | `sdk-go` | Go module `github.com/jamescarr/ankusa/packages/sdk-go` (`go.mod`) | `sdk-go-vX.Y.Z`, then `packages/sdk-go/vX.Y.Z` after CI | [`release-go.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-go.yml) |
+| `sdk-php` | Packagist package `jamescarr/ankusa` (`composer.json`) | `sdk-php-vX.Y.Z` | [`release-php.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-php.yml) |
 
 The npm, PyPI, and crates.io packages are all named `ankusa`, and the RubyGems
 gem is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project;
@@ -116,6 +117,11 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   [Ruby SDK (RubyGems)](#ruby-sdk-rubygems) below.
 - **Go:** no repository secret — the module proxy reads the pushed git tag:
   see [Go module (proxy.golang.org)](#go-module-proxygolangorg) below.
+- **Packagist (the PHP SDK):** `SDK_PHP_DEPLOY_KEY`, an SSH deploy key with
+  **write access** to the read-only mirror `jamescarr/ankusa-php`;
+  `PACKAGIST_USERNAME`, the Packagist account name; and `PACKAGIST_TOKEN`, that
+  account's API token. Setup: see [PHP SDK (Packagist)](#php-sdk-packagist)
+  below.
 
 ## Python SDK (PyPI)
 
@@ -375,3 +381,98 @@ proxy, but only after that wait has passed.
 The repository has to be public for the proxy to fetch it. If it is private,
 the module tag is still pushed, but consumers need
 `GOPRIVATE=github.com/jamescarr/ankusa` and pkg.go.dev never lists the module.
+
+## PHP SDK (Packagist)
+
+`sdk-php` publishes as the `jamescarr/ankusa` package on
+[Packagist](https://packagist.org/), which installs it with
+`composer require jamescarr/ankusa`. Packagist reads `composer.json` at the
+root of a repository, so it cannot be pointed at this monorepo —
+[`release-php.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-php.yml)
+pushes the package to the **read-only split mirror**
+[`jamescarr/ankusa-php`](https://github.com/jamescarr/ankusa-php) (tagged
+`vX.Y.Z` there; the monorepo tag stays `sdk-php-vX.Y.Z`) and then asks
+Packagist to re-crawl it. Development happens in `packages/sdk-php` only;
+anything committed to the mirror is overwritten by the next release.
+
+### One-time Packagist setup
+
+Needed once, before the first `release:tag sdk-php`.
+
+1. Create the public repository `jamescarr/ankusa-php` ("Read-only mirror of
+   packages/sdk-php in jamescarr/ankusa"). Disable Issues, Wiki and Projects:
+   every question about the code belongs in the main repo.
+2. Give the release workflow write access to it:
+
+   ```sh
+   ssh-keygen -t ed25519 -N '' -C ankusa-php-mirror -f ankusa-php-deploy
+   ```
+
+   Add `ankusa-php-deploy.pub` as a **deploy key with write access** on
+   `jamescarr/ankusa-php`, then store the private half on this repo and delete
+   both files:
+
+   ```sh
+   gh secret set SDK_PHP_DEPLOY_KEY < ankusa-php-deploy
+   rm ankusa-php-deploy ankusa-php-deploy.pub
+   ```
+
+3. Seed the mirror, so Packagist has something to import:
+
+   ```sh
+   git clone git@github.com:jamescarr/ankusa-php.git /tmp/ankusa-php
+   cp -R packages/sdk-php/. /tmp/ankusa-php/
+   (cd /tmp/ankusa-php && git add -A && git commit -m 'Seed from jamescarr/ankusa' && git push origin HEAD:main)
+   ```
+
+4. Submit <https://github.com/jamescarr/ankusa-php> at
+   <https://packagist.org/packages/submit>. The package name comes from its
+   `composer.json` (`jamescarr/ankusa`), and Packagist verifies the repository
+   by reading that file.
+5. From Packagist → Profile → API token, set the two remaining secrets:
+
+   ```sh
+   gh secret set PACKAGIST_USERNAME   # the Packagist account name
+   gh secret set PACKAGIST_TOKEN      # the API token
+   ```
+
+   Use the account's **Safe** API token; if the `update-package` call in the
+   workflow answers `403`, use the main API token instead.
+
+Check the name is free before the first tag (Packagist names are
+first-come):
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://repo.packagist.org/p2/jamescarr/ankusa.json   # 404 = available
+```
+
+If `jamescarr/ankusa` is taken, change `name` in
+[`packages/sdk-php/composer.json`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-php/composer.json)
+(and this document) before tagging: `release:preflight`, `release:verify` and
+the publish job all read that field, so nothing else changes.
+
+### Release commands
+
+Same flow as every other package ([above](#the-flow)); only the package name
+differs. With no ordering constraint against the Hex packages:
+
+```sh
+mise run status                          # version, last tag, published?, commits since
+mise run release:prepare minor sdk-php   # or patch | major | 0.2.1
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-php
+mise run release:watch sdk-php           # the tag run pushes the mirror and updates Packagist
+mise run release:verify sdk-php          # HTTP 200 for the version on Packagist
+```
+
+`release:prepare` rewrites `public const string VERSION` in
+[`src/Version.php`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-php/src/Version.php)
+(Composer locks don't record the root version, so nothing else needs
+rewriting); `release:tag`'s preflight confirms the version is still
+unpublished on Packagist and the tag is free; the tag run pushes the mirror,
+triggers a Packagist update, polls `repo.packagist.org` until the version
+appears, and cuts the GitHub release from the CHANGELOG section. Because
+Packagist installs from the mirror's GitHub zipball, the archive carries
+whatever `packages/sdk-php/.gitattributes` does *not* mark `export-ignore` —
+tests and dev configs stay out of what users download.

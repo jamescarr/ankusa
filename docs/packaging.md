@@ -58,6 +58,10 @@ packages/
   sdk-python                  the `ankusa` PyPI client SDK.
   sdk-rust                    the `ankusa` crates.io client SDK.
   sdk-ruby                    the `ankusa-sdk` RubyGems client SDK.
+  sdk-php                     the `jamescarr/ankusa` Packagist client SDK,
+                              published through the read-only mirror
+                              jamescarr/ankusa-php (Packagist reads
+                              composer.json at a repository root).
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker

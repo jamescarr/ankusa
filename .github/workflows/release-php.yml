@@ -1,0 +1,123 @@
+name: Release (PHP)
+
+# Tag-driven Packagist publish for packages/sdk-php (published as the
+# `jamescarr/ankusa` package on Packagist), the same shape as
+# release-python.yml's PyPI flow — its own tag prefix, `sdk-php-v*` (the
+# directory name), distinct from the Hex core package's `ankusa-v*`, the npm
+# SDK's `sdk-typescript-v*`, and the PyPI SDK's `sdk-python-v*`. Tagged by
+# `mise run release:tag sdk-php`.
+#
+# Packagist cannot read a package that lives in a subdirectory: it wants a
+# composer.json at the root of the repository it is pointed at. So this job
+# pushes this directory to the read-only split mirror
+# `jamescarr/ankusa-php`, tagged `vX.Y.Z` there (the monorepo tag stays
+# `sdk-php-vX.Y.Z`), and then asks Packagist to update the package from that
+# mirror. Repo secrets: SDK_PHP_DEPLOY_KEY (write access to the mirror),
+# PACKAGIST_USERNAME and PACKAGIST_TOKEN. See docs/releasing.md.
+
+on:
+  push:
+    tags:
+      - "sdk-php-v*"
+
+concurrency:
+  group: release-php-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          [ "$(pkg_kind "$PKG")" = php ] || fail "$GITHUB_REF_NAME is not a PHP package tag"
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          PKG_VERSION=$(pkg_version "$PKG")
+          [ "$PKG_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/src/Version.php $PKG_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to Packagist + GitHub release
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    env:
+      MIRROR: git@github.com:jamescarr/ankusa-php.git
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push to the split mirror
+        env:
+          DEPLOY_KEY: ${{ secrets.SDK_PHP_DEPLOY_KEY }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          deploy_key="$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$DEPLOY_KEY" > "$deploy_key"
+          chmod 600 "$deploy_key"
+          export GIT_SSH_COMMAND="ssh -i $deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+          # A rerun of this job must not fail on a mirror that already has the
+          # tag (the push before the Packagist step may have succeeded).
+          if git ls-remote --exit-code --tags "$MIRROR" "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::notice::v$VERSION is already on the mirror; nothing to push"
+            exit 0
+          fi
+
+          git clone --depth 1 "$MIRROR" "$RUNNER_TEMP/mirror"
+          git -C "$RUNNER_TEMP/mirror" rm -rq --ignore-unmatch .
+          cp -R packages/sdk-php/. "$RUNNER_TEMP/mirror/"
+          git -C "$RUNNER_TEMP/mirror" add -A
+          git -C "$RUNNER_TEMP/mirror" \
+            -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --allow-empty -m "sdk-php v$VERSION (jamescarr/ankusa@$GITHUB_SHA)"
+          git -C "$RUNNER_TEMP/mirror" tag "v$VERSION"
+          git -C "$RUNNER_TEMP/mirror" push origin HEAD:main "v$VERSION"
+
+      - name: Update Packagist
+        env:
+          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh
+          NAME=$(node -p "require('./packages/sdk-php/composer.json').name")
+
+          curl -sSf -X POST -H 'content-type: application/json' \
+            "https://packagist.org/api/update-package?username=$PACKAGIST_USERNAME&apiToken=$PACKAGIST_TOKEN" \
+            -d "{\"repository\":{\"url\":\"https://packagist.org/packages/$NAME\"}}"
+
+          # Packagist crawls the mirror asynchronously; poll until the version
+          # is visible rather than claiming a publish that never happened.
+          for _ in $(seq 1 30); do
+            code=$(pkg_registry_code sdk-php "$VERSION")
+            if [ "$code" = 200 ]; then
+              echo "$NAME $VERSION is on Packagist"
+              exit 0
+            fi
+            sleep 10
+          done
+          fail "$NAME $VERSION is not visible on Packagist after 5 minutes"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh && pkg_notes sdk-php "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

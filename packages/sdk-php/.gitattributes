@@ -1,0 +1,15 @@
+# Files Composer's `archive`/Packagist exclude from the published package
+# (`composer archive` applies these, which is what `mise run check:package
+# sdk-php` builds). The mirror repo carries this file too, so the same rules
+# apply whether the archive is built here or from the split.
+/tests export-ignore
+/.gitattributes export-ignore
+/phpunit.xml.dist export-ignore
+/phpstan.neon.dist export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/composer.lock export-ignore
+# Never ship dependencies or dev caches, even if a local run left them behind
+# (`composer archive` zips the working directory, not the git index).
+/vendor export-ignore
+/.phpunit.cache export-ignore
+/.php-cs-fixer.cache export-ignore

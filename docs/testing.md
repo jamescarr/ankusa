@@ -218,15 +218,17 @@ messages.
 ## SDK conformance: one harness across the SDKs
 
 `packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`,
-`packages/sdk-ruby`, and `packages/sdk-go` are the five client SDKs. Rather than
-hand-write each one's edge-case tests, all five are checked against the same
-language-neutral vectors in `conformance/`: a feature manifest
+`packages/sdk-ruby`, `packages/sdk-go`, and `packages/sdk-php` are the six client
+SDKs. Rather than hand-write each one's edge-case tests, all six are checked
+against the same language-neutral vectors in `conformance/`: a feature manifest
 (`features.json`), JSON cases (`cases/*.json`), and a native runner per SDK
 (`packages/sdk-python/tests/test_conformance.py`,
 `packages/sdk-typescript/src/conformance/conformance.test.ts`,
 `packages/sdk-rust/tests/conformance.rs`,
 `packages/sdk-ruby/test/conformance_test.rb`,
-`packages/sdk-go/conformance_test.go`).
+`packages/sdk-go/conformance_test.go`,
+`packages/sdk-php/tests/Conformance/ConformanceTest.php` — the PHP runner
+stands up PHP's built-in server on a free port to answer as the mock gateway).
 
 ```sh
 mise run check:conformance    # validate conformance/, then run every SDK

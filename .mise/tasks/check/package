@@ -63,6 +63,13 @@ case "$kind" in
     go vet ./...
     go test -race -count=1 ./...
     ;;
+  php)
+    composer validate --strict
+    composer install --no-interaction --no-progress
+    composer lint
+    composer analyse
+    composer test
+    ;;
 esac
 
 if [ "$kind" = hex ]; then
@@ -93,4 +100,15 @@ if [ "$kind" = ruby ]; then
   # Build the gem the way release-ruby.yml publishes it.
   tmp=$(mktemp -d)
   gem build --strict --output "$tmp/$pkg.gem"
+fi
+
+if [ "$kind" = php ]; then
+  # Build the archive `composer archive` produces from this directory and fail
+  # if anything outside the published surface leaked in. Composer applies only
+  # .gitattributes export-ignore here (not .gitignore), and `composer install`
+  # and `composer lint` above just wrote vendor/ and the tool caches.
+  tmp=$(mktemp -d)
+  composer archive --format=zip --dir="$tmp" --file=sdk-php
+  leaked=$(unzip -Z1 "$tmp/sdk-php.zip" | grep -E '^(vendor|tests|\.phpunit\.cache)/|^\.php-cs-fixer\.cache$' || true)
+  [ -z "$leaked" ] || fail "the sdk-php archive ships files it must not: $(echo $leaked)"
 fi
