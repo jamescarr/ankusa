@@ -101,6 +101,12 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
      `:reject` (`401`, nothing stored), `:quarantine` (`202`, held in a
      rate-limited durable pen. See [`delivery.md`](delivery.md)), or
      `:accept_flag` (commits anyway, envelope marked `flagged: true`).
+   - An accepted hook is charged against its tenant's ingest rate limit
+     (`rate_limits`) before anything is written. Over the limit is `429` with
+     `Retry-After`, nothing stored — and because the charge comes after
+     verification, a flood of forged requests spends no budget and can never
+     lock a tenant out. See
+     [`configuration.md#rate-limits`](configuration.md#rate-limits).
 3. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default two)
    receives the envelope and **blocks the caller** until the batch it lands
    in commits. The flush to the WAL runs in a `Task`, so the batcher keeps
@@ -113,9 +119,9 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    `Retry-After`, never a promise the store can't back.
 4. **`Ankusa.WAL`** commits durably and returns `{:committed, envelope}` (with
    `seq` assigned) per record, in the original order. The edge maps this to
-   `201`/`202`/`401`/`404`/`413`/`503`; a body it cannot read at all (client
-   disconnect, read timeout) is `400`, kept distinct from `413` rather than
-   reported as "too large".
+   `201`/`202`/`401`/`404`/`413`/`429`/`503`; a body it cannot read at all
+   (client disconnect, read timeout) is `400`, kept distinct from `413` rather
+   than reported as "too large".
 
 Under `wal: :none` steps 3 and 4 do not exist: **`Ankusa.Edge.Publish`** asks
 each of the source's `Ankusa.Sink`s, in declaration order, in the request
@@ -307,8 +313,8 @@ that asks for it. See
 ## Telemetry
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix:
-`ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`,
-`quarantine`, `claim_check`. Components emit events; they never call each
+`ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `quarantine`,
+`rate_limit`, `claim_check`. Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
 code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for
 the full event list and measurement/metadata shapes.

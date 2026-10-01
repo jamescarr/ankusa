@@ -63,6 +63,7 @@ Every top-level section, with its keys and defaults:
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
+| `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -231,7 +232,8 @@ config :ankusa,
     log_sample: 100,
     ip_denied_status: 403,
     seed: []
-  }
+  },
+  rate_limits: %{default: nil, tenants: %{}}
 ```
 
 | Key | Default | Meaning |
@@ -275,6 +277,7 @@ config :ankusa,
 | `routes.log_sample` | `100` | 1 in N rejections is logged at `:debug`; `0` disables it. |
 | `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. With `403` a sender can tell a route that has its own `ip_rules` (which denied it) from a path that does not exist (`404`); `404` removes that distinction. |
 | `routes.seed` | `[]` | Route definitions loaded at boot (see below). With the ETS store they are loaded on **every** boot. |
+| `rate_limits.default`, `rate_limits.tenants` | `nil`, `%{}` | Per-tenant ingest limits, `%{rate: hooks_per_second, burst: hooks}`; fractions are allowed (`0.5` is one every two seconds) and both keys are required. Precedence is a runtime override, then the tenant's own entry, then `default`; no limit means unlimited. See [Rate limits](#rate-limits). |
 
 #### The admin API
 
@@ -283,7 +286,10 @@ With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 `GET /v1/wal` (this node's WAL stats; `409 wal_disabled` under
 `wal.type: none`), `GET /v1/dlq` and `POST /v1/dlq/replay` (`:dispatch` role),
 and `GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the
-node's roles. It is **unauthenticated by design**: put it behind your own
+node's roles. The `:edge` role also gets `GET /v1/rate-limits` and
+`GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit`, which read and adjust this
+node's per-tenant ingest limits ([Rate limits](#rate-limits)). Everything here
+is **unauthenticated by design**: put it behind your own
 proxy, SSO, or network policy. The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
 
@@ -400,6 +406,39 @@ response is safe to retry.
 Rejections are logged at `:debug`, sampled at `routes.log_sample` (1 in N, `0`
 for silent), and emit `[:ankusa, :routes, :reject]`; captures emit
 `[:ankusa, :routes, :match]` with `%{instance, route_id, cached, cacheable}`.
+
+#### Rate limits
+
+Per-tenant ingest limits, enforced by each edge node **in its own memory**: a
+fleet of N edges admits up to N × the limit, so size the numbers per node, not
+for the fleet. A catch-URL scheme that lets the sender choose its tenant
+(`routing: tenant_path`) has as many budgets as there are tenant names.
+
+```yaml
+rate_limits:
+  default: {rate: 50, burst: 100}
+  tenants:
+    acme: {rate: 500, burst: 1000}
+```
+
+A hook is charged **after verification and before the durable write**, so only
+hooks verification accepted spend a tenant's budget: a flood of forged requests
+is free and can never lock a tenant out. Over the limit, the sender gets `429`
+with a `Retry-After` header and nothing is stored — no WAL record, no dispatch,
+no claim. The check costs one ETS compare-and-swap per accepted hook, and a
+denial writes nothing; the `[:ankusa, :rate_limit, :rejected]` event and its
+`ankusa_rate_limit_rejected_total` counter (tagged by tenant) are the signal,
+so rejections are not logged.
+
+Limits can also be adjusted per tenant at runtime, with no restart:
+`GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit` on
+`admin.port` (`:edge` role only, `409 role_not_enabled` elsewhere). An override
+lives on **the node that accepted it** and is persisted to
+`<data_dir>/<instance>/rate_limits.json`, the same node-local model as
+API-managed sources — put durable limits in the config. `PUT` and `DELETE`
+reset that tenant's bucket, so a raised limit is not held back by the old
+limit's accumulated debt. There is no "unlimited" value: to exempt a tenant
+from a `default`, give it a high limit of its own.
 
 ### Configuring a source
 

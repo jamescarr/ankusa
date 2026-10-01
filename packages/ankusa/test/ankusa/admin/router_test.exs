@@ -109,6 +109,13 @@ defmodule Ankusa.Admin.RouterTest do
     assert %{"error" => "role_not_enabled", "role" => "dispatch"} = JSON.decode!(conn.resp_body)
   end
 
+  test "the rate-limit routes are edge-only, like the quarantine list", %{inst: inst} do
+    conn = call(inst, :get, "/v1/rate-limits")
+
+    assert conn.status == 409
+    assert %{"error" => "role_not_enabled", "role" => "edge"} = JSON.decode!(conn.resp_body)
+  end
+
   # ── DLQ ────────────────────────────────────────────────────────────────────
 
   test "GET /v1/dlq filters by source and never returns bodies", %{inst: inst, config: config} do
@@ -624,6 +631,107 @@ defmodule Ankusa.Admin.RouterTest do
       conn = call(inst, :post, "/v1/tenants/acme/sources", oversized)
       assert conn.status == 400
       assert %{"error" => "invalid_source"} = JSON.decode!(conn.resp_body)
+    end
+  end
+
+  describe "per-tenant rate limits" do
+    setup do
+      config =
+        test_config(
+          roles: [:edge],
+          admin: %{enabled: true, port: 0},
+          rate_limits: %{
+            default: %{rate: 5, burst: 10},
+            tenants: %{"acme" => %{rate: 1, burst: 2}}
+          }
+        )
+
+      put_config(config)
+      start_supervised!({Ankusa.Instance, config})
+      %{inst: config.instance, config: config}
+    end
+
+    test "GET reports the config's limit, or the default", %{inst: inst} do
+      assert JSON.decode!(call(inst, :get, "/v1/tenants/acme/rate-limit").resp_body) ==
+               %{"tenant" => "acme", "rate" => 1, "burst" => 2, "source" => "config"}
+
+      assert JSON.decode!(call(inst, :get, "/v1/tenants/globex/rate-limit").resp_body) ==
+               %{"tenant" => "globex", "rate" => 5, "burst" => 10, "source" => "default"}
+    end
+
+    test "PUT takes effect at once, and DELETE hands the tenant back to config", %{inst: inst} do
+      put = call(inst, :put, "/v1/tenants/acme/rate-limit", ~s({"rate":2.5,"burst":4}))
+
+      assert put.status == 200
+
+      assert JSON.decode!(put.resp_body) ==
+               %{"tenant" => "acme", "rate" => 2.5, "burst" => 4, "source" => "override"}
+
+      assert JSON.decode!(call(inst, :get, "/v1/tenants/acme/rate-limit").resp_body)["source"] ==
+               "override"
+
+      assert JSON.decode!(call(inst, :get, "/v1/rate-limits").resp_body) == %{
+               "default" => %{"rate" => 5, "burst" => 10},
+               "tenants" => [
+                 %{"tenant" => "acme", "rate" => 2.5, "burst" => 4, "source" => "override"}
+               ]
+             }
+
+      # 204 carries no body.
+      assert call(inst, :delete, "/v1/tenants/acme/rate-limit").status == 204
+
+      assert JSON.decode!(call(inst, :get, "/v1/tenants/acme/rate-limit").resp_body)["source"] ==
+               "config"
+
+      assert JSON.decode!(call(inst, :delete, "/v1/tenants/acme/rate-limit").resp_body) ==
+               %{"error" => "rate_limit_not_found"}
+    end
+
+    test "an override the node cannot persist is 503 and changes nothing", %{
+      inst: inst,
+      config: config
+    } do
+      # A directory where `rate_limits.json` belongs: the write cannot land, so
+      # the override is refused rather than applied in memory only.
+      File.mkdir_p!(Ankusa.Config.path(config, "rate_limits.json"))
+
+      conn = call(inst, :put, "/v1/tenants/acme/rate-limit", ~s({"rate":100,"burst":100}))
+
+      assert conn.status == 503
+      assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+
+      assert JSON.decode!(call(inst, :get, "/v1/tenants/acme/rate-limit").resp_body)["source"] ==
+               "config"
+    end
+
+    test "a bad limit is 400 invalid_rate_limit, named", %{inst: inst} do
+      for {body, message} <- [
+            {~s({"rate":0,"burst":1}), "rate must be a number greater than 0, got 0"},
+            {~s({"rate":1}), "burst is required"},
+            {~s({"rate":1,"burst":1.5}), "burst must be an integer of at least 1, got 1.5"},
+            {~s({"rate":1,"burst":1,"per":"s"}), ~s(unknown field "per")},
+            {"[1]", "body must be a JSON object"},
+            {"not json", "body must be a JSON object"}
+          ] do
+        conn = call(inst, :put, "/v1/tenants/acme/rate-limit", body)
+
+        assert conn.status == 400, "#{body} returned #{conn.status}"
+
+        assert %{"error" => "invalid_rate_limit", "message" => ^message} =
+                 JSON.decode!(conn.resp_body)
+      end
+    end
+
+    test "a bad tenant is 400 invalid_tenant on every route", %{inst: inst} do
+      for {method, body} <- [
+            {:get, ""},
+            {:put, ~s({"rate":1,"burst":1})},
+            {:delete, ""}
+          ] do
+        conn = call(inst, method, "/v1/tenants/bad.tenant/rate-limit", body)
+        assert conn.status == 400, "#{method} returned #{conn.status}"
+        assert %{"error" => "invalid_tenant"} = JSON.decode!(conn.resp_body)
+      end
     end
   end
 

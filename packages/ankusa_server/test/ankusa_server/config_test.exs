@@ -639,6 +639,57 @@ defmodule AnkusaServer.ConfigTest do
              ~s(routes.ip_rules.rules are invalid: rule 0: invalid cidr "10.0.0.0/33")
   end
 
+  # ── translation: rate limits ────────────────────────────────────────────────
+
+  test "a rate_limits section maps to core's rate_limits config" do
+    path =
+      tmp_config("""
+      rate_limits:
+        default: {rate: 0.5, burst: 5}
+        tenants:
+          acme: {rate: 100, burst: 200}
+          globex: {rate: "${GLOBEX_RATE}", burst: "10"}
+      """)
+
+    rate_limits = Config.load!(path: path, env: %{"GLOBEX_RATE" => "12.5"}).config.rate_limits
+
+    assert rate_limits == %{
+             default: %{rate: 0.5, burst: 5},
+             tenants: %{
+               "acme" => %{rate: 100, burst: 200},
+               "globex" => %{rate: 12.5, burst: 10}
+             }
+           }
+  end
+
+  test "no rate_limits section means what core defaults to" do
+    path = tmp_config("http: {port: 4000}\n")
+
+    assert Config.load!(path: path, env: %{}).config.rate_limits ==
+             %Ankusa.Config{}.rate_limits
+  end
+
+  test "a bad rate limit names the key, and core's ranges come back as core's message" do
+    for {yaml, message} <- [
+          {"rate_limits: {defaults: {rate: 1, burst: 1}}",
+           ~s(rate_limits: unknown key "defaults")},
+          {"rate_limits: {tenants: {acme: {rate: 1}}}",
+           ~s(rate_limits.tenants.acme: missing required key "burst")},
+          {"rate_limits: {tenants: {acme: {rate: fast, burst: 1}}}",
+           ~s(rate_limits.tenants.acme.rate: expected a number, got "fast")},
+          {"rate_limits: {tenants: {acme: {rate: 1, burst: 1, per: s}}}",
+           ~s(rate_limits.tenants.acme: unknown key "per")},
+          {"rate_limits: {tenants: [acme]}",
+           ~s(rate_limits.tenants: expected a mapping of tenant id to limit, got ["acme"])},
+          {"rate_limits: {default: {rate: 0, burst: 1}}",
+           "rate_limits.default.rate must be a number greater than 0, got 0"}
+        ] do
+      path = tmp_config(yaml <> "\n")
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
+  end
+
   # ── translation: storage ────────────────────────────────────────────────────
 
   test "storage.gcs.auth selects the token provider" do

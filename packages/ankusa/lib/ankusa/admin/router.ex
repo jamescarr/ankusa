@@ -33,11 +33,13 @@ defmodule Ankusa.Admin.Router do
 
   alias Ankusa.Config
   alias Ankusa.Admin.Redact
+  alias Ankusa.Edge.RateLimiter
 
   # A replay body is a filter, not a payload: three optional scalar keys. 64 KiB
   # is already an order of magnitude more than it can legitimately need.
   @max_replay_body 65_536
   @max_source_body 65_536
+  @max_rate_limit_body 65_536
   @default_limit 100
   @max_limit 1000
 
@@ -118,6 +120,25 @@ defmodule Ankusa.Admin.Router do
 
   delete "/v1/tenants/:tenant/sources/:name" do
     source_delete(conn, tenant, name)
+  end
+
+  # The limiter is the edge node's own state (`Ankusa.Edge.RateLimiter`), so
+  # these are role-gated like the quarantine list, not node-agnostic like
+  # source management.
+  get "/v1/rate-limits" do
+    require_role(conn, :edge, &rate_limits_index/1)
+  end
+
+  get "/v1/tenants/:tenant/rate-limit" do
+    require_role(conn, :edge, &rate_limit_get(&1, tenant))
+  end
+
+  put "/v1/tenants/:tenant/rate-limit" do
+    require_role(conn, :edge, &rate_limit_put(&1, tenant))
+  end
+
+  delete "/v1/tenants/:tenant/rate-limit" do
+    require_role(conn, :edge, &rate_limit_delete(&1, tenant))
   end
 
   match _ do
@@ -314,12 +335,99 @@ defmodule Ankusa.Admin.Router do
     |> Redact.source_entry()
   end
 
+  # ── per-tenant rate limits ──────────────────────────────────────────────────
+
+  defp rate_limits_index(conn) do
+    %{default: default, tenants: tenants} = RateLimiter.list(instance(conn))
+
+    send_json(conn, 200, %{
+      default: limit(default),
+      tenants:
+        Enum.map(tenants, fn {tenant, limit, source} ->
+          rate_limit_entry(tenant, {limit, source})
+        end)
+    })
+  end
+
+  defp rate_limit_get(conn, tenant) do
+    if valid_identity?(tenant) do
+      send_json(
+        conn,
+        200,
+        rate_limit_entry(tenant, RateLimiter.effective(instance(conn), tenant))
+      )
+    else
+      invalid_tenant(conn)
+    end
+  end
+
+  defp rate_limit_put(conn, tenant) do
+    if valid_identity?(tenant) do
+      with_rate_limit_body(conn, fn attrs, conn ->
+        case RateLimiter.put_override(instance(conn), tenant, attrs) do
+          {:ok, limit} -> send_json(conn, 200, rate_limit_entry(tenant, {limit, :override}))
+          {:error, :invalid, message} -> invalid_rate_limit(conn, message)
+          {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
+        end
+      end)
+    else
+      invalid_tenant(conn)
+    end
+  end
+
+  defp rate_limit_delete(conn, tenant) do
+    if valid_identity?(tenant) do
+      case RateLimiter.delete_override(instance(conn), tenant) do
+        # 204 carries no body: there is nothing left to describe.
+        :ok -> Plug.Conn.send_resp(conn, 204, "")
+        {:error, :not_found} -> send_json(conn, 404, %{error: "rate_limit_not_found"})
+        {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
+      end
+    else
+      invalid_tenant(conn)
+    end
+  end
+
+  defp rate_limit_entry(tenant, {limit, source}) do
+    %{
+      tenant: tenant,
+      rate: limit && limit.rate,
+      burst: limit && limit.burst,
+      source: Atom.to_string(source)
+    }
+  end
+
+  defp limit(nil), do: nil
+  defp limit(%{rate: rate, burst: burst}), do: %{rate: rate, burst: burst}
+
+  # The body is a limit, not a spec: two required keys. A body that is empty,
+  # oversized, unparseable, or not an object is the same `invalid_rate_limit`,
+  # whose message is the parser's.
+  defp with_rate_limit_body(conn, fun) do
+    case Ankusa.Http.read_body_limited(conn, @max_rate_limit_body) do
+      {:ok, body, conn} ->
+        case JSON.decode(body) do
+          {:ok, map} when is_map(map) -> fun.(map, conn)
+          _ -> invalid_rate_limit(conn, "body must be a JSON object")
+        end
+
+      {:too_large, conn} ->
+        invalid_rate_limit(conn, "body must be a JSON object")
+
+      {:error, _reason, conn} ->
+        invalid_rate_limit(conn, "body must be a JSON object")
+    end
+  end
+
   defp valid_identity?(value), do: is_binary(value) and Regex.match?(@identity_regex, value)
 
   defp invalid_tenant(conn), do: send_json(conn, 400, %{error: "invalid_tenant"})
 
   defp invalid_source(conn, message),
     do: send_json(conn, 400, %{error: "invalid_source", message: message})
+
+  defp invalid_rate_limit(conn, message),
+    do: send_json(conn, 400, %{error: "invalid_rate_limit", message: message})
 
   # Matches `Ankusa.SourceStore`'s own message for a bad identity.
   defp invalid_name_message(name),

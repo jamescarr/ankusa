@@ -18,6 +18,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
+  | `[:ankusa, :rate_limit, :rejected]` | — | `:instance`, `:tenant_id`, `:source_id` |
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
@@ -25,7 +26,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
 
-  `:outcome` on `:ingest` is `:committed | :quarantined | :rejected`,
+  `:outcome` on `:ingest` is `:committed | :quarantined | :rejected | :rate_limited`,
   or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,
   independent of what the source's `on_verify_failure` policy then decides.
 

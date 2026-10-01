@@ -55,6 +55,11 @@ tags:
     description: Inspect and replay dead-lettered hooks. `:dispatch` role only.
   - name: quarantine
     description: Recent quarantined hooks. `:edge` role only.
+  - name: rate_limits
+    description: |
+      Per-tenant ingest rate limits: config values plus this node's runtime
+      overrides (persisted to `rate_limits.json` on the node). `:edge` role
+      only; node-local.
   - name: routes
     description: |
       Route definitions and the global IP rules, on the `routes.admin.port`
@@ -257,6 +262,100 @@ paths:
           $ref: '#/components/responses/InvalidFilter'
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
+  /v1/rate-limits:
+    get:
+      operationId: listRateLimits
+      tags: [rate_limits]
+      summary: Every limit this node enforces
+      description: |
+        The configured default and the configured tenants, unioned with this
+        node's runtime overrides (an override wins). Sorted by tenant id.
+        `default` is `null` when the config sets none, which with no tenant
+        entry means unlimited.
+      responses:
+        '200':
+          description: The default, if any, and every tenant with a limit — configured or overridden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimits'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+  /v1/tenants/{tenant}/rate-limit:
+    parameters:
+      - name: tenant
+        in: path
+        required: true
+        description: The tenant id, as it appears in the catch URL.
+        schema:
+          type: string
+    get:
+      operationId: getTenantRateLimit
+      tags: [rate_limits]
+      summary: The limit that applies to one tenant
+      description: |
+        The override when this node has one, else `rate_limits.tenants`, else
+        `rate_limits.default` — with `source` saying which. `source: none` means
+        unlimited; `rate` and `burst` are `null` then.
+      responses:
+        '200':
+          description: The effective limit and where it came from.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantRateLimit'
+        '400':
+          $ref: '#/components/responses/InvalidTenant'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+    put:
+      operationId: putTenantRateLimit
+      tags: [rate_limits]
+      summary: Set a tenant's override
+      description: |
+        Stored in this node's memory and persisted to `rate_limits.json`, so it
+        survives a restart of this node. Takes effect at once: the tenant's
+        bucket is reset, so a raised limit is not held back by the old limit's
+        accumulated debt. A `{rate, burst}` pair is required whole — neither key
+        is inferred.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RateLimit'
+      responses:
+        '200':
+          description: The stored override.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantRateLimit'
+        '400':
+          $ref: '#/components/responses/InvalidRateLimit'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/RateLimitStoreUnavailable'
+    delete:
+      operationId: deleteTenantRateLimit
+      tags: [rate_limits]
+      summary: Remove a tenant's override
+      description: |
+        The config's limit applies again (`source: config` or `default`), and
+        the bucket is reset. Immediate, like the source store's own deletes —
+        and, like them, this node's alone.
+      responses:
+        '204':
+          description: Deleted. No body.
+        '400':
+          $ref: '#/components/responses/InvalidTenant'
+        '404':
+          $ref: '#/components/responses/RateLimitNotFound'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/RateLimitStoreUnavailable'
   /admin/routes/test:
     servers:
       - url: http://localhost:4003
@@ -758,6 +857,59 @@ components:
         replayed:
           type: integer
           description: Number of entries re-delivered.
+    RateLimit:
+      type: object
+      description: |
+        A rate limit. `rate` is hooks per second and may be fractional (`0.5`
+        is one every two seconds); `burst` is the most hooks admitted back to
+        back.
+      required: [rate, burst]
+      additionalProperties: false
+      properties:
+        rate:
+          type: number
+          exclusiveMinimum: 0
+          example: 50
+        burst:
+          type: integer
+          minimum: 1
+          example: 100
+    TenantRateLimit:
+      type: object
+      description: One tenant's limit, and whether it came from config or an override.
+      required: [tenant, rate, burst, source]
+      properties:
+        tenant:
+          type: string
+        rate:
+          type: [number, 'null']
+          description: `null` when `source` is `none`.
+        burst:
+          type: [integer, 'null']
+          description: `null` when `source` is `none`.
+        source:
+          type: string
+          enum: [override, config, default, none]
+          description: |
+            `override`: this node's runtime override. `config`:
+            `rate_limits.tenants`. `default`: `rate_limits.default`. `none`: no
+            limit applies, so the tenant is unlimited.
+    RateLimits:
+      type: object
+      required: [default, tenants]
+      properties:
+        default:
+          oneOf:
+            - $ref: '#/components/schemas/RateLimit'
+            - type: 'null'
+          description: |
+            The configured `rate_limits.default`, or `null` when the config sets
+            none. It is never an override: overrides are per tenant.
+        tenants:
+          type: array
+          description: Sorted by tenant id.
+          items:
+            $ref: '#/components/schemas/TenantRateLimit'
     RoutesHealth:
       type: object
       description: |
@@ -1007,6 +1159,9 @@ components:
             - invalid_ip_rules
             - invalid_request
             - invalid_body
+            - invalid_tenant
+            - invalid_rate_limit
+            - rate_limit_not_found
             - store_unavailable
             - wal_disabled
         field:
@@ -1034,6 +1189,30 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    InvalidTenant:
+      description: '`400`. `invalid_tenant`: the tenant is not a valid identity — it must match `[A-Za-z0-9_-]{1,64}`, because it is a URL path segment and a storage partition.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            badTenant:
+              value: {error: invalid_tenant}
+    InvalidRateLimit:
+      description: '`400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, and unknown fields are refused. `message` says which.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            zeroRate:
+              value: {error: invalid_rate_limit, message: 'rate must be a number greater than 0, got 0'}
+            missingBurst:
+              value: {error: invalid_rate_limit, message: 'burst is required'}
+            unknownField:
+              value: {error: invalid_rate_limit, message: 'unknown field "per"'}
+            notJson:
+              value: {error: invalid_rate_limit, message: 'body must be a JSON object'}
     RoleNotEnabled:
       description: '`409`. `role_not_enabled`: this node does not run the role the route needs. Ask another node.'
       content:
@@ -1147,6 +1326,15 @@ components:
           examples:
             noSuchRoute:
               value: {error: not_found}
+    RateLimitNotFound:
+      description: '`404`. `rate_limit_not_found`: this node holds no runtime override for that tenant. The config may still give it a limit — `GET` reports that as `source: config` or `default`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            noOverride:
+              value: {error: rate_limit_not_found}
     StoreUnavailable:
       description: '`503`. `store_unavailable`: nothing was written. Either the route store could not be reached (a Redis store with Redis down), or the write kept losing to concurrent writers and exhausted its retries — the table changed under the snapshot it had validated, every time. Both are transient: retry, and reads keep working from this node''s in-memory snapshot either way.'
       content:
@@ -1155,4 +1343,13 @@ components:
             $ref: '#/components/schemas/Error'
           examples:
             redisDown:
+              value: {error: store_unavailable}
+    RateLimitStoreUnavailable:
+      description: '`503`. `store_unavailable`: `rate_limits.json` could not be written on this node, so the override was not applied — this node''s limits are unchanged. Transient: retry.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unwritableDataDir:
               value: {error: store_unavailable}

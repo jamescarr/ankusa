@@ -13,23 +13,28 @@ defmodule Ankusa.MetricsTest do
 
   alias Ankusa.SourceStore.Static
 
-  defp start_instance do
+  defp start_instance(extra \\ []) do
     config =
       test_config(
-        roles: [:edge],
-        admin: %{enabled: true, port: 0},
-        source_store:
-          {Static,
-           sources: %{
-             "demo" => [
-               verifier: {Ankusa.Verifier.None, []},
-               sinks: [{Ankusa.Sink.Log, []}]
-             ],
-             "strict" => [
-               verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
-               on_verify_failure: :quarantine
-             ]
-           }}
+        Keyword.merge(
+          [
+            roles: [:edge],
+            admin: %{enabled: true, port: 0},
+            source_store:
+              {Static,
+               sources: %{
+                 "demo" => [
+                   verifier: {Ankusa.Verifier.None, []},
+                   sinks: [{Ankusa.Sink.Log, []}]
+                 ],
+                 "strict" => [
+                   verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
+                   on_verify_failure: :quarantine
+                 ]
+               }}
+          ],
+          extra
+        )
       )
 
     put_config(config)
@@ -68,6 +73,21 @@ defmodule Ankusa.MetricsTest do
     # ...and the successful verification above left no series at all: only
     # `status: :failed` events are kept.
     refute scrape =~ ~s(provider="Ankusa.Verifier.None")
+  end
+
+  test "a denied hook is counted once, with its tenant, and tagged rate_limited" do
+    config = start_instance(rate_limits: %{tenants: %{"acme" => %{rate: 0.001, burst: 1}}})
+
+    req = Map.put(request("demo", "x"), :tenant_id, "acme")
+
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(config.instance, req)
+    assert {:error, {:rate_limited, _}} = Ankusa.Edge.Ingest.ingest(config.instance, req)
+
+    scrape = Ankusa.Metrics.scrape(config.instance)
+
+    assert scrape =~ "ankusa_rate_limit_rejected_total{"
+    assert scrape =~ ~s(tenant_id="acme")
+    assert scrape =~ ~s(outcome="rate_limited")
   end
 
   test "duration histograms are exported in seconds, not native units" do

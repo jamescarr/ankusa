@@ -20,6 +20,18 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml)
   is the runnable starting point.
 
+- `rate_limits: {default: …, tenants: {…}}`: per-tenant ingest rate limits. A
+  hook over its tenant's limit gets `429` with `Retry-After` and nothing is
+  written; the charge happens after verification, so a flood of forged requests
+  never spends a tenant's budget. Enforced by each edge node in its own memory,
+  so N edges admit N × the limit. A `rate` and `burst` pair is required per
+  entry, ranges and tenant ids are validated at boot (and by `check-config`,
+  with the same messages as core), and `reference.yml` documents the keys.
+  Limits are also readable and adjustable at runtime through the admin API —
+  `GET /v1/rate-limits`, `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit`, on
+  the `edge` role — which persists overrides to `rate_limits.json` on the
+  node, the same node-local model as API-managed sources.
+
 - `- {type: redis, ...}` sinks: each delivered hook is `PUBLISH`ed to a Redis
   pub/sub channel as an `Ankusa.Sink.Message`, the same value the broker sinks
   publish. Keys: `url` (credentials and db live in it), `channel` (a static

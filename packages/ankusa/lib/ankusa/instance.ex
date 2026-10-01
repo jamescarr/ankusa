@@ -36,6 +36,7 @@ defmodule Ankusa.Instance do
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Routes.validate_config!(config)
     Ankusa.WAL.validate_config!(config)
+    Ankusa.Edge.RateLimiter.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =
@@ -93,7 +94,10 @@ defmodule Ankusa.Instance do
   defp edge_children(config, opts) do
     if Config.role?(config, :edge) do
       [
-        {Ankusa.Edge.Quarantine, opts}
+        {Ankusa.Edge.Quarantine, opts},
+        # Before the batchers and the listener, so the tables exist before the
+        # first request can reach `Ingest`.
+        {Ankusa.Edge.RateLimiter, opts}
       ] ++
         batcher_children(config, opts) ++
         [

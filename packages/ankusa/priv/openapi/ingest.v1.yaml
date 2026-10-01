@@ -64,6 +64,8 @@ paths:
           $ref: '#/components/responses/UnknownSource'
         '413':
           $ref: '#/components/responses/TooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '503':
           $ref: '#/components/responses/Overloaded'
   /webhooks/{tenant_id}/{source_id}:
@@ -96,6 +98,8 @@ paths:
           $ref: '#/components/responses/UnknownSource'
         '413':
           $ref: '#/components/responses/TooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '503':
           $ref: '#/components/responses/Overloaded'
   /health:
@@ -179,6 +183,7 @@ components:
             - not_found
             - overload
             - store_unavailable
+            - rate_limited
         reason:
           type: string
           description: Present on `verification_failed` and `body_read_failed`.
@@ -231,6 +236,18 @@ components:
             $ref: '#/components/schemas/Error'
     TooLarge:
       description: '`413`. `payload_too_large`. Permanent; body exceeds `max_body_bytes`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: |
+        `429`. `rate_limited`: this hook's tenant is over its ingest rate limit
+        on this node (`rate_limits`). Nothing was stored. Transient — retry
+        after the `Retry-After` seconds.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
       content:
         application/json:
           schema:

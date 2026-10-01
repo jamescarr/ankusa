@@ -15,13 +15,14 @@ defmodule Ankusa.Edge.Ingest do
   """
 
   alias Ankusa.{Envelope, Source, Verification}
-  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine}
+  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine, RateLimiter}
 
   @type result ::
           {:ok, Envelope.t()}
           | {:quarantined, term()}
           | {:rejected, term()}
-          | {:error, :unknown_source | :overload | :store_unavailable}
+          | {:error,
+             :unknown_source | :overload | :store_unavailable | {:rate_limited, pos_integer()}}
 
   @type request :: %{
           required(:source_id) => String.t(),
@@ -65,9 +66,29 @@ defmodule Ankusa.Edge.Ingest do
     env = build_envelope(source, tenant_id, req)
 
     case verify(instance, source, env) do
-      {:accept, env} -> commit(instance, source, env)
+      {:accept, env} -> admit(instance, source, env)
       {:quarantine, env, reason} -> quarantine(instance, env, reason)
       {:reject, reason} -> {:rejected, reason}
+    end
+  end
+
+  # The charge comes after verification, and only for hooks verification
+  # accepted: a forged flood is free, so it can never lock a tenant out of its
+  # own budget. Quarantine has its own global bucket and never spends a
+  # tenant's.
+  defp admit(instance, source, env) do
+    case RateLimiter.hit(instance, env.tenant_id) do
+      :ok ->
+        commit(instance, source, env)
+
+      {:error, {:rate_limited, _}} = limited ->
+        Ankusa.Telemetry.emit([:rate_limit, :rejected], %{}, %{
+          instance: instance,
+          tenant_id: env.tenant_id,
+          source_id: env.source_id
+        })
+
+        limited
     end
   end
 
@@ -164,5 +185,6 @@ defmodule Ankusa.Edge.Ingest do
   defp tag({:ok, _}), do: :committed
   defp tag({:quarantined, _}), do: :quarantined
   defp tag({:rejected, _}), do: :rejected
+  defp tag({:error, {:rate_limited, _retry_after_ms}}), do: :rate_limited
   defp tag({:error, reason}), do: reason
 end
