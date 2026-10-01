@@ -322,6 +322,28 @@ Every failure carries `retryable`: `false` for `InvalidClaimRefError`,
 `:body`) and `ClaimIntegrityError`; `true` for `ClaimCheckUnavailableError`
 (`5xx`/`503` or unreachable).
 
+### From Java, with the SDK
+
+[`packages/sdk-java`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-java)
+(Maven Central `io.github.jamescarr:ankusa-sdk`, Java 17+) ships a
+`ClaimCheckClient` on the JDK's own `HttpClient` against the same contract: it
+parses a ref, redeems it, and verifies the bytes against the message's sha256
+before returning them. Alongside it sit a webhook header helper and the routes,
+admin, and sources clients.
+
+```java
+import io.github.jamescarr.ankusa.claimcheck.ClaimCheckClient;
+
+ClaimCheckClient claimCheck = new ClaimCheckClient("http://localhost:4001");
+
+// claim and sha256 are the queue message's fields.
+byte[] body = claimCheck.redeem(claim, sha256);
+```
+
+Every failure is an unchecked `ClaimCheckError` whose `retryable()` returns
+`false` for a malformed ref, `404`, other `4xx` or an integrity mismatch, and
+`true` for `5xx`/`503`, an unfollowed redirect, or an unreachable gateway.
+
 ### Any other language
 
 Any OpenAPI generator, `openapi-generator`, `openapi-python-client`, works

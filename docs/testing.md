@@ -6,7 +6,7 @@ different infrastructure dependency (none, RabbitMQ, Redpanda, NATS, Redis).
 `mise run check:package <pkg>` runs one package's full CI check (format,
 warnings-as-errors, tests, docs), starting and stopping that package's own
 `docker-compose.yml` around the suite; `mise run check` runs all of them. The
-seven client SDKs are also checked against one shared, language-neutral vector
+eight client SDKs are also checked against one shared, language-neutral vector
 suite — `mise run check:conformance`, below.
 
 ## `ankusa` core: `mix test`
@@ -223,11 +223,11 @@ messages.
 ## SDK conformance: one harness across the SDKs
 
 `packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`,
-`packages/sdk-ruby`, `packages/sdk-go`, `packages/sdk-php`, and
-`packages/sdk-elixir` are the seven client SDKs. Rather than hand-write each
-one's edge-case tests, all seven are checked against the same language-neutral
-vectors in `conformance/`: a feature manifest (`features.json`), JSON cases
-(`cases/*.json`), and a native runner per SDK
+`packages/sdk-ruby`, `packages/sdk-go`, `packages/sdk-php`,
+`packages/sdk-elixir`, and `packages/sdk-java` are the eight client SDKs.
+Rather than hand-write each one's edge-case tests, all eight are checked
+against the same language-neutral vectors in `conformance/`: a feature manifest
+(`features.json`), JSON cases (`cases/*.json`), and a native runner per SDK
 (`packages/sdk-python/tests/test_conformance.py`,
 `packages/sdk-typescript/src/conformance/conformance.test.ts`,
 `packages/sdk-rust/tests/conformance.rs`,
@@ -235,9 +235,12 @@ vectors in `conformance/`: a feature manifest (`features.json`), JSON cases
 `packages/sdk-go/conformance_test.go`,
 `packages/sdk-php/tests/Conformance/ConformanceTest.php` — the PHP runner
 stands up PHP's built-in server on a free port to answer as the mock gateway —
-and `packages/sdk-elixir/test/conformance_test.exs`, whose runner hand-writes a
+`packages/sdk-elixir/test/conformance_test.exs`, whose runner hand-writes a
 `:gen_tcp` gateway so it can abandon a delayed response mid-flight the way the
-timeout vectors require).
+timeout vectors require, and
+`packages/sdk-java/src/test/java/io/github/jamescarr/ankusa/conformance/ConformanceTest.java`,
+a JUnit Jupiter `@TestFactory` that starts the JDK's own
+`com.sun.net.httpserver.HttpServer` for the mock gateway).
 
 ```sh
 mise run check:conformance    # validate conformance/, then run every SDK

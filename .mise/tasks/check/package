@@ -70,6 +70,13 @@ case "$kind" in
     composer analyse
     composer test
     ;;
+  java)
+    # One foreground sbt JVM; testFull, not test, because of sbt 2's cache and
+    # the external vectors; publish stages the unsigned bundle that
+    # release-maven.yml signs.
+    rm -rf target/sona-staging
+    sbt --server --batch "javafmtCheckAll; testFull; doc; publish"
+    ;;
 esac
 
 if [ "$kind" = hex ]; then
@@ -111,4 +118,23 @@ if [ "$kind" = php ]; then
   composer archive --format=zip --dir="$tmp" --file=sdk-php
   leaked=$(unzip -Z1 "$tmp/sdk-php.zip" | grep -E '^(vendor|tests|\.phpunit\.cache)/|^\.php-cs-fixer\.cache$' || true)
   [ -z "$leaked" ] || fail "the sdk-php archive ships files it must not: $(echo $leaked)"
+fi
+
+if [ "$kind" = java ]; then
+  # The staged bundle is exactly what release-maven.yml signs and uploads.
+  group=$(_pkg_sbt_setting "$dir" organization)
+  artifact=$(_pkg_sbt_setting "$dir" name)
+  v=$(pkg_version "$pkg")
+  staged="target/sona-staging/${group//.//}/$artifact/$v"
+  for suffix in .jar -sources.jar -javadoc.jar .pom -cyclonedx.json; do
+    [ -f "$staged/$artifact-$v$suffix" ] || fail "publish staged no $artifact-$v$suffix"
+  done
+  jar="$staged/$artifact-$v.jar"
+  unzip -p "$jar" META-INF/MANIFEST.MF | grep -q '^Automatic-Module-Name: io.github.jamescarr.ankusa' ||
+    fail "$jar has no Automatic-Module-Name"
+  javap -v -cp "$jar" io.github.jamescarr.ankusa.ClientOptions | grep -q 'major version: 61' ||
+    fail "$jar is not Java 17 bytecode"
+  if grep -qi scala "$staged/$artifact-$v.pom"; then fail "the POM mentions Scala"; fi
+  leaked=$(unzip -Z1 "$jar" | grep -vE '^(META-INF/|io/$|io/github/$|io/github/jamescarr/$|io/github/jamescarr/ankusa/)' || true)
+  [ -z "$leaked" ] || fail "the jar ships files outside io/github/jamescarr/ankusa: $(echo $leaked)"
 fi
