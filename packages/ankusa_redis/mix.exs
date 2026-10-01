@@ -71,8 +71,7 @@ defmodule AnkusaRedis.MixProject do
   # store as `insert(instance, route)` and `replace(instance, route)`, while this
   # store implements the version-checked `insert/3` and `replace/3` that core has
   # from the 0.3 line on (see `Ankusa.Routes.Store`). Against a 0.2.x core every
-  # route write would fail, so Hex must never pair them. It also has to stay
-  # satisfied by the core in this tree, or `ankusa_server` could not build.
+  # route write would fail, so Hex must never pair them.
   defp ankusa_dep do
     if Mix.env() in [:dev, :test] do
       {:ankusa, path: "../ankusa"}
