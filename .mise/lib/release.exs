@@ -7,14 +7,15 @@
 #     nothing under [Unreleased].
 #
 #   elixir .mise/lib/release.exs apply DIR NEW TAG_PREFIX PREV_TAG DATE
-#     Sets @version in mix.exs (npm versions are `npm version`'s job;
-#     pyproject.toml versions are `uv version`'s job), opens
+#     Sets @version in mix.exs, or `version` in Cargo.toml for a Cargo package
+#     (npm versions are `npm version`'s job; pyproject.toml versions are
+#     `uv version`'s job), opens
 #     `## [NEW] - DATE` under [Unreleased] in CHANGELOG.md, and points the
 #     footer compare links at the new tag. PREV_TAG may be "" (first release).
 defmodule Release do
   @repo "https://github.com/jamescarr/ankusa"
   @version_re ~r/^  @version "([^"]+)"$/m
-  @pyproject_version_re ~r/^version = "([^"]+)"$/m
+  @toml_version_re ~r/^version = "([^"]+)"$/m
 
   def main(["plan", dir, bump]) do
     current = current_version(dir)
@@ -25,12 +26,24 @@ defmodule Release do
   def main(["apply", dir, new, prefix, prev_tag, date]) do
     Version.parse(new) == :error && die("#{new} is not a version")
 
-    unless File.exists?(Path.join(dir, "package.json")) or
-             File.exists?(Path.join(dir, "pyproject.toml")) do
-      mix = Path.join(dir, "mix.exs")
-      source = File.read!(mix)
-      _ = mix_version!(source, mix)
-      File.write!(mix, Regex.replace(@version_re, source, ~s(  @version "#{new}")))
+    cargo_toml = Path.join(dir, "Cargo.toml")
+
+    cond do
+      # Their own tools bump these: `npm version` and `uv version`.
+      File.exists?(Path.join(dir, "package.json")) or
+          File.exists?(Path.join(dir, "pyproject.toml")) ->
+        :ok
+
+      File.exists?(cargo_toml) ->
+        source = File.read!(cargo_toml)
+        _ = toml_version!(source, cargo_toml)
+        File.write!(cargo_toml, Regex.replace(@toml_version_re, source, ~s(version = "#{new}")))
+
+      true ->
+        mix = Path.join(dir, "mix.exs")
+        source = File.read!(mix)
+        _ = mix_version!(source, mix)
+        File.write!(mix, Regex.replace(@version_re, source, ~s(  @version "#{new}")))
     end
 
     changelog = Path.join(dir, "CHANGELOG.md")
@@ -54,6 +67,7 @@ defmodule Release do
   defp current_version(dir) do
     package_json = Path.join(dir, "package.json")
     pyproject = Path.join(dir, "pyproject.toml")
+    cargo_toml = Path.join(dir, "Cargo.toml")
     mix = Path.join(dir, "mix.exs")
 
     cond do
@@ -64,18 +78,23 @@ defmodule Release do
         end
 
       File.exists?(pyproject) ->
-        pyproject |> File.read!() |> pyproject_version!(pyproject)
+        pyproject |> File.read!() |> toml_version!(pyproject)
+
+      File.exists?(cargo_toml) ->
+        cargo_toml |> File.read!() |> toml_version!(cargo_toml)
 
       File.exists?(mix) ->
         mix |> File.read!() |> mix_version!(mix)
 
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, or mix.exs")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, or mix.exs")
     end
   end
 
-  defp pyproject_version!(source, path) do
-    case Regex.scan(@pyproject_version_re, source) do
+  # `[package] version = "..."` and PEP 621's `version = "..."` are the same
+  # line, so one reader serves both.
+  defp toml_version!(source, path) do
+    case Regex.scan(@toml_version_re, source) do
       [[_, v]] -> v
       [] -> die(~s(#{path} has no `version = "..."` line))
       _ -> die(~s(#{path} has more than one `version = "..."` line))

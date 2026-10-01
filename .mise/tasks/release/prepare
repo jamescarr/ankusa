@@ -58,6 +58,11 @@ while [ $i -lt ${#pkgs[@]} ]; do
     # then the tag run) fails with "lockfile needs to be updated". --no-sync
     # keeps it from also creating a .venv in the package directory.
     (cd "$dir" && uv version "$new" --no-sync >/dev/null)
+  elif [ "$(pkg_kind "$p")" = cargo ]; then
+    # Cargo.lock records the crate's own version, so the bump has to rewrite it
+    # or the next `cargo build --locked` (CI on this PR, then `cargo publish
+    # --locked`) fails. --workspace touches only this crate's lock entries.
+    (cd "$dir" && cargo update --workspace --quiet)
   fi
   printf '  %-18s -> %s\n' "$p" "$new"
 

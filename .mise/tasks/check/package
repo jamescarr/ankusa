@@ -45,6 +45,12 @@ case "$kind" in
     uv run pytest
     uv run mypy
     ;;
+  cargo)
+    cargo fmt --check
+    cargo clippy --locked --all-targets --all-features -- -D warnings
+    cargo test --locked --all-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
+    ;;
 esac
 
 if [ "$kind" = hex ]; then
@@ -63,4 +69,10 @@ if [ "$kind" = python ]; then
   # Build the sdist + wheel the way release-python.yml publishes them.
   tmp=$(mktemp -d)
   uv build --out-dir "$tmp"
+fi
+
+if [ "$kind" = cargo ]; then
+  # Package (and build from the packaged sources) the way release-crates.yml
+  # publishes it.
+  cargo package --locked --allow-dirty
 fi

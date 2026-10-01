@@ -1,0 +1,87 @@
+name: Release (crates.io)
+
+# Tag-driven crates.io publish for packages/sdk-rust (published as the
+# `ankusa` crate), the same shape as release-python.yml — its own tag prefix,
+# `sdk-rust-v*` (the directory name), distinct from the Hex core package's
+# `ankusa-v*` and the npm/PyPI SDKs' `sdk-typescript-v*`/`sdk-python-v*`.
+# Tagged by `mise run release:tag sdk-rust`.
+#
+# Publishes with the `CARGO_REGISTRY_TOKEN` repository secret: a crates.io API
+# token carrying the `publish-new` scope (creating the crate name — the first
+# release only) and `publish-update` (a new version of an existing crate, so
+# every release after that), from crates.io → Account Settings → API Tokens.
+# crates.io Trusted Publishing would avoid the secret, but a trusted publisher
+# is registered on the crate's own settings page, so the crate has to exist
+# before it can be used — the first publish is token-driven regardless.
+# docs/releasing.md lists the three changes that switch this workflow over
+# afterwards.
+
+on:
+  push:
+    tags:
+      - "sdk-rust-v*"
+
+concurrency:
+  group: release-crates-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          [ "$(pkg_kind "$PKG")" = cargo ] || fail "$GITHUB_REF_NAME is not a Cargo package tag"
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          PKG_VERSION=$(pkg_version "$PKG")
+          [ "$PKG_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/Cargo.toml $PKG_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to crates.io + GitHub release
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-level permissions replace the workflow's rather than extending
+      # them, so `contents: write` has to be repeated here or `gh release
+      # create` below gets a 403.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to .mise.toml's rust, the toolchain `mise run check:package
+      # sdk-rust` built and tested with: dtolnay/rust-toolchain's default
+      # floats, which would let the release be built by a compiler nothing
+      # here ever validated.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - name: cargo publish
+        working-directory: packages/sdk-rust
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh && pkg_notes sdk-rust "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
