@@ -7,5 +7,5 @@ COPY src ./src
 RUN cargo build --release --locked
 
 FROM alpine:3.24
-COPY --from=build /src/target/release/ankusa-rust-worker /usr/local/bin/worker
+COPY --from=build /src/target/release/ankusa-nats-consumer /usr/local/bin/worker
 CMD ["worker"]

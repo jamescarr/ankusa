@@ -1,0 +1,41 @@
+# Ankusa publishing to NATS JetStream, consumed by a Rust worker.
+#   docker compose up --build -d --wait
+#   curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1","type":"invoice.paid"}'
+#   docker compose logs worker
+services:
+  nats:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222"]   # JetStream on, monitoring on 8222
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Creates the ANKUSA stream on startup, then pulls from it. Holds no storage
+  # credentials: large bodies are redeemed through Ankusa's claim-check gateway.
+  worker:
+    build: .                   # this directory: Cargo.toml + src, SDK from crates.io
+    init: true                 # tini as PID 1, so `docker compose stop worker` is instant
+    environment:
+      NATS_URL: nats://nats:4222
+      CLAIM_CHECK_URL: http://ankusa:4001
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  ankusa:
+    image: ${ANKUSA_IMAGE:-jamescarr/ankusa:edge}
+    ports:
+      - "4000:4000"            # ingest: the only port providers need
+      - "127.0.0.1:4002:4002"  # admin API: health, metrics, dead letters, replay
+      # 4001, the claim-check gateway, stays on the compose network: it serves
+      # hook bodies without authentication.
+    volumes:
+      - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
+      - ankusa-data:/var/lib/ankusa
+    depends_on:
+      - worker
+
+volumes:
+  ankusa-data:

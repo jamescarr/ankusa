@@ -1,0 +1,35 @@
+# The nats-consumer config: one open `demo` source publishing to NATS JetStream,
+# with large bodies checked in to the claim-check gateway on this same node.
+# Every key, at its default: https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml
+
+node:
+  roles: [edge, dispatch, storage, claim_check]
+  data_dir: /var/lib/ankusa
+
+admin:
+  enabled: true
+  port: 4002
+
+claim_check:
+  port: 4001
+
+# Short on purpose, so a missing stream dead-letters in seconds, not minutes:
+# 6 attempts over roughly 8-15s. The default is 12 attempts, backing off to 30s.
+dispatch:
+  retry:
+    base_ms: 1000
+    max_ms: 4000
+    max_attempts: 6
+
+sources:
+  demo:
+    # Accepts anything, so it works before you have provider credentials.
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    sinks:
+      - type: nats
+        servers: [nats:4222]
+        # The worker's ANKUSA stream covers `ankusa.>`.
+        subject: ankusa.demo
+        # Low on purpose, so a ~20 KB hook takes the claim-check path.
+        inline_max_bytes: 8192
