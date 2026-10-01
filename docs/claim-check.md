@@ -234,6 +234,33 @@ Every failure is a `ClaimCheckError`, and `is_retryable()` splits it the same
 way: `false` for a malformed ref, `404`, other `4xx`, or an integrity
 mismatch; `true` for `5xx`/`503`, an unfollowed redirect, or an unreachable
 gateway.
+### From PHP, with the SDK
+
+[`packages/sdk-php`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-php)
+(Packagist package `jamescarr/ankusa`) ships the same three pieces on top of
+PSR-18 (`guzzlehttp/guzzle` by default, any PSR-18 client injected): a
+`ClaimCheckClient` that parses a ref, redeems it, and verifies the bytes against
+the message's sha256, a webhook header helper for the HTTP-sink side, and
+clients for the routes, admin and source APIs.
+
+```sh
+composer require jamescarr/ankusa   # or, before its first Packagist release,
+                                    # a path repository, see the package README
+```
+
+```php
+use Ankusa\ClaimCheck\ClaimCheckClient;
+use Ankusa\ClaimCheck\ClaimCheckError;
+
+$claimCheck = new ClaimCheckClient(getenv('CLAIM_CHECK_URL') ?: 'http://localhost:4001');
+
+// $claim and $sha256 are the queue message's fields.
+$body = $claimCheck->redeem($claim, $sha256);
+```
+
+Every failure is a `ClaimCheckError` whose `isRetryable()` returns `false` for a
+malformed ref, `404`, other `4xx` or an integrity mismatch, and `true` for
+`5xx`/`503` or an unreachable gateway.
 
 ### From Ruby, with the SDK
 

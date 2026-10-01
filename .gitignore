@@ -39,6 +39,12 @@ packages/sdk-rust/target/
 packages/sdk-ruby/*.gem
 packages/sdk-ruby/.bundle/
 
+# Composer (packages/sdk-php): vendored deps, and the tool caches
+# (phpunit's cache directory, php-cs-fixer's cache file).
+packages/sdk-php/vendor/
+packages/sdk-php/.phpunit.cache/
+packages/sdk-php/.php-cs-fixer.cache
+
 # Python (packages/sdk-python, examples/quickstart).
 **/.venv/
 **/__pycache__/

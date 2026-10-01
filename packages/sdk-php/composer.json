@@ -1,0 +1,54 @@
+{
+    "name": "jamescarr/ankusa",
+    "description": "Client SDK for Ankusa deployments: the claim-check gateway client, the route-management, operator (admin) and source-management clients, and a webhook-receiving header helper.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": [
+        "ankusa",
+        "webhook",
+        "claim-check",
+        "routes",
+        "admin"
+    ],
+    "homepage": "https://github.com/jamescarr/ankusa/tree/main/packages/sdk-php",
+    "support": {
+        "issues": "https://github.com/jamescarr/ankusa/issues",
+        "source": "https://github.com/jamescarr/ankusa/tree/main/packages/sdk-php"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ankusa\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Ankusa\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "lint": "php-cs-fixer check --diff",
+        "fix": "php-cs-fixer fix",
+        "analyse": "phpstan analyse --no-progress --memory-limit=1G",
+        "test": "phpunit",
+        "conformance": "phpunit --testsuite conformance"
+    },
+    "config": {
+        "platform": {
+            "php": "8.3.0"
+        },
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "require": {
+        "php": "^8.3",
+        "guzzlehttp/guzzle": "^7.9",
+        "guzzlehttp/psr7": "^2.13",
+        "psr/http-client": "^1.0",
+        "psr/http-message": "^2.0"
+    },
+    "require-dev": {
+        "friendsofphp/php-cs-fixer": "^3.95",
+        "phpstan/phpstan": "^2.2",
+        "phpunit/phpunit": "^12.5"
+    }
+}

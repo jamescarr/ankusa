@@ -19,3 +19,21 @@ actionlint = "1.7.12"
 uv = "0.12.16"
 # packages/sdk-go's toolchain; the `go` line in its go.mod is the floor.
 go = "1.27.1"
+# Prebuilt static PHP (static-php-cli "common" extensions): mise's own php
+# backends compile from source. Pinned to packages/sdk-php's floor (^8.3).
+[tools."http:php"]
+version = "8.3.32"
+
+[tools."http:php".platforms]
+linux-x64 = { url = "https://dl.static-php.dev/static-php-cli/common/php-8.3.32-cli-linux-x86_64.tar.gz", checksum = "sha256:d7ff2bc40846f4efed2757e5929f7469c96f672fbf33eb4bb80cd695534750fe" }
+linux-arm64 = { url = "https://dl.static-php.dev/static-php-cli/common/php-8.3.32-cli-linux-aarch64.tar.gz", checksum = "sha256:e7644c646a62c44627d00e3deff498eeb943814adcc948b3de42a8ebfe07aaf2" }
+macos-x64 = { url = "https://dl.static-php.dev/static-php-cli/common/php-8.3.32-cli-macos-x86_64.tar.gz", checksum = "sha256:aad1365eb29a6788c59494d39bc71ef5f72a8a384495b0d6004007a768449f8b" }
+macos-arm64 = { url = "https://dl.static-php.dev/static-php-cli/common/php-8.3.32-cli-macos-aarch64.tar.gz", checksum = "sha256:1cc8148750bd1722031daba1618825a8b7d0a3830bb92c50d8dd844a1dcfb306" }
+
+# Composer, as the phar. `bin = "composer"` makes the download land on PATH
+# under its own name (`http:composer` alone would install it as `composer.phar`).
+[tools."http:composer"]
+version = "2.10.3"
+url = "https://getcomposer.org/download/2.10.3/composer.phar"
+checksum = "sha256:7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6"
+bin = "composer"
