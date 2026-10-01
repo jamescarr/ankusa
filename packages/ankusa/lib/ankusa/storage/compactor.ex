@@ -19,6 +19,8 @@ defmodule Ankusa.Storage.Compactor do
 
   use GenServer
 
+  require Logger
+
   alias Ankusa.{Config, Envelope}
   alias Ankusa.Storage.Index
 
@@ -84,13 +86,26 @@ defmodule Ankusa.Storage.Compactor do
         {written, state}
 
       entries ->
-        write_segment(state, entries)
-        state = %{state | cursor: next_cursor}
+        case write_segment(state, entries) do
+          :ok ->
+            state = %{state | cursor: next_cursor}
 
-        if more? do
-          compact(state, written + 1)
-        else
-          {written + 1, state}
+            if more? do
+              compact(state, written + 1)
+            else
+              {written + 1, state}
+            end
+
+          {:error, reason} ->
+            # Cursor not advanced, loop stops: the same records (and same
+            # segment key) are rewritten next tick, and `Index`'s `insert_new`
+            # makes that a no-op for rows already written.
+            Logger.warning(
+              "[ankusa] compactor cursor #{next_cursor} not persisted, " <>
+                "segment is rewritten next tick: #{inspect(reason)}"
+            )
+
+            {written, state}
         end
     end
   end
@@ -182,21 +197,40 @@ defmodule Ankusa.Storage.Compactor do
 
     :ok = Index.append(config, rows)
 
-    :ok = Ankusa.WAL.put_cursor(instance, :compactor, last_seq)
+    case Ankusa.WAL.put_cursor(instance, :compactor, last_seq) do
+      :ok ->
+        # never truncate past what dispatch has consumed — at-least-once
+        dispatch_seq = Ankusa.WAL.get_cursor(instance, :dispatch)
+        truncate_through = min(last_seq, dispatch_seq)
 
-    # never truncate past what dispatch has consumed — at-least-once
-    dispatch_seq = Ankusa.WAL.get_cursor(instance, :dispatch)
-    :ok = Ankusa.WAL.truncate_through(instance, min(last_seq, dispatch_seq))
+        case Ankusa.WAL.truncate_through(instance, truncate_through) do
+          :ok ->
+            :ok
 
-    Ankusa.Telemetry.emit(
-      [:compact, :stop],
-      %{
-        records: length(entries),
-        bytes: byte_size(segment),
-        duration: System.monotonic_time() - started
-      },
-      %{instance: instance}
-    )
+          {:error, reason} ->
+            # The records are in the segment and the index; the floor write can
+            # be retried by any later `truncate_through`.
+            Logger.warning(
+              "[ankusa] WAL truncation through #{truncate_through} failed, " <>
+                "retried after the next segment: #{inspect(reason)}"
+            )
+        end
+
+        Ankusa.Telemetry.emit(
+          [:compact, :stop],
+          %{
+            records: length(entries),
+            bytes: byte_size(segment),
+            duration: System.monotonic_time() - started
+          },
+          %{instance: instance}
+        )
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp schedule(interval) when is_integer(interval) and interval > 0 do

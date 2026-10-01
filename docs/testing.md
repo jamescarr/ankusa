@@ -12,15 +12,18 @@ suite — `mise run check:conformance`, below.
 ## `ankusa` core: `mix test`
 
 ```sh
-mise run check:package ankusa         # 389 tests, no external infra needed
+mise run check:package ankusa         # 412 tests, no external infra needed
 mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
-The 389 always-on tests cover:
+The 412 always-on tests cover:
 
 - **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
   truncation, that a restart after a full truncation does **not** reuse seqs,
-  and the measurements `[:commit, :stop]` reports.
+  the measurements `[:commit, :stop]` reports, and fault-injected write
+  failures: a failed append reports `{:error, _}` without killing the WAL and
+  without consuming a seq, and a failed cursor or floor write leaves the
+  in-memory state exactly where it was.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing
@@ -46,9 +49,11 @@ The 389 always-on tests cover:
   cursor while another ordering key proceeds, and same-key deliveries stay in
   the order dispatch read them from the log.
 - **Storage**: compaction round-trip, `roll_bytes` splitting a backlog into
-  several segments in one tick, and the live index: a lookup after a
-  later compaction sees every row, and one taken while the compactor is down
-  falls back to the file and is correct again after its restart.
+  several segments in one tick, a compactor cursor that cannot be persisted
+  being retried on the next tick instead of crashing, and the live index: a
+  lookup after a later compaction sees every row, and one taken while the
+  compactor is down falls back to the file and is correct again after its
+  restart.
 - **Claim Check** (`test/ankusa/claim_check/`, `test/ankusa/dispatch/claim_check_test.exs`):
   reference parsing (URN grammar, tenant and ULID claim-id rejection, date
   partitions from the pack id's timestamp, claim ids locating their pack and

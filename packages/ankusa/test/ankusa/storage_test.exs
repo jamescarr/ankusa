@@ -246,4 +246,35 @@ defmodule Ankusa.StorageTest do
     # everything was compacted, so the WAL is fully reclaimed
     assert Ankusa.WAL.stats(inst).records == 0
   end
+
+  test "a compactor cursor that can't be persisted is retried next tick, not crashed on",
+       %{inst: inst, config: config} do
+    originals = commit!(inst, [envelope("acme", "one"), envelope("acme", "two")])
+    last_seq = originals |> List.last() |> Map.fetch!(:seq)
+    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, last_seq)
+
+    compactor = GenServer.whereis(Ankusa.via(inst, :compactor))
+
+    # A directory where `persist_term/2` wants its temp file makes the cursor
+    # write fail, the way a full disk would.
+    wal_path = Path.join(Config.path(config, "wal"), "ankusa.wal")
+    File.mkdir_p!(wal_path <> ".cursors.tmp")
+
+    assert {:ok, 0} == Compactor.tick(inst)
+    assert GenServer.whereis(Ankusa.via(inst, :compactor)) == compactor
+    assert Process.alive?(compactor)
+    assert Ankusa.WAL.get_cursor(inst, :compactor) == 0
+    # nothing was truncated: the records are still the WAL's to re-compact
+    assert Ankusa.WAL.stats(inst).records == 2
+
+    File.rmdir!(wal_path <> ".cursors.tmp")
+
+    assert {:ok, 1} == Compactor.tick(inst)
+    assert Ankusa.WAL.stats(inst).records == 0
+
+    for original <- originals do
+      assert {:ok, fetched} = Storage.fetch(inst, original.id)
+      assert fetched.body == original.body
+    end
+  end
 end

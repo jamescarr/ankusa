@@ -11,6 +11,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Fixed
+
+- **A full disk no longer crash-loops the WAL.** A failed disk write in
+  `Ankusa.WAL.DiskLog` now surfaces as `{:error, reason}` instead of a crashed
+  process: a failed `append/2` acks nothing and consumes no seqs — the batcher's
+  existing `503 store_unavailable` mapping is unchanged — and a failed
+  `put_cursor/3`/`truncate_through/2` leaves the cursor/floor where it was. A
+  physical rewrite that cannot copy is skipped, not fatal. Dispatch and the
+  compactor retry a failed cursor write on their next tick, and ingest resumes
+  on its own once space frees. The `Ankusa.WAL` adapter contract documents the
+  new error returns. Not covered yet: the compactor's segment and index writes
+  still raise on a full disk, so on a node running the `storage` role with the
+  local blob store on the same volume, the compactor can still crash-loop.
+- A WAL rewrite no longer reuses a `.compact` file left by a crash mid-rewrite,
+  whose stale tail could otherwise follow the copied frames into the new log.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

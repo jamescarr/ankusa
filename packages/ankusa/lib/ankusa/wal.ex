@@ -17,6 +17,10 @@ defmodule Ankusa.WAL do
       use them only as a cursor.
     * After a crash, replay MUST drop a torn trailing record (a commit that never
       `fsync`'d) so no un-acked write is ever surfaced.
+    * `append/2`, `put_cursor/3` and `truncate_through/2` return `{:error, reason}`
+      when the write could not be made durable (a full disk, say). A failed
+      `append/2` makes none of its records visible and consumes no seqs; a failed
+      `put_cursor/3`/`truncate_through/2` leaves the cursor/floor where it was.
 
   A record is `%{envelope: Ankusa.Envelope.t()}`. Adapters set `envelope.seq` on
   the returned committed envelope.
@@ -28,17 +32,18 @@ defmodule Ankusa.WAL do
   @type entry :: %{envelope: Envelope.t()}
   @type result :: {:committed, Envelope.t()}
 
-  @callback append(server(), [entry()]) :: {:ok, [result()]}
+  @callback append(server(), [entry()]) :: {:ok, [result()]} | {:error, term()}
   @callback read(server(), after_seq :: non_neg_integer(), limit :: pos_integer()) ::
               [Envelope.t()]
   @callback get_cursor(server(), name :: atom()) :: non_neg_integer()
-  @callback put_cursor(server(), name :: atom(), seq :: non_neg_integer()) :: :ok
-  @callback truncate_through(server(), seq :: non_neg_integer()) :: :ok
+  @callback put_cursor(server(), name :: atom(), seq :: non_neg_integer()) ::
+              :ok | {:error, term()}
+  @callback truncate_through(server(), seq :: non_neg_integer()) :: :ok | {:error, term()}
   @callback stats(server()) :: map()
 
   # ── facade ──────────────────────────────────────────────────────────────
 
-  @spec append(atom(), [entry()]) :: {:ok, [result()]}
+  @spec append(atom(), [entry()]) :: {:ok, [result()]} | {:error, term()}
   def append(instance, records), do: apply_mod(instance, :append, [records])
 
   @spec read(atom(), non_neg_integer(), pos_integer()) :: [Envelope.t()]
@@ -47,10 +52,10 @@ defmodule Ankusa.WAL do
   @spec get_cursor(atom(), atom()) :: non_neg_integer()
   def get_cursor(instance, name), do: apply_mod(instance, :get_cursor, [name])
 
-  @spec put_cursor(atom(), atom(), non_neg_integer()) :: :ok
+  @spec put_cursor(atom(), atom(), non_neg_integer()) :: :ok | {:error, term()}
   def put_cursor(instance, name, seq), do: apply_mod(instance, :put_cursor, [name, seq])
 
-  @spec truncate_through(atom(), non_neg_integer()) :: :ok
+  @spec truncate_through(atom(), non_neg_integer()) :: :ok | {:error, term()}
   def truncate_through(instance, seq), do: apply_mod(instance, :truncate_through, [seq])
 
   @spec stats(atom()) :: map()
