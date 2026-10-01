@@ -156,6 +156,64 @@ From here, ingest is done. Two independent consumers tail the WAL by `seq`:
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and serialized per `c:Ankusa.Sink.ordering_key/2`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal, durable watermark cursor survives restart. |
 | Quarantine | Token-bucket rate-limited (100 burst, 20/s refill) durable pen. A bad secret rotation can't silently eat real events, and a flood of forged requests can't fill the disk. |
 
+## Archive: a retention window, by design (planned)
+
+> **Planned, not shipped.** Designed in
+> [`reliability-fixes.md`](https://github.com/jamescarr/ankusa/blob/main/reliability-fixes.md)
+> (Phase 1). Today the compactor writes `seg/` segments indexed on the node;
+> see [`storage.md`](storage.md).
+
+The archive holds every accepted hook for a fixed **window**: a day, a week,
+ninety days. The window is the archive bucket's lifecycle policy, not an Ankusa
+setting. The archive is a recovery buffer for replay, not a system of record:
+a replay reaches back as far as the window, and older hooks are gone on
+purpose.
+
+```mermaid
+flowchart LR
+    W[(WAL)] -->|seq cursor| C[Compactor\narchive writer]
+    C -->|"segments + manifests\narchive/v1/dt=/hr=/m=/writer/"| A[("ankusa-archive\nbucket")]
+    C -->|"watermark\narchive/v1/_writers/"| A
+    LC{{"lifecycle rule\nexpire archive/v1/dt= after N days"}} -.->|deletes whole days| A
+    R[Replay / fetch by id] -->|"window within the last N days"| A
+```
+
+- **The store owns the window.** One lifecycle rule on the `archive/v1/dt=`
+  prefix (S3 or R2 lifecycle configuration, GCS Object Lifecycle Management,
+  Azure lifecycle management, an OCI lifecycle policy) expires archived hooks.
+  Ankusa never expires an archived hook from a cloud store and has no
+  retention setting for one.
+- **The window is a floor.** Lifecycle rules count days from an object's
+  creation, and a segment is written after its hooks arrive, so every hook is
+  held for at least the window. Stores expire asynchronously, so it may live
+  somewhat longer. A replay over a window older than that delivers nothing.
+- **Size it to your recovery horizon**: the longest a consumer outage can go
+  unnoticed, plus the time to replay it. Claims (`claims/`) keep their own
+  rule ([`claim-check.md#retention`](claim-check.md#retention)); archive
+  segments hold full bodies, never claim refs, so the two windows are
+  independent.
+- **Watermarks never expire.** `archive/v1/_writers/` sits outside the `dt=`
+  prefix, so the rule never touches it.
+- **Its own bucket.** `archive.store` (YAML) / the archive's `blob_store`
+  (Elixir) names the archive's store; unset, it is `storage`'s. Give it a
+  dedicated bucket, `ankusa-archive` in these docs, so its lifecycle rule
+  describes the archive and nothing else. The name takes a hyphen, unlike the
+  `ankusa.events` exchange: Azure container names allow no dots, and GCS
+  requires domain verification for dotted bucket names.
+- **LocalFS is the exception.** A directory has no lifecycle policy, so with a
+  LocalFS archive `archive.retention_days` has Ankusa's sweeper delete whole
+  `dt=` days past the window, the same sweeper behind
+  `claim_check.retention_days`. Unset, a LocalFS archive keeps everything; set
+  with any other store, boot fails.
+
+A one-week window on S3:
+
+```sh
+aws s3api put-bucket-lifecycle-configuration --bucket ankusa-archive \
+  --lifecycle-configuration '{"Rules":[{"ID":"ankusa-archive-window","Status":"Enabled",
+    "Filter":{"Prefix":"archive/v1/dt="},"Expiration":{"Days":7}}]}'
+```
+
 ## Instance model
 
 Every process is registered through a single `Registry` (`Ankusa.Registry`)

@@ -37,6 +37,16 @@ both.
    `wal: none` is unreleased (`packages/ankusa/CHANGELOG.md` `[Unreleased]`),
    so requiring the key breaks no deployed config. Under `wal: disk` the archive
    is always `object_store` (the compactor already archives everything today).
+4. **The archive is a window, and the object store defines it.** The archive
+   has its own blob store (`archive.blob_store`, default `storage.blob_store`);
+   docs and examples use a dedicated `ankusa-archive` bucket so one lifecycle
+   rule on `archive/v1/dt=` is the whole retention policy (one day, one week,
+   whatever the operator sets). Ankusa never expires archive objects in a cloud
+   store. LocalFS has no lifecycle policy, so `archive.retention_days` drives
+   Ankusa's sweeper there and is a boot error with any other store, the same
+   rule as `claim_check.retention_days`. The name is hyphenated, not
+   `ankusa.archive` like the `ankusa.events` exchange: Azure containers allow no
+   dots and GCS requires domain verification for dotted bucket names.
 
 ## Invariants (acceptance targets for the whole plan)
 
@@ -54,6 +64,9 @@ both.
 - **I7** Every prefix a read path lists holds O(writers) objects per minute at
   steady state, independent of flush rate, core count, and tenant count. This
   is a scale requirement, not an optimization.
+- **I8** The archive holds every hook for at least the window its store's
+  lifecycle policy (LocalFS: `archive.retention_days`) defines, and Ankusa
+  deletes no hook inside it. A replay window older than that reads nothing.
 
 ## Phase 0: stop losing acked hooks (ship first, independent)
 
@@ -148,11 +161,15 @@ end
   behaviour, with a settable `sealed_through` and late inserts, so the replay
   engine is built and tested without any real writer.
 
-Config: `archive: {Ankusa.Archive.ObjectStore, opts} | :none`, on top of
+Config: `archive: {Ankusa.Archive.ObjectStore, opts} | :none`. `opts[:blob_store]`
+is an `Ankusa.BlobStore` `{module, opts}` tuple; absent, the archive uses
 `storage.blob_store`. YAML: `archive.type: object_store | none` (+ Phase 4
-types), `archive.retention_days`, `archive.seal_lag_ms` (default 30 000),
-`archive.clock_skew_ms` (default 1 000), `archive.watermark_interval_ms`
-(default 5 000).
+types); `archive.store` with the same keys and loader as the `storage` store
+(`type: local | s3 | gcs`, `s3.*`, `gcs.*` through `s3_opts!/1`/`gcs_opts!/1`
+in `ankusa_server/lib/ankusa_server/config.ex`), absent → `storage`'s store;
+`archive.retention_days` (LocalFS only, see Retention); `archive.seal_lag_ms`
+(default 30 000), `archive.clock_skew_ms` (default 1 000),
+`archive.watermark_interval_ms` (default 5 000).
 
 **One clock read per hook.** `build_envelope/3` (`edge/ingest.ex:144-149`)
 reads the clock twice (`UUIDv7.generate/0`, then `System.system_time/1`). Read
@@ -251,11 +268,25 @@ archive/v1/_writers/<writer>                                              # disk
   wait (I6). A node lost for good is retired by an operator (Phase 2 admin
   API), which acknowledges that its unarchived backlog is gone.
 
-**Retention.** `archive.retention_days`. LocalFS: delete whole `dt=`
-directories past retention (same approach as `claim_check/sweeper.ex:10-14`;
-generalize it rather than add a second sweeper). S3/GCS/Azure/OCI: a bucket
-lifecycle rule on `archive/v1/dt=` (documented, as for claim check).
-`_writers/` is never expired.
+**Retention: a window the store owns.** The archive keeps hooks for a fixed
+window, and the archive store's lifecycle policy is that window:
+- S3/R2/GCS/Azure/OCI: one lifecycle rule expiring prefix `archive/v1/dt=`
+  after N days, set by the operator. Ankusa ships no expiry path and no
+  retention key for these stores (a Phase 3 merge deletes flush segments only
+  once the merged segment holds their hooks). Documented example (S3):
+  `aws s3api put-bucket-lifecycle-configuration --bucket ankusa-archive
+  --lifecycle-configuration '{"Rules":[{"ID":"ankusa-archive-window","Status":"Enabled","Filter":{"Prefix":"archive/v1/dt="},"Expiration":{"Days":7}}]}'`.
+- Lifecycle rules count days from object creation, and a segment is created
+  after its hooks' `received_at`, so every hook is held at least N days (I8);
+  expiry is asynchronous, so it may live somewhat longer.
+- `_writers/` is outside the `dt=` prefix, so the rule never expires a
+  watermark.
+- LocalFS: `archive.retention_days` makes the sweeper delete whole `dt=`
+  directories once every object in them is past retention (the
+  `claim_check/sweeper.ex:10-14` approach; generalize that sweeper, don't add a
+  second). `nil` (default) keeps everything. Set with a non-LocalFS archive
+  store → boot error from `Archive.validate_config!/1`:
+  `"archive.retention_days is set but the archive store is <module> — the LocalFS sweeper doesn't cover it. Use a lifecycle rule on the archive/v1/dt= prefix instead, and leave retention_days nil."`
 
 **Deleted.** `Ankusa.Storage.Index` (`storage/index.ex`), `segments/index.log`,
 `Ankusa.Storage.fetch/2` (replaced by `Ankusa.Archive.fetch/2`), the
@@ -263,7 +294,9 @@ lifecycle rule on `archive/v1/dt=` (documented, as for claim check).
 archive.
 
 **Docs.** Lift the one-bucket-per-node rule (`deployment.md:126-129`); rewrite
-`storage.md` for the layout, watermarks, and ack bound.
+`storage.md` for the layout, watermarks, and ack bound. Drop the "Planned, not
+shipped" note from the Archive section of `architecture.md` and add
+`archive.store` / `archive.retention_days` to `configuration.md`.
 
 **Tests**
 - two instances, one LocalFS root: no overwrite; a window read returns both
@@ -285,6 +318,10 @@ archive.
 - `sealed_through/2` returns the minimum over writers and names the lagging
   ones.
 - retention deletes only expired `dt=` directories and never `_writers/`.
+- `archive.retention_days` with an S3 archive store → boot raises; with
+  LocalFS → the sweeper starts.
+- `archive` without `blob_store` writes under `storage.blob_store`; with one,
+  only that store receives `archive/v1/` keys.
 
 ## Phase 2: replay engine + admin API
 
@@ -414,6 +451,8 @@ and both runners. DLQ methods stay until Phase 5.
   - `wal: disk`: `archive: none` is rejected, and a node running the WAL must
     run `:storage` (the compactor already truncates the WAL,
     `compactor.ex:188-189`).
+  - `archive.retention_days` set with a non-LocalFS archive store → boot error
+    (text in Phase 1 Retention).
 - Runtime sources: `WAL.validate_config!` only checks static sources
   (`wal.ex:78-82`). `SourceStore.put/5` must validate the decoded source
   (durable sink **and** archive coverage) before persisting. Today decoding
@@ -581,9 +620,9 @@ Owns: `archive.ex` (behaviour + facade: `read`, `fetch`, `sealed_through`,
 `label`, `writers`, `retire_writer`), `Archive.Layout` (pure: minute prefixes
 for a window, segment/manifest/merged/writer keys, id → minute),
 `Archive.Manifest` (encode/decode incl. `replaces`), `Config` keys
-(`archive.*`, `replay.*`), `ctx.replay` in the `Sink` typedoc, OpenAPI paths
-and schemas for `/v1/replays*` and `/v1/archive/writers*`,
-`test/support/archive_memory.ex`.
+(`archive.*` incl. `blob_store`, `replay.*`), `ctx.replay` in the `Sink`
+typedoc, OpenAPI paths and schemas for `/v1/replays*` and
+`/v1/archive/writers*`, `test/support/archive_memory.ex`.
 Done: Layout/Manifest round-trip and boundary tests (minute/hour/day edges,
 id → minute); `Archive.Memory` passes a shared behaviour conformance test that
 W4, W16, and W17 reuse.
@@ -615,7 +654,9 @@ its last hook completes), registration before the listener; objects asserted
 via Layout/Manifest.
 
 **W6: retention** (Phase 1). Deps: W1.
-Owns: generalizing `claim_check/sweeper.ex` to archive `dt=` partitions.
+Owns: generalizing `claim_check/sweeper.ex` to LocalFS archive `dt=`
+partitions under `archive.retention_days` (cloud stores expire by lifecycle
+rule; no code).
 Done: expired `dt=` directories deleted; `_writers/` and unexpired days
 untouched; claim-check retention behaviour unchanged.
 
@@ -663,10 +704,12 @@ Done: the Phase 3 writer tests; after merge, a sealed minute prefix holds ≤ 2
 objects per writer (I7).
 
 **W14: coverage checks + YAML** (Phase 3). Deps: W1.
-Owns: `Archive.validate_config!/1` and its call in `Instance`, `put/5`
-validation in `SourceStore` (durable + coverage; decode moved to the facade),
-the runtime durability gap in `wal.ex`, the YAML `archive` section, `reference.yml`, `direct.yml`,
-and the boot banner / `check-config` via `Archive.label/1`.
+Owns: `Archive.validate_config!/1` and its call in `Instance` (incl. the
+LocalFS-only `retention_days` check), `put/5` validation in `SourceStore`
+(durable + coverage; decode moved to the facade), the runtime durability gap
+in `wal.ex`, the YAML `archive` section (incl. `archive.store`,
+`archive.retention_days`), `reference.yml`, `direct.yml`, and the boot banner /
+`check-config` via `Archive.label/1`.
 Done: the Phase 3 check tests plus `ankusa_server` config tests.
 
 **W15: `Sink.Message.decode/1`** (Phase 4). Deps: none.
