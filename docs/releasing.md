@@ -262,9 +262,9 @@ mise run release:verify sdk-rust           # HTTP 200 for the version on crates.
 `Cargo.lock` with `cargo update --workspace` (the lock records the crate's own
 version, so `--locked` fails without it); `release:tag`'s preflight confirms
 the version is still unpublished on crates.io and the tag is free; the tag run
-publishes with `cargo publish --locked` on the same Rust toolchain `.mise.toml`
-pins for `check:package sdk-rust`, and cuts the GitHub release from the
-CHANGELOG section.
+publishes with `cargo publish --locked` on the same Rust toolchain
+`.mise/conf.d/sdk-rust.toml` pins for `check:package sdk-rust`, and cuts the
+GitHub release from the CHANGELOG section.
 
 ## Ruby SDK (RubyGems)
 

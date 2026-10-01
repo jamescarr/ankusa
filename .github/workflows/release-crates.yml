@@ -64,10 +64,10 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      # Pinned to .mise.toml's rust, the toolchain `mise run check:package
-      # sdk-rust` built and tested with: dtolnay/rust-toolchain's default
-      # floats, which would let the release be built by a compiler nothing
-      # here ever validated.
+      # Pinned to .mise/conf.d/sdk-rust.toml's rust, the toolchain `mise run
+      # check:package sdk-rust` built and tested with:
+      # dtolnay/rust-toolchain's default floats, which would let the release be
+      # built by a compiler nothing here ever validated.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98.1"

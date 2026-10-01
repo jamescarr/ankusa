@@ -40,6 +40,7 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
           # pkg_version loads the gemspec, so this job needs ruby.
           install_args: ruby
       - id: resolve
@@ -72,11 +73,12 @@ jobs:
       id-token: write # RubyGems Trusted Publishing
     steps:
       - uses: actions/checkout@v4
-      # Pinned to .mise.toml's ruby, the one `mise run check:package sdk-ruby`
-      # built and tested with.
+      # Pinned to .mise/conf.d/sdk-ruby.toml's ruby, the one `mise run
+      # check:package sdk-ruby` built and tested with.
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
           install_args: ruby
 
       - name: gem build

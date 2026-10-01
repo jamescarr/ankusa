@@ -67,6 +67,7 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mix local.hex --force && mix local.rebar --force
 
       - name: mix deps.get

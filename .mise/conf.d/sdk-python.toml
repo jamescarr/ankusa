@@ -1,0 +1,4 @@
+# packages/sdk-python's toolchain. examples/*/pyproject.toml (check:examples)
+# and release:prepare's example relock use it too.
+[tools]
+uv = "0.12.16"
