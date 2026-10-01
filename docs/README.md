@@ -33,7 +33,7 @@ New here? Start with the [quickstart](quickstart.md).
 | --- | --- |
 | [`testing.md`](testing.md) | running the suites, local infra, what each one covers |
 | [`packaging.md`](packaging.md) | why adapters are separate packages, and how to add one |
-| [`releasing.md`](releasing.md) | releasing any package: Hex, the server image, npm, PyPI, crates.io, or RubyGems |
+| [`releasing.md`](releasing.md) | releasing any package: Hex, the server image, npm, PyPI, crates.io, RubyGems, or Go |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | before opening a PR |
 
 Exact callback signatures and options: the module docs on

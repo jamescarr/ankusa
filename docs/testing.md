@@ -6,7 +6,7 @@ different infrastructure dependency (none, RabbitMQ, Redpanda, NATS, Redis).
 `mise run check:package <pkg>` runs one package's full CI check (format,
 warnings-as-errors, tests, docs), starting and stopping that package's own
 `docker-compose.yml` around the suite; `mise run check` runs all of them. The
-four client SDKs are also checked against one shared, language-neutral vector
+five client SDKs are also checked against one shared, language-neutral vector
 suite — `mise run check:conformance`, below.
 
 ## `ankusa` core: `mix test`
@@ -217,15 +217,16 @@ messages.
 
 ## SDK conformance: one harness across the SDKs
 
-`packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`, and
-`packages/sdk-ruby` are the four client SDKs. Rather than hand-write each one's
-edge-case tests, all four are checked against the same language-neutral vectors
-in `conformance/`: a feature manifest (`features.json`), JSON cases
-(`cases/*.json`), and a native runner per SDK
+`packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`,
+`packages/sdk-ruby`, and `packages/sdk-go` are the five client SDKs. Rather than
+hand-write each one's edge-case tests, all five are checked against the same
+language-neutral vectors in `conformance/`: a feature manifest
+(`features.json`), JSON cases (`cases/*.json`), and a native runner per SDK
 (`packages/sdk-python/tests/test_conformance.py`,
 `packages/sdk-typescript/src/conformance/conformance.test.ts`,
 `packages/sdk-rust/tests/conformance.rs`,
-`packages/sdk-ruby/test/conformance_test.rb`).
+`packages/sdk-ruby/test/conformance_test.rb`,
+`packages/sdk-go/conformance_test.go`).
 
 ```sh
 mise run check:conformance    # validate conformance/, then run every SDK

@@ -12,6 +12,7 @@ the files in it decide where it publishes:
 | `sdk-python` | PyPI package `ankusa` (`pyproject.toml`) | `sdk-python-vX.Y.Z` | [`release-python.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-python.yml) |
 | `sdk-rust` | crates.io crate `ankusa` (`Cargo.toml`) | `sdk-rust-vX.Y.Z` | [`release-crates.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-crates.yml) |
 | `sdk-ruby` | RubyGems gem `ankusa-sdk` (`ankusa-sdk.gemspec`) | `sdk-ruby-vX.Y.Z` | [`release-ruby.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-ruby.yml) |
+| `sdk-go` | Go module `github.com/jamescarr/ankusa/packages/sdk-go` (`go.mod`) | `sdk-go-vX.Y.Z`, then `packages/sdk-go/vX.Y.Z` after CI | [`release-go.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-go.yml) |
 
 The npm, PyPI, and crates.io packages are all named `ankusa`, and the RubyGems
 gem is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project;
@@ -36,7 +37,8 @@ mise run release:verify ankusa_nats
    isn't `origin/main`, and refuses a package whose `CHANGELOG.md` has nothing
    under `[Unreleased]`. For each package it sets the version (`@version` in
    `mix.exs`, `[package] version` in `Cargo.toml`, `VERSION` in a gem's
-   `lib/**/version.rb`, `npm version` for npm, or `uv version` for Python),
+   `lib/**/version.rb`, `const Version` in a Go module's `version.go`,
+   `npm version` for npm, or `uv version` for Python),
    opens a dated `## [X.Y.Z]` heading
    under `[Unreleased]`, and points the footer compare links at the new tag.
    It commits all of them on `release/<tag>`, pushes, and opens a PR whose
@@ -68,7 +70,7 @@ fails at `MIX_ENV=prod mix deps.get`. `release:preflight` enforces this: an
 adapter's preflight fails until the core version in the tree is on Hex.
 `release:prepare` can still bump core and adapters together in one PR.
 
-The server image and the npm, Python, Rust, and Ruby SDKs have no ordering
+The server image and the npm, Python, Rust, Ruby, and Go SDKs have no ordering
 constraint: the image builds from this checkout, and none of the SDKs depends
 on anything here.
 
@@ -112,6 +114,8 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   rather than OIDC.
 - **RubyGems:** no repository secret — Trusted Publishing (OIDC); see
   [Ruby SDK (RubyGems)](#ruby-sdk-rubygems) below.
+- **Go:** no repository secret — the module proxy reads the pushed git tag:
+  see [Go module (proxy.golang.org)](#go-module-proxygolangorg) below.
 
 ## Python SDK (PyPI)
 
@@ -328,3 +332,46 @@ CI passing; `release:tag`'s preflight confirms the version is still unpublished
 on RubyGems and the tag is free; the tag run builds the gem with `gem build`,
 pushes it through the trusted publisher, and cuts the GitHub release from the
 CHANGELOG section.
+
+## Go module (proxy.golang.org)
+
+`sdk-go` publishes as the Go module
+`github.com/jamescarr/ankusa/packages/sdk-go` (package name `ankusa`), with no
+token to store: the module proxy reads the pushed git tag. A module in a
+subdirectory needs a *second* tag, `packages/sdk-go/vX.Y.Z` — that is the one
+`go get` resolves, while `sdk-go-vX.Y.Z` is the repo convention. `release-go.yml`
+pushes the module tag only after the full test suite passes, because a proxy
+and checksum-database version is immutable: it must never point at a commit CI
+has not run on. The workflow then waits for the proxy to serve the version,
+which is also what lists the module on pkg.go.dev.
+
+Same flow as every other package ([above](#the-flow)); only the package name
+differs:
+
+```sh
+mise run status                            # version, last tag, published?, commits since
+mise run release:prepare minor sdk-go      # or patch | major | 0.1.0
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-go                # pushes sdk-go-vX.Y.Z
+mise run release:watch sdk-go              # the tag run pushes packages/sdk-go/vX.Y.Z
+mise run release:verify sdk-go             # HTTP 200 for the version on the proxy
+```
+
+`release:prepare` rewrites the `const Version` line in
+[`packages/sdk-go/version.go`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-go/version.go);
+`release:tag`'s preflight also refuses a run whose
+`packages/sdk-go/vX.Y.Z` module tag already exists on `origin`, and
+`release:verify` asks `proxy.golang.org` for the version.
+
+Two steps treat Go differently from the other kinds. Preflight does not ask the
+proxy about the version, because a request made before the module tag exists
+caches a miss there for up to about 30 minutes (the mirror does not re-check on
+every request) — exactly the state a release starts in. It checks the module
+tag on `origin` instead, which is the same fact, and `release-go.yml` waits up
+to 40 minutes for the proxy to serve the version. `release:verify` does ask the
+proxy, but only after that wait has passed.
+
+The repository has to be public for the proxy to fetch it. If it is private,
+the module tag is still pushed, but consumers need
+`GOPRIVATE=github.com/jamescarr/ankusa` and pkg.go.dev never lists the module.

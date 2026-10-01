@@ -4,7 +4,8 @@
 # directory under packages/; its name is the git tag prefix (`<name>-vX.Y.Z`)
 # and its kind comes from the files in it:
 #   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex,
-#   else pyproject.toml -> python, else Cargo.toml -> cargo, else *.gemspec -> ruby.
+#   else pyproject.toml -> python, else Cargo.toml -> cargo, else *.gemspec -> ruby,
+#   else go.mod -> go.
 #
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
@@ -66,19 +67,21 @@ pkg_kind() {
     echo cargo
   elif [ -n "$(_pkg_gemspec "$dir")" ]; then
     echo ruby
+  elif [ -f "$ROOT/$dir/go.mod" ]; then
+    echo go
   else
-    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, or *.gemspec"
+    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, or go.mod"
   fi
 }
 
 # `ankusa` first (everything else depends on it), then the other Hex packages,
 # then Docker images, then npm packages, then Python ones, then Cargo ones, then
-# Ruby gems; byte order within each group.
+# Ruby gems, then Go modules; byte order within each group.
 pkg_names() {
   local kind name all
   all=$(_pkg_all)
   if [ -d "$ROOT/packages/ankusa" ]; then echo ankusa; fi
-  for kind in hex docker npm python cargo ruby; do
+  for kind in hex docker npm python cargo ruby go; do
     for name in $all; do
       if [ "$name" != ankusa ] && [ "$(pkg_kind "$name")" = "$kind" ]; then
         printf '%s\n' "$name"
@@ -109,6 +112,7 @@ pkg_version() {
     # The range matters: `[[test]] name = …` is also a column-0 `name =`.
     cargo) v=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' "$ROOT/$dir/Cargo.toml") ;;
     ruby) v=$(ruby -e 'print Gem::Specification.load(ARGV[0]).version' "$(_pkg_gemspec "$dir")") ;;
+    go) v=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' "$ROOT/$dir/version.go") ;;
   esac
   [ -n "$v" ] || fail "could not read the version of $1 from $dir"
   printf '%s\n' "$v"
@@ -121,6 +125,10 @@ pkg_tag() {
   fi
   printf '%s-v%s\n' "$1" "$v"
 }
+
+# The tag the Go module proxy resolves for a module in packages/<name>/:
+# `packages/<name>/vX.Y.Z`. Pushed by release-go.yml after CI passes.
+pkg_go_tag() { printf '%s/v%s\n' "$(pkg_dir "$1")" "$2"; }
 
 pkg_from_tag() {
   local name="${1%-v*}"
@@ -145,7 +153,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name crate_name gem_name
+  local dir kind url npm_name pypi_name crate_name gem_name module
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -168,6 +176,10 @@ pkg_registry_code() {
       gem_name=$(ruby -e 'print Gem::Specification.load(ARGV[0]).name' "$(_pkg_gemspec "$dir")")
       url="https://rubygems.org/api/v2/rubygems/$gem_name/versions/$2.json"
       ;;
+    go)
+      module=$(sed -n 's/^module //p' "$ROOT/$dir/go.mod")
+      url="https://proxy.golang.org/$module/@v/v$2.info"
+      ;;
   esac
   # curl prints 000 and exits non-zero when the registry is unreachable; the
   # 000 is the useful part. crates.io answers 403 to curl's own user agent, so
@@ -183,6 +195,7 @@ pkg_workflow() {
     python) echo release-python.yml ;;
     cargo) echo release-crates.yml ;;
     ruby) echo release-ruby.yml ;;
+    go) echo release-go.yml ;;
   esac
 }
 
@@ -199,6 +212,8 @@ pkg_secrets() {
     cargo) echo CARGO_REGISTRY_TOKEN ;;
     # RubyGems publishes via Trusted Publishing (OIDC): no repo secret needed.
     ruby) : ;;
+    # The Go module proxy reads the git tag: no repo secret needed.
+    go) : ;;
   esac
 }
 

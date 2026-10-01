@@ -1,4 +1,5 @@
 {"sdks": {
+  "sdk-go":         {"setup": [],                                                   "run": ["go", "test", "-count=1", "-run", "^TestConformance$", "."]},
   "sdk-python":     {"setup": [["uv", "sync", "--locked"]],                         "run": ["uv", "run", "pytest", "tests/test_conformance.py"]},
   "sdk-ruby":       {"setup": [["env", "BUNDLE_FROZEN=true", "bundle", "install"]], "run": ["bundle", "exec", "rake", "conformance"]},
   "sdk-rust":       {"setup": [["cargo", "build", "--locked", "--tests"]],          "run": ["cargo", "test", "--locked", "--test", "conformance"]},
