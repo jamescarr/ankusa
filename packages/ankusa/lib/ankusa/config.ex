@@ -102,7 +102,18 @@ defmodule Ankusa.Config do
               ip_denied_status: 403,
               # route attrs (maps or keyword lists) loaded at boot
               seed: []
-            }
+            },
+            # per-tenant ingest rate limits, enforced in this node's memory
+            # (see `Ankusa.Edge.RateLimiter`). Precedence: a runtime override
+            # (admin API) beats `tenants[tenant]`, which beats `default`.
+            # `default: nil` and no tenant entry means unlimited.
+            #
+            #   %{default: nil | %{rate: number, burst: pos_integer},
+            #     tenants: %{tenant_id => %{rate: number, burst: pos_integer}}}
+            #
+            # `rate` is hooks per second (fractions allowed), `burst` the most
+            # hooks admitted back to back.
+            rate_limits: %{default: nil, tenants: %{}}
 
   @type t :: %__MODULE__{}
 
@@ -143,7 +154,7 @@ defmodule Ankusa.Config do
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:admin`,
-  `:routes`) over the defaults.
+  `:routes`, `:rate_limits`) over the defaults.
 
   `:routes` is nested one level deeper than the rest (`:routes` has its own
   `:cache`, `:ip_rules`, and `:admin` sections), so `put_routes/2` merges those
@@ -171,7 +182,7 @@ defmodule Ankusa.Config do
         k == :routes ->
           put_routes(acc, v)
 
-        k in [:batcher, :dispatch, :storage, :claim_check, :admin] ->
+        k in [:batcher, :dispatch, :storage, :claim_check, :admin, :rate_limits] ->
           put_section(acc, k, v)
 
         Map.has_key?(base, k) ->

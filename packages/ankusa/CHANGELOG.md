@@ -29,6 +29,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - `GET /v1/wal` on the admin API: this node's `Ankusa.WAL.stats/1`, or
   `409 wal_disabled` under `wal: :none`. `Ankusa.WAL.label/1` names the
   configured adapter for boot banners and `check-config`.
+- Per-tenant ingest rate limits (`Ankusa.Edge.RateLimiter`, `rate_limits` in the
+  config: `%{rate: hooks_per_second, burst: hooks}` per tenant, plus a
+  `default`). A hook is charged **after verification and before the durable
+  write**, so forged requests spend no budget; over the limit the sender gets
+  `429` with `Retry-After` and nothing is stored. Enforcement is GCRA over one
+  ETS row per tenant, updated by compare-and-swap, so concurrent hooks on one
+  tenant cannot overshoot, and the buckets are this node's alone. The admin API
+  reads and adjusts limits at runtime without a restart (`GET /v1/rate-limits`,
+  `GET|PUT|DELETE /v1/tenants/:tenant/rate-limit`, `:edge` role), persisting
+  overrides to `rate_limits.json` in the instance's data dir; a `PUT` or
+  `DELETE` resets that tenant's bucket. Rejections emit
+  `[:ankusa, :rate_limit, :rejected]` (tenant-tagged) and appear as
+  `ankusa_rate_limit_rejected_total`, and the ingest `:outcome` label gains
+  `:rate_limited`.
 
 ### Changed
 

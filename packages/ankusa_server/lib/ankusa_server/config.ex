@@ -57,7 +57,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes batcher dispatch wal storage claim_check sources source_store)
+  @root_keys ~w(node log http admin routes rate_limits batcher dispatch wal storage claim_check sources source_store)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -80,6 +80,8 @@ defmodule AnkusaServer.Config do
   @routes_rule_keys ~w(action cidr)
   @routes_admin_keys ~w(port)
   @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
+  @rate_limits_keys ~w(default tenants)
+  @rate_limit_keys ~w(rate burst)
   @source_keys ~w(tenant on_verify_failure verify sinks)
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
@@ -286,6 +288,7 @@ defmodule AnkusaServer.Config do
         http_section(doc) ++
         admin_section(doc) ++
         routes_section(doc) ++
+        rate_limits_section(doc) ++
         batcher_section(doc) ++
         dispatch_section(doc) ++
         wal_section(doc) ++
@@ -300,6 +303,7 @@ defmodule AnkusaServer.Config do
       # config that would refuse to boot must fail `check-config` too, with the
       # same message.
       Ankusa.Routes.validate_config!(config)
+      Ankusa.Edge.RateLimiter.validate_config!(config)
       Ankusa.WAL.validate_config!(config)
       config
     rescue
@@ -653,6 +657,56 @@ defmodule AnkusaServer.Config do
       other ->
         raise ConfigError, message: type_error(path ++ ["seed"], "a list of routes", other)
     end
+  end
+
+  # ── rate limits ─────────────────────────────────────────────────────────────
+
+  # The server checks shape and types only — that both keys are present, and
+  # that `rate` is a number and `burst` an integer. Ranges and tenant ids are
+  # core's (`Ankusa.Edge.RateLimiter.validate_config!/1`), so the message an
+  # operator sees is the same whether they run the image or embed the library.
+  #
+  # No env override: a per-tenant map is not env-shaped. `${VAR}` inside the
+  # values is how a deployment parameterizes one.
+  defp rate_limits_section(doc) do
+    path = ["rate_limits"]
+    rate_limits = section!(doc, "rate_limits", @rate_limits_keys, [])
+
+    [
+      rate_limits:
+        []
+        |> put_opt(:default, rate_limit_opt(rate_limits, "default", path))
+        |> put_opt(:tenants, rate_limit_tenants(rate_limits, path))
+    ]
+  end
+
+  defp rate_limit_opt(map, key, path) do
+    case map[key] do
+      nil -> nil
+      value -> rate_limit!(value, path ++ [key])
+    end
+  end
+
+  defp rate_limit_tenants(rate_limits, path) do
+    case Map.get(rate_limits, "tenants") do
+      nil ->
+        nil
+
+      tenants when is_map(tenants) ->
+        Map.new(tenants, fn {tenant, limit} ->
+          tenant = to_string(tenant)
+          {tenant, rate_limit!(limit, path ++ ["tenants", tenant])}
+        end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["tenants"], "a mapping of tenant id to limit", other)
+    end
+  end
+
+  defp rate_limit!(value, path) do
+    limit = section!(value, @rate_limit_keys, path)
+    %{rate: required_number!(limit, "rate", path), burst: required_int!(limit, "burst", path)}
   end
 
   # ── sources ─────────────────────────────────────────────────────────────────
@@ -1027,6 +1081,46 @@ defmodule AnkusaServer.Config do
     case Integer.parse(value) do
       {int, ""} -> int
       _ -> raise ConfigError, message: type_error(path, "an integer", value)
+    end
+  end
+
+  # A required integer, where absent and explicit-nil are both "you didn't say".
+  defp required_int!(map, key, path) do
+    case map[key] do
+      nil -> raise ConfigError, message: "#{render_path(path)}: missing required key \"#{key}\""
+      _value -> int_opt(map, key, path)
+    end
+  end
+
+  defp required_number!(map, key, path) do
+    case map[key] do
+      nil ->
+        raise ConfigError, message: "#{render_path(path)}: missing required key \"#{key}\""
+
+      value when is_number(value) ->
+        value
+
+      # Quoted YAML and `${VAR}` interpolation both arrive as strings.
+      value when is_binary(value) ->
+        parse_number!(value, path ++ [key])
+
+      value ->
+        raise ConfigError, message: type_error(path ++ [key], "a number", value)
+    end
+  end
+
+  # Integer first, so `"100"` stays an integer; then float, so `"12.5"` does
+  # not come back as `12` with a trailing ".5" nobody checked.
+  defp parse_number!(value, path) do
+    case Integer.parse(value) do
+      {int, ""} ->
+        int
+
+      _ ->
+        case Float.parse(value) do
+          {float, ""} -> float
+          _ -> raise ConfigError, message: type_error(path, "a number", value)
+        end
     end
   end
 

@@ -182,6 +182,58 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
+  describe "Ankusa.Edge.RateLimiter.validate_config!/1" do
+    defp validated_limits(rate_limits),
+      do: Ankusa.Edge.RateLimiter.validate_config!(Config.new(rate_limits: rate_limits))
+
+    test "accepts the defaults, and mixed integer and fractional rates" do
+      assert :ok = Ankusa.Edge.RateLimiter.validate_config!(Config.new())
+
+      assert :ok =
+               validated_limits(%{
+                 default: %{rate: 0.5, burst: 5},
+                 tenants: %{
+                   "acme" => %{rate: 100, burst: 200},
+                   "globex" => %{rate: 0.5, burst: 1}
+                 }
+               })
+    end
+
+    test "rejects an unknown key in the section, before any value is looked at" do
+      assert_raise ArgumentError, ~r/rate_limits\.defualt/, fn ->
+        Config.new(rate_limits: [defualt: nil])
+      end
+    end
+
+    test "rejects a limit that is not exactly rate and burst, or out of range" do
+      for {rate_limits, message} <- [
+            {%{default: %{rate: 0, burst: 1}},
+             "rate_limits.default.rate must be a number greater than 0, got 0"},
+            {%{tenants: %{"acme" => %{rate: 1, burst: 0}}},
+             "rate_limits.tenants.acme.burst must be an integer of at least 1, got 0"},
+            {%{tenants: %{"acme" => [rate: 1, burst: 1]}},
+             "rate_limits.tenants.acme must be a map with exactly :rate and :burst, " <>
+               "got [rate: 1, burst: 1]"},
+            {%{tenants: %{"bad.tenant" => %{rate: 1, burst: 1}}},
+             "rate_limits.tenants: tenant id \"bad.tenant\" must match [A-Za-z0-9_-]{1,64}"},
+            {%{tenants: []}, "rate_limits.tenants must be a map of tenant id to limit, got []"}
+          ] do
+        error = assert_raise ArgumentError, fn -> validated_limits(rate_limits) end
+        assert error.message == message
+      end
+    end
+
+    test "rejects a limit carrying a key that is neither rate nor burst" do
+      # The message embeds the offending map, whose inspect order is the atom
+      # table's, so only the prefix is pinned.
+      assert_raise ArgumentError,
+                   ~r/^rate_limits\.tenants\.acme must be a map with exactly :rate and :burst/,
+                   fn ->
+                     validated_limits(%{tenants: %{"acme" => %{rate: 1, burst: 1, per: 1}}})
+                   end
+    end
+  end
+
   describe "wal: :none" do
     test "drops the WAL's reader roles, keeping the rest" do
       assert Config.new(wal: :none).roles == [:edge]

@@ -116,6 +116,32 @@ routes:
   #   ip_rules: [{action: allow, cidr: "203.0.113.0/24"}]
   #   metadata: {owner: payments}
 
+rate_limits:
+  # Per-tenant ingest limits, enforced by each edge node in its own memory: a
+  # fleet of N edges admits up to N x the limit, and the numbers below are per
+  # node, not for the fleet.
+  #
+  # A hook is charged after verification and before the durable write, so a
+  # flood of forged requests never spends a tenant's budget — only hooks whose
+  # signature passed (or whose source accepts failures) do.
+  #
+  # A hook over the limit gets 429 with a Retry-After header, and nothing is
+  # stored: no WAL record, no dispatch, no claim.
+  #
+  # Limits can also be adjusted per tenant at runtime, without a restart:
+  # `PUT /v1/tenants/{tenant}/rate-limit` on the admin port, persisted to
+  # rate_limits.json on the node (the same node-local model as API-managed
+  # sources). A runtime value beats the ones below.
+  #
+  # `rate` is hooks per second (fractions are allowed: 0.5 is one every two
+  # seconds) and `burst` is the most admitted back to back. Both are required,
+  # neither is inferred. No `default` and no tenant entry means unlimited; to
+  # exempt one tenant from a default, give it a high limit of its own.
+  default: null
+  # default: {rate: 50, burst: 100}
+  tenants: {}
+  #   acme: {rate: 500, burst: 1000}
+
 batcher:
   # The WAL serializes commits itself, so partitions beyond a couple only
   # add contention.

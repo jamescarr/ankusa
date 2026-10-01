@@ -82,6 +82,15 @@ defmodule Ankusa.Edge.Router do
   defp respond(conn, {:error, :unknown_source}),
     do: send_json(conn, 404, %{error: "unknown_source"})
 
+  defp respond(conn, {:error, {:rate_limited, retry_after_ms}}) do
+    conn
+    |> Plug.Conn.put_resp_header(
+      "retry-after",
+      Integer.to_string(div(retry_after_ms + 999, 1000))
+    )
+    |> send_json(429, %{error: "rate_limited"})
+  end
+
   defp respond(conn, {:error, reason}) when reason in [:overload, :store_unavailable] do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "1")
