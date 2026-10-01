@@ -62,6 +62,11 @@ packages/
                               published through the read-only mirror
                               jamescarr/ankusa-php (Packagist reads
                               composer.json at a repository root).
+  sdk-elixir                  the `ankusa_sdk` Hex client SDK: a `Plug`
+                              receiver for HTTP-sink deliveries and a decoder
+                              for the queue-sink message format, plus clients
+                              for the operator APIs. A pure HTTP client — it
+                              never depends on `ankusa` core.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker

@@ -293,6 +293,35 @@ Every failure is a `ClaimCheckError` subclass with a `retryable?` method:
 `true` for `5xx`/`503` or an unreachable gateway, the same dead-letter vs.
 retry split as the TypeScript and Python clients.
 
+### From Elixir, with the SDK
+
+[`packages/sdk-elixir`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-elixir)
+(Hex package `ankusa_sdk`) ships an `Ankusa.SDK.ClaimCheck` against the same
+contract: it parses a ref, redeems it, and verifies the bytes against the
+message's sha256 before returning them, the same end-to-end check the other
+clients run and the gateway itself does not. It is the umbrella package for
+Elixir consumers: alongside the claim-check client sit `Ankusa.SDK.Receiver`
+(the `Plug` for HTTP-sink deliveries) and the routes, admin, and sources
+clients.
+
+```elixir
+# mix.exs: {:ankusa_sdk, "~> 0.3"}
+claim_check = Ankusa.SDK.ClaimCheck.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
+
+case Ankusa.SDK.ClaimCheck.redeem(claim_check, claim, sha256) do
+  {:ok, body} -> handle(body)
+  # bad ref/sha256, 404, or an integrity mismatch: dead-letter, don't requeue
+  {:error, %{retryable: false} = error} -> dead_letter(error)
+  # gateway unreachable or 5xx: safe to retry
+  {:error, %{retryable: true} = error} -> requeue(error)
+end
+```
+
+Every failure carries `retryable`: `false` for `InvalidClaimRefError`,
+`ClaimNotFoundError`, `ClaimRejectedError` (other `4xx`, with `:status` and
+`:body`) and `ClaimIntegrityError`; `true` for `ClaimCheckUnavailableError`
+(`5xx`/`503` or unreachable).
+
 ### Any other language
 
 Any OpenAPI generator, `openapi-generator`, `openapi-python-client`, works

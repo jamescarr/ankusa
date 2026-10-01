@@ -22,7 +22,7 @@ flowchart LR
 | `packages/ankusa_redis` | Redis adapters: the route store (`Ankusa.Routes.Store.Redis` — definitions in Redis, shared by every edge node) and the pub/sub sink (`Ankusa.Sink.Redis`). Path-depends on `ankusa` + one client (`redix`). Own `docker-compose.yml` (Redis on `:6399`). |
 | `conformance/` | Language-neutral SDK vectors (`features.json`, `cases/*.json`) and the checker (`check.mjs`) every `packages/sdk-*` must pass; `mise run check:conformance`. |
 | `packages/ankusa_server` | The `jamescarr/ankusa` Docker image: core + every adapter, driven entirely by YAML (`config.ex` is the loader). Not published to Hex. |
-| `packages/sdk-typescript`, `sdk-python`, `sdk-rust`, `sdk-ruby`, `sdk-go`, `sdk-php` | Published client SDKs (npm `ankusa`, PyPI `ankusa`, crates.io `ankusa`, RubyGems `ankusa-sdk`, Go module `github.com/jamescarr/ankusa/packages/sdk-go`, Packagist `jamescarr/ankusa`) for writing worker consumers. |
+| `packages/sdk-typescript`, `sdk-python`, `sdk-rust`, `sdk-ruby`, `sdk-go`, `sdk-php`, `sdk-elixir` | Published client SDKs (npm `ankusa`, PyPI `ankusa`, crates.io `ankusa`, RubyGems `ankusa-sdk`, Go module `github.com/jamescarr/ankusa/packages/sdk-go`, Packagist `jamescarr/ankusa`, Hex `ankusa_sdk`) for writing worker consumers. |
 | `examples/*` | Runnable Docker-composed demos, one per delivery transport; see [`examples/README.md`](examples/README.md). |
 | `tools/loadgen` | Load generator used by the `oban-consumer` example. |
 | `docs/*` | Prose docs, see table below. Index: [`docs/README.md`](docs/README.md). |
@@ -62,7 +62,7 @@ Why the package split (and when a new adapter earns its own package):
 | [`elixir.md`](docs/elixir.md) | embed the library in your own app |
 | [`testing.md`](docs/testing.md) | running the suites, local infra, what each one covers |
 | [`packaging.md`](docs/packaging.md) | why adapters are separate packages, and how to add one |
-| [`releasing.md`](docs/releasing.md) | releasing any package: Hex, the server image, npm, PyPI, crates.io, RubyGems, or Go |
+| [`releasing.md`](docs/releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, or Packagist |
 
 Exact callback signatures and options: module docs on [HexDocs](https://hexdocs.pm/ankusa).
 

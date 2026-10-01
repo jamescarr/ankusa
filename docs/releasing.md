@@ -14,11 +14,13 @@ the files in it decide where it publishes:
 | `sdk-ruby` | RubyGems gem `ankusa-sdk` (`ankusa-sdk.gemspec`) | `sdk-ruby-vX.Y.Z` | [`release-ruby.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-ruby.yml) |
 | `sdk-go` | Go module `github.com/jamescarr/ankusa/packages/sdk-go` (`go.mod`) | `sdk-go-vX.Y.Z`, then `packages/sdk-go/vX.Y.Z` after CI | [`release-go.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-go.yml) |
 | `sdk-php` | Packagist package `jamescarr/ankusa` (`composer.json`) | `sdk-php-vX.Y.Z` | [`release-php.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-php.yml) |
+| `sdk-elixir` | Hex package `ankusa_sdk` (`mix.exs`) | `sdk-elixir-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
 
-The npm, PyPI, and crates.io packages are all named `ankusa`, and the RubyGems
-gem is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project;
-each one's tag prefix is its directory name, not the package name, so none can
-be confused with the Hex core's `ankusa-vX.Y.Z` or with each other.
+The npm, PyPI, and crates.io packages are all named `ankusa`, the RubyGems gem
+is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project, and
+the Elixir SDK publishes as `ankusa_sdk` because Hex's `ankusa` is this repo's
+core; each one's tag prefix is its directory name, not the package name, so none
+can be confused with the Hex core's `ankusa-vX.Y.Z` or with each other.
 
 ## The flow
 
@@ -73,7 +75,9 @@ adapter's preflight fails until the core version in the tree is on Hex.
 
 The server image and the npm, Python, Rust, Ruby, and Go SDKs have no ordering
 constraint: the image builds from this checkout, and none of the SDKs depends
-on anything here.
+on anything here. `sdk-elixir` is a Hex package but has no `ankusa` dependency
+either, so `release:preflight` skips the core-first check for it (the check
+applies only to packages whose `mix.exs` depends on `ankusa`).
 
 ## The server image
 
@@ -476,3 +480,37 @@ appears, and cuts the GitHub release from the CHANGELOG section. Because
 Packagist installs from the mirror's GitHub zipball, the archive carries
 whatever `packages/sdk-php/.gitattributes` does *not* mark `export-ignore` —
 tests and dev configs stay out of what users download.
+
+## Elixir SDK (Hex)
+
+`sdk-elixir` publishes as the `ankusa_sdk` package on Hex (Hex's `ankusa` is
+this repo's core), from
+[`packages/sdk-elixir/mix.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-elixir/mix.exs),
+using the same `HEX_API_KEY` secret as the core packages. It has **no ordering
+constraint** against them: the SDK is a pure HTTP client and does not depend on
+`ankusa` at all, so `release:preflight` does not wait for core to be live (and
+its registry lookup reads the app name from `mix.exs`, since the Hex name and
+the directory name differ).
+
+The flow is the same as every other package ([above](#the-flow)):
+
+```sh
+mise run status                            # version, last tag, published?, commits since
+mise run release:prepare minor sdk-elixir  # or patch | major | 0.4.0
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-elixir
+mise run release:watch sdk-elixir          # the tag run builds and publishes to Hex
+mise run release:verify sdk-elixir         # HTTP 200 for the version on hex.pm
+```
+
+`release:prepare` rewrites `@version` in `mix.exs`; `release:tag`'s preflight
+confirms the tag is free and `ankusa_sdk` `@version` is still unpublished; the
+tag run checks the tag against `mix.exs`, waits for the full CI suite, then
+publishes with `MIX_ENV=prod mix hex.publish` and cuts the GitHub release from
+the CHANGELOG section. `mix.lock` is committed so CI's
+`mix deps.get --check-locked` gate pins CI to known versions, but it is not in
+the package's `files`: Hex consumers resolve `req ~> 0.7` and `plug ~> 1.18`
+themselves. Because the SDK has no `ankusa` dependency, the publish job's
+`MIX_ENV=prod mix deps.get` resolves everything from Hex, with no core-first
+wait.
