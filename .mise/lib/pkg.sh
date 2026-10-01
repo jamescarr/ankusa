@@ -156,11 +156,18 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name crate_name gem_name module composer_name meta code
+  local dir kind url npm_name pypi_name crate_name gem_name hex_name module composer_name meta code
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
-    hex) url="https://hex.pm/api/packages/$1/releases/$2" ;;
+    hex)
+      # The package directory is the git-tag prefix, not necessarily the Hex
+      # name (`sdk-elixir` publishes as `ankusa_sdk`), so read the app it
+      # declares.
+      hex_name=$(sed -n 's/^      app: :\([a-z0-9_]*\),$/\1/p' "$ROOT/$dir/mix.exs")
+      [ -n "$hex_name" ] || fail "could not read the app name from $dir/mix.exs"
+      url="https://hex.pm/api/packages/$hex_name/releases/$2"
+      ;;
     docker) url="https://hub.docker.com/v2/namespaces/${DOCKER_IMAGE%%/*}/repositories/${DOCKER_IMAGE#*/}/tags/$2" ;;
     npm)
       npm_name=$(node -p "require('$ROOT/$dir/package.json').name")

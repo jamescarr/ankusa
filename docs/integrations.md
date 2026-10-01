@@ -52,6 +52,24 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
   **not** forwarded by `Sink.Http` or `Sink.Message`, so header-borne ids are
   not available downstream.
 
+Elixir consumers get this contract as a `Plug`: `Ankusa.SDK.Receiver` (Hex
+package
+[`ankusa_sdk`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-elixir))
+reads the raw body before any parser, parses the `x-ankusa-*` headers, calls
+your `Ankusa.SDK.Handler` implementation, and answers `202` once it returns
+`:ok` — or `503` when it returns `{:error, _}`, and `500` if it raises or
+returns anything else; Ankusa retries both, exactly the retry signal above.
+Mount it above `Plug.Parsers`:
+
+```elixir
+plug Ankusa.SDK.Receiver, path: "/deliveries", handler: MyApp.Hooks
+plug Plug.Parsers, parsers: [:json], json_decoder: JSON
+```
+
+The queue side has an equivalent: `Ankusa.SDK.Message.decode/1` parses
+`Sink.Message` JSON and `to_hook/2` redeems a claim check before handing the
+same `Ankusa.SDK.Hook` to the same handler.
+
 ## Oban
 
 [`examples/oban-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/)

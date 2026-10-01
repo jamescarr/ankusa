@@ -41,10 +41,11 @@ for p in "${pkgs[@]}"; do
     printf '%s\n' "$secrets" | grep -qx "$s" || fail "repo secret $s is not set"
   done
 
-  # Adapters build under :prod, where they resolve {:ankusa, "~> ..."} from
-  # Hex rather than the path dep: a tag pushed before core is live dies at
-  # `MIX_ENV=prod mix deps.get`.
-  if [ "$kind" = hex ] && [ "$p" != ankusa ]; then
+  # Packages that path-depend on core build under :prod, where they resolve
+  # `{:ankusa, "~> ..."}` from Hex instead: a tag pushed before core is live
+  # dies at `MIX_ENV=prod mix deps.get`. Elixir SDKs do not depend on core at
+  # all, so they have no ordering constraint.
+  if [ "$kind" = hex ] && [ "$p" != ankusa ] && grep -q '{:ankusa, "' "$ROOT/$dir/mix.exs"; then
     core=$(pkg_version ankusa)
     code=$(pkg_registry_code ankusa "$core")
     [ "$code" = 200 ] ||

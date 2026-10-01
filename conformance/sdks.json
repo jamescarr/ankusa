@@ -1,4 +1,5 @@
 {"sdks": {
+  "sdk-elixir":     {"setup": [["mix", "local.hex", "--force", "--if-missing"], ["mix", "local.rebar", "--force", "--if-missing"], ["mix", "deps.get", "--check-locked"]], "run": ["mix", "test", "test/conformance_test.exs"]},
   "sdk-go":         {"setup": [],                                                             "run": ["go", "test", "-count=1", "-run", "^TestConformance$", "."]},
   "sdk-php":        {"setup": [["composer", "install", "--no-interaction", "--no-progress"]], "run": ["composer", "conformance"]},
   "sdk-python":     {"setup": [["uv", "sync", "--locked"]],                                   "run": ["uv", "run", "pytest", "tests/test_conformance.py"]},

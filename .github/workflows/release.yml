@@ -13,10 +13,12 @@ name: Release
 
 on:
   push:
-    # Every Hex package is `ankusa` or `ankusa_<adapter>`, so a new adapter
+    # Every Hex package is `ankusa`, `ankusa_<adapter>`, or `sdk-elixir` (the
+    # Hex name `ankusa_sdk` does not match its directory), so a new adapter
     # needs no edit here. The server image has its own workflow (docker.yml).
     tags:
       - "ankusa*-v*"
+      - "sdk-elixir-v*"
       - "!ankusa_server-v*"
 
 concurrency:
