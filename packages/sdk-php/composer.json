@@ -28,7 +28,7 @@
     "scripts": {
         "lint": "php-cs-fixer check --diff",
         "fix": "php-cs-fixer fix",
-        "analyse": "phpstan analyse --no-progress",
+        "analyse": "phpstan analyse --no-progress --memory-limit=1G",
         "test": "phpunit",
         "conformance": "phpunit --testsuite conformance"
     },
