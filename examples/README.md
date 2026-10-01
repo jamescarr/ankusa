@@ -8,9 +8,11 @@ flowchart LR
     A -->|HTTP| H[Your HTTP worker]
     A -->|publish| R[(RabbitMQ)]
     A -->|produce| K[(Kafka)]
+    A -->|publish| N[(NATS JetStream)]
     R --> QW[Queue worker]
     K --> SW[SQS / stream worker]
-    QW & SW -.->|large payloads| CC[Claim-check gateway]
+    N --> RW[Rust worker]
+    QW & SW & RW -.->|large payloads| CC[Claim-check gateway]
 ```
 
 ## Pick one
@@ -20,6 +22,7 @@ flowchart LR
 | [quickstart](quickstart/) | HTTP | Python (FastAPI, uv) | docker | `docker compose up --build -d --wait` |
 | [rabbitmq-consumer](rabbitmq-consumer/) | RabbitMQ | TypeScript | docker | `docker compose up --build` |
 | [kafka-sqs-consumer](kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | docker | `docker compose up --build -d --wait` |
+| [nats-consumer](nats-consumer/) | NATS JetStream | Rust | docker | `docker compose up --build -d --wait` |
 | [oban-consumer](oban-consumer/) | HTTP → Oban | Elixir | docker, kind, kubectl | `./run.sh` |
 
 ## quickstart
@@ -78,6 +81,26 @@ flowchart LR
 
 [`kafka-sqs-consumer/`](kafka-sqs-consumer/)
 
+## nats-consumer
+
+The published image publishes each hook to a NATS JetStream subject, and a Rust
+worker built on the published `ankusa` crate pulls them through a durable
+consumer. The worker creates its own stream, redeems bodies over
+`inline_max_bytes` through the claim-check gateway with `ClaimCheckClient`,
+dedupes on the hook id, `nak`s a failure a retry can fix (the gateway
+unreachable), and `term`s one it can't (bad JSON, a sha256 mismatch). No object
+store: the claim-check gateway runs on the same node as everything else.
+
+```mermaid
+flowchart LR
+    P[Provider] --> A[Ankusa :4000]
+    A --> N[(JetStream ANKUSA)]
+    N --> W[Rust worker]
+    W -.->|claim ref| CC[claim-check :4001]
+```
+
+[`nats-consumer/`](nats-consumer/)
+
 ## oban-consumer
 
 A real Kubernetes (`kind`) deployment: three self-contained Ankusa nodes, each
@@ -98,4 +121,4 @@ flowchart LR
 
 `rabbitmq-consumer`, `kafka-sqs-consumer`, and `oban-consumer` build their
 ingest app from this repo's Elixir source, so you can see the library in use;
-`quickstart` runs the published image instead.
+`quickstart` and `nats-consumer` run the published image instead.
