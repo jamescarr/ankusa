@@ -93,9 +93,11 @@ jobs:
           # it learned to skip Go — so wait 40. This fetch is also what lists
           # the version on pkg.go.dev, and giving up before the proxy's cache
           # expires would fail an otherwise fine release.
-          for i in $(seq 1 40); do
+          tries=0
+          while [ "$tries" -lt 40 ]; do
             code=$(pkg_registry_code sdk-go "$VERSION")
             [ "$code" = 200 ] && { echo "proxy.golang.org serves sdk-go $VERSION"; exit 0; }
+            tries=$((tries + 1))
             sleep 60
           done
           fail "proxy.golang.org never served sdk-go $VERSION (last HTTP $code)"
