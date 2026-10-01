@@ -15,12 +15,15 @@ the files in it decide where it publishes:
 | `sdk-go` | Go module `github.com/jamescarr/ankusa/packages/sdk-go` (`go.mod`) | `sdk-go-vX.Y.Z`, then `packages/sdk-go/vX.Y.Z` after CI | [`release-go.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-go.yml) |
 | `sdk-php` | Packagist package `jamescarr/ankusa` (`composer.json`) | `sdk-php-vX.Y.Z` | [`release-php.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-php.yml) |
 | `sdk-elixir` | Hex package `ankusa_sdk` (`mix.exs`) | `sdk-elixir-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
+| `sdk-java` | Maven Central `io.github.jamescarr:ankusa-sdk` (`build.sbt`) | `sdk-java-vX.Y.Z` | [`release-maven.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-maven.yml) |
 
 The npm, PyPI, and crates.io packages are all named `ankusa`, the RubyGems gem
-is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project, and
-the Elixir SDK publishes as `ankusa_sdk` because Hex's `ankusa` is this repo's
-core; each one's tag prefix is its directory name, not the package name, so none
-can be confused with the Hex core's `ankusa-vX.Y.Z` or with each other.
+is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project, the
+Elixir SDK publishes as `ankusa_sdk` because Hex's `ankusa` is this repo's
+core, and the Java SDK publishes under the `io.github.jamescarr` group because
+that is the namespace GitHub verifies for this account; each one's tag prefix
+is its directory name, not the package name, so none can be confused with the
+Hex core's `ankusa-vX.Y.Z` or with each other.
 
 ## The flow
 
@@ -126,6 +129,12 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   `PACKAGIST_USERNAME`, the Packagist account name; and `PACKAGIST_TOKEN`, that
   account's API token. Setup: see [PHP SDK (Packagist)](#php-sdk-packagist)
   below.
+- **Maven Central (the Java SDK):** `SONATYPE_USERNAME` and
+  `SONATYPE_PASSWORD`, a Central Portal user token's two halves, plus
+  `PGP_SECRET` (base64 of the armored secret signing key) and
+  `PGP_PASSPHRASE`. The Central Portal has no OIDC trusted publishing, so all
+  four are repository secrets. Setup: see
+  [Java SDK (Maven Central)](#java-sdk-maven-central) below.
 
 ## Python SDK (PyPI)
 
@@ -514,3 +523,68 @@ the package's `files`: Hex consumers resolve `req ~> 0.7` and `plug ~> 1.18`
 themselves. Because the SDK has no `ankusa` dependency, the publish job's
 `MIX_ENV=prod mix deps.get` resolves everything from Hex, with no core-first
 wait.
+
+## Java SDK (Maven Central)
+
+`sdk-java` publishes as `io.github.jamescarr:ankusa-sdk` on Maven Central, from
+[`packages/sdk-java/build.sbt`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-java/build.sbt),
+whose `organization`, `name` and `version` are the coordinates — `pkg_version`
+and `pkg_registry_code` read them with `sed` and
+`release:prepare` rewrites `version`, exactly as they do for the other kinds.
+The jar is built on JDK 25 but is Java 17 bytecode and Java 17 API
+(`javacOptions` pins `--release 17`), carries
+`Automatic-Module-Name: io.github.jamescarr.ankusa` in its manifest — sbt has no
+JPMS descriptor support, so there is no `module-info.java` — and has no
+`_3` suffix or Scala dependency (`crossPaths := false`,
+`autoScalaLibrary := false`), which `mise run check:package sdk-java` asserts
+along with the staged bundle's shape.
+
+Publishing goes through the [Central
+Portal](https://central.sonatype.com/), using sbt 2's built-in staging:
+`publishSigned` stages the jar, sources, javadoc, POM and CycloneDX SBOM, each
+with an armored `.asc` beside them, in
+`packages/sdk-java/target/sona-staging`, and `sonaRelease` uploads that bundle
+and waits for the portal to validate it. `mise run check:package sdk-java` runs
+the unsigned `publish` and then checks the staged bundle, so the shape the
+release signs is the shape CI gated on — including the SBOM, which sbt-sbom
+attaches as the `cyclonedx` classifier artifact without any build.sbt setting.
+
+Needed once, before the first `release:tag sdk-java`, all by the repository
+owner:
+
+1. Sign in to <https://central.sonatype.com/> with GitHub. That verifies
+   `io.github.jamescarr` for the account, so no DNS TXT record is needed for
+   this group id.
+2. Generate a user token (Account → Generate User Token) and store its halves as
+   the `SONATYPE_USERNAME` and `SONATYPE_PASSWORD` repository secrets. sbt 2
+   reads both names out of the environment and appends them as a credential for
+   `central.sonatype.com`; there is nothing to write to `~/.sbt`.
+3. Create a PGP key pair, publish its public half to
+   `keyserver.ubuntu.com`, and store the base64 of the armored secret key as
+   `PGP_SECRET` and its passphrase as `PGP_PASSPHRASE`:
+
+   ```sh
+   gpg --quick-generate-key 'jamescarr <james.r.carr@gmail.com>' rsa4096 sign never
+   gpg --keyserver keyserver.ubuntu.com --send-keys <key id>
+   gpg --export-secret-keys --armor <key id> | base64 | tr -d '\n' | gh secret set PGP_SECRET
+   ```
+
+The flow is the same as every other package ([above](#the-flow)):
+
+```sh
+mise run status                            # version, last tag, published?, commits since
+mise run release:prepare minor sdk-java    # or patch | major | 0.3.0
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-java
+mise run release:watch sdk-java            # the tag run signs, uploads, and waits for repo1
+mise run release:verify sdk-java           # HTTP 200 for the POM on repo1.maven.org
+```
+
+`release:verify` reads the POM at
+`https://repo1.maven.org/maven2/io/github/jamescarr/ankusa-sdk/<version>/ankusa-sdk-<version>.pom`,
+so it confirms the portal's publish reached the CDN, not just that the portal
+accepted the bundle. The release workflow runs the same check in a loop for up
+to an hour: the portal answers `PUBLISHED` before repo1 serves the POM.
+`sonaRelease` cannot be exercised locally without the real token, so
+`release-maven.yml` is only exercised by an actual tag.

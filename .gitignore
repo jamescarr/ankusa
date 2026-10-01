@@ -45,6 +45,17 @@ packages/sdk-php/vendor/
 packages/sdk-php/.phpunit.cache/
 packages/sdk-php/.php-cs-fixer.cache
 
+# sbt (packages/sdk-java): every build output under target/, plus the Eclipse
+# project files the jdtls language server reads (written by sbt jdtlsProject)
+# and anything an editor leaves behind.
+packages/sdk-java/target/
+packages/sdk-java/project/target/
+packages/sdk-java/project/project/
+packages/sdk-java/.bsp/
+packages/sdk-java/.project
+packages/sdk-java/.classpath
+packages/sdk-java/.settings/
+
 # Python (packages/sdk-python, examples/quickstart).
 **/.venv/
 **/__pycache__/

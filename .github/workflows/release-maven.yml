@@ -1,0 +1,140 @@
+name: Release (Maven Central)
+
+# Tag-driven Maven Central publish for packages/sdk-java (published as
+# `io.github.jamescarr:ankusa-sdk`), the same shape as release-crates.yml — its
+# own tag prefix, `sdk-java-v*` (the directory name), distinct from the Hex core
+# package's `ankusa-v*` and the other SDKs' prefixes. Tagged by
+# `mise run release:tag sdk-java`.
+#
+# Publishing goes through the Central Portal: `publishSigned` stages the bundle
+# (jar, sources, javadoc, POM and CycloneDX SBOM, each with an armored .asc
+# beside it) in packages/sdk-java/target/sona-staging, then `sonaRelease`
+# uploads it and waits for the portal to finish validating it.
+#
+# Four repository secrets, because the Central Portal has no OIDC trusted
+# publishing:
+#   SONATYPE_USERNAME/SONATYPE_PASSWORD  a portal user token, from
+#     central.sonatype.com -> Account -> Generate User Token. sbt 2 reads these
+#     two names out of the environment and appends them as a credential for
+#     central.sonatype.com.
+#   PGP_SECRET       base64 of the armored secret signing key
+#                    (`gpg --export-secret-keys --armor <id> | base64 | tr -d '\n'`).
+#   PGP_PASSPHRASE   that key's passphrase.
+# The public half must be on keyserver.ubuntu.com, or the portal rejects the
+# bundle. docs/releasing.md lists them and the one-time portal setup.
+
+on:
+  push:
+    tags:
+      - "sdk-java-v*"
+
+concurrency:
+  group: release-maven-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          [ "$(pkg_kind "$PKG")" = java ] || fail "$GITHUB_REF_NAME is not an sbt (Maven Central) package tag"
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          PKG_VERSION=$(pkg_version "$PKG")
+          [ "$PKG_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/build.sbt $PKG_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Sign, upload to the Central Portal, + GitHub release
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-level permissions replace the workflow's rather than extending
+      # them, so `contents: write` has to be repeated here or `gh release
+      # create` below gets a 403. The other three are what actions/attest
+      # needs: id-token to mint the Sigstore certificate, attestations to
+      # persist the attestation, artifact-metadata for the storage record.
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          # Pinned to .mise/conf.d/sdk-java.toml's java and sbt, the toolchain
+          # `mise run check:package sdk-java` built and tested with.
+          install_args: java sbt
+
+      - name: Import the signing key
+        env:
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+        run: printf '%s' "$PGP_SECRET" | base64 --decode | gpg --batch --import
+
+      - name: Sign and stage
+        working-directory: packages/sdk-java
+        env:
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+        run: sbt --server --batch "publishSigned"
+
+      - uses: actions/attest@v4
+        with:
+          # No predicate input, so this is SLSA build provenance for the exact
+          # bytes about to be uploaded.
+          subject-path: |
+            packages/sdk-java/target/sona-staging/io/github/jamescarr/ankusa-sdk/${{ needs.resolve.outputs.version }}/*.jar
+            packages/sdk-java/target/sona-staging/io/github/jamescarr/ankusa-sdk/${{ needs.resolve.outputs.version }}/*.pom
+            packages/sdk-java/target/sona-staging/io/github/jamescarr/ankusa-sdk/${{ needs.resolve.outputs.version }}/*-cyclonedx.json
+
+      - name: Upload to the Central Portal
+        working-directory: packages/sdk-java
+        env:
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+        # sonaRelease uploads the staged bundle and waits for the portal to
+        # answer PUBLISHED; a validation failure fails this step.
+        run: sbt --server --batch "sonaRelease"
+
+      - name: Wait for repo1.maven.org
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh
+          # The portal's PUBLISHED precedes the sync to repo1.maven.org, and a
+          # preflight that probed this version before the upload cached a 404
+          # there, so wait an hour before calling it failed.
+          tries=0
+          while [ "$tries" -lt 60 ]; do
+            code=$(pkg_registry_code sdk-java "$VERSION")
+            [ "$code" = 200 ] && { echo "repo1.maven.org serves sdk-java $VERSION"; exit 0; }
+            tries=$((tries + 1))
+            sleep 60
+          done
+          fail "repo1.maven.org never served sdk-java $VERSION (last HTTP $code)"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh && pkg_notes sdk-java "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

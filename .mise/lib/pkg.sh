@@ -5,7 +5,7 @@
 # and its kind comes from the files in it:
 #   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex,
 #   else pyproject.toml -> python, else Cargo.toml -> cargo, else *.gemspec -> ruby,
-#   else go.mod -> go, else composer.json -> php.
+#   else go.mod -> go, else composer.json -> php, else build.sbt -> java.
 #
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
@@ -52,6 +52,9 @@ _pkg_gemspec() {
   done
 }
 
+# A column-0 `<key> := "<value>"` setting from packages/<name>/build.sbt.
+_pkg_sbt_setting() { sed -n "s/^$2 := \"\(.*\)\"\$/\1/p" "$ROOT/$1/build.sbt"; }
+
 pkg_kind() {
   local dir
   dir=$(pkg_dir "$1") || exit 1
@@ -71,19 +74,22 @@ pkg_kind() {
     echo go
   elif [ -f "$ROOT/$dir/composer.json" ]; then
     echo php
+  elif [ -f "$ROOT/$dir/build.sbt" ]; then
+    echo java
   else
-    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, go.mod, or composer.json"
+    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, go.mod, composer.json, or build.sbt"
   fi
 }
 
 # `ankusa` first (everything else depends on it), then the other Hex packages,
 # then Docker images, then npm packages, then Python ones, then Cargo ones, then
-# Ruby gems, then Go modules, then PHP ones; byte order within each group.
+# Ruby gems, then Go modules, then PHP ones, then Java ones; byte order within
+# each group.
 pkg_names() {
   local kind name all
   all=$(_pkg_all)
   if [ -d "$ROOT/packages/ankusa" ]; then echo ankusa; fi
-  for kind in hex docker npm python cargo ruby go php; do
+  for kind in hex docker npm python cargo ruby go php java; do
     for name in $all; do
       if [ "$name" != ankusa ] && [ "$(pkg_kind "$name")" = "$kind" ]; then
         printf '%s\n' "$name"
@@ -116,6 +122,7 @@ pkg_version() {
     ruby) v=$(ruby -e 'print Gem::Specification.load(ARGV[0]).version' "$(_pkg_gemspec "$dir")") ;;
     go) v=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' "$ROOT/$dir/version.go") ;;
     php) v=$(sed -n "s/^    public const string VERSION = '\(.*\)';\$/\1/p" "$ROOT/$dir/src/Version.php") ;;
+    java) v=$(_pkg_sbt_setting "$dir" version) ;;
   esac
   [ -n "$v" ] || fail "could not read the version of $1 from $dir"
   printf '%s\n' "$v"
@@ -156,7 +163,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name crate_name gem_name hex_name module composer_name meta code
+  local dir kind url npm_name pypi_name crate_name gem_name hex_name module composer_name meta code maven_group maven_artifact
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -203,6 +210,14 @@ pkg_registry_code() {
       printf '%s' "$code"
       return
       ;;
+    java)
+      # Coordinates come from build.sbt; repo1 serves the POM once Central has
+      # synced the release.
+      maven_group=$(_pkg_sbt_setting "$dir" organization)
+      maven_artifact=$(_pkg_sbt_setting "$dir" name)
+      [ -n "$maven_group" ] && [ -n "$maven_artifact" ] || fail "could not read organization/name from $dir/build.sbt"
+      url="https://repo1.maven.org/maven2/${maven_group//.//}/$maven_artifact/$2/$maven_artifact-$2.pom"
+      ;;
   esac
   # curl prints 000 and exits non-zero when the registry is unreachable; the
   # 000 is the useful part. crates.io answers 403 to curl's own user agent, so
@@ -220,6 +235,7 @@ pkg_workflow() {
     ruby) echo release-ruby.yml ;;
     go) echo release-go.yml ;;
     php) echo release-php.yml ;;
+    java) echo release-maven.yml ;;
   esac
 }
 
@@ -241,6 +257,9 @@ pkg_secrets() {
     # Packagist: the deploy key pushes to the read-only split mirror
     # jamescarr/ankusa-php, then the API token triggers the package update.
     php) echo SDK_PHP_DEPLOY_KEY PACKAGIST_USERNAME PACKAGIST_TOKEN ;;
+    # Maven Central's Central Portal has no OIDC trusted publishing: a portal
+    # user token, plus the PGP key sbt-pgp signs with.
+    java) echo SONATYPE_USERNAME SONATYPE_PASSWORD PGP_SECRET PGP_PASSPHRASE ;;
   esac
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="mix format every Mix project; gofmt every Go package"
+#MISE description="mix format every Mix project; gofmt every Go package; google-java-format every sbt package"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -12,9 +12,16 @@ for d in $(mix_projects); do
 done
 
 for p in $(pkg_names); do
-  if [ "$(pkg_kind "$p")" = go ]; then
-    d=$(pkg_dir "$p")
-    echo "==> $d"
-    gofmt -w "$d"
-  fi
+  case "$(pkg_kind "$p")" in
+    go)
+      d=$(pkg_dir "$p")
+      echo "==> $d"
+      gofmt -w "$d"
+      ;;
+    java)
+      d=$(pkg_dir "$p")
+      echo "==> $d"
+      (cd "$d" && sbt --server --batch "javafmtAll")
+      ;;
+  esac
 done

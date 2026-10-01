@@ -1,0 +1,6 @@
+# packages/sdk-java's toolchain: the JDK sbt builds and tests on (the published
+# jar targets Java 17 through --release) and the sbt runner, which fetches the
+# sbt version pinned in packages/sdk-java/project/build.properties.
+[tools]
+java = "temurin-25.0.4+101.0.LTS"
+sbt = "2.0.9"

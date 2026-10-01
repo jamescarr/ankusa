@@ -67,6 +67,12 @@ packages/
                               for the queue-sink message format, plus clients
                               for the operator APIs. A pure HTTP client — it
                               never depends on `ankusa` core.
+  sdk-java                    the `io.github.jamescarr:ankusa-sdk` Maven
+                              Central client SDK, built with sbt 2 and
+                              published as Java 17 bytecode. Pure Java on
+                              the JDK's HttpClient plus Jackson 3 and the
+                              JSpecify annotations; a pure HTTP client like
+                              the other SDKs.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker

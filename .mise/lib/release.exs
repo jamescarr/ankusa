@@ -9,7 +9,8 @@
 #   elixir .mise/lib/release.exs apply DIR NEW TAG_PREFIX PREV_TAG DATE
 #     Sets @version in mix.exs, `version` in Cargo.toml for a Cargo package,
 #     VERSION in lib/**/version.rb for a gem, `const Version` in version.go
-#     for a Go module, or `VERSION` in src/Version.php for the PHP SDK (npm
+#     for a Go module, `VERSION` in src/Version.php for the PHP SDK, or
+#     `version :=` in build.sbt for an sbt package (npm
 #     versions are `npm version`'s job; pyproject.toml versions are
 #     `uv version`'s job), opens
 #     `## [NEW] - DATE` under [Unreleased] in CHANGELOG.md, and points the
@@ -22,6 +23,7 @@ defmodule Release do
   @gem_version_re ~r/^([ \t]*)VERSION = "([^"]+)"$/m
   @go_version_re ~r/^const Version = "([^"]+)"$/m
   @php_version_re ~r/^    public const string VERSION = '([^']+)';$/m
+  @sbt_version_re ~r/^version := "([^"]+)"$/m
 
   def main(["plan", dir, bump]) do
     current = current_version(dir)
@@ -73,8 +75,14 @@ defmodule Release do
         _ = go_version!(source, file)
         File.write!(file, Regex.replace(@go_version_re, source, ~s(const Version = "#{new}")))
 
+      File.exists?(Path.join(dir, "build.sbt")) ->
+        file = Path.join(dir, "build.sbt")
+        source = File.read!(file)
+        _ = sbt_version!(source, file)
+        File.write!(file, Regex.replace(@sbt_version_re, source, ~s(version := "#{new}")))
+
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, or version.go")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, version.go, or build.sbt")
     end
 
     changelog = Path.join(dir, "CHANGELOG.md")
@@ -102,6 +110,7 @@ defmodule Release do
     composer = Path.join(dir, "composer.json")
     mix = Path.join(dir, "mix.exs")
     version_go = Path.join(dir, "version.go")
+    build_sbt = Path.join(dir, "build.sbt")
 
     cond do
       File.exists?(package_json) ->
@@ -130,8 +139,11 @@ defmodule Release do
       File.exists?(version_go) ->
         version_go |> File.read!() |> go_version!(version_go)
 
+      File.exists?(build_sbt) ->
+        build_sbt |> File.read!() |> sbt_version!(build_sbt)
+
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, or version.go")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, version.go, or build.sbt")
     end
   end
 
@@ -157,6 +169,14 @@ defmodule Release do
       [[_, v]] -> v
       [] -> die(~s(#{path} has no `const Version = "..."` line))
       _ -> die(~s(#{path} has more than one `const Version = "..."` line))
+    end
+  end
+
+  defp sbt_version!(source, path) do
+    case Regex.scan(@sbt_version_re, source) do
+      [[_, v]] -> v
+      [] -> die(~s(#{path} has no `version := "..."` line))
+      _ -> die(~s(#{path} has more than one `version := "..."` line))
     end
   end
 

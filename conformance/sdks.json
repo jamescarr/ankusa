@@ -1,6 +1,7 @@
 {"sdks": {
   "sdk-elixir":     {"setup": [["mix", "local.hex", "--force", "--if-missing"], ["mix", "local.rebar", "--force", "--if-missing"], ["mix", "deps.get", "--check-locked"]], "run": ["mix", "test", "test/conformance_test.exs"]},
   "sdk-go":         {"setup": [],                                                             "run": ["go", "test", "-count=1", "-run", "^TestConformance$", "."]},
+  "sdk-java":       {"setup": [["sbt", "--server", "--batch", "Test/compile"]],              "run": ["sbt", "--server", "--batch", "testOnly io.github.jamescarr.ankusa.conformance.ConformanceTest"]},
   "sdk-php":        {"setup": [["composer", "install", "--no-interaction", "--no-progress"]], "run": ["composer", "conformance"]},
   "sdk-python":     {"setup": [["uv", "sync", "--locked"]],                                   "run": ["uv", "run", "pytest", "tests/test_conformance.py"]},
   "sdk-ruby":       {"setup": [["env", "BUNDLE_FROZEN=true", "bundle", "install"]],           "run": ["bundle", "exec", "rake", "conformance"]},

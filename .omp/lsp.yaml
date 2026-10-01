@@ -16,3 +16,17 @@ servers:
       - mix.exs
       - mix.lock
       - packages/ankusa/mix.exs
+  # jdtls (brew install jdtls) serves packages/sdk-java. It cannot import an
+  # sbt build, so run `sbt --server --batch jdtlsProject` in packages/sdk-java
+  # first, and again after changing libraryDependencies, to write the .project
+  # and .classpath it reads. rootMarkers replaces the built-in list wholesale,
+  # so the built-in five are repeated here alongside the repo-root marker.
+  jdtls:
+    rootMarkers:
+      - pom.xml
+      - build.gradle
+      - build.gradle.kts
+      - settings.gradle
+      - .project
+      - packages/sdk-java/build.sbt
+    warmupTimeoutMs: 30000
