@@ -68,9 +68,11 @@ Exact callback signatures and options: module docs on [HexDocs](https://hexdocs.
 
 ## Commands
 
-`mise install` once for the pinned toolchain (`.mise.toml`). All tasks live in
-`.mise/tasks/` (one file each); `mise tasks ls` lists every one; CI runs the
-same tasks this table does.
+`mise install` once for the pinned toolchain: repo-wide tools in `.mise.toml`,
+each SDK's own toolchain in `.mise/conf.d/<package>.toml`. A new SDK adds its
+fragment and leaves `.mise.toml` alone, so parallel SDK PRs don't conflict.
+All tasks live in `.mise/tasks/` (one file each); `mise tasks ls` lists every
+one; CI runs the same tasks this table does.
 
 | Task | What |
 | --- | --- |

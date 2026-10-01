@@ -1,9 +1,10 @@
 name: CI
 
 # Every job runs the same `mise run` task you run locally, with the toolchain
-# pinned in .mise.toml. The package matrix is discovered from packages/*, so a
-# new package (`mise run new:adapter`) needs no edit here; packages that need
-# live infrastructure bring up their own docker-compose.yml in check:package.
+# pinned in .mise.toml and .mise/conf.d/*.toml. The package matrix is
+# discovered from packages/*, so a new package (`mise run new:adapter`) needs no
+# edit here; packages that need live infrastructure bring up their own
+# docker-compose.yml in check:package.
 
 on:
   push:
@@ -30,6 +31,7 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mise run lint:workflows
       - run: mise run check:links
 
@@ -46,6 +48,7 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:package ${{ matrix.package }}
 
@@ -57,6 +60,7 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mise run check:conformance
 
   # The deployable wrappers and TypeScript workers: path-dep consumers of the
@@ -69,6 +73,7 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:examples
 
@@ -80,5 +85,6 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:tools

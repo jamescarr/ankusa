@@ -1,0 +1,3 @@
+# packages/sdk-ruby (the ankusa-sdk gem); mise installs a precompiled build.
+[tools]
+ruby = "4.0"
