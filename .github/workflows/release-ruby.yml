@@ -1,0 +1,99 @@
+name: Release (Ruby)
+
+# Tag-driven RubyGems publish for packages/sdk-ruby (published as the
+# `ankusa-sdk` gem), the same shape as release-python.yml's PyPI flow — its own
+# tag prefix, `sdk-ruby-v*` (the directory name), distinct from the Hex core
+# package's `ankusa-v*` and the other SDKs'. The gem is `ankusa-sdk` rather than
+# `ankusa` because RubyGems' `ankusa` is an unrelated project. Tagged by
+# `mise run release:tag sdk-ruby`.
+#
+# Publishes via RubyGems Trusted Publishing (OIDC): no long-lived token secret
+# in this repo. One-time setup on rubygems.org: until the gem exists there is no
+# gem settings page to use, so register a *pending* trusted publisher under
+# https://rubygems.org/profile/oidc/pending_trusted_publishers with Gem name
+# `ankusa-sdk`, Repository owner `jamescarr`, Repository name `ankusa`, Workflow
+# filename `release-ruby.yml`, Environment `rubygems`. Until that publisher
+# exists this workflow's publish step fails with no matching publisher, which
+# leaves the tag pushed and unpublished rather than publishing anything wrong.
+# See docs/releasing.md.
+
+on:
+  push:
+    tags:
+      - "sdk-ruby-v*"
+
+concurrency:
+  group: release-ruby-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.9.11
+          # pkg_version loads the gemspec, so this job needs ruby.
+          install_args: ruby
+      - id: resolve
+        run: |
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          [ "$(pkg_kind "$PKG")" = ruby ] || fail "$GITHUB_REF_NAME is not a Ruby package tag"
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          PKG_VERSION=$(pkg_version "$PKG")
+          [ "$PKG_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/lib/ankusa/sdk/version.rb $PKG_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to RubyGems + GitHub release
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      # Job-level permissions replace the workflow's rather than extending
+      # them, so `contents: write` has to be repeated here or `gh release
+      # create` below gets a 403.
+      contents: write
+      id-token: write # RubyGems Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to .mise.toml's ruby, the one `mise run check:package sdk-ruby`
+      # built and tested with.
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.9.11
+          install_args: ruby
+
+      - name: gem build
+        working-directory: packages/sdk-ruby
+        run: gem build --strict --output "$RUNNER_TEMP/ankusa-sdk.gem"
+
+      # With no role or token input this defaults to the gem's trusted publisher
+      # (the `rubygems` environment above) and exports GEM_HOST_API_KEY.
+      - uses: rubygems/configure-rubygems-credentials@v2.1.0
+
+      - name: Publish gem
+        run: gem push "$RUNNER_TEMP/ankusa-sdk.gem"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh && pkg_notes sdk-ruby "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"

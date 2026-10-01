@@ -31,11 +31,13 @@ packages/*/*.tar
 # Node (examples/*/worker).
 **/node_modules/
 
-# TypeScript / Python / Rust SDK build output (built via "npm run build" /
-# "npm pack" / "uv build" / "cargo build").
+# TypeScript / Python / Rust / Ruby SDK build output (built via "npm run
+# build" / "npm pack" / "uv build" / "cargo build" / "gem build").
 packages/sdk-typescript/dist/
 packages/sdk-python/dist/
 packages/sdk-rust/target/
+packages/sdk-ruby/*.gem
+packages/sdk-ruby/.bundle/
 
 # Python (packages/sdk-python, examples/quickstart).
 **/.venv/

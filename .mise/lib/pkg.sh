@@ -4,7 +4,7 @@
 # directory under packages/; its name is the git tag prefix (`<name>-vX.Y.Z`)
 # and its kind comes from the files in it:
 #   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex,
-#   else pyproject.toml -> python, else Cargo.toml -> cargo.
+#   else pyproject.toml -> python, else Cargo.toml -> cargo, else *.gemspec -> ruby.
 #
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
@@ -42,6 +42,15 @@ pkg_dir() {
   printf 'packages/%s\n' "$name"
 }
 
+# The *.gemspec in packages/<name> (nothing when there is none).
+_pkg_gemspec() {
+  local f
+  for f in "$ROOT/$1"/*.gemspec; do
+    if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+    return 0
+  done
+}
+
 pkg_kind() {
   local dir
   dir=$(pkg_dir "$1") || exit 1
@@ -55,19 +64,21 @@ pkg_kind() {
     echo python
   elif [ -f "$ROOT/$dir/Cargo.toml" ]; then
     echo cargo
+  elif [ -n "$(_pkg_gemspec "$dir")" ]; then
+    echo ruby
   else
-    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, or Cargo.toml"
+    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, or *.gemspec"
   fi
 }
 
 # `ankusa` first (everything else depends on it), then the other Hex packages,
-# then Docker images, then npm packages, then Python ones, then Cargo ones;
-# byte order within each group.
+# then Docker images, then npm packages, then Python ones, then Cargo ones, then
+# Ruby gems; byte order within each group.
 pkg_names() {
   local kind name all
   all=$(_pkg_all)
   if [ -d "$ROOT/packages/ankusa" ]; then echo ankusa; fi
-  for kind in hex docker npm python cargo; do
+  for kind in hex docker npm python cargo ruby; do
     for name in $all; do
       if [ "$name" != ankusa ] && [ "$(pkg_kind "$name")" = "$kind" ]; then
         printf '%s\n' "$name"
@@ -97,6 +108,7 @@ pkg_version() {
     python) v=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/$dir/pyproject.toml") ;;
     # The range matters: `[[test]] name = …` is also a column-0 `name =`.
     cargo) v=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' "$ROOT/$dir/Cargo.toml") ;;
+    ruby) v=$(ruby -e 'print Gem::Specification.load(ARGV[0]).version' "$(_pkg_gemspec "$dir")") ;;
   esac
   [ -n "$v" ] || fail "could not read the version of $1 from $dir"
   printf '%s\n' "$v"
@@ -133,7 +145,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name crate_name
+  local dir kind url npm_name pypi_name crate_name gem_name
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -152,6 +164,10 @@ pkg_registry_code() {
       crate_name=$(sed -n '/^\[package\]/,/^\[/ s/^name = "\(.*\)"$/\1/p' "$ROOT/$dir/Cargo.toml")
       url="https://crates.io/api/v1/crates/$crate_name/$2"
       ;;
+    ruby)
+      gem_name=$(ruby -e 'print Gem::Specification.load(ARGV[0]).name' "$(_pkg_gemspec "$dir")")
+      url="https://rubygems.org/api/v2/rubygems/$gem_name/versions/$2.json"
+      ;;
   esac
   # curl prints 000 and exits non-zero when the registry is unreachable; the
   # 000 is the useful part. crates.io answers 403 to curl's own user agent, so
@@ -166,6 +182,7 @@ pkg_workflow() {
     npm) echo release-npm.yml ;;
     python) echo release-python.yml ;;
     cargo) echo release-crates.yml ;;
+    ruby) echo release-ruby.yml ;;
   esac
 }
 
@@ -180,6 +197,8 @@ pkg_secrets() {
     # can be registered for it, so the first publish is token-driven; the
     # switch afterwards is in docs/releasing.md.
     cargo) echo CARGO_REGISTRY_TOKEN ;;
+    # RubyGems publishes via Trusted Publishing (OIDC): no repo secret needed.
+    ruby) : ;;
   esac
 }
 

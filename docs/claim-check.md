@@ -235,6 +235,37 @@ way: `false` for a malformed ref, `404`, other `4xx`, or an integrity
 mismatch; `true` for `5xx`/`503`, an unfollowed redirect, or an unreachable
 gateway.
 
+### From Ruby, with the SDK
+
+[`packages/sdk-ruby`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-ruby)
+(RubyGems gem `ankusa-sdk`) ships an `Ankusa::ClaimCheckClient` against the same
+contract: it parses a ref, redeems it, and verifies the bytes against the
+message's sha256 before returning them, the same end-to-end check the
+TypeScript, Python, and Rust clients run and the gateway itself does not. It's
+the umbrella client package for Ruby: the claim-check client sits alongside the
+routes, admin, and sources clients and a webhook header-parsing helper.
+
+```sh
+gem install ankusa-sdk   # or, before its first RubyGems release, a path dep,
+                          # see the package README
+```
+
+```ruby
+require "ankusa/sdk"
+
+CLAIM_CHECK = Ankusa::ClaimCheckClient.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
+
+# claim and sha256 are the queue message's fields.
+def redeem_claim(claim, sha256)
+  CLAIM_CHECK.redeem(claim, sha256)
+end
+```
+
+Every failure is a `ClaimCheckError` subclass with a `retryable?` method:
+`false` for a malformed ref, `404`, other `4xx`, or an integrity mismatch;
+`true` for `5xx`/`503` or an unreachable gateway, the same dead-letter vs.
+retry split as the TypeScript and Python clients.
+
 ### Any other language
 
 Any OpenAPI generator, `openapi-generator`, `openapi-python-client`, works

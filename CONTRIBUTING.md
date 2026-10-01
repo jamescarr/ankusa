@@ -20,5 +20,5 @@ last tag, and whether it's published.
 
 - Test layout, integration tags, local infra: [`docs/testing.md`](docs/testing.md)
 - Why a package gets split, and how to add one: [`docs/packaging.md`](docs/packaging.md)
-- Releasing any package (Hex, the server image, npm, PyPI): [`docs/releasing.md`](docs/releasing.md)
+- Releasing any package (Hex, the server image, npm, PyPI, RubyGems): [`docs/releasing.md`](docs/releasing.md)
 - What the framework guarantees, and how to run it: [`docs/README.md`](docs/README.md)
