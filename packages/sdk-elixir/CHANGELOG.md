@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `Ankusa.SDK.Receiver`, a `Plug` for `Ankusa.Sink.Http` deliveries: it reads
@@ -44,3 +46,6 @@ follows [Semantic Versioning](https://semver.org/).
   only, since the pool owns its connect options.
 - The language-neutral conformance runner
   (`test/conformance_test.exs`), passing every vector in `conformance/cases`.
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-elixir-v0.3.0
