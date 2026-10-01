@@ -87,8 +87,9 @@ The published image publishes each hook to a NATS JetStream subject, and a Rust
 worker built on the published `ankusa` crate pulls them through a durable
 consumer. The worker creates its own stream, redeems bodies over
 `inline_max_bytes` through the claim-check gateway with `ClaimCheckClient`,
-dedupes on the hook id, and `nak`s failures for redelivery. No object store:
-the claim-check gateway runs on the same node as everything else.
+dedupes on the hook id, `nak`s a failure a retry can fix (the gateway
+unreachable), and `term`s one it can't (bad JSON, a sha256 mismatch). No object
+store: the claim-check gateway runs on the same node as everything else.
 
 ```mermaid
 flowchart LR

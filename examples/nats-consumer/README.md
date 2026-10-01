@@ -25,7 +25,7 @@ flowchart LR
 | `ankusa.yml` | One open `demo` source whose NATS sink publishes to `ankusa.demo`, with `inline_max_bytes: 8192` so a ~20 KB hook takes the claim-check path |
 | `Cargo.toml` / `Cargo.lock` | The worker's crate: `async-nats`, `serde_json`, `base64`, and `ankusa` (published 0.3.0, `default-features = false`, since the gateway is plain HTTP) |
 | `Dockerfile` | Builds the worker with `cargo build --release --locked`; the build context is this directory alone, because the SDK comes from crates.io |
-| `src/main.rs` | Creates the `ANKUSA` stream and a durable pull consumer, decodes each message, redeems claims via `ankusa::ClaimCheckClient`, dedupes on `id`, acks |
+| `src/main.rs` | Creates the `ANKUSA` stream and a durable pull consumer, decodes each message, redeems claims via `ankusa::ClaimCheckClient`, dedupes on `id`, then acks, `nak`s, or `term`s the message |
 
 ## Run it
 
@@ -65,8 +65,14 @@ an Ankusa claim-check gateway (both default to `localhost`).
 - **Dedupe on `id`**: delivery is at-least-once. The worker records an id only
   after the hook is handled, so a failure is redelivered, not skipped as a
   duplicate.
-- **Failures are `nak`ed** and redelivered after 2s, at most 5 times per
-  message (`max_deliver`).
+- **Only what a retry can fix is retried.** An unreachable claim-check gateway
+  (`ClaimCheckError::is_retryable()`) is `nak`ed and redelivered every 5s until
+  it's back. Bad JSON, an unknown claim, or a sha256 mismatch would fail the
+  same way every time, so the worker logs it and `term`s the message, and
+  JetStream stops redelivering it.
+- **Transient NATS errors don't stop the worker.** A missed heartbeat or a
+  failed ack is logged and consumption continues. An unacked message is
+  redelivered later, and the dedupe absorbs a hook that was already handled.
 - Every message is the same JSON the RabbitMQ and Kafka sinks publish, so this
   worker's decoding works for those transports too. Format and claim-check
   details: [`../../docs/claim-check.md`](../../docs/claim-check.md).

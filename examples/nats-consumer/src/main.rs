@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use ankusa::ClaimCheckClient;
+use ankusa::bytes::Bytes;
 use async_nats::jetstream::{self, AckKind, consumer, stream};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -28,6 +29,16 @@ struct Hook {
     body_base64: Option<String>,
     claim: Option<String>,
     sha256: Option<String>,
+}
+
+/// Why a message wasn't handled, which decides how JetStream is answered.
+enum Failure {
+    /// Trying again later can work, e.g. the claim-check gateway was
+    /// unreachable: `nak` it, and JetStream redelivers it after a delay.
+    Retry(Error),
+    /// Every redelivery would fail the same way, e.g. bad JSON or a sha256
+    /// mismatch: `term` it, and JetStream stops redelivering it.
+    GiveUp(Error),
 }
 
 #[tokio::main]
@@ -52,8 +63,6 @@ async fn main() -> Result<(), Error> {
             "worker",
             consumer::pull::Config {
                 durable_name: Some("worker".into()),
-                // A message that keeps failing is given up after 5 tries.
-                max_deliver: 5,
                 ..Default::default()
             },
         )
@@ -66,40 +75,72 @@ async fn main() -> Result<(), Error> {
 
     let mut messages = consumer.messages().await?;
     while let Some(message) = messages.next().await {
-        let message = message?;
-        let ack = match process(&message.payload, &claim_check, &mut handled).await {
-            Ok(()) => AckKind::Ack,
+        // A missed heartbeat or a failed pull is logged, not fatal. If the
+        // consumer is deleted, the stream reports it once and then ends.
+        let message = match message {
+            Ok(message) => message,
             Err(err) => {
-                eprintln!("failed, will redeliver: {err}");
-                AckKind::Nak(Some(Duration::from_secs(2)))
+                eprintln!("receive failed: {err}");
+                continue;
             }
         };
-        message.ack_with(ack).await?;
+        let ack = match process(&message.payload, &claim_check, &mut handled).await {
+            Ok(()) => AckKind::Ack,
+            Err(Failure::Retry(err)) => {
+                eprintln!("will retry in 5s: {err}");
+                AckKind::Nak(Some(Duration::from_secs(5)))
+            }
+            Err(Failure::GiveUp(err)) => {
+                eprintln!("giving up on message: {err}");
+                AckKind::Term
+            }
+        };
+        // A lost ack means JetStream redelivers the message later; the dedupe
+        // covers a hook that was already handled.
+        if let Err(err) = message.ack_with(ack).await {
+            eprintln!("ack failed: {err}");
+        }
     }
-    Ok(())
+    Err("message stream ended".into())
 }
 
 async fn process(
     payload: &[u8],
     claim_check: &ClaimCheckClient,
     handled: &mut HashSet<String>,
-) -> Result<(), Error> {
-    let hook: Hook = serde_json::from_slice(payload)?;
+) -> Result<(), Failure> {
+    let hook: Hook = serde_json::from_slice(payload).map_err(|err| Failure::GiveUp(err.into()))?;
     if handled.contains(&hook.id) {
         println!("duplicate id={} (already handled)", hook.id);
         return Ok(());
     }
 
     let (body, via) = match (&hook.body_base64, &hook.claim, &hook.sha256) {
-        (Some(inline), _, _) => (BASE64.decode(inline)?, "inline"),
-        (None, Some(claim), Some(sha256)) => {
-            (claim_check.redeem(claim, sha256).await?.to_vec(), "claim")
+        (Some(inline), _, _) => {
+            let body = BASE64
+                .decode(inline)
+                .map_err(|err| Failure::GiveUp(err.into()))?;
+            (Bytes::from(body), "inline")
         }
-        _ => return Err("message has neither body_base64 nor claim + sha256".into()),
+        // `redeem` fetches the body and checks it against `sha256`. Only an
+        // unreachable gateway is worth retrying: a missing claim or a digest
+        // mismatch fails the same way every time.
+        (None, Some(claim), Some(sha256)) => match claim_check.redeem(claim, sha256).await {
+            Ok(body) => (body, "claim"),
+            Err(err) if err.is_retryable() => return Err(Failure::Retry(err.into())),
+            Err(err) => return Err(Failure::GiveUp(err.into())),
+        },
+        _ => {
+            return Err(Failure::GiveUp(
+                "no body_base64, and no claim + sha256".into(),
+            ));
+        }
     };
 
-    // Your business logic goes here. The id is recorded only after it
-    // succeeds: if it fails, the message is redelivered rather than skipped.
+    // Your business logic goes here. On failure, return `Failure::Retry` if
+    // trying again later can work (a database outage), `Failure::GiveUp` if it
+    // can't. The id is recorded only after success, so a retried hook is
+    // handled again instead of being skipped as a duplicate.
     let preview = String::from_utf8_lossy(&body[..body.len().min(80)]);
     println!(
         "received id={} source={} via={via} bytes={} body={preview}",
