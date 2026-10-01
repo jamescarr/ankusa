@@ -66,11 +66,17 @@ defmodule AnkusaRedis.MixProject do
   # required for this package to be publishable at all. Mix rejects two
   # entries for the same app regardless of :only, so this has to be a
   # single conditional entry, not a duplicate-with-disjoint-:only pair.
+  #
+  # The requirement is a compatibility fence, not a nicety: core 0.2.x calls the
+  # store as `insert(instance, route)` and `replace(instance, route)`, while this
+  # store implements the version-checked `insert/3` and `replace/3` that core has
+  # from the 0.3 line on (see `Ankusa.Routes.Store`). Against a 0.2.x core every
+  # route write would fail, so Hex must never pair them.
   defp ankusa_dep do
     if Mix.env() in [:dev, :test] do
       {:ankusa, path: "../ankusa"}
     else
-      {:ankusa, "~> 0.2"}
+      {:ankusa, "~> 0.3"}
     end
   end
 end

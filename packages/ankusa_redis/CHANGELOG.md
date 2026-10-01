@@ -19,10 +19,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Needs the `ankusa` release that carries the version-checked
-  `Ankusa.Routes.Store` callbacks** (`insert/3`, `replace/3`); release the two
-  together. An older `Ankusa.Routes.Store.Redis` does not implement the new
-  arities.
+- **Requires `ankusa ~> 0.3`** (it was `~> 0.2`). The store implements the
+  version-checked `Ankusa.Routes.Store` callbacks (`insert/3`, `replace/3`) that
+  core has from the 0.3 line on; a 0.2.x core calls `insert/2` and `replace/2`
+  and every route write would fail, so Hex no longer pairs them. Release it with
+  that core. In the other direction, `ankusa_redis` 0.2.x does not implement the
+  new arities and cannot be used with it.
 - Every write is one Lua script. `insert` and `replace` are conditioned on the
   version the caller validated against and answer `{:error, :stale}` — after the
   node has reloaded — when Redis holds another; `delete` and `put_ip_rules` bump
