@@ -7,9 +7,10 @@
 #     nothing under [Unreleased].
 #
 #   elixir .mise/lib/release.exs apply DIR NEW TAG_PREFIX PREV_TAG DATE
-#     Sets @version in mix.exs, `version` in Cargo.toml for a Cargo package, or
-#     VERSION in lib/**/version.rb for a gem (npm versions are `npm version`'s
-#     job; pyproject.toml versions are `uv version`'s job), opens
+#     Sets @version in mix.exs, `version` in Cargo.toml for a Cargo package,
+#     VERSION in lib/**/version.rb for a gem, or `const Version` in version.go
+#     for a Go module (npm versions are `npm version`'s job; pyproject.toml
+#     versions are `uv version`'s job), opens
 #     `## [NEW] - DATE` under [Unreleased] in CHANGELOG.md, and points the
 #     footer compare links at the new tag. PREV_TAG may be "" (first release).
 defmodule Release do
@@ -18,6 +19,7 @@ defmodule Release do
   @toml_version_re ~r/^version = "([^"]+)"$/m
   # [ \t]*, not \s*: in multiline mode \s would swallow preceding newlines.
   @gem_version_re ~r/^([ \t]*)VERSION = "([^"]+)"$/m
+  @go_version_re ~r/^const Version = "([^"]+)"$/m
 
   def main(["plan", dir, bump]) do
     current = current_version(dir)
@@ -53,8 +55,14 @@ defmodule Release do
         _ = gem_version!(source, file)
         File.write!(file, Regex.replace(@gem_version_re, source, ~s(\\1VERSION = "#{new}")))
 
+      File.exists?(Path.join(dir, "version.go")) ->
+        file = Path.join(dir, "version.go")
+        source = File.read!(file)
+        _ = go_version!(source, file)
+        File.write!(file, Regex.replace(@go_version_re, source, ~s(const Version = "#{new}")))
+
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, or *.gemspec")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, *.gemspec, or version.go")
     end
 
     changelog = Path.join(dir, "CHANGELOG.md")
@@ -80,6 +88,7 @@ defmodule Release do
     pyproject = Path.join(dir, "pyproject.toml")
     cargo_toml = Path.join(dir, "Cargo.toml")
     mix = Path.join(dir, "mix.exs")
+    version_go = Path.join(dir, "version.go")
 
     cond do
       File.exists?(package_json) ->
@@ -101,8 +110,11 @@ defmodule Release do
         file = gem_version_file!(dir)
         file |> File.read!() |> gem_version!(file)
 
+      File.exists?(version_go) ->
+        version_go |> File.read!() |> go_version!(version_go)
+
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, or *.gemspec")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, *.gemspec, or version.go")
     end
   end
 
@@ -120,6 +132,14 @@ defmodule Release do
       [[_, _, v]] -> v
       [] -> die(~s(#{path} has no `VERSION = "..."` line))
       _ -> die(~s(#{path} has more than one `VERSION = "..."` line))
+    end
+  end
+
+  defp go_version!(source, path) do
+    case Regex.scan(@go_version_re, source) do
+      [[_, v]] -> v
+      [] -> die(~s(#{path} has no `const Version = "..."` line))
+      _ -> die(~s(#{path} has more than one `const Version = "..."` line))
     end
   end
 

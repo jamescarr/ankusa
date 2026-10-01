@@ -20,8 +20,20 @@ for p in "${pkgs[@]}"; do
   if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then fail "tag $tag already exists locally"; fi
   if git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then fail "tag $tag already exists on origin"; fi
 
-  code=$(pkg_registry_code "$p" "$v")
-  [ "$code" = 404 ] || fail "$p $v is already published (HTTP $code); run release:prepare first"
+  if [ "$kind" = go ]; then
+    # The Go module proxy resolves `packages/<name>/vX.Y.Z`, a second tag
+    # release-go.yml pushes after CI passes: it must not exist yet. That tag,
+    # not a proxy probe, is this kind's "already published" check — probing
+    # proxy.golang.org before the tag exists caches a 404 for up to about 30
+    # minutes, which would fail the publish workflow's own wait.
+    go_tag=$(pkg_go_tag "$p" "$v")
+    if git ls-remote --exit-code --tags origin "$go_tag" >/dev/null 2>&1; then
+      fail "Go module tag $go_tag already exists on origin"
+    fi
+  else
+    code=$(pkg_registry_code "$p" "$v")
+    [ "$code" = 404 ] || fail "$p $v is already published (HTTP $code); run release:prepare first"
+  fi
 
   # The publish workflow cannot run without these, and finding out from a
   # failed run after the tag exists is worse than finding out now.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="mix format every Mix project that has a .formatter.exs"
+#MISE description="mix format every Mix project; gofmt every Go package"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -8,5 +8,13 @@ for d in $(mix_projects); do
   if [ -f "$d/.formatter.exs" ]; then
     echo "==> $d"
     (cd "$d" && mix format)
+  fi
+done
+
+for p in $(pkg_names); do
+  if [ "$(pkg_kind "$p")" = go ]; then
+    d=$(pkg_dir "$p")
+    echo "==> $d"
+    gofmt -w "$d"
   fi
 done

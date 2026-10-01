@@ -1,0 +1,109 @@
+name: Release (Go)
+
+# Tag-driven Go module publish for packages/sdk-go (module
+# github.com/jamescarr/ankusa/packages/sdk-go, package `ankusa`). Two tags are
+# involved, and they are not the same tag:
+#
+#   sdk-go-v*           the repo convention — `mise run release:tag sdk-go`
+#                       creates it (directory name + version) — and the
+#                       trigger for this workflow;
+#   packages/sdk-go/v*  what the Go module proxy resolves for a module that
+#                       lives in a subdirectory of its repository. Pushed by
+#                       this workflow, after CI passes, because proxy and sumdb
+#                       versions are immutable: a module tag must never point
+#                       at a commit CI has not run on.
+#
+# No repo secret is needed: the proxy reads the pushed git tag, and pkg.go.dev
+# lists the module once the proxy has fetched the version. The repository must
+# be public for that fetch to succeed; on a private repo consumers need
+# GOPRIVATE=github.com/jamescarr/ankusa and pkg.go.dev never lists it. See
+# docs/releasing.md.
+
+on:
+  push:
+    tags:
+      - "sdk-go-v*"
+
+concurrency:
+  group: release-go-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          source .mise/lib/pkg.sh
+          PKG=$(pkg_from_tag "$GITHUB_REF_NAME")
+          [ "$(pkg_kind "$PKG")" = go ] || fail "$GITHUB_REF_NAME is not a Go module tag"
+          VERSION="${GITHUB_REF_NAME#"$PKG"-v}"
+          PKG_VERSION=$(pkg_version "$PKG")
+          [ "$PKG_VERSION" = "$VERSION" ] || fail "tag $VERSION != $(pkg_dir "$PKG")/version.go $PKG_VERSION"
+          pkg_has_heading "$PKG" "$VERSION" || fail "$(pkg_dir "$PKG")/CHANGELOG.md has no '## [$VERSION]' heading"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: Run full test suite
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Push Go module tag + GitHub release
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-level permissions replace the workflow's rather than extending
+      # them, so `contents: write` has to be repeated here or the tag push
+      # and `gh release create` below get a 403.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push Go module tag
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh
+          GO_TAG=$(pkg_go_tag sdk-go "$VERSION")
+          # A tag pushed with GITHUB_TOKEN triggers no workflows, and a re-run
+          # of this job must not fail on its own earlier tag.
+          if git ls-remote --exit-code --tags origin "refs/tags/$GO_TAG" >/dev/null; then
+            echo "$GO_TAG already pushed"
+          else
+            git tag "$GO_TAG" "$GITHUB_SHA" && git push origin "$GO_TAG"
+          fi
+
+      - name: Wait for proxy.golang.org
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh
+          # A miss is cached for up to about 30 minutes whenever the version
+          # was requested before the module tag existed — `mise run status`
+          # probes every package, and so did this repo's own preflight before
+          # it learned to skip Go — so wait 40. This fetch is also what lists
+          # the version on pkg.go.dev, and giving up before the proxy's cache
+          # expires would fail an otherwise fine release.
+          for i in $(seq 1 40); do
+            code=$(pkg_registry_code sdk-go "$VERSION")
+            [ "$code" = 200 ] && { echo "proxy.golang.org serves sdk-go $VERSION"; exit 0; }
+            sleep 60
+          done
+          fail "proxy.golang.org never served sdk-go $VERSION (last HTTP $code)"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          source .mise/lib/pkg.sh && pkg_notes sdk-go "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
