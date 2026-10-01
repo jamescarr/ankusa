@@ -36,6 +36,7 @@ packages/*/*.tar
 packages/sdk-typescript/dist/
 packages/sdk-python/dist/
 packages/sdk-rust/target/
+examples/*/target/
 packages/sdk-ruby/*.gem
 packages/sdk-ruby/.bundle/
 

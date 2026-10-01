@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, and the Python worker's lockfile"
+#MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, the Python worker's lockfile, and the Rust worker's fmt/clippy"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -32,6 +32,13 @@ for f in examples/*/pyproject.toml; do
   d="${f%/pyproject.toml}"
   echo "==> $d"
   (cd "$d" && uv sync --locked)
+done
+
+for f in examples/*/Cargo.toml; do
+  [ -f "$f" ] || continue
+  d="${f%/Cargo.toml}"
+  echo "==> $d"
+  (cd "$d" && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
 done
 
 for f in examples/*/*/package.json; do

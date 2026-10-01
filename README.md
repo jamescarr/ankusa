@@ -157,6 +157,7 @@ Roles, the container, and fleets: [`docs/deployment.md`](docs/deployment.md).
 | Example | Delivers via | Worker | Shows |
 | --- | --- | --- | --- |
 | [quickstart](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/) | HTTP | Python | retries, dead letters, replay |
+| [rust-worker](https://github.com/jamescarr/ankusa/tree/main/examples/rust-worker/) | HTTP | Rust | the published Rust crate, parses headers and dedupes on `x-ankusa-id` |
 | [rabbitmq-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) | RabbitMQ | TypeScript | consumer-owned queues, large payloads via the claim-check gateway |
 | [kafka-sqs-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | per-source ordering, failure drills |
 | [oban-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/) | HTTP → Oban on Kubernetes | Elixir | a fleet of independent nodes, each with its own disk WAL, load-tested with pods killed mid-run |

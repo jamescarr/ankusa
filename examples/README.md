@@ -18,6 +18,7 @@ flowchart LR
 | Example | Delivers via | Worker | Needs | Run |
 | --- | --- | --- | --- | --- |
 | [quickstart](quickstart/) | HTTP | Python (FastAPI, uv) | docker | `docker compose up --build -d --wait` |
+| [rust-worker](rust-worker/) | HTTP | Rust (axum) | docker | `docker compose up --build -d --wait` |
 | [rabbitmq-consumer](rabbitmq-consumer/) | RabbitMQ | TypeScript | docker | `docker compose up --build` |
 | [kafka-sqs-consumer](kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | docker | `docker compose up --build -d --wait` |
 | [oban-consumer](oban-consumer/) | HTTP → Oban | Elixir | docker, kind, kubectl | `./run.sh` |
@@ -39,6 +40,15 @@ flowchart LR
 ```
 
 [`quickstart/`](quickstart/)
+
+## rust-worker
+
+The quickstart with the worker in Rust: an [axum](https://github.com/tokio-rs/axum)
+service built against the published `ankusa` crate from crates.io, using its
+`parse_headers` to read the delivery's identity and deduping on `x-ankusa-id`.
+Same compose file, same open `demo` source, same shorter retries.
+
+[`rust-worker/`](rust-worker/)
 
 ## rabbitmq-consumer
 
