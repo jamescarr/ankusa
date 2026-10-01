@@ -14,7 +14,7 @@ with a `routes.seed`), or that deliver hooks to a Redis pub/sub channel.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.2"},
+    {:ankusa, "~> 0.3"},
     {:ankusa_redis, "~> 0.2"}
   ]
 end
