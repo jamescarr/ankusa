@@ -8,6 +8,8 @@ elixir = "1.20.4-otp-29"
 erlang = "29.1"
 node = "22"
 rust = { version = "1.98.1", components = ["clippy", "rustfmt"] } # packages/sdk-rust
+# packages/sdk-ruby (the ankusa-sdk gem); mise installs a precompiled build.
+ruby = "4.0"
 # brod's crc32cer NIF (ankusa_kafka, ankusa_server, and the kafka example)
 # compiles from source and needs CMake >= 3.16; 4.4.3 builds it on macOS.
 cmake = "4.4.3"

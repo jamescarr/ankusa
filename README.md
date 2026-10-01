@@ -146,9 +146,9 @@ flowchart LR
     Q --> W[Your workers]
 ```
 
-Your workers can be written in anything. A TypeScript, Python, or Go consumer
-reads from the queue and fetches large payloads over HTTP without ever holding
-storage credentials.
+Your workers can be written in anything. A TypeScript, Python, Ruby, or Go
+consumer reads from the queue and fetches large payloads over HTTP without ever
+holding storage credentials.
 
 Roles, the container, and fleets: [`docs/deployment.md`](docs/deployment.md).
 

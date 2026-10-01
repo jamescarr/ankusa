@@ -51,6 +51,11 @@ case "$kind" in
     cargo test --locked --all-features
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
     ;;
+  ruby)
+    BUNDLE_FROZEN=true bundle install
+    bundle exec rake test
+    bundle exec rake standard
+    ;;
 esac
 
 if [ "$kind" = hex ]; then
@@ -75,4 +80,10 @@ if [ "$kind" = cargo ]; then
   # Package (and build from the packaged sources) the way release-crates.yml
   # publishes it.
   cargo package --locked --allow-dirty
+fi
+
+if [ "$kind" = ruby ]; then
+  # Build the gem the way release-ruby.yml publishes it.
+  tmp=$(mktemp -d)
+  gem build --strict --output "$tmp/$pkg.gem"
 fi

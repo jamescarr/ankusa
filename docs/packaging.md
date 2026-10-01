@@ -57,6 +57,7 @@ packages/
   sdk-typescript              the `ankusa` npm client SDK.
   sdk-python                  the `ankusa` PyPI client SDK.
   sdk-rust                    the `ankusa` crates.io client SDK.
+  sdk-ruby                    the `ankusa-sdk` RubyGems client SDK.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker

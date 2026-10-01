@@ -63,6 +63,11 @@ while [ $i -lt ${#pkgs[@]} ]; do
     # or the next `cargo build --locked` (CI on this PR, then `cargo publish
     # --locked`) fails. --workspace touches only this crate's lock entries.
     (cd "$dir" && cargo update --workspace --quiet)
+  elif [ "$(pkg_kind "$p")" = ruby ]; then
+    # release.exs already rewrote lib/**/version.rb. Gemfile.lock records the
+    # gem's own version, so relock or the next frozen `bundle install` (CI on
+    # this PR, then the tag run) fails.
+    (cd "$dir" && bundle lock >/dev/null)
   fi
   printf '  %-18s -> %s\n' "$p" "$new"
 

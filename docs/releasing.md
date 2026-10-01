@@ -11,10 +11,12 @@ the files in it decide where it publishes:
 | `sdk-typescript` | npm package `ankusa` (`package.json`) | `sdk-typescript-vX.Y.Z` | [`release-npm.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-npm.yml) |
 | `sdk-python` | PyPI package `ankusa` (`pyproject.toml`) | `sdk-python-vX.Y.Z` | [`release-python.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-python.yml) |
 | `sdk-rust` | crates.io crate `ankusa` (`Cargo.toml`) | `sdk-rust-vX.Y.Z` | [`release-crates.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-crates.yml) |
+| `sdk-ruby` | RubyGems gem `ankusa-sdk` (`ankusa-sdk.gemspec`) | `sdk-ruby-vX.Y.Z` | [`release-ruby.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-ruby.yml) |
 
-The npm, PyPI, and crates.io packages are all named `ankusa`; each one's tag
-prefix is its directory name, not the package name, so none can be confused
-with the Hex core's `ankusa-vX.Y.Z` or with each other.
+The npm, PyPI, and crates.io packages are all named `ankusa`, and the RubyGems
+gem is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project;
+each one's tag prefix is its directory name, not the package name, so none can
+be confused with the Hex core's `ankusa-vX.Y.Z` or with each other.
 
 ## The flow
 
@@ -33,8 +35,9 @@ mise run release:verify ankusa_nats
 1. **`release:prepare <bump> <pkgs>…`** refuses a dirty tree or a `HEAD` that
    isn't `origin/main`, and refuses a package whose `CHANGELOG.md` has nothing
    under `[Unreleased]`. For each package it sets the version (`@version` in
-   `mix.exs`, `npm version` for npm, or `uv version` for Python), opens a
-   dated `## [X.Y.Z]` heading
+   `mix.exs`, `[package] version` in `Cargo.toml`, `VERSION` in a gem's
+   `lib/**/version.rb`, `npm version` for npm, or `uv version` for Python),
+   opens a dated `## [X.Y.Z]` heading
    under `[Unreleased]`, and points the footer compare links at the new tag.
    It commits all of them on `release/<tag>`, pushes, and opens a PR whose
    body is the release notes. `--no-pr` stops after the local commit.
@@ -65,7 +68,7 @@ fails at `MIX_ENV=prod mix deps.get`. `release:preflight` enforces this: an
 adapter's preflight fails until the core version in the tree is on Hex.
 `release:prepare` can still bump core and adapters together in one PR.
 
-The server image and the npm, Python, and Rust SDKs have no ordering
+The server image and the npm, Python, Rust, and Ruby SDKs have no ordering
 constraint: the image builds from this checkout, and none of the SDKs depends
 on anything here.
 
@@ -107,6 +110,8 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   <https://crates.io/settings/tokens> (Account Settings → API Tokens). See
   [Rust SDK (crates.io)](#rust-sdk-cratesio) below for why it is a token
   rather than OIDC.
+- **RubyGems:** no repository secret — Trusted Publishing (OIDC); see
+  [Ruby SDK (RubyGems)](#ruby-sdk-rubygems) below.
 
 ## Python SDK (PyPI)
 
@@ -249,4 +254,77 @@ version, so `--locked` fails without it); `release:tag`'s preflight confirms
 the version is still unpublished on crates.io and the tag is free; the tag run
 publishes with `cargo publish --locked` on the same Rust toolchain `.mise.toml`
 pins for `check:package sdk-rust`, and cuts the GitHub release from the
+CHANGELOG section.
+
+## Ruby SDK (RubyGems)
+
+`sdk-ruby` publishes as the `ankusa-sdk` gem on RubyGems (RubyGems' `ankusa`
+belongs to an unrelated project). There is no token to store or rotate:
+[`release-ruby.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-ruby.yml)
+authenticates with RubyGems [Trusted Publishing](https://guides.rubygems.org/trusted-publishing/)
+(OIDC), so the only setup is on RubyGems itself, and the only manual step in the
+whole flow.
+
+### One-time RubyGems setup
+
+`ankusa-sdk` does not exist on RubyGems yet, so register a **pending** trusted
+publisher: the first successful publish creates the gem and binds the name to
+this repo. From the RubyGems account that will own the gem:
+
+1. Sign in at <https://rubygems.org/session/new>.
+2. Open <https://rubygems.org/profile/oidc/pending_trusted_publishers>
+   (**Trusted publishers** under your profile).
+3. Under **Pending trusted publishers**, fill in exactly:
+
+   | Field | Value |
+   | --- | --- |
+   | Gem name | `ankusa-sdk` |
+   | Repository owner | `jamescarr` |
+   | Repository name | `ankusa` |
+   | Workflow filename | `release-ruby.yml` |
+   | Environment | `rubygems` |
+
+   Leave the Workflow Repository fields blank.
+
+4. Save. Nothing else on RubyGems is needed: the `rubygems` GitHub environment
+   is created on first use, and every later release publishes without further
+   RubyGems changes.
+
+The gem name has to be free, and RubyGems names are first-come. Check before
+the first tag:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://rubygems.org/api/v1/gems/ankusa-sdk.json   # 404 = available
+```
+
+If it is taken, change `spec.name` in
+[`packages/sdk-ruby/ankusa-sdk.gemspec`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-ruby/ankusa-sdk.gemspec)
+(and this document) before tagging; `release:preflight` and `release:verify`
+read that field, so nothing else changes.
+
+Optionally add the `rubygems` environment under Settings → Environments first if
+you want to gate publishes behind a required reviewer; an environment with no
+protection rules behaves like none.
+
+### Release commands
+
+Same flow as every other package ([above](#the-flow)); only the package name
+differs. With no ordering constraint against the Hex packages:
+
+```sh
+mise run status                             # version, last tag, published?, commits since
+mise run release:prepare minor sdk-ruby     # or patch | major | 0.2.1
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-ruby
+mise run release:watch sdk-ruby             # the tag run builds and publishes
+mise run release:verify sdk-ruby            # HTTP 200 for the version on RubyGems
+```
+
+`release:prepare` rewrites `lib/ankusa/sdk/version.rb` (through
+[`.mise/lib/release.exs`](https://github.com/jamescarr/ankusa/blob/main/.mise/lib/release.exs))
+and runs `bundle lock`, so the release PR keeps the frozen `bundle install` in
+CI passing; `release:tag`'s preflight confirms the version is still unpublished
+on RubyGems and the tag is free; the tag run builds the gem with `gem build`,
+pushes it through the trusted publisher, and cuts the GitHub release from the
 CHANGELOG section.

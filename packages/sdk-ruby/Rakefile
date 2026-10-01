@@ -1,0 +1,17 @@
+# frozen_string_literal: true
+
+require "rake/testtask"
+require "standard/rake"
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "lib" << "test"
+  t.test_files = FileList["test/**/*_test.rb"]
+end
+
+# Just the language-neutral vectors, for `mise run check:conformance`.
+Rake::TestTask.new(:conformance) do |t|
+  t.libs << "lib" << "test"
+  t.test_files = ["test/conformance_test.rb"]
+end
+
+task default: %i[test standard]

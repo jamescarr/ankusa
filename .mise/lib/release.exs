@@ -7,15 +7,17 @@
 #     nothing under [Unreleased].
 #
 #   elixir .mise/lib/release.exs apply DIR NEW TAG_PREFIX PREV_TAG DATE
-#     Sets @version in mix.exs, or `version` in Cargo.toml for a Cargo package
-#     (npm versions are `npm version`'s job; pyproject.toml versions are
-#     `uv version`'s job), opens
+#     Sets @version in mix.exs, `version` in Cargo.toml for a Cargo package, or
+#     VERSION in lib/**/version.rb for a gem (npm versions are `npm version`'s
+#     job; pyproject.toml versions are `uv version`'s job), opens
 #     `## [NEW] - DATE` under [Unreleased] in CHANGELOG.md, and points the
 #     footer compare links at the new tag. PREV_TAG may be "" (first release).
 defmodule Release do
   @repo "https://github.com/jamescarr/ankusa"
   @version_re ~r/^  @version "([^"]+)"$/m
   @toml_version_re ~r/^version = "([^"]+)"$/m
+  # [ \t]*, not \s*: in multiline mode \s would swallow preceding newlines.
+  @gem_version_re ~r/^([ \t]*)VERSION = "([^"]+)"$/m
 
   def main(["plan", dir, bump]) do
     current = current_version(dir)
@@ -39,11 +41,20 @@ defmodule Release do
         _ = toml_version!(source, cargo_toml)
         File.write!(cargo_toml, Regex.replace(@toml_version_re, source, ~s(version = "#{new}")))
 
-      true ->
+      File.exists?(Path.join(dir, "mix.exs")) ->
         mix = Path.join(dir, "mix.exs")
         source = File.read!(mix)
         _ = mix_version!(source, mix)
         File.write!(mix, Regex.replace(@version_re, source, ~s(  @version "#{new}")))
+
+      Path.wildcard(Path.join(dir, "*.gemspec")) != [] ->
+        file = gem_version_file!(dir)
+        source = File.read!(file)
+        _ = gem_version!(source, file)
+        File.write!(file, Regex.replace(@gem_version_re, source, ~s(\\1VERSION = "#{new}")))
+
+      true ->
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, or *.gemspec")
     end
 
     changelog = Path.join(dir, "CHANGELOG.md")
@@ -86,8 +97,29 @@ defmodule Release do
       File.exists?(mix) ->
         mix |> File.read!() |> mix_version!(mix)
 
+      Path.wildcard(Path.join(dir, "*.gemspec")) != [] ->
+        file = gem_version_file!(dir)
+        file |> File.read!() |> gem_version!(file)
+
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, or mix.exs")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, mix.exs, or *.gemspec")
+    end
+  end
+
+  # The one lib/**/version.rb a gem package ships.
+  defp gem_version_file!(dir) do
+    case Path.wildcard(Path.join(dir, "lib/**/version.rb")) do
+      [file] -> file
+      [] -> die("#{dir} has no lib/**/version.rb")
+      _ -> die("#{dir} has more than one lib/**/version.rb")
+    end
+  end
+
+  defp gem_version!(source, path) do
+    case Regex.scan(@gem_version_re, source) do
+      [[_, _, v]] -> v
+      [] -> die(~s(#{path} has no `VERSION = "..."` line))
+      _ -> die(~s(#{path} has more than one `VERSION = "..."` line))
     end
   end
 
