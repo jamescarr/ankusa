@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
+No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other packages in this release.
+
 ## [0.2.1] - 2026-09-28
 
 ### Added
@@ -56,7 +60,8 @@ follows [Semantic Versioning](https://semver.org/).
 - The message is built by `Ankusa.Sink.Message` (in `ankusa`), shared
   with `ankusa_kafka`, so both sinks publish byte-identical messages.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.1...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.1...ankusa_rabbitmq-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.0...ankusa_rabbitmq-v0.2.1
 [0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.1.0...ankusa_rabbitmq-v0.2.0
 [0.1.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_rabbitmq-v0.1.0

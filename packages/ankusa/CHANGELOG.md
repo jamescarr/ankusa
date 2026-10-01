@@ -11,6 +11,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `wal: :none`, the stateless ack path. Ingest verifies, then publishes to the
@@ -43,6 +45,14 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `[:ankusa, :rate_limit, :rejected]` (tenant-tagged) and appear as
   `ankusa_rate_limit_rejected_total`, and the ingest `:outcome` label gains
   `:rate_limited`.
+- `Ankusa.SourceStore` gains optional write callbacks `put/5`, `get/3`, and
+  `list_tenant/2`, plus matching facade functions, and a new
+  `Ankusa.SourceStore.Persistent` adapter that keeps sources in ETS and
+  persists the API-managed ones to `sources.json` under the instance data
+  directory. Sources can now be created, listed, and updated at runtime.
+- The admin API gains `GET`/`POST /v1/tenants/:tenant/sources` and
+  `GET`/`PUT /v1/tenants/:tenant/sources/:name`, and `GET /health` now reports
+  the application version.
 
 ### Changed
 
@@ -113,19 +123,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   logged instead of a crash.
 - The release notes below named `Ankusa.Net.CIDR` and `stream_data` property
   tests; neither ever shipped, and the entry now says what did.
-
-## [0.3.0] - 2026-09-28
-
-### Added
-
-- `Ankusa.SourceStore` gains optional write callbacks `put/5`, `get/3`, and
-  `list_tenant/2`, plus matching facade functions, and a new
-  `Ankusa.SourceStore.Persistent` adapter that keeps sources in ETS and
-  persists the API-managed ones to `sources.json` under the instance data
-  directory. Sources can now be created, listed, and updated at runtime.
-- The admin API gains `GET`/`POST /v1/tenants/:tenant/sources` and
-  `GET`/`PUT /v1/tenants/:tenant/sources/:name`, and `GET /health` now reports
-  the application version.
 
 ## [0.2.4] - 2026-09-28
 
@@ -395,7 +392,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   defaults to `false`, so depending on `ankusa` never binds a port as a side
   effect.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.4...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.4...ankusa-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.1...ankusa-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.0...ankusa-v0.2.1
 [0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.1.0...ankusa-v0.2.0

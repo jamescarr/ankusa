@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `ClaimCheckClient`: `redeem(claim_ref, sha256)` parses a claim-check ref,
@@ -33,3 +35,6 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `Transport`, the injectable request hook (`ReqwestTransport` by default, so
   the crate drives its own HTTP client or none at all), and `ClientBuilder`
   for shared base URL, headers, and timeout.
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-rust-v0.3.0

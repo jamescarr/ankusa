@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Added
 
 - `Ankusa\ClaimCheck\ClaimCheckClient`: `redeem(ref, sha256)` parses a
@@ -40,3 +42,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   bring its own transport. Client headers ride on every request; a JSON body
   always goes out as `content-type: application/json`, replacing any
   caller-supplied `Content-Type` rather than duplicating it.
+
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.3.0...HEAD
+[0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-php-v0.3.0
