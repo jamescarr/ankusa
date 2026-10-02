@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.Sink.RabbitMQ` implements `c:Ankusa.Sink.describe/2`, advertising its
+  broker, vhost, exchange, and routing key to the AsyncAPI document the admin
+  API serves. Credentials in `:url` are never part of it.
+- `Ankusa.Sink.RabbitMQ.Connection.default_url/0`.
+
 ### Removed
 
 - The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:

@@ -30,6 +30,7 @@ defmodule AnkusaExample.Ingest.MixProject do
       # Mix to use ours everywhere in the tree, which is exactly what a
       # monorepo example wiring both path-dependent packages together needs.
       {:ankusa, path: "../../../packages/ankusa", override: true},
+      {:async_api_spex, path: "../../../packages/async_api_spex", override: true},
       {:ankusa_rabbitmq, path: "../../../packages/ankusa_rabbitmq"}
     ]
   end

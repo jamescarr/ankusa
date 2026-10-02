@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.Sink.NATS` implements `c:Ankusa.Sink.describe/2`, advertising its
+  servers and subject to the AsyncAPI document the admin API serves.
+  `:servers` now also takes one comma-separated string, as the YAML key
+  documents.
+
 ### Removed
 
 - The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:

@@ -53,11 +53,11 @@ defmodule AnkusaRedis.MixProject do
   end
 
   defp deps do
-    [
-      ankusa_dep(),
-      {:redix, "~> 1.5"},
-      {:ex_doc, "~> 0.40", only: :dev, runtime: false}
-    ]
+    ankusa_deps() ++
+      [
+        {:redix, "~> 1.5"},
+        {:ex_doc, "~> 0.40", only: :dev, runtime: false}
+      ]
   end
 
   # Path dep for local monorepo development/test; the Hex-published version
@@ -72,11 +72,17 @@ defmodule AnkusaRedis.MixProject do
   # store implements the version-checked `insert/3` and `replace/3` that core has
   # from the 0.3 line on (see `Ankusa.Routes.Store`). Against a 0.2.x core every
   # route write would fail, so Hex must never pair them.
-  defp ankusa_dep do
+  defp ankusa_deps do
     if Mix.env() in [:dev, :test] do
-      {:ankusa, path: "../ankusa"}
+      [
+        {:ankusa, path: "../ankusa"},
+        # Core's own requirement on this is the Hex release, which Mix resolves
+        # when it loads `../ankusa` as a dependency (deps load under :prod), so
+        # the checkout is pinned here the same way `:ankusa` is.
+        {:async_api_spex, path: "../async_api_spex", override: true}
+      ]
     else
-      {:ankusa, "~> 0.3"}
+      [{:ankusa, "~> 0.3"}]
     end
   end
 end

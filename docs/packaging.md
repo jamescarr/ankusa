@@ -36,7 +36,8 @@ packages/
   ankusa                      core. mix.exs runtime deps: {bandit, plug, cidr,
                               req, aws_signature, telemetry_metrics,
                               telemetry_metrics_prometheus_core, nebulex,
-                              nebulex_local, rocksdb}. No adapter deps.
+                              nebulex_local, rocksdb, async_api_spex}. No adapter
+                              deps.
     lib/ankusa/…              behaviours, envelope, config, registry, telemetry,
                               edge/dispatch/storage machinery, the store
                               (Ankusa.Store, on erlang-rocksdb), and every
@@ -55,6 +56,11 @@ packages/
                               a pub/sub channel).
   ankusa_server               the jamescarr/ankusa Docker image: core + every
                               adapter, configured by YAML. Not on Hex.
+  async_api_spex              generic AsyncAPI 3.0 library: document structs,
+                              `use AsyncApiSpex.Schema`/`Message`, a validator,
+                              a Plug, `mix async_api_spex.gen`. No Ankusa code;
+                              core depends on it for `Ankusa.AsyncApi`. Any
+                              Elixir app can use it on its own.
   sdk-typescript              the `ankusa` npm client SDK.
   sdk-python                  the `ankusa` PyPI client SDK.
   sdk-rust                    the `ankusa` crates.io client SDK.
@@ -91,6 +97,14 @@ suite needs `Ankusa.Registry` running (started by `ankusa`'s own Application);
 none needs any config to get it, since Ankusa.Application's built-in default
 instance is off (`autostart: false`) by default and only the core project's
 own `packages/ankusa/config/config.exs` turns it on.
+
+Core itself depends on `async_api_spex` the same way (`path:` in dev/test, the
+Hex release otherwise). Mix loads a path dependency's `mix.exs` under `:prod`,
+so a project that path-depends on core would resolve the Hex `async_api_spex`,
+which is not published until a release. Each such project (the four adapters'
+dev/test deps, `ankusa_server`, the example ingest apps) therefore also pins
+`{:async_api_spex, path: "../async_api_spex", override: true}`, the same way
+the examples pin `:ankusa`.
 
 ## Why S3/GCS/Azure/OCI stayed in-tree but RabbitMQ/Kafka/NATS didn't
 

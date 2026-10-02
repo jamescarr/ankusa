@@ -37,6 +37,7 @@ defmodule Ankusa.Instance do
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Routes.validate_config!(config)
     Ankusa.Queue.validate_config!(config)
+    Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
@@ -44,6 +45,7 @@ defmodule Ankusa.Instance do
       metrics_children(config, opts) ++
         store_children(config, opts) ++
         source_store_children(config, opts) ++
+        lifecycle_children(config, opts) ++
         routes_children(config, opts) ++
         edge_children(config, opts) ++
         routes_admin_children(config) ++
@@ -98,6 +100,12 @@ defmodule Ankusa.Instance do
       []
     end
   end
+
+  # Lifecycle events are published from memory (`Ankusa.Lifecycle.Publisher`),
+  # on every node whatever its roles: the admin API that makes the changes runs
+  # on any node. It starts before every listener that can make one.
+  defp lifecycle_children(%Config{lifecycle: %{sinks: []}}, _opts), do: []
+  defp lifecycle_children(_config, opts), do: [{Ankusa.Lifecycle.Publisher, opts}]
 
   defp edge_children(config, opts) do
     if Config.role?(config, :edge) do

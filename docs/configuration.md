@@ -65,6 +65,7 @@ Every top-level section, with its keys and defaults:
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent`; `persistent` adds API-managed sources kept in this node's store). See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
+| `lifecycle` | `sinks` (none: off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -297,6 +298,10 @@ which read and adjust this node's per-tenant ingest limits
 is **unauthenticated by design**: put it behind your own
 proxy, SSO, or network policy. The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
+
+With `admin.enabled: true` it also serves `GET /asyncapi.json`, the AsyncAPI
+document of the channels this node publishes to ([AsyncAPI and lifecycle
+events](asyncapi.md)).
 
 #### Route management
 

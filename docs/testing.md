@@ -139,6 +139,26 @@ The always-on tests cover:
   the description of it. The `wal.type: none` half is backed by
   `edge_direct_test.exs`, which asserts the response really does wait for the
   sink's confirm — and is a `503` when that confirm never comes.
+- **Lifecycle events** (`lifecycle_test.exs`): through a real instance, a
+  source's create/update/delete and a route's create/replace/patch/delete each
+  deliver one CloudEvent to the configured sink, the source's secret arrives
+  redacted, a refused change emits nothing, and the store assigns no seq to an
+  event (they bypass it). A refusing sink is retried until it confirms; when
+  the retries run out the event is dropped and counted but the change stands; a
+  broken sink (one that raises, or returns neither `:ok` nor an error) never
+  holds back another or crashes the publisher; a full queue and a publisher that isn't
+  running each drop and count the event; with no lifecycle sinks there is no
+  publisher. `ankusa:lifecycle` is a `404` at ingest, an event over a sink's
+  inline threshold is claim-checked under a valid tenant and redeems to the
+  event, and each invalid lifecycle config is refused at boot.
+- **The AsyncAPI document** (`async_api_test.exs`, plus `GET /asyncapi.json` in
+  `admin/router_test.exs`): sources on one address share a channel, sinks
+  without a channel are absent, a computed address is a channel of its own, the
+  tenant is fixed in a message only when the route resolver takes it from the
+  source, ids that collide once sanitized stay distinct, lifecycle sinks add a
+  channel naming the CloudEvent schema, and every document `async_api_spex`
+  validates. The adapters' `*_describe_test.exs` pin what each sink advertises
+  (and that no credential reaches it) without a broker.
 
 The 16 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
@@ -157,13 +177,27 @@ It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 on
 the bucket/container bootstrap, runs `mix test --include integration` in
 `packages/ankusa`, and tears the emulators down.
 
+## `async_api_spex`: `mix test`
+
+```sh
+mise run check:package async_api_spex    # 16 tests, no external infra needed
+```
+
+Covers: a document declared with `use AsyncApiSpex.Schema` / `Message` encoding
+to the exact AsyncAPI 3.0 JSON (lowerCamel keys, no nulls, `$ref`s into
+`components`, `x-` extensions inlined), two modules claiming one component name
+raising, each validator rule failing with one error that names its JSON path,
+bad macro options raising at compile time, `AsyncApiSpex.Plug.RenderSpec`
+answering `application/asyncapi+json`, and `mix async_api_spex.gen` writing a
+decodable file.
+
 ## `ankusa_rabbitmq`: `mix test`
 
 Same pattern: every test needs live RabbitMQ (on :5673 AMQP, :15673
 management UI):
 
 ```sh
-mise run check:package ankusa_rabbitmq   # 4 tests
+mise run check:package ankusa_rabbitmq   # 8 tests
 ```
 
 Covers: inline-payload publish + decode, fat-payload claim check-in (message
@@ -177,7 +211,7 @@ unreachable broker.
 Same pattern, against Redpanda on :19092:
 
 ```sh
-mise run check:package ankusa_kafka      # 5 tests
+mise run check:package ankusa_kafka      # 10 tests
 ```
 
 `KAFKA_BROKERS` (default `localhost:19092`) points the suite at another
@@ -199,7 +233,7 @@ Same pattern, against NATS with JetStream enabled (on :4223 client, :8223
 monitoring):
 
 ```sh
-mise run check:package ankusa_nats       # 6 tests
+mise run check:package ankusa_nats       # 9 tests
 ```
 
 `NATS_SERVERS` (default `localhost:4223`) points the suite at another server.
@@ -231,7 +265,7 @@ toolchain.
 Same pattern, against Redis on :6399:
 
 ```sh
-mise run check:package ankusa_redis      # 26 tests
+mise run check:package ankusa_redis      # 29 tests
 ```
 
 `REDIS_URL` (default `redis://localhost:6399`) points the suite at another

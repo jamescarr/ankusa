@@ -27,6 +27,7 @@ defmodule AnkusaExample.Ingest.MixProject do
       # ankusa_kafka's deps() picks the Hex `:ankusa` when built as a nested
       # dependency, which conflicts with this path entry.
       {:ankusa, path: "../../../packages/ankusa", override: true},
+      {:async_api_spex, path: "../../../packages/async_api_spex", override: true},
       {:ankusa_kafka, path: "../../../packages/ankusa_kafka"}
     ]
   end

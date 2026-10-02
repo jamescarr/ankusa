@@ -88,7 +88,14 @@ defmodule Ankusa.SourceStore do
       %Config{source_store: {mod, _}} = Ankusa.config(instance)
 
       if exports?(mod, :put, 5) do
-        mod.put(instance, tenant, name, spec, mode)
+        result = mod.put(instance, tenant, name, spec, mode)
+
+        with {:ok, stored} <- result do
+          action = if mode == :create, do: :created, else: :updated
+          Ankusa.Lifecycle.source_changed(instance, action, stored)
+        end
+
+        result
       else
         {:error, :read_only}
       end
@@ -126,7 +133,20 @@ defmodule Ankusa.SourceStore do
       %Config{source_store: {mod, _}} = Ankusa.config(instance)
 
       if exports?(mod, :delete, 3) do
-        mod.delete(instance, tenant, name)
+        # Read before the delete: the event's `data` is the last view of the
+        # source, and there is nothing left to read afterwards.
+        prior = if exports?(mod, :get, 3), do: mod.get(instance, tenant, name), else: :error
+
+        with :ok <- mod.delete(instance, tenant, name) do
+          entry =
+            case prior do
+              {:ok, stored} -> stored
+              :error -> %{tenant: tenant, name: name}
+            end
+
+          Ankusa.Lifecycle.source_changed(instance, :deleted, entry)
+          :ok
+        end
       else
         {:error, :read_only}
       end

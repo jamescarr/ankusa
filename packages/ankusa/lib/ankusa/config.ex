@@ -111,7 +111,12 @@ defmodule Ankusa.Config do
             #
             # `rate` is hooks per second (fractions allowed), `burst` the most
             # hooks admitted back to back.
-            rate_limits: %{default: nil, tenants: %{}}
+            rate_limits: %{default: nil, tenants: %{}},
+            # where lifecycle events (a source or route created/updated/deleted,
+            # as CloudEvents) are delivered: `[{module, opts}]` implementing
+            # Ankusa.Sink, run through the WAL and dispatch like a hook. `[]`
+            # means lifecycle events are off. See `Ankusa.Lifecycle`.
+            lifecycle: %{sinks: []}
 
   @type t :: %__MODULE__{}
 
@@ -152,7 +157,7 @@ defmodule Ankusa.Config do
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:admin`,
-  `:routes`, `:rate_limits`) over the defaults.
+  `:routes`, `:rate_limits`, `:lifecycle`) over the defaults.
 
   `:routes` is nested one level deeper than the rest (`:routes` has its own
   `:cache`, `:ip_rules`, and `:admin` sections), so `put_routes/2` merges those
@@ -180,7 +185,7 @@ defmodule Ankusa.Config do
         k == :routes ->
           put_routes(acc, v)
 
-        k in [:batcher, :dispatch, :storage, :claim_check, :admin, :rate_limits] ->
+        k in [:batcher, :dispatch, :storage, :claim_check, :admin, :rate_limits, :lifecycle] ->
           put_section(acc, k, v)
 
         Map.has_key?(base, k) ->

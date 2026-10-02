@@ -183,6 +183,20 @@ defmodule Ankusa.Metrics do
           event_name: [:ankusa, :claim_check, :redeem],
           tags: [:instance, :result]
         )
+      ),
+      counter(
+        "ankusa.lifecycle.delivered.total",
+        scoped(own,
+          event_name: [:ankusa, :lifecycle, :delivered],
+          tags: [:instance, :type, :sink]
+        )
+      ),
+      counter(
+        "ankusa.lifecycle.dropped.total",
+        scoped(own,
+          event_name: [:ankusa, :lifecycle, :dropped],
+          tags: [:instance, :type, :reason]
+        )
       )
     ]
   end

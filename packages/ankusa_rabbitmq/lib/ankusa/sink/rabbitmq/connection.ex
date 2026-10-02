@@ -42,13 +42,19 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
     GenServer.call(server, {:publish, routing_key, payload, headers}, 15_000)
   end
 
+  @doc """
+  The AMQP URL this connection uses when `:url` is not configured.
+  """
+  @spec default_url() :: String.t()
+  def default_url, do: "amqp://guest:guest@localhost:5672"
+
   # ── GenServer ───────────────────────────────────────────────────────────
 
   @impl true
   def init(opts) do
     state = %{
       instance: Keyword.fetch!(opts, :instance),
-      url: Keyword.get(opts, :url, "amqp://guest:guest@localhost:5672"),
+      url: Keyword.get(opts, :url, default_url()),
       exchange: Keyword.fetch!(opts, :exchange),
       exchange_type: Keyword.get(opts, :exchange_type, :topic),
       retry_ms: Keyword.get(opts, :retry_ms, @default_retry_ms),

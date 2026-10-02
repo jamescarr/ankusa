@@ -63,6 +63,7 @@ defmodule Ankusa.Sink.Kafka do
   @behaviour Ankusa.Sink
 
   alias Ankusa.Envelope
+  alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
 
   @impl true
@@ -82,6 +83,51 @@ defmodule Ankusa.Sink.Kafka do
 
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
+
+  @impl true
+  def describe(subject, opts) do
+    topic = Keyword.fetch!(opts, :topic)
+
+    %Description{
+      protocol: "kafka",
+      host: opts |> Keyword.fetch!(:brokers) |> Enum.map_join(",", &broker/1),
+      address: topic,
+      channel_bindings: %{"kafka" => %{"topic" => topic, "bindingVersion" => "0.5.0"}},
+      message_bindings: %{
+        "kafka" => %{"key" => key_schema(subject, opts), "bindingVersion" => "0.5.0"}
+      },
+      ankusa_headers: true
+    }
+  end
+
+  defp broker({host, port}), do: "#{host}:#{port}"
+  defp broker(host_port) when is_binary(host_port), do: host_port
+
+  # `subject.tenant_id` is nil when the tenant varies per hook, so the default
+  # key is only a single constant when the tenant is known up front.
+  defp key_schema(subject, opts) do
+    case Keyword.get(opts, :key) do
+      key when is_binary(key) ->
+        %{"type" => "string", "const" => key}
+
+      fun when is_function(fun, 1) ->
+        %{"type" => "string", "description" => "Computed per hook by a configured function."}
+
+      nil ->
+        default_key_schema(subject)
+    end
+  end
+
+  defp default_key_schema(%{tenant_id: tenant, source_id: source_id}) when is_binary(tenant) do
+    %{"type" => "string", "const" => "#{tenant}/#{source_id}"}
+  end
+
+  defp default_key_schema(%{source_id: source_id}) do
+    %{
+      "type" => "string",
+      "pattern" => "^[A-Za-z0-9_-]{1,64}/" <> Regex.escape(source_id) <> "$"
+    }
+  end
 
   # Not `:brod.produce/5` with the `:hash` partitioner: that path looks the
   # partition count up with auto-creation allowed, regardless of the client's

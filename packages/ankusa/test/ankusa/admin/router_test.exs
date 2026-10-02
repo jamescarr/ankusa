@@ -436,6 +436,42 @@ defmodule Ankusa.Admin.RouterTest do
     assert headers == %{"authorization" => "[REDACTED]", "x-team" => "[REDACTED]"}
   end
 
+  # ── AsyncAPI ───────────────────────────────────────────────────────────────
+
+  test "GET /asyncapi.json serves the channels the sources publish to, without credentials" do
+    config =
+      test_config(
+        roles: [:edge],
+        admin: %{enabled: true},
+        source_store:
+          {Ankusa.SourceStore.Static,
+           sources: %{
+             "stripe" => [
+               sinks: [
+                 {Ankusa.Test.DescribedSink, address: "ankusa.hooks", password: "leakhunter"}
+               ]
+             ]
+           }}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/asyncapi.json")
+
+    assert conn.status == 200
+    assert [content_type] = Plug.Conn.get_resp_header(conn, "content-type")
+    assert content_type =~ "application/asyncapi+json"
+
+    refute conn.resp_body =~ "leakhunter"
+
+    document = JSON.decode!(conn.resp_body)
+    assert document["asyncapi"] == "3.0.0"
+    assert document["id"] == "urn:ankusa:instance:#{config.instance}"
+
+    assert [%{"address" => "ankusa.hooks", "messages" => %{"stripe" => _}}] =
+             Map.values(document["channels"])
+  end
+
   test "Config.new/1 rejects an unknown admin key like any other section" do
     assert_raise ArgumentError, ~r/unknown Ankusa.Config key: admin.tokens/, fn ->
       Config.new(admin: %{enabled: true, tokens: ["nope"]})

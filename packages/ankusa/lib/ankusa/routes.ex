@@ -182,13 +182,15 @@ defmodule Ankusa.Routes do
           | {:error, :too_many_routes | :store_unavailable}
   def create(instance, attrs) do
     with {:ok, route} <- Route.from_attrs(attrs) do
-      write(instance, fn ->
+      instance
+      |> write(fn ->
         with {:ok, snapshot} <- writable_snapshot(instance),
              :ok <- unique_id(snapshot, route),
              :ok <- no_conflict(snapshot, route) do
           put(route, Store.insert(instance, route, snapshot.version))
         end
       end)
+      |> announce(instance, :created)
     end
   end
 
@@ -205,22 +207,30 @@ defmodule Ankusa.Routes do
           | {:error, :too_many_routes | :store_unavailable}
   def replace(instance, id, attrs) do
     with {:ok, route} <- Route.from_attrs(attrs, id: id) do
-      write(instance, fn ->
-        with {:ok, snapshot} <- writable_snapshot(instance),
-             :ok <- no_conflict(snapshot, route) do
-          case Map.fetch(snapshot.by_id, id) do
-            {:ok, existing} ->
-              # The stored route is what gets returned: `inserted_at` is the one the
-              # route already had, and the caller has to be told that, not the
-              # timestamp this call happened to mint.
-              stored = %{route | inserted_at: existing.inserted_at}
-              put(stored, Store.replace(instance, stored, snapshot.version))
+      result =
+        write(instance, fn ->
+          with {:ok, snapshot} <- writable_snapshot(instance),
+               :ok <- no_conflict(snapshot, route) do
+            case Map.fetch(snapshot.by_id, id) do
+              {:ok, existing} ->
+                # The stored route is what gets returned: `inserted_at` is the one the
+                # route already had, and the caller has to be told that, not the
+                # timestamp this call happened to mint.
+                stored = %{route | inserted_at: existing.inserted_at}
+                stored |> put(Store.replace(instance, stored, snapshot.version)) |> tag(:updated)
 
-            :error ->
-              put(route, Store.insert(instance, route, snapshot.version))
+              :error ->
+                route |> put(Store.insert(instance, route, snapshot.version)) |> tag(:created)
+            end
           end
-        end
-      end)
+        end)
+
+      # Only the attempt that committed reaches here: `write/2` has already
+      # retried the ones that lost a race.
+      case result do
+        {:ok, stored, action} -> announce({:ok, stored}, instance, action)
+        other -> other
+      end
     end
   end
 
@@ -239,7 +249,8 @@ defmodule Ankusa.Routes do
     # The route being patched and the conflict check both come from ONE snapshot:
     # reading them separately would let a concurrent writer slip between the two
     # reads and have its change overwritten by this merge.
-    write(instance, fn ->
+    instance
+    |> write(fn ->
       with {:ok, snapshot} <- writable_snapshot(instance),
            {:ok, existing} <- fetch(snapshot, id),
            {:ok, patch} <- patch_attrs(patch),
@@ -250,11 +261,17 @@ defmodule Ankusa.Routes do
         put(route, Store.replace(instance, route, snapshot.version))
       end
     end)
+    |> announce(instance, :updated)
   end
 
   @doc "Delete a route definition."
   @spec delete(atom(), String.t()) :: :ok | {:error, :not_found | :store_unavailable}
-  def delete(instance, id), do: Store.delete(instance, id)
+  def delete(instance, id) do
+    with :ok <- Store.delete(instance, id) do
+      Ankusa.Lifecycle.route_changed(instance, :deleted, id)
+      :ok
+    end
+  end
 
   @doc """
   The global IP rules, parsed.
@@ -528,6 +545,19 @@ defmodule Ankusa.Routes do
   # error the caller gets the error tuple, not a definition that isn't there.
   defp put(route, :ok), do: {:ok, route}
   defp put(_route, {:error, reason}), do: {:error, reason}
+
+  defp tag({:ok, route}, action), do: {:ok, route, action}
+  defp tag(other, _action), do: other
+
+  # The change has committed; recording it is the lifecycle module's business and
+  # never changes the caller's result. Called after `write/2` returns, never
+  # inside its closure, which may run again on a lost race.
+  defp announce({:ok, route} = result, instance, action) do
+    Ankusa.Lifecycle.route_changed(instance, action, route)
+    result
+  end
+
+  defp announce(other, _instance, _action), do: other
 
   # Run one validate-then-write attempt, and run it again if the store says the
   # table moved under it (`:stale`): the store has already published the newer

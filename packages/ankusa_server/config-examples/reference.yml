@@ -214,6 +214,19 @@ claim_check:
   # The gateway performs no authentication. Keep 4001 internal and put your
   # proxy, mesh, or network policy in front of it, the same as 4002.
 
+lifecycle:
+  # Where a lifecycle event goes when a source or route is created, updated, or
+  # deleted (through the admin API or the route-management API): a CloudEvents
+  # 1.0 message, io.ankusa.source.created and friends, published from memory
+  # with the dispatch retry policy; not persisted. The same sink types as a source's
+  # `sinks`, at least one. Omit the whole section to turn lifecycle events off.
+  # `ankusa:lifecycle` is a reserved source id. The AsyncAPI document on
+  # GET /asyncapi.json describes this channel too. See docs/asyncapi.md.
+  sinks:
+    - type: kafka
+      brokers: ["${KAFKA_BROKERS}"]
+      topic: ankusa.lifecycle
+
 sources:
   # One source per provider endpoint. The id is the catch-URL segment:
   # POST /webhooks/stripe here.

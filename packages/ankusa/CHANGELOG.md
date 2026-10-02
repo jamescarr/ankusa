@@ -13,6 +13,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **An AsyncAPI 3.0 document of the channels an instance publishes to**, served
+  by the admin API at `GET /asyncapi.json` (`application/asyncapi+json`) and
+  built by `Ankusa.AsyncApi.document/1` from the configured sources. Messaging
+  sinks advertise their channel through the new optional
+  `c:Ankusa.Sink.describe/2` callback (`Ankusa.Sink.Description`); the Kafka,
+  RabbitMQ, NATS, and Redis sinks implement it. Built on the new `async_api_spex`
+  package, now a dependency. [`docs/asyncapi.md`](../../docs/asyncapi.md).
+- **Lifecycle events**: `config.lifecycle.sinks` (off by default) receives a
+  CloudEvents 1.0 event, `io.ankusa.source.{created,updated,deleted}` or
+  `io.ankusa.route.{created,updated,deleted}`, whenever `Ankusa.SourceStore.put/5`
+  or `delete/3` or `Ankusa.Routes.create/2`, `replace/3`, `update/3`, or
+  `delete/2` changes something. Events never touch the store: a supervised
+  in-memory publisher (`Ankusa.Lifecycle.Publisher`) delivers each one to every
+  lifecycle sink independently, retrying with `dispatch.retry`, off the caller's
+  path. When its queue is full (10,000 pending sink deliveries), when retries run
+  out, or when it isn't running, the event is dropped and counted; pending
+  events are lost on restart and are not ordered. A lifecycle failure never
+  fails the change. `[:ankusa, :lifecycle, :delivered]` and
+  `[:ankusa, :lifecycle, :dropped]` telemetry events, and the
+  `ankusa_lifecycle_delivered_total` / `ankusa_lifecycle_dropped_total` metrics.
 - `Ankusa.Store`: one RocksDB database per instance at
   `<data_dir>/<instance>/store` (Hex `rocksdb`, erlang-rocksdb), holding the
   hooks, one delivery row per hook and sink, the quarantine pen, API-managed
@@ -43,6 +63,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- `Ankusa.Admin.Redact.source_entry/1` takes the `Ankusa.SourceStore.stored()`
+  map and builds the redacted source view itself (the admin API's source
+  endpoints and the lifecycle events share it), where it used to redact a map
+  the admin router had built.
 - **Breaking: the WAL, DLQ, quarantine and segment-index files, and the
   `sources.json` / `rate_limits.json` state files, are gone.** One RocksDB store
   per instance owns them all; a 0.3 data dir is imported on first boot (above).

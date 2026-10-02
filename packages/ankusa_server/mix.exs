@@ -29,6 +29,9 @@ defmodule AnkusaServer.MixProject do
   defp deps do
     [
       {:ankusa, path: "../ankusa", override: true},
+      # Core's own requirement is the Hex release outside dev/test, and this
+      # project builds in :prod; same reason as the override above.
+      {:async_api_spex, path: "../async_api_spex", override: true},
       {:ankusa_rabbitmq, path: "../ankusa_rabbitmq"},
       {:ankusa_kafka, path: "../ankusa_kafka"},
       {:ankusa_nats, path: "../ankusa_nats"},

@@ -1,6 +1,7 @@
 defmodule Ankusa.Admin.Router do
   @moduledoc """
   The operator HTTP API: health, Prometheus metrics, the redacted config, the
+  AsyncAPI document of the channels this instance publishes to, the
   dead-letter queue, and this node's recent quarantine list.
 
   It exists so operating Ankusa does not require an Elixir shell. Everything
@@ -88,6 +89,12 @@ defmodule Ankusa.Admin.Router do
 
   get "/v1/config" do
     send_json(conn, 200, Redact.config(config(conn)))
+  end
+
+  # No role gate, like `/v1/config`: it is built from config, and the document
+  # carries no credentials (`Ankusa.AsyncApi`).
+  get "/asyncapi.json" do
+    AsyncApiSpex.Plug.RenderSpec.send_spec(conn, Ankusa.AsyncApi.document(instance(conn)))
   end
 
   get "/v1/dlq" do
@@ -204,7 +211,7 @@ defmodule Ankusa.Admin.Router do
         instance(conn)
         |> Ankusa.SourceStore.list_tenant(tenant)
         |> Enum.sort_by(& &1.name)
-        |> Enum.map(&source_entry/1)
+        |> Enum.map(&Redact.source_entry/1)
 
       send_json(conn, 200, %{tenant: tenant, entries: entries})
     else
@@ -222,7 +229,7 @@ defmodule Ankusa.Admin.Router do
 
       true ->
         case Ankusa.SourceStore.get(instance(conn), tenant, name) do
-          {:ok, stored} -> send_json(conn, 200, source_entry(stored))
+          {:ok, stored} -> send_json(conn, 200, Redact.source_entry(stored))
           :error -> send_json(conn, 404, %{error: "source_not_found"})
         end
     end
@@ -304,27 +311,12 @@ defmodule Ankusa.Admin.Router do
 
   defp put_source(conn, ok_status, result) do
     case result do
-      {:ok, stored} -> send_json(conn, ok_status, source_entry(stored))
+      {:ok, stored} -> send_json(conn, ok_status, Redact.source_entry(stored))
       {:error, :invalid, message} -> invalid_source(conn, message)
       {:error, :exists} -> send_json(conn, 409, %{error: "source_exists"})
       {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
       {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
     end
-  end
-
-  defp source_entry(stored) do
-    spec = stored.spec
-
-    %{
-      tenant: stored.tenant,
-      name: stored.name,
-      source_id: stored.source_id,
-      ingest_path: "/webhooks/#{stored.source_id}",
-      verify: Map.get(spec, "verify") || %{"type" => "none"},
-      on_verify_failure: Map.get(spec, "on_verify_failure"),
-      sinks: Map.get(spec, "sinks", [])
-    }
-    |> Redact.source_entry()
   end
 
   # ── per-tenant rate limits ──────────────────────────────────────────────────

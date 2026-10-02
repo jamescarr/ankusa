@@ -16,12 +16,14 @@ on:
     tags: ["ankusa_server-v*"]
     paths:
       - "packages/ankusa*/**"
+      - "packages/async_api_spex/**"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "packages/ankusa*/**"
+      - "packages/async_api_spex/**"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
       - ".github/workflows/ci.yml"

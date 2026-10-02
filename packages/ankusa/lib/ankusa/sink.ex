@@ -52,7 +52,33 @@ defmodule Ankusa.Sink do
   """
   @callback durable?(opts :: keyword()) :: boolean()
 
-  @optional_callbacks inline_max_bytes: 1, durable?: 1
+  @doc """
+  Where this sink publishes, for the AsyncAPI document (`Ankusa.AsyncApi`).
+
+  `subject` names the hook the description is for: `source_id`, and `tenant_id`
+  (`nil` when the tenant varies per hook, i.e. a resolver that reads it from the
+  URL). Only messaging sinks implement this; `Ankusa.Sink.Log` and
+  `Ankusa.Sink.Http` have no channel to advertise and are left out.
+
+  The description must never contain credentials or URL userinfo.
+  """
+  @callback describe(
+              subject :: %{source_id: String.t(), tenant_id: String.t() | nil},
+              opts :: keyword()
+            ) :: Ankusa.Sink.Description.t()
+
+  @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
+
+  @doc """
+  Resolve `c:describe/2` for `mod`; `nil` for a sink that doesn't implement it.
+  """
+  @spec describe(module(), %{source_id: String.t(), tenant_id: String.t() | nil}, keyword()) ::
+          Ankusa.Sink.Description.t() | nil
+  def describe(mod, subject, opts) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :describe, 2),
+      do: mod.describe(subject, opts),
+      else: nil
+  end
 
   @doc """
   Resolve the inline threshold for `mod` with `opts`; `nil` for sinks that

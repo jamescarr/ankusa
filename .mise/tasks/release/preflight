@@ -52,5 +52,14 @@ for p in "${pkgs[@]}"; do
       fail "ankusa $core is not on Hex yet — release:tag ankusa first, wait for release:watch ankusa"
   fi
 
+  # Same for a package that depends on `async_api_spex` (core): it builds under
+  # :prod, so `{:async_api_spex, "~> ..."}` must already be on Hex.
+  if [ "$kind" = hex ] && [ "$p" != async_api_spex ] && grep -q '{:async_api_spex, "' "$ROOT/$dir/mix.exs"; then
+    spex=$(pkg_version async_api_spex)
+    code=$(pkg_registry_code async_api_spex "$spex")
+    [ "$code" = 200 ] ||
+      fail "async_api_spex $spex is not on Hex yet — release:tag async_api_spex first, wait for release:watch async_api_spex"
+  fi
+
   printf '  %-18s %s -> %s\n' "$p" "$v" "$tag"
 done

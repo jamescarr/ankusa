@@ -71,6 +71,7 @@ defmodule Ankusa.Sink.Redis do
   @behaviour Ankusa.Sink
 
   alias Ankusa.Envelope
+  alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
 
   @default_publish_timeout_ms 5_000
@@ -88,6 +89,32 @@ defmodule Ankusa.Sink.Redis do
 
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
+
+  @impl true
+  def describe(subject, opts) do
+    uri = URI.parse(Keyword.fetch!(opts, :url))
+
+    %Description{
+      protocol: uri.scheme,
+      host: "#{uri.host}:#{uri.port || 6379}",
+      pathname: pathname(uri),
+      address: address(subject, opts),
+      ankusa_headers: false
+    }
+  end
+
+  # The Redis database is the URL path; userinfo is dropped.
+  defp pathname(%URI{path: path}) when path in [nil, "", "/"], do: nil
+  defp pathname(%URI{path: path}), do: path
+
+  # Only a configured static channel is a fixed address; a function computes it
+  # per hook, so the document cannot name it.
+  defp address(_subject, opts) do
+    case Keyword.fetch!(opts, :channel) do
+      channel when is_binary(channel) -> channel
+      fun when is_function(fun, 1) -> nil
+    end
+  end
 
   # Pub/sub keeps no copy, so a hook this sink accepts can be lost to a
   # subscriber that disconnects afterwards (see the moduledoc). Dispatch must

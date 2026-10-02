@@ -263,6 +263,53 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ "disk, none"
   end
 
+  # ── lifecycle ───────────────────────────────────────────────────────────────
+
+  test "lifecycle.sinks takes the same sink types a source does" do
+    path =
+      tmp_config("""
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      lifecycle:
+        sinks:
+          - {type: kafka, brokers: ["redpanda:9092"], topic: ankusa.lifecycle}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert [{Ankusa.Sink.Kafka, opts}] = config.lifecycle.sinks
+    assert opts[:topic] == "ankusa.lifecycle"
+  end
+
+  test "without a lifecycle section lifecycle events are off" do
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}")
+
+    assert Config.load!(path: path, env: %{}).config.lifecycle == %{sinks: []}
+  end
+
+  test "a lifecycle section without sinks, or with an unknown key, is rejected by name" do
+    path = tmp_config("lifecycle: {}")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "lifecycle.sinks"
+    assert error.message =~ ~s(missing required key "sinks")
+
+    path = tmp_config("lifecycle: {sinks: [{type: log}], topic: x}")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(lifecycle: unknown key "topic")
+  end
+
+  test "a source named like the reserved lifecycle source is rejected" do
+    path =
+      tmp_config("""
+      sources:
+        "ankusa:lifecycle": {verify: {type: none}, sinks: [{type: log}]}
+      lifecycle:
+        sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s("ankusa:lifecycle" is reserved for lifecycle events)
+  end
+
   # ── validation errors ───────────────────────────────────────────────────────
 
   test "an unknown key names its path, including list indexes" do

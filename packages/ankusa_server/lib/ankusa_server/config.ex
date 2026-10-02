@@ -57,7 +57,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes rate_limits batcher dispatch wal storage claim_check sources source_store)
+  @root_keys ~w(node log http admin routes rate_limits batcher dispatch wal storage claim_check sources source_store lifecycle)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -71,6 +71,7 @@ defmodule AnkusaServer.Config do
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes)
   @source_store_keys ~w(type)
+  @lifecycle_keys ~w(sinks)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms)
   # Keys the Redis store owns; the ETS store must not silently drop them.
@@ -294,7 +295,8 @@ defmodule AnkusaServer.Config do
         wal_section(doc) ++
         storage_section(doc) ++
         claim_check_section(doc) ++
-        source_store_section(doc)
+        source_store_section(doc) ++
+        lifecycle_section(doc)
 
     try do
       config = Ankusa.Config.new(opts)
@@ -305,6 +307,7 @@ defmodule AnkusaServer.Config do
       Ankusa.Routes.validate_config!(config)
       Ankusa.Edge.RateLimiter.validate_config!(config)
       Ankusa.Queue.validate_config!(config)
+      Ankusa.Lifecycle.validate_config!(config)
       config
     rescue
       error in ArgumentError -> raise ConfigError, message: error.message
@@ -724,6 +727,20 @@ defmodule AnkusaServer.Config do
             {Ankusa.SourceStore.Persistent,
              sources: sources, decoder: &AnkusaServer.Config.source_from_map!/2}
         ]
+    end
+  end
+
+  # Lifecycle events are delivered to the same kind of sinks a source's hooks
+  # are, so the sink walker is shared: every sink type, its key check, and its
+  # error message carry over to `lifecycle.sinks` unchanged.
+  defp lifecycle_section(doc) do
+    case doc["lifecycle"] do
+      nil ->
+        []
+
+      _ ->
+        lifecycle = section!(doc, "lifecycle", @lifecycle_keys, [])
+        [lifecycle: %{sinks: sinks!(lifecycle, ["lifecycle"])}]
     end
   end
 

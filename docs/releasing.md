@@ -6,7 +6,7 @@ the files in it decide where it publishes:
 
 | Package | Kind | Tag | Published by |
 | --- | --- | --- | --- |
-| `ankusa`, `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis` | Hex (`mix.exs`) | `<pkg>-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
+| `ankusa`, `ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`, `async_api_spex` | Hex (`mix.exs`) | `<pkg>-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
 | `ankusa_server` | Docker image `jamescarr/ankusa` (`Dockerfile`) | `ankusa_server-vX.Y.Z` | [`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml) |
 | `sdk-typescript` | npm package `ankusa` (`package.json`) | `sdk-typescript-vX.Y.Z` | [`release-npm.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-npm.yml) |
 | `sdk-python` | PyPI package `ankusa` (`pyproject.toml`) | `sdk-python-vX.Y.Z` | [`release-python.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-python.yml) |
@@ -76,6 +76,13 @@ fails at `MIX_ENV=prod mix deps.get`. `release:preflight` enforces this: an
 adapter's preflight fails until the core version in the tree is on Hex.
 `release:prepare` can still bump core and adapters together in one PR.
 
+`async_api_spex` comes before core: `ankusa` depends on it, and builds under
+`:prod` resolve it from Hex, so a core tag pushed before `async_api_spex` is
+live fails the same way. Tag `async_api_spex` alone first, wait for
+`release:watch async_api_spex`, then continue as above;
+`release:preflight` fails a core tag until the `async_api_spex` version in the
+tree is on Hex.
+
 The server image and the npm, Python, Rust, Ruby, and Go SDKs have no ordering
 constraint: the image builds from this checkout, and none of the SDKs depends
 on anything here. `sdk-elixir` is a Hex package but has no `ankusa` dependency
@@ -84,7 +91,7 @@ applies only to packages whose `mix.exs` depends on `ankusa`).
 
 ## The server image
 
-Every push to `main` touching `packages/ankusa*/**`, `.dockerignore`, or the
+Every push to `main` touching `packages/ankusa*/**`, `packages/async_api_spex/**`, `.dockerignore`, or the
 docker/ci workflows publishes `jamescarr/ankusa:edge` and `:sha-<short>` for
 `linux/amd64` and `linux/arm64`. Pull requests touching the same paths build and
 smoke-test the image without pushing.
