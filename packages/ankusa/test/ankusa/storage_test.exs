@@ -133,6 +133,27 @@ defmodule Ankusa.StorageTest do
     def list(instance, prefix, _opts), do: LocalFS.list(instance, prefix, [])
   end
 
+  # ── a once-raising codec ───────────────────────────────────────────────────
+
+  # Raises on its first `encode/1` and delegates to `Raw` afterwards. The
+  # compactor process survives the tick, so its process dictionary remembers.
+  defmodule RaisingOnceCodec do
+    @behaviour Ankusa.Codec
+
+    @impl true
+    def encode(items) do
+      if Process.get(:raised_once) do
+        Ankusa.Codec.Raw.encode(items)
+      else
+        Process.put(:raised_once, true)
+        raise "codec boom"
+      end
+    end
+
+    @impl true
+    def decode_record(bin), do: Ankusa.Codec.Raw.decode_record(bin)
+  end
+
   # ── helpers ────────────────────────────────────────────────────────────────
 
   # Boot a full `Ankusa.Instance` with one source `"acme"` whose sinks are the
@@ -342,6 +363,19 @@ defmodule Ankusa.StorageTest do
 
     # Its obligation is gone, so the next tick has nothing left to do.
     assert {:ok, 0} == Compactor.tick(inst)
+  end
+
+  test "a raising codec fails the tick without crashing it, and the next tick retries" do
+    config = start(roles: [:edge, :storage], storage: %{codec: {RaisingOnceCodec, []}})
+    inst = config.instance
+    [env] = commit!(inst, [envelope("codec-retry")])
+
+    assert {:ok, 0} == Compactor.tick(inst)
+    assert Process.alive?(Ankusa.whereis(inst, :compactor))
+
+    assert {:ok, 1} == Compactor.tick(inst)
+    assert {:ok, fetched} = Storage.fetch(inst, env.id)
+    assert fetched.body == "codec-retry"
   end
 
   test "the catalogue is in the store, so fetch survives an instance restart" do

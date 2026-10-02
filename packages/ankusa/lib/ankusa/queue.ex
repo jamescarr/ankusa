@@ -97,10 +97,13 @@ defmodule Ankusa.Queue do
   end
 
   @doc """
-  The dead-lettered deliveries (the DLQ), newest first. `total` counts every
-  match; `entries` holds the first `:limit`, each `%{envelope, reason, at}`
-  with `reason` the failure as text. Options: `:source_id`, `:since` (a unix-ms
-  lower bound on the dead-letter time), `:limit`.
+  The dead-lettered deliveries (the DLQ), newest first. `total` counts the
+  matching dead keys that could be read back as a row and a hook; `entries`
+  holds the first `:limit`, each `%{envelope, reason, at}` with `reason` the
+  failure as text. A dead key whose row or hook is gone (corruption) is logged
+  and not listed; one beyond the returned page is still counted, so `total` is
+  exact unless corruption hides past the page. Options: `:source_id`, `:since`
+  (a unix-ms lower bound on the dead-letter time), `:limit`.
   """
   @spec dead(atom(), keyword()) ::
           {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}

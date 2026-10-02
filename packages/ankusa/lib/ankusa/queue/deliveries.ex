@@ -367,8 +367,10 @@ defmodule Ankusa.Queue.Deliveries do
             {entries, [{seq, sink} | orphans]}
         end)
 
-      # A dead key whose row or hook is gone lists nothing, so it is not counted
-      # either; replay deletes it. Said out loud, since it should not happen.
+      # A dead key whose row or hook is gone lists nothing, so orphans on the
+      # returned page are not counted either, and are logged since it should
+      # not happen; replay deletes them. One past the page is still counted,
+      # so `total` is exact unless corruption hides beyond it.
       if orphans != [] do
         Logger.warning(
           "[ankusa] DLQ key(s) with no delivery row or hook, not listed: #{inspect(Enum.reverse(orphans))}"

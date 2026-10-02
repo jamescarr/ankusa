@@ -153,20 +153,25 @@ defmodule Ankusa.StoreMigrateTest do
       assert {:ok, %Envelope{seq: 42}} = Ingest.ingest(inst, request("demo", "x"))
     end
 
-    test "a hook dead-lettered twice in 0.3 is one dead row, with the later reason" do
+    test "a hook dead-lettered repeatedly in 0.3 is one dead row, with the last reason" do
       config = config()
       dead = envelope(1)
 
-      Legacy.log!(Path.join(Config.path(config, "dlq"), "dlq.log"), [
-        Legacy.dlq_entry(dead, {:sink, SomeSink, :first}, 1_700_000_000_000),
-        Legacy.dlq_entry(dead, {:sink, SomeSink, :second}, 1_700_000_005_000)
-      ])
+      # 1,001 records cross the 1,000-record import batch boundary, so the
+      # dedupe must survive a flush. 0.3 left the old DLQ entry in place on
+      # every replay, so a real dlq.log can look like this.
+      records =
+        Enum.map(1..1_001, fn i ->
+          Legacy.dlq_entry(dead, {:sink, SomeSink, i}, 1_700_000_000_000 + i)
+        end)
+
+      Legacy.log!(Path.join(Config.path(config, "dlq"), "dlq.log"), records)
 
       inst = boot(config)
 
       assert {:ok, %{total: 1, entries: [entry]}} = Queue.dead(inst, limit: 10)
-      assert entry.reason == inspect({:sink, SomeSink, :second})
-      assert entry.at == 1_700_000_005_000
+      assert entry.reason == inspect({:sink, SomeSink, 1_001})
+      assert entry.at == 1_700_000_001_001
 
       assert {:ok, 1} = Ankusa.Dispatch.replay(inst, %{})
     end
@@ -316,6 +321,41 @@ defmodule Ankusa.StoreMigrateTest do
 
         assert File.exists?(path)
       end
+    end
+
+    test "a rate_limits.json that cannot be read refuses to start; it is not treated as empty" do
+      config = config(roles: [:edge])
+      path = Legacy.rate_limits_json!(config, [{"acme", 5, 10}])
+      File.chmod!(path, 0o000)
+      on_exit(fn -> File.chmod(path, 0o644) end)
+
+      # Root reads anything; then there is nothing to test.
+      if match?({:error, :eacces}, File.read(path)) do
+        Process.flag(:trap_exit, true)
+        put_config(config)
+        assert {:error, error} = start_supervised({Ankusa.Instance, config})
+
+        assert {:legacy_read_failed, ^path, :eacces} =
+                 find(error, &match?({:legacy_read_failed, _, _}, &1))
+
+        assert File.exists?(path)
+      end
+    end
+
+    test "a length prefix no 0.3 record had stops that file's import, with the byte count" do
+      config = config(roles: [:edge])
+      dlq = Path.join(Config.path(config, "dlq"), "dlq.log")
+      File.mkdir_p!(Path.dirname(dlq))
+      File.write!(dlq, <<0x7FFFFFFF::32>>)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          inst = boot(config)
+          assert {:ok, %{total: 0}} = Queue.dead(inst, limit: 10)
+        end)
+
+      assert log =~ "claims 2147483647 bytes"
+      assert Path.wildcard(Config.path(config, "dlq") <> ".migrated-*") != []
     end
   end
 

@@ -133,4 +133,35 @@ defmodule Ankusa.QueueTest do
     assert_receive {:telemetry, [:ankusa, :commit, :exception], _measurements, %{instance: ^inst}}
     refute_receive {:telemetry, [:ankusa, :commit, :stop], _, %{instance: ^inst}}, 200
   end
+
+  test "a stored hook that does not decode is a corrupt_value error, not a crash" do
+    config = config(roles: [:edge])
+    inst = config.instance
+    start_supervised!({Ankusa.Instance, config})
+
+    :ok =
+      Ankusa.Store.write(inst, [{:put, :hooks, Ankusa.Store.Keys.hook(5), "garbage"}], sync: true)
+
+    assert {:error, {:corrupt_value, :hooks, _message}} = Queue.hooks(inst, 0, 10)
+  end
+
+  test "an orphaned dead key is logged and not counted in total" do
+    config = config(roles: [:edge])
+    inst = config.instance
+    start_supervised!({Ankusa.Instance, config})
+
+    now = System.system_time(:millisecond)
+
+    :ok =
+      Ankusa.Store.write(
+        inst,
+        [
+          {:put, :index, Ankusa.Store.Keys.dead(now, 99, 0xFFFE),
+           :erlang.term_to_binary({"load", "evt_orphan"})}
+        ],
+        sync: true
+      )
+
+    assert {:ok, %{total: 0, entries: []}} = Queue.dead(inst, limit: 10)
+  end
 end

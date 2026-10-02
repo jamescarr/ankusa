@@ -128,6 +128,9 @@ defmodule Ankusa.Admin.RouterTest do
     assert inst_name == to_string(config.instance)
     assert Enum.sort(Map.keys(wal)) == ["deliveries", "disk_bytes", "hooks", "next_seq"]
     assert wal["next_seq"] == 2
+    # The store's own end-of-range sentinel keys are not hooks or deliveries.
+    assert wal["hooks"] == 1
+    assert wal["deliveries"] == 1
 
     none = test_config(roles: [:edge], admin: %{enabled: true}, wal: :none)
     put_config(none)
@@ -135,6 +138,19 @@ defmodule Ankusa.Admin.RouterTest do
     conn = call(none.instance, :get, "/v1/wal")
     assert conn.status == 409
     assert %{"error" => "wal_disabled"} = JSON.decode!(conn.resp_body)
+  end
+
+  test "GET /v1/wal on an empty store reports zero hooks and deliveries" do
+    config = test_config(roles: [:edge], admin: %{enabled: true, port: 0})
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+
+    assert %{"wal" => wal} =
+             JSON.decode!(call(config.instance, :get, "/v1/wal").resp_body)
+
+    assert wal["next_seq"] == 1
+    assert wal["hooks"] == 0
+    assert wal["deliveries"] == 0
   end
 
   # ── role gating ────────────────────────────────────────────────────────────

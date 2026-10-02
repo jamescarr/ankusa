@@ -489,9 +489,10 @@ defmodule Ankusa.Store do
         if scan_done?(s, key) do
           {:ok, acc}
         else
-          case fun.(key, value, acc) do
+          case decode_step(fun, key, value, acc, s.family) do
             {:cont, acc} -> scan(itr, if(s.reverse?, do: :prev, else: :next), s, fun, acc)
             {:halt, acc} -> {:ok, acc}
+            {:error, _} = error -> error
           end
         end
 
@@ -506,6 +507,22 @@ defmodule Ankusa.Store do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Fold callbacks decode stored values (`Envelope.from_binary/1`,
+  # `:erlang.binary_to_term/1`). A value that does not decode is corrupt data,
+  # not a reason to crash the caller (which would only crash identically on
+  # every restart); it becomes a named error the caller can surface.
+  defp decode_step(fun, key, value, acc, family) do
+    fun.(key, value, acc)
+  rescue
+    e in ArgumentError ->
+      Logger.error(
+        "[ankusa] #{family} scan hit a value that does not decode (key #{inspect(key)}): " <>
+          Exception.message(e)
+      )
+
+      {:error, {:corrupt_value, family, Exception.message(e)}}
   end
 
   # Forward: a key at/after the end of the range, or the high sentinel itself.
@@ -588,10 +605,10 @@ defmodule Ankusa.Store do
   # owner is the Store process, so caching one in a caller would survive the
   # owner's death and raise `ArgumentError` on every later use.
   #
-  # Only an `ArgumentError` raised by the NIF itself means that. One raised by a
-  # caller's fold function (a stored value that does not decode) is a bug or
-  # corruption in the data, and is re-raised rather than reported as a transient
-  # outage the caller would just retry.
+  # Only an `ArgumentError` the NIF raises means that, and it becomes
+  # `:store_unavailable`. Anything else (a fold callback that could not decode
+  # a stored value) becomes a distinguishable `:corrupt_value` error instead:
+  # re-raising would only crash the caller identically on every restart.
   defp with_handles(instance, fun) do
     case handles(instance) do
       {:ok, handles} ->
@@ -603,7 +620,8 @@ defmodule Ankusa.Store do
               Logger.error("[ankusa] store handle is stale: #{Exception.message(e)}")
               {:error, :store_unavailable}
             else
-              reraise e, __STACKTRACE__
+              Logger.error("[ankusa] store call failed on bad data: #{Exception.message(e)}")
+              {:error, {:corrupt_value, Exception.message(e)}}
             end
         end
 
