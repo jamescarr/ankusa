@@ -1,7 +1,7 @@
 defmodule AnkusaNats.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.4.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   # Same forced-split pattern as ankusa_rabbitmq and ankusa_kafka: `ankusa` core
@@ -75,7 +75,9 @@ defmodule AnkusaNats.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      [{:ankusa, "~> 0.2"}]
+      # `~> 0.4`, not older: `describe/2` builds `Ankusa.Sink.Description`, which
+      # core has from 0.4.0, so Hex must never pair this with an older core.
+      [{:ankusa, "~> 0.4"}]
     end
   end
 end

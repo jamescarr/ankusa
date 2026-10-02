@@ -6,11 +6,18 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-02
+
 ### Added
 
 - `Ankusa.Sink.Redis` implements `c:Ankusa.Sink.describe/2`, advertising its
   server, database, and channel to the AsyncAPI document the admin API serves.
   Credentials in `:url` are never part of it.
+
+### Changed
+
+- The Hex requirement on `ankusa` is `~> 0.4` (was `~> 0.3`): `describe/2`
+  needs `Ankusa.Sink.Description`, which core has from 0.4.0.
 
 ### Removed
 
@@ -86,6 +93,7 @@ follows [Semantic Versioning](https://semver.org/).
 - Depends on `ankusa` `~> 0.2`, which introduced `Ankusa.Routes.Store` and
   `Ankusa.Routes.Snapshot`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.3.0...ankusa_redis-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.2.4...ankusa_redis-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_redis-v0.2.4

@@ -6,6 +6,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-02
+
 ### Added
 
 - `GET /asyncapi.json` on the admin port: an AsyncAPI 3.0 document
@@ -171,7 +173,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...ankusa_server-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...ankusa_server-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_server-v0.2.1

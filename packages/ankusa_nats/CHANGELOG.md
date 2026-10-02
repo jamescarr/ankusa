@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-02
+
 ### Added
 
 - `Ankusa.Sink.NATS` implements `c:Ankusa.Sink.describe/2`, advertising its
   servers and subject to the AsyncAPI document the admin API serves.
   `:servers` now also takes one comma-separated string, as the YAML key
   documents.
+
+### Changed
+
+- The Hex requirement on `ankusa` is `~> 0.4` (was `~> 0.2`): `describe/2`
+  needs `Ankusa.Sink.Description`, which core has from 0.4.0.
 
 ### Removed
 
@@ -63,7 +70,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - The message `claim` field is now a claim-check ref URN string instead of a
   nested ticket object, breaking for consumers; the message `v` stays `1`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.3.0...ankusa_nats-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.2.1...ankusa_nats-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.2.0...ankusa_nats-v0.2.1
 [0.2.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_nats-v0.2.0

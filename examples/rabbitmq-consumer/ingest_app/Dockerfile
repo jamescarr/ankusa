@@ -13,6 +13,7 @@ RUN apk add --no-cache build-base cmake linux-headers openssl-dev zstd-dev && mi
 
 WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa
+COPY packages/async_api_spex ./packages/async_api_spex
 COPY packages/ankusa_rabbitmq ./packages/ankusa_rabbitmq
 COPY examples/rabbitmq-consumer/ingest_app ./examples/rabbitmq-consumer/ingest_app
 
