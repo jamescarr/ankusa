@@ -3,9 +3,17 @@ defmodule Ankusa.RouteResolverTest do
 
   import Ankusa.TestHelpers
   alias Ankusa.Edge.Router
-  alias Ankusa.{Route, RouteResolver, WAL}
+  alias Ankusa.{Route, RouteResolver}
 
+  # A hook is only stored when something is obliged to handle it, so sources
+  # without sinks of their own get a log sink (nothing dispatches here, so the
+  # delivery row simply stays pending).
   defp start(resolver, sources) do
+    sources =
+      Map.new(sources, fn {id, opts} ->
+        {id, Keyword.put_new(opts, :sinks, [{Ankusa.Sink.Log, []}])}
+      end)
+
     config =
       test_config(
         roles: [:edge],
@@ -78,7 +86,7 @@ defmodule Ankusa.RouteResolverTest do
       assert globex.status == 201
       assert acme_again.status == 201
 
-      envs = WAL.read(config.instance, -1, 10)
+      {:ok, envs} = Ankusa.Queue.hooks(config.instance, 0, 10)
       assert length(envs) == 3
       assert Enum.map(envs, & &1.tenant_id) |> Enum.sort() == ["acme", "acme", "globex"]
       assert Enum.all?(envs, &(&1.source_id == "stripe"))
@@ -91,7 +99,7 @@ defmodule Ankusa.RouteResolverTest do
         })
 
       assert post(config, "/webhooks/demo", ~s({"hi":1})).status == 201
-      assert [env] = WAL.read(config.instance, -1, 10)
+      assert {:ok, [env]} = Ankusa.Queue.hooks(config.instance, 0, 10)
       assert env.tenant_id == "customer-42"
       assert env.source_id == "demo"
     end
@@ -101,14 +109,14 @@ defmodule Ankusa.RouteResolverTest do
       assert post(config, "/webhooks/stripe", "x").status == 404
     end
 
-    test "a URL tenant outside the grammar is a 404 and nothing reaches the WAL" do
+    test "a URL tenant outside the grammar is a 404 and nothing is stored" do
       config = start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => []})
 
       for tenant <- ["ac.me", "ac%2Fme", String.duplicate("a", 65)] do
         assert post(config, "/webhooks/#{tenant}/stripe", "x").status == 404, tenant
       end
 
-      assert WAL.read(config.instance, -1, 10) == []
+      assert stored_ids(config.instance) == []
     end
   end
 

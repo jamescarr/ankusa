@@ -170,7 +170,7 @@ defmodule AnkusaServer.ConfigTest do
     assert config.roles == [:edge, :dispatch]
     assert config.data_dir == "/data"
     assert config.admin.port == 9000
-    assert config.wal == {Ankusa.WAL.DiskLog, []}
+    assert config.wal == :disk
   end
 
   # ── wal.type: none ──────────────────────────────────────────────────────────
@@ -277,6 +277,25 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "sources.a.sinks[0]"
     assert error.message =~ ~s(unknown key "urll")
+  end
+
+  test "the removed dispatch.poll_ms and http-sink ordered keys are rejected by name" do
+    path = tmp_config("dispatch: {poll_ms: 200}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "dispatch"
+    assert error.message =~ ~s(unknown key "poll_ms")
+
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks:
+            - {type: http, url: "http://sink.invalid", ordered: true}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.a.sinks[0]"
+    assert error.message =~ ~s(unknown key "ordered")
   end
 
   test "the removed claim-check keys tokens/remote/max_bytes are rejected by name" do

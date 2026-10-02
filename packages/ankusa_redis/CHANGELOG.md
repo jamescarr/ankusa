@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- The sink no longer implements the removed Ankusa.Sink.ordering_key/2
+  callback: deliveries are unordered. The channel still decides the
+  destination, so Redis pub/sub's own per-channel order is unchanged. Requires
+  the matching `ankusa` core.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

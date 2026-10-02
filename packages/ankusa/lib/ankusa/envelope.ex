@@ -3,7 +3,7 @@ defmodule Ankusa.Envelope do
   The claim-checked record that flows through every layer.
 
   The envelope is the *only* thing components share. Compaction, dispatch, and
-  the dashboard read committed envelopes from the WAL; they never call the edge.
+  the dashboard read committed envelopes from the store; they never call the edge.
 
   `body` is the exact raw bytes as received — signature checks need it verbatim.
   Keep it as a refcounted binary and pass it by reference.
@@ -20,7 +20,7 @@ defmodule Ankusa.Envelope do
     :headers,
     :content_type,
     :body,
-    # assigned by the WAL at commit time; nil until durably stored
+    # assigned by `Ankusa.Queue.Writer` at commit time; nil until durably stored
     :seq,
     # %Ankusa.Verification{}
     :verification,
@@ -53,7 +53,7 @@ defmodule Ankusa.Envelope do
   end
 
   @doc """
-  Serialize an envelope to a compact binary for the WAL.
+  Serialize an envelope to a compact binary for the store.
 
   `body` is kept verbatim; the term is `:erlang.term_to_binary/2` with
   `:deterministic` so re-encoding a replayed record is byte-stable.

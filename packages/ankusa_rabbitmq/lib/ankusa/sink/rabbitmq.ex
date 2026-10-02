@@ -41,11 +41,6 @@ defmodule Ankusa.Sink.RabbitMQ do
     end
   end
 
-  # RabbitMQ orders per queue, and which queue a message lands in follows from
-  # the routing key — so that is the ordering scope.
-  @impl true
-  def ordering_key(env, opts), do: routing_key(env, opts)
-
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 

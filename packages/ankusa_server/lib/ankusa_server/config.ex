@@ -63,7 +63,7 @@ defmodule AnkusaServer.Config do
   @http_keys ~w(port max_body_bytes routing prefix)
   @admin_keys ~w(enabled port)
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
-  @dispatch_keys ~w(poll_ms batch concurrency max_inflight max_inflight_bytes retry)
+  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type)
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
@@ -86,7 +86,7 @@ defmodule AnkusaServer.Config do
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms ordered)
+  @http_sink_keys ~w(type url method headers timeout_ms)
   @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes)
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes ssl sasl)
   @sasl_keys ~w(mechanism username password)
@@ -304,7 +304,7 @@ defmodule AnkusaServer.Config do
       # same message.
       Ankusa.Routes.validate_config!(config)
       Ankusa.Edge.RateLimiter.validate_config!(config)
-      Ankusa.WAL.validate_config!(config)
+      Ankusa.Queue.validate_config!(config)
       config
     rescue
       error in ArgumentError -> raise ConfigError, message: error.message
@@ -398,7 +398,6 @@ defmodule AnkusaServer.Config do
     [
       dispatch:
         []
-        |> put_opt(:poll_ms, int_opt(dispatch, "poll_ms", ["dispatch"]))
         |> put_opt(:batch, int_opt(dispatch, "batch", ["dispatch"]))
         |> put_opt(:concurrency, int_opt(dispatch, "concurrency", ["dispatch"]))
         |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
@@ -428,7 +427,7 @@ defmodule AnkusaServer.Config do
     wal = section!(doc, "wal", @wal_keys, [])
 
     case enum!(wal["type"] || "disk", ~w(disk none), ["wal", "type"]) do
-      "disk" -> [wal: {Ankusa.WAL.DiskLog, []}]
+      "disk" -> [wal: :disk]
       "none" -> [wal: :none]
     end
   end
@@ -896,8 +895,7 @@ defmodule AnkusaServer.Config do
          [url: required_string!(sink, "url", path)]
          |> put_opt(:method, atom_enum_opt(sink, "method", ~w(post put patch), path))
          |> put_opt(:headers, headers(sink["headers"], path ++ ["headers"]))
-         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
-         |> put_opt(:ordered, bool_opt(sink, "ordered", path))}
+         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))}
 
       "rabbitmq" ->
         check_keys!(sink, @rabbitmq_sink_keys, path)

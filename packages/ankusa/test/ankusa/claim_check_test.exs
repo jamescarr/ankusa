@@ -7,7 +7,7 @@ defmodule Ankusa.ClaimCheckTest do
 
   setup do
     inst = :"cc#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
+    dir = Ankusa.TestHelpers.unique_data_dir(inst)
     on_exit(fn -> File.rm_rf(dir) end)
 
     config = Config.new(instance: inst, data_dir: dir, roles: [])

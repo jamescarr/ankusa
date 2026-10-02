@@ -10,11 +10,26 @@
 FROM elixir:1.20.4-alpine AS build
 
 # build-base/cmake/git are for the C++ NIFs: `crc32cer` (via brod, the Kafka
-# client) compiles on install in :prod and has no prebuilt artifact.
-RUN apk add --no-cache build-base cmake git && mix local.hex --force && mix local.rebar --force
+# client) compiles on install in :prod and has no prebuilt artifact. rocksdb
+# (the node's local store) needs linux-headers, openssl-dev and zstd-dev on
+# top of build-base.
+RUN apk add --no-cache build-base cmake git linux-headers openssl-dev zstd-dev && mix local.hex --force && mix local.rebar --force
 ENV MIX_ENV=prod
 WORKDIR /repo
 
+# The deps layer: mix.exs and mix.lock alone let `deps.get` resolve, and the
+# RocksDB build is cached until one of these lockfiles changes.
+COPY packages/ankusa/mix.exs packages/ankusa/mix.lock ./packages/ankusa/
+COPY packages/ankusa_rabbitmq/mix.exs packages/ankusa_rabbitmq/mix.lock ./packages/ankusa_rabbitmq/
+COPY packages/ankusa_kafka/mix.exs packages/ankusa_kafka/mix.lock ./packages/ankusa_kafka/
+COPY packages/ankusa_nats/mix.exs packages/ankusa_nats/mix.lock ./packages/ankusa_nats/
+COPY packages/ankusa_redis/mix.exs packages/ankusa_redis/mix.lock ./packages/ankusa_redis/
+COPY packages/ankusa_server/mix.exs packages/ankusa_server/mix.lock ./packages/ankusa_server/
+
+WORKDIR /repo/packages/ankusa_server
+RUN mix deps.get --only prod && mix deps.compile rocksdb
+
+WORKDIR /repo
 COPY packages ./packages
 
 WORKDIR /repo/packages/ankusa_server
@@ -22,13 +37,14 @@ RUN mix deps.get --only prod && mix release ankusa
 
 # Alpine 3.24 to match the elixir:1.20.4-alpine build stage (3.24.2). The release
 # is a set of BEAM files plus ERTS, so the runtime needs little beyond the C
-# libraries the NIFs link against: curl is for the healthcheck, tini reaps the
-# BEAM's children as PID 1. liblksctp is not for SCTP sockets (nothing here uses
-# one) — ERTS dlopens it at boot and prints an alarming stderr warning without
-# it on every `eval` and `start`.
+# libraries the NIFs link against (zstd-libs is the RocksDB NIF's: it would
+# arrive through curl anyway, which is not a reason to rely on it): curl is for
+# the healthcheck, tini reaps the BEAM's children as PID 1. liblksctp is not for
+# SCTP sockets (nothing here uses one) — ERTS dlopens it at boot and prints an
+# alarming stderr warning without it on every `eval` and `start`.
 FROM alpine:3.24
 
-RUN apk add --no-cache libstdc++ libgcc ncurses-libs openssl ca-certificates tini curl liblksctp \
+RUN apk add --no-cache libstdc++ libgcc zstd-libs ncurses-libs openssl ca-certificates tini curl liblksctp \
  && addgroup -S ankusa && adduser -S -G ankusa -h /var/lib/ankusa ankusa \
  && mkdir -p /var/lib/ankusa /etc/ankusa && chown ankusa:ankusa /var/lib/ankusa
 

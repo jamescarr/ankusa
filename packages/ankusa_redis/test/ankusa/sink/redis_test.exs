@@ -86,7 +86,7 @@ defmodule Ankusa.Sink.RedisTest do
   } do
     {ps, ref} = subscribe!(channel)
 
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}_#{System.os_time(:microsecond)}")
     on_exit(fn -> File.rm_rf(dir) end)
     Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: dir))
 
@@ -127,14 +127,6 @@ defmodule Ankusa.Sink.RedisTest do
     assert channels == [fixed, dynamic]
   end
 
-  test "ordering_key is the channel" do
-    env = envelope()
-
-    assert Redis.ordering_key(env, channel: "fixed") == "fixed"
-
-    assert Redis.ordering_key(env, channel: &"ankusa.#{&1.source_id}") == "ankusa.src"
-  end
-
   test "the sink is not durable: pub/sub keeps no copy" do
     assert Redis.durable?([]) == false
     assert Ankusa.Sink.durable?(Redis, url: @url, channel: "any") == false
@@ -150,7 +142,7 @@ defmodule Ankusa.Sink.RedisTest do
       )
 
     assert_raise ArgumentError, ~r/none of its sinks is durable/, fn ->
-      Ankusa.WAL.validate_config!(config)
+      Ankusa.Queue.validate_config!(config)
     end
   end
 

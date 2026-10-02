@@ -36,11 +36,12 @@ packages/
   ankusa                      core. mix.exs runtime deps: {bandit, plug, cidr,
                               req, aws_signature, telemetry_metrics,
                               telemetry_metrics_prometheus_core, nebulex,
-                              nebulex_local}. No adapter deps.
+                              nebulex_local, rocksdb}. No adapter deps.
     lib/ankusa/…              behaviours, envelope, config, registry, telemetry,
-                              edge/dispatch/storage machinery, and every
+                              edge/dispatch/storage machinery, the store
+                              (Ankusa.Store, on erlang-rocksdb), and every
                               zero-external-dep default adapter
-                              (WAL.DiskLog, BlobStore.{LocalFS,S3,GCS,Azure,OCI},
+                              (BlobStore.{LocalFS,S3,GCS,Azure,OCI},
                               Codec.Raw, all Verifiers,
                               Sink.{Log,Http}, RetryPolicy.Exponential,
                               RouteResolver.{Path,TenantPath})
@@ -140,12 +141,36 @@ path, and pin it against the provider's own reference vectors", which is what
 signature of OCI's published test string (computed independently with OpenSSL)
 and reconstructing the signing string from a captured request.
 
+`rocksdb` is the one native dependency core takes on its own, and the rule
+above says why: it is the node's store, not an adapter. Every role that reads
+or writes hooks (`edge`, `dispatch`, `storage`) opens it, and so does a
+writable source store; only a claim-check-only node runs without one. It is
+compiled into every build either way, so there is no default deployment to
+spare. It is built from source on `mix deps.compile` and needs cmake ≥ 3.12, a
+C++20 compiler, and
+the zstd and OpenSSL development headers (plus `linux-headers` on Alpine). The
+`ankusa_server` image installs all of them and builds RocksDB in its own cached
+layer, so a source change does not rebuild it; Ubuntu CI runners need
+`libzstd-dev`.
+
+The cost is paid per Mix project, not once: each adapter package,
+`ankusa_server`, and every example app has its own `_build`, so each one
+compiles its own copy of RocksDB (minutes, not seconds, on a cold cache) once
+per checkout or lockfile change. CI caches `deps` and `_build` per package (and
+once for all the examples), keyed on the lockfile and the pinned toolchain, so
+a warm run skips it. An embedder that already has RocksDB installed can link
+the NIF against it instead of building the bundled copy (the NIF itself still
+compiles); `deps/rocksdb/CUSTOMIZED_BUILDS.md` in the Hex package lists the
+options.
+
 `Ankusa.Sink.RabbitMQ` needs `amqp` (which pulls `amqp_client`,
 `rabbit_common`: real NIF/native-adjacent Erlang libraries).
 `Ankusa.Sink.Kafka` needs `brod`, which pulls `crc32cer`: a C++ NIF that
-compiles from source on every `mix deps.compile`, so that package carries a
-build-toolchain requirement (CMake ≥ 3.16 plus a C++ compiler) that no
-`ankusa` core user should be forced to satisfy. `Ankusa.Sink.NATS` needs
+compiles from source on every `mix deps.compile`, so that package carries its
+own build-toolchain requirement (CMake ≥ 3.16 plus a C++ compiler) on top of
+core's. The split is not "no native code"; it is "no native code a deployment
+doesn't need": an HTTP-only deployment compiles `rocksdb` and not `crc32cer`.
+`Ankusa.Sink.NATS` needs
 `gnat`, which pulls `jason`, `nkeys` (+ `ed25519`/`kcl`), `nimble_parsec`, and
 `connection`, pure Elixir, but four libraries nobody running an HTTP-,
 Kafka-, or RabbitMQ-only deployment has any use for, which is the same test
@@ -163,7 +188,8 @@ applications per **role** (`hook_edge`, `hook_storage`, `hook_dispatch`,
 config concern (`config.roles` / `ANKUSA_ROLES`), not a dependency-weight
 concern. Splitting them into packages would buy package-management overhead
 (version matrix, release coordination) for zero dependency-isolation
-benefit: every role's code has the same (zero) external deps as core. One
+benefit: every role's code uses the same dependencies core already pulls in
+(the store included). One
 release, many roles, config decides what boots. See
 [`deployment.md`](deployment.md).
 
@@ -173,7 +199,7 @@ release, many roles, config decides what boots. See
    library is the right tool, take it, then put the adapter in its own package
    so deployments that don't configure it never compile it. If no dependency is
    warranted, the adapter belongs in `ankusa` core next to the dependency-free
-   ones (`BlobStore.LocalFS`, `WAL.DiskLog`, `Codec.Raw`, the verifiers), not
+   ones (`BlobStore.LocalFS`, `Codec.Raw`, the verifiers), not
    because hand-rolling is preferred, but because a dependency that buys nothing
    is a liability.
 2. Scaffold it: `mise run new:adapter <name> [--module Mod]` creates
@@ -186,7 +212,7 @@ release, many roles, config decides what boots. See
 3. Implement the behaviour. Register any supervised process (a connection
    pool, a channel) through `Ankusa.Registry`/`Ankusa.via/2` exactly like the
    framework's own processes do: this is what lets the facade
-   (`Ankusa.WAL.append/2`, `Ankusa.Sink`'s `deliver/3` call sites) dispatch to
+   (`Ankusa.Sink`'s `deliver/3` call sites, for example) dispatch to
    your adapter without `ankusa` core knowing your package exists.
 4. **Verify against real infrastructure, not mocks.** `ankusa_rabbitmq`,
    `ankusa_kafka`, `ankusa_nats`, and `ankusa_redis` are tested against real

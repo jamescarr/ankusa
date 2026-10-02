@@ -35,7 +35,7 @@ sleep 1 && docker compose logs worker
 # received id=01a0... source=demo bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-Tear down (the `-v` drops the WAL volume too):
+Tear down (the `-v` drops the data volume too):
 
 ```sh
 docker compose down -v

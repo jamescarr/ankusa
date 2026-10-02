@@ -3,11 +3,18 @@ defmodule Ankusa.EdgeTest do
 
   import Ankusa.TestHelpers
   alias Ankusa.Edge.{Ingest, Router}
-  alias Ankusa.WAL
 
   @secret "whsec_" <> Base.encode64("supersecret-key")
 
+  # A hook is only stored when something is obliged to handle it, so sources
+  # without sinks of their own get a log sink: stored hooks stay pending (no
+  # dispatch role runs here), which is what these tests look at.
   defp start_edge(sources) do
+    sources =
+      Map.new(sources, fn {id, opts} ->
+        {id, Keyword.put_new(opts, :sinks, [{Ankusa.Sink.Log, []}])}
+      end)
+
     config =
       test_config(roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: sources})
 
@@ -34,7 +41,7 @@ defmodule Ankusa.EdgeTest do
     # Exactly these two keys: the ingest surface carries no node-local state.
     assert Map.keys(JSON.decode!(conn.resp_body)) == ["id", "status"]
     # durably readable straight after the ack
-    assert [env] = WAL.read(config.instance, -1, 10)
+    assert {:ok, [env]} = Ankusa.Queue.hooks(config.instance, 0, 10)
     assert env.id == id
     assert env.body == ~s({"hello":"world"})
   end
@@ -43,7 +50,7 @@ defmodule Ankusa.EdgeTest do
     config = start_edge(%{})
     conn = route(config, request("nope", "x"))
     assert conn.status == 404
-    assert WAL.stats(config.instance).records == 0
+    assert stored_ids(config.instance) == []
   end
 
   test "the same body posted twice is stored twice" do
@@ -58,8 +65,7 @@ defmodule Ankusa.EdgeTest do
     assert %{"status" => "accepted", "id" => id1} = JSON.decode!(first.resp_body)
     assert %{"status" => "accepted", "id" => id2} = JSON.decode!(second.resp_body)
     assert id1 != id2
-    assert WAL.read(config.instance, 0, 10) |> length() == 2
-    assert WAL.stats(config.instance).records == 2
+    assert length(stored_ids(config.instance)) == 2
   end
 
   test "valid Standard Webhooks signature is accepted; a bad one is rejected (401)" do
@@ -90,8 +96,8 @@ defmodule Ankusa.EdgeTest do
     assert bad.status == 401
     assert %{"error" => "verification_failed"} = JSON.decode!(bad.resp_body)
 
-    # only the verified hook made it to the WAL
-    assert WAL.stats(config.instance).records == 1
+    # only the verified hook was stored
+    assert length(stored_ids(config.instance)) == 1
   end
 
   test "quarantine policy durably holds a failed hook and returns 202" do
@@ -107,8 +113,8 @@ defmodule Ankusa.EdgeTest do
 
     assert conn.status == 202
     assert %{"status" => "quarantined"} = JSON.decode!(conn.resp_body)
-    assert WAL.stats(config.instance).records == 0
-    assert [entry] = Ankusa.Edge.Quarantine.recent(config.instance)
+    assert stored_ids(config.instance) == []
+    assert {:ok, [entry]} = Ankusa.Edge.Quarantine.recent(config.instance, 10)
     assert entry.source_id == "q"
   end
 
@@ -132,65 +138,47 @@ defmodule Ankusa.EdgeTest do
   end
 
   test "sheds with 503 once max_queue is reached while a commit is in flight" do
-    # A WAL whose commit takes long enough that the queue fills behind it. Each
-    # commit also makes progress (2 records leave the queue per 300 ms), so the
-    # queue cannot simply fill once and stay full.
-    defmodule SlowWAL do
-      @behaviour Ankusa.WAL
-
-      def child_spec(opts), do: Ankusa.WAL.DiskLog.child_spec(opts)
-
-      def start_link(opts), do: Ankusa.WAL.DiskLog.start_link(opts)
-
-      @impl Ankusa.WAL
-      def append(server, records) do
-        Process.sleep(300)
-        Ankusa.WAL.DiskLog.append(server, records)
-      end
-
-      @impl Ankusa.WAL
-      def read(server, after_seq, limit), do: Ankusa.WAL.DiskLog.read(server, after_seq, limit)
-
-      @impl Ankusa.WAL
-      def get_cursor(server, name), do: Ankusa.WAL.DiskLog.get_cursor(server, name)
-
-      @impl Ankusa.WAL
-      def put_cursor(server, name, seq), do: Ankusa.WAL.DiskLog.put_cursor(server, name, seq)
-
-      @impl Ankusa.WAL
-      def truncate_through(server, seq), do: Ankusa.WAL.DiskLog.truncate_through(server, seq)
-
-      @impl Ankusa.WAL
-      def stats(server), do: Ankusa.WAL.DiskLog.stats(server)
-    end
-
+    # The queue writer is suspended, so the first commit blocks and the queue
+    # fills behind it. Resuming it lets everything that was admitted commit.
     config =
       test_config(
         roles: [:edge],
-        wal: {SlowWAL, []},
-        source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => []}},
+        source_store:
+          {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
         batcher: %{partitions: 1, max_batch: 2, max_queue: 4, max_delay_ms: 0}
       )
 
     start_supervised!({Ankusa.Instance, config})
     inst = config.instance
 
-    results =
-      1..20
-      |> Enum.map(fn _ -> Task.async(fn -> Ingest.ingest(inst, request("demo", "x")) end) end)
-      |> Enum.map(&Task.await(&1, 30_000))
+    writer = Ankusa.whereis(inst, :queue_writer)
+    :ok = :sys.suspend(writer)
 
-    overloads = Enum.count(results, &(&1 == {:error, :overload}))
-    committed = for {:ok, env} <- results, do: env
+    tasks =
+      Enum.map(1..20, fn _ -> Task.async(fn -> Ingest.ingest(inst, request("demo", "x")) end) end)
+
+    # What is shed is answered at once, while the writer is still stuck; what
+    # was admitted is still waiting on it.
+    {done, pending} =
+      tasks |> Task.yield_many(500) |> Enum.split_with(fn {_task, result} -> result != nil end)
 
     # The bound has to bite: with 20 concurrent callers and a queue that holds
     # 4, most of them never get in.
-    assert overloads >= 10
+    assert Enum.count(done, &match?({_, {:ok, {:error, :overload}}}, &1)) >= 10
+
+    :ok = :sys.resume(writer)
+
+    results =
+      Enum.map(done, fn {_task, {:ok, result}} -> result end) ++
+        Enum.map(pending, fn {task, nil} -> Task.await(task, 30_000) end)
+
+    overloads = Enum.count(results, &(&1 == {:error, :overload}))
+    committed = for {:ok, env} <- results, do: env
     assert length(committed) + overloads == 20
 
-    # ...and everything that *was* acked is durably in the WAL.
-    in_wal = inst |> WAL.read(-1, 100) |> MapSet.new(& &1.id)
-    assert Enum.all?(committed, &MapSet.member?(in_wal, &1.id))
+    # ...and everything that *was* acked is durably stored.
+    stored = inst |> stored_ids() |> MapSet.new()
+    assert Enum.all?(committed, &MapSet.member?(stored, &1.id))
   end
 
   test "oversize payload is refused with 413" do

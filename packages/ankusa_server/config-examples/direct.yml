@@ -1,8 +1,11 @@
-# A stateless ingest node: no WAL, no local state, no volume.
+# A stateless ingest node: no hook store. Without a volume it also forgets any
+# API-managed sources, rate-limit overrides and quarantined hooks on restart.
 #
 #   topology : edge only — the broker is the bus
-#   WAL      : none — the broker's publisher confirm is the ack. Nothing on local
-#              disk; run as a Deployment, not a StatefulSet.
+#   wal.type : none — the queue's mode (the name is historical). The broker's
+#              publisher confirm is the ack; no hook is written locally, so run
+#              as a Deployment, not a StatefulSet. The store still opens for the
+#              quarantine pen, rate-limit overrides and API-managed sources.
 #   storage  : none — there is nothing to compact
 #   secrets  : STRIPE_WHSEC (injected via ${VAR})
 #   sink     : RABBITMQ_URL / RABBITMQ_EXCHANGE — a broker that confirms durably
@@ -20,8 +23,8 @@
 #     jamescarr/ankusa
 #
 # `node.roles` may keep saying `[edge, dispatch, storage]`: with `wal.type: none`
-# the WAL's readers are dropped from the effective roles (visible on
-# `GET /health` on the admin port).
+# the `dispatch` and `storage` roles are dropped from the effective roles
+# (visible on `GET /health` on the admin port).
 
 node:
   roles: [edge]
@@ -40,8 +43,9 @@ sources:
       secret: "${STRIPE_WHSEC}"
       tolerance_seconds: 300
     # The default, spelled out: a bad signature is rejected, never quarantined.
-    # Under `wal.type: none` a quarantine would be the one thing written to this
-    # node's disk, and it is not acked customer data either way.
+    # Under `wal.type: none` a quarantined hook would still be a local write
+    # (the pen lives in the store), and it is not acked customer data either
+    # way.
     on_verify_failure: reject
     sinks:
       - type: rabbitmq

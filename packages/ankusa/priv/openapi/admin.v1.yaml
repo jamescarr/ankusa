@@ -58,7 +58,7 @@ tags:
   - name: rate_limits
     description: |
       Per-tenant ingest rate limits: config values plus this node's runtime
-      overrides (persisted to `rate_limits.json` on the node). `:edge` role
+      overrides (persisted in the node's store). `:edge` role
       only; node-local.
   - name: routes
     description: |
@@ -109,7 +109,7 @@ paths:
       tags: [operations]
       summary: Prometheus metrics
       description: |
-        The node's `Ankusa.Metrics` scrape: ingest, verification, WAL commit,
+        The node's `Ankusa.Metrics` scrape: ingest, verification, store commit,
         load shedding, quarantine, dispatch, compaction, and claim-check
         series. Only the events this node emits appear — an edge node has no
         dispatch series, a storage node has no ingest series.
@@ -151,14 +151,14 @@ paths:
     get:
       operationId: getWal
       tags: [operations]
-      summary: This node's WAL statistics
+      summary: This node's queue statistics
       description: |
-        `Ankusa.WAL.stats/1` from this node's own log, `{}` when the log is
-        unreachable. Node-local, like the DLQ and the quarantine list: ask
-        every node. A node running `wal.type: none` has no log to report.
+        `Ankusa.Queue.stats/1` from this node's own store, `{}` when the store
+        is unreachable. Node-local, like the DLQ and the quarantine list: ask
+        every node. A node running `wal.type: none` has no queue to report.
       responses:
         '200':
-          description: This node's WAL stats.
+          description: This node's queue statistics.
           content:
             application/json:
               schema:
@@ -172,7 +172,7 @@ paths:
       summary: List dead-lettered hooks
       description: |
         Newest first, metadata only — bodies are never returned. Results are
-        this node's DLQ file; with several dispatch nodes, ask each one.
+        this node's dead delivery rows; with several dispatch nodes, ask each one.
       parameters:
         - name: source_id
           in: query
@@ -204,16 +204,21 @@ paths:
           $ref: '#/components/responses/InvalidFilter'
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
   /v1/dlq/replay:
     post:
       operationId: replayDeadLetters
       tags: [dlq]
       summary: Re-deliver dead-lettered hooks
       description: |
-        Re-delivers matching entries through their source's configured sinks.
-        Replay is at-least-once: an entry already delivered upstream but not
-        recorded as such will be delivered again, so consumers should dedupe on
-        the envelope id. Entries stay in the DLQ — replay does not remove them.
+        Moves matching dead-lettered rows back to pending with a fresh attempt
+        count; the dispatch pipeline then delivers them through their source's
+        *current* sinks. The response counts the rows moved, not hooks
+        delivered. Replay is at-least-once: an entry already delivered upstream
+        but not recorded as such will be delivered again, so consumers should
+        dedupe on the envelope id. A replayed entry leaves the DLQ; one that
+        fails again is dead-lettered again.
       requestBody:
         required: false
         description: |
@@ -234,15 +239,17 @@ paths:
           $ref: '#/components/responses/InvalidFilter'
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
   /v1/quarantine:
     get:
       operationId: listQuarantined
       tags: [quarantine]
       summary: Recent quarantined hooks
       description: |
-        The edge node's in-memory recent list (at most 200 entries), newest
-        first. Metadata only — bodies are never returned. The durable record
-        lives in `quarantine/quarantine.log` on the node's data volume.
+        The newest quarantined entries from this node's store, newest first.
+        Metadata only — bodies are never returned; the headers and body stay in
+        the store.
       parameters:
         - name: limit
           in: query
@@ -262,6 +269,8 @@ paths:
           $ref: '#/components/responses/InvalidFilter'
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
   /v1/rate-limits:
     get:
       operationId: listRateLimits
@@ -313,7 +322,7 @@ paths:
       tags: [rate_limits]
       summary: Set a tenant's override
       description: |
-        Stored in this node's memory and persisted to `rate_limits.json`, so it
+        Stored in this node's memory and persisted to its store, so it
         survives a restart of this node. Takes effect at once: the tenant's
         bucket is reset, so a raised limit is not held back by the old limit's
         accumulated debt. A `{rate, burst}` pair is required whole — neither key
@@ -336,7 +345,7 @@ paths:
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
         '503':
-          $ref: '#/components/responses/RateLimitStoreUnavailable'
+          $ref: '#/components/responses/NodeStoreUnavailable'
     delete:
       operationId: deleteTenantRateLimit
       tags: [rate_limits]
@@ -355,7 +364,7 @@ paths:
         '409':
           $ref: '#/components/responses/RoleNotEnabled'
         '503':
-          $ref: '#/components/responses/RateLimitStoreUnavailable'
+          $ref: '#/components/responses/NodeStoreUnavailable'
   /admin/routes/test:
     servers:
       - url: http://localhost:4003
@@ -766,8 +775,9 @@ components:
         wal:
           type: object
           description: |
-            Adapter-defined WAL stats (`next_seq`, `min_seq`, `max_seq`,
-            `cursors` for the disk log), `{}` when the WAL is unreachable.
+            This node's store: `next_seq` (exact), `hooks` and `deliveries`
+            (RocksDB key estimates), `disk_bytes`; `{}` when the store is
+            unreachable.
     DlqEntry:
       type: object
       description: A dead-lettered hook. The recorded reason is `inspect/1` of a term.
@@ -791,7 +801,7 @@ components:
           type: [string, 'null']
         seq:
           type: [integer, 'null']
-          description: WAL sequence number, `null` if the record never committed.
+          description: Queue sequence number of the committed hook, `null` if it never committed.
         received_at:
           type: integer
           description: When the edge received the hook, unix milliseconds.
@@ -883,10 +893,10 @@ components:
           type: string
         rate:
           type: [number, 'null']
-          description: `null` when `source` is `none`.
+          description: '`null` when `source` is `none`.'
         burst:
           type: [integer, 'null']
-          description: `null` when `source` is `none`.
+          description: '`null` when `source` is `none`.'
         source:
           type: string
           enum: [override, config, default, none]
@@ -1344,12 +1354,12 @@ components:
           examples:
             redisDown:
               value: {error: store_unavailable}
-    RateLimitStoreUnavailable:
-      description: '`503`. `store_unavailable`: `rate_limits.json` could not be written on this node, so the override was not applied — this node''s limits are unchanged. Transient: retry.'
+    NodeStoreUnavailable:
+      description: '`503`. `store_unavailable`: this node''s store could not be read or written, so nothing changed. Transient: retry.'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
           examples:
-            unwritableDataDir:
+            storeDown:
               value: {error: store_unavailable}

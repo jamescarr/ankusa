@@ -8,7 +8,7 @@ under a closed-loop burst.
 ```mermaid
 flowchart LR
     P[Provider / loadgen] -->|POST /webhooks/demo| A[ankusa\n3 pods, all-role\nStatefulSet]
-    A -->|WAL fsync, then ack| P
+    A -->|store fsync, then ack| P
     A -->|"Ankusa.Sink.Http\nPOST /deliveries"| C[consumer\n2 replicas: Plug + Oban]
     C --> OJ[Oban jobs]
     OJ --> DB[(processed_webhooks\ndb: consumer)]
@@ -18,11 +18,11 @@ flowchart LR
 
 - `ankusa` is a 3-pod StatefulSet running all three roles in every pod
   (`ANKUSA_ROLES=edge,dispatch,storage`). Each pod is a self-contained node:
-  it accepts webhooks, fsyncs them to its own `Ankusa.WAL.DiskLog` on its own
+  it accepts webhooks, fsyncs them to its own RocksDB store on its own
   PVC, and dispatches them to `consumer` itself over `Ankusa.Sink.Http`
   (plain HTTP POSTs to `/deliveries`). A killed pod comes back on the same
-  PVC and drains its own WAL; the surviving pods keep answering throughout.
-  The three pods are independent nodes behind one Service: no shared log,
+  PVC and drains its own store; the surviving pods keep answering throughout.
+  The three pods are independent nodes behind one Service: no shared store,
   no separate dispatch fleet to keep in sync. Ankusa and `ingest_app` know
   nothing about Oban, jobs, or queues; the sink only knows it's making an
   HTTP call.
@@ -34,8 +34,8 @@ flowchart LR
   at-least-once, so this idempotency is what makes the pipeline exactly-once
   end to end.
 - `postgres` is one StatefulSet holding one database: `consumer` (Oban's own
-  tables plus `processed_webhooks`). The WALs live on the ankusa pods' PVCs,
-  not here.
+  tables plus `processed_webhooks`). Each node's store lives on that ankusa
+  pod's PVC, not here.
 - `tools/loadgen` drives three phases against the cluster and, for each,
   verifies every 201-acknowledged webhook eventually lands exactly once in
   `processed_webhooks` with a matching body hash: proof of zero loss, not
@@ -88,7 +88,7 @@ running for inspection.
    `ankusa-0`, then `ankusa-1`, then one `consumer` pod are each killed in
    turn (10s apart) while traffic keeps flowing.
 3. **burst**: a closed-loop flood at `CONCURRENCY` concurrent requests for
-   `BURST_SECONDS` seconds, no rate limit, to prove the WAL absorbs a spike
+   `BURST_SECONDS` seconds, no rate limit, to prove the store absorbs a spike
    without dropping anything.
 
 Each phase writes `$OUT_DIR/<phase>.csv` (every acknowledged id + its body's

@@ -12,11 +12,11 @@
 _**Don't fight the traffic. Steer it.**_
 
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
-at it: every hook is written to a durable log before Ankusa answers `2xx`, every
-accepted POST is stored under a fresh `id`, and each hook is delivered to your
-own worker over HTTP, RabbitMQ, Kafka, NATS JetStream, or Redis pub/sub, with
-retries, a dead-letter queue, and replay. Start with one container. Grow into a
-fleet by changing config, not code.
+at it: every hook is written to a durable local store before Ankusa answers
+`2xx`, every accepted POST is stored under a fresh `id`, and each hook is
+delivered to your own worker over HTTP, RabbitMQ, Kafka, NATS JetStream, or
+Redis pub/sub, with retries, a dead-letter queue, and replay. Start with one
+container. Grow into a fleet by changing config, not code.
 
 ## Quickstart
 
@@ -32,7 +32,7 @@ docker run -d --name ankusa \
 until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy ]; do sleep 1; done
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"accepted"}   (returned only after the WAL fsync)
+# => {"id":"01a0...","status":"accepted"}   (returned only after the store fsync)
 ```
 
 Done? `docker rm -f ankusa`
@@ -80,13 +80,15 @@ walks through outages, dead letters, replay, and pointing a real provider at it.
 ## How it works
 
 Ankusa never answers `2xx` until the hook is durably accepted, and which system
-accepts it is one config key. By default (`wal.type: disk`) the fsync lands
-first and `201 accepted` is the only committed response — there is no `200`. If
-a node dies before the write, the provider never got an ack and retries; that
-retry is a new hook with a new `id`, stored and delivered again, because ingest
-does no deduplication and delivery is at-least-once. Under `wal.type: none` the
-node keeps no log at all: it publishes to the source's sinks inside the request
-and acks on the broker's confirm. Either way, when the destination slows down,
+accepts it is one config key. By default (`wal.type: disk` — the queue's mode,
+named for the log it replaced) the hook is written to the node's RocksDB store,
+the fsync lands first, and `201 accepted` is the only committed response —
+there is no `200`. If a node dies before the write, the provider never got an
+ack and retries; that retry is a new hook with a new `id`, stored and delivered
+again, because ingest does no deduplication and delivery is at-least-once.
+Under `wal.type: none` the node keeps no store at all: it publishes to the
+source's sinks inside the request and acks on the broker's confirm. Either way,
+when the destination slows down,
 Ankusa answers `503` with `Retry-After`, so providers back off and try again
 instead of losing events. You get that guarantee on day one, on one machine,
 and you keep it when you run a hundred.
@@ -98,7 +100,7 @@ why each guarantee holds.
 flowchart LR
     P[Provider] -->|POST catch URL| E[Edge]
     E --> B[Group-commit Batcher]
-    B -->|one fsync| W[(WAL)]
+    B -->|one fsync| W[(Store)]
     W -->|ack| P
     W --> C[Compactor]
     W --> D[Dispatch]
@@ -123,14 +125,14 @@ replace that piece and keep the rest.
 ## Grow into a fleet
 
 When one box is not enough, run N independent all-role nodes behind a load
-balancer. Each node has its own data volume, its own WAL, and its own DLQ/admin
-API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ, or Redis
-pub/sub.
-`WAL.DiskLog` keeps `edge`, `dispatch`, and `storage` in one BEAM node, so a node
-is the unit of scale: add nodes, not roles. Give each node **its own bucket**
-(or LocalFS) for segments. Segment keys are `seg/<first_seq>-<last_seq>.seg`,
-and remote blob stores ignore the instance, so nodes sharing a bucket overwrite
-each other's segments.
+balancer. Each node has its own data volume, its own store, and its own
+DLQ/admin API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ, or
+Redis pub/sub.
+A disk-mode node keeps `edge`, `dispatch`, and `storage` in one BEAM node, so a
+node is the unit of scale: add nodes, not roles. Give each node **its own
+bucket** (or LocalFS) for segments. Segment keys are
+`seg/<first_seq>-<last_seq>.seg`, and remote blob stores ignore the instance,
+so nodes sharing a bucket overwrite each other's segments.
 
 ```mermaid
 flowchart LR
@@ -138,11 +140,11 @@ flowchart LR
     LB --> E1[Ankusa node 1]
     LB --> E2[Ankusa node 2]
     LB --> E3[Ankusa node N]
-    E1 --> WAL1[("own WAL\n+ volume")]
-    E2 --> WAL2[("own WAL\n+ volume")]
-    E3 --> WAL3[("own WAL\n+ volume")]
-    WAL1 & WAL2 & WAL3 --> Q[Kafka / NATS / RabbitMQ / HTTP]
-    WAL1 & WAL2 & WAL3 --> S[(S3 / GCS)]
+    E1 --> ST1[("own store\n+ volume")]
+    E2 --> ST2[("own store\n+ volume")]
+    E3 --> ST3[("own store\n+ volume")]
+    ST1 & ST2 & ST3 --> Q[Kafka / NATS / RabbitMQ / HTTP]
+    ST1 & ST2 & ST3 --> S[(S3 / GCS)]
     Q --> W[Your workers]
 ```
 
@@ -158,9 +160,9 @@ Roles, the container, and fleets: [`docs/deployment.md`](docs/deployment.md).
 | --- | --- | --- | --- |
 | [quickstart](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/) | HTTP | Python | retries, dead letters, replay |
 | [rabbitmq-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/) | RabbitMQ | TypeScript | consumer-owned queues, large payloads via the claim-check gateway |
-| [kafka-sqs-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | per-source ordering, failure drills |
+| [kafka-sqs-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | SQS FIFO handoff, failure drills |
 | [nats-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/) | NATS JetStream | Rust | a consumer-owned stream, claim-check redemption with the published Rust crate |
-| [oban-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/) | HTTP → Oban on Kubernetes | Elixir | a fleet of independent nodes, each with its own disk WAL, load-tested with pods killed mid-run |
+| [oban-consumer](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/) | HTTP → Oban on Kubernetes | Elixir | a fleet of independent nodes, each with its own on-disk store, load-tested with pods killed mid-run |
 
 How to pick one: [examples/README.md](https://github.com/jamescarr/ankusa/blob/main/examples/README.md)
 
@@ -186,7 +188,7 @@ to steer an elephant. Its root, aṅka, means "to bend" or "curve".
 
 Webhook traffic behaves like the elephant. It is large, it arrives on its own
 schedule, and it will not wait for you. So the framework takes the same shape:
-absorb the traffic durably and fast through the WAL and batcher, then steer
+absorb the traffic durably and fast through the store and batcher, then steer
 where it goes next through routing and dispatch.
 
 ## License

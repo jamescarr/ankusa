@@ -21,11 +21,11 @@ defmodule Ankusa.Sink.Redis do
 
   For the same reason `durable?/1` is `false` — a subscriber that disconnects
   after the publish loses the message. A source whose only sinks are Redis
-  cannot run `wal.type: none` (`Ankusa.WAL` rejects it at boot), and a Redis
+  cannot run `wal.type: none` (`Ankusa.Queue.validate_config!/1` rejects it at boot), and a Redis
   sink listed next to a durable one still gates every ack in that mode: boot
   only needs one durable sink, but every sink has to confirm, so
   `{:error, :no_subscribers}` is a `503` for the whole request. With the
-  default WAL the hook stays in the log and the DLQ, which is what makes
+  default queue the hook stays in the store and the DLQ, which is what makes
   replay possible at all. A Redis that *keeps* messages is a Redis Stream
   (`XADD`), a different sink than this one.
 
@@ -85,12 +85,6 @@ defmodule Ankusa.Sink.Redis do
       publish(conn, channel(env, opts), payload, timeout)
     end
   end
-
-  # Redis delivers the publishes of one connection to a channel in order, so
-  # the channel is the ordering scope — the same shape as `Sink.NATS`'s
-  # subject, and a sink-level `Sink.Kafka`'s record key.
-  @impl true
-  def ordering_key(env, opts), do: channel(env, opts)
 
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)

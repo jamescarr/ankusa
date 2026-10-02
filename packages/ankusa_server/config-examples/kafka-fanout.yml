@@ -35,7 +35,8 @@ sources:
       - type: kafka
         brokers: "${KAFKA_BROKERS}"
         topic: "${KAFKA_TOPIC:-ankusa.hooks}"
-        # Partition key: same tenant/source stays ordered.
+        # Partition key: the same key lands on the same partition. Hooks are
+        # not published in order, so this is not an ordering guarantee.
         key: stripe
         # Above this, the body becomes a claim ticket.
         inline_max_bytes: 8192

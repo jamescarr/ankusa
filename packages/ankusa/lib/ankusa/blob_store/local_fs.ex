@@ -3,9 +3,10 @@ defmodule Ankusa.BlobStore.LocalFS do
   Default `Ankusa.BlobStore`: immutable segments on the local filesystem.
 
   Segments live under `Config.path(config, "segments")`. Writes are atomic
-  (temp file + rename) so a reader never sees a half-written segment. Reads use
-  `:file.pread/3` for a single-record range `GET` without slurping the whole
-  segment into memory.
+  (temp file + rename) and durable (file and directory fsyncs), so a reader
+  never sees a half-written segment and a committed segment survives power
+  loss. Reads use `:file.pread/3` for a single-record range `GET` without
+  slurping the whole segment into memory.
   """
 
   @behaviour Ankusa.BlobStore
@@ -15,11 +16,10 @@ defmodule Ankusa.BlobStore.LocalFS do
   @impl true
   def put(instance, key, data, _opts) do
     path = abs(instance, key)
-    File.mkdir_p!(Path.dirname(path))
-    tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
-    File.write!(tmp, data)
-    File.rename!(tmp, path)
-    :ok
+
+    with :ok <- Ankusa.Fsync.mkdir_p(Path.dirname(path)) do
+      Ankusa.Fsync.write_file(path, data)
+    end
   end
 
   @impl true

@@ -119,8 +119,12 @@ defmodule Ankusa.Edge.Ingest do
     end
   end
 
+  # `function_exported?/3` is false for a module nothing has loaded yet, which
+  # would label the first verification with the module name instead of the scheme.
   defp verifier_scheme(mod, opts) do
-    if function_exported?(mod, :scheme_name, 1), do: mod.scheme_name(opts), else: inspect(mod)
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :scheme_name, 1),
+      do: mod.scheme_name(opts),
+      else: inspect(mod)
   end
 
   defp verify_status(:ok), do: :ok
@@ -133,15 +137,17 @@ defmodule Ankusa.Edge.Ingest do
   defp commit(instance, source, env) do
     case Ankusa.config(instance).wal do
       :none -> Publish.publish(instance, source, env)
-      _ -> buffered_commit(instance, env)
+      _ -> buffered_commit(instance, source, env)
     end
   end
 
-  defp buffered_commit(instance, env) do
+  # The sinks travel with the hook: the queue writes one delivery row per sink in
+  # the same batch as the hook itself.
+  defp buffered_commit(instance, source, env) do
     partition = BatcherSupervisor.partition(instance, env.id)
 
     try do
-      case Batcher.commit(instance, partition, %{envelope: env}) do
+      case Batcher.commit(instance, partition, %{envelope: env, sinks: source.sinks}) do
         {:committed, committed} -> {:ok, committed}
         {:error, :overload} -> {:error, :overload}
         {:error, :store_unavailable} -> {:error, :store_unavailable}
@@ -157,6 +163,7 @@ defmodule Ankusa.Edge.Ingest do
     case Quarantine.put(instance, env, reason) do
       :ok -> {:quarantined, reason}
       :rate_limited -> {:rejected, {:quarantine_rate_limited, reason}}
+      {:error, :store_unavailable} -> {:error, :store_unavailable}
     end
   end
 

@@ -95,12 +95,11 @@ defmodule Ankusa.MixProject do
           Ankusa.Edge.BatcherSupervisor,
           Ankusa.Edge.Quarantine,
           Ankusa.Storage.Compactor,
-          Ankusa.Storage.Index,
+          Ankusa.Store,
+          Ankusa.Queue.Writer,
           Ankusa.Dispatch.Pipeline,
-          Ankusa.Dispatch.DLQ,
           Ankusa.ClaimCheck.Router,
           Ankusa.ClaimCheck.Sweeper,
-          Ankusa.DurableLog,
           Ankusa.Http,
           Ankusa.HttpClient,
           Ankusa.UUIDv7
@@ -142,6 +141,11 @@ defmodule Ankusa.MixProject do
       # route definitions across nodes need a network store.
       {:nebulex, "~> 3.0"},
       {:nebulex_local, "~> 3.0"},
+      # The node's local store (hooks, deliveries, archive catalogue, quarantine
+      # pen, sources, rate limits). Native build needs cmake >= 3.12, a C++20
+      # compiler and, on Linux, kernel headers. 3.1.2 is the first Hex build
+      # that compiles outside a git checkout.
+      {:rocksdb, "~> 3.1 and >= 3.1.2"},
       # The OpenAPI contract test reads priv/openapi/*.yaml and drives the
       # listeners from the examples in it, so the document and the code cannot
       # drift apart.

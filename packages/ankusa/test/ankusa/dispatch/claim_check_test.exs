@@ -1,15 +1,19 @@
 defmodule Ankusa.Dispatch.ClaimCheckTest do
   @moduledoc """
-  Dispatch's side of the claim check: bodies checked in once per envelope,
-  packed per tenant per WAL read batch, and read-order preserved while packs
-  upload.
+  Dispatch's side of the claim check: bodies checked in once per hook, packs
+  shared by every sink of a hook and every retry, and a failed pack falling
+  back to a per-hook check-in.
   """
 
   use ExUnit.Case, async: false
 
-  alias Ankusa.{ClaimCheck, Config, Envelope, UUIDv7, WAL}
+  import Ankusa.TestHelpers
+
+  alias Ankusa.{ClaimCheck, Envelope, UUIDv7}
   alias Ankusa.Dispatch.Pipeline
   alias Ankusa.Test.CountingBlobStore
+
+  @moduletag capture_log: true
 
   # A queue-style sink: claims bodies over `:threshold`, reports the ref it was
   # handed, and fails its first `:fail_times` attempts (counted in `:agent`).
@@ -41,24 +45,22 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
   end
 
   defp start(sinks, store_opts, dispatch \\ %{}) do
-    inst = :"dcc#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
-    on_exit(fn -> File.rm_rf(dir) end)
-
     config =
-      Config.new(
-        instance: inst,
-        data_dir: dir,
-        roles: [:dispatch],
+      test_config(
+        roles: [:edge, :dispatch],
         storage: %{blob_store: {CountingBlobStore, [pid: self()] ++ store_opts}},
-        dispatch: dispatch,
+        dispatch:
+          Map.merge(
+            %{
+              retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 20, jitter: false}
+            },
+            dispatch
+          ),
         source_store: {Ankusa.SourceStore.Static, sources: %{"src1" => %{sinks: sinks}}}
       )
 
-    Ankusa.put_config(config)
-    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
-    start_supervised!({Pipeline, instance: inst, config: config, max_sleep_ms: 1})
-    inst
+    start_supervised!({Ankusa.Instance, config})
+    config.instance
   end
 
   defp append(inst, tenant, body) do
@@ -75,8 +77,7 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
       size: byte_size(body)
     }
 
-    {:ok, [{:committed, _}]} = WAL.append(inst, [%{envelope: env}])
-    env
+    enqueue!(inst, env)
   end
 
   defp puts do
@@ -91,6 +92,20 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
 
   defp redeem(inst, %{ref: ref, sha256: sha256}), do: ClaimCheck.redeem(inst, ref, sha256)
 
+  # Holds dispatch so a batch of enqueues is committed before anything is
+  # claimed: the pipeline packs per store scan, and a wake would otherwise let
+  # it claim the first hook before the rest are committed.
+  defp with_held_dispatch(inst, fun) do
+    pid = Ankusa.whereis(inst, :dispatch)
+    :ok = :sys.suspend(pid)
+
+    try do
+      fun.()
+    after
+      :ok = :sys.resume(pid)
+    end
+  end
+
   test "a fat hook on two claim sinks is written once, even when a sink fails before succeeding" do
     {:ok, agent} = Agent.start_link(fn -> 2 end)
 
@@ -104,7 +119,7 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
       )
 
     env = append(inst, "acme", fat())
-    assert {:ok, 1} = Pipeline.tick(inst)
+    assert {:ok, _} = Pipeline.tick(inst)
 
     assert_receive {:delivered, :a, id, claim_a}
     assert_receive {:delivered, :b, ^id, claim_b}
@@ -117,13 +132,16 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
   test "a batch packs per tenant: three fat hooks across two tenants take two writes" do
     inst = start([{ClaimSink, name: :a, pid: self(), threshold: 100}], [])
 
-    envs = [
-      append(inst, "acme", fat()),
-      append(inst, "globex", fat()),
-      append(inst, "acme", fat())
-    ]
+    envs =
+      with_held_dispatch(inst, fn ->
+        [
+          append(inst, "acme", fat()),
+          append(inst, "globex", fat()),
+          append(inst, "acme", fat())
+        ]
+      end)
 
-    assert {:ok, 3} = Pipeline.tick(inst)
+    assert {:ok, _} = Pipeline.tick(inst)
 
     assert length(puts()) == 2
 
@@ -137,7 +155,7 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
     inst = start([{ClaimSink, name: :a, pid: self(), threshold: 10_000}], [])
 
     _env = append(inst, "acme", fat())
-    assert {:ok, 1} = Pipeline.tick(inst)
+    assert {:ok, _} = Pipeline.tick(inst)
 
     assert_receive {:delivered, :a, _id, nil}
     assert puts() == []
@@ -147,8 +165,12 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
     {:ok, failures} = Agent.start_link(fn -> 1 end)
     inst = start([{ClaimSink, name: :a, pid: self(), threshold: 100}], failures: failures)
 
-    envs = [append(inst, "acme", fat()), append(inst, "acme", fat())]
-    assert {:ok, 2} = Pipeline.tick(inst)
+    envs =
+      with_held_dispatch(inst, fn ->
+        [append(inst, "acme", fat()), append(inst, "acme", fat())]
+      end)
+
+    assert {:ok, _} = Pipeline.tick(inst)
 
     for env <- envs do
       assert_receive {:delivered, :a, id, claim} when id == env.id
@@ -157,18 +179,5 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
 
     # The failed pack, then one write per hook.
     assert length(puts()) == 3
-  end
-
-  test "a later hook in the same lane never overtakes one whose pack is still uploading" do
-    inst =
-      start([{ClaimSink, name: :a, pid: self(), threshold: 100}], [put_delay_ms: 200], %{batch: 1})
-
-    first = append(inst, "acme", fat())
-    second = append(inst, "acme", "small")
-    assert {:ok, 2} = Pipeline.tick(inst)
-
-    assert_receive {:delivered, :a, id1, %{ref: %Ankusa.ClaimCheck.Ref{}}}
-    assert_receive {:delivered, :a, id2, nil}
-    assert [id1, id2] == [first.id, second.id]
   end
 end

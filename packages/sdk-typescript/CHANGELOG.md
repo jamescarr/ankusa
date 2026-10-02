@@ -6,6 +6,18 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The generated admin types (`src/admin/admin-schema.d.ts`) are regenerated
+  from the server's current OpenAPI document. They now include `GET /v1/wal`,
+  `GET /v1/rate-limits` and `/v1/tenants/{tenant}/rate-limit`, which the
+  previous generated file was missing, and type a `503`
+  (`NodeStoreUnavailable`, `{"error": "store_unavailable"}`) on `GET /v1/dlq`,
+  `POST /v1/dlq/replay`, `GET /v1/quarantine` and the rate-limit routes. `/v1/wal`
+  now describes the node's store (`next_seq`, `hooks`, `deliveries`,
+  `disk_bytes`). Types only: the client already rejected every `5xx` with
+  `AdminUnavailableError`, so no runtime behaviour changes.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

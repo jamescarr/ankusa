@@ -117,7 +117,7 @@ defmodule Ankusa.Sink.NATSTest do
   } do
     {:ok, _sid} = Gnat.sub(admin, self(), subject)
 
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}_#{System.os_time(:microsecond)}")
     on_exit(fn -> File.rm_rf(dir) end)
     Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: dir))
 
