@@ -1,7 +1,7 @@
 defmodule AnkusaKafka.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.4.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   # Same forced-split pattern as ankusa_rabbitmq: `ankusa` core stays free of

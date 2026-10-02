@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-02
+
 ### Added
 
 - `Ankusa.Sink.Kafka` implements `c:Ankusa.Sink.describe/2`, advertising its
@@ -68,7 +70,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - Synchronous produce with `acks=all`
 - Kafka headers: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `content_type`
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.3.0...ankusa_kafka-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.1...ankusa_kafka-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.0...ankusa_kafka-v0.2.1
 [0.2.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.1.0...ankusa_kafka-v0.2.0

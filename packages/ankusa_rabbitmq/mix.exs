@@ -1,7 +1,7 @@
 defmodule AnkusaRabbitmq.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.4.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   # Forced split: `ankusa` core stays free of the
