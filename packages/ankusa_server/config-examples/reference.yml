@@ -48,7 +48,7 @@ routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
   # On is deny-by-default: a request is captured only if its method and
   # normalized path match an enabled route *and* its client IP passes the IP
-  # rules. Everything else is rejected before the WAL is touched.
+  # rules. Everything else is rejected before the store is touched.
   enabled: false
   # A hard cap on definitions. Creating one past it is a 409; nothing is ever
   # evicted — an evicted route would start rejecting real webhooks.
@@ -126,12 +126,12 @@ rate_limits:
   # signature passed (or whose source accepts failures) do.
   #
   # A hook over the limit gets 429 with a Retry-After header, and nothing is
-  # stored: no WAL record, no dispatch, no claim.
+  # stored: no hook, no dispatch, no claim.
   #
   # Limits can also be adjusted per tenant at runtime, without a restart:
-  # `PUT /v1/tenants/{tenant}/rate-limit` on the admin port, persisted to
-  # rate_limits.json on the node (the same node-local model as API-managed
-  # sources). A runtime value beats the ones below.
+  # `PUT /v1/tenants/{tenant}/rate-limit` on the admin port, persisted in the
+  # node's store (the same node-local model as API-managed sources). A runtime
+  # value beats the ones below.
   #
   # `rate` is hooks per second (fractions are allowed: 0.5 is one every two
   # seconds) and `burst` is the most admitted back to back. Both are required,

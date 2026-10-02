@@ -152,6 +152,24 @@ defmodule Ankusa.StoreMigrateTest do
 
       assert {:ok, %Envelope{seq: 42}} = Ingest.ingest(inst, request("demo", "x"))
     end
+
+    test "a hook dead-lettered twice in 0.3 is one dead row, with the later reason" do
+      config = config()
+      dead = envelope(1)
+
+      Legacy.log!(Path.join(Config.path(config, "dlq"), "dlq.log"), [
+        Legacy.dlq_entry(dead, {:sink, SomeSink, :first}, 1_700_000_000_000),
+        Legacy.dlq_entry(dead, {:sink, SomeSink, :second}, 1_700_000_005_000)
+      ])
+
+      inst = boot(config)
+
+      assert {:ok, %{total: 1, entries: [entry]}} = Queue.dead(inst, limit: 10)
+      assert entry.reason == inspect({:sink, SomeSink, :second})
+      assert entry.at == 1_700_000_005_000
+
+      assert {:ok, 1} = Ankusa.Dispatch.replay(inst, %{})
+    end
   end
 
   describe "everything else 0.3 kept" do
@@ -259,6 +277,45 @@ defmodule Ankusa.StoreMigrateTest do
 
       assert {:corrupt_legacy_sidecar, ^cursors} = find_corrupt_sidecar(error)
       assert File.exists?(wal_dir(config))
+    end
+
+    test "a frame with a valid checksum around a term that will not decode refuses to start" do
+      config = config(roles: [:edge])
+      path = Legacy.wal!(config, [envelope(1)])
+
+      payload = "not an external term"
+      crc = :erlang.crc32(payload)
+      frame = <<0x484B::16, 1::8, 0::8, 2::64, crc::32, byte_size(payload)::32, payload::binary>>
+      File.write!(path, frame, [:append])
+
+      Process.flag(:trap_exit, true)
+      put_config(config)
+      assert {:error, error} = start_supervised({Ankusa.Instance, config})
+
+      assert {:legacy_import_failed, _} = find(error, &match?({:legacy_import_failed, _}, &1))
+      assert File.exists?(wal_dir(config))
+    end
+
+    test "a sources.json that cannot be read refuses to start; it is not treated as empty" do
+      config = config(roles: [:edge])
+
+      path =
+        Legacy.sources_json!(config, [{"acme", "billing", %{"sinks" => [%{"type" => "log"}]}}])
+
+      File.chmod!(path, 0o000)
+      on_exit(fn -> File.chmod(path, 0o644) end)
+
+      # Root reads anything; then there is nothing to test.
+      if match?({:error, :eacces}, File.read(path)) do
+        Process.flag(:trap_exit, true)
+        put_config(config)
+        assert {:error, error} = start_supervised({Ankusa.Instance, config})
+
+        assert {:legacy_read_failed, ^path, :eacces} =
+                 find(error, &match?({:legacy_read_failed, _, _}, &1))
+
+        assert File.exists?(path)
+      end
     end
   end
 

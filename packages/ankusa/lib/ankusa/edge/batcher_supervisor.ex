@@ -1,7 +1,7 @@
 defmodule Ankusa.Edge.BatcherSupervisor do
   @moduledoc """
   A fixed pool of `Ankusa.Edge.Batcher` processes, one per partition (two by
-  default). The DiskLog GenServer serializes commits itself, so extra
+  default). `Ankusa.Queue.Writer` serializes commits itself, so extra
   partitions mostly add contention rather than throughput. What the pool still
   buys is fault isolation: one wedged partition leaves the others committing.
   """

@@ -187,7 +187,7 @@ DLQ directly:
 
 ```elixir
 # one entry per hook: the envelope plus the source's sinks at ack time
-{:ok, [%{committed: env}]} =
+{:ok, [{:committed, env}]} =
   Ankusa.Queue.enqueue(:default, [%{envelope: env, sinks: [{Ankusa.Sink.Http, url: "..."}]}])
 
 {:ok, hooks} = Ankusa.Queue.hooks(:default, 0, 100)     # seq > 0, ascending

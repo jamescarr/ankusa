@@ -73,8 +73,8 @@ defmodule Ankusa.Queue do
   @spec stats(atom()) :: {:ok, map()} | {:error, term()}
   def stats(instance) do
     with {:ok, next_seq} <- next_seq(instance),
-         {:ok, hooks} <- Store.property(instance, :hooks, "rocksdb.estimate-num-keys"),
-         {:ok, deliveries} <- Store.property(instance, :deliveries, "rocksdb.estimate-num-keys"),
+         {:ok, hooks} <- key_estimate(instance, :hooks),
+         {:ok, deliveries} <- key_estimate(instance, :deliveries),
          {:ok, disk_bytes} <- disk_bytes(instance) do
       {:ok,
        %{
@@ -83,6 +83,16 @@ defmodule Ankusa.Queue do
          deliveries: deliveries,
          disk_bytes: disk_bytes
        }}
+    end
+  end
+
+  # The store keeps end-of-range sentinel keys in every scanned family; they are
+  # not hooks or deliveries, so an empty store reports 0, not 2.
+  defp key_estimate(instance, cf) do
+    sentinels = Enum.count(Keys.sentinels(), fn {sentinel_cf, _key} -> sentinel_cf == cf end)
+
+    with {:ok, n} <- Store.property(instance, cf, "rocksdb.estimate-num-keys") do
+      {:ok, max(n - sentinels, 0)}
     end
   end
 

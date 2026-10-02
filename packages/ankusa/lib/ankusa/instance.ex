@@ -1,13 +1,14 @@
 defmodule Ankusa.Instance do
   @moduledoc """
   Supervises one instance of the framework from a `%Ankusa.Config{}`. Only the
-  children for configured roles boot, so the same code runs as one all-roles
-  release on a laptop or as split edge/storage/dispatch fleets — the boundaries
-  between components are durable state (the WAL), not function calls.
+  children for configured roles boot, so the same code runs any role set. The
+  boundaries between components are durable state (this node's store), not
+  function calls.
 
-  Components hand work to each other through the WAL; killing the storage or
+  Components hand work to each other through the store; killing the storage or
   dispatch tree never stops the edge from acking. There are no links across
-  component boundaries.
+  component boundaries. The store is node-local, so every role that reads or
+  writes hooks has to run on the node that holds it.
   """
 
   use Supervisor
@@ -56,7 +57,7 @@ defmodule Ankusa.Instance do
 
   # The admin API's Prometheus reporter, first of all: it attaches its handlers
   # synchronously (`start_async: false`), so the events every later child emits
-  # while starting — boot-time dispatch of the WAL backlog, ingest the edge
+  # while starting — boot-time dispatch of the stored backlog, ingest the edge
   # accepts before the rest of the tree is up — are counted.
   defp metrics_children(config, opts) do
     if config.admin.enabled, do: [{Ankusa.Metrics, opts}], else: []

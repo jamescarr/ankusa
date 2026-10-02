@@ -38,7 +38,7 @@ directly (the NIF runs on dirty schedulers). There is no per-reader cursor:
 
 ```elixir
 entry = %{envelope: envelope, sinks: [{Ankusa.Sink.Http, url: "https://example.internal"}]}
-{:ok, [%{committed: envelope}]} = Ankusa.Queue.enqueue(:default, [entry])
+{:ok, [{:committed, envelope}]} = Ankusa.Queue.enqueue(:default, [entry])
 
 {:ok, hooks} = Ankusa.Queue.hooks(:default, 0, 100)            # seq > 0, ascending
 {:ok, %{next_seq: _, hooks: _, deliveries: _, disk_bytes: _}} = Ankusa.Queue.stats(:default)

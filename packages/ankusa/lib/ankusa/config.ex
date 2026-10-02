@@ -159,7 +159,7 @@ defmodule Ankusa.Config do
   too — `routes.cache.max_size` keeps the other cache keys.
 
   `wal: :none` is normalized last: the roles are settled before `normalize_wal/1`
-  drops the WAL's readers (`:dispatch`, `:storage`) from them.
+  drops the queue's readers (`:dispatch`, `:storage`) from them.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do

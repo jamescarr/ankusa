@@ -129,7 +129,7 @@ defmodule Ankusa.Store do
       Logger.info("[ankusa] store at #{path}. Durable to power loss on THIS host only.")
 
       # Handles are published, so the import can use `write/3` and `get/3`.
-      case Migrate.run(config) do
+      case run_migration(config) do
         :ok ->
           {:ok, %{db: db, cache: cache, cfs: cfs, table: table, path: path}}
 
@@ -146,6 +146,27 @@ defmodule Ankusa.Store do
     else
       close_and_fail(path, cache, db, cfs, :ets_table_exists)
     end
+  end
+
+  # The import reads files 0.3 wrote, any of which may be damaged in ways no
+  # parser anticipates (a valid CRC around a term that will not decode, an I/O
+  # error mid-read). Whatever it raises becomes a refusal to start, which goes
+  # through the same close path as any other: never `init/1` crashing with the
+  # database still open.
+  defp run_migration(config) do
+    Migrate.run(config)
+  rescue
+    exception ->
+      Logger.error(
+        "[ankusa] importing the 0.3 data dir failed: " <>
+          Exception.format(:error, exception, __STACKTRACE__)
+      )
+
+      {:error, {:legacy_import_failed, Exception.message(exception)}}
+  catch
+    kind, reason ->
+      Logger.error("[ankusa] importing the 0.3 data dir failed: #{inspect({kind, reason})}")
+      {:error, {:legacy_import_failed, {kind, reason}}}
   end
 
   defp close_and_fail(path, cache, db, cfs, reason) do
@@ -566,6 +587,11 @@ defmodule Ankusa.Store do
   # Every call looks the handles up fresh: a handle is a NIF resource whose
   # owner is the Store process, so caching one in a caller would survive the
   # owner's death and raise `ArgumentError` on every later use.
+  #
+  # Only an `ArgumentError` raised by the NIF itself means that. One raised by a
+  # caller's fold function (a stored value that does not decode) is a bug or
+  # corruption in the data, and is re-raised rather than reported as a transient
+  # outage the caller would just retry.
   defp with_handles(instance, fun) do
     case handles(instance) do
       {:ok, handles} ->
@@ -573,14 +599,21 @@ defmodule Ankusa.Store do
           fun.(handles)
         rescue
           e in ArgumentError ->
-            Logger.error("[ankusa] store handle is stale: #{Exception.message(e)}")
-            {:error, :store_unavailable}
+            if raised_by_nif?(__STACKTRACE__) do
+              Logger.error("[ankusa] store handle is stale: #{Exception.message(e)}")
+              {:error, :store_unavailable}
+            else
+              reraise e, __STACKTRACE__
+            end
         end
 
       {:error, :store_unavailable} = error ->
         error
     end
   end
+
+  defp raised_by_nif?([{:rocksdb, _fun, _args, _location} | _]), do: true
+  defp raised_by_nif?(_stacktrace), do: false
 
   defp handles(instance) do
     table = :"ankusa_store_#{instance}"

@@ -1,4 +1,5 @@
-# A stateless ingest node: no hook store, no volume.
+# A stateless ingest node: no hook store. Without a volume it also forgets any
+# API-managed sources, rate-limit overrides and quarantined hooks on restart.
 #
 #   topology : edge only — the broker is the bus
 #   wal.type : none — the queue's mode (the name is historical). The broker's

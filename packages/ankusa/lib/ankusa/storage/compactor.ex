@@ -111,6 +111,7 @@ defmodule Ankusa.Storage.Compactor do
 
         pending ->
           {present, missing} = Enum.split_with(hooks, fn {_seq, bin} -> bin != nil end)
+          {entries, undecodable} = decode_ids(present)
           missing_seqs = Enum.map(missing, &elem(&1, 0))
 
           if missing_seqs != [] do
@@ -119,7 +120,17 @@ defmodule Ankusa.Storage.Compactor do
             )
           end
 
-          with :ok <- write_segment(state, present, missing_seqs) do
+          # A stored hook that does not decode can never be archived; retrying it
+          # would stop the archive behind it for good. Its obligation goes, the
+          # hook itself stays for whatever deliveries it still has.
+          if undecodable != [] do
+            Logger.error(
+              "[ankusa] hook(s) #{inspect(undecodable)} do not decode and cannot be archived; " <>
+                "dropping their archive obligation(s)"
+            )
+          end
+
+          with :ok <- write_segment(state, entries, missing_seqs ++ undecodable) do
             {:ok, {pending |> List.last() |> elem(0), more?}}
           end
       end
@@ -132,15 +143,17 @@ defmodule Ankusa.Storage.Compactor do
     Archive.archived(state.instance, nil, [], missing_seqs)
   end
 
-  defp write_segment(state, present, missing_seqs) do
-    instance = state.instance
+  defp write_segment(state, entries, missing_seqs) do
     started = System.monotonic_time()
     {codec, _opts} = state.config.storage.codec
 
-    entries = Enum.map(present, fn {seq, bin} -> {seq, Envelope.from_binary(bin).id, bin} end)
+    with {:ok, {segment, index}} <- encode(codec, entries) do
+      write_encoded(state, entries, missing_seqs, segment, index, started)
+    end
+  end
 
-    {segment, index} =
-      codec.encode(Enum.map(entries, fn {_seq, id, bin} -> %{key: id, payload: bin} end))
+  defp write_encoded(state, entries, missing_seqs, segment, index, started) do
+    instance = state.instance
 
     seqs = Enum.map(entries, &elem(&1, 0))
     ids = Enum.map(entries, &elem(&1, 1))
@@ -187,6 +200,28 @@ defmodule Ankusa.Storage.Compactor do
 
       :ok
     end
+  end
+
+  # `{seq, id, bin}` for every hook that decodes, and the seqs of those that do not.
+  defp decode_ids(present) do
+    {entries, undecodable} =
+      Enum.reduce(present, {[], []}, fn {seq, bin}, {ok, bad} ->
+        try do
+          {[{seq, Envelope.from_binary(bin).id, bin} | ok], bad}
+        rescue
+          _ -> {ok, [seq | bad]}
+        end
+      end)
+
+    {Enum.reverse(entries), Enum.reverse(undecodable)}
+  end
+
+  # The codec is configurable code: a raise is this tick's failure, retried next
+  # tick like a failed blob write, never a crashed compactor.
+  defp encode(codec, entries) do
+    {:ok, codec.encode(Enum.map(entries, fn {_seq, id, bin} -> %{key: id, payload: bin} end))}
+  rescue
+    error -> {:error, {:raised, error}}
   end
 
   # A blob store is user code (S3, GCS, a custom adapter): an error return and a

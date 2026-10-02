@@ -322,6 +322,28 @@ defmodule Ankusa.StorageTest do
     assert fetched.seq == env.seq
   end
 
+  test "a stored hook that does not decode is skipped; the rest are archived and the compactor lives" do
+    config = start(roles: [:edge, :storage])
+    inst = config.instance
+
+    [good, poison] = commit!(inst, [envelope("good"), envelope("poison")])
+
+    :ok =
+      Ankusa.Store.write(inst, [{:put, :hooks, Ankusa.Store.Keys.hook(poison.seq), "garbage"}],
+        sync: true
+      )
+
+    assert {:ok, 1} == Compactor.tick(inst)
+    assert Process.alive?(Ankusa.whereis(inst, :compactor))
+
+    assert {:ok, fetched} = Storage.fetch(inst, good.id)
+    assert fetched.body == "good"
+    assert :error == Storage.fetch(inst, poison.id)
+
+    # Its obligation is gone, so the next tick has nothing left to do.
+    assert {:ok, 0} == Compactor.tick(inst)
+  end
+
   test "the catalogue is in the store, so fetch survives an instance restart" do
     config = start(roles: [:edge, :storage])
     inst = config.instance

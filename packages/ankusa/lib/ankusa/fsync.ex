@@ -7,8 +7,8 @@ defmodule Ankusa.Fsync do
   # nothing. Everything returns `:ok | {:error, reason}` and never raises.
 
   @doc """
-  Fsyncs a directory. Opens it as a directory (no `:raw` fallback for
-  filesystems that refuse the raw flag), syncs, closes.
+  Fsyncs a directory: opens it as a directory (raw, falling back to a non-raw
+  open on filesystems that refuse the raw flag), syncs, closes.
   """
   def fsync_dir(dir) do
     case open_dir(dir) do

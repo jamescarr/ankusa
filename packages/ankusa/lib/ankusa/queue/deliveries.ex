@@ -18,6 +18,8 @@ defmodule Ankusa.Queue.Deliveries do
   # Op builders are pure and return `[Ankusa.Store.op()]`; the caller decides
   # when (and with what durability) to write them.
 
+  require Logger
+
   alias Ankusa.{Envelope, Store}
   alias Ankusa.Store.Keys
 
@@ -348,24 +350,32 @@ defmodule Ankusa.Queue.Deliveries do
            ),
          {:ok, hooks} <-
            Store.multi_get(instance, :hooks, Enum.map(kept, fn {_, seq, _} -> Keys.hook(seq) end)) do
-      entries =
+      {entries, orphans} =
         [kept, rows, hooks]
         |> Enum.zip()
-        |> Enum.flat_map(fn
-          {{at, seq, _sink}, {:ok, row}, {:ok, hook}} ->
-            [
-              %{
-                envelope: %{Envelope.from_binary(hook) | seq: seq},
-                reason: decode_row(row).error,
-                at: at
-              }
-            ]
+        |> Enum.reduce({[], []}, fn
+          {{at, seq, _sink}, {:ok, row}, {:ok, hook}}, {entries, orphans} ->
+            entry = %{
+              envelope: %{Envelope.from_binary(hook) | seq: seq},
+              reason: decode_row(row).error,
+              at: at
+            }
 
-          _missing ->
-            []
+            {[entry | entries], orphans}
+
+          {{_at, seq, sink}, _row, _hook}, {entries, orphans} ->
+            {entries, [{seq, sink} | orphans]}
         end)
 
-      {:ok, %{total: total, entries: entries}}
+      # A dead key whose row or hook is gone lists nothing, so it is not counted
+      # either; replay deletes it. Said out loud, since it should not happen.
+      if orphans != [] do
+        Logger.warning(
+          "[ankusa] DLQ key(s) with no delivery row or hook, not listed: #{inspect(Enum.reverse(orphans))}"
+        )
+      end
+
+      {:ok, %{total: total - length(orphans), entries: Enum.reverse(entries)}}
     end
   end
 

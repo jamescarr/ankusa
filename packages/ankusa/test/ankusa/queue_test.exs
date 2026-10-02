@@ -118,18 +118,19 @@ defmodule Ankusa.QueueTest do
 
     enqueue!(inst, envelope(1))
 
-    assert_receive {:telemetry, [:ankusa, :commit, :stop], measurements, metadata}
+    # The handler sees every instance's commits and this module is async: match
+    # this test's instance, not whichever commit arrives first.
+    assert_receive {:telemetry, [:ankusa, :commit, :stop], measurements, %{instance: ^inst}}
     assert measurements.batch_size == 1
     assert measurements.bytes > 0
     assert is_integer(measurements.duration)
-    assert metadata.instance == inst
 
     :ok = Supervisor.terminate_child(Ankusa.via(inst, :instance), {Ankusa.Store, inst})
     assert {:error, _} = Queue.enqueue(inst, [%{envelope: envelope(2), sinks: [{Log, []}]}])
 
     # The span emits :exception, never :stop, so the commit series counts only
     # real commits.
-    assert_receive {:telemetry, [:ankusa, :commit, :exception], _measurements, _metadata}
-    refute_receive {:telemetry, [:ankusa, :commit, :stop], _, _}, 200
+    assert_receive {:telemetry, [:ankusa, :commit, :exception], _measurements, %{instance: ^inst}}
+    refute_receive {:telemetry, [:ankusa, :commit, :stop], _, %{instance: ^inst}}, 200
   end
 end

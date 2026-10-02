@@ -406,9 +406,10 @@ The DLQ is the set of **dead delivery rows** — there is no separate file. When
 a row's sink gives up, the row is marked dead and carries the failure as text:
 `inspect({:sink, Module, reason})`, the exact `reason` string `GET /v1/dlq`
 returns. A dead row is still an obligation, so its hook is kept (and survives
-a restart) until the row is replayed and delivered. The row is written in the
-same store batch as any other transition, so a give-up cannot be lost to a
-power failure.
+a restart) until the row is replayed and delivered. The give-up is one atomic
+store batch, but dispatch writes its outcomes without a per-write fsync: a power
+failure right after one can undo it, and the hook is retried again
+(at-least-once, never lost). The next synced commit makes it durable.
 
 `Ankusa.Dispatch.replay/2` moves matching dead rows back to pending with a
 fresh attempt count, and the pipeline delivers them through the source's
@@ -456,6 +457,6 @@ answered `202`, so the pen is the only copy — inspect or re-inject it
 deliberately. See [Direct mode](#direct-mode).
 
 ```elixir
-Ankusa.Edge.Quarantine.recent(:default)
-# => [%{id: "...", source_id: "stripe", received_at: ..., reason: :no_match}, ...]
+{:ok, entries} = Ankusa.Edge.Quarantine.recent(:default, 50)
+# entries: [%{id: "...", source_id: "stripe", received_at: ..., reason: :no_match}, ...]
 ```

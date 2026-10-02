@@ -20,7 +20,7 @@ defmodule Ankusa.Edge.Router do
     instance = instance(conn)
 
     # The route guard runs before anything else on the capture path: a request it
-    # rejects is never read, verified, or written to the WAL. With routes off it
+    # rejects is never read, verified, or written to the store. With routes off it
     # returns the conn untouched.
     case RouteGuard.call(conn, instance: instance) do
       %Plug.Conn{halted: true} = conn -> conn

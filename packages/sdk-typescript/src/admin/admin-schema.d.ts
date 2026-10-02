@@ -35,7 +35,7 @@ export interface paths {
         };
         /**
          * Prometheus metrics
-         * @description The node's `Ankusa.Metrics` scrape: ingest, verification, WAL commit,
+         * @description The node's `Ankusa.Metrics` scrape: ingest, verification, store commit,
          *     load shedding, quarantine, dispatch, compaction, and claim-check
          *     series. Only the events this node emits appear — an edge node has no
          *     dispatch series, a storage node has no ingest series.
@@ -908,7 +908,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description This node's WAL stats. */
+            /** @description This node's queue statistics. */
             200: {
                 headers: {
                     [name: string]: unknown;

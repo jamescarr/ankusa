@@ -501,8 +501,11 @@ defmodule Ankusa.DispatchTest do
     assert_receive {:delivered, :cap, cap_id}
     assert cap_id == env.id
 
-    # The gate task is holding the hook's second row claimed, but the first
-    # row's outcome is recorded before the gate even starts (concurrency 1).
+    # The gate task is holding the hook's second row claimed. The first row's
+    # outcome may still be in the Pipeline's outcome buffer (written every
+    # 10 ms); the graceful stop below flushes it in `terminate/2`. So this pins a
+    # graceful restart. After a crash inside that 10 ms window the first row is
+    # redelivered too, which at-least-once allows.
     assert_receive {:gate_started, gate_id, _task}
     assert gate_id == env.id
 

@@ -8,7 +8,7 @@ defmodule Ankusa.Telemetry do
 
     * **span** (`span/3`) — emits `:start`, `:stop`, and `:exception`, with
       `:duration` in native units on `:stop`. Used where a crash is itself worth
-      an event: the request-path stages and the WAL commit.
+      an event: the request-path stages and the store commit.
     * **single event** (`emit/3`) — for background ticks that time themselves.
 
   | Event | Measurements | Metadata |

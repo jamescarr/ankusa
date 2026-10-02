@@ -4,7 +4,7 @@ defmodule Ankusa.Edge.RouteGuard do
   the IP rules and matches an enabled route.
 
   `Ankusa.Edge.Router` calls this before anything else on the capture path, so a
-  rejected request is never read, never verified, and never written to the WAL —
+  rejected request is never read, never verified, and never written to the store —
   it cannot become a record, a dispatch, or a delivery. It is also a plain
   `Plug`, so an embedder that owns its own Bandit pipeline can put it in front of
   whatever it already has.

@@ -58,7 +58,7 @@ tags:
   - name: rate_limits
     description: |
       Per-tenant ingest rate limits: config values plus this node's runtime
-      overrides (persisted to `rate_limits.json` on the node). `:edge` role
+      overrides (persisted in the node's store). `:edge` role
       only; node-local.
   - name: routes
     description: |
@@ -109,7 +109,7 @@ paths:
       tags: [operations]
       summary: Prometheus metrics
       description: |
-        The node's `Ankusa.Metrics` scrape: ingest, verification, WAL commit,
+        The node's `Ankusa.Metrics` scrape: ingest, verification, store commit,
         load shedding, quarantine, dispatch, compaction, and claim-check
         series. Only the events this node emits appear — an edge node has no
         dispatch series, a storage node has no ingest series.
@@ -158,7 +158,7 @@ paths:
         every node. A node running `wal.type: none` has no queue to report.
       responses:
         '200':
-          description: This node's WAL stats.
+          description: This node's queue statistics.
           content:
             application/json:
               schema:

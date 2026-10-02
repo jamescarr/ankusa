@@ -194,6 +194,9 @@ defmodule Ankusa.Store.Migrate do
         ops = Enum.flat_map(entries, &source_ops/1)
         with :ok <- write(ctx, ops, :sync), do: {:ok, length(ops), []}
 
+      {:error, {:legacy_read_failed, _, _}} = error ->
+        error
+
       _ ->
         unreadable_json(path)
     end
@@ -214,6 +217,9 @@ defmodule Ankusa.Store.Migrate do
 
         with :ok <- write(ctx, ops, :sync), do: {:ok, length(ops), []}
 
+      {:error, {:legacy_read_failed, _, _}} = error ->
+        error
+
       _ ->
         unreadable_json(path)
     end
@@ -229,16 +235,22 @@ defmodule Ankusa.Store.Migrate do
     []
   end
 
+  # A file that cannot be *read* is not the same as one that does not parse: a
+  # permission or I/O error says nothing about its contents, so it refuses to
+  # start like any other legacy read failure, instead of booting without the
+  # sources or overrides it holds.
   defp read_json(path) do
-    with {:ok, body} <- File.read(path), do: JSON.decode(body)
+    case File.read(path) do
+      {:ok, body} -> JSON.decode(body)
+      {:error, posix} -> {:error, {:legacy_read_failed, path, posix}}
+    end
   end
 
-  # A file this node cannot make sense of imports nothing, is kept (renamed) for
-  # an operator, and does not stop the boot: 0.3 itself booted without it.
+  # A file this node read but cannot make sense of imports nothing, is kept
+  # (renamed) for an operator, and does not stop the boot: 0.3 itself booted
+  # without it.
   defp unreadable_json(path) do
-    Logger.error(
-      "[ankusa] #{path}: unreadable, unparseable, or wrong shape; nothing imported from it"
-    )
+    Logger.error("[ankusa] #{path}: unparseable or wrong shape; nothing imported from it")
 
     {:ok, 0, []}
   end
@@ -281,36 +293,56 @@ defmodule Ankusa.Store.Migrate do
     with {:ok, count, _max_seq} <- result, do: {:ok, count, []}
   end
 
+  # 0.3 never removed a DLQ entry, so a hook dead-lettered twice (redelivered
+  # after a restart, say) appears twice. There is one delivery row per hook and
+  # sink, so the later entry wins and the earlier dead key is deleted: a dead
+  # row has exactly one `?x` key.
   defp import_dlq(ctx, path) do
+    seen = :ets.new(:ankusa_migrate_dlq_seen, [:set, :private])
+
     result =
-      import_log(ctx, Path.join(path, "dlq.log"), :unsafe, fn
-        %{envelope: %Envelope{seq: seq} = env, reason: reason, at: at} when is_integer(seq) ->
-          bin = Envelope.to_binary(%{env | seq: nil})
-          size = byte_size(bin)
-          error = inspect(reason, limit: 50, printable_limit: 4096)
-          unresolved = Deliveries.unresolved_dead()
+      try do
+        import_log(ctx, Path.join(path, "dlq.log"), :unsafe, fn
+          %{envelope: %Envelope{seq: seq} = env, reason: reason, at: at} when is_integer(seq) ->
+            bin = Envelope.to_binary(%{env | seq: nil})
+            size = byte_size(bin)
+            error = inspect(reason, limit: 50, printable_limit: 4096)
+            unresolved = Deliveries.unresolved_dead()
+            dead_key = Keys.dead(at, seq, unresolved)
 
-          row =
-            Deliveries.encode_row(%{
-              module: nil,
-              state: :dead,
-              attempts: 0,
-              at: at,
-              error: error,
-              size: size
-            })
+            superseded =
+              case :ets.lookup(seen, seq) do
+                [{^seq, ^dead_key}] -> []
+                [{^seq, old_key}] -> [{:delete, :index, old_key}]
+                [] -> []
+              end
 
-          {:ok,
-           [
-             {:put, :hooks, Keys.hook(seq), bin},
-             {:put, :deliveries, Keys.delivery(seq, unresolved), row},
-             {:put, :index, Keys.dead(at, seq, unresolved),
-              :erlang.term_to_binary({env.source_id, env.id})}
-           ], seq}
+            true = :ets.insert(seen, {seq, dead_key})
 
-        _other ->
-          :skip
-      end)
+            row =
+              Deliveries.encode_row(%{
+                module: nil,
+                state: :dead,
+                attempts: 0,
+                at: at,
+                error: error,
+                size: size
+              })
+
+            {:ok,
+             superseded ++
+               [
+                 {:put, :hooks, Keys.hook(seq), bin},
+                 {:put, :deliveries, Keys.delivery(seq, unresolved), row},
+                 {:put, :index, dead_key, :erlang.term_to_binary({env.source_id, env.id})}
+               ], seq}
+
+          _other ->
+            :skip
+        end)
+      after
+        :ets.delete(seen)
+      end
 
     with {:ok, count, max_seq} <- result do
       with {:ok, ops} <- next_seq_ops(ctx, max_seq + 1), do: {:ok, count, ops}
@@ -344,6 +376,18 @@ defmodule Ankusa.Store.Migrate do
       {:eof, _} ->
         finish_log(acc)
 
+      {<<len::32>>, _reader} when len > @max_frame ->
+        # Not a length any 0.3 record had: the prefix itself is damaged. Stop
+        # without reading `len` bytes (it could be most of a large file), and
+        # say how much is left unread.
+        Logger.error(
+          "[ankusa] #{acc.file}: record at byte #{pos} claims #{len} bytes, which no 0.3 " <>
+            "record had; stopped after #{acc.count} imported, #{reader.size - pos} bytes " <>
+            "not imported (the file is kept)"
+        )
+
+        finish_log(acc)
+
       {<<len::32>>, reader} ->
         case read_at(reader, pos + 4, len) do
           {bin, reader} when is_binary(bin) and byte_size(bin) == len ->
@@ -363,14 +407,24 @@ defmodule Ankusa.Store.Migrate do
             end
 
           _torn ->
-            Logger.warning("[ankusa] #{acc.file}: torn final record at byte #{pos}; ignored")
-            finish_log(acc)
+            torn(acc, pos, reader.size)
         end
 
       {_partial, _} ->
-        Logger.warning("[ankusa] #{acc.file}: torn final record at byte #{pos}; ignored")
-        finish_log(acc)
+        torn(acc, pos, reader.size)
     end
+  end
+
+  # A record that runs past the end of the file: the append that never
+  # finished, or a damaged length prefix. Either way nothing after it can be
+  # read; the byte count lets an operator tell a few torn bytes from a lot.
+  defp torn(acc, pos, size) do
+    Logger.warning(
+      "[ankusa] #{acc.file}: record at byte #{pos} runs past the end of the file; " <>
+        "#{size - pos} trailing bytes ignored"
+    )
+
+    finish_log(acc)
   end
 
   defp apply_record(:skip, acc), do: {:ok, acc}
@@ -675,6 +729,9 @@ defmodule Ankusa.Store.Migrate do
 
   # ── batches ──────────────────────────────────────────────────────────────
 
+  # `ops` holds one list per record, newest first, and `flush/2` writes them
+  # oldest first: a key written by two records in one batch ends up with the
+  # later record's value, the same as across a flush.
   defp new_batch, do: %{ops: [], count: 0, bytes: 0}
 
   defp add_to_batch(batch, ops) do
@@ -684,7 +741,7 @@ defmodule Ankusa.Store.Migrate do
         _other, acc -> acc
       end)
 
-    %{batch | ops: ops ++ batch.ops, count: batch.count + 1, bytes: batch.bytes + bytes}
+    %{batch | ops: [ops | batch.ops], count: batch.count + 1, bytes: batch.bytes + bytes}
   end
 
   defp maybe_flush(ctx, batch) do
@@ -696,7 +753,7 @@ defmodule Ankusa.Store.Migrate do
   end
 
   defp flush(_ctx, %{ops: []}), do: :ok
-  defp flush(ctx, batch), do: write(ctx, batch.ops, :async)
+  defp flush(ctx, batch), do: write(ctx, batch.ops |> Enum.reverse() |> Enum.concat(), :async)
 
   defp write(ctx, ops, mode) do
     case Store.write(ctx.instance, ops, sync: mode == :sync) do

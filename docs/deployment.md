@@ -202,9 +202,9 @@ the node runs `wal.type: disk`; everything else imports on first boot.
 
 Two 0.3 config keys now fail as unknown keys: `dispatch.poll_ms` (dispatch no
 longer polls — a commit wakes it, and it otherwise sleeps until the earliest
-due row) and an HTTP sink's `ordered` (deliveries are not ordered). Core's old
-`{module, opts}` `wal` form raises `ArgumentError` with a hint to use
-`wal: :disk`.
+due row) and an HTTP sink's `ordered` (deliveries are not ordered). In core,
+`wal: {Ankusa.WAL.DiskLog, _}` raises `ArgumentError` with a hint to use
+`wal: :disk`; any other value but `:disk` or `:none` raises too.
 
 ## When a node refuses to start
 

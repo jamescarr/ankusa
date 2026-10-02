@@ -235,9 +235,10 @@ leaves ingest open and puts HTTP basic auth on the admin API.
 the quarantine pen, API-managed sources, rate-limit overrides, the segment
 catalogue) and local segments. Losing it loses un-dispatched hooks, so give it
 a volume and back it, or move segments to S3/GCS, where they are not your
-problem anymore. Under `wal.type: none` there is nothing there to lose: mount
-no volume, run the image as a plain `Deployment`, and let the broker hold the
-durable copy. See
+problem anymore. Under `wal.type: none` there is no hook there to lose: run the
+image as a plain `Deployment` and let the broker hold the durable copy. The
+store still holds API-managed sources, rate-limit overrides and the quarantine
+pen, so mount a volume if those must survive a restart. See
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml)
 and [`docs/delivery.md#direct-mode`](https://github.com/jamescarr/ankusa/blob/main/docs/delivery.md#direct-mode).
 
