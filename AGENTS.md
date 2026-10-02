@@ -42,7 +42,7 @@ Why the package split (and when a new adapter earns its own package):
 | Dispatch (sinks, retries, DLQ) | `dispatch.ex`, `dispatch/pipeline.ex`, `sink.ex`, `sink/{log,http,message,description}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
 | Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,sweeper}.ex` |
 | Route management | `routes.ex`, `routes/{route,matcher,snapshot,cache,router,store}.ex`, `routes/store/ets.ex`, `net.ex`, `net/client_ip.ex` |
-| Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex`, `source.ex`, `source_store.ex`, `lifecycle.ex`, `async_api.ex` + `async_api/schemas.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex`, `ulid.ex`, `uuid_v7.ex` |
+| Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex`, `source.ex`, `source_store.ex`, `lifecycle.ex` + `lifecycle/publisher.ex`, `async_api.ex` + `async_api/schemas.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex`, `ulid.ex`, `uuid_v7.ex` |
 
 `packages/ankusa_server/lib/ankusa_server`: `application.ex`, `cli.ex`,
 `config.ex` (YAML → core config), `config_error.ex`, `gcs_token.ex`.

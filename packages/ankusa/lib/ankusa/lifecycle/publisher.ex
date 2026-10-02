@@ -1,4 +1,7 @@
 defmodule Ankusa.Lifecycle.Publisher do
+  @max_pending 10_000
+  @max_concurrency 8
+
   @moduledoc """
   Delivers lifecycle events (`Ankusa.Lifecycle`) to `config.lifecycle.sinks`
   from memory, bypassing the store.
@@ -11,11 +14,11 @@ defmodule Ankusa.Lifecycle.Publisher do
 
   Everything is best effort and in memory:
 
-    * the queue is bounded at 10,000 pending sink deliveries (a job that is
+    * the queue is bounded at #{@max_pending} pending sink deliveries (a job that is
       waiting, running, or sleeping before a retry); an event that does not fit
       is dropped;
     * pending jobs are lost when the node stops;
-    * jobs run concurrently (at most 8 at a time), so there is no ordering.
+    * jobs run concurrently (at most #{@max_concurrency} at a time), so there is no ordering.
 
   Every drop is logged and emitted as `[:ankusa, :lifecycle, :dropped]` with a
   `:reason` of `:not_running`, `:queue_full`, or `:gave_up`; a confirmed
@@ -30,9 +33,6 @@ defmodule Ankusa.Lifecycle.Publisher do
   require Logger
 
   alias Ankusa.{Envelope, Sink, Telemetry}
-
-  @max_pending 10_000
-  @max_concurrency 8
 
   @type job :: %{
           env: Envelope.t(),
@@ -143,6 +143,11 @@ defmodule Ankusa.Lifecycle.Publisher do
 
       {:error, reason} ->
         {:noreply, state |> retry(job, reason) |> start_jobs()}
+
+      # A sink is user code: anything but `:ok` / `{:error, _}` is a failed
+      # delivery, not a reason to crash the publisher and lose the queue.
+      other ->
+        {:noreply, state |> retry(job, {:bad_return, other}) |> start_jobs()}
     end
   end
 

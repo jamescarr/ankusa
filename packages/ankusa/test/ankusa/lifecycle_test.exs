@@ -42,6 +42,15 @@ defmodule Ankusa.LifecycleTest do
     end
   end
 
+  defmodule BadReturnSink do
+    @moduledoc "A sink that is broken in a quieter way: it returns something that is neither `:ok` nor `{:error, _}`."
+
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: {:ok, :offset}
+  end
+
   defmodule RaisingSink do
     @moduledoc "A sink that is broken: it raises."
 
@@ -311,6 +320,28 @@ defmodule Ankusa.LifecycleTest do
                      2_000
 
       assert sink == inspect(RaisingSink)
+    end
+
+    test "a sink returning neither :ok nor an error is a failed delivery, and the publisher survives" do
+      attach([[:ankusa, :lifecycle, :dropped]])
+
+      config =
+        start_instance(
+          dispatch: [retry: @fast_retry],
+          lifecycle: %{sinks: [{BadReturnSink, []}]}
+        )
+
+      publisher = Ankusa.whereis(config.instance, :lifecycle)
+      assert is_pid(publisher)
+
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+
+      assert_receive {:telemetry, [:ankusa, :lifecycle, :dropped],
+                      %{reason: :gave_up, sink: sink, type: "io.ankusa.source.created"}},
+                     2_000
+
+      assert sink == inspect(BadReturnSink)
+      assert Ankusa.whereis(config.instance, :lifecycle) == publisher
     end
 
     test "a full queue drops the event and counts it" do

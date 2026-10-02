@@ -145,7 +145,8 @@ The always-on tests cover:
   redacted, a refused change emits nothing, and the store assigns no seq to an
   event (they bypass it). A refusing sink is retried until it confirms; when
   the retries run out the event is dropped and counted but the change stands; a
-  broken sink never holds back another; a full queue and a publisher that isn't
+  broken sink (one that raises, or returns neither `:ok` nor an error) never
+  holds back another or crashes the publisher; a full queue and a publisher that isn't
   running each drop and count the event; with no lifecycle sinks there is no
   publisher. `ankusa:lifecycle` is a `404` at ingest, an event over a sink's
   inline threshold is claim-checked under a valid tenant and redeems to the
