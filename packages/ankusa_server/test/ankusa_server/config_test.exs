@@ -170,7 +170,7 @@ defmodule AnkusaServer.ConfigTest do
     assert config.roles == [:edge, :dispatch]
     assert config.data_dir == "/data"
     assert config.admin.port == 9000
-    assert config.wal == {Ankusa.WAL.DiskLog, []}
+    assert config.wal == :disk
   end
 
   # ── wal.type: none ──────────────────────────────────────────────────────────
@@ -310,19 +310,6 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ ~s("ankusa:lifecycle" is reserved for lifecycle events)
   end
 
-  test "under wal.type none a log-only lifecycle is rejected: the event would be acked on nothing" do
-    path =
-      tmp_config("""
-      wal: {type: none}
-      sources: {demo: {verify: {type: none}, sinks: [{type: kafka, brokers: ["k:9092"], topic: t}]}}
-      lifecycle:
-        sinks: [{type: log}]
-      """)
-
-    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
-    assert error.message =~ "none of its sinks is durable"
-  end
-
   # ── validation errors ───────────────────────────────────────────────────────
 
   test "an unknown key names its path, including list indexes" do
@@ -337,6 +324,25 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "sources.a.sinks[0]"
     assert error.message =~ ~s(unknown key "urll")
+  end
+
+  test "the removed dispatch.poll_ms and http-sink ordered keys are rejected by name" do
+    path = tmp_config("dispatch: {poll_ms: 200}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "dispatch"
+    assert error.message =~ ~s(unknown key "poll_ms")
+
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks:
+            - {type: http, url: "http://sink.invalid", ordered: true}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.a.sinks[0]"
+    assert error.message =~ ~s(unknown key "ordered")
   end
 
   test "the removed claim-check keys tokens/remote/max_bytes are rejected by name" do

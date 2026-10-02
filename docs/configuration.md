@@ -24,7 +24,7 @@ Check a file before you start the container:
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -e STRIPE_WHSEC jamescarr/ankusa:edge check-config
 # => config OK: roles=[:edge, :dispatch, :storage] sources=demo,stripe \
-#      wal=Ankusa.WAL.DiskLog storage=Ankusa.BlobStore.LocalFS
+#      wal=disk storage=Ankusa.BlobStore.LocalFS
 
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -e STRIPE_WHSEC jamescarr/ankusa:edge print-config
@@ -52,17 +52,18 @@ Every top-level section, with its keys and defaults:
 
 | Section | Keys (default) |
 | --- | --- |
-| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the WAL's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
+| `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
 | `log` | `level` (`info`) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000) |
-| `dispatch` | `poll_ms` (200), `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
-| `wal` | `type` (`disk` \| `none`) |
+| `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
+| `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
+| `source_store` | `type` (`static` \| `persistent`; `persistent` adds API-managed sources kept in this node's store). See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 | `lifecycle` | `sinks` (none: off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
 
@@ -128,7 +129,7 @@ URL), cannot be described by this engine. They need a bespoke
 | `type` | Keys |
 | --- | --- |
 | `log` | none |
-| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `ordered` (`false`; `true` serializes deliveries per `{tenant_id, source_id}`, one at a time in the order dispatch read them). The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
+| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000). Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536). |
 | `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
 | `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats--subject-delivery). |
@@ -152,7 +153,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`) |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `none`; the queue's mode) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
@@ -170,7 +171,7 @@ All loadable as-is. Copy one, delete what you don't use, replace the `${VAR}`s:
 | File | What it is |
 | --- | --- |
 | [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
-| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
+| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/single-node.yml) | one box: a disk queue, Stripe + GitHub, HTTP sink |
 | [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
 | [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
 
@@ -198,10 +199,9 @@ config :ankusa,
   max_body_bytes: 8_000_000,
   route_resolver: {Ankusa.RouteResolver.Path, []},
   source_store: {Ankusa.SourceStore.Static, sources: %{}},
-  wal: {Ankusa.WAL.DiskLog, []},
+  wal: :disk,
   batcher: %{partitions: 2, max_batch: 256, max_delay_ms: 0, max_queue: 10_000},
   dispatch: %{
-    poll_ms: 200,
     batch: 128,
     concurrency: 32,
     max_inflight: 4096,
@@ -240,22 +240,21 @@ config :ankusa,
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `instance` | `:default` | Registry namespace. See [`architecture.md#instance-model`](architecture.md#instance-model). Two instances with different names run independently in one VM. |
-| `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{wal,segments,quarantine,dlq}`. |
-| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role. See [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. With `wal: :none` the roles that only read the log (`:dispatch`, `:storage`) are dropped from this list rather than rejected, so an existing all-role deployment can flip `wal.type` with no other change; `GET /health` on the admin port reports the effective roles. See [`deployment.md`](deployment.md). |
+| `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{store,segments}`: the node's RocksDB store and the LocalFS blob root. |
+| `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role. See [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. The roles divide the hook's life: `:edge` accepts and commits it, `:dispatch` delivers it, `:storage` archives it, and the hook is deleted once its last obligation clears — so `edge,dispatch` and `edge,dispatch,storage` both reclaim delivered hooks, and an archive that is off or behind never holds up delivery. All the roles share one node-local store, so they run in one BEAM (see [`deployment.md`](deployment.md)). With `wal: :none` the roles that only read the queue (`:dispatch`, `:storage`) are dropped from this list rather than rejected, so an existing all-role deployment can flip `wal.type` with no other change; `GET /health` on the admin port reports the effective roles. |
 | `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in the default Ankusa.Application. |
 | `max_body_bytes` | `8_000_000` | Hard cap enforced while streaming the request body; over it is `413` without buffering the whole thing. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. |
-| `wal` | `{Ankusa.WAL.DiskLog, []}` | `{module, opts}` implementing `Ankusa.WAL`, or `:none`: no log, ack on the sink's confirm. Under `:none` the node runs only `:edge` and every statically configured source needs at least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`); boot refuses a config that cannot make that promise. See [`delivery.md`](delivery.md#direct-mode). |
-| `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The DiskLog GenServer serializes commits itself, so more partitions only add contention. |
+| `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); the rest is read-only. |
+| `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
+| `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The queue writer serializes commits itself, so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
-| `batcher.max_delay_ms` | `0` | Commit immediately. The WAL append runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
+| `batcher.max_delay_ms` | `0` | Commit immediately. The store commit runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
 | `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
-| `dispatch.poll_ms` | `200` | How often the dispatch pipeline polls the WAL past its cursor. |
-| `dispatch.batch` | `128` | Max envelopes read per WAL read. |
+| `dispatch.batch` | `128` | Delivery rows claimed per store scan. |
 | `dispatch.concurrency` | `32` | Max sink deliveries in flight at once. Keep Req's Finch pool (default 50) at least this large for `Sink.Http`. |
-| `dispatch.max_inflight` | `4096` | Max admitted-but-unfinished envelopes. Bounds how much a stalled destination can hold. |
-| `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their body bytes. |
+| `dispatch.max_inflight` | `4096` | Max claimed, unfinished deliveries. Bounds how much a stalled destination can hold. |
+| `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their stored hook sizes. |
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: the **default**, overridable per source (see below). |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec`: segment record framing. |
@@ -284,12 +283,18 @@ config :ankusa,
 
 With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 (Prometheus text), `GET /v1/config` (the effective config, secrets redacted),
-`GET /v1/wal` (this node's WAL stats; `409 wal_disabled` under
-`wal.type: none`), `GET /v1/dlq` and `POST /v1/dlq/replay` (`:dispatch` role),
-and `GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the
-node's roles. The `:edge` role also gets `GET /v1/rate-limits` and
-`GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit`, which read and adjust this
-node's per-tenant ingest limits ([Rate limits](#rate-limits)). Everything here
+`GET /v1/wal` (this node's store stats: `next_seq`, and the `hooks`,
+`deliveries` and `disk_bytes` estimates; `{}` when the store cannot be read,
+`409 wal_disabled` under `wal.type: none`), `GET /v1/dlq` and
+`POST /v1/dlq/replay` (`:dispatch` role), and `GET /v1/quarantine` (`:edge`
+role) on `admin.port`, independent of the node's roles. Source management is
+node-agnostic: `GET|POST /v1/tenants/{tenant}/sources` and
+`GET|PUT|DELETE /v1/tenants/{tenant}/sources/{name}`, on a writable source
+store (`409 source_store_read_only` otherwise). The `:edge` role also gets
+`GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit`,
+which read and adjust this node's per-tenant ingest limits
+([Rate limits](#rate-limits)); a store that cannot be read or written answers
+`503 store_unavailable`. Everything here
 is **unauthenticated by design**: put it behind your own
 proxy, SSO, or network policy. The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
@@ -304,8 +309,8 @@ events](asyncapi.md)).
 true` the edge becomes deny-by-default: a `POST` is captured only if it passes
 the IP rules **and** its method and normalized path match an enabled route.
 Anything else is answered `404` (`403` for an IP denial, unless
-`ip_denied_status: 404`) and never reaches the WAL — no record, no dispatch, no
-delivery.
+`ip_denied_status: 404`) and never reaches the queue — no record, no dispatch,
+no delivery.
 
 Path patterns, no regex:
 
@@ -429,8 +434,8 @@ rate_limits:
 A hook is charged **after verification and before the durable write**, so only
 hooks verification accepted spend a tenant's budget: a flood of forged requests
 is free and can never lock a tenant out. Over the limit, the sender gets `429`
-with a `Retry-After` header and nothing is stored — no WAL record, no dispatch,
-no claim. The check costs one ETS compare-and-swap per accepted hook, and a
+with a `Retry-After` header and nothing is stored — no hook record, no
+dispatch, no claim. The check costs one ETS compare-and-swap per accepted hook, and a
 denial writes nothing; the `[:ankusa, :rate_limit, :rejected]` event and its
 `ankusa_rate_limit_rejected_total` counter (tagged by tenant) are the signal,
 so rejections are not logged.
@@ -438,9 +443,9 @@ so rejections are not logged.
 Limits can also be adjusted per tenant at runtime, with no restart:
 `GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit` on
 `admin.port` (`:edge` role only, `409 role_not_enabled` elsewhere). An override
-lives on **the node that accepted it** and is persisted to
-`<data_dir>/<instance>/rate_limits.json`, the same node-local model as
-API-managed sources — put durable limits in the config. `PUT` and `DELETE`
+lives on **the node that accepted it** and is persisted in this node's store
+(one key per tenant), the same node-local model as API-managed sources — put
+durable limits in the config. `PUT` and `DELETE`
 reset that tenant's bucket, so a raised limit is not held back by the old
 limit's accumulated debt. There is no "unlimited" value: to exempt a tenant
 from a `default`, give it a high limit of its own.
@@ -487,18 +492,20 @@ the map.
 | Behaviour | Job | Default | Also shipped |
 | --- | --- | --- | --- |
 | `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
-| `Ankusa.WAL` | Durable ack, ordered log, truncation | `WAL.DiskLog` (fsync group commit) | none (`:none` drops the log entirely: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
+| `Ankusa.Queue` | Durable ack and seq assignment over this node's store | `wal: :disk` (one synced commit per batch) | none (`wal: :none` drops the queue entirely: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
 | `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack) |
-| `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | none |
+| `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | `SourceStore.Persistent` (API-managed sources in this node's store) |
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package), `Sink.Redis` (pub/sub channel publish, `ankusa_redis` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | none |
 | `Ankusa.BlobStore` | Segment PUT / range GET / delete | `BlobStore.LocalFS` | `BlobStore.S3` (+R2/MinIO), `BlobStore.GCS` |
 | `Ankusa.ClaimCheck` | Pack claims into the object store, redeem by reference | none (the instance's `BlobStore`) | none |
 | `Ankusa.Codec` | Segment record framing | `Codec.Raw` (len-prefixed, CRC32) | none |
 
-Swapping any of these is a one-line config change, `route_resolver:
-{Ankusa.RouteResolver.TenantPath, []}`, because every layer is a behaviour with
-`{module, opts}` config, resolved at the call site, never hardcoded.
+Swapping a behaviour is a one-line config change, `route_resolver:
+{Ankusa.RouteResolver.TenantPath, []}`, because every pluggable layer is a
+behaviour with `{module, opts}` config, resolved at the call site, never
+hardcoded. The queue is the exception: its mode is `wal: :disk | :none`, not a
+module.
 
 ### Runtime environment overrides
 
@@ -510,7 +517,10 @@ vars on top of whatever `config.exs` sets:
   `ANKUSA_ROLES=edge,dispatch`). Parsed with `Ankusa.Config.parse_roles!/1`:
   an unknown role name (anything other than `edge`, `dispatch`, `storage`,
   `claim_check`) raises `ArgumentError` and fails boot rather than silently
-  starting with the wrong roles.
+  starting with the wrong roles. `edge` commits hooks, `dispatch` delivers
+  them, `storage` archives them, and a hook is deleted once its last
+  obligation clears: `edge,dispatch` reclaims delivered hooks without the
+  archive, so dropping `storage` no longer strands them.
 
 `autostart` (application env, default `false`) gates whether
 Ankusa.Application boots its built-in default instance at all. A library

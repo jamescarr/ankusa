@@ -2,7 +2,7 @@ defmodule Ankusa.Edge.Batcher do
   @moduledoc """
   Group-commit batcher, one process per partition. Requests hand it an envelope
   and **block on the reply**. The batcher buffers callers, then flushes the whole
-  batch to the WAL in one `append` (one fsync). Every blocked caller is replied
+  batch to the queue in one `enqueue` (one fsync). Every blocked caller is replied
   to *after* the commit returns — that is what makes the ack honest.
 
   The append itself runs in a `Task`, so the batcher keeps accepting requests
@@ -21,7 +21,7 @@ defmodule Ankusa.Edge.Batcher do
 
   require Logger
 
-  alias Ankusa.WAL
+  alias Ankusa.Queue
 
   # ── api ───────────────────────────────────────────────────────────────────
 
@@ -44,11 +44,11 @@ defmodule Ankusa.Edge.Batcher do
   Submit a record and block until it is durably committed (or shed).
 
   Returns `{:committed, env}` | `{:error, :overload}` |
-  `{:error, :store_unavailable}`. The WAL itself is never allowed to crash the
-  call: a failed append (or a dead WAL process) is reported as
+  `{:error, :store_unavailable}`. The queue itself is never allowed to crash the
+  call: a failed commit (or a dead writer process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
   """
-  @spec commit(atom(), non_neg_integer(), WAL.entry(), timeout()) ::
+  @spec commit(atom(), non_neg_integer(), Queue.entry(), timeout()) ::
           {:committed, Ankusa.Envelope.t()}
           | {:error, :overload | :store_unavailable}
   def commit(instance, partition, record, timeout \\ 15_000) do
@@ -114,7 +114,7 @@ defmodule Ankusa.Edge.Batcher do
 
       {:error, reason} ->
         # Nothing was acked: every caller in the batch gets a 503-mapped error.
-        Logger.warning("[ankusa] WAL append failed: #{inspect(reason)}")
+        Logger.warning("[ankusa] store commit failed: #{inspect(reason)}")
 
         Enum.each(entries, fn {from, _record} ->
           GenServer.reply(from, {:error, :store_unavailable})
@@ -128,7 +128,7 @@ defmodule Ankusa.Edge.Batcher do
     # Defensive: the commit task died without delivering a result (a kill, not
     # an error it could catch). Fail its callers instead of leaving them
     # blocked until their call times out.
-    Logger.warning("[ankusa] WAL append task died: #{inspect(reason)}")
+    Logger.warning("[ankusa] store commit task died: #{inspect(reason)}")
 
     Enum.each(state.inflight.entries, fn {from, _record} ->
       GenServer.reply(from, {:error, :store_unavailable})
@@ -147,7 +147,7 @@ defmodule Ankusa.Edge.Batcher do
   defp inflight_size(%{inflight: nil}), do: 0
   defp inflight_size(%{inflight: %{entries: entries}}), do: length(entries)
 
-  # A commit in flight already owns the batcher's WAL turn; the new record waits
+  # A commit in flight already owns the batcher's turn; the new record waits
   # in `buffer` and the completion flushes it immediately.
   defp maybe_flush(%{inflight: inflight} = state) when inflight != nil, do: state
 
@@ -166,7 +166,7 @@ defmodule Ankusa.Edge.Batcher do
     records = Enum.map(entries, fn {_from, record} -> record end)
     instance = state.instance
 
-    task = Task.async(fn -> safe_append(instance, records) end)
+    task = Task.async(fn -> safe_enqueue(instance, records) end)
 
     %{
       state
@@ -176,11 +176,11 @@ defmodule Ankusa.Edge.Batcher do
     }
   end
 
-  # The WAL append runs in a Task, so a failing WAL has to come back as a value:
+  # The commit runs in a Task, so a failing store has to come back as a value:
   # an unhandled exit would take the batcher (linked to the task) and every
   # blocked caller's call down with it.
-  defp safe_append(instance, records) do
-    WAL.append(instance, records)
+  defp safe_enqueue(instance, records) do
+    Queue.enqueue(instance, records)
   rescue
     error -> {:error, error}
   catch

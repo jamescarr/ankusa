@@ -12,7 +12,7 @@ defmodule Ankusa.Routes do
 
   `enabled?: false` is the historical behaviour: every `POST` is captured. With
   routes on, a request is captured only if it passes the IP rules and matches an
-  enabled route; everything else is rejected **before** the WAL is touched, so a
+  enabled route; everything else is rejected **before** the store is touched, so a
   rejected request never becomes a record, a dispatch, or a delivery.
 
   ## Decision order

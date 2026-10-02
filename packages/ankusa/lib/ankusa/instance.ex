@@ -1,13 +1,14 @@
 defmodule Ankusa.Instance do
   @moduledoc """
   Supervises one instance of the framework from a `%Ankusa.Config{}`. Only the
-  children for configured roles boot, so the same code runs as one all-roles
-  release on a laptop or as split edge/storage/dispatch fleets — the boundaries
-  between components are durable state (the WAL), not function calls.
+  children for configured roles boot, so the same code runs any role set. The
+  boundaries between components are durable state (this node's store), not
+  function calls.
 
-  Components hand work to each other through the WAL; killing the storage or
+  Components hand work to each other through the store; killing the storage or
   dispatch tree never stops the edge from acking. There are no links across
-  component boundaries.
+  component boundaries. The store is node-local, so every role that reads or
+  writes hooks has to run on the node that holds it.
   """
 
   use Supervisor
@@ -35,15 +36,16 @@ defmodule Ankusa.Instance do
     Ankusa.put_config(config)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Routes.validate_config!(config)
-    Ankusa.WAL.validate_config!(config)
+    Ankusa.Queue.validate_config!(config)
     Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =
       metrics_children(config, opts) ++
-        wal_children(config, opts) ++
+        store_children(config, opts) ++
         source_store_children(config, opts) ++
+        lifecycle_children(config, opts) ++
         routes_children(config, opts) ++
         edge_children(config, opts) ++
         routes_admin_children(config) ++
@@ -57,26 +59,33 @@ defmodule Ankusa.Instance do
 
   # The admin API's Prometheus reporter, first of all: it attaches its handlers
   # synchronously (`start_async: false`), so the events every later child emits
-  # while starting — boot-time dispatch of the WAL backlog, ingest the edge
+  # while starting — boot-time dispatch of the stored backlog, ingest the edge
   # accepts before the rest of the tree is up — are counted.
   defp metrics_children(config, opts) do
     if config.admin.enabled, do: [{Ankusa.Metrics, opts}], else: []
   end
 
-  # The WAL only matters to roles that actually read or write it. A node
-  # running only `:claim_check` needs blob-store credentials, never WAL
-  # credentials — so it shouldn't open one. Under `wal: :none` there is no log
-  # at all: ingest acks on a sink's confirm and nothing here reads a log.
-  defp wal_children(%Config{wal: :none}, _opts), do: []
-
-  defp wal_children(config, opts) do
-    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
-      {wal_mod, _} = config.wal
-      [{wal_mod, opts}]
+  # The node's local store. Roles that read or write hooks, deliveries or the
+  # archive need it; a writable source store needs it too, because it is where
+  # the sources live. It must start before every child that reads from it: the
+  # source store, the edge, dispatch and storage.
+  defp store_children(config, opts) do
+    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
+         match?({Ankusa.SourceStore.Persistent, _}, config.source_store) do
+      [{Ankusa.Store, opts}] ++ writer_children(config, opts)
     else
       []
     end
   end
+
+  # The one process that assigns seqs and commits hooks. Only an `:edge` node
+  # writes hooks, and only under `wal: :disk`: under `wal: :none` ingest acks on
+  # a sink's confirm and nothing is committed.
+  defp writer_children(%Config{wal: :disk} = config, opts) do
+    if Config.role?(config, :edge), do: [{Ankusa.Queue.Writer, opts}], else: []
+  end
+
+  defp writer_children(_config, _opts), do: []
 
   # A writable store (e.g. `Ankusa.SourceStore.Persistent`) must be up before the
   # edge accepts a request, since every ingest reads through it. A read-only
@@ -91,6 +100,12 @@ defmodule Ankusa.Instance do
       []
     end
   end
+
+  # Lifecycle events are published from memory (`Ankusa.Lifecycle.Publisher`),
+  # on every node whatever its roles: the admin API that makes the changes runs
+  # on any node. It starts before every listener that can make one.
+  defp lifecycle_children(%Config{lifecycle: %{sinks: []}}, _opts), do: []
+  defp lifecycle_children(_config, opts), do: [{Ankusa.Lifecycle.Publisher, opts}]
 
   defp edge_children(config, opts) do
     if Config.role?(config, :edge) do

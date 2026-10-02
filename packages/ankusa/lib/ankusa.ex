@@ -5,11 +5,11 @@ defmodule Ankusa do
   ## Core invariant
 
   Never return `2xx` until the hook is durably stored. The edge acks only after
-  the group-commit batcher's WAL commit returns.
+  the group-commit batcher's store commit returns.
 
   ## Layers (all pluggable behaviours)
 
-    * `Ankusa.WAL`         — durable, ordered log with fast acks and truncation.
+    * `Ankusa.Queue`       — the durable hook queue: hooks, delivery rows, DLQ, replay.
     * `Ankusa.Verifier`    — signature/timestamp checks (Standard Webhooks, Stripe…).
     * `Ankusa.SourceStore` — per-source config, secrets, and failure policy.
     * `Ankusa.Sink`        — what happens to a delivered hook.

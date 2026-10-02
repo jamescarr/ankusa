@@ -2,10 +2,11 @@
 # so the mono-repo's relative path deps resolve identically to local dev.
 #
 # Dev-mode image (mix run, not a release), like examples/rabbitmq-consumer.
-# build-base + cmake: brod's crc32cer NIF compiles from source.
+# build-base + cmake: brod's crc32cer NIF and rocksdb compile from source;
+# linux-headers, openssl-dev and zstd-dev are the rocksdb build's system needs.
 FROM elixir:1.20.4-alpine
 
-RUN apk add --no-cache build-base cmake && mix local.hex --force && mix local.rebar --force
+RUN apk add --no-cache build-base cmake linux-headers openssl-dev zstd-dev && mix local.hex --force && mix local.rebar --force
 
 WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa

@@ -63,33 +63,6 @@ defmodule Ankusa.SourceStore do
     mod.fetch(instance, source_id)
   end
 
-  @doc """
-  The sinks a delivered hook of `source_id` goes to; `[]` for an unknown source.
-
-  Dispatch resolves sinks here rather than through `fetch/2` so it can also
-  deliver the reserved lifecycle source (`Ankusa.Lifecycle`), which the edge must
-  never resolve: ingest keeps using `fetch/2`, and `POST /webhooks/ankusa:lifecycle`
-  stays a `404`.
-  """
-  @spec sinks(atom(), String.t()) :: [{module(), keyword()}]
-  def sinks(instance, source_id) do
-    lifecycle_id = Ankusa.Lifecycle.source_id()
-
-    case source_id do
-      ^lifecycle_id ->
-        case Ankusa.Lifecycle.source(instance) do
-          {:ok, source} -> source.sinks
-          :error -> []
-        end
-
-      _ ->
-        case fetch(instance, source_id) do
-          {:ok, source} -> source.sinks
-          :error -> []
-        end
-    end
-  end
-
   @spec list(atom()) :: [String.t()]
   def list(instance) do
     %Config{source_store: {mod, _}} = Ankusa.config(instance)

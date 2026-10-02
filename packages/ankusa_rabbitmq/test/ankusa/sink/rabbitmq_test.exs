@@ -95,7 +95,10 @@ defmodule Ankusa.Sink.RabbitMQTest do
     env = envelope(%{body: body, size: byte_size(body), content_type: "application/octet-stream"})
 
     claim_dir =
-      Path.join(System.tmp_dir!(), "ankusa_rmq_claim_#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "ankusa_rmq_claim_#{System.unique_integer([:positive])}_#{System.os_time(:microsecond)}"
+      )
 
     on_exit(fn -> File.rm_rf(claim_dir) end)
     Ankusa.put_config(Ankusa.Config.new(instance: inst, data_dir: claim_dir))

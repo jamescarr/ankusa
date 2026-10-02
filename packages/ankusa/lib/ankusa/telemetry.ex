@@ -8,7 +8,7 @@ defmodule Ankusa.Telemetry do
 
     * **span** (`span/3`) — emits `:start`, `:stop`, and `:exception`, with
       `:duration` in native units on `:stop`. Used where a crash is itself worth
-      an event: the request-path stages and the WAL commit.
+      an event: the request-path stages and the store commit.
     * **single event** (`emit/3`) — for background ticks that time themselves.
 
   | Event | Measurements | Metadata |
@@ -25,8 +25,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id`, `:result` |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
-  | `[:ankusa, :lifecycle, :emitted]` | — | `:instance`, `:type` |
-  | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type` |
+  | `[:ankusa, :lifecycle, :delivered]` | — | `:instance`, `:type`, `:sink` |
+  | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:not_running`, `:queue_full`, `:gave_up`) |
 
   `:outcome` on `:ingest` is `:committed | :quarantined | :rejected | :rate_limited`,
   or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,
@@ -48,7 +48,7 @@ defmodule Ankusa.Telemetry do
 
   `fun` returns `{result, extra_meta}`, or `{result, measurements, extra_meta}`
   when the span has measurements of its own to report on `:stop` — what
-  `Ankusa.WAL.DiskLog` does with a commit's `batch_size` and `bytes`. Either
+  `Ankusa.Queue.Writer` does with a commit's `batch_size` and `bytes`. Either
   return shape merges the start metadata into the stop event, so a handler can
   read `:stop` alone.
   """

@@ -185,17 +185,17 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
-        "ankusa.lifecycle.emitted.total",
+        "ankusa.lifecycle.delivered.total",
         scoped(own,
-          event_name: [:ankusa, :lifecycle, :emitted],
-          tags: [:instance, :type]
+          event_name: [:ankusa, :lifecycle, :delivered],
+          tags: [:instance, :type, :sink]
         )
       ),
       counter(
         "ankusa.lifecycle.dropped.total",
         scoped(own,
           event_name: [:ankusa, :lifecycle, :dropped],
-          tags: [:instance, :type]
+          tags: [:instance, :type, :reason]
         )
       )
     ]

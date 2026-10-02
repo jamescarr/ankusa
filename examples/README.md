@@ -67,7 +67,7 @@ flowchart LR
 
 The same topology one transport over, plus the hop RabbitMQ doesn't need: a
 Redpanda Connect bridge carries records from a Kafka topic into an SQS FIFO
-queue, and the FIFO `MessageGroupId` keeps per-source order end to end. Its
+queue keyed by `tenant/source`, so one source's records land in one group. Its
 README documents three failure drills: bridge down, worker down, poison claim.
 
 ```mermaid
@@ -104,14 +104,14 @@ flowchart LR
 ## oban-consumer
 
 A real Kubernetes (`kind`) deployment: three self-contained Ankusa nodes, each
-with its own WAL on a persistent volume, calling the consumer over HTTP, with
-Oban doing the actual work. `tools/loadgen` drives three load phases, steady,
-chaos with pods killed mid-run, and a closed-loop burst, and verifies every
-acknowledged hook is delivered and processed.
+with its own on-disk store on a persistent volume, calling the consumer over
+HTTP, with Oban doing the actual work. `tools/loadgen` drives three load phases,
+steady, chaos with pods killed mid-run, and a closed-loop burst, and verifies
+every acknowledged hook is delivered and processed.
 
 ```mermaid
 flowchart LR
-    L[load generator] --> N[ankusa ×3, all-role, own WAL on PVC]
+    L[load generator] --> N[ankusa ×3, all-role, own store on PVC]
     N -->|POST /deliveries| C[consumer]
     C --> OJ[Oban]
     OJ --> DB[(processed_webhooks)]

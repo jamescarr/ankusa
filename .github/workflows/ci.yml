@@ -49,6 +49,15 @@ jobs:
         with:
           version: 2026.9.11
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - name: cache mix deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/${{ matrix.package }}/deps
+            packages/${{ matrix.package }}/_build
+          key: mix-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:package ${{ matrix.package }}
 
@@ -74,6 +83,15 @@ jobs:
         with:
           version: 2026.9.11
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - name: cache mix deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            examples/*/*/deps
+            examples/*/*/_build
+          key: mix-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml', 'examples/*/*/mix.lock') }}
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:examples
 

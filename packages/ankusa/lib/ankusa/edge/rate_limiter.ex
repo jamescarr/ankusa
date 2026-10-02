@@ -9,9 +9,8 @@ defmodule Ankusa.Edge.RateLimiter do
   Limits come from three places, in precedence order:
 
     1. a runtime override set through the admin API (`PUT
-       /v1/tenants/:tenant/rate-limit`), persisted to
-       `Ankusa.Config.path(config, "rate_limits.json")` and node-local, exactly
-       like API-managed sources;
+       /v1/tenants/:tenant/rate-limit`), persisted to this node's `Ankusa.Store`
+       and node-local, exactly like API-managed sources;
     2. `rate_limits.tenants[tenant]`;
     3. `rate_limits.default`.
 
@@ -38,12 +37,12 @@ defmodule Ankusa.Edge.RateLimiter do
   require Logger
 
   alias Ankusa.Config
+  alias Ankusa.Store
+  alias Ankusa.Store.Keys
 
   @type limit :: %{rate: number(), burst: pos_integer()}
   @type source :: :override | :config | :default
 
-  @filename "rate_limits.json"
-  @version 1
   @sweep_ms 60_000
 
   # ── process ─────────────────────────────────────────────────────────────────
@@ -82,10 +81,14 @@ defmodule Ankusa.Edge.RateLimiter do
       write_concurrency: true
     ])
 
-    load_persisted(config, overrides)
-    Process.send_after(self(), :sweep, @sweep_ms)
+    case load_persisted(instance, overrides) do
+      :ok ->
+        Process.send_after(self(), :sweep, @sweep_ms)
+        {:ok, %{instance: instance, config: config}}
 
-    {:ok, %{instance: instance, config: config}}
+      {:error, reason} ->
+        {:stop, {:rate_limits_load_failed, reason}}
+    end
   end
 
   @impl true
@@ -342,9 +345,8 @@ defmodule Ankusa.Edge.RateLimiter do
   @impl true
   def handle_call({:put, tenant_id, limit}, _from, state) do
     table = overrides_table(state.instance)
-    current = Map.new(:ets.tab2list(table))
 
-    case persist(state.config, Map.put(current, tenant_id, limit)) do
+    case persist_put(state.instance, tenant_id, limit) do
       :ok ->
         :ets.insert(table, {tenant_id, limit})
         :ets.delete(buckets_table(state.instance), tenant_id)
@@ -364,9 +366,9 @@ defmodule Ankusa.Edge.RateLimiter do
         {:reply, {:error, :not_found}, state}
 
       [{^tenant_id, _limit}] ->
-        current = Map.new(:ets.tab2list(table))
+        ops = [{:delete, :default, Keys.rate_limit(tenant_id)}]
 
-        case persist(state.config, Map.delete(current, tenant_id)) do
+        case Store.write(state.instance, ops, sync: true) do
           :ok ->
             :ets.delete(table, tenant_id)
             :ets.delete(buckets_table(state.instance), tenant_id)
@@ -381,53 +383,36 @@ defmodule Ankusa.Edge.RateLimiter do
 
   # ── persistence ─────────────────────────────────────────────────────────────
 
-  defp persist(%Config{} = config, limits) do
-    path = Config.path(config, @filename)
+  # One key per override (`r:<tenant>`), synced: a `PUT` answers "stored".
+  defp persist_put(instance, tenant_id, %{rate: rate, burst: burst}) do
+    value = JSON.encode!(%{"rate" => rate, "burst" => burst})
+    Store.write(instance, [{:put, :default, Keys.rate_limit(tenant_id), value}], sync: true)
+  end
 
-    body =
-      JSON.encode!(%{
-        "version" => @version,
-        "tenants" =>
-          Map.new(limits, fn {tenant, %{rate: rate, burst: burst}} ->
-            {tenant, %{"rate" => rate, "burst" => burst}}
-          end)
-      })
+  # A store this node cannot read must not boot with silently empty overrides:
+  # a tenant's raised or lowered limit would quietly revert to the config's.
+  defp load_persisted(instance, table) do
+    %{lo: lo, hi: hi} = Keys.family(:rate_limits)
 
-    tmp = path <> ".tmp.#{System.unique_integer([:positive])}"
+    result =
+      Store.fold(instance, :rate_limits, {lo, hi}, :ok, fn key, value, :ok ->
+        load_entry(Keys.decode_rate_limit(key), value, table)
+        {:cont, :ok}
+      end)
 
-    # `mkdir_p/1`, not `mkdir_p!/1`: a bad data dir is a `store_unavailable`
-    # reply, never a crash of the process that owns the tables.
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(tmp, body, [:sync]) do
-      File.rename(tmp, path)
+    case result do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp load_persisted(%Config{} = config, table) do
-    path = Config.path(config, @filename)
-
-    case File.read(path) do
-      {:error, :enoent} ->
-        :ok
-
-      {:ok, body} ->
-        case JSON.decode(body) do
-          {:ok, %{"version" => @version, "tenants" => tenants}} when is_map(tenants) ->
-            Enum.each(tenants, &load_entry(&1, table))
-
-          _ ->
-            quarantine(path)
-        end
-
-      {:error, _reason} ->
-        quarantine(path)
-    end
-  end
-
-  defp load_entry({tenant, attrs}, table) do
+  defp load_entry(tenant, value, table) do
     result =
       if Ankusa.ClaimCheck.Ref.valid_tenant?(tenant) do
-        parse_limit(attrs)
+        case JSON.decode(value) do
+          {:ok, attrs} -> parse_limit(attrs)
+          {:error, _} -> {:error, :invalid, "stored override is not valid JSON"}
+        end
       else
         {:error, :invalid, "tenant id #{inspect(tenant)} must match [A-Za-z0-9_-]{1,64}"}
       end
@@ -439,25 +424,6 @@ defmodule Ankusa.Edge.RateLimiter do
       {:error, :invalid, message} ->
         Logger.warning(
           "[ankusa] skipping persisted rate limit for tenant #{inspect(tenant)}: #{message}"
-        )
-    end
-  end
-
-  # A file this node cannot read is never worth failing the boot over: the
-  # config's limits still apply. Keep the bytes for an operator, though.
-  defp quarantine(path) do
-    target = "#{path}.corrupt-#{System.system_time(:second)}"
-
-    case File.rename(path, target) do
-      :ok ->
-        Logger.error(
-          "[ankusa] #{path}: unreadable, unparseable, or wrong shape; moved to #{target}"
-        )
-
-      {:error, reason} ->
-        Logger.error(
-          "[ankusa] #{path}: unreadable, unparseable, or wrong shape; could not move it aside: " <>
-            inspect(reason)
         )
     end
   end

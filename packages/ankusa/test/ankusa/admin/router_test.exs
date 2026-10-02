@@ -10,9 +10,33 @@ defmodule Ankusa.Admin.RouterTest do
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.{Config, Envelope, UUIDv7}
+  alias Ankusa.Config
   alias Ankusa.Admin.Router
-  alias Ankusa.Dispatch.DLQ
+  alias Ankusa.Dispatch.Pipeline
+
+  # Always fails, so with `max_attempts: 1` one attempt dead-letters the row.
+  defmodule AlwaysFailSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: {:error, :always}
+  end
+
+  # Fails while its agent holds `false`; once it holds `true` it delivers the
+  # body to the test pid.
+  defmodule GatedSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      if Agent.get(Keyword.fetch!(opts, :agent), & &1) do
+        send(Keyword.fetch!(opts, :pid), {:delivered, env.id, env.body})
+        :ok
+      else
+        {:error, :gated}
+      end
+    end
+  end
 
   setup do
     config = test_config(roles: [:dispatch], admin: %{enabled: true})
@@ -30,35 +54,40 @@ defmodule Ankusa.Admin.RouterTest do
     Router.call(conn, Router.init(instance: inst))
   end
 
-  defp envelope(source_id, body, overrides \\ %{}) do
-    struct(
-      %Envelope{
-        id: UUIDv7.generate(),
-        source_id: source_id,
-        tenant_id: "default",
-        received_at: 1_737_500_000_000,
-        method: "POST",
-        path: "/webhooks/#{source_id}",
-        headers: [],
-        content_type: "application/json",
-        body: body,
-        size: byte_size(body),
-        seq: 1
-      },
-      overrides
-    )
+  # Boots an edge+dispatch instance whose dispatch dead-letters on the first
+  # failure (`max_attempts: 1`), so ingesting through it creates real dead rows.
+  defp start_dlq_instance(sources) do
+    config =
+      test_config(
+        roles: [:edge, :dispatch],
+        admin: %{enabled: true, port: 0},
+        source_store: {Ankusa.SourceStore.Static, sources: sources},
+        dispatch: %{
+          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false}
+        }
+      )
+
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+    config
+  end
+
+  defp ingest!(config, source_id, body) do
+    {:ok, env} = Ankusa.Edge.Ingest.ingest(config.instance, request(source_id, body))
+    env
   end
 
   # ── no auth ────────────────────────────────────────────────────────────────
 
-  test "every route answers with no authorization header at all", %{inst: inst} do
+  test "every route answers with no authorization header at all" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+
     for path <- ["/health", "/v1/config", "/v1/dlq", "/v1/dlq?source_id=x"] do
-      conn = call(inst, :get, path)
+      conn = call(config.instance, :get, path)
       assert conn.status == 200, "#{path} returned #{conn.status}"
     end
 
-    conn = call(inst, :post, "/v1/dlq/replay", "{}")
-    assert conn.status == 200
+    assert call(config.instance, :post, "/v1/dlq/replay", "{}").status == 200
   end
 
   test "an unrouted path is 404", %{inst: inst} do
@@ -76,18 +105,32 @@ defmodule Ankusa.Admin.RouterTest do
     assert vsn == to_string(Application.spec(:ankusa, :vsn))
   end
 
-  # ── WAL ────────────────────────────────────────────────────────────────────
+  # ── store stats ────────────────────────────────────────────────────────────
 
-  test "GET /v1/wal reports this node's log, 409 when this node has none" do
-    config = test_config(roles: [:edge], admin: %{enabled: true})
+  test "GET /v1/wal reports this node's store, 409 when this node has none" do
+    config =
+      test_config(
+        roles: [:edge],
+        admin: %{enabled: true, port: 0},
+        source_store:
+          {Ankusa.SourceStore.Static, sources: %{"a" => [sinks: [{Ankusa.Sink.Log, []}]]}}
+      )
+
     put_config(config)
     start_supervised!({Ankusa.Instance, config})
+
+    # Exactly one successful commit: its seq is 1, so the next is 2.
+    _env = ingest!(config, "a", ~s({"id":"one"}))
 
     assert %{"instance" => inst_name, "wal" => wal} =
              JSON.decode!(call(config.instance, :get, "/v1/wal").resp_body)
 
     assert inst_name == to_string(config.instance)
-    assert %{"records" => _, "next_seq" => _, "cursors" => _} = wal
+    assert Enum.sort(Map.keys(wal)) == ["deliveries", "disk_bytes", "hooks", "next_seq"]
+    assert wal["next_seq"] == 2
+    # The store's own end-of-range sentinel keys are not hooks or deliveries.
+    assert wal["hooks"] == 1
+    assert wal["deliveries"] == 1
 
     none = test_config(roles: [:edge], admin: %{enabled: true}, wal: :none)
     put_config(none)
@@ -95,6 +138,19 @@ defmodule Ankusa.Admin.RouterTest do
     conn = call(none.instance, :get, "/v1/wal")
     assert conn.status == 409
     assert %{"error" => "wal_disabled"} = JSON.decode!(conn.resp_body)
+  end
+
+  test "GET /v1/wal on an empty store reports zero hooks and deliveries" do
+    config = test_config(roles: [:edge], admin: %{enabled: true, port: 0})
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+
+    assert %{"wal" => wal} =
+             JSON.decode!(call(config.instance, :get, "/v1/wal").resp_body)
+
+    assert wal["next_seq"] == 1
+    assert wal["hooks"] == 0
+    assert wal["deliveries"] == 0
   end
 
   # ── role gating ────────────────────────────────────────────────────────────
@@ -118,46 +174,56 @@ defmodule Ankusa.Admin.RouterTest do
 
   # ── DLQ ────────────────────────────────────────────────────────────────────
 
-  test "GET /v1/dlq filters by source and never returns bodies", %{inst: inst, config: config} do
-    a = envelope("a", ~s({"secret":"top-secret-payload"}))
-    DLQ.write(config, a, {:sink, Ankusa.Sink.Http, {:status, 503}})
-    DLQ.write(config, envelope("b", ~s({"id":"b1"})), :timeout)
+  test "GET /v1/dlq filters by source and never returns bodies" do
+    config =
+      start_dlq_instance(%{
+        "a" => [sinks: [{AlwaysFailSink, []}]],
+        "b" => [sinks: [{AlwaysFailSink, []}]]
+      })
 
-    conn = call(inst, :get, "/v1/dlq?source_id=a")
+    a = ingest!(config, "a", ~s({"secret":"top-secret-payload"}))
+    _b = ingest!(config, "b", ~s({"id":"b1"}))
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
+
+    conn = call(config.instance, :get, "/v1/dlq?source_id=a")
     assert conn.status == 200
 
     assert %{"total" => 1, "entries" => [entry]} = JSON.decode!(conn.resp_body)
     assert entry["id"] == a.id
     assert entry["source_id"] == "a"
     assert entry["seq"] == 1
-    assert entry["reason"] =~ "503"
+    assert entry["reason"] == inspect({:sink, AlwaysFailSink, :always})
     refute Map.has_key?(entry, "body")
     refute conn.resp_body =~ "top-secret-payload"
   end
 
-  test "GET /v1/dlq returns the newest write first, up to limit", %{inst: inst, config: config} do
-    old = envelope("a", "{}")
-    new = envelope("a", "{}")
-    DLQ.write(config, old, :first)
-    DLQ.write(config, new, :second)
+  test "GET /v1/dlq returns the newest write first, up to limit" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+
+    old = ingest!(config, "a", "{}")
+    new = ingest!(config, "a", "{}")
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
 
     assert %{"total" => 2, "entries" => [only]} =
-             JSON.decode!(call(inst, :get, "/v1/dlq?limit=1").resp_body)
+             JSON.decode!(call(config.instance, :get, "/v1/dlq?limit=1").resp_body)
 
     assert only["id"] == new.id
 
     assert %{"total" => 2, "entries" => [first, second]} =
-             JSON.decode!(call(inst, :get, "/v1/dlq").resp_body)
+             JSON.decode!(call(config.instance, :get, "/v1/dlq").resp_body)
 
     assert first["id"] == new.id
     assert second["id"] == old.id
   end
 
-  test "GET /v1/dlq clamps limit to 1000", %{inst: inst, config: config} do
-    for _ <- 1..1001, do: DLQ.write(config, envelope("a", "{}"), :timeout)
+  test "GET /v1/dlq clamps limit to 1000" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+
+    for _ <- 1..1001, do: ingest!(config, "a", "{}")
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
 
     assert %{"total" => 1001, "entries" => entries} =
-             JSON.decode!(call(inst, :get, "/v1/dlq?limit=5000").resp_body)
+             JSON.decode!(call(config.instance, :get, "/v1/dlq?limit=5000").resp_body)
 
     assert length(entries) == 1000
   end
@@ -172,54 +238,88 @@ defmodule Ankusa.Admin.RouterTest do
   end
 
   test "POST /v1/dlq/replay re-delivers the matching entry through its sink" do
-    {:ok, capture} = Agent.start_link(fn -> [] end)
+    {:ok, agent} = Agent.start_link(fn -> false end)
+    config = start_dlq_instance(%{"a" => [sinks: [{GatedSink, agent: agent, pid: self()}]]})
 
-    Req.Test.stub(__MODULE__, fn conn ->
-      {:ok, body, conn} = Plug.Conn.read_body(conn)
-      Agent.update(capture, &[body | &1])
-      Plug.Conn.send_resp(conn, 200, "ok")
-    end)
+    target = ingest!(config, "a", ~s({"id":"evt_replay"}))
+    _other = ingest!(config, "a", ~s({"id":"evt_other"}))
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
 
-    config =
-      test_config(
-        roles: [:dispatch],
-        admin: %{enabled: true},
-        source_store:
-          {Ankusa.SourceStore.Static,
-           sources: %{
-             "a" => [
-               sinks: [
-                 {Ankusa.Sink.Http,
-                  url: "http://sink.test/hook", req_options: [plug: {Req.Test, __MODULE__}]}
-               ]
-             ]
-           }}
-      )
-
-    put_config(config)
-
-    target = envelope("a", ~s({"id":"evt_replay"}))
-    DLQ.write(config, target, {:sink, Ankusa.Sink.Http, {:status, 503}})
-    DLQ.write(config, envelope("b", ~s({"id":"evt_other"})), :timeout)
+    # The sink recovers only after both hooks are dead-lettered.
+    Agent.update(agent, fn _ -> true end)
 
     conn = call(config.instance, :post, "/v1/dlq/replay", JSON.encode!(%{"id" => target.id}))
-
     assert conn.status == 200
     assert %{"replayed" => 1} = JSON.decode!(conn.resp_body)
-    assert Agent.get(capture, & &1) == [target.body]
+
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
+    assert_received {:delivered, id, body}
+    assert id == target.id
+    assert body == target.body
+    refute_received {:delivered, _, _}
+
+    conn = call(config.instance, :post, "/v1/dlq/replay", JSON.encode!(%{"id" => target.id}))
+    assert conn.status == 200
+    assert %{"replayed" => 0} = JSON.decode!(conn.resp_body)
   end
 
-  test "an empty replay body replays everything", %{inst: inst, config: config} do
-    DLQ.write(config, envelope("a", ~s({"id":"1"})), :timeout)
-    DLQ.write(config, envelope("b", ~s({"id":"2"})), :timeout)
+  test "an empty replay body replays everything" do
+    {:ok, agent} = Agent.start_link(fn -> false end)
+    config = start_dlq_instance(%{"a" => [sinks: [{GatedSink, agent: agent, pid: self()}]]})
 
-    conn = call(inst, :post, "/v1/dlq/replay", "")
+    ingest!(config, "a", ~s({"id":"1"}))
+    ingest!(config, "a", ~s({"id":"2"}))
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
+
+    Agent.update(agent, fn _ -> true end)
+
+    conn = call(config.instance, :post, "/v1/dlq/replay", "")
     assert conn.status == 200
     assert %{"replayed" => 2} = JSON.decode!(conn.resp_body)
 
-    conn = call(inst, :post, "/v1/dlq/replay", "not json")
+    assert {:ok, _settled} = Pipeline.tick(config.instance)
+    assert_receive {:delivered, _, _}
+    assert_receive {:delivered, _, _}
+
+    conn = call(config.instance, :post, "/v1/dlq/replay", "not json")
     assert conn.status == 400
     assert %{"error" => "invalid_filter", "field" => "body"} = JSON.decode!(conn.resp_body)
+  end
+
+  @tag :capture_log
+  test "an unreachable store is 503 on dlq, replay and quarantine, and {} on /v1/wal" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+    inst = config.instance
+    :ok = Supervisor.terminate_child(Ankusa.via(inst, :instance), {Ankusa.Store, inst})
+
+    conn = call(inst, :get, "/v1/dlq")
+    assert conn.status == 503
+    assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+
+    conn = call(inst, :post, "/v1/dlq/replay", "{}")
+    assert conn.status == 503
+    assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+
+    conn = call(inst, :get, "/v1/quarantine")
+    assert conn.status == 503
+    assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+
+    conn = call(inst, :get, "/v1/wal")
+    assert conn.status == 200
+    assert %{"instance" => _, "wal" => %{}} = JSON.decode!(conn.resp_body)
+  end
+
+  @tag :capture_log
+  test "replay while the pipeline is down is a 503, not a crashed request" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+    inst = config.instance
+
+    :ok =
+      Supervisor.terminate_child(Ankusa.via(inst, :instance), {Ankusa.Dispatch.Pipeline, inst})
+
+    conn = call(inst, :post, "/v1/dlq/replay", "{}")
+    assert conn.status == 503
+    assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
   end
 
   # ── quarantine ─────────────────────────────────────────────────────────────
@@ -403,6 +503,7 @@ defmodule Ankusa.Admin.RouterTest do
         )
 
       put_config(config)
+      start_supervised!({Ankusa.Store, instance: config.instance, config: config})
       {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(config)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
@@ -629,6 +730,7 @@ defmodule Ankusa.Admin.RouterTest do
         )
 
       put_config(config)
+      start_supervised!({Ankusa.Store, instance: config.instance, config: config})
       {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(config)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
@@ -723,13 +825,11 @@ defmodule Ankusa.Admin.RouterTest do
                %{"error" => "rate_limit_not_found"}
     end
 
-    test "an override the node cannot persist is 503 and changes nothing", %{
-      inst: inst,
-      config: config
-    } do
-      # A directory where `rate_limits.json` belongs: the write cannot land, so
-      # the override is refused rather than applied in memory only.
-      File.mkdir_p!(Ankusa.Config.path(config, "rate_limits.json"))
+    @tag :capture_log
+    test "an override the node cannot persist is 503 and changes nothing", %{inst: inst} do
+      # The store under the limiter goes away: the write cannot land, so the
+      # override is refused rather than applied in memory only.
+      :ok = Supervisor.terminate_child(Ankusa.via(inst, :instance), {Ankusa.Store, inst})
 
       conn = call(inst, :put, "/v1/tenants/acme/rate-limit", ~s({"rate":100,"burst":100}))
 

@@ -118,12 +118,6 @@ defmodule Ankusa.Sink.NATS do
     end
   end
 
-  # Order within a subject is the order the stream received it, so the subject
-  # is this sink's ordering scope — the same shape as `Sink.Kafka`'s record key,
-  # minus the partition indirection.
-  @impl true
-  def ordering_key(env, opts), do: subject(env, opts)
-
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
 

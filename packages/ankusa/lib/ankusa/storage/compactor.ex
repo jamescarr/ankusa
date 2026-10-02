@@ -1,20 +1,25 @@
 defmodule Ankusa.Storage.Compactor do
   @moduledoc """
-  Packs committed WAL records into immutable segments and reclaims the WAL.
+  Packs committed hooks into immutable segments and clears their archive
+  obligations.
 
-  Each tick reads WAL records past the compactor cursor in bounded chunks and
-  packs them into segments of at most `config.storage.roll_bytes` of payload.
-  A backlog therefore becomes *several* segments per tick instead of one
-  unbounded one: peak memory is a chunk plus one segment, whatever the backlog
-  and however long a storage node was unavailable.
+  A hook committed while the `:storage` role runs carries an *archive
+  obligation* (`Ankusa.Queue`). Each tick takes obligations in `seq` order until
+  their stored sizes reach `config.storage.roll_bytes`, packs those hooks into
+  one segment, and goes on: a backlog becomes *several* segments per tick
+  instead of one unbounded one, so peak memory is one segment whatever the
+  backlog and however long a storage node was unavailable.
 
-  Each segment is encoded via `config.storage.codec`, `PUT` through the blob
-  store, and followed by its per-record rows in `Ankusa.Storage.Index` and an
-  advance of the durable compactor cursor.
+  A segment is encoded via `config.storage.codec` and `PUT` through the blob
+  store as `seg/<first>-<last>.seg`, followed by an index object
+  (`seg/<first>-<last>.idx`: event id to offset, length and seq) and the
+  segment's catalogue row in the store. Only then do its obligations clear. A
+  hook is deleted when its *last* obligation — archive or delivery — clears, so
+  an archive that is behind or switched off never blocks delivery, and delivery
+  never blocks the archive.
 
-  The WAL is then truncated through `min(compactor_seq, dispatch_seq)`: records
-  the dispatch pipeline has not yet consumed are never dropped, preserving
-  at-least-once delivery.
+  A failed write ends the tick, nothing crashes, and the same hooks are
+  written again next tick under the same keys.
   """
 
   use GenServer
@@ -22,11 +27,8 @@ defmodule Ankusa.Storage.Compactor do
   require Logger
 
   alias Ankusa.{Config, Envelope}
-  alias Ankusa.Storage.Index
-
-  # Read granularity: bounds one read's memory, and how much the roll check can
-  # overshoot `roll_bytes` by at most.
-  @read_chunk 256
+  alias Ankusa.Queue.{Archive, Reclaim}
+  alias Ankusa.Store.Keys
 
   # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -47,15 +49,15 @@ defmodule Ankusa.Storage.Compactor do
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
     %Config{} = config = Keyword.fetch!(opts, :config)
-    cursor = Ankusa.WAL.get_cursor(instance, :compactor)
     interval = config.storage.interval_ms
 
-    # This process owns the live index: it is the only writer, it reloads the
-    # table from the file whenever it (re)starts, and lookups elsewhere read it.
-    Index.open(config)
+    # Markers a crash left between "obligation cleared" and "hook deleted".
+    with {:error, reason} <- Reclaim.sweep(instance) do
+      Logger.warning("[ankusa] hook reclaim sweep failed: #{inspect(reason)}")
+    end
 
     schedule(interval)
-    {:ok, %{instance: instance, config: config, cursor: cursor, interval: interval}}
+    {:ok, %{instance: instance, config: config, interval: interval, after_seq: 0}}
   end
 
   # ── ticks ─────────────────────────────────────────────────────────────────
@@ -78,159 +80,159 @@ defmodule Ankusa.Storage.Compactor do
   defp compact(state), do: compact(state, 0)
 
   defp compact(state, written) do
-    {entries, next_cursor, more?} =
-      collect(state, state.cursor, state.config.storage.roll_bytes)
-
-    case entries do
-      [] ->
+    case archive_batch(state) do
+      {:ok, :none} ->
         {written, state}
 
-      entries ->
-        case write_segment(state, entries) do
-          :ok ->
-            state = %{state | cursor: next_cursor}
+      {:ok, {last_seq, more?}} ->
+        state = %{state | after_seq: last_seq}
+        if more?, do: compact(state, written + 1), else: {written + 1, state}
 
-            if more? do
-              compact(state, written + 1)
-            else
-              {written + 1, state}
-            end
+      {:error, reason} ->
+        # `after_seq` did not move, so the same hooks (and the same segment
+        # key) are written again next tick.
+        Logger.warning(
+          "[ankusa] archive segment after seq #{state.after_seq} not written, " <>
+            "retried next tick: #{inspect(reason)}"
+        )
 
-          {:error, reason} ->
-            # Cursor not advanced, loop stops: the same records (and same
-            # segment key) are rewritten next tick, and `Index`'s `insert_new`
-            # makes that a no-op for rows already written.
-            Logger.warning(
-              "[ankusa] compactor cursor #{next_cursor} not persisted, " <>
-                "segment is rewritten next tick: #{inspect(reason)}"
-            )
-
-            {written, state}
-        end
+        {written, state}
     end
   end
 
-  # Collect envelopes up to a payload-byte budget. `more?` says whether the WAL
-  # may still hold records past the returned cursor, which is what lets a tick
-  # write several segments instead of stopping at the first one.
-  defp collect(state, cursor, roll_bytes) do
-    collect(state, cursor, roll_bytes, [], 0, false)
-  end
+  defp archive_batch(state) do
+    roll_bytes = state.config.storage.roll_bytes
 
-  defp collect(state, cursor, roll_bytes, acc, bytes, more?) do
-    # `acc != []` matters: with a budget of 0 the first check would otherwise
-    # return nothing at all and no segment would ever be written.
-    if acc != [] and bytes >= roll_bytes do
-      {Enum.reverse(acc), cursor, more?}
-    else
-      case Ankusa.WAL.read(state.instance, cursor, @read_chunk) do
+    with {:ok, pending, more?} <- Archive.pending(state.instance, state.after_seq, roll_bytes),
+         {:ok, hooks} <- Archive.hooks(state.instance, Enum.map(pending, &elem(&1, 0))) do
+      case pending do
         [] ->
-          {Enum.reverse(acc), cursor, more?}
+          {:ok, :none}
 
-        envelopes ->
-          {entries, taken, leftover?} = take_within_budget(envelopes, roll_bytes - bytes)
+        pending ->
+          {present, missing} = Enum.split_with(hooks, fn {_seq, bin} -> bin != nil end)
+          {entries, undecodable} = decode_ids(present)
+          missing_seqs = Enum.map(missing, &elem(&1, 0))
 
-          cursor =
-            if taken == 0,
-              do: cursor,
-              else: envelopes |> Enum.at(taken - 1) |> Map.fetch!(:seq)
+          if missing_seqs != [] do
+            Logger.error(
+              "[ankusa] archive obligation(s) for hook(s) #{inspect(missing_seqs)} have no hook; dropping them"
+            )
+          end
 
-          bytes =
-            bytes +
-              Enum.reduce(entries, 0, fn {_env, record}, sum ->
-                sum + byte_size(record.payload)
-              end)
+          # A stored hook that does not decode can never be archived; retrying it
+          # would stop the archive behind it for good. Its obligation goes, the
+          # hook itself stays for whatever deliveries it still has.
+          if undecodable != [] do
+            Logger.error(
+              "[ankusa] hook(s) #{inspect(undecodable)} do not decode and cannot be archived; " <>
+                "dropping their archive obligation(s)"
+            )
+          end
 
-          more? = leftover? or length(envelopes) == @read_chunk
-
-          collect(state, cursor, roll_bytes, Enum.reverse(entries) ++ acc, bytes, more?)
+          with :ok <- write_segment(state, entries, missing_seqs ++ undecodable) do
+            {:ok, {pending |> List.last() |> elem(0), more?}}
+          end
       end
     end
   end
 
-  # Take records until the budget is spent — always at least one, so a tick
-  # always makes progress even when a single record exceeds `roll_bytes`.
-  defp take_within_budget(envelopes, budget), do: take_within_budget(envelopes, budget, [], 0)
+  # Every hook of the batch was already gone: nothing to write, only
+  # obligations to drop.
+  defp write_segment(state, [], missing_seqs) do
+    Archive.archived(state.instance, nil, [], missing_seqs)
+  end
 
-  defp take_within_budget([env | rest], budget, acc, bytes) do
-    record = %{key: env.id, payload: Envelope.to_binary(env)}
-    acc = [{env, record} | acc]
-    bytes = bytes + byte_size(record.payload)
+  defp write_segment(state, entries, missing_seqs) do
+    started = System.monotonic_time()
+    {codec, _opts} = state.config.storage.codec
 
-    if bytes >= budget or rest == [] do
-      {Enum.reverse(acc), length(acc), rest != []}
-    else
-      take_within_budget(rest, budget, acc, bytes)
+    with {:ok, {segment, index}} <- encode(codec, entries) do
+      write_encoded(state, entries, missing_seqs, segment, index, started)
     end
   end
 
-  defp take_within_budget([], _budget, acc, _bytes), do: {Enum.reverse(acc), length(acc), false}
-
-  defp write_segment(state, entries) do
+  defp write_encoded(state, entries, missing_seqs, segment, index, started) do
     instance = state.instance
-    config = state.config
-    started = System.monotonic_time()
 
-    first_seq = entries |> hd() |> elem(0) |> Map.fetch!(:seq)
-    last_seq = entries |> List.last() |> elem(0) |> Map.fetch!(:seq)
-    {codec, _} = config.storage.codec
-
-    {segment, index} = codec.encode(Enum.map(entries, fn {_env, record} -> record end))
-
+    seqs = Enum.map(entries, &elem(&1, 0))
+    ids = Enum.map(entries, &elem(&1, 1))
+    first_seq = hd(seqs)
+    last_seq = List.last(seqs)
     key = "seg/#{pad(first_seq)}-#{pad(last_seq)}.seg"
-    :ok = Ankusa.BlobStore.put(instance, key, segment)
+    idx_key = "seg/#{pad(first_seq)}-#{pad(last_seq)}.idx"
 
-    rows =
-      Enum.zip(entries, index)
-      |> Enum.map(fn {{env, _record}, entry} ->
+    idx =
+      entries
+      |> Enum.zip(index)
+      |> Map.new(fn {{seq, id, _bin}, entry} -> {id, {entry.offset, entry.length, seq}} end)
+
+    row = %{
+      key: key,
+      idx_key: idx_key,
+      first_seq: first_seq,
+      last_seq: last_seq,
+      min_id: Enum.min(ids),
+      max_id: Enum.max(ids),
+      count: length(entries),
+      bytes: byte_size(segment)
+    }
+
+    with :ok <- put(instance, key, segment),
+         :ok <- put(instance, idx_key, :erlang.term_to_binary(idx)),
+         :ok <- Archive.archived(instance, row, seqs, missing_seqs) do
+      markers = Enum.map(seqs, fn seq -> {seq, Keys.cleared(seq, 1, 0)} end)
+
+      # A failed reclaim only defers: the markers stay and the sweep finds them.
+      with {:error, reason} <- Reclaim.run(instance, markers) do
+        Logger.warning("[ankusa] hook reclaim deferred to the next sweep: #{inspect(reason)}")
+      end
+
+      Ankusa.Telemetry.emit(
+        [:compact, :stop],
         %{
-          event_id: env.id,
-          source_id: env.source_id,
-          tenant_id: env.tenant_id,
-          received_at: env.received_at,
-          seq: env.seq,
-          segment_key: key,
-          offset: entry.offset,
-          length: entry.length
-        }
+          records: length(entries),
+          bytes: byte_size(segment),
+          duration: System.monotonic_time() - started
+        },
+        %{instance: instance}
+      )
+
+      :ok
+    end
+  end
+
+  # `{seq, id, bin}` for every hook that decodes, and the seqs of those that do not.
+  defp decode_ids(present) do
+    {entries, undecodable} =
+      Enum.reduce(present, {[], []}, fn {seq, bin}, {ok, bad} ->
+        try do
+          {[{seq, Envelope.from_binary(bin).id, bin} | ok], bad}
+        rescue
+          _ -> {ok, [seq | bad]}
+        end
       end)
 
-    :ok = Index.append(config, rows)
+    {Enum.reverse(entries), Enum.reverse(undecodable)}
+  end
 
-    case Ankusa.WAL.put_cursor(instance, :compactor, last_seq) do
-      :ok ->
-        # never truncate past what dispatch has consumed — at-least-once
-        dispatch_seq = Ankusa.WAL.get_cursor(instance, :dispatch)
-        truncate_through = min(last_seq, dispatch_seq)
+  # The codec is configurable code: a raise is this tick's failure, retried next
+  # tick like a failed blob write, never a crashed compactor.
+  defp encode(codec, entries) do
+    {:ok, codec.encode(Enum.map(entries, fn {_seq, id, bin} -> %{key: id, payload: bin} end))}
+  rescue
+    error -> {:error, {:raised, error}}
+  end
 
-        case Ankusa.WAL.truncate_through(instance, truncate_through) do
-          :ok ->
-            :ok
-
-          {:error, reason} ->
-            # The records are in the segment and the index; the floor write can
-            # be retried by any later `truncate_through`.
-            Logger.warning(
-              "[ankusa] WAL truncation through #{truncate_through} failed, " <>
-                "retried after the next segment: #{inspect(reason)}"
-            )
-        end
-
-        Ankusa.Telemetry.emit(
-          [:compact, :stop],
-          %{
-            records: length(entries),
-            bytes: byte_size(segment),
-            duration: System.monotonic_time() - started
-          },
-          %{instance: instance}
-        )
-
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
+  # A blob store is user code (S3, GCS, a custom adapter): an error return and a
+  # raise are the same failure — this tick is retried, nothing crashes.
+  defp put(instance, key, data) do
+    case Ankusa.BlobStore.put(instance, key, data) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
     end
+  rescue
+    error -> {:error, {:raised, error}}
   end
 
   defp schedule(interval) when is_integer(interval) and interval > 0 do

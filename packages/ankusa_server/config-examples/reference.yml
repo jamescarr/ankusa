@@ -48,7 +48,7 @@ routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
   # On is deny-by-default: a request is captured only if its method and
   # normalized path match an enabled route *and* its client IP passes the IP
-  # rules. Everything else is rejected before the WAL is touched.
+  # rules. Everything else is rejected before the store is touched.
   enabled: false
   # A hard cap on definitions. Creating one past it is a 409; nothing is ever
   # evicted — an evicted route would start rejecting real webhooks.
@@ -126,12 +126,12 @@ rate_limits:
   # signature passed (or whose source accepts failures) do.
   #
   # A hook over the limit gets 429 with a Retry-After header, and nothing is
-  # stored: no WAL record, no dispatch, no claim.
+  # stored: no hook, no dispatch, no claim.
   #
   # Limits can also be adjusted per tenant at runtime, without a restart:
-  # `PUT /v1/tenants/{tenant}/rate-limit` on the admin port, persisted to
-  # rate_limits.json on the node (the same node-local model as API-managed
-  # sources). A runtime value beats the ones below.
+  # `PUT /v1/tenants/{tenant}/rate-limit` on the admin port, persisted in the
+  # node's store (the same node-local model as API-managed sources). A runtime
+  # value beats the ones below.
   #
   # `rate` is hooks per second (fractions are allowed: 0.5 is one every two
   # seconds) and `burst` is the most admitted back to back. Both are required,
@@ -147,7 +147,7 @@ batcher:
   # add contention.
   partitions: 2
   max_batch: 256
-  # 0 = commit as soon as a batch is ready; the WAL append runs in a task, so
+  # 0 = commit as soon as a batch is ready; the store commit runs in a task, so
   # raising this trades a little ack latency for larger batches.
   max_delay_ms: 0
   # Full queue = shed load with 503 rather than grow without bound. Counts
@@ -155,13 +155,12 @@ batcher:
   max_queue: 10000
 
 dispatch:
-  poll_ms: 200
   batch: 128
   # Max sink deliveries in flight at once. Keep Req's Finch pool (default 50)
   # at least this large when using the http sink.
   concurrency: 32
-  # Admitted-but-unfinished envelopes, and the max sum of their body bytes:
-  # bounds what a stalled destination can hold.
+  # Claimed-but-unfinished deliveries, and the max sum of their stored hook
+  # sizes in bytes: bounds what a stalled destination can hold.
   max_inflight: 4096
   max_inflight_bytes: 134217728
   retry:
@@ -172,9 +171,9 @@ dispatch:
     jitter: true
 
 wal:
-  # [env ANKUSA_WAL_TYPE] disk — local append-only log; survives process crash and power loss on this host, not the loss of the host.
-  #                        none — no local log: ingest publishes to the source's sinks in the request and acks on
-  #                               their confirm. The node keeps no state, runs only the `edge` role, and every
+  # [env ANKUSA_WAL_TYPE] disk — the local RocksDB store; every hook is on disk before the ack, so it survives process crash and power loss on this host, not the loss of the host.
+  #                        none — no local queue: ingest publishes to the source's sinks in the request and acks on
+  #                               their confirm. The node keeps no hook state, runs only the `edge` role, and every
   #                               source must have a durable sink (a broker ack, a publisher confirm, an upstream 2xx).
   type: disk
 
@@ -218,8 +217,8 @@ claim_check:
 lifecycle:
   # Where a lifecycle event goes when a source or route is created, updated, or
   # deleted (through the admin API or the route-management API): a CloudEvents
-  # 1.0 message, io.ankusa.source.created and friends, carried like a hook and
-  # delivered through the WAL and dispatch. The same sink types as a source's
+  # 1.0 message, io.ankusa.source.created and friends, published from memory
+  # with the dispatch retry policy; not persisted. The same sink types as a source's
   # `sinks`, at least one. Omit the whole section to turn lifecycle events off.
   # `ankusa:lifecycle` is a reserved source id. The AsyncAPI document on
   # GET /asyncapi.json describes this channel too. See docs/asyncapi.md.
@@ -252,9 +251,6 @@ sources:
         # post | put | patch
         method: post
         timeout_ms: 5000
-        # true = one delivery at a time per {tenant_id, source_id}, in seq
-        # order. Default false: deliveries to this sink run concurrently.
-        # ordered: false
         headers:
           x-ankusa-env: prod
       - type: rabbitmq

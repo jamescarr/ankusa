@@ -10,20 +10,25 @@ defmodule Ankusa.Lifecycle do
   wrappers over those) becomes one CloudEvents 1.0 event delivered to those
   sinks.
 
-  ## Delivery is the hook pipeline
+  ## Delivery bypasses the store
 
-  An event is an `Ankusa.Envelope` of the reserved source `#{inspect("ankusa:lifecycle")}`
-  committed to the WAL, so it inherits what a hook has: retries, the DLQ,
-  `Ankusa.Dispatch.replay/2`, claim check, and every sink adapter. Under
-  `wal: :none` it is published in the call that made the change instead, as a
-  hook is. The reserved source exists only for dispatch (`Ankusa.SourceStore.sinks/2`);
-  the edge never resolves it, so `POST /webhooks/ankusa:lifecycle` is a `404`.
-  The colon keeps it out of reach of every tenant-scoped id, which is
-  `[A-Za-z0-9_-]` joined by a dot.
+  An event is an `Ankusa.Envelope` of the reserved source id
+  `#{inspect("ankusa:lifecycle")}`, but it never touches the store: it is handed to
+  `Ankusa.Lifecycle.Publisher`, a supervised in-memory process that delivers it
+  to every lifecycle sink independently, retrying a failed sink with
+  `dispatch.retry`. The change that caused it does not wait: the call returns
+  once the event is queued.
 
-  The change has already happened when the event is committed. A failure to
-  record it is logged and counted (`[:ankusa, :lifecycle, :dropped]`), never
-  returned to the caller whose change succeeded.
+  Delivery is best effort. The publisher's queue is bounded (10,000 pending sink
+  deliveries); when it is full, when a sink's retries run out, or when the
+  publisher is not running, the event is dropped for that sink, logged, and
+  counted (`[:ankusa, :lifecycle, :dropped]`). Pending events are lost on a node
+  restart, and there is no ordering. A lifecycle failure is never returned to
+  the caller whose change succeeded.
+
+  The reserved id exists only on the event: the edge never resolves it, so
+  `POST /webhooks/ankusa:lifecycle` is a `404`. The colon keeps it out of reach
+  of every tenant-scoped id, which is `[A-Za-z0-9_-]` joined by a dot.
 
   ## The event
 
@@ -42,11 +47,9 @@ defmodule Ankusa.Lifecycle do
   tenant, `"default"`.
   """
 
-  require Logger
-
   alias Ankusa.{Config, Envelope, Source}
   alias Ankusa.Admin.Redact
-  alias Ankusa.Edge.Publish
+  alias Ankusa.Lifecycle.Publisher
   alias Ankusa.Routes.Route
 
   @source_id "ankusa:lifecycle"
@@ -76,9 +79,8 @@ defmodule Ankusa.Lifecycle do
   @doc """
   Reject a lifecycle configuration that cannot work. Raises `ArgumentError`.
 
-  Under `wal: :none` an event is published in the request that made the change,
-  so, as for a static source (`Ankusa.WAL.validate_config!/1`), at least one sink
-  must be durable.
+  The reserved source id must not be declared as a static source: it would let
+  any provider post hooks that consumers read as lifecycle events.
   """
   @spec validate_config!(Config.t()) :: :ok
   def validate_config!(%Config{lifecycle: %{sinks: sinks}} = config) do
@@ -88,13 +90,6 @@ defmodule Ankusa.Lifecycle do
 
     if reserved_source_declared?(config) do
       raise ArgumentError, "source #{inspect(@source_id)} is reserved for lifecycle events"
-    end
-
-    if config.wal == :none and sinks != [] and
-         not Enum.any?(sinks, fn {mod, opts} -> Ankusa.Sink.durable?(mod, opts) end) do
-      raise ArgumentError,
-            "lifecycle: wal: :none publishes lifecycle events on a sink's confirm, " <>
-              "but none of its sinks is durable. Configure a durable sink, or use wal.type: disk."
     end
 
     :ok
@@ -114,7 +109,7 @@ defmodule Ankusa.Lifecycle do
   A source changed. `entry` is the `Ankusa.SourceStore.stored()` map, or for a
   deletion the store could not read back, just `%{tenant: tenant, name: name}`.
   """
-  @spec source_changed(atom(), action(), map()) :: :ok | {:error, term()}
+  @spec source_changed(atom(), action(), map()) :: :ok
   def source_changed(instance, action, %{tenant: tenant, name: name} = entry) do
     data =
       if Map.has_key?(entry, :spec),
@@ -128,7 +123,7 @@ defmodule Ankusa.Lifecycle do
   A route changed. `route` is the `Ankusa.Routes.Route` for a creation or an
   update, the route id for a deletion.
   """
-  @spec route_changed(atom(), action(), Route.t() | String.t()) :: :ok | {:error, term()}
+  @spec route_changed(atom(), action(), Route.t() | String.t()) :: :ok
   def route_changed(instance, action, %Route{} = route) do
     emit(instance, "io.ankusa.route.#{action}", route.id, "default", Route.to_json(route))
   end
@@ -142,21 +137,9 @@ defmodule Ankusa.Lifecycle do
       :error ->
         :ok
 
-      {:ok, source} ->
+      {:ok, _source} ->
         env = envelope(instance, type, subject, tenant, data)
-
-        case commit(instance, source, env) do
-          :ok ->
-            Ankusa.Telemetry.emit([:lifecycle, :emitted], %{}, %{instance: instance, type: type})
-
-          {:error, reason} ->
-            Logger.error(
-              "[ankusa] lifecycle event #{type} for #{subject} not recorded: #{inspect(reason)}"
-            )
-
-            Ankusa.Telemetry.emit([:lifecycle, :dropped], %{}, %{instance: instance, type: type})
-            {:error, reason}
-        end
+        Publisher.publish(instance, env, type, subject)
     end
   end
 
@@ -187,28 +170,5 @@ defmodule Ankusa.Lifecycle do
       body: body,
       size: byte_size(body)
     }
-  end
-
-  # Straight to the WAL, not through `Ankusa.Edge.Batcher`: the batchers only run
-  # on a node with the edge role, and a node that serves the admin API need not
-  # have it. The WAL process may not exist at all on a `:claim_check`-only node.
-  defp commit(instance, source, env) do
-    case Ankusa.config(instance).wal do
-      :none ->
-        case Publish.publish(instance, source, env) do
-          {:ok, _env} -> :ok
-          {:error, reason} -> {:error, reason}
-        end
-
-      _wal ->
-        try do
-          case Ankusa.WAL.append(instance, [%{envelope: env}]) do
-            {:ok, _results} -> :ok
-            {:error, reason} -> {:error, reason}
-          end
-        catch
-          :exit, reason -> {:error, {:wal_unavailable, reason}}
-        end
-    end
   end
 end

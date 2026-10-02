@@ -90,32 +90,34 @@ rpk topic consume ankusa.lifecycle -n 1 -f '%v\n' | jq -r .body_base64 | base64 
 # "io.ankusa.source.created"
 ```
 
-Delivery is the hook pipeline's. The event is committed to the WAL as an
-envelope of the reserved source `ankusa:lifecycle` and dispatched with the same
-retries, dead-letter queue, [replay](delivery.md), and claim check; under
-`wal: {type: none}` it is published inside the call that made the change, and
-boot refuses the config unless one lifecycle sink is durable. Two things differ
-from a hook:
+Lifecycle events bypass the store. They are not hooks: nothing is written to the
+store, and they do not go through dispatch. A supervised in-memory publisher,
+running on every node that has a lifecycle sink, hands each event to every
+lifecycle sink independently, so a broker that is down never holds back another.
+It is best effort:
 
-- The change has already happened. If the event cannot be recorded (the WAL is
-  full, the sink refuses under `wal: none`), the caller still gets success; the
-  failure is logged and counted as `ankusa_lifecycle_dropped_total`
-  (`ankusa_lifecycle_emitted_total` counts the rest, by `type`).
+- The change has already happened, and the call that made it returns without
+  waiting on a broker. A failed delivery is retried with the `dispatch.retry`
+  policy, exponential by default. When the retries run out, when the publisher's
+  queue is full (10,000 pending sink deliveries), or when the publisher is not
+  running, the event is dropped for that sink, logged, and counted as
+  `ankusa_lifecycle_dropped_total` (label `reason`: `gave_up`, `queue_full`,
+  `not_running`). `ankusa_lifecycle_delivered_total` counts the rest. The caller
+  always gets the success of its change.
+- Pending events are lost when the node stops, and there is no ordering:
+  deliveries run concurrently and retries reorder them. A consumer that needs a
+  complete picture reads the admin API's source and route lists.
 - The edge never resolves `ankusa:lifecycle`: `POST /webhooks/ankusa:lifecycle`
   is a `404`, and a configured source of that id is a boot error.
-- It is a WAL envelope and nothing more. It is not listed by
-  `GET /v1/tenants/{tenant}/sources` (it lives in no source store), it never
-  passes through ingest, so the tenant rate limiter and the quarantine never see
-  it and `ankusa_ingest_*` does not count it. The compactor archives it to the
-  object store like any WAL record, and a dead-lettered event is counted by
-  `ankusa_dispatch_dead_lettered_total{source_id="ankusa:lifecycle"}`. Source
-  events carry the source's tenant; route events carry the default tenant,
-  `default`, because a claim-checked body needs a real tenant. An event over a
-  sink's `inline_max_bytes` goes through the claim check like a hook.
+- The event is not listed by `GET /v1/tenants/{tenant}/sources`, never passes
+  through ingest (so the tenant rate limiter and the quarantine never see it and
+  `ankusa_ingest_*` does not count it), and is not archived. Source events carry
+  the source's tenant; route events carry the default tenant, `default`, because
+  a claim-checked body needs a real tenant. An event over a sink's
+  `inline_max_bytes` goes through the claim check inside the sink, like a hook.
 
 Only the node that served the change emits, so a route written on one node of a
-Redis-backed fleet is announced once. Nodes need the `dispatch` role to deliver
-what their WAL holds, as for hooks.
+Redis-backed fleet is announced once.
 
 ## Describing your own sink
 

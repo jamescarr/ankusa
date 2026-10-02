@@ -12,18 +12,39 @@ suite — `mise run check:conformance`, below.
 ## `ankusa` core: `mix test`
 
 ```sh
-mise run check:package ankusa         # 433 tests, no external infra needed
+mise run check:package ankusa         # no external infra needed
 mise run test:integration             # +16 tests against the floci emulators (see below)
 ```
 
-The 433 always-on tests cover:
+The always-on tests cover:
 
-- **WAL** (`WAL.DiskLog`): group commit, crash-replay (torn-frame handling),
-  truncation, that a restart after a full truncation does **not** reuse seqs,
-  the measurements `[:commit, :stop]` reports, and fault-injected write
-  failures: a failed append reports `{:error, _}` without killing the WAL and
-  without consuming a seq, and a failed cursor or floor write leaves the
-  in-memory state exactly where it was.
+- **Store and queue** (`store_test.exs`, `queue_test.exs`): the RocksDB store
+  applies one batch across column families (puts, deletes, range deletes) and
+  refuses an unreadable or missing store with `:store_unavailable` rather than
+  reporting it empty; `fold/6` is half-open, ordered and never yields a
+  sentinel; a corrupt blob or SST block fails the scan and the point read
+  instead of silently shortening results, and a damaged WAL record refuses to
+  open while a torn tail drops cleanly; `reopen/1` republishes working handles
+  and keeps every committed key, and a store left closed by a failed reopen
+  opens again by itself; the database opens with the recovery, blob and buffer
+  settings asked for (read back from the `OPTIONS` file RocksDB writes, since
+  RocksDB keeps its default for a value it cannot parse). The queue writer
+  assigns dense, strictly
+  increasing seqs (the hook's seq comes from its key); seqs never repeat after
+  every hook is delivered, reclaimed and the instance restarts; a commit while
+  the store is down is refused and recovers with a higher seq; and
+  `[:commit, :stop]` measures successful commits only.
+- **Migration** (`store_migrate_test.exs`): a 0.3 data dir imports once — only
+  what 0.3 had not finished (undelivered hooks deliver, unarchived hooks
+  archive), dead letters carry over and replay to the current sinks, the
+  quarantine pen, API sources, rate-limit overrides and the segment index all
+  carry over, and the next seq clears everything imported. An artifact that
+  cannot be trusted stops the boot: damage in the middle of the 0.3 WAL with acked
+  frames after it, or a cursor file 0.3 did not write, refuses to start rather
+  than guess; a torn final frame imports every complete frame before it. An
+  artifact that shows up after the first boot is never imported over live
+  data, and under `wal: :none` the queue artifacts are left for a node that
+  has a queue.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing
@@ -38,22 +59,35 @@ The 433 always-on tests cover:
 - **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with
   `503` once the batcher's queue fills while a commit is in flight, pluggable
   route resolvers (`Path` and `TenantPath`), and that the same body posted
-  twice is stored twice (two ids, two WAL records). `edge_direct_test.exs`
+  twice is stored twice (two ids, two stored hooks). `edge_direct_test.exs`
   covers the other ack path (`wal: :none`): the `201` body is exactly
   `{id, status}`, a sink sees the envelope before the response, a refusing or
-  raising sink is `503` with `Retry-After` and is called exactly once, no WAL
-  process or `wal/` directory exists, and an oversized body reaches the sink
-  with `ctx.claim`.
-- **Dispatch**: retry, DLQ, a sink that *raises* being retried and dead-lettered
-  instead of killing the pipeline, and ordering: a blocked delivery holds the
-  cursor while another ordering key proceeds, and same-key deliveries stay in
-  the order dispatch read them from the log.
-- **Storage**: compaction round-trip, `roll_bytes` splitting a backlog into
-  several segments in one tick, a compactor cursor that cannot be persisted
-  being retried on the next tick instead of crashing, and the live index: a
-  lookup after a later compaction sees every row, and one taken while the
-  compactor is down falls back to the file and is correct again after its
-  restart.
+  raising sink is `503` with `Retry-After` and is called exactly once, no
+  queue writer or `wal/` directory exists, and an oversized body reaches the
+  sink with `ctx.claim`.
+- **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
+  exactly once; a failing sink is retried until it succeeds; a failing sink's
+  retries do not hold the slots a healthy source needs (D1); one dead row per
+  exhausted sink, with the failing sink named in the stored reason, and the
+  hook kept until every obligation clears; replay re-delivers a dead hook once
+  and then reclaims it (D5); a raising sink and a bad-returning sink are
+  dead-lettered, not fatal to dispatch; hooks whose source was deleted are
+  dead-lettered after a restart (D2); a claimed row is retried after a
+  restart while a delivered row is not (D7); a row that became visible below
+  the scan floor (a stalled commit) is delivered when its wake arrives; and a
+  window that drained is refilled even when housekeeping flushes the outcomes
+  first. Ordering is not asserted: lanes are gone.
+- **Filesystem durability** (`fsync_test.exs`): the helpers return an error
+  for a path they cannot open, write or rename, never raise, and `write_file`
+  replaces content in one step and leaves no temp file. The fsync order on
+  disk is checked by `strace` on Linux, not in the suite.
+- **Storage** (`storage_test.exs`): compaction round-trips every hook
+  byte-for-byte with its seq, and a tick writes one segment plus one index
+  object; a hook survives one cleared obligation and is reclaimed once both
+  clear, in either order; without the `:storage` role a delivered hook is
+  reclaimed straight away (W5); `roll_bytes` caps a segment's size; a failing
+  blob store fails the tick without crashing it and the next tick retries; and
+  the catalogue lives in the store, so fetch survives an instance restart.
 - **Claim Check** (`test/ankusa/claim_check/`, `test/ankusa/dispatch/claim_check_test.exs`):
   reference parsing (URN grammar, tenant and ULID claim-id rejection, date
   partitions from the pack id's timestamp, claim ids locating their pack and
@@ -83,7 +117,7 @@ The 433 always-on tests cover:
   decision matrix (including a route's own rules replacing the global list, and
   a global deny beating them), the decision cache, the dry run's rule and scope
   reporting, telemetry, and CRUD. `edge_route_guard_test.exs` drives the guard
-  with real requests and asserts its WAL effects (a rejected request writes
+  with real requests and asserts its store effects (a rejected request writes
   **nothing**); `routes/router_test.exs` drives the management API over both
   `Plug.Test.conn` and a real socket, unauthenticated by design like
   `Ankusa.Admin.Router`. `routes/router_openapi_test.exs` is the
@@ -94,22 +128,28 @@ The 433 always-on tests cover:
   the status, schema, and field names against the document, plus the documented
   method matrix, 404s for the near-misses of the documented surface, and every
   example against its own schema, so the spec and the code cannot drift apart.
-- **A loss checker**: acks 500 hooks concurrently, hard-kills the instance
-  mid-flight, and proves every acked id survives replay from the WAL. Zero
-  tolerance: this is the test that actually backs the `wal.type: disk` half of
-  the core invariant claim in [`architecture.md`](architecture.md), not just
+- **A loss checker** (`loss_test.exs`): the one test here that runs a separate
+  OS process. It starts a child BEAM that owns the same store as the test's
+  instance and ingests concurrently, waits for 500 printed acks, then
+  `kill -9`s the child — no clean shutdown, no flush beyond the `sync: true`
+  commit that preceded each ack — reopens only the store over the same data
+  dir and proves every acked id reads back. Zero tolerance: this is the test
+  that actually backs the `wal.type: disk` half of the core invariant claim in
+  [`architecture.md`](architecture.md), not just
   the description of it. The `wal.type: none` half is backed by
   `edge_direct_test.exs`, which asserts the response really does wait for the
   sink's confirm — and is a `503` when that confirm never comes.
-- **Lifecycle events** (`lifecycle_test.exs`): through a real instance with
-  dispatch running, a source's create/update/delete and a route's
-  create/replace/patch/delete each deliver one CloudEvent to the configured
-  sink, the source's secret arrives redacted, a refused change emits nothing,
-  lifecycle off writes nothing to the WAL, `wal: none` delivers before the call
-  returns, a refusing sink loses the event (counted as dropped) but never the
-  change, `ankusa:lifecycle` is a `404` at ingest, an event over a sink's inline
-  threshold is claim-checked under a valid tenant and redeems to the event, and
-  each invalid lifecycle config is refused at boot.
+- **Lifecycle events** (`lifecycle_test.exs`): through a real instance, a
+  source's create/update/delete and a route's create/replace/patch/delete each
+  deliver one CloudEvent to the configured sink, the source's secret arrives
+  redacted, a refused change emits nothing, and the store assigns no seq to an
+  event (they bypass it). A refusing sink is retried until it confirms; when
+  the retries run out the event is dropped and counted but the change stands; a
+  broken sink never holds back another; a full queue and a publisher that isn't
+  running each drop and count the event; with no lifecycle sinks there is no
+  publisher. `ankusa:lifecycle` is a `404` at ingest, an event over a sink's
+  inline threshold is claim-checked under a valid tenant and redeems to the
+  event, and each invalid lifecycle config is refused at boot.
 - **The AsyncAPI document** (`async_api_test.exs`, plus `GET /asyncapi.json` in
   `admin/router_test.exs`): sources on one address share a channel, sinks
   without a channel are absent, a computed address is a channel of its own, the
@@ -224,7 +264,7 @@ toolchain.
 Same pattern, against Redis on :6399:
 
 ```sh
-mise run check:package ankusa_redis      # 30 tests
+mise run check:package ankusa_redis      # 29 tests
 ```
 
 `REDIS_URL` (default `redis://localhost:6399`) points the suite at another
@@ -239,13 +279,13 @@ starting a node that would deny everything. The suite deletes only the keys unde
 its own namespace (`ankusa:routes:test`) between tests — never `FLUSHDB`, which
 would wipe a Redis you happen to share with it.
 
-`test/ankusa/sink/redis_test.exs` (7 tests) covers `Ankusa.Sink.Redis` against
+`test/ankusa/sink/redis_test.exs` (6 tests) covers `Ankusa.Sink.Redis` against
 the same server, subscribing with `Redix.PubSub` in the test process: an inline
 message arriving on the channel with the `Ankusa.Sink.Message` body, a fat
 payload checked in through `ClaimCheck` and the message carrying a redeemable
 claim, `:channel` as a static string and as a 1-arity fun, a publish to a
-channel with no subscriber being `{:error, :no_subscribers}`, `ordering_key`
-and `durable?` pinned — including `Ankusa.WAL.validate_config!` refusing a
+channel with no subscriber being `{:error, :no_subscribers}`, `durable?` pinned
+— including `Ankusa.Queue.validate_config!` refusing a
 `wal: none` source whose only sink is this one — and an unreachable server
 failing fast (`:econnrefused`, not a hang). Every publish in the suite goes to
 a per-test unique channel and instance, so tests never see each other's
@@ -339,35 +379,10 @@ acked envelope. One JSON line plus a table; exit code is non-zero if anything
 acked never arrived. It runs under `MIX_ENV=test` because core's
 `config/config.exs` autostarts the default instance on :4000 outside `:test`.
 
-On the reference machine (Apple M4 Pro, macOS), before and after the
-reliability/perf pass:
-
-| | `end_to_end_per_s` | `drain_s` | `ingest_per_s` | `missing` |
-| --- | --- | --- | --- | --- |
-| before (sequential dispatch) | 120–123 | 162–165 | 15k–53k¹ | 0 |
-| after (concurrent dispatch) | 4.1k–4.7k | 3.9–4.6 | 66k–78k | 0 |
-
-¹ The two baseline runs differ (52.8k with the machine idle, 15.2k while builds
-and tests ran concurrently on the same host); dispatch was the ceiling either
-way, and `end_to_end_per_s` was unaffected. The "after" range is across repeated
-runs (the high end on an idle host, the low end with other work in flight).
-
-Dispatch *was* that ceiling: one envelope at a time, cursor written after each.
-`drain_s` is now ~40× lower, and the theoretical ceiling at
-`dispatch.concurrency` 32 with a 5 ms sink is 6.4k/s. The bench lands at
-4.1–4.7k/s, with the pipeline idle most of the time.
-
-Profiling this bench also surfaced two bottlenecks unrelated to the pipeline's
-shape, both fixed in this pass:
-
-- `WAL.DiskLog.read/3` used `:ets.select/3` with a `>` guard, which makes ETS
-  scan the `ordered_set` from the front on every read: 371 µs per call with the
-  cursor at the tail of a 20k-record log, versus 0.05 µs for the keyed
-  `:ets.next/2` walk it uses now.
-- the dispatch task closure reached into `state.instance`/`state.config`, which
-  captures the *whole* pipeline state, so every spawn copied `runnable`
-  (thousands of admitted envelopes) into the new process: ~580 µs per spawn,
-  46 µs once the fields are bound before the closure.
+The bench reports `ingest_per_s`, `end_to_end_per_s`, `drain_s` and `missing`,
+and exits non-zero if anything acked never arrived. The numbers are
+machine-dependent and move with the pipeline, so run it on your own hardware
+rather than reading a figure here.
 
 ## Load and end-to-end (kind + Oban)
 
@@ -375,7 +390,7 @@ shape, both fixed in this pass:
 is the only test in this repo that proves zero loss on a real, multi-node
 Kubernetes deployment rather than in-process. It stands up a `kind` cluster
 (a 3-pod `ankusa` StatefulSet, each pod a self-contained all-role node with
-its own WAL on a persistent volume, and a 2-replica `consumer` running Oban),
+its own store on a persistent volume, and a 2-replica `consumer` running Oban),
 then drives [`tools/loadgen`](https://github.com/jamescarr/ankusa/blob/main/tools/loadgen)
 through three phases against it:
 
@@ -427,15 +442,16 @@ paced phases never build a backlog for the burst phase to inherit.
 
 ### The chaos-phase loss: root cause and fix
 
-> **Historical note.** This bug lived in the `WAL.Postgres` adapter, which has
-> since been removed, Ankusa ships `WAL.DiskLog` only, and the `ankusa_postgres`
-> package with it. The write-up is kept because the failure mode (a reader
+> **Historical note.** This bug lived in the WAL.Postgres adapter, which has
+> since been removed, along with the `ankusa_postgres` package; Ankusa's queue
+> now commits to the RocksDB store, not to a log adapter. The write-up is kept
+> because the failure mode (a reader
 > losing a commit that landed out of `seq` order) is a real hazard for any log
 > adapter, and because the chaos phase below is still the proof that an
-> all-`DiskLog` node loses nothing under pod kills.
+> all-store node loses nothing under pod kills.
 
 Killing an `ankusa-worker` pod used to drop ~0.5–1.5% of acked hooks
-permanently. The mechanism was not in the dispatch pipeline: `WAL.Postgres`
+permanently. The mechanism was not in the dispatch pipeline: WAL.Postgres
 allocated `seq` at INSERT time (`BIGSERIAL`) but a row only became visible at
 COMMIT, so two writers could allocate 100 and 101 and commit in the opposite
 order. A reader following the log with `seq > cursor` read 101, advanced its
@@ -446,7 +462,7 @@ no DLQ, exactly the observed signature, with the cursor already advanced. It
 took killing the *worker* to reproduce because that bursts the catch-up load
 onto the shared Postgres and widens the allocation→commit window.
 
-`WAL.Postgres.append/2` took a per-instance advisory lock
+WAL.Postgres.append/2 took a per-instance advisory lock
 (`pg_advisory_xact_lock`) before allocating seqs and held it until COMMIT, so
 seq order *was* commit order; fleet-wide serialized commits per instance was the
 accepted cost. The regression test (`ankusa_postgres`) widened the window with a

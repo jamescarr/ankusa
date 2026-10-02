@@ -198,7 +198,11 @@ defmodule Ankusa.AsyncApi do
 
     [
       if(hooks != [], do: "Hooks from: " <> source_list(hooks)),
-      if(lifecycle != [], do: "Ankusa lifecycle events (CloudEvents 1.0, structured)"),
+      if(lifecycle != [],
+        do:
+          "Ankusa lifecycle events (CloudEvents 1.0, structured), published from memory: " <>
+            "retried, not persisted, not ordered"
+      ),
       if(Enum.any?(entries, &(&1.d.address == nil)),
         do: "The address is computed per hook by a configured function and cannot be advertised."
       )

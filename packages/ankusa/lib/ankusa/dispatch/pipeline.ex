@@ -1,51 +1,77 @@
 defmodule Ankusa.Dispatch.Pipeline do
   @moduledoc """
-  Async dispatch pipeline: reads committed envelopes from the WAL in ascending
-  `seq` order and delivers each to every sink configured on its source, with
-  per-source retry/backoff and dead-lettering. At-least-once — the durable
-  dispatch cursor only advances once an envelope has been fully handled.
+  Async dispatch pipeline: a scheduler over *delivery rows*. Every committed
+  hook has one row per sink of its source (`Ankusa.Queue`); this process claims
+  the rows that are due, runs each delivery in a `Task.Supervisor` task, and
+  records the outcome as a single store batch. At-least-once: a row is only
+  deleted after its sink answered `:ok`, and a restart makes every claimed row
+  due again.
 
-  ## Concurrency and ordering
+  ## What wakes it
 
-  Deliveries run in `Task.Supervisor` tasks, up to `dispatch.concurrency` at a
-  time, so a slow sink (or a retry backoff) holds up only what it must. What it
-  must is decided by `c:Ankusa.Sink.ordering_key/2`: deliveries to the same sink
-  with an equal key run one at a time, in the order dispatch read them from the
-  log, while different keys run concurrently. `nil` means no constraint.
+  A commit sends it `:wake`, so a new hook is claimed at once, not at the next
+  poll. Otherwise it sleeps until the earliest due row: a retry is a row due at
+  `now + backoff`, so waiting costs no slot and no process — a sink that is
+  down for an hour holds up nothing but its own rows.
 
-  The cursor is a **watermark**: `read_seq` when nothing is in flight, else one
-  below the lowest admitted-but-unfinished seq. It never moves past an envelope
-  that hasn't been fully handled, which is what keeps redelivery at-least-once,
-  and it may lag a finished envelope behind it — that is the price of
-  concurrency, not a bug (the WAL contract forbids a lower seq appearing later,
-  so gaps in the watermark are safe).
+  ## Concurrency
 
-  A WAL read window (`dispatch.max_inflight`, `dispatch.max_inflight_bytes`)
-  bounds admitted-but-unfinished work, so a dead sink cannot walk the pipeline
-  into an OOM.
+  Up to `dispatch.concurrency` deliveries run at a time. A window
+  (`dispatch.max_inflight` rows, `dispatch.max_inflight_bytes` of stored hook)
+  bounds claimed-but-unfinished work, so a dead sink cannot walk the pipeline
+  into an OOM. Deliveries are not ordered: two hooks for one sink may run in
+  either order, and a retry runs after whatever is due before it.
+
+  ## Binding
+
+  A row binds to `(sink index, module)` at ack time. Its opts always come from
+  the source as it is *now*, so a config fix applies to the backlog and no fun
+  or secret is ever persisted. If the source's sinks were reordered the row
+  falls back to the one sink with its module; if it cannot be bound it is
+  dead-lettered as `{:sink_gone, index, module}`, and a deleted source as
+  `{:source_gone, source_id}`.
 
   ## Claim check
 
-  A body larger than one of its sinks' `c:Ankusa.Sink.inline_max_bytes/1` is
-  checked in **once**, before any of its sinks run. Each WAL read batch's
-  claims are packed per tenant and uploaded together
-  (`Ankusa.ClaimCheck.check_in_batch/2`) in a task, while the batch's jobs wait
-  in a FIFO of staged batches. Batches release in read order, so per-lane
-  `seq` order holds. The ref rides to every sink and every retry in
-  `ctx.claim`. If a pack fails, its jobs still run: the first attempt checks the
-  body in on its own, and the ref is reused across that job's retries.
+  A body larger than a sink's `c:Ankusa.Sink.inline_max_bytes/1` is checked in
+  **once** per hook, before any of its sinks run: the claims of a scan are
+  packed per tenant and uploaded together (`Ankusa.ClaimCheck.check_in_batch/2`)
+  in a task, and the ref is stored with the hook so every sink and every retry
+  reuses it. If a pack fails, its jobs still run: the first attempt checks the
+  body in on its own.
 
-  `start_link/1` opts: `:instance`, `:config`, and optional `:max_sleep_ms`
-  which clamps every backoff sleep (so deterministic tests don't hang).
+  `start_link/1` opts: `:instance` and `:config`.
   """
 
   use GenServer
 
   require Logger
 
-  alias Ankusa.{ClaimCheck, Sink, SourceStore, Telemetry, WAL}
-  alias Ankusa.Dispatch.DLQ
+  alias Ankusa.{ClaimCheck, Sink, SourceStore, Store, Telemetry}
+  alias Ankusa.Queue.{Deliveries, Reclaim}
   alias Ankusa.Sink.Message
+  alias Ankusa.Store.Keys
+
+  @housekeeping_ms 1_000
+  # Housekeeping ticks between `Reclaim.sweep/1` runs.
+  @sweep_every 60
+  # Outcome writes are buffered and written as one batch: one store write and one
+  # reclaim probe per `@flush_entries` outcomes (or per `@flush_ms`), not one
+  # each. A crash inside the window redelivers those hooks, which at-least-once
+  # allows and the next synced commit would have flushed anyway.
+  @flush_ms 10
+  @flush_entries 256
+  # The due scan starts at `floor`, so it does not walk the tombstones of every
+  # row claimed before it (that made draining a backlog quadratic). The floor
+  # follows the claims, trailing the last claimed due time by `@floor_lag_ms`
+  # (clock jitter), and is kept under every row that can still become visible
+  # beneath it: a commit's wake carries the batch stamp, a retry or a replay
+  # lowers it to its own due time. A reset every `@floor_reset_ms` is the
+  # backstop for anything unforeseen.
+  @floor_lag_ms 1_000
+  @floor_reset_ms 300_000
+  @holdoff_ms 1_000
+  @max_sleep_ms 30_000
 
   # ── public API ────────────────────────────────────────────────────────────
 
@@ -64,11 +90,13 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   @doc """
-  Drain until caught up; returns envelopes fully handled during the call.
+  Block until nothing is claimed, running, or due; returns the rows settled
+  (delivered or dead-lettered) during the call. A row waiting out a backoff is
+  not due, so this does not wait for it.
   """
   @spec tick(atom()) :: {:ok, non_neg_integer()}
   def tick(instance) do
-    GenServer.call(Ankusa.via(instance, :dispatch), :tick)
+    GenServer.call(Ankusa.via(instance, :dispatch), :tick, 30_000)
   end
 
   # ── GenServer ─────────────────────────────────────────────────────────────
@@ -77,7 +105,6 @@ defmodule Ankusa.Dispatch.Pipeline do
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
     config = Keyword.fetch!(opts, :config)
-    max_sleep = Keyword.get(opts, :max_sleep_ms, nil)
 
     # Linked to us on purpose: nobody else knows about it, and it must not
     # outlive the pipeline. Tests that start the Pipeline alone still get it.
@@ -85,49 +112,132 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     Process.flag(:trap_exit, true)
 
-    cursor = WAL.get_cursor(instance, :dispatch)
+    send(self(), :recover)
+    Process.send_after(self(), :housekeeping, @housekeeping_ms)
 
-    state = %{
-      instance: instance,
-      config: config,
-      max_sleep: max_sleep,
-      task_sup: task_sup,
-      # last durably persisted dispatch cursor
-      cursor: cursor,
-      # last seq read out of the WAL (may be ahead of `cursor`)
-      read_seq: cursor,
-      # admitted, not yet fully handled
-      pending: :gb_sets.empty(),
-      # seq => {jobs outstanding, body bytes}
-      remaining: %{},
-      inflight_bytes: 0,
-      # lane => :queue of jobs waiting for that lane to free up
-      lanes: %{},
-      runnable: :queue.new(),
-      running: %{},
-      completed: 0,
-      waiters: [],
-      window_full?: false,
-      # read batches admitted but held back until their claims are packed, in
-      # read order: %{ref: pack task ref | nil, jobs: [job]}
-      staged: :queue.new(),
-      # pack task ref => true
-      packing: %{}
-    }
-
-    {:ok, schedule(state)}
+    {:ok,
+     %{
+       instance: instance,
+       config: config,
+       task_sup: task_sup,
+       recovered?: false,
+       # see @floor_lag_ms
+       floor: 0,
+       floor_reset_at: mono_ms(),
+       # rows claimed and not yet finished, and their stored hook bytes
+       claimed: 0,
+       claimed_bytes: 0,
+       window_full?: false,
+       # a failed scan backs off instead of spinning
+       holdoff?: false,
+       runnable: :queue.new(),
+       running: %{},
+       # pack task ref => the jobs it will give claims to
+       packing: %{},
+       packing_seqs: MapSet.new(),
+       # seq => jobs of a hook whose claim is still being packed
+       waiting: %{},
+       # outcome batches the store refused, in order: [{ops, reclaim_pairs}]
+       unrecorded: [],
+       # outcomes not yet written, newest first: [{ops, reclaim_pairs}]
+       buffer: [],
+       buffered: 0,
+       flush_timer: nil,
+       timer: nil,
+       settled: 0,
+       waiters: [],
+       sweep_ticks: 0
+     }}
   end
 
   @impl true
   def handle_call(:tick, from, state) do
     state = state |> fill() |> start_jobs()
-    maybe_reply_waiters(%{state | waiters: state.waiters ++ [{from, state.completed}]})
+    maybe_reply_waiters(%{state | waiters: state.waiters ++ [{from, state.settled}]})
+  end
+
+  def handle_call({:replay, filter}, _from, state) do
+    # Dead rows still in the outcome buffer must be visible to the scan.
+    state = flush(state)
+    at = now_ms()
+
+    case Deliveries.replay(state.instance, filter, at) do
+      {:ok, replayed} ->
+        send(self(), :wake)
+        {:reply, {:ok, replayed}, lower_floor(state, at)}
+
+      {:error, reason} ->
+        Logger.error("[ankusa] replay failed: #{inspect(reason)}")
+        {:reply, {:error, :store_unavailable}, state}
+    end
+  end
+
+  # Stopped by its supervisor: write what is buffered, so a graceful stop does
+  # not redeliver hooks that were already delivered. The store may already be
+  # gone; then they are redelivered, which is the at-least-once contract.
+  @impl true
+  def terminate(_reason, state) do
+    state |> flush() |> flush_unrecorded()
+    :ok
   end
 
   @impl true
-  def handle_info(:poll, state) do
-    state = state |> fill() |> start_jobs() |> persist_cursor()
-    {:noreply, schedule(state)}
+  def handle_info(:recover, state) do
+    with {:ok, claimed} <- Deliveries.recover_inflight(state.instance, now_ms()),
+         :ok <- Reclaim.sweep(state.instance) do
+      if claimed > 0 do
+        Logger.info(
+          "[ankusa] dispatch made #{claimed} claimed delivery row(s) due again after a restart"
+        )
+      end
+
+      send(self(), :wake)
+      {:noreply, %{state | recovered?: true}}
+    else
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa] dispatch could not recover from the store, retrying: #{inspect(reason)}"
+        )
+
+        Process.send_after(self(), :recover, @holdoff_ms)
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(:wake, state) do
+    state = %{state | holdoff?: false} |> fill() |> start_jobs() |> schedule_next()
+    maybe_reply_waiters(state)
+  end
+
+  # A commit's rows became visible only now, though they were stamped before it
+  # (the fsync in between): a scan may already have gone past that stamp.
+  def handle_info({:wake, at}, state), do: handle_info(:wake, lower_floor(state, at))
+
+  # A flush makes retries and expansions visible, and the capacity the outcomes
+  # freed is claimed here, once, rather than once per outcome.
+  def handle_info(:flush, state) do
+    state = %{state | flush_timer: nil} |> flush() |> refill() |> start_jobs() |> schedule_next()
+    maybe_reply_waiters(state)
+  end
+
+  def handle_info(:housekeeping, state) do
+    Process.send_after(self(), :housekeeping, @housekeeping_ms)
+
+    # `schedule_next` is here because a flush cancels the flush timer, and with
+    # it the refill that would have followed: whatever the outcomes freed is
+    # claimed by the wake this arms. It also re-arms a lost wake, once a second.
+    state = state |> flush() |> flush_unrecorded() |> schedule_next()
+    ticks = state.sweep_ticks + 1
+
+    state =
+      if ticks >= @sweep_every do
+        sweep(state)
+        %{state | sweep_ticks: 0}
+      else
+        %{state | sweep_ticks: ticks}
+      end
+
+    maybe_reply_waiters(state)
   end
 
   def handle_info({ref, {:packed, results}}, %{packing: packing} = state)
@@ -150,46 +260,17 @@ defmodule Ankusa.Dispatch.Pipeline do
     |> maybe_reply_waiters()
   end
 
-  def handle_info({ref, result}, %{running: running} = state) when is_map_key(running, ref) do
+  def handle_info({ref, {result, fresh_claim}}, %{running: running} = state)
+      when is_map_key(running, ref) do
     Process.demonitor(ref, [:flush])
-    job = Map.fetch!(running, ref)
-    state = %{state | running: Map.delete(running, ref)}
-
-    state =
-      case result do
-        {:dead, reason} ->
-          # Serialized here on purpose: DLQ appends stay in one process.
-          DLQ.write(state.config, job.env, reason)
-
-          Telemetry.emit([:dispatch, :dlq], %{}, %{
-            instance: state.instance,
-            source_id: job.env.source_id,
-            sink: elem(job.sink, 0)
-          })
-
-          state
-
-        :ok ->
-          state
-      end
-
-    state =
-      state
-      |> release_lane(job)
-      |> complete(job.seq)
-      |> start_jobs()
-
-    state = if state.window_full?, do: state |> fill() |> start_jobs(), else: state
-
-    maybe_reply_waiters(state)
+    outcome(state, ref, result, fresh_claim)
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{running: running} = state)
       when is_map_key(running, ref) do
-    # No result ever arrived: the task was killed. Restarting from the durable
-    # cursor (this stops the process) re-reads the envelope, so at-least-once
-    # still holds.
-    {:stop, {:delivery_task_crashed, reason}, state}
+    # No result ever arrived: the task was killed. That is a failed attempt like
+    # any other, and the row's own retry policy decides what happens next.
+    outcome(state, ref, {:error, {:exit, reason}}, nil)
   end
 
   def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
@@ -198,201 +279,335 @@ defmodule Ankusa.Dispatch.Pipeline do
   # down a process other parts of the tree are waiting on.
   def handle_info(_message, state), do: {:noreply, state}
 
-  @impl true
-  def terminate(_reason, state) do
-    # Best effort: the WAL may already be gone during a shutdown.
-    try do
-      persist_cursor(state)
-    catch
-      :exit, _ -> :ok
-    end
+  # ── claiming ──────────────────────────────────────────────────────────────
 
-    :ok
-  end
+  # Nothing is claimed before the restart recovery has made the rows a previous
+  # life left claimed due again.
+  defp fill(%{recovered?: false} = state), do: state
+  defp fill(%{holdoff?: true} = state), do: state
 
-  # ── reading ───────────────────────────────────────────────────────────────
-
-  defp fill(state), do: fill(state, %{})
-
-  defp fill(state, memo) do
-    dispatch = state.config.dispatch
-
-    if map_size(state.remaining) >= dispatch.max_inflight or
-         state.inflight_bytes >= dispatch.max_inflight_bytes do
+  defp fill(state) do
+    if at_capacity?(state) do
       %{state | window_full?: true}
     else
-      requested = min(dispatch.batch, dispatch.max_inflight - map_size(state.remaining))
-      envelopes = WAL.read(state.instance, state.read_seq, requested)
-      {state, memo, jobs} = Enum.reduce(envelopes, {state, memo, []}, &admit/2)
-      state = stage(state, Enum.reverse(jobs))
+      scan(maybe_reset_floor(state))
+    end
+  end
 
-      # A full read means there is likely more; a short one means the WAL has no
-      # more to give right now.
-      if length(envelopes) == requested do
-        fill(state, memo)
-      else
+  defp at_capacity?(state) do
+    dispatch = state.config.dispatch
+    state.claimed >= dispatch.max_inflight or state.claimed_bytes >= dispatch.max_inflight_bytes
+  end
+
+  defp scan(state) do
+    dispatch = state.config.dispatch
+    now = now_ms()
+    limit = min(dispatch.batch, dispatch.max_inflight - state.claimed)
+    budget = dispatch.max_inflight_bytes - state.claimed_bytes
+
+    case Deliveries.due(state.instance, now, state.floor, limit, budget) do
+      {:ok, []} ->
         %{state | window_full?: false}
-      end
+
+      {:ok, dues} ->
+        case claim(state, dues, now) do
+          {:ok, state} ->
+            # Past the rows just claimed, and only once they are: a failed load or
+            # claim leaves them due, and the floor has to stay beneath them.
+            state = raise_floor(state, List.last(dues).at)
+
+            # A full page means there is probably more; a short one means
+            # nothing else is due right now.
+            if length(dues) == limit,
+              do: fill(state),
+              else: %{state | window_full?: at_capacity?(state)}
+
+          {:error, state} ->
+            holdoff(state)
+        end
+
+      {:error, reason} ->
+        Logger.error("[ankusa] dispatch could not scan the store, retrying: #{inspect(reason)}")
+        holdoff(state)
     end
   end
 
-  defp admit(env, {state, memo, jobs}) do
-    {sinks, memo} = sinks_for(state.instance, env.source_id, memo)
-
-    if sinks == [] do
-      # Nothing to deliver: handled, and it does not enter the window at all.
-      {%{state | read_seq: env.seq, completed: state.completed + 1}, memo, jobs}
+  # Load before claiming: a failed read leaves every row due, with nothing to
+  # undo. This process is the only one that moves pending rows, so nothing can
+  # change them in between.
+  defp claim(state, dues, now) do
+    with {:ok, loaded} <- Deliveries.load(state.instance, dues),
+         :ok <- Deliveries.claim(state.instance, dues) do
+      {:ok, resolve(state, loaded, now)}
     else
-      bytes = byte_size(env.body)
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa] dispatch could not claim delivery rows, retrying: #{inspect(reason)}"
+        )
 
-      state = %{
-        state
-        | read_seq: env.seq,
-          pending: :gb_sets.add(env.seq, state.pending),
-          remaining: Map.put(state.remaining, env.seq, {length(sinks), bytes}),
-          inflight_bytes: state.inflight_bytes + bytes
-      }
-
-      jobs =
-        Enum.reduce(sinks, jobs, fn {mod, opts} = sink, jobs ->
-          [
-            %{
-              seq: env.seq,
-              env: env,
-              sink: sink,
-              lane: lane(mod, env, opts),
-              needs_claim: needs_claim?(mod, opts, env),
-              claim: nil
-            }
-            | jobs
-          ]
-        end)
-
-      {state, memo, jobs}
+        {:error, state}
     end
   end
 
-  defp needs_claim?(mod, opts, env) do
+  defp holdoff(state) do
+    state = cancel_timer(state)
+    timer = Process.send_after(self(), :wake, @holdoff_ms)
+    %{state | holdoff?: true, timer: timer}
+  end
+
+  defp maybe_reset_floor(state) do
+    if mono_ms() - state.floor_reset_at >= @floor_reset_ms do
+      %{state | floor: 0, floor_reset_at: mono_ms()}
+    else
+      state
+    end
+  end
+
+  # ── resolving claimed rows ────────────────────────────────────────────────
+
+  # Every claimed row ends up in one of three places: a job to run, a
+  # non-delivery outcome written right here (dead-lettered, expanded, dropped),
+  # or both ends of a missing row cleaned up.
+  defp resolve(state, loaded, now) do
+    acc = {state, [], [], [], %{}}
+
+    {state, ops, pairs, jobs, _sources} =
+      Enum.reduce(loaded, acc, fn item, acc -> resolve_one(item, acc, now) end)
+
+    state
+    |> record(ops, pairs)
+    |> stage(Enum.reverse(jobs))
+  end
+
+  defp resolve_one(%{row: nil} = item, {state, ops, pairs, jobs, sources}, _now) do
+    Logger.warning("[ankusa] delivery row #{item.seq}/#{item.sink} vanished; dropping its claim")
+    {state, [{:delete, :index, Keys.inflight(item.seq, item.sink)} | ops], pairs, jobs, sources}
+  end
+
+  defp resolve_one(%{env: nil} = item, {state, ops, pairs, jobs, sources}, _now) do
+    Logger.error("[ankusa] hook #{item.seq} is missing; dropping its delivery row #{item.sink}")
+
+    drop = [
+      {:delete, :deliveries, Keys.delivery(item.seq, item.sink)},
+      {:delete, :index, Keys.inflight(item.seq, item.sink)}
+    ]
+
+    {state, drop ++ ops, pairs, jobs, sources}
+  end
+
+  defp resolve_one(item, {state, ops, pairs, jobs, sources}, now) do
+    {source, sources} = fetch_source(state.instance, item.env.source_id, sources)
+
+    cond do
+      source == :error ->
+        dead(item, {:source_gone, item.env.source_id}, {state, ops, pairs, jobs, sources}, now)
+
+      Deliveries.unresolved?(item.sink) ->
+        expand(item, source, {state, ops, pairs, jobs, sources}, now)
+
+      true ->
+        case bind(source.sinks, item.sink, item.row.module) do
+          {:ok, spec} ->
+            job = %{
+              seq: item.seq,
+              sink: item.sink,
+              size: item.size,
+              row: item.row,
+              env: item.env,
+              spec: spec,
+              claim: item.claim
+            }
+
+            {state, ops, pairs, [job | jobs], sources}
+
+          :error ->
+            reason = {:sink_gone, item.sink, item.row.module}
+            dead(item, reason, {state, ops, pairs, jobs, sources}, now)
+        end
+    end
+  end
+
+  # An imported row never recorded its sink: give the hook one row per current
+  # sink of its source, and wake up to claim them.
+  defp expand(item, source, {state, ops, pairs, jobs, sources}, now) do
+    case Deliveries.existing_sinks(state.instance, item.seq) do
+      {:ok, existing} ->
+        send(self(), :wake)
+
+        expansion =
+          Deliveries.expand_ops(item.seq, item.sink, item.size, source.sinks, existing, now)
+
+        pairs =
+          if source.sinks == [], do: [cleared(item.seq, item.sink) | pairs], else: pairs
+
+        {state, expansion ++ ops, pairs, jobs, sources}
+
+      {:error, reason} ->
+        Logger.warning("[ankusa] could not expand imported row #{item.seq}: #{inspect(reason)}")
+        retry_later = Deliveries.retry_ops(item.seq, item.sink, item.row, now + @holdoff_ms, nil)
+        {state, retry_later ++ ops, pairs, jobs, sources}
+    end
+  end
+
+  defp dead(item, reason, {state, ops, pairs, jobs, sources}, now) do
+    error = inspect(reason, limit: 50, printable_limit: 4096)
+    dead_ops = Deliveries.dead_ops(item.seq, item.sink, item.row, now, error, item.env)
+    state = settle_dead(state, item.env, item.row.module, item.row.attempts)
+    {state, dead_ops ++ ops, pairs, jobs, sources}
+  end
+
+  defp settle_dead(state, env, module, attempts) do
+    Telemetry.emit([:dispatch, :stop], %{}, %{
+      instance: state.instance,
+      result: :dlq,
+      attempts: attempts
+    })
+
+    Telemetry.emit([:dispatch, :dlq], %{}, %{
+      instance: state.instance,
+      source_id: env.source_id,
+      sink: module
+    })
+
+    %{state | settled: state.settled + 1}
+  end
+
+  defp fetch_source(instance, source_id, sources) do
+    case sources do
+      %{^source_id => source} ->
+        {source, sources}
+
+      _ ->
+        source =
+          case SourceStore.fetch(instance, source_id) do
+            {:ok, source} -> source
+            :error -> :error
+          end
+
+        {source, Map.put(sources, source_id, source)}
+    end
+  end
+
+  # The sink at the row's index, if it is still the same module; else the only
+  # sink with that module; else the row cannot be bound.
+  defp bind(sinks, index, module) do
+    case Enum.at(sinks, index) do
+      {^module, _opts} = sink ->
+        {:ok, sink}
+
+      _ ->
+        case Enum.filter(sinks, fn {mod, _opts} -> mod == module end) do
+          [sink] -> {:ok, sink}
+          _ -> :error
+        end
+    end
+  end
+
+  defp cleared(seq, sink), do: {seq, Keys.cleared(seq, 0, sink)}
+
+  # ── claim check staging ───────────────────────────────────────────────────
+
+  defp stage(state, []), do: state
+
+  defp stage(state, jobs) do
+    bytes = Enum.reduce(jobs, 0, &(&1.size + &2))
+
+    state = %{
+      state
+      | claimed: state.claimed + length(jobs),
+        claimed_bytes: state.claimed_bytes + bytes
+    }
+
+    {needing, ready} = Enum.split_with(jobs, &needs_claim?/1)
+    state = Enum.reduce(ready, state, &enqueue(&2, &1))
+
+    # A hook whose claim is already being packed waits for that pack.
+    {waiting, to_pack} = Enum.split_with(needing, &MapSet.member?(state.packing_seqs, &1.seq))
+
+    state =
+      Enum.reduce(waiting, state, fn job, state ->
+        %{state | waiting: Map.update(state.waiting, job.seq, [job], &[job | &1])}
+      end)
+
+    pack(state, to_pack)
+  end
+
+  # A body over the sink's inline limit needs a claim, unless the hook already
+  # has a stored one.
+  defp needs_claim?(%{claim: claim}) when claim != nil, do: false
+
+  defp needs_claim?(%{spec: {mod, opts}, env: env}) do
     case Sink.inline_max_bytes(mod, opts) do
       nil -> false
       max -> env.size > max
     end
   end
 
-  # ── claim check staging ───────────────────────────────────────────────────
+  defp pack(state, []), do: state
 
-  # A batch with no claims and nothing staged ahead of it goes straight to the
-  # lanes. Anything else joins the FIFO, so no job is ever enqueued ahead of a
-  # lower seq still waiting on its pack.
-  defp stage(state, []), do: state
+  defp pack(state, jobs) do
+    by_seq = Enum.group_by(jobs, & &1.seq)
+    items = Enum.map(by_seq, fn {_seq, [job | _]} -> Message.claim_item(job.env) end)
+    instance = state.instance
 
-  defp stage(state, jobs) do
-    items =
-      jobs
-      |> Enum.filter(& &1.needs_claim)
-      |> Enum.uniq_by(& &1.env.id)
-      |> Enum.map(&Message.claim_item(&1.env))
+    task =
+      Task.Supervisor.async_nolink(state.task_sup, fn ->
+        {:packed, ClaimCheck.check_in_batch(instance, items)}
+      end)
 
-    cond do
-      items == [] and :queue.is_empty(state.staged) ->
-        Enum.reduce(jobs, state, &enqueue_job(&2, &1))
-
-      items == [] ->
-        %{state | staged: :queue.in(%{ref: nil, jobs: jobs}, state.staged)}
-
-      true ->
-        instance = state.instance
-
-        task =
-          Task.Supervisor.async_nolink(state.task_sup, fn ->
-            {:packed, ClaimCheck.check_in_batch(instance, items)}
-          end)
-
-        %{
-          state
-          | staged: :queue.in(%{ref: task.ref, jobs: jobs}, state.staged),
-            packing: Map.put(state.packing, task.ref, true)
-        }
-    end
+    %{
+      state
+      | packing: Map.put(state.packing, task.ref, jobs),
+        packing_seqs: MapSet.union(state.packing_seqs, MapSet.new(Map.keys(by_seq)))
+    }
   end
 
-  # Attach each job's ref (a failed pack leaves it nil, so the job checks its
-  # body in itself), mark the batch ready, and release every ready batch at the
-  # head of the FIFO.
+  # Persist each hook's ref, give it to the pack's jobs and to the jobs that
+  # waited on it (a failed pack leaves a job without one, so it checks its body
+  # in itself), and let them all run.
   defp packed(state, ref, results) do
-    staged =
-      :queue.filter(
-        fn
-          %{ref: ^ref, jobs: jobs} ->
-            [%{ref: nil, jobs: Enum.map(jobs, &attach_claim(&1, results))}]
+    {jobs, packing} = Map.pop(state.packing, ref)
+    seqs = jobs |> Enum.map(& &1.seq) |> Enum.uniq()
 
-          batch ->
-            [batch]
-        end,
-        state.staged
-      )
+    claims =
+      jobs
+      |> Enum.uniq_by(& &1.seq)
+      |> Enum.flat_map(fn job ->
+        case Map.get(results, job.env.id) do
+          {:ok, claim} -> [{job.seq, claim}]
+          _ -> []
+        end
+      end)
+      |> Map.new()
 
-    release_staged(%{state | staged: staged, packing: Map.delete(state.packing, ref)})
+    claim_ops = Enum.flat_map(claims, fn {seq, claim} -> Deliveries.claim_ops(seq, claim) end)
+    state = record(state, claim_ops, [])
+
+    {waiting, released} =
+      Enum.reduce(seqs, {state.waiting, []}, fn seq, {waiting, released} ->
+        {jobs, waiting} = Map.pop(waiting, seq, [])
+        {waiting, jobs ++ released}
+      end)
+
+    state = %{
+      state
+      | packing: packing,
+        packing_seqs: MapSet.difference(state.packing_seqs, MapSet.new(seqs)),
+        waiting: waiting
+    }
+
+    Enum.reduce(jobs ++ released, state, fn job, state ->
+      job =
+        case Map.fetch(claims, job.seq) do
+          {:ok, claim} -> %{job | claim: claim}
+          :error -> job
+        end
+
+      enqueue(state, job)
+    end)
   end
 
-  defp attach_claim(%{needs_claim: true, env: env} = job, results) do
-    case Map.get(results, env.id) do
-      {:ok, ref} -> %{job | claim: ref}
-      _ -> job
-    end
-  end
-
-  defp attach_claim(job, _results), do: job
-
-  defp release_staged(state) do
-    case :queue.peek(state.staged) do
-      {:value, %{ref: nil, jobs: jobs}} ->
-        state = Enum.reduce(jobs, state, &enqueue_job(&2, &1))
-        release_staged(%{state | staged: :queue.drop(state.staged)})
-
-      _ ->
-        state
-    end
-  end
-
-  defp sinks_for(instance, source_id, memo) do
-    case Map.fetch(memo, source_id) do
-      {:ok, sinks} ->
-        {sinks, memo}
-
-      :error ->
-        sinks = SourceStore.sinks(instance, source_id)
-
-        {sinks, Map.put(memo, source_id, sinks)}
-    end
-  end
-
-  defp lane(mod, env, opts) do
-    case Sink.ordering_key(mod, env, opts) do
-      nil -> nil
-      key -> {mod, key}
-    end
-  end
-
-  defp enqueue_job(state, %{lane: nil} = job) do
-    %{state | runnable: :queue.in(job, state.runnable)}
-  end
-
-  defp enqueue_job(state, %{lane: lane} = job) do
-    case Map.fetch(state.lanes, lane) do
-      {:ok, queue} ->
-        %{state | lanes: Map.put(state.lanes, lane, :queue.in(job, queue))}
-
-      :error ->
-        # Lane was free: this job runs now, and the lane is marked busy until it
-        # (and everything queued behind it) is done.
-        %{
-          state
-          | lanes: Map.put(state.lanes, lane, :queue.new()),
-            runnable: :queue.in(job, state.runnable)
-        }
-    end
-  end
+  defp enqueue(state, job), do: %{state | runnable: :queue.in(job, state.runnable)}
 
   # ── running ───────────────────────────────────────────────────────────────
 
@@ -414,144 +629,276 @@ defmodule Ankusa.Dispatch.Pipeline do
         # what capped throughput (measured: ~580µs per spawn, 1.5k/s; 46µs and
         # 5.1k/s once hoisted).
         instance = state.instance
-        config = state.config
-        max_sleep = state.max_sleep
 
         task =
           Task.Supervisor.async_nolink(state.task_sup, fn ->
-            deliver(job, instance, config, max_sleep)
+            run_job(job, instance)
           end)
 
         start_jobs(%{state | runnable: runnable, running: Map.put(state.running, task.ref, job)})
     end
   end
 
-  # Runs in the task. Returns `:ok` or `{:dead, reason}`; never raises, never
-  # touches the DLQ — the pipeline process owns those two decisions.
-  defp deliver(job, instance, config, max_sleep) do
-    deliver(job, instance, config, max_sleep, 1)
-  end
+  # Runs in the task. Returns `{result, fresh_claim}` and never raises or
+  # touches the store — the pipeline process owns every row transition.
+  defp run_job(%{env: env, spec: {mod, opts}} = job, instance) do
+    case ensure_claim(job, instance) do
+      {:ok, claim, fresh} ->
+        result =
+          case Sink.safe_deliver(mod, env, ctx(job, instance, claim), opts) do
+            :ok -> :ok
+            {:error, _reason} = error -> error
+            other -> {:error, {:bad_return, other}}
+          end
 
-  defp deliver(%{env: env, sink: {mod, opts}} = job, instance, config, max_sleep, attempt) do
-    # A job whose pack failed checks its body in here, once; the ref then rides
-    # along to every retry.
-    {job, result} =
-      case ensure_claim(job, instance) do
-        {:ok, job} -> {job, Sink.safe_deliver(mod, env, ctx(job, instance, attempt), opts)}
-        {:error, reason} -> {job, {:error, {:claim_check, reason}}}
-      end
-
-    case result do
-      :ok ->
-        Telemetry.emit([:dispatch, :stop], %{}, %{
-          instance: instance,
-          result: :ok,
-          attempts: attempt
-        })
-
-        :ok
+        {result, fresh}
 
       {:error, reason} ->
-        {rmod, ropts} = config.dispatch.retry
-
-        case rmod.backoff(attempt, ropts) do
-          {:retry, delay} ->
-            # Sleeping here blocks this lane only — not the pipeline.
-            sleep(delay, max_sleep)
-            deliver(job, instance, config, max_sleep, attempt + 1)
-
-          :give_up ->
-            Telemetry.emit([:dispatch, :stop], %{}, %{
-              instance: instance,
-              result: :dlq,
-              attempts: attempt
-            })
-
-            {:dead, {:sink, mod, reason}}
-        end
+        {{:error, {:claim_check, reason}}, nil}
     end
   end
 
-  defp ensure_claim(%{needs_claim: true, claim: nil, env: env} = job, instance) do
-    with {:ok, ref} <- Message.check_in(instance, env), do: {:ok, %{job | claim: ref}}
+  # A job that has no ref yet but needs one (its pack failed) checks its body in
+  # here, once; the new ref is reported back and persisted with the outcome.
+  defp ensure_claim(%{claim: claim}, _instance) when claim != nil, do: {:ok, claim, nil}
+
+  defp ensure_claim(job, instance) do
+    if needs_claim?(job) do
+      with {:ok, claim} <- Message.check_in(instance, job.env), do: {:ok, claim, claim}
+    else
+      {:ok, nil, nil}
+    end
   end
 
-  defp ensure_claim(job, _instance), do: {:ok, job}
-
-  defp ctx(%{env: env, claim: claim}, instance, attempt) do
+  defp ctx(%{env: env, row: row}, instance, claim) do
     ctx = %{
       instance: instance,
       source_id: env.source_id,
       tenant_id: env.tenant_id,
-      attempt: attempt
+      attempt: row.attempts + 1
     }
 
     if claim, do: Map.put(ctx, :claim, claim), else: ctx
   end
 
-  # ── bookkeeping ───────────────────────────────────────────────────────────
+  # ── outcomes ──────────────────────────────────────────────────────────────
 
-  defp release_lane(state, %{lane: nil}), do: state
+  defp outcome(state, ref, result, fresh_claim) do
+    job = Map.fetch!(state.running, ref)
 
-  defp release_lane(state, %{lane: lane}) do
-    case state.lanes |> Map.fetch!(lane) |> :queue.out() do
-      {{:value, next}, queue} ->
-        %{
-          state
-          | lanes: Map.put(state.lanes, lane, queue),
-            runnable: :queue.in(next, state.runnable)
-        }
+    state = %{
+      state
+      | running: Map.delete(state.running, ref),
+        claimed: state.claimed - 1,
+        claimed_bytes: state.claimed_bytes - job.size
+    }
 
-      {:empty, _queue} ->
-        %{state | lanes: Map.delete(state.lanes, lane)}
-    end
-  end
+    attempts = job.row.attempts + 1
+    now = now_ms()
+    claim_ops = if fresh_claim, do: Deliveries.claim_ops(job.seq, fresh_claim), else: []
 
-  defp complete(%{remaining: remaining} = state, seq) do
-    case Map.fetch!(remaining, seq) do
-      {1, bytes} ->
-        %{
-          state
-          | remaining: Map.delete(remaining, seq),
-            pending: :gb_sets.delete(seq, state.pending),
-            inflight_bytes: state.inflight_bytes - bytes,
-            completed: state.completed + 1
-        }
-
-      {n, bytes} ->
-        %{state | remaining: Map.put(remaining, seq, {n - 1, bytes})}
-    end
-  end
-
-  # ── cursor ────────────────────────────────────────────────────────────────
-
-  defp watermark(%{pending: pending, read_seq: read_seq}) do
-    case :gb_sets.is_empty(pending) do
-      true -> read_seq
-      false -> :gb_sets.smallest(pending) - 1
-    end
-  end
-
-  defp persist_cursor(state) do
-    mark = watermark(state)
-
-    if mark > state.cursor do
-      case WAL.put_cursor(state.instance, :dispatch, mark) do
+    {state, ops, pairs} =
+      case result do
         :ok ->
-          %{state | cursor: mark}
+          Telemetry.emit([:dispatch, :stop], %{}, %{
+            instance: state.instance,
+            result: :ok,
+            attempts: attempts
+          })
+
+          {%{state | settled: state.settled + 1}, Deliveries.delivered_ops(job.seq, job.sink),
+           [cleared(job.seq, job.sink)]}
 
         {:error, reason} ->
-          # Keep the last durable cursor: the next persist (every `:poll`)
-          # retries, and a restart redelivers from there — at-least-once holds.
-          Logger.warning(
-            "[ankusa] dispatch cursor #{mark} not persisted, retrying: #{inspect(reason)}"
-          )
-
-          state
+          failed(state, job, reason, attempts, now)
       end
-    else
+
+    state =
       state
+      |> record(claim_ops, [])
+      |> buffer(ops, pairs)
+      |> start_jobs()
+      # While outcomes are buffered the store cannot say what is due; the flush
+      # asks, once, instead of every outcome asking.
+      |> then(fn state -> if state.buffered == 0, do: schedule_next(state), else: state end)
+
+    maybe_reply_waiters(state)
+  end
+
+  defp failed(state, job, reason, attempts, now) do
+    {rmod, ropts} = state.config.dispatch.retry
+    row = %{job.row | attempts: attempts}
+
+    case rmod.backoff(attempts, ropts) do
+      {:retry, delay} ->
+        error = inspect(reason, limit: 50, printable_limit: 4096)
+        {state, Deliveries.retry_ops(job.seq, job.sink, row, now + delay, error), []}
+
+      :give_up ->
+        {mod, _opts} = job.spec
+        error = inspect({:sink, mod, reason}, limit: 50, printable_limit: 4096)
+        state = settle_dead(state, job.env, mod, attempts)
+        {state, Deliveries.dead_ops(job.seq, job.sink, row, now, error, job.env), []}
     end
+  end
+
+  # Write a batch. The Pipeline's writes are not synced: losing one means a
+  # redelivery, and the next synced commit flushes everything before it.
+  defp record(state, [], _pairs), do: state
+
+  defp record(state, ops, pairs) do
+    case write(state, ops) do
+      {:ok, state} ->
+        reclaim(state.instance, pairs)
+        state
+
+      {:error, reason} ->
+        Logger.warning("[ankusa] dispatch outcome not recorded, retrying: #{inspect(reason)}")
+        %{state | unrecorded: state.unrecorded ++ [{ops, pairs}]}
+    end
+  end
+
+  # A failed reclaim only defers: the marker stays, and `Reclaim.sweep/1` finds it.
+  defp reclaim(_instance, []), do: :ok
+
+  defp reclaim(instance, pairs) do
+    with {:error, reason} <- Reclaim.run(instance, pairs) do
+      Logger.warning("[ankusa] hook reclaim deferred to the next sweep: #{inspect(reason)}")
+    end
+
+    :ok
+  end
+
+  defp lower_floor(state, at), do: %{state | floor: min(state.floor, at)}
+  defp raise_floor(state, at), do: %{state | floor: max(state.floor, at - @floor_lag_ms)}
+
+  # Every Pipeline write goes through here. Once it is in, the rows it made due
+  # (a retry, an expansion) are visible to scans, so the floor must be at or
+  # under the earliest of them: a scan that ran while the write was buffered, or
+  # failing and waiting for housekeeping, may have raised it past.
+  defp write(state, ops) do
+    case Store.write(state.instance, ops, sync: false) do
+      :ok -> {:ok, lower_floor_for(state, ops)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp lower_floor_for(state, ops) do
+    Enum.reduce(ops, state, fn
+      {:put, :index, <<?d, _::binary>> = key, _value}, state ->
+        {at, _seq, _sink} = Keys.decode_due(key)
+        lower_floor(state, at)
+
+      _op, state ->
+        state
+    end)
+  end
+
+  defp refill(%{window_full?: true} = state), do: fill(state)
+  defp refill(state), do: state
+
+  defp buffer(state, ops, pairs) do
+    state = %{state | buffer: [{ops, pairs} | state.buffer], buffered: state.buffered + 1}
+
+    if state.buffered >= @flush_entries do
+      state |> flush() |> refill()
+    else
+      arm_flush(state)
+    end
+  end
+
+  defp arm_flush(%{flush_timer: nil} = state),
+    do: %{state | flush_timer: Process.send_after(self(), :flush, @flush_ms)}
+
+  defp arm_flush(state), do: state
+
+  # Everything buffered goes out as one batch, in the order it happened (two
+  # outcomes may touch one hook), then one reclaim for the lot.
+  defp flush(%{buffer: []} = state), do: state
+
+  defp flush(state) do
+    if state.flush_timer, do: Process.cancel_timer(state.flush_timer)
+
+    entries = Enum.reverse(state.buffer)
+    ops = Enum.flat_map(entries, &elem(&1, 0))
+    pairs = Enum.flat_map(entries, &elem(&1, 1))
+    state = %{state | buffer: [], buffered: 0, flush_timer: nil}
+
+    case write(state, ops) do
+      {:ok, state} ->
+        reclaim(state.instance, pairs)
+        state
+
+      {:error, reason} ->
+        Logger.warning("[ankusa] dispatch outcomes not recorded, retrying: #{inspect(reason)}")
+        %{state | unrecorded: state.unrecorded ++ [{ops, pairs}]}
+    end
+  end
+
+  # ── housekeeping ──────────────────────────────────────────────────────────
+
+  defp flush_unrecorded(%{unrecorded: []} = state), do: state
+
+  defp flush_unrecorded(%{unrecorded: [{ops, pairs} | rest]} = state) do
+    case write(state, ops) do
+      {:ok, state} ->
+        reclaim(state.instance, pairs)
+        flush_unrecorded(%{state | unrecorded: rest})
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp sweep(state) do
+    with {:error, reason} <- Reclaim.sweep(state.instance) do
+      Logger.warning("[ankusa] hook reclaim sweep failed: #{inspect(reason)}")
+    end
+  end
+
+  # ── scheduling ────────────────────────────────────────────────────────────
+
+  defp schedule_next(%{holdoff?: true} = state), do: state
+  defp schedule_next(%{recovered?: false} = state), do: state
+  # `window_full?` is a hint from the last look: outcomes since may have emptied
+  # the window, so what decides is whether it is full now. Believing the flag
+  # would cancel the wake of a window that has since drained.
+  defp schedule_next(%{window_full?: true} = state) do
+    if at_capacity?(state),
+      do: cancel_timer(state),
+      else: schedule_next(%{state | window_full?: false})
+  end
+
+  defp schedule_next(state) do
+    case Deliveries.next_due_at(state.instance, state.floor) do
+      {:ok, nil} ->
+        cancel_timer(state)
+
+      {:ok, at} ->
+        now = now_ms()
+
+        if at <= now do
+          send(self(), :wake)
+          cancel_timer(state)
+        else
+          set_timer(state, min(at - now, @max_sleep_ms))
+        end
+
+      {:error, _reason} ->
+        set_timer(state, @holdoff_ms)
+    end
+  end
+
+  defp set_timer(state, ms) do
+    state = cancel_timer(state)
+    %{state | timer: Process.send_after(self(), :wake, ms)}
+  end
+
+  defp cancel_timer(%{timer: nil} = state), do: state
+
+  defp cancel_timer(%{timer: ref} = state) do
+    Process.cancel_timer(ref)
+    %{state | timer: nil}
   end
 
   # ── waiters ───────────────────────────────────────────────────────────────
@@ -559,20 +906,17 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp maybe_reply_waiters(%{waiters: []} = state), do: {:noreply, state}
 
   defp maybe_reply_waiters(state) do
-    if idle?(state) do
-      state = drain_while_caught_up(state)
+    if quiet?(state) do
+      # Nothing is running: record what is buffered before saying so.
+      state = state |> flush() |> schedule_next()
 
       if idle?(state) do
-        state = persist_cursor(state)
-        completed = state.completed
-
-        Enum.each(state.waiters, fn {from, c0} ->
-          GenServer.reply(from, {:ok, completed - c0})
+        Enum.each(state.waiters, fn {from, settled0} ->
+          GenServer.reply(from, {:ok, state.settled - settled0})
         end)
 
         {:noreply, %{state | waiters: []}}
       else
-        # Something is in flight again; its completion re-checks the waiters.
         {:noreply, state}
       end
     else
@@ -580,30 +924,21 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp drain_while_caught_up(state) do
-    before = state.read_seq
-    state = state |> fill() |> start_jobs()
+  defp quiet?(state) do
+    state.recovered? and state.claimed == 0 and map_size(state.running) == 0 and
+      map_size(state.packing) == 0 and :queue.is_empty(state.runnable)
+  end
 
-    cond do
-      not idle?(state) -> state
-      state.read_seq == before -> state
-      true -> drain_while_caught_up(state)
+  defp idle?(state), do: quiet?(state) and state.buffered == 0 and not due_now?(state)
+
+  # A store that cannot answer must not hang `tick/1` callers forever.
+  defp due_now?(state) do
+    case Deliveries.next_due_at(state.instance, state.floor) do
+      {:ok, at} when is_integer(at) -> at <= now_ms()
+      _ -> false
     end
   end
 
-  defp idle?(state) do
-    map_size(state.running) == 0 and :queue.is_empty(state.runnable) and
-      :gb_sets.is_empty(state.pending) and :queue.is_empty(state.staged) and
-      map_size(state.packing) == 0
-  end
-
-  # ── scheduling ────────────────────────────────────────────────────────────
-
-  defp schedule(state) do
-    Process.send_after(self(), :poll, state.config.dispatch.poll_ms)
-    state
-  end
-
-  defp sleep(delay, nil), do: Process.sleep(delay)
-  defp sleep(delay, cap), do: Process.sleep(min(delay, cap))
+  defp now_ms, do: System.system_time(:millisecond)
+  defp mono_ms, do: System.monotonic_time(:millisecond)
 end

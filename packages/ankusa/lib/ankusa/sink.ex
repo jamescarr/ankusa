@@ -6,6 +6,14 @@ defmodule Ankusa.Sink do
 
   Delivery is at-least-once. Return `:ok` on success; `{:error, reason}` triggers
   the source's `Ankusa.RetryPolicy`.
+
+  Deliveries are **not ordered**: hooks for one sink may be delivered in any
+  order, and a retry runs after whatever is due before it. A Kafka partition key
+  or an AMQP routing key only keeps the order hooks were *published* in, so it
+  does not restore one. A consumer that needs order has to rebuild it from data
+  it receives (the provider's own event timestamp or sequence number in the
+  body; `received_at` is on every message, but ties are possible within a
+  millisecond) and tolerate redelivery.
   """
 
   alias Ankusa.Envelope
@@ -22,25 +30,6 @@ defmodule Ankusa.Sink do
         }
 
   @callback deliver(Envelope.t(), ctx(), opts :: keyword()) :: :ok | {:error, term()}
-
-  @doc """
-  The ordering scope for this delivery, or `nil` for "no constraint".
-
-  Deliveries to the same sink with an equal `ordering_key/2` are **never in
-  flight at the same time**, and they run one at a time, in the order dispatch
-  read them from the log. Different keys run concurrently, which is what lets
-  dispatch fan out without giving up per-key ordering. `nil` opts the delivery
-  out of ordering entirely.
-
-  `wal.type: none` publishes inside the request and so imposes no ordering at
-  all — the destination's own keying is the only ordering in that mode.
-
-  A sink's ordering key must be at least as narrow as the ordering its
-  destination actually guarantees — a Kafka topic partition key, an AMQP
-  routing key, a downstream row id. Claiming a wider scope than the key
-  guarantees (nothing) is a correctness bug, not a perf knob.
-  """
-  @callback ordering_key(Envelope.t(), opts :: keyword()) :: term() | nil
 
   @doc """
   The largest body this sink sends inline, or `nil` if it never uses the claim
@@ -78,7 +67,7 @@ defmodule Ankusa.Sink do
               opts :: keyword()
             ) :: Ankusa.Sink.Description.t()
 
-  @optional_callbacks ordering_key: 2, inline_max_bytes: 1, durable?: 1, describe: 2
+  @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
 
   @doc """
   Resolve `c:describe/2` for `mod`; `nil` for a sink that doesn't implement it.
@@ -100,25 +89,6 @@ defmodule Ankusa.Sink do
     Code.ensure_loaded(mod)
 
     if function_exported?(mod, :inline_max_bytes, 1), do: mod.inline_max_bytes(opts), else: nil
-  end
-
-  @doc """
-  Resolve the ordering key for `mod` with `opts`.
-
-  Sinks that don't implement `ordering_key/2` get the conservative default
-  `{tenant_id, source_id}`: a sink that has not reasoned about its own ordering
-  guarantees gets serialization per source rather than silently interleaved
-  deliveries.
-  """
-  @spec ordering_key(module(), Envelope.t(), keyword()) :: term() | nil
-  def ordering_key(mod, env, opts) do
-    Code.ensure_loaded(mod)
-
-    if function_exported?(mod, :ordering_key, 2) do
-      mod.ordering_key(env, opts)
-    else
-      {env.tenant_id, env.source_id}
-    end
   end
 
   @doc """

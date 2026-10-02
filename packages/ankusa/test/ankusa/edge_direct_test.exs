@@ -128,15 +128,13 @@ defmodule Ankusa.Edge.DirectTest do
              )
   end
 
-  test "nothing is written to this node: no WAL process, no wal directory" do
+  test "nothing is queued on this node: no queue writer, no stored hook" do
     config = start_direct([{CaptureSink, [to: self(), outcome: :ok]}])
 
     assert route(config, "demo", "{}").status == 201
 
-    assert GenServer.whereis(Ankusa.via(config.instance, :wal)) == nil
-
-    wal_dir = Path.join([config.data_dir, to_string(config.instance), "wal"])
-    refute File.exists?(wal_dir)
+    assert Ankusa.whereis(config.instance, :queue_writer) == nil
+    assert Ankusa.Queue.hooks(config.instance, 0, 10) == {:ok, []}
   end
 
   test "a body over a sink's inline_max_bytes is checked in once, and the ctx carries the claim" do

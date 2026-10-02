@@ -6,7 +6,7 @@ defmodule Ankusa.Admin.Router do
 
   It exists so operating Ankusa does not require an Elixir shell. Everything
   here had an IEx-only affordance before (`Ankusa.Dispatch.replay/2`,
-  `Ankusa.Edge.Quarantine.recent/1`, `:sys.get_state/1`-style poking); this is
+  `Ankusa.Edge.Quarantine.recent/2`, `:sys.get_state/1`-style poking); this is
   the same surface over HTTP.
 
   ## No authentication, by design
@@ -23,10 +23,10 @@ defmodule Ankusa.Admin.Router do
 
   A route that needs a role this node does not run returns
   `409 role_not_enabled` rather than an empty success: the DLQ is the dispatch
-  node's disk, the quarantine list is the edge node's memory, so a wrong-node
+  node's store, the quarantine list is the edge node's, so a wrong-node
   answer must be distinguishable from "nothing there". `GET /v1/wal` is the
-  same kind of answer: the WAL stats describe this node's own log, and under
-  `wal.type: none` there is no log to describe (`409 wal_disabled`).
+  same kind of answer: it describes this node's own store, and under
+  `wal.type: none` there is no queue to describe (`409 wal_disabled`).
   Aggregating across nodes is the operator's job (scrape every admin port).
   """
 
@@ -160,24 +160,17 @@ defmodule Ankusa.Admin.Router do
     with {:ok, source_id} <- string_param(params, "source_id"),
          {:ok, since} <- int_param(params, "since", nil),
          {:ok, limit} <- int_param(params, "limit", @default_limit) do
-      entries =
-        conn
-        |> config()
-        |> Ankusa.Dispatch.DLQ.entries()
-        |> Enum.filter(&matches?(&1, source_id, since))
-        # Newest first. The file is append-ordered, so the index breaks ties
-        # between entries dead-lettered in the same millisecond — an operator
-        # paging the DLQ needs a stable order, and `at` alone isn't one.
-        |> Enum.with_index()
-        |> Enum.sort_by(fn {%{at: at}, index} -> {at, index} end, :desc)
-        |> Enum.map(&elem(&1, 0))
+      case Ankusa.Queue.dead(instance(conn),
+             source_id: source_id,
+             since: since,
+             limit: clamp_limit(limit)
+           ) do
+        {:ok, %{total: total, entries: entries}} ->
+          send_json(conn, 200, %{total: total, entries: Enum.map(entries, &dlq_entry/1)})
 
-      limited = Enum.take(entries, clamp_limit(limit))
-
-      send_json(conn, 200, %{
-        total: length(entries),
-        entries: Enum.map(limited, &dlq_entry/1)
-      })
+        {:error, _reason} ->
+          send_json(conn, 503, %{error: "store_unavailable"})
+      end
     else
       {:error, field} -> invalid_filter(conn, field)
     end
@@ -195,14 +188,13 @@ defmodule Ankusa.Admin.Router do
     params = Plug.Conn.fetch_query_params(conn).query_params
 
     with {:ok, limit} <- int_param(params, "limit", @default_limit) do
-      entries =
-        conn
-        |> instance()
-        |> Ankusa.Edge.Quarantine.recent()
-        |> Enum.take(clamp_limit(limit))
-        |> Enum.map(&quarantine_entry/1)
+      case Ankusa.Edge.Quarantine.recent(instance(conn), clamp_limit(limit)) do
+        {:ok, entries} ->
+          send_json(conn, 200, %{entries: Enum.map(entries, &quarantine_entry/1)})
 
-      send_json(conn, 200, %{entries: entries})
+        {:error, _reason} ->
+          send_json(conn, 503, %{error: "store_unavailable"})
+      end
     else
       {:error, field} -> invalid_filter(conn, field)
     end
@@ -442,8 +434,10 @@ defmodule Ankusa.Admin.Router do
         |> put_present(:id, id)
         |> put_present(:since, since)
 
-      replayed = Ankusa.Dispatch.replay(instance(conn), filter)
-      send_json(conn, 200, %{replayed: replayed})
+      case Ankusa.Dispatch.replay(instance(conn), filter) do
+        {:ok, replayed} -> send_json(conn, 200, %{replayed: replayed})
+        {:error, _reason} -> send_json(conn, 503, %{error: "store_unavailable"})
+      end
     else
       {:error, field} -> invalid_filter(conn, field)
     end
@@ -461,10 +455,6 @@ defmodule Ankusa.Admin.Router do
   defp put_present(filter, _key, nil), do: filter
   defp put_present(filter, key, value), do: Map.put(filter, key, value)
 
-  defp matches?(%{envelope: env, at: at}, source_id, since) do
-    (is_nil(source_id) or env.source_id == source_id) and (is_nil(since) or at >= since)
-  end
-
   # Bodies are never returned: an operator triaging the DLQ wants to know what
   # failed and why, and the payloads in there are the customer's.
   defp dlq_entry(%{envelope: env, reason: reason, at: at}) do
@@ -477,7 +467,7 @@ defmodule Ankusa.Admin.Router do
       dead_lettered_at: at,
       size: env.size,
       content_type: env.content_type,
-      reason: inspect(reason)
+      reason: reason
     }
   end
 
@@ -526,11 +516,14 @@ defmodule Ankusa.Admin.Router do
 
   defp clamp_limit(limit), do: limit |> max(0) |> min(@max_limit)
 
-  # A `:claim_check`-only node with the admin API on runs no WAL process, and
-  # the WAL is node-local anyway: a missing or unresponsive log is `%{}`, not a
+  # A `:claim_check`-only node with the admin API on runs no store, and the
+  # store is node-local anyway: a missing or unreadable one is `%{}`, not a
   # 500.
   defp safe_stats(instance) do
-    Ankusa.WAL.stats(instance)
+    case Ankusa.Queue.stats(instance) do
+      {:ok, stats} -> stats
+      {:error, _reason} -> %{}
+    end
   rescue
     _ -> %{}
   catch

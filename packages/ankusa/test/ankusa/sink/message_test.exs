@@ -7,7 +7,7 @@ defmodule Ankusa.Sink.MessageTest do
 
   setup do
     instance = :"msg_#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{instance}")
+    dir = Ankusa.TestHelpers.unique_data_dir(instance)
     Ankusa.put_config(Ankusa.Config.new(instance: instance, data_dir: dir))
     on_exit(fn -> File.rm_rf(dir) end)
     %{ctx: %{instance: instance, source_id: "src", tenant_id: "t1", attempt: 1}}

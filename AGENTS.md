@@ -1,14 +1,14 @@
 # Agent notes
 
 Ankusa is a self-hosted webhook receiver (Elixir/OTP): write every hook to a
-durable WAL before answering `2xx`, then dispatch it to HTTP/RabbitMQ/Kafka/NATS
-sinks with retries, DLQ, and replay. Full pipeline and guarantees:
-[`docs/architecture.md`](docs/architecture.md).
+durable local store before answering `2xx`, then dispatch it to
+HTTP/RabbitMQ/Kafka/NATS sinks with retries, DLQ, and replay. Full pipeline and
+guarantees: [`docs/architecture.md`](docs/architecture.md).
 
 ```mermaid
 flowchart LR
     P[Provider] --> E[Edge: Router/Ingest]
-    E --> B[Batcher] --> W[(WAL)]
+    E --> B[Batcher] --> W[(Store)]
     W --> C[Compactor] --> S[(Object store)]
     W --> D[Dispatch] --> SK[Sinks/DLQ]
 ```
@@ -17,7 +17,7 @@ flowchart LR
 
 | Path | What |
 | --- | --- |
-| `packages/ankusa` | Core Mix project: edge/WAL/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `cidr`, `req`, `aws_signature`, `telemetry_metrics`/`telemetry_metrics_prometheus_core`, `nebulex`/`nebulex_local`, `async_api_spex` only). |
+| `packages/ankusa` | Core Mix project: edge/store/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `cidr`, `req`, `aws_signature`, `rocksdb`, `telemetry_metrics`/`telemetry_metrics_prometheus_core`, `nebulex`/`nebulex_local`, `async_api_spex` only). |
 | `packages/ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats` | One sink adapter each (`Sink.RabbitMQ`/`Kafka`/`NATS`), path-depend on `ankusa` + one broker client (`amqp`/`brod`/`gnat`). Own `docker-compose.yml` for local broker infra. |
 | `packages/ankusa_redis` | Redis adapters: the route store (`Ankusa.Routes.Store.Redis` — definitions in Redis, shared by every edge node) and the pub/sub sink (`Ankusa.Sink.Redis`). Path-depends on `ankusa` + one client (`redix`). Own `docker-compose.yml` (Redis on `:6399`). |
 | `packages/async_api_spex` | Generic AsyncAPI 3.0 library, no Ankusa code (structs, `use AsyncApiSpex.Schema`/`Message`, validator, `AsyncApiSpex.Plug.RenderSpec`, `mix async_api_spex.gen`). Core depends on it for `Ankusa.AsyncApi`; every project that path-depends on core and builds in `:prod` (the adapters, `ankusa_server`, the examples) pins it by path with `override: true`. Publish it to Hex before core. |
@@ -37,9 +37,9 @@ Why the package split (and when a new adapter earns its own package):
 | Stage | Modules |
 | --- | --- |
 | Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/quarantine.ex`, `edge/route_guard.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,none,schemes}.ex` |
-| WAL | `wal.ex`, `wal/disk_log.ex`, `durable_log.ex` |
-| Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `storage/index.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex` |
-| Dispatch (sinks, retries, DLQ) | `dispatch.ex`, `dispatch/pipeline.ex`, `dispatch/dlq.ex`, `sink.ex`, `sink/{log,http,message,description}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
+| Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `store.ex`, `store/{keys,migrate}.ex`, `fsync.ex` |
+| Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex` |
+| Dispatch (sinks, retries, DLQ) | `dispatch.ex`, `dispatch/pipeline.ex`, `sink.ex`, `sink/{log,http,message,description}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
 | Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,sweeper}.ex` |
 | Route management | `routes.ex`, `routes/{route,matcher,snapshot,cache,router,store}.ex`, `routes/store/ets.ex`, `net.ex`, `net/client_ip.ex` |
 | Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex`, `source.ex`, `source_store.ex`, `lifecycle.ex`, `async_api.ex` + `async_api/schemas.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex`, `ulid.ex`, `uuid_v7.ex` |
@@ -56,7 +56,7 @@ Why the package split (and when a new adapter earns its own package):
 | [`deployment.md`](docs/deployment.md) | roles, the container, fleets |
 | [`architecture.md`](docs/architecture.md) | the guarantees, the request path |
 | [`delivery.md`](docs/delivery.md) | sinks, retries, DLQ, quarantine |
-| [`storage.md`](docs/storage.md) | the log and object stores |
+| [`storage.md`](docs/storage.md) | the node's store and the object stores |
 | [`claim-check.md`](docs/claim-check.md) | large payloads to queue workers |
 | [`multi-tenancy.md`](docs/multi-tenancy.md) | catch URLs per customer |
 | [`integrations.md`](docs/integrations.md) | Oban, Celery, queues |

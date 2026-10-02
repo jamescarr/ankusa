@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   brokers, topic, and record key to the AsyncAPI document the admin API serves.
   Credentials (`:sasl`) are never part of it.
 
+### Removed
+
+- The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:
+  deliveries are unordered. The record key still decides the partition, so
+  Kafka's own per-partition ordering is unchanged. Requires the matching
+  `ankusa` core.
+
 ## [0.3.0] - 2026-10-01
 
 No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other packages in this release.
@@ -36,7 +43,7 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 
 ### Added
 
-- `c:Ankusa.Sink.ordering_key/2`, implemented by this sink as the record key,
+- Ankusa.Sink.ordering_key/2, implemented by this sink as the record key,
   which is exactly the partition (and so the ordering) scope. Dispatch now
   serializes deliveries sharing a key and runs different keys concurrently.
   "Per-key ordering" is stated to the pipeline instead of assumed.
@@ -48,7 +55,7 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - `:inline_max_bytes` defaults to 64 KiB (was 8 KiB), read from
   `Ankusa.Sink.Message.inline_max_bytes/1`.
 - Depends on `ankusa` `~> 0.2`: core 0.1 has neither
-  `Ankusa.Sink.Message.inline_max_bytes/1` nor `c:Ankusa.Sink.ordering_key/2`.
+  `Ankusa.Sink.Message.inline_max_bytes/1` nor Ankusa.Sink.ordering_key/2.
 
 ## [0.1.0] - 2026-09-23
 

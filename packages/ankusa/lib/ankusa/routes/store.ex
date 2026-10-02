@@ -2,7 +2,7 @@ defmodule Ankusa.Routes.Store do
   @moduledoc """
   Where route definitions live. This module is both the **behaviour** every
   store implements and the instance-scoped **facade** the context calls, the
-  same split as `Ankusa.WAL` and `Ankusa.SourceStore`: the facade resolves
+  same split as `Ankusa.SourceStore`: the facade resolves
   `config.routes.store`'s `{module, opts}` and delegates.
 
   ## Two stores

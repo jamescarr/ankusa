@@ -24,14 +24,42 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   CloudEvents 1.0 event, `io.ankusa.source.{created,updated,deleted}` or
   `io.ankusa.route.{created,updated,deleted}`, whenever `Ankusa.SourceStore.put/5`
   or `delete/3` or `Ankusa.Routes.create/2`, `replace/3`, `update/3`, or
-  `delete/2` changes something. Events are committed to the WAL as the reserved
-  source `ankusa:lifecycle` and delivered by dispatch like a hook (under
-  `wal: :none`, published in the call). `[:ankusa, :lifecycle, :emitted]` and
+  `delete/2` changes something. Events never touch the store: a supervised
+  in-memory publisher (`Ankusa.Lifecycle.Publisher`) delivers each one to every
+  lifecycle sink independently, retrying with `dispatch.retry`, off the caller's
+  path. When its queue is full (10,000 pending sink deliveries), when retries run
+  out, or when it isn't running, the event is dropped and counted; pending
+  events are lost on restart and are not ordered. A lifecycle failure never
+  fails the change. `[:ankusa, :lifecycle, :delivered]` and
   `[:ankusa, :lifecycle, :dropped]` telemetry events, and the
-  `ankusa_lifecycle_emitted_total` / `ankusa_lifecycle_dropped_total` metrics.
-- `Ankusa.SourceStore.sinks/2`: the sinks a delivered hook of a source id goes
-  to. Dispatch (`Ankusa.Dispatch.Pipeline`, `Ankusa.Dispatch.replay/2`)
-  resolves sinks through it; ingest still uses `fetch/2`.
+  `ankusa_lifecycle_delivered_total` / `ankusa_lifecycle_dropped_total` metrics.
+- `Ankusa.Store`: one RocksDB database per instance at
+  `<data_dir>/<instance>/store` (Hex `rocksdb`, erlang-rocksdb), holding the
+  hooks, one delivery row per hook and sink, the quarantine pen, API-managed
+  sources, rate-limit overrides, the segment catalogue, and the migration
+  markers. It replaces `wal/ankusa.wal` (and its `.cursors`/`.truncated`
+  sidecars), `dlq/dlq.log`, `quarantine/quarantine.log`, `segments/index.log`,
+  `sources.json`, and `rate_limits.json`. Column families: `default`, `hooks`,
+  `deliveries`, `index`, `archive`, `quarantine`.
+- `Ankusa.Queue` (public): `enqueue/2` commits a batch of hooks with one synced
+  store write, `hooks/3` reads them back, `stats/1` reports the store, `dead/2`
+  lists the dead rows, and `validate_config!/1` / `label/1` replace the old WAL
+  adapter's. `Ankusa.Queue.Writer` is the only seq assigner: one group commit is
+  one synced batch holding each hook, one pending delivery row and due key per
+  sink of its source (bound by sink index and module at ack), an archive
+  obligation while the `storage` role runs, and the seq marker. A failed commit
+  acks nothing but may consume seqs, so seqs are strictly increasing and never
+  reused (gaps are allowed). A hook with no obligations is acked with a seq but
+  not stored.
+- `Ankusa.Edge.Quarantine.recent/2` reads the pen from the store, newest first;
+  the pen survives a restart (the old 200-entry in-memory list is gone).
+- An import of a 0.3 data dir on the first boot of a new store:
+  `sources.json`, `rate_limits.json`, `quarantine/`, `wal/`, `dlq/`, and
+  `segments/index.log` are read in that order, marked in the store, and then
+  renamed `<name>.migrated-<unix seconds>` (never deleted — renaming them back
+  is the rollback). Imported dead letters replay to the source's current sinks,
+  and the next seq is past everything imported. Reading is chunked, so memory
+  stays bounded at any file size.
 
 ### Changed
 
@@ -39,22 +67,93 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   map and builds the redacted source view itself (the admin API's source
   endpoints and the lifecycle events share it), where it used to redact a map
   the admin router had built.
+- **Breaking: the WAL, DLQ, quarantine and segment-index files, and the
+  `sources.json` / `rate_limits.json` state files, are gone.** One RocksDB store
+  per instance owns them all; a 0.3 data dir is imported on first boot (above).
+  The data volume now holds `store/`, segments at
+  `segments/seg/<first_seq>-<last_seq>.seg` with a new sibling
+  `seg/<first_seq>-<last_seq>.idx` per segment, and `claims/...` claim packs.
+- **Breaking: `wal: {Ankusa.WAL.DiskLog, _}` raises** `ArgumentError` with the
+  hint to use `wal: :disk` (the RocksDB store) or `wal: :none`. The key itself
+  is unchanged: `wal: :disk | :none` in core, `wal.type: disk | none` in YAML.
+- **Breaking: `Ankusa.Dispatch.replay/2` returns `{:ok, n}`** — the number of
+  rows moved back to pending — and is asynchronous: it moves the rows and the
+  pipeline delivers them. A replayed row leaves the DLQ, where the old replay
+  left the entry in place. It needs the `dispatch` role.
+- **Breaking: `GET /v1/wal` reports the store.** The body is `next_seq`
+  (exact) plus `hooks` and `deliveries` (RocksDB key estimates) and
+  `disk_bytes`; `wal` is `{}` when the store is unreachable, and it is still
+  `409 wal_disabled` under `wal.type: none`. `503 store_unavailable` is added to
+  `GET /v1/dlq`, `POST /v1/dlq/replay`, `GET /v1/quarantine`, and the
+  rate-limit routes.
+- **Breaking for embedders: core compiles a NIF.** Building `rocksdb` from
+  source needs cmake >= 3.12, a C++20 compiler, and zstd + OpenSSL development
+  headers; on Alpine, `linux-headers`, and Ubuntu CI runners need `libzstd-dev`.
+- Dispatch is a scheduler over delivery rows. A commit wakes it; otherwise it
+  sleeps until the earliest due row. A retry is a row due at `now + backoff`,
+  so it frees its concurrency slot instead of sleeping inside a task. The
+  window is `dispatch.max_inflight` claimed rows and
+  `dispatch.max_inflight_bytes` (the sum of their stored hook sizes);
+  `dispatch.batch` is rows claimed per store scan.
+- A row's sink binding is `(index, module)` at ack, but its opts always come
+  from the source as it is now, so a config fix applies to the backlog and no
+  fun or secret is ever persisted. A reordered source falls back to the unique
+  sink with the row's module; otherwise the row is dead-lettered with
+  `{:sink_gone, index, module}`, and a deleted source with
+  `{:source_gone, source_id}`.
+
+### Removed
+
+- **Breaking: the Ankusa.Sink.ordering_key/2 callback, Sink.ordering_key/3, and
+  the http sink's `ordered` option.** Deliveries are unordered, and a broker
+  key (a Kafka partition key, an AMQP routing key) only keeps the order hooks
+  were published in. A consumer that needs order has to rebuild it from data it
+  receives, such as the provider's event timestamp or sequence number in the
+  body, and tolerate redelivery.
+- **Breaking: `dispatch.poll_ms`.** Dispatch is woken by a commit or by the next
+  due row; the key is now an unknown-key error.
+- Ankusa.WAL, Ankusa.WAL.DiskLog, Ankusa.DurableLog, Ankusa.Storage.Index,
+  Ankusa.Dispatch.DLQ.
 
 ### Fixed
 
-- **A full disk no longer crash-loops the WAL.** A failed disk write in
-  `Ankusa.WAL.DiskLog` now surfaces as `{:error, reason}` instead of a crashed
-  process: a failed `append/2` acks nothing and consumes no seqs — the batcher's
-  existing `503 store_unavailable` mapping is unchanged — and a failed
-  `put_cursor/3`/`truncate_through/2` leaves the cursor/floor where it was. A
-  physical rewrite that cannot copy is skipped, not fatal. Dispatch and the
-  compactor retry a failed cursor write on their next tick, and ingest resumes
-  on its own once space frees. The `Ankusa.WAL` adapter contract documents the
-  new error returns. Not covered yet: the compactor's segment and index writes
-  still raise on a full disk, so on a node running the `storage` role with the
-  local blob store on the same volume, the compactor can still crash-loop.
-- A WAL rewrite no longer reuses a `.compact` file left by a crash mid-rewrite,
-  whose stale tail could otherwise follow the copied frames into the new log.
+- **A full disk recovers by itself.** A commit that cannot write answers `503`
+  `store_unavailable` and acks nothing; the Writer asks the store to close and
+  reopen (at most once every 5 s), which clears RocksDB's latched write error,
+  so ingest resumes once space frees.
+- **`kill -9` loses nothing acked.** Every commit is one synced store write; the
+  loss suite SIGKILLs a separate BEAM and every acked hook is read back.
+- **Corruption is reported, never silently truncated or shortened.**
+  `paranoid_checks` plus `wal_recovery_mode: tolerate_corrupted_tail_records`
+  drop a torn tail (the last, never-acked write) and refuse to open on damage
+  before it (`{:store_open_failed, path, reason}`). Point reads report checksum
+  failures; a scan believes only a result that reaches its end-of-range
+  sentinel. The Writer, the persistent source store, and the rate limiter refuse
+  to start when they cannot read their state, rather than treating an unreadable
+  store as empty.
+- **One damaged frame in a 0.3 WAL no longer drops the acked frames after it.**
+  A frame that fails its CRC with a valid frame after it refuses to start
+  (`{:damaged_legacy_wal, path, byte, later_byte}`); only a torn tail is
+  skipped. An unreadable `.cursors` or `.truncated` sidecar likewise refuses to
+  start (`{:corrupt_legacy_sidecar, path}`).
+- **Reclamation no longer needs the archive.** A hook is deleted once its last
+  obligation clears — every delivery row and, only if `storage` ran at ack
+  time, the archive obligation. So a node without the `storage` role reclaims on
+  delivery, and the compactor can lag or be off without blocking delivery.
+- **A retry no longer holds a delivery slot**, so a failing sink cannot starve
+  other sinks or sources.
+- **The archive compactor no longer crash-loops.** A failed blob write ends the
+  tick with an error log; nothing crashes, and the same hooks are rewritten next
+  tick.
+- **LocalFS blob writes are durable.** `Ankusa.BlobStore.LocalFS` writes a
+  temp file, fsyncs it, renames it, and fsyncs the directory on every `put`; a
+  failed write returns `{:error, reason}` instead of raising. Claim packs,
+  segments, and index objects all go through it.
+- **The `scheme` label on verification metrics is the scheme, from the first
+  request.** Ingest asked a verifier for its scheme name without loading the
+  module first, so until something else had loaded it the label (and the
+  `scheme` in telemetry metadata) was the module name instead, for example
+  `Ankusa.Verifier.Hmac` where `stripe` was meant.
 
 ## [0.3.0] - 2026-10-01
 
@@ -65,7 +164,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   once every sink has confirmed; a refusal is a `503` with `Retry-After` and the
   provider retries. No WAL, no batcher, no dispatch pipeline, no compactor, no
   DLQ: the node runs only the `edge` role (the WAL's reader roles are dropped
-  from `config.roles` rather than rejected). `Ankusa.WAL.validate_config!/1`
+  from `config.roles` rather than rejected). Ankusa.WAL.validate_config!/1
   refuses a `wal: :none` config in which a statically configured source has no
   sink whose `:ok` means durable — sources created at runtime through the admin
   API are not checked.
@@ -73,8 +172,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   to `true`, and `Ankusa.Sink.Log` answers `false`. `Ankusa.Sink.safe_deliver/4`
   (the raise/throw/exit-to-`{:error, reason}` wrapper hidden inside the dispatch
   pipeline) is now public, so both ack paths deliver through the same function.
-- `GET /v1/wal` on the admin API: this node's `Ankusa.WAL.stats/1`, or
-  `409 wal_disabled` under `wal: :none`. `Ankusa.WAL.label/1` names the
+- `GET /v1/wal` on the admin API: this node's Ankusa.WAL.stats/1, or
+  `409 wal_disabled` under `wal: :none`. Ankusa.WAL.label/1 names the
   configured adapter for boot banners and `check-config`.
 - Per-tenant ingest rate limits (`Ankusa.Edge.RateLimiter`, `rate_limits` in the
   config: `%{rate: hooks_per_second, burst: hooks}` per tenant, plus a
@@ -288,7 +387,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   provider. The `shopify` and `slack` `verify.type` values are new.
 - `scheme_name/1` optional callback on `Ankusa.Verifier`, a `scheme` field on
   `Ankusa.Verification`, and a `scheme` label on `ankusa.verify.failures.total`.
-- `c:Ankusa.Sink.ordering_key/2`: optional sink callback naming the ordering
+- Ankusa.Sink.ordering_key/2, an optional sink callback naming the ordering
   scope of a delivery. Deliveries to the same sink with an equal key run one at
   a time in `seq` order, different keys run concurrently. `Sink.Http` takes
   `ordered: true` to opt in (off by default); `Sink.Kafka` uses its record key,
@@ -340,7 +439,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `check_in/4`.
 
 - Dispatch is **concurrent**: up to `dispatch.concurrency` (default `32`) sink
-  deliveries run at once, serialized per `c:Ankusa.Sink.ordering_key/2`, and the
+  deliveries run at once, serialized per Ankusa.Sink.ordering_key/2, and the
   durable cursor is a watermark that never advances past an unfinished
   envelope. A slow or retrying sink no longer blocks the whole instance, and
   `dispatch.max_inflight` (4096) / `dispatch.max_inflight_bytes` (128 MiB) bound
@@ -353,7 +452,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   only add contention. `max_queue` bounds buffered *and* in-flight records. A
   failed WAL append now replies `{:error, :store_unavailable}` (→ `503`) to
   every caller in the batch instead of crashing the batcher.
-- `WAL.DiskLog` truncation is logical first: `truncate_through/2` records a
+- WAL.DiskLog truncation is logical first: `truncate_through/2` records a
   durable seq floor (`<name>.truncated`) and drops index entries, and only
   rewrites the file once the dead prefix passes `:rewrite_min_bytes` (default
   64 MiB) and is as large as the live suffix. `.cursors`, `.dedup`, and
@@ -376,7 +475,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Fixed
 
-- `WAL.DiskLog`: a restart after a full truncation resumed at `seq` 1 while the
+- WAL.DiskLog: a restart after a full truncation resumed at `seq` 1 while the
   persisted cursors were far ahead, so every new hook was skipped by dispatch
   and then deleted by the next truncation. Seq allocation now continues from
   the truncation floor, the persisted cursors, and the last replayed frame.
@@ -384,7 +483,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   advance past a dead letter (or a compaction cursor past index rows) that a
   power loss then dropped, leaving the hook in neither place.
 - `Ankusa.Dispatch` no longer copies the whole pipeline state into every
-  delivery task, and `WAL.DiskLog` no longer scans its whole index per read.
+  delivery task, and WAL.DiskLog no longer scans its whole index per read.
   Together those two were the dispatch throughput ceiling (see
   [`docs/testing.md`](docs/testing.md#core-bench--benchcore_benchexs)).
 
@@ -393,9 +492,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 ### Added
 
 - Core ingest pipeline: Bandit edge, group-commit batcher, durable WAL
-  (`Ankusa.WAL.DiskLog`), idempotent receiver, dispatch pipeline, segment
+  (Ankusa.WAL.DiskLog), idempotent receiver, dispatch pipeline, segment
   compactor.
-- Pluggable behaviours: `Ankusa.RouteResolver`, `Ankusa.WAL`,
+- Pluggable behaviours: `Ankusa.RouteResolver`, Ankusa.WAL,
   `Ankusa.Verifier`, `Ankusa.DedupKey`, `Ankusa.SourceStore`, `Ankusa.Sink`,
   `Ankusa.RetryPolicy`, `Ankusa.BlobStore`, `Ankusa.Codec`.
 - Verifiers: Standard Webhooks, Stripe, GitHub.

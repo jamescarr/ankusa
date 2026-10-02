@@ -20,10 +20,6 @@ defmodule Bench.Sink do
     :ets.insert(:bench_delivered, {env.id})
     :ok
   end
-
-  # Deliberately no `@impl`: baseline core has no `ordering_key/2` callback, so
-  # its absence-of-warning is what lets this one script run on both trees.
-  def ordering_key(_env, _opts), do: nil
 end
 
 Logger.configure(level: :warning)
@@ -66,7 +62,7 @@ config =
        }}
   )
 
-{:ok, _instance} = Ankusa.Instance.start_link(config)
+{:ok, instance_sup} = Ankusa.Instance.start_link(config)
 
 # ── ingest ──────────────────────────────────────────────────────────────────
 
@@ -174,6 +170,11 @@ drain_s           #{report.drain_s}
 end_to_end_per_s  #{report.end_to_end_per_s}
 missing           #{report.missing}
 """)
+
+# Close the store before the VM goes: one that exits (or halts) with a database
+# open can die inside the native teardown, and that crash would replace this
+# script's own exit status.
+Supervisor.stop(instance_sup)
 
 if drain_result == :timeout do
   IO.write(:stderr, "core_bench: timed out waiting for delivery (#{acked} acked)\n")

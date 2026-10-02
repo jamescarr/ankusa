@@ -1,7 +1,8 @@
 # One process, one host, no external services beyond the sinks themselves.
 #
 #   topology : edge + dispatch + storage in a single container
-#   WAL      : local disk (survives process crash and power loss on this host)
+#   wal.type : disk (the default) — the node's RocksDB store on local disk; it
+#              survives process crash and power loss on this host
 #   storage  : local filesystem
 #   secrets  : STRIPE_WHSEC, GITHUB_WEBHOOK_SECRET (injected via ${VAR})
 #   sink     : SINK_URL, an HTTP endpoint you own

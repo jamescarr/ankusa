@@ -184,7 +184,10 @@ defmodule Ankusa.AsyncApiTest do
       )
 
     channel = map["channels"] |> Map.values() |> Enum.find(&(&1["address"] == "ankusa.lifecycle"))
-    assert channel["description"] == "Ankusa lifecycle events (CloudEvents 1.0, structured)"
+
+    assert channel["description"] ==
+             "Ankusa lifecycle events (CloudEvents 1.0, structured), published from memory: " <>
+               "retried, not persisted, not ordered"
 
     assert %{"ankusa_lifecycle" => message} = channel["messages"]
     assert message["name"] == "ankusa:lifecycle"

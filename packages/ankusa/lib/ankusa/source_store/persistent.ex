@@ -6,15 +6,15 @@ defmodule Ankusa.SourceStore.Persistent do
   Seeds (`sources:` in the store opts, the same shape `Ankusa.SourceStore.Static`
   takes) are resolved at boot and are read-only: they never appear in
   `list_tenant/2` and cannot be written through `put/5`. Sources created or
-  updated through the admin API are kept in ETS and written to
-  `Ankusa.Config.path(config, "sources.json")`, so they survive a restart.
+  updated through the admin API are kept in ETS and written to this node's
+  `Ankusa.Store` (one key per source), so they survive a restart.
 
   ## Reads and writes
 
   Reads (`fetch/2`, `get/3`, `list_tenant/2`) go straight to a `:protected` ETS
   table, so they never serialize behind the GenServer. Writes go through the
   GenServer, which is the table's owner and the only process that may modify it,
-  and persist the whole file after each accepted change.
+  and persist the one changed key, synced, before replying.
 
   ## The decoder
 
@@ -33,10 +33,8 @@ defmodule Ankusa.SourceStore.Persistent do
 
   require Logger
 
-  alias Ankusa.{Config, Source}
-
-  @version 1
-  @filename "sources.json"
+  alias Ankusa.{Config, Source, Store}
+  alias Ankusa.Store.Keys
 
   @spec start_link(Config.t()) :: GenServer.on_start()
   def start_link(%Config{} = config) do
@@ -100,9 +98,14 @@ defmodule Ankusa.SourceStore.Persistent do
       :ets.insert(table, {{:source, source_id}, {nil, source}})
     end)
 
-    orphans = load_persisted(config, table, decoder)
+    case load_persisted(config.instance, table, decoder) do
+      :ok ->
+        {:ok, %{config: config, table: table, decoder: decoder}}
 
-    {:ok, %{config: config, table: table, decoder: decoder, orphans: orphans}}
+      # Booting without the persisted sources would 404 every hook for them.
+      {:error, reason} ->
+        {:stop, {:source_store_load_failed, reason}}
+    end
   end
 
   @impl true
@@ -144,9 +147,9 @@ defmodule Ankusa.SourceStore.Persistent do
   end
 
   defp apply_delete(state, tenant, name, source_id) do
-    entries = state.table |> all_stored() |> Enum.reject(&(&1.source_id == source_id))
+    ops = [{:delete, :default, Keys.source(tenant, name)}]
 
-    case persist(state, entries, source_id) do
+    case Store.write(state.config.instance, ops, sync: true) do
       :ok ->
         :ets.delete(state.table, {:source, source_id})
         :ets.delete(state.table, {:stored, tenant, name})
@@ -181,9 +184,9 @@ defmodule Ankusa.SourceStore.Persistent do
       {:ok, source_opts} ->
         entry = %{tenant: tenant, name: name, source_id: source_id, spec: spec}
         source = Source.new(source_id, Keyword.put(source_opts, :tenant_id, tenant))
-        entries = state.table |> all_stored() |> Enum.reject(&(&1.source_id == source_id))
+        ops = [{:put, :default, Keys.source(tenant, name), JSON.encode!(spec)}]
 
-        case persist(state, [entry | entries], source_id) do
+        case Store.write(state.config.instance, ops, sync: true) do
           :ok ->
             :ets.insert(state.table, [
               {{:source, source_id}, {entry, source}},
@@ -238,128 +241,67 @@ defmodule Ankusa.SourceStore.Persistent do
 
   # ── persistence ─────────────────────────────────────────────────────────────
 
-  # Loads the persisted entries into ETS and returns the raw parsed values it
-  # could not load (`orphans`): entries that no longer decode, malformed ones,
-  # and entries whose id collides with a configured seed. Those are kept in the
-  # GenServer state so a later write re-emits them verbatim instead of silently
-  # dropping them from the file.
-  defp load_persisted(config, table, decoder) do
-    path = Ankusa.Config.path(config, @filename)
+  # One key per source (`s:<tenant>\0<name>` -> the spec as JSON), written
+  # synced: a successful `PUT` answers "stored". A row that is rejected on boot
+  # (a seed collision, a spec the decoder no longer accepts) is skipped with a
+  # warning and stays in the store untouched, so rolling a config change back
+  # brings it straight back.
+  defp load_persisted(instance, table, decoder) do
+    %{lo: lo, hi: hi} = Keys.family(:sources)
 
-    with {:ok, body} <- File.read(path),
-         {:ok, %{"version" => @version, "sources" => entries}} when is_list(entries) <-
-           JSON.decode(body) do
-      Enum.flat_map(entries, &load_entry(&1, table, decoder))
-    else
-      {:error, :enoent} ->
-        []
+    result =
+      Store.fold(instance, :sources, {lo, hi}, :ok, fn key, value, :ok ->
+        load_entry(Keys.decode_source(key), value, table, decoder)
+        {:cont, :ok}
+      end)
 
-      _unreadable_or_bad_shape ->
-        quarantine(path)
-        []
+    case result do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp load_entry(%{"tenant" => tenant, "name" => name, "spec" => spec} = entry, table, decoder)
-       when is_binary(tenant) and is_binary(name) and is_map(spec) do
+  defp load_entry({tenant, name}, value, table, decoder) do
     source_id = source_id(tenant, name)
 
-    cond do
-      seed?(table, source_id) ->
+    case JSON.decode(value) do
+      {:ok, spec} when is_map(spec) ->
+        load_spec(tenant, name, source_id, spec, table, decoder)
+
+      _ ->
         Logger.warning(
-          "[ankusa] skipping persisted source #{source_id}: it is seeded from configuration"
-        )
-
-        [entry]
-
-      true ->
-        case decode(decoder, source_id, spec) do
-          {:ok, source_opts} ->
-            source = Source.new(source_id, Keyword.put(source_opts, :tenant_id, tenant))
-            stored = %{tenant: tenant, name: name, source_id: source_id, spec: spec}
-
-            :ets.insert(table, [
-              {{:source, source_id}, {stored, source}},
-              {{:stored, tenant, name}, stored}
-            ])
-
-            []
-
-          {:error, :invalid, message} ->
-            Logger.warning("[ankusa] skipping persisted source #{source_id}: #{message}")
-            [entry]
-        end
-    end
-  end
-
-  defp load_entry(entry, _table, _decoder) do
-    Logger.warning("[ankusa] skipping malformed persisted source entry: #{inspect(entry)}")
-    [entry]
-  end
-
-  defp quarantine(path) do
-    target = "#{path}.corrupt-#{System.system_time(:second)}"
-
-    case File.rename(path, target) do
-      :ok ->
-        Logger.error(
-          "[ankusa] #{path}: unreadable, unparseable, or wrong shape; moved to #{target}"
-        )
-
-      {:error, reason} ->
-        Logger.error(
-          "[ankusa] #{path}: unreadable, unparseable, or wrong shape; could not move it aside: " <>
-            inspect(reason)
+          "[ankusa] skipping persisted source #{source_id}: stored spec is not a JSON object"
         )
     end
   end
 
-  defp persist(state, entries, superseded_id) do
-    path = Ankusa.Config.path(state.config, @filename)
-    File.mkdir_p!(Path.dirname(path))
+  defp load_entry(nil, _value, _table, _decoder) do
+    Logger.warning("[ankusa] skipping a persisted source with a malformed key")
+  end
 
-    body =
-      JSON.encode!(%{
-        "version" => @version,
-        "sources" =>
-          (entries
-           |> Enum.sort_by(& &1.source_id)
-           |> Enum.map(&to_json_entry/1)) ++ drop_orphan(state.orphans, superseded_id)
-      })
+  defp load_spec(tenant, name, source_id, spec, table, decoder) do
+    if seed?(table, source_id) do
+      Logger.warning(
+        "[ankusa] skipping persisted source #{source_id}: it is seeded from configuration"
+      )
+    else
+      case decode(decoder, source_id, spec) do
+        {:ok, source_opts} ->
+          source = Source.new(source_id, Keyword.put(source_opts, :tenant_id, tenant))
+          stored = %{tenant: tenant, name: name, source_id: source_id, spec: spec}
 
-    tmp = path <> ".tmp.#{System.unique_integer([:positive])}"
+          :ets.insert(table, [
+            {{:source, source_id}, {stored, source}},
+            {{:stored, tenant, name}, stored}
+          ])
 
-    case File.write(tmp, body, [:sync]) do
-      :ok -> File.rename(tmp, path)
-      error -> error
+        {:error, :invalid, message} ->
+          Logger.warning("[ankusa] skipping persisted source #{source_id}: #{message}")
+      end
     end
   end
-
-  # An ETS stored entry (atom keys) becomes the persisted shape; anything else
-  # is an orphan kept exactly as it was parsed.
-  defp to_json_entry(%{tenant: tenant, name: name, spec: spec}) do
-    %{"tenant" => tenant, "name" => name, "spec" => spec}
-  end
-
-  defp to_json_entry(other), do: other
-
-  # The ETS entry supersedes any orphan that held the same id, so it is dropped
-  # from the snapshot. Malformed orphans have no id and are never targeted.
-  defp drop_orphan(orphans, superseded_id) do
-    Enum.reject(orphans, fn orphan -> orphan_id(orphan) == superseded_id end)
-  end
-
-  defp orphan_id(%{"tenant" => tenant, "name" => name})
-       when is_binary(tenant) and is_binary(name),
-       do: source_id(tenant, name)
-
-  defp orphan_id(_other), do: nil
 
   # ── ETS helpers ─────────────────────────────────────────────────────────────
-
-  defp all_stored(table) do
-    :ets.select(table, [{{{:stored, :_, :_}, :"$1"}, [], [:"$1"]}])
-  end
 
   defp lookup_stored(table, tenant, name) do
     case :ets.lookup(table, {:stored, tenant, name}) do

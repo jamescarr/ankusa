@@ -14,10 +14,39 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   sources configured right now. See `docs/asyncapi.md`.
 - A `lifecycle:` section (`lifecycle.sinks`, the same sink types as a
   source's). With it, creating, updating, or deleting a source through the
-  admin API, or a route through the route-management API, delivers a
-  CloudEvents 1.0 event (`io.ankusa.source.created`, …) to those sinks through
-  the WAL and dispatch. Absent, nothing changes. The source id
-  `ankusa:lifecycle` is reserved for them and refused in `sources:`.
+  admin API, or a route through the route-management API, publishes a
+  CloudEvents 1.0 event (`io.ankusa.source.created`, …) to those sinks from
+  memory, bypassing the store: retried with the dispatch retry policy, not
+  persisted. Absent, nothing changes. The source id `ankusa:lifecycle` is
+  reserved for them and refused in `sources:`.
+
+### Changed
+
+- **Breaking: `dispatch.poll_ms` and the http sink's `ordered` key are
+  removed**, and the loader now rejects either as an unknown key. Dispatch is
+  woken by a commit (or by the next due row) instead of polling, and deliveries
+  are unordered.
+- `wal.type: disk` is now the node's RocksDB store (still the default, and the
+  same key). The data volume holds `store/` (hooks, delivery rows, the
+  quarantine pen, API-managed sources, rate-limit overrides, the segment
+  catalogue), segments at `segments/seg/<first_seq>-<last_seq>.seg` with a new
+  sibling `.idx` per segment, and `claims/...`. It replaces the WAL, DLQ,
+  quarantine, and segment-index files and the `sources.json` /
+  `rate_limits.json` state files. `check-config` prints `wal=disk`. A 0.3 data
+  volume is imported on the first boot of a new store, each artifact renamed
+  `*.migrated-*` (never deleted; rename them back to roll back).
+- The image builds RocksDB from source: the build stage adds `cmake`,
+  `linux-headers`, `openssl-dev`, and `zstd-dev` on top of `build-base` and
+  `git`, and the build is cached in its own layer so it only reruns when a
+  lockfile changes. The runtime stage is unchanged.
+
+### Fixed
+
+- A node that cannot read its store refuses to start, instead of treating it as
+  empty. An unreadable 0.3 artifact also refuses the import: a damaged frame in
+  `wal/` with valid frames after it, or an unreadable `.cursors`/`.truncated`
+  sidecar, fails boot with a log line naming the file, and a store that will not
+  open logs and exits rather than booting empty.
 
 ## [0.3.0] - 2026-10-01
 

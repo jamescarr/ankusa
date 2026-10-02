@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:servers` now also takes one comma-separated string, as the YAML key
   documents.
 
+### Removed
+
+- The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:
+  deliveries are unordered. The subject still decides which stream order the
+  message joins, so NATS/JetStream's own per-subject ordering is unchanged.
+  Requires the matching `ankusa` core.
+
 ## [0.3.0] - 2026-10-01
 
 No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other packages in this release.
@@ -40,7 +47,7 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - `Ankusa.Sink.NATS`: publishes delivered hooks to a NATS JetStream subject
   on a stream the operator owns (the sink never creates one). Delivery is
   acknowledged by JetStream's publish ack, not by the write to the socket.
-- `c:Ankusa.Sink.ordering_key/2`, implemented by this sink as the subject:
+- Ankusa.Sink.ordering_key/2, implemented by this sink as the subject:
   the scope order is defined within ("the order the stream received it").
   Dispatch serializes deliveries sharing it and runs different subjects
   concurrently.

@@ -22,7 +22,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest]
-    I -->|WAL fsync, then 201| P
+    I -->|store fsync, then 201| P
     I -->|"produce, acks=all\nkey tenant/source"| K[("topic ankusa.events")]
     I -.->|"body > 8 KiB: check in"| S[(S3 / floci)]
 ```
@@ -105,13 +105,13 @@ Same contract as the RabbitMQ example, because it's the same message
 
 | Hop | Guarantee | Duplicates | Ordering |
 | --- | --- | --- | --- |
-| Provider → WAL | durable ack | yes: every accepted POST is stored and delivered again (at-least-once) | n/a |
-| WAL → Kafka | at-least-once, `acks=all` | yes, on a retried produce | per key, per dispatch node |
+| Provider → store | durable ack | yes: every accepted POST is stored and delivered again (at-least-once) | n/a |
+| store → Kafka | at-least-once, `acks=all` | yes, on a retried produce | none: dispatch is unordered, so a retry can be produced after a later hook; the record key still picks the partition |
 | Kafka → SQS | at-least-once (offset committed after SQS accepts) | absorbed within 5 minutes by the FIFO dedup id | per key (`max_in_flight: 1`, group = key) |
 | SQS → worker | at-least-once (visibility timeout) | yes, after 5 minutes | per group, while the worker processes each group in order |
 | **Consumer contract** | **idempotent on `id`** | | |
 
-The FIFO queue is what carries Kafka's per-key order into SQS: the record
+The FIFO queue is what carries Kafka's partition order into SQS: the record
 key becomes the `MessageGroupId`, and the envelope `id` becomes the
 `MessageDeduplicationId`. FIFO costs throughput (roughly 300 msg/s per queue,
 ~3,000 batched) and head-of-line blocking *within a group*: one slow source
@@ -157,8 +157,8 @@ Each proves one thing. They're worth running by hand at least once.
 1. **Bridge down**: `docker compose stop bridge`, then send a few hooks.
    Ingest keeps returning `201` (the ack never depended on the broker), and
    consumer-group lag grows in the Redpanda Console. `docker compose start
-   bridge` and the lag drains; the worker prints everything, in order per
-   source. *Proves the queue is a real buffer, not a synchronous hop.*
+   bridge` and the lag drains; the worker prints the backlog, group by group.
+   *Proves the queue is a real buffer, not a synchronous hop.*
 2. **Worker down**: `docker compose stop worker`, send hooks, and watch
    `ApproximateNumberOfMessages` on the main queue grow. Start the worker
    and it drains. *Proves SQS holds the backlog while the consumer is gone.*
