@@ -13,6 +13,7 @@ ENV MIX_ENV=prod
 
 WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa
+COPY packages/async_api_spex ./packages/async_api_spex
 COPY examples/oban-consumer/ingest_app ./examples/oban-consumer/ingest_app
 
 WORKDIR /repo/examples/oban-consumer/ingest_app

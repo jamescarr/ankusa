@@ -76,7 +76,9 @@ defmodule AnkusaRabbitmq.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      [{:ankusa, "~> 0.2"}]
+      # `~> 0.4`, not older: `describe/2` builds `Ankusa.Sink.Description`, which
+      # core has from 0.4.0, so Hex must never pair this with an older core.
+      [{:ankusa, "~> 0.4"}]
     end
   end
 end

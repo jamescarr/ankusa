@@ -67,11 +67,12 @@ defmodule AnkusaRedis.MixProject do
   # entries for the same app regardless of :only, so this has to be a
   # single conditional entry, not a duplicate-with-disjoint-:only pair.
   #
-  # The requirement is a compatibility fence, not a nicety: core 0.2.x calls the
+  # The requirement is a compatibility fence, not a nicety. Core 0.2.x calls the
   # store as `insert(instance, route)` and `replace(instance, route)`, while this
   # store implements the version-checked `insert/3` and `replace/3` that core has
-  # from the 0.3 line on (see `Ankusa.Routes.Store`). Against a 0.2.x core every
-  # route write would fail, so Hex must never pair them.
+  # from the 0.3 line on (see `Ankusa.Routes.Store`); and the sink's `describe/2`
+  # builds `Ankusa.Sink.Description`, which core has from 0.4.0. Against an older
+  # core this would fail, so Hex must never pair them.
   defp ankusa_deps do
     if Mix.env() in [:dev, :test] do
       [
@@ -82,7 +83,7 @@ defmodule AnkusaRedis.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      [{:ankusa, "~> 0.3"}]
+      [{:ankusa, "~> 0.4"}]
     end
   end
 end

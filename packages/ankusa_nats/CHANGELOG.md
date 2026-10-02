@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:servers` now also takes one comma-separated string, as the YAML key
   documents.
 
+### Changed
+
+- The Hex requirement on `ankusa` is `~> 0.4` (was `~> 0.2`): `describe/2`
+  needs `Ankusa.Sink.Description`, which core has from 0.4.0.
+
 ### Removed
 
 - The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:

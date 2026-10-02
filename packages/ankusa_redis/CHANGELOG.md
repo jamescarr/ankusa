@@ -14,6 +14,11 @@ follows [Semantic Versioning](https://semver.org/).
   server, database, and channel to the AsyncAPI document the admin API serves.
   Credentials in `:url` are never part of it.
 
+### Changed
+
+- The Hex requirement on `ankusa` is `~> 0.4` (was `~> 0.3`): `describe/2`
+  needs `Ankusa.Sink.Description`, which core has from 0.4.0.
+
 ### Removed
 
 - The sink no longer implements the removed Ankusa.Sink.ordering_key/2

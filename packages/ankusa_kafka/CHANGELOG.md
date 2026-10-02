@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   brokers, topic, and record key to the AsyncAPI document the admin API serves.
   Credentials (`:sasl`) are never part of it.
 
+### Changed
+
+- The Hex requirement on `ankusa` is `~> 0.4` (was `~> 0.2`): `describe/2`
+  needs `Ankusa.Sink.Description`, which core has from 0.4.0.
+
 ### Removed
 
 - The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:

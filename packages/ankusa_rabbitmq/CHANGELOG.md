@@ -15,6 +15,11 @@ follows [Semantic Versioning](https://semver.org/).
   API serves. Credentials in `:url` are never part of it.
 - `Ankusa.Sink.RabbitMQ.Connection.default_url/0`.
 
+### Changed
+
+- The Hex requirement on `ankusa` is `~> 0.4` (was `~> 0.2`): `describe/2`
+  needs `Ankusa.Sink.Description`, which core has from 0.4.0.
+
 ### Removed
 
 - The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:

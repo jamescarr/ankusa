@@ -10,6 +10,7 @@ RUN apk add --no-cache build-base cmake linux-headers openssl-dev zstd-dev && mi
 
 WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa
+COPY packages/async_api_spex ./packages/async_api_spex
 COPY packages/ankusa_kafka ./packages/ankusa_kafka
 COPY examples/kafka-sqs-consumer/ingest_app ./examples/kafka-sqs-consumer/ingest_app
 
