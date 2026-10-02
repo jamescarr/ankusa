@@ -6,6 +6,19 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Added
+
+- `GET /asyncapi.json` on the admin port: an AsyncAPI 3.0 document
+  (`application/asyncapi+json`) of the Kafka topics, RabbitMQ routing keys,
+  NATS subjects, and Redis channels this node publishes to, built from the
+  sources configured right now. See `docs/asyncapi.md`.
+- A `lifecycle:` section (`lifecycle.sinks`, the same sink types as a
+  source's). With it, creating, updating, or deleting a source through the
+  admin API, or a route through the route-management API, delivers a
+  CloudEvents 1.0 event (`io.ankusa.source.created`, …) to those sinks through
+  the WAL and dispatch. Absent, nothing changes. The source id
+  `ankusa:lifecycle` is reserved for them and refused in `sources:`.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

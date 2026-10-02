@@ -11,6 +11,35 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **An AsyncAPI 3.0 document of the channels an instance publishes to**, served
+  by the admin API at `GET /asyncapi.json` (`application/asyncapi+json`) and
+  built by `Ankusa.AsyncApi.document/1` from the configured sources. Messaging
+  sinks advertise their channel through the new optional
+  `c:Ankusa.Sink.describe/2` callback (`Ankusa.Sink.Description`); the Kafka,
+  RabbitMQ, NATS, and Redis sinks implement it. Built on the new `async_api_spex`
+  package, now a dependency. [`docs/asyncapi.md`](../../docs/asyncapi.md).
+- **Lifecycle events**: `config.lifecycle.sinks` (off by default) receives a
+  CloudEvents 1.0 event, `io.ankusa.source.{created,updated,deleted}` or
+  `io.ankusa.route.{created,updated,deleted}`, whenever `Ankusa.SourceStore.put/5`
+  or `delete/3` or `Ankusa.Routes.create/2`, `replace/3`, `update/3`, or
+  `delete/2` changes something. Events are committed to the WAL as the reserved
+  source `ankusa:lifecycle` and delivered by dispatch like a hook (under
+  `wal: :none`, published in the call). `[:ankusa, :lifecycle, :emitted]` and
+  `[:ankusa, :lifecycle, :dropped]` telemetry events, and the
+  `ankusa_lifecycle_emitted_total` / `ankusa_lifecycle_dropped_total` metrics.
+- `Ankusa.SourceStore.sinks/2`: the sinks a delivered hook of a source id goes
+  to. Dispatch (`Ankusa.Dispatch.Pipeline`, `Ankusa.Dispatch.replay/2`)
+  resolves sinks through it; ingest still uses `fetch/2`.
+
+### Changed
+
+- `Ankusa.Admin.Redact.source_entry/1` takes the `Ankusa.SourceStore.stored()`
+  map and builds the redacted source view itself (the admin API's source
+  endpoints and the lifecycle events share it), where it used to redact a map
+  the admin router had built.
+
 ### Fixed
 
 - **A full disk no longer crash-loops the WAL.** A failed disk write in

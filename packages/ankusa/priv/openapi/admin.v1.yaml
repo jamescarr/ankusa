@@ -144,6 +144,34 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+  /asyncapi.json:
+    get:
+      operationId: getAsyncApi
+      tags: [operations]
+      summary: AsyncAPI 3.0 document of this instance's messaging channels
+      description: |
+        Every Kafka topic, RabbitMQ routing key, NATS subject, and Redis channel
+        this instance publishes delivered hooks to, built from the sources and
+        sinks configured right now, plus the lifecycle events channel when
+        `lifecycle.sinks` is set. Each message is an `Ankusa.Sink.Message` v1
+        envelope (`SinkMessageV1` in `components.schemas`). Sinks without a
+        channel (`log`, `http`) are left out. Carries no credentials.
+
+        The body is JSON, which AsyncAPI tooling reads as YAML 1.2.
+      responses:
+        '200':
+          description: The AsyncAPI document.
+          content:
+            application/asyncapi+json:
+              schema:
+                type: object
+                required: [asyncapi, info]
+                properties:
+                  asyncapi:
+                    const: '3.0.0'
+                  info:
+                    type: object
+                additionalProperties: true
   /v1/wal:
     servers:
       - url: http://localhost:4002

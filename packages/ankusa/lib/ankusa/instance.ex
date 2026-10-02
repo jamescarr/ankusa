@@ -36,6 +36,7 @@ defmodule Ankusa.Instance do
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Routes.validate_config!(config)
     Ankusa.WAL.validate_config!(config)
+    Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     opts = [instance: config.instance, config: config]
 

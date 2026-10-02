@@ -6,6 +6,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.Sink.Redis` implements `c:Ankusa.Sink.describe/2`, advertising its
+  server, database, and channel to the AsyncAPI document the admin API serves.
+  Credentials in `:url` are never part of it.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

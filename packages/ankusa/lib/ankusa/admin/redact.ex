@@ -45,16 +45,27 @@ defmodule Ankusa.Admin.Redact do
   end
 
   @doc """
-  A redacted, JSON-encodable view of one tenant-scoped source entry, the shape
-  the admin API's source routes return.
+  A redacted, JSON-encodable view of one tenant-scoped source, built from the
+  `Ankusa.SourceStore.stored()` map: the shape the admin API's source routes
+  return and the `data` of a source lifecycle event.
 
-  The entry is plain JSON (atom keys at the top level, string keys below, plus
-  strings, numbers, maps, and lists), so it takes exactly the same rules as
-  `config/1`: a secret-named key at any depth and a value under a `headers` map
-  become `"[REDACTED]"`, and a URL userinfo password is hidden.
+  The stored spec is plain JSON (string keys, plus strings, numbers, maps, and
+  lists), so it takes exactly the same rules as `config/1`: a secret-named key
+  at any depth and a value under a `headers` map become `"[REDACTED]"`, and a
+  URL userinfo password is hidden.
   """
-  @spec source_entry(map()) :: map()
-  def source_entry(entry) when is_map(entry), do: redact_map(entry)
+  @spec source_entry(Ankusa.SourceStore.stored()) :: map()
+  def source_entry(%{tenant: tenant, name: name, source_id: source_id, spec: spec}) do
+    redact_map(%{
+      tenant: tenant,
+      name: name,
+      source_id: source_id,
+      ingest_path: "/webhooks/#{source_id}",
+      verify: Map.get(spec, "verify") || %{"type" => "none"},
+      on_verify_failure: Map.get(spec, "on_verify_failure"),
+      sinks: Map.get(spec, "sinks", [])
+    })
+  end
 
   defp redact_map(map), do: Map.new(map, fn {k, v} -> {to_string(k), redact(to_string(k), v)} end)
 

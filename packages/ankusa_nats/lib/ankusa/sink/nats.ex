@@ -97,6 +97,7 @@ defmodule Ankusa.Sink.NATS do
   @behaviour Ankusa.Sink
 
   alias Ankusa.Envelope
+  alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
 
   @default_publish_timeout_ms 5_000
@@ -125,6 +126,28 @@ defmodule Ankusa.Sink.NATS do
 
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)
+
+  @impl true
+  def describe(subject, opts) do
+    %Description{
+      protocol: "nats",
+      host:
+        opts
+        |> servers()
+        |> Enum.map_join(",", fn %{host: host, port: port} -> "#{host}:#{port}" end),
+      address: address(subject, opts),
+      ankusa_headers: true
+    }
+  end
+
+  # Only a configured static subject is a fixed address; a function computes it
+  # per hook, so the document cannot name it.
+  defp address(_subject, opts) do
+    case Keyword.fetch!(opts, :subject) do
+      subject when is_binary(subject) -> subject
+      fun when is_function(fun, 1) -> nil
+    end
+  end
 
   # The publish is a request, not a `Gnat.pub/3`: `pub/3` returns once the bytes
   # are handed to the socket, while the whole point here is to wait for
@@ -247,8 +270,20 @@ defmodule Ankusa.Sink.NATS do
 
     opts
     |> Keyword.fetch!(:servers)
+    |> server_list()
     |> Enum.map(fn server -> Map.merge(overrides, server_settings(server)) end)
   end
+
+  # `:servers` is a list of `"host:port"` strings or `{host, port}` tuples; a
+  # YAML loader may also hand over one comma-separated string.
+  defp server_list(servers) when is_binary(servers) do
+    servers
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp server_list(servers), do: servers
 
   defp server_settings({host, port}), do: %{host: to_charlist(host), port: port}
 

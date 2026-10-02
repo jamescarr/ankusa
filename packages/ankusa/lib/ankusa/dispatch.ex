@@ -24,11 +24,7 @@ defmodule Ankusa.Dispatch do
     |> DLQ.entries()
     |> Enum.filter(&matches?(&1, filter))
     |> Enum.reduce(0, fn %{envelope: env}, count ->
-      sinks =
-        case SourceStore.fetch(instance, env.source_id) do
-          {:ok, source} -> source.sinks
-          :error -> []
-        end
+      sinks = SourceStore.sinks(instance, env.source_id)
 
       ctx = %{instance: instance, source_id: env.source_id, tenant_id: env.tenant_id, attempt: 1}
       Enum.each(sinks, fn {mod, opts} -> mod.deliver(env, ctx, opts) end)

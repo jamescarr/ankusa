@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.Sink.Kafka` implements `c:Ankusa.Sink.describe/2`, advertising its
+  brokers, topic, and record key to the AsyncAPI document the admin API serves.
+  Credentials (`:sasl`) are never part of it.
+
 ## [0.3.0] - 2026-10-01
 
 No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other packages in this release.

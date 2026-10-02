@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.Sink.NATS` implements `c:Ankusa.Sink.describe/2`, advertising its
+  servers and subject to the AsyncAPI document the admin API serves.
+  `:servers` now also takes one comma-separated string, as the YAML key
+  documents.
+
 ## [0.3.0] - 2026-10-01
 
 No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other packages in this release.

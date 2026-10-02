@@ -25,6 +25,7 @@ New here? Start with the [quickstart](quickstart.md).
 | Doc | Read it when |
 | --- | --- |
 | [`integrations.md`](integrations.md) | Oban, Celery, queues |
+| [`asyncapi.md`](asyncapi.md) | the AsyncAPI document of an instance's channels, and lifecycle events |
 | [`elixir.md`](elixir.md) | embed the library |
 
 ## Contributing

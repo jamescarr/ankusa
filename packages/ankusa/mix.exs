@@ -63,6 +63,7 @@ defmodule Ankusa.MixProject do
         "../../docs/storage.md",
         "../../docs/claim-check.md",
         "../../docs/multi-tenancy.md",
+        "../../docs/asyncapi.md",
         "../../docs/packaging.md",
         "../../docs/testing.md",
         "../../docs/releasing.md",
@@ -79,7 +80,8 @@ defmodule Ankusa.MixProject do
           "../../docs/integrations.md",
           "../../docs/storage.md",
           "../../docs/claim-check.md",
-          "../../docs/multi-tenancy.md"
+          "../../docs/multi-tenancy.md",
+          "../../docs/asyncapi.md"
         ],
         Contributing: [
           "../../docs/packaging.md",
@@ -115,6 +117,7 @@ defmodule Ankusa.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      async_api_spex_dep(),
       {:bandit, "~> 1.12.5"},
       {:plug, "~> 1.18"},
       # CIDR parsing and range membership for the route-management IP rules and
@@ -148,5 +151,18 @@ defmodule Ankusa.MixProject do
       {:yaml_elixir, "~> 2.12", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
+  end
+
+  # The AsyncAPI document builder behind `GET /asyncapi.json`
+  # (`Ankusa.AsyncApi`). Same poncho split as the adapters' `ankusa_dep/0`: the
+  # monorepo checkout in dev/test, the Hex release for anyone consuming this
+  # package from Hex.pm (Hex rejects path deps). A project that path-depends on
+  # core and builds in :prod, like `ankusa_server`, pins the checkout itself.
+  defp async_api_spex_dep do
+    if Mix.env() in [:dev, :test] do
+      {:async_api_spex, path: "../async_api_spex"}
+    else
+      {:async_api_spex, "~> 0.1"}
+    end
   end
 end

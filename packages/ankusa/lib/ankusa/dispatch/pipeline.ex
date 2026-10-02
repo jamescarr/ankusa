@@ -361,11 +361,7 @@ defmodule Ankusa.Dispatch.Pipeline do
         {sinks, memo}
 
       :error ->
-        sinks =
-          case SourceStore.fetch(instance, source_id) do
-            {:ok, source} -> source.sinks
-            :error -> []
-          end
+        sinks = SourceStore.sinks(instance, source_id)
 
         {sinks, Map.put(memo, source_id, sinks)}
     end
