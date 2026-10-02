@@ -2,82 +2,63 @@
 
 ## The dispatch pipeline
 
-`Ankusa.Dispatch.Pipeline` is a `GenServer`, one per instance, that polls the
-WAL every `dispatch.poll_ms` (default 200ms) for records past its own
-durable cursor (up to `dispatch.batch` at a time, default 128). For each
-envelope it looks the source up via `Ankusa.SourceStore` and enqueues one
-delivery job per sink.
+`Ankusa.Dispatch.Pipeline` is a `GenServer`, one per instance, that is a
+scheduler over **delivery rows** (`Ankusa.Queue`), not a poller. A commit
+sends it `:wake`, so a new hook is claimed at once; otherwise it sleeps until
+the earliest due row. A retry is a row due at `now + backoff`, so it frees its
+concurrency slot instead of sleeping in it — a sink that is down for an hour
+holds up nothing but its own rows.
 
-Jobs run concurrently, up to `dispatch.concurrency` (default 32) at a time,
-each in a `Task.Supervisor` task, so a slow or retrying sink only delays what
-actually has to wait for it. What has to wait is decided by the **ordering
-key**: deliveries to the same sink with an equal
-`c:Ankusa.Sink.ordering_key/2` never overlap and run one at a time, in the
-order dispatch read them from the log; different keys are independent. `nil`
-means no constraint.
+For each claimed row dispatch looks the source up via `Ankusa.SourceStore`,
+runs one delivery in a `Task.Supervisor` task (up to `dispatch.concurrency`,
+default 32), and records the outcome as a single store batch. A row binds to
+`(sink index, module)` at ack time; its opts always come from the source as it
+is *now*, so a config fix applies to the backlog and no fun or secret is ever
+persisted. If the sinks were reordered a row falls back to the one sink with
+its module; if it cannot be bound it is dead-lettered as
+`{:sink_gone, index, module}`, and a deleted source as
+`{:source_gone, source_id}`.
 
-The cursor is a **watermark**, not a per-envelope save point: it sits at the
-last seq read when nothing is in flight, and one below the lowest
-admitted-but-unfinished seq otherwise. An envelope dispatch has already
-finished can therefore sit behind the watermark until an earlier one finishes.
-If the node dies first it is redelivered, which at-least-once permits. The
-WAL's contract (seq order *is* commit order) is what makes advancing past
-finished work safe at all.
+**Deliveries are not ordered.** Two hooks for one sink may run in either
+order, and a retry runs after whatever is due before it. A Kafka partition key
+or an AMQP routing key only keeps the order hooks were published in, so it does
+not restore one. A consumer that needs order has to rebuild it from data it
+receives (the provider's own event timestamp or sequence number in the body;
+`received_at` is on every message, but ties are possible within a millisecond)
+and tolerate redelivery.
 
 Two windows bound memory and keep a stalled destination from walking the
-pipeline into an OOM: `dispatch.max_inflight` (default 4096 envelopes) and
-`dispatch.max_inflight_bytes` (default 128 MiB of body bytes). Dispatch simply
-stops reading until something completes.
+pipeline into an OOM: `dispatch.max_inflight` (default 4096 claimed,
+unfinished rows) and `dispatch.max_inflight_bytes` (default 128 MiB, the sum
+of their stored hook sizes). `dispatch.batch` (default 128) is the rows
+claimed per store scan. Dispatch stops claiming until something completes.
 
-On `:give_up` from the retry policy, the envelope is written to the DLQ, in
-the pipeline process, so DLQ appends stay serialized, and its jobs stop. One
-failing sink never blocks delivery to the others, and never blocks the next
-envelope. A sink that **raises, throws, or exits** is treated exactly like one
-returning `{:error, reason}`: the retry policy still applies, and the pipeline
-keeps running.
-
-### Ordering keys
-
-```elixir
-@callback ordering_key(Envelope.t(), opts :: keyword()) :: term() | nil
-
-@optional_callbacks ordering_key: 2
-```
-
-A sink's ordering key must be at least as narrow as the ordering its
-destination actually guarantees. Claiming a wider scope than the destination
-provides is a correctness bug, not a throughput knob:
-
-| Sink | Key | Why |
-| --- | --- | --- |
-| `Sink.Http` | `{tenant_id, source_id}` when `ordered: true`, else `nil` | An arbitrary HTTP endpoint promises nothing about concurrent requests; opt in when yours does. |
-| `Sink.Kafka` | the record key (default `"#{tenant_id}/#{source_id}"`) | The key picks the partition, and a partition is Kafka's ordering scope. |
-| `Sink.RabbitMQ` | the routing key (default `"ankusa.#{source_id}"`) | RabbitMQ orders per queue, and the routing key decides the queue. |
-| `Sink.NATS` | the subject | Within a subject, the order is the order the stream received it. |
-| `Sink.Redis` | the channel | Redis delivers one connection's publishes to a channel in order. |
-| `Sink.Log` | `nil` | Interleaved log lines are fine. |
-| any sink that doesn't implement `ordering_key/2` | `{tenant_id, source_id}` | Conservative default: serialize per source rather than silently interleave. |
+On `:give_up` from the retry policy the row becomes a dead row (the DLQ) and
+stops. One failing sink never blocks delivery to the others, and never blocks
+the next hook. A sink that **raises, throws, or exits** is treated exactly
+like one returning `{:error, reason}`: the retry policy still applies, and the
+pipeline keeps running.
 
 ## Direct mode
 
 `wal.type: none` replaces the pipeline above with one synchronous call per
 request (`Ankusa.Edge.Publish`): the request process publishes the envelope to
 each of the source's sinks in declaration order and answers `201` only once
-every sink has confirmed. No polling, no concurrency window, no watermark — and
+every sink has confirmed. No polling, no concurrency window — and
 **the rest of this section does not apply**:
 
 - no retry policy: the first sink refusal is the answer, a `503` with
   `Retry-After`, and the provider's retry *is* the retry;
-- no dead-letter queue and no replay: there is no log to replay from;
-- no `dispatch.*` limits and no ordering key — `Sink.ordering_key/2` is not
-  consulted, because publishes happen inside the request and never overlap.
-  The destination's own keying is the only ordering in this mode.
+- no dead-letter queue and no replay: nothing is committed, so there are no
+  rows to replay from;
+- no `dispatch.*` limits — publishes happen inside the request and never
+  overlap, so the destination's own keying is the only ordering in this mode.
 
 What still applies is the sink contract below, plus one optional callback:
 `c:Ankusa.Sink.durable?/1`. A sink's `:ok` must mean the hook is accepted by
 something that outlives this node, and boot refuses a `wal: :none` config in
 which no sink of a statically configured source can promise that
-(`Ankusa.WAL.validate_config!/1`). `Sink.Log` returns `false` — nothing durable
+(`Ankusa.Queue.validate_config!/1`). `Sink.Log` returns `false` — nothing durable
 happened — and so does `Sink.Redis`: pub/sub keeps no copy, so a subscriber
 that disconnects after the publish loses the message. Every other shipped sink
 confirms durably. A source created at runtime through the admin API is not
@@ -92,10 +73,10 @@ time, so every provider retry duplicates it there. Put a pub/sub sink in a
 better served by `wal.type: disk`, which keeps the non-durable sink's failures
 in the DLQ instead of in the provider's retry loop).
 
-The one piece of local state this mode has is the quarantine pen: the edge
-creates its log at boot (empty), and entries are appended only for a source
-whose `on_verify_failure` is `quarantine` — the default, `reject`, appends
-nothing. See [Quarantine](#quarantine).
+The one piece of local state this mode has is the quarantine pen: entries are
+written to the store only for a source whose `on_verify_failure` is
+`quarantine` — the default, `reject`, appends nothing. See
+[Quarantine](#quarantine).
 
 ## `Ankusa.Sink`
 
@@ -108,17 +89,20 @@ at-least-once. Return `:ok` only once you're certain the hook was actually
 handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`. A
 raised exception, throw, or exit is treated as `{:error, ...}` too.
 
-Sinks may also implement the optional `ordering_key/2` callback, which tells
-dispatch which deliveries may run concurrently, see
-[Ordering keys](#ordering-keys) above, the optional `inline_max_bytes/1`
-callback, which tells dispatch how large a body this sink sends inline, and the
-optional `durable?/1` callback, which says whether `:ok` means the hook is
-durably accepted (`wal.type: none` acks on that promise; default `true`):
+Deliveries are **not ordered**: hooks for one sink may be delivered in any
+order, and a retry runs after whatever is due before it. A consumer that needs
+order has to rebuild it from data it receives (not from the sink's key, which
+only keeps the order hooks were published in) and tolerate redelivery.
+
+Sinks may also implement two optional callbacks: `inline_max_bytes/1`, which
+tells dispatch how large a body this sink sends inline, and `durable?/1`,
+which says whether `:ok` means the hook is durably accepted (`wal.type: none`
+acks on that promise; default `true`):
 
 ```elixir
 @callback inline_max_bytes(opts :: keyword()) :: pos_integer() | nil
 @callback durable?(opts :: keyword()) :: boolean()
-@optional_callbacks ordering_key: 2, inline_max_bytes: 1, durable?: 1
+@optional_callbacks inline_max_bytes: 1, durable?: 1
 ```
 
 A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`) returns its
@@ -131,7 +115,7 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. `ordered: true` serializes per `{tenant_id, source_id}`. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -177,8 +161,8 @@ config.
 (default 64 KiB) rides along base64-encoded in the message; anything larger
 is checked in through `Ankusa.ClaimCheck` (see
 [`claim-check.md`](claim-check.md)) and the message carries a claim reference
-instead. This extends the WAL/segment design's "small hot path, big
-payloads elsewhere" principle to the queue: RabbitMQ throughput and memory
+instead. This extends the queue-and-segment design's "small hot path, big
+payloads elsewhere" principle to the broker: RabbitMQ throughput and memory
 stay flat regardless of how large a webhook payload is, and any consumer,
 BEAM or not, redeems the reference without needing blob-store credentials of
 its own.
@@ -244,12 +228,12 @@ sinks: [
 ]
 ```
 
-**The record key is the ordering scope.** The same key lands on the same
-partition, and dispatch serializes deliveries sharing that key: one delivery
-per key at a time, in the order dispatch read it (Kafka's `ordering_key/2`
-returns exactly the record key). Different keys are delivered concurrently.
-Order is *not*
-preserved across a DLQ replay or after the topic's partition count changes. Keys are hashed with brod's `:hash`
+**The record key picks the partition.** The same key lands on the same
+partition, and a Kafka consumer reads a key's records in the order they were
+produced. Dispatch does **not** serialize deliveries sharing a key, so produce
+order is not commit order; a destination that needs commit order has to
+reorder downstream. Order is also *not* preserved across a DLQ replay or after
+the topic's partition count changes. Keys are hashed with brod's `:hash`
 (`erlang:phash2/1`), not the Java client's murmur2, so the same key can land
 on a different partition than a Java producer would choose.
 
@@ -418,47 +402,58 @@ per-source override (see [`configuration.md`](configuration.md)).
 
 ## Dead letters and replay
 
-`Ankusa.Dispatch.DLQ` is a durable, append-only, length-prefixed log
-(`<data_dir>/<instance>/dlq/dlq.log`). One record per give-up:
-`%{envelope:, reason:, at:}`. Each append is fsynced before dispatch advances
-its cursor past the hook, so a dead letter can't be lost to a power failure.
-Reads tolerate a torn trailing record (a partial append) and just drop it, same
-discipline as the WAL and the quarantine log.
+The DLQ is the set of **dead delivery rows** — there is no separate file. When
+a row's sink gives up, the row is marked dead and carries the failure as text:
+`inspect({:sink, Module, reason})`, the exact `reason` string `GET /v1/dlq`
+returns. A dead row is still an obligation, so its hook is kept (and survives
+a restart) until the row is replayed and delivered. The row is written in the
+same store batch as any other transition, so a give-up cannot be lost to a
+power failure.
 
-`Ankusa.Dispatch.replay/2` re-delivers dead-lettered hooks through their
-source's current sinks:
+`Ankusa.Dispatch.replay/2` moves matching dead rows back to pending with a
+fresh attempt count, and the pipeline delivers them through the source's
+*current* sinks and options:
 
 ```elixir
-Ankusa.Dispatch.replay(:default, source_id: "stripe", since: System.system_time(:millisecond) - 3_600_000)
-# => 7  (number of entries replayed)
+{:ok, 7} = Ankusa.Dispatch.replay(:default, source_id: "stripe", since: System.system_time(:millisecond) - 3_600_000)
 ```
 
-Filters (`:source_id`, `:id`, `:since`, a unix-ms lower bound) are all
-optional and combine as AND; omit the filter entirely to replay everything.
+It returns the number of rows moved back to pending — `{:ok, 0}` when nothing
+matched. Delivery is **asynchronous**: by the time it returns the rows are out
+of the DLQ and the pipeline will deliver them (a row that fails again is
+dead-lettered again). It needs the `:dispatch` role on this node. Filters
+(`:source_id`, `:id`, `:since`, a unix-ms lower bound) are all optional and
+combine as AND; omit the filter entirely to replay everything. Delivery is
+at-least-once, so a replayed hook is a redelivery.
 
 ## Quarantine
 
 A rate-limited durable holding pen for envelopes whose source has
 `on_verify_failure: :quarantine`. The point: a bad secret rotation should
-never silently eat real events, but a flood of forged requests shouldn't be
-able to fill the disk either.
+never silently eat real events, so a quarantined hook is answered `202` (the
+provider will not retry it) and kept for an operator to inspect or re-inject.
 
 - Token bucket: 100 burst, refills 20/s. Over the limit, `Ankusa.Edge.Quarantine.put/3`
-  returns `:rate_limited` (surfaced to the caller as `401`, not `202`.
-  The request is refused outright rather than silently dropped) instead of
-  writing.
-- Durable append-only log (`<data_dir>/<instance>/quarantine/quarantine.log`),
-  one `fsync` per write.
-- `Ankusa.Edge.Quarantine.recent/1` keeps the last 200 entries in memory
-  (headers/body dropped from the in-memory summary. Full record is on
-  disk) for a dashboard or operator inspection.
+  returns `:rate_limited` (surfaced to the caller as `401`, not `202`; the
+  request is refused outright rather than silently dropped) instead of
+  writing. The bucket caps the rate, not the pen's total size: nothing evicts
+  or expires held entries, so size the volume for the quarantine you intend
+  to keep.
+- Stored in this node's `Ankusa.Store` (two keys per entry in one synced batch:
+  a summary, and the headers and body), so `put/3` answers `:ok` only once
+  both are on disk. A store that cannot take the write makes ingest answer
+  `503` and spends no token.
+- `Ankusa.Edge.Quarantine.recent/2` lists the newest entries (id, source, time,
+  reason; the headers and body stay in the store) for a dashboard or operator
+  inspection. It reads the store, so a restart does not empty it.
 
-Under `wal.type: none` this pen is the **only** local state the node has (no
-WAL, no DLQ). The log is created empty at boot; entries are appended only when
-a source opts in with `on_verify_failure: quarantine`, and the `reject` default
-appends nothing. It is forensic scratch space, not acked customer data — a hook
-in the pen was never acked — which is why the combination is allowed rather
-than rejected on a stateless node. See [Direct mode](#direct-mode).
+Under `wal.type: none` this pen, the API-managed sources and the rate-limit
+overrides are the node's only local state: nothing is committed, so there is
+no queue and no DLQ. Entries are written only when a source opts in with
+`on_verify_failure: quarantine`; the `reject` default writes nothing. A
+quarantined hook was not delivered by this node, but the provider *was*
+answered `202`, so the pen is the only copy — inspect or re-inject it
+deliberately. See [Direct mode](#direct-mode).
 
 ```elixir
 Ankusa.Edge.Quarantine.recent(:default)

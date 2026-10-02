@@ -35,13 +35,13 @@ defmodule Ankusa.Instance do
     Ankusa.put_config(config)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Routes.validate_config!(config)
-    Ankusa.WAL.validate_config!(config)
+    Ankusa.Queue.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =
       metrics_children(config, opts) ++
-        wal_children(config, opts) ++
+        store_children(config, opts) ++
         source_store_children(config, opts) ++
         routes_children(config, opts) ++
         edge_children(config, opts) ++
@@ -62,20 +62,27 @@ defmodule Ankusa.Instance do
     if config.admin.enabled, do: [{Ankusa.Metrics, opts}], else: []
   end
 
-  # The WAL only matters to roles that actually read or write it. A node
-  # running only `:claim_check` needs blob-store credentials, never WAL
-  # credentials — so it shouldn't open one. Under `wal: :none` there is no log
-  # at all: ingest acks on a sink's confirm and nothing here reads a log.
-  defp wal_children(%Config{wal: :none}, _opts), do: []
-
-  defp wal_children(config, opts) do
-    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
-      {wal_mod, _} = config.wal
-      [{wal_mod, opts}]
+  # The node's local store. Roles that read or write hooks, deliveries or the
+  # archive need it; a writable source store needs it too, because it is where
+  # the sources live. It must start before every child that reads from it: the
+  # source store, the edge, dispatch and storage.
+  defp store_children(config, opts) do
+    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
+         match?({Ankusa.SourceStore.Persistent, _}, config.source_store) do
+      [{Ankusa.Store, opts}] ++ writer_children(config, opts)
     else
       []
     end
   end
+
+  # The one process that assigns seqs and commits hooks. Only an `:edge` node
+  # writes hooks, and only under `wal: :disk`: under `wal: :none` ingest acks on
+  # a sink's confirm and nothing is committed.
+  defp writer_children(%Config{wal: :disk} = config, opts) do
+    if Config.role?(config, :edge), do: [{Ankusa.Queue.Writer, opts}], else: []
+  end
+
+  defp writer_children(_config, _opts), do: []
 
   # A writable store (e.g. `Ankusa.SourceStore.Persistent`) must be up before the
   # edge accepts a request, since every ingest reads through it. A read-only

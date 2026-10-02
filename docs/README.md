@@ -16,7 +16,7 @@ New here? Start with the [quickstart](quickstart.md).
 | --- | --- |
 | [`architecture.md`](architecture.md) | the guarantees |
 | [`delivery.md`](delivery.md) | sinks, retries, DLQ, quarantine |
-| [`storage.md`](storage.md) | the log and object stores |
+| [`storage.md`](storage.md) | the store and object stores |
 | [`claim-check.md`](claim-check.md) | large payloads to queue workers |
 | [`multi-tenancy.md`](multi-tenancy.md) | catch URLs per customer |
 

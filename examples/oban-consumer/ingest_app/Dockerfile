@@ -8,7 +8,7 @@
 # a real Kubernetes cluster and needs a proper release artifact.
 FROM elixir:1.20.4-alpine AS build
 
-RUN mix local.hex --force && mix local.rebar --force
+RUN apk add --no-cache build-base cmake linux-headers openssl-dev zstd-dev && mix local.hex --force && mix local.rebar --force
 ENV MIX_ENV=prod
 
 WORKDIR /repo
@@ -19,6 +19,9 @@ WORKDIR /repo/examples/oban-consumer/ingest_app
 RUN mix deps.get --only prod && mix release ingest
 
 FROM elixir:1.20.4-alpine
+
+# The release's RocksDB NIF links the system zstd, which this base image lacks.
+RUN apk add --no-cache zstd-libs
 
 COPY --from=build /repo/examples/oban-consumer/ingest_app/_build/prod/rel/ingest /app
 

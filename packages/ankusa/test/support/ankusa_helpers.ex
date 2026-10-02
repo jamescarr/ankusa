@@ -9,12 +9,25 @@ defmodule Ankusa.TestHelpers do
   def unique_instance, do: :"t#{System.unique_integer([:positive])}"
 
   @doc """
+  A temp data dir no other test run can have used. `System.unique_integer/1`
+  restarts at 1 in every VM, so a run that was SIGKILLed (the loss test does
+  that to a child; a developer's ^C can do it to this one) leaves stores behind
+  that a later run would otherwise open and inherit.
+  """
+  def unique_data_dir(inst) do
+    Path.join(
+      System.tmp_dir!(),
+      "ankusa_#{inst}_#{System.unique_integer([:positive])}_#{System.os_time(:microsecond)}"
+    )
+  end
+
+  @doc """
   Build an isolated `%Ankusa.Config{}` with a fresh temp `data_dir` (auto-cleaned)
   and an ephemeral HTTP port. Pass `overrides` as keyword to `Ankusa.Config.new/1`.
   """
   def test_config(overrides \\ []) do
     inst = Keyword.get(overrides, :instance, unique_instance())
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}_#{System.unique_integer([:positive])}")
+    dir = unique_data_dir(inst)
     ExUnit.Callbacks.on_exit(fn -> File.rm_rf(dir) end)
 
     overrides
@@ -57,6 +70,29 @@ defmodule Ankusa.TestHelpers do
 
     start_supervised!({Ankusa.Instance, config})
     config
+  end
+
+  @doc """
+  Commit `env` straight through `Ankusa.Queue`, with the sinks its source has
+  right now (none if the source is unknown). Returns the committed envelope.
+  """
+  def enqueue!(instance, %Ankusa.Envelope{} = env) do
+    sinks =
+      case Ankusa.SourceStore.fetch(instance, env.source_id) do
+        {:ok, source} -> source.sinks
+        :error -> []
+      end
+
+    {:ok, [{:committed, committed}]} =
+      Ankusa.Queue.enqueue(instance, [%{envelope: env, sinks: sinks}])
+
+    committed
+  end
+
+  @doc "Ids of every hook still in the store, in seq order."
+  def stored_ids(instance) do
+    {:ok, hooks} = Ankusa.Queue.hooks(instance, 0, 100_000)
+    Enum.map(hooks, & &1.id)
   end
 
   @doc "Build a raw ingest request map for `Ankusa.Edge.Ingest`/router."

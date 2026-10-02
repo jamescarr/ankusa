@@ -91,6 +91,18 @@ The solution scopes are proposals, not measurements. Library behaviour is cited 
 <a id="g1"></a>
 ## G1 · Storage: five hand-rolled formats, one owning process, reclamation tied to the archive
 
+**Status (2026-10-02).** Option D — RocksDB through `erlang-rocksdb`, the
+fallback in the option table below — was implemented at the scope of the "Option
+C in detail" design: one store per instance holding the hooks, one delivery row
+per hook and sink, the quarantine pen, API-managed sources, rate-limit overrides
+and the archive catalogue. It closes W1 W2 S3 W8 S4 W7 W3 S7 W6 D9 W5 S2, and
+also D1 via the delivery-row scheduler (a retry frees its concurrency slot
+instead of sleeping in it, and a commit wakes dispatch). It does not do the rest
+of G4 (per-sink windows, circuit breakers, attempt deadlines), G5 (dedupe,
+message v2), quarantine re-verify, or the G2 supervision tree. The analysis
+below is the review as recorded at commit `42b6f5a` and is not edited; where it
+describes the old WAL it describes that commit, not the current code.
+
 Everything Ankusa writes to local disk goes through one of five formats, and each implements a different part of the same discipline:
 
 | Format | Holds | Checksum | After a torn or damaged write | fsync |
@@ -879,20 +891,14 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 | Claim | Where | Reality |
 |---|---|---|
-| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `202` for quarantine with no way back (E1); `201` then a silent drop for unknown sources (D2) and unroutable RabbitMQ publishes (B1); `201` for a non-UTF-8 header no queue sink can ever take (B8). |
-| Replay "drops a torn trailing frame" / "truncates the file at the first torn/invalid one". | `architecture.md:151`, `storage.md:64-65` | The second is accurate, and it is the bug: every acked frame after a mid-log error goes too (W2). A failed read drops the whole log (W1). |
-| Reclaiming "costs a few ETS deletes and never blocks appends". | `storage.md:66-68` | Each reclaim is a floor write, `fdatasync` and rename inside the WAL process; a rewrite blocks for the whole copy (W3). |
-| A failed write "is reported, not fatal … Ingest resumes on its own once space frees." | `storage.md:76-81` | A full disk tears the DLQ and the index: later dead letters vanish and the node stops booting (S3). |
-| "Take the compactor down: ingest keeps acking, the WAL grows, an alarm fires, nothing is lost." | `architecture.md:61-63`, `Ankusa.Instance` module doc | A store error rebuilds the whole instance every 4.5–6.5 s (S1); there is no WAL-size metric (O5). |
-| "A slow or retrying sink only delays what actually has to wait for it." / "One failing sink never blocks delivery to the others." | `delivery.md:11-13,33-35` | 0/100 delivered for a healthy tenant (D1). |
-| Quarantine: "a flood of forged requests can't fill the disk". | `architecture.md:157`, `delivery.md:442-444` | An unbounded log with a ~160 MB/s ceiling (E2). |
-| "A hook in the pen was never acked." | `delivery.md:459-460` | The provider received a `202` (E1). |
-| `WAL.DiskLog` + `BlobStore.LocalFS` survive power loss on the box. | `architecture.md:27-28`, `storage.md:84` | LocalFS segments and claims are never fsynced, while the WAL floor moves past them (S4). |
+| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `202` for quarantine with no way back (E1); `201` then a drop for unroutable RabbitMQ publishes (B1); `201` for a non-UTF-8 header no queue sink can ever take (B8). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed.) |
+| "Take the compactor down: ingest keeps acking, the WAL grows, an alarm fires, nothing is lost." | `architecture.md:62-73`, `Ankusa.Instance` module doc | Ingest does keep acking and nothing is lost, and the compactor no longer rebuilds the instance (S1 fixed) — but **an alarm still does not fire**: no store-size or cursor-lag metric is exposed (O5). |
+| Quarantine: "a flood of forged requests can't fill the disk". | `delivery.md:442-444` | Still false: the pen's total size is uncapped, and moving it into the store only makes each write durable — a flood can still fill the disk (E2). |
+| "A hook in the pen was never acked." | `delivery.md:459-460` | Still false: the provider received a `202`, and the pen is still write-only — nothing re-verifies a held hook back into ingest (E1). |
 | A confirm means the message "really was persisted by RabbitMQ". | `ankusa_rabbitmq/lib/ankusa/sink/rabbitmq/connection.ex:7-9` | A publish no queue receives is confirmed too (B1). |
 | "There are no global process names anywhere in the framework." | `architecture.md:220-221` | Every adapter registers fixed node-global supervisors (B7). |
 | One claim-check gateway serves N ingest nodes. | `architecture.md:288-331` | Per-node buckets make other nodes' claims `404` (C1). |
 | "The dynamic store itself isn't shipped yet." | `multi-tenancy.md:127` | `SourceStore.Persistent` and tenant source CRUD ship. |
-| `ANKUSA_ROLES=edge,dispatch` as the example override. | `configuration.md:243,504-505` | That role set never truncates the WAL (W5). |
 
 ## What is done well
 

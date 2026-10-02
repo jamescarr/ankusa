@@ -12,9 +12,9 @@ _**Don't fight the traffic. Steer it.** Durable webhook ingestion for any volume
 
 Run Ankusa without knowing Elixir, the way you run Elasticsearch without knowing
 Java. One image, one YAML file, HTTP in and HTTP out. Every hook is written to a
-durable log before it is acked, so a provider retry is either a hook that was
-durably stored (and will be delivered again) or one that genuinely never
-arrived.
+durable local store before it is acked, so a provider retry is either a hook
+that was durably stored (and will be delivered again) or one that genuinely
+never arrived.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ docker run -d --name ankusa \
 until [ "$(docker inspect --format '{{.State.Health.Status}}' ankusa)" = healthy ]; do sleep 1; done
 
 curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-# => {"id":"01a0...","status":"accepted"}   (returned only after the WAL fsync)
+# => {"id":"01a0...","status":"accepted"}   (returned only after the store fsync)
 ```
 
 That is a complete, durable webhook receiver. The `demo` source accepts anything
@@ -74,17 +74,17 @@ Starting points, all loadable as-is:
 | File | What it is |
 | --- | --- |
 | [`config-examples/reference.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/reference.yml) | every key, at its default, with the alternatives |
-| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/single-node.yml) | one box: disk WAL, Stripe + GitHub, HTTP sink |
+| [`config-examples/single-node.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/single-node.yml) | one box: on-disk store, Stripe + GitHub, HTTP sink |
 | [`config-examples/kafka-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/kafka-fanout.yml), [`rabbitmq-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/rabbitmq-fanout.yml), [`nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/nats-fanout.yml) | queue fan-out, with the claim-check gateway (`claim_check` role included) |
 | [`config-examples/multi-tenant.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/multi-tenant.yml) | one instance, many tenants, tenant in the URL |
-| [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml) | stateless edge (`wal.type: none`): no volume, broker confirm is the ack |
+| [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml) | stateless edge (`wal.type: none`): no hook store, broker confirm is the ack |
 
 ### Check it before you run it
 
 ```sh
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -e STRIPE_WHSEC jamescarr/ankusa:edge check-config
-# => config OK: roles=[:edge, :dispatch, :storage] sources=stripe wal=Ankusa.WAL.DiskLog storage=Ankusa.BlobStore.LocalFS
+# => config OK: roles=[:edge, :dispatch, :storage] sources=stripe wal=disk storage=Ankusa.BlobStore.LocalFS
 
 docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -e STRIPE_WHSEC jamescarr/ankusa:edge print-config
@@ -176,7 +176,7 @@ Operating Ankusa without a shell:
 
 ```sh
 curl localhost:4002/v1/config                 # the effective config, secrets redacted
-curl localhost:4002/v1/wal                    # this node's WAL stats (409 under wal.type: none)
+curl localhost:4002/v1/wal                    # this node's store stats (409 under wal.type: none)
 curl 'localhost:4002/v1/dlq?limit=10'         # dead-lettered hooks (metadata only)
 curl -XPOST localhost:4002/v1/dlq/replay -d '{"id":"<id from GET /v1/dlq>"}'
 curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"stripe"}'
@@ -184,12 +184,13 @@ curl localhost:4002/v1/quarantine             # hooks held after a failed verifi
 curl localhost:4002/metrics                   # Prometheus
 ```
 
-The DLQ, WAL, and quarantine endpoints are node-local, the DLQ is the dispatch
-node's disk, the WAL is this node's log, quarantine is the edge node's memory,
-and answer `409 role_not_enabled` (or, for the WAL, `409 wal_disabled`) when you
-ask the wrong node. Metrics are node-local too:
-an edge node exports ingest series, a worker exports dispatch and compaction
-series. Scrape every node.
+The DLQ, WAL, and quarantine endpoints are node-local and read this node's
+store: the DLQ is its dead delivery rows, the WAL endpoint its store stats,
+and quarantine the edge node's pen. They answer `409 role_not_enabled` (or,
+for the WAL, `409 wal_disabled`) when you ask the wrong node, and
+`503 store_unavailable` when the store cannot be read. Metrics are node-local
+too: an edge node exports ingest series, a worker exports dispatch and
+compaction series. Scrape every node.
 
 The HTTP contracts are in
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
@@ -230,11 +231,13 @@ leaves ingest open and puts HTTP basic auth on the admin API.
 
 ## Data
 
-`/var/lib/ankusa` holds the WAL, the quarantine log, the dead-letter queue, and
-local segments. Losing it loses un-dispatched hooks, so give it a volume and back
-it, or move segments to S3/GCS, where they are not your problem anymore. Under
-`wal.type: none` there is nothing there to lose: mount no volume, run the image
-as a plain `Deployment`, and let the broker hold the durable copy. See
+`/var/lib/ankusa` holds the node's RocksDB store (hooks, the dead-letter queue,
+the quarantine pen, API-managed sources, rate-limit overrides, the segment
+catalogue) and local segments. Losing it loses un-dispatched hooks, so give it
+a volume and back it, or move segments to S3/GCS, where they are not your
+problem anymore. Under `wal.type: none` there is nothing there to lose: mount
+no volume, run the image as a plain `Deployment`, and let the broker hold the
+durable copy. See
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml)
 and [`docs/delivery.md#direct-mode`](https://github.com/jamescarr/ankusa/blob/main/docs/delivery.md#direct-mode).
 

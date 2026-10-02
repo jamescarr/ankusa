@@ -8,7 +8,7 @@ for consumers that shouldn't hold storage credentials.
 ```mermaid
 flowchart LR
     P[Provider / curl] -->|POST /webhooks/demo| I[Ankusa ingest\nedge+dispatch+storage]
-    I -->|WAL fsync, then ack| P
+    I -->|store fsync, then ack| P
     I -->|"small body (base64)"| X((ankusa.events\nexchange))
     I -.fat body: Direct check-in.-> S[(S3 / floci)]
     I -->|"fat body → message carries a claim ref"| X
@@ -107,7 +107,7 @@ docker compose down -v
 ## Scaling the ingest fleet
 
 `docker compose up --build --scale ingest=3` runs three independent ingest
-containers, each with its own local WAL, all publishing to the same
+containers, each with its own local store, all publishing to the same
 exchange, checking claims in against the same `claim-check` gateway, and
 writing to the same bucket. Nothing about `Ankusa.Sink.RabbitMQ` or
 `Ankusa.BlobStore.S3` changes: that's the "durable state, not RPC" rule

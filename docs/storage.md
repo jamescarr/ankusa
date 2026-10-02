@@ -1,108 +1,142 @@
-# Storage: WAL, segments, object stores
+# Storage: the local store and the object store
 
-Two tiers, on purpose. The WAL is the fast, small, durable tier the ack
-depends on under the default `wal.type: disk`. The object store is the cheap,
-large, long-term tier. Segments roll off the WAL asynchronously, never blocking
-an ack. See [`architecture.md`](architecture.md) for how this fits the request
-path, and the [`wal: :none`](#none-no-wal-at-all) section below for the mode
-that has none of it.
+Two tiers, on purpose. The **local store** is the fast, small, durable tier the
+ack depends on under the default `wal.type: disk`: one RocksDB database per
+instance holding every committed hook, one delivery row per hook and sink, the
+archive obligations and the segment catalogue. The **object store** is the
+cheap, large, long-term tier: segments roll into it asynchronously, never
+blocking an ack. See [`architecture.md`](architecture.md) for how this fits the
+request path, and the [`wal: :none`](#none-no-queue-no-store-hooks) section
+below for the mode that has none of it.
 
-## `Ankusa.WAL`
+## `Ankusa.Store` and `Ankusa.Queue`
+
+The local store is one RocksDB database per instance at
+`<data_dir>/<instance>/store`, opened by `Ankusa.Store`. Everything below lives
+in it: the committed hooks, their delivery rows and the archive's catalogue.
+The queue's mode is named by the historical `wal` key (`wal: :disk | :none`,
+YAML `wal.type`): `:disk` is the store-backed queue described here, `:none` is
+the direct path [below](#none-no-queue-no-store-hooks).
+
+Column families, all in that one database:
+
+| Family | Holds |
+| --- | --- |
+| `default` | the next-seq marker, migration markers, API-managed sources, rate-limit overrides |
+| `hooks` | each committed hook, keyed by its `seq` |
+| `deliveries` | one delivery row per hook and sink |
+| `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs |
+| `archive` | the segment catalogue, and locations imported from a 0.3 node's index |
+| `quarantine` | the quarantine pen: one summary and one body key per held envelope |
+
+`Ankusa.Store` owns the DB handle; every other process calls
+`Ankusa.Store.write/3`, `get/3`, `multi_get/3`, `fold/6` and `property/3`
+directly (the NIF runs on dirty schedulers). There is no per-reader cursor:
+`Ankusa.Queue.hooks/3` walks the `hooks` family by `seq`.
+
+`Ankusa.Queue` is the public face of the queue:
 
 ```elixir
-@callback append(server(), [entry()]) :: {:ok, [result()]} | {:error, term()}
-@callback read(server(), after_seq :: non_neg_integer(), limit :: pos_integer()) :: [Envelope.t()]
-@callback get_cursor(server(), name :: atom()) :: non_neg_integer()
-@callback put_cursor(server(), name :: atom(), seq :: non_neg_integer()) :: :ok | {:error, term()}
-@callback truncate_through(server(), seq :: non_neg_integer()) :: :ok | {:error, term()}
-@callback stats(server()) :: map()
+entry = %{envelope: envelope, sinks: [{Ankusa.Sink.Http, url: "https://example.internal"}]}
+{:ok, [%{committed: envelope}]} = Ankusa.Queue.enqueue(:default, [entry])
+
+{:ok, hooks} = Ankusa.Queue.hooks(:default, 0, 100)            # seq > 0, ascending
+{:ok, %{next_seq: _, hooks: _, deliveries: _, disk_bytes: _}} = Ankusa.Queue.stats(:default)
+{:ok, %{total: _, entries: _}} = Ankusa.Queue.dead(:default, source_id: "stripe")
 ```
 
-Contract every adapter must uphold:
+### The commit: one synced batch
 
-- `append/2` is a **group commit**: given a list of records, write them all
-  and issue a *single* commit, then return per-record results in order. Every
-  record is written. Ingest does no deduplication, so a provider retry after
-  a lost ack is stored again as its own record.
-- A committed record gets a strictly increasing `seq`, and seq order **is**
-  commit order: once a reader has observed seq `N`, no record with seq `≤ N`
-  becomes visible later. Readers use `seq` only as a cursor; `0` means
-  "nothing consumed yet." Values may have gaps.
-- `append/2`, `put_cursor/3` and `truncate_through/2` return `{:error, reason}`
-  when the write could not be made durable — a full disk, say. A failed
-  `append/2` makes none of its records visible and consumes no seqs; a failed
-  `put_cursor/3`/`truncate_through/2` leaves the cursor/floor where it was. The
-  caller retries. Nothing acked is lost; a failed cursor write only widens
-  at-least-once redelivery after a restart.
-- After a crash, replay must drop a torn trailing record (a write that
-  started but never committed). No un-acked write is ever surfaced as
-  durable.
+`Ankusa.Queue.Writer`, one per instance, is the only process that assigns a
+`seq`. It writes **one** synced RocksDB batch containing:
 
-### `:none`: no WAL at all
+- the hook, keyed by seq;
+- one pending delivery row and one due key per sink of its source, bound by
+  sink index and module at ack time;
+- an archive obligation, but only while the `:storage` role runs;
+- the next-seq marker.
 
-`wal: :none` is the other ack path: no log, no batcher, no compactor, no
+The batch is atomic: a commit either lands whole or nothing is acked, and a
+failed commit makes the batcher answer `503 store_unavailable`. Seqs are
+strictly increasing and never reused — gaps are allowed, because a failed
+commit still consumes seqs. `[:ankusa, :commit, :stop]` reports `batch_size`,
+`bytes` and `duration`. A hook whose source has no sinks while `:storage` is
+off has no obligations at all: it is acked and stamped with a seq but not
+stored.
+
+### Durability, corruption, full disk
+
+- One `sync: true` batch per commit: hundreds of hooks, one fsync. The boot
+  line says it plainly: `[ankusa] store at <path>. Durable to power loss on
+  THIS host only.` `kill -9` loses no acked hook; RocksDB recovers its own WAL.
+  Local `BlobStore.LocalFS` writes are durable too (see below).
+- RocksDB opens with `paranoid_checks` and
+  `wal_recovery_mode: tolerate_corrupted_tail_records`: a torn trailing write
+  (the last, never-acked one) is dropped. Damage anywhere before it refuses to
+  open (`{:store_open_failed, path, reason}`, with a log line), because a store
+  this node cannot read is never treated as empty. Point reads report checksum
+  failures; a scan only trusts a result that reaches the end of its range, so
+  corruption surfaces as an error, never as a silently shorter list. The
+  Writer, the source store and the rate limiter refuse to start when they
+  cannot read their state.
+- Full disk: commits fail (`503 store_unavailable`, nothing acked); the Writer
+  asks the Store to close and reopen, which clears RocksDB's latched write
+  error, so ingest resumes by itself once space frees.
+- Stop an instance cleanly (supervisor shutdown, `docker stop`'s SIGTERM) and
+  the store closes with it. SIGKILL keeps the data (RocksDB WAL recovery), but a
+  node halted mid-write-load with the DB open can segfault at exit.
+
+### Reclamation: a hook is deleted by its obligations
+
+A hook's obligations are its delivery rows (pending or dead) and, only if
+`:storage` ran at ack time, its archive obligation. When the last one clears,
+the hook is deleted — whatever roles the node runs. So a node without the
+archive (`ANKUSA_ROLES=edge,dispatch`) reclaims on delivery, and an archive
+that is behind, off or on another node never blocks delivery.
+
+### `:none`: no queue, no store hooks
+
+`wal: :none` is the other ack path: no hook queue, no batcher, no compactor, no
 dispatch pipeline, no DLQ. Ingest verifies, publishes to the source's sinks
 inside the request (`Ankusa.Edge.Publish`), and answers `201` only once every
-sink has confirmed. `Ankusa.Sink.durable?/2` is the promise that makes a
+sink has confirmed. `c:Ankusa.Sink.durable?/1` is the promise that makes a
 sink's `:ok` mean "something that outlives this node accepted it" — true for
 every shipped sink except `Sink.Log` and `Sink.Redis` — and boot refuses a
 `wal: :none` config in which a static source has no durable sink. One durable
 sink is enough to pass that check, but *every* sink still has to confirm, so a
 non-durable sink that cannot (Redis with no subscriber) turns every ingest
-into a `503`. There is no log and no segment on this node, so there is nothing
-to compact: the two-tier story in this document does not apply. See
+into a `503`. Nothing is committed and no segment is written, so the two-tier
+story in this document does not apply. The node still runs `Ankusa.Store` for
+the quarantine pen, API-managed sources and rate-limit overrides. See
 [`delivery.md#direct-mode`](delivery.md#direct-mode) and
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 
-### `WAL.DiskLog`: the default, single-node
+### The default, single-node
 
-Append-only, length-prefixed, CRC32-per-record binary log on local disk.
-No external dependencies: OTP's `:file`, `:ets`, and `:erlang.crc32` only.
-
-- One `:file.pwrite` + one `:file.datasync` (fsync) per batch: hundreds of
-  hooks, one fsync.
-- Replay validates every frame's CRC and truncates the file at the first
-  torn/invalid one.
-- Truncation is **logical first**: `truncate_through/2` records a durable seq
-  floor in `<name>.truncated` and drops the affected index entries, so
-  reclaiming a few records costs a few ETS deletes and never blocks appends.
-  The file is rewritten only once the dead prefix passes `:rewrite_min_bytes`
-  (default 64 MiB) and is at least as large as the live suffix it would copy.
-  The floor is also what keeps `seq` from being reused: after a restart,
-  allocation resumes at the floor, the persisted cursors, or the last replayed
-  frame, whichever is highest, never at 1.
-- Cursors and the truncation floor are written to a temp file, fsynced, then
-  renamed, so a power loss leaves the old or the new file, never a torn one.
-- A failed write — a full disk, a dead device — is reported, not fatal: the
-  WAL process stays up, a failed batch acks nothing and reuses its seqs, a
-  failed cursor/floor write leaves the in-memory value alone, a rewrite that
-  cannot copy is skipped, and the batcher turns the failure into
-  `503 store_unavailable` while dispatch and the compactor retry their cursor
-  writes on the next tick. Ingest resumes on its own once space frees. The
-  compactor's segment and index writes are not covered yet: with the local
-  blob store on the same volume, a full disk can still crash-loop it.
-- Durable to process crash and power loss **on that box**, not to losing the
-  box. It's one local file. Every WAL role (`edge`, `dispatch`, `storage`)
-  reads that same file, so they must all run in **one** BEAM node; splitting
-  them across processes or hosts is not supported. See "Scaling out" below.
+The default `wal: :disk` runs the store on local disk, with no external
+dependency beyond RocksDB itself. Every store-backed role (`edge`, `dispatch`,
+`storage`) reads that same database, and RocksDB is single-process, so they
+must all run in **one** BEAM node; splitting them across processes or hosts is
+not supported. It is durable to process crash and power loss **on that box**,
+not to losing the box. See "Scaling out" below.
 
 ```elixir
-config :ankusa, wal: {Ankusa.WAL.DiskLog, []}   # the default; no opts required
-# wal: {Ankusa.WAL.DiskLog, rewrite_min_bytes: 64 * 1024 * 1024}  # that IS the default
+config :ankusa, wal: :disk   # the default
 ```
 
 ## Scaling out
 
-One node is one `WAL.DiskLog` file. To scale, run **N independent all-role
+One node is one local store. To scale, run **N independent all-role
 nodes behind a load balancer**. Each with its own data volume and its own
 DLQ/admin API. Each node also needs **its own bucket** (or its own LocalFS
-root) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg`, which
-name no instance or node, and remote blob stores ignore the `instance`
-argument, so two nodes sharing a bucket silently overwrite each other's
-segments. See [`deployment.md`](deployment.md) for the operational shape.
+root) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg` (with
+the sibling `.idx` object), which name no instance or node, and remote blob
+stores ignore the `instance` argument, so two nodes sharing a bucket silently
+overwrite each other's segments. See [`deployment.md`](deployment.md) for the
+operational shape.
 
-Under `wal: :none` none of this applies: there is no WAL file, no segment
-story, and no volume — replicas are freely interchangeable, and the broker (or
+Under `wal: :none` none of this applies: there is no queue, no segment story
+and no data volume — replicas are freely interchangeable, and the broker (or
 whatever answers the sink) is the only shared state. See
 [`architecture.md#4-stateless-ingest-fleet-wal-none`](architecture.md#4-stateless-ingest-fleet-wal-none).
 
@@ -127,15 +161,15 @@ store-specific error (`:enoent`, an HTTP status). `Ankusa.ClaimCheck`
 claim consistently regardless of which store is configured.
 
 Two independent namespaces share one `BlobStore` by default and never
-collide: `seg/...` (compaction, written by `Ankusa.Storage.Compactor`, every
-hook) and `claims/...` (`Ankusa.ClaimCheck`, packed per tenant per dispatch
-batch, one object holding many claims under
+collide: `seg/...` (each segment written by `Ankusa.Storage.Compactor`, plus
+its sibling `.idx` index object) and `claims/...` (`Ankusa.ClaimCheck`, packed
+per tenant per dispatch batch, one object holding many claims under
 `claims/tenant=<t>/dt=<day>/<pack_id>`). Retention differs per namespace
 too. See [`claim-check.md#retention`](claim-check.md#retention).
 
 | Adapter | Deps | Notes |
 | --- | --- | --- |
-| `BlobStore.LocalFS` | none | Default. Atomic writes (temp file + rename). `get_range` uses `:file.pread/3`, never slurps the whole segment. |
+| `BlobStore.LocalFS` | none | Default. Durable writes: temp file fsync, rename, directory fsync; `put` returns `{:error, reason}` instead of raising. `get_range` uses `:file.pread/3`, never slurps the whole segment. |
 | `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
 | `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS. The adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
 | `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
@@ -235,37 +269,40 @@ the `get_range` callback needs.
 
 ## `Ankusa.Storage.Compactor`: how segments get written
 
-One tick (default every `storage.interval_ms`, 1s):
+A hook committed while the `:storage` role runs carries an *archive
+obligation*. Each tick (default every `storage.interval_ms`, 1s) clears some:
 
-1. Read WAL records past the compactor's own cursor in bounded chunks (256
-   records per read), accumulating until their payloads reach
-   `storage.roll_bytes` (default 16 MiB) or the WAL has nothing more to give.
-   A long backlog therefore produces **several segments in one tick**, not one
-   unbounded segment. Peak memory is a chunk plus a segment, however far
-   behind a storage node fell.
-2. Encode those records into one segment via the configured `Codec`.
+1. Read archive obligations past the compactor's own position, in `seq` order,
+   taking them until their stored sizes reach `storage.roll_bytes` (default
+   16 MiB) — always at least one, so a hook larger than a segment still gets
+   one. Sizes come from the obligation keys, so nothing is read and discarded
+   to find out how much fits. A long backlog produces **several segments in
+   one tick**: the tick repeats while obligations remain.
+2. Encode those hooks into one segment via the configured `Codec`.
 3. `PUT` the segment to the blob store under a deterministic key:
    `seg/<zero-padded first_seq>-<zero-padded last_seq>.seg`.
-4. Append one index row per record to `Ankusa.Storage.Index` (durable,
-   append-only, fsynced before the cursor moves, on local disk regardless of
-   which `BlobStore` is configured): `event_id`, `tenant_id`, `source_id`,
-   `seq`, `segment_key`, `offset`, `length`.
-5. Advance the compactor's durable cursor.
-6. Truncate the WAL through `min(compactor_seq, dispatch_seq)`. **Never**
-   past what dispatch has consumed yet, so at-least-once delivery survives
-   compaction even if dispatch is lagging or down.
+4. `PUT` the segment's index object, the same key with `.idx`, mapping each
+   event id to `{offset, length, seq}` for range reads.
+5. Write the segment's catalogue row to the store: key, index key, seq and id
+   ranges, count and byte size.
+6. Clear the batch's obligations. Each cleared obligation leaves a marker; when
+   a hook's last obligation is gone, the hook is deleted.
 
-This is why segments are never one-object-per-hook: PUT cost amortizes over
-however many records landed in one tick, and archive-tier storage (which
-bills a minimum object size) stays cheap at scale.
+A failed blob write ends the tick without crashing: nothing moves, and the
+same hooks are written again next tick under the same keys. This is why
+segments are never one-object-per-hook: PUT cost amortizes over however many
+records landed in one tick, and archive-tier storage (which bills a minimum
+object size) stays cheap at scale.
 
 ## Replay by id
 
-`Ankusa.Storage.fetch/2` looks an event id up through the index, range-reads
-exactly its frame from the blob store, and decodes it back into the
-original `%Ankusa.Envelope{}`, the read-side counterpart to compaction,
-usable for building a replay/audit API or a dashboard without touching the
-WAL.
+`Ankusa.Storage.fetch/2` resolves an event id through the catalogue: the
+segment rows whose id range could hold it (ids are time-ordered, so that is a
+segment or two), then each candidate's `.idx` object, then a range read of
+exactly that record's bytes from the blob store. It decodes the frame back
+into the original `%Ankusa.Envelope{}` with its `seq`. Hooks a 0.3 node
+archived resolve through the legacy locations imported from its index log. It
+reads no queue state, so it works on a storage node with dispatch off.
 
 ```elixir
 {:ok, envelope} = Ankusa.Storage.fetch(:default, event_id)

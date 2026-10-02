@@ -99,9 +99,12 @@ An unresolvable URL shape returns `:error`, which the router turns into a
 `tenant_id` on a `%Ankusa.Source{}` (default `"default"`) is the
 **storage/retention scope**. It also travels with every delivery. Concretely:
 
-- **Storage**: the segment index row (`Ankusa.Storage.Index`) carries
-  `tenant_id`, so per-tenant retention/deletion is a real, queryable
-  dimension, not something bolted on after the fact.
+- **Storage**: `tenant_id` is a field of `Ankusa.Envelope`, so it is inside
+  every stored hook and every segment's bytes. The store's segment catalogue is
+  keyed by `seq` and event-id range, not by tenant, so it cannot answer "which
+  segments hold tenant X" — a per-tenant retention rule has to read the
+  segments. Claim packs are the exception: their keys are tenant-prefixed
+  (`claims/tenant=acme/...`), so a tenant's claims are deletable by prefix.
 - **Delivery**: `tenant_id` is in every `Ankusa.Sink`'s `ctx` map
   (`ctx.tenant_id`), so a sink can route, tag, or partition by it. For
   example, `Ankusa.Sink.RabbitMQ`'s default routing key doesn't include it, but a
@@ -113,23 +116,35 @@ otherwise `"default"`. This means `TenantPath` and per-source `tenant_id`
 can coexist: a resolver-provided tenant always overrides a source's
 declared one, never the reverse.
 
-## What isn't built yet
+## Dynamic sources
 
-Everything above works today against `SourceStore.Static` (sources declared
-in `config.exs`), which means the *set* of valid `source_id`s is still
-fixed at boot. A real multi-tenant SaaS or a product minting opaque catch
-URLs at runtime needs a
-**dynamic** endpoint store, mint a catch URL via an API call, have it work
-immediately, no redeploy. That means a DB-backed `SourceStore` (e.g.
-`SourceStore.Ecto`, read-through cached, invalidated on write) plus a small
-control-plane API to create/revoke endpoints. That's a real gap, not a
-subtlety: `RouteResolver`/`Route`/tenant-scoped storage are the seams that
-make it *possible*; the dynamic store itself isn't shipped yet.
+Everything above is a store decision, not a boot-time one: the router resolves
+a `source_id` and asks the configured `Ankusa.SourceStore` for it, so a source
+can appear at runtime with no redeploy. Two stores ship:
 
-One consequence of that split for `wal.type: none`: its boot check — every
-statically configured source needs at least one sink whose `:ok` means durable
-(`Ankusa.Sink.durable?/2`, enforced by `Ankusa.WAL.validate_config!/1`) — only
-sees sources in the static store. A source created at runtime through the admin
+- **`SourceStore.Static`** (the default) reads sources declared in `config.exs`
+  and nothing else. The admin API's write routes answer
+  `409 source_store_read_only` against it.
+- **`SourceStore.Persistent`** (the image's `source_store.type: persistent`)
+  seeds the same `sources:` map and adds tenant-scoped ones through the admin
+  API: `GET|POST /v1/tenants/{tenant}/sources` and
+  `GET|PUT|DELETE /v1/tenants/{tenant}/sources/{name}`, with the same spec
+  validation as the YAML file. Each source is one synced key in the node's
+  store, so a created or updated source works immediately and survives a
+  restart. That is what makes a product minting per-customer catch URLs
+  possible without a redeploy: `RouteResolver`/`Route` gave you the URL shape,
+  this gives you the runtime endpoint.
+
+`SourceStore.Persistent` keeps its sources in this node's store, so it is
+node-local like the rest of it: that node's admin API writes, that node's edge
+reads. A fleet wants either one node serving the source API, or an external
+store — a DB-backed `SourceStore.Ecto`, read-through cached, invalidated on
+write — which the `Ankusa.SourceStore` behaviour is the seam for.
+
+One consequence for `wal.type: none`: its boot check — every statically
+configured source needs at least one sink whose `:ok` means durable
+(`Ankusa.Sink.durable?/2`, enforced by `Ankusa.Queue.validate_config!/1`) —
+only sees sources in the config. A source created at runtime through the admin
 API is not checked, because the store's decoder has no instance config, so a
 `wal: :none` node with a writable source store can be handed a log-only source
 at runtime. Give runtime-created sources durable sinks, or run `wal.type: disk`

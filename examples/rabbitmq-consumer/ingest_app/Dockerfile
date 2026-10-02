@@ -5,9 +5,11 @@
 #
 # Dev-mode image (mix run, not a release) — right-sized for an example; a
 # real deployment would build a proper `mix release` in a multi-stage image.
+# build-base + cmake + linux-headers + openssl-dev + zstd-dev: the rocksdb NIF
+# (ankusa core) builds from source; the last three are its system needs.
 FROM elixir:1.20.4-alpine
 
-RUN mix local.hex --force && mix local.rebar --force
+RUN apk add --no-cache build-base cmake linux-headers openssl-dev zstd-dev && mix local.hex --force && mix local.rebar --force
 
 WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa

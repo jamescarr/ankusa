@@ -170,7 +170,7 @@ defmodule AnkusaServer.ConfigTest do
     assert config.roles == [:edge, :dispatch]
     assert config.data_dir == "/data"
     assert config.admin.port == 9000
-    assert config.wal == {Ankusa.WAL.DiskLog, []}
+    assert config.wal == :disk
   end
 
   # ── wal.type: none ──────────────────────────────────────────────────────────

@@ -16,34 +16,32 @@ defmodule Ankusa.Config do
             max_body_bytes: 8_000_000,
             # {module, opts} implementing Ankusa.SourceStore
             source_store: {Ankusa.SourceStore.Static, sources: %{}},
-            # {module, opts} implementing Ankusa.WAL, or :none: no log, ack on
-            # the sink's confirm. With :none, `new/1` drops :dispatch and
-            # :storage from :roles (they read the WAL and nothing else) and
-            # requires :edge to remain.
-            wal: {Ankusa.WAL.DiskLog, []},
-            # group-commit batcher. The DiskLog GenServer serializes commits
-            # itself, so more partitions only add contention now that a
-            # partition commits asynchronously instead of holding the caller's
-            # message queue.
+            # :disk (the RocksDB store: every hook is on disk before the ack) or
+            # :none: no log, ack on the sink's confirm. With :none, `new/1` drops
+            # :dispatch and :storage from :roles (there is nothing for them to
+            # read) and requires :edge to remain.
+            wal: :disk,
+            # group-commit batcher. The queue writer serializes commits itself,
+            # so more partitions only add contention now that a partition commits
+            # asynchronously instead of holding the caller's message queue.
             batcher: %{
               partitions: 2,
               max_batch: 256,
-              # 0 = commit as soon as the batch fills, no linger: the WAL
-              # append is a Task, so waiting costs a scheduling hop, not
-              # head-of-line blocking.
+              # 0 = commit as soon as the batch fills, no linger: the commit is a
+              # Task, so waiting costs a scheduling hop, not head-of-line
+              # blocking.
               max_delay_ms: 0,
               max_queue: 10_000
             },
             # dispatch pipeline
             dispatch: %{
-              poll_ms: 200,
-              # bounds one WAL read's worth of memory
+              # delivery rows claimed per store scan
               batch: 128,
               # max sink deliveries in flight at once
               concurrency: 32,
-              # max admitted (not yet fully handled) envelopes...
+              # max claimed, unfinished deliveries...
               max_inflight: 4096,
-              # ...and the max sum of their body bytes
+              # ...and the max sum of their stored hook sizes in bytes
               max_inflight_bytes: 134_217_728,
               retry: {Ankusa.RetryPolicy.Exponential, []}
             },
@@ -195,7 +193,7 @@ defmodule Ankusa.Config do
     |> normalize_wal()
   end
 
-  # `:dispatch` and `:storage` read the WAL and nothing else, so with no WAL
+  # `:dispatch` and `:storage` read the queue and nothing else, so with no queue
   # they have no work: they are dropped rather than rejected, which lets an
   # existing `roles: [:edge, :dispatch, :storage]` deployment flip
   # `wal.type: none` with no other change. The check is "a role is left", not
@@ -209,7 +207,16 @@ defmodule Ankusa.Config do
     end
   end
 
-  defp normalize_wal(config), do: config
+  defp normalize_wal(%__MODULE__{wal: :disk} = config), do: config
+
+  defp normalize_wal(%__MODULE__{wal: {Ankusa.WAL.DiskLog, _}}) do
+    raise ArgumentError,
+          "wal: {Ankusa.WAL.DiskLog, _} was removed: use wal: :disk (the RocksDB store) or wal: :none"
+  end
+
+  defp normalize_wal(%__MODULE__{wal: other}) do
+    raise ArgumentError, "wal must be :disk or :none, got #{inspect(other)}"
+  end
 
   defp put_section(acc, k, v) do
     Map.put(acc, k, merge_known!(Map.get(acc, k), v, to_string(k)))

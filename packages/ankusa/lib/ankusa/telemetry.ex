@@ -46,7 +46,7 @@ defmodule Ankusa.Telemetry do
 
   `fun` returns `{result, extra_meta}`, or `{result, measurements, extra_meta}`
   when the span has measurements of its own to report on `:stop` — what
-  `Ankusa.WAL.DiskLog` does with a commit's `batch_size` and `bytes`. Either
+  `Ankusa.Queue.Writer` does with a commit's `batch_size` and `bytes`. Either
   return shape merges the start metadata into the stop event, so a handler can
   read `:stop` alone.
   """

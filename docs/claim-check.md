@@ -56,7 +56,7 @@ urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
 
 The gateway is the `claim_check` role of the same image, and it is read-only:
 no writes, no listing, no delete. It reads the same `storage` block as the
-nodes that write claims, and needs no WAL:
+nodes that write claims, and needs no store:
 
 ```yaml
 node:
@@ -364,12 +364,13 @@ runs, shared by every sink of that source. Two more levers keep writes cheap:
   most webhook bodies ride inline: base64 turns it into about 88 KiB, under
   Kafka's 1 MiB `max.message.bytes` and SQS's 256 KiB. Raise or lower
   `inline_max_bytes` per sink; the cost moves to broker bytes.
-- **Claims are packed.** Dispatch holds up to `dispatch.batch` (128) hooks per
-  WAL read, checks each batch's claims in per tenant as one object, and gives
-  every hook a byte range inside it: one `PUT` per tenant per batch instead of
-  one per hook, with no added latency (the batch is already in hand). A group
-  bigger than `claim_check.pack_max_bytes` (16 MiB default) splits into several
-  objects; a body bigger than that gets an object of its own.
+- **Claims are packed.** Dispatch claims up to `dispatch.batch` (128) delivery
+  rows per store scan, checks each batch's claims in per tenant as one object,
+  and gives every hook a byte range inside it: one `PUT` per tenant per batch
+  instead of one per hook, with no added latency (the batch is already in
+  hand). A group bigger than `claim_check.pack_max_bytes` (16 MiB default)
+  splits into several objects; a body bigger than that gets an object of its
+  own.
 
 Packs never mix tenants, so the write count is one per *tenant present* in a
 batch. A tenant with thousands of distinct values, an account id say, keeps

@@ -259,7 +259,7 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
-  describe "Ankusa.WAL.validate_config!/1" do
+  describe "Ankusa.Queue.validate_config!/1" do
     defp wal_config(opts), do: Config.new([wal: :none] ++ opts)
 
     defp source(sinks) do
@@ -267,22 +267,22 @@ defmodule Ankusa.ConfigTest do
     end
 
     test "is :ok for a disk WAL whatever the sinks" do
-      assert :ok = Ankusa.WAL.validate_config!(Config.new())
+      assert :ok = Ankusa.Queue.validate_config!(Config.new())
 
       assert :ok =
-               Ankusa.WAL.validate_config!(
+               Ankusa.Queue.validate_config!(
                  Config.new(source_store: source([{Ankusa.Sink.Log, []}]))
                )
     end
 
     test "requires at least one durable sink per static source" do
       assert_raise ArgumentError, ~r/source "demo": wal: :none acks/, fn ->
-        Ankusa.WAL.validate_config!(wal_config(source_store: source([{Ankusa.Sink.Log, []}])))
+        Ankusa.Queue.validate_config!(wal_config(source_store: source([{Ankusa.Sink.Log, []}])))
       end
 
       # A source that names no sinks gets the Log default, which is not durable.
       assert_raise ArgumentError, ~r/source "demo"/, fn ->
-        Ankusa.WAL.validate_config!(
+        Ankusa.Queue.validate_config!(
           wal_config(source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => []}})
         )
       end
@@ -290,7 +290,27 @@ defmodule Ankusa.ConfigTest do
 
     test "a durable sink anywhere in the list satisfies it" do
       sinks = [{Ankusa.Sink.Log, []}, {Ankusa.Sink.Http, [url: "http://sink.test"]}]
-      assert :ok = Ankusa.WAL.validate_config!(wal_config(source_store: source(sinks)))
+      assert :ok = Ankusa.Queue.validate_config!(wal_config(source_store: source(sinks)))
+    end
+  end
+
+  describe "wal normalization" do
+    test "the removed disk-log tuple raises with a hint" do
+      assert_raise ArgumentError, ~r/use wal: :disk/, fn ->
+        Config.new(wal: {Ankusa.WAL.DiskLog, []})
+      end
+    end
+
+    test "an unknown wal value raises" do
+      assert_raise ArgumentError, ~r/wal must be :disk or :none/, fn ->
+        Config.new(wal: :bogus)
+      end
+    end
+
+    test "dispatch.poll_ms is no longer a config key" do
+      assert_raise ArgumentError, ~r/unknown Ankusa.Config key: dispatch\.poll_ms/, fn ->
+        Config.new(dispatch: %{poll_ms: 200})
+      end
     end
   end
 end

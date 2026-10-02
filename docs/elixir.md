@@ -1,7 +1,7 @@
 # Ankusa for Elixir
 
-The same pipeline the container runs, durable WAL, verification,
-dispatch, sinks, as a library in your own supervision tree. If you would
+The same pipeline the container runs — a durable local store, verification,
+dispatch, sinks — as a library in your own supervision tree. If you would
 rather run Ankusa as a container, or you don't write Elixir, start at the
 [README](../README.md).
 
@@ -17,6 +17,10 @@ def deps do
   ]
 end
 ```
+
+`ankusa` depends on `rocksdb`, a NIF built from source when you run
+`mix deps.compile`: you need cmake >= 3.12, a C++20 compiler, and zstd +
+OpenSSL development headers (on Alpine, also `linux-headers`).
 
 ## Configure a source
 
@@ -51,7 +55,7 @@ You'll see the durability banner and the listener come up:
 
 ```
 [ankusa] starting instance default roles=[:edge, :dispatch, :storage] port=4000 data_dir=./data
-[ankusa] DiskLog WAL at ./data/default/wal/ankusa.wal: recovered 0 record(s), next_seq=1. Durable to power loss on THIS host only.
+[ankusa] store at ./data/default/store. Durable to power loss on THIS host only.
 Running Ankusa.Edge.Router with Bandit 1.12.5 at 0.0.0.0:4000 (http)
 ```
 
@@ -68,7 +72,8 @@ curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' \
 # => {"id":"01a0...","status":"accepted"}
 ```
 
-The `201` returns only *after* the payload is `fsync`'d to the WAL, that's
+The `201` returns only *after* the payload is committed to the store with one
+synced batch, that's
 the [core invariant](architecture.md#the-core-invariant), not a formality.
 The dispatch pipeline then delivers it, visible in the server log:
 
@@ -77,7 +82,7 @@ The dispatch pipeline then delivers it, visible in the server log:
 ```
 
 Under `wal.type: none` the same `201` means the sinks confirmed inside the
-request instead: there is no log, no dispatch pipeline, and the provider's
+request instead: there is no queue, no dispatch pipeline, and the provider's
 retry is the retry.
 
 ### 3. Every accepted POST is stored
@@ -101,20 +106,26 @@ curl localhost:4000/health
 # => {"status":"ok","instance":"default"}
 
 curl localhost:4002/v1/wal      # admin.enabled: true
-# => {"instance":"default","wal":{"records":..,"cursors":{"dispatch":..}}}
+# => {"instance":"default","wal":{"next_seq":..,"hooks":..,"deliveries":..,"disk_bytes":..}}
 ```
 
-Durable state on disk (the WAL is truncated as the compactor rolls
-segments):
+`hooks` and `deliveries` are RocksDB key estimates; `next_seq` is exact.
+`wal` is `{}` when the store cannot be read, and `/v1/wal` is `409
+wal_disabled` under `wal.type: none`.
+
+Durable state on disk — the store, plus the segments the compactor rolls out
+of it:
 
 ```sh
 find data/default -type f
-# data/default/wal/ankusa.wal        data/default/segments/index.log
+# data/default/store/...        # RocksDB: hooks, delivery rows, catalogue
 # data/default/segments/seg/00000000000000000001-...seg
+# data/default/segments/seg/00000000000000000001-...idx
 ```
 
-State lives under `./data/<instance>/` (`wal/`, `segments/`, `quarantine/`,
-`dlq/`).
+State lives under `./data/<instance>/`: `store/` holds the queue, DLQ,
+quarantine, sources and rate limits; `segments/` holds the object store's
+segment and index objects.
 
 ## Endpoints
 
@@ -122,7 +133,7 @@ The ingest listener serves the catch URL, plus one read-only endpoint:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source`, see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the durable accept — the WAL fsync, or every sink's confirm under `wal.type: none`: `201 accepted` is the only committed response (there is no `200`). Every accepted POST is a new hook with a new `id`; ingest does no deduplication, so a provider retry after a lost ack is stored and delivered again. `201` accepted / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded or undeliverable. |
+| `POST` | *(catch URL)* | Ingest. Path scheme is set by the configured `Ankusa.RouteResolver` (default `/webhooks/:source_id`; `TenantPath` gives `/webhooks/:tenant/:source`, see [`multi-tenancy.md`](multi-tenancy.md)). Raw body kept verbatim; verified inline; the `2xx` is returned only after the durable accept — the store commit, or every sink's confirm under `wal.type: none`: `201 accepted` is the only committed response (there is no `200`). Every accepted POST is a new hook with a new `id`; ingest does no deduplication, so a provider retry after a lost ack is stored and delivered again. `201` accepted / `202` quarantined / `400` body unreadable / `401` verification failed / `404` unknown source / `413` too large / `503` overloaded or undeliverable. |
 | `GET` | `/health` | Liveness. Always `200` while the listener is up. |
 
 The operator API on its own port, `/metrics`, the dead-letter queue, replay,
@@ -134,6 +145,16 @@ quarantine, is `admin.enabled: true`; see the admin API section in
 `Ankusa.Instance`'s `init/1` starts children conditionally on `config.roles`:
 
 ```elixir
+defp store_children(config, opts) do
+  if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
+       match?({Ankusa.SourceStore.Persistent, _}, config.source_store),
+    do: [{Ankusa.Store, opts} | writer_children(config, opts)],
+    else: []
+end
+
+defp writer_children(%Config{wal: :disk} = config, opts),
+  do: if(Config.role?(config, :edge), do: [{Ankusa.Queue.Writer, opts}], else: [])
+
 defp edge_children(config, opts), do: if Config.role?(config, :edge), do: [...], else: []
 defp dispatch_children(config, opts), do: if Config.role?(config, :dispatch), do: [...], else: []
 defp storage_children(config, opts), do: if Config.role?(config, :storage), do: [...], else: []
@@ -144,18 +165,42 @@ One Mix release, many deployments: the same compiled artifact runs
 all-in-one on a laptop or as a node in a fleet, because *which* children
 start is a runtime config decision, never a build-time one.
 
-`edge`, `dispatch`, and `storage` share the one local `WAL.DiskLog` file, so
-every WAL role has to run in the **same BEAM node**: you can't split them
+`edge`, `dispatch`, and `storage` share the one local RocksDB store at
+`<data_dir>/<instance>/store`, and RocksDB is single-process, so every
+store-backed role has to run in the **same BEAM node**: you can't split them
 across processes or hosts. `claim_check` is stateless and can run anywhere:
 
 ```sh
-ANKUSA_ROLES=edge,dispatch,storage mix run --no-halt   # the WAL-bearing shape
+ANKUSA_ROLES=edge,dispatch,storage mix run --no-halt   # the store-backed shape
 ANKUSA_ROLES=claim_check mix run --no-halt             # claim-check gateway, any node
 ```
 
 Ankusa.Application reads `ANKUSA_ROLES` (comma-separated) and `PORT` on top of
 whatever `config.exs` sets, see
 [`configuration.md#runtime-environment-overrides`](configuration.md#runtime-environment-overrides).
+
+## The queue from code
+
+The default `wal: :disk` commits every accepted hook to `Ankusa.Queue`; the
+batcher does it on the ingest path, and you can read the queue and manage the
+DLQ directly:
+
+```elixir
+# one entry per hook: the envelope plus the source's sinks at ack time
+{:ok, [%{committed: env}]} =
+  Ankusa.Queue.enqueue(:default, [%{envelope: env, sinks: [{Ankusa.Sink.Http, url: "..."}]}])
+
+{:ok, hooks} = Ankusa.Queue.hooks(:default, 0, 100)     # seq > 0, ascending
+{:ok, stats} = Ankusa.Queue.stats(:default)             # %{next_seq, hooks, deliveries, disk_bytes}
+{:ok, %{total: n, entries: entries}} = Ankusa.Queue.dead(:default, source_id: "stripe")
+
+{:ok, replayed} = Ankusa.Dispatch.replay(:default, source_id: "stripe")  # rows moved back to pending
+```
+
+`Ankusa.Dispatch.replay/2` returns `{:ok, n}` (the number of dead rows moved
+back to pending) and is asynchronous: the pipeline delivers them, and a row
+that fails again is dead-lettered again. Under `wal.type: none` nothing is
+committed, so there is no queue and no DLQ.
 
 ## Deploying your own wrapper app
 
@@ -173,7 +218,11 @@ shows the pattern rather than prescribing one image for every use case:
   prescribe a release config because that's genuinely deployment-specific
   (env-var vs. `runtime.exs`-based config, which roles per image, etc.).
 
-Either way, a deployable wrapper app (like
+A build stage needs the RocksDB toolchain from [Install](#install) — cmake, a
+C++20 compiler, zstd and OpenSSL headers — the same packages the shipped
+example installs in its build stage.
+
+A deployable wrapper app (like
 [`ingest_app/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/ingest_app)) is the intended
 pattern: a tiny Mix project that depends on `ankusa` (+ whichever adapter
 packages it needs), reads its own env vars, and calls `Ankusa.Config.new/1` +
@@ -189,6 +238,6 @@ Dockerfile/compose context that goes with it, is in
 
 - Every config key, struct and YAML: [`configuration.md`](configuration.md)
 - Embedding Ankusa and Oban in one app: [`integrations.md`](integrations.md#in-process-embedding-ankusa-and-oban-in-the-same-app)
-- WAL and object stores: [`storage.md`](storage.md)
+- The local store and object stores: [`storage.md`](storage.md)
 - Sinks, retries, dead letters: [`delivery.md`](delivery.md)
 - Module reference and callback signatures: [HexDocs](https://hexdocs.pm/ankusa)

@@ -45,236 +45,302 @@ defmodule Ankusa.Codec.RawTest do
 end
 
 defmodule Ankusa.StorageTest do
+  @moduledoc """
+  The archive: hooks committed under the `:storage` role carry an archive
+  obligation, a tick packs them into `seg/<first>-<last>.seg` plus a `.idx`
+  object and a catalogue row, and `Ankusa.Storage.fetch/2` reads any of them
+  back byte-for-byte.
+
+  A hook is only deleted once *both* of its obligations clear — the archive's
+  and every delivery row's — so these tests pin the archive-then-deliver and
+  deliver-then-archive orders, the W5 case with no `:storage` role at all, and
+  that a failing blob store defers a tick instead of crashing the compactor.
+  """
+
   use ExUnit.Case, async: false
 
-  alias Ankusa.{Config, Envelope}
+  import Ankusa.TestHelpers
+
+  alias Ankusa.{Envelope, Store}
+  alias Ankusa.Dispatch.Pipeline
   alias Ankusa.Storage
-  alias Ankusa.Storage.{Compactor, Index}
+  alias Ankusa.Storage.Compactor
+  alias Ankusa.Store.Keys
 
-  setup do
-    inst = :"t#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
-    on_exit(fn -> File.rm_rf(dir) end)
+  # ── test sinks ─────────────────────────────────────────────────────────────
 
-    config =
-      Config.new(
-        instance: inst,
-        data_dir: dir,
-        roles: [:edge, :dispatch, :storage],
-        source_store: {Ankusa.SourceStore.Static, sources: %{"acme" => %{}}},
-        # disable the interval auto-tick so `tick/1` fully controls the test
-        storage: %{interval_ms: 0}
-      )
+  defmodule CapturingSink do
+    @behaviour Ankusa.Sink
 
-    Ankusa.put_config(config)
-    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
-    start_supervised!({Compactor, instance: inst, config: config})
-
-    %{inst: inst, config: config}
+    @impl true
+    def deliver(env, ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:delivered, env.id, ctx.attempt})
+      :ok
+    end
   end
 
-  defp envelope(source_id, body) do
+  # Holds the delivery open until the test releases it, so the test controls
+  # whether the archive or the delivery clears first.
+  defmodule GateSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:started, env.id, self()})
+      id = env.id
+
+      receive do
+        {:go, ^id} ->
+          send(Keyword.fetch!(opts, :pid), {:delivered, id, 1})
+          :ok
+      after
+        5_000 -> {:error, :gate_timeout}
+      end
+    end
+  end
+
+  # ── a failing blob store ───────────────────────────────────────────────────
+
+  # Fails `put/4` for the first N calls (counted in an `Agent`), then delegates
+  # to `LocalFS`, the way a full bucket or a 5xx from S3 behaves.
+  defmodule FailingBlobStore do
+    @behaviour Ankusa.BlobStore
+
+    alias Ankusa.BlobStore.LocalFS
+
+    @impl true
+    def put(instance, key, data, opts) do
+      case Agent.get_and_update(Keyword.fetch!(opts, :agent), fn
+             n when n > 0 -> {:fail, n - 1}
+             n -> {:ok, n}
+           end) do
+        :fail -> {:error, :boom}
+        :ok -> LocalFS.put(instance, key, data, [])
+      end
+    end
+
+    @impl true
+    def get(instance, key, _opts), do: LocalFS.get(instance, key, [])
+
+    @impl true
+    def get_range(instance, key, offset, length, _opts),
+      do: LocalFS.get_range(instance, key, offset, length, [])
+
+    @impl true
+    def delete(instance, key, _opts), do: LocalFS.delete(instance, key, [])
+
+    @impl true
+    def list(instance, prefix, _opts), do: LocalFS.list(instance, prefix, [])
+  end
+
+  # ── helpers ────────────────────────────────────────────────────────────────
+
+  # Boot a full `Ankusa.Instance` with one source `"acme"` whose sinks are the
+  # test's. `storage.interval_ms: 0` disables the compactor's timer so `tick/1`
+  # alone drives the archive.
+  defp start(opts) do
+    sinks = Keyword.get(opts, :sinks, [{CapturingSink, [pid: self()]}])
+    roles = Keyword.get(opts, :roles, [:edge, :dispatch, :storage])
+    storage = Map.merge(%{interval_ms: 0}, Map.new(Keyword.get(opts, :storage, %{})))
+    extra = Keyword.drop(opts, [:sinks, :roles, :storage])
+
+    config =
+      test_config(
+        Keyword.merge(
+          [
+            roles: roles,
+            source_store: {Ankusa.SourceStore.Static, sources: %{"acme" => %{sinks: sinks}}},
+            storage: storage
+          ],
+          extra
+        )
+      )
+
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+    config
+  end
+
+  defp envelope(body) do
     %Envelope{
-      id: "evt-#{System.unique_integer([:positive])}",
-      source_id: source_id,
+      id: "evt_" <> Integer.to_string(System.unique_integer([:positive])),
+      source_id: "acme",
+      tenant_id: "default",
       received_at: System.system_time(:millisecond),
       method: "POST",
-      path: "/hooks/#{source_id}",
-      headers: [{"content-type", "application/json"}, {"x-src", source_id}],
+      path: "/hooks/acme",
+      headers: [{"content-type", "application/json"}, {"x-test", "1"}],
       content_type: "application/json",
       body: body,
       size: byte_size(body)
     }
   end
 
-  defp commit!(inst, envelopes) do
-    records = Enum.map(envelopes, &%{envelope: &1})
-    {:ok, results} = Ankusa.WAL.append(inst, records)
-    for {:committed, env} <- results, do: env
-  end
+  defp commit!(inst, envelopes), do: Enum.map(envelopes, &enqueue!(inst, &1))
 
-  test "tick compacts WAL records into one segment, indexes them, and truncates",
-       %{inst: inst, config: config} do
+  # ── tests ──────────────────────────────────────────────────────────────────
+
+  test "a tick writes one segment and one index object, and every hook reads back byte-for-byte" do
+    config = start(roles: [:edge, :storage])
+    inst = config.instance
+
     originals =
       commit!(inst, [
-        envelope("acme", ~s({"n":1})),
-        envelope("acme", ~s({"n":2,"blob":"aaaaaaaaaa"})),
-        envelope("beta", <<0, 1, 2, 3, 4, 5>>),
-        envelope("acme", ~s({"n":4}))
+        envelope(~s({"n":1})),
+        envelope(~s({"n":2,"pad":"aaaaaaaaaa"})),
+        envelope(<<0, 1, 2, 3, 4, 5>>),
+        envelope(~s({"n":4}))
       ])
 
     assert length(originals) == 4
-    last_seq = originals |> List.last() |> Map.fetch!(:seq)
-
-    # dispatch has consumed everything, so the compactor may truncate fully
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, last_seq)
-    assert Ankusa.WAL.stats(inst).records == 4
+    assert Enum.all?(originals, &is_integer(&1.seq))
 
     assert {:ok, 1} == Compactor.tick(inst)
 
-    # exactly one immutable segment written
-    assert [segment_key] = Ankusa.BlobStore.list(inst, "seg")
-    assert String.starts_with?(segment_key, "seg/")
-    assert String.ends_with?(segment_key, ".seg")
+    keys = Ankusa.BlobStore.list(inst, "seg/")
+    assert [seg_key] = Enum.filter(keys, &String.ends_with?(&1, ".seg"))
+    assert String.starts_with?(seg_key, "seg/")
+    assert [_idx_key] = Enum.filter(keys, &String.ends_with?(&1, ".idx"))
+    assert length(keys) == 2
 
-    # one durable index row per committed record
-    rows = Index.all(config)
-    assert length(rows) == 4
-    assert Enum.map(rows, & &1.seq) == Enum.map(originals, & &1.seq)
-    assert Enum.all?(rows, &(&1.segment_key == segment_key))
-
-    # every original is fetchable byte-for-byte through the storage read path
+    # every original is fetchable byte-for-byte through the storage read path,
+    # with the seq stamped from the segment index
     for original <- originals do
       assert {:ok, fetched} = Storage.fetch(inst, original.id)
       assert fetched.id == original.id
       assert fetched.body == original.body
       assert fetched.source_id == original.source_id
       assert fetched.headers == original.headers
+      assert fetched.seq == original.seq
     end
 
-    # index lookup miss is an honest :error
-    assert :error == Index.lookup(config, "no-such-event")
-    assert :error == Storage.fetch(inst, "no-such-event")
+    # the archive cleared, but every hook is still stored...
+    assert Enum.sort(stored_ids(inst)) == Enum.sort(Enum.map(originals, & &1.id))
 
-    # the WAL was reclaimed after compaction
-    assert Ankusa.WAL.stats(inst).records == 0
+    # ...because this node runs no dispatch: its delivery rows are still pending
+    for original <- originals do
+      assert {:ok, row} = Store.get(inst, :deliveries, Keys.delivery(original.seq, 0))
+
+      assert %{state: :pending, attempts: 0, module: CapturingSink} =
+               :erlang.binary_to_term(row)
+    end
 
     # a second tick with nothing new is a no-op
     assert {:ok, 0} == Compactor.tick(inst)
   end
 
-  test "a lookup after a later compaction sees the rows that tick just wrote",
-       %{inst: inst, config: config} do
-    [first] = commit!(inst, [envelope("acme", ~s({"n":1}))])
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, first.seq)
+  test "a hook survives one clear and is reclaimed once both clear (archive, then delivery)" do
+    config = start(roles: [:edge, :dispatch, :storage], sinks: [{GateSink, [pid: self()]}])
+    inst = config.instance
+
+    [env] = commit!(inst, [envelope("gated")])
+    assert_receive {:started, id, gate}, 2_000
+    assert id == env.id
+
+    # the archive clears first; the delivery is still held open, so the hook stays
     assert {:ok, 1} == Compactor.tick(inst)
+    assert env.id in stored_ids(inst)
 
-    assert {:ok, _row} = Index.lookup(config, first.id)
-
-    [second] = commit!(inst, [envelope("acme", ~s({"n":2}))])
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, second.seq)
-    assert {:ok, 1} == Compactor.tick(inst)
-
-    # the row appended by that earlier read's tick must still be there, and the
-    # new one visible
-    assert {:ok, row} = Index.lookup(config, second.id)
-    assert row.event_id == second.id
-    assert {:ok, _old} = Index.lookup(config, first.id)
-
-    assert {:ok, fetched} = Storage.fetch(inst, second.id)
-    assert fetched.body == second.body
+    # release the sink; now the last obligation clears and the hook is deleted
+    send(gate, {:go, id})
+    assert_receive {:delivered, ^id, _attempt}, 2_000
+    assert {:ok, _} = Pipeline.tick(inst)
+    refute env.id in stored_ids(inst)
+    assert stored_ids(inst) == []
   end
 
-  test "a lookup works while the compactor is down, and the restart reloads the index",
-       %{inst: inst, config: config} do
-    [env] = commit!(inst, [envelope("acme", ~s({"n":1}))])
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, env.seq)
+  test "a hook survives one clear and is reclaimed once both clear (delivery, then archive)" do
+    config = start(roles: [:edge, :dispatch, :storage], sinks: [{GateSink, [pid: self()]}])
+    inst = config.instance
+
+    [env] = commit!(inst, [envelope("gated")])
+    assert_receive {:started, id, gate}, 2_000
+    assert id == env.id
+
+    # the delivery clears first; the archive obligation still holds the hook
+    send(gate, {:go, id})
+    assert_receive {:delivered, ^id, _attempt}, 2_000
+    assert {:ok, _} = Pipeline.tick(inst)
+    assert env.id in stored_ids(inst)
+
+    # the archive clears; now the hook is gone
     assert {:ok, 1} == Compactor.tick(inst)
-
-    assert {:ok, row} = Index.lookup(config, env.id)
-
-    # The table belongs to the compactor, so with it stopped a lookup has none —
-    # that is the crash-restart window, and it reads the file instead: slow,
-    # never wrong.
-    :ok = stop_supervised({Compactor, inst})
-    assert {:ok, from_file} = Index.lookup(config, env.id)
-    assert from_file.segment_key == row.segment_key
-
-    # the restart reloads the table from the same file
-    start_supervised!({Compactor, instance: inst, config: config})
-    assert {:ok, reloaded} = Index.lookup(config, env.id)
-    assert reloaded == row
-    assert {:ok, fetched} = Storage.fetch(inst, env.id)
-    assert fetched.body == env.body
+    refute env.id in stored_ids(inst)
+    assert stored_ids(inst) == []
   end
 
-  test "compaction never truncates past the dispatch cursor", %{inst: inst, config: config} do
-    originals = commit!(inst, [envelope("acme", "one"), envelope("acme", "two")])
-    [first_seq, last_seq] = Enum.map(originals, & &1.seq)
+  test "without the :storage role a delivered hook is reclaimed straight away (W5)" do
+    config = start(roles: [:edge, :dispatch])
+    inst = config.instance
 
-    # dispatch has only consumed the first record
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, first_seq)
+    [env] = commit!(inst, [envelope("fast")])
+    assert_receive {:delivered, id, 1}, 2_000
+    assert id == env.id
 
-    assert {:ok, 1} == Compactor.tick(inst)
-
-    # both records are compacted and indexed...
-    assert length(Index.all(config)) == 2
-    # ...but the un-dispatched record must survive in the WAL
-    stats = Ankusa.WAL.stats(inst)
-    assert stats.records == 1
-    assert stats.min_seq == last_seq
+    assert {:ok, _} = Pipeline.tick(inst)
+    refute env.id in stored_ids(inst)
+    assert stored_ids(inst) == []
   end
 
-  test "roll_bytes caps segment size: a backlog compacts into several segments" do
-    inst = :"t#{System.unique_integer([:positive])}"
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{inst}")
-    on_exit(fn -> File.rm_rf(dir) end)
+  test "roll_bytes caps segment size: three hooks compact into three segments" do
+    config = start(roles: [:edge, :storage], storage: %{roll_bytes: 1})
+    inst = config.instance
+
+    originals = commit!(inst, [envelope("one"), envelope("two"), envelope("three")])
+
+    # one tick writes every segment the backlog needs, not one holding it all
+    assert {:ok, 3} == Compactor.tick(inst)
+    assert length(Ankusa.BlobStore.list(inst, "seg/")) == 6
+
+    for original <- originals do
+      assert {:ok, fetched} = Storage.fetch(inst, original.id)
+      assert fetched.body == original.body
+      assert fetched.seq == original.seq
+    end
+  end
+
+  test "a failing blob store fails the tick without crashing it, and the next tick retries" do
+    agent = start_supervised!({Agent, fn -> 1 end})
 
     config =
-      Config.new(
-        instance: inst,
-        data_dir: dir,
-        roles: [:edge, :dispatch, :storage],
-        source_store: {Ankusa.SourceStore.Static, sources: %{"acme" => %{}}},
-        # a byte budget of 1 forces one record per segment
-        storage: %{interval_ms: 0, roll_bytes: 1}
-      )
+      start(roles: [:edge, :storage], storage: %{blob_store: {FailingBlobStore, [agent: agent]}})
 
-    Ankusa.put_config(config)
-    start_supervised!({Ankusa.WAL.DiskLog, instance: inst, config: config})
-    start_supervised!({Compactor, instance: inst, config: config})
-
-    originals =
-      commit!(inst, [
-        envelope("acme", "one"),
-        envelope("acme", "two"),
-        envelope("acme", "three")
-      ])
-
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, originals |> List.last() |> Map.fetch!(:seq))
-
-    # one tick writes every segment the backlog needs, not one segment holding
-    # the whole backlog
-    assert {:ok, 3} == Compactor.tick(inst)
-    assert length(Ankusa.BlobStore.list(inst, "seg")) == 3
-
-    for original <- originals do
-      assert {:ok, fetched} = Storage.fetch(inst, original.id)
-      assert fetched.body == original.body
-    end
-
-    # everything was compacted, so the WAL is fully reclaimed
-    assert Ankusa.WAL.stats(inst).records == 0
-  end
-
-  test "a compactor cursor that can't be persisted is retried next tick, not crashed on",
-       %{inst: inst, config: config} do
-    originals = commit!(inst, [envelope("acme", "one"), envelope("acme", "two")])
-    last_seq = originals |> List.last() |> Map.fetch!(:seq)
-    :ok = Ankusa.WAL.put_cursor(inst, :dispatch, last_seq)
-
-    compactor = GenServer.whereis(Ankusa.via(inst, :compactor))
-
-    # A directory where `persist_term/2` wants its temp file makes the cursor
-    # write fail, the way a full disk would.
-    wal_path = Path.join(Config.path(config, "wal"), "ankusa.wal")
-    File.mkdir_p!(wal_path <> ".cursors.tmp")
+    inst = config.instance
+    [env] = commit!(inst, [envelope("retry-me")])
 
     assert {:ok, 0} == Compactor.tick(inst)
-    assert GenServer.whereis(Ankusa.via(inst, :compactor)) == compactor
+    compactor = Ankusa.whereis(inst, :compactor)
+    assert is_pid(compactor)
     assert Process.alive?(compactor)
-    assert Ankusa.WAL.get_cursor(inst, :compactor) == 0
-    # nothing was truncated: the records are still the WAL's to re-compact
-    assert Ankusa.WAL.stats(inst).records == 2
+    assert Ankusa.BlobStore.list(inst, "seg/") == []
+    assert :error == Storage.fetch(inst, env.id)
 
-    File.rmdir!(wal_path <> ".cursors.tmp")
-
+    # the same hooks are written again under the same keys next tick
     assert {:ok, 1} == Compactor.tick(inst)
-    assert Ankusa.WAL.stats(inst).records == 0
+    assert {:ok, fetched} = Storage.fetch(inst, env.id)
+    assert fetched.body == env.body
+    assert fetched.seq == env.seq
+  end
+
+  test "the catalogue is in the store, so fetch survives an instance restart" do
+    config = start(roles: [:edge, :storage])
+    inst = config.instance
+
+    originals = commit!(inst, [envelope("one"), envelope("two")])
+    assert {:ok, 1} == Compactor.tick(inst)
+
+    :ok = stop_supervised!({Ankusa.Instance, inst})
+    start_supervised!({Ankusa.Instance, config})
 
     for original <- originals do
       assert {:ok, fetched} = Storage.fetch(inst, original.id)
       assert fetched.body == original.body
+      assert fetched.seq == original.seq
     end
+  end
+
+  test "fetch of an unknown id is :error" do
+    config = start(roles: [:edge, :storage])
+    assert :error == Storage.fetch(config.instance, "no-such-event")
   end
 end

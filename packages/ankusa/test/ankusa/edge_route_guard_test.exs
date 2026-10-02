@@ -1,10 +1,10 @@
 defmodule Ankusa.Edge.RouteGuardTest do
   @moduledoc """
-  The guard at the edge, over a real instance and a real WAL.
+  The guard at the edge, over a real instance and a real store.
 
   The point of every rejection case is the same assertion: **no record**. A
-  rejected request must not become a WAL entry, because everything downstream —
-  dispatch, delivery, a provider's webhook count — is derived from the WAL.
+  rejected request must not become a stored hook, because everything downstream —
+  dispatch, delivery, a provider's webhook count — is derived from what is stored.
   """
 
   use ExUnit.Case, async: false
@@ -13,12 +13,14 @@ defmodule Ankusa.Edge.RouteGuardTest do
 
   alias Ankusa.Edge.Router
   alias Ankusa.Routes
-  alias Ankusa.WAL
 
   defp start(routes_opts) do
     start_routes(routes_opts,
       source_store:
-        {Ankusa.SourceStore.Static, sources: %{"demo" => [verifier: {Ankusa.Verifier.None, []}]}}
+        {Ankusa.SourceStore.Static,
+         sources: %{
+           "demo" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{Ankusa.Sink.Log, []}]]
+         }}
     )
   end
 
@@ -36,7 +38,7 @@ defmodule Ankusa.Edge.RouteGuardTest do
     Router.call(conn, Router.init(instance: config.instance))
   end
 
-  defp records(config), do: WAL.stats(config.instance).records
+  defp records(config), do: length(stored_ids(config.instance))
 
   describe "routes on" do
     setup do

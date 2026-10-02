@@ -1,7 +1,7 @@
 defmodule Ankusa.Edge.RateLimitTest do
   @moduledoc """
   Per-tenant ingest rate limits, end to end: a real edge instance, real POSTs
-  through the router, and the WAL as the witness for "nothing was stored".
+  through the router, and the store as the witness for "nothing was stored".
 
   Timing matters to one property only — that a bucket refills — so the limits
   here are chosen to make that observable in well under a second, and every
@@ -16,7 +16,12 @@ defmodule Ankusa.Edge.RateLimitTest do
 
   @secret "whsec_" <> Base.encode64("supersecret-key")
 
-  defp start_edge(rate_limits, sources \\ %{"demo" => [verifier: {Ankusa.Verifier.None, []}]}) do
+  defp start_edge(
+         rate_limits,
+         sources \\ %{
+           "demo" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{Ankusa.Sink.Log, []}]]
+         }
+       ) do
     config =
       test_config(
         roles: [:edge],
@@ -60,7 +65,7 @@ defmodule Ankusa.Edge.RateLimitTest do
     assert statuses(config, "acme", "demo", 3) == [201, 201, 429]
 
     # The 429 is a real denial, not a hint: the third hook never reached the log.
-    assert Ankusa.WAL.stats(config.instance).records == 2
+    assert length(stored_ids(config.instance)) == 2
 
     denied = post(config, "/webhooks/acme/demo", "{}")
     assert Plug.Conn.get_resp_header(denied, "retry-after") == ["1000"]
@@ -144,10 +149,10 @@ defmodule Ankusa.Edge.RateLimitTest do
   test "an override applies at once, survives a restart, and can be deleted" do
     config = test_config(rate_limits: %{tenants: %{"acme" => %{rate: 0.001, burst: 1}}})
     put_config(config)
+    start_store!(config)
 
     {:ok, pid} = start_limiter(config)
     inst = config.instance
-    path = Ankusa.Config.path(config, "rate_limits.json")
 
     assert RateLimiter.hit(inst, "acme") == :ok
     assert {:error, {:rate_limited, _}} = RateLimiter.hit(inst, "acme")
@@ -162,9 +167,11 @@ defmodule Ankusa.Edge.RateLimitTest do
     assert {:error, {:rate_limited, _}} = RateLimiter.hit(inst, "acme")
 
     assert {_, :override} = RateLimiter.effective(inst, "acme")
-    assert File.exists?(path)
 
+    # A full restart: the limiter and the store under it both stop.
     GenServer.stop(pid)
+    stop_supervised!({Ankusa.Store, inst})
+    start_store!(config)
     {:ok, _pid} = start_limiter(config)
 
     assert {_, :override} = RateLimiter.effective(inst, "acme")
@@ -174,22 +181,39 @@ defmodule Ankusa.Edge.RateLimitTest do
     assert RateLimiter.delete_override(inst, "acme") == {:error, :not_found}
   end
 
-  test "a corrupt file is moved aside and the node still boots" do
+  test "an override row that cannot be read back is skipped, not fatal" do
     config = test_config()
     put_config(config)
     inst = config.instance
-    path = Ankusa.Config.path(config, "rate_limits.json")
+    start_store!(config)
 
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, "not json")
+    :ok =
+      Ankusa.Store.write(
+        inst,
+        [{:put, :default, Ankusa.Store.Keys.rate_limit("acme"), "not json"}],
+        sync: true
+      )
 
     start_limiter(config)
 
     assert RateLimiter.effective(inst, "acme") == {nil, :none}
-    assert Path.wildcard(path <> ".corrupt-*") != []
 
     assert {:ok, %{rate: 1, burst: 2}} =
              RateLimiter.put_override(inst, "acme", %{"rate" => 1, "burst" => 2})
+  end
+
+  @tag :capture_log
+  test "the limiter refuses to boot when the store cannot be read" do
+    config = test_config()
+    put_config(config)
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:rate_limits_load_failed, :store_unavailable}} =
+             RateLimiter.start_link(instance: config.instance, config: config)
+  end
+
+  defp start_store!(config) do
+    start_supervised!({Ankusa.Store, instance: config.instance, config: config})
   end
 
   defp start_limiter(config) do

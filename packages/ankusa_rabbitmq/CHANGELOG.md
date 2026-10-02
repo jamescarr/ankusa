@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- The sink no longer implements the removed Ankusa.Sink.ordering_key/2 callback:
+  deliveries are unordered. The routing key still decides the queue, so
+  RabbitMQ's per-queue ordering is unchanged. Requires the matching `ankusa`
+  core.
+
 ## [0.3.0] - 2026-10-01
 
 No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other packages in this release.
@@ -29,7 +36,7 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 
 ### Added
 
-- `c:Ankusa.Sink.ordering_key/2`, implemented by this sink as the routing key:
+- Ankusa.Sink.ordering_key/2, implemented by this sink as the routing key:
   RabbitMQ orders per queue, and the routing key decides the queue. Dispatch
   now serializes deliveries sharing a key and runs different keys concurrently.
 
@@ -40,7 +47,7 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - `:inline_max_bytes` defaults to 64 KiB (was 8 KiB), read from
   `Ankusa.Sink.Message.inline_max_bytes/1`.
 - Depends on `ankusa` `~> 0.2`: core 0.1 has neither
-  `Ankusa.Sink.Message.inline_max_bytes/1` nor `c:Ankusa.Sink.ordering_key/2`.
+  `Ankusa.Sink.Message.inline_max_bytes/1` nor Ankusa.Sink.ordering_key/2.
 
 ## [0.1.0] - 2026-09-23
 

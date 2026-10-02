@@ -71,6 +71,8 @@ jobs:
           version: 2026.9.11
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mix local.hex --force && mix local.rebar --force
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
 
       - name: mix deps.get
         working-directory: ${{ needs.resolve.outputs.dir }}

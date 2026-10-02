@@ -73,6 +73,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/wal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * This node's queue statistics
+         * @description `Ankusa.Queue.stats/1` from this node's own store, `{}` when the store
+         *     is unreachable. Node-local, like the DLQ and the quarantine list: ask
+         *     every node. A node running `wal.type: none` has no queue to report.
+         */
+        get: operations["getWal"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/dlq": {
         parameters: {
             query?: never;
@@ -83,7 +105,7 @@ export interface paths {
         /**
          * List dead-lettered hooks
          * @description Newest first, metadata only — bodies are never returned. Results are
-         *     this node's DLQ file; with several dispatch nodes, ask each one.
+         *     this node's dead delivery rows; with several dispatch nodes, ask each one.
          */
         get: operations["listDeadLetters"];
         put?: never;
@@ -105,10 +127,13 @@ export interface paths {
         put?: never;
         /**
          * Re-deliver dead-lettered hooks
-         * @description Re-delivers matching entries through their source's configured sinks.
-         *     Replay is at-least-once: an entry already delivered upstream but not
-         *     recorded as such will be delivered again, so consumers should dedupe on
-         *     the envelope id. Entries stay in the DLQ — replay does not remove them.
+         * @description Moves matching dead-lettered rows back to pending with a fresh attempt
+         *     count; the dispatch pipeline then delivers them through their source's
+         *     *current* sinks. The response counts the rows moved, not hooks
+         *     delivered. Replay is at-least-once: an entry already delivered upstream
+         *     but not recorded as such will be delivered again, so consumers should
+         *     dedupe on the envelope id. A replayed entry leaves the DLQ; one that
+         *     fails again is dead-lettered again.
          */
         post: operations["replayDeadLetters"];
         delete?: never;
@@ -126,14 +151,76 @@ export interface paths {
         };
         /**
          * Recent quarantined hooks
-         * @description The edge node's in-memory recent list (at most 200 entries), newest
-         *     first. Metadata only — bodies are never returned. The durable record
-         *     lives in `quarantine/quarantine.log` on the node's data volume.
+         * @description The newest quarantined entries from this node's store, newest first.
+         *     Metadata only — bodies are never returned; the headers and body stay in
+         *     the store.
          */
         get: operations["listQuarantined"];
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/rate-limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every limit this node enforces
+         * @description The configured default and the configured tenants, unioned with this
+         *     node's runtime overrides (an override wins). Sorted by tenant id.
+         *     `default` is `null` when the config sets none, which with no tenant
+         *     entry means unlimited.
+         */
+        get: operations["listRateLimits"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant}/rate-limit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * The limit that applies to one tenant
+         * @description The override when this node has one, else `rate_limits.tenants`, else
+         *     `rate_limits.default` — with `source` saying which. `source: none` means
+         *     unlimited; `rate` and `burst` are `null` then.
+         */
+        get: operations["getTenantRateLimit"];
+        /**
+         * Set a tenant's override
+         * @description Stored in this node's memory and persisted to its store, so it
+         *     survives a restart of this node. Takes effect at once: the tenant's
+         *     bucket is reset, so a raised limit is not held back by the old limit's
+         *     accumulated debt. A `{rate, burst}` pair is required whole — neither key
+         *     is inferred.
+         */
+        put: operations["putTenantRateLimit"];
+        post?: never;
+        /**
+         * Remove a tenant's override
+         * @description The config's limit applies again (`source: config` or `default`), and
+         *     the bucket is reset. Immediate, like the source store's own deletes —
+         *     and, like them, this node's alone.
+         */
+        delete: operations["deleteTenantRateLimit"];
         options?: never;
         head?: never;
         patch?: never;
@@ -293,13 +380,22 @@ export interface components {
             /** @description The roles this node runs, sorted. */
             roles: ("claim_check" | "dispatch" | "edge" | "storage")[];
         };
+        Wal: {
+            instance: string;
+            /**
+             * @description This node's store: `next_seq` (exact), `hooks` and `deliveries`
+             *     (RocksDB key estimates), `disk_bytes`; `{}` when the store is
+             *     unreachable.
+             */
+            wal: Record<string, never>;
+        };
         /** @description A dead-lettered hook. The recorded reason is `inspect/1` of a term. */
         DlqEntry: {
             /** @description Envelope id (a UUIDv7). */
             id: string;
             source_id: string;
             tenant_id: string | null;
-            /** @description WAL sequence number, `null` if the record never committed. */
+            /** @description Queue sequence number of the committed hook, `null` if it never committed. */
             seq: number | null;
             /** @description When the edge received the hook, unix milliseconds. */
             received_at: number;
@@ -337,6 +433,41 @@ export interface components {
         Replayed: {
             /** @description Number of entries re-delivered. */
             replayed: number;
+        };
+        /**
+         * @description A rate limit. `rate` is hooks per second and may be fractional (`0.5`
+         *     is one every two seconds); `burst` is the most hooks admitted back to
+         *     back.
+         */
+        RateLimit: {
+            /** @example 50 */
+            rate: number;
+            /** @example 100 */
+            burst: number;
+        };
+        /** @description One tenant's limit, and whether it came from config or an override. */
+        TenantRateLimit: {
+            tenant: string;
+            /** @description `null` when `source` is `none`. */
+            rate: number | null;
+            /** @description `null` when `source` is `none`. */
+            burst: number | null;
+            /**
+             * @description `override`: this node's runtime override. `config`:
+             *     `rate_limits.tenants`. `default`: `rate_limits.default`. `none`: no
+             *     limit applies, so the tenant is unlimited.
+             * @enum {string}
+             */
+            source: "override" | "config" | "default" | "none";
+        };
+        RateLimits: {
+            /**
+             * @description The configured `rate_limits.default`, or `null` when the config sets
+             *     none. It is never an override: overrides are per tenant.
+             */
+            default: components["schemas"]["RateLimit"] | null;
+            /** @description Sorted by tenant id. */
+            tenants: components["schemas"]["TenantRateLimit"][];
         };
         /**
          * @description `GET /health` on the `routes.admin.port` listener: how many route
@@ -540,7 +671,7 @@ export interface components {
         /** @description The error shape every endpoint answers with, on every listener. */
         Error: {
             /** @enum {string} */
-            error: "not_found" | "invalid_filter" | "role_not_enabled" | "invalid_route" | "duplicate_route" | "too_many_routes" | "invalid_query" | "invalid_ip_rules" | "invalid_request" | "invalid_body" | "store_unavailable";
+            error: "not_found" | "invalid_filter" | "role_not_enabled" | "invalid_route" | "duplicate_route" | "too_many_routes" | "invalid_query" | "invalid_ip_rules" | "invalid_request" | "invalid_body" | "invalid_tenant" | "invalid_rate_limit" | "rate_limit_not_found" | "store_unavailable" | "wal_disabled";
             /**
              * @description The offending field: on `invalid_filter` the parameter or `body`; on
              *     the route errors the route field (`path`, `ip_rules`, …), the
@@ -567,12 +698,44 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description `400`. `invalid_tenant`: the tenant is not a valid identity — it must match `[A-Za-z0-9_-]{1,64}`, because it is a URL path segment and a storage partition. */
+        InvalidTenant: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description `400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, and unknown fields are refused. `message` says which. */
+        InvalidRateLimit: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description `409`. `role_not_enabled`: this node does not run the role the route needs. Ask another node. */
         RoleNotEnabled: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description `409`. `wal_disabled`: this node runs `wal.type: none` and has no log to report. */
+        WalDisabled: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "error": "wal_disabled"
+                 *     }
+                 */
                 "application/json": components["schemas"]["Error"];
             };
         };
@@ -630,8 +793,26 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description `404`. `rate_limit_not_found`: this node holds no runtime override for that tenant. The config may still give it a limit — `GET` reports that as `source: config` or `default`. */
+        RateLimitNotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description `503`. `store_unavailable`: nothing was written. Either the route store could not be reached (a Redis store with Redis down), or the write kept losing to concurrent writers and exhausted its retries — the table changed under the snapshot it had validated, every time. Both are transient: retry, and reads keep working from this node's in-memory snapshot either way. */
         StoreUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description `503`. `store_unavailable`: this node's store could not be read or written, so nothing changed. Transient: retry. */
+        NodeStoreUnavailable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -718,6 +899,27 @@ export interface operations {
             };
         };
     };
+    getWal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description This node's WAL stats. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Wal"];
+                };
+            };
+            409: components["responses"]["WalDisabled"];
+        };
+    };
     listDeadLetters: {
         parameters: {
             query?: {
@@ -745,6 +947,7 @@ export interface operations {
             };
             400: components["responses"]["InvalidFilter"];
             409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
         };
     };
     replayDeadLetters: {
@@ -775,6 +978,7 @@ export interface operations {
             };
             400: components["responses"]["InvalidFilter"];
             409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
         };
     };
     listQuarantined: {
@@ -800,6 +1004,108 @@ export interface operations {
             };
             400: components["responses"]["InvalidFilter"];
             409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    listRateLimits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The default, if any, and every tenant with a limit — configured or overridden. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RateLimits"];
+                };
+            };
+            409: components["responses"]["RoleNotEnabled"];
+        };
+    };
+    getTenantRateLimit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The effective limit and where it came from. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantRateLimit"];
+                };
+            };
+            400: components["responses"]["InvalidTenant"];
+            409: components["responses"]["RoleNotEnabled"];
+        };
+    };
+    putTenantRateLimit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RateLimit"];
+            };
+        };
+        responses: {
+            /** @description The stored override. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantRateLimit"];
+                };
+            };
+            400: components["responses"]["InvalidRateLimit"];
+            409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    deleteTenantRateLimit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. No body. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["InvalidTenant"];
+            404: components["responses"]["RateLimitNotFound"];
+            409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
         };
     };
     testRoute: {

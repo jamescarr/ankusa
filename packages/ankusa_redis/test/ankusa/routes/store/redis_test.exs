@@ -20,7 +20,8 @@ defmodule Ankusa.Routes.Store.RedisTest do
   # in `ankusa`'s test/support, which a dependency does not compile.
   defp build_config(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    dir = Path.join(System.tmp_dir!(), "ankusa_#{instance}_#{System.unique_integer([:positive])}")
+    unique = "#{System.unique_integer([:positive])}_#{System.os_time(:microsecond)}"
+    dir = Path.join(System.tmp_dir!(), "ankusa_#{instance}_#{unique}")
     ExUnit.Callbacks.on_exit(fn -> File.rm_rf(dir) end)
 
     opts

@@ -12,11 +12,6 @@ defmodule Ankusa.Sink.Log do
     :ok
   end
 
-  # A log line has no ordering guarantee to preserve (interleaved lines are
-  # fine), so it imposes none on dispatch either.
-  @impl true
-  def ordering_key(_env, _opts), do: nil
-
   # A log line keeps nothing: a node that crashed right after saying `:ok`
   # would have dropped the hook. `wal.type: none` must not ack on this.
   @impl true

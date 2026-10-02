@@ -86,19 +86,21 @@ drill takes seconds; the default is 12 attempts backing off to 30s.
 
 ### Replay is safe
 
-Run the replay call again:
+Replay moves matching dead rows back to pending and returns how many it moved;
+delivery then happens asynchronously, in the background. The entry leaves the
+dead-letter queue, so a second replay has nothing to move:
 
 ```sh
 curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"demo"}'
-# => {"replayed":1}
-sleep 1 && docker compose logs worker | grep 'duplicate id='
-# duplicate id=01a0... source=demo (already handled)
+# => {"replayed":0}
 ```
 
-Entries stay in the dead-letter queue after a replay, so replaying twice is
-normal. Redelivery is harmless because the worker dedupes on `x-ankusa-id`,
-here with an in-memory set, which a real worker replaces with a unique key in
-its database.
+Redelivery is still at-least-once, so the receiver stays idempotent: a hook
+that reached the sink before it failed is delivered again with the same
+`x-ankusa-id`, and the worker dedupes on it — here with an in-memory set, which
+a real worker replaces with a unique key in its database. In this drill the
+worker was down for every attempt, so replay delivers evt_3 once and never
+again.
 
 ## 5. Look inside
 
@@ -152,14 +154,14 @@ GitHub and Standard Webhooks sources are the same shape with a different
 - `401`: verification failed
 - `404`: unknown source
 - `413`: body over `max_body_bytes`
-- `503`: no durable destination right now (overload, or a sink refused under
-  `wal.type: none`); retry later
+- `503`: no durable destination right now (overload, the store could not take
+  the commit, or a sink refused under `wal.type: none`); retry later
 
 `201 accepted` is the only committed response, and it comes back only after a
-durable accept: the WAL fsync (`wal.type: disk`, the default) or every sink's
-confirm (`wal.type: none`); there is no `200`. Every accepted POST is a new hook
-with a new `id`, and a provider retry after a lost ack is stored and delivered
-again. Ingest does no deduplication.
+durable accept: the store's synced commit (`wal.type: disk`, the default) or
+every sink's confirm (`wal.type: none`); there is no `200`. Every accepted POST
+is a new hook with a new `id`, and a provider retry after a lost ack is stored
+and delivered again. Ingest does no deduplication.
 
 The catch URL is `/webhooks/:source_id` by default; a tenant-in-the-URL scheme
 is one config line away, see [`multi-tenancy.md`](multi-tenancy.md).
