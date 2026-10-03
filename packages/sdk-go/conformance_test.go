@@ -176,13 +176,25 @@ func dispatch(t *testing.T, c conformanceCase, recorder *recorder) (any, error) 
 		return ankusa.ParseClaimRef(decode[string](t, c.Input["ref"]))
 
 	case "parse_headers":
-		headers := http.Header{}
-		for name, value := range decode[map[string]string](t, c.Input["headers"]) {
-			// Deliberately not canonicalized: the SDK's own
-			// case-insensitivity is what the vectors exercise.
-			headers[name] = []string{value}
+		return ankusa.ParseHeaders(headerInput(t, c.Input["headers"]))
+
+	case "decode_message":
+		return ankusa.DecodeMessage([]byte(decode[string](t, c.Input["message"])))
+
+	case "idempotency_key":
+		includeReplay := decode[bool](t, c.Input["include_replay"])
+		if raw, ok := c.Input["message"]; ok && len(raw) > 0 && string(raw) != "null" {
+			message, err := ankusa.DecodeMessage([]byte(decode[string](t, raw)))
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"key": message.IdempotencyKey(includeReplay)}, nil
 		}
-		return ankusa.ParseHeaders(headers)
+		hook, err := ankusa.ParseHeaders(headerInput(t, c.Input["headers"]))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"key": hook.IdempotencyKey(includeReplay)}, nil
 
 	case "redeem":
 		g := startGateway(t, gateway, client, recorder)
@@ -280,10 +292,25 @@ func dispatch(t *testing.T, c conformanceCase, recorder *recorder) (any, error) 
 		defer closeGateway()
 		return admin.ListDeadLetters(ctx, decode[ankusa.ListDeadLettersParams](t, c.Input["params"]))
 
-	case "admin_dlq_replay":
+	case "admin_replay_create":
 		admin, closeGateway := buildAdminClient(t, gateway, client, recorder)
 		defer closeGateway()
-		return admin.ReplayDeadLetters(ctx, decode[ankusa.ReplayFilter](t, c.Input["filter"]))
+		return admin.CreateReplay(ctx, decode[ankusa.ReplaySpec](t, c.Input["spec"]))
+
+	case "admin_replay_get":
+		admin, closeGateway := buildAdminClient(t, gateway, client, recorder)
+		defer closeGateway()
+		return admin.GetReplay(ctx, decode[string](t, c.Input["id"]))
+
+	case "admin_replay_list":
+		admin, closeGateway := buildAdminClient(t, gateway, client, recorder)
+		defer closeGateway()
+		return admin.ListReplays(ctx)
+
+	case "admin_replay_update":
+		admin, closeGateway := buildAdminClient(t, gateway, client, recorder)
+		defer closeGateway()
+		return admin.UpdateReplay(ctx, decode[string](t, c.Input["id"]), decode[ankusa.ReplayPatch](t, c.Input["patch"]))
 
 	case "admin_quarantine":
 		admin, closeGateway := buildAdminClient(t, gateway, client, recorder)
@@ -474,6 +501,18 @@ func bodyBytes(t *testing.T, spec *bodySpec) []byte {
 		return compacted.Bytes()
 	}
 	return nil
+}
+
+// headerInput builds an http.Header from a vector's headers object.
+// Deliberately not canonicalized: the SDK's own case-insensitivity is what
+// the vectors exercise.
+func headerInput(t *testing.T, raw json.RawMessage) http.Header {
+	t.Helper()
+	headers := http.Header{}
+	for name, value := range decode[map[string]string](t, raw) {
+		headers[name] = []string{value}
+	}
+	return headers
 }
 
 // decode unmarshals an input field; a missing field is the zero value.

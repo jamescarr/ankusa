@@ -81,12 +81,32 @@ module Ankusa
       json(request("GET", "/v1/dlq", query: params))
     end
 
-    # POST /v1/dlq/replay -> {replayed}.
+    # POST /v1/replays -> the created Replay, as a Hash.
     #
-    # `filter` is a filter, not a payload; omitted or empty (`{}`) replays
-    # everything.
-    def replay_dead_letters(filter = nil)
-      json(request("POST", "/v1/dlq/replay", json: filter || {}))
+    # `spec` is the replay spec: `{"kind" => "dlq", ...}` or
+    # `{"kind" => "archive", "from" => ms, "to" => ms, ...}`. A retried POST
+    # with the same normalized filter returns the running job with 200 instead
+    # of starting a second one.
+    def create_replay(spec)
+      json(request("POST", "/v1/replays", json: spec))
+    end
+
+    # GET /v1/replays/{id} -> the Replay, as a Hash.
+    def get_replay(id)
+      json(request("GET", "/v1/replays/#{replay_path(id)}"))
+    end
+
+    # GET /v1/replays -> {"replays" => [Replay, ...]}, newest first.
+    def list_replays
+      json(request("GET", "/v1/replays"))
+    end
+
+    # PATCH /v1/replays/{id} -> the updated Replay, as a Hash.
+    #
+    # `patch` may carry `state` (`running`/`paused`/`cancelled`), `rate` and
+    # `max_lag_ms`.
+    def update_replay(id, patch)
+      json(request("PATCH", "/v1/replays/#{replay_path(id)}", json: patch))
     end
 
     # GET /v1/quarantine -> recent quarantined hooks, newest first.
@@ -98,6 +118,12 @@ module Ankusa
     end
 
     private
+
+    # Percent-encodes a replay id as one path segment, so a `/`, `?` or `#` in
+    # an id can't reshape the URL.
+    def replay_path(id)
+      id.to_s.b.gsub(/[^A-Za-z0-9_.~-]/) { |char| format("%%%02X", char.ord) }
+    end
 
     def request(http_method, path, query: nil, json: nil)
       response = @connection.request(http_method, path, query: query, json: json)

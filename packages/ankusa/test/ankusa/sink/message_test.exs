@@ -91,4 +91,83 @@ defmodule Ankusa.Sink.MessageTest do
 
     assert {:error, {:claim_check, :invalid_tenant}} = Message.encode(env, ctx, 100)
   end
+
+  # ── G5 fields ─────────────────────────────────────────────────────────────
+
+  test "an inline body carries its sha256, dedupe_key, replay_id and headers", %{ctx: ctx} do
+    env =
+      envelope("hello", %{
+        dedupe_key: "evt_1",
+        headers: [{"x-github-event", "push"}, {"X-Custom", "v"}]
+      })
+
+    assert {:ok, json} =
+             Message.encode(
+               env,
+               Map.merge(ctx, %{replay_id: "rid", forward_headers: :default}),
+               100
+             )
+
+    decoded = JSON.decode!(json)
+
+    assert decoded["sha256"] ==
+             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+    assert decoded["dedupe_key"] == "evt_1"
+    assert decoded["replay_id"] == "rid"
+    assert decoded["headers"] == %{"x-github-event" => "push", "x-custom" => "v"}
+  end
+
+  test "absent dedupe_key/replay_id encode as null and headers as {}", %{ctx: ctx} do
+    env = envelope("hello")
+    assert {:ok, json} = Message.encode(env, ctx, 100)
+    decoded = JSON.decode!(json)
+    assert decoded["dedupe_key"] == nil
+    assert decoded["replay_id"] == nil
+    assert decoded["headers"] == %{}
+  end
+
+  test "forwarded_headers honors default, allowlist and []" do
+    env =
+      envelope("x", %{
+        headers: [
+          {"X-GitHub-Event", "push"},
+          {"X-Custom", "v"},
+          {"Authorization", "Bearer secret"},
+          {"X-Ankusa-Whatever", "no"}
+        ]
+      })
+
+    assert Message.forwarded_headers(env, :default) == %{
+             "x-github-event" => "push",
+             "x-custom" => "v"
+           }
+
+    assert Message.forwarded_headers(env, ["x-github-event"]) == %{"x-github-event" => "push"}
+    assert Message.forwarded_headers(env, []) == %{}
+  end
+
+  test "repeated headers are joined with \", \" in arrival order" do
+    env =
+      envelope("x", %{
+        headers: [{"x-multi", "a"}, {"x-other", "z"}, {"x-multi", "b"}]
+      })
+
+    assert Message.forwarded_headers(env) == %{"x-multi" => "a, b", "x-other" => "z"}
+  end
+
+  test "a claim message also carries dedupe_key/replay_id/headers", %{ctx: ctx} do
+    env =
+      envelope(:crypto.strong_rand_bytes(101), %{
+        dedupe_key: "evt_9",
+        headers: [{"x-a", "1"}]
+      })
+
+    assert {:ok, json} = Message.encode(env, Map.put(ctx, :replay_id, "rid"), 100)
+    decoded = JSON.decode!(json)
+    assert decoded["dedupe_key"] == "evt_9"
+    assert decoded["replay_id"] == "rid"
+    assert decoded["headers"] == %{"x-a" => "1"}
+    assert decoded["sha256"] == Base.encode16(:crypto.hash(:sha256, env.body), case: :lower)
+  end
 end

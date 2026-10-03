@@ -7,12 +7,35 @@
       "input": {
         "gateway": {
           "status": 200,
-          "body": {"json": {"status": "ok", "instance": "default", "roles": ["edge", "dispatch", "storage"]}}
+          "body": {
+            "json": {
+              "status": "ok",
+              "instance": "default",
+              "roles": [
+                "edge",
+                "dispatch",
+                "storage"
+              ]
+            }
+          }
         }
       },
       "expect": {
-        "ok": {"status": "ok", "instance": "default", "roles": ["edge", "dispatch", "storage"]},
-        "requests": [{"method": "GET", "path": "/health"}]
+        "ok": {
+          "status": "ok",
+          "instance": "default",
+          "roles": [
+            "edge",
+            "dispatch",
+            "storage"
+          ]
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/health"
+          }
+        ]
       }
     },
     {
@@ -22,13 +45,24 @@
       "input": {
         "gateway": {
           "status": 200,
-          "headers": {"content-type": "text/plain; version=0.0.4"},
-          "body": {"text": "ankusa_ingest_requests_total{instance=\"default\"} 1\n"}
+          "headers": {
+            "content-type": "text/plain; version=0.0.4"
+          },
+          "body": {
+            "text": "ankusa_ingest_requests_total{instance=\"default\"} 1\n"
+          }
         }
       },
       "expect": {
-        "ok": {"text": "ankusa_ingest_requests_total{instance=\"default\"} 1\n"},
-        "requests": [{"method": "GET", "path": "/metrics"}]
+        "ok": {
+          "text": "ankusa_ingest_requests_total{instance=\"default\"} 1\n"
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/metrics"
+          }
+        ]
       }
     },
     {
@@ -38,12 +72,31 @@
       "input": {
         "gateway": {
           "status": 200,
-          "body": {"json": {"instance": "default", "roles": ["edge"], "port": 4000}}
+          "body": {
+            "json": {
+              "instance": "default",
+              "roles": [
+                "edge"
+              ],
+              "port": 4000
+            }
+          }
         }
       },
       "expect": {
-        "ok": {"instance": "default", "roles": ["edge"], "port": 4000},
-        "requests": [{"method": "GET", "path": "/v1/config"}]
+        "ok": {
+          "instance": "default",
+          "roles": [
+            "edge"
+          ],
+          "port": 4000
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/config"
+          }
+        ]
       }
     },
     {
@@ -90,20 +143,12 @@
             }
           ]
         },
-        "requests": [{"method": "GET", "path": "/v1/dlq"}]
-      }
-    },
-    {
-      "id": "admin.dlq.replay.ok",
-      "feature": "admin.operations",
-      "operation": "admin_dlq_replay",
-      "input": {
-        "gateway": {"status": 200, "body": {"json": {"replayed": 2}}},
-        "filter": {"source_id": "demo"}
-      },
-      "expect": {
-        "ok": {"replayed": 2},
-        "requests": [{"method": "POST", "path": "/v1/dlq/replay"}]
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/dlq"
+          }
+        ]
       }
     },
     {
@@ -116,7 +161,12 @@
           "body": {
             "json": {
               "entries": [
-                {"id": "0194f4a0-0000-7000-8000-000000000001", "source_id": "demo", "received_at": 1720000000000, "reason": ":no_match"}
+                {
+                  "id": "0194f4a0-0000-7000-8000-000000000001",
+                  "source_id": "demo",
+                  "received_at": 1720000000000,
+                  "reason": ":no_match"
+                }
               ]
             }
           }
@@ -125,10 +175,20 @@
       "expect": {
         "ok": {
           "entries": [
-            {"id": "0194f4a0-0000-7000-8000-000000000001", "source_id": "demo", "received_at": 1720000000000, "reason": ":no_match"}
+            {
+              "id": "0194f4a0-0000-7000-8000-000000000001",
+              "source_id": "demo",
+              "received_at": 1720000000000,
+              "reason": ":no_match"
+            }
           ]
         },
-        "requests": [{"method": "GET", "path": "/v1/quarantine"}]
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/quarantine"
+          }
+        ]
       }
     },
     {
@@ -136,10 +196,22 @@
       "feature": "admin.errors",
       "operation": "admin_dlq_list",
       "input": {
-        "gateway": {"status": 409, "body": {"json": {"error": "role_not_enabled", "role": "dispatch"}}}
+        "gateway": {
+          "status": 409,
+          "body": {
+            "json": {
+              "error": "role_not_enabled",
+              "role": "dispatch"
+            }
+          }
+        }
       },
       "expect": {
-        "error": {"class": "RoleNotEnabledError", "retryable": false, "role": "dispatch"}
+        "error": {
+          "class": "RoleNotEnabledError",
+          "retryable": false,
+          "role": "dispatch"
+        }
       }
     },
     {
@@ -147,10 +219,15 @@
       "feature": "admin.errors",
       "operation": "admin_health",
       "input": {
-        "gateway": {"unreachable": true}
+        "gateway": {
+          "unreachable": true
+        }
       },
       "expect": {
-        "error": {"class": "AdminUnavailableError", "retryable": true}
+        "error": {
+          "class": "AdminUnavailableError",
+          "retryable": true
+        }
       }
     },
     {
@@ -160,11 +237,22 @@
       "input": {
         "gateway": {
           "status": 400,
-          "body": {"json": {"error": "invalid_filter", "field": "limit", "message": "must be an integer"}}
+          "body": {
+            "json": {
+              "error": "invalid_filter",
+              "field": "limit",
+              "message": "must be an integer"
+            }
+          }
         }
       },
       "expect": {
-        "error": {"class": "AdminRejectedError", "retryable": false, "status": 400, "code": "invalid_filter"}
+        "error": {
+          "class": "AdminRejectedError",
+          "retryable": false,
+          "status": 400,
+          "code": "invalid_filter"
+        }
       }
     },
     {
@@ -172,10 +260,20 @@
       "feature": "admin.errors",
       "operation": "admin_dlq_list",
       "input": {
-        "gateway": {"status": 500, "body": {"json": {"error": "internal_error"}}}
+        "gateway": {
+          "status": 500,
+          "body": {
+            "json": {
+              "error": "internal_error"
+            }
+          }
+        }
       },
       "expect": {
-        "error": {"class": "AdminUnavailableError", "retryable": true}
+        "error": {
+          "class": "AdminUnavailableError",
+          "retryable": true
+        }
       }
     },
     {
@@ -183,10 +281,291 @@
       "feature": "admin.errors",
       "operation": "admin_dlq_list",
       "input": {
-        "gateway": {"status": 302, "headers": {"location": "http://gateway.invalid/v1/dlq"}}
+        "gateway": {
+          "status": 302,
+          "headers": {
+            "location": "http://gateway.invalid/v1/dlq"
+          }
+        }
       },
       "expect": {
-        "error": {"class": "AdminUnavailableError", "retryable": true}
+        "error": {
+          "class": "AdminUnavailableError",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "admin.replay.create.ok",
+      "feature": "admin.operations",
+      "operation": "admin_replay_create",
+      "input": {
+        "gateway": {
+          "status": 202,
+          "body": {
+            "json": {
+              "id": "0194f4a0-0000-7000-8000-0000000000aa",
+              "kind": "dlq",
+              "state": "running",
+              "filter": {
+                "source_id": "demo"
+              },
+              "rate": 500,
+              "max_lag_ms": 2000,
+              "created_at": 1720000000000,
+              "updated_at": 1720000000000,
+              "finished_at": null,
+              "moved": 0,
+              "scanned": 0,
+              "skipped": 0,
+              "delivered": 0,
+              "dead": 0,
+              "error": null
+            }
+          }
+        },
+        "spec": {
+          "kind": "dlq",
+          "source_id": "demo",
+          "rate": 500
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "0194f4a0-0000-7000-8000-0000000000aa",
+          "kind": "dlq",
+          "state": "running",
+          "filter": {
+            "source_id": "demo"
+          },
+          "rate": 500,
+          "max_lag_ms": 2000,
+          "created_at": 1720000000000,
+          "updated_at": 1720000000000,
+          "finished_at": null,
+          "moved": 0,
+          "scanned": 0,
+          "skipped": 0,
+          "delivered": 0,
+          "dead": 0,
+          "error": null
+        },
+        "requests": [
+          {
+            "method": "POST",
+            "path": "/v1/replays"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admin.replay.get.ok",
+      "feature": "admin.operations",
+      "operation": "admin_replay_get",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "id": "0194f4a0-0000-7000-8000-0000000000aa",
+              "kind": "dlq",
+              "state": "running",
+              "filter": {
+                "source_id": "demo"
+              },
+              "rate": 500,
+              "max_lag_ms": 2000,
+              "created_at": 1720000000000,
+              "updated_at": 1720000000000,
+              "finished_at": null,
+              "moved": 0,
+              "scanned": 0,
+              "skipped": 0,
+              "delivered": 0,
+              "dead": 0,
+              "error": null
+            }
+          }
+        },
+        "id": "0194f4a0-0000-7000-8000-0000000000aa"
+      },
+      "expect": {
+        "ok": {
+          "id": "0194f4a0-0000-7000-8000-0000000000aa",
+          "kind": "dlq",
+          "state": "running",
+          "filter": {
+            "source_id": "demo"
+          },
+          "rate": 500,
+          "max_lag_ms": 2000,
+          "created_at": 1720000000000,
+          "updated_at": 1720000000000,
+          "finished_at": null,
+          "moved": 0,
+          "scanned": 0,
+          "skipped": 0,
+          "delivered": 0,
+          "dead": 0,
+          "error": null
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/replays/0194f4a0-0000-7000-8000-0000000000aa"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admin.replay.list.ok",
+      "feature": "admin.operations",
+      "operation": "admin_replay_list",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "replays": [
+                {
+                  "id": "0194f4a0-0000-7000-8000-0000000000aa",
+                  "kind": "dlq",
+                  "state": "running",
+                  "filter": {
+                    "source_id": "demo"
+                  },
+                  "rate": 500,
+                  "max_lag_ms": 2000,
+                  "created_at": 1720000000000,
+                  "updated_at": 1720000000000,
+                  "finished_at": null,
+                  "moved": 0,
+                  "scanned": 0,
+                  "skipped": 0,
+                  "delivered": 0,
+                  "dead": 0,
+                  "error": null
+                }
+              ]
+            }
+          }
+        }
+      },
+      "expect": {
+        "ok": {
+          "replays": [
+            {
+              "id": "0194f4a0-0000-7000-8000-0000000000aa",
+              "kind": "dlq",
+              "state": "running",
+              "filter": {
+                "source_id": "demo"
+              },
+              "rate": 500,
+              "max_lag_ms": 2000,
+              "created_at": 1720000000000,
+              "updated_at": 1720000000000,
+              "finished_at": null,
+              "moved": 0,
+              "scanned": 0,
+              "skipped": 0,
+              "delivered": 0,
+              "dead": 0,
+              "error": null
+            }
+          ]
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/replays"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admin.replay.update.ok",
+      "feature": "admin.operations",
+      "operation": "admin_replay_update",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "body": {
+            "json": {
+              "id": "0194f4a0-0000-7000-8000-0000000000aa",
+              "kind": "dlq",
+              "state": "paused",
+              "filter": {
+                "source_id": "demo"
+              },
+              "rate": 500,
+              "max_lag_ms": 2000,
+              "created_at": 1720000000000,
+              "updated_at": 1720000000000,
+              "finished_at": null,
+              "moved": 0,
+              "scanned": 0,
+              "skipped": 0,
+              "delivered": 0,
+              "dead": 0,
+              "error": null
+            }
+          }
+        },
+        "id": "0194f4a0-0000-7000-8000-0000000000aa",
+        "patch": {
+          "state": "paused"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "0194f4a0-0000-7000-8000-0000000000aa",
+          "kind": "dlq",
+          "state": "paused",
+          "filter": {
+            "source_id": "demo"
+          },
+          "rate": 500,
+          "max_lag_ms": 2000,
+          "created_at": 1720000000000,
+          "updated_at": 1720000000000,
+          "finished_at": null,
+          "moved": 0,
+          "scanned": 0,
+          "skipped": 0,
+          "delivered": 0,
+          "dead": 0,
+          "error": null
+        },
+        "requests": [
+          {
+            "method": "PATCH",
+            "path": "/v1/replays/0194f4a0-0000-7000-8000-0000000000aa"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admin.replay.get.not_found",
+      "feature": "admin.errors",
+      "operation": "admin_replay_get",
+      "input": {
+        "gateway": {
+          "status": 404,
+          "body": {
+            "json": {
+              "error": "replay_not_found"
+            }
+          }
+        },
+        "id": "missing"
+      },
+      "expect": {
+        "error": {
+          "class": "AdminRejectedError",
+          "status": 404,
+          "code": "replay_not_found"
+        }
       }
     }
   ]

@@ -5,14 +5,6 @@ require "test_helper"
 # Unit tests for the operator (admin) client's request shapes, which no
 # conformance vector covers.
 class AdminTest < Minitest::Test
-  def test_replay_without_filter_sends_empty_object
-    transport, recorded = injected(->(_request) { json_response(200, {"replayed" => 3}) })
-    client = Ankusa::AdminClient.new("http://gateway.invalid", transport: transport)
-
-    assert_equal({"replayed" => 3}, client.replay_dead_letters)
-    assert_equal({}, JSON.parse(recorded.first.body))
-  end
-
   def test_query_params_sent_only_when_present
     transport, recorded = injected(->(_request) { json_response(200, {"entries" => []}) })
     client = Ankusa::AdminClient.new("http://gateway.invalid", transport: transport)

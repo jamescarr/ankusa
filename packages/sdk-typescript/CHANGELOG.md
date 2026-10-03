@@ -6,17 +6,40 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `decodeMessage(data: string | Uint8Array)`, the queue-message decoder: parses
+  the v1 envelope, checks the body forms and integrity (`size_mismatch`,
+  `integrity`, `tenant_mismatch`), and ignores unknown keys. Every failure is
+  an `InvalidMessageError` with `retryable: false`, a `code`, and the
+  offending `field`. The decoded `Message` also carries the inline bytes as a
+  non-enumerable `body`.
+- `idempotencyKey(messageOrHeaders, { includeReplay? })`: `source_id:dedupe_key`
+  when a non-empty `dedupe_key` is set, else `id`, plus `#replay:<replay_id>`
+  when `includeReplay` is set and the delivery is a replay. Accepts a decoded
+  `Message` or the `HookHeaders` of an HTTP delivery.
+- `HookHeaders` gains `dedupeKey` (from `x-ankusa-dedupe-key`) and `replayId`
+  (from `x-ankusa-replay-id`); each is `null` when the header is absent or
+  empty.
+- Admin replay jobs: `createReplay(spec)`, `getReplay(id)`, `listReplays()`,
+  and `updateReplay(id, patch)`, with the `Replay`, `ReplayList`, `ReplaySpec`,
+  and `ReplayPatch` types. A `404` is `AdminRejectedError` with code
+  `replay_not_found`; a `409 replay_finished` is `AdminRejectedError` too.
+
+### Removed
+
+- `replayDeadLetters()`, `ReplayFilter`, and `Replayed`: the server's
+  `POST /v1/dlq/replay` is gone in favour of replay jobs.
+
 ### Changed
 
 - The generated admin types (`src/admin/admin-schema.d.ts`) are regenerated
-  from the server's current OpenAPI document. They now include `GET /v1/wal`,
-  `GET /v1/rate-limits` and `/v1/tenants/{tenant}/rate-limit`, which the
-  previous generated file was missing, and type a `503`
-  (`NodeStoreUnavailable`, `{"error": "store_unavailable"}`) on `GET /v1/dlq`,
-  `POST /v1/dlq/replay`, `GET /v1/quarantine` and the rate-limit routes. `/v1/wal`
-  now describes the node's store (`next_seq`, `hooks`, `deliveries`,
-  `disk_bytes`). Types only: the client already rejected every `5xx` with
-  `AdminUnavailableError`, so no runtime behaviour changes.
+  from the server's current OpenAPI document: the replay routes replace
+  `/v1/dlq/replay`, and `GET /v1/wal`, `GET /v1/rate-limits` and
+  `/v1/tenants/{tenant}/rate-limit` are now included. `/v1/wal` describes the
+  node's store (`next_seq`, `hooks`, `deliveries`, `disk_bytes`), and the
+  mutated routes type a `503` (`NodeStoreUnavailable`,
+  `{"error": "store_unavailable"}`).
 
 ## [0.3.0] - 2026-10-01
 

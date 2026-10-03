@@ -18,8 +18,13 @@
     "admin_metrics",
     "admin_config",
     "admin_dlq_list",
-    "admin_dlq_replay",
-    "admin_quarantine"
+    "admin_replay_create",
+    "admin_replay_get",
+    "admin_replay_list",
+    "admin_replay_update",
+    "admin_quarantine",
+    "decode_message",
+    "idempotency_key"
   ],
   "features": [
     {"id": "claim_ref.parse", "description": "Parse urn:ankusa:claim:v1:<tenant>:<claim_id> into tenant_id, claim_id, and the /v1/claims/{tenant_id}/{claim_id} path; anything else raises InvalidClaimRefError."},
@@ -32,6 +37,9 @@
     {"id": "claim_check.client.timeout", "description": "A per-client request timeout; exceeding it raises ClaimCheckUnavailableError."},
     {"id": "claim_check.client.transport", "description": "An injectable transport (Python transport=, TypeScript fetch) replaces the network."},
     {"id": "webhook.parse_headers", "description": "Parse x-ankusa-id/-source/-tenant and content-type case-insensitively; a missing or empty x-ankusa-id raises MissingHookIdError."},
+    {"id": "message.decode", "description": "Decode a v1 queue message: the inline (body_base64) and claim body forms, the optional fields (sha256, dedupe_key, replay_id, headers), and unknown keys are ignored."},
+    {"id": "message.integrity", "description": "Size mismatch -> InvalidMessageError(size_mismatch); sha256 mismatch -> InvalidMessageError(integrity); claim tenant != tenant_id -> InvalidMessageError(tenant_mismatch)."},
+    {"id": "message.idempotency_key", "description": "The idempotency key rule: source_id:dedupe_key when a non-empty dedupe_key is set, else id; with include_replay and a replay_id, append #replay:<replay_id>."},
     {"id": "routes.crud", "description": "Create, list, read, replace, update, and delete route definitions over the route-management listener (routes.admin.port)."},
     {"id": "routes.ip_rules", "description": "Get and replace the global IP rules."},
     {"id": "routes.dry_run", "description": "Dry-run a request against the route table and return the decision without capturing anything."},
@@ -39,7 +47,7 @@
     {"id": "routes.input_validation", "description": "Route ids are checked before any request and then percent-encoded as one path segment: an id that isn't a string, is empty, or is exactly `.` or `..` raises InvalidRouteIdError (no request), while every other id travels with `/`, `?`, `#`, `%` and space escaped as %2F %3F %23 %25 %20."},
     {"id": "routes.request_shape", "description": "Requests match the documented API: JSON bodies carry exactly the caller's input, and query parameters go out in input order with booleans as `true`/`false`."},
     {"id": "routes.health", "description": "GET /health on the route-management listener returns {status, routes}."},
-    {"id": "admin.operations", "description": "Operator API: health, Prometheus metrics, redacted config, DLQ list/replay, and quarantine."},
+    {"id": "admin.operations", "description": "Operator API: health, Prometheus metrics, redacted config, DLQ list, replay jobs, and quarantine."},
     {"id": "admin.errors", "description": "2xx is success. A 409 whose body has error role_not_enabled -> RoleNotEnabledError(role); every other 4xx -> AdminRejectedError(status, code = the body's error). Anything else that isn't 2xx (5xx, an unfollowed 3xx redirect, 1xx) or a transport failure -> AdminUnavailableError (retryable)."}
   ]
 }

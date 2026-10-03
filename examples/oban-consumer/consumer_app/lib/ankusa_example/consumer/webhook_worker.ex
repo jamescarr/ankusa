@@ -1,12 +1,11 @@
 defmodule AnkusaExample.Consumer.WebhookWorker do
   @moduledoc """
   The Oban side of the HTTP handoff: `AnkusaExample.Consumer.Router` inserts
-  one of these per accepted `POST /deliveries` request, keyed uniquely on
-  `ankusa_id` (see the router's `Oban.insert/1` call). Recording into
-  `processed_webhooks` is idempotent by design — Ankusa's HTTP sink retries
-  on any non-2xx, so the same `ankusa_id` can legitimately land here more
-  than once; the `ON CONFLICT` bump of `deliveries` is what proves "zero
-  loss, at-least-once" without double-counting business effects.
+  one of these per newly-seen idempotency key, in the same transaction that
+  records the row. The job runs the business effect once and stamps
+  `processed_at`; the row (not Oban's job uniqueness) is the dedupe, so
+  pruning completed jobs can never let a provider retry or a replay re-run
+  the effect. The body stays in the table — job args carry only the key.
   """
 
   use Oban.Worker, queue: :webhooks, max_attempts: 10
@@ -17,22 +16,46 @@ defmodule AnkusaExample.Consumer.WebhookWorker do
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: args}) do
-    body = Base.decode64!(args["body_base64"])
-    sha_hex = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+    key = args["idempotency_key"]
 
-    Repo.query!(
-      """
-      INSERT INTO processed_webhooks
-        (ankusa_id, source_id, tenant_id, body_sha256, deliveries, processed_at)
-      VALUES ($1, $2, $3, $4, 1, now())
-      ON CONFLICT (ankusa_id) DO UPDATE
-        SET deliveries = processed_webhooks.deliveries + 1
-      """,
-      [args["ankusa_id"], args["source_id"], args["tenant_id"], sha_hex]
-    )
+    result =
+      Repo.transaction(fn ->
+        %Postgrex.Result{rows: rows} =
+          Repo.query!(
+            """
+            SELECT ankusa_id, processed_at
+            FROM processed_webhooks
+            WHERE idempotency_key = $1
+            FOR UPDATE
+            """,
+            [key]
+          )
 
-    Logger.info("processed ankusa_id=#{args["ankusa_id"]}")
+        case rows do
+          # The row was pruned or never existed: nothing to do.
+          [] ->
+            :ok
 
-    :ok
+          [[ankusa_id, processed_at]] ->
+            if is_nil(processed_at) do
+              # The effect runs here, inside the transaction that marks it
+              # done, so a crash mid-run redelivers the job and runs it again
+              # — at-least-once, which the callers' own idempotency absorbs.
+              Repo.query!(
+                "UPDATE processed_webhooks SET processed_at = now() WHERE idempotency_key = $1",
+                [key]
+              )
+
+              Logger.info("processed ankusa_id=#{ankusa_id}")
+            end
+
+            :ok
+        end
+      end)
+
+    case result do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 end

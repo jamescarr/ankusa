@@ -65,7 +65,7 @@ defmodule AnkusaServer.Config do
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
   @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
-  @wal_keys ~w(type)
+  @wal_keys ~w(type publish_timeout_ms)
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
@@ -83,7 +83,15 @@ defmodule AnkusaServer.Config do
   @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants)
   @rate_limit_keys ~w(rate burst)
-  @source_keys ~w(tenant on_verify_failure verify sinks)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers)
+  @dedupe_keys ~w(preset header json ttl_seconds)
+  @dedupe_presets %{
+    "github" => :github,
+    "standard_webhooks" => :standard_webhooks,
+    "svix" => :svix,
+    "shopify" => :shopify,
+    "stripe" => :stripe
+  }
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @log_sink_keys ~w(type)
@@ -430,8 +438,12 @@ defmodule AnkusaServer.Config do
     wal = section!(doc, "wal", @wal_keys, [])
 
     case enum!(wal["type"] || "disk", ~w(disk none), ["wal", "type"]) do
-      "disk" -> [wal: :disk]
-      "none" -> [wal: :none]
+      "disk" ->
+        [wal: :disk]
+
+      "none" ->
+        [wal: :none]
+        |> put_opt(:direct_publish_timeout_ms, int_opt(wal, "publish_timeout_ms", ["wal"]))
     end
   end
 
@@ -787,6 +799,102 @@ defmodule AnkusaServer.Config do
     |> put_opt(:on_verify_failure, atom_enum_opt(source, "on_verify_failure", @policies, path))
     |> put_opt(:verifier, verifier(source, path))
     |> Keyword.put(:sinks, sinks!(source, path))
+    |> put_opt(:dedupe, dedupe(source, path))
+    |> put_opt(:forward_headers, forward_headers(source, path))
+  end
+
+  # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
+  # preset/header/json and an optional `ttl_seconds`. Returns a value
+  # `Ankusa.Dedupe.new!/1` accepts: a preset atom, or a `ttl_ms`-carrying map.
+  defp dedupe(source, path) do
+    case source["dedupe"] do
+      nil ->
+        nil
+
+      preset when is_binary(preset) ->
+        enum!(preset, Map.keys(@dedupe_presets), path ++ ["dedupe"])
+        Map.fetch!(@dedupe_presets, preset)
+
+      value ->
+        dedupe_section!(value, path ++ ["dedupe"])
+    end
+  end
+
+  defp dedupe_section!(value, path) do
+    spec = section!(value, @dedupe_keys, path)
+
+    from =
+      case {spec["preset"], spec["header"], spec["json"]} do
+        {nil, nil, nil} ->
+          raise ConfigError,
+            message: "#{render_path(path)}: set exactly one of preset, header, json"
+
+        {preset, nil, nil} ->
+          {:preset,
+           Map.fetch!(
+             @dedupe_presets,
+             enum!(preset, Map.keys(@dedupe_presets), path ++ ["preset"])
+           )}
+
+        {nil, _header, nil} ->
+          {:header, string_opt(spec, "header", path)}
+
+        {nil, nil, _json} ->
+          {:json, string_opt(spec, "json", path)}
+
+        _other ->
+          raise ConfigError,
+            message: "#{render_path(path)}: set exactly one of preset, header, json"
+      end
+
+    # A blank header or dot path would pass `new!/1`'s pattern but silently
+    # never dedupe: refuse it here with the config's own error shape.
+    case from do
+      {:header, ""} ->
+        raise ConfigError, message: "#{render_path(path ++ ["header"])}: must not be empty"
+
+      {:json, ""} ->
+        raise ConfigError, message: "#{render_path(path ++ ["json"])}: must not be empty"
+
+      _ ->
+        :ok
+    end
+
+    ttl_ms =
+      case int_opt(spec, "ttl_seconds", path) do
+        nil ->
+          nil
+
+        s when s > 0 ->
+          {:ttl_ms, s * 1_000}
+
+        s ->
+          raise ConfigError,
+            message: "#{render_path(path ++ ["ttl_seconds"])}: must be > 0, got #{s}"
+      end
+
+    [from, ttl_ms] |> Enum.reject(&is_nil/1) |> Map.new()
+  end
+
+  defp forward_headers(source, path) do
+    case source["forward_headers"] do
+      nil ->
+        nil
+
+      headers when is_list(headers) ->
+        Enum.map(headers, fn header ->
+          if is_binary(header) and header != "" do
+            String.downcase(header)
+          else
+            raise ConfigError,
+              message: type_error(path ++ ["forward_headers"], "a list of header names", headers)
+          end
+        end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["forward_headers"], "a list of header names", other)
+    end
   end
 
   defp verifier(source, path) do

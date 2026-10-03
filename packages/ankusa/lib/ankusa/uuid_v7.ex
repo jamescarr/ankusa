@@ -53,6 +53,18 @@ defmodule Ankusa.UUIDv7 do
 
   def timestamp_ms(_), do: :error
 
+  @doc "The lowest possible UUIDv7 id whose timestamp is `ms`."
+  @spec min_for(non_neg_integer()) :: String.t()
+  def min_for(ms) when is_integer(ms) and ms >= 0 do
+    <<ms::48, 7::4, 0::12, 2::2, 0::62>> |> encode()
+  end
+
+  @doc "The highest possible UUIDv7 id whose timestamp is `ms`."
+  @spec max_for(non_neg_integer()) :: String.t()
+  def max_for(ms) when is_integer(ms) and ms >= 0 do
+    <<ms::48, 7::4, -1::12, 2::2, -1::62>> |> encode()
+  end
+
   defp encode(<<a::32, b::16, c::16, d::16, e::48>>) do
     [
       Base.encode16(<<a::32>>, case: :lower),

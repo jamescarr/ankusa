@@ -22,6 +22,11 @@ defmodule Ankusa.Edge.DirectTest do
     def deliver(env, ctx, opts) do
       send(Keyword.fetch!(opts, :to), {:delivered, env, ctx})
 
+      case Keyword.get(opts, :sleep_ms) do
+        ms when is_integer(ms) and ms > 0 -> Process.sleep(ms)
+        _ -> :ok
+      end
+
       case Keyword.get(opts, :outcome, :ok) do
         :ok -> :ok
         :error -> {:error, :nope}
@@ -136,7 +141,7 @@ defmodule Ankusa.Edge.DirectTest do
     assert_received {:delivered, _, _}
   end
 
-  test "publishes to every sink in declaration order, stopping at the first refusal" do
+  test "publishes to every sink concurrently, even when one refuses" do
     config =
       start_direct([
         {CaptureSink, [to: self(), outcome: :ok]},
@@ -147,9 +152,10 @@ defmodule Ankusa.Edge.DirectTest do
     conn = route(config, "demo", "{}")
 
     assert conn.status == 503
+    # All three ran: publishing is concurrent, the refusal does not stop the rest.
     assert_received {:delivered, _, _}
     assert_received {:delivered, _, _}
-    refute_received {:delivered, _, _}
+    assert_received {:delivered, _, _}
   end
 
   test "a source with no sinks cannot ack" do
@@ -204,5 +210,45 @@ defmodule Ankusa.Edge.DirectTest do
       assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
       refute_received {:delivered, _, _}
     end
+  end
+
+  # ── E7: concurrent publish under one deadline ─────────────────────────────
+
+  test "two slow sinks run concurrently: the ack waits for the slowest, not the sum" do
+    config =
+      start_direct([
+        {CaptureSink, [to: self(), sleep_ms: 300]},
+        {CaptureSink, [to: self(), sleep_ms: 300]}
+      ])
+
+    start = System.monotonic_time(:millisecond)
+
+    conn = route(config, "demo", "{}")
+
+    elapsed = System.monotonic_time(:millisecond) - start
+
+    assert conn.status == 201
+    # Sequentially this would be ~600 ms; concurrently it is ~300 ms.
+    assert elapsed < 550
+    assert_received {:delivered, _, _}
+    assert_received {:delivered, _, _}
+  end
+
+  @tag :capture_log
+  test "a sink that misses direct_publish_timeout_ms is a 503 within the deadline" do
+    config =
+      start_direct([{CaptureSink, [to: self(), sleep_ms: 1_000]}],
+        direct_publish_timeout_ms: 200
+      )
+
+    start = System.monotonic_time(:millisecond)
+
+    conn = route(config, "demo", "{}")
+
+    elapsed = System.monotonic_time(:millisecond) - start
+
+    assert conn.status == 503
+    assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
+    assert elapsed >= 150 and elapsed < 500
   end
 end

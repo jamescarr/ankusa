@@ -4,11 +4,13 @@ use std::fmt;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use percent_encoding::utf8_percent_encode;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::client::{
-    ClientBuilder, ConfigError, Core, HeaderNames, Query, UnavailableReason, decode, error_body,
-    json_body,
+    ClientBuilder, ConfigError, Core, HeaderNames, Query, SEGMENT, UnavailableReason, decode,
+    error_body, json_body,
 };
 use crate::transport::{ReqwestTransport, Transport};
 
@@ -113,22 +115,51 @@ impl<T: Transport> AdminClient<T> {
         decode(response.body()).map_err(AdminError::Unavailable)
     }
 
-    /// `POST /v1/dlq/replay`: re-delivers everything `filter` matches. An
-    /// empty filter replays the whole queue.
+    /// `POST /v1/replays`: starts a replay job. The node answers `202` for a
+    /// new job, or `200` with the running one when a `running` or `paused` job
+    /// with the same normalized filter already exists, which makes a proxy
+    /// retry idempotent.
     ///
     /// # Errors
     ///
-    /// [`AdminError`], as its variants document. A filter the node refuses is
-    /// [`AdminError::Rejected`].
-    pub async fn replay_dead_letters(&self, filter: &ReplayFilter) -> Result<Replayed, AdminError> {
-        let body = json_body(filter).map_err(AdminError::Unavailable)?;
-        let response = self
-            .core
-            .send(http::Method::POST, "/v1/dlq/replay", Some(body))
+    /// [`AdminError`], as its variants document. `404` a missing job,
+    /// `409 role_not_enabled` (archive replay on a node without a queue
+    /// writer) and a rejected spec are all [`AdminError::Rejected`] or
+    /// [`AdminError::RoleNotEnabled`].
+    pub async fn create_replay(&self, spec: &ReplaySpec) -> Result<Replay, AdminError> {
+        self.send(http::Method::POST, "/v1/replays", spec).await
+    }
+
+    /// `GET /v1/replays/{id}`.
+    ///
+    /// # Errors
+    ///
+    /// [`AdminError`], as its variants document. A missing job is
+    /// [`AdminError::Rejected`] with code `replay_not_found`.
+    pub async fn get_replay(&self, id: &str) -> Result<Replay, AdminError> {
+        self.get_json(&replay_path(id)).await
+    }
+
+    /// `GET /v1/replays`: every replay job, newest first.
+    ///
+    /// # Errors
+    ///
+    /// [`AdminError`], as its variants document.
+    pub async fn list_replays(&self) -> Result<ReplayList, AdminError> {
+        self.get_json("/v1/replays").await
+    }
+
+    /// `PATCH /v1/replays/{id}`: pauses, resumes or cancels a job, and adjusts
+    /// its `rate` and `max_lag_ms`.
+    ///
+    /// # Errors
+    ///
+    /// [`AdminError`], as its variants document. A finished job is
+    /// [`AdminError::Rejected`] with code `replay_finished`; a missing one has
+    /// code `replay_not_found`.
+    pub async fn update_replay(&self, id: &str, patch: &ReplayPatch) -> Result<Replay, AdminError> {
+        self.send(http::Method::PATCH, &replay_path(id), patch)
             .await
-            .map_err(AdminError::Unavailable)?;
-        let response = check(response)?;
-        decode(response.body()).map_err(AdminError::Unavailable)
     }
 
     /// `GET /v1/quarantine`: one page of the hooks whose signature did not
@@ -159,6 +190,33 @@ impl<T: Transport> AdminClient<T> {
             .map_err(AdminError::Unavailable)?;
         check(response)
     }
+
+    async fn get_json<R: DeserializeOwned>(&self, path_and_query: &str) -> Result<R, AdminError> {
+        let response = self.get(path_and_query).await?;
+        decode(response.body()).map_err(AdminError::Unavailable)
+    }
+
+    async fn send<R: DeserializeOwned, B: Serialize + ?Sized>(
+        &self,
+        method: http::Method,
+        path_and_query: &str,
+        body: &B,
+    ) -> Result<R, AdminError> {
+        let body = json_body(body).map_err(AdminError::Unavailable)?;
+        let response = self
+            .core
+            .send(method, path_and_query, Some(body))
+            .await
+            .map_err(AdminError::Unavailable)?;
+        let response = check(response)?;
+        decode(response.body()).map_err(AdminError::Unavailable)
+    }
+}
+
+/// `/v1/replays/{id}`: the id travels as one percent-encoded path segment, so
+/// it can never reshape the request.
+fn replay_path(id: &str) -> String {
+    format!("/v1/replays/{}", utf8_percent_encode(id, SEGMENT))
 }
 
 /// Maps a response status onto the client's classification: `2xx` is the
@@ -268,26 +326,98 @@ pub struct QuarantinePage {
     pub entries: Vec<QuarantineEntry>,
 }
 
-/// What a replay re-delivered.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A replay job.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct Replayed {
-    /// Number of entries re-delivered.
-    pub replayed: u64,
+pub struct Replay {
+    /// The job id, a `UUIDv7`.
+    pub id: String,
+    /// `"dlq"` or `"archive"`.
+    pub kind: String,
+    /// `"running"`, `"paused"`, `"done"`, `"cancelled"` or `"failed"`.
+    pub state: String,
+    /// The filter the job was created with.
+    pub filter: serde_json::Map<String, serde_json::Value>,
+    /// Items per second: delivery rows for `dlq`, hooks for `archive`.
+    pub rate: u64,
+    /// The oldest-due dispatch lag the job tolerates, milliseconds.
+    pub max_lag_ms: u64,
+    /// Creation time, unix milliseconds.
+    pub created_at: i64,
+    /// Last update time, unix milliseconds.
+    pub updated_at: i64,
+    /// When the job finished, or `None` while it is still running.
+    pub finished_at: Option<i64>,
+    /// Rows revived (`dlq`) or hooks re-enqueued (`archive`).
+    pub moved: u64,
+    /// Keys or records examined.
+    pub scanned: u64,
+    /// Archive records with no source, no bound sink, or an undecodable frame.
+    pub skipped: u64,
+    /// Deliveries the pipeline reported as delivered.
+    pub delivered: u64,
+    /// Deliveries that dead-lettered again.
+    pub dead: u64,
+    /// The failure or auto-pause message, when there is one.
+    pub error: Option<String>,
 }
 
-/// Which dead letters to replay. All `None` replays the whole queue.
+/// Every replay job, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ReplayList {
+    /// The jobs.
+    pub replays: Vec<Replay>,
+}
+
+/// What `POST /v1/replays` starts: a `dlq` job over dead-lettered rows, or an
+/// `archive` job over a time window of an archived source.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct ReplayFilter {
-    /// Exact source id.
+pub struct ReplaySpec {
+    /// `"dlq"` or `"archive"`.
+    pub kind: String,
+    /// Restrict to one source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
-    /// Exact envelope id.
+    /// Restrict to one envelope id (`dlq` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// Inclusive lower bound on the dead-letter timestamp, unix milliseconds.
+    /// Inclusive lower bound on the dead-letter time, unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
+    /// Inclusive upper bound on the dead-letter time, unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+    /// Inclusive lower bound on `received_at`, unix milliseconds (`archive`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<i64>,
+    /// Inclusive upper bound on `received_at`, unix milliseconds (`archive`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<i64>,
+    /// Sink indexes into the source's current `sinks` (`archive`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sinks: Option<Vec<u64>>,
+    /// Items per second. The node defaults to `1000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<u64>,
+    /// The oldest-due dispatch lag the job tolerates, milliseconds. The node
+    /// defaults to `2000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lag_ms: Option<u64>,
+}
+
+/// What `PATCH /v1/replays/{id}` changes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReplayPatch {
+    /// `"running"`, `"paused"` or `"cancelled"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Items per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<u64>,
+    /// The oldest-due dispatch lag the job tolerates, milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lag_ms: Option<u64>,
 }
 
 /// The filters `GET /v1/dlq` accepts.
@@ -350,7 +480,7 @@ impl AdminError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminClient, AdminError, ListDeadLettersParams};
+    use super::{AdminClient, AdminError, ListDeadLettersParams, ReplayPatch, ReplaySpec};
     use crate::client::{ClientBuilder, test_support::Recording};
 
     fn client(transport: Recording) -> AdminClient<Recording> {
@@ -394,5 +524,79 @@ mod tests {
         let transport = Recording::new(200, "ok");
         let client = client(transport);
         assert_eq!(client.metrics().await.expect("text"), "ok");
+    }
+
+    const REPLAY: &str = r#"{"id":"r1","kind":"dlq","state":"running","filter":{},
+        "rate":1000,"max_lag_ms":2000,"created_at":0,"updated_at":0,"finished_at":null,
+        "moved":0,"scanned":0,"skipped":0,"delivered":0,"dead":0,"error":null}"#;
+
+    #[tokio::test]
+    async fn replay_methods_use_the_documented_paths() {
+        let transport = Recording::new(202, REPLAY);
+        let targets = transport.targets();
+        let client = client(transport);
+        let spec = ReplaySpec {
+            kind: "dlq".to_owned(),
+            source_id: Some("demo".to_owned()),
+            rate: Some(500),
+            ..ReplaySpec::default()
+        };
+        let created = client.create_replay(&spec).await.expect("created");
+        assert_eq!(created.id, "r1");
+        // The id travels as one percent-encoded path segment.
+        client.get_replay("r 1").await.expect("got");
+        client
+            .update_replay(
+                "r1",
+                &ReplayPatch {
+                    state: Some("paused".to_owned()),
+                    ..ReplayPatch::default()
+                },
+            )
+            .await
+            .expect("updated");
+        assert_eq!(
+            targets.lock().expect("not poisoned").as_slice(),
+            ["/v1/replays", "/v1/replays/r%201", "/v1/replays/r1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_replays_returns_the_page() {
+        let client = client(Recording::new(200, r#"{"replays":[]}"#));
+        assert!(
+            client
+                .list_replays()
+                .await
+                .expect("listed")
+                .replays
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_replay_is_a_rejection_with_the_body_code() {
+        let client = client(Recording::new(404, r#"{"error":"replay_not_found"}"#));
+        match client.get_replay("missing").await.expect_err("missing") {
+            AdminError::Rejected { status, code } => {
+                assert_eq!(status, http::StatusCode::NOT_FOUND);
+                assert_eq!(code.as_deref(), Some("replay_not_found"));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replay_spec_serializes_to_the_given_keys() {
+        let spec = ReplaySpec {
+            kind: "dlq".to_owned(),
+            source_id: Some("demo".to_owned()),
+            rate: Some(500),
+            ..ReplaySpec::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&spec).expect("serializable"),
+            serde_json::json!({"kind": "dlq", "source_id": "demo", "rate": 500})
+        );
     }
 }

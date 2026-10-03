@@ -17,7 +17,17 @@ this project follows [Semantic Versioning](https://semver.org/).
   `getIpRules`, `putIpRules`, and `testRoute`. Every call is one request, no
   retries, and a redirect is never followed: a `3xx` is a `RoutesUnavailableError`.
 - `AdminClient`: the DLQ and quarantine client — `health`, `metrics`, `config`,
-  `listDeadLetters`, `replayDeadLetters`, and `listQuarantined`.
+  `listDeadLetters`, `listQuarantined`, and the replay jobs `createReplay`,
+  `getReplay`, `listReplays`, and `updateReplay`.
+- `Message.decode`, the queue-message decoder: it validates the v1 message,
+  decodes and verifies the body, and raises `InvalidMessageError` (`code()`,
+  `field()`) on a bad message. `Message.idempotencyKey(includeReplay)` and
+  `HookHeaders.idempotencyKey(includeReplay)` compute the key a worker dedupes
+  on.
+- `HookHeaders.parse` for receivers: the `x-ankusa-id`, `x-ankusa-source`,
+  `x-ankusa-tenant`, `content-type`, `x-ankusa-dedupe-key`, and
+  `x-ankusa-replay-id` headers of a delivery, and `MissingHookIdError` when
+  `x-ankusa-id` is absent.
 - `SourcesClient`: the tenant-scoped source API — `serverVersion`, `listSources`,
   `getSource`, `createSource`, `updateSource`, and `deleteSource`. A client built
   with an `expectedVersion` fetches `/health` once, caches the reported version,

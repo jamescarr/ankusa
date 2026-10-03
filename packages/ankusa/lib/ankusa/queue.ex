@@ -19,7 +19,11 @@ defmodule Ankusa.Queue do
   alias Ankusa.Store
   alias Ankusa.Store.Keys
 
-  @type entry :: %{envelope: Envelope.t(), sinks: [{module(), keyword()}]}
+  @type entry :: %{
+          required(:envelope) => Envelope.t(),
+          required(:sinks) => [{module(), keyword()}],
+          optional(:dedupe_ttl_ms) => pos_integer() | nil
+        }
 
   @doc """
   Commits `entries` durably to the store (one synced batch), assigning each a
@@ -36,14 +40,43 @@ defmodule Ankusa.Queue do
   half-way: an abandoned call would commit anyway, unacknowledged.
   """
   @spec enqueue(atom(), [entry()], integer() | :infinity) ::
-          {:ok, [{:committed, Envelope.t()}]} | {:error, term()}
+          {:ok, [{:committed, Envelope.t()} | {:duplicate, Envelope.t()}]} | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do
     items =
-      Enum.map(entries, fn %{envelope: env, sinks: sinks} ->
-        {env, Envelope.to_binary(%{env | seq: nil}), Enum.map(sinks, &elem(&1, 0))}
+      Enum.map(entries, fn %{envelope: env, sinks: sinks} = entry ->
+        {env, Envelope.to_binary(%{env | seq: nil}), Enum.map(sinks, &elem(&1, 0)),
+         Map.get(entry, :dedupe_ttl_ms)}
       end)
 
     GenServer.call(Ankusa.via(instance, :queue_writer), {:enqueue, items, deadline}, :infinity)
+  end
+
+  @type redrive_entry :: %{
+          bin: binary(),
+          size: non_neg_integer(),
+          sinks: [{non_neg_integer(), module()}],
+          replay_id: String.t()
+        }
+
+  @doc """
+  Re-commit archived hooks as new queue entries, for a `kind: :archive` replay
+  job. Each entry gets a fresh seq, its hook payload, and one pending delivery
+  row per bound sink carrying `replay: replay_id`. No archive obligation (the
+  hook is already archived) and no ingest dedupe.
+
+  `extra_ops` ride in the same synced batch as the hooks — the job's cursor
+  update — so the cursor and the moved hooks commit atomically. Returns the
+  number of entries committed. The call is `:infinity` for the same reason as
+  `enqueue/3`: the writer never abandons a started batch.
+  """
+  @spec redrive(atom(), [redrive_entry()], [Ankusa.Store.op()]) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def redrive(instance, entries, extra_ops) do
+    GenServer.call(
+      Ankusa.via(instance, :queue_writer),
+      {:redrive, entries, extra_ops},
+      :infinity
+    )
   end
 
   @doc """

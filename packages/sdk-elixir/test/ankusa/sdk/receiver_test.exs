@@ -50,15 +50,36 @@ defmodule Ankusa.SDK.ReceiverTest do
 
     assert_received {:hook, hook}
 
-    assert hook == %Hook{
-             id: "01a0",
-             source_id: "demo",
-             tenant_id: "acme",
-             content_type: "application/json",
-             body: @body,
-             received_at: nil,
-             size: byte_size(@body)
-           }
+    assert hook.id == "01a0"
+    assert hook.source_id == "demo"
+    assert hook.tenant_id == "acme"
+    assert hook.content_type == "application/json"
+    assert hook.body == @body
+    assert hook.received_at == nil
+    assert hook.size == byte_size(@body)
+    assert hook.dedupe_key == nil
+    assert hook.replay_id == nil
+    assert hook.headers["x-ankusa-id"] == "01a0"
+    assert hook.headers["x-ankusa-source"] == "demo"
+  end
+
+  test "a delivery carries the dedupe key, replay id, and forwarded headers" do
+    conn =
+      post("/deliveries", @body,
+        "x-ankusa-id": "01a0",
+        "x-ankusa-source": "demo",
+        "x-ankusa-dedupe-key": "evt_9",
+        "x-ankusa-replay-id": "rid-1",
+        "x-github-event": "push"
+      )
+      |> Receiver.call(receiver_opts())
+
+    assert conn.status == 202
+    assert_received {:hook, %Hook{} = hook}
+
+    assert hook.dedupe_key == "evt_9"
+    assert hook.replay_id == "rid-1"
+    assert hook.headers["x-github-event"] == "push"
   end
 
   test "a delivery without a tenant has a nil tenant_id" do

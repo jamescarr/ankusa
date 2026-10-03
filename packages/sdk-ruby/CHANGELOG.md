@@ -6,6 +6,28 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa::Message` and `Ankusa.decode_message(data)`, plus
+  `Ankusa::InvalidMessageError` (with `code`, `field` and `retryable?` false):
+  decode and validate the v1 queue message every sink delivers — the inline
+  (`body_base64`) and claim-check (`claim`) body forms, `sha256`,
+  `dedupe_key`, `replay_id`, and the forwarded `headers`, ignoring unknown
+  keys.
+- `Message#idempotency_key` / `HookHeaders#idempotency_key`, the key to store
+  in a processed-ids table: the provider's `dedupe_key` folded with
+  `source_id` when set, else `id`, with an optional `#replay:<replay_id>`
+  suffix (`include_replay: true`).
+- `HookHeaders#dedupe_key` / `HookHeaders#replay_id`, parsed from
+  `x-ankusa-dedupe-key` / `x-ankusa-replay-id`.
+- `AdminClient#create_replay`, `#get_replay`, `#list_replays` and
+  `#update_replay` for the `POST/GET/PATCH /v1/replays` replay-job API.
+
+### Removed
+
+- `AdminClient#replay_dead_letters`, replaced by the replay-job API above.
+  `POST /v1/dlq/replay` no longer exists.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

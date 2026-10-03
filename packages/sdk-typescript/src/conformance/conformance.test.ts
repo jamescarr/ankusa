@@ -63,6 +63,7 @@ const ERROR_CLASSES: Record<string, unknown> = {
   AdminUnavailableError: sdk.AdminUnavailableError,
   RoleNotEnabledError: sdk.RoleNotEnabledError,
   AdminRejectedError: sdk.AdminRejectedError,
+  InvalidMessageError: sdk.InvalidMessageError,
 };
 
 function bodyBytes(body: Body | undefined): Buffer {
@@ -212,7 +213,9 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
     patch?: Record<string, unknown>;
     rules?: Record<string, unknown>;
     request?: Record<string, unknown>;
-    filter?: Record<string, unknown>;
+    message?: string;
+    include_replay?: boolean;
+    spec?: Record<string, unknown>;
   };
   const gateway = input.gateway as Gateway;
   const client = input.client ?? {};
@@ -228,7 +231,22 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         source: parsed.source,
         tenant: parsed.tenant,
         content_type: parsed.contentType,
+        dedupe_key: parsed.dedupeKey,
+        replay_id: parsed.replayId,
       };
+    }
+    case "decode_message": {
+      // `Message` carries the wire fields plus a non-enumerable decoded
+      // `body`, so it deep-equals the vector's `ok` directly.
+      return sdk.decodeMessage(input.message as string);
+    }
+    case "idempotency_key": {
+      const includeReplay = input.include_replay === true;
+      const hook =
+        input.headers !== undefined
+          ? sdk.parseHeaders(input.headers as Record<string, string>)
+          : sdk.decodeMessage(input.message as string);
+      return { key: sdk.idempotencyKey(hook, { includeReplay }) };
     }
     case "redeem": {
       const built = await buildClient(gateway, client, requests, makeClaimCheckClient);
@@ -360,10 +378,37 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         await built.close();
       }
     }
-    case "admin_dlq_replay": {
+    case "admin_replay_create": {
       const built = await buildClient(gateway, client, requests, makeAdminClient);
       try {
-        return await (built.client as sdk.AdminClient).replayDeadLetters(input.filter as sdk.ReplayFilter);
+        return await (built.client as sdk.AdminClient).createReplay(input.spec as sdk.ReplaySpec);
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_replay_get": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).getReplay(input.id as string);
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_replay_list": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).listReplays();
+      } finally {
+        await built.close();
+      }
+    }
+    case "admin_replay_update": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).updateReplay(
+          input.id as string,
+          input.patch as sdk.ReplayPatch,
+        );
       } finally {
         await built.close();
       }

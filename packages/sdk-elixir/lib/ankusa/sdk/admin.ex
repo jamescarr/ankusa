@@ -1,8 +1,8 @@
 defmodule Ankusa.SDK.Admin do
   @moduledoc """
   The operator listener (`admin.port`, default `4002`): health, Prometheus
-  metrics, the redacted configuration, the dead-letter queue, and the quarantine
-  list.
+  metrics, the redacted configuration, the dead-letter queue, replay jobs, and
+  the quarantine list.
 
   Responses are node-local by design, so a fleet operator scrapes every node's
   admin port. The listener performs no authentication of its own — `:headers` is
@@ -16,6 +16,10 @@ defmodule Ankusa.SDK.Admin do
   admin = Ankusa.SDK.Admin.new("http://localhost:4002")
   {:ok, %{"status" => "ok"}} = Ankusa.SDK.Admin.health(admin)
   {:ok, %{"total" => total}} = Ankusa.SDK.Admin.list_dead_letters(admin, limit: 10)
+
+  {:ok, replay} = Ankusa.SDK.Admin.create_replay(admin, %{"kind" => "dlq", "rate" => 500})
+  {:ok, %{"replays" => replays}} = Ankusa.SDK.Admin.list_replays(admin)
+  {:ok, replay} = Ankusa.SDK.Admin.update_replay(admin, replay["id"], %{"state" => "paused"})
   ```
   """
 
@@ -60,13 +64,36 @@ defmodule Ankusa.SDK.Admin do
     do: json(client, :get, "/v1/dlq", query: params)
 
   @doc """
-  Replay dead letters: `POST /v1/dlq/replay` → `{\"replayed\", n}`.
+  Create a replay job: `POST /v1/replays` with `spec` as the JSON body.
 
-  `filter` is a filter, not a payload: `nil` and `%{}` both replay everything.
+  `spec` is a map (or keyword list) naming the job: `%{"kind" => "dlq"}` or
+  `%{"kind" => "archive"}`, plus the kind's filter (`source_id`/`since`/`until`
+  for `dlq`, `from`/`to`/`sinks` for `archive`) and the optional `rate` and
+  `max_lag_ms`. The response is the full Replay object; a retry of the same
+  spec answers the existing running/paused job instead of creating a second.
   """
-  @spec replay_dead_letters(t(), term()) :: {:ok, term()} | {:error, Exception.t()}
-  def replay_dead_letters(%__MODULE__{} = client, filter \\ nil),
-    do: json(client, :post, "/v1/dlq/replay", json: filter || %{})
+  @spec create_replay(t(), term()) :: {:ok, term()} | {:error, Exception.t()}
+  def create_replay(%__MODULE__{} = client, spec),
+    do: json(client, :post, "/v1/replays", json: spec)
+
+  @doc "One replay job by id: `GET /v1/replays/:id`. A `404` is `replay_not_found`."
+  @spec get_replay(t(), String.t()) :: {:ok, term()} | {:error, Exception.t()}
+  def get_replay(%__MODULE__{} = client, id), do: json(client, :get, "/v1/replays/#{id}")
+
+  @doc "Every replay job, newest first: `GET /v1/replays` → `{\"replays\", [...]}`."
+  @spec list_replays(t()) :: {:ok, term()} | {:error, Exception.t()}
+  def list_replays(%__MODULE__{} = client), do: json(client, :get, "/v1/replays")
+
+  @doc """
+  Change a replay job: `PATCH /v1/replays/:id`.
+
+  `patch` may set `state` (`"running"`/`"paused"`/`"cancelled"`), `rate`, and
+  `max_lag_ms`. A job that already finished (`done`/`cancelled`/`failed`) is a
+  `replay_finished` rejection.
+  """
+  @spec update_replay(t(), String.t(), term()) :: {:ok, term()} | {:error, Exception.t()}
+  def update_replay(%__MODULE__{} = client, id, patch),
+    do: json(client, :patch, "/v1/replays/#{id}", json: patch)
 
   @doc """
   Recent quarantined hooks, newest first: `GET /v1/quarantine`.

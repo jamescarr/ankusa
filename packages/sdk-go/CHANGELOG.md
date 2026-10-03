@@ -7,6 +7,25 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `DecodeMessage` and the `Message` type: decode a v1 queue message with the
+  body-integrity checks (`size_mismatch`, `integrity`, `tenant_mismatch`) and
+  the `dedupe_key`/`replay_id`/`headers` fields, raising `InvalidMessageError`
+  (`Code`, `Field`, `Retryable() == false`) on any malformed input.
+- `Message.IdempotencyKey(includeReplay)` and
+  `HookHeaders.IdempotencyKey(includeReplay)`: the source-scoped key a
+  consumer dedupes a delivery on.
+- `HookHeaders.DedupeKey` and `HookHeaders.ReplayID`, read from
+  `x-ankusa-dedupe-key` and `x-ankusa-replay-id` by `ParseHeaders`.
+- `AdminClient.CreateReplay`, `GetReplay`, `ListReplays`, and `UpdateReplay`,
+  with the `Replay`, `ReplayList`, `ReplaySpec`, and `ReplayPatch` types.
+
+### Removed
+
+- `AdminClient.ReplayDeadLetters`, `ReplayFilter`, and `Replayed`; replay is
+  now the replay-job API above.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

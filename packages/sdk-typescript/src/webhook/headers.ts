@@ -4,8 +4,11 @@
  * See "HTTP handoff" in docs/integrations.md for the full contract this
  * mirrors: the raw body arrives verbatim, and identity travels in
  * `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-tenant` (only when the source
- * has a tenant), and `content-type`. A receiver must dedupe on `x-ankusa-id`:
- * delivery is at-least-once, so the same hook can arrive twice after a retry.
+ * has a tenant), `content-type`, and — when the source has a dedupe rule or
+ * the delivery is a replay — `x-ankusa-dedupe-key` and
+ * `x-ankusa-replay-id`. A receiver dedupes on the key `idempotencyKey` derives
+ * (`x-ankusa-dedupe-key` when set, else `x-ankusa-id`): delivery is
+ * at-least-once, so the same hook can arrive twice after a retry.
  */
 
 /** The identity of one HTTP-sink delivery. */
@@ -15,6 +18,10 @@ export type HookHeaders = {
   /** Only present when the source has a tenant. */
   tenant: string | null;
   contentType: string | null;
+  /** The provider event key; `null` when absent or empty. */
+  dedupeKey: string | null;
+  /** The replay job id; `null` when absent or empty. */
+  replayId: string | null;
 };
 
 /**
@@ -60,5 +67,9 @@ export function parseHeaders(headers: HeaderSource): HookHeaders {
     source: lowered.get("x-ankusa-source") ?? "",
     tenant: lowered.get("x-ankusa-tenant") ?? null,
     contentType: lowered.get("content-type") ?? null,
+    // An empty value is the same as absent: a receiver must not build an
+    // `"source:"` key around nothing.
+    dedupeKey: lowered.get("x-ankusa-dedupe-key") || null,
+    replayId: lowered.get("x-ankusa-replay-id") || null,
   };
 }

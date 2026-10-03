@@ -4,9 +4,24 @@ module Ankusa
   # The identity of one HTTP-sink delivery: the headers Ankusa's HTTP sink
   # attaches to every delivery.
   #
-  # `content_type` and `tenant` are nil when the delivery had no such header
-  # (a tenant only travels when the source has one).
-  HookHeaders = Data.define(:id, :source, :tenant, :content_type)
+  # `content_type`, `tenant`, `dedupe_key` and `replay_id` are nil when the
+  # delivery had no such header (a tenant only travels when the source has one;
+  # `dedupe_key` only when the source declared a dedupe key; `replay_id` only
+  # when the delivery is a replay).
+  HookHeaders = Data.define(:id, :source, :tenant, :content_type, :dedupe_key, :replay_id) do
+    # The idempotency key for this delivery: `source:dedupe_key` when a non-empty
+    # `dedupe_key` is set, else `id`.
+    #
+    # A replay keeps the original `id` and `dedupe_key` and adds `replay_id`, so
+    # by default a replay produces the same key as the delivery it replays and a
+    # receiver that already processed it drops it. Pass `include_replay: true`
+    # to reprocess replays instead.
+    def idempotency_key(include_replay: false)
+      key = (dedupe_key.nil? || dedupe_key.empty?) ? id : "#{source}:#{dedupe_key}"
+      key += "#replay:#{replay_id}" if include_replay && !replay_id.nil?
+      key
+    end
+  end
 
   # Raised by `Ankusa.parse_headers` when `x-ankusa-id` is absent or empty.
   #
@@ -32,7 +47,16 @@ module Ankusa
       id: hook_id,
       source: lowered.fetch("x-ankusa-source", ""),
       tenant: lowered["x-ankusa-tenant"],
-      content_type: lowered["content-type"]
+      content_type: lowered["content-type"],
+      dedupe_key: presence(lowered["x-ankusa-dedupe-key"]),
+      replay_id: presence(lowered["x-ankusa-replay-id"])
     )
   end
+
+  # An empty header counts as absent: Ankusa only sends these when it has a
+  # value, and a proxy that rewrites a header to "" should not fabricate one.
+  def self.presence(value)
+    (value.nil? || value.empty?) ? nil : value
+  end
+  private_class_method :presence
 end

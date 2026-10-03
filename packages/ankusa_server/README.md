@@ -178,8 +178,9 @@ Operating Ankusa without a shell:
 curl localhost:4002/v1/config                 # the effective config, secrets redacted
 curl localhost:4002/v1/wal                    # this node's store stats (409 under wal.type: none)
 curl 'localhost:4002/v1/dlq?limit=10'         # dead-lettered hooks (metadata only)
-curl -XPOST localhost:4002/v1/dlq/replay -d '{"id":"<id from GET /v1/dlq>"}'
-curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"stripe"}'
+curl -XPOST localhost:4002/v1/replays -d '{"kind":"dlq","id":"<id from GET /v1/dlq>","rate":100}'
+curl localhost:4002/v1/replays                # every replay job, newest first
+curl -XPATCH localhost:4002/v1/replays/<job-id> -d '{"state":"cancelled"}'
 curl localhost:4002/v1/quarantine             # hooks held after a failed verification
 curl localhost:4002/metrics                   # Prometheus
 ```

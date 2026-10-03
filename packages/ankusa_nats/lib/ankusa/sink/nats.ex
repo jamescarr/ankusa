@@ -30,17 +30,21 @@ defmodule Ankusa.Sink.NATS do
   permissions).
 
   A publish whose ack is lost can still have been stored, so delivery is
-  at-least-once; consumers dedupe on `id` (or on JetStream's own
-  `Nats-Msg-Id` duplicate window, if they set one themselves — this sink does
-  not, because a hook replayed from the DLQ is a *new* deliberate publish).
+  at-least-once. Every publish sets `Nats-Msg-Id` to the hook's `id` — or
+  `id:replay:<replay_id>` for a replay — so JetStream's duplicate window
+  collapses a lost-ack retry of one delivery, while a deliberate replay of the
+  same hook carries a distinct id and is always stored. Consumers dedupe on
+  `id` (or on the `dedupe_key` the message carries).
 
   ## What each message carries
 
     * **subject** — `:subject` (a static string, or a 1-arity fun over the
       `Ankusa.Envelope`).
-    * **headers** — `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
-      `ankusa_message_version`, `content_type`. The same five
-      `Ankusa.Sink.Kafka` sets, so a consumer parses one set regardless of
+    * **headers** — `Nats-Msg-Id` (`id`, or `id:replay:<replay_id>` on a
+      replay), then `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
+      `ankusa_message_version`, `content_type` — the same set
+      `Ankusa.Sink.Kafka` sets, plus `ankusa_dedupe_key` and `ankusa_replay_id`
+      when the hook carries them — so a consumer parses one set regardless of
       transport.
     * **body** — the `Ankusa.Sink.Message` JSON.
 
@@ -114,7 +118,7 @@ defmodule Ankusa.Sink.NATS do
 
     with :ok <- ensure_connection(conn, opts),
          {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
-      publish(conn, subject, payload, headers(env), timeout)
+      publish(conn, subject, payload, headers(env, ctx), timeout)
     end
   end
 
@@ -203,15 +207,27 @@ defmodule Ankusa.Sink.NATS do
     end
   end
 
-  defp headers(env) do
+  defp headers(env, ctx) do
+    msg_id =
+      case ctx[:replay_id] do
+        r when is_binary(r) -> env.id <> ":replay:" <> r
+        _ -> env.id
+      end
+
     [
+      {"Nats-Msg-Id", msg_id},
       {"ankusa_id", env.id},
       {"ankusa_source_id", env.source_id},
       {"ankusa_tenant_id", env.tenant_id || ""},
       {"ankusa_message_version", "1"},
       {"content_type", "application/json"}
     ]
+    |> maybe_header("ankusa_dedupe_key", env.dedupe_key)
+    |> maybe_header("ankusa_replay_id", ctx[:replay_id])
   end
+
+  defp maybe_header(headers, _name, nil), do: headers
+  defp maybe_header(headers, name, value) when is_binary(value), do: headers ++ [{name, value}]
 
   defp subject(env, opts) do
     case Keyword.fetch!(opts, :subject) do

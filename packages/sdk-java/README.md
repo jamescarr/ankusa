@@ -3,8 +3,8 @@
 The Java client SDK for [Ankusa](https://github.com/jamescarr/ankusa)
 deployments: the claim-check gateway client, the route-management client
 (`routes.admin.port`), the operator (`admin.port`) client, the tenant-scoped
-sources client, and a helper for receiving Ankusa's HTTP sink deliveries. It
-implements exactly the surface in
+sources client, the queue-message decoder, and a helper for receiving Ankusa's
+HTTP sink deliveries. It implements exactly the surface in
 [`conformance/`](https://github.com/jamescarr/ankusa/tree/main/conformance),
 the language-neutral vectors every Ankusa SDK passes.
 
@@ -92,7 +92,7 @@ percent-encoded as one path segment.
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, and the quarantine list.
+the redacted config, the DLQ, replay jobs, and the quarantine list.
 
 ```java
 AdminClient admin = new AdminClient("http://localhost:4002");
@@ -100,9 +100,22 @@ AdminClient admin = new AdminClient("http://localhost:4002");
 AdminHealth health = admin.health();                    // status, instance, roles
 String metrics = admin.metrics();                       // Prometheus text
 DlqPage dlq = admin.listDeadLetters(ListDeadLettersParams.builder().limit(10).build());
-Replayed replayed = admin.replayDeadLetters(ReplayFilter.builder().sourceId("demo").build());
 QuarantinePage quarantine = admin.listQuarantined();
+
+// Replay dead letters, or redrive an archived time window, without flooding live traffic.
+Replay replay = admin.createReplay(ReplaySpec.builder().kind("dlq").sourceId("demo").rate(500).build());
+Replay state = admin.getReplay(replay.id());
+Replay paused = admin.updateReplay(replay.id(), ReplayPatch.builder().state("paused").build());
+ReplayList jobs = admin.listReplays();
 ```
+
+`createReplay` returns `202` with a new job, or `200` with an existing running
+or paused job whose filter matches, so a proxy retry is idempotent. A job moves
+rows only while dispatch has spare capacity, so it slows down rather than
+delaying live hooks; `updateReplay` pauses, resumes, cancels, or re-paces one.
+`getReplay` on a missing id is an `AdminRejectedError(404, "replay_not_found")`,
+and `updateReplay` on a finished job is an
+`AdminRejectedError(409, "replay_finished")`.
 
 `metrics()` is empty on a node that has not captured, dispatched, or redeemed
 anything yet: a Prometheus series only exists once its first event fires.
@@ -136,13 +149,74 @@ hook's identity, which Ankusa attaches as headers:
 ```java
 HookHeaders hook = HookHeaders.parse(request::getHeader); // e.g. HttpServletRequest
 // hook.id(), hook.source(), hook.tenant(), hook.contentType()
+// hook.dedupeKey(), hook.replayId()
+String key = hook.idempotencyKey(false); // same rule as the queue message
 ```
 
 `HookHeaders.parse` also takes a `Map<String, List<String>>` (header names
 matched case-insensitively). `x-ankusa-id` is required — a missing or empty
 one is `MissingHookIdError`; dedupe on it, since delivery is at-least-once.
-`source()` defaults to `""`; `tenant()` and `contentType()` are null when
-absent.
+`source()` defaults to `""`; `tenant()`, `contentType()`, `dedupeKey()` and
+`replayId()` are null when absent (a `dedupeKey` or `replayId` header that is
+present but empty is also null).
+
+## Consuming queue messages
+
+Ankusa publishes each delivery as a JSON v1 message over the configured sink.
+Decode it, verify the body, and dedupe before doing any work: delivery is
+at-least-once, and a provider retry or a replay must not re-run the effect.
+
+```java
+import io.github.jamescarr.ankusa.message.InvalidMessageError;
+import io.github.jamescarr.ankusa.message.Message;
+
+Message message = Message.decode(payload);            // throws InvalidMessageError
+
+byte[] body =
+    message.claim() != null
+        ? claimCheck.redeem(message.claim(), message.sha256()) // verified against sha256
+        : message.body();
+
+String key = message.idempotencyKey(false);           // drops replays of processed events
+```
+
+`Message.decode` validates in the contract's order and raises
+`InvalidMessageError` with a machine-readable `code()` (`invalid_json`,
+`not_an_object`, `unsupported_version`, `invalid_field`, `ambiguous_body`,
+`missing_body`, `invalid_body_base64`, `size_mismatch`, `integrity`,
+`tenant_mismatch`, …) and, for a field failure, `field()`. It is never
+retryable: the same bytes always fail the same way, so dead-letter them.
+
+The idempotency key is `source_id:dedupe_key` when the source extracted a
+provider event key, so a provider's retry of one event collapses even across
+brokers; otherwise it is the delivery `id`, so a broker redelivery collapses.
+Pass `includeReplay` true only when a replay must be processed again.
+
+Record the key in a processed-ids table in the same transaction as the effect,
+and skip an insert that conflicts:
+
+```sql
+CREATE TABLE processed_webhooks (
+  idempotency_key text PRIMARY KEY,
+  processed_at    timestamptz NOT NULL DEFAULT now()
+);
+```
+
+```java
+try (PreparedStatement insert =
+    connection.prepareStatement(
+        "INSERT INTO processed_webhooks (idempotency_key) VALUES (?) ON CONFLICT DO NOTHING")) {
+  insert.setString(1, key);
+  if (insert.executeUpdate() == 0) {
+    return; // already processed
+  }
+}
+applyTheEffect(body);
+```
+
+The same rule is on HTTP sink deliveries as
+`HookHeaders.idempotencyKey(boolean)`, which reads `x-ankusa-dedupe-key` and
+`x-ankusa-replay-id`.
 
 ## Options
 
@@ -174,6 +248,7 @@ its own subtypes (`ClaimCheckError`, `RoutesError`, `AdminError`,
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
 | `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, an unfollowed `3xx`, or any other non-`200` |
 | `MissingHookIdError` | `false` | `x-ankusa-id` is absent or empty |
+| `InvalidMessageError` | `false` | a queue message is not a valid v1 message (`code()`, `field()`) |
 | `InvalidRouteIdError` | `false` | route id is null, empty, or exactly `.`/`..` |
 | `RouteNotFoundError` | `false` | routes listener `404` |
 | `RoutesRejectedError` | `false` | routes listener `4xx` other than `404` (`status()`, `code()`, `field()`, `detail()`, `conflictingId()`, `maxRoutes()`) |

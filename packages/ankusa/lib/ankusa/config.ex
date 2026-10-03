@@ -21,6 +21,9 @@ defmodule Ankusa.Config do
             # :dispatch and :storage from :roles (there is nothing for them to
             # read) and requires :edge to remain.
             wal: :disk,
+            # direct mode only: the overall deadline every sink must confirm
+            # under. Must stay under the provider's own timeout (GitHub's is 10 s).
+            direct_publish_timeout_ms: 8_000,
             # group-commit batcher. The queue writer serializes commits itself,
             # so more partitions only add contention now that a partition commits
             # asynchronously instead of holding the caller's message queue.

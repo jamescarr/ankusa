@@ -13,6 +13,53 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Ingest dedupe.** `Ankusa.Dedupe` extracts a provider event key (a delivery
+  header such as GitHub's `x-github-delivery`, or a JSON field such as
+  Stripe's `"id"`) from every accepted hook, configured per source as
+  `dedupe: :github | :standard_webhooks | :svix | :shopify | :stripe` or
+  `dedupe: %{header: …}` / `dedupe: %{json: …}` with an optional `ttl_ms`
+  (default 72 h). Keys are scoped to tenant and source. The queue writer
+  collapses envelopes that share a key
+  atomically in the commit batch: the retry is answered `201` with the
+  original hook's id and `"duplicate": true`, nothing extra is stored. Expired
+  keys are swept inside the writer. A forged, flag-accepted request never
+  claims a key.
+- **Replay jobs.** `POST /v1/replays` creates a durable, paced replay job:
+  `kind: :dlq` re-sends dead delivery rows, `kind: :archive` re-sends archived
+  hooks over a `received_at` window. Jobs drip rows into the existing due
+  index at `rate` items per second, and only while dispatch's oldest-due lag
+  is at most `max_lag_ms` and its in-flight window is not full — a replay uses
+  only spare capacity and inherits retries, the DLQ, claim check and
+  at-least-once bookkeeping. Every job is a store record whose cursor commits
+  in the same batch as the rows it moves, so a restart resumes it; a job that
+  keeps dead-lettering its deliveries pauses itself. `GET /v1/replays`,
+  `GET|PATCH /v1/replays/{id}` manage them (`POST /v1/dlq/replay` is removed).
+  `Ankusa.Replay.start/2`, `list/1`, `get/2` and `update/3` expose the same
+  surface to embedders; replayed deliveries keep the hook's original `id` and
+  `dedupe_key` and carry the job id as `replay_id` (also
+  `x-ankusa-replay-id`, the `ankusa_replay_id` broker header, and NATS
+  `Nats-Msg-Id` as `id:replay:<replay_id>`). A dead row whose delivery record
+  cannot be decoded is passed over, not dropped or retried: it stays in the
+  DLQ and `GET /v1/dlq` lists it with the reason `undecodable delivery row`.
+- **Message identity and integrity.** Every queue message now carries
+  `sha256` (also on inline bodies), `dedupe_key`, `replay_id`, and the
+  forwarded provider request `headers` (per the source's `forward_headers`
+  option, `:default` forwards everything except auth/framing/hop-by-hop and
+  `x-ankusa-*` headers). `Sink.Http` forwards them as request headers, with
+  `x-ankusa-dedupe-key`/`x-ankusa-replay-id`; RabbitMQ carries the hook id as
+  AMQP `message_id` plus the dedupe/replay AMQP headers; Kafka and NATS carry
+  them as record headers. All 8 SDKs decode the message, verify its integrity,
+  and compute the idempotency key (`source:dedupe_key` when set, else `id`,
+  plus `#replay:<replay_id>` when asked); the conformance suite covers it.
+- **Direct-mode deadline.** With `wal.type: none`, `Ankusa.Edge.Publish`
+  publishes to every sink concurrently under one overall deadline
+  (`direct_publish_timeout_ms`, default 8 000, configurable as
+  `wal.publish_timeout_ms` in `ankusa.yml`); a sink that misses it is a 503.
+- `Ankusa.Dispatch.Pipeline.pressure/1` reports the oldest-due lag and window
+  state for replay pacing.
+- `Ankusa.UUIDv7.min_for/1` and `max_for/1` bound a millisecond's id range.
+- `Ankusa.Queue.redrive/3` commits archived hooks back into the queue in one
+  synced batch with the replay job's cursor.
 - **Failure domains.** `Ankusa.Instance` is now `:rest_for_one`, and dispatch,
   storage (compactor and claim-check sweeper), lifecycle, metrics and the
   admin, route-admin and claim-check listeners each run under
@@ -34,6 +81,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- Delivery rows may carry `replay: replay_id`, the job a replayed delivery is
+  attributed to.
+- `GET /v1/dlq` is unchanged; `POST /v1/dlq/replay` is replaced by the replay
+  jobs API above.
 - `Ankusa.Queue.enqueue/3` takes an optional `deadline` (a
   `System.monotonic_time(:millisecond)` value) and waits for the commit's
   outcome instead of timing out after 5 s. The writer refuses, without
@@ -46,6 +97,11 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - `Ankusa.Sink.safe_deliver/4` returns `{:error, {:bad_return, value}}` for
   any return value other than `:ok` or `{:error, _}`. Dispatch, lifecycle
   events and the `wal: :none` ack path all deliver through it.
+
+### Removed
+
+- `Ankusa.Dispatch` (`Ankusa.Dispatch.replay/2`) — replaced by
+  `Ankusa.Replay.start/2`.
 
 ### Fixed
 

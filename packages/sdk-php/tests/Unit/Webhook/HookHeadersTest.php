@@ -119,10 +119,50 @@ final class HookHeadersTest extends TestCase
         self::assertSame('missing x-ankusa-id header', $err->getMessage());
     }
 
+    public function testDedupeAndReplayHeadersAreParsed(): void
+    {
+        $headers = HookHeaders::fromHeaders([
+            'X-Ankusa-Id' => '01a0',
+            'x-ankusa-source' => 'stripe',
+            'X-Ankusa-Dedupe-Key' => 'evt_9',
+            'X-Ankusa-Replay-Id' => 'rid-1',
+        ]);
+
+        self::assertSame('evt_9', $headers->dedupeKey);
+        self::assertSame('rid-1', $headers->replayId);
+    }
+
+    public function testEmptyDedupeAndReplayHeadersAreNull(): void
+    {
+        $headers = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'x-ankusa-dedupe-key' => '',
+            'x-ankusa-replay-id' => '',
+        ]);
+
+        self::assertNull($headers->dedupeKey);
+        self::assertNull($headers->replayId);
+    }
+
+    public function testIdempotencyKeyPrefersTheDedupeKeyAndCanIncludeTheReplay(): void
+    {
+        $plain = HookHeaders::fromHeaders(['x-ankusa-id' => '01a0', 'x-ankusa-source' => 'stripe']);
+        self::assertSame('01a0', $plain->idempotencyKey());
+
+        $deduped = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'x-ankusa-source' => 'stripe',
+            'x-ankusa-dedupe-key' => 'evt_1',
+            'x-ankusa-replay-id' => 'rid-1',
+        ]);
+        self::assertSame('stripe:evt_1', $deduped->idempotencyKey());
+        self::assertSame('stripe:evt_1#replay:rid-1', $deduped->idempotencyKey(true));
+    }
+
     /* --- helpers ------------------------------------------------------------ */
 
     /**
-     * @return array{id: string, source: string, tenant: ?string, contentType: ?string}
+     * @return array{id: string, source: string, tenant: ?string, contentType: ?string, dedupeKey: ?string, replayId: ?string}
      */
     private static function flatten(HookHeaders $headers): array
     {
@@ -131,6 +171,8 @@ final class HookHeadersTest extends TestCase
             'source' => $headers->source,
             'tenant' => $headers->tenant,
             'contentType' => $headers->contentType,
+            'dedupeKey' => $headers->dedupeKey,
+            'replayId' => $headers->replayId,
         ];
     }
 

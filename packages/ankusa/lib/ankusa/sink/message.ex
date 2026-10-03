@@ -8,14 +8,18 @@ defmodule Ankusa.Sink.Message do
   base64-encoded. Anything larger lives in the claim check and the message
   carries its `Ankusa.ClaimCheck.Ref` as one string instead, plus the
   lowercase hex sha256 the reader checks the redeemed bytes against (see
-  `docs/claim-check.md`):
+  `docs/claim-check.md`). Every message carries `sha256`, `dedupe_key`,
+  `replay_id` and the forwarded provider `headers`:
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
-       "body_base64": "eyJpZCI6..."}
+       "dedupe_key": "evt_1", "replay_id": null,
+       "headers": {"x-github-event": "push"},
+       "sha256": "2cf24dba...", "body_base64": "eyJpZCI6..."}
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 3145728,
+       "dedupe_key": "evt_1", "replay_id": null, "headers": {},
        "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
        "sha256": "3bea8a9a07c1e8dc..."}
 
@@ -34,6 +38,11 @@ defmodule Ankusa.Sink.Message do
   alias Ankusa.ClaimCheck.Ref
 
   @default_inline_max_bytes 65_536
+
+  # Never leaves the node: request headers that only mean something to the
+  # edge (auth, framing, hop-by-hop) are stripped before forwarding, plus
+  # every `x-ankusa-*` header the sink itself owns.
+  @never_forwarded ~w(authorization proxy-authorization cookie x-api-key host content-length content-type connection keep-alive transfer-encoding te trailer upgrade expect)
 
   @doc "The default `inline_max_bytes` for every queue-style sink: 64 KiB."
   @spec default_inline_max_bytes() :: pos_integer()
@@ -61,11 +70,20 @@ defmodule Ankusa.Sink.Message do
       tenant_id: env.tenant_id,
       received_at: env.received_at,
       content_type: env.content_type,
-      size: env.size
+      size: env.size,
+      dedupe_key: env.dedupe_key,
+      replay_id: Map.get(ctx, :replay_id),
+      headers: forwarded_headers(env, Map.get(ctx, :forward_headers, :default))
     }
 
     if env.size <= inline_max_bytes do
-      {:ok, JSON.encode!(Map.put(base, :body_base64, Base.encode64(env.body)))}
+      {:ok,
+       JSON.encode!(
+         Map.merge(base, %{
+           body_base64: Base.encode64(env.body),
+           sha256: Base.encode16(:crypto.hash(:sha256, env.body), case: :lower)
+         })
+       )}
     else
       case claim(ctx, env) do
         {:ok, %{ref: ref, sha256: sha256}} ->
@@ -75,6 +93,41 @@ defmodule Ankusa.Sink.Message do
           {:error, {:claim_check, reason}}
       end
     end
+  end
+
+  @doc """
+  The provider request headers a sink may see, per the source's
+  `forward_headers` option.
+
+  * `:default` forwards every header except the never-forwarded set.
+  * A list of names forwards only those, still minus the never-forwarded set.
+  * `[]` forwards nothing.
+
+  Names are lowercased; repeated names are joined with `", "` in arrival
+  order. Never forwarded: `#{Enum.join(@never_forwarded, "` `")}`, plus any
+  `x-ankusa-*` header.
+  """
+  @spec forwarded_headers(Envelope.t(), :default | [String.t()]) :: %{String.t() => String.t()}
+  def forwarded_headers(env, mode \\ :default)
+
+  def forwarded_headers(%Envelope{} = env, :default), do: forward(env, nil)
+
+  def forwarded_headers(%Envelope{} = env, names) when is_list(names) do
+    allowed = MapSet.new(Enum.map(names, &String.downcase/1))
+    forward(env, allowed)
+  end
+
+  defp forward(%Envelope{headers: headers}, allowed) do
+    Enum.reduce(headers, %{}, fn {name, value}, acc ->
+      name = String.downcase(name)
+
+      cond do
+        String.starts_with?(name, "x-ankusa-") -> acc
+        name in @never_forwarded -> acc
+        allowed != nil and not MapSet.member?(allowed, name) -> acc
+        true -> Map.update(acc, name, value, &(&1 <> ", " <> value))
+      end
+    end)
   end
 
   @doc """

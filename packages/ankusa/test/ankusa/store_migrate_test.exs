@@ -134,9 +134,9 @@ defmodule Ankusa.StoreMigrateTest do
       assert entry.reason == inspect({:sink, SomeSink, :boom})
       assert entry.at == 1_700_000_000_000
 
-      assert {:ok, 1} = Ankusa.Dispatch.replay(inst, %{})
+      assert {:ok, :created, _job} = Ankusa.Replay.start(inst, %{kind: :dlq})
       {:ok, _} = Pipeline.tick(inst)
-      assert_received {:delivered, id, 1}
+      assert_receive {:delivered, id, 1}, 5_000
       assert id == dead.id
       assert {:ok, %{total: 0}} = Queue.dead(inst, limit: 10)
     end
@@ -173,7 +173,7 @@ defmodule Ankusa.StoreMigrateTest do
       assert entry.reason == inspect({:sink, SomeSink, 1_001})
       assert entry.at == 1_700_000_001_001
 
-      assert {:ok, 1} = Ankusa.Dispatch.replay(inst, %{})
+      assert {:ok, :created, _job} = Ankusa.Replay.start(inst, %{kind: :dlq})
     end
   end
 

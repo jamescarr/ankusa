@@ -19,6 +19,7 @@ defmodule Ankusa.Edge.Ingest do
 
   @type result ::
           {:ok, Envelope.t()}
+          | {:duplicate, Envelope.t()}
           | {:quarantined, term()}
           | {:rejected, term()}
           | {:error,
@@ -77,6 +78,15 @@ defmodule Ankusa.Edge.Ingest do
   # own budget. Quarantine has its own global bucket and never spends a
   # tenant's.
   defp admit(instance, source, env) do
+    # A forged, flag-accepted request must not claim a provider event key and
+    # suppress the real event, so no key is extracted when the hook was flagged.
+    env =
+      if match?(%Verification{flagged: true}, env.verification) do
+        env
+      else
+        %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
+      end
+
     case RateLimiter.hit(instance, env.tenant_id) do
       :ok ->
         commit(instance, source, env)
@@ -146,9 +156,16 @@ defmodule Ankusa.Edge.Ingest do
   defp buffered_commit(instance, source, env) do
     partition = BatcherSupervisor.partition(instance, env.id)
 
+    record = %{
+      envelope: env,
+      sinks: source.sinks,
+      dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
+    }
+
     try do
-      case Batcher.commit(instance, partition, %{envelope: env, sinks: source.sinks}) do
+      case Batcher.commit(instance, partition, record) do
         {:committed, committed} -> {:ok, committed}
+        {:duplicate, duplicate} -> {:duplicate, duplicate}
         {:error, :overload} -> {:error, :overload}
         {:error, :store_unavailable} -> {:error, :store_unavailable}
       end
@@ -190,6 +207,7 @@ defmodule Ankusa.Edge.Ingest do
   end
 
   defp tag({:ok, _}), do: :committed
+  defp tag({:duplicate, _}), do: :duplicate
   defp tag({:quarantined, _}), do: :quarantined
   defp tag({:rejected, _}), do: :rejected
   defp tag({:error, {:rate_limited, _retry_after_ms}}), do: :rate_limited

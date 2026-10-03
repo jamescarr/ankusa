@@ -1,7 +1,7 @@
 [project]
 name = "ankusa"
 version = "0.3.0"
-description = "Client SDK for Ankusa deployments. Bundles the claim-check gateway client, the route-management and operator (admin) clients, the source-management client, and a webhook-receiving header helper; more clients (ingest) land here as they're built."
+description = "Client SDK for Ankusa deployments. Bundles the claim-check gateway client, the route-management and operator (admin) clients, the source-management client, a webhook-receiving header helper, and the queue-message decoder with its idempotency-key helper; more clients (ingest) land here as they're built."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"

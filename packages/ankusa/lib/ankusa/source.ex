@@ -18,7 +18,11 @@ defmodule Ankusa.Source do
     # what to do when verification fails: :reject | :quarantine | :accept_flag
     on_verify_failure: :reject,
     # [{module, opts}] implementing Ankusa.Sink
-    sinks: [{Ankusa.Sink.Log, []}]
+    sinks: [{Ankusa.Sink.Log, []}],
+    # %Ankusa.Dedupe{} or nil; the provider event key collapsed at ingest
+    dedupe: nil,
+    # :default | [header names]; provider request headers forwarded to sinks
+    forward_headers: :default
   ]
 
   @type policy :: :reject | :quarantine | :accept_flag
@@ -27,7 +31,9 @@ defmodule Ankusa.Source do
           tenant_id: String.t(),
           verifier: {module(), keyword()},
           on_verify_failure: policy(),
-          sinks: [{module(), keyword()}]
+          sinks: [{module(), keyword()}],
+          dedupe: Ankusa.Dedupe.t() | nil,
+          forward_headers: :default | [String.t()]
         }
 
   @doc """
@@ -50,7 +56,20 @@ defmodule Ankusa.Source do
       tenant_id: tenant_id,
       verifier: Map.get(opts, :verifier, {Ankusa.Verifier.None, []}),
       on_verify_failure: Map.get(opts, :on_verify_failure, :reject),
-      sinks: Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}])
+      sinks: Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}]),
+      dedupe: Ankusa.Dedupe.new!(Map.get(opts, :dedupe)),
+      forward_headers: forward_headers(id, Map.get(opts, :forward_headers, :default))
     }
+  end
+
+  defp forward_headers(_id, :default), do: :default
+
+  defp forward_headers(id, headers) do
+    if is_list(headers) and Enum.all?(headers, &(is_binary(&1) and &1 != "")) do
+      Enum.map(headers, &String.downcase/1)
+    else
+      raise ArgumentError,
+            "source #{inspect(id)}: forward_headers must be :default or a list of header names"
+    end
   end
 end

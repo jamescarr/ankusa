@@ -40,6 +40,20 @@ defmodule Ankusa.Store.Keys do
   def cleared(seq, kind, sink), do: <<?c, seq::64, kind::8, sink::16>>
   def claim(seq), do: <<?k, seq::64>>
 
+  # Ingest dedupe: `?u` maps a provider event key to
+  # `<<expires_at::64, original_id::binary>>`, and `?e` is its expiry-sweep
+  # index. Both live in the index CF so the writer's batch is atomic. Keys
+  # are scoped by tenant as well as source: `TenantPath` routing serves one
+  # source to many tenants, and two tenants must never collapse each other's
+  # events.
+  def dedupe(tenant_id, source_id, key),
+    do: <<?u, tenant_id::binary, 0, byte_size(source_id)::16, source_id::binary, key::binary>>
+
+  def dedupe_expiry(at, tenant_id, source_id, key),
+    do:
+      <<?e, at::64, tenant_id::binary, 0, byte_size(source_id)::16, source_id::binary,
+        key::binary>>
+
   # ── archive ───────────────────────────────────────────────────────────────
 
   def segment(first_seq), do: <<?S, first_seq::64>>
@@ -53,6 +67,9 @@ defmodule Ankusa.Store.Keys do
   def quarantine_body(received_at, id) when is_binary(id),
     do: <<?b, received_at::64, id::binary>>
 
+  # Replay jobs (`Ankusa.Dispatch.Replayer`); `id` is a UUIDv7 string.
+  def replay_job(id) when is_binary(id), do: "j:" <> id
+
   # ── decoders ──────────────────────────────────────────────────────────────
 
   def decode_due(<<?d, at::64, seq::64, sink::16>>), do: {at, seq, sink}
@@ -60,6 +77,16 @@ defmodule Ankusa.Store.Keys do
   def decode_dead(<<?x, at::64, seq::64, sink::16>>), do: {at, seq, sink}
   def decode_cleared(<<?c, seq::64, kind::8, sink::16>>), do: {seq, kind, sink}
   def decode_delivery(<<seq::64, sink::16>>), do: {seq, sink}
+
+  def decode_dedupe_expiry(<<?e, at::64, rest::binary>>) do
+    case :binary.split(rest, <<0>>) do
+      [tenant_id, <<n::16, source_id::binary-size(n), key::binary>>] ->
+        {at, tenant_id, source_id, key}
+
+      _ ->
+        :error
+    end
+  end
 
   def decode_source(<<"s:", rest::binary>>) do
     case :binary.split(rest, <<0>>) do
@@ -88,10 +115,12 @@ defmodule Ankusa.Store.Keys do
     dead: %{cf: :index, lo: <<?x>>, hi: <<?x, @ff18::binary>>},
     archive_pending: %{cf: :index, lo: <<?a>>, hi: <<?a, @ff8::binary>>},
     cleared: %{cf: :index, lo: <<?c>>, hi: <<?c, @ff11::binary>>},
+    dedupe_expiry: %{cf: :index, lo: <<?e>>, hi: <<?e, @ff8::binary, 0xFF>>},
     segments: %{cf: :archive, lo: <<?S>>, hi: <<?S, @ff8::binary>>},
     quarantine: %{cf: :quarantine, lo: <<?s>>, hi: <<?s, @ff8::binary>>},
     sources: %{cf: :default, lo: "s:", hi: <<"s:", 0xFF>>},
-    rate_limits: %{cf: :default, lo: "r:", hi: <<"r:", 0xFF>>}
+    rate_limits: %{cf: :default, lo: "r:", hi: <<"r:", 0xFF>>},
+    replays: %{cf: :default, lo: "j:", hi: <<"j:", 0xFF>>}
   }
 
   @doc "The column family, low and high sentinel of a scanned key family."

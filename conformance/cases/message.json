@@ -1,0 +1,343 @@
+{
+  "cases": [
+    {
+      "id": "message.decode.inline_full",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"headers\":{\"x-github-event\":\"push\"},\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01a0",
+          "source_id": "demo",
+          "tenant_id": "acme",
+          "received_at": 1720000000000,
+          "content_type": "application/json",
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "dedupe_key": "evt_1",
+          "replay_id": null,
+          "headers": {"x-github-event": "push"}
+        }
+      }
+    },
+    {
+      "id": "message.decode.claim",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":3145728,\"dedupe_key\":null,\"replay_id\":null,\"headers\":{},\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\",\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01a0",
+          "source_id": "demo",
+          "tenant_id": "acme",
+          "received_at": 1720000000000,
+          "content_type": "application/json",
+          "size": 3145728,
+          "body_base64": null,
+          "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+          "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "dedupe_key": null,
+          "replay_id": null,
+          "headers": {}
+        }
+      }
+    },
+    {
+      "id": "message.decode.legacy_inline_minimal",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01a0",
+          "source_id": "demo",
+          "tenant_id": null,
+          "received_at": 1720000000000,
+          "content_type": null,
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "headers": {}
+        }
+      }
+    },
+    {
+      "id": "message.decode.unknown_keys_ignored",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"future_field\":{\"nested\":true},\"another\":42}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01a0",
+          "source_id": "demo",
+          "tenant_id": null,
+          "received_at": 1720000000000,
+          "content_type": null,
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "headers": {}
+        }
+      }
+    },
+    {
+      "id": "message.decode.replay",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"replay_id\":\"0194f4a0-0000-7000-8000-0000000000aa\",\"dedupe_key\":\"evt_1\"}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01a0",
+          "source_id": "demo",
+          "tenant_id": null,
+          "received_at": 1720000000000,
+          "content_type": null,
+          "size": 5,
+          "body_base64": "aGVsbG8=",
+          "claim": null,
+          "sha256": null,
+          "dedupe_key": "evt_1",
+          "replay_id": "0194f4a0-0000-7000-8000-0000000000aa",
+          "headers": {}
+        }
+      }
+    },
+    {
+      "id": "message.reject.invalid_json",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {"message": "not json"},
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_json", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.not_an_object",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {"message": "[1,2,3]"},
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "not_an_object", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.unsupported_version",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":2,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "unsupported_version", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.missing_version",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "unsupported_version", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.missing_id",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "id"}
+      }
+    },
+    {
+      "id": "message.reject.bad_headers",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"headers\":{\"x-n\":42}}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "headers"}
+      }
+    },
+    {
+      "id": "message.reject.ambiguous_body",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\",\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "ambiguous_body", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.missing_body",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "missing_body", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.invalid_body_base64",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"!not_base64!\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_body_base64", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.claim_without_sha256",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"size\":5,\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "sha256"}
+      }
+    },
+    {
+      "id": "message.reject.size_mismatch",
+      "feature": "message.integrity",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":6,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "size_mismatch", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.digest_mismatch",
+      "feature": "message.integrity",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"sha256\":\"d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "integrity", "field": null}
+      }
+    },
+    {
+      "id": "message.reject.tenant_mismatch",
+      "feature": "message.integrity",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"other\",\"received_at\":1720000000000,\"size\":5,\"claim\":\"urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002\",\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "tenant_mismatch", "field": null}
+      }
+    },
+    {
+      "id": "idempotency.id_only",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {"ok": {"key": "01a0"}}
+    },
+    {
+      "id": "idempotency.dedupe_key",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\"}"
+      },
+      "expect": {"ok": {"key": "stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.replay_ignored_by_default",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":\"rid-1\"}"
+      },
+      "expect": {"ok": {"key": "stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.replay_included",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":\"rid-1\"}",
+        "include_replay": true
+      },
+      "expect": {"ok": {"key": "stripe:evt_1#replay:rid-1"}}
+    },
+    {
+      "id": "idempotency.replay_included_id_only",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"replay_id\":\"rid-1\"}",
+        "include_replay": true
+      },
+      "expect": {"ok": {"key": "01a0#replay:rid-1"}}
+    },
+    {
+      "id": "idempotency.from_headers",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "stripe",
+          "x-ankusa-dedupe-key": "evt_1"
+        }
+      },
+      "expect": {"ok": {"key": "stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.from_headers_replay",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "stripe",
+          "x-ankusa-dedupe-key": "evt_1",
+          "x-ankusa-replay-id": "rid-1"
+        },
+        "include_replay": true
+      },
+      "expect": {"ok": {"key": "stripe:evt_1#replay:rid-1"}}
+    }
+  ]
+}

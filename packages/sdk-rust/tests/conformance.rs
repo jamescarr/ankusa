@@ -1,5 +1,5 @@
 //! Runs the language-neutral vectors in `conformance/cases/*.json` against
-//! this crate's public API — the same 94 cases the TypeScript and Python SDKs
+//! this crate's public API — the same 124 cases the TypeScript and Python SDKs
 //! pass. `mise run check:conformance` runs it for every SDK; by hand:
 //! `cargo test --locked --test conformance`.
 //!
@@ -23,9 +23,10 @@ use ankusa::bytes::Bytes;
 use ankusa::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use ankusa::{
     AdminClient, AdminError, ClaimCheckClient, ClaimCheckError, ClientBuilder, DryRunRequest,
-    InvalidClaimRefError, IpRules, ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams,
-    MissingHookIdError, ReplayFilter, RouteInput, RoutePatch, RoutesClient, RoutesError, Transport,
-    TransportError, parse_claim_ref, parse_headers,
+    InvalidClaimRefError, InvalidMessageError, IpRules, ListDeadLettersParams,
+    ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError, ReplayPatch, ReplaySpec,
+    RouteInput, RoutePatch, RoutesClient, RoutesError, Transport, TransportError, decode_message,
+    parse_claim_ref, parse_headers,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -257,7 +258,30 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "source": parsed.source,
                 "tenant": parsed.tenant,
                 "content_type": parsed.content_type,
+                "dedupe_key": parsed.dedupe_key,
+                "replay_id": parsed.replay_id,
             }))
+        }
+        "decode_message" => {
+            let message =
+                decode_message(input_str(case, "message").as_bytes()).map_err(OpError::Message)?;
+            Ok(message_json(&message))
+        }
+        "idempotency_key" => {
+            let include_replay = case
+                .input
+                .get("include_replay")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let key = match case.input.get("message").and_then(Value::as_str) {
+                Some(message) => decode_message(message.as_bytes())
+                    .map_err(OpError::Message)?
+                    .idempotency_key(include_replay),
+                None => parse_headers(&input_headers(case))
+                    .map_err(OpError::Hook)?
+                    .idempotency_key(include_replay),
+            };
+            Ok(json!({ "key": key }))
         }
         "redeem" => {
             let client = claim_check(builder);
@@ -368,12 +392,34 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                     .map_err(OpError::Admin)?,
             ))
         }
-        "admin_dlq_replay" => {
+        "admin_replay_create" => {
             let client = admin(builder);
-            let filter: ReplayFilter = input_or_default(case, "filter");
+            let spec: ReplaySpec = input_required(case, "spec");
+            Ok(to_value(
+                &client.create_replay(&spec).await.map_err(OpError::Admin)?,
+            ))
+        }
+        "admin_replay_get" => {
+            let client = admin(builder);
             Ok(to_value(
                 &client
-                    .replay_dead_letters(&filter)
+                    .get_replay(input_str(case, "id"))
+                    .await
+                    .map_err(OpError::Admin)?,
+            ))
+        }
+        "admin_replay_list" => {
+            let client = admin(builder);
+            Ok(to_value(
+                &client.list_replays().await.map_err(OpError::Admin)?,
+            ))
+        }
+        "admin_replay_update" => {
+            let client = admin(builder);
+            let patch: ReplayPatch = input_required(case, "patch");
+            Ok(to_value(
+                &client
+                    .update_replay(input_str(case, "id"), &patch)
                     .await
                     .map_err(OpError::Admin)?,
             ))
@@ -402,6 +448,7 @@ enum OpError {
         InvalidClaimRefError,
     ),
     Hook(MissingHookIdError),
+    Message(InvalidMessageError),
     Claim(ClaimCheckError),
     Routes(RoutesError),
     Admin(AdminError),
@@ -416,6 +463,11 @@ fn error_json(err: &OpError) -> Value {
         }
         OpError::Hook(_) => {
             map.insert("class".to_owned(), json!("MissingHookIdError"));
+        }
+        OpError::Message(err) => {
+            entry(&mut map, "InvalidMessageError", err.is_retryable());
+            map.insert("code".to_owned(), json!(err.code));
+            map.insert("field".to_owned(), json!(err.field));
         }
         // Every class reports the SDK's own `is_retryable()`: a literal would
         // hide a wrong implementation behind a passing vector.
@@ -633,6 +685,26 @@ fn input_headers(case: &Case) -> HeaderMap {
 
 fn to_value<T: serde::Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect("serializable")
+}
+
+/// The decoded message, with the inline body re-encoded as standard base64 so
+/// both sides compare bytes.
+fn message_json(message: &Message) -> Value {
+    json!({
+        "v": message.v,
+        "id": message.id,
+        "source_id": message.source_id,
+        "tenant_id": message.tenant_id,
+        "received_at": message.received_at,
+        "content_type": message.content_type,
+        "size": message.size,
+        "body_base64": message.body.as_ref().map(|body| BASE64.encode(body)),
+        "claim": message.claim,
+        "sha256": message.sha256,
+        "dedupe_key": message.dedupe_key,
+        "replay_id": message.replay_id,
+        "headers": message.headers,
+    })
 }
 
 fn json_or_null(bytes: &[u8]) -> Value {

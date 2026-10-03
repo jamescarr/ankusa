@@ -158,7 +158,10 @@ defmodule Mix.Tasks.Loadgen.Verify do
       %Postgrex.Result{rows: rows} =
         Postgrex.query!(
           conn,
-          "SELECT ankusa_id, body_sha256, deliveries FROM processed_webhooks WHERE ankusa_id = ANY($1)",
+          # A row counts only after its worker ran: `processed_at` is the
+          # effect-completion stamp, so a delivery still sitting in the
+          # queue is not "processed" yet.
+          "SELECT ankusa_id, body_sha256, deliveries FROM processed_webhooks WHERE ankusa_id = ANY($1) AND processed_at IS NOT NULL",
           [chunk]
         )
 
@@ -170,7 +173,11 @@ defmodule Mix.Tasks.Loadgen.Verify do
 
   defp total_processed_count(conn) do
     %Postgrex.Result{rows: [[count]]} =
-      Postgrex.query!(conn, "SELECT count(*) FROM processed_webhooks", [])
+      Postgrex.query!(
+        conn,
+        "SELECT count(*) FROM processed_webhooks WHERE processed_at IS NOT NULL",
+        []
+      )
 
     count
   end

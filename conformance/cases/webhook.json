@@ -17,7 +17,9 @@
           "id": "01a0",
           "source": "demo",
           "tenant": "acme",
-          "content_type": "application/json"
+          "content_type": "application/json",
+          "dedupe_key": null,
+          "replay_id": null
         }
       }
     },
@@ -37,7 +39,9 @@
           "id": "01a0",
           "source": "demo",
           "tenant": null,
-          "content_type": "text/plain"
+          "content_type": "text/plain",
+          "dedupe_key": null,
+          "replay_id": null
         }
       }
     },
@@ -55,7 +59,9 @@
           "id": "01a0",
           "source": "",
           "tenant": null,
-          "content_type": null
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null
         }
       }
     },
@@ -86,6 +92,29 @@
       "expect": {
         "error": {
           "class": "MissingHookIdError"
+        }
+      }
+    },
+    {
+      "id": "webhook.dedupe_and_replay",
+      "feature": "webhook.parse_headers",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-dedupe-key": "evt_9",
+          "x-ankusa-replay-id": "rid-1"
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "demo",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": "evt_9",
+          "replay_id": "rid-1"
         }
       }
     }

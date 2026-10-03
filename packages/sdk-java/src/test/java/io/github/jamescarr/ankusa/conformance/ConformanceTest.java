@@ -11,7 +11,8 @@ import io.github.jamescarr.ankusa.admin.AdminRejectedError;
 import io.github.jamescarr.ankusa.admin.AdminUnavailableError;
 import io.github.jamescarr.ankusa.admin.ListDeadLettersParams;
 import io.github.jamescarr.ankusa.admin.ListQuarantinedParams;
-import io.github.jamescarr.ankusa.admin.ReplayFilter;
+import io.github.jamescarr.ankusa.admin.ReplayPatch;
+import io.github.jamescarr.ankusa.admin.ReplaySpec;
 import io.github.jamescarr.ankusa.admin.RoleNotEnabledError;
 import io.github.jamescarr.ankusa.claimcheck.ClaimCheckClient;
 import io.github.jamescarr.ankusa.claimcheck.ClaimCheckUnavailableError;
@@ -20,6 +21,8 @@ import io.github.jamescarr.ankusa.claimcheck.ClaimNotFoundError;
 import io.github.jamescarr.ankusa.claimcheck.ClaimRejectedError;
 import io.github.jamescarr.ankusa.claimcheck.InvalidClaimRefError;
 import io.github.jamescarr.ankusa.claimcheck.ParsedClaimRef;
+import io.github.jamescarr.ankusa.message.InvalidMessageError;
+import io.github.jamescarr.ankusa.message.Message;
 import io.github.jamescarr.ankusa.routes.DryRunRequest;
 import io.github.jamescarr.ankusa.routes.InvalidRouteIdError;
 import io.github.jamescarr.ankusa.routes.IpRules;
@@ -86,6 +89,7 @@ public final class ConformanceTest {
           Map.entry("ClaimRejectedError", ClaimRejectedError.class),
           Map.entry("ClaimIntegrityError", ClaimIntegrityError.class),
           Map.entry("ClaimCheckUnavailableError", ClaimCheckUnavailableError.class),
+          Map.entry("InvalidMessageError", InvalidMessageError.class),
           Map.entry("MissingHookIdError", MissingHookIdError.class),
           Map.entry("InvalidRouteIdError", InvalidRouteIdError.class),
           Map.entry("RouteNotFoundError", RouteNotFoundError.class),
@@ -202,6 +206,8 @@ public final class ConformanceTest {
     return switch (vector.operation()) {
       case "parse_claim_ref" -> ParsedClaimRef.parse(text(vector, "ref"));
       case "parse_headers" -> HookHeaders.parse(headerMap(vector));
+      case "decode_message" -> Message.decode(text(vector, "message"));
+      case "idempotency_key" -> Map.of("key", idempotencyKey(vector));
       case "redeem" ->
           withClient(
               vector,
@@ -285,15 +291,25 @@ public final class ConformanceTest {
                     optional(vector, "params", ListDeadLettersParams.class);
                 return params == null ? admin.listDeadLetters() : admin.listDeadLetters(params);
               });
-      case "admin_dlq_replay" ->
+      case "admin_replay_create" ->
           withClient(
               vector,
               recorder,
               AdminClient::new,
-              admin -> {
-                ReplayFilter filter = optional(vector, "filter", ReplayFilter.class);
-                return filter == null ? admin.replayDeadLetters() : admin.replayDeadLetters(filter);
-              });
+              admin -> admin.createReplay(decode(vector, "spec", ReplaySpec.class)));
+      case "admin_replay_get" ->
+          withClient(
+              vector, recorder, AdminClient::new, admin -> admin.getReplay(text(vector, "id")));
+      case "admin_replay_list" ->
+          withClient(vector, recorder, AdminClient::new, AdminClient::listReplays);
+      case "admin_replay_update" ->
+          withClient(
+              vector,
+              recorder,
+              AdminClient::new,
+              admin ->
+                  admin.updateReplay(
+                      text(vector, "id"), decode(vector, "patch", ReplayPatch.class)));
       case "admin_quarantine" ->
           withClient(
               vector,
@@ -351,6 +367,24 @@ public final class ConformanceTest {
     Map<String, List<String>> headers = new LinkedHashMap<>();
     given.forEach((name, value) -> headers.put(name, List.of(value)));
     return headers;
+  }
+
+  /**
+   * Runs the {@code idempotency_key} operation: decode the message (or parse the headers), then
+   * compute the key with the vector's {@code include_replay}.
+   */
+  private static String idempotencyKey(CaseSpec vector) {
+    boolean includeReplay = booleanInput(vector, "include_replay");
+    if (vector.input().containsKey("headers")) {
+      return HookHeaders.parse(headerMap(vector)).idempotencyKey(includeReplay);
+    }
+    return Message.decode(text(vector, "message")).idempotencyKey(includeReplay);
+  }
+
+  /** An optional boolean input, false when absent. */
+  private static boolean booleanInput(CaseSpec vector, String field) {
+    JsonNode node = vector.input().get(field);
+    return node != null && node.asBoolean(false);
   }
 
   /**
@@ -447,6 +481,15 @@ public final class ConformanceTest {
           return rejected.status();
         case "code":
           return rejected.code();
+        default:
+          break;
+      }
+    } else if (error instanceof InvalidMessageError invalid) {
+      switch (key) {
+        case "code":
+          return invalid.code();
+        case "field":
+          return invalid.field();
         default:
           break;
       }

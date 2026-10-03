@@ -87,7 +87,7 @@ defmodule Ankusa.Admin.RouterTest do
       assert conn.status == 200, "#{path} returned #{conn.status}"
     end
 
-    assert call(config.instance, :post, "/v1/dlq/replay", "{}").status == 200
+    assert call(config.instance, :post, "/v1/replays", ~s({"kind":"dlq"})).status == 202
   end
 
   test "an unrouted path is 404", %{inst: inst} do
@@ -237,7 +237,47 @@ defmodule Ankusa.Admin.RouterTest do
     assert %{"error" => "invalid_filter", "field" => "limit"} = JSON.decode!(conn.resp_body)
   end
 
-  test "POST /v1/dlq/replay re-delivers the matching entry through its sink" do
+  # ── replay jobs ────────────────────────────────────────────────────────────
+
+  defp poll_job(inst, id, fun, deadline) do
+    {:ok, job} = Ankusa.Replay.get(inst, id)
+
+    if fun.(job) do
+      job
+    else
+      if System.monotonic_time(:millisecond) > deadline do
+        flunk("replay job #{id} never reached the expected state: #{inspect(job)}")
+      else
+        Process.sleep(50)
+        poll_job(inst, id, fun, deadline)
+      end
+    end
+  end
+
+  # The replayer loads its jobs from the store asynchronously at boot; a call
+  # before that is a (correct) `:store_unavailable`. Tests that hit the API
+  # right after boot wait for the load.
+  defp wait_loaded(inst) do
+    deadline = System.monotonic_time(:millisecond) + 3_000
+    wait_loaded(inst, deadline)
+  end
+
+  defp wait_loaded(inst, deadline) do
+    case Ankusa.Replay.list(inst) do
+      {:ok, _jobs} ->
+        :ok
+
+      {:error, :store_unavailable} ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("replayer never loaded")
+        else
+          Process.sleep(25)
+          wait_loaded(inst, deadline)
+        end
+    end
+  end
+
+  test "POST /v1/replays creates a dlq job that re-delivers the matching entry" do
     {:ok, agent} = Agent.start_link(fn -> false end)
     config = start_dlq_instance(%{"a" => [sinks: [{GatedSink, agent: agent, pid: self()}]]})
 
@@ -248,46 +288,219 @@ defmodule Ankusa.Admin.RouterTest do
     # The sink recovers only after both hooks are dead-lettered.
     Agent.update(agent, fn _ -> true end)
 
-    conn = call(config.instance, :post, "/v1/dlq/replay", JSON.encode!(%{"id" => target.id}))
-    assert conn.status == 200
-    assert %{"replayed" => 1} = JSON.decode!(conn.resp_body)
+    conn =
+      call(
+        config.instance,
+        :post,
+        "/v1/replays",
+        JSON.encode!(%{"kind" => "dlq", "id" => target.id})
+      )
 
-    assert {:ok, _settled} = Pipeline.tick(config.instance)
-    assert_received {:delivered, id, body}
+    assert conn.status == 202
+    replay = JSON.decode!(conn.resp_body)
+    assert replay["kind"] == "dlq"
+    assert replay["state"] == "running"
+    assert replay["filter"] == %{"id" => target.id}
+    assert replay["rate"] == 1000
+    assert replay["max_lag_ms"] == 2000
+    assert replay["finished_at"] == nil
+
+    assert_receive {:delivered, id, body}, 5_000
     assert id == target.id
     assert body == target.body
     refute_received {:delivered, _, _}
 
-    conn = call(config.instance, :post, "/v1/dlq/replay", JSON.encode!(%{"id" => target.id}))
-    assert conn.status == 200
-    assert %{"replayed" => 0} = JSON.decode!(conn.resp_body)
+    # The job flips to done when its range is exhausted, before the pipeline's
+    # next housekeeping reports the delivery outcome; wait for both.
+    deadline = System.monotonic_time(:millisecond) + 5_000
+
+    job =
+      poll_job(
+        config.instance,
+        replay["id"],
+        fn job ->
+          job.state == :done and job.delivered == 1
+        end,
+        deadline
+      )
+
+    assert job.moved == 1
+    assert job.state == :done
   end
 
-  test "an empty replay body replays everything" do
+  test "the same create is idempotent: 202 then 200 with the same job" do
     {:ok, agent} = Agent.start_link(fn -> false end)
     config = start_dlq_instance(%{"a" => [sinks: [{GatedSink, agent: agent, pid: self()}]]})
-
     ingest!(config, "a", ~s({"id":"1"}))
-    ingest!(config, "a", ~s({"id":"2"}))
     assert {:ok, _settled} = Pipeline.tick(config.instance)
 
-    Agent.update(agent, fn _ -> true end)
+    body = ~s({"kind":"dlq","source_id":"a","rate":500})
 
-    conn = call(config.instance, :post, "/v1/dlq/replay", "")
-    assert conn.status == 200
-    assert %{"replayed" => 2} = JSON.decode!(conn.resp_body)
+    first = call(config.instance, :post, "/v1/replays", body)
+    assert first.status == 202
+    job = JSON.decode!(first.resp_body)
 
-    assert {:ok, _settled} = Pipeline.tick(config.instance)
-    assert_receive {:delivered, _, _}
-    assert_receive {:delivered, _, _}
+    second = call(config.instance, :post, "/v1/replays", body)
+    assert second.status == 200
+    assert JSON.decode!(second.resp_body)["id"] == job["id"]
+  end
 
-    conn = call(config.instance, :post, "/v1/dlq/replay", "not json")
+  test "GET /v1/replays/:id, GET /v1/replays and PATCH state transitions" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+    inst = config.instance
+
+    created = JSON.decode!(call(inst, :post, "/v1/replays", ~s({"kind":"dlq"})).resp_body)
+    id = created["id"]
+
+    # Pause before it finishes.
+    paused = call(inst, :patch, "/v1/replays/#{id}", ~s({"state":"paused"}))
+    assert paused.status == 200
+    assert JSON.decode!(paused.resp_body)["state"] == "paused"
+
+    assert %{"id" => ^id, "state" => "paused"} =
+             JSON.decode!(call(inst, :get, "/v1/replays/#{id}").resp_body)
+
+    listed = JSON.decode!(call(inst, :get, "/v1/replays").resp_body)
+    assert [%{"id" => ^id} | _] = listed["replays"]
+
+    resumed = call(inst, :patch, "/v1/replays/#{id}", ~s({"state":"running"}))
+    assert JSON.decode!(resumed.resp_body)["state"] == "running"
+
+    cancelled = call(inst, :patch, "/v1/replays/#{id}", ~s({"state":"cancelled"}))
+    assert cancelled.status == 200
+    assert JSON.decode!(cancelled.resp_body)["state"] == "cancelled"
+
+    # A finished job refuses further patches.
+    again = call(inst, :patch, "/v1/replays/#{id}", ~s({"state":"running"}))
+    assert again.status == 409
+    assert JSON.decode!(again.resp_body) == %{"error" => "replay_finished"}
+  end
+
+  test "GET /v1/replays/:id is 404 replay_not_found for an unknown id" do
+    config = test_config(roles: [:dispatch], admin: %{enabled: true})
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+    wait_loaded(config.instance)
+    conn = call(config.instance, :get, "/v1/replays/nope")
+    assert conn.status == 404
+    assert JSON.decode!(conn.resp_body) == %{"error" => "replay_not_found"}
+  end
+
+  test "unknown keys and malformed bodies are 400 invalid_filter" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+    inst = config.instance
+
+    conn = call(inst, :post, "/v1/replays", ~s({"kind":"dlq","bogus":1}))
+    assert conn.status == 400
+    assert %{"error" => "invalid_filter", "field" => "bogus"} = JSON.decode!(conn.resp_body)
+
+    conn = call(inst, :post, "/v1/replays", ~s({"kind":"nope"}))
+    assert conn.status == 400
+    assert %{"error" => "invalid_filter", "field" => "kind"} = JSON.decode!(conn.resp_body)
+
+    conn = call(inst, :post, "/v1/replays", "not json")
     assert conn.status == 400
     assert %{"error" => "invalid_filter", "field" => "body"} = JSON.decode!(conn.resp_body)
+
+    conn = call(inst, :post, "/v1/replays", "")
+    assert conn.status == 400
+    assert %{"error" => "invalid_filter", "field" => "kind"} = JSON.decode!(conn.resp_body)
+
+    # A key from the other kind is refused, not dropped: a dlq spec carrying
+    # an archive window must never become an unbounded DLQ replay.
+    conn = call(inst, :post, "/v1/replays", ~s({"kind":"dlq","from":0,"to":1000}))
+    assert conn.status == 400
+    assert %{"error" => "invalid_filter", "field" => "from"} = JSON.decode!(conn.resp_body)
+
+    conn =
+      call(inst, :post, "/v1/replays", ~s({"kind":"archive","from":0,"to":1000,"since":5}))
+
+    assert conn.status == 400
+    assert %{"error" => "invalid_filter", "field" => "since"} = JSON.decode!(conn.resp_body)
+  end
+
+  test "an archive job on a node without a queue writer is 409 role_not_enabled/edge" do
+    config = test_config(roles: [:dispatch], admin: %{enabled: true})
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+    wait_loaded(config.instance)
+    conn = call(config.instance, :post, "/v1/replays", ~s({"kind":"archive","from":0,"to":1}))
+    assert conn.status == 409
+    assert JSON.decode!(conn.resp_body) == %{"error" => "role_not_enabled", "role" => "edge"}
+  end
+
+  test "17 concurrent jobs is 409 too_many_replays" do
+    config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
+    inst = config.instance
+
+    # Seed 16 paused jobs directly, so they count as active without racing the
+    # replayer tick.
+    now = System.system_time(:millisecond)
+
+    jobs =
+      for i <- 1..16 do
+        %{
+          id: "seed-#{i}",
+          kind: :dlq,
+          filter: %{id: "seed-#{i}"},
+          rate: 1_000,
+          max_lag_ms: 2_000,
+          state: :paused,
+          created_at: now + i,
+          updated_at: now + i,
+          finished_at: nil,
+          cursor: nil,
+          upto: now,
+          moved: 0,
+          scanned: 0,
+          skipped: 0,
+          delivered: 0,
+          dead: 0,
+          error: nil
+        }
+      end
+
+    :ok =
+      Ankusa.Store.write(
+        inst,
+        Enum.map(jobs, fn job ->
+          {:put, :default, Ankusa.Store.Keys.replay_job(job.id), :erlang.term_to_binary(job)}
+        end),
+        sync: true
+      )
+
+    # A restarted replayer loads the seeded jobs.
+    subtree = Ankusa.Instance.Isolated.subtree(inst, :dispatch)
+
+    :ok = Supervisor.terminate_child(subtree, {Ankusa.Dispatch.Replayer, inst})
+    {:ok, _} = Supervisor.restart_child(subtree, {Ankusa.Dispatch.Replayer, inst})
+
+    deadline = System.monotonic_time(:millisecond) + 3_000
+
+    until_loaded = fn until_loaded ->
+      case Ankusa.Replay.list(inst) do
+        {:ok, jobs} when length(jobs) == 16 ->
+          :ok
+
+        _other ->
+          if System.monotonic_time(:millisecond) > deadline do
+            flunk("seeded jobs were not loaded")
+          else
+            Process.sleep(50)
+            until_loaded.(until_loaded)
+          end
+      end
+    end
+
+    until_loaded.(until_loaded)
+
+    conn = call(inst, :post, "/v1/replays", ~s({"kind":"dlq"}))
+    assert conn.status == 409
+    assert JSON.decode!(conn.resp_body) == %{"error" => "too_many_replays"}
   end
 
   @tag :capture_log
-  test "an unreachable store is 503 on dlq, replay and quarantine, and {} on /v1/wal" do
+  test "an unreachable store is 503 on dlq, replays and quarantine, and {} on /v1/wal" do
     config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
     inst = config.instance
     :ok = Supervisor.terminate_child(Ankusa.via(inst, :instance), {Ankusa.Store, inst})
@@ -296,7 +509,7 @@ defmodule Ankusa.Admin.RouterTest do
     assert conn.status == 503
     assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
 
-    conn = call(inst, :post, "/v1/dlq/replay", "{}")
+    conn = call(inst, :post, "/v1/replays", ~s({"kind":"dlq"}))
     assert conn.status == 503
     assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
 
@@ -310,17 +523,17 @@ defmodule Ankusa.Admin.RouterTest do
   end
 
   @tag :capture_log
-  test "replay while the pipeline is down is a 503, not a crashed request" do
+  test "replays while the dispatch domain is down is a 503, not a crashed request" do
     config = start_dlq_instance(%{"a" => [sinks: [{AlwaysFailSink, []}]]})
     inst = config.instance
 
     :ok =
       Supervisor.terminate_child(
-        Ankusa.Instance.Isolated.subtree(inst, :dispatch),
-        {Ankusa.Dispatch.Pipeline, inst}
+        Ankusa.via(inst, :instance),
+        {Ankusa.Instance.Isolated, :dispatch}
       )
 
-    conn = call(inst, :post, "/v1/dlq/replay", "{}")
+    conn = call(inst, :post, "/v1/replays", ~s({"kind":"dlq"}))
     assert conn.status == 503
     assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
   end

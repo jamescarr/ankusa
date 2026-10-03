@@ -118,4 +118,77 @@ defmodule Ankusa.Sink.HttpTest do
       )
     end
   end
+
+  # ── G5 forwarded headers ──────────────────────────────────────────────────
+
+  test "provider headers are forwarded per the source option, minus the denylist", %{
+    capture: capture
+  } do
+    env =
+      envelope(%{
+        dedupe_key: "evt_1",
+        headers: [
+          {"X-GitHub-Event", "push"},
+          {"Authorization", "Bearer secret"},
+          {"X-Ankusa-Whatever", "no"},
+          {"Content-Length", "17"}
+        ]
+      })
+
+    assert :ok =
+             Sink.Http.deliver(
+               env,
+               %{attempt: 1, replay_id: "rid", forward_headers: :default},
+               opts("/hooks")
+             )
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    h = Map.new(headers)
+    assert h["x-github-event"] == "push"
+    assert h["x-ankusa-dedupe-key"] == "evt_1"
+    assert h["x-ankusa-replay-id"] == "rid"
+    refute Map.has_key?(h, "authorization")
+    refute Map.has_key?(h, "x-ankusa-whatever")
+    refute Map.has_key?(h, "content-length")
+  end
+
+  test "an allowlist forwards only the named headers", %{capture: capture} do
+    env = envelope(%{headers: [{"x-keep", "1"}, {"x-drop", "2"}]})
+
+    assert :ok =
+             Sink.Http.deliver(env, %{attempt: 1, forward_headers: ["x-keep"]}, opts("/hooks"))
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    h = Map.new(headers)
+    assert h["x-keep"] == "1"
+    refute Map.has_key?(h, "x-drop")
+  end
+
+  test "a forwarded name colliding with a sink-set or opts header is dropped", %{
+    capture: capture
+  } do
+    # The provider sends its own x-ankusa-id; the sink's identity header wins.
+    env = envelope(%{headers: [{"x-ankusa-id", "forged"}, {"x-trace", "provider"}]})
+
+    assert :ok =
+             Sink.Http.deliver(
+               env,
+               %{attempt: 1, forward_headers: :default},
+               opts("/hooks", headers: [{"x-trace", "operator"}])
+             )
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    h = Map.new(headers)
+    assert h["x-ankusa-id"] == env.id
+    assert h["x-trace"] == "operator"
+  end
+
+  test "no dedupe key or replay id means no such headers", %{capture: capture} do
+    assert :ok = Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/hooks"))
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    h = Map.new(headers)
+    refute Map.has_key?(h, "x-ankusa-dedupe-key")
+    refute Map.has_key?(h, "x-ankusa-replay-id")
+  end
 end

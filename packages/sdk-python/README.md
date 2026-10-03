@@ -5,8 +5,9 @@ one PyPI package meant to bundle everything a non-Elixir consumer needs to
 talk to an Ankusa deployment. Today that's the
 [claim-check gateway](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md)
 client, the route-management and operator (admin) clients, the
-source-management client, and a webhook-receiving header helper; more clients
-(ingest) land here as they're built.
+source-management client, a webhook-receiving header helper, and the queue
+message decoder with its idempotency-key helper; more clients (ingest) land
+here as they're built.
 
 ## Install
 
@@ -114,11 +115,73 @@ def do_POST(self):
 `HookHeaders.id` is what a receiver dedupes on: delivery is at-least-once
 (see "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
-so the same hook can arrive twice after a retry. Header lookup is always
+so the same hook can arrive twice after a retry. When the source extracts the
+provider's own event key, `HookHeaders.dedupe_key` carries it (and
+`replay_id` marks a replay); `idempotency_key(hook)` folds both into the key
+to store — see "Consuming queue messages". Header lookup is always
 case-insensitive, regardless of whether the mapping passed in already is.
 
 [`examples/quickstart/worker.py`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/worker.py)
 uses this.
+
+## Consuming queue messages
+
+Every sink — HTTP, RabbitMQ, Kafka, NATS — delivers one JSON message per
+hook: the identity fields, the body (inline `body_base64` or a claim-check
+`claim`), `sha256`, and, when present, `dedupe_key`, `replay_id` and the
+forwarded provider `headers`. `decode_message` validates all of it and
+`idempotency_key` gives the value to store in a processed-ids table:
+
+```python
+import base64
+import sqlite3
+
+from ankusa import ClaimCheckClient, InvalidMessageError, decode_message, idempotency_key
+
+claim_check = ClaimCheckClient("http://localhost:4001")
+db = sqlite3.connect("processed.db")
+db.execute("CREATE TABLE IF NOT EXISTS processed (key TEXT PRIMARY KEY)")
+
+def consume(raw: str | bytes) -> None:
+    try:
+        message = decode_message(raw)
+    except InvalidMessageError as err:
+        # Poison message: dead-letter, never requeue. err.retryable is False;
+        # err.code is e.g. "integrity", err.field names a bad key.
+        raise
+
+    key = idempotency_key(message)  # source_id:dedupe_key, else id
+    if db.execute("SELECT 1 FROM processed WHERE key = ?", (key,)).fetchone():
+        return  # already handled this event
+    body = (
+        claim_check.redeem(message.claim, message.sha256)
+        if message.claim
+        else base64.b64decode(message.body_base64)
+    )
+    handle(body)
+    db.execute("INSERT INTO processed (key) VALUES (?)", (key,))
+    db.commit()
+```
+
+- `idempotency_key(message)` is `source_id:dedupe_key` when the source
+  extracted the provider's event key, else `id` — so a provider retry that
+  arrives with a fresh Ankusa `id` still collapses onto the same row.
+- A replayed delivery is dropped by default. To reprocess replays instead,
+  pass `include_replay=True`: the key then ends in `#replay:<replay_id>`.
+- `message.body_base64` is the decoded body re-encoded as standard base64, so
+  compare bytes; the claim-check form ships `sha256` for `ClaimCheckClient`.
+- `message.headers` holds the forwarded provider request headers (lowercased);
+  `message.dedupe_key` / `message.replay_id` are `None` when absent.
+
+A webhook receiver can take the same shortcut straight off the HTTP sink's
+headers with `parse_headers` + `idempotency_key(hook)`, where
+`hook.source` plays the part of `source_id`.
+
+When a sink has grown a backlog, or a downstream processor failed after the
+sink accepted a batch, re-drive it with a replay job over the admin client
+(see "Admin client" above): `kind: "dlq"` re-sends rows that dead-lettered,
+`kind: "archive"` re-sends hooks over a time window. Replays keep the original
+`id` and `dedupe_key` and add `replay_id`.
 
 ## Routes client
 
@@ -154,8 +217,8 @@ unfollowed redirect, a non-JSON success body, or unreachable; retryable).
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, and the quarantine list — the `operations`,
-`dlq`, and `quarantine` tags of `admin.v1.yaml`.
+the redacted config, the DLQ, replay jobs, and the quarantine list — the
+`operations`, `dlq`, `replays`, and `quarantine` tags of `admin.v1.yaml`.
 
 ```python
 import os
@@ -166,16 +229,26 @@ admin = AdminClient(os.environ.get("ADMIN_URL", "http://localhost:4002"))
 
 admin.health()                          # {"status": "ok", "instance": ..., "roles": [...]}
 admin.list_dead_letters({"limit": 10})  # {"total": ..., "entries": [...]}
-admin.replay_dead_letters({"source_id": "demo"})
 admin.list_quarantined()
+
+job = admin.create_replay({"kind": "dlq", "source_id": "stripe", "rate": 500})
+admin.get_replay(job["id"])
+admin.list_replays()                    # {"replays": [Replay, ...]}, newest first
+admin.update_replay(job["id"], {"state": "paused"})   # resume, pause or cancel
 ```
 
+`create_replay()` is idempotent for retries: a second POST of the same filter
+while the job is `running`/`paused` returns the existing job (`200`) instead of
+starting another (`202`). `list_replays()` returns `{"replays": [...]}` as the
+API sends it.
+
 Methods: `health()`, `metrics()` (Prometheus text), `config()`,
-`list_dead_letters()`, `replay_dead_letters()`, `list_quarantined()`. Failures
-are `AdminError` subclasses: `RoleNotEnabledError` (409 `role_not_enabled`,
-carrying `role`), `AdminRejectedError` (any other 4xx, carrying `code`), and
-`AdminUnavailableError` (5xx, an unfollowed redirect, or unreachable;
-retryable).
+`list_dead_letters()`, `create_replay()`, `get_replay()`, `list_replays()`,
+`update_replay()`, `list_quarantined()`. Failures are `AdminError` subclasses:
+`RoleNotEnabledError` (409 `role_not_enabled`, carrying `role`),
+`AdminRejectedError` (any other 4xx — a missing replay is a 404 with
+`code="replay_not_found"`), and `AdminUnavailableError` (5xx, an unfollowed
+redirect, or unreachable; retryable).
 
 ## Sources client
 
@@ -229,6 +302,7 @@ src/ankusa/
   __init__.py           # umbrella barrel: re-exports every client this package bundles
   py.typed
   webhook.py             # x-ankusa-* header parsing for HTTP-sink receivers
+  message.py             # v1 queue-message decoder + idempotency-key helper
   claim_check/           # the claim-check gateway client
     __init__.py          # barrel for this client
     client.py

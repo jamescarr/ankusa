@@ -7,7 +7,17 @@ defmodule Ankusa.SDK.ConformanceTest do
 
   use ExUnit.Case, async: true
 
-  alias Ankusa.SDK.{Admin, ClaimCheck, ClaimRef, ConformanceGateway, Recorder, Routes, Webhook}
+  alias Ankusa.SDK.{
+    Admin,
+    ClaimCheck,
+    ClaimRef,
+    ConformanceGateway,
+    Idempotency,
+    Message,
+    Recorder,
+    Routes,
+    Webhook
+  }
 
   # The exact module the vectors name; the runner matches by identity, never by
   # subclass.
@@ -24,7 +34,8 @@ defmodule Ankusa.SDK.ConformanceTest do
     "RoutesUnavailableError" => Ankusa.SDK.RoutesUnavailableError,
     "RoleNotEnabledError" => Ankusa.SDK.RoleNotEnabledError,
     "AdminRejectedError" => Ankusa.SDK.AdminRejectedError,
-    "AdminUnavailableError" => Ankusa.SDK.AdminUnavailableError
+    "AdminUnavailableError" => Ankusa.SDK.AdminUnavailableError,
+    "InvalidMessageError" => Ankusa.SDK.InvalidMessageError
   }
 
   case_paths =
@@ -140,8 +151,42 @@ defmodule Ankusa.SDK.ConformanceTest do
       "id" => headers.id,
       "source" => headers.source,
       "tenant" => headers.tenant,
-      "content_type" => headers.content_type
+      "content_type" => headers.content_type,
+      "dedupe_key" => headers.dedupe_key,
+      "replay_id" => headers.replay_id
     }
+  end
+
+  defp run("decode_message", _case, _params_by_id, input, _base_url, _recorder) do
+    message = unwrap!(Message.decode(input["message"]))
+
+    %{
+      "v" => message.v,
+      "id" => message.id,
+      "source_id" => message.source_id,
+      "tenant_id" => message.tenant_id,
+      "received_at" => message.received_at,
+      "content_type" => message.content_type,
+      "size" => message.size,
+      "body_base64" => message.body && Base.encode64(message.body),
+      "claim" => message.claim,
+      "sha256" => message.sha256,
+      "dedupe_key" => message.dedupe_key,
+      "replay_id" => message.replay_id,
+      "headers" => message.headers
+    }
+  end
+
+  defp run("idempotency_key", _case, _params_by_id, input, _base_url, _recorder) do
+    opts = [include_replay: input["include_replay"] == true]
+
+    key =
+      case input do
+        %{"message" => message} -> Idempotency.key(unwrap!(Message.decode(message)), opts)
+        %{"headers" => headers} -> Idempotency.key(unwrap!(Webhook.parse_headers(headers)), opts)
+      end
+
+    %{"key" => key}
   end
 
   defp run("redeem", _case, _params_by_id, input, base_url, recorder) do
@@ -225,10 +270,22 @@ defmodule Ankusa.SDK.ConformanceTest do
     with_admin(input, base_url, recorder, &unwrap!(Admin.list_dead_letters(&1, params)))
   end
 
-  defp run("admin_dlq_replay", _case, _params_by_id, input, base_url, recorder) do
-    filter = input["filter"]
+  defp run("admin_replay_create", _case, _params_by_id, input, base_url, recorder) do
+    with_admin(input, base_url, recorder, &unwrap!(Admin.create_replay(&1, input["spec"])))
+  end
 
-    with_admin(input, base_url, recorder, &unwrap!(Admin.replay_dead_letters(&1, filter)))
+  defp run("admin_replay_get", _case, _params_by_id, input, base_url, recorder) do
+    with_admin(input, base_url, recorder, &unwrap!(Admin.get_replay(&1, input["id"])))
+  end
+
+  defp run("admin_replay_list", _case, _params_by_id, input, base_url, recorder) do
+    with_admin(input, base_url, recorder, &unwrap!(Admin.list_replays(&1)))
+  end
+
+  defp run("admin_replay_update", _case, _params_by_id, input, base_url, recorder) do
+    with_admin(input, base_url, recorder, fn client ->
+      unwrap!(Admin.update_replay(client, input["id"], input["patch"]))
+    end)
   end
 
   defp run("admin_quarantine", _case, _params_by_id, input, base_url, recorder) do

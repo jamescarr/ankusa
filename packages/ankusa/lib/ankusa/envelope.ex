@@ -24,6 +24,9 @@ defmodule Ankusa.Envelope do
     :seq,
     # %Ankusa.Verification{}
     :verification,
+    # provider event key extracted at ingest (Ankusa.Dedupe.key/2); nil when
+    # the source has no dedupe or the stamp is missing
+    :dedupe_key,
     size: 0
   ]
 
@@ -39,6 +42,7 @@ defmodule Ankusa.Envelope do
           body: binary(),
           seq: non_neg_integer() | nil,
           verification: Ankusa.Verification.t() | nil,
+          dedupe_key: String.t() | nil,
           size: non_neg_integer()
         }
 

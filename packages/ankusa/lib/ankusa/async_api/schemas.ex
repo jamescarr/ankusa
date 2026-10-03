@@ -15,12 +15,23 @@ defmodule Ankusa.AsyncApi.SinkMessage do
           "carries its reference as `claim` plus the lowercase hex `sha256` to check the " <>
           "redeemed bytes against. `v` changes only when an existing field changes meaning or " <>
           "disappears: adding a field keeps `v: 1`, so consumers must ignore keys they do not know.",
-      "required" => ["v", "id", "source_id", "received_at", "size"],
+      "required" => [
+        "v",
+        "id",
+        "source_id",
+        "received_at",
+        "size",
+        "sha256",
+        "dedupe_key",
+        "replay_id",
+        "headers"
+      ],
       "properties" => %{
         "v" => %{"const" => 1, "description" => "Wire format version."},
         "id" => %{
           "type" => "string",
-          "description" => "The hook's id (a UUIDv7). Delivery is at-least-once: dedupe on it."
+          "description" =>
+            "The hook's id (a UUIDv7). Delivery is at-least-once: dedupe on `dedupe_key` when set, else `id`."
         },
         "source_id" => %{"type" => "string"},
         "tenant_id" => %{"type" => ["string", "null"]},
@@ -37,6 +48,22 @@ defmodule Ankusa.AsyncApi.SinkMessage do
           "minimum" => 0,
           "description" => "Bytes in the hook body."
         },
+        "dedupe_key" => %{
+          "type" => ["string", "null"],
+          "description" =>
+            "The provider event key extracted at ingest, or `null`. Null does not mean no key: " <>
+              "check whether the source is configured with one."
+        },
+        "replay_id" => %{
+          "type" => ["string", "null"],
+          "description" => "The replay job id when this delivery is a replay, else `null`."
+        },
+        "headers" => %{
+          "type" => "object",
+          "description" =>
+            "Forwarded provider request headers, lowercased; repeated names joined with `, `. " <>
+              "`{}` when the source forwards none."
+        },
         "body_base64" => %{
           "type" => "string",
           "contentEncoding" => "base64",
@@ -51,12 +78,12 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         "sha256" => %{
           "type" => "string",
           "pattern" => "^[0-9a-f]{64}$",
-          "description" => "Hex SHA-256 of the body. Present with `claim`."
+          "description" => "Hex SHA-256 of the body, on every message."
         }
       },
       "oneOf" => [
         %{"required" => ["body_base64"]},
-        %{"required" => ["claim", "sha256"]}
+        %{"required" => ["claim"]}
       ]
     }
 end
@@ -86,7 +113,21 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
           "description" => "The tenant, or the empty string when there is none."
         },
         "ankusa_message_version" => %{"const" => "1"},
-        "content_type" => %{"const" => "application/json"}
+        "content_type" => %{"const" => "application/json"},
+        "ankusa_dedupe_key" => %{
+          "type" => "string",
+          "description" => "The provider event key, when the hook carries one."
+        },
+        "ankusa_replay_id" => %{
+          "type" => "string",
+          "description" => "The replay job id, when this delivery is a replay."
+        },
+        "Nats-Msg-Id" => %{
+          "type" => "string",
+          "description" =>
+            "NATS only: `id`, or `id:replay:<replay_id>` on a replay, so JetStream's " <>
+              "duplicate window collapses lost-ack retries of one delivery."
+        }
       }
     }
 end

@@ -234,39 +234,139 @@ paths:
           $ref: '#/components/responses/RoleNotEnabled'
         '503':
           $ref: '#/components/responses/NodeStoreUnavailable'
-  /v1/dlq/replay:
+  /v1/replays:
     post:
-      operationId: replayDeadLetters
-      tags: [dlq]
-      summary: Re-deliver dead-lettered hooks
+      operationId: createReplay
+      tags: [replays]
+      summary: Create a replay job
       description: |
-        Moves matching dead-lettered rows back to pending with a fresh attempt
-        count; the dispatch pipeline then delivers them through their source's
-        *current* sinks. The response counts the rows moved, not hooks
-        delivered. Replay is at-least-once: an entry already delivered upstream
-        but not recorded as such will be delivered again, so consumers should
-        dedupe on the envelope id. A replayed entry leaves the DLQ; one that
-        fails again is dead-lettered again.
+        Creates a durable, paced replay job. `kind: dlq` re-sends dead delivery
+        rows; `kind: archive` re-sends archived hooks over a `received_at`
+        window. Rows are dripped in at `rate` items per second, only while the
+        dispatch pipeline's oldest-due lag is at most `max_lag_ms` and its
+        in-flight window is not full, so a replay only uses capacity live
+        traffic leaves free. A `dlq` job touches only rows dead-lettered at or
+        before its own creation time. Every replayed delivery keeps the hook's
+        original `id` and `dedupe_key` and carries the job id as `replay_id`.
+        Posting the same spec again while a `running` or `paused` job with the
+        same kind and filter exists returns that job (200), so a proxy retry
+        is idempotent.
       requestBody:
-        required: false
+        required: true
         description: |
-          A filter, not a payload. Omitted or empty (`{}`) replays everything.
-          Unknown keys are ignored.
+          `kind` is required. Unknown keys are refused with `invalid_filter`.
+          `since`/`until` are inclusive dead-letter-time bounds (unix ms) for
+          `dlq`; `from`/`to` are inclusive `received_at` bounds (unix ms) for
+          `archive`, and `to` must be old enough that the compactor has
+          archived the whole window. `sinks` indexes into the source's current
+          sinks; omitted means every current sink.
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ReplayFilter'
+              $ref: '#/components/schemas/ReplaySpec'
       responses:
-        '200':
-          description: The number of entries replayed.
+        '202':
+          description: The new job, running.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Replayed'
+                $ref: '#/components/schemas/Replay'
+        '200':
+          description: An existing running or paused job with the same kind and filter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Replay'
         '400':
           $ref: '#/components/responses/InvalidFilter'
         '409':
+          description: |
+            `role_not_enabled` (an `archive` job on a node without a queue
+            writer) or `too_many_replays` (16 jobs already running or paused).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
+    get:
+      operationId: listReplays
+      tags: [replays]
+      summary: List replay jobs
+      description: Every replay job, newest first.
+      responses:
+        '200':
+          description: All jobs, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayList'
+        '409':
           $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
+  /v1/replays/{id}:
+    get:
+      operationId: getReplay
+      tags: [replays]
+      summary: One replay job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Replay'
+        '404':
+          $ref: '#/components/responses/ReplayNotFound'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
+    patch:
+      operationId: updateReplay
+      tags: [replays]
+      summary: Pause, resume, cancel, or re-rate a replay job
+      description: |
+        `state` is `running`, `paused` or `cancelled`; resuming clears `error`
+        and resets the auto-pause window. `rate` and `max_lag_ms` take effect
+        at once. A `done`, `cancelled` or `failed` job refuses patches with
+        `replay_finished`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayPatch'
+      responses:
+        '200':
+          description: The updated job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Replay'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '404':
+          $ref: '#/components/responses/ReplayNotFound'
+        '409':
+          description: '`role_not_enabled`, or `replay_finished` for a finished job.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
           $ref: '#/components/responses/NodeStoreUnavailable'
   /v1/quarantine:
@@ -876,25 +976,134 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/QuarantineEntry'
-    ReplayFilter:
+    ReplaySpec:
       type: object
+      required: [kind]
       properties:
+        kind:
+          type: string
+          enum: [dlq, archive]
+          description: '`dlq` re-sends dead rows; `archive` re-sends archived hooks over a time window.'
         source_id:
           type: string
-          description: Exact source id.
+          description: Exact source id to filter on.
         id:
           type: string
-          description: Exact envelope id.
+          description: Exact envelope id to filter on (`dlq` only).
         since:
           type: integer
-          description: Inclusive lower bound on the dead-letter timestamp, unix milliseconds.
-    Replayed:
-      type: object
-      required: [replayed]
-      properties:
-        replayed:
+          description: Inclusive lower bound on the dead-letter timestamp, unix milliseconds (`dlq` only).
+        until:
           type: integer
-          description: Number of entries re-delivered.
+          description: Inclusive upper bound on the dead-letter timestamp, unix milliseconds (`dlq` only). Must not be less than `since`.
+        from:
+          type: integer
+          minimum: 0
+          description: Inclusive lower bound on `received_at`, unix milliseconds (`archive` only).
+        to:
+          type: integer
+          description: |
+            Inclusive upper bound on `received_at`, unix milliseconds
+            (`archive` only). Must be greater than `from`, and old enough that
+            the compactor has archived the whole window (`storage.roll_ms +
+            storage.interval_ms` in the past).
+        sinks:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: integer
+            minimum: 0
+          description: Indexes into the source's current sinks; omitted means every current sink (`archive` only).
+        rate:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          default: 1000
+          description: Items per second — delivery rows for `dlq`, hooks for `archive`.
+        max_lag_ms:
+          type: integer
+          minimum: 100
+          maximum: 600000
+          default: 2000
+          description: The oldest-due lag at which the job throttles, in milliseconds.
+    ReplayPatch:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [running, paused, cancelled]
+        rate:
+          type: integer
+          minimum: 1
+          maximum: 100000
+        max_lag_ms:
+          type: integer
+          minimum: 100
+          maximum: 600000
+    Replay:
+      type: object
+      description: |
+        A replay job. Counters are best-effort: `moved`/`scanned`/`skipped` are
+        committed with the job's cursor, `delivered`/`dead` come from the
+        pipeline's outcome reports and are approximate across a crash.
+      required:
+        [id, kind, state, filter, rate, max_lag_ms, created_at, updated_at, finished_at,
+         moved, scanned, skipped, delivered, dead, error]
+      properties:
+        id:
+          type: string
+          description: UUIDv7 job id; also the `replay_id` on every replayed delivery.
+        kind:
+          type: string
+          enum: [dlq, archive]
+        state:
+          type: string
+          enum: [running, paused, done, cancelled, failed]
+        filter:
+          type: object
+          description: Exactly the filter keys given at creation.
+        rate:
+          type: integer
+          description: Items per second.
+        max_lag_ms:
+          type: integer
+          description: Throttle threshold, milliseconds.
+        created_at:
+          type: integer
+          description: Unix milliseconds.
+        updated_at:
+          type: integer
+          description: Unix milliseconds.
+        finished_at:
+          type: [integer, 'null']
+          description: Unix milliseconds, `null` until the job finishes.
+        moved:
+          type: integer
+          description: Rows revived (`dlq`) or hooks re-enqueued (`archive`).
+        scanned:
+          type: integer
+          description: Keys or records examined.
+        skipped:
+          type: integer
+          description: Archive records with no source, no bound sink, or an undecodable frame.
+        delivered:
+          type: integer
+          description: Deliveries this job's rows got through, per pipeline outcome reports.
+        dead:
+          type: integer
+          description: Deliveries this job's rows dead-lettered again, per pipeline outcome reports.
+        error:
+          type: [string, 'null']
+          description: '`null`, or why the job paused itself or failed.'
+    ReplayList:
+      type: object
+      required: [replays]
+      properties:
+        replays:
+          type: array
+          items:
+            $ref: '#/components/schemas/Replay'
     RateLimit:
       type: object
       description: |
@@ -1222,7 +1431,7 @@ components:
           description: Present on `too_many_routes`; the configured cap.
   responses:
     InvalidFilter:
-      description: '`400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter, or `body`.'
+      description: '`400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key.'
       content:
         application/json:
           schema:
@@ -1257,6 +1466,13 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    ReplayNotFound:
+      description: '`404`. `replay_not_found`: this node holds no replay job with that id.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: replay_not_found}
     WalDisabled:
       description: '`409`. `wal_disabled`: this node runs `wal.type: none` and has no log to report.'
       content:

@@ -17,6 +17,9 @@ defmodule Ankusa.Sink.RabbitMQ do
   `mandatory`, so a message the exchange routes to no queue is
   `{:error, {:unroutable, routing_key}}`, retried by the source's
   `Ankusa.RetryPolicy` and then dead-lettered like any other sink failure.
+  Every publish carries the hook's `id` as AMQP `message_id`, plus the
+  `ankusa_dedupe_key` and `ankusa_replay_id` headers when the hook carries
+  them, so consumers dedupe on the same identity the message JSON exposes.
   Surviving a broker restart is the queue's property: messages are always
   published `persistent`, and durable classic and quorum queues persist them
   before confirming. The other errors are `{:error, :nacked}` (the broker
@@ -51,9 +54,26 @@ defmodule Ankusa.Sink.RabbitMQ do
 
     with {:ok, name} <- ensure_started(ctx.instance, exchange, opts),
          {:ok, payload} <- Message.encode(env, ctx, inline_max_bytes) do
-      Connection.publish(name, routing_key(env, opts), payload)
+      Connection.publish(name, routing_key(env, opts), payload,
+        message_id: env.id,
+        headers: amqp_headers(env, ctx)
+      )
     end
   end
+
+  # `env.id` rides as `message_id`; the dedupe key and the replay marker travel
+  # as AMQP headers, each only when present, so consumers see the same identity
+  # as the message JSON.
+  defp amqp_headers(env, ctx) do
+    []
+    |> maybe_put_amqp("ankusa_dedupe_key", env.dedupe_key)
+    |> maybe_put_amqp("ankusa_replay_id", ctx[:replay_id])
+  end
+
+  defp maybe_put_amqp(headers, _name, nil), do: headers
+
+  defp maybe_put_amqp(headers, name, value) when is_binary(value),
+    do: [{name, :longstr, value} | headers]
 
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)

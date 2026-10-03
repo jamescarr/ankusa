@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
@@ -51,17 +52,66 @@ type QuarantinePage struct {
 	Entries []QuarantineEntry `json:"entries"`
 }
 
-// ReplayFilter selects hooks to replay. The zero value replays everything the
-// runtime allows; a non-zero field narrows it.
-type ReplayFilter struct {
+// ReplaySpec is a replay-job creation body. Kind is "dlq" (default a
+// dead-letter replay) or "archive" (a time-range redrive); the rest of the
+// fields narrow or pace it. See conformance/README.md for the rules.
+type ReplaySpec struct {
+	// Kind is "dlq" or "archive".
+	Kind string `json:"kind"`
+	// SourceID limits the job to one source.
 	SourceID string `json:"source_id,omitempty"`
-	ID       string `json:"id,omitempty"`
-	Since    int64  `json:"since,omitempty"`
+	// ID limits a dlq job to one dead-lettered hook id.
+	ID string `json:"id,omitempty"`
+	// Since and Until are inclusive dead-letter-time bounds (unix ms), dlq
+	// only.
+	Since int64 `json:"since,omitempty"`
+	Until int64 `json:"until,omitempty"`
+	// From and To are inclusive received_at bounds (unix ms), archive only.
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
+	// Sinks lists indexes into the source's current sinks, archive only.
+	Sinks []int `json:"sinks,omitempty"`
+	// Rate is items per second (1..100000; server default 1000).
+	Rate int `json:"rate,omitempty"`
+	// MaxLagMS is the dispatch-lag ceiling before the job throttles
+	// (100..600000; server default 2000).
+	MaxLagMS int `json:"max_lag_ms,omitempty"`
 }
 
-// Replayed is how many hooks a replay enqueued.
-type Replayed struct {
-	Replayed int `json:"replayed"`
+// ReplayPatch is a replay-job update body. A zero field is left unchanged.
+type ReplayPatch struct {
+	// State is "running", "paused", or "cancelled".
+	State string `json:"state,omitempty"`
+	// Rate is items per second.
+	Rate int `json:"rate,omitempty"`
+	// MaxLagMS is the dispatch-lag ceiling in milliseconds.
+	MaxLagMS int `json:"max_lag_ms,omitempty"`
+}
+
+// Replay is a replay job. Filter is the normalized filter it was created
+// with; Counters (Moved, Scanned, Skipped, Delivered, Dead) are in the
+// server's own units and Delivered/Dead are approximate across a crash.
+type Replay struct {
+	ID         string         `json:"id"`
+	Kind       string         `json:"kind"`
+	State      string         `json:"state"`
+	Filter     map[string]any `json:"filter"`
+	Rate       int            `json:"rate"`
+	MaxLagMS   int            `json:"max_lag_ms"`
+	CreatedAt  int64          `json:"created_at"`
+	UpdatedAt  int64          `json:"updated_at"`
+	FinishedAt *int64         `json:"finished_at"`
+	Moved      int64          `json:"moved"`
+	Scanned    int64          `json:"scanned"`
+	Skipped    int64          `json:"skipped"`
+	Delivered  int64          `json:"delivered"`
+	Dead       int64          `json:"dead"`
+	Error      *string        `json:"error"`
+}
+
+// ReplayList is GET /v1/replays: every replay job, newest first.
+type ReplayList struct {
+	Replays []Replay `json:"replays"`
 }
 
 // ListDeadLettersParams filters a DLQ listing. Zero values mean "no filter".
@@ -156,24 +206,75 @@ func (c *AdminClient) ListDeadLetters(ctx context.Context, p ListDeadLettersPara
 	return &page, nil
 }
 
-// ReplayDeadLetters replays every dead letter matching f. The zero filter
-// sends `{}`.
-func (c *AdminClient) ReplayDeadLetters(ctx context.Context, f ReplayFilter) (*Replayed, error) {
-	body, err := encodeJSON("replay dead letters", f)
+// CreateReplay starts a replay job. The server answers 202 with the new job,
+// or 200 with an existing running/paused job whose normalized filter matches,
+// which makes a retried request idempotent.
+func (c *AdminClient) CreateReplay(ctx context.Context, spec ReplaySpec) (*Replay, error) {
+	body, err := encodeJSON("create replay", spec)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.call(ctx, http.MethodPost, "/v1/dlq/replay", body)
+	resp, err := c.call(ctx, http.MethodPost, "/v1/replays", body)
 	if err != nil {
 		return nil, err
 	}
 
-	var replayed Replayed
-	if err := decodeJSON(resp, &replayed); err != nil {
+	var replay Replay
+	if err := decodeJSON(resp, &replay); err != nil {
 		return nil, err
 	}
-	return &replayed, nil
+	return &replay, nil
+}
+
+// GetReplay fetches one replay job. A 404 is an *AdminRejectedError with
+// status 404 and code "replay_not_found".
+func (c *AdminClient) GetReplay(ctx context.Context, id string) (*Replay, error) {
+	resp, err := c.call(ctx, http.MethodGet, "/v1/replays/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var replay Replay
+	if err := decodeJSON(resp, &replay); err != nil {
+		return nil, err
+	}
+	return &replay, nil
+}
+
+// ListReplays lists replay jobs, newest first.
+func (c *AdminClient) ListReplays(ctx context.Context) (*ReplayList, error) {
+	resp, err := c.call(ctx, http.MethodGet, "/v1/replays", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var list ReplayList
+	if err := decodeJSON(resp, &list); err != nil {
+		return nil, err
+	}
+	return &list, nil
+}
+
+// UpdateReplay patches a replay job's state, rate, or lag ceiling. A 404 is
+// an *AdminRejectedError with code "replay_not_found"; a 409 with code
+// "replay_finished" means the job is done, cancelled, or failed.
+func (c *AdminClient) UpdateReplay(ctx context.Context, id string, patch ReplayPatch) (*Replay, error) {
+	body, err := encodeJSON("update replay", patch)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.call(ctx, http.MethodPatch, "/v1/replays/"+url.PathEscape(id), body)
+	if err != nil {
+		return nil, err
+	}
+
+	var replay Replay
+	if err := decodeJSON(resp, &replay); err != nil {
+		return nil, err
+	}
+	return &replay, nil
 }
 
 // ListQuarantined lists quarantined hooks, newest first.
