@@ -64,6 +64,26 @@ defmodule Ankusa.Sink.RabbitMQTest do
     end
   end
 
+  defp deliver_when_connected(env, ctx, opts) do
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    retry_deliver(env, ctx, opts, deadline)
+  end
+
+  defp retry_deliver(env, ctx, opts, deadline) do
+    case RabbitMQ.deliver(env, ctx, opts) do
+      {:error, :not_connected} ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("sink did not reconnect within 5 s")
+        else
+          Process.sleep(50)
+          retry_deliver(env, ctx, opts, deadline)
+        end
+
+      other ->
+        other
+    end
+  end
+
   test "inline payload publishes a small message the consumer can decode", %{
     instance: inst,
     exchange: exch,
@@ -142,6 +162,66 @@ defmodule Ankusa.Sink.RabbitMQTest do
 
     {_payload2, meta2} = get_message(chan, queue)
     assert meta2.routing_key == "dyn.t1.src"
+  end
+
+  test "a publish no queue is bound to receive is {:error, {:unroutable, key}}, not :ok", %{
+    instance: inst,
+    chan: chan
+  } do
+    exch = "ankusa.test.unbound.#{System.unique_integer([:positive])}"
+    opts = [exchange: exch, url: @amqp_url]
+
+    assert {:error, {:unroutable, "ankusa.src"}} = RabbitMQ.deliver(envelope(), ctx(inst), opts)
+
+    {:ok, %{queue: queue}} = AMQP.Queue.declare(chan, "", exclusive: true)
+    :ok = AMQP.Queue.bind(chan, queue, exch, routing_key: "#")
+
+    env = envelope()
+    assert :ok = RabbitMQ.deliver(env, ctx(inst), opts)
+    {payload, _meta} = get_message(chan, queue)
+    assert JSON.decode!(payload)["id"] == env.id
+  end
+
+  test "a channel the broker closes is reopened and re-declares the exchange", %{
+    instance: inst,
+    exchange: exch,
+    chan: chan,
+    queue: queue
+  } do
+    opts = [exchange: exch, url: @amqp_url, retry_ms: 200]
+
+    assert :ok = RabbitMQ.deliver(envelope(), ctx(inst), opts)
+    get_message(chan, queue)
+
+    :ok = AMQP.Exchange.delete(chan, exch)
+
+    assert {:error, {:channel_closed, _}} = RabbitMQ.deliver(envelope(), ctx(inst), opts)
+
+    assert {:error, {:unroutable, "ankusa.src"}} =
+             deliver_when_connected(envelope(), ctx(inst), opts)
+
+    :ok = AMQP.Queue.bind(chan, queue, exch, routing_key: "#")
+
+    env = envelope()
+    assert :ok = RabbitMQ.deliver(env, ctx(inst), opts)
+    {payload, _meta} = get_message(chan, queue)
+    assert JSON.decode!(payload)["id"] == env.id
+  end
+
+  test "a publish a queue refuses is {:error, :nacked}", %{instance: inst, chan: chan} do
+    exch = "ankusa.test.full.#{System.unique_integer([:positive])}"
+    :ok = AMQP.Exchange.declare(chan, exch, :topic, durable: true)
+
+    {:ok, %{queue: queue}} =
+      AMQP.Queue.declare(chan, "",
+        exclusive: true,
+        arguments: [{"x-max-length", 0}, {"x-overflow", "reject-publish"}]
+      )
+
+    :ok = AMQP.Queue.bind(chan, queue, exch, routing_key: "#")
+
+    assert {:error, :nacked} =
+             RabbitMQ.deliver(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
   end
 
   test "an unreachable broker fails fast with :not_connected instead of hanging" do

@@ -146,7 +146,8 @@ services:
   # redeemed through `claim-check`.
   worker:
     build:
-      context: ./worker
+      context: ../..                                    # repo root: package.json
+      dockerfile: examples/kafka-sqs-consumer/worker/Dockerfile  # file:-links ../../../packages/sdk-typescript
     depends_on:
       aws-bootstrap:
         condition: service_completed_successfully
