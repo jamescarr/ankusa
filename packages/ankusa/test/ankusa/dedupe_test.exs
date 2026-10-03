@@ -290,6 +290,27 @@ defmodule Ankusa.DedupeTest do
     assert length(stored_ids(inst)) == 4
   end
 
+  test "a stored dedupe value that does not decode commits fresh and heals the key" do
+    config = start_edge(%{"demo" => []})
+    inst = config.instance
+    u_key = Keys.dedupe("default", "demo", "d1")
+
+    # Shorter than the 8-byte expiry it should start with.
+    :ok = Store.write(inst, [{:put, :index, u_key, <<1, 2, 3>>}], sync: true)
+
+    assert {:ok, [{:committed, first}]} =
+             Ankusa.Queue.enqueue(inst, [direct_entry(direct_env("default"))])
+
+    # The corrupt value was overwritten by the commit, so the key dedupes again.
+    assert {:ok, <<_at::64, id::binary>>} = Store.get(inst, :index, u_key)
+    assert id == first.id
+
+    assert {:ok, [{:duplicate, again}]} =
+             Ankusa.Queue.enqueue(inst, [direct_entry(direct_env("default"))])
+
+    assert again.id == first.id
+  end
+
   test "the sweep drops an expiry key it cannot decode instead of failing" do
     config = start_edge(%{"demo" => []})
     inst = config.instance

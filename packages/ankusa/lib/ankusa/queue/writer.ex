@@ -270,7 +270,11 @@ defmodule Ankusa.Queue.Writer do
 
                     {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1}
 
-                  {:ok, :not_found} ->
+                  {:ok, _absent_or_corrupt} ->
+                    # Nothing stored, or a value too short to hold its 8-byte
+                    # expiry (the clauses above took every decodable one). Neither
+                    # may suppress a hook, and a corrupt value is overwritten here
+                    # so the key dedupes again, instead of staying broken for good.
                     seen = Map.put(seen, key, env.id)
 
                     new_ops = [
@@ -279,11 +283,6 @@ defmodule Ankusa.Queue.Writer do
                     ]
 
                     {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1}
-
-                  {:ok, _other} ->
-                    # A value that does not decode: never let it suppress a hook.
-                    seen = Map.put(seen, key, env.id)
-                    {seen, [{:fresh, item} | results], [item | fresh], ops, n + 1}
                 end
 
               true ->
