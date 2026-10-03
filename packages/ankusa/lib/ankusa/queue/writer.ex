@@ -224,15 +224,9 @@ defmodule Ankusa.Queue.Writer do
   # that will commit) plus the fresh items, their dedupe ops, and the count.
   # A stored entry counts as a duplicate only while `expires_at > now`.
   defp dedupe_check(instance, items, now) do
-    keyed =
-      Enum.filter(items, fn {env, _bin, _mods, ttl} ->
-        is_binary(env.dedupe_key) and is_integer(ttl)
-      end)
+    keyed = Enum.filter(items, fn {env, _bin, _mods, ttl} -> dedupe?(env, ttl) end)
 
-    keys =
-      Enum.map(keyed, fn {env, _bin, _mods, _ttl} ->
-        Keys.dedupe(env.tenant_id || "default", env.source_id, env.dedupe_key)
-      end)
+    keys = Enum.map(keyed, fn {env, _bin, _mods, _ttl} -> u_key(env) end)
 
     case read_stored(instance, keys) do
       {:error, reason} ->
@@ -242,18 +236,13 @@ defmodule Ankusa.Queue.Writer do
         stored =
           keyed
           |> Enum.zip(stored_results)
-          |> Map.new(fn {{env, _bin, _mods, _ttl}, result} ->
-            {Keys.dedupe(env.tenant_id || "default", env.source_id, env.dedupe_key), result}
-          end)
+          |> Map.new(fn {{env, _bin, _mods, _ttl}, result} -> {u_key(env), result} end)
 
         {_seen, results, fresh, dedupe_ops, fresh_count} =
           Enum.reduce(items, {%{}, [], [], [], 0}, fn item, {seen, results, fresh, ops, n} ->
             {env, _bin, _mods, ttl} = item
 
-            key =
-              if is_binary(env.dedupe_key) and is_integer(ttl) do
-                Keys.dedupe(env.tenant_id || "default", env.source_id, env.dedupe_key)
-              end
+            key = if dedupe?(env, ttl), do: u_key(env)
 
             cond do
               key != nil and Map.has_key?(seen, key) ->
@@ -275,20 +264,8 @@ defmodule Ankusa.Queue.Writer do
 
                     new_ops = [
                       {:put, :index, key, <<now + ttl::64, env.id::binary>>},
-                      {:put, :index,
-                       Keys.dedupe_expiry(
-                         now + ttl,
-                         env.tenant_id || "default",
-                         env.source_id,
-                         env.dedupe_key
-                       ), <<>>},
-                      {:delete, :index,
-                       Keys.dedupe_expiry(
-                         old_at,
-                         env.tenant_id || "default",
-                         env.source_id,
-                         env.dedupe_key
-                       )}
+                      {:put, :index, expiry_key(now + ttl, env), <<>>},
+                      {:delete, :index, expiry_key(old_at, env)}
                     ]
 
                     {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1}
@@ -298,13 +275,7 @@ defmodule Ankusa.Queue.Writer do
 
                     new_ops = [
                       {:put, :index, key, <<now + ttl::64, env.id::binary>>},
-                      {:put, :index,
-                       Keys.dedupe_expiry(
-                         now + ttl,
-                         env.tenant_id || "default",
-                         env.source_id,
-                         env.dedupe_key
-                       ), <<>>}
+                      {:put, :index, expiry_key(now + ttl, env), <<>>}
                     ]
 
                     {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1}
@@ -329,6 +300,26 @@ defmodule Ankusa.Queue.Writer do
          }}
     end
   end
+
+  # An entry dedupes only with a key, a ttl, and a tenant the key encoding can
+  # carry. Ingest guarantees the last (it validates the tenant); a direct
+  # `Queue.enqueue` caller may not, and a key builder raising inside the
+  # writer's batch would crash the writer, so such an entry just skips dedupe.
+  defp dedupe?(env, ttl) do
+    is_binary(env.dedupe_key) and is_integer(ttl) and tenant_ok?(env.tenant_id)
+  end
+
+  # `nil` is the default tenant, as everywhere else in the edge. A NUL would
+  # break the expiry key's tenant/source split, so it is refused.
+  defp tenant_ok?(nil), do: true
+  defp tenant_ok?(tenant), do: is_binary(tenant) and :binary.match(tenant, <<0>>) == :nomatch
+
+  defp u_key(env), do: Keys.dedupe(tenant_of(env), env.source_id, env.dedupe_key)
+
+  defp expiry_key(at, env),
+    do: Keys.dedupe_expiry(at, tenant_of(env), env.source_id, env.dedupe_key)
+
+  defp tenant_of(env), do: env.tenant_id || "default"
 
   # No keys means no dedupe anywhere in the batch: skip the store read
   # entirely, so the zero-dedupe hot path never pays for it (and a

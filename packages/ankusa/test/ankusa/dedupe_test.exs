@@ -222,16 +222,99 @@ defmodule Ankusa.DedupeTest do
       )
   end
 
-  test "the same key under two tenants commits twice" do
+  test "the same source and event key under two tenants are two events, each deduped on its own" do
     config = start_edge(%{"demo" => [dedupe: :github]})
+    base = request("demo", "x", [{"x-github-delivery", "d1"}])
+    acme = Map.put(base, :tenant_id, "acme")
+    globex = Map.put(base, :tenant_id, "globex")
 
-    acme = request("demo", "x", [{"x-github-delivery", "d1"}])
-    globex = Map.put(acme, :tenant_id, "globex")
+    assert {:ok, acme1} = Ingest.ingest(config.instance, acme)
+    assert {:ok, globex1} = Ingest.ingest(config.instance, globex)
+    assert acme1.id != globex1.id
 
-    assert {:ok, env1} = Ingest.ingest(config.instance, acme)
-    assert {:ok, env2} = Ingest.ingest(config.instance, globex)
-    assert env1.id != env2.id
+    # A retry collapses onto its own tenant's original, never the other's.
+    assert {:duplicate, acme2} = Ingest.ingest(config.instance, acme)
+    assert {:duplicate, globex2} = Ingest.ingest(config.instance, globex)
+    assert acme2.id == acme1.id
+    assert globex2.id == globex1.id
     assert length(stored_ids(config.instance)) == 2
+  end
+
+  defp direct_env(tenant_id) do
+    %Envelope{
+      id: Ankusa.UUIDv7.generate(),
+      source_id: "demo",
+      tenant_id: tenant_id,
+      received_at: System.system_time(:millisecond),
+      method: "POST",
+      path: "/demo",
+      headers: [],
+      body: "x",
+      dedupe_key: "d1"
+    }
+  end
+
+  defp direct_entry(env),
+    do: %{envelope: env, sinks: [{Ankusa.Sink.Log, []}], dedupe_ttl_ms: 60_000}
+
+  test "a direct enqueue with no tenant dedupes under the default tenant" do
+    config = start_edge(%{"demo" => []})
+    inst = config.instance
+
+    assert {:ok, [{:committed, first}]} =
+             Ankusa.Queue.enqueue(inst, [direct_entry(direct_env(nil))])
+
+    assert {:ok, [{:duplicate, again}]} =
+             Ankusa.Queue.enqueue(inst, [direct_entry(direct_env(nil))])
+
+    assert again.id == first.id
+
+    assert {:ok, <<_at::64, _id::binary>>} =
+             Store.get(inst, :index, Keys.dedupe("default", "demo", "d1"))
+  end
+
+  test "a tenant the key encoding cannot carry skips dedupe and leaves the writer alive" do
+    config = start_edge(%{"demo" => []})
+    inst = config.instance
+    writer = Ankusa.whereis(inst, :queue_writer)
+
+    for tenant <- ["a" <> <<0>> <> "b", :acme] do
+      assert {:ok, [{:committed, _}]} =
+               Ankusa.Queue.enqueue(inst, [direct_entry(direct_env(tenant))])
+
+      assert {:ok, [{:committed, _}]} =
+               Ankusa.Queue.enqueue(inst, [direct_entry(direct_env(tenant))])
+    end
+
+    assert Ankusa.whereis(inst, :queue_writer) == writer
+    assert length(stored_ids(inst)) == 4
+  end
+
+  test "the sweep drops an expiry key it cannot decode instead of failing" do
+    config = start_edge(%{"demo" => []})
+    inst = config.instance
+
+    # No tenant/source separator: `decode_dedupe_expiry/1` answers `:error`.
+    bad = <<?e, 1::64, "no-separator">>
+    :ok = Store.write(inst, [{:put, :index, bad, <<>>}], sync: true)
+
+    send(Ankusa.whereis(inst, :queue_writer), :sweep_dedupe)
+
+    deadline = System.monotonic_time(:millisecond) + 2_000
+
+    wait = fn wait ->
+      case Store.get(inst, :index, bad) do
+        :not_found ->
+          :ok
+
+        _present ->
+          if System.monotonic_time(:millisecond) > deadline,
+            do: flunk("malformed expiry key was not swept within 2s"),
+            else: Process.sleep(20) && wait.(wait)
+      end
+    end
+
+    wait.(wait)
   end
 
   test "new!/1 rejects malformed specs" do

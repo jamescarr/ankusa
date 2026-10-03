@@ -405,6 +405,18 @@ defmodule Ankusa.Admin.RouterTest do
     conn = call(inst, :post, "/v1/replays", "")
     assert conn.status == 400
     assert %{"error" => "invalid_filter", "field" => "kind"} = JSON.decode!(conn.resp_body)
+
+    # A key from the other kind is refused, not dropped: a dlq spec carrying
+    # an archive window must never become an unbounded DLQ replay.
+    conn = call(inst, :post, "/v1/replays", ~s({"kind":"dlq","from":0,"to":1000}))
+    assert conn.status == 400
+    assert %{"error" => "invalid_filter", "field" => "from"} = JSON.decode!(conn.resp_body)
+
+    conn =
+      call(inst, :post, "/v1/replays", ~s({"kind":"archive","from":0,"to":1000,"since":5}))
+
+    assert conn.status == 400
+    assert %{"error" => "invalid_filter", "field" => "since"} = JSON.decode!(conn.resp_body)
   end
 
   test "an archive job on a node without a queue writer is 409 role_not_enabled/edge" do

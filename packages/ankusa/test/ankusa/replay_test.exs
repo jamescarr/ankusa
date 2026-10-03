@@ -40,7 +40,7 @@ defmodule Ankusa.ReplayTest do
     @behaviour Ankusa.Sink
 
     @impl true
-    def deliver(env, ctx, opts) do
+    def deliver(env, _ctx, opts) do
       send(Keyword.fetch!(opts, :pid), {:gated, env.id})
       Process.sleep(Keyword.get(opts, :sleep_ms, 0))
       :ok
@@ -416,6 +416,73 @@ defmodule Ankusa.ReplayTest do
     {:ok, job} = Replay.get(inst, job.id)
     assert job.moved == 3
     assert {:ok, _} = Store.get(inst, :index, bad_key)
+
+    # It stays listable: one corrupt row must not take `GET /v1/dlq` down.
+    assert {:ok, %{total: 1, entries: [%{reason: "undecodable delivery row"}]}} =
+             Ankusa.Queue.dead(inst, limit: 10)
+  end
+
+  # Dead index entries only: the scan reads the key and its `{source, id}`
+  # value, so rows a filter skips never need a hook or a delivery row.
+  defp dead_keys!(inst, source_id, first_seq, count, at) do
+    ops =
+      for seq <- first_seq..(first_seq + count - 1) do
+        {:put, :index, Keys.dead(at, seq, 0), :erlang.term_to_binary({source_id, "id-#{seq}"})}
+      end
+
+    :ok = Store.write(inst, ops, sync: true)
+  end
+
+  test "dead_page halts at its scan budget before the filter, and resumes from its cursor" do
+    config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
+    inst = config.instance
+    at = System.system_time(:millisecond) - 120_000
+    dead_keys!(inst, "a", 2_000_001, 25, at)
+    write_dead!(inst, 3_000_000, build_env("b"), RecordSink, at + 1_000)
+
+    range = {<<?x, 0::64>>, <<?x, at + 2_000::64>>}
+
+    # Ten keys examined, none of them "b": the page ends there, reports the
+    # cursor it reached, and does not claim the range is exhausted.
+    assert {:ok, [], last, false, 10} =
+             Deliveries.dead_page(inst, range, %{source_id: "b"}, 100, 10)
+
+    assert last == Keys.dead(at, 2_000_010, 0)
+
+    # The next page, from that cursor, reaches the "b" row and finishes.
+    assert {:ok, [{_key, 3_000_000, 0}], _last, true, 16} =
+             Deliveries.dead_page(
+               inst,
+               {last <> <<0>>, elem(range, 1)},
+               %{source_id: "b"},
+               100,
+               100
+             )
+  end
+
+  test "a job whose first matching row is past one tick's scan budget still moves it" do
+    config =
+      start(%{
+        "a" => [sinks: [{RecordSink, pid: self()}]],
+        "b" => [sinks: [{RecordSink, pid: self()}]]
+      })
+
+    inst = config.instance
+    at = System.system_time(:millisecond) - 120_000
+
+    # More "a" rows than the replayer examines in one tick (20 000), all
+    # dead-lettered before the single "b" row.
+    dead_keys!(inst, "a", 2_000_001, 20_050, at)
+    write_dead!(inst, 3_000_000, build_env("b"), RecordSink, at + 1_000)
+
+    assert {:ok, :created, job} = Replay.start(inst, %{kind: :dlq, source_id: "b", rate: 10_000})
+    poll_job_state(inst, job.id, fn job -> job.state == :done end)
+
+    {:ok, job} = Replay.get(inst, job.id)
+    assert job.moved == 1
+    assert job.scanned == 20_051
+    assert_receive {:replayed, _id, replay_id}, 5_000
+    assert replay_id == job.id
   end
 
   test "archive redrive: compacted hooks re-deliver through the chosen sinks, no new obligations" do

@@ -38,7 +38,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   surface to embedders; replayed deliveries keep the hook's original `id` and
   `dedupe_key` and carry the job id as `replay_id` (also
   `x-ankusa-replay-id`, the `ankusa_replay_id` broker header, and NATS
-  `Nats-Msg-Id` as `id:replay:<replay_id>`).
+  `Nats-Msg-Id` as `id:replay:<replay_id>`). A dead row whose delivery record
+  cannot be decoded is passed over, not dropped or retried: it stays in the
+  DLQ and `GET /v1/dlq` lists it with the reason `undecodable delivery row`.
 - **Message identity and integrity.** Every queue message now carries
   `sha256` (also on inline bodies), `dedupe_key`, `replay_id`, and the
   forwarded provider request `headers` (per the source's `forward_headers`

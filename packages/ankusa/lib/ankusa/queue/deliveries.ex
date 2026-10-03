@@ -406,7 +406,7 @@ defmodule Ankusa.Queue.Deliveries do
           {{at, seq, _sink}, {:ok, row}, {:ok, hook}}, {entries, orphans} ->
             entry = %{
               envelope: %{Envelope.from_binary(hook) | seq: seq},
-              reason: decode_row(row).error,
+              reason: row_error(row),
               at: at
             }
 
@@ -428,6 +428,15 @@ defmodule Ankusa.Queue.Deliveries do
 
       {:ok, %{total: total - length(orphans), entries: Enum.reverse(entries)}}
     end
+  end
+
+  # A delivery row that does not decode still lists: the replay engine leaves
+  # such a row in the DLQ (see `revive_row/7`), so listing must not raise on
+  # it and take the whole page down.
+  defp row_error(bin) do
+    decode_row(bin).error
+  rescue
+    _ -> "undecodable delivery row"
   end
 
   defp matches?(filter, source_id, id, at) do
