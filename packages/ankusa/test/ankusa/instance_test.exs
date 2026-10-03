@@ -71,24 +71,30 @@ defmodule Ankusa.InstanceTest do
     end
   end
 
-  # Kill `pid_fun.()` over and over, waiting for the supervisor to bring it
-  # back each time, until the subtree gives up (its budget is 3 restarts in
-  # 5 s, so four kills).
-  defp kill_until_down(inst, domain, pid_fun, kills \\ 10) do
-    cond do
-      Isolated.subtree(inst, domain) == nil ->
-        :ok
+  # Kill `pid_fun.()` over and over until the subtree gives up (its budget is 3
+  # restarts in 5 s, so four kills). After each kill wait for one of the two
+  # outcomes: a new process (kill again) or the subtree gone. `nil` in between,
+  # while the supervisor is restarting or the manager has not yet handled its
+  # supervisor's exit, is neither.
+  defp kill_until_down(inst, domain, pid_fun, kills \\ 10)
 
-      kills == 0 ->
-        flunk("#{domain} subtree never exhausted its restart budget")
+  defp kill_until_down(_inst, domain, _pid_fun, 0),
+    do: flunk("#{domain} subtree never exhausted its restart budget")
 
-      true ->
-        pid = pid_fun.()
-        Process.exit(pid, :kill)
-        eventually(fn -> pid_fun.() != pid end)
-        kill_until_down(inst, domain, pid_fun, kills - 1)
-    end
+  defp kill_until_down(inst, domain, pid_fun, kills) do
+    pid = pid_fun.()
+    assert is_pid(pid)
+    Process.exit(pid, :kill)
+
+    eventually(fn ->
+      Isolated.subtree(inst, domain) == nil or replaced?(pid_fun.(), pid)
+    end)
+
+    if Isolated.subtree(inst, domain) != nil,
+      do: kill_until_down(inst, domain, pid_fun, kills - 1)
   end
+
+  defp replaced?(new, old), do: is_pid(new) and new != old
 
   @tag :capture_log
   test "a dispatch subtree that exhausts its restart budget leaves the edge up and comes back" do

@@ -42,7 +42,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   (`{:error, :caller_gone}`).
 - `Ankusa.Edge.Batcher.commit/4`'s `timeout` bounds how long a record may wait
   before its batch *starts* committing (15 s by default), not the commit
-  itself.
+  itself. `:infinity` still means no bound.
 - `Ankusa.Sink.safe_deliver/4` returns `{:error, {:bad_return, value}}` for
   any return value other than `:ok` or `{:error, _}`. Dispatch, lifecycle
   events and the `wal: :none` ack path all deliver through it.

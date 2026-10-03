@@ -273,10 +273,12 @@ where it happens:
   outlive it unregistered. The instance notices and stops itself so that
   whatever supervises it starts it again, every process registered anew.
 
-A crash report prints a process's state and the message it was handling, so
-the processes that hold sink options (dispatch, lifecycle, storage, the
+A crash report prints a process's state and the message it was handling. The
+processes whose state holds sink options (dispatch, lifecycle, storage, the
 sweeper, the rate limiter, the writable source store, the batchers) redact them
-from their status. Supervisors cannot: their child specs carry the config, so
+from the state they report; the batchers and the writable source store also
+from the message, since their calls carry a hook's or a source's sinks.
+Supervisors cannot: their child specs carry the config, so
 `:sys.get_status/1` on a supervisor, or a supervisor report when SASL reports
 are turned on (`handle_sasl_reports`, off by default), still prints it.
 

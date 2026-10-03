@@ -64,23 +64,27 @@ defmodule Ankusa.Edge.Batcher do
   call: a failed commit (or a dead writer process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
 
-  `timeout` (milliseconds) bounds how long the record may wait before its batch
-  *starts* committing. Once it has started the call waits for the outcome, so a
-  slow disk is never answered `:store_unavailable` for a hook it then commits
-  (see the moduledoc for the crash windows that still can).
+  `timeout` (milliseconds, or `:infinity`) bounds how long the record may wait
+  before its batch *starts* committing. Once it has started the call waits for
+  the outcome, so a slow disk is never answered `:store_unavailable` for a hook
+  it then commits (see the moduledoc for the crash windows that still can).
   """
-  @spec commit(atom(), non_neg_integer(), Queue.entry(), non_neg_integer()) ::
+  @spec commit(atom(), non_neg_integer(), Queue.entry(), timeout()) ::
           {:committed, Ankusa.Envelope.t()}
           | {:error, :overload | :store_unavailable}
   def commit(instance, partition, record, timeout \\ 15_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-
     GenServer.call(
       Ankusa.via(instance, {:batcher, partition}),
-      {:enqueue, record, deadline},
+      {:enqueue, record, deadline(timeout)},
       :infinity
     )
   end
+
+  # `:infinity` stays an atom all the way to the writer. Atoms sort above every
+  # integer, so it is never `<= now`, never the minimum of a batch that holds a
+  # real deadline, and never earlier than an armed one.
+  defp deadline(:infinity), do: :infinity
+  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
 
   # ── server ────────────────────────────────────────────────────────────────
 
@@ -329,6 +333,9 @@ defmodule Ankusa.Edge.Batcher do
     deadline = state.buffer |> Enum.map(fn {_from, _record, d} -> d end) |> Enum.min()
     arm_expiry(state, deadline)
   end
+
+  # A record with no deadline never expires: no timer to arm.
+  defp arm_expiry(state, :infinity), do: state
 
   defp arm_expiry(state, deadline) do
     ref = Process.send_after(self(), :expire, max(deadline - now(), 0))

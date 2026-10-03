@@ -262,6 +262,37 @@ defmodule Ankusa.EdgeTest do
   end
 
   @tag :capture_log
+  test "an :infinity timeout waits behind a stuck commit and never expires; a finite one beside it does" do
+    inst = start_stalled_edge()
+    batcher = Ankusa.whereis(inst, {:batcher, 0})
+    writer = Ankusa.whereis(inst, :queue_writer)
+    :ok = :sys.suspend(writer)
+
+    a = entry(1)
+    b = entry(2)
+    c = entry(3)
+    task_a = commit_in_task(inst, a, :infinity)
+    eventually(fn -> inflight?(batcher) end)
+    task_b = commit_in_task(inst, b, :infinity)
+    eventually(fn -> :sys.get_state(batcher).count == 1 end)
+    task_c = commit_in_task(inst, c, 200)
+
+    # C expires behind the stuck commit; B, with no deadline, keeps waiting.
+    assert {:ok, {:error, :store_unavailable}} = Task.yield(task_c, 1_000)
+    assert Task.yield(task_b, 0) == nil
+    assert Ankusa.whereis(inst, {:batcher, 0}) == batcher
+
+    :ok = :sys.resume(writer)
+    assert {:committed, _} = Task.await(task_a)
+    assert {:committed, _} = Task.await(task_b)
+
+    stored = stored_ids(inst)
+    assert a.envelope.id in stored
+    assert b.envelope.id in stored
+    refute c.envelope.id in stored
+  end
+
+  @tag :capture_log
   test "the writer refuses a batch whose deadline passed before it could start" do
     inst = start_stalled_edge()
     writer = Ankusa.whereis(inst, :queue_writer)
