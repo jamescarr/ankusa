@@ -3,12 +3,31 @@ defmodule Ankusa.Instance do
   Supervises one instance of the framework from a `%Ankusa.Config{}`. Only the
   children for configured roles boot, so the same code runs any role set. The
   boundaries between components are durable state (this node's store), not
-  function calls.
+  function calls. The store is node-local, so every role that reads or writes
+  hooks has to run on the node that holds it.
 
-  Components hand work to each other through the store; killing the storage or
-  dispatch tree never stops the edge from acking. There are no links across
-  component boundaries. The store is node-local, so every role that reads or
-  writes hooks has to run on the node that holds it.
+  ## Failure domains
+
+  The tree is `:rest_for_one`, and what the instance does when a part of it
+  fails depends on which part:
+
+    * **The core** — the store, the source store and the edge subtree (routes,
+      queue writer, quarantine, rate limiter, batchers, ingress listener) — is
+      what acks hooks. A crash there restarts whatever depends on it: the edge
+      restarts with the store it writes to, and everything started after it
+      restarts with the edge. A core that keeps crashing exhausts this
+      supervisor's budget and the instance stops, for its parent to restart.
+    * **Every other domain** — dispatch, archive/storage, lifecycle events,
+      metrics, and the admin, route-admin and claim-check listeners — runs
+      under `Ankusa.Instance.Isolated`. It has its own restart budget, and when
+      that is exhausted it is restarted later with backoff instead of taking
+      the instance down. A broken sink, a port someone else took or a full
+      object store stops that domain, not the edge acking hooks; the hooks wait
+      in the store and are dispatched when the domain returns.
+    * **The registry** — a restart of `Ankusa.Registry` forgets every name an
+      instance process registered. `Ankusa.Instance.RegistryWatch` notices and
+      stops the instance, so whatever supervises it starts it again, every
+      process registered anew.
   """
 
   use Supervisor
@@ -16,6 +35,7 @@ defmodule Ankusa.Instance do
   require Logger
 
   alias Ankusa.Config
+  alias Ankusa.Instance.Isolated
 
   @spec start_link(Config.t()) :: Supervisor.on_start()
   def start_link(%Config{} = config) do
@@ -42,19 +62,28 @@ defmodule Ankusa.Instance do
     opts = [instance: config.instance, config: config]
 
     children =
-      metrics_children(config, opts) ++
+      [{Ankusa.Instance.RegistryWatch, config.instance}] ++
+        metrics_children(config, opts) ++
         store_children(config, opts) ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
-        routes_children(config, opts) ++
         edge_children(config, opts) ++
         routes_admin_children(config) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
-        claim_check_children(config, opts) ++
-        admin_children(config, opts)
+        claim_check_children(config) ++
+        admin_children(config)
 
-    Supervisor.init(children, strategy: :one_for_one)
+    # `:any_significant`: the registry watcher is the only significant child.
+    # Its exit takes this supervisor down, and the instance's parent restarts
+    # it.
+    Supervisor.init(children, strategy: :rest_for_one, auto_shutdown: :any_significant)
+  end
+
+  # One optional subtree behind its own restart budget: see
+  # `Ankusa.Instance.Isolated`.
+  defp isolated(config, domain, children) do
+    [{Isolated, instance: config.instance, domain: domain, children: children}]
   end
 
   # The admin API's Prometheus reporter, first of all: it attaches its handlers
@@ -62,7 +91,7 @@ defmodule Ankusa.Instance do
   # while starting — boot-time dispatch of the stored backlog, ingest the edge
   # accepts before the rest of the tree is up — are counted.
   defp metrics_children(config, opts) do
-    if config.admin.enabled, do: [{Ankusa.Metrics, opts}], else: []
+    if config.admin.enabled, do: isolated(config, :metrics, [{Ankusa.Metrics, opts}]), else: []
   end
 
   # The node's local store. Roles that read or write hooks, deliveries or the
@@ -72,19 +101,16 @@ defmodule Ankusa.Instance do
   defp store_children(config, opts) do
     if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
          match?({Ankusa.SourceStore.Persistent, _}, config.source_store) do
-      [{Ankusa.Store, opts}] ++ writer_children(config, opts)
+      [{Ankusa.Store, opts}]
     else
       []
     end
   end
 
-  # The one process that assigns seqs and commits hooks. Only an `:edge` node
-  # writes hooks, and only under `wal: :disk`: under `wal: :none` ingest acks on
-  # a sink's confirm and nothing is committed.
-  defp writer_children(%Config{wal: :disk} = config, opts) do
-    if Config.role?(config, :edge), do: [{Ankusa.Queue.Writer, opts}], else: []
-  end
-
+  # The one process that assigns seqs and commits hooks, in the edge subtree
+  # (only an `:edge` node writes hooks). Only under `wal: :disk`: under
+  # `wal: :none` ingest acks on a sink's confirm and nothing is committed.
+  defp writer_children(%Config{wal: :disk}, opts), do: [{Ankusa.Queue.Writer, opts}]
   defp writer_children(_config, _opts), do: []
 
   # A writable store (e.g. `Ankusa.SourceStore.Persistent`) must be up before the
@@ -105,23 +131,44 @@ defmodule Ankusa.Instance do
   # on every node whatever its roles: the admin API that makes the changes runs
   # on any node. It starts before every listener that can make one.
   defp lifecycle_children(%Config{lifecycle: %{sinks: []}}, _opts), do: []
-  defp lifecycle_children(_config, opts), do: [{Ankusa.Lifecycle.Publisher, opts}]
 
+  defp lifecycle_children(config, opts),
+    do: isolated(config, :lifecycle, [{Ankusa.Lifecycle.Publisher, opts}])
+
+  # Everything that stands between a request and the ack, in one subtree
+  # (`:rest_for_one`, so each child restarts with what it depends on):
+  # a crash anywhere in it restarts the rest of it, never the store.
   defp edge_children(config, opts) do
     if Config.role?(config, :edge) do
+      # The route definitions and the decision cache, before the ingress
+      # listener accepts a request: the guard fails closed, so a store that
+      # isn't up yet would reject every hook.
+      edge =
+        routes_children(config, opts) ++
+          writer_children(config, opts) ++
+          [
+            {Ankusa.Edge.Quarantine, opts},
+            # Before the batchers and the listener, so the tables exist before
+            # the first request can reach `Ingest`.
+            {Ankusa.Edge.RateLimiter, opts}
+          ] ++
+          batcher_children(config, opts) ++
+          [
+            {Bandit,
+             plug: {Ankusa.Edge.Router, [instance: config.instance]},
+             scheme: :http,
+             port: config.port}
+          ]
+
       [
-        {Ankusa.Edge.Quarantine, opts},
-        # Before the batchers and the listener, so the tables exist before the
-        # first request can reach `Ingest`.
-        {Ankusa.Edge.RateLimiter, opts}
-      ] ++
-        batcher_children(config, opts) ++
-        [
-          {Bandit,
-           plug: {Ankusa.Edge.Router, [instance: config.instance]},
-           scheme: :http,
-           port: config.port}
-        ]
+        %{
+          id: {:edge, config.instance},
+          start:
+            {Supervisor, :start_link,
+             [edge, [strategy: :rest_for_one, name: Ankusa.via(config.instance, :edge)]]},
+          type: :supervisor
+        }
+      ]
     else
       []
     end
@@ -132,9 +179,6 @@ defmodule Ankusa.Instance do
   defp batcher_children(%Config{wal: :none}, _opts), do: []
   defp batcher_children(_config, opts), do: [{Ankusa.Edge.BatcherSupervisor, opts}]
 
-  # The route definitions and the decision cache, before the ingress listener
-  # accepts a request: the guard fails closed, so a store that isn't up yet
-  # would reject every hook.
   defp routes_children(config, opts) do
     if routes?(config) do
       {store_mod, _store_opts} = config.routes.store
@@ -163,9 +207,9 @@ defmodule Ankusa.Instance do
           "do not expose it publicly, front it with your own proxy or network policy"
       )
 
-      [
+      isolated(config, :routes_admin, [
         bandit_child(Ankusa.Routes.Router, config.instance, config.routes.admin.port)
-      ]
+      ])
     else
       []
     end
@@ -192,28 +236,34 @@ defmodule Ankusa.Instance do
     ]
   end
 
-  defp claim_check_children(config, _opts) do
+  defp claim_check_children(config) do
     if Config.role?(config, :claim_check) do
       Logger.warning(
         "[ankusa] claim-check API on :#{config.claim_check.port} performs no authentication; " <>
           "front it with your own proxy, mesh, or network policy"
       )
 
-      [
+      isolated(config, :claim_check, [
         bandit_child(Ankusa.ClaimCheck.Router, config.instance, config.claim_check.port)
-      ]
+      ])
     else
       []
     end
   end
 
   defp dispatch_children(config, opts) do
-    if Config.role?(config, :dispatch), do: [{Ankusa.Dispatch.Pipeline, opts}], else: []
+    if Config.role?(config, :dispatch),
+      do: isolated(config, :dispatch, [{Ankusa.Dispatch.Pipeline, opts}]),
+      else: []
   end
 
   defp storage_children(config, opts) do
     if Config.role?(config, :storage) do
-      [{Ankusa.Storage.Compactor, opts}] ++ sweeper_children(config, opts)
+      isolated(
+        config,
+        :storage,
+        [{Ankusa.Storage.Compactor, opts}] ++ sweeper_children(config, opts)
+      )
     else
       []
     end
@@ -225,16 +275,16 @@ defmodule Ankusa.Instance do
 
   # The operator API, last, so it only listens once everything it reports on
   # has started.
-  defp admin_children(config, _opts) do
+  defp admin_children(config) do
     if config.admin.enabled do
       Logger.warning(
         "[ankusa] admin API on :#{config.admin.port} is unauthenticated; do not expose it " <>
           "publicly, front it with your own proxy or network policy"
       )
 
-      [
+      isolated(config, :admin, [
         bandit_child(Ankusa.Admin.Router, config.instance, config.admin.port)
-      ]
+      ])
     else
       []
     end

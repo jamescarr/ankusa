@@ -59,12 +59,28 @@ The always-on tests cover:
 - **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with
   `503` once the batcher's queue fills while a commit is in flight, pluggable
   route resolvers (`Path` and `TenantPath`), and that the same body posted
-  twice is stored twice (two ids, two stored hooks). `edge_direct_test.exs`
+  twice is stored twice (two ids, two stored hooks). A commit is never
+  abandoned: a record still buffered at its deadline behind a stuck commit is
+  answered `503` and never stored, the writer refuses a batch whose deadline
+  passed before it could start, a commit stuck longer than the old 5 s writer
+  timeout is waited out and every `201` is stored, and a commit task killed from
+  outside while its call waits for the writer fails only its own batch and
+  leaves nothing of it stored. The batcher's status shows how many records it
+  holds, never their sinks. `edge_direct_test.exs`
   covers the other ack path (`wal: :none`): the `201` body is exactly
-  `{id, status}`, a sink sees the envelope before the response, a refusing or
-  raising sink is `503` with `Retry-After` and is called exactly once, no
-  queue writer or `wal/` directory exists, and an oversized body reaches the
-  sink with `ctx.claim`.
+  `{id, status}`, a sink sees the envelope before the response, a refusing,
+  raising or bad-returning sink is `503` with `Retry-After` and is called
+  exactly once, no queue writer runs and no hook is stored, an oversized
+  body reaches the sink with `ctx.claim`, and a claim check whose blob store
+  exits or returns garbage is a `503` before any sink runs.
+- **Failure domains** (`instance_test.exs`): a dispatch subtree that exhausts
+  its restart budget leaves the edge listener, batchers and store untouched,
+  still acks hooks during the outage and delivers them when the subtree comes
+  back; a restart that fails is retried with a longer delay while the manager
+  stays up; a `Registry` partition crash rebuilds the instance with every
+  process registered again; and no process's status (`:sys.get_status/1`, what
+  a crash report prints) contains sink options, nor does the crash report of a
+  batcher or source store that dies handling a hook or a source write.
 - **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
   exactly once; a failing sink is retried until it succeeds; a failing sink's
   retries do not hold the slots a healthy source needs (D1); one dead row per

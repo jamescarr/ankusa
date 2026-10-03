@@ -25,6 +25,7 @@ defmodule Ankusa.Edge.DirectTest do
       case Keyword.get(opts, :outcome, :ok) do
         :ok -> :ok
         :error -> {:error, :nope}
+        :bad_return -> :error
         :raise -> raise "sink exploded"
       end
     end
@@ -34,12 +35,42 @@ defmodule Ankusa.Edge.DirectTest do
     def inline_max_bytes(opts), do: Keyword.get(opts, :inline_max_bytes)
   end
 
-  defp start_direct(sinks) do
+  # A blob store whose write misbehaves the way user code can: a
+  # `:token_provider` that exits (a `GenServer.call` into a dead process), or a
+  # return the behaviour does not allow.
+  defmodule MisbehavingBlobStore do
+    @moduledoc false
+    @behaviour Ankusa.BlobStore
+
+    @impl true
+    def put(_instance, _key, _data, opts) do
+      case Keyword.fetch!(opts, :mode) do
+        :exit -> exit(:token_provider_down)
+        :bad_return -> :stored
+      end
+    end
+
+    @impl true
+    def get(_, _, _), do: {:error, :not_found}
+    @impl true
+    def get_range(_, _, _, _, _), do: {:error, :not_found}
+    @impl true
+    def delete(_, _, _), do: :ok
+    @impl true
+    def list(_, _, _), do: []
+  end
+
+  defp start_direct(sinks, overrides \\ []) do
     config =
       test_config(
-        roles: [:edge],
-        wal: :none,
-        source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: sinks]}}
+        Keyword.merge(
+          [
+            roles: [:edge],
+            wal: :none,
+            source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: sinks]}}
+          ],
+          overrides
+        )
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -95,6 +126,16 @@ defmodule Ankusa.Edge.DirectTest do
     assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
   end
 
+  test "a sink that returns something other than :ok or {:error, _} is the same 503" do
+    config = start_direct([{CaptureSink, [to: self(), outcome: :bad_return]}])
+
+    conn = route(config, "demo", "{}")
+
+    assert conn.status == 503
+    assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
+    assert_received {:delivered, _, _}
+  end
+
   test "publishes to every sink in declaration order, stopping at the first refusal" do
     config =
       start_direct([
@@ -147,5 +188,21 @@ defmodule Ankusa.Edge.DirectTest do
     assert %Ankusa.ClaimCheck.Ref{} = ctx.claim.ref
     assert is_binary(ctx.claim.sha256)
     assert ctx.claim.ref.tenant_id == env.tenant_id
+  end
+
+  for mode <- [:exit, :bad_return] do
+    @tag :capture_log
+    test "a claim check whose blob store #{mode}s is a 503, and the sink never runs (#{mode})" do
+      config =
+        start_direct([{CaptureSink, [to: self(), inline_max_bytes: 16]}],
+          storage: %{blob_store: {MisbehavingBlobStore, [mode: unquote(mode)]}}
+        )
+
+      conn = route(config, "demo", String.duplicate("x", 64))
+
+      assert conn.status == 503
+      assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
+      refute_received {:delivered, _, _}
+    end
   end
 end

@@ -159,7 +159,7 @@ From here, ingest is done. Two independent consumers work off the same store:
 | Component | Guarantee |
 | --- | --- |
 | `Ankusa.Store` (the `wal.type: disk` queue) | One RocksDB database per instance. A commit is one synced batch: the hook, one pending delivery row per sink, an archive obligation while `:storage` runs, and the seq marker. A torn tail (an unacked write) is dropped on open; damage before it refuses to start (`{:store_open_failed, …}`) rather than silently shortening a read. LocalFS blob writes are fsynced (temp file, rename, directory). |
-| Group-commit batcher | One process per partition; the store commit runs in a task, so commits pipeline while callers block until their own commit returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. |
+| Group-commit batcher | One process per partition; the store commit runs in a supervised task, so commits pipeline while callers block until their own commit returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. Every record carries a deadline (15 s by default) for its batch to *start* committing: a record still buffered at its deadline behind a stalled commit is answered `503` and dropped, and the writer refuses a batch that missed its deadline. A batch the writer has started is never abandoned, so a stall never answers `503` for a hook it then commits; a process dying while the writer is mid-commit (the commit task, the batcher, or the writer after its sync) still can, and the provider's retry stores that hook again. |
 | Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `wal.type: none` it is every sink's confirm. Ingest does no deduplication, so a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
 | `wal: :none` (direct ack) | Ingest publishes to every sink in the request and answers `201` only after each confirmed; the first refusal is a `503` with `Retry-After`, with no internal retry. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `Ankusa.Sink.durable?/2` is the per-sink promise, checked at boot for every static source. The quarantine pen is the only local state this mode has at all; it lives in the store, and rows appear only for a source that asks for it. |
 | Compactor | Never writes one object per hook: it takes archive obligations byte-sized up to `storage.roll_bytes` and packs them into one immutable segment plus one index object. A failed blob write ends the tick and the same hooks are retried next tick. |
@@ -250,6 +250,35 @@ that exist only to read the queue have no work, so `Ankusa.Config.new/1` drops
 all-role deployment can flip `wal.type` with no other change. No component may
 require another to be *reachable at runtime*; they only ever hand off through
 the store and the object store.
+
+### Failure domains
+
+The instance supervisor is `:rest_for_one`, and what a failure costs depends on
+where it happens:
+
+- **The core** is the store, the source store and the edge subtree (routes,
+  queue writer, quarantine, rate limiter, batchers, the ingress listener). It is
+  what acks hooks, so a crash there restarts what depends on it, and a core that
+  keeps crashing stops the instance for its supervisor to restart.
+- **Every other domain** (dispatch, storage, lifecycle events, metrics, and the
+  admin, route-admin and claim-check listeners) runs under its own restart
+  budget. When that is exhausted it is restarted later, backing off from 1 s up
+  to 60 s, instead of taking the instance down: a sink that keeps raising or a
+  port someone else took stops that domain, not the edge. Hooks wait in the
+  store and are dispatched when the domain returns. A child that cannot start
+  when the instance *boots* still fails the boot. Each outage emits
+  `[:ankusa, :instance, :subtree_down]` and each recovery `:subtree_up`.
+- **The registry.** A restart of `Ankusa.Registry`, or of one of its partitions,
+  forgets every name an instance registered, and the processes that trap exits
+  outlive it unregistered. The instance notices and stops itself so that
+  whatever supervises it starts it again, every process registered anew.
+
+A crash report prints a process's state and the message it was handling, so
+the processes that hold sink options (dispatch, lifecycle, storage, the
+sweeper, the rate limiter, the writable source store, the batchers) redact them
+from their status. Supervisors cannot: their child specs carry the config, so
+`:sys.get_status/1` on a supervisor, or a supervisor report when SASL reports
+are turned on (`handle_sasl_reports`, off by default), still prints it.
 
 ## Deployment topologies
 
@@ -384,7 +413,8 @@ that asks for it. See
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix:
 `ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `quarantine`,
-`rate_limit`, `claim_check`. Components emit events; they never call each
+`rate_limit`, `claim_check`, `instance` (a failure domain going down or coming
+back). Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
 code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for
 the full event list and measurement/metadata shapes.

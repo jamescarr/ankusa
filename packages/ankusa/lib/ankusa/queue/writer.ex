@@ -75,7 +75,28 @@ defmodule Ankusa.Queue.Writer do
   end
 
   @impl true
-  def handle_call({:enqueue, items}, _from, state) do
+  def handle_call({:enqueue, items, deadline}, {caller, _tag}, state) do
+    cond do
+      expired?(deadline) ->
+        # Not started, so nothing to undo: no seq consumed, no store touched.
+        {:reply, {:error, :deadline_exceeded}, state}
+
+      # The caller died while its call waited here (a commit task killed from
+      # outside, or taken down with its batcher). The batcher has already
+      # answered those hooks 503, so committing the batch would store hooks
+      # nobody acked. Callers are always local: the Registry is node-local.
+      not Process.alive?(caller) ->
+        {:reply, {:error, :caller_gone}, state}
+
+      true ->
+        commit_batch(items, state)
+    end
+  end
+
+  defp expired?(:infinity), do: false
+  defp expired?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+
+  defp commit_batch(items, state) do
     # Never behind a previous batch, even if the wall clock steps back: dispatch
     # keeps its scan floor just under the stamps it has seen, and relies on
     # stamps never going down.

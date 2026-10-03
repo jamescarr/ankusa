@@ -11,6 +11,70 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **Failure domains.** `Ankusa.Instance` is now `:rest_for_one`, and dispatch,
+  storage (compactor and claim-check sweeper), lifecycle, metrics and the
+  admin, route-admin and claim-check listeners each run under
+  `Ankusa.Instance.Isolated` with a restart budget of their own. When a
+  domain's budget is exhausted it is restarted later with backoff (1 s doubling
+  to 60 s, reset after a minute up) instead of rebuilding the instance, edge
+  listener included. The store, the source store and the edge (routes, queue
+  writer, quarantine, rate limiter, batchers, ingress listener, now one
+  `rest_for_one` subtree registered as `Ankusa.via(instance, :edge)`) are the
+  core: a crash there restarts what depends on it. A child that cannot start at
+  boot still fails the boot. New telemetry events
+  `[:ankusa, :instance, :subtree_down]` (`:delay_ms`; `:instance`, `:domain`,
+  `:reason`) and `[:ankusa, :instance, :subtree_up]`.
+- `Ankusa.Instance.RegistryWatch`: an instance stops, and its supervisor
+  restarts it, when `Ankusa.Registry` or one of its partitions restarts. A
+  restart used to leave the store and every supervisor running but
+  unregistered (`Ankusa.whereis/2` returned `nil`). The application's own
+  supervisor is now `:rest_for_one` for the same reason.
+
+### Changed
+
+- `Ankusa.Queue.enqueue/3` takes an optional `deadline` (a
+  `System.monotonic_time(:millisecond)` value) and waits for the commit's
+  outcome instead of timing out after 5 s. The writer refuses, without
+  consuming a seq, a batch it could not start before the deadline
+  (`{:error, :deadline_exceeded}`) and one whose caller died while it waited
+  (`{:error, :caller_gone}`).
+- `Ankusa.Edge.Batcher.commit/4`'s `timeout` bounds how long a record may wait
+  before its batch *starts* committing (15 s by default), not the commit
+  itself.
+- `Ankusa.Sink.safe_deliver/4` returns `{:error, {:bad_return, value}}` for
+  any return value other than `:ok` or `{:error, _}`. Dispatch, lifecycle
+  events and the `wal: :none` ack path all deliver through it.
+
+### Fixed
+
+- A stalled store no longer answers `503` for hooks it then commits. It used to
+  answer `503` after 5 s for hooks the writer committed afterwards; now a batch
+  the writer has started is waited out, one it has not is refused, and one
+  whose commit task died before the writer reached it is dropped. A process
+  dying while the writer is mid-commit (the commit task, the batcher, or the
+  writer after its sync) can still answer `503` for a durable hook, which the
+  provider's retry then stores again.
+- The batcher's commit task is supervised, not linked: a commit task that dies
+  fails its own batch, not the batcher and the records buffered behind it.
+- A sink that returns something other than `:ok` or `{:error, _}` is a `503` on
+  the `wal: :none` ack path, not a `CaseClauseError` in the request.
+- A claim check whose blob store write exits, throws or returns something other
+  than `:ok` or `{:error, _}` (a `:token_provider` that exits, say) is
+  `{:error, {:unavailable, _}}`, a `503` under `wal: :none`, not a crashed
+  request.
+- A GenServer crash report (the "terminating" report Logger prints) no longer
+  prints sink options, and neither does `:sys.get_status/1` on these
+  processes: the dispatch pipeline, compactor, claim-check sweeper, rate
+  limiter, lifecycle publisher, writable source store, edge batchers and
+  `Ankusa.Instance.Isolated` redact their state, and the batchers and the
+  writable source store also redact the message being handled. Supervisors
+  still carry the config in their children's start arguments, so
+  `:sys.get_status/1` on a supervisor (and observer) still shows it, and so
+  would supervisor reports if SASL reports were enabled (Logger's
+  `handle_sasl_reports`, off by default).
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

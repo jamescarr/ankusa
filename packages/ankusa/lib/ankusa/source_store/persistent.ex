@@ -108,6 +108,23 @@ defmodule Ankusa.SourceStore.Persistent do
     end
   end
 
+  # A crash report prints the state and the last message: the config is the
+  # whole instance config (its seeded sources carry sink options), and a `put`
+  # carries the new source's sinks.
+  @impl true
+  def format_status(status) do
+    Map.new(status, fn
+      {:state, %{config: _} = state} ->
+        {:state, %{state | config: :redacted}}
+
+      {:message, {:put, tenant, name, _spec, mode}} ->
+        {:message, {:put, tenant, name, :redacted, mode}}
+
+      other ->
+        other
+    end)
+  end
+
   @impl true
   def handle_call({:put, tenant, name, spec, mode}, _from, state) do
     source_id = source_id(tenant, name)

@@ -60,6 +60,14 @@ defmodule Ankusa.Storage.Compactor do
     {:ok, %{instance: instance, config: config, interval: interval, after_seq: 0}}
   end
 
+  # Crash reports print the state; the config carries the object store's
+  # credentials.
+  @impl true
+  def format_status(%{state: %{config: _} = state} = status),
+    do: %{status | state: %{state | config: :redacted}}
+
+  def format_status(status), do: status
+
   # ── ticks ─────────────────────────────────────────────────────────────────
 
   @impl true
