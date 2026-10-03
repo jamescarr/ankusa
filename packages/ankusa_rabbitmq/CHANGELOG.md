@@ -6,6 +6,26 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A publish no queue is bound to receive is no longer reported as delivered:
+  every publish is `mandatory`, and `deliver/3` answers
+  `{:error, {:unroutable, routing_key}}` instead of `:ok`, so the hook is
+  retried and then dead-lettered (a `503` under `wal.type: none`) rather than
+  settled while the broker kept nothing. There is no option to turn this off.
+- A channel the broker closes (a `404` publishing to a deleted exchange, a `406`)
+  is reopened at once on the same connection, re-declaring the exchange. The
+  publish it interrupted answers `{:error, {:channel_closed, reason}}`.
+  Previously every later publish failed with `{:publish_failed, _}` until the
+  node restarted.
+- `:confirm_timeout_ms` is milliseconds. The confirm wait read it as seconds,
+  so an unconfirmed publish blocked the connection for up to 70 s while its
+  caller gave up at 15 s. Each publish now waits for its own confirm only,
+  so one stale publish no longer delays later ones.
+- A channel that fails setup (for example a `406` on `exchange.declare`) no
+  longer leaks an AMQP connection on every retry; the connection is kept and
+  only the channel is retried.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

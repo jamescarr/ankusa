@@ -157,7 +157,10 @@ worked deployment.
 exchange, and everything downstream of that, is the consumer's job. This
 mirrors real AMQP topology ownership: producers own exchanges, consumers
 own their own queues. Adding a fifth consumer later never touches ingest
-config.
+config. Until at least one queue is bound, a hook is not delivered: every
+publish is `mandatory`, so one the exchange routes to no queue fails as
+`{:error, {:unroutable, routing_key}}`, is retried, and is dead-lettered once
+the retry policy gives up (under `wal.type: none` it is a `503`).
 
 **Messages stay small on purpose.** A body under `:inline_max_bytes`
 (default 64 KiB) rides along base64-encoded in the message; anything larger
@@ -205,12 +208,26 @@ per `(instance, exchange)`, started on demand by the first `deliver/3` call,
 registered through the same `Ankusa.Registry`/`Ankusa.via` every other
 instance-scoped process uses (own `DynamicSupervisor`, booted by
 `ankusa_rabbitmq`'s own `Application`, zero changes to `ankusa` core). Every
-publish waits for the broker's **confirm** before `deliver/3` returns `:ok`.
-A return value dispatch trusts as "delivered" really was persisted by
-RabbitMQ, not just handed to a socket. Connection loss doesn't crash the
-GenServer; it retries on a timer and replies `{:error, :not_connected}` to
-publishes meanwhile, which flows straight into the existing
-`Ankusa.RetryPolicy`. No separate reconnect policy to get wrong.
+publish is `mandatory` and waits for the broker's **confirm** of that publish,
+so `deliver/3` returns `:ok` only when at least one queue bound to the exchange
+accepted the message, never just because a socket took it. Surviving a broker
+restart is the queue's property: messages are always published `persistent`,
+and durable classic and quorum queues persist them before confirming. Every
+other result is an error that flows straight into the source's
+`Ankusa.RetryPolicy`:
+
+| Result | Meaning |
+| --- | --- |
+| `:ok` | Confirmed and not returned: at least one queue accepted it. |
+| `{:error, {:unroutable, routing_key}}` | The exchange routed it to no queue. |
+| `{:error, :nacked}` | The broker refused it, e.g. a queue's `reject-publish` overflow. |
+| `{:error, :confirm_timeout}` | No confirm within `:confirm_timeout_ms` (milliseconds, default 5000). |
+| `{:error, {:channel_closed, reason}}` | The broker closed the channel before the confirm (a publish to a deleted exchange is a `404`). The channel is reopened at once on the same connection, re-declaring the exchange. |
+| `{:error, {:publish_failed, reason}}` | The publish itself failed. |
+| `{:error, :not_connected}` | No channel yet. Connection loss doesn't crash the GenServer; it reconnects every `:retry_ms` (default 5000). |
+
+There is no option to turn `mandatory` off, and no separate reconnect policy
+to get wrong.
 
 ### `Sink.Kafka`: topic delivery
 

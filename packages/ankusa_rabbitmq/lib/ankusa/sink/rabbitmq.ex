@@ -12,6 +12,19 @@ defmodule Ankusa.Sink.RabbitMQ do
   ticket without blob-store credentials of its own. The message is
   `Ankusa.Sink.Message`, byte-identical to what `Ankusa.Sink.Kafka` produces.
 
+  `deliver/3` answers `:ok` only when the broker confirmed the message and at
+  least one queue bound to the exchange accepted it: every publish is
+  `mandatory`, so a message the exchange routes to no queue is
+  `{:error, {:unroutable, routing_key}}`, retried by the source's
+  `Ankusa.RetryPolicy` and then dead-lettered like any other sink failure.
+  Surviving a broker restart is the queue's property: messages are always
+  published `persistent`, and durable classic and quorum queues persist them
+  before confirming. The other errors are `{:error, :nacked}` (the broker
+  refused it, e.g. a queue's `reject-publish` overflow),
+  `{:error, :confirm_timeout}`, `{:error, {:channel_closed, reason}}` (the
+  channel is reopened at once, re-declaring the exchange),
+  `{:error, {:publish_failed, reason}}` and `{:error, :not_connected}`.
+
   ## opts
 
     * `:exchange`          — required
@@ -20,8 +33,8 @@ defmodule Ankusa.Sink.RabbitMQ do
     * `:routing_key`       — a static string, or a 1-arity fun `(Envelope.t() -> String.t())`;
                               default `"ankusa.\#{source_id}"`
     * `:inline_max_bytes`  — default 64 KiB (65,536), configurable
-    * `:retry_ms`          — reconnect backoff, default `5_000`
-    * `:confirm_timeout_ms` — publisher-confirm wait, default `5_000`
+    * `:retry_ms`          — reconnect backoff in milliseconds, default `5_000`
+    * `:confirm_timeout_ms` — publisher-confirm wait in milliseconds, default `5_000`
   """
 
   @behaviour Ankusa.Sink

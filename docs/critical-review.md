@@ -445,6 +445,8 @@ The edge answers `2xx` once a hook is durable, and durable is not the same as de
 
 **Fix:** `mandatory: true` with a `basic.return` handler that fails the publish (or an alternate exchange validated at connect), and `durable?/1` returning false until then.
 
+**Status (2026-10-03).** Fixed in `ankusa_rabbitmq`: every publish is `mandatory`, the channel process sends `basic.return` and the publish's own `basic.ack` straight to the connection GenServer, and a return before the ack makes `deliver/3` answer `{:error, {:unroutable, routing_key}}`, which dispatch retries and then dead-letters (a `503` under `wal.type: none`). `durable?/1` keeps the default `true`: `:ok` now means a queue accepted the message. Probe 15 re-run: `{:error, {:unroutable, "ankusa.src"}}` with nothing bound, then 2,000 of 2,000 `:ok` and queued once a queue is bound. In `examples/rabbitmq-consumer`, a hook posted before the worker bound its queue was returned 7 times (`return_unroutable: 7`) and delivered once the worker started.
+
 <a id="b8"></a>
 ### B8 · High · Reproduced — A non-UTF-8 `Content-Type` is acked, never deliverable to a queue sink, and poisons replay
 
@@ -538,6 +540,8 @@ Every delivery for an exchange goes through one GenServer whose `handle_call/3` 
 `ankusa_rabbitmq/lib/ankusa/sink/rabbitmq/connection.ex:63-87`
 
 Only `conn.pid` is monitored. A channel-level error (the exchange deleted or redeclared with different arguments, `404`/`406`, or a broker-initiated channel close) kills the channel process while the connection stays up. `state.chan` keeps pointing at the dead pid, every publish lands in `catch :exit` and returns `{:error, {:publish_failed, _}}`, and every hook retries twelve times into the DLQ until the node restarts. Monitor the channel and reopen it.
+
+**Status (2026-10-03).** Fixed: the channel is monitored, and a broker-closed channel is reopened at once on the live connection, re-declaring the exchange; the publish it interrupted answers `{:error, {:channel_closed, reason}}`. A channel that fails setup no longer leaks its connection on every retry.
 
 <a id="d7"></a>
 ### D7 · Medium · Code — Progress is per envelope, not per sink, and the byte window overshoots
@@ -915,11 +919,10 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 | Claim | Where | Reality |
 |---|---|---|
-| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `202` for quarantine with no way back (E1); `201` then a drop for unroutable RabbitMQ publishes (B1); `201` for a non-UTF-8 header no queue sink can ever take (B8). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed.) |
+| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `202` for quarantine with no way back (E1); `201` for a non-UTF-8 header no queue sink can ever take (B8). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed. The drop of unroutable RabbitMQ publishes, B1, is fixed: they are retried, then dead-lettered.) |
 | "Take the compactor down: ingest keeps acking, the WAL grows, an alarm fires, nothing is lost." | `architecture.md:62-73`, `Ankusa.Instance` module doc | Ingest does keep acking and nothing is lost, and the compactor no longer rebuilds the instance (S1 fixed) — but **an alarm still does not fire**: no store-size or cursor-lag metric is exposed (O5). |
 | Quarantine: "a flood of forged requests can't fill the disk". | `delivery.md:442-444` | Still false: the pen's total size is uncapped, and moving it into the store only makes each write durable — a flood can still fill the disk (E2). |
 | "A hook in the pen was never acked." | `delivery.md:459-460` | Still false: the provider received a `202`, and the pen is still write-only — nothing re-verifies a held hook back into ingest (E1). |
-| A confirm means the message "really was persisted by RabbitMQ". | `ankusa_rabbitmq/lib/ankusa/sink/rabbitmq/connection.ex:7-9` | A publish no queue receives is confirmed too (B1). |
 | "There are no global process names anywhere in the framework." | `architecture.md:220-221` | Every adapter registers fixed node-global supervisors (B7). |
 | One claim-check gateway serves N ingest nodes. | `architecture.md:288-331` | Per-node buckets make other nodes' claims `404` (C1). |
 | "The dynamic store itself isn't shipped yet." | `multi-tenancy.md:127` | `SourceStore.Persistent` and tenant source CRUD ship. |
