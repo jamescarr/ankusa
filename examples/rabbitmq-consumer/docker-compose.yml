@@ -103,7 +103,8 @@ services:
   # HTTP API instead.
   worker:
     build:
-      context: ./worker
+      context: ../..                                    # repo root: package.json
+      dockerfile: examples/rabbitmq-consumer/worker/Dockerfile  # file:-links ../../../packages/sdk-typescript
     depends_on:
       rabbitmq:
         condition: service_healthy

@@ -15,6 +15,6 @@ erl_crash.dump
 **/*.egg-info
 **/.pytest_cache
 **/.mypy_cache
-packages/sdk-typescript
+packages/sdk-typescript/dist
 packages/sdk-rust
 packages/sdk-java
