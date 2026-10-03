@@ -23,8 +23,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
-- `Ankusa.SDK.Admin.replay_dead_letters/2`; `POST /v1/dlq/replay` is gone in
-  favour of replay jobs.
+- The admin client's `replay_dead_letters` function; `POST /v1/dlq/replay` is
+  gone in favour of replay jobs.
 
 ## [0.3.0] - 2026-10-01
 
