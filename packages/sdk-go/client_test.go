@@ -130,16 +130,32 @@ func TestQueryStrings(t *testing.T) {
 	}
 }
 
-// TestReplayEmptyFilterBody: the zero filter still sends a body, `{}`.
-func TestReplayEmptyFilterBody(t *testing.T) {
+// TestReplayRequestShapes: the wire shape of the four replay methods — their
+// paths and methods, and that unset spec/patch fields stay out of the bodies
+// (the conformance vectors do not assert request bodies).
+func TestReplayRequestShapes(t *testing.T) {
+	type request struct {
+		method string
+		path   string
+		body   string
+	}
 	var mu sync.Mutex
-	var bodies []string
+	var requests []request
+
+	const replayJSON = `{"id":"0194f4a0-0000-7000-8000-0000000000aa","kind":"dlq","state":"running","filter":{"source_id":"demo"},"rate":500,"max_lag_ms":2000,"created_at":1720000000000,"updated_at":1720000000000,"finished_at":null,"moved":0,"scanned":0,"skipped":0,"delivered":0,"dead":0,"error":null}`
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		mu.Lock()
-		bodies = append(bodies, string(raw))
+		requests = append(requests, request{method: r.Method, path: r.URL.Path, body: string(raw)})
 		mu.Unlock()
-		_, _ = w.Write([]byte(`{"replayed":0}`))
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/replays" {
+			_, _ = w.Write([]byte(`{"replays":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(replayJSON))
 	}))
 	defer server.Close()
 
@@ -147,15 +163,30 @@ func TestReplayEmptyFilterBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new admin client: %v", err)
 	}
-	if _, err := admin.ReplayDeadLetters(context.Background(), ankusa.ReplayFilter{}); err != nil {
-		t.Fatalf("replay dead letters: %v", err)
+	ctx := context.Background()
+	const id = "0194f4a0-0000-7000-8000-0000000000aa"
+
+	if _, err := admin.CreateReplay(ctx, ankusa.ReplaySpec{Kind: "dlq", SourceID: "demo", Rate: 500}); err != nil {
+		t.Fatalf("create replay: %v", err)
+	}
+	if _, err := admin.GetReplay(ctx, id); err != nil {
+		t.Fatalf("get replay: %v", err)
+	}
+	if _, err := admin.ListReplays(ctx); err != nil {
+		t.Fatalf("list replays: %v", err)
+	}
+	if _, err := admin.UpdateReplay(ctx, id, ankusa.ReplayPatch{State: "paused"}); err != nil {
+		t.Fatalf("update replay: %v", err)
 	}
 
-	if len(bodies) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(bodies))
+	want := []request{
+		{http.MethodPost, "/v1/replays", `{"kind":"dlq","source_id":"demo","rate":500}`},
+		{http.MethodGet, "/v1/replays/" + id, ""},
+		{http.MethodGet, "/v1/replays", ""},
+		{http.MethodPatch, "/v1/replays/" + id, `{"state":"paused"}`},
 	}
-	if bodies[0] != "{}" {
-		t.Errorf("replay body: got %q, want %q", bodies[0], "{}")
+	if !reflect.DeepEqual(requests, want) {
+		t.Errorf("requests:\n got: %+v\nwant: %+v", requests, want)
 	}
 }
 

@@ -26,6 +26,11 @@ defmodule Ankusa.Sink do
           # the envelope's claim-check ref, when dispatch already checked its
           # body in (see `c:inline_max_bytes/1`)
           optional(:claim) => Ankusa.ClaimCheck.claim(),
+          # the replay job id, set on every delivery a replay job re-drives
+          optional(:replay_id) => String.t(),
+          # which provider request headers travel into the sink message
+          # (`Ankusa.Sink.Message.forwarded_headers/2`); absent means `:default`
+          optional(:forward_headers) => :default | [String.t()],
           optional(atom()) => term()
         }
 

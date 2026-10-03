@@ -383,7 +383,7 @@ defmodule Ankusa.DispatchTest do
     assert stored_ids(inst) == [id]
   end
 
-  test "D5: replay re-delivers a dead hook once and then reclaims it" do
+  test "D5: a replay job re-delivers a dead hook once and then reclaims it" do
     {:ok, agent} = Agent.start_link(fn -> :fail end)
 
     inst =
@@ -397,12 +397,32 @@ defmodule Ankusa.DispatchTest do
 
     Agent.update(agent, fn _ -> :ok end)
 
-    assert Ankusa.Dispatch.replay(inst, %{}) == {:ok, 1}
-    assert {:ok, _} = Pipeline.tick(inst)
-    assert_receive {:delivered, id}
+    assert {:ok, :created, job} = Ankusa.Replay.start(inst, %{kind: :dlq, rate: 1_000})
+    assert job.state == :running
+
+    assert_receive {:delivered, id}, 5_000
     assert id == env.id
 
-    assert Ankusa.Dispatch.replay(inst, %{}) == {:ok, 0}
+    # The job finishes and the hook is reclaimed.
+    deadline = System.monotonic_time(:millisecond) + 5_000
+
+    wait = fn wait ->
+      case Ankusa.Replay.get(inst, job.id) do
+        {:ok, %{state: :done, moved: 1, delivered: 1}} ->
+          :ok
+
+        _ ->
+          if System.monotonic_time(:millisecond) > deadline,
+            do: flunk("job did not finish"),
+            else:
+              (
+                Process.sleep(50)
+                wait.(wait)
+              )
+      end
+    end
+
+    wait.(wait)
     assert stored_ids(inst) == []
   end
 

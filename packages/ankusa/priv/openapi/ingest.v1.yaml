@@ -156,6 +156,11 @@ components:
           description: |
             The envelope id Ankusa assigned to this hook (a UUIDv7), generated
             on receipt. Unrelated to the provider's own event id.
+        duplicate:
+          type: boolean
+          description: |
+            `true` when a provider retry was collapsed by the source's dedupe:
+            nothing new was stored, and `id` is the original hook's id.
     Quarantined:
       type: object
       required: [status, reason]

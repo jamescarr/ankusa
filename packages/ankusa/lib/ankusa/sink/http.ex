@@ -15,7 +15,11 @@ defmodule Ankusa.Sink.Http do
 
   The original `env.body` is sent verbatim with the envelope's content-type
   (falling back to `application/octet-stream`). Identity headers `x-ankusa-id`,
-  `x-ankusa-source`, and (when set) `x-ankusa-tenant` are always added. A `2xx`
+  `x-ankusa-source`, and (when set) `x-ankusa-tenant` are always added, plus
+  `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the hook carries them.
+  Provider request headers are forwarded per the source's `forward_headers`
+  option (see `Ankusa.Sink.Message.forwarded_headers/2`); a forwarded name that
+  collides with one of these or with `opts[:headers]` is dropped. A `2xx`
   response is `:ok`;
 
   Redirects are never followed: this body is the hook, and a followed redirect
@@ -26,19 +30,30 @@ defmodule Ankusa.Sink.Http do
   @behaviour Ankusa.Sink
 
   alias Ankusa.HttpClient
+  alias Ankusa.Sink.Message
 
   @impl true
-  def deliver(env, _ctx, opts) do
+  def deliver(env, ctx, opts) do
     timeout = Keyword.get(opts, :timeout_ms, 5000)
 
-    headers =
+    opts_headers =
+      Enum.map(Keyword.get(opts, :headers, []), fn {k, v} -> {to_string(k), to_string(v)} end)
+
+    own =
       [
         {"x-ankusa-id", env.id},
         {"x-ankusa-source", env.source_id},
         {"content-type", env.content_type || "application/octet-stream"}
       ] ++
         tenant_header(env.tenant_id) ++
-        Enum.map(Keyword.get(opts, :headers, []), fn {k, v} -> {to_string(k), to_string(v)} end)
+        dedupe_header(env.dedupe_key) ++
+        replay_header(ctx[:replay_id])
+
+    forwarded =
+      Message.forwarded_headers(env, ctx[:forward_headers] || :default)
+      |> Enum.reject(fn {name, _value} -> owned?(name, own) or owned?(name, opts_headers) end)
+
+    headers = forwarded ++ own ++ opts_headers
 
     case HttpClient.request(
            Keyword.get(opts, :method, :post),
@@ -53,6 +68,18 @@ defmodule Ankusa.Sink.Http do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  # A forwarded name that collides with a header the sink sets, or with one the
+  # operator configured in `opts[:headers]`, is dropped (compared lowercased).
+  defp owned?(name, headers) do
+    Enum.any?(headers, fn {k, _v} -> String.downcase(to_string(k)) == name end)
+  end
+
+  defp dedupe_header(key) when is_binary(key), do: [{"x-ankusa-dedupe-key", key}]
+  defp dedupe_header(_), do: []
+
+  defp replay_header(replay_id) when is_binary(replay_id), do: [{"x-ankusa-replay-id", replay_id}]
+  defp replay_header(_), do: []
 
   defp tenant_header(tenant_id) when is_binary(tenant_id), do: [{"x-ankusa-tenant", tenant_id}]
   defp tenant_header(_), do: []

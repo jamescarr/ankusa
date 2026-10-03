@@ -56,19 +56,30 @@ def test_dlq_and_quarantine_hit_the_right_paths() -> None:
     with ankusa.AdminClient("http://gateway.invalid", transport=_transport(200, page, records)) as client:
         assert client.list_dead_letters() == page
         assert client.list_quarantined() == page
-    with ankusa.AdminClient("http://gateway.invalid", transport=_transport(200, {"replayed": 2}, records)) as client:
-        assert client.replay_dead_letters({"source_id": "demo"}) == {"replayed": 2}
 
-    assert [r.method for r in records] == ["GET", "GET", "POST"]
-    assert [r.url.path for r in records] == ["/v1/dlq", "/v1/quarantine", "/v1/dlq/replay"]
-    assert json.loads(records[2].content) == {"source_id": "demo"}
+    assert [r.method for r in records] == ["GET", "GET"]
+    assert [r.url.path for r in records] == ["/v1/dlq", "/v1/quarantine"]
 
 
-def test_replay_without_filter_sends_empty_object() -> None:
+def test_replay_methods_hit_the_right_paths() -> None:
     records: list[httpx.Request] = []
-    with ankusa.AdminClient("http://gateway.invalid", transport=_transport(200, {"replayed": 3}, records)) as client:
-        assert client.replay_dead_letters() == {"replayed": 3}
-    assert json.loads(records[0].content) == {}
+    replay = {"id": "0194f4a0-0000-7000-8000-0000000000aa", "kind": "dlq", "state": "running"}
+    with ankusa.AdminClient("http://gateway.invalid", transport=_transport(200, replay, records)) as client:
+        assert client.create_replay({"kind": "dlq", "source_id": "demo"}) == replay
+        assert client.get_replay(replay["id"]) == replay
+        assert client.update_replay(replay["id"], {"state": "paused"}) == replay
+    with ankusa.AdminClient("http://gateway.invalid", transport=_transport(200, {"replays": [replay]}, records)) as client:
+        assert client.list_replays() == {"replays": [replay]}
+
+    assert [r.method for r in records] == ["POST", "GET", "PATCH", "GET"]
+    assert [r.url.path for r in records] == [
+        "/v1/replays",
+        f"/v1/replays/{replay['id']}",
+        f"/v1/replays/{replay['id']}",
+        "/v1/replays",
+    ]
+    assert json.loads(records[0].content) == {"kind": "dlq", "source_id": "demo"}
+    assert json.loads(records[2].content) == {"state": "paused"}
 
 
 def test_query_params_sent_only_when_present() -> None:

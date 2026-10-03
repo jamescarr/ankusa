@@ -73,6 +73,9 @@ defmodule Ankusa.Edge.Router do
   defp respond(conn, {:ok, env}),
     do: send_json(conn, 201, %{status: "accepted", id: env.id})
 
+  defp respond(conn, {:duplicate, env}),
+    do: send_json(conn, 201, %{status: "accepted", id: env.id, duplicate: true})
+
   defp respond(conn, {:quarantined, reason}),
     do: send_json(conn, 202, %{status: "quarantined", reason: inspect(reason)})
 

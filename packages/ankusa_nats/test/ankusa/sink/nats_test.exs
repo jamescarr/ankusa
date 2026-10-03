@@ -85,17 +85,20 @@ defmodule Ankusa.Sink.NATSTest do
   } do
     {:ok, _sid} = Gnat.sub(admin, self(), subject)
 
-    env = envelope()
-    assert :ok = NATS.deliver(env, ctx(inst), opts(subject))
+    env = envelope(%{dedupe_key: "evt_1"})
+    assert :ok = NATS.deliver(env, Map.put(ctx(inst), :replay_id, "rid"), opts(subject))
 
     assert_receive {:msg, %{topic: ^subject, body: body, headers: headers}}, 2_000
 
     assert Map.new(headers) == %{
+             "nats-msg-id" => env.id <> ":replay:rid",
              "ankusa_id" => env.id,
              "ankusa_source_id" => "src",
              "ankusa_tenant_id" => "t1",
              "ankusa_message_version" => "1",
-             "content_type" => "application/json"
+             "content_type" => "application/json",
+             "ankusa_dedupe_key" => "evt_1",
+             "ankusa_replay_id" => "rid"
            }
 
     decoded = JSON.decode!(body)

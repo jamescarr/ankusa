@@ -174,15 +174,19 @@ end
 
 defmodule Ankusa.SDK.InvalidMessageError do
   @moduledoc """
-  The bytes aren't a v1 `Ankusa.Sink.Message` payload. `:reason` is one of
-  `:invalid_json`, `:not_an_object`, `{:unsupported_version, v}`,
-  `{:invalid_field, key}`, `:ambiguous_body`, `:invalid_body_base64`, or
-  `:missing_body`.
+  The bytes aren't a valid v1 `Ankusa.Sink.Message` payload. Always
+  `retryable: false` — the same bytes will fail the same way.
+
+  `:code` is a stable string (`"invalid_json"`, `"not_an_object"`,
+  `"unsupported_version"`, `"invalid_field"`, `"ambiguous_body"`,
+  `"missing_body"`, `"invalid_body_base64"`, `"size_mismatch"`, `"integrity"`,
+  `"tenant_mismatch"`); `:field` names the offending key when `:code` is
+  `"invalid_field"`, else `nil`. `:reason` carries the same as an Elixir term.
   """
 
-  @type t :: %__MODULE__{reason: term()}
+  @type t :: %__MODULE__{reason: term(), code: String.t(), field: String.t() | nil}
 
-  defexception [:message, :reason, retryable: false]
+  defexception [:message, :reason, :code, :field, retryable: false]
 end
 
 defmodule Ankusa.SDK.SourceNotFoundError do

@@ -156,6 +156,74 @@ defmodule Ankusa.SDK.MessageTest do
     end
   end
 
+  describe "decode/1 integrity and optional fields" do
+    test "carries dedupe_key, replay_id, and headers" do
+      assert {:ok, message} =
+               decode(
+                 inline_message(%{
+                   "dedupe_key" => "evt_1",
+                   "replay_id" => "rid-1",
+                   "headers" => %{"x-github-event" => "push"},
+                   "sha256" => @sha256
+                 })
+               )
+
+      assert message.dedupe_key == "evt_1"
+      assert message.replay_id == "rid-1"
+      assert message.headers == %{"x-github-event" => "push"}
+      assert message.sha256 == @sha256
+    end
+
+    test "absent optional fields decode to null and an empty headers map" do
+      assert {:ok, message} = decode(inline_message())
+
+      assert message.dedupe_key == nil
+      assert message.replay_id == nil
+      assert message.sha256 == nil
+      assert message.headers == %{}
+    end
+
+    test "rejects headers whose values are not all strings, naming headers" do
+      assert {:error, %InvalidMessageError{code: "invalid_field", field: "headers"}} =
+               decode(inline_message(%{"headers" => %{"x-n" => 42}}))
+    end
+
+    test "rejects a malformed sha256 at the field stage" do
+      assert {:error, %InvalidMessageError{code: "invalid_field", field: "sha256"}} =
+               decode(inline_message(%{"sha256" => "not-hex"}))
+    end
+
+    test "a decoded length other than size is a size_mismatch" do
+      assert {:error, %InvalidMessageError{code: "size_mismatch", retryable: false}} =
+               decode(inline_message(%{"size" => byte_size(@body) + 1}))
+    end
+
+    test "a digest that does not match the body is an integrity error" do
+      assert {:error, %InvalidMessageError{code: "integrity", retryable: false}} =
+               decode(inline_message(%{"sha256" => String.duplicate("a", 64)}))
+    end
+
+    test "a matching inline digest decodes" do
+      assert {:ok, message} = decode(inline_message(%{"sha256" => @sha256}))
+      assert message.body == @body
+    end
+
+    test "rejects a claim that does not parse as a claim ref" do
+      assert {:error, %InvalidMessageError{code: "invalid_field", field: "claim"}} =
+               decode(claim_message(%{"claim" => "not-a-ref"}))
+    end
+
+    test "rejects a claim whose tenant disagrees with tenant_id" do
+      assert {:error, %InvalidMessageError{code: "tenant_mismatch", retryable: false}} =
+               decode(claim_message(%{"tenant_id" => "other"}))
+    end
+
+    test "a claim whose tenant matches, or a null tenant, decodes" do
+      assert {:ok, _message} = decode(claim_message())
+      assert {:ok, _message} = decode(claim_message(%{"tenant_id" => nil}))
+    end
+  end
+
   describe "to_hook/2" do
     test "an inline message makes no request" do
       plug = fn _conn -> flunk("an inline message must not reach the claim check") end
@@ -171,6 +239,25 @@ defmodule Ankusa.SDK.MessageTest do
       assert hook.body == @body
       assert hook.received_at == 1_737_500_000_000
       assert hook.size == byte_size(@body)
+    end
+
+    test "an inline message carries its dedupe key, replay id, and headers onto the hook" do
+      plug = fn _conn -> flunk("an inline message must not reach the claim check") end
+      claim_check = ClaimCheck.new("http://gateway.invalid", req_options: [plug: plug])
+
+      {:ok, message} =
+        decode(
+          inline_message(%{
+            "dedupe_key" => "evt_1",
+            "replay_id" => "rid-1",
+            "headers" => %{"x-github-event" => "push"}
+          })
+        )
+
+      assert {:ok, %Hook{} = hook} = Message.to_hook(message, claim_check)
+      assert hook.dedupe_key == "evt_1"
+      assert hook.replay_id == "rid-1"
+      assert hook.headers == %{"x-github-event" => "push"}
     end
 
     test "a claim message redeems it through the gateway" do

@@ -194,13 +194,19 @@ DLQ directly:
 {:ok, stats} = Ankusa.Queue.stats(:default)             # %{next_seq, hooks, deliveries, disk_bytes}
 {:ok, %{total: n, entries: entries}} = Ankusa.Queue.dead(:default, source_id: "stripe")
 
-{:ok, replayed} = Ankusa.Dispatch.replay(:default, source_id: "stripe")  # rows moved back to pending
+# A durable, paced replay job instead of a one-shot flip:
+{:ok, :created, job} = Ankusa.Replay.start(:default, kind: :dlq, source_id: "stripe", rate: 1_000)
+{:ok, job} = Ankusa.Replay.get(:default, job.id)        # watch moved/delivered/state
+{:ok, job} = Ankusa.Replay.update(:default, job.id, state: :paused)   # or :cancelled / a new :rate
 ```
 
-`Ankusa.Dispatch.replay/2` returns `{:ok, n}` (the number of dead rows moved
-back to pending) and is asynchronous: the pipeline delivers them, and a row
-that fails again is dead-lettered again. Under `wal.type: none` nothing is
-committed, so there is no queue and no DLQ.
+`Ankusa.Replay.start/2` creates a job that drips dead rows back to pending at
+`rate` items per second — only while dispatch has spare capacity — and the
+pipeline delivers them asynchronously; a row that fails again is
+dead-lettered again. The job is durable (its cursor commits with the rows it
+moved) and resumable, and it pauses itself if its deliveries keep
+dead-lettering. Under `wal.type: none` nothing is committed, so there is no
+queue and no DLQ.
 
 ## Deploying your own wrapper app
 

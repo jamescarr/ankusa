@@ -6,6 +6,21 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `decode_message` and `Message`, for consumers of Ankusa's queue: the inline
+  (`body_base64`) and claim (`claim`) body forms, `sha256`/size/tenant
+  validation, forwarded `headers`, and `Message::idempotency_key(include_replay)`.
+- `HookHeaders` gains `dedupe_key`, `replay_id`, and `idempotency_key`.
+- `AdminClient` gains `create_replay`, `get_replay`, `list_replays`, and
+  `update_replay`, with the `Replay`, `ReplayList`, `ReplaySpec`, and
+  `ReplayPatch` models.
+
+### Changed
+
+- Replaced `AdminClient::replay_dead_letters` and its `ReplayFilter`/`Replayed`
+  models with the replay-job API above.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

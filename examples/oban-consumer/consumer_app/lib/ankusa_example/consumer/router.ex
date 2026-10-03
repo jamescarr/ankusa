@@ -1,14 +1,18 @@
 defmodule AnkusaExample.Consumer.Router do
   @moduledoc """
   The HTTP handoff surface `Ankusa.Sink.Http` calls (see `CONSUMER_URL` on
-  the ingest side). Every accepted delivery becomes one uniquely-keyed Oban
-  job; the worker fleet (`AnkusaExample.Consumer.WebhookWorker`) does the
-  actual, idempotent bookkeeping in `processed_webhooks`.
+  the ingest side). Every accepted delivery is recorded in
+  `processed_webhooks` under its idempotency key — `source:dedupe_key` when
+  the request carries `x-ankusa-dedupe-key`, else the ankusa id — and becomes
+  one Oban job. The worker fleet (`AnkusaExample.Consumer.WebhookWorker`)
+  runs the actual business effect and stamps `processed_at`, so a provider
+  retry or a DLQ replay collapses into a `deliveries + 1` bump instead of a
+  second effect.
   """
 
   use Plug.Router
 
-  alias AnkusaExample.Consumer.WebhookWorker
+  alias AnkusaExample.Consumer.{Repo, WebhookWorker}
 
   # Running cap on the body Ankusa may hand off in one request. Chosen to be
   # generous for a webhook payload while still bounding memory per request;
@@ -72,26 +76,74 @@ defmodule AnkusaExample.Consumer.Router do
   end
 
   defp insert_job(conn, ankusa_id, body) do
-    args = %{
-      "ankusa_id" => ankusa_id,
-      "source_id" => header(conn, "x-ankusa-source"),
-      "tenant_id" => header(conn, "x-ankusa-tenant"),
-      "content_type" => header(conn, "content-type"),
-      "body_base64" => Base.encode64(body)
+    source_id = header(conn, "x-ankusa-source") || ""
+
+    # The idempotency key rule: `source:dedupe_key` when the delivery carries
+    # a provider event key, else the ankusa id. A replay of the same event
+    # (same dedupe key) is a duplicate even though the ankusa id is the same;
+    # a deliberately re-sent hook with `x-ankusa-replay-id` is the consumer's
+    # to dedupe or reprocess, so this example treats it as a duplicate too.
+    key =
+      case header(conn, "x-ankusa-dedupe-key") do
+        nil -> ankusa_id
+        dedupe_key -> "#{source_id}:#{dedupe_key}"
+      end
+
+    attrs = %{
+      idempotency_key: key,
+      ankusa_id: ankusa_id,
+      source_id: source_id,
+      tenant_id: header(conn, "x-ankusa-tenant"),
+      body: body,
+      body_sha256: :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
     }
 
-    args
-    |> WebhookWorker.new(unique: [period: :infinity, keys: [:ankusa_id]])
-    |> Oban.insert()
-    |> case do
-      # Oban 2.24's `%Oban.Job{}` carries a `conflict?` boolean: when the
-      # `unique:` key matches an already-inserted job, `Oban.insert/1` still
-      # returns `{:ok, job}`, but `job` is the *existing* row (not a fresh
-      # insert) and `conflict?` is `true`. That's the documented way to
-      # distinguish "this ankusa_id was already queued" from "brand new job"
-      # without a second query — see https://hexdocs.pm/oban/unique_jobs.html.
-      {:ok, %Oban.Job{id: id, conflict?: conflict?}} ->
-        send_resp(conn, 202, JSON.encode!(%{job_id: id, duplicate: conflict?}))
+    # One transaction: the row is the dedupe, and the job joins it. `xmax = 0`
+    # means this insert created the row; the update path means the event
+    # already arrived, and the reply says so without queuing a second job.
+    # The job insert runs inside the same transaction, so a row and its job
+    # commit together or not at all — a lost job insert rolls the row back,
+    # and Ankusa's retry can insert it afresh.
+    result =
+      Repo.transaction(fn ->
+        %Postgrex.Result{rows: [[inserted]]} =
+          Repo.query!(
+            """
+            INSERT INTO processed_webhooks
+              (idempotency_key, ankusa_id, source_id, tenant_id, body, body_sha256, deliveries)
+            VALUES ($1, $2, $3, $4, $5, $6, 1)
+            ON CONFLICT (idempotency_key) DO UPDATE
+              SET deliveries = processed_webhooks.deliveries + 1
+            RETURNING (xmax = 0) AS inserted
+            """,
+            [
+              key,
+              ankusa_id,
+              source_id,
+              attrs.tenant_id,
+              attrs.body,
+              attrs.body_sha256
+            ]
+          )
+
+        case inserted do
+          true ->
+            case %{"idempotency_key" => key} |> WebhookWorker.new() |> Oban.insert() do
+              {:ok, %Oban.Job{id: id}} -> id
+              {:error, reason} -> Repo.rollback({:job_insert, reason})
+            end
+
+          false ->
+            :duplicate
+        end
+      end)
+
+    case result do
+      {:ok, job_id} when is_integer(job_id) ->
+        send_resp(conn, 202, JSON.encode!(%{job_id: job_id, duplicate: false}))
+
+      {:ok, :duplicate} ->
+        send_resp(conn, 202, JSON.encode!(%{job_id: nil, duplicate: true}))
 
       {:error, _reason} ->
         send_resp(conn, 503, "")

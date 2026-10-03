@@ -75,9 +75,8 @@ sleep 20
 curl -s localhost:4002/v1/dlq
 # => {"total":1,"entries":[{"id":"01a0...","source_id":"demo",...}]}
 docker compose start worker
-sleep 1
-curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"demo"}'
-# => {"replayed":1}
+curl -XPOST localhost:4002/v1/replays -d '{"kind":"dlq","source_id":"demo","rate":100}'
+# => 202 {"id":"01a0...","kind":"dlq","state":"running","filter":{"source_id":"demo"},...}
 sleep 1 && docker compose logs worker | grep evt_3
 ```
 
@@ -86,18 +85,23 @@ drill takes seconds; the default is 12 attempts backing off to 30s.
 
 ### Replay is safe
 
-Replay moves matching dead rows back to pending and returns how many it moved;
-delivery then happens asynchronously, in the background. The entry leaves the
-dead-letter queue, so a second replay has nothing to move:
+A replay is a durable job, not a one-shot flip: it drips dead rows back into
+the delivery queue at `rate` items per second, and only while dispatch has
+spare capacity (the oldest-due lag stays under `max_lag_ms`, 2 s by default),
+so it can never flood a recovering sink or starve live traffic. Each replayed
+delivery keeps the hook's original id and carries the job's `replay_id`.
+Watch it and stop it anytime:
 
 ```sh
-curl -XPOST localhost:4002/v1/dlq/replay -d '{"source_id":"demo"}'
-# => {"replayed":0}
+curl -s localhost:4002/v1/replays/<job-id>
+# => {"state":"done","moved":1,"delivered":1,...}
+curl -XPATCH localhost:4002/v1/replays/<job-id> -d '{"state":"cancelled"}'
 ```
 
 Redelivery is still at-least-once, so the receiver stays idempotent: a hook
 that reached the sink before it failed is delivered again with the same
-`x-ankusa-id`, and the worker dedupes on it — here with an in-memory set, which
+`x-ankusa-id` and the same `x-ankusa-dedupe-key`, and the worker dedupes on
+the latter — here with an in-memory set, which
 a real worker replaces with a unique key in its database. In this drill the
 worker was down for every attempt, so replay delivers evt_3 once and never
 again.

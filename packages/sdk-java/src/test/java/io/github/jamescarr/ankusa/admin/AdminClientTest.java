@@ -9,8 +9,15 @@ import io.github.jamescarr.ankusa.TransportRequest;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 
-/** The query strings and replay bodies the vectors do not pin. */
+/** The query strings, paths and replay bodies the vectors do not pin. */
 class AdminClientTest {
+
+  /** One replay job body, shared by every replay response below. */
+  private static final String REPLAY =
+      "{\"id\":\"0194f4a0-0000-7000-8000-0000000000aa\",\"kind\":\"dlq\",\"state\":\"running\","
+          + "\"filter\":{\"source_id\":\"demo\"},\"rate\":500,\"max_lag_ms\":2000,"
+          + "\"created_at\":1720000000000,\"updated_at\":1720000000000,\"finished_at\":null,"
+          + "\"moved\":0,\"scanned\":0,\"skipped\":0,\"delivered\":0,\"dead\":0,\"error\":null}";
 
   private final FakeTransport transport =
       new FakeTransport(
@@ -18,7 +25,12 @@ class AdminClientTest {
               switch (request.uri().getPath()) {
                 case "/v1/dlq" -> FakeTransport.json(200, "{\"total\":0,\"entries\":[]}");
                 case "/v1/quarantine" -> FakeTransport.json(200, "{\"entries\":[]}");
-                case "/v1/dlq/replay" -> FakeTransport.json(200, "{\"replayed\":0}");
+                case "/v1/replays" ->
+                    "POST".equals(request.method())
+                        ? FakeTransport.json(202, REPLAY)
+                        : FakeTransport.json(200, "{\"replays\":[" + REPLAY + "]}");
+                case "/v1/replays/0194f4a0-0000-7000-8000-0000000000aa" ->
+                    FakeTransport.json(200, REPLAY);
                 default -> FakeTransport.json(404, "{}");
               });
 
@@ -58,20 +70,49 @@ class AdminClientTest {
   }
 
   @Test
-  void replay_with_no_filter_sends_an_empty_object() {
-    assertEquals(0, admin.replayDeadLetters().replayed());
+  void create_replay_sends_exactly_the_spec_the_caller_set() {
+    Replay replay =
+        admin.createReplay(ReplaySpec.builder().kind("dlq").sourceId("demo").rate(500).build());
+
+    assertEquals("0194f4a0-0000-7000-8000-0000000000aa", replay.id());
 
     TransportRequest request = transport.onlyRequest();
     assertEquals("POST", request.method());
-    assertEquals("/v1/dlq/replay", request.uri().getPath());
-    assertEquals("{}", body(request));
+    assertEquals("/v1/replays", request.uri().getPath());
+    assertEquals("{\"kind\":\"dlq\",\"source_id\":\"demo\",\"rate\":500}", body(request));
   }
 
   @Test
-  void replay_sends_exactly_the_filter_the_caller_set() {
-    admin.replayDeadLetters(ReplayFilter.builder().sourceId("demo").since(5L).build());
+  void get_replay_uses_the_id_as_one_path_segment() {
+    assertEquals(
+        "0194f4a0-0000-7000-8000-0000000000aa",
+        admin.getReplay("0194f4a0-0000-7000-8000-0000000000aa").id());
 
-    assertEquals("{\"source_id\":\"demo\",\"since\":5}", body(transport.onlyRequest()));
+    assertEquals(
+        "/v1/replays/0194f4a0-0000-7000-8000-0000000000aa",
+        transport.onlyRequest().uri().getPath());
+  }
+
+  @Test
+  void list_replays_decodes_the_page() {
+    assertEquals(1, admin.listReplays().replays().size());
+
+    assertEquals("/v1/replays", transport.onlyRequest().uri().getPath());
+    assertNull(transport.onlyRequest().body());
+  }
+
+  @Test
+  void update_replay_sends_exactly_the_patch_the_caller_set() {
+    Replay replay =
+        admin.updateReplay(
+            "0194f4a0-0000-7000-8000-0000000000aa", ReplayPatch.builder().state("paused").build());
+
+    assertEquals("0194f4a0-0000-7000-8000-0000000000aa", replay.id());
+
+    TransportRequest request = transport.onlyRequest();
+    assertEquals("PATCH", request.method());
+    assertEquals("/v1/replays/0194f4a0-0000-7000-8000-0000000000aa", request.uri().getPath());
+    assertEquals("{\"state\":\"paused\"}", body(request));
   }
 
   private static String body(TransportRequest request) {

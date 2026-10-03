@@ -124,6 +124,67 @@ $body = file_get_contents('php://input');
 [docs/integrations.md](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
 so the same hook can arrive twice after a retry.
 
+## Consuming queue messages
+
+A queue consumer (Redis, a broker, or an HTTP-sink body) decodes one v1
+message, verifies its integrity, and computes the key it dedupes on before it
+touches the effect. `Message::decode()` is the whole decoder — it refuses
+anything that doesn't verify, so a decoded message is safe to act on:
+
+```php
+use Ankusa\Message\Message;
+use Ankusa\Message\InvalidMessageError;
+
+try {
+    $message = Message::decode($payload);
+} catch (InvalidMessageError $err) {
+    // never retryable: dead-letter it
+    error_log("bad message: {$err->errorCode} " . ($err->field ?? ''));
+    return;
+}
+
+$body = $message->body ?? $claimCheck->redeem($message->claim, $message->sha256);
+$key  = $message->idempotencyKey();
+```
+
+`idempotencyKey()` is `source_id:dedupe_key` when the provider event key is
+present, else the `id`; delivery is at-least-once, so this is the stable handle
+when a provider retries. It ignores `replay_id` by default — a replayed event
+you already processed stays deduped. A consumer that must reprocess replays
+calls `idempotencyKey(includeReplay: true)`, which appends
+`#replay:<replay_id>`.
+
+The key is meant to be a row in a processed-ids table, written with the effect:
+
+```sql
+CREATE TABLE processed_webhooks (
+    idempotency_key text PRIMARY KEY,
+    ankusa_id       text        NOT NULL,
+    processed_at    timestamptz NOT NULL DEFAULT now()
+);
+```
+
+```php
+$stmt = $pdo->prepare(
+    'INSERT INTO processed_webhooks (idempotency_key, ankusa_id) VALUES (:key, :id)
+     ON CONFLICT (idempotency_key) DO NOTHING'
+);
+$stmt->execute(['key' => $key, 'id' => $message->id]);
+
+if ($stmt->rowCount() === 0) {
+    return; // already processed this provider event
+}
+
+// ... apply the effect, in the same transaction ...
+```
+
+A raw `HookHeaders` (the HTTP sink's headers) answers the same method, so a
+receiver and a queue consumer share one dedupe rule:
+
+```php
+$key = HookHeaders::fromHeaders(getallheaders())->idempotencyKey();
+```
+
 ## Routes client
 
 Manage route definitions and the global IP rules on the route-management
@@ -157,8 +218,8 @@ non-JSON success body, or unreachable; retryable).
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, and the quarantine list — the `operations`, `dlq`
-and `quarantine` tags of `admin.v1.yaml`.
+the redacted config, the DLQ, replay jobs, and the quarantine list — the
+`operations`, `dlq`, `replays` and `quarantine` tags of `admin.v1.yaml`.
 
 ```php
 use Ankusa\Admin\AdminClient;
@@ -167,14 +228,22 @@ $admin = new AdminClient(getenv('ADMIN_URL') ?: 'http://localhost:4002');
 
 $admin->health();                          // ['status' => 'ok', 'instance' => ..., 'roles' => [...]]
 $admin->listDeadLetters(['limit' => 10]);  // ['total' => ..., 'entries' => [...]]
-$admin->replayDeadLetters(['source_id' => 'demo']);
 $admin->listQuarantined();
+
+// Replay jobs. A job is node-local, so a fleet replay is one job per node:
+$job = $admin->createReplay(['kind' => 'dlq', 'source_id' => 'demo', 'rate' => 500]);
+$admin->getReplay($job['id']);              // the Replay object
+$admin->listReplays();                      // ['replays' => [...]], newest first
+$admin->updateReplay($job['id'], ['state' => 'paused']);  // or 'running'/'cancelled'
 ```
 
-Methods: `health()`, `metrics()` (Prometheus text), `config()`,
-`listDeadLetters()`, `replayDeadLetters()`, `listQuarantined()`. Failures are
-`AdminError` subclasses: `RoleNotEnabledError` (409 `role_not_enabled`,
-carrying `$role`), `AdminRejectedError` (any other 4xx, carrying `$errorCode`),
+`createReplay()` returns the created job (HTTP 202) or, when an equivalent job
+is already running or paused, that job (HTTP 200) — so a proxy retry is
+idempotent. Methods: `health()`, `metrics()` (Prometheus text), `config()`,
+`listDeadLetters()`, `createReplay()`, `getReplay()`, `listReplays()`,
+`updateReplay()`, `listQuarantined()`. Failures are `AdminError` subclasses:
+`RoleNotEnabledError` (409 `role_not_enabled`, carrying `$role`),
+`AdminRejectedError` (any other 4xx, carrying `$errorCode`),
 and `AdminUnavailableError` (5xx, an unfollowed redirect, or unreachable;
 retryable).
 
@@ -237,9 +306,10 @@ raises `SourceInvalidError` before a path is built.
   throws on a status code; an injected client owns its own timeout and redirect
   policy, though the SDK still treats any `3xx` as a failure. Client headers
   ride on every request.
-- Request bodies are JSON objects: `replayDeadLetters()` with no filter sends
-  `{}`, never `[]`. Nested empty objects are the caller's job — pass
-  `(object) []` for a nested `{}`, or `[]` for a nested `[]`.
+- Request bodies are JSON objects: `createReplay()` and `updateReplay()` send
+  the spec/patch they're given, never `[]`. Nested empty objects are the
+  caller's job — pass `(object) []` for a nested `{}`, or `[]` for a nested
+  `[]`.
 
 ## Layout
 
@@ -249,6 +319,7 @@ src/
   Version.php              # the version the release tooling reads
   Internal/HttpTransport.php  # @internal: query/body encoding + PSR-18 call
   Webhook/                 # x-ankusa-* header parsing for HTTP-sink receivers
+  Message/                 # v1 queue-message decoding + idempotency key
   ClaimCheck/              # the claim-check gateway client
   Routes/                  # the route-management client (routes.admin.port)
   Admin/                   # the operator client (admin.port)

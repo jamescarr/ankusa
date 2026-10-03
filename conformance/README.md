@@ -52,12 +52,65 @@ then runs every registered SDK's native runner.
 - `parse_claim_ref`: `{"ref": string}` → `ok` is
   `{"tenant_id", "claim_id", "path"}`.
 - `parse_headers`: `{"headers": {string: string}}` → `ok` is
-  `{"id", "source", "tenant": string|null, "content_type": string|null}`.
+  `{"id", "source", "tenant": string|null, "content_type": string|null,
+  "dedupe_key": string|null, "replay_id": string|null}`. `dedupe_key` comes
+  from `x-ankusa-dedupe-key`, `replay_id` from `x-ankusa-replay-id`; each is
+  `null` when the header is absent or empty.
 - `redeem`: `{"client"?: Client, "gateway": Gateway, "ref": string, "sha256": string}`
   → `ok` is `{"body": Body}`. Runners compare bytes: both the expected `Body`
   and the returned bytes become `{"base64": ...}` before deep-equal.
 - `health`: `{"client"?: Client, "gateway": Gateway}` → `ok` is the parsed JSON
   object.
+- `decode_message`: `{"message": string}` → `ok` is the decoded message:
+  `{"v", "id", "source_id", "tenant_id", "received_at", "content_type",
+  "size", "body_base64": string|null, "claim": string|null,
+  "sha256": string|null, "dedupe_key": string|null,
+  "replay_id": string|null, "headers": {}}`. `body_base64` here is the decoded
+  body re-encoded as standard base64, so runners compare bytes. The decode
+  rules run in order and the first failure wins; every failure raises
+  `InvalidMessageError` with `retryable=false`, `code`, and `field`
+  (string or null):
+  1. Not JSON → `invalid_json`; JSON that isn't an object → `not_an_object`.
+  2. `v` missing or not the integer 1 → `unsupported_version`.
+  3. Field types, in this order, else `invalid_field` with `field` set to the
+     key name: `id` a non-empty string; `source_id` a string; `received_at` an
+     integer; `size` an integer ≥ 0; `tenant_id`/`content_type`/`dedupe_key`/
+     `replay_id` a string, null, or absent; `headers` absent or an object whose
+     values are all strings; `sha256` absent or 64 lowercase hex characters.
+  4. Body form: both `body_base64` and `claim` → `ambiguous_body`; neither →
+     `missing_body`; `body_base64` that isn't valid base64 →
+     `invalid_body_base64`; a `claim` that doesn't parse as a claim ref →
+     `invalid_field` (`field: "claim"`); `claim` without `sha256` →
+     `invalid_field` (`field: "sha256"`).
+  5. Inline body: decoded length ≠ `size` → `size_mismatch`; `sha256` present
+     and ≠ the lowercase hex sha256 of the decoded body → `integrity`.
+  6. Claim: `tenant_id` non-null and the claim ref's tenant ≠ `tenant_id` →
+     `tenant_mismatch`.
+
+  Unknown keys are ignored. Absent `dedupe_key`, `replay_id` and `sha256`
+  decode to `null`; absent `headers` decodes to `{}`.
+- `idempotency_key`: `{"message": string}` or `{"headers": {…}}`, plus an
+  optional `"include_replay": bool`. The runner decodes the message with
+  `decode_message` or parses the headers with `parse_headers`, then calls the
+  SDK helper. `ok` is `{"key": string}`. The rule: start from `dedupe_key` —
+  if it is non-null and non-empty the key is `source_id <> ":" <> dedupe_key`,
+  otherwise it is `id`; with `include_replay: true` and a non-null `replay_id`,
+  append `"#replay:" <> replay_id`. `include_replay` defaults to `false`, so a
+  consumer that dedupes this way drops replays of events it already processed;
+  one that must reprocess them sets `include_replay: true`.
+- `admin_replay_create`: `{"gateway": Gateway, "spec": object}` → `ok` is the
+  full Replay object (202 for a new job, 200 for an existing one).
+- `admin_replay_get`: `{"gateway": Gateway, "id": string}` → `ok` is the full
+  Replay object.
+- `admin_replay_list`: `{"gateway": Gateway}` → `ok` is
+  `{"replays": [Replay…]}`.
+- `admin_replay_update`: `{"gateway": Gateway, "id": string, "patch": object}`
+  → `ok` is the full Replay object.
+- Admin replay routes: 404 is `AdminRejectedError(status 404, code
+  replay_not_found)`; a 409 whose `error` is `role_not_enabled` is
+  `RoleNotEnabledError(role)`; every other 4xx is `AdminRejectedError(status,
+  code = the body's error)`; anything else that isn't 2xx (5xx, an unfollowed
+  3xx redirect, 1xx) or a transport failure is `AdminUnavailableError`.
 
 ### Helpers
 

@@ -147,7 +147,10 @@ defmodule Ankusa.SDK.Receiver do
       content_type: headers.content_type,
       body: body,
       received_at: nil,
-      size: byte_size(body)
+      size: byte_size(body),
+      dedupe_key: headers.dedupe_key,
+      replay_id: headers.replay_id,
+      headers: headers.headers
     }
 
     case module.handle_hook(hook, arg) do

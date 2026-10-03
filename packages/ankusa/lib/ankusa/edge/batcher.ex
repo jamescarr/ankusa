@@ -59,7 +59,7 @@ defmodule Ankusa.Edge.Batcher do
   @doc """
   Submit a record and block until it is durably committed (or shed).
 
-  Returns `{:committed, env}` | `{:error, :overload}` |
+  Returns `{:committed, env}` | `{:duplicate, env}` | `{:error, :overload}` |
   `{:error, :store_unavailable}`. The queue itself is never allowed to crash the
   call: a failed commit (or a dead writer process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
@@ -71,6 +71,7 @@ defmodule Ankusa.Edge.Batcher do
   """
   @spec commit(atom(), non_neg_integer(), Queue.entry(), timeout()) ::
           {:committed, Ankusa.Envelope.t()}
+          | {:duplicate, Ankusa.Envelope.t()}
           | {:error, :overload | :store_unavailable}
   def commit(instance, partition, record, timeout \\ 15_000) do
     GenServer.call(

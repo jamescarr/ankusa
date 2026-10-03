@@ -73,6 +73,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/asyncapi.json": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * AsyncAPI 3.0 document of this instance's messaging channels
+         * @description Every Kafka topic, RabbitMQ routing key, NATS subject, and Redis channel
+         *     this instance publishes delivered hooks to, built from the sources and
+         *     sinks configured right now, plus the lifecycle events channel when
+         *     `lifecycle.sinks` is set. Each message is an `Ankusa.Sink.Message` v1
+         *     envelope (`SinkMessageV1` in `components.schemas`). Sinks without a
+         *     channel (`log`, `http`) are left out. Carries no credentials.
+         *
+         *     The body is JSON, which AsyncAPI tooling reads as YAML 1.2.
+         */
+        get: operations["getAsyncApi"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/wal": {
         parameters: {
             query?: never;
@@ -116,30 +143,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/dlq/replay": {
+    "/v1/replays": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List replay jobs
+         * @description Every replay job, newest first.
+         */
+        get: operations["listReplays"];
         put?: never;
         /**
-         * Re-deliver dead-lettered hooks
-         * @description Moves matching dead-lettered rows back to pending with a fresh attempt
-         *     count; the dispatch pipeline then delivers them through their source's
-         *     *current* sinks. The response counts the rows moved, not hooks
-         *     delivered. Replay is at-least-once: an entry already delivered upstream
-         *     but not recorded as such will be delivered again, so consumers should
-         *     dedupe on the envelope id. A replayed entry leaves the DLQ; one that
-         *     fails again is dead-lettered again.
+         * Create a replay job
+         * @description Creates a durable, paced replay job. `kind: dlq` re-sends dead delivery
+         *     rows; `kind: archive` re-sends archived hooks over a `received_at`
+         *     window. Rows are dripped in at `rate` items per second, only while the
+         *     dispatch pipeline's oldest-due lag is at most `max_lag_ms` and its
+         *     in-flight window is not full, so a replay only uses capacity live
+         *     traffic leaves free. A `dlq` job touches only rows dead-lettered at or
+         *     before its own creation time. Every replayed delivery keeps the hook's
+         *     original `id` and `dedupe_key` and carries the job id as `replay_id`.
+         *     Posting the same spec again while a `running` or `paused` job with the
+         *     same kind and filter exists returns that job (200), so a proxy retry
+         *     is idempotent.
          */
-        post: operations["replayDeadLetters"];
+        post: operations["createReplay"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/v1/replays/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One replay job */
+        get: operations["getReplay"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Pause, resume, cancel, or re-rate a replay job
+         * @description `state` is `running`, `paused` or `cancelled`; resuming clears `error`
+         *     and resets the auto-pause window. `rate` and `max_lag_ms` take effect
+         *     at once. A `done`, `cancelled` or `failed` job refuses patches with
+         *     `replay_finished`.
+         */
+        patch: operations["updateReplay"];
         trace?: never;
     };
     "/v1/quarantine": {
@@ -422,17 +481,87 @@ export interface components {
         QuarantinePage: {
             entries: components["schemas"]["QuarantineEntry"][];
         };
-        ReplayFilter: {
-            /** @description Exact source id. */
+        ReplaySpec: {
+            /**
+             * @description `dlq` re-sends dead rows; `archive` re-sends archived hooks over a time window.
+             * @enum {string}
+             */
+            kind: "dlq" | "archive";
+            /** @description Exact source id to filter on. */
             source_id?: string;
-            /** @description Exact envelope id. */
+            /** @description Exact envelope id to filter on (`dlq` only). */
             id?: string;
-            /** @description Inclusive lower bound on the dead-letter timestamp, unix milliseconds. */
+            /** @description Inclusive lower bound on the dead-letter timestamp, unix milliseconds (`dlq` only). */
             since?: number;
+            /** @description Inclusive upper bound on the dead-letter timestamp, unix milliseconds (`dlq` only). Must not be less than `since`. */
+            until?: number;
+            /** @description Inclusive lower bound on `received_at`, unix milliseconds (`archive` only). */
+            from?: number;
+            /**
+             * @description Inclusive upper bound on `received_at`, unix milliseconds
+             *     (`archive` only). Must be greater than `from`, and old enough that
+             *     the compactor has archived the whole window (`storage.roll_ms +
+             *     storage.interval_ms` in the past).
+             */
+            to?: number;
+            /** @description Indexes into the source's current sinks; omitted means every current sink (`archive` only). */
+            sinks?: number[];
+            /**
+             * @description Items per second — delivery rows for `dlq`, hooks for `archive`.
+             * @default 1000
+             */
+            rate: number;
+            /**
+             * @description The oldest-due lag at which the job throttles, in milliseconds.
+             * @default 2000
+             */
+            max_lag_ms: number;
         };
-        Replayed: {
-            /** @description Number of entries re-delivered. */
-            replayed: number;
+        ReplayPatch: {
+            /** @enum {string} */
+            state?: "running" | "paused" | "cancelled";
+            rate?: number;
+            max_lag_ms?: number;
+        };
+        /**
+         * @description A replay job. Counters are best-effort: `moved`/`scanned`/`skipped` are
+         *     committed with the job's cursor, `delivered`/`dead` come from the
+         *     pipeline's outcome reports and are approximate across a crash.
+         */
+        Replay: {
+            /** @description UUIDv7 job id; also the `replay_id` on every replayed delivery. */
+            id: string;
+            /** @enum {string} */
+            kind: "dlq" | "archive";
+            /** @enum {string} */
+            state: "running" | "paused" | "done" | "cancelled" | "failed";
+            /** @description Exactly the filter keys given at creation. */
+            filter: Record<string, never>;
+            /** @description Items per second. */
+            rate: number;
+            /** @description Throttle threshold, milliseconds. */
+            max_lag_ms: number;
+            /** @description Unix milliseconds. */
+            created_at: number;
+            /** @description Unix milliseconds. */
+            updated_at: number;
+            /** @description Unix milliseconds, `null` until the job finishes. */
+            finished_at: number | null;
+            /** @description Rows revived (`dlq`) or hooks re-enqueued (`archive`). */
+            moved: number;
+            /** @description Keys or records examined. */
+            scanned: number;
+            /** @description Archive records with no source, no bound sink, or an undecodable frame. */
+            skipped: number;
+            /** @description Deliveries this job's rows got through, per pipeline outcome reports. */
+            delivered: number;
+            /** @description Deliveries this job's rows dead-lettered again, per pipeline outcome reports. */
+            dead: number;
+            /** @description `null`, or why the job paused itself or failed. */
+            error: string | null;
+        };
+        ReplayList: {
+            replays: components["schemas"]["Replay"][];
         };
         /**
          * @description A rate limit. `rate` is hooks per second and may be fractional (`0.5`
@@ -689,7 +818,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description `400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter, or `body`. */
+        /** @description `400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key. */
         InvalidFilter: {
             headers: {
                 [name: string]: unknown;
@@ -722,6 +851,20 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description `404`. `replay_not_found`: this node holds no replay job with that id. */
+        ReplayNotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "error": "replay_not_found"
+                 *     }
+                 */
                 "application/json": components["schemas"]["Error"];
             };
         };
@@ -899,6 +1042,32 @@ export interface operations {
             };
         };
     };
+    getAsyncApi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The AsyncAPI document. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/asyncapi+json": {
+                        /** @constant */
+                        asyncapi: "3.0.0";
+                        info: Record<string, never>;
+                    } & {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     getWal: {
         parameters: {
             query?: never;
@@ -950,7 +1119,29 @@ export interface operations {
             503: components["responses"]["NodeStoreUnavailable"];
         };
     };
-    replayDeadLetters: {
+    listReplays: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All jobs, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplayList"];
+                };
+            };
+            409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    createReplay: {
         parameters: {
             query?: never;
             header?: never;
@@ -958,26 +1149,113 @@ export interface operations {
             cookie?: never;
         };
         /**
-         * @description A filter, not a payload. Omitted or empty (`{}`) replays everything.
-         *     Unknown keys are ignored.
+         * @description `kind` is required. Unknown keys are refused with `invalid_filter`.
+         *     `since`/`until` are inclusive dead-letter-time bounds (unix ms) for
+         *     `dlq`; `from`/`to` are inclusive `received_at` bounds (unix ms) for
+         *     `archive`, and `to` must be old enough that the compactor has
+         *     archived the whole window. `sinks` indexes into the source's current
+         *     sinks; omitted means every current sink.
          */
-        requestBody?: {
+        requestBody: {
             content: {
-                "application/json": components["schemas"]["ReplayFilter"];
+                "application/json": components["schemas"]["ReplaySpec"];
             };
         };
         responses: {
-            /** @description The number of entries replayed. */
+            /** @description An existing running or paused job with the same kind and filter. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Replayed"];
+                    "application/json": components["schemas"]["Replay"];
+                };
+            };
+            /** @description The new job, running. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Replay"];
                 };
             };
             400: components["responses"]["InvalidFilter"];
+            /**
+             * @description `role_not_enabled` (an `archive` job on a node without a queue
+             *     writer) or `too_many_replays` (16 jobs already running or paused).
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    getReplay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Replay"];
+                };
+            };
+            404: components["responses"]["ReplayNotFound"];
             409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    updateReplay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplayPatch"];
+            };
+        };
+        responses: {
+            /** @description The updated job. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Replay"];
+                };
+            };
+            400: components["responses"]["InvalidFilter"];
+            404: components["responses"]["ReplayNotFound"];
+            /** @description `role_not_enabled`, or `replay_finished` for a finished job. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             503: components["responses"]["NodeStoreUnavailable"];
         };
     };

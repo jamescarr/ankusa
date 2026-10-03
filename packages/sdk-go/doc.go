@@ -1,8 +1,8 @@
 // Package ankusa is the Go client SDK for an Ankusa deployment: the
 // claim-check gateway client ([ClaimCheckClient]), the route-management
 // client ([RoutesClient]), the operator client ([AdminClient]), plus
-// [ParseClaimRef] and [ParseHeaders] for consumers of claim-check URNs and
-// Ankusa's HTTP sink deliveries.
+// [DecodeMessage], [ParseClaimRef], and [ParseHeaders] for consumers of the
+// v1 queue message, claim-check URNs, and Ankusa's HTTP sink deliveries.
 //
 // Every client is built by a New…Client constructor that takes a base URL —
 // the listener's own host and port, e.g. the claim-check gateway's, the

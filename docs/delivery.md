@@ -39,13 +39,32 @@ the next hook. A sink that **raises, throws, or exits** is treated exactly
 like one returning `{:error, reason}`: the retry policy still applies, and the
 pipeline keeps running.
 
+### Replay jobs
+
+Dead rows and archived hooks can be re-sent with a replay job
+(`POST /v1/replays`): `kind: dlq` revives dead rows, `kind: archive` re-enqueues
+archived hooks over a `received_at` window. A job never bulk-flips rows — it
+drips them into the delivery queue at `rate` items per second (default 1 000,
+max 100 000), and only while dispatch's oldest-due lag is at most `max_lag_ms`
+(default 2 000) and its in-flight window is not full, so a replay uses only
+the capacity live traffic leaves free and can be left running. Jobs are
+durable: the cursor commits in the same batch as the rows it moved, a restart
+resumes it, and a job whose deliveries keep dead-lettering pauses itself.
+A `dlq` job touches only rows dead-lettered at or before its own creation, so
+rows that die again during the replay are never picked up twice by one job.
+Replayed deliveries keep the hook's original `id` and `dedupe_key` and carry
+the job's `replay_id` in the message, the broker headers, and the HTTP
+headers. Manage jobs with `GET /v1/replays`, `GET|PATCH /v1/replays/{id}`.
+See the runbook in [`Ankusa.Replay`](https://hexdocs.pm/ankusa/Ankusa.Replay.html).
+
 ## Direct mode
 
 `wal.type: none` replaces the pipeline above with one synchronous call per
 request (`Ankusa.Edge.Publish`): the request process publishes the envelope to
-each of the source's sinks in declaration order and answers `201` only once
-every sink has confirmed. No polling, no concurrency window — and
-**the rest of this section does not apply**:
+every sink of the source **concurrently**, all under one overall deadline
+(`direct_publish_timeout_ms`, default 8 s — keep it under the provider's own
+timeout), and answers `201` only once every sink has confirmed. No polling, no
+concurrency window — and **the rest of this section does not apply**:
 
 - no retry policy: the first sink refusal is the answer, a `503` with
   `Retry-After`, and the provider's retry *is* the retry;
@@ -187,16 +206,28 @@ Message shape (`Ankusa.Sink.Message`, byte-identical for `Sink.Kafka`):
 ```jsonc
 // inline
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
- "content_type": "application/json", "size": 245, "body_base64": "eyJpZCI6..."}
+ "content_type": "application/json", "size": 245, "dedupe_key": "evt_1", "replay_id": null,
+ "headers": {"x-github-event": "push"}, "sha256": "2cf24d...", "body_base64": "eyJpZCI6..."}
 
 // fat payload
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
- "content_type": "application/octet-stream", "size": 3145728,
+ "content_type": "application/octet-stream", "size": 3145728, "dedupe_key": "evt_1",
+ "replay_id": null, "headers": {},
  "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002", "sha256": "3bea8a..."}
 ```
 
 `"v"` changes only when an existing field changes meaning or disappears;
 consumers must ignore keys they don't know.
+
+Every message carries `sha256` (lowercase hex, inline bodies too), the
+provider event `dedupe_key` (or `null`), the `replay_id` of the replay job when
+this delivery is a replay (else `null`), and the forwarded provider request
+`headers` (lowercased; the source's `forward_headers` option decides which —
+see [`configuration.md`](configuration.md#sources)). Consumers dedupe on the
+idempotency key: `source_id:dedupe_key` when the key is set, else `id`; append
+`#replay:<replay_id>` to the key when a replay must be reprocessed rather than
+dropped. Every SDK ships the decoder and the helper; see its README's
+"Consuming queue messages".
 
 A consumer redeems `claim` with `GET /v1/claims/:tenant/:claim_id` against the
 claim-check gateway and checks the bytes against the message's `sha256`. See
@@ -430,21 +461,38 @@ store batch, but dispatch writes its outcomes without a per-write fsync: a power
 failure right after one can undo it, and the hook is retried again
 (at-least-once, never lost). The next synced commit makes it durable.
 
-`Ankusa.Dispatch.replay/2` moves matching dead rows back to pending with a
-fresh attempt count, and the pipeline delivers them through the source's
-*current* sinks and options:
+`Ankusa.Replay.start/2` creates a durable replay job that moves matching dead
+rows back to pending, a paced page at a time, and the pipeline delivers them
+through the source's *current* sinks and options:
 
 ```elixir
-{:ok, 7} = Ankusa.Dispatch.replay(:default, source_id: "stripe", since: System.system_time(:millisecond) - 3_600_000)
+{:ok, :created, job} =
+  Ankusa.Replay.start(:default,
+    kind: :dlq,
+    source_id: "stripe",
+    since: System.system_time(:millisecond) - 3_600_000,
+    rate: 1_000
+  )
 ```
 
-It returns the number of rows moved back to pending — `{:ok, 0}` when nothing
-matched. Delivery is **asynchronous**: by the time it returns the rows are out
-of the DLQ and the pipeline will deliver them (a row that fails again is
-dead-lettered again). It needs the `:dispatch` role on this node. Filters
-(`:source_id`, `:id`, `:since`, a unix-ms lower bound) are all optional and
-combine as AND; omit the filter entirely to replay everything. Delivery is
-at-least-once, so a replayed hook is a redelivery.
+The job drips rows into the delivery queue at `rate` items per second (default
+1 000, max 100 000) and only while dispatch has spare capacity (its
+oldest-due lag stays under `max_lag_ms`, 2 s by default), so it can be left
+running against live traffic. It is durable — the cursor commits in the same
+batch as the rows it moves — so a restart resumes it; a job whose deliveries
+keep dead-lettering pauses itself. Replayed deliveries keep the hook's
+original `id` and `dedupe_key` and carry the job id as `replay_id`.
+`Ankusa.Replay.get/2` and `update/3` watch and steer it
+(`:running | :paused | :cancelled`); the admin API exposes the same jobs as
+`POST /v1/replays`, `GET /v1/replays[/:id]`, `PATCH /v1/replays/:id`. Delivery
+is **asynchronous**: by the time a page is moved the rows are out of the DLQ
+and the pipeline will deliver them (a row that fails again is dead-lettered
+again). It needs the `:dispatch` role on this node. Filters (`:source_id`,
+`:id`, `:since`, `:until`, unix-ms bounds) are all optional and combine as
+AND; a `dlq` job touches only rows dead-lettered at or before its own
+creation, so rows that die again during the replay are never picked up twice.
+`kind: :archive` re-sends archived hooks over a `received_at` window instead.
+Delivery is at-least-once, so a replayed hook is a redelivery.
 
 ## Quarantine
 

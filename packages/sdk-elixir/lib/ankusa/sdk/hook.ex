@@ -14,8 +14,15 @@ defmodule Ankusa.SDK.Hook do
 
   A hook can arrive more than once: the dispatcher retries a sink that failed,
   a consumer requeues a message it could not handle, and neither is a bug. The
-  fix is on the reader's side — dedupe on `id` (a ULID assigned once, at
-  ingest) rather than on the body or an arrival timestamp.
+  fix is on the reader's side — dedupe on the idempotency key
+  (`Ankusa.SDK.Idempotency.key/2`) rather than on the body or an arrival
+  timestamp.
+
+  `dedupe_key` is the provider's own event key when the source extracted one
+  (`x-ankusa-dedupe-key` over HTTP, the message's `dedupe_key` from a queue);
+  `replay_id` names the replay job when this delivery is a replay; `headers`
+  are the provider request headers — the request's over HTTP, the forwarded
+  ones from a queue message.
   """
 
   @type t :: %__MODULE__{
@@ -25,8 +32,22 @@ defmodule Ankusa.SDK.Hook do
           content_type: String.t() | nil,
           body: binary(),
           received_at: non_neg_integer() | nil,
-          size: non_neg_integer()
+          size: non_neg_integer(),
+          dedupe_key: String.t() | nil,
+          replay_id: String.t() | nil,
+          headers: %{String.t() => String.t()}
         }
 
-  defstruct [:id, :source_id, :tenant_id, :content_type, :body, :received_at, :size]
+  defstruct [
+    :id,
+    :source_id,
+    :tenant_id,
+    :content_type,
+    :body,
+    :received_at,
+    :size,
+    :dedupe_key,
+    :replay_id,
+    headers: %{}
+  ]
 end

@@ -48,6 +48,7 @@ ERROR_CLASSES: dict[str, type[BaseException]] = {
         "AdminUnavailableError",
         "RoleNotEnabledError",
         "AdminRejectedError",
+        "InvalidMessageError",
     )
 }
 
@@ -209,6 +210,20 @@ def _run_parse_headers(case: dict[str, Any], requests: list[RecordedRequest]) ->
     return dataclasses.asdict(ankusa.parse_headers(case["input"]["headers"]))
 
 
+def _run_decode_message(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    return dataclasses.asdict(ankusa.decode_message(case["input"]["message"]))
+
+
+def _run_idempotency_key(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    hook = (
+        ankusa.decode_message(inp["message"])
+        if "message" in inp
+        else ankusa.parse_headers(inp["headers"])
+    )
+    return {"key": ankusa.idempotency_key(hook, include_replay=inp.get("include_replay", False))}
+
+
 def _run_redeem(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     inp = case["input"]
     with _connected_with(ankusa.ClaimCheckClient, inp["gateway"], inp.get("client") or {}, requests) as claim_check:
@@ -307,10 +322,28 @@ def _run_admin_dlq_list(case: dict[str, Any], requests: list[RecordedRequest]) -
         return admin.list_dead_letters(inp.get("params"))
 
 
-def _run_admin_dlq_replay(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+def _run_admin_replay_create(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     inp = case["input"]
     with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
-        return admin.replay_dead_letters(inp.get("filter"))
+        return admin.create_replay(inp["spec"])
+
+
+def _run_admin_replay_get(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.get_replay(inp["id"])
+
+
+def _run_admin_replay_list(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.list_replays()
+
+
+def _run_admin_replay_update(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    with _connected_with(ankusa.AdminClient, inp["gateway"], inp.get("client") or {}, requests) as admin:
+        return admin.update_replay(inp["id"], inp["patch"])
 
 
 def _run_admin_quarantine(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
@@ -322,6 +355,8 @@ def _run_admin_quarantine(case: dict[str, Any], requests: list[RecordedRequest])
 RUNNERS: dict[str, Runner] = {
     "parse_claim_ref": _run_parse_claim_ref,
     "parse_headers": _run_parse_headers,
+    "decode_message": _run_decode_message,
+    "idempotency_key": _run_idempotency_key,
     "redeem": _run_redeem,
     "health": _run_health,
     "routes_health": _run_routes_health,
@@ -338,7 +373,10 @@ RUNNERS: dict[str, Runner] = {
     "admin_metrics": _run_admin_metrics,
     "admin_config": _run_admin_config,
     "admin_dlq_list": _run_admin_dlq_list,
-    "admin_dlq_replay": _run_admin_dlq_replay,
+    "admin_replay_create": _run_admin_replay_create,
+    "admin_replay_get": _run_admin_replay_get,
+    "admin_replay_list": _run_admin_replay_list,
+    "admin_replay_update": _run_admin_replay_update,
     "admin_quarantine": _run_admin_quarantine,
 }
 

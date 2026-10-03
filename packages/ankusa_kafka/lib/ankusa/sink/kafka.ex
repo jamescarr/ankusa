@@ -11,7 +11,8 @@ defmodule Ankusa.Sink.Kafka do
       it is the ordering scope: records with the same key are consumed in the
       order they were produced.
     * **headers** — `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
-      `ankusa_message_version`, `content_type` (`application/json`).
+      `ankusa_message_version`, `content_type` (`application/json`), plus
+      `ankusa_dedupe_key` and `ankusa_replay_id` when the hook carries them.
       Underscores, not hyphens, so they are usable unquoted as Redpanda
       Connect metadata and SQS attribute names.
     * **timestamp** — `env.received_at` (event time, not dispatch time).
@@ -76,7 +77,8 @@ defmodule Ankusa.Sink.Kafka do
          {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
          key = key(env, opts),
          {:ok, partition} <- partition(client, topic, key),
-         {:ok, call_ref} <- :brod.produce(client, topic, partition, key, record(env, payload)) do
+         {:ok, call_ref} <-
+           :brod.produce(client, topic, partition, key, record(env, ctx, payload)) do
       :brod.sync_produce_request(call_ref, timeout)
     end
   end
@@ -139,19 +141,25 @@ defmodule Ankusa.Sink.Kafka do
     end
   end
 
-  defp record(env, payload) do
+  defp record(env, ctx, payload) do
     %{
       ts: env.received_at,
       value: payload,
-      headers: [
-        {"ankusa_id", env.id},
-        {"ankusa_source_id", env.source_id},
-        {"ankusa_tenant_id", env.tenant_id || ""},
-        {"ankusa_message_version", "1"},
-        {"content_type", "application/json"}
-      ]
+      headers:
+        [
+          {"ankusa_id", env.id},
+          {"ankusa_source_id", env.source_id},
+          {"ankusa_tenant_id", env.tenant_id || ""},
+          {"ankusa_message_version", "1"},
+          {"content_type", "application/json"}
+        ]
+        |> maybe_header("ankusa_dedupe_key", env.dedupe_key)
+        |> maybe_header("ankusa_replay_id", ctx[:replay_id])
     }
   end
+
+  defp maybe_header(headers, _name, nil), do: headers
+  defp maybe_header(headers, name, value) when is_binary(value), do: headers ++ [{name, value}]
 
   defp key(env, opts) do
     case Keyword.get(opts, :key, &default_key/1) do

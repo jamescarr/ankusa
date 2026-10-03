@@ -5,8 +5,9 @@ one npm package meant to bundle everything a non-Elixir consumer needs to
 talk to an Ankusa deployment — the
 [claim-check gateway](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md)
 client, the route-management client (`routes.admin.port`), the operator
-(`admin.port`) client, and a helper for receiving Ankusa's HTTP sink
-deliveries.
+(`admin.port`) client, a helper for receiving Ankusa's HTTP sink deliveries,
+and a decoder for the queue message those deliveries carry (with the
+idempotency-key helper that goes with it).
 
 ## Claim-check client
 
@@ -127,8 +128,8 @@ unreachable — retryable).
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, and the quarantine list — the `operations`,
-`dlq`, and `quarantine` tags of `admin.v1.yaml`.
+the redacted config, the DLQ, replay jobs, and the quarantine list — the
+`operations`, `dlq`, `replays`, and `quarantine` tags of `admin.v1.yaml`.
 
 ```ts
 import { createAdminClient } from "ankusa";
@@ -137,14 +138,25 @@ const admin = createAdminClient({ baseUrl: "http://localhost:4002" });
 
 await admin.health();                        // { status, instance, roles }
 await admin.listDeadLetters({ limit: 10 });
-await admin.replayDeadLetters({ source_id: "demo" });
 await admin.listQuarantined();
+
+// A replay job re-sends dead rows (`kind: "dlq"`) or archived hooks over a
+// `received_at` window (`kind: "archive"`), at `rate` items per second and
+// only while live traffic leaves dispatch capacity free.
+const job = await admin.createReplay({ kind: "dlq", source_id: "demo", rate: 500 });
+await admin.getReplay(job.id);
+await admin.listReplays();                   // { replays: Replay[] }
+await admin.updateReplay(job.id, { rate: 2_000 });
+await admin.updateReplay(job.id, { state: "paused" });   // "running" resumes, "cancelled" stops
 ```
 
 Methods: `health()`, `metrics()` (Prometheus text), `config()`,
-`listDeadLetters()`, `replayDeadLetters()`, `listQuarantined()`. Failures are
-`AdminError` subclasses: `RoleNotEnabledError` (409 `role_not_enabled`,
-carrying `role`), `AdminRejectedError` (any other `4xx`, carrying `code`), and
+`listDeadLetters()`, `createReplay()`, `getReplay()`, `listReplays()`,
+`updateReplay()`, `listQuarantined()`. `createReplay` is idempotent: posting
+the same kind and filter while a matching `running`/`paused` job exists
+returns that job. Failures are `AdminError` subclasses: `RoleNotEnabledError`
+(409 `role_not_enabled`, carrying `role`), `AdminRejectedError` (any other
+`4xx`, carrying `code` — e.g. `replay_not_found` or `replay_finished`), and
 `AdminUnavailableError` (`5xx`, an unfollowed `3xx`, or unreachable —
 retryable).
 
@@ -161,18 +173,68 @@ import { parseHeaders } from "ankusa";
 // `req.headers` is whatever your framework hands you (`http.IncomingHttpHeaders`,
 // an Express `req.headers`, a WHATWG `Headers`, ...).
 const hook = parseHeaders(req.headers);
-// hook = { id, source, tenant, contentType }
+// hook = { id, source, tenant, contentType, dedupeKey, replayId }
 
-// Dedupe on `hook.id`: delivery is at-least-once, so a retried hook arrives twice.
-// `x-ankusa-id` is the identity to dedupe on, so a delivery without it is a
-// framework bug rather than a tolerable request: `parseHeaders` raises
-// `MissingHookIdError` instead of returning a blank id.
+// Dedupe on `idempotencyKey(hook)`: delivery is at-least-once, so a retried
+// hook arrives twice. `x-ankusa-id` is always the identity, so a delivery
+// without it is a framework bug rather than a tolerable request: `parseHeaders`
+// raises `MissingHookIdError` instead of returning a blank id.
 ```
 
 Every other header is optional — `tenant` is `null` unless the source has
-one, and `source`/`contentType` default to `""`/`null`. See "HTTP handoff" in
+one, `source`/`contentType` default to `""`/`null`, and `dedupeKey`/`replayId`
+are `null` when absent. See "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)
-for the full contract.
+for the full contract. `dedupeKey` is the provider's event key when the source
+has a dedupe rule; `replayId` is set only on replayed deliveries.
+
+## Consuming queue messages
+
+Ankusa's sinks carry a JSON envelope (`v: 1`) alongside the body — as the
+broker payload for RabbitMQ/Kafka/NATS/Redis, or as the HTTP body for the
+webhook helper. `decodeMessage` parses it and verifies the bytes it names, so
+a consumer never touches a corrupt or truncated body:
+
+```ts
+import { decodeMessage, idempotencyKey, InvalidMessageError } from "ankusa";
+
+try {
+  const message = decodeMessage(raw);            // raw: string | Uint8Array
+  // message = { v, id, source_id, tenant_id, received_at, content_type, size,
+  //             body_base64, claim, sha256, dedupe_key, replay_id, headers }
+  const body = message.body ??                     // decoded inline bytes (Uint8Array)
+    await claimCheck.redeem(message.claim!, message.sha256!);   // or the claim gateway
+
+  // The key is `source_id:dedupe_key` when a provider event key is set, else
+  // `id` — so provider retries (same event key) collapse to one row. Replays
+  // keep the original key, so dedupe drops them unless you pass
+  // `{ includeReplay: true }`.
+  const key = idempotencyKey(message);
+
+  await db.query(
+    `insert into processed_webhooks (idempotency_key, body)
+     values ($1, $2)
+     on conflict (idempotency_key) do nothing`,
+    [key, body],
+  );
+} catch (err) {
+  if (err instanceof InvalidMessageError && !err.retryable) {
+    // invalid_json / unsupported_version / integrity / ...: dead-letter, don't retry
+    throw err;
+  }
+  throw err;   // transport failure: retry
+}
+```
+
+`InvalidMessageError` carries `retryable: false`, a `code` (`invalid_json`,
+`not_an_object`, `unsupported_version`, `invalid_field`, `ambiguous_body`,
+`missing_body`, `invalid_body_base64`, `size_mismatch`, `integrity`,
+`tenant_mismatch`), and the offending `field` when the rule is about one key.
+Body delivery is at-least-once, so every consumer must dedupe on the key —
+`source_id:dedupe_key` when `dedupe_key` is set, else `id`.
+
+`idempotencyKey` also takes the `HookHeaders` an HTTP receiver already has
+(`parseHeaders(req.headers)`), where `source` plays `source_id`.
 
 ## Layout
 
@@ -201,6 +263,9 @@ src/
     index.ts
     headers.ts
     webhook.test.ts
+  message/             # the queue-message decoder + idempotency-key helper
+    index.ts
+    message.test.ts
 ```
 
 A future client (say, an ingest helper) gets its own `src/<name>/` directory

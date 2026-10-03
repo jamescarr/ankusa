@@ -100,7 +100,8 @@ defmodule MyApp.Hooks do
   @impl Ankusa.SDK.Handler
   def handle_hook(%Ankusa.SDK.Hook{} = hook, _arg) do
     # Return :ok only once the hook is durably handled; delivery is
-    # at-least-once, so dedupe on hook.id.
+    # at-least-once, so dedupe on the idempotency key
+    # (Ankusa.SDK.Idempotency.key/2), not on the arrival alone.
     case MyApp.Store.insert(hook.id, hook.body) do
       :inserted -> :ok
       :duplicate -> :ok
@@ -147,6 +148,13 @@ The handler sees one value whichever transport delivered the hook:
 | `body` | the raw request body | inline body, or the redeemed claim |
 | `received_at` | `nil` (the HTTP sink doesn't send it) | message `received_at`, unix ms |
 | `size` | `byte_size(body)` | message `size` |
+| `dedupe_key` | `x-ankusa-dedupe-key` | message `dedupe_key` |
+| `replay_id` | `x-ankusa-replay-id` | message `replay_id` |
+| `headers` | every request header, lowercased | the forwarded provider headers |
+
+Dedupe on the key `Ankusa.SDK.Idempotency.key/2` computes (see "Consuming queue
+messages" below), not on `id` alone: a provider retry can reach you as several
+hook ids.
 
 The header parsing on its own is `Ankusa.SDK.Webhook.parse_headers/1`, for
 receivers built on something else.
@@ -181,14 +189,76 @@ def handle_message(message_body, claim_check) do
 end
 ```
 
-`decode/1` rejects a malformed message with an exact reason
-(`:invalid_json`, `:not_an_object`, `{:unsupported_version, v}`,
-`{:invalid_field, key}`, `:ambiguous_body`, `:invalid_body_base64`,
-`:missing_body`) and ignores keys it doesn't know, so a newer producer adding a
+`decode/1` returns an `Ankusa.SDK.InvalidMessageError` with a stable `code`
+(`"invalid_json"`, `"not_an_object"`, `"unsupported_version"`, `"invalid_field"`,
+`"ambiguous_body"`, `"missing_body"`, `"invalid_body_base64"`,
+`"size_mismatch"`, `"integrity"`, `"tenant_mismatch"`) and, when the code is
+`"invalid_field"`, the offending `field`. It also verifies the inline body's
+length against `size`, its bytes against `sha256`, and a claim's tenant against
+`tenant_id`. Keys it doesn't know are ignored, so a newer producer adding a
 field doesn't break an older consumer.
 
 Kafka/NATS headers and the RabbitMQ routing key are not read: the JSON body
 carries everything.
+
+## Consuming queue messages
+
+A queue consumer is at-least-once end to end, so the handler must make its
+effect idempotent. Decode the message, compute the idempotency key, and
+insert-or-ignore it into a processed-ids table before doing the work:
+
+```elixir
+defmodule MyApp.Consumer do
+  alias Ankusa.SDK.{Idempotency, Message}
+
+  def handle(raw, claim_check) do
+    with {:ok, message} <- Message.decode(raw),
+         {:ok, hook} <- Message.to_hook(message, claim_check),
+         key = Idempotency.key(message) do
+      case MyApp.Store.claim(key, hook.id) do
+        :inserted -> MyApp.Hooks.handle_hook(hook, [])
+        :duplicate -> :ok
+      end
+    else
+      # Undecodable bytes and every bad-ref/404/integrity failure are
+      # `retryable: false` — dead-letter, don't requeue.
+      {:error, %{retryable: false} = error} -> {:dlq, error}
+      # An unreachable or 5xx gateway is safe to retry.
+      {:error, %{retryable: true} = error} -> {:requeue, error}
+    end
+  end
+end
+```
+
+The key is the table's primary key, so the database enforces the dedupe:
+
+```elixir
+defmodule MyApp.Repo.Migrations.CreateProcessedHooks do
+  use Ecto.Migration
+
+  def change do
+    create table(:processed_hooks, primary_key: false) do
+      add :idempotency_key, :text, primary_key: true
+      add :ankusa_id, :text, null: false
+      add :processed_at, :utc_datetime_usec
+    end
+
+    create index(:processed_hooks, [:ankusa_id])
+  end
+end
+```
+
+`Ankusa.SDK.Idempotency.key/2` accepts the decoded `Message`, the parsed
+`Ankusa.SDK.Webhook.Headers`, or a `Hook`. It is `source_id:dedupe_key` when
+the source extracted a provider event key (Stripe's `id`, GitHub's
+`x-github-delivery`, ...) and the hook id otherwise, so a provider's own
+retries collapse even when ingest minted a fresh hook id for each one. A replay
+of an already-processed delivery computes the same key and is dropped; pass
+`include_replay: true` when the consumer must reprocess replays:
+
+```elixir
+key = Ankusa.SDK.Idempotency.key(message, include_replay: true)
+```
 
 ## Routes client
 
@@ -226,14 +296,19 @@ admin = Ankusa.SDK.Admin.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
 {:ok, _} = Ankusa.SDK.Admin.health(admin)
 {:ok, text} = Ankusa.SDK.Admin.metrics(admin)
 {:ok, %{"total" => total}} = Ankusa.SDK.Admin.list_dead_letters(admin, limit: 10)
-{:ok, %{"replayed" => n}} = Ankusa.SDK.Admin.replay_dead_letters(admin, %{"source_id" => "demo"})
 {:ok, _} = Ankusa.SDK.Admin.list_quarantined(admin)
+
+# Replay jobs: re-send the dead-letter queue, or an archived time window.
+{:ok, replay} = Ankusa.SDK.Admin.create_replay(admin, %{"kind" => "dlq", "rate" => 500})
+{:ok, replay} = Ankusa.SDK.Admin.get_replay(admin, replay["id"])
+{:ok, %{"replays" => replays}} = Ankusa.SDK.Admin.list_replays(admin)
+{:ok, paused} = Ankusa.SDK.Admin.update_replay(admin, replay["id"], %{"state" => "paused"})
 ```
 
 Failures: `RoleNotEnabledError` (`409 role_not_enabled`, carrying `:role`),
-`AdminRejectedError` (any other `4xx`, carrying `:code`), and
-`AdminUnavailableError` (`5xx`, an unfollowed redirect, a non-JSON success
-body, or unreachable; retryable).
+`AdminRejectedError` (any other `4xx`, carrying `:code` — a missing job is
+`404 replay_not_found`), and `AdminUnavailableError` (`5xx`, an unfollowed
+redirect, a non-JSON success body, or unreachable; retryable).
 
 ## Sources client
 
@@ -287,6 +362,7 @@ lib/ankusa/sdk/
   webhook.ex                 # x-ankusa-* header parsing
   receiver.ex                # the Plug that receives HTTP-sink deliveries
   message.ex                 # queue wire format: decode + to_hook
+  idempotency.ex             # the idempotency key for any delivery
   claim_ref.ex               # urn:ankusa:claim:v1:<tenant>:<claim_id>
   claim_check.ex             # the claim-check gateway client
   routes.ex                  # the route-management client

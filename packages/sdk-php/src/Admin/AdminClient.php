@@ -12,8 +12,9 @@ use Psr\Http\Message\ResponseInterface;
 /**
  * Operate against the operator API (`admin.port`, default 4002) —
  * `Ankusa.Admin.Router`: health, Prometheus metrics, the redacted
- * configuration, the dead-letter queue, and the quarantine list. Responses are
- * node-local by design, so a fleet operator scrapes every node's admin port.
+ * configuration, the dead-letter queue, replay jobs, and the quarantine list.
+ * Responses are node-local by design, so a fleet operator scrapes every node's
+ * admin port.
  *
  * The listener itself performs no authentication — `$headers` is for whatever a
  * deployer's own boundary (service mesh, an API gateway) expects in front of it.
@@ -80,18 +81,60 @@ final class AdminClient
     }
 
     /**
-     * `POST /v1/dlq/replay` -> `{replayed}`.
+     * `POST /v1/replays` -> the created (202) or already-active (200) replay
+     * job.
      *
-     * `$filter` is a filter, not a payload; omitted or empty replays everything
-     * (the body goes out as `{}`, never `[]`).
+     * `$spec` is the JSON body verbatim: `kind` (`dlq` or `archive`) plus its
+     * filter keys, and the optional `rate`/`max_lag_ms`. Posting the same spec
+     * twice while the job is running or paused returns that job, so a proxy
+     * retry is idempotent. The body always goes out as the spec object, never
+     * `[]`.
      *
-     * @param array<string, mixed> $filter
+     * @param array<string, mixed> $spec
      *
      * @return array<array-key, mixed>
      */
-    public function replayDeadLetters(array $filter = []): array
+    public function createReplay(array $spec): array
     {
-        return $this->json($this->request('POST', '/v1/dlq/replay', json: $filter));
+        return $this->json($this->request('POST', '/v1/replays', json: $spec));
+    }
+
+    /**
+     * `GET /v1/replays/{id}` -> the replay job.
+     *
+     * A missing job is a `404 replay_not_found` -> {@see AdminRejectedError}.
+     *
+     * @return array<array-key, mixed>
+     */
+    public function getReplay(string $id): array
+    {
+        return $this->json($this->request('GET', '/v1/replays/' . rawurlencode($id)));
+    }
+
+    /**
+     * `GET /v1/replays` -> `{replays: [...]}`, newest first.
+     *
+     * @return array<array-key, mixed>
+     */
+    public function listReplays(): array
+    {
+        return $this->json($this->request('GET', '/v1/replays'));
+    }
+
+    /**
+     * `PATCH /v1/replays/{id}` -> the updated replay job.
+     *
+     * `$patch` may carry `state` (`running`/`paused`/`cancelled`),
+     * `rate` and `max_lag_ms`. A `done`/`cancelled`/`failed` job is a
+     * `409 replay_finished`; a missing one is a `404 replay_not_found`.
+     *
+     * @param array<string, mixed> $patch
+     *
+     * @return array<array-key, mixed>
+     */
+    public function updateReplay(string $id, array $patch): array
+    {
+        return $this->json($this->request('PATCH', '/v1/replays/' . rawurlencode($id), json: $patch));
     }
 
     /**

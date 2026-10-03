@@ -26,8 +26,10 @@ export type AdminClientOptions = {
 export type Health = components["schemas"]["Health"];
 export type DlqPage = components["schemas"]["DlqPage"];
 export type QuarantinePage = components["schemas"]["QuarantinePage"];
-export type Replayed = components["schemas"]["Replayed"];
-export type ReplayFilter = components["schemas"]["ReplayFilter"];
+export type Replay = components["schemas"]["Replay"];
+export type ReplayList = components["schemas"]["ReplayList"];
+export type ReplaySpec = components["schemas"]["ReplaySpec"];
+export type ReplayPatch = components["schemas"]["ReplayPatch"];
 
 export type ListDeadLettersParams = NonNullable<paths["/v1/dlq"]["get"]["parameters"]["query"]>;
 export type ListQuarantinedParams = NonNullable<paths["/v1/quarantine"]["get"]["parameters"]["query"]>;
@@ -41,8 +43,17 @@ export type AdminClient = {
   config(): Promise<Record<string, unknown>>;
   /** List dead-lettered hooks (newest first, metadata only). */
   listDeadLetters(params?: ListDeadLettersParams): Promise<DlqPage>;
-  /** Re-deliver matching dead-lettered hooks; returns how many were replayed. */
-  replayDeadLetters(filter?: ReplayFilter): Promise<Replayed>;
+  /**
+   * Create a replay job. A `running`/`paused` job with the same kind and
+   * filter comes back instead, so a proxy retry is idempotent.
+   */
+  createReplay(spec: ReplaySpec): Promise<Replay>;
+  /** One replay job by id. */
+  getReplay(id: string): Promise<Replay>;
+  /** Every replay job, newest first. */
+  listReplays(): Promise<ReplayList>;
+  /** Pause, resume, cancel, or re-rate a replay job. */
+  updateReplay(id: string, patch: ReplayPatch): Promise<Replay>;
   /** Recent quarantined hooks (newest first, metadata only). */
   listQuarantined(params?: ListQuarantinedParams): Promise<QuarantinePage>;
 };
@@ -123,9 +134,29 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     );
   }
 
-  async function replayDeadLetters(filter?: ReplayFilter): Promise<Replayed> {
-    return request<Replayed>(() =>
-      http.POST("/v1/dlq/replay", { body: filter, signal: AbortSignal.timeout(timeoutMs) }),
+  async function createReplay(spec: ReplaySpec): Promise<Replay> {
+    return request<Replay>(() =>
+      http.POST("/v1/replays", { body: spec, signal: AbortSignal.timeout(timeoutMs) }),
+    );
+  }
+
+  async function getReplay(id: string): Promise<Replay> {
+    return request<Replay>(() =>
+      http.GET("/v1/replays/{id}", { params: { path: { id } }, signal: AbortSignal.timeout(timeoutMs) }),
+    );
+  }
+
+  async function listReplays(): Promise<ReplayList> {
+    return request<ReplayList>(() => http.GET("/v1/replays", { signal: AbortSignal.timeout(timeoutMs) }));
+  }
+
+  async function updateReplay(id: string, patch: ReplayPatch): Promise<Replay> {
+    return request<Replay>(() =>
+      http.PATCH("/v1/replays/{id}", {
+        params: { path: { id } },
+        body: patch,
+        signal: AbortSignal.timeout(timeoutMs),
+      }),
     );
   }
 
@@ -135,5 +166,15 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     );
   }
 
-  return { health, metrics, config, listDeadLetters, replayDeadLetters, listQuarantined };
+  return {
+    health,
+    metrics,
+    config,
+    listDeadLetters,
+    createReplay,
+    getReplay,
+    listReplays,
+    updateReplay,
+    listQuarantined,
+  };
 }

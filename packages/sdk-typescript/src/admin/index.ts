@@ -5,8 +5,10 @@ export type {
   Health,
   DlqPage,
   QuarantinePage,
-  Replayed,
-  ReplayFilter,
+  Replay,
+  ReplayList,
+  ReplaySpec,
+  ReplayPatch,
   ListDeadLettersParams,
   ListQuarantinedParams,
 } from "./client.js";

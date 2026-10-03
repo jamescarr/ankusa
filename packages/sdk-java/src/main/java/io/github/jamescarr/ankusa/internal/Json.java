@@ -33,6 +33,18 @@ public final class Json {
   private Json() {}
 
   /**
+   * Parses a body into a JSON tree, without binding it to a type.
+   *
+   * @param body the JSON bytes
+   * @return the parsed tree
+   * @throws JacksonException when {@code body} is not valid JSON; the message decoder turns that
+   *     into its own error
+   */
+  public static JsonNode readTree(byte[] body) {
+    return MAPPER.readTree(body);
+  }
+
+  /**
    * Encodes a request body.
    *
    * @param value the value to encode

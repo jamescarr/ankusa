@@ -253,7 +253,11 @@ defmodule Ankusa.Instance do
 
   defp dispatch_children(config, opts) do
     if Config.role?(config, :dispatch),
-      do: isolated(config, :dispatch, [{Ankusa.Dispatch.Pipeline, opts}]),
+      do:
+        isolated(config, :dispatch, [
+          {Ankusa.Dispatch.Pipeline, opts},
+          {Ankusa.Dispatch.Replayer, opts}
+        ]),
       else: []
   end
 

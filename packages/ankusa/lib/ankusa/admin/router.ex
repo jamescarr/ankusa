@@ -101,8 +101,20 @@ defmodule Ankusa.Admin.Router do
     require_role(conn, :dispatch, &dlq_index/1)
   end
 
-  post "/v1/dlq/replay" do
-    require_role(conn, :dispatch, &dlq_replay/1)
+  post "/v1/replays" do
+    require_role(conn, :dispatch, &replay_create/1)
+  end
+
+  get "/v1/replays" do
+    require_role(conn, :dispatch, &replay_list/1)
+  end
+
+  get "/v1/replays/:id" do
+    require_role(conn, :dispatch, &replay_get(&1, id))
+  end
+
+  patch "/v1/replays/:id" do
+    require_role(conn, :dispatch, &replay_update(&1, id))
   end
 
   get "/v1/quarantine" do
@@ -173,14 +185,6 @@ defmodule Ankusa.Admin.Router do
       end
     else
       {:error, field} -> invalid_filter(conn, field)
-    end
-  end
-
-  defp dlq_replay(conn) do
-    case Ankusa.Http.read_body_limited(conn, @max_replay_body) do
-      {:ok, body, conn} -> replay(conn, body)
-      {:too_large, conn} -> invalid_filter(conn, "body")
-      {:error, _reason, conn} -> invalid_filter(conn, "body")
     end
   end
 
@@ -417,29 +421,183 @@ defmodule Ankusa.Admin.Router do
   defp invalid_name_message(name),
     do: "name #{inspect(name)} must match [A-Za-z0-9_-]{1,64}"
 
-  # ── replay filter ───────────────────────────────────────────────────────────
+  # ── replay jobs ────────────────────────────────────────────────────────────
 
-  # Body rules match `Ankusa.Dispatch.replay/2`'s filter: `source_id` and `id`
-  # are exact matches, `since` is an inclusive lower bound on the dead-letter
-  # timestamp. An empty body replays everything — the same as `replay/2` with an
-  # empty filter, which is the operator's escape hatch for a full drain.
-  defp replay(conn, body) do
-    with {:ok, filter} <- decode_filter(body),
-         {:ok, source_id} <- string_param(filter, "source_id"),
-         {:ok, id} <- string_param(filter, "id"),
-         {:ok, since} <- int_param(filter, "since", nil) do
-      filter =
-        %{}
-        |> put_present(:source_id, source_id)
-        |> put_present(:id, id)
-        |> put_present(:since, since)
+  @kind_map %{"dlq" => :dlq, "archive" => :archive}
+  @state_map %{"running" => :running, "paused" => :paused, "cancelled" => :cancelled}
+  @replay_spec_keys ~w(kind source_id id since until from to sinks rate max_lag_ms)
+  @replay_patch_keys ~w(state rate max_lag_ms)
 
-      case Ankusa.Dispatch.replay(instance(conn), filter) do
-        {:ok, replayed} -> send_json(conn, 200, %{replayed: replayed})
-        {:error, _reason} -> send_json(conn, 503, %{error: "store_unavailable"})
+  defp replay_create(conn) do
+    with_replay_body(conn, fn map, conn ->
+      with {:ok, spec} <- replay_spec(map) do
+        case Ankusa.Replay.start(instance(conn), spec) do
+          {:ok, :created, job} ->
+            send_json(conn, 202, Ankusa.Replay.to_json(job))
+
+          {:ok, :existing, job} ->
+            send_json(conn, 200, Ankusa.Replay.to_json(job))
+
+          {:error, {:invalid, field}} ->
+            invalid_filter(conn, field)
+
+          {:error, :too_many_replays} ->
+            send_json(conn, 409, %{error: "too_many_replays"})
+
+          {:error, {:role_not_enabled, role}} ->
+            send_json(conn, 409, %{error: "role_not_enabled", role: to_string(role)})
+
+          {:error, :store_unavailable} ->
+            send_json(conn, 503, %{error: "store_unavailable"})
+        end
+      else
+        {:error, field} -> invalid_filter(conn, field)
       end
-    else
-      {:error, field} -> invalid_filter(conn, field)
+    end)
+  end
+
+  defp replay_list(conn) do
+    case Ankusa.Replay.list(instance(conn)) do
+      {:ok, jobs} -> send_json(conn, 200, %{replays: Enum.map(jobs, &Ankusa.Replay.to_json/1)})
+      {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
+    end
+  end
+
+  defp replay_get(conn, id) do
+    case Ankusa.Replay.get(instance(conn), id) do
+      {:ok, job} -> send_json(conn, 200, Ankusa.Replay.to_json(job))
+      {:error, :not_found} -> send_json(conn, 404, %{error: "replay_not_found"})
+      {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
+    end
+  end
+
+  defp replay_update(conn, id) do
+    with_replay_body(conn, fn map, conn ->
+      with {:ok, patch} <- replay_patch(map) do
+        case Ankusa.Replay.update(instance(conn), id, patch) do
+          {:ok, job} -> send_json(conn, 200, Ankusa.Replay.to_json(job))
+          {:error, :not_found} -> send_json(conn, 404, %{error: "replay_not_found"})
+          {:error, :finished} -> send_json(conn, 409, %{error: "replay_finished"})
+          {:error, {:invalid, field}} -> invalid_filter(conn, field)
+          {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
+        end
+      else
+        {:error, field} -> invalid_filter(conn, field)
+      end
+    end)
+  end
+
+  # A replay body is a spec, not a payload: read it as a JSON object with a
+  # modest size cap. Unknown keys and malformed bodies are `invalid_filter`.
+  defp with_replay_body(conn, fun) do
+    case Ankusa.Http.read_body_limited(conn, @max_replay_body) do
+      {:ok, body, conn} ->
+        case decode_filter(body) do
+          {:ok, map} -> fun.(map, conn)
+          {:error, field} -> invalid_filter(conn, field)
+        end
+
+      {:too_large, conn} ->
+        invalid_filter(conn, "body")
+
+      {:error, _reason, conn} ->
+        invalid_filter(conn, "body")
+    end
+  end
+
+  defp replay_spec(map) do
+    case unknown_key(map, @replay_spec_keys) do
+      nil ->
+        with {:ok, kind} <- enum_param(map, "kind", @kind_map),
+             {:ok, source_id} <- string_param(map, "source_id"),
+             {:ok, id} <- string_param(map, "id"),
+             {:ok, since} <- int_param(map, "since", nil),
+             {:ok, until} <- int_param(map, "until", nil),
+             {:ok, from} <- int_param(map, "from", nil),
+             {:ok, to} <- int_param(map, "to", nil),
+             {:ok, rate} <- int_param(map, "rate", nil),
+             {:ok, max_lag_ms} <- int_param(map, "max_lag_ms", nil),
+             {:ok, sinks} <- sinks_param(map) do
+          spec =
+            %{kind: kind}
+            |> put_present(:source_id, source_id)
+            |> put_present(:id, id)
+            |> put_present(:since, since)
+            |> put_present(:until, until)
+            |> put_present(:from, from)
+            |> put_present(:to, to)
+            |> put_present(:rate, rate)
+            |> put_present(:max_lag_ms, max_lag_ms)
+            |> put_present(:sinks, sinks)
+
+          {:ok, spec}
+        end
+
+      key ->
+        {:error, key}
+    end
+  end
+
+  defp replay_patch(map) do
+    case unknown_key(map, @replay_patch_keys) do
+      nil ->
+        with {:ok, state} <- optional_enum(map, "state", @state_map),
+             {:ok, rate} <- int_param(map, "rate", nil),
+             {:ok, max_lag_ms} <- int_param(map, "max_lag_ms", nil) do
+          patch =
+            %{}
+            |> put_present(:state, state)
+            |> put_present(:rate, rate)
+            |> put_present(:max_lag_ms, max_lag_ms)
+
+          {:ok, patch}
+        end
+
+      key ->
+        {:error, key}
+    end
+  end
+
+  defp unknown_key(map, allowed) do
+    Enum.find(Map.keys(map), &(&1 not in allowed))
+  end
+
+  defp enum_param(map, key, mapping) do
+    case Map.fetch(map, key) do
+      :error ->
+        {:error, key}
+
+      {:ok, value} ->
+        case Map.fetch(mapping, value) do
+          {:ok, atom} -> {:ok, atom}
+          :error -> {:error, key}
+        end
+    end
+  end
+
+  defp optional_enum(map, key, mapping) do
+    case Map.fetch(map, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, value} ->
+        case Map.fetch(mapping, value) do
+          {:ok, atom} -> {:ok, atom}
+          :error -> {:error, key}
+        end
+    end
+  end
+
+  defp sinks_param(map) do
+    case Map.fetch(map, "sinks") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, sinks} when is_list(sinks) ->
+        if Enum.all?(sinks, &is_integer/1), do: {:ok, sinks}, else: {:error, "sinks"}
+
+      {:ok, _other} ->
+        {:error, "sinks"}
     end
   end
 

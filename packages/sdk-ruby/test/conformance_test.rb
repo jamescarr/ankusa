@@ -32,6 +32,7 @@ CONFORMANCE_ERROR_CLASSES = %w[
   AdminUnavailableError
   RoleNotEnabledError
   AdminRejectedError
+  InvalidMessageError
 ].to_h { |name| [name, Ankusa.const_get(name)] }
 
 # The attributes a vector may assert on a thrown error. `retryable` reads
@@ -77,7 +78,13 @@ class ConformanceTest < Minitest::Test
         next if key == "class"
 
         assert error.key?(key), "#{error["class"]} has no attribute #{key.inspect} (expected #{value.inspect})"
-        assert_equal value, error[key], "#{error["class"]}.#{key}"
+        # A vector may assert a null attribute (`InvalidMessageError#field`);
+        # Minitest 6 refuses assert_equal nil.
+        if value.nil?
+          assert_nil error[key], "#{error["class"]}.#{key}"
+        else
+          assert_equal value, error[key], "#{error["class"]}.#{key}"
+        end
       end
     end
 
@@ -95,7 +102,40 @@ class ConformanceTest < Minitest::Test
       {"tenant_id" => ref.tenant_id, "claim_id" => ref.claim_id, "path" => ref.path}
     when "parse_headers"
       headers = Ankusa.parse_headers(input.fetch("headers"))
-      {"id" => headers.id, "source" => headers.source, "tenant" => headers.tenant, "content_type" => headers.content_type}
+      {
+        "id" => headers.id,
+        "source" => headers.source,
+        "tenant" => headers.tenant,
+        "content_type" => headers.content_type,
+        "dedupe_key" => headers.dedupe_key,
+        "replay_id" => headers.replay_id
+      }
+    when "decode_message"
+      message = Ankusa.decode_message(input.fetch("message"))
+      {
+        "v" => message.v,
+        "id" => message.id,
+        "source_id" => message.source_id,
+        "tenant_id" => message.tenant_id,
+        "received_at" => message.received_at,
+        "content_type" => message.content_type,
+        "size" => message.size,
+        "body_base64" => message.body.nil? ? nil : [message.body].pack("m0"),
+        "claim" => message.claim,
+        "sha256" => message.sha256,
+        "dedupe_key" => message.dedupe_key,
+        "replay_id" => message.replay_id,
+        "headers" => message.headers
+      }
+    when "idempotency_key"
+      include_replay = input.fetch("include_replay", false)
+      key =
+        if input.key?("message")
+          Ankusa.decode_message(input.fetch("message")).idempotency_key(include_replay: include_replay)
+        else
+          Ankusa.parse_headers(input.fetch("headers")).idempotency_key(include_replay: include_replay)
+        end
+      {"key" => key}
     when "redeem"
       with_client(Ankusa::ClaimCheckClient, input, requests) do |client|
         body = client.redeem(input.fetch("ref"), input.fetch("sha256"))
@@ -136,8 +176,16 @@ class ConformanceTest < Minitest::Test
       with_client(Ankusa::AdminClient, input, requests, &:config)
     when "admin_dlq_list"
       with_client(Ankusa::AdminClient, input, requests) { |client| client.list_dead_letters(input["params"]) }
-    when "admin_dlq_replay"
-      with_client(Ankusa::AdminClient, input, requests) { |client| client.replay_dead_letters(input["filter"]) }
+    when "admin_replay_create"
+      with_client(Ankusa::AdminClient, input, requests) { |client| client.create_replay(input.fetch("spec")) }
+    when "admin_replay_get"
+      with_client(Ankusa::AdminClient, input, requests) { |client| client.get_replay(input.fetch("id")) }
+    when "admin_replay_list"
+      with_client(Ankusa::AdminClient, input, requests, &:list_replays)
+    when "admin_replay_update"
+      with_client(Ankusa::AdminClient, input, requests) do |client|
+        client.update_replay(input.fetch("id"), input.fetch("patch"))
+      end
     when "admin_quarantine"
       with_client(Ankusa::AdminClient, input, requests) { |client| client.list_quarantined(input["params"]) }
     else

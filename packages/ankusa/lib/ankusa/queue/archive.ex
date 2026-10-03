@@ -93,6 +93,26 @@ defmodule Ankusa.Queue.Archive do
     end
   end
 
+  @doc """
+  The first catalogue row with `first_seq > after_first_seq` whose id range
+  overlaps `[min_id, max_id]`, or `nil` when no such segment exists. The
+  replay engine walks a time window one segment at a time with this.
+  """
+  @spec next_segment(atom(), non_neg_integer(), String.t(), String.t()) ::
+          {:ok, map() | nil} | {:error, term()}
+  def next_segment(instance, after_first_seq, min_id, max_id) do
+    %{hi: hi} = Keys.family(:segments)
+    range = {Keys.segment(after_first_seq + 1), hi}
+
+    Store.fold(instance, :segments, range, nil, fn _key, value, acc ->
+      row = :erlang.binary_to_term(value)
+
+      if row.max_id >= min_id and row.min_id <= max_id,
+        do: {:halt, row},
+        else: {:cont, acc}
+    end)
+  end
+
   @doc "Catalogue rows whose id range could hold `id`, oldest first."
   @spec segments_containing(atom(), String.t()) :: {:ok, [map()]} | {:error, term()}
   def segments_containing(instance, id) do

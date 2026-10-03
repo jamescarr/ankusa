@@ -99,6 +99,20 @@ defmodule Ankusa.Dispatch.Pipeline do
     GenServer.call(Ankusa.via(instance, :dispatch), :tick, 30_000)
   end
 
+  @doc """
+  The spare capacity a replay job may use right now: the lag of the oldest due
+  row (`lag_ms`, 0 when nothing is due) and whether the in-flight window is
+  full. `{:error, :unavailable}` while the pipeline is down or the store
+  cannot answer.
+  """
+  @spec pressure(atom()) ::
+          {:ok, %{lag_ms: non_neg_integer(), window_full: boolean()}} | {:error, :unavailable}
+  def pressure(instance) do
+    GenServer.call(Ankusa.via(instance, :dispatch), :pressure, 1_000)
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
   # ── GenServer ─────────────────────────────────────────────────────────────
 
   @impl true
@@ -146,7 +160,10 @@ defmodule Ankusa.Dispatch.Pipeline do
        timer: nil,
        settled: 0,
        waiters: [],
-       sweep_ticks: 0
+       sweep_ticks: 0,
+       # replay job id => %{delivered: n, dead: n} since the last housekeeping
+       # report to `Ankusa.Dispatch.Replayer`
+       replay_outcomes: %{}
      }}
   end
 
@@ -176,20 +193,15 @@ defmodule Ankusa.Dispatch.Pipeline do
     maybe_reply_waiters(%{state | waiters: state.waiters ++ [{from, state.settled}]})
   end
 
-  def handle_call({:replay, filter}, _from, state) do
-    # Dead rows still in the outcome buffer must be visible to the scan.
-    state = flush(state)
-    at = now_ms()
+  def handle_call(:pressure, _from, state) do
+    reply =
+      case Deliveries.next_due_at(state.instance, state.floor) do
+        {:ok, nil} -> {:ok, %{lag_ms: 0, window_full: at_capacity?(state)}}
+        {:ok, at} -> {:ok, %{lag_ms: max(0, now_ms() - at), window_full: at_capacity?(state)}}
+        {:error, _reason} -> {:error, :unavailable}
+      end
 
-    case Deliveries.replay(state.instance, filter, at) do
-      {:ok, replayed} ->
-        send(self(), :wake)
-        {:reply, {:ok, replayed}, lower_floor(state, at)}
-
-      {:error, reason} ->
-        Logger.error("[ankusa] replay failed: #{inspect(reason)}")
-        {:reply, {:error, :store_unavailable}, state}
-    end
+    {:reply, reply, state}
   end
 
   # Stopped by its supervisor: write what is buffered, so a graceful stop does
@@ -246,7 +258,13 @@ defmodule Ankusa.Dispatch.Pipeline do
     # `schedule_next` is here because a flush cancels the flush timer, and with
     # it the refill that would have followed: whatever the outcomes freed is
     # claimed by the wake this arms. It also re-arms a lost wake, once a second.
-    state = state |> flush() |> flush_unrecorded() |> schedule_next()
+    state =
+      state
+      |> flush()
+      |> flush_unrecorded()
+      |> report_replay_outcomes()
+      |> schedule_next()
+
     ticks = state.sweep_ticks + 1
 
     state =
@@ -298,6 +316,22 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Stray messages (e.g. a DOWN from a task already demonitored) must never take
   # down a process other parts of the tree are waiting on.
   def handle_info(_message, state), do: {:noreply, state}
+
+  # Replay jobs learn how many of their deliveries settled, so the Replayer can
+  # count and auto-pause. Sent on housekeeping, so at most once a second; a
+  # missing Replayer (no :dispatch role tree) just drops them.
+  defp report_replay_outcomes(%{replay_outcomes: outcomes} = state)
+       when map_size(outcomes) == 0,
+       do: state
+
+  defp report_replay_outcomes(state) do
+    case Ankusa.whereis(state.instance, :replayer) do
+      pid when is_pid(pid) -> send(pid, {:replay_outcomes, state.replay_outcomes})
+      nil -> :ok
+    end
+
+    %{state | replay_outcomes: %{}}
+  end
 
   # ── claiming ──────────────────────────────────────────────────────────────
 
@@ -435,7 +469,8 @@ defmodule Ankusa.Dispatch.Pipeline do
               row: item.row,
               env: item.env,
               spec: spec,
-              claim: item.claim
+              claim: item.claim,
+              forward_headers: source.forward_headers
             }
 
             {state, ops, pairs, [job | jobs], sources}
@@ -472,7 +507,12 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp dead(item, reason, {state, ops, pairs, jobs, sources}, now) do
     error = inspect(reason, limit: 50, printable_limit: 4096)
     dead_ops = Deliveries.dead_ops(item.seq, item.sink, item.row, now, error, item.env)
-    state = settle_dead(state, item.env, item.row.module, item.row.attempts)
+
+    state =
+      state
+      |> settle_dead(item.env, item.row.module, item.row.attempts)
+      |> bump_replay(item.row, :dead)
+
     {state, dead_ops ++ ops, pairs, jobs, sources}
   end
 
@@ -685,13 +725,20 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp ctx(%{env: env, row: row}, instance, claim) do
+  defp ctx(%{env: env, row: row} = job, instance, claim) do
     ctx = %{
       instance: instance,
       source_id: env.source_id,
       tenant_id: env.tenant_id,
-      attempt: row.attempts + 1
+      attempt: row.attempts + 1,
+      forward_headers: job.forward_headers
     }
+
+    ctx =
+      case Map.get(row, :replay) do
+        r when is_binary(r) -> Map.put(ctx, :replay_id, r)
+        _ -> ctx
+      end
 
     if claim, do: Map.put(ctx, :claim, claim), else: ctx
   end
@@ -721,8 +768,8 @@ defmodule Ankusa.Dispatch.Pipeline do
             attempts: attempts
           })
 
-          {%{state | settled: state.settled + 1}, Deliveries.delivered_ops(job.seq, job.sink),
-           [cleared(job.seq, job.sink)]}
+          {%{state | settled: state.settled + 1} |> bump_replay(job.row, :delivered),
+           Deliveries.delivered_ops(job.seq, job.sink), [cleared(job.seq, job.sink)]}
 
         {:error, reason} ->
           failed(state, job, reason, attempts, now)
@@ -752,8 +799,22 @@ defmodule Ankusa.Dispatch.Pipeline do
       :give_up ->
         {mod, _opts} = job.spec
         error = inspect({:sink, mod, reason}, limit: 50, printable_limit: 4096)
-        state = settle_dead(state, job.env, mod, attempts)
+        state = state |> settle_dead(job.env, mod, attempts) |> bump_replay(row, :dead)
         {state, Deliveries.dead_ops(job.seq, job.sink, row, now, error, job.env), []}
+    end
+  end
+
+  # A delivery belonging to a replay job: counted so the Replayer can report
+  # and auto-pause. Rows without a `replay` key are live deliveries and skip.
+  defp bump_replay(state, row, kind) do
+    case Map.get(row, :replay) do
+      r when is_binary(r) ->
+        counts = Map.get(state.replay_outcomes, r, %{delivered: 0, dead: 0})
+        counts = Map.update!(counts, kind, &(&1 + 1))
+        %{state | replay_outcomes: Map.put(state.replay_outcomes, r, counts)}
+
+      _ ->
+        state
     end
   end
 

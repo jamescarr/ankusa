@@ -58,7 +58,7 @@ Every top-level section, with its keys and defaults:
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `retry.base_ms` (100), `retry.max_ms` (30000), `retry.max_attempts` (12), `retry.jitter` (`true`) |
-| `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical) |
+| `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
 | `claim_check` | `port` (4001), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
@@ -83,6 +83,8 @@ One source per provider endpoint; the key is the catch-URL segment
 | `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300). `hmac` takes the descriptor keys below. |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
+| `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. |
+| `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or `:default`/absent for every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. |
 
 ### Custom HMAC schemes
 
@@ -285,9 +287,11 @@ With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 (Prometheus text), `GET /v1/config` (the effective config, secrets redacted),
 `GET /v1/wal` (this node's store stats: `next_seq`, and the `hooks`,
 `deliveries` and `disk_bytes` estimates; `{}` when the store cannot be read,
-`409 wal_disabled` under `wal.type: none`), `GET /v1/dlq` and
-`POST /v1/dlq/replay` (`:dispatch` role), and `GET /v1/quarantine` (`:edge`
-role) on `admin.port`, independent of the node's roles. Source management is
+`409 wal_disabled` under `wal.type: none`), `GET /v1/dlq`, the replay jobs API
+— `POST /v1/replays`, `GET /v1/replays`, `GET|PATCH /v1/replays/{id}` — and
+`GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the node's
+roles. Replay jobs are per node, so a fleet replay is one `POST /v1/replays`
+per dispatch node. Source management is
 node-agnostic: `GET|POST /v1/tenants/{tenant}/sources` and
 `GET|PUT|DELETE /v1/tenants/{tenant}/sources/{name}`, on a writable source
 store (`409 source_store_read_only` otherwise). The `:edge` role also gets

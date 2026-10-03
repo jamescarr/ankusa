@@ -1,8 +1,9 @@
 """Client for the operator listener (``admin.port``, default 4002).
 
 This is ``Ankusa.Admin.Router``: health, Prometheus metrics, the redacted
-configuration, the dead-letter queue, and the quarantine list. Responses are
-node-local by design, so a fleet operator scrapes every node's admin port.
+configuration, the dead-letter queue, replay jobs, and the quarantine list.
+Responses are node-local by design, so a fleet operator scrapes every node's
+admin port.
 
 Like the claim-check client, the listener itself performs no authentication --
 ``headers`` is for whatever a deployer's own boundary (service mesh, an API
@@ -14,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import TracebackType
 from typing import Any, Self
+from urllib.parse import quote
 
 import httpx
 
@@ -77,16 +79,35 @@ class AdminClient:
         """
         return self._json(self._request("GET", "/v1/dlq", params=_query(params)))
 
-    def replay_dead_letters(
-        self,
-        filter: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """``POST /v1/dlq/replay`` -> ``{replayed}``.
+    def create_replay(self, spec: Mapping[str, Any]) -> dict[str, Any]:
+        """``POST /v1/replays`` -> the replay job (202 for a new one, 200 for an
+        existing ``running``/``paused`` job with the same filter, so a proxy
+        retry is idempotent).
 
-        ``filter`` is a filter, not a payload; omitted or empty (``{}``)
-        replays everything.
+        ``spec`` is the request body verbatim: ``kind`` (``"dlq"`` or
+        ``"archive"``) plus that kind's bounds and any optional ``rate`` /
+        ``max_lag_ms``.
         """
-        return self._json(self._request("POST", "/v1/dlq/replay", json=dict(filter or {})))
+        return self._json(self._request("POST", "/v1/replays", json=dict(spec)))
+
+    def get_replay(self, replay_id: str) -> dict[str, Any]:
+        """``GET /v1/replays/{id}`` -> the replay job; ``404`` raises
+        ``AdminRejectedError`` with ``code="replay_not_found"``."""
+        return self._json(self._request("GET", f"/v1/replays/{quote(replay_id, safe='')}"))
+
+    def list_replays(self) -> dict[str, Any]:
+        """``GET /v1/replays`` -> ``{"replays": [...]}``, newest first."""
+        return self._json(self._request("GET", "/v1/replays"))
+
+    def update_replay(self, replay_id: str, patch: Mapping[str, Any]) -> dict[str, Any]:
+        """``PATCH /v1/replays/{id}`` -> the replay job.
+
+        ``patch`` may carry ``state`` (``"running"``, ``"paused"`` or
+        ``"cancelled"``), ``rate`` and ``max_lag_ms``.
+        """
+        return self._json(
+            self._request("PATCH", f"/v1/replays/{quote(replay_id, safe='')}", json=dict(patch))
+        )
 
     def list_quarantined(
         self,

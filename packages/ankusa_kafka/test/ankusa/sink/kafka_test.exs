@@ -77,8 +77,8 @@ defmodule Ankusa.Sink.KafkaTest do
     instance: inst,
     topic: topic
   } do
-    env = envelope()
-    assert :ok = Kafka.deliver(env, ctx(inst), opts(topic))
+    env = envelope(%{dedupe_key: "evt_1"})
+    assert :ok = Kafka.deliver(env, Map.put(ctx(inst), :replay_id, "rid"), opts(topic))
 
     assert [msg] = fetch_all(topic)
     assert msg.key == "t1/src"
@@ -89,7 +89,9 @@ defmodule Ankusa.Sink.KafkaTest do
              "ankusa_source_id" => "src",
              "ankusa_tenant_id" => "t1",
              "ankusa_message_version" => "1",
-             "content_type" => "application/json"
+             "content_type" => "application/json",
+             "ankusa_dedupe_key" => "evt_1",
+             "ankusa_replay_id" => "rid"
            }
 
     decoded = JSON.decode!(msg.value)

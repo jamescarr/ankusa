@@ -358,7 +358,7 @@ defmodule AnkusaServer.ConfigTest do
     end
   end
 
-  test "a removed dedup key on a source is rejected by name" do
+  test "the removed dedup `type:` form on a source is rejected by name" do
     path =
       tmp_config("""
       sources:
@@ -369,7 +369,93 @@ defmodule AnkusaServer.ConfigTest do
       """)
 
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.demo"
     assert error.message =~ ~s(unknown key "dedup")
+  end
+
+  test "dedupe accepts a preset, a header map, a json map, and a ttl" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            a: {verify: {type: none}, dedupe: github, sinks: [{type: log}]}
+            b: {verify: {type: none}, dedupe: {header: X-Custom-Id}, sinks: [{type: log}]}
+            c: {verify: {type: none}, dedupe: {json: data.id, ttl_seconds: 60}, sinks: [{type: log}]}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert sources["a"][:dedupe] == :github
+    assert sources["b"][:dedupe] == %{header: "X-Custom-Id"}
+    assert sources["c"][:dedupe] == %{json: "data.id", ttl_ms: 60_000}
+
+    # `Source.new/2` (what every fetch builds) folds the header name.
+    assert Ankusa.Source.new("b", sources["b"]).dedupe.from == {:header, "x-custom-id"}
+  end
+
+  test "a dedupe map with none or several sources, a blank header, or a bad ttl is rejected" do
+    for {yaml, fragment} <- [
+          {"dedupe: {ttl_seconds: 60}", "set exactly one of preset, header, json"},
+          {"dedupe: {header: x-id, json: data.id}", "set exactly one of preset, header, json"},
+          {"dedupe: {header: ''}", "must not be empty"},
+          {"dedupe: {header: x-id, ttl_seconds: 0}", "must be > 0"},
+          {"dedupe: {preset: nope}", ~s(unknown value "nope")}
+        ] do
+      path =
+        tmp_config("""
+        sources:
+          demo:
+            verify: {type: none}
+            #{yaml}
+            sinks: [{type: log}]
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ "sources.demo.dedupe"
+      assert error.message =~ fragment
+    end
+  end
+
+  test "forward_headers accepts a list (lowercased) or nothing, and rejects other shapes" do
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          sources:
+            a: {verify: {type: none}, forward_headers: [X-GitHub-Event], sinks: [{type: log}]}
+            b: {verify: {type: none}, forward_headers: [], sinks: [{type: log}]}
+            c: {verify: {type: none}, sinks: [{type: log}]}
+          """),
+        env: %{}
+      ).config
+
+    sources = config.source_store |> elem(1) |> Keyword.fetch!(:sources)
+
+    assert sources["a"][:forward_headers] == ["x-github-event"]
+    assert sources["b"][:forward_headers] == []
+    assert sources["c"][:forward_headers] == nil
+
+    # The list survives `Source.new/2` — `[]` means "forward nothing", not an
+    # error, and every fetch builds the struct through this path.
+    assert Ankusa.Source.new("b", sources["b"]).forward_headers == []
+    assert Ankusa.Source.new("a", sources["a"]).forward_headers == ["x-github-event"]
+    assert Ankusa.Source.new("c", sources["c"]).forward_headers == :default
+
+    path =
+      tmp_config("""
+      sources:
+        demo:
+          verify: {type: none}
+          forward_headers: X-GitHub-Event
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.demo.forward_headers"
+    assert error.message =~ "a list of header names"
   end
 
   test "an unknown verifier type lists the valid ones" do

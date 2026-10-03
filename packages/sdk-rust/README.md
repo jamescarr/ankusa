@@ -1,8 +1,8 @@
 # ankusa
 
 Client SDK for [Ankusa](https://github.com/jamescarr/ankusa), the self-hosted
-webhook receiver: claim-check redemption, webhook header parsing, and clients
-for the route-management and operator APIs.
+webhook receiver: claim-check redemption, webhook header parsing, queue-message
+decoding, and clients for the route-management and operator APIs.
 
 Async only, on Tokio: every call is an `async fn` you drive yourself, and every
 request is bounded by `tokio::time::timeout`, so the runtime needs its timers (a
@@ -99,6 +99,49 @@ assert_eq!(hook_id(&headers)?, "01a0");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+`HookHeaders` also carries `dedupe_key` (from `x-ankusa-dedupe-key`) and
+`replay_id` (from `x-ankusa-replay-id`), each `None` when the header is absent
+or empty, and its `idempotency_key(include_replay)` applies the same rule as
+`Message` below.
+
+## Consuming queue messages
+
+An Ankusa sink delivers the `v: 1` queue message as JSON: the body inline
+(`body_base64`) or as a claim-check ref (`claim`), the body's `sha256`, the
+provider's `dedupe_key` and forwarded `headers`, and a `replay_id` when the
+delivery is a replay. `decode_message` validates all of it and, on any
+malformed input, returns an `InvalidMessageError` that is never retryable
+(`err.code` is `invalid_json`, `size_mismatch`, `integrity`, …; `err.field`
+names the offending key when the code is `invalid_field`).
+
+Key a processed-ids table on `idempotency_key`: `source_id:dedupe_key` when a
+non-empty `dedupe_key` is present, else `id`. Pass `include_replay: true` only
+if the consumer must reprocess replays — the default drops replays of events it
+already processed.
+
+```rust
+use ankusa::{InvalidMessageError, decode_message};
+use std::collections::HashSet;
+
+/// Returns `false` when the delivery was already processed.
+fn first_delivery(
+    raw: &[u8],
+    processed: &mut HashSet<String>,
+) -> Result<bool, InvalidMessageError> {
+    let message = decode_message(raw)?;
+    let key = message.idempotency_key(false);
+    if !processed.insert(key) {
+        return Ok(false); // a provider retry, or a replay of an event we ran
+    }
+    // ... perform the effect, keyed by `key` ...
+    Ok(true)
+}
+```
+
+Both body forms are supported: an inline message exposes the bytes as
+`message.body`, while a claim-form message exposes the ref as `message.claim`
+for a `ClaimCheckClient::redeem` call.
+
 ## Routes client
 
 `RoutesClient` drives the route-management listener (`routes.admin.port`): the
@@ -165,6 +208,44 @@ println!("{} of {} dead letters", page.entries.len(), page.total);
 # }
 ```
 
+Replay jobs are managed on the same listener. `create_replay` starts one (a
+`dlq` job over dead-lettered rows, or an `archive` job over a time window) and
+returns the running job when the same spec is posted twice, so a proxy retry is
+safe:
+
+```rust,no_run
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+use ankusa::{AdminClient, ReplayPatch, ReplaySpec};
+
+let admin = AdminClient::new("http://127.0.0.1:4002")?;
+let replay = admin
+    .create_replay(&ReplaySpec {
+        kind: "dlq".to_owned(),
+        source_id: Some("stripe".to_owned()),
+        rate: Some(500),
+        ..ReplaySpec::default()
+    })
+    .await?;
+println!("replay {} is {}", replay.id, replay.state);
+
+let jobs = admin.list_replays().await?;
+println!("{} jobs", jobs.replays.len());
+
+let paused = admin
+    .update_replay(
+        &replay.id,
+        &ReplayPatch {
+            state: Some("paused".to_owned()),
+            ..ReplayPatch::default()
+        },
+    )
+    .await?;
+println!("replay {} is now {}", paused.id, paused.state);
+# Ok(())
+# }
+```
+
 ## Custom transport
 
 `ClientBuilder` shares a base URL, headers, and a timeout across whichever
@@ -218,5 +299,5 @@ mise run check:package sdk-rust # format, clippy -D warnings, tests, docs, cargo
 
 The conformance suite runs the language-neutral vectors in
 [`conformance/`](https://github.com/jamescarr/ankusa/tree/main/conformance)
-against this crate's public API, so `ankusa` passes the same 94 cases the
+against this crate's public API, so `ankusa` passes the same 124 cases the
 TypeScript and Python SDKs do.

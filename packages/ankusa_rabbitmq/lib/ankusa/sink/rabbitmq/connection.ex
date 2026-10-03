@@ -66,8 +66,9 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
 
   @spec publish(GenServer.server(), String.t(), binary(), keyword()) ::
           :ok | {:error, term()}
-  def publish(server, routing_key, payload, headers \\ []) do
-    GenServer.call(server, {:publish, routing_key, payload, headers}, 15_000)
+  # `props` is `[message_id: String.t() | nil, headers: [{String.t(), atom(), term()}]`.
+  def publish(server, routing_key, payload, props \\ []) do
+    GenServer.call(server, {:publish, routing_key, payload, props}, 15_000)
   end
 
   @doc """
@@ -118,12 +119,12 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
   def handle_info({basic_return(), amqp_msg()}, state), do: {:noreply, state}
 
   @impl true
-  def handle_call({:publish, _routing_key, _payload, _headers}, _from, %{chan: nil} = state) do
+  def handle_call({:publish, _routing_key, _payload, _props}, _from, %{chan: nil} = state) do
     {:reply, {:error, :not_connected}, state}
   end
 
-  def handle_call({:publish, routing_key, payload, headers}, _from, state) do
-    {result, state} = publish_and_confirm(state, routing_key, payload, headers)
+  def handle_call({:publish, routing_key, payload, props}, _from, state) do
+    {result, state} = publish_and_confirm(state, routing_key, payload, props)
     {:reply, result, state}
   end
 
@@ -221,10 +222,10 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
 
   # ── publish ─────────────────────────────────────────────────────────────
 
-  defp publish_and_confirm(state, routing_key, payload, headers) do
+  defp publish_and_confirm(state, routing_key, payload, props) do
     deadline = System.monotonic_time(:millisecond) + state.confirm_timeout_ms
 
-    case send_publish(state, routing_key, payload, headers) do
+    case send_publish(state, routing_key, payload, props) do
       {:ok, seqno} -> await_confirm(state, seqno, routing_key, payload, deadline, false)
       {:error, _reason} = error -> {error, state}
     end
@@ -232,15 +233,24 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
 
   # This process is the channel's only publisher, so the seqno read first is the
   # delivery tag the broker will confirm. A blocked publish does not consume one.
-  defp send_publish(state, routing_key, payload, headers) do
+  defp send_publish(state, routing_key, payload, props) do
     seqno = AMQP.Confirm.next_publish_seqno(state.chan)
 
-    case AMQP.Basic.publish(state.chan, state.exchange, routing_key, payload,
-           mandatory: true,
-           persistent: true,
-           content_type: "application/json",
-           headers: headers
-         ) do
+    opts = [
+      mandatory: true,
+      persistent: true,
+      content_type: "application/json",
+      headers: Keyword.get(props, :headers, [])
+    ]
+
+    # The hook's `id` is the broker's `message_id`, so consumers dedupe on it.
+    opts =
+      case Keyword.get(props, :message_id) do
+        nil -> opts
+        id when is_binary(id) -> Keyword.put(opts, :message_id, id)
+      end
+
+    case AMQP.Basic.publish(state.chan, state.exchange, routing_key, payload, opts) do
       :ok -> {:ok, seqno}
       {:error, reason} -> {:error, {:publish_failed, reason}}
     end

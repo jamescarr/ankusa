@@ -5,8 +5,8 @@ deployments: one gem meant to bundle everything a non-Elixir consumer needs to
 talk to an Ankusa deployment. Today that's the
 [claim-check gateway](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md)
 client, the route-management and operator (admin) clients, the
-source-management client, and a webhook-receiving header helper; more clients
-(ingest) land here as they're built.
+source-management client, a webhook-receiving header helper, and the queue
+message decoder; more clients (ingest) land here as they're built.
 
 ## Install
 
@@ -127,8 +127,68 @@ end
 `HookHeaders#id` is what a receiver dedupes on: delivery is at-least-once (see
 "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
-so the same hook can arrive twice after a retry. Header lookup is always
-case-insensitive, regardless of whether the mapping passed in already is.
+so the same hook can arrive twice after a retry. When the source extracted the
+provider's own event key, `HookHeaders#dedupe_key` carries it (and `replay_id`
+marks a replay); `#idempotency_key` folds both into the key to store — see
+"Consuming queue messages". Header lookup is always case-insensitive,
+regardless of whether the mapping passed in already is.
+
+## Consuming queue messages
+
+Every sink — HTTP, RabbitMQ, Kafka, NATS — delivers one JSON message per hook:
+the identity fields, the body (inline `body_base64` or a claim-check `claim`),
+`sha256`, and, when present, `dedupe_key`, `replay_id` and the forwarded
+provider `headers`. `Ankusa.decode_message` validates all of it and
+`Message#idempotency_key` gives the value to store in a processed-ids table:
+
+```ruby
+require "ankusa/sdk"
+
+CLAIM_CHECK = Ankusa::ClaimCheckClient.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
+DB = PG.connect(ENV.fetch("DATABASE_URL"))
+DB.exec("CREATE TABLE IF NOT EXISTS processed (key text primary key)")
+
+def consume(raw)
+  begin
+    message = Ankusa.decode_message(raw)
+  rescue Ankusa::InvalidMessageError => e
+    # Poison message: dead-letter, never requeue. `e.retryable?` is false;
+    # `e.code` is e.g. "integrity"; `e.field` names the offending key.
+    raise
+  end
+
+  key = message.idempotency_key   # source_id:dedupe_key, else id
+  return if DB.exec_params("SELECT 1 FROM processed WHERE key = $1", [key]).any?
+
+  body = message.claim ? CLAIM_CHECK.redeem(message.claim, message.sha256) : message.body
+  handle(body)
+  DB.exec_params("INSERT INTO processed (key) VALUES ($1)", [key])
+end
+```
+
+- `idempotency_key` is `source_id:dedupe_key` when the source extracted the
+  provider's own event key, else `id` — so a provider retry that arrives with a
+  fresh Ankusa `id` still collapses onto the same row.
+- A replayed delivery is dropped by default. To reprocess replays instead, pass
+  `include_replay: true`: the key then ends in `#replay:<replay_id>`.
+- `message.body` is the decoded inline bytes (nil for the claim form);
+  `message.headers` holds the forwarded provider request headers (lowercased).
+  `message.sha256` is checked against the inline bytes by `decode_message`
+  itself, and against the claim's bytes by `CLAIM_CHECK.redeem`.
+- `decode_message` raises `InvalidMessageError` before you act on a message:
+  bad JSON, a non-object, an unsupported `v`, a bad field type, both or neither
+  body form, invalid base64, a length/sha256 mismatch, or a claim whose tenant
+  differs from `tenant_id`.
+
+A webhook receiver can take the same shortcut straight off the HTTP sink's
+headers with `Ankusa.parse_headers(headers).idempotency_key`, where `source`
+plays the part of `source_id`.
+
+When a sink has grown a backlog, or a downstream processor failed after the
+sink accepted a batch, re-drive it with a replay job over the admin client (see
+"Admin client" below): `"kind" => "dlq"` re-sends rows that dead-lettered,
+`"kind" => "archive"` re-sends hooks over a time window. Replays keep the
+original `id` and `dedupe_key` and add `replay_id`.
 
 ## Routes client
 
@@ -162,8 +222,8 @@ unfollowed redirect, a non-JSON success body, or unreachable; retryable).
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics, the
-redacted config, the DLQ, and the quarantine list — the `operations`, `dlq`, and
-`quarantine` tags of `admin.v1.yaml`.
+redacted config, the DLQ, replay jobs, and the quarantine list — the
+`operations`, `dlq`, `replays`, and `quarantine` tags of `admin.v1.yaml`.
 
 ```ruby
 require "ankusa/sdk"
@@ -172,14 +232,24 @@ admin = Ankusa::AdminClient.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
 
 admin.health                          # {"status" => "ok", "instance" => ..., "roles" => [...]}
 admin.list_dead_letters({"limit" => 10})  # {"total" => ..., "entries" => [...]}
-admin.replay_dead_letters({"source_id" => "demo"})
 admin.list_quarantined
+
+job = admin.create_replay({"kind" => "dlq", "source_id" => "stripe", "rate" => 500})
+admin.get_replay(job["id"])
+admin.list_replays                    # {"replays" => [Replay, ...]}, newest first
+admin.update_replay(job["id"], {"state" => "paused"})   # resume, pause or cancel
 ```
 
+`create_replay` is idempotent for retries: a second POST of the same filter
+while the job is `running`/`paused` returns the existing job (`200`) instead of
+starting another (`202`). `list_replays` returns `{"replays" => [...]}` exactly
+as the API sends it.
+
 Methods: `health`, `metrics` (Prometheus text), `config`, `list_dead_letters`,
-`replay_dead_letters`, `list_quarantined`. Failures are `AdminError` subclasses:
-`RoleNotEnabledError` (409 `role_not_enabled`, carrying `role`),
-`AdminRejectedError` (any other 4xx, carrying `code`), and
+`create_replay`, `get_replay`, `list_replays`, `update_replay`,
+`list_quarantined`. Failures are `AdminError` subclasses: `RoleNotEnabledError`
+(409 `role_not_enabled`, carrying `role`), `AdminRejectedError` (any other 4xx —
+a missing replay is a 404 with `code` `replay_not_found`), and
 `AdminUnavailableError` (5xx, an unfollowed redirect, or unreachable;
 retryable).
 
@@ -236,6 +306,7 @@ lib/ankusa/
   connection.rb         # shared URL/query/body/JSON rules (@api private)
   webhook.rb            # x-ankusa-* header parsing for HTTP-sink receivers
   claim_check.rb        # the claim-check gateway client
+  message.rb            # decode the v1 queue message + the idempotency key
   routes.rb             # the route-management client (routes.admin.port)
   admin.rb              # the operator client (admin.port)
   sources.rb            # the tenant-scoped source-management client (admin.port)

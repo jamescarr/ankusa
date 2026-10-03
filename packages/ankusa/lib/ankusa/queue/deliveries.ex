@@ -11,7 +11,9 @@ defmodule Ankusa.Queue.Deliveries do
   # Every transition is one batch, so a row always has exactly one index key.
   # The row value is a term: `%{module, state, attempts, at, error, size}`;
   # `at` is the due time while pending and the dead-letter time once dead, and
-  # `size` the stored hook's byte size. Rows bind to `(sink index, module)`;
+  # `size` the stored hook's byte size. A row revived by a replay job
+  # (`Ankusa.Dispatch.Replayer`) additionally carries `replay: replay_id`, the
+  # job id the delivery is attributed to. Rows bind to `(sink index, module)`;
   # their opts are resolved from the *current* source at delivery time, so a
   # config fix applies to the backlog and no fun or secret is ever persisted.
   #
@@ -253,61 +255,108 @@ defmodule Ankusa.Queue.Deliveries do
 
   # ── the DLQ ───────────────────────────────────────────────────────────────
 
-  @doc """
-  Move dead rows back to pending, in batches. `filter` may carry `:source_id`,
-  `:id` and `:since` (a unix-ms lower bound on the dead-letter time).
-  """
-  @spec replay(atom(), map(), integer()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def replay(instance, filter, now) do
-    %{lo: lo, hi: hi} = Keys.family(:dead)
+  # A paged scan over dead rows in `range`, for the replay engine. Keeps keys
+  # matching `filter` (`:source_id`, `:id`) — the dead-letter time is bounded
+  # by the range itself. Stops after `limit` hits or `max_scan` keys examined.
+  # Returns the hits (ascending), the last key seen (`nil` when the range held
+  # nothing), whether the range was exhausted, and the keys scanned.
+  @spec dead_page(atom(), {binary(), binary()}, map(), pos_integer(), pos_integer()) ::
+          {:ok, [{binary(), pos_integer(), non_neg_integer()}], binary() | nil, boolean(),
+           non_neg_integer()}
+          | {:error, term()}
+  def dead_page(instance, {lower, upper}, filter, limit, max_scan) do
+    result =
+      Store.fold(instance, :dead, {lower, upper}, {0, 0, [], nil}, fn key,
+                                                                      value,
+                                                                      {scanned, hit_n, hits, last} ->
+        # The scan budget is enforced before the filter: a filter that matches
+        # little must not make one tick fold the whole range.
+        if scanned >= max_scan do
+          {:halt, {scanned, hit_n, hits, last}}
+        else
+          {_at, seq, sink} = Keys.decode_dead(key)
+          {source_id, id} = :erlang.binary_to_term(value)
 
-    scan =
-      Store.fold(instance, :dead, {lo, hi}, [], fn key, value, acc ->
-        {at, seq, sink} = Keys.decode_dead(key)
-        {source_id, id} = :erlang.binary_to_term(value)
+          cond do
+            not dead_match?(filter, source_id, id) ->
+              {:cont, {scanned + 1, hit_n, hits, key}}
 
-        if matches?(filter, source_id, id, at),
-          do: {:cont, [{key, seq, sink} | acc]},
-          else: {:cont, acc}
-      end)
+            hit_n >= limit ->
+              {:halt, {scanned, hit_n, hits, last}}
 
-    with {:ok, hits} <- scan do
-      hits
-      |> Enum.reverse()
-      |> Enum.chunk_every(1_000)
-      |> Enum.reduce_while({:ok, 0}, fn chunk, {:ok, replayed} ->
-        case replay_chunk(instance, chunk, now) do
-          {:ok, n} -> {:cont, {:ok, replayed + n}}
-          {:error, reason} -> {:halt, {:error, reason}}
+            true ->
+              {:cont, {scanned + 1, hit_n + 1, [{key, seq, sink} | hits], key}}
+          end
         end
       end)
+
+    case result do
+      {:ok, {scanned, hit_n, hits, last}} ->
+        # The fold ends by halt (limit/max_scan reached) or by running off the
+        # range; only the latter means every dead row in range was examined.
+        exhausted? = hit_n < limit and scanned < max_scan
+        {:ok, Enum.reverse(hits), last, exhausted?, scanned}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp replay_chunk(instance, chunk, now) do
-    keys = Enum.map(chunk, fn {_key, seq, sink} -> Keys.delivery(seq, sink) end)
+  # `matches?/4` minus the `:since` bound: the page's range carries that.
+  defp dead_match?(filter, source_id, id) do
+    keep?(filter, :source_id, source_id) and keep?(filter, :id, id)
+  end
+
+  # Move dead rows back to pending for a replay job: the revived row keeps its
+  # hook and gets `replay: replay_id`, `attempts: 0` and a due time of `now`.
+  # A dead key whose row is gone is deleted as an orphan. Returns the batch ops
+  # and the number of rows actually revived.
+  @spec revive_ops(atom(), [{binary(), pos_integer(), non_neg_integer()}], integer(), String.t()) ::
+          {:ok, [Ankusa.Store.op()], non_neg_integer()} | {:error, term()}
+  def revive_ops(instance, hits, now, replay_id) do
+    keys = Enum.map(hits, fn {_key, seq, sink} -> Keys.delivery(seq, sink) end)
 
     with {:ok, rows} <- Store.multi_get(instance, :deliveries, keys) do
-      {ops, flipped} =
-        chunk
+      {ops, revived} =
+        hits
         |> Enum.zip(rows)
-        |> Enum.flat_map_reduce(0, fn
-          {{key, seq, sink}, {:ok, bin}}, flipped ->
-            row = %{decode_row(bin) | state: :pending, attempts: 0, at: now, error: nil}
-
-            {[
-               {:delete, :index, key},
-               {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
-               {:put, :index, Keys.due(now, seq, sink), <<row.size::32>>}
-             ], flipped + 1}
-
-          # The row is gone but its dead key is not: drop the orphan.
-          {{key, _seq, _sink}, :not_found}, flipped ->
-            {[{:delete, :index, key}], flipped}
+        |> Enum.reduce({[], 0}, fn {{key, seq, sink}, result}, {ops, n} ->
+          {row_ops, n} = revive_row(key, seq, sink, result, now, replay_id, n)
+          {row_ops ++ ops, n}
         end)
 
-      with :ok <- Store.write(instance, ops, sync: true), do: {:ok, flipped}
+      {:ok, ops, revived}
     end
+  end
+
+  # Older rows (written before the `replay` field existed) lack the key, so
+  # `Map.put`, not `%{row | replay: ...}`. A row that does not decode can never
+  # be revived: it stays in the DLQ (still visible to `GET /v1/dlq`) and the
+  # job's cursor simply moves past it, so one corrupt row cannot wedge the
+  # replay engine on it forever.
+  defp revive_row(key, seq, sink, {:ok, bin}, now, replay_id, n) do
+    row =
+      decode_row(bin)
+      |> Map.merge(%{state: :pending, attempts: 0, at: now, error: nil})
+      |> Map.put(:replay, replay_id)
+
+    {[
+       {:delete, :index, key},
+       {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
+       {:put, :index, Keys.due(now, seq, sink), <<row.size::32>>}
+     ], n + 1}
+  rescue
+    error ->
+      Logger.warning(
+        "[ankusa] dead row #{seq}/#{sink} does not decode and was left in the DLQ: " <>
+          Exception.message(error)
+      )
+
+      {[], n}
+  end
+
+  defp revive_row(key, _seq, _sink, :not_found, _now, _replay_id, n) do
+    {[{:delete, :index, key}], n}
   end
 
   @doc """

@@ -21,6 +21,7 @@ default = ["rustls"]
 rustls = ["reqwest/rustls"]
 
 [dependencies]
+base64 = "0.23.1"
 bytes = "1.12.1"
 hex = "0.4.3"
 http = "1.5.0"

@@ -66,12 +66,40 @@ describe("createAdminClient", () => {
     assert.equal(url.searchParams.has("limit"), false);
   });
 
-  test("replayDeadLetters POSTs the filter as JSON", async () => {
-    const { fetch, requests } = mockGateway(200, JSON.stringify({ replayed: 2 }));
+  test("createReplay POSTs the spec and returns the job", async () => {
+    const job = { id: "r1", kind: "dlq", state: "running", rate: 500 };
+    const { fetch, requests } = mockGateway(202, JSON.stringify(job));
     const client = createAdminClient({ baseUrl: "http://gateway", fetch });
-    assert.deepEqual(await client.replayDeadLetters({ source_id: "demo" }), { replayed: 2 });
+    assert.deepEqual(await client.createReplay({ kind: "dlq", source_id: "demo", rate: 500 }), job);
     assert.equal(requests[0].method, "POST");
-    assert.equal(requests[0].url, "http://gateway/v1/dlq/replay");
+    assert.equal(requests[0].url, "http://gateway/v1/replays");
+  });
+
+  test("getReplay GETs the job by id", async () => {
+    const job = { id: "r1", kind: "dlq", state: "running", rate: 500 };
+    const { fetch, requests } = mockGateway(200, JSON.stringify(job));
+    const client = createAdminClient({ baseUrl: "http://gateway", fetch });
+    assert.deepEqual(await client.getReplay("r1"), job);
+    assert.equal(requests[0].method, "GET");
+    assert.equal(requests[0].url, "http://gateway/v1/replays/r1");
+  });
+
+  test("listReplays GETs the collection", async () => {
+    const page = { replays: [{ id: "r1", kind: "dlq", state: "running", rate: 500 }] };
+    const { fetch, requests } = mockGateway(200, JSON.stringify(page));
+    const client = createAdminClient({ baseUrl: "http://gateway", fetch });
+    assert.deepEqual(await client.listReplays(), page);
+    assert.equal(requests[0].method, "GET");
+    assert.equal(requests[0].url, "http://gateway/v1/replays");
+  });
+
+  test("updateReplay PATCHes the patch and returns the job", async () => {
+    const job = { id: "r1", kind: "dlq", state: "paused", rate: 500 };
+    const { fetch, requests } = mockGateway(200, JSON.stringify(job));
+    const client = createAdminClient({ baseUrl: "http://gateway", fetch });
+    assert.deepEqual(await client.updateReplay("r1", { state: "paused" }), job);
+    assert.equal(requests[0].method, "PATCH");
+    assert.equal(requests[0].url, "http://gateway/v1/replays/r1");
   });
 
   test("listQuarantined sends the limit query param", async () => {

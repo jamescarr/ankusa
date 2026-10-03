@@ -13,7 +13,8 @@ import tools.jackson.core.JacksonException;
 
 /**
  * Operates against the Ankusa operator listener ({@code admin.port}, default 4002): health,
- * Prometheus metrics, the redacted configuration, the dead-letter queue, and the quarantine list.
+ * Prometheus metrics, the redacted configuration, the dead-letter queue, replay jobs, and the
+ * quarantine list.
  *
  * <p>Every answer is node-local, so a fleet operator queries each node's admin port. The listener
  * authenticates nobody on its own; the headers in {@link ClientOptions} are for whatever boundary a
@@ -24,7 +25,9 @@ import tools.jackson.core.JacksonException;
  *
  * AdminHealth health = admin.health();
  * DlqPage dead = admin.listDeadLetters(ListDeadLettersParams.builder().limit(50).build());
- * Replayed replayed = admin.replayDeadLetters(ReplayFilter.builder().sourceId("gh").build());
+ * Replay replay = admin.createReplay(ReplaySpec.builder().kind("dlq").rate(500).build());
+ * Replay paused = admin.updateReplay(replay.id(), ReplayPatch.builder().state("paused").build());
+ * ReplayList jobs = admin.listReplays();
  * }</pre>
  *
  * <p>Construct one per listener and share it: a client holds no mutable state and every method is
@@ -145,33 +148,70 @@ public final class AdminClient {
   }
 
   /**
-   * Replays every dead letter.
+   * Creates a replay job.
    *
-   * @return how many were replayed
+   * <p>The body is the spec as JSON; the listener answers {@code 202} with the new job, or {@code
+   * 200} with an existing running or paused job whose filter matches, which makes a proxy retry
+   * idempotent. A job never bulk-flips rows: it drips them into dispatch at {@code rate} and only
+   * while dispatch has spare capacity.
+   *
+   * @param spec what to replay and how fast
+   * @return the replay job
    * @throws RoleNotEnabledError when the listener refuses the call for a missing role
    * @throws AdminRejectedError when the listener refuses the call with another 4xx
    * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx, or
-   *     answers with a body that is not the replay result
+   *     answers with a body that is not a replay
    */
-  public Replayed replayDeadLetters() {
-    return replayDeadLetters(ReplayFilter.builder().build());
+  public Replay createReplay(ReplaySpec spec) {
+    return decode(send("POST", "/v1/replays", Json.write(spec)), Replay.class);
   }
 
   /**
-   * Replays the dead letters a filter selects.
+   * Reads one replay job.
    *
-   * <p>The filter travels as the request body; an all-null filter is sent as an empty object, which
-   * replays everything.
+   * @param id the job id
+   * @return the replay job
+   * @throws RoleNotEnabledError when the listener refuses the call for a missing role
+   * @throws AdminRejectedError when the listener refuses the call with another 4xx, including a
+   *     {@code 404} whose code is {@code replay_not_found}
+   * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx, or
+   *     answers with a body that is not a replay
+   */
+  public Replay getReplay(String id) {
+    return decode(send("GET", "/v1/replays/" + HttpCore.pathSegment(id), null), Replay.class);
+  }
+
+  /**
+   * Lists the replay jobs.
    *
-   * @param filter which entries to replay
-   * @return how many were replayed
+   * @return the jobs, newest first
    * @throws RoleNotEnabledError when the listener refuses the call for a missing role
    * @throws AdminRejectedError when the listener refuses the call with another 4xx
    * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx, or
-   *     answers with a body that is not the replay result
+   *     answers with a body that is not a replay page
    */
-  public Replayed replayDeadLetters(ReplayFilter filter) {
-    return decode(send("POST", "/v1/dlq/replay", Json.write(filter)), Replayed.class);
+  public ReplayList listReplays() {
+    return decode(send("GET", "/v1/replays", null), ReplayList.class);
+  }
+
+  /**
+   * Pauses, resumes, cancels, or re-paces a replay job.
+   *
+   * <p>The body is the patch as JSON; only the fields the caller set travel. Resuming ({@code
+   * state: "running"}) clears the job's error and resets its auto-pause window.
+   *
+   * @param id the job id
+   * @param patch what to change
+   * @return the updated replay job
+   * @throws RoleNotEnabledError when the listener refuses the call for a missing role
+   * @throws AdminRejectedError when the listener refuses the call with another 4xx, including a
+   *     {@code 404} ({@code replay_not_found}) and a {@code 409} ({@code replay_finished})
+   * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx, or
+   *     answers with a body that is not a replay
+   */
+  public Replay updateReplay(String id, ReplayPatch patch) {
+    return decode(
+        send("PATCH", "/v1/replays/" + HttpCore.pathSegment(id), Json.write(patch)), Replay.class);
   }
 
   /**

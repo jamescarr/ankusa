@@ -13,39 +13,44 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The admin vectors cover the status/body classification; this file covers the
- * wire shapes they cannot express: the `{}` body a filter-less replay sends,
- * the raw Prometheus body, query-parameter omission, and the client headers
- * that ride on every request.
+ * wire shapes they cannot express: the spec a create posts, the patch an update
+ * posts, the replay paths, the raw Prometheus body, query-parameter omission,
+ * and the client headers that ride on every request.
  */
 final class AdminClientTest extends TestCase
 {
     private const string BASE_URL = 'http://admin.test';
 
-    public function testReplayWithoutFilterSendsAnEmptyJsonObject(): void
+    public function testCreateReplayPostsTheSpecAsTheBody(): void
     {
-        $http = RecordingHttpClient::canned(200, [], '{"replayed":3}');
+        $http = RecordingHttpClient::canned(202, [], '{"id":"r1","state":"running"}');
         $client = self::client($http);
 
-        self::assertSame(['replayed' => 3], $client->replayDeadLetters());
-        self::assertSame(['replayed' => 3], $client->replayDeadLetters([]));
+        self::assertSame(['id' => 'r1', 'state' => 'running'], $client->createReplay(['kind' => 'dlq', 'source_id' => 'demo']));
 
-        self::assertSame('{}', self::body($http, 0));
-        self::assertSame('{}', self::body($http, 1));
+        self::assertSame('{"kind":"dlq","source_id":"demo"}', self::body($http, 0));
 
         $request = self::requestAt($http, 0);
         self::assertSame('POST', $request['method']);
-        self::assertSame('/v1/dlq/replay', $request['path']);
+        self::assertSame('/v1/replays', $request['path']);
     }
 
-    public function testReplayWithFilterSendsTheFilterObject(): void
+    public function testGetListAndUpdateReplayUseTheReplayPaths(): void
     {
-        $http = RecordingHttpClient::canned(200, [], '{"replayed":1}');
+        $http = RecordingHttpClient::canned(200, [], '{"id":"r1","state":"paused"}');
         $client = self::client($http);
 
-        self::assertSame(['replayed' => 1], $client->replayDeadLetters(['source_id' => 'demo']));
+        $client->getReplay('0194f4a0-0000-7000-8000-0000000000aa');
+        $client->listReplays();
+        $client->updateReplay('0194f4a0-0000-7000-8000-0000000000aa', ['state' => 'paused']);
 
-        self::assertSame('{"source_id":"demo"}', self::body($http, 0));
-        self::assertSame('/v1/dlq/replay', self::requestPath($http, 0));
+        self::assertSame('GET', self::requestAt($http, 0)['method']);
+        self::assertSame('/v1/replays/0194f4a0-0000-7000-8000-0000000000aa', self::requestPath($http, 0));
+        self::assertSame('GET', self::requestAt($http, 1)['method']);
+        self::assertSame('/v1/replays', self::requestPath($http, 1));
+        self::assertSame('PATCH', self::requestAt($http, 2)['method']);
+        self::assertSame('/v1/replays/0194f4a0-0000-7000-8000-0000000000aa', self::requestPath($http, 2));
+        self::assertSame('{"state":"paused"}', self::body($http, 2));
     }
 
     public function testMetricsReturnsTheRawNonJsonBodyVerbatim(): void

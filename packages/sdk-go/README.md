@@ -2,8 +2,9 @@
 
 The Go client SDK for [Ankusa](https://github.com/jamescarr/ankusa)
 deployments: the claim-check gateway client, the route-management client
-(`routes.admin.port`), the operator (`admin.port`) client, and a helper for
-receiving Ankusa's HTTP sink deliveries. It implements exactly the surface in
+(`routes.admin.port`), the operator (`admin.port`) client, a decoder for the
+v1 queue message, and a helper for receiving Ankusa's HTTP sink deliveries. It
+implements exactly the surface in
 [`conformance/`](https://github.com/jamescarr/ankusa/tree/main/conformance),
 the language-neutral vectors every Ankusa SDK passes.
 
@@ -76,7 +77,7 @@ percent-encoded as one path segment.
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, and the quarantine list.
+the redacted config, the DLQ, replay jobs, and the quarantine list.
 
 ```go
 admin, err := ankusa.NewAdminClient("http://localhost:4002", ankusa.Options{})
@@ -87,8 +88,15 @@ if err != nil {
 health, err := admin.Health(ctx)                             // {Status, Instance, Roles}
 metrics, err := admin.Metrics(ctx)                           // Prometheus text
 dlq, err := admin.ListDeadLetters(ctx, ankusa.ListDeadLettersParams{Limit: 10})
-replayed, err := admin.ReplayDeadLetters(ctx, ankusa.ReplayFilter{SourceID: "demo"})
 quarantine, err := admin.ListQuarantined(ctx, ankusa.ListQuarantinedParams{})
+
+// Replay jobs. CreateReplay answers 202 with a new job, or 200 with an
+// existing running/paused job whose filter matches, so a retried POST is
+// idempotent.
+replay, err := admin.CreateReplay(ctx, ankusa.ReplaySpec{Kind: "dlq", SourceID: "demo", Rate: 500})
+replay, err = admin.GetReplay(ctx, replay.ID)                // *AdminRejectedError{404, "replay_not_found"} when absent
+replays, err := admin.ListReplays(ctx)                       // ReplayList, newest first
+replay, err = admin.UpdateReplay(ctx, replay.ID, ankusa.ReplayPatch{State: "paused"}) // 409 "replay_finished" once done
 ```
 
 ## Webhook helper
@@ -101,16 +109,57 @@ hook, err := ankusa.ParseHeaders(r.Header)
 if err != nil {
     return err // *MissingHookIdError
 }
-// hook.ID, hook.Source, hook.Tenant, hook.ContentType
+// hook.ID, hook.Source, hook.Tenant, hook.ContentType, hook.DedupeKey, hook.ReplayID
 
-// Dedupe on hook.ID: delivery is at-least-once, so a retried hook arrives
-// twice. A delivery without x-ankusa-id is a framework bug, so ParseHeaders
-// returns *MissingHookIdError instead of a blank id.
+// The key to dedupe on: the source-scoped dedupe key when the sink set one,
+// else the hook id. Pass true to reprocess replays instead of dropping them.
+key := hook.IdempotencyKey(false)
+
+// A delivery without x-ankusa-id is a framework bug, so ParseHeaders returns
+// *MissingHookIdError instead of a blank id.
 ```
 
-`x-ankusa-id` is required; `x-ankusa-source`, `x-ankusa-tenant`, and
-`content-type` are optional (`Source` defaults to `""`; `Tenant` and
-`ContentType` are `nil` when absent).
+`x-ankusa-id` is required; `x-ankusa-source`, `x-ankusa-tenant`,
+`content-type`, `x-ankusa-dedupe-key`, and `x-ankusa-replay-id` are optional
+(`Source` defaults to `""`; `Tenant`, `ContentType`, `DedupeKey`, and
+`ReplayID` are `nil` when absent or empty).
+
+## Consuming queue messages
+
+A worker reading a broker's deliveries gets the v1 queue message as JSON.
+Decode it, compute the idempotency key, and record that key in the same
+transaction as the side effect, so a redelivery is a no-op:
+
+```go
+message, err := ankusa.DecodeMessage(payload)
+if err != nil {
+    var bad *ankusa.InvalidMessageError
+    if errors.As(err, &bad) {
+        // bad.Code: invalid_json, not_an_object, unsupported_version,
+        // invalid_field (bad.Field names the key), ambiguous_body,
+        // missing_body, invalid_body_base64, size_mismatch, integrity, or
+        // tenant_mismatch. Retryable() is false: dead-letter, never retry.
+    }
+    return err
+}
+
+key := message.IdempotencyKey(false) // source_id:dedupe_key, else id
+
+// One transaction: insert the processed-ids row and, only if it was new, run
+// the effect.
+//
+//   INSERT INTO processed_webhooks (idempotency_key) VALUES ($1)
+//     ON CONFLICT (idempotency_key) DO NOTHING;
+//   if rows_affected == 0 { return nil } // already processed
+//   ... apply the effect ...
+```
+
+`Message.Body` holds the decoded inline body; for a claim message it is nil
+and `Claim`/`Sha256` go to `ClaimCheckClient.Redeem`. Absent `dedupe_key`,
+`replay_id`, and `sha256` decode to nil, and absent `headers` decodes to an
+empty map. `IdempotencyKey(true)` appends `#replay:<replay_id>`, so a replay
+of an event already processed is reprocessed rather than dropped; leave it
+false (the default) to drop replays.
 
 ## Errors
 
@@ -125,6 +174,7 @@ bit decides dead-letter vs. retry:
 | `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`Status`, `Body`) |
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
 | `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, an unfollowed `3xx`, or any other non-`200` |
+| `InvalidMessageError` | `false` | `DecodeMessage` could not decode the queue message (`Code`, `Field`) |
 | `MissingHookIdError` | `false` | `x-ankusa-id` is absent or empty |
 | `InvalidRouteIdError` | `false` | route id is empty or exactly `.`/`..` |
 | `RouteNotFoundError` | `false` | routes listener `404` |

@@ -6,6 +6,7 @@ mod admin;
 mod claim_check;
 mod claim_ref;
 mod client;
+mod message;
 mod routes;
 mod transport;
 mod webhook;
@@ -17,11 +18,13 @@ pub use http;
 
 pub use crate::admin::{
     AdminClient, AdminError, AdminHealth, DlqEntry, DlqPage, ListDeadLettersParams,
-    ListQuarantinedParams, QuarantineEntry, QuarantinePage, ReplayFilter, Replayed,
+    ListQuarantinedParams, QuarantineEntry, QuarantinePage, Replay, ReplayList, ReplayPatch,
+    ReplaySpec,
 };
 pub use crate::claim_check::{ClaimCheckClient, ClaimCheckError, ClaimCheckHealth};
 pub use crate::claim_ref::{InvalidClaimRefError, ParsedClaimRef, parse_claim_ref};
 pub use crate::client::{ClientBuilder, ConfigError, UnavailableReason};
+pub use crate::message::{InvalidMessageError, Message, decode_message};
 pub use crate::routes::{
     Access, DryRunIpRule, DryRunReason, DryRunRequest, DryRunResult, IpRule, IpRuleScope, IpRules,
     ListRoutesParams, Route, RouteInput, RoutePage, RoutePatch, RoutesClient, RoutesError,

@@ -90,11 +90,23 @@ defmodule Ankusa.Sink.RabbitMQTest do
     chan: chan,
     queue: queue
   } do
-    env = envelope()
-    assert :ok = RabbitMQ.deliver(env, ctx(inst), exchange: exch, url: @amqp_url)
+    env = envelope(%{dedupe_key: "evt_1"})
+
+    assert :ok =
+             RabbitMQ.deliver(env, Map.put(ctx(inst), :replay_id, "rid"),
+               exchange: exch,
+               url: @amqp_url
+             )
 
     {payload, meta} = get_message(chan, queue)
     assert meta.routing_key == "ankusa.src"
+    assert meta.message_id == env.id
+
+    assert {"ankusa_dedupe_key", :longstr, "evt_1"} =
+             List.keyfind(meta.headers, "ankusa_dedupe_key", 0)
+
+    assert {"ankusa_replay_id", :longstr, "rid"} =
+             List.keyfind(meta.headers, "ankusa_replay_id", 0)
 
     decoded = JSON.decode!(payload)
     assert decoded["v"] == 1

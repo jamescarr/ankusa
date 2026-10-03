@@ -12,6 +12,8 @@ describe("parseHeaders", () => {
       source: "",
       tenant: "acme",
       contentType: null,
+      dedupeKey: null,
+      replayId: null,
     });
   });
 
@@ -19,9 +21,14 @@ describe("parseHeaders", () => {
     const headers: Record<string, string | string[] | undefined> = {
       "x-ankusa-id": ["01a0", "01a1"],
       "x-ankusa-source": undefined,
+      "X-Ankusa-Dedupe-Key": "evt_9",
+      "x-ankusa-replay-id": "",
     };
     const parsed = parseHeaders(headers);
     assert.equal(parsed.id, "01a0");
     assert.equal(parsed.source, "");
+    // An empty header is the same as absent.
+    assert.equal(parsed.dedupeKey, "evt_9");
+    assert.equal(parsed.replayId, null);
   });
 });
