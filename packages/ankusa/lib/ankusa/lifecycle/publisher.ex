@@ -102,6 +102,23 @@ defmodule Ankusa.Lifecycle.Publisher do
      }}
   end
 
+  # Crash reports print the state: the sinks carry credentials and the queued
+  # jobs carry the lifecycle envelopes.
+  @impl true
+  def format_status(%{state: %{sinks: sinks} = state} = status) do
+    %{
+      status
+      | state: %{
+          state
+          | sinks: Enum.map(sinks, &elem(&1, 0)),
+            ready: :queue.len(state.ready),
+            running: map_size(state.running)
+        }
+    }
+  end
+
+  def format_status(status), do: status
+
   @impl true
   def handle_cast({:publish, env, type, subject}, state) do
     count = length(state.sinks)
@@ -143,11 +160,6 @@ defmodule Ankusa.Lifecycle.Publisher do
 
       {:error, reason} ->
         {:noreply, state |> retry(job, reason) |> start_jobs()}
-
-      # A sink is user code: anything but `:ok` / `{:error, _}` is a failed
-      # delivery, not a reason to crash the publisher and lose the queue.
-      other ->
-        {:noreply, state |> retry(job, {:bad_return, other}) |> start_jobs()}
     end
   end
 

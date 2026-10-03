@@ -321,6 +321,30 @@ If 1 or 2 fails, run the same tests against D.
 <a id="g2"></a>
 ## G2 · Errors: expected failures crash processes that share one restart budget
 
+**Status (2026-10-02).** O1, D3, W4 and W9 implemented; O2 and O7 in part (the residue is listed below). O1: dispatch, storage, lifecycle,
+metrics and the admin, route-admin and claim-check listeners each run under
+`Ankusa.Instance.Isolated` with a restart budget of their own and a backoff
+restart when it is spent, so none of them can take the edge listener down; the
+store, source store and edge subtree are the core, under a `rest_for_one`
+root. D3: `Sink.safe_deliver/4` returns `{:error, {:bad_return, value}}` for a
+non-conforming return on every path, direct mode included, and the claim
+check's blob-store write (inside `ClaimCheck.check_in/4`) turns a raise, exit,
+throw or stray return into `{:error, _}`. W9: the batcher's commit task is supervised,
+not linked, and the writer drops a batch whose commit task died before the
+writer reached it. W4: the batcher gives each record a deadline for its batch to
+start, the writer refuses an expired batch, and a started batch is waited out,
+so a stall never answers `503` for a hook it then commits; a process dying
+while the writer is mid-commit (commit task, batcher, or writer) still can. O2
+(the `format_status/1` part only): every process whose state holds sink options
+redacts them from the state `format_status/1` reports, and the batchers and the
+writable source store also from the message they were handling.
+Still open: supervisors' child specs carry the config, so `:sys.get_status/1`
+on a supervisor and SASL supervisor reports (off by default) print it; the
+adapter packages are not covered. O7 (the Registry bullet only): an instance
+stops, and is restarted, when `Ankusa.Registry` or one of its partitions
+restarts. The other O2 and O7 items remain open. Circuit breakers are G4.
+The analysis below is the review as recorded at commit `42b6f5a`.
+
 This is the Verdict's inverted assertiveness at the scale of the supervision tree. A `503` from S3, a full disk or a sink's odd return value crashes a process, and every process in the instance shares one `one_for_one` budget of 3 restarts in 5 seconds, so how far a failure spreads depends only on how fast it repeats (O1's table).
 
 <a id="o1"></a>

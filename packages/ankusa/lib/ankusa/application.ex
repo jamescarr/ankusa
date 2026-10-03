@@ -10,7 +10,9 @@ defmodule Ankusa.Application do
     children =
       [{Registry, keys: :unique, name: Ankusa.Registry}] ++ default_instance()
 
-    opts = [strategy: :one_for_one, name: Ankusa.Supervisor]
+    # `rest_for_one`: a Registry restart forgets every registered name, so
+    # anything started after it (the default instance) must restart with it.
+    opts = [strategy: :rest_for_one, name: Ankusa.Supervisor]
     Supervisor.start_link(children, opts)
   end
 

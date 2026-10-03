@@ -91,6 +91,14 @@ defmodule Ankusa.Edge.RateLimiter do
     end
   end
 
+  # Crash reports print the state; the config is the whole instance config,
+  # sink options and all.
+  @impl true
+  def format_status(%{state: %{config: _} = state} = status),
+    do: %{status | state: %{state | config: :redacted}}
+
+  def format_status(status), do: status
+
   @impl true
   def handle_info(:sweep, state) do
     now = System.monotonic_time()

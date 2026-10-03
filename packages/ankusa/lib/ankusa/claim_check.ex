@@ -305,12 +305,21 @@ defmodule Ankusa.ClaimCheck do
       byte_size(content_type)
   end
 
-  # A blob store is external code: a crash in its write is an unavailable
-  # store, not a crashed caller.
+  # A blob store is external code, and so is a `:token_provider` it calls (a
+  # `GenServer.call` into Goth or the like): a raise, exit, throw or a stray
+  # return in its write is an unavailable store, not a crashed caller. Under
+  # `wal: :none` the caller is the request.
   defp put(instance, key, data) do
-    BlobStore.put(instance, key, data)
+    case BlobStore.put(instance, key, data) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+      other -> {:error, {:bad_return, other}}
+    end
   rescue
     error -> {:error, error}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+    :throw, value -> {:error, {:throw, value}}
   end
 
   defp item_result({:ok, refs}, id), do: {:ok, Map.fetch!(refs, id)}

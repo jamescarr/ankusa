@@ -15,6 +15,22 @@ defmodule Ankusa.Edge.Batcher do
   When it is reached the batcher sheds load: the caller gets `{:error,
   :overload}`, which the edge turns into a `503` with `Retry-After`. Never ack
   what you haven't saved.
+
+  ## Deadlines
+
+  Every record carries a deadline: the latest moment its batch may *start*
+  committing. A record still buffered at its deadline (a commit ahead of it is
+  stalled) is answered `{:error, :store_unavailable}` and dropped, and the
+  writer refuses a batch whose earliest deadline passed while it queued behind
+  other work (`Ankusa.Queue.enqueue/3`). A batch the writer has started is never
+  abandoned: its callers wait for the commit's outcome, however long the disk
+  takes. A stall therefore never turns into a `503` for a hook that is then
+  committed. The one way a `503` can still cover a durable hook is a process
+  dying while the writer is mid-commit (the commit task killed, the batcher
+  crashing and taking its tasks down, or the writer crashing after the sync but
+  before it replies); the provider's retry then stores the hook a second time.
+  The commit task is supervised, not linked: a task that dies takes only its own
+  batch's callers with it, never the batcher or the records buffered behind it.
   """
 
   use GenServer
@@ -47,13 +63,28 @@ defmodule Ankusa.Edge.Batcher do
   `{:error, :store_unavailable}`. The queue itself is never allowed to crash the
   call: a failed commit (or a dead writer process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
+
+  `timeout` (milliseconds, or `:infinity`) bounds how long the record may wait
+  before its batch *starts* committing. Once it has started the call waits for
+  the outcome, so a slow disk is never answered `:store_unavailable` for a hook
+  it then commits (see the moduledoc for the crash windows that still can).
   """
   @spec commit(atom(), non_neg_integer(), Queue.entry(), timeout()) ::
           {:committed, Ankusa.Envelope.t()}
           | {:error, :overload | :store_unavailable}
   def commit(instance, partition, record, timeout \\ 15_000) do
-    GenServer.call(Ankusa.via(instance, {:batcher, partition}), {:enqueue, record}, timeout)
+    GenServer.call(
+      Ankusa.via(instance, {:batcher, partition}),
+      {:enqueue, record, deadline(timeout)},
+      :infinity
+    )
   end
+
+  # `:infinity` stays an atom all the way to the writer. Atoms sort above every
+  # integer, so it is never `<= now`, never the minimum of a batch that holds a
+  # real deadline, and never earlier than an armed one.
+  defp deadline(:infinity), do: :infinity
+  defp deadline(timeout_ms), do: System.monotonic_time(:millisecond) + timeout_ms
 
   # ── server ────────────────────────────────────────────────────────────────
 
@@ -62,23 +93,50 @@ defmodule Ankusa.Edge.Batcher do
     config = Keyword.fetch!(opts, :config)
     b = config.batcher
 
+    # Linked on purpose, like `Dispatch.Pipeline`: the commit tasks must not
+    # outlive the batcher.
+    {:ok, task_sup} = Task.Supervisor.start_link()
+
     {:ok,
      %{
        instance: config.instance,
        max_batch: b.max_batch,
        max_delay_ms: b.max_delay_ms,
        max_queue: b.max_queue,
-       # newest-first
+       task_sup: task_sup,
+       # newest-first: [{from, record, deadline}]
        buffer: [],
        count: 0,
-       # nil | %{ref: reference, entries: [{from, record}]}
+       # nil | %{ref: reference, entries: [{from, record, deadline}]}
        inflight: nil,
-       timer: nil
+       timer: nil,
+       # The timer that answers buffered records at their deadline, and the
+       # deadline it was armed for.
+       expire_timer: nil,
+       expire_at: nil
      }}
   end
 
+  # A crash report prints the state and the last message, and every record —
+  # buffered, in flight, or the `{:enqueue, record, deadline}` being handled —
+  # carries its source's `{module, opts}` sinks (credentials) and the hook's
+  # body: report how many, not what.
   @impl true
-  def handle_call({:enqueue, record}, from, state) do
+  def format_status(status) do
+    Map.new(status, fn
+      {:state, %{buffer: _, inflight: _} = state} ->
+        {:state, %{state | buffer: state.count, inflight: inflight_size(state)}}
+
+      {:message, {:enqueue, _record, deadline}} ->
+        {:message, {:enqueue, :redacted, deadline}}
+
+      other ->
+        other
+    end)
+  end
+
+  @impl true
+  def handle_call({:enqueue, record, deadline}, from, state) do
     if state.count + inflight_size(state) >= state.max_queue do
       Ankusa.Telemetry.emit([:load_shed], %{queue: state.count + inflight_size(state)}, %{
         instance: state.instance
@@ -86,8 +144,13 @@ defmodule Ankusa.Edge.Batcher do
 
       {:reply, {:error, :overload}, state}
     else
-      state = %{state | buffer: [{from, record} | state.buffer], count: state.count + 1}
-      {:noreply, maybe_flush(state)}
+      state = %{
+        state
+        | buffer: [{from, record, deadline} | state.buffer],
+          count: state.count + 1
+      }
+
+      {:noreply, state |> maybe_flush() |> ensure_expiry(from, deadline)}
     end
   end
 
@@ -102,6 +165,20 @@ defmodule Ankusa.Edge.Batcher do
     end
   end
 
+  def handle_info(:expire, state) do
+    state = cancel_expiry(state)
+    {expired, state} = drop_expired(state)
+
+    if expired > 0 do
+      Logger.warning(
+        "[ankusa] #{expired} hook(s) passed their commit deadline behind a stalled commit; " <>
+          "answered 503, nothing committed"
+      )
+    end
+
+    {:noreply, rearm_expiry(state)}
+  end
+
   def handle_info({ref, result}, %{inflight: %{ref: ref, entries: entries}} = state) do
     Process.demonitor(ref, [:flush])
     state = %{state | inflight: nil}
@@ -110,13 +187,15 @@ defmodule Ankusa.Edge.Batcher do
       {:ok, results} ->
         entries
         |> Enum.zip(results)
-        |> Enum.each(fn {{from, _record}, replied} -> GenServer.reply(from, replied) end)
+        |> Enum.each(fn {{from, _record, _deadline}, replied} ->
+          GenServer.reply(from, replied)
+        end)
 
       {:error, reason} ->
         # Nothing was acked: every caller in the batch gets a 503-mapped error.
         Logger.warning("[ankusa] store commit failed: #{inspect(reason)}")
 
-        Enum.each(entries, fn {from, _record} ->
+        Enum.each(entries, fn {from, _record, _deadline} ->
           GenServer.reply(from, {:error, :store_unavailable})
         end)
     end
@@ -125,12 +204,16 @@ defmodule Ankusa.Edge.Batcher do
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{inflight: %{ref: ref}} = state) do
-    # Defensive: the commit task died without delivering a result (a kill, not
-    # an error it could catch). Fail its callers instead of leaving them
-    # blocked until their call times out.
+    # The commit task died without delivering a result (killed from outside;
+    # `safe_enqueue/3` turns every error it could catch into a value). The task
+    # is not linked, so the batcher and the records buffered behind this batch
+    # carry on. Fail the batch's callers instead of leaving them blocked
+    # forever. If the task's call is still waiting in the writer's mailbox the
+    # writer sees its caller is gone and commits nothing. If the writer is
+    # already mid-commit, that batch is durable and its callers were told 503.
     Logger.warning("[ankusa] store commit task died: #{inspect(reason)}")
 
-    Enum.each(state.inflight.entries, fn {from, _record} ->
+    Enum.each(state.inflight.entries, fn {from, _record, _deadline} ->
       GenServer.reply(from, {:error, :store_unavailable})
     end)
 
@@ -162,25 +245,35 @@ defmodule Ankusa.Edge.Batcher do
 
   defp start_commit(state) do
     state = cancel_timer(state)
-    {entries, remainder} = split_batch(state.buffer, state.max_batch)
-    records = Enum.map(entries, fn {_from, record} -> record end)
-    instance = state.instance
+    {_expired, state} = drop_expired(state)
 
-    task = Task.async(fn -> safe_enqueue(instance, records) end)
-
-    %{
+    if state.count == 0 do
       state
-      | buffer: remainder,
-        count: length(remainder),
-        inflight: %{ref: task.ref, entries: entries}
-    }
+    else
+      {entries, remainder} = split_batch(state.buffer, state.max_batch)
+      records = Enum.map(entries, fn {_from, record, _deadline} -> record end)
+      deadline = entries |> Enum.map(fn {_from, _record, deadline} -> deadline end) |> Enum.min()
+      instance = state.instance
+
+      task =
+        Task.Supervisor.async_nolink(state.task_sup, fn ->
+          safe_enqueue(instance, records, deadline)
+        end)
+
+      %{
+        state
+        | buffer: remainder,
+          count: length(remainder),
+          inflight: %{ref: task.ref, entries: entries}
+      }
+    end
   end
 
-  # The commit runs in a Task, so a failing store has to come back as a value:
-  # an unhandled exit would take the batcher (linked to the task) and every
-  # blocked caller's call down with it.
-  defp safe_enqueue(instance, records) do
-    Queue.enqueue(instance, records)
+  # The commit runs in a Task, so a failing store has to come back as a value.
+  # The task is not linked, but a value is still better than a `:DOWN`: it says
+  # why, and the batch's callers get their answer in one message.
+  defp safe_enqueue(instance, records, deadline) do
+    Queue.enqueue(instance, records, deadline)
   rescue
     error -> {:error, error}
   catch
@@ -202,5 +295,57 @@ defmodule Ankusa.Edge.Batcher do
   defp cancel_timer(%{timer: ref} = state) do
     Process.cancel_timer(ref)
     %{state | timer: nil}
+  end
+
+  # ── deadlines ─────────────────────────────────────────────────────────────
+
+  defp now, do: System.monotonic_time(:millisecond)
+
+  # Answers and drops every buffered record past its deadline. Returns how many.
+  defp drop_expired(%{count: 0} = state), do: {0, state}
+
+  defp drop_expired(state) do
+    now = now()
+    {expired, live} = Enum.split_with(state.buffer, fn {_from, _record, d} -> d <= now end)
+
+    Enum.each(expired, fn {from, _record, _deadline} ->
+      GenServer.reply(from, {:error, :store_unavailable})
+    end)
+
+    {length(expired), %{state | buffer: live, count: length(live)}}
+  end
+
+  # Only a record that is still buffered (it is the newest entry) needs the
+  # timer: one that went straight into a commit is the writer's to refuse.
+  defp ensure_expiry(%{buffer: [{from, _record, _deadline} | _]} = state, from, deadline) do
+    cond do
+      state.expire_timer == nil -> arm_expiry(state, deadline)
+      deadline < state.expire_at -> state |> cancel_expiry() |> arm_expiry(deadline)
+      true -> state
+    end
+  end
+
+  defp ensure_expiry(state, _from, _deadline), do: state
+
+  defp rearm_expiry(%{buffer: []} = state), do: state
+
+  defp rearm_expiry(state) do
+    deadline = state.buffer |> Enum.map(fn {_from, _record, d} -> d end) |> Enum.min()
+    arm_expiry(state, deadline)
+  end
+
+  # A record with no deadline never expires: no timer to arm.
+  defp arm_expiry(state, :infinity), do: state
+
+  defp arm_expiry(state, deadline) do
+    ref = Process.send_after(self(), :expire, max(deadline - now(), 0))
+    %{state | expire_timer: ref, expire_at: deadline}
+  end
+
+  defp cancel_expiry(%{expire_timer: nil} = state), do: state
+
+  defp cancel_expiry(%{expire_timer: ref} = state) do
+    Process.cancel_timer(ref)
+    %{state | expire_timer: nil, expire_at: nil}
   end
 end

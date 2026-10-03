@@ -107,13 +107,19 @@ defmodule Ankusa.Sink do
   Call `c:deliver/3`, turning a raise, throw, or exit into `{:error, reason}`.
 
   A sink is user code: it may raise, throw, or exit (a `GenServer.call` into a
-  dead process). Any of those is a delivery failure, not a caller crash. Both
-  ack paths — `Ankusa.Dispatch.Pipeline` and `Ankusa.Edge.Publish` — deliver
-  through here so they agree on what "the sink failed" means.
+  dead process). Any of those is a delivery failure, not a caller crash. Any
+  other return value is `{:error, {:bad_return, value}}`. Every ack path —
+  `Ankusa.Dispatch.Pipeline`, `Ankusa.Lifecycle.Publisher` and
+  `Ankusa.Edge.Publish` — delivers through here so they agree on what "the sink
+  failed" means, and each can match on `:ok | {:error, _}` exhaustively.
   """
   @spec safe_deliver(module(), Envelope.t(), ctx(), keyword()) :: :ok | {:error, term()}
   def safe_deliver(mod, env, ctx, opts) do
-    mod.deliver(env, ctx, opts)
+    case mod.deliver(env, ctx, opts) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+      other -> {:error, {:bad_return, other}}
+    end
   rescue
     error -> {:error, {:raised, error}}
   catch

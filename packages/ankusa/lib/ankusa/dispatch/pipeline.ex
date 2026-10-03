@@ -150,6 +150,26 @@ defmodule Ankusa.Dispatch.Pipeline do
      }}
   end
 
+  # A crash report prints the state. `config` carries every sink's options
+  # (credentials), and the jobs in `runnable`/`running`/`waiting`/`packing`
+  # carry the same options plus the hook's body: report sizes, not contents.
+  @impl true
+  def format_status(%{state: %{config: _} = state} = status) do
+    %{
+      status
+      | state: %{
+          state
+          | config: :redacted,
+            runnable: :queue.len(state.runnable),
+            running: map_size(state.running),
+            waiting: map_size(state.waiting),
+            packing: map_size(state.packing)
+        }
+    }
+  end
+
+  def format_status(status), do: status
+
   @impl true
   def handle_call(:tick, from, state) do
     state = state |> fill() |> start_jobs()
@@ -644,12 +664,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp run_job(%{env: env, spec: {mod, opts}} = job, instance) do
     case ensure_claim(job, instance) do
       {:ok, claim, fresh} ->
-        result =
-          case Sink.safe_deliver(mod, env, ctx(job, instance, claim), opts) do
-            :ok -> :ok
-            {:error, _reason} = error -> error
-            other -> {:error, {:bad_return, other}}
-          end
+        result = Sink.safe_deliver(mod, env, ctx(job, instance, claim), opts)
 
         {result, fresh}
 

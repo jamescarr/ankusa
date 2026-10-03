@@ -27,6 +27,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
   | `[:ankusa, :lifecycle, :delivered]` | — | `:instance`, `:type`, `:sink` |
   | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:not_running`, `:queue_full`, `:gave_up`) |
+  | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` |
+  | `[:ankusa, :instance, :subtree_up]` | — | `:instance`, `:domain` |
 
   `:outcome` on `:ingest` is `:committed | :quarantined | :rejected | :rate_limited`,
   or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,

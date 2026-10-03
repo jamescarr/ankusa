@@ -315,7 +315,10 @@ defmodule Ankusa.Admin.RouterTest do
     inst = config.instance
 
     :ok =
-      Supervisor.terminate_child(Ankusa.via(inst, :instance), {Ankusa.Dispatch.Pipeline, inst})
+      Supervisor.terminate_child(
+        Ankusa.Instance.Isolated.subtree(inst, :dispatch),
+        {Ankusa.Dispatch.Pipeline, inst}
+      )
 
     conn = call(inst, :post, "/v1/dlq/replay", "{}")
     assert conn.status == 503

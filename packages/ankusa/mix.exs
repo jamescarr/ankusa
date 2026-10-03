@@ -104,6 +104,8 @@ defmodule Ankusa.MixProject do
           Ankusa.ClaimCheck.Sweeper,
           Ankusa.Http,
           Ankusa.HttpClient,
+          Ankusa.Instance.Isolated,
+          Ankusa.Instance.RegistryWatch,
           Ankusa.UUIDv7
         ]
       ]

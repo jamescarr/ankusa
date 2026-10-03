@@ -25,15 +25,25 @@ defmodule Ankusa.Queue do
   Commits `entries` durably to the store (one synced batch), assigning each a
   fresh seq, and returns the committed envelopes. The batch is atomic: it is
   either fully durable or nothing was acked.
+
+  `deadline` is a `System.monotonic_time(:millisecond)` value. The writer
+  refuses with `{:error, :deadline_exceeded}` a batch it could not *start*
+  before then, and with `{:error, :caller_gone}` one whose caller died while it
+  waited; in both nothing is written and no seq is consumed. Once the writer has
+  started the batch the call waits for the commit's outcome however long it
+  takes, so a returned `{:error, _}` other than those two may mean the commit
+  failed, and `{:ok, _}` means it is durable. The call is never abandoned
+  half-way: an abandoned call would commit anyway, unacknowledged.
   """
-  @spec enqueue(atom(), [entry()]) :: {:ok, [{:committed, Envelope.t()}]} | {:error, term()}
-  def enqueue(instance, entries) do
+  @spec enqueue(atom(), [entry()], integer() | :infinity) ::
+          {:ok, [{:committed, Envelope.t()}]} | {:error, term()}
+  def enqueue(instance, entries, deadline \\ :infinity) do
     items =
       Enum.map(entries, fn %{envelope: env, sinks: sinks} ->
         {env, Envelope.to_binary(%{env | seq: nil}), Enum.map(sinks, &elem(&1, 0))}
       end)
 
-    GenServer.call(Ankusa.via(instance, :queue_writer), {:enqueue, items}, 5_000)
+    GenServer.call(Ankusa.via(instance, :queue_writer), {:enqueue, items, deadline}, :infinity)
   end
 
   @doc """

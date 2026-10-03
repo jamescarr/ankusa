@@ -87,7 +87,9 @@ written to the store only for a source whose `on_verify_failure` is
 `ctx` is `%{instance:, source_id:, tenant_id:, attempt:}`. Delivery is
 at-least-once. Return `:ok` only once you're certain the hook was actually
 handled; `{:error, reason}` triggers the source's `Ankusa.RetryPolicy`. A
-raised exception, throw, or exit is treated as `{:error, ...}` too.
+raised exception, throw, or exit is treated as `{:error, ...}` too, and so is
+any other return value (`{:error, {:bad_return, value}}`) on every path:
+dispatch, lifecycle events, and the `wal: :none` ack.
 
 Deliveries are **not ordered**: hooks for one sink may be delivered in any
 order, and a retry runs after whatever is due before it. A consumer that needs
