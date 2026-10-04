@@ -106,7 +106,9 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    re-serialized copy), and runs the source's `Ankusa.Verifier`.
    - Verification failure follows the source's `on_verify_failure` policy:
      `:reject` (`401`, nothing stored), `:quarantine` (`202`, held in a
-     rate-limited durable pen. See [`delivery.md`](delivery.md)), or
+     durable pen with a per-source rate limit and a byte cap — `429` or `503`
+     when either refuses — until a `quarantine` replay job re-verifies and
+     releases it. See [`delivery.md`](delivery.md#quarantine)), or
      `:accept_flag` (commits anyway, envelope marked `flagged: true`).
    - An accepted hook is charged against its tenant's ingest rate limit
      (`rate_limits`) before anything is written. Over the limit is `429` with
@@ -164,7 +166,7 @@ From here, ingest is done. Two independent consumers work off the same store:
 | `wal: :none` (direct ack) | Ingest publishes to every sink in the request and answers `201` only after each confirmed; the first refusal is a `503` with `Retry-After`, with no internal retry. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `Ankusa.Sink.durable?/2` is the per-sink promise, checked at boot for every static source. The quarantine pen is the only local state this mode has at all; it lives in the store, and rows appear only for a source that asks for it. |
 | Compactor | Never writes one object per hook: it takes archive obligations byte-sized up to `storage.roll_bytes` and packs them into one immutable segment plus one index object. A failed blob write ends the tick and the same hooks are retried next tick. |
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and bounded by `dispatch.max_inflight`/`max_inflight_bytes`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal. Not ordered: ordering lanes are gone, and a consumer that needs order has to rebuild it from data it receives. DLQ entries are dead delivery rows; a replay moves them back to pending, so a replayed hook leaves the DLQ. |
-| Quarantine | Token-bucket rate-limited (100 burst, 20/s refill) pen, durable in the store: it survives a restart, and a store that cannot write is a `503` that spends no token. A bad secret rotation can't silently eat real events, but the pen's total size is **not** capped — a flood can fill the disk — and a quarantined hook still gets a `202`, with nothing re-verifying it back into ingest. |
+| Quarantine | A durable pen in the store, bounded twice: a token bucket per source (`quarantine.burst`/`rate`, default 100 / 20 per s; over it, `429 quarantine_rate_limited`) and a cap on its total bytes (`quarantine.max_bytes`, default 1 GiB; a full pen answers `503 quarantine_full` and never evicts a held hook). It survives a restart, its byte count too, and a store that cannot write is a `503` that spends no token. A `quarantine` replay job re-verifies held hooks against the source's current verifier and commits the ones that pass with their original `id`; `DELETE /v1/quarantine` purges the rest. A secret list (`secret: [new, old]`) keeps a rotation out of the pen in the first place. |
 
 ## Archive: a retention window, by design (planned)
 

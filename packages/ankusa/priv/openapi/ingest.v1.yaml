@@ -189,6 +189,8 @@ components:
             - overload
             - store_unavailable
             - rate_limited
+            - quarantine_rate_limited
+            - quarantine_full
         reason:
           type: string
           description: Present on `verification_failed` and `body_read_failed`.
@@ -224,11 +226,9 @@ components:
             $ref: '#/components/schemas/Error'
     VerificationFailed:
       description: |
-        `401`. `verification_failed`. When `reason` starts with
-        `{:quarantine_rate_limited,`, the source's policy would have quarantined
-        the hook but the quarantine rate limit was hit: transient, retry later.
-        Any other `reason` is a failed signature verification — permanent for
-        this body, do not retry unchanged.
+        `401`. `verification_failed`: the signature check failed and the
+        source's `on_verify_failure` is `reject`. Permanent for this body — do
+        not retry it unchanged.
       content:
         application/json:
           schema:
@@ -247,9 +247,14 @@ components:
             $ref: '#/components/schemas/Error'
     RateLimited:
       description: |
-        `429`. `rate_limited`: this hook's tenant is over its ingest rate limit
-        on this node (`rate_limits`). Nothing was stored. Transient — retry
-        after the `Retry-After` seconds.
+        `429`. Nothing was stored. Transient — retry after the `Retry-After`
+        seconds. `error` is one of:
+
+        - `rate_limited`: this hook's tenant is over its ingest rate limit on
+          this node (`rate_limits`).
+        - `quarantine_rate_limited`: verification failed, the source's
+          `on_verify_failure` is `quarantine`, and the source's quarantine
+          bucket on this node (`quarantine.burst`/`quarantine.rate`) is empty.
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'
@@ -259,11 +264,19 @@ components:
             $ref: '#/components/schemas/Error'
     Overloaded:
       description: |
-        `503`. `overload` (batcher queue full: the edge sheds load rather than
-        growing without bound) or `store_unavailable` (no durable destination
-        accepted the hook: the store commit failed under `wal.type: disk`, or a
-        sink refused under `wal.type: none`). Transient — retry after the
-        `Retry-After` seconds.
+        `503`. Transient — retry after the `Retry-After` seconds. `error` is
+        one of:
+
+        - `overload`: the batcher queue is full; the edge sheds load rather
+          than growing without bound.
+        - `store_unavailable`: no durable destination accepted the hook (the
+          store commit failed under `wal.type: disk`, or a sink refused under
+          `wal.type: none`).
+        - `quarantine_full`: verification failed, the source's
+          `on_verify_failure` is `quarantine`, and this node's pen is at its
+          byte cap (`quarantine.max_bytes`). Nothing was stored — a full pen
+          refuses, it never evicts a held hook. It clears only when an operator
+          releases or purges entries, so `Retry-After` is `60`.
       headers:
         Retry-After:
           $ref: '#/components/headers/RetryAfter'

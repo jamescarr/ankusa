@@ -10,14 +10,17 @@ defmodule Ankusa.EdgeTest do
   # A hook is only stored when something is obliged to handle it, so sources
   # without sinks of their own get a log sink: stored hooks stay pending (no
   # dispatch role runs here), which is what these tests look at.
-  defp start_edge(sources) do
+  defp start_edge(sources, overrides \\ []) do
     sources =
       Map.new(sources, fn {id, opts} ->
         {id, Keyword.put_new(opts, :sinks, [{Ankusa.Sink.Log, []}])}
       end)
 
     config =
-      test_config(roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: sources})
+      test_config(
+        [roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: sources}] ++
+          overrides
+      )
 
     start_supervised!({Ankusa.Instance, config})
     config
@@ -117,6 +120,71 @@ defmodule Ankusa.EdgeTest do
     assert stored_ids(config.instance) == []
     assert {:ok, [entry]} = Ankusa.Edge.Quarantine.recent(config.instance, 10)
     assert entry.source_id == "q"
+  end
+
+  defp quarantining(ids) do
+    Map.new(ids, fn id ->
+      {id,
+       [
+         verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: @secret},
+         on_verify_failure: :quarantine
+       ]}
+    end)
+  end
+
+  defp forged(config, source_id, body \\ "forged"),
+    do: route(config, request(source_id, body, [{"webhook-signature", "v1,nope"}]))
+
+  test "each source has its own quarantine bucket; over it is 429 with Retry-After" do
+    config = start_edge(quarantining(["q1", "q2"]), quarantine: %{burst: 2, rate: 1})
+
+    assert forged(config, "q1").status == 202
+    assert forged(config, "q1").status == 202
+
+    limited = forged(config, "q1")
+    assert limited.status == 429
+    assert JSON.decode!(limited.resp_body) == %{"error" => "quarantine_rate_limited"}
+    assert [retry_after] = Plug.Conn.get_resp_header(limited, "retry-after")
+    assert String.to_integer(retry_after) >= 1
+
+    # q1's flood never spent q2's tokens.
+    assert forged(config, "q2").status == 202
+    assert {:ok, entries} = Ankusa.Edge.Quarantine.recent(config.instance, 10)
+    assert Enum.frequencies_by(entries, & &1.source_id) == %{"q1" => 2, "q2" => 1}
+  end
+
+  test "a full pen refuses with 503 and evicts nothing; a purge makes room again" do
+    # One entry (a 2 KB body plus its envelope) fits under 3 KB; two never do.
+    body = String.duplicate("x", 2_000)
+    config = start_edge(quarantining(["q"]), quarantine: %{max_bytes: 3_000})
+
+    assert forged(config, "q", body).status == 202
+    assert {:ok, [held]} = Ankusa.Edge.Quarantine.recent(config.instance, 10)
+
+    full = forged(config, "q", body)
+    assert full.status == 503
+    assert JSON.decode!(full.resp_body) == %{"error" => "quarantine_full"}
+    assert Plug.Conn.get_resp_header(full, "retry-after") == ["60"]
+    assert {:ok, [^held]} = Ankusa.Edge.Quarantine.recent(config.instance, 10)
+
+    assert {:ok, %{deleted: 1, bytes: bytes}} =
+             Ankusa.Edge.Quarantine.purge(config.instance, %{}, 10)
+
+    assert bytes == held.size
+    assert forged(config, "q", body).status == 202
+  end
+
+  test "the pen's byte count survives a restart" do
+    body = String.duplicate("x", 2_000)
+    config = start_edge(quarantining(["q"]), quarantine: %{max_bytes: 3_000})
+
+    assert forged(config, "q", body).status == 202
+
+    stop_supervised!({Ankusa.Instance, config.instance})
+    start_supervised!({Ankusa.Instance, config})
+
+    # The restarted pen counted the held entry back from the store.
+    assert forged(config, "q", body).status == 503
   end
 
   test "load shed: a full batcher queue returns 503 with Retry-After" do

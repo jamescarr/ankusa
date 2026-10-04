@@ -18,16 +18,24 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code "archive"}: required inclusive {@code from}/{@code to} bounds on {@code receivedAt},
  *       in Unix milliseconds, plus optional {@code sourceId} and {@code sinks} (indexes into the
  *       source's current sink list; omitted means every current sink).
+ *   <li>{@code "quarantine"}: optional {@code sourceId}, {@code id}, and inclusive {@code
+ *       since}/{@code until} bounds on {@code receivedAt}, in Unix milliseconds. The job
+ *       re-verifies held hooks against each source's current verifier and releases the ones that
+ *       pass; only hooks quarantined at or before its own creation time are touched.
  * </ul>
  *
  * <p>{@code rate} is items per second (1..100000, default 1000); {@code maxLagMs} is the dispatcher
  * lag above which the job pauses itself (100..600000, default 2000).
  *
- * @param kind {@code "dlq"} or {@code "archive"}, or null to let the listener default it
+ * @param kind {@code "dlq"}, {@code "archive"}, or {@code "quarantine"}, or null to let the
+ *     listener default it
  * @param sourceId replay only this source's rows, or null for every source
- * @param id replay only the dead-letter row with this id, or null for any row
- * @param since the earliest dead-letter time to replay, inclusive, or null for any
- * @param until the latest dead-letter time to replay, inclusive, or null for any
+ * @param id replay only the dead-letter row ({@code dlq}) or held hook ({@code quarantine}) with
+ *     this id, or null for any
+ * @param since the earliest dead-letter time ({@code dlq}) or {@code receivedAt} ({@code
+ *     quarantine}) to replay, inclusive, or null for any
+ * @param until the latest dead-letter time ({@code dlq}) or {@code receivedAt} ({@code quarantine})
+ *     to replay, inclusive, or null for any
  * @param from the earliest {@code receivedAt} to replay, inclusive, or null
  * @param to the latest {@code receivedAt} to replay, inclusive, or null
  * @param sinks the sink indexes to redrive archive hooks to, or null for every current sink
@@ -74,7 +82,8 @@ public record ReplaySpec(
     /**
      * Sets the kind.
      *
-     * @param kind {@code "dlq"} or {@code "archive"}, or null for the listener's default
+     * @param kind {@code "dlq"}, {@code "archive"}, or {@code "quarantine"}, or null for the
+     *     listener's default
      * @return this builder
      */
     public Builder kind(@Nullable String kind) {

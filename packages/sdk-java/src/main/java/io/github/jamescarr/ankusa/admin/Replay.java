@@ -7,13 +7,14 @@ import org.jspecify.annotations.Nullable;
  * A replay job, as the {@code /v1/replays} endpoints return it.
  *
  * <p>A job re-sends either dead-letter queue rows ({@code kind: "dlq"}) or hooks archived over a
- * time window ({@code kind: "archive"}). It moves rows only as fast as dispatch has spare capacity,
- * so it never delays live traffic. {@code moved}, {@code scanned} and {@code skipped} are exact;
- * {@code delivered} and {@code dead} are the outcomes the dispatcher reported and are approximate
- * across a restart.
+ * time window ({@code kind: "archive"}), or releases quarantined hooks that now pass verification
+ * ({@code kind: "quarantine"}). It moves rows only as fast as dispatch has spare capacity, so it
+ * never delays live traffic. {@code moved}, {@code scanned} and {@code skipped} are exact; {@code
+ * delivered} and {@code dead} are the outcomes the dispatcher reported and are approximate across a
+ * restart.
  *
  * @param id the job id, a UUIDv7
- * @param kind {@code "dlq"} or {@code "archive"}
+ * @param kind {@code "dlq"}, {@code "archive"}, or {@code "quarantine"}
  * @param state {@code "running"}, {@code "paused"}, {@code "done"}, {@code "cancelled"}, or {@code
  *     "failed"}
  * @param filter exactly the filter keys the job was created with
@@ -22,9 +23,12 @@ import org.jspecify.annotations.Nullable;
  * @param createdAt when the job was created, in Unix milliseconds
  * @param updatedAt when the job last changed, in Unix milliseconds
  * @param finishedAt when the job finished, or null while it has not
- * @param moved rows revived ({@code dlq}) or hooks re-enqueued ({@code archive})
+ * @param moved rows revived ({@code dlq}), hooks re-enqueued ({@code archive}), or held hooks that
+ *     passed verification again ({@code quarantine})
  * @param scanned keys or records examined
- * @param skipped archive records with no source, no bound sink, or an undecodable frame
+ * @param skipped archive records with no source, no bound sink, or an undecodable frame ({@code
+ *     archive}); held hooks that still fail verification or were already accepted ({@code
+ *     quarantine})
  * @param delivered outcomes the dispatcher reported as delivered
  * @param dead outcomes the dispatcher reported as dead-lettered
  * @param error the auto-pause or failure reason, or null when there is none

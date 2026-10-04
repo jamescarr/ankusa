@@ -9,6 +9,13 @@ defmodule Ankusa.Verifier.Hmac do
   provider. `:secret` and `:tolerance` carry the key and replay window, exactly
   as with the old bespoke verifiers.
 
+  `:secret` is a binary or a list of binaries (current first); every key is
+  tried, so a rotation window is `secret: [new, old]` — hooks signed with
+  either verify while the provider switches over, and none land in quarantine.
+  An empty key would verify whatever anyone signs with it, so a missing or
+  empty secret, an empty list, or an element that is empty or does not decode
+  fails every hook with `:bad_secret`.
+
   Providers that are not body-HMAC — Twilio (SHA1 over the full request URL plus
   sorted form params) and PayPal (RSA over a certificate fetched from a provider
   URL) — are not expressible here and stay bespoke `Ankusa.Verifier` modules.
@@ -70,10 +77,14 @@ defmodule Ankusa.Verifier.Hmac do
          {:ok, candidates, sig_ts} <- candidates(env, scheme),
          {:ok, ts} <- timestamp(env, scheme, sig_ts, opts),
          {:ok, signed} <- signed_bytes(env, scheme, ts),
-         {:ok, key} <- secret_key(opts, scheme) do
-      expected = encode(:crypto.mac(:hmac, scheme.hash, key, signed), scheme.encoding)
+         {:ok, keys} <- secret_keys(opts, scheme) do
+      matched? =
+        Enum.any?(keys, fn key ->
+          expected = encode(:crypto.mac(:hmac, scheme.hash, key, signed), scheme.encoding)
+          Enum.any?(candidates, &Verifier.secure_compare(&1, expected))
+        end)
 
-      if Enum.any?(candidates, &Verifier.secure_compare(&1, expected)) do
+      if matched? do
         :ok
       else
         {:error, :no_match}
@@ -244,19 +255,32 @@ defmodule Ankusa.Verifier.Hmac do
     end
   end
 
-  defp secret_key(opts, %Scheme{secret_decode: :raw}) do
-    {:ok, Keyword.get(opts, :secret, "")}
+  # An empty HMAC key verifies whatever anyone signs with it, and anyone can
+  # sign with it, so the verifier fails closed: a missing or empty `:secret`,
+  # an empty list, or any element that is not a binary or decodes to nothing is
+  # `:bad_secret`. One unusable key in a list is a config mistake, not a
+  # narrower rotation window.
+  defp secret_keys(opts, %Scheme{secret_decode: decode}) do
+    keys = opts |> Keyword.get(:secret) |> List.wrap() |> Enum.map(&decode_secret(&1, decode))
+
+    if keys != [] and Enum.all?(keys, &match?({:ok, _}, &1)),
+      do: {:ok, Enum.map(keys, fn {:ok, key} -> key end)},
+      else: {:error, :bad_secret}
   end
 
-  defp secret_key(opts, %Scheme{secret_decode: :whsec_base64}) do
-    secret = Keyword.get(opts, :secret, "")
-    raw = String.replace_prefix(secret, "whsec_", "")
-
-    case Base.decode64(raw) do
-      {:ok, key} -> {:ok, key}
-      :error -> {:error, :bad_secret}
+  defp decode_secret(secret, decode) when is_binary(secret) do
+    case raw_key(secret, decode) do
+      {:ok, key} when key != "" -> {:ok, key}
+      _empty_or_undecodable -> :error
     end
   end
+
+  defp decode_secret(_secret, _decode), do: :error
+
+  defp raw_key(secret, :raw), do: {:ok, secret}
+
+  defp raw_key(secret, :whsec_base64),
+    do: secret |> String.replace_prefix("whsec_", "") |> Base.decode64()
 
   defp encode(mac, :hex), do: Base.encode16(mac, case: :lower)
   defp encode(mac, :base64), do: Base.encode64(mac)

@@ -66,9 +66,10 @@ defmodule Ankusa.SDK.Admin do
   @doc """
   Create a replay job: `POST /v1/replays` with `spec` as the JSON body.
 
-  `spec` is a map (or keyword list) naming the job: `%{"kind" => "dlq"}` or
-  `%{"kind" => "archive"}`, plus the kind's filter (`source_id`/`since`/`until`
-  for `dlq`, `from`/`to`/`sinks` for `archive`) and the optional `rate` and
+  `spec` is a map (or keyword list) naming the job: `%{"kind" => "dlq"}`,
+  `%{"kind" => "archive"}` or `%{"kind" => "quarantine"}`, plus the kind's
+  filter (`source_id`/`id`/`since`/`until` for `dlq` and `quarantine`,
+  `from`/`to`/`sinks` for `archive`) and the optional `rate` and
   `max_lag_ms`. The response is the full Replay object; a retry of the same
   spec answers the existing running/paused job instead of creating a second.
   """

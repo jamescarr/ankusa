@@ -84,9 +84,9 @@ class AdminClient:
         existing ``running``/``paused`` job with the same filter, so a proxy
         retry is idempotent).
 
-        ``spec`` is the request body verbatim: ``kind`` (``"dlq"`` or
-        ``"archive"``) plus that kind's bounds and any optional ``rate`` /
-        ``max_lag_ms``.
+        ``spec`` is the request body verbatim: ``kind`` (``"dlq"``,
+        ``"archive"`` or ``"quarantine"``) plus that kind's bounds and any
+        optional ``rate`` / ``max_lag_ms``.
         """
         return self._json(self._request("POST", "/v1/replays", json=dict(spec)))
 

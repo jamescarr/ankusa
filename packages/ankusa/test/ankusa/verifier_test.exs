@@ -97,6 +97,59 @@ defmodule Ankusa.VerifierTest do
                )
     end
 
+    test "judges the timestamp window at `:now` when given", %{key: key, secret: secret} do
+      ts = System.system_time(:second) - 10_000
+      body = "payload"
+      env = swh_env("msg_1", ts, swh_sign(key, "msg_1", ts, body), body)
+      opts = [scheme: :standard_webhooks, secret: secret]
+
+      assert Hmac.verify(env, [{:now, ts + 60} | opts]) == :ok
+
+      assert {:error, :timestamp_out_of_tolerance} =
+               Hmac.verify(env, [{:now, ts + 10_000} | opts])
+    end
+
+    test "a list of secrets accepts a hook signed with any of them", %{key: key, secret: secret} do
+      old_key = :crypto.strong_rand_bytes(24)
+      old_secret = "whsec_" <> Base.encode64(old_key)
+      ts = System.system_time(:second)
+      opts = [scheme: :standard_webhooks, secret: [secret, old_secret]]
+
+      for k <- [key, old_key] do
+        env = swh_env("msg_1", ts, swh_sign(k, "msg_1", ts, "payload"), "payload")
+        assert Hmac.verify(env, opts) == :ok
+      end
+
+      stranger = swh_sign(:crypto.strong_rand_bytes(24), "msg_1", ts, "payload")
+
+      assert {:error, :no_match} =
+               Hmac.verify(swh_env("msg_1", ts, stranger, "payload"), opts)
+    end
+
+    test "an empty key fails closed, even for a hook signed with it", %{key: key, secret: secret} do
+      ts = System.system_time(:second)
+      # Signed with the empty key: what anyone can forge.
+      forged = swh_env("msg_1", ts, swh_sign("", "msg_1", ts, "payload"), "payload")
+
+      for bad <- [
+            nil,
+            "",
+            "whsec_",
+            [],
+            [secret, ""],
+            [secret, "whsec_not base64!"],
+            [secret, 42]
+          ] do
+        assert {:error, :bad_secret} =
+                 Hmac.verify(forged, scheme: :standard_webhooks, secret: bad)
+      end
+
+      assert {:error, :bad_secret} = Hmac.verify(forged, scheme: :standard_webhooks)
+
+      good = swh_env("msg_1", ts, swh_sign(key, "msg_1", ts, "payload"), "payload")
+      assert Hmac.verify(good, scheme: :standard_webhooks, secret: [secret]) == :ok
+    end
+
     test "rejects missing headers", %{secret: secret} do
       assert {:error, :missing_signature} =
                Hmac.verify(env([], "body"), scheme: :standard_webhooks, secret: secret)
@@ -153,6 +206,13 @@ defmodule Ankusa.VerifierTest do
     test "rejects a missing header", %{secret: secret} do
       assert {:error, :missing_signature} =
                Hmac.verify(env([], "body"), scheme: :stripe, secret: secret)
+    end
+
+    test "an empty secret fails closed, even for a hook signed with the empty key" do
+      t = System.system_time(:second)
+      env = env([{"Stripe-Signature", stripe_sign("", t, "payload")}], "payload")
+
+      assert {:error, :bad_secret} = Hmac.verify(env, scheme: :stripe, secret: "")
     end
   end
 

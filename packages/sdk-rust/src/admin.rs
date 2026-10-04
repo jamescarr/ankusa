@@ -332,13 +332,14 @@ pub struct QuarantinePage {
 pub struct Replay {
     /// The job id, a `UUIDv7`.
     pub id: String,
-    /// `"dlq"` or `"archive"`.
+    /// `"dlq"`, `"archive"` or `"quarantine"`.
     pub kind: String,
     /// `"running"`, `"paused"`, `"done"`, `"cancelled"` or `"failed"`.
     pub state: String,
     /// The filter the job was created with.
     pub filter: serde_json::Map<String, serde_json::Value>,
-    /// Items per second: delivery rows for `dlq`, hooks for `archive`.
+    /// Items per second: delivery rows for `dlq`, hooks for `archive` and
+    /// `quarantine`.
     pub rate: u64,
     /// The oldest-due dispatch lag the job tolerates, milliseconds.
     pub max_lag_ms: u64,
@@ -348,11 +349,14 @@ pub struct Replay {
     pub updated_at: i64,
     /// When the job finished, or `None` while it is still running.
     pub finished_at: Option<i64>,
-    /// Rows revived (`dlq`) or hooks re-enqueued (`archive`).
+    /// Rows revived (`dlq`), hooks re-enqueued (`archive`), or held hooks that
+    /// passed verification again (`quarantine`).
     pub moved: u64,
     /// Keys or records examined.
     pub scanned: u64,
-    /// Archive records with no source, no bound sink, or an undecodable frame.
+    /// Archive records with no source, no bound sink, or an undecodable frame
+    /// (`archive`); held hooks that still fail verification or were already
+    /// accepted (`quarantine`).
     pub skipped: u64,
     /// Deliveries the pipeline reported as delivered.
     pub delivered: u64,
@@ -370,22 +374,24 @@ pub struct ReplayList {
     pub replays: Vec<Replay>,
 }
 
-/// What `POST /v1/replays` starts: a `dlq` job over dead-lettered rows, or an
-/// `archive` job over a time window of an archived source.
+/// What `POST /v1/replays` starts: a `dlq` job over dead-lettered rows, an
+/// `archive` job over a time window of an archived source, or a `quarantine`
+/// job that re-verifies held hooks and releases the ones that now pass.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReplaySpec {
-    /// `"dlq"` or `"archive"`.
+    /// `"dlq"`, `"archive"` or `"quarantine"`.
     pub kind: String,
     /// Restrict to one source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
-    /// Restrict to one envelope id (`dlq` only).
+    /// Restrict to one envelope id (`dlq` and `quarantine`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// Inclusive lower bound on the dead-letter time, unix milliseconds.
+    /// Inclusive lower bound, unix milliseconds: on the dead-letter time
+    /// (`dlq`) or on `received_at` (`quarantine`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<i64>,
-    /// Inclusive upper bound on the dead-letter time, unix milliseconds.
+    /// Inclusive upper bound, on the same time as `since`, unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<i64>,
     /// Inclusive lower bound on `received_at`, unix milliseconds (`archive`).

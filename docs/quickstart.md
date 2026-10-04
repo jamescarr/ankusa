@@ -114,6 +114,8 @@ curl localhost:4002/health
 curl -s localhost:4002/metrics | grep ankusa_ingest_requests_total
 curl localhost:4002/v1/config      # the effective config, secrets redacted
 curl localhost:4002/v1/quarantine  # hooks held after a failed verification
+# fixed the secret? release the held hooks that now verify:
+curl -XPOST localhost:4002/v1/replays -d '{"kind":"quarantine"}'
 ```
 
 Port 4002 is unauthenticated, so never publish it: the compose file binds it to
@@ -158,8 +160,13 @@ GitHub and Standard Webhooks sources are the same shape with a different
 - `401`: verification failed
 - `404`: unknown source
 - `413`: body over `max_body_bytes`
+- `429`: over a rate limit, nothing stored — the tenant's (`rate_limited`) or,
+  for a hook that would be quarantined, its source's quarantine bucket
+  (`quarantine_rate_limited`); retry after `Retry-After`
 - `503`: no durable destination right now (overload, the store could not take
-  the commit, or a sink refused under `wal.type: none`); retry later
+  the commit, or a sink refused under `wal.type: none`), or the quarantine pen
+  is full (`quarantine_full`, `Retry-After: 60`, until an operator releases or
+  purges); retry later
 
 `201 accepted` is the only committed response, and it comes back only after a
 durable accept: the store's synced commit (`wal.type: disk`, the default) or
