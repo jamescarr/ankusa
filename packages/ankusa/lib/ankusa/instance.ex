@@ -60,6 +60,7 @@ defmodule Ankusa.Instance do
     Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     Ankusa.Edge.Quarantine.validate_config!(config)
+    Ankusa.Dispatch.Pipeline.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =

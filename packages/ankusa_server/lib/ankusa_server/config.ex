@@ -63,7 +63,7 @@ defmodule AnkusaServer.Config do
   @http_keys ~w(port max_body_bytes routing prefix)
   @admin_keys ~w(enabled port)
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
-  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes retry)
+  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type publish_timeout_ms)
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
@@ -320,6 +320,7 @@ defmodule AnkusaServer.Config do
       Ankusa.Routes.validate_config!(config)
       Ankusa.Edge.RateLimiter.validate_config!(config)
       Ankusa.Edge.Quarantine.validate_config!(config)
+      Ankusa.Dispatch.Pipeline.validate_config!(config)
       Ankusa.Queue.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
       config
@@ -419,6 +420,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:concurrency, int_opt(dispatch, "concurrency", ["dispatch"]))
         |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
         |> put_opt(:max_inflight_bytes, int_opt(dispatch, "max_inflight_bytes", ["dispatch"]))
+        |> put_opt(:attempt_timeout_ms, int_opt(dispatch, "attempt_timeout_ms", ["dispatch"]))
         |> put_opt(:retry, retry_policy(retry))
     ]
   end

@@ -112,6 +112,14 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - `Ankusa.Verifier.check_timestamp/2` takes `now:` (Unix seconds) to judge the
   window against a fixed instant; `Ankusa.Verifier.scheme_name/2` is the
   shared scheme label.
+- `config.dispatch.attempt_timeout_ms` (default `30_000`): a delivery attempt
+  that has not returned after it is killed and counts as a failed attempt with
+  reason `{:attempt_timeout, ms}`, so a hung sink frees its dispatch slot. It
+  covers the sink call and the fallback claim check-in of an attempt, and
+  `Ankusa.Lifecycle.Publisher` applies the same deadline to lifecycle sinks.
+  The sink may still complete a killed delivery, so consumers dedupe on the
+  idempotency key. `Ankusa.Dispatch.Pipeline.validate_config!/1` rejects a value
+  that is not a positive integer.
 
 ### Changed
 
@@ -144,6 +152,14 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `quarantine.max_bytes` with `503 quarantine_full` (`Retry-After: 60`); it
   never evicts a held hook. Entries held by earlier versions stay readable and
   releasable (rebuilt as `POST /`).
+- **The default retry policy retries for about 6 hours.**
+  `Ankusa.RetryPolicy.Exponential` defaults to `max_ms: 300_000` and
+  `max_attempts: 84` (they were `30_000` and `12`, about 83 s): 100 ms doubling
+  to a 5-minute cap by attempt 13, then 5 minutes apart. A retry is a delivery
+  row due later and holds no slot, so a longer horizon costs nothing while a
+  sink is down. Set `max_attempts` lower to dead-letter sooner. Errors are not
+  classified yet, so a permanent failure (an HTTP `400`, say) also takes every
+  attempt before it reaches the DLQ.
 
 ### Removed
 

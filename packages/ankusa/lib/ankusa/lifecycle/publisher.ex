@@ -11,6 +11,8 @@ defmodule Ankusa.Lifecycle.Publisher do
   one job per sink, so a sink that is down never holds back another. A failed
   job is retried after the delay `config.dispatch.retry` gives (an
   `Ankusa.RetryPolicy`); when the policy gives up the job is dropped.
+  An attempt that has not returned after `config.dispatch.attempt_timeout_ms` is
+  killed and counts as a failed attempt.
 
   Everything is best effort and in memory:
 
@@ -94,6 +96,7 @@ defmodule Ankusa.Lifecycle.Publisher do
        instance: instance,
        sinks: config.lifecycle.sinks,
        retry: config.dispatch.retry,
+       attempt_timeout_ms: config.dispatch.attempt_timeout_ms,
        max_pending: Keyword.get(opts, :max_pending, @max_pending),
        sup: sup,
        ready: :queue.new(),
@@ -143,30 +146,47 @@ defmodule Ankusa.Lifecycle.Publisher do
   @impl true
   def handle_info({ref, result}, %{running: running} = state) when is_map_key(running, ref) do
     Process.demonitor(ref, [:flush])
-    {job, running} = Map.pop!(running, ref)
-    state = %{state | running: running}
+    {%{job: job, timer: timer}, running} = Map.pop!(running, ref)
+    Process.cancel_timer(timer)
 
-    case result do
-      :ok ->
-        {mod, _opts} = job.sink
-
-        Telemetry.emit([:lifecycle, :delivered], %{}, %{
-          instance: state.instance,
-          type: job.type,
-          sink: inspect(mod)
-        })
-
-        {:noreply, start_jobs(%{state | pending: state.pending - 1})}
-
-      {:error, reason} ->
-        {:noreply, state |> retry(job, reason) |> start_jobs()}
-    end
+    {:noreply, %{state | running: running} |> finished(job, result) |> start_jobs()}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{running: running} = state)
       when is_map_key(running, ref) do
-    {job, running} = Map.pop!(running, ref)
+    {%{job: job, timer: timer}, running} = Map.pop!(running, ref)
+    Process.cancel_timer(timer)
+
     {:noreply, %{state | running: running} |> retry(job, {:exit, reason}) |> start_jobs()}
+  end
+
+  # The attempt outlasted `dispatch.attempt_timeout_ms`: kill it and count a
+  # failed attempt. A reply that landed in the mailbox meanwhile still counts.
+  def handle_info({:attempt_timeout, ref}, %{running: running} = state)
+      when is_map_key(running, ref) do
+    {%{job: job, task: task}, running} = Map.pop!(running, ref)
+    state = %{state | running: running}
+
+    state =
+      case Task.shutdown(task, :brutal_kill) do
+        {:ok, result} ->
+          finished(state, job, result)
+
+        {:exit, reason} ->
+          retry(state, job, {:exit, reason})
+
+        nil ->
+          {mod, _opts} = job.sink
+
+          Logger.warning(
+            "[ankusa] lifecycle event #{job.type} for #{job.subject}: #{inspect(mod)} did not " <>
+              "finish within #{state.attempt_timeout_ms}ms; attempt #{job.attempt} failed"
+          )
+
+          retry(state, job, {:attempt_timeout, state.attempt_timeout_ms})
+      end
+
+    {:noreply, start_jobs(state)}
   end
 
   def handle_info({:retry, job}, state) do
@@ -193,14 +213,31 @@ defmodule Ankusa.Lifecycle.Publisher do
           attempt: job.attempt
         }
 
-        %Task{ref: ref} =
+        task =
           Task.Supervisor.async_nolink(state.sup, fn ->
             Sink.safe_deliver(mod, job.env, ctx, opts)
           end)
 
-        start_jobs(%{state | ready: ready, running: Map.put(state.running, ref, job)})
+        timer = Process.send_after(self(), {:attempt_timeout, task.ref}, state.attempt_timeout_ms)
+        entry = %{job: job, task: task, timer: timer}
+
+        start_jobs(%{state | ready: ready, running: Map.put(state.running, task.ref, entry)})
     end
   end
+
+  defp finished(state, job, :ok) do
+    {mod, _opts} = job.sink
+
+    Telemetry.emit([:lifecycle, :delivered], %{}, %{
+      instance: state.instance,
+      type: job.type,
+      sink: inspect(mod)
+    })
+
+    %{state | pending: state.pending - 1}
+  end
+
+  defp finished(state, job, {:error, reason}), do: retry(state, job, reason)
 
   defp retry(state, job, reason) do
     {retry_mod, retry_opts} = state.retry

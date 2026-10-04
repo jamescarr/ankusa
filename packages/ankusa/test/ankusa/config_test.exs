@@ -313,4 +313,25 @@ defmodule Ankusa.ConfigTest do
       end
     end
   end
+
+  describe "Ankusa.Dispatch.Pipeline.validate_config!/1" do
+    test "defaults to a 30 s attempt deadline, and accepts it" do
+      config = Config.new()
+
+      assert config.dispatch.attempt_timeout_ms == 30_000
+      assert :ok = Ankusa.Dispatch.Pipeline.validate_config!(config)
+    end
+
+    test "rejects a deadline that is not a positive integer" do
+      for bad <- [0, -5, 1.5, nil, "30000"] do
+        assert_raise ArgumentError,
+                     ~r/dispatch.attempt_timeout_ms must be a positive integer, got #{Regex.escape(inspect(bad))}/,
+                     fn ->
+                       Ankusa.Dispatch.Pipeline.validate_config!(
+                         Config.new(dispatch: %{attempt_timeout_ms: bad})
+                       )
+                     end
+      end
+    end
+  end
 end

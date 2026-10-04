@@ -356,6 +356,39 @@ defmodule Ankusa.DispatchTest do
     end
   end
 
+  test "D6: an attempt that outlasts dispatch.attempt_timeout_ms is killed, frees its slot, and counts as failed" do
+    inst =
+      start(
+        %{
+          "hang" => %{sinks: [{GateSink, mode: :block, pid: self()}]},
+          "healthy" => %{sinks: [{TagSink, tag: :healthy, pid: self()}]}
+        },
+        dispatch: %{concurrency: 1, attempt_timeout_ms: 100, retry: retry(max_attempts: 2)}
+      )
+
+    hang_id = enqueue!(inst, build_env("hang")).id
+    healthy_id = enqueue!(inst, build_env("healthy")).id
+
+    assert_receive {:gate_started, ^hang_id, task_pid}, 1_000
+    ref = Process.monitor(task_pid)
+
+    # `:noproc` only if the kill beat the monitor. The gate's own timeout is
+    # 5 s, so nothing but the deadline ends the task inside this second.
+    assert_receive {:DOWN, ^ref, :process, ^task_pid, reason}, 1_000
+    assert reason in [:killed, :noproc]
+
+    # concurrency: 1, so this only runs because the hung attempt's slot was freed
+    assert_receive {:delivered, :healthy, ^healthy_id}, 1_000
+
+    # the retry (due at once) hangs and is killed too, and then the policy gives up
+    assert {:ok, _} = Pipeline.tick(inst)
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == hang_id
+
+    assert entry.reason ==
+             inspect({:sink, GateSink, {:attempt_timeout, 100}}, limit: 50, printable_limit: 4096)
+  end
+
   # ── the DLQ ────────────────────────────────────────────────────────────────
 
   test "one dead row per exhausted sink, and the hook stays until it clears" do

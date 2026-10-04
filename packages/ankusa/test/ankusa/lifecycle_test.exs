@@ -344,6 +344,33 @@ defmodule Ankusa.LifecycleTest do
       assert Ankusa.whereis(config.instance, :lifecycle) == publisher
     end
 
+    test "an attempt that outlasts dispatch.attempt_timeout_ms is killed and retried, then dropped" do
+      attach([[:ankusa, :lifecycle, :dropped]])
+
+      config =
+        start_instance(
+          dispatch: [retry: @fast_retry, attempt_timeout_ms: 100],
+          lifecycle: %{sinks: [{GateSink, to: self()}]}
+        )
+
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+
+      # This GateSink blocks until `:go`, which the test never sends: only the
+      # deadline ends the attempt. `:noproc` only if the kill beat the monitor.
+      assert_receive {:gated, pid1, _}, 2_000
+      ref = Process.monitor(pid1)
+      assert_receive {:DOWN, ^ref, :process, ^pid1, reason}, 1_000
+      assert reason in [:killed, :noproc]
+
+      # The retry gates again in a new process, and every attempt times out.
+      assert_receive {:gated, pid2, _}, 2_000
+      assert pid2 != pid1
+
+      assert_receive {:telemetry, [:ankusa, :lifecycle, :dropped],
+                      %{reason: :gave_up, type: "io.ankusa.source.created"}},
+                     3_000
+    end
+
     test "a full queue drops the event and counts it" do
       attach([[:ankusa, :lifecycle, :dropped], [:ankusa, :lifecycle, :delivered]])
 

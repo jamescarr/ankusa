@@ -346,6 +346,15 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ ~s(unknown key "ordered")
   end
 
+  test "dispatch.attempt_timeout_ms loads, and a non-positive value fails with the key's name" do
+    path = tmp_config("dispatch: {attempt_timeout_ms: 2500}\n")
+    assert Config.load!(path: path, env: %{}).config.dispatch.attempt_timeout_ms == 2500
+
+    path = tmp_config("dispatch: {attempt_timeout_ms: 0}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "dispatch.attempt_timeout_ms must be a positive integer, got 0"
+  end
+
   test "the removed claim-check keys tokens/remote/max_bytes are rejected by name" do
     for key <- ["tokens", "remote", "max_bytes"] do
       path =

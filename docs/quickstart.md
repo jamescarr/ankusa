@@ -81,7 +81,7 @@ sleep 1 && docker compose logs worker | grep evt_3
 ```
 
 `ankusa.yml` caps retries at 6 attempts (roughly 8–15s, jitter included) so this
-drill takes seconds; the default is 12 attempts backing off to 30s.
+drill takes seconds; the default is 84 attempts backing off to 5 min (about 6 hours).
 
 ### Replay is safe
 

@@ -14,7 +14,7 @@ claim_check:
   port: 4001
 
 # Short on purpose, so a missing stream dead-letters in seconds, not minutes:
-# 6 attempts over roughly 8-15s. The default is 12 attempts, backing off to 30s.
+# 6 attempts over roughly 8-15s. The default is 84 attempts, backing off to 5 min (about 6 hours).
 dispatch:
   retry:
     base_ms: 1000

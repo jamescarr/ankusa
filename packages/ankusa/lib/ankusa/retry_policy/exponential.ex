@@ -5,10 +5,15 @@ defmodule Ankusa.RetryPolicy.Exponential do
   `opts`:
 
     * `:base_ms`      — base delay (default `100`)
-    * `:max_ms`       — delay ceiling before jitter (default `30_000`)
-    * `:max_attempts` — give up once `attempt` reaches this (default `12`)
+    * `:max_ms`       — delay ceiling before jitter (default `300_000`)
+    * `:max_attempts` — give up once `attempt` reaches this (default `84`)
     * `:jitter`       — multiply the delay by a random factor in `[0.5, 1.0]`
       (default `true`)
+
+  Defaults retry for about 6 hours: 100 ms doubling to the 5-minute cap by
+  attempt 13, then 5 minutes apart until attempt 84 (21 709.5 s without jitter;
+  jitter halves a delay at worst, so 3–6 h). Set `max_attempts` lower to
+  dead-letter sooner.
   """
 
   @behaviour Ankusa.RetryPolicy
@@ -16,8 +21,8 @@ defmodule Ankusa.RetryPolicy.Exponential do
   @impl true
   def backoff(attempt, opts) do
     base_ms = Keyword.get(opts, :base_ms, 100)
-    max_ms = Keyword.get(opts, :max_ms, 30_000)
-    max_attempts = Keyword.get(opts, :max_attempts, 12)
+    max_ms = Keyword.get(opts, :max_ms, 300_000)
+    max_attempts = Keyword.get(opts, :max_attempts, 84)
     jitter = Keyword.get(opts, :jitter, true)
 
     if attempt >= max_attempts do

@@ -179,10 +179,14 @@ dispatch:
   # sizes in bytes: bounds what a stalled destination can hold.
   max_inflight: 4096
   max_inflight_bytes: 134217728
+  # A delivery attempt that has not returned after this is killed and counts
+  # as a failed attempt (the sink may still complete it; consumers dedupe on
+  # the idempotency key). Keep it above every sink's own timeout.
+  attempt_timeout_ms: 30000
   retry:
     base_ms: 100
-    max_ms: 30000
-    max_attempts: 12
+    max_ms: 300000
+    max_attempts: 84
     # Full jitter: delay is multiplied by a random factor in [0.5, 1.0].
     jitter: true
 

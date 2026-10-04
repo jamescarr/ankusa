@@ -36,4 +36,16 @@ defmodule Ankusa.RetryPolicy.ExponentialTest do
       assert delay <= round(full)
     end
   end
+
+  test "the defaults retry for about 6 hours: 83 backoffs summing to 21 709.5 s, then give up" do
+    total =
+      Enum.reduce(1..83, 0, fn attempt, acc ->
+        {:retry, delay} = Exponential.backoff(attempt, jitter: false)
+        acc + delay
+      end)
+
+    assert total == 21_709_500
+    assert {:retry, _} = Exponential.backoff(83, [])
+    assert Exponential.backoff(84, []) == :give_up
+  end
 end

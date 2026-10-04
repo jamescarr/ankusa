@@ -21,6 +21,10 @@ defmodule Ankusa.Dispatch.Pipeline do
   bounds claimed-but-unfinished work, so a dead sink cannot walk the pipeline
   into an OOM. Deliveries are not ordered: two hooks for one sink may run in
   either order, and a retry runs after whatever is due before it.
+  An attempt that has not returned after `dispatch.attempt_timeout_ms` (default
+  30 s) is killed and counts as a failed attempt, `{:attempt_timeout, ms}`, so a
+  hung sink frees its slot; the fallback claim check-in runs inside the same
+  deadline.
 
   ## Binding
 
@@ -111,6 +115,17 @@ defmodule Ankusa.Dispatch.Pipeline do
     GenServer.call(Ankusa.via(instance, :dispatch), :pressure, 1_000)
   catch
     :exit, _ -> {:error, :unavailable}
+  end
+
+  @doc "Check `config.dispatch.attempt_timeout_ms`; raises `ArgumentError` naming the key."
+  @spec validate_config!(Ankusa.Config.t()) :: :ok
+  def validate_config!(%Ankusa.Config{dispatch: %{attempt_timeout_ms: ms}}) do
+    unless is_integer(ms) and ms >= 1 do
+      raise ArgumentError,
+            "dispatch.attempt_timeout_ms must be a positive integer, got #{inspect(ms)}"
+    end
+
+    :ok
   end
 
   # ── GenServer ─────────────────────────────────────────────────────────────
@@ -309,6 +324,33 @@ defmodule Ankusa.Dispatch.Pipeline do
     # No result ever arrived: the task was killed. That is a failed attempt like
     # any other, and the row's own retry policy decides what happens next.
     outcome(state, ref, {:error, {:exit, reason}}, nil)
+  end
+
+  # The attempt outlasted `dispatch.attempt_timeout_ms`: kill it and count a
+  # failed attempt. A reply that landed in the mailbox meanwhile still counts.
+  def handle_info({:attempt_timeout, ref}, %{running: running} = state)
+      when is_map_key(running, ref) do
+    %{job: job, task: task} = Map.fetch!(running, ref)
+    timeout = state.config.dispatch.attempt_timeout_ms
+
+    case Task.shutdown(task, :brutal_kill) do
+      {:ok, {result, fresh_claim}} ->
+        outcome(state, ref, result, fresh_claim)
+
+      {:exit, reason} ->
+        outcome(state, ref, {:error, {:exit, reason}}, nil)
+
+      nil ->
+        {mod, _opts} = job.spec
+
+        Logger.warning(
+          "[ankusa] sink #{inspect(mod)} did not finish hook #{job.env.id} within " <>
+            "#{timeout}ms; attempt #{job.row.attempts + 1} failed (the sink may still " <>
+            "complete it; consumers dedupe on the idempotency key)"
+        )
+
+        outcome(state, ref, {:error, {:attempt_timeout, timeout}}, nil)
+    end
   end
 
   def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
@@ -689,13 +731,21 @@ defmodule Ankusa.Dispatch.Pipeline do
         # what capped throughput (measured: ~580µs per spawn, 1.5k/s; 46µs and
         # 5.1k/s once hoisted).
         instance = state.instance
+        timeout = state.config.dispatch.attempt_timeout_ms
 
         task =
           Task.Supervisor.async_nolink(state.task_sup, fn ->
             run_job(job, instance)
           end)
 
-        start_jobs(%{state | runnable: runnable, running: Map.put(state.running, task.ref, job)})
+        timer = Process.send_after(self(), {:attempt_timeout, task.ref}, timeout)
+        entry = %{job: job, task: task, timer: timer}
+
+        start_jobs(%{
+          state
+          | runnable: runnable,
+            running: Map.put(state.running, task.ref, entry)
+        })
     end
   end
 
@@ -746,11 +796,12 @@ defmodule Ankusa.Dispatch.Pipeline do
   # ── outcomes ──────────────────────────────────────────────────────────────
 
   defp outcome(state, ref, result, fresh_claim) do
-    job = Map.fetch!(state.running, ref)
+    {%{job: job, timer: timer}, running} = Map.pop!(state.running, ref)
+    Process.cancel_timer(timer)
 
     state = %{
       state
-      | running: Map.delete(state.running, ref),
+      | running: running,
         claimed: state.claimed - 1,
         claimed_bytes: state.claimed_bytes - job.size
     }
