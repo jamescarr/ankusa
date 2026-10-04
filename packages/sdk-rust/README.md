@@ -99,25 +99,29 @@ assert_eq!(hook_id(&headers)?, "01a0");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`HookHeaders` also carries `dedupe_key` (from `x-ankusa-dedupe-key`) and
-`replay_id` (from `x-ankusa-replay-id`), each `None` when the header is absent
-or empty, and its `idempotency_key(include_replay)` applies the same rule as
-`Message` below.
+`HookHeaders` also carries `dedupe_key` (from `x-ankusa-dedupe-key`),
+`replay_id` (from `x-ankusa-replay-id`) and `idempotency_key` (from
+`x-ankusa-idempotency-key`), each `None` when the header is absent or empty,
+and its `idempotency_key(include_replay)` applies the same rule as `Message`
+below.
 
 ## Consuming queue messages
 
 An Ankusa sink delivers the `v: 1` queue message as JSON: the body inline
 (`body_base64`) or as a claim-check ref (`claim`), the body's `sha256`, the
-provider's `dedupe_key` and forwarded `headers`, and a `replay_id` when the
+provider's `dedupe_key`, the `idempotency_key` Ankusa computed for the hook,
+and forwarded `headers`, and a `replay_id` when the
 delivery is a replay. `decode_message` validates all of it and, on any
 malformed input, returns an `InvalidMessageError` that is never retryable
 (`err.code` is `invalid_json`, `size_mismatch`, `integrity`, …; `err.field`
 names the offending key when the code is `invalid_field`).
 
-Key a processed-ids table on `idempotency_key`: `source_id:dedupe_key` when a
-non-empty `dedupe_key` is present, else `id`. Pass `include_replay: true` only
-if the consumer must reprocess replays — the default drops replays of events it
-already processed.
+Key a processed-ids table on `idempotency_key`: the key Ankusa shipped
+(`tenant:source_id:dedupe_key` when the hook has a provider event key, else
+`id`). For a message from a node that predates the field it computes the same
+key itself, with tenant `default` when there is none. Pass
+`include_replay: true` only if the consumer must reprocess replays — the
+default drops replays of events it already processed.
 
 ```rust
 use ankusa::{InvalidMessageError, decode_message};

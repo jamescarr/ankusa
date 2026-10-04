@@ -2,8 +2,8 @@ defmodule AnkusaExample.Consumer.Router do
   @moduledoc """
   The HTTP handoff surface `Ankusa.Sink.Http` calls (see `CONSUMER_URL` on
   the ingest side). Every accepted delivery is recorded in
-  `processed_webhooks` under its idempotency key — `source:dedupe_key` when
-  the request carries `x-ankusa-dedupe-key`, else the ankusa id — and becomes
+  `processed_webhooks` under its idempotency key — the `x-ankusa-idempotency-key`
+  header the sink ships (the ankusa id when a legacy sender omits it) — and becomes
   one Oban job. The worker fleet (`AnkusaExample.Consumer.WebhookWorker`)
   runs the actual business effect and stamps `processed_at`, so a provider
   retry or a DLQ replay collapses into a `deliveries + 1` bump instead of a
@@ -78,16 +78,14 @@ defmodule AnkusaExample.Consumer.Router do
   defp insert_job(conn, ankusa_id, body) do
     source_id = header(conn, "x-ankusa-source") || ""
 
-    # The idempotency key rule: `source:dedupe_key` when the delivery carries
-    # a provider event key, else the ankusa id. A replay of the same event
-    # (same dedupe key) is a duplicate even though the ankusa id is the same;
-    # a deliberately re-sent hook with `x-ankusa-replay-id` is the consumer's
-    # to dedupe or reprocess, so this example treats it as a duplicate too.
-    key =
-      case header(conn, "x-ankusa-dedupe-key") do
-        nil -> ankusa_id
-        dedupe_key -> "#{source_id}:#{dedupe_key}"
-      end
+    # The idempotency key is the one `Ankusa.Sink.Http` ships:
+    # `tenant:source:dedupe_key` when the hook carries a provider event key,
+    # else the ankusa id. Read it, never rebuild it, so two tenants that share
+    # a provider event id stay two hooks here too. A sender that predates the
+    # header falls back to the ankusa id. A deliberately re-sent hook with
+    # `x-ankusa-replay-id` is the consumer's to dedupe or reprocess, so this
+    # example treats it as a duplicate.
+    key = header(conn, "x-ankusa-idempotency-key") || ankusa_id
 
     attrs = %{
       idempotency_key: key,

@@ -3,10 +3,10 @@ defmodule AnkusaExample.Consumer.Repo.Migrations.CreateProcessedWebhooks do
 
   def change do
     create table(:processed_webhooks, primary_key: false) do
-      # The idempotency key the router computed: `source:dedupe_key` when the
-      # delivery carries `x-ankusa-dedupe-key`, else the ankusa id. The
-      # primary key, so a provider retry and a replay of the same event land
-      # on one row no matter how often they arrive.
+      # The idempotency key the router read off the sink's
+      # `x-ankusa-idempotency-key` header (the ankusa id when a legacy sender
+      # omits it). The primary key, so a provider retry and a replay of the
+      # same event land on one row no matter how often they arrive.
       add :idempotency_key, :text, primary_key: true
       add :ankusa_id, :text, null: false
       add :source_id, :text, null: false

@@ -108,7 +108,8 @@ class ConformanceTest < Minitest::Test
         "tenant" => headers.tenant,
         "content_type" => headers.content_type,
         "dedupe_key" => headers.dedupe_key,
-        "replay_id" => headers.replay_id
+        "replay_id" => headers.replay_id,
+        "idempotency_key" => headers.to_h[:idempotency_key]
       }
     when "decode_message"
       message = Ankusa.decode_message(input.fetch("message"))
@@ -125,6 +126,7 @@ class ConformanceTest < Minitest::Test
         "sha256" => message.sha256,
         "dedupe_key" => message.dedupe_key,
         "replay_id" => message.replay_id,
+        "idempotency_key" => message.to_h[:idempotency_key],
         "headers" => message.headers
       }
     when "idempotency_key"

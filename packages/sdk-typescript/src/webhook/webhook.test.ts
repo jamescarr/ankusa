@@ -14,6 +14,7 @@ describe("parseHeaders", () => {
       contentType: null,
       dedupeKey: null,
       replayId: null,
+      idempotencyKey: null,
     });
   });
 
@@ -23,6 +24,7 @@ describe("parseHeaders", () => {
       "x-ankusa-source": undefined,
       "X-Ankusa-Dedupe-Key": "evt_9",
       "x-ankusa-replay-id": "",
+      "X-Ankusa-Idempotency-Key": "acme:stripe:evt_9",
     };
     const parsed = parseHeaders(headers);
     assert.equal(parsed.id, "01a0");
@@ -30,5 +32,6 @@ describe("parseHeaders", () => {
     // An empty header is the same as absent.
     assert.equal(parsed.dedupeKey, "evt_9");
     assert.equal(parsed.replayId, null);
+    assert.equal(parsed.idempotencyKey, "acme:stripe:evt_9");
   });
 });

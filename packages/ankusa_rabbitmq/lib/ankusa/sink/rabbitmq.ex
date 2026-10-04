@@ -18,8 +18,10 @@ defmodule Ankusa.Sink.RabbitMQ do
   `{:error, {:unroutable, routing_key}}`, retried by the source's
   `Ankusa.RetryPolicy` and then dead-lettered like any other sink failure.
   Every publish carries the hook's `id` as AMQP `message_id`, plus the
-  `ankusa_dedupe_key` and `ankusa_replay_id` headers when the hook carries
-  them, so consumers dedupe on the same identity the message JSON exposes.
+  `ankusa_idempotency_key` header (the key consumers dedupe on, the message
+  JSON's `idempotency_key`) and the `ankusa_dedupe_key` and `ankusa_replay_id`
+  headers when the hook carries them, so consumers dedupe on the same identity
+  the message JSON exposes.
   Surviving a broker restart is the queue's property: messages are always
   published `persistent`, and durable classic and quorum queues persist them
   before confirming. The other errors are `{:error, :nacked}` (the broker
@@ -61,11 +63,11 @@ defmodule Ankusa.Sink.RabbitMQ do
     end
   end
 
-  # `env.id` rides as `message_id`; the dedupe key and the replay marker travel
-  # as AMQP headers, each only when present, so consumers see the same identity
-  # as the message JSON.
+  # `env.id` rides as `message_id`; the idempotency key always travels as an
+  # AMQP header, the dedupe key and the replay marker only when present, so
+  # consumers see the same identity as the message JSON.
   defp amqp_headers(env, ctx) do
-    []
+    [{"ankusa_idempotency_key", :longstr, Envelope.idempotency_key(env)}]
     |> maybe_put_amqp("ankusa_dedupe_key", env.dedupe_key)
     |> maybe_put_amqp("ankusa_replay_id", ctx[:replay_id])
   end

@@ -15,16 +15,20 @@ defmodule Ankusa.SDK.Message do
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
        "sha256": "2cf24dba5fb0a30e...", "dedupe_key": "evt_1", "replay_id": null,
+       "idempotency_key": "acme:stripe:evt_1",
        "headers": {"x-github-event": "push"}, "body_base64": "eyJpZCI6..."}
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 3145728,
        "sha256": "3bea8a9a07c1e8dc...", "dedupe_key": null, "replay_id": null,
+       "idempotency_key": "01a0...",
        "headers": {}, "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002"}
 
   `sha256` is the lowercase hex SHA-256 of the body; `dedupe_key` is the
   provider's event key when the source extracted one; `replay_id` names the
-  replay job when this delivery is a replay of an older one; `headers` are the
+  replay job when this delivery is a replay of an older one; `idempotency_key`
+  is the tenant-scoped key Ankusa computed for the hook (read it through
+  `Ankusa.SDK.Idempotency.key/2`); `headers` are the
   provider request headers the sink forwarded (lowercased, `""` joined).
 
   `v` changes only when an existing field changes meaning or disappears, and
@@ -60,6 +64,7 @@ defmodule Ankusa.SDK.Message do
           sha256: String.t() | nil,
           dedupe_key: String.t() | nil,
           replay_id: String.t() | nil,
+          idempotency_key: String.t() | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -76,6 +81,7 @@ defmodule Ankusa.SDK.Message do
     :sha256,
     :dedupe_key,
     :replay_id,
+    :idempotency_key,
     headers: %{}
   ]
 
@@ -134,6 +140,7 @@ defmodule Ankusa.SDK.Message do
       size: message.size,
       dedupe_key: message.dedupe_key,
       replay_id: message.replay_id,
+      idempotency_key: message.idempotency_key,
       headers: message.headers
     }
   end
@@ -163,6 +170,7 @@ defmodule Ankusa.SDK.Message do
          {:ok, content_type} <- optional_string(raw, "content_type"),
          {:ok, dedupe_key} <- optional_string(raw, "dedupe_key"),
          {:ok, replay_id} <- optional_string(raw, "replay_id"),
+         {:ok, idempotency_key} <- optional_string(raw, "idempotency_key"),
          {:ok, headers} <- headers(raw),
          {:ok, sha256} <- sha256(raw) do
       {:ok,
@@ -176,6 +184,7 @@ defmodule Ankusa.SDK.Message do
          size: size,
          dedupe_key: dedupe_key,
          replay_id: replay_id,
+         idempotency_key: idempotency_key,
          headers: headers,
          sha256: sha256
        }}

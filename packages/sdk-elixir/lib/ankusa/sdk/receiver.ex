@@ -150,6 +150,7 @@ defmodule Ankusa.SDK.Receiver do
       size: byte_size(body),
       dedupe_key: headers.dedupe_key,
       replay_id: headers.replay_id,
+      idempotency_key: headers.idempotency_key,
       headers: headers.headers
     }
 

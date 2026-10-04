@@ -1,10 +1,12 @@
 //! The headers Ankusa's HTTP sink puts on a delivered hook.
 
+use crate::message::KeyParts;
+
 /// The `x-ankusa-*` headers of a delivered hook, borrowed from the header map
 /// they were parsed out of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookHeaders<'a> {
-    /// `x-ankusa-id`: the envelope id, a `UUIDv7`. Dedupe on this.
+    /// `x-ankusa-id`: the envelope id, a `UUIDv7`.
     pub id: &'a str,
     /// `x-ankusa-source`: the source id, `""` when the header is absent.
     pub source: &'a str,
@@ -18,27 +20,33 @@ pub struct HookHeaders<'a> {
     /// `x-ankusa-replay-id`: the replay job id, when the delivery is a replay.
     /// `None` when the header is absent or empty.
     pub replay_id: Option<&'a str>,
+    /// `x-ankusa-idempotency-key`: the tenant-scoped key Ankusa computed for
+    /// the hook. `None` when the header is absent or empty (a sender that
+    /// predates it). Read it through [`HookHeaders::idempotency_key`].
+    pub idempotency_key: Option<&'a str>,
 }
 
 impl HookHeaders<'_> {
-    /// The idempotency key for this delivery: `source:dedupe_key` when a
-    /// non-empty `dedupe_key` is set, otherwise `id`.
+    /// The idempotency key for this delivery.
+    ///
+    /// It is the key Ankusa shipped in `x-ankusa-idempotency-key` when that is
+    /// a non-empty string. For a delivery from a node that predates the
+    /// header it is computed: `tenant:source:dedupe_key` (tenant `default`
+    /// when there is none) for a non-empty `dedupe_key`, otherwise `id`.
     ///
     /// With `include_replay`, a non-null `replay_id` appends
     /// `#replay:<replay_id>`.
     #[must_use]
     pub fn idempotency_key(&self, include_replay: bool) -> String {
-        let mut key = match self.dedupe_key.filter(|key| !key.is_empty()) {
-            Some(dedupe_key) => format!("{}:{}", self.source, dedupe_key),
-            None => self.id.to_owned(),
-        };
-        if include_replay {
-            if let Some(replay_id) = self.replay_id {
-                key.push_str("#replay:");
-                key.push_str(replay_id);
-            }
+        KeyParts {
+            shipped: self.idempotency_key,
+            tenant: self.tenant,
+            source: self.source,
+            dedupe_key: self.dedupe_key,
+            id: self.id,
+            replay_id: self.replay_id,
         }
-        key
+        .key(include_replay)
     }
 }
 
@@ -62,6 +70,8 @@ pub fn parse_headers(headers: &http::HeaderMap) -> Result<HookHeaders<'_>, Missi
         content_type: header(headers, "content-type"),
         dedupe_key: header(headers, "x-ankusa-dedupe-key").filter(|value| !value.is_empty()),
         replay_id: header(headers, "x-ankusa-replay-id").filter(|value| !value.is_empty()),
+        idempotency_key: header(headers, "x-ankusa-idempotency-key")
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -128,8 +138,11 @@ mod tests {
         let parsed = parse_headers(&map).expect("id present");
         assert_eq!(parsed.dedupe_key, Some("evt_1"));
         assert_eq!(parsed.replay_id, Some("rid-1"));
-        assert_eq!(parsed.idempotency_key(false), "stripe:evt_1");
-        assert_eq!(parsed.idempotency_key(true), "stripe:evt_1#replay:rid-1");
+        assert_eq!(parsed.idempotency_key(false), "default:stripe:evt_1");
+        assert_eq!(
+            parsed.idempotency_key(true),
+            "default:stripe:evt_1#replay:rid-1"
+        );
 
         let empty = headers(&[
             ("x-ankusa-id", "01a0"),
@@ -140,5 +153,35 @@ mod tests {
         assert_eq!(parsed.dedupe_key, None);
         assert_eq!(parsed.replay_id, None);
         assert_eq!(parsed.idempotency_key(true), "01a0");
+    }
+
+    #[test]
+    fn the_shipped_key_wins_and_empty_means_absent() {
+        let map = headers(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-source", "stripe"),
+            ("x-ankusa-tenant", "globex"),
+            ("x-ankusa-dedupe-key", "evt_1"),
+            ("x-ankusa-replay-id", "rid-1"),
+            ("x-ankusa-idempotency-key", "acme:stripe:evt_1"),
+        ]);
+        let parsed = parse_headers(&map).expect("id present");
+        assert_eq!(parsed.idempotency_key, Some("acme:stripe:evt_1"));
+        assert_eq!(parsed.idempotency_key(false), "acme:stripe:evt_1");
+        assert_eq!(
+            parsed.idempotency_key(true),
+            "acme:stripe:evt_1#replay:rid-1"
+        );
+
+        let empty = headers(&[
+            ("x-ankusa-id", "01a0"),
+            ("x-ankusa-source", "stripe"),
+            ("x-ankusa-tenant", "acme"),
+            ("x-ankusa-dedupe-key", "evt_1"),
+            ("x-ankusa-idempotency-key", ""),
+        ]);
+        let parsed = parse_headers(&empty).expect("id present");
+        assert_eq!(parsed.idempotency_key, None);
+        assert_eq!(parsed.idempotency_key(false), "acme:stripe:evt_1");
     }
 }

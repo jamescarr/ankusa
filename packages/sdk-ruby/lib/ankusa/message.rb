@@ -24,34 +24,67 @@ module Ankusa
     def retryable? = false
   end
 
+  # The one idempotency-key rule, shared by `Message` and `HookHeaders` so it
+  # lives in one place.
+  #
+  # The key Ankusa shipped (`shipped`) when it is a non-empty string; otherwise,
+  # for a hook from a node that predates the field, `tenant:source:dedupe_key`
+  # (tenant "default" when nil) for a non-empty `dedupe_key`, else `id`. With
+  # `include_replay` and a `replay_id`, `#replay:<replay_id>` is appended.
+  module IdempotencyKey
+    def self.build(shipped:, tenant:, source:, dedupe_key:, id:, replay_id:, include_replay:)
+      key =
+        if !shipped.nil? && !shipped.empty?
+          shipped
+        elsif !dedupe_key.nil? && !dedupe_key.empty?
+          "#{tenant || "default"}:#{source}:#{dedupe_key}"
+        else
+          id
+        end
+      key += "#replay:#{replay_id}" if include_replay && !replay_id.nil?
+      key
+    end
+  end
+  private_constant :IdempotencyKey
+
   # One decoded v1 queue message. `body` holds the inline bytes (or nil for the
   # claim form, where the bytes are fetched with `Ankusa::ClaimCheckClient`);
   # `claim` holds the ref string in that case. `headers` is the forwarded
   # provider request headers, `{}` when the message carried none.
   #
-  # `idempotency_key` is the one value a consumer should dedupe on; see
-  # `Ankusa.decode_message` for the decode rules.
+  # `idempotency_key` is the one value a consumer should dedupe on, as
+  # `Message#idempotency_key` (the field is nil only for a message from a node
+  # that predates it); see `Ankusa.decode_message` for the decode rules.
   Message = Data.define(
     :v, :id, :source_id, :tenant_id, :received_at, :content_type, :size,
-    :body, :claim, :sha256, :dedupe_key, :replay_id, :headers
+    :body, :claim, :sha256, :dedupe_key, :replay_id, :idempotency_key, :headers
   ) do
-    # The idempotency key for this message: `source_id:dedupe_key` when a
-    # non-empty `dedupe_key` is set, else `id`.
+    # `Data.define` made `idempotency_key` the reader of the decoded field; keep
+    # that value reachable here and let the helper below take over the name.
+    # The decoded field itself is still in `to_h[:idempotency_key]`.
+    alias_method :shipped_idempotency_key, :idempotency_key
+    private :shipped_idempotency_key
+
+    # The idempotency key for this message: the key Ankusa shipped in the
+    # `idempotency_key` field when it is non-empty; for a message that predates
+    # the field, `tenant:source_id:dedupe_key` (tenant "default" when there is
+    # none) when a non-empty `dedupe_key` is set, else `id`.
     #
     # A replay keeps the original `id` and `dedupe_key` and adds `replay_id`, so
     # by default a replay produces the same key as the delivery it replays and a
     # consumer that already processed it drops it. Pass `include_replay: true`
     # to reprocess replays instead.
     def idempotency_key(include_replay: false)
-      key = (dedupe_key.nil? || dedupe_key.empty?) ? id : "#{source_id}:#{dedupe_key}"
-      key += "#replay:#{replay_id}" if include_replay && !replay_id.nil?
-      key
+      IdempotencyKey.build(
+        shipped: shipped_idempotency_key, tenant: tenant_id, source: source_id,
+        dedupe_key: dedupe_key, id: id, replay_id: replay_id, include_replay: include_replay
+      )
     end
   end
 
   # The optional string-keyed fields that may be a string, null, or absent.
   # Checked in this order, so the first offending key is the one reported.
-  MESSAGE_STRING_FIELDS = %w[tenant_id content_type dedupe_key replay_id].freeze
+  MESSAGE_STRING_FIELDS = %w[tenant_id content_type dedupe_key replay_id idempotency_key].freeze
   private_constant :MESSAGE_STRING_FIELDS
 
   # Decodes one v1 queue message (the JSON body a sink or broker delivers) into
@@ -151,6 +184,7 @@ module Ankusa
       sha256: sha256,
       dedupe_key: parsed["dedupe_key"],
       replay_id: parsed["replay_id"],
+      idempotency_key: parsed["idempotency_key"],
       headers: headers
     )
   end

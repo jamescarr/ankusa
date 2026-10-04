@@ -20,20 +20,26 @@ var lowercaseHex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 //
 // The pointer fields are nil when the message omitted them, matching the
 // wire contract; Headers is never nil (absent decodes to an empty map).
+//
+// ShippedIdempotencyKey is the wire's idempotency_key: the tenant-scoped key
+// Ankusa computed once for the hook, nil for a message from a node that
+// predates the field. Read the key through IdempotencyKey, which falls back
+// to computing it.
 type Message struct {
-	V           int               `json:"v"`
-	ID          string            `json:"id"`
-	SourceID    string            `json:"source_id"`
-	TenantID    *string           `json:"tenant_id"`
-	ReceivedAt  int64             `json:"received_at"`
-	ContentType *string           `json:"content_type"`
-	Size        int64             `json:"size"`
-	BodyBase64  *string           `json:"body_base64"`
-	Claim       *string           `json:"claim"`
-	SHA256      *string           `json:"sha256"`
-	DedupeKey   *string           `json:"dedupe_key"`
-	ReplayID    *string           `json:"replay_id"`
-	Headers     map[string]string `json:"headers"`
+	V                     int               `json:"v"`
+	ID                    string            `json:"id"`
+	SourceID              string            `json:"source_id"`
+	TenantID              *string           `json:"tenant_id"`
+	ReceivedAt            int64             `json:"received_at"`
+	ContentType           *string           `json:"content_type"`
+	Size                  int64             `json:"size"`
+	BodyBase64            *string           `json:"body_base64"`
+	Claim                 *string           `json:"claim"`
+	SHA256                *string           `json:"sha256"`
+	DedupeKey             *string           `json:"dedupe_key"`
+	ReplayID              *string           `json:"replay_id"`
+	ShippedIdempotencyKey *string           `json:"idempotency_key"`
+	Headers               map[string]string `json:"headers"`
 
 	// Body is the decoded inline body. It is nil for a claim message.
 	Body []byte `json:"-"`
@@ -119,6 +125,12 @@ func DecodeMessage(data []byte) (Message, error) {
 	}
 	msg.ReplayID = replayID
 
+	shipped, ok := optionalString(obj, "idempotency_key")
+	if !ok {
+		return Message{}, invalidField("idempotency_key")
+	}
+	msg.ShippedIdempotencyKey = shipped
+
 	if headers, ok := headersValue(obj["headers"]); ok {
 		msg.Headers = headers
 	} else {
@@ -196,22 +208,34 @@ func DecodeMessage(data []byte) (Message, error) {
 	return msg, nil
 }
 
-// IdempotencyKey is the key a consumer dedupes this delivery on: the
-// source-scoped dedupe key when the message carries a non-empty one, else the
-// message id. With includeReplay it also distinguishes a replay of an event
-// already processed; without it (the default), a replay dedupes to the same
-// key as the original delivery.
+// IdempotencyKey is the key a consumer dedupes this delivery on: the key
+// Ankusa shipped in the message's idempotency_key when it is a non-empty
+// string. For a message from a node that predates the field it is computed:
+// tenant:source_id:dedupe_key (tenant "default" when there is none) for a
+// non-empty dedupe key, else the message id. With includeReplay it also
+// distinguishes a replay of an event already processed; without it (the
+// default), a replay dedupes to the same key as the original delivery.
 func (m Message) IdempotencyKey(includeReplay bool) string {
-	return idempotencyKey(m.SourceID, m.ID, m.DedupeKey, m.ReplayID, includeReplay)
+	return idempotencyKey(m.ShippedIdempotencyKey, m.TenantID, m.SourceID, m.ID, m.DedupeKey, m.ReplayID, includeReplay)
 }
 
 // idempotencyKey is the shared rule behind Message.IdempotencyKey and
-// HookHeaders.IdempotencyKey. sourceID is the message's source_id, or the
-// HTTP sink's x-ankusa-source for headers.
-func idempotencyKey(sourceID, id string, dedupeKey, replayID *string, includeReplay bool) string {
-	key := id
-	if dedupeKey != nil && *dedupeKey != "" {
-		key = sourceID + ":" + *dedupeKey
+// HookHeaders.IdempotencyKey. sourceID and tenant are the message's source_id
+// and tenant_id, or the HTTP sink's x-ankusa-source and x-ankusa-tenant for
+// headers; shipped is the idempotency_key / x-ankusa-idempotency-key value.
+func idempotencyKey(shipped, tenant *string, sourceID, id string, dedupeKey, replayID *string, includeReplay bool) string {
+	var key string
+	switch {
+	case shipped != nil && *shipped != "":
+		key = *shipped
+	case dedupeKey != nil && *dedupeKey != "":
+		tenantID := "default"
+		if tenant != nil {
+			tenantID = *tenant
+		}
+		key = tenantID + ":" + sourceID + ":" + *dedupeKey
+	default:
+		key = id
 	}
 	if includeReplay && replayID != nil {
 		key += "#replay:" + *replayID

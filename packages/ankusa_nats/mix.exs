@@ -75,9 +75,10 @@ defmodule AnkusaNats.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      # `~> 0.4`, not older: `describe/2` builds `Ankusa.Sink.Description`, which
-      # core has from 0.4.0, so Hex must never pair this with an older core.
-      [{:ankusa, "~> 0.4"}]
+      # `~> 0.5`, not older: `deliver/3` calls `Ankusa.Envelope.idempotency_key/1`,
+      # which core ships from 0.5.0 (it is not in 0.4.x), so Hex must never pair
+      # this with an older core.
+      [{:ankusa, "~> 0.5"}]
     end
   end
 end

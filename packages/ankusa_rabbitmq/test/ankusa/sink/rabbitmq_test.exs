@@ -102,6 +102,9 @@ defmodule Ankusa.Sink.RabbitMQTest do
     assert meta.routing_key == "ankusa.src"
     assert meta.message_id == env.id
 
+    assert {"ankusa_idempotency_key", :longstr, "t1:src:evt_1"} =
+             List.keyfind(meta.headers, "ankusa_idempotency_key", 0)
+
     assert {"ankusa_dedupe_key", :longstr, "evt_1"} =
              List.keyfind(meta.headers, "ankusa_dedupe_key", 0)
 

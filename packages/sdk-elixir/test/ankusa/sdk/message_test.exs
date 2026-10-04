@@ -157,12 +157,13 @@ defmodule Ankusa.SDK.MessageTest do
   end
 
   describe "decode/1 integrity and optional fields" do
-    test "carries dedupe_key, replay_id, and headers" do
+    test "carries dedupe_key, replay_id, idempotency_key, and headers" do
       assert {:ok, message} =
                decode(
                  inline_message(%{
                    "dedupe_key" => "evt_1",
                    "replay_id" => "rid-1",
+                   "idempotency_key" => "acme:demo:evt_1",
                    "headers" => %{"x-github-event" => "push"},
                    "sha256" => @sha256
                  })
@@ -170,6 +171,7 @@ defmodule Ankusa.SDK.MessageTest do
 
       assert message.dedupe_key == "evt_1"
       assert message.replay_id == "rid-1"
+      assert message.idempotency_key == "acme:demo:evt_1"
       assert message.headers == %{"x-github-event" => "push"}
       assert message.sha256 == @sha256
     end
@@ -179,6 +181,7 @@ defmodule Ankusa.SDK.MessageTest do
 
       assert message.dedupe_key == nil
       assert message.replay_id == nil
+      assert message.idempotency_key == nil
       assert message.sha256 == nil
       assert message.headers == %{}
     end
@@ -250,6 +253,7 @@ defmodule Ankusa.SDK.MessageTest do
           inline_message(%{
             "dedupe_key" => "evt_1",
             "replay_id" => "rid-1",
+            "idempotency_key" => "acme:demo:evt_1",
             "headers" => %{"x-github-event" => "push"}
           })
         )
@@ -257,6 +261,7 @@ defmodule Ankusa.SDK.MessageTest do
       assert {:ok, %Hook{} = hook} = Message.to_hook(message, claim_check)
       assert hook.dedupe_key == "evt_1"
       assert hook.replay_id == "rid-1"
+      assert hook.idempotency_key == "acme:demo:evt_1"
       assert hook.headers == %{"x-github-event" => "push"}
     end
 

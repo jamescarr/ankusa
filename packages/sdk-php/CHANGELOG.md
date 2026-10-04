@@ -6,6 +6,15 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Message::$idempotencyKey` and `HookHeaders::$idempotencyKey`, the key Ankusa
+  ships (the message's `idempotency_key`, the `x-ankusa-idempotency-key`
+  header). `idempotencyKey()` on both returns it, and for a message or
+  delivery that predates it computes `tenant:source_id:dedupe_key` (tenant
+  `default` when there is none) when a dedupe key is set, else the id, plus
+  `#replay:<replay_id>` with `includeReplay: true`.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

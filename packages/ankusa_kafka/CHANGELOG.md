@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Every record carries the `ankusa_idempotency_key` header: the same
+  tenant-scoped key as the message's `idempotency_key`
+  (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
+  0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
+  which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

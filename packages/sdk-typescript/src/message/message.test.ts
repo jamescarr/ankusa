@@ -62,8 +62,8 @@ describe("decodeMessage", () => {
 describe("idempotencyKey", () => {
   test("from a Message: dedupe_key, with the replay marker only when asked", () => {
     const message = decodeMessage(INLINE);
-    assert.equal(idempotencyKey(message), "stripe:evt_1");
-    assert.equal(idempotencyKey(message, { includeReplay: true }), "stripe:evt_1#replay:rid-1");
+    assert.equal(idempotencyKey(message), "default:stripe:evt_1");
+    assert.equal(idempotencyKey(message, { includeReplay: true }), "default:stripe:evt_1#replay:rid-1");
   });
 
   test("from HookHeaders: source plays source_id", () => {
@@ -72,7 +72,28 @@ describe("idempotencyKey", () => {
       "x-ankusa-source": "stripe",
       "x-ankusa-dedupe-key": "evt_1",
     });
-    assert.equal(idempotencyKey(headers), "stripe:evt_1");
+    assert.equal(idempotencyKey(headers), "default:stripe:evt_1");
+  });
+
+  test("a Message's shipped idempotency_key wins over recomputing it", () => {
+    const message = decodeMessage(
+      JSON.stringify({ ...JSON.parse(INLINE), tenant_id: "globex", idempotency_key: "acme:stripe:evt_1" }),
+    );
+    assert.equal(idempotencyKey(message), "acme:stripe:evt_1");
+    assert.equal(idempotencyKey(message, { includeReplay: true }), "acme:stripe:evt_1#replay:rid-1");
+  });
+
+  test("HookHeaders' shipped x-ankusa-idempotency-key wins over recomputing it", () => {
+    const headers = parseHeaders({
+      "x-ankusa-id": "01a0",
+      "x-ankusa-source": "stripe",
+      "x-ankusa-tenant": "globex",
+      "x-ankusa-dedupe-key": "evt_1",
+      "x-ankusa-replay-id": "rid-1",
+      "x-ankusa-idempotency-key": "acme:stripe:evt_1",
+    });
+    assert.equal(idempotencyKey(headers), "acme:stripe:evt_1");
+    assert.equal(idempotencyKey(headers, { includeReplay: true }), "acme:stripe:evt_1#replay:rid-1");
   });
 
   test("falls back to id without a dedupe_key", () => {

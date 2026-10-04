@@ -13,7 +13,7 @@ defmodule Ankusa.Dedupe do
 
   The TTL bounds the memory a provider retry storm can occupy: after it
   expires, the same event commits again (and consumers dedupe on the
-  `dedupe_key` the message carries). #{@default_ttl_ms} ms (72 h) covers
+  `idempotency_key` the message carries). #{@default_ttl_ms} ms (72 h) covers
   Stripe's 3-day and Shopify's 48-hour retry schedules.
 
   The window is per tenant and source: the same key under two tenants (one

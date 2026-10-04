@@ -233,6 +233,7 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         content_type: parsed.contentType,
         dedupe_key: parsed.dedupeKey,
         replay_id: parsed.replayId,
+        idempotency_key: parsed.idempotencyKey,
       };
     }
     case "decode_message": {

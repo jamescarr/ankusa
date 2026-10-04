@@ -19,7 +19,8 @@
           "tenant": "acme",
           "content_type": "application/json",
           "dedupe_key": null,
-          "replay_id": null
+          "replay_id": null,
+          "idempotency_key": null
         }
       }
     },
@@ -41,7 +42,8 @@
           "tenant": null,
           "content_type": "text/plain",
           "dedupe_key": null,
-          "replay_id": null
+          "replay_id": null,
+          "idempotency_key": null
         }
       }
     },
@@ -61,7 +63,8 @@
           "tenant": null,
           "content_type": null,
           "dedupe_key": null,
-          "replay_id": null
+          "replay_id": null,
+          "idempotency_key": null
         }
       }
     },
@@ -104,7 +107,8 @@
           "x-ankusa-id": "01a0",
           "x-ankusa-source": "demo",
           "x-ankusa-dedupe-key": "evt_9",
-          "x-ankusa-replay-id": "rid-1"
+          "x-ankusa-replay-id": "rid-1",
+          "x-ankusa-idempotency-key": "default:demo:evt_9"
         }
       },
       "expect": {
@@ -114,7 +118,30 @@
           "tenant": null,
           "content_type": null,
           "dedupe_key": "evt_9",
-          "replay_id": "rid-1"
+          "replay_id": "rid-1",
+          "idempotency_key": "default:demo:evt_9"
+        }
+      }
+    },
+    {
+      "id": "webhook.idempotency_key_empty_is_null",
+      "feature": "webhook.parse_headers",
+      "operation": "parse_headers",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-idempotency-key": ""
+        }
+      },
+      "expect": {
+        "ok": {
+          "id": "01a0",
+          "source": "",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null
         }
       }
     }

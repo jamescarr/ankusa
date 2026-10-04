@@ -4,22 +4,34 @@ module Ankusa
   # The identity of one HTTP-sink delivery: the headers Ankusa's HTTP sink
   # attaches to every delivery.
   #
-  # `content_type`, `tenant`, `dedupe_key` and `replay_id` are nil when the
-  # delivery had no such header (a tenant only travels when the source has one;
-  # `dedupe_key` only when the source declared a dedupe key; `replay_id` only
-  # when the delivery is a replay).
-  HookHeaders = Data.define(:id, :source, :tenant, :content_type, :dedupe_key, :replay_id) do
-    # The idempotency key for this delivery: `source:dedupe_key` when a non-empty
-    # `dedupe_key` is set, else `id`.
+  # `content_type`, `tenant`, `dedupe_key`, `replay_id` and `idempotency_key` are
+  # nil when the delivery had no such header (a tenant only travels when the
+  # source has one; `dedupe_key` only when the source declared a dedupe key;
+  # `replay_id` only when the delivery is a replay; `idempotency_key` is
+  # missing only from a sender that predates the header).
+  HookHeaders = Data.define(
+    :id, :source, :tenant, :content_type, :dedupe_key, :replay_id, :idempotency_key
+  ) do
+    # `Data.define` made `idempotency_key` the reader of the parsed header; keep
+    # that value reachable here and let the helper below take over the name.
+    # The parsed header itself is still in `to_h[:idempotency_key]`.
+    alias_method :shipped_idempotency_key, :idempotency_key
+    private :shipped_idempotency_key
+
+    # The idempotency key for this delivery: the key Ankusa shipped in
+    # `x-ankusa-idempotency-key` when it is non-empty; for a delivery that
+    # predates the header, `tenant:source:dedupe_key` (tenant "default" when
+    # there is none) when a non-empty `dedupe_key` is set, else `id`.
     #
     # A replay keeps the original `id` and `dedupe_key` and adds `replay_id`, so
     # by default a replay produces the same key as the delivery it replays and a
     # receiver that already processed it drops it. Pass `include_replay: true`
     # to reprocess replays instead.
     def idempotency_key(include_replay: false)
-      key = (dedupe_key.nil? || dedupe_key.empty?) ? id : "#{source}:#{dedupe_key}"
-      key += "#replay:#{replay_id}" if include_replay && !replay_id.nil?
-      key
+      IdempotencyKey.build(
+        shipped: shipped_idempotency_key, tenant: tenant, source: source,
+        dedupe_key: dedupe_key, id: id, replay_id: replay_id, include_replay: include_replay
+      )
     end
   end
 
@@ -49,7 +61,8 @@ module Ankusa
       tenant: lowered["x-ankusa-tenant"],
       content_type: lowered["content-type"],
       dedupe_key: presence(lowered["x-ankusa-dedupe-key"]),
-      replay_id: presence(lowered["x-ankusa-replay-id"])
+      replay_id: presence(lowered["x-ankusa-replay-id"]),
+      idempotency_key: presence(lowered["x-ankusa-idempotency-key"])
     )
   end
 

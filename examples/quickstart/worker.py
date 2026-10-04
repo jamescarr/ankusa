@@ -3,22 +3,23 @@
 identity Ankusa attaches to every delivery.
 
 Ankusa POSTs each hook's raw body here, with its identity in headers:
-x-ankusa-id (dedupe on this), x-ankusa-source, and x-ankusa-tenant when the
-source has one. Answer 2xx once the hook is safely handled; anything else (or
-no answer within 5s) is retried, then dead-lettered for replay.
+x-ankusa-id, x-ankusa-source, x-ankusa-tenant when the source has one, and
+x-ankusa-idempotency-key (dedupe on this: `idempotency_key(hook)` returns it).
+Answer 2xx once the hook is safely handled; anything else (or no answer within
+5s) is retried, then dead-lettered for replay.
 """
 
 import os
 
 import uvicorn
-from ankusa import MissingHookIdError, parse_headers
+from ankusa import MissingHookIdError, idempotency_key, parse_headers
 from fastapi import FastAPI, Request, Response
 
 PORT = int(os.environ.get("PORT", "8080"))
 
 app = FastAPI()
 
-# In memory for the demo. A real worker records handled ids durably (a unique
+# In memory for the demo. A real worker records handled keys durably (a unique
 # key in its database), so a redelivery is a no-op even across restarts.
 handled: set[str] = set()
 
@@ -35,11 +36,12 @@ async def hooks(request: Request) -> Response:
     except MissingHookIdError:
         return Response(status_code=400)
 
-    if hook.id in handled:
-        print(f"duplicate id={hook.id} source={hook.source} (already handled)", flush=True)
+    key = idempotency_key(hook)
+    if key in handled:
+        print(f"duplicate key={key} source={hook.source} (already handled)", flush=True)
     else:
         handle(hook.source, body)
-        handled.add(hook.id)
+        handled.add(key)
         print(
             f"received id={hook.id} source={hook.source} "
             f"bytes={len(body)} "

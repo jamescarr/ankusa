@@ -150,9 +150,10 @@ The handler sees one value whichever transport delivered the hook:
 | `size` | `byte_size(body)` | message `size` |
 | `dedupe_key` | `x-ankusa-dedupe-key` | message `dedupe_key` |
 | `replay_id` | `x-ankusa-replay-id` | message `replay_id` |
+| `idempotency_key` | `x-ankusa-idempotency-key` | message `idempotency_key` |
 | `headers` | every request header, lowercased | the forwarded provider headers |
 
-Dedupe on the key `Ankusa.SDK.Idempotency.key/2` computes (see "Consuming queue
+Dedupe on the key `Ankusa.SDK.Idempotency.key/2` returns (see "Consuming queue
 messages" below), not on `id` alone: a provider retry can reach you as several
 hook ids.
 
@@ -249,12 +250,17 @@ end
 ```
 
 `Ankusa.SDK.Idempotency.key/2` accepts the decoded `Message`, the parsed
-`Ankusa.SDK.Webhook.Headers`, or a `Hook`. It is `source_id:dedupe_key` when
-the source extracted a provider event key (Stripe's `id`, GitHub's
+`Ankusa.SDK.Webhook.Headers`, or a `Hook`. Ankusa computes the key once per hook
+and ships it (the message's `idempotency_key`, the `x-ankusa-idempotency-key`
+header), and `key/2` returns that value. It is `tenant:source_id:dedupe_key`
+when the source extracted a provider event key (Stripe's `id`, GitHub's
 `x-github-delivery`, ...) and the hook id otherwise, so a provider's own
-retries collapse even when ingest minted a fresh hook id for each one. A replay
-of an already-processed delivery computes the same key and is dropped; pass
-`include_replay: true` when the consumer must reprocess replays:
+retries collapse even when ingest minted a fresh hook id for each one, and two
+tenants that share a provider event id stay apart. For a message or delivery
+from a node that predates the field `key/2` computes the same key itself
+(tenant `default` when there is none). A replay of an already-processed
+delivery computes the same key and is dropped; pass `include_replay: true` when
+the consumer must reprocess replays:
 
 ```elixir
 key = Ankusa.SDK.Idempotency.key(message, include_replay: true)
