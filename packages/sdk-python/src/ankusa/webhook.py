@@ -3,14 +3,15 @@
 See "HTTP handoff" in docs/integrations.md for the full contract this
 mirrors: the raw body arrives verbatim, and identity travels in
 ``x-ankusa-id``, ``x-ankusa-source``, ``x-ankusa-tenant`` (only when the
-source has a tenant), and ``content-type``. The provider's own event key and,
-on a replay, the replay job id ride along in ``x-ankusa-dedupe-key`` and
-``x-ankusa-replay-id`` when they exist.
+source has a tenant), ``content-type`` and ``x-ankusa-idempotency-key``. The
+provider's own event key and, on a replay, the replay job id ride along in
+``x-ankusa-dedupe-key`` and ``x-ankusa-replay-id`` when they exist.
 
 A receiver must dedupe: delivery is at-least-once, so the same hook can
 arrive twice after a retry. Prefer ``idempotency_key`` (see
-``ankusa.message``) over ``x-ankusa-id`` alone -- it collapses the provider
-retries that arrive with a fresh ``id``.
+``ankusa.message``) over ``x-ankusa-id`` alone -- it returns the tenant-scoped
+key Ankusa shipped, which collapses the provider retries that arrive with a
+fresh ``id``.
 """
 
 from __future__ import annotations
@@ -43,6 +44,9 @@ class HookHeaders:
     dedupe_key: str | None
     # Set only on a delivery Ankusa replayed; the replay job id.
     replay_id: str | None
+    # The tenant-scoped key to dedupe on, from ``x-ankusa-idempotency-key``;
+    # None when absent or empty (a sender that predates the header).
+    idempotency_key: str | None
 
 
 def parse_headers(headers: Mapping[str, str]) -> HookHeaders:
@@ -68,4 +72,5 @@ def parse_headers(headers: Mapping[str, str]) -> HookHeaders:
         content_type=lowered.get("content-type"),
         dedupe_key=lowered.get("x-ankusa-dedupe-key") or None,
         replay_id=lowered.get("x-ankusa-replay-id") or None,
+        idempotency_key=lowered.get("x-ankusa-idempotency-key") or None,
     )

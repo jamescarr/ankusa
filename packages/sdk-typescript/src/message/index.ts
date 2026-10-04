@@ -29,6 +29,12 @@ export type Message = {
   dedupe_key: string | null;
   /** The replay job id when this delivery is a replay; `null` otherwise. */
   replay_id: string | null;
+  /**
+   * The tenant-scoped key to dedupe on, computed once by Ankusa
+   * (`tenant:source_id:dedupe_key`, else `id`); `null` when the producer predates
+   * the field. `idempotencyKey` reads it and falls back to computing it.
+   */
+  idempotency_key: string | null;
   /** Forwarded provider request headers (lowercase names); `{}` when none. */
   headers: Record<string, string>;
   /** The decoded inline body (non-enumerable); `null` for a claim message. */
@@ -111,7 +117,7 @@ export function decodeMessage(data: string | Uint8Array): Message {
   if (typeof size !== "number" || !Number.isInteger(size) || size < 0) {
     throw new InvalidMessageError("invalid_field", "size");
   }
-  for (const key of ["tenant_id", "content_type", "dedupe_key", "replay_id"] as const) {
+  for (const key of ["tenant_id", "content_type", "dedupe_key", "replay_id", "idempotency_key"] as const) {
     const value = raw[key];
     if (!(value === undefined || value === null || typeof value === "string")) {
       throw new InvalidMessageError("invalid_field", key);
@@ -182,6 +188,7 @@ export function decodeMessage(data: string | Uint8Array): Message {
     sha256: (sha256 ?? null) as string | null,
     dedupe_key: (raw.dedupe_key ?? null) as string | null,
     replay_id: (raw.replay_id ?? null) as string | null,
+    idempotency_key: (raw.idempotency_key ?? null) as string | null,
     headers,
   } as Message;
   // Non-enumerable, so a decoded message still serializes to exactly the wire
@@ -209,19 +216,31 @@ export type IdempotencyKeyOptions = {
  * The idempotency key for one delivery, from a decoded `Message` or from the
  * `HookHeaders` of an HTTP delivery (where `source_id` is `source`).
  *
- * `source_id:dedupe_key` when a non-empty `dedupe_key` is set, else `id`; with
- * `includeReplay` and a `replay_id`, `#replay:<replay_id>` is appended.
+ * It is the value Ankusa shipped (the message's `idempotency_key`, or the
+ * `x-ankusa-idempotency-key` header) when that is a non-empty string. For a
+ * message or delivery from a node that predates the field it is computed:
+ * `tenant:source_id:dedupe_key` (tenant `default` when there is none) for a
+ * non-empty `dedupe_key`, else `id`. With `includeReplay` and a `replay_id`,
+ * `#replay:<replay_id>` is appended.
  */
 export function idempotencyKey(
   hook: Message | HookHeaders,
   options: IdempotencyKeyOptions = {},
 ): string {
   // A Message carries `source_id`; HookHeaders carries `source`.
-  const sourceId = "source_id" in hook ? hook.source_id : hook.source;
-  const dedupe = "source_id" in hook ? hook.dedupe_key : hook.dedupeKey;
-  const replayId = "source_id" in hook ? hook.replay_id : hook.replayId;
+  const shipped = "source_id" in hook ? hook.idempotency_key : hook.idempotencyKey;
 
-  let key = dedupe !== null && dedupe !== "" ? `${sourceId}:${dedupe}` : hook.id;
+  let key: string;
+  if (typeof shipped === "string" && shipped !== "") {
+    key = shipped;
+  } else {
+    const tenant = "source_id" in hook ? hook.tenant_id : hook.tenant;
+    const sourceId = "source_id" in hook ? hook.source_id : hook.source;
+    const dedupe = "source_id" in hook ? hook.dedupe_key : hook.dedupeKey;
+    key = dedupe !== null && dedupe !== "" ? `${tenant ?? "default"}:${sourceId}:${dedupe}` : hook.id;
+  }
+
+  const replayId = "source_id" in hook ? hook.replay_id : hook.replayId;
   if (options.includeReplay && replayId !== null) key += `#replay:${replayId}`;
   return key;
 }

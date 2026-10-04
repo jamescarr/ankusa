@@ -15,8 +15,10 @@ defmodule Ankusa.Sink.Http do
 
   The original `env.body` is sent verbatim with the envelope's content-type
   (falling back to `application/octet-stream`). Identity headers `x-ankusa-id`,
-  `x-ankusa-source`, and (when set) `x-ankusa-tenant` are always added, plus
-  `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the hook carries them.
+  `x-ankusa-source`, `x-ankusa-idempotency-key` (the key a consumer dedupes on,
+  see `Ankusa.Envelope.idempotency_key/1`) and (when set) `x-ankusa-tenant` are
+  always added, plus `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the
+  hook carries them.
   Provider request headers are forwarded per the source's `forward_headers`
   option (see `Ankusa.Sink.Message.forwarded_headers/2`); a forwarded name that
   collides with one of these or with `opts[:headers]` is dropped. A `2xx`
@@ -29,7 +31,7 @@ defmodule Ankusa.Sink.Http do
 
   @behaviour Ankusa.Sink
 
-  alias Ankusa.HttpClient
+  alias Ankusa.{Envelope, HttpClient}
   alias Ankusa.Sink.Message
 
   @impl true
@@ -42,6 +44,7 @@ defmodule Ankusa.Sink.Http do
     own =
       [
         {"x-ankusa-id", env.id},
+        {"x-ankusa-idempotency-key", Envelope.idempotency_key(env)},
         {"x-ankusa-source", env.source_id},
         {"content-type", env.content_type || "application/octet-stream"}
       ] ++

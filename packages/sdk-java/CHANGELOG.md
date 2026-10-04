@@ -19,15 +19,18 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `AdminClient`: the DLQ and quarantine client — `health`, `metrics`, `config`,
   `listDeadLetters`, `listQuarantined`, and the replay jobs `createReplay`,
   `getReplay`, `listReplays`, and `updateReplay`.
-- `Message.decode`, the queue-message decoder: it validates the v1 message,
-  decodes and verifies the body, and raises `InvalidMessageError` (`code()`,
-  `field()`) on a bad message. `Message.idempotencyKey(includeReplay)` and
-  `HookHeaders.idempotencyKey(includeReplay)` compute the key a worker dedupes
-  on.
+- `Message.decode`, the queue-message decoder: it validates the v1 message
+  (including the shipped `idempotency_key`, the `idempotencyKey` record
+  component), decodes and verifies the body, and raises `InvalidMessageError`
+  (`code()`, `field()`) on a bad message. `Message.idempotencyKey(includeReplay)`
+  and `HookHeaders.idempotencyKey(includeReplay)` return the key a worker dedupes
+  on: the key Ankusa shipped, or for a message or delivery that predates it
+  `tenant:source_id:dedupe_key` (tenant `default` when there is none) when a
+  dedupe key is set, else `id`.
 - `HookHeaders.parse` for receivers: the `x-ankusa-id`, `x-ankusa-source`,
-  `x-ankusa-tenant`, `content-type`, `x-ankusa-dedupe-key`, and
-  `x-ankusa-replay-id` headers of a delivery, and `MissingHookIdError` when
-  `x-ankusa-id` is absent.
+  `x-ankusa-tenant`, `content-type`, `x-ankusa-dedupe-key`,
+  `x-ankusa-replay-id`, and `x-ankusa-idempotency-key` headers of a delivery,
+  and `MissingHookIdError` when `x-ankusa-id` is absent.
 - `SourcesClient`: the tenant-scoped source API — `serverVersion`, `listSources`,
   `getSource`, `createSource`, `updateSource`, and `deleteSource`. A client built
   with an `expectedVersion` fetches `/health` once, caches the reported version,

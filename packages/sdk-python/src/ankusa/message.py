@@ -68,8 +68,10 @@ class Message:
 
     ``body_base64`` and ``claim`` are mutually exclusive; ``body_base64`` is
     the decoded body re-encoded as standard base64, so compare bytes.
-    ``dedupe_key``, ``replay_id`` and ``sha256`` are ``None`` when the sender
-    omitted them; ``headers`` is ``{}`` when there are none.
+    ``dedupe_key``, ``replay_id``, ``idempotency_key`` and ``sha256`` are
+    ``None`` when the sender omitted them; ``headers`` is ``{}`` when there are
+    none. ``idempotency_key`` is the tenant-scoped key Ankusa computed once for
+    the hook; read it through ``idempotency_key()``.
     """
 
     v: int
@@ -84,6 +86,7 @@ class Message:
     sha256: str | None
     dedupe_key: str | None
     replay_id: str | None
+    idempotency_key: str | None
     headers: dict[str, str]
 
 
@@ -148,6 +151,7 @@ def decode_message(data: str | bytes) -> Message:
     content_type = _optional_string(payload, "content_type")
     dedupe_key = _optional_string(payload, "dedupe_key")
     replay_id = _optional_string(payload, "replay_id")
+    idempotency_key = _optional_string(payload, "idempotency_key")
 
     forwarded = payload.get("headers")
     headers: dict[str, str] = {}
@@ -207,6 +211,7 @@ def decode_message(data: str | bytes) -> Message:
         sha256=sha256,
         dedupe_key=dedupe_key,
         replay_id=replay_id,
+        idempotency_key=idempotency_key,
         headers=headers,
     )
 
@@ -214,25 +219,49 @@ def decode_message(data: str | bytes) -> Message:
 def idempotency_key(hook: Message | HookHeaders, *, include_replay: bool = False) -> str:
     """The key a consumer stores in its processed-ids table.
 
-    Start from ``dedupe_key`` (the provider's own event key): when it is set,
-    the key is ``source_id:dedupe_key``, so a provider retry that arrives with
-    a fresh Ankusa ``id`` still collapses to the same row. With no
-    ``dedupe_key`` the key is ``id`` -- the identity Ankusa has always sent.
+    Ankusa computes the key once per hook and ships it (the message's
+    ``idempotency_key``, or the ``x-ankusa-idempotency-key`` header); when that
+    is a non-empty string it is the key. For a message or delivery from a node
+    that predates the field it is computed from the hook's own fields:
+    ``tenant:source_id:dedupe_key`` when ``dedupe_key`` (the provider's own
+    event key) is set -- tenant is ``default`` when there is none -- so a
+    provider retry that arrives with a fresh Ankusa ``id`` still collapses to
+    the same row, else ``id``.
 
     ``include_replay`` defaults to ``False``, so a replay of an event already
     processed is dropped. A consumer that must re-run replays sets it, and the
     key gains a ``#replay:<replay_id>`` suffix. ``hook`` may be a decoded
     ``Message`` or the ``HookHeaders`` of an HTTP-sink delivery (where the
-    ``source`` header plays the part of ``source_id``).
+    ``source`` and ``tenant`` headers play the part of ``source_id`` and
+    ``tenant_id``).
     """
     if isinstance(hook, Message):
-        source_id, dedupe_key, hook_id, replay_id = hook.source_id, hook.dedupe_key, hook.id, hook.replay_id
+        shipped, tenant, source_id, dedupe_key, hook_id, replay_id = (
+            hook.idempotency_key,
+            hook.tenant_id,
+            hook.source_id,
+            hook.dedupe_key,
+            hook.id,
+            hook.replay_id,
+        )
     elif isinstance(hook, HookHeaders):
-        source_id, dedupe_key, hook_id, replay_id = hook.source, hook.dedupe_key, hook.id, hook.replay_id
+        shipped, tenant, source_id, dedupe_key, hook_id, replay_id = (
+            hook.idempotency_key,
+            hook.tenant,
+            hook.source,
+            hook.dedupe_key,
+            hook.id,
+            hook.replay_id,
+        )
     else:
         raise TypeError(f"hook must be a Message or HookHeaders, got {type(hook).__name__}")
 
-    key = f"{source_id}:{dedupe_key}" if dedupe_key else hook_id
+    if shipped:
+        key = shipped
+    elif dedupe_key:
+        key = f"{tenant if tenant is not None else 'default'}:{source_id}:{dedupe_key}"
+    else:
+        key = hook_id
     if include_replay and replay_id:
         key = f"{key}#replay:{replay_id}"
     return key

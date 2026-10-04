@@ -243,7 +243,8 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
       headers: Keyword.get(props, :headers, [])
     ]
 
-    # The hook's `id` is the broker's `message_id`, so consumers dedupe on it.
+    # The hook's `id` is the broker's `message_id`, a handle for broker-level
+    # tooling; the key to dedupe on is the `ankusa_idempotency_key` header.
     opts =
       case Keyword.get(props, :message_id) do
         nil -> opts

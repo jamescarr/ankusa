@@ -34,7 +34,7 @@ defmodule Ankusa.Sink.NATS do
   `id:replay:<replay_id>` for a replay — so JetStream's duplicate window
   collapses a lost-ack retry of one delivery, while a deliberate replay of the
   same hook carries a distinct id and is always stored. Consumers dedupe on
-  `id` (or on the `dedupe_key` the message carries).
+  the message's `idempotency_key`.
 
   ## What each message carries
 
@@ -42,10 +42,10 @@ defmodule Ankusa.Sink.NATS do
       `Ankusa.Envelope`).
     * **headers** — `Nats-Msg-Id` (`id`, or `id:replay:<replay_id>` on a
       replay), then `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
-      `ankusa_message_version`, `content_type` — the same set
-      `Ankusa.Sink.Kafka` sets, plus `ankusa_dedupe_key` and `ankusa_replay_id`
-      when the hook carries them — so a consumer parses one set regardless of
-      transport.
+      `ankusa_idempotency_key`, `ankusa_message_version`, `content_type` — the
+      same set `Ankusa.Sink.Kafka` sets, plus `ankusa_dedupe_key` and
+      `ankusa_replay_id` when the hook carries them — so a consumer parses one
+      set regardless of transport.
     * **body** — the `Ankusa.Sink.Message` JSON.
 
   ## Process model
@@ -219,6 +219,7 @@ defmodule Ankusa.Sink.NATS do
       {"ankusa_id", env.id},
       {"ankusa_source_id", env.source_id},
       {"ankusa_tenant_id", env.tenant_id || ""},
+      {"ankusa_idempotency_key", Ankusa.Envelope.idempotency_key(env)},
       {"ankusa_message_version", "1"},
       {"content_type", "application/json"}
     ]

@@ -29,9 +29,30 @@ defmodule Ankusa.SDK.IdempotencyTest do
     assert Idempotency.key(headers(%{})) == "01a0"
   end
 
-  test "a dedupe key is namespaced by the source" do
-    assert Idempotency.key(message(%{dedupe_key: "evt_1"})) == "stripe:evt_1"
-    assert Idempotency.key(headers(%{dedupe_key: "evt_1"})) == "stripe:evt_1"
+  test "a dedupe key is scoped by the tenant and the source" do
+    assert Idempotency.key(message(%{dedupe_key: "evt_1"})) == "default:stripe:evt_1"
+    assert Idempotency.key(headers(%{dedupe_key: "evt_1"})) == "default:stripe:evt_1"
+
+    assert Idempotency.key(message(%{dedupe_key: "evt_1", tenant_id: "acme"})) ==
+             "acme:stripe:evt_1"
+
+    assert Idempotency.key(headers(%{dedupe_key: "evt_1", tenant: "acme"})) ==
+             "acme:stripe:evt_1"
+  end
+
+  test "the shipped idempotency key wins over recomputing it" do
+    shipped = "acme:stripe:evt_1"
+
+    assert Idempotency.key(message(%{idempotency_key: shipped, dedupe_key: "other"})) == shipped
+    assert Idempotency.key(headers(%{idempotency_key: shipped, dedupe_key: "other"})) == shipped
+
+    replayed = message(%{idempotency_key: shipped, replay_id: "rid-1"})
+    assert Idempotency.key(replayed, include_replay: true) == shipped <> "#replay:rid-1"
+  end
+
+  test "an empty shipped idempotency key falls back to computing it" do
+    assert Idempotency.key(message(%{idempotency_key: "", dedupe_key: "evt_1"})) ==
+             "default:stripe:evt_1"
   end
 
   test "an empty dedupe key falls back to the id" do
@@ -41,8 +62,10 @@ defmodule Ankusa.SDK.IdempotencyTest do
   test "a replay is ignored by default and appended with include_replay" do
     replayed = message(%{dedupe_key: "evt_1", replay_id: "rid-1"})
 
-    assert Idempotency.key(replayed) == "stripe:evt_1"
-    assert Idempotency.key(replayed, include_replay: true) == "stripe:evt_1#replay:rid-1"
+    assert Idempotency.key(replayed) == "default:stripe:evt_1"
+
+    assert Idempotency.key(replayed, include_replay: true) ==
+             "default:stripe:evt_1#replay:rid-1"
   end
 
   test "include_replay with no dedupe key appends to the id" do
@@ -54,7 +77,12 @@ defmodule Ankusa.SDK.IdempotencyTest do
   test "a Hook works the same way" do
     hook = %Hook{id: "01a0", source_id: "stripe", dedupe_key: "evt_1", replay_id: "rid-1"}
 
-    assert Idempotency.key(hook) == "stripe:evt_1"
-    assert Idempotency.key(hook, include_replay: true) == "stripe:evt_1#replay:rid-1"
+    assert Idempotency.key(hook) == "default:stripe:evt_1"
+
+    assert Idempotency.key(hook, include_replay: true) ==
+             "default:stripe:evt_1#replay:rid-1"
+
+    shipped = %Hook{id: "01a0", source_id: "stripe", idempotency_key: "acme:stripe:evt_1"}
+    assert Idempotency.key(shipped) == "acme:stripe:evt_1"
   end
 end

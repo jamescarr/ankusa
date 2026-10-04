@@ -56,6 +56,13 @@ defmodule Ankusa.Envelope do
     end)
   end
 
+  @doc "The tenant-scoped key a consumer dedupes this hook on; see docs/delivery.md."
+  @spec idempotency_key(t()) :: String.t()
+  def idempotency_key(%__MODULE__{dedupe_key: key} = env) when is_binary(key) and key != "",
+    do: (env.tenant_id || "default") <> ":" <> env.source_id <> ":" <> key
+
+  def idempotency_key(%__MODULE__{id: id}), do: id
+
   @doc """
   Serialize an envelope to a compact binary for the store.
 

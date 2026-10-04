@@ -260,6 +260,7 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "content_type": parsed.content_type,
                 "dedupe_key": parsed.dedupe_key,
                 "replay_id": parsed.replay_id,
+                "idempotency_key": parsed.idempotency_key,
             }))
         }
         "decode_message" => {
@@ -703,6 +704,7 @@ fn message_json(message: &Message) -> Value {
         "sha256": message.sha256,
         "dedupe_key": message.dedupe_key,
         "replay_id": message.replay_id,
+        "idempotency_key": message.idempotency_key,
         "headers": message.headers,
     })
 }

@@ -22,7 +22,7 @@ flowchart LR
 | `ankusa.yml` | One open `demo` source whose single HTTP sink points at the worker, with retries shortened so the drills are quick |
 | `pyproject.toml` / `uv.lock` | The worker's `uv` project; `ankusa` resolves to [`../../packages/sdk-python`](../../packages/sdk-python) as a local path dependency |
 | `Dockerfile` | Builds the worker with `uv sync --locked`; built from the **repo root** so it can see `packages/sdk-python` (see the comment at its top) |
-| `worker.py` | FastAPI app: reads the body, parses headers via `ankusa.parse_headers`, dedupes on `x-ankusa-id`, prints |
+| `worker.py` | FastAPI app: reads the body, parses headers via `ankusa.parse_headers`, dedupes on `ankusa.idempotency_key` (the `x-ankusa-idempotency-key` header), prints |
 
 ## Run it
 

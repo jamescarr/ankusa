@@ -10,7 +10,7 @@ defmodule Ankusa.Edge.Publish do
   `Retry-After`, and the provider retries. Sinks that already confirmed keep
   their copy, so the retry is a second hook with a second `id` — the same
   at-least-once contract a provider retry after a lost ack has always had
-  here, and the reason consumers dedupe on the provider's own event id.
+  here, and the reason consumers dedupe on the idempotency key.
 
   There is no retry policy and no dead-letter queue in this mode: the provider
   is the retry, and the broker is the durable store.
@@ -58,7 +58,7 @@ defmodule Ankusa.Edge.Publish do
               Logger.warning(
                 "[ankusa] sink #{inspect(mod)} did not confirm hook #{env.id} within " <>
                   "#{timeout}ms; answered 503 (the sink may still store it; " <>
-                  "consumers dedupe on id/dedupe_key)"
+                  "consumers dedupe on the idempotency key)"
               )
 
               {mod, :error}

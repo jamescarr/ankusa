@@ -1,5 +1,6 @@
 package io.github.jamescarr.ankusa.webhook;
 
+import io.github.jamescarr.ankusa.internal.IdempotencyKey;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -17,6 +18,9 @@ import org.jspecify.annotations.Nullable;
  *     header is absent or empty
  * @param replayId the replay job id, from {@code x-ankusa-replay-id}, or null when the header is
  *     absent or empty
+ * @param idempotencyKey the tenant-scoped key Ankusa computed for the hook, from {@code
+ *     x-ankusa-idempotency-key}, or null when the header is absent or empty; read it through {@link
+ *     #idempotencyKey(boolean)}
  */
 public record HookHeaders(
     String id,
@@ -24,15 +28,16 @@ public record HookHeaders(
     @Nullable String tenant,
     @Nullable String contentType,
     @Nullable String dedupeKey,
-    @Nullable String replayId) {
+    @Nullable String replayId,
+    @Nullable String idempotencyKey) {
 
   /**
    * Reads the headers through a lookup function.
    *
    * <p>The function is asked for lower-case names — {@code x-ankusa-id}, {@code x-ankusa-source},
    * {@code x-ankusa-tenant}, {@code content-type}, {@code x-ankusa-dedupe-key}, {@code
-   * x-ankusa-replay-id} — and must compare header names case-insensitively, as {@code
-   * HttpServletRequest::getHeader} does.
+   * x-ankusa-replay-id}, {@code x-ankusa-idempotency-key} — and must compare header names
+   * case-insensitively, as {@code HttpServletRequest::getHeader} does.
    *
    * @param lookup returns a header's value, or null when it is absent
    * @return the delivery's headers
@@ -52,26 +57,27 @@ public record HookHeaders(
         lookup.apply("x-ankusa-tenant"),
         lookup.apply("content-type"),
         nonEmpty(lookup.apply("x-ankusa-dedupe-key")),
-        nonEmpty(lookup.apply("x-ankusa-replay-id")));
+        nonEmpty(lookup.apply("x-ankusa-replay-id")),
+        nonEmpty(lookup.apply("x-ankusa-idempotency-key")));
   }
 
   /**
    * The key a worker dedupes on.
    *
-   * <p>When {@link #dedupeKey()} is non-null and non-empty the key is {@code source:dedupe_key},
-   * which collapses provider retries of one event; otherwise it is the delivery {@link #id()}. With
-   * {@code includeReplay} and a {@link #replayId()}, the key gains a {@code #replay:<replay_id>}
-   * suffix so a replay is processed again; omit it (false) to drop replays.
+   * <p>Ankusa computes the key once per hook and ships it as {@code x-ankusa-idempotency-key}; when
+   * that is a non-empty string it is the key. For a delivery from a sender that predates the header
+   * the key is computed: {@code tenant:source:dedupe_key} (tenant {@code default} when there is
+   * none) when {@link #dedupeKey()} is non-null and non-empty, which collapses provider retries of
+   * one event, otherwise the delivery {@link #id()}. With {@code includeReplay} and a {@link
+   * #replayId()}, the key gains a {@code #replay:<replay_id>} suffix so a replay is processed
+   * again; omit it (false) to drop replays.
    *
    * @param includeReplay whether a replay should get a distinct key
    * @return the idempotency key
    */
   public String idempotencyKey(boolean includeReplay) {
-    String key = dedupeKey != null && !dedupeKey.isEmpty() ? source + ":" + dedupeKey : id;
-    if (includeReplay && replayId != null) {
-      key = key + "#replay:" + replayId;
-    }
-    return key;
+    return IdempotencyKey.resolve(
+        idempotencyKey, tenant, source, dedupeKey, id, replayId, includeReplay);
   }
 
   /** Maps an absent or empty header value to null, per the contract. */

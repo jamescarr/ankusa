@@ -3,8 +3,9 @@
 //! A consumer receives the message JSON, decodes it with [`decode_message`],
 //! and deduplicates on [`Message::idempotency_key`]. The message carries the
 //! body inline (`body_base64`) or as a claim-check ref (`claim`), the body's
-//! sha256, the provider's `dedupe_key`, the forwarded request `headers`, and
-//! the `replay_id` when the delivery is a replay.
+//! sha256, the provider's `dedupe_key`, the forwarded request `headers`, the
+//! `replay_id` when the delivery is a replay, and the `idempotency_key` Ankusa
+//! computed for the hook.
 
 use std::collections::BTreeMap;
 
@@ -42,13 +43,21 @@ pub struct Message {
     pub dedupe_key: Option<String>,
     /// The replay job id, when this delivery is a replay.
     pub replay_id: Option<String>,
+    /// The tenant-scoped key Ankusa computed for the hook, when the message
+    /// carries one (a node that predates the field sends none). Read it
+    /// through [`Message::idempotency_key`].
+    pub idempotency_key: Option<String>,
     /// The forwarded provider request headers, lowercased.
     pub headers: BTreeMap<String, String>,
 }
 
 impl Message {
-    /// The idempotency key for this delivery: `source_id:dedupe_key` when a
-    /// non-empty `dedupe_key` is set, otherwise `id`.
+    /// The idempotency key for this delivery.
+    ///
+    /// It is the key Ankusa shipped in the message's `idempotency_key` when
+    /// that is a non-empty string. For a message from a node that predates the
+    /// field it is computed: `tenant:source_id:dedupe_key` (tenant `default`
+    /// when there is none) for a non-empty `dedupe_key`, otherwise `id`.
     ///
     /// With `include_replay`, a non-null `replay_id` appends
     /// `#replay:<replay_id>`, so a consumer that must reprocess replays treats
@@ -56,12 +65,45 @@ impl Message {
     /// already processed.
     #[must_use]
     pub fn idempotency_key(&self, include_replay: bool) -> String {
-        let mut key = match self.dedupe_key.as_deref().filter(|key| !key.is_empty()) {
-            Some(dedupe_key) => format!("{}:{}", self.source_id, dedupe_key),
-            None => self.id.clone(),
+        KeyParts {
+            shipped: self.idempotency_key.as_deref(),
+            tenant: self.tenant_id.as_deref(),
+            source: &self.source_id,
+            dedupe_key: self.dedupe_key.as_deref(),
+            id: &self.id,
+            replay_id: self.replay_id.as_deref(),
+        }
+        .key(include_replay)
+    }
+}
+
+/// The fields the idempotency key is built from, borrowed from a [`Message`]
+/// or from the `HookHeaders` of a delivery. The one place the rule lives.
+pub(crate) struct KeyParts<'a> {
+    pub(crate) shipped: Option<&'a str>,
+    pub(crate) tenant: Option<&'a str>,
+    pub(crate) source: &'a str,
+    pub(crate) dedupe_key: Option<&'a str>,
+    pub(crate) id: &'a str,
+    pub(crate) replay_id: Option<&'a str>,
+}
+
+impl KeyParts<'_> {
+    pub(crate) fn key(&self, include_replay: bool) -> String {
+        let mut key = if let Some(shipped) = self.shipped.filter(|key| !key.is_empty()) {
+            shipped.to_owned()
+        } else if let Some(dedupe_key) = self.dedupe_key.filter(|key| !key.is_empty()) {
+            format!(
+                "{}:{}:{}",
+                self.tenant.unwrap_or("default"),
+                self.source,
+                dedupe_key
+            )
+        } else {
+            self.id.to_owned()
         };
         if include_replay {
-            if let Some(replay_id) = self.replay_id.as_deref() {
+            if let Some(replay_id) = self.replay_id {
                 key.push_str("#replay:");
                 key.push_str(replay_id);
             }
@@ -99,8 +141,9 @@ impl InvalidMessageError {
 
 /// Decodes a `v: 1` queue message.
 ///
-/// Unknown keys are ignored. An absent `dedupe_key`, `replay_id` or `sha256`
-/// decodes to `None`; an absent `headers` decodes to an empty map.
+/// Unknown keys are ignored. An absent `dedupe_key`, `replay_id`,
+/// `idempotency_key` or `sha256` decodes to `None`; an absent `headers`
+/// decodes to an empty map.
 ///
 /// # Errors
 ///
@@ -137,6 +180,7 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
     let content_type = optional_string(&map, "content_type")?;
     let dedupe_key = optional_string(&map, "dedupe_key")?;
     let replay_id = optional_string(&map, "replay_id")?;
+    let idempotency_key = optional_string(&map, "idempotency_key")?;
     let headers = headers_field(&map)?;
     let sha256 = sha256_field(&map)?;
 
@@ -200,6 +244,7 @@ pub fn decode_message(data: &[u8]) -> Result<Message, InvalidMessageError> {
         sha256,
         dedupe_key,
         replay_id,
+        idempotency_key,
         headers,
     })
 }
@@ -287,8 +332,8 @@ mod tests {
         )
         .expect("valid message");
         assert_eq!(message.body.as_deref(), Some(b"hello".as_slice()));
-        assert_eq!(message.idempotency_key(false), "stripe:evt_1");
-        assert_eq!(message.idempotency_key(true), "stripe:evt_1");
+        assert_eq!(message.idempotency_key(false), "default:stripe:evt_1");
+        assert_eq!(message.idempotency_key(true), "default:stripe:evt_1");
     }
 
     #[test]
@@ -298,8 +343,46 @@ mod tests {
                  "body_base64":"aGVsbG8=","dedupe_key":"evt_1","replay_id":"rid-1"}"#,
         )
         .expect("valid message");
-        assert_eq!(message.idempotency_key(false), "stripe:evt_1");
-        assert_eq!(message.idempotency_key(true), "stripe:evt_1#replay:rid-1");
+        assert_eq!(message.idempotency_key(false), "default:stripe:evt_1");
+        assert_eq!(
+            message.idempotency_key(true),
+            "default:stripe:evt_1#replay:rid-1"
+        );
+    }
+
+    #[test]
+    fn the_shipped_key_wins_over_recomputing_it() {
+        let message = decode_message(
+            br#"{"v":1,"id":"01a0","source_id":"demo","tenant_id":"globex","received_at":1,
+                 "size":5,"body_base64":"aGVsbG8=","dedupe_key":"other","replay_id":"rid-1",
+                 "idempotency_key":"acme:stripe:evt_1"}"#,
+        )
+        .expect("valid message");
+        assert_eq!(message.idempotency_key(false), "acme:stripe:evt_1");
+        assert_eq!(
+            message.idempotency_key(true),
+            "acme:stripe:evt_1#replay:rid-1"
+        );
+    }
+
+    #[test]
+    fn a_tenant_scopes_the_computed_key() {
+        let message = decode_message(
+            br#"{"v":1,"id":"01a0","source_id":"stripe","tenant_id":"acme","received_at":1,
+                 "size":5,"body_base64":"aGVsbG8=","dedupe_key":"evt_1"}"#,
+        )
+        .expect("valid message");
+        assert_eq!(message.idempotency_key(false), "acme:stripe:evt_1");
+    }
+
+    #[test]
+    fn a_non_string_idempotency_key_is_invalid() {
+        let bad = err(
+            r#"{"v":1,"id":"01a0","source_id":"s","received_at":1,"size":5,
+                "body_base64":"aGVsbG8=","idempotency_key":7}"#,
+        );
+        assert_eq!(bad.code, "invalid_field");
+        assert_eq!(bad.field, Some("idempotency_key"));
     }
 
     #[test]

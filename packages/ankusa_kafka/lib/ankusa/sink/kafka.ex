@@ -11,8 +11,10 @@ defmodule Ankusa.Sink.Kafka do
       it is the ordering scope: records with the same key are consumed in the
       order they were produced.
     * **headers** — `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
-      `ankusa_message_version`, `content_type` (`application/json`), plus
-      `ankusa_dedupe_key` and `ankusa_replay_id` when the hook carries them.
+      `ankusa_message_version`, `content_type` (`application/json`) and
+      `ankusa_idempotency_key` (the key consumers dedupe on, the message's
+      `idempotency_key`), plus `ankusa_dedupe_key` and `ankusa_replay_id` when
+      the hook carries them.
       Underscores, not hyphens, so they are usable unquoted as Redpanda
       Connect metadata and SQS attribute names.
     * **timestamp** — `env.received_at` (event time, not dispatch time).
@@ -24,7 +26,7 @@ defmodule Ankusa.Sink.Kafka do
 
   brod's producer is not idempotent, so a produce retried after a lost ack
   can write the record twice. Delivery is at-least-once anyway; consumers
-  dedupe on `id`.
+  dedupe on the `idempotency_key`.
 
   The sink **never creates topics**. Partition count decides which keys share
   a partition and can only grow, remapping keys when it does — that belongs
@@ -151,6 +153,7 @@ defmodule Ankusa.Sink.Kafka do
           {"ankusa_source_id", env.source_id},
           {"ankusa_tenant_id", env.tenant_id || ""},
           {"ankusa_message_version", "1"},
+          {"ankusa_idempotency_key", Ankusa.Envelope.idempotency_key(env)},
           {"content_type", "application/json"}
         ]
         |> maybe_header("ankusa_dedupe_key", env.dedupe_key)

@@ -44,9 +44,9 @@ that accepts anything, so it works before you have any provider credentials:
 
 ### 2. Deliver to your own worker
 
-Ankusa POSTs each hook to your endpoint with the raw body intact and
-`x-ankusa-id` for idempotency; short outages are retried, long ones land in a
-dead-letter queue you can replay with one call.
+Ankusa POSTs each hook to your endpoint with the raw body intact and an
+`x-ankusa-idempotency-key` header to dedupe on; short outages are retried, long
+ones land in a dead-letter queue you can replay with one call.
 
 ```sh
 git clone https://github.com/jamescarr/ankusa

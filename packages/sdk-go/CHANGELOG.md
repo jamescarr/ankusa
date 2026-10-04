@@ -11,13 +11,19 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 - `DecodeMessage` and the `Message` type: decode a v1 queue message with the
   body-integrity checks (`size_mismatch`, `integrity`, `tenant_mismatch`) and
-  the `dedupe_key`/`replay_id`/`headers` fields, raising `InvalidMessageError`
-  (`Code`, `Field`, `Retryable() == false`) on any malformed input.
+  the `dedupe_key`/`replay_id`/`idempotency_key`/`headers` fields, raising
+  `InvalidMessageError` (`Code`, `Field`, `Retryable() == false`) on any
+  malformed input. The wire's `idempotency_key` is `Message.ShippedIdempotencyKey`
+  (the field name cannot be `IdempotencyKey`, which is the helper).
 - `Message.IdempotencyKey(includeReplay)` and
-  `HookHeaders.IdempotencyKey(includeReplay)`: the source-scoped key a
-  consumer dedupes a delivery on.
-- `HookHeaders.DedupeKey` and `HookHeaders.ReplayID`, read from
-  `x-ankusa-dedupe-key` and `x-ankusa-replay-id` by `ParseHeaders`.
+  `HookHeaders.IdempotencyKey(includeReplay)`: the key a consumer dedupes a
+  delivery on. It is the key Ankusa shipped (`idempotency_key` /
+  `x-ankusa-idempotency-key`); for a message or delivery that predates it, the
+  helper computes `tenant:source_id:dedupe_key` (tenant `default` when there is
+  none) when a dedupe key is set, else the id.
+- `HookHeaders.DedupeKey`, `HookHeaders.ReplayID`, and
+  `HookHeaders.ShippedIdempotencyKey`, read from `x-ankusa-dedupe-key`,
+  `x-ankusa-replay-id`, and `x-ankusa-idempotency-key` by `ParseHeaders`.
 - `AdminClient.CreateReplay`, `GetReplay`, `ListReplays`, and `UpdateReplay`,
   with the `Replay`, `ReplayList`, `ReplaySpec`, and `ReplayPatch` types.
 

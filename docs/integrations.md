@@ -33,24 +33,31 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
 **The contract:**
 
 - The raw body, verbatim, exactly as the provider sent it.
-- Headers: `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-tenant` (when the
-  source has a tenant), and `content-type`.
+- Headers: `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,
+  `x-ankusa-tenant` (when the source has a tenant), and `content-type`;
+  `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the hook carries them.
 - Respond `2xx` only after the job is durably enqueued: a `202` after an
   in-transaction insert commits, not before.
 - A non-`2xx` response or a timeout is retried per `dispatch.retry`, then
   dead-lettered (see [`delivery.md`](delivery.md)).
-- Dedupe on `x-ankusa-id`: consumers are idempotent receivers. Delivery is
-  at-least-once, so your endpoint can see the same `x-ankusa-id` twice (a
+- Dedupe on `x-ankusa-idempotency-key`: consumers are idempotent receivers.
+  Delivery is at-least-once, so your endpoint can see the same key twice (a
   `2xx` that was lost in transit, a dispatch retry after a timeout that
-  actually succeeded). `x-ankusa-id` identifies one stored hook; your enqueue
+  actually succeeded). Ankusa computes the key once per hook:
+  `tenant:source_id:dedupe_key` when the source extracts the provider's event
+  key, else the hook's `x-ankusa-id`. Read it; don't rebuild it. Your enqueue
   MUST be idempotent on it: see the worked examples below for how (a unique
-  job key in Oban, `task_id=` in Celery).
-- Provider retries arrive as **distinct hooks** with distinct `x-ankusa-id`s:
-  ingest does not collapse them. Dedupe those on the provider's own event
+  row keyed on it in the Oban example, an idempotent task body in Celery).
+- Provider retries arrive as **distinct hooks** with distinct `x-ankusa-id`s
+  unless the source sets `dedupe`, which collapses them at ingest into one
+  hook (and so one key). Without it, dedupe those on the provider's own event
   id in the body (e.g. Stripe's `id`).
-- The original request headers (`X-GitHub-Delivery`, `webhook-id`, …) are
-  **not** forwarded by `Sink.Http` or `Sink.Message`, so header-borne ids are
-  not available downstream.
+- Provider request headers (`X-GitHub-Delivery`, `webhook-id`, …) are
+  forwarded by `Sink.Http` per the source's `forward_headers` option (and
+  carried in `Sink.Message`'s `headers`), minus authentication and framing
+  headers and every `x-ankusa-*` name. They arrive beside the `x-ankusa-*`
+  headers above; when the source extracts one as its dedupe key it is also
+  `x-ankusa-dedupe-key`.
 
 Elixir consumers get this contract as a `Plug`: `Ankusa.SDK.Receiver` (Hex
 package
@@ -83,6 +90,11 @@ plain HTTP.
 
 ### `/deliveries` route
 
+The router keys on the `x-ankusa-idempotency-key` header the sink ships (the
+ankusa id when a sender predates it). That key is the primary key of a
+`processed_webhooks` row, and the Oban job is inserted in the same transaction
+as the row.
+
 ```elixir
 defp handle_delivery(conn, body) do
   case header(conn, "x-ankusa-id") do
@@ -92,25 +104,49 @@ defp handle_delivery(conn, body) do
 end
 
 defp insert_job(conn, ankusa_id, body) do
-  args = %{
-    "ankusa_id" => ankusa_id,
-    "source_id" => header(conn, "x-ankusa-source"),
-    "tenant_id" => header(conn, "x-ankusa-tenant"),
-    "content_type" => header(conn, "content-type"),
-    "body_base64" => Base.encode64(body)
-  }
+  # The key Ankusa computed: read it, never rebuild it.
+  key = header(conn, "x-ankusa-idempotency-key") || ankusa_id
 
-  args
-  |> WebhookWorker.new(unique: [period: :infinity, keys: [:ankusa_id]])
-  |> Oban.insert()
-  |> case do
-    # Oban's `%Oban.Job{}` carries a `conflict?` boolean: when the `unique:`
-    # key matches an already-inserted job, `Oban.insert/1` still returns
-    # `{:ok, job}`, but `job` is the *existing* row and `conflict?` is
-    # `true`, the documented way to tell "already queued" from "brand new"
-    # without a second query.
-    {:ok, %Oban.Job{id: id, conflict?: conflict?}} ->
-      send_resp(conn, 202, JSON.encode!(%{job_id: id, duplicate: conflict?}))
+  result =
+    Repo.transaction(fn ->
+      # `xmax = 0` means this insert created the row; the conflict path means
+      # the hook already arrived, and no second job is queued for it.
+      %Postgrex.Result{rows: [[inserted]]} =
+        Repo.query!(
+          """
+          INSERT INTO processed_webhooks
+            (idempotency_key, ankusa_id, source_id, tenant_id, body, body_sha256, deliveries)
+          VALUES ($1, $2, $3, $4, $5, $6, 1)
+          ON CONFLICT (idempotency_key) DO UPDATE
+            SET deliveries = processed_webhooks.deliveries + 1
+          RETURNING (xmax = 0) AS inserted
+          """,
+          [
+            key,
+            ankusa_id,
+            header(conn, "x-ankusa-source") || "",
+            header(conn, "x-ankusa-tenant"),
+            body,
+            :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+          ]
+        )
+
+      if inserted do
+        case %{"idempotency_key" => key} |> WebhookWorker.new() |> Oban.insert() do
+          {:ok, %Oban.Job{id: id}} -> id
+          {:error, reason} -> Repo.rollback({:job_insert, reason})
+        end
+      else
+        :duplicate
+      end
+    end)
+
+  case result do
+    {:ok, job_id} when is_integer(job_id) ->
+      send_resp(conn, 202, JSON.encode!(%{job_id: job_id, duplicate: false}))
+
+    {:ok, :duplicate} ->
+      send_resp(conn, 202, JSON.encode!(%{job_id: nil, duplicate: true}))
 
     {:error, _reason} ->
       send_resp(conn, 503, "")
@@ -125,27 +161,41 @@ defmodule WebhookWorker do
   use Oban.Worker, queue: :webhooks, max_attempts: 10
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: args}) do
-    body = Base.decode64!(args["body_base64"])
-    sha256 = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+  def perform(%Oban.Job{args: %{"idempotency_key" => key}}) do
+    result =
+      Repo.transaction(fn ->
+        %Postgrex.Result{rows: rows} =
+          Repo.query!(
+            "SELECT processed_at FROM processed_webhooks WHERE idempotency_key = $1 FOR UPDATE",
+            [key]
+          )
 
-    Repo.query!(
-      "INSERT INTO processed_webhooks (ankusa_id, source_id, tenant_id, body_sha256, deliveries, processed_at) " <>
-        "VALUES ($1,$2,$3,$4,1,now()) ON CONFLICT (ankusa_id) DO UPDATE SET deliveries = processed_webhooks.deliveries + 1",
-      [args["ankusa_id"], args["source_id"], args["tenant_id"], sha256]
-    )
+        # Not yet processed: run the business effect here, inside the
+        # transaction that marks it done. A pruned or already-processed row is
+        # nothing to do.
+        if rows == [[nil]] do
+          Repo.query!(
+            "UPDATE processed_webhooks SET processed_at = now() WHERE idempotency_key = $1",
+            [key]
+          )
+        end
+      end)
 
-    :ok
+    case result do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 end
 ```
 
-`unique: [period: :infinity, keys: [:ankusa_id]]` is what makes the `POST`
-idempotent on `x-ankusa-id`: a second enqueue with the same id never creates
-a second job. The `ON CONFLICT ... DO UPDATE SET deliveries = deliveries + 1`
-in `perform/1` is a second, independent idempotency layer: it's what proves
-"processed" against actual attempts rather than just against enqueue, and is
-what the `deliveries` column in `docs/testing.md`'s results table measures.
+The `idempotency_key` primary key is what makes the `POST` idempotent: a second
+delivery of the same hook (a lost `2xx`, a DLQ replay) bumps `deliveries` and
+queues no second job. The row, not Oban's job uniqueness, is the dedupe, so
+pruning completed jobs can never let a retry or a replay re-run the effect.
+`processed_at` is what proves "processed" against actual attempts rather than
+just against enqueue, and the `deliveries` column is what `docs/testing.md`'s
+results table measures.
 Full source: [`examples/oban-consumer/consumer_app`](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/consumer_app).
 
 ### In-process: embedding Ankusa and Oban in the same app
@@ -161,6 +211,7 @@ defmodule MyApp.ObanSink do
   @impl true
   def deliver(env, ctx, _opts) do
     args = %{
+      "idempotency_key" => Ankusa.Envelope.idempotency_key(env),
       "ankusa_id" => env.id,
       "source_id" => env.source_id,
       "tenant_id" => ctx.tenant_id,
@@ -168,7 +219,7 @@ defmodule MyApp.ObanSink do
       "body_base64" => Base.encode64(env.body)
     }
 
-    case args |> MyApp.WebhookWorker.new(unique: [period: :infinity, keys: [:ankusa_id]]) |> Oban.insert() do
+    case args |> MyApp.WebhookWorker.new(unique: [period: :infinity, keys: [:idempotency_key]]) |> Oban.insert() do
       {:ok, _job} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -180,9 +231,12 @@ end
 sinks: [{MyApp.ObanSink, []}]
 ```
 
-Same idempotency key (`:ankusa_id`), same `Oban.Worker` shape as the HTTP
-example: the only thing that changes is the transport between Ankusa's
-dispatch pipeline and the enqueue: a function call instead of a socket.
+Same idempotency key (`Ankusa.Envelope.idempotency_key/1`, the value `Sink.Http`
+ships as `x-ankusa-idempotency-key`), and the transport is the only thing that
+changes between Ankusa's dispatch pipeline and the enqueue: a function call
+instead of a socket. Oban's `unique:` only dedupes against jobs still in the
+table, so with a pruner either keep the key in your own table as the HTTP
+example does or set the unique period past the prune age.
 
 ## Celery
 
@@ -200,6 +254,8 @@ def deliveries():
     if not ankusa_id:
         return jsonify(error="missing x-ankusa-id"), 400
 
+    key = request.headers.get("x-ankusa-idempotency-key") or ankusa_id
+
     source = request.headers.get("x-ankusa-source")
     tenant = request.headers.get("x-ankusa-tenant")
     content_type = request.headers.get("content-type")
@@ -207,8 +263,8 @@ def deliveries():
 
     try:
         process_webhook.apply_async(
-            args=[ankusa_id, source, tenant, content_type, body_b64],
-            task_id=ankusa_id,
+            args=[key, ankusa_id, source, tenant, content_type, body_b64],
+            task_id=key,
         )
     except Exception:
         # broker down, etc. Ankusa retries per dispatch.retry, then DLQs.
@@ -232,11 +288,11 @@ message.
 **Celery does not dedupe on `task_id`** the way Oban's `unique:` does: a
 `task_id` collision with Celery+Redis (the common combination) can raise
 depending on backend, but isn't a documented guarantee across all
-broker/backend pairs. Treat `task_id=ankusa_id` as a debugging/traceability
+broker/backend pairs. Treat `task_id=key` as a debugging/traceability
 aid, not a dedup mechanism, and make `process_webhook`'s body itself
-idempotent on `ankusa_id` (an upsert, same as `WebhookWorker.perform/1`
-above), the same "at-least-once delivery, idempotent consumer" rule that
-applies to every sink on this page.
+idempotent on the idempotency key (an upsert, same as the Oban example's
+`processed_webhooks` row above), the same "at-least-once delivery, idempotent
+consumer" rule that applies to every sink on this page.
 
 ## Queue handoff
 

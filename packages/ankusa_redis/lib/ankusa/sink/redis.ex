@@ -30,7 +30,7 @@ defmodule Ankusa.Sink.Redis do
   (`XADD`), a different sink than this one.
 
   Delivery is at-least-once: a retry or a DLQ replay republishes, so
-  consumers dedupe on `id`.
+  consumers dedupe on the message's `idempotency_key`.
 
   ## Process model
 

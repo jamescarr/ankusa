@@ -9,17 +9,19 @@ defmodule Ankusa.Sink.Message do
   carries its `Ankusa.ClaimCheck.Ref` as one string instead, plus the
   lowercase hex sha256 the reader checks the redeemed bytes against (see
   `docs/claim-check.md`). Every message carries `sha256`, `dedupe_key`,
-  `replay_id` and the forwarded provider `headers`:
+  `replay_id`, `idempotency_key` (the tenant-scoped key a consumer dedupes on:
+  `Ankusa.Envelope.idempotency_key/1`) and the forwarded provider `headers`:
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
-       "dedupe_key": "evt_1", "replay_id": null,
+       "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
        "headers": {"x-github-event": "push"},
        "sha256": "2cf24dba...", "body_base64": "eyJpZCI6..."}
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 3145728,
-       "dedupe_key": "evt_1", "replay_id": null, "headers": {},
+       "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+       "headers": {},
        "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
        "sha256": "3bea8a9a07c1e8dc..."}
 
@@ -73,6 +75,7 @@ defmodule Ankusa.Sink.Message do
       size: env.size,
       dedupe_key: env.dedupe_key,
       replay_id: Map.get(ctx, :replay_id),
+      idempotency_key: Envelope.idempotency_key(env),
       headers: forwarded_headers(env, Map.get(ctx, :forward_headers, :default))
     }
 

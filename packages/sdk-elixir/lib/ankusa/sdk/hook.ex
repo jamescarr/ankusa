@@ -20,9 +20,12 @@ defmodule Ankusa.SDK.Hook do
 
   `dedupe_key` is the provider's own event key when the source extracted one
   (`x-ankusa-dedupe-key` over HTTP, the message's `dedupe_key` from a queue);
-  `replay_id` names the replay job when this delivery is a replay; `headers`
-  are the provider request headers — the request's over HTTP, the forwarded
-  ones from a queue message.
+  `idempotency_key` is the tenant-scoped key Ankusa computed for the hook
+  (`x-ankusa-idempotency-key` over HTTP, the message's `idempotency_key` from a
+  queue; `nil` from a node that predates it) — read it through
+  `Ankusa.SDK.Idempotency.key/2`; `replay_id` names the replay job when this
+  delivery is a replay; `headers` are the provider request headers — the
+  request's over HTTP, the forwarded ones from a queue message.
   """
 
   @type t :: %__MODULE__{
@@ -35,6 +38,7 @@ defmodule Ankusa.SDK.Hook do
           size: non_neg_integer(),
           dedupe_key: String.t() | nil,
           replay_id: String.t() | nil,
+          idempotency_key: String.t() | nil,
           headers: %{String.t() => String.t()}
         }
 
@@ -48,6 +52,7 @@ defmodule Ankusa.SDK.Hook do
     :size,
     :dedupe_key,
     :replay_id,
+    :idempotency_key,
     headers: %{}
   ]
 end

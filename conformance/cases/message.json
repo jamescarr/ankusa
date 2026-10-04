@@ -5,7 +5,7 @@
       "feature": "message.decode",
       "operation": "decode_message",
       "input": {
-        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"headers\":{\"x-github-event\":\"push\"},\"body_base64\":\"aGVsbG8=\"}"
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":\"acme:demo:evt_1\",\"headers\":{\"x-github-event\":\"push\"},\"body_base64\":\"aGVsbG8=\"}"
       },
       "expect": {
         "ok": {
@@ -21,6 +21,7 @@
           "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
           "dedupe_key": "evt_1",
           "replay_id": null,
+          "idempotency_key": "acme:demo:evt_1",
           "headers": {"x-github-event": "push"}
         }
       }
@@ -46,6 +47,7 @@
           "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
           "dedupe_key": null,
           "replay_id": null,
+          "idempotency_key": null,
           "headers": {}
         }
       }
@@ -71,6 +73,7 @@
           "sha256": null,
           "dedupe_key": null,
           "replay_id": null,
+          "idempotency_key": null,
           "headers": {}
         }
       }
@@ -96,6 +99,7 @@
           "sha256": null,
           "dedupe_key": null,
           "replay_id": null,
+          "idempotency_key": null,
           "headers": {}
         }
       }
@@ -121,6 +125,7 @@
           "sha256": null,
           "dedupe_key": "evt_1",
           "replay_id": "0194f4a0-0000-7000-8000-0000000000aa",
+          "idempotency_key": null,
           "headers": {}
         }
       }
@@ -174,6 +179,17 @@
       },
       "expect": {
         "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "id"}
+      }
+    },
+    {
+      "id": "message.reject.bad_idempotency_key",
+      "feature": "message.decode",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":5,\"sha256\":\"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\",\"dedupe_key\":\"evt_1\",\"replay_id\":null,\"idempotency_key\":7,\"headers\":{\"x-github-event\":\"push\"},\"body_base64\":\"aGVsbG8=\"}"
+      },
+      "expect": {
+        "error": {"class": "InvalidMessageError", "retryable": false, "code": "invalid_field", "field": "idempotency_key"}
       }
     },
     {
@@ -280,7 +296,34 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\"}"
       },
-      "expect": {"ok": {"key": "stripe:evt_1"}}
+      "expect": {"ok": {"key": "default:stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.dedupe_key_tenant",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\"}"
+      },
+      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.shipped_wins",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"other\",\"idempotency_key\":\"acme:stripe:evt_1\"}"
+      },
+      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.shipped_empty_falls_back",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"idempotency_key\":\"\"}"
+      },
+      "expect": {"ok": {"key": "default:stripe:evt_1"}}
     },
     {
       "id": "idempotency.replay_ignored_by_default",
@@ -289,7 +332,7 @@
       "input": {
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":\"rid-1\"}"
       },
-      "expect": {"ok": {"key": "stripe:evt_1"}}
+      "expect": {"ok": {"key": "default:stripe:evt_1"}}
     },
     {
       "id": "idempotency.replay_included",
@@ -299,7 +342,7 @@
         "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"stripe\",\"received_at\":1720000000000,\"size\":5,\"body_base64\":\"aGVsbG8=\",\"dedupe_key\":\"evt_1\",\"replay_id\":\"rid-1\"}",
         "include_replay": true
       },
-      "expect": {"ok": {"key": "stripe:evt_1#replay:rid-1"}}
+      "expect": {"ok": {"key": "default:stripe:evt_1#replay:rid-1"}}
     },
     {
       "id": "idempotency.replay_included_id_only",
@@ -322,7 +365,35 @@
           "x-ankusa-dedupe-key": "evt_1"
         }
       },
-      "expect": {"ok": {"key": "stripe:evt_1"}}
+      "expect": {"ok": {"key": "default:stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.from_headers_tenant",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "stripe",
+          "x-ankusa-tenant": "acme",
+          "x-ankusa-dedupe-key": "evt_1"
+        }
+      },
+      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
+    },
+    {
+      "id": "idempotency.from_headers_shipped",
+      "feature": "message.idempotency_key",
+      "operation": "idempotency_key",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "stripe",
+          "x-ankusa-idempotency-key": "acme:stripe:evt_1",
+          "x-ankusa-dedupe-key": "other"
+        }
+      },
+      "expect": {"ok": {"key": "acme:stripe:evt_1"}}
     },
     {
       "id": "idempotency.from_headers_replay",
@@ -337,7 +408,7 @@
         },
         "include_replay": true
       },
-      "expect": {"ok": {"key": "stripe:evt_1#replay:rid-1"}}
+      "expect": {"ok": {"key": "default:stripe:evt_1#replay:rid-1"}}
     }
   ]
 }

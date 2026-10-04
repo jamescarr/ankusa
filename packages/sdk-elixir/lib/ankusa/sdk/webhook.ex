@@ -13,6 +13,7 @@ defmodule Ankusa.SDK.Webhook do
   | `content-type` | `content_type` | `nil` |
   | `x-ankusa-dedupe-key` | `dedupe_key` | `nil` (also when empty) |
   | `x-ankusa-replay-id` | `replay_id` | `nil` (also when empty) |
+  | `x-ankusa-idempotency-key` | `idempotency_key` | `nil` (also when empty) |
 
   The parsed struct also carries every request header in `headers`
   (lowercased), so a receiver can read the provider's own headers the sink
@@ -38,10 +39,20 @@ defmodule Ankusa.SDK.Webhook do
             content_type: String.t() | nil,
             dedupe_key: String.t() | nil,
             replay_id: String.t() | nil,
+            idempotency_key: String.t() | nil,
             headers: %{String.t() => String.t()}
           }
 
-    defstruct [:id, :source, :tenant, :content_type, :dedupe_key, :replay_id, headers: %{}]
+    defstruct [
+      :id,
+      :source,
+      :tenant,
+      :content_type,
+      :dedupe_key,
+      :replay_id,
+      :idempotency_key,
+      headers: %{}
+    ]
   end
 
   @doc """
@@ -83,6 +94,7 @@ defmodule Ankusa.SDK.Webhook do
            content_type: fetch(headers, "content-type"),
            dedupe_key: non_empty(headers, "x-ankusa-dedupe-key"),
            replay_id: non_empty(headers, "x-ankusa-replay-id"),
+           idempotency_key: non_empty(headers, "x-ankusa-idempotency-key"),
            headers: headers
          }}
 
@@ -91,8 +103,8 @@ defmodule Ankusa.SDK.Webhook do
     end
   end
 
-  # `dedupe_key` and `replay_id` are `nil` when the header is absent or empty,
-  # so a consumer never keys on `""`.
+  # `dedupe_key`, `replay_id` and `idempotency_key` are `nil` when the header is
+  # absent or empty, so a consumer never keys on `""`.
   defp non_empty(headers, name) do
     case fetch(headers, name) do
       "" -> nil

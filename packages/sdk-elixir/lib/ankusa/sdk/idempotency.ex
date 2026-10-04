@@ -3,18 +3,22 @@ defmodule Ankusa.SDK.Idempotency do
   The idempotency key for one delivery, whichever transport delivered it.
 
   Delivery is at-least-once: a provider retry, a sink retry, or a requeued
-  message can hand the same hook over more than once. Keying on the hook id
-  alone collapses a provider's own retries only after ingest has already
-  stored them as separate hooks, so the key is the provider's dedupe key when
-  the source extracted one, and the hook id otherwise:
+  message can hand the same hook over more than once. Ankusa computes one
+  tenant-scoped key per hook and ships it (the message's `idempotency_key`, the
+  `x-ankusa-idempotency-key` header); this module returns that value. Read it,
+  don't rebuild it.
 
-      source_id <> ":" <> dedupe_key     when dedupe_key is non-null and non-empty
-      id                                  otherwise
+  For a message or delivery from a node that predates the field, the key is
+  computed from the hook's own fields, by the same rule core uses:
 
-  A replay of an older delivery carries a `replay_id`. The key ignores it by
-  default, so a consumer that already processed the original drops the replay;
-  a consumer that must reprocess replays passes `include_replay: true`, which
-  appends `"#replay:" <> replay_id`.
+      tenant <> ":" <> source_id <> ":" <> dedupe_key   when dedupe_key is non-null and non-empty
+      id                                                 otherwise
+
+  where `tenant` is `"default"` when there is none. A replay of an older
+  delivery carries a `replay_id`. The key ignores it by default, so a consumer
+  that already processed the original drops the replay; a consumer that must
+  reprocess replays passes `include_replay: true`, which appends
+  `"#replay:" <> replay_id`.
 
   Accepts the decoded `Ankusa.SDK.Message`, the parsed
   `Ankusa.SDK.Webhook.Headers` from an HTTP delivery, or an
@@ -40,23 +44,52 @@ defmodule Ankusa.SDK.Idempotency do
   def key(message_or_headers, opts \\ [])
 
   def key(%Message{} = message, opts) do
-    build(message.source_id, message.id, message.dedupe_key, message.replay_id, opts)
+    build(
+      message.idempotency_key,
+      message.tenant_id,
+      message.source_id,
+      message.id,
+      message.dedupe_key,
+      message.replay_id,
+      opts
+    )
   end
 
   def key(%Webhook.Headers{} = headers, opts) do
-    build(headers.source, headers.id, headers.dedupe_key, headers.replay_id, opts)
+    build(
+      headers.idempotency_key,
+      headers.tenant,
+      headers.source,
+      headers.id,
+      headers.dedupe_key,
+      headers.replay_id,
+      opts
+    )
   end
 
   def key(%Hook{} = hook, opts) do
-    build(hook.source_id, hook.id, hook.dedupe_key, hook.replay_id, opts)
+    build(
+      hook.idempotency_key,
+      hook.tenant_id,
+      hook.source_id,
+      hook.id,
+      hook.dedupe_key,
+      hook.replay_id,
+      opts
+    )
   end
 
-  defp build(source_id, id, dedupe_key, replay_id, opts) do
+  defp build(shipped, tenant, source_id, id, dedupe_key, replay_id, opts) do
     base =
-      if is_binary(dedupe_key) and dedupe_key != "" do
-        "#{source_id}:#{dedupe_key}"
-      else
-        id
+      cond do
+        is_binary(shipped) and shipped != "" ->
+          shipped
+
+        is_binary(dedupe_key) and dedupe_key != "" ->
+          "#{tenant || "default"}:#{source_id}:#{dedupe_key}"
+
+        true ->
+          id
       end
 
     if Keyword.get(opts, :include_replay, false) and not is_nil(replay_id) do

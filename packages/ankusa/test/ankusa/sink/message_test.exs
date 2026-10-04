@@ -114,6 +114,7 @@ defmodule Ankusa.Sink.MessageTest do
              "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
     assert decoded["dedupe_key"] == "evt_1"
+    assert decoded["idempotency_key"] == "t1:src:evt_1"
     assert decoded["replay_id"] == "rid"
     assert decoded["headers"] == %{"x-github-event" => "push", "x-custom" => "v"}
   end
@@ -124,6 +125,7 @@ defmodule Ankusa.Sink.MessageTest do
     decoded = JSON.decode!(json)
     assert decoded["dedupe_key"] == nil
     assert decoded["replay_id"] == nil
+    assert decoded["idempotency_key"] == env.id
     assert decoded["headers"] == %{}
   end
 
@@ -167,6 +169,7 @@ defmodule Ankusa.Sink.MessageTest do
     decoded = JSON.decode!(json)
     assert decoded["dedupe_key"] == "evt_9"
     assert decoded["replay_id"] == "rid"
+    assert decoded["idempotency_key"] == "t1:src:evt_9"
     assert decoded["headers"] == %{"x-a" => "1"}
     assert decoded["sha256"] == Base.encode16(:crypto.hash(:sha256, env.body), case: :lower)
   end

@@ -4,11 +4,11 @@
  * See "HTTP handoff" in docs/integrations.md for the full contract this
  * mirrors: the raw body arrives verbatim, and identity travels in
  * `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-tenant` (only when the source
- * has a tenant), `content-type`, and — when the source has a dedupe rule or
- * the delivery is a replay — `x-ankusa-dedupe-key` and
- * `x-ankusa-replay-id`. A receiver dedupes on the key `idempotencyKey` derives
- * (`x-ankusa-dedupe-key` when set, else `x-ankusa-id`): delivery is
- * at-least-once, so the same hook can arrive twice after a retry.
+ * has a tenant), `content-type`, `x-ankusa-idempotency-key`, and — when the
+ * source has a dedupe rule or the delivery is a replay — `x-ankusa-dedupe-key`
+ * and `x-ankusa-replay-id`. A receiver dedupes on the key `idempotencyKey`
+ * returns (the shipped `x-ankusa-idempotency-key`): delivery is at-least-once,
+ * so the same hook can arrive twice after a retry.
  */
 
 /** The identity of one HTTP-sink delivery. */
@@ -22,6 +22,11 @@ export type HookHeaders = {
   dedupeKey: string | null;
   /** The replay job id; `null` when absent or empty. */
   replayId: string | null;
+  /**
+   * The tenant-scoped key to dedupe on, from `x-ankusa-idempotency-key`; `null`
+   * when absent or empty (a sender that predates the header).
+   */
+  idempotencyKey: string | null;
 };
 
 /**
@@ -71,5 +76,6 @@ export function parseHeaders(headers: HeaderSource): HookHeaders {
     // `"source:"` key around nothing.
     dedupeKey: lowered.get("x-ankusa-dedupe-key") || null,
     replayId: lowered.get("x-ankusa-replay-id") || null,
+    idempotencyKey: lowered.get("x-ankusa-idempotency-key") || null,
   };
 }

@@ -149,16 +149,16 @@ hook's identity, which Ankusa attaches as headers:
 ```java
 HookHeaders hook = HookHeaders.parse(request::getHeader); // e.g. HttpServletRequest
 // hook.id(), hook.source(), hook.tenant(), hook.contentType()
-// hook.dedupeKey(), hook.replayId()
-String key = hook.idempotencyKey(false); // same rule as the queue message
+// hook.dedupeKey(), hook.replayId(), hook.idempotencyKey()
+String key = hook.idempotencyKey(false); // the key Ankusa shipped; same rule as the queue message
 ```
 
 `HookHeaders.parse` also takes a `Map<String, List<String>>` (header names
 matched case-insensitively). `x-ankusa-id` is required — a missing or empty
 one is `MissingHookIdError`; dedupe on it, since delivery is at-least-once.
-`source()` defaults to `""`; `tenant()`, `contentType()`, `dedupeKey()` and
-`replayId()` are null when absent (a `dedupeKey` or `replayId` header that is
-present but empty is also null).
+`source()` defaults to `""`; `tenant()`, `contentType()`, `dedupeKey()`,
+`replayId()` and `idempotencyKey()` are null when absent (a `dedupeKey`,
+`replayId` or `idempotencyKey` header that is present but empty is also null).
 
 ## Consuming queue messages
 
@@ -187,10 +187,14 @@ String key = message.idempotencyKey(false);           // drops replays of proces
 `tenant_mismatch`, …) and, for a field failure, `field()`. It is never
 retryable: the same bytes always fail the same way, so dead-letter them.
 
-The idempotency key is `source_id:dedupe_key` when the source extracted a
-provider event key, so a provider's retry of one event collapses even across
-brokers; otherwise it is the delivery `id`, so a broker redelivery collapses.
-Pass `includeReplay` true only when a replay must be processed again.
+Ankusa computes the idempotency key once per hook and ships it as the message's
+`idempotency_key`; `message.idempotencyKey(boolean)` returns it. It is
+`tenant:source_id:dedupe_key` when the source extracted a provider event key,
+so a provider's retry of one event collapses even across brokers, and two
+tenants that share a provider event id stay apart; otherwise it is the delivery
+`id`, so a broker redelivery collapses. For a message from a node that predates
+the field the helper computes the same key itself (tenant `default` when there
+is none). Pass `includeReplay` true only when a replay must be processed again.
 
 Record the key in a processed-ids table in the same transaction as the effect,
 and skip an insert that conflicts:
@@ -215,8 +219,10 @@ applyTheEffect(body);
 ```
 
 The same rule is on HTTP sink deliveries as
-`HookHeaders.idempotencyKey(boolean)`, which reads `x-ankusa-dedupe-key` and
-`x-ankusa-replay-id`.
+`HookHeaders.idempotencyKey(boolean)`, which reads `x-ankusa-idempotency-key`
+(and, only for a sender that predates it, computes the key from
+`x-ankusa-dedupe-key`, `x-ankusa-tenant` and `x-ankusa-source`;
+`x-ankusa-replay-id` is read for `includeReplay`).
 
 ## Options
 
