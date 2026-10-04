@@ -3,12 +3,13 @@ defmodule Ankusa.Dispatch.Replayer do
   Durable, paced replay jobs over the delivery rows.
 
   A job (`Ankusa.Replay`) re-sends either dead rows (`kind: :dlq`) or archived
-  hooks (`kind: :archive`). It never bulk-flips rows: once a tick it drips up
-  to `rate` rows into the existing due index, and only while the Pipeline's
-  oldest-due lag is at most the job's `max_lag_ms` and its in-flight window is
-  not full — so a replay only uses dispatch capacity live traffic leaves free,
-  and inherits retries, the DLQ, claim check and at-least-once bookkeeping from
-  the Pipeline untouched.
+  hooks (`kind: :archive`), or releases hooks held in the quarantine pen that
+  now pass verification (`kind: :quarantine`). It never bulk-flips rows: once
+  a tick it drips up to `rate` rows into the existing due index, and only while
+  the Pipeline's oldest-due lag is at most the job's `max_lag_ms` and its
+  in-flight window is not full — so a replay only uses dispatch capacity live
+  traffic leaves free, and inherits retries, the DLQ, claim check and
+  at-least-once bookkeeping from the Pipeline untouched.
 
   Every job is durable: its record (id, filter, rate, state, cursor, counters)
   lives in the store, and the cursor is written in the same batch as the rows
@@ -24,7 +25,8 @@ defmodule Ankusa.Dispatch.Replayer do
 
   require Logger
 
-  alias Ankusa.{BlobStore, SourceStore, Store, Telemetry, UUIDv7}
+  alias Ankusa.{BlobStore, Dedupe, SourceStore, Store, Telemetry, UUIDv7, Verification, Verifier}
+  alias Ankusa.Edge.Quarantine
   alias Ankusa.Queue
   alias Ankusa.Queue.{Archive, Deliveries}
   alias Ankusa.Store.Keys
@@ -183,7 +185,8 @@ defmodule Ankusa.Dispatch.Replayer do
           length(active) >= @max_active ->
             {:reply, {:error, :too_many_replays}, state}
 
-          spec.kind == :archive and Ankusa.whereis(state.instance, :queue_writer) == nil ->
+          spec.kind in [:archive, :quarantine] and
+              Ankusa.whereis(state.instance, :queue_writer) == nil ->
             {:reply, {:error, {:role_not_enabled, :edge}}, state}
 
           true ->
@@ -200,7 +203,7 @@ defmodule Ankusa.Dispatch.Replayer do
               updated_at: now,
               finished_at: nil,
               cursor: nil,
-              upto: dlq_upto(spec, now),
+              upto: upto(spec, now),
               moved: 0,
               scanned: 0,
               skipped: 0,
@@ -467,6 +470,54 @@ defmodule Ankusa.Dispatch.Replayer do
     end
   end
 
+  # Re-verify a page of held hooks against each source's current verifier.
+  # The ones that pass commit as new hooks (original id, `replay: job.id` on
+  # every delivery row) in one synced batch with their pen deletes and the
+  # job's cursor; the rest stay in the pen, counted as skipped.
+  defp step(state, %{kind: :quarantine} = job, n) do
+    instance = state.instance
+    now = System.system_time(:millisecond)
+
+    {first, upper} = Quarantine.range(Map.get(job.filter, :since), job.upto)
+    lower = if job.cursor, do: job.cursor <> <<0>>, else: first
+
+    with {:ok, hits, last, exhausted?, scanned} <-
+           Quarantine.page(instance, {lower, upper}, job.filter, n, @max_scan_per_tick),
+         {:ok, entries, ops, bytes, failed} <- release_page(instance, hits, job.id) do
+      job = %{
+        job
+        | cursor: last || job.cursor,
+          scanned: job.scanned + scanned,
+          skipped: job.skipped + failed,
+          updated_at: now
+      }
+
+      job = if exhausted?, do: %{job | state: :done, finished_at: now}, else: job
+
+      case commit_release(instance, job, entries, ops, exhausted?) do
+        {:ok, moved, duplicates} ->
+          job = %{job | moved: job.moved + moved, skipped: job.skipped + duplicates}
+          Quarantine.released(instance, bytes)
+
+          if moved > 0 do
+            Telemetry.emit([:replay, :moved], %{count: moved}, %{
+              instance: instance,
+              replay_id: job.id,
+              kind: job.kind
+            })
+          end
+
+          state = if exhausted?, do: finish_release(state, job), else: state
+          {:ok, state, job, moved, exhausted?}
+
+        {:error, reason} ->
+          {:error, state, job, reason}
+      end
+    else
+      {:error, reason} -> {:error, state, job, reason}
+    end
+  end
+
   # Find (and load) the segment the cursor points at, or the next one covering
   # the job's window.
   defp load_segment(state, job) do
@@ -730,13 +781,143 @@ defmodule Ankusa.Dispatch.Replayer do
     end
   end
 
+  # ── quarantine steps ──────────────────────────────────────────────────────
+
+  # Each hit's envelope, re-verified. Returns the queue entries, the deletes for
+  # their pen entries, the bytes those held, and how many hits stay held (a
+  # failed check, an unknown source, a body gone or unreadable). A store error
+  # fails the page so the tick retries it.
+  defp release_page(instance, hits, replay_id) do
+    result =
+      Enum.reduce_while(hits, {[], [], 0, 0}, fn {key, summary} = hit,
+                                                 {entries, ops, bytes, failed} ->
+        case Quarantine.envelope(instance, hit) do
+          {:ok, env} ->
+            case reverify(instance, env) do
+              {:ok, entry} ->
+                entry = Map.put(entry, :replay_id, replay_id)
+                size = Map.get(summary, :size, 0)
+
+                {:cont,
+                 {[entry | entries], Quarantine.delete_ops(key) ++ ops, bytes + size, failed}}
+
+              :failed ->
+                {:cont, {entries, ops, bytes, failed + 1}}
+            end
+
+          held when held in [:not_found, {:error, :undecodable}] ->
+            {:cont, {entries, ops, bytes, failed + 1}}
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+      end)
+
+    case result do
+      {:error, reason} -> {:error, reason}
+      {entries, ops, bytes, failed} -> {:ok, Enum.reverse(entries), ops, bytes, failed}
+    end
+  end
+
+  # The timestamp window is judged at the hook's receive time (`:now`, see
+  # `Ankusa.Verifier.check_timestamp/2`): the release is late, the hook was
+  # not. A verifier that raises fails the check like any other.
+  defp reverify(instance, env) do
+    with {:ok, source} <- SourceStore.fetch(instance, env.source_id) do
+      env = %{env | tenant_id: env.tenant_id || source.tenant_id}
+      {mod, opts} = source.verifier
+
+      case safe_verify(mod, env, opts) do
+        :ok ->
+          verification = %Verification{
+            status: :ok,
+            provider: mod,
+            scheme: Verifier.scheme_name(mod, opts)
+          }
+
+          env = %{env | verification: verification, seq: nil}
+
+          {:ok,
+           %{
+             envelope: %{env | dedupe_key: Dedupe.key(source.dedupe, env)},
+             sinks: source.sinks,
+             dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
+           }}
+
+        _failed ->
+          :failed
+      end
+    else
+      :error -> :failed
+    end
+  end
+
+  defp safe_verify(mod, env, opts) do
+    mod.verify(env, Keyword.put(opts, :now, div(env.received_at, 1000)))
+  rescue
+    error -> {:error, {:raised, error}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  # Nothing passed: only the cursor moves. Otherwise the writer commits the
+  # hooks, the pen deletes and the cursor as one synced batch. A duplicate
+  # (the provider's own retry already got through) still leaves the pen. The
+  # record written here predates this page's moved/duplicate counts; the next
+  # progress write (or `finish_release/2`) carries them.
+  defp commit_release(instance, job, [], _ops, finished?) do
+    case Store.write(instance, [job_put(job)], sync: finished?) do
+      :ok -> {:ok, 0, 0}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp commit_release(instance, job, entries, ops, _finished?) do
+    # The writer lives in the edge domain: a down or restarting writer must
+    # back this job off like any transient error, never crash the Replayer.
+    result =
+      try do
+        Queue.release(instance, entries, ops ++ [job_put(job)])
+      catch
+        :exit, reason -> {:error, {:writer_down, reason}}
+      end
+
+    case result do
+      {:ok, results} ->
+        {:ok, Enum.count(results, &match?({:committed, _}, &1)),
+         Enum.count(results, &match?({:duplicate, _}, &1))}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The counters the commit just settled (moved, duplicates) were not in the
+  # record it wrote; a finished job gets no further progress write, so persist
+  # them now.
+  defp finish_release(state, job) do
+    case Store.write(state.instance, [job_put(job)], sync: true) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[ankusa] replay job #{job.id} final persist failed: #{inspect(reason)}")
+    end
+
+    emit_state(state.instance, job)
+    prune_finished(put_job(state, job))
+  end
+
   # ── job bookkeeping ───────────────────────────────────────────────────────
 
-  defp dlq_upto(%{kind: :dlq, filter: filter}, now) do
+  # `:dlq` and `:quarantine` jobs only touch entries at or before their own
+  # creation (or their `until`), so what fails again during the job is never
+  # picked up a second time.
+  defp upto(%{kind: kind, filter: filter}, now) when kind in [:dlq, :quarantine] do
     min(Map.get(filter, :until, now), now)
   end
 
-  defp dlq_upto(_spec, _now), do: nil
+  defp upto(_spec, _now), do: nil
 
   defp job_put(job) do
     {:put, :default, Keys.replay_job(job.id), :erlang.term_to_binary(job)}

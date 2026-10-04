@@ -22,7 +22,9 @@ defmodule Ankusa.Queue do
   @type entry :: %{
           required(:envelope) => Envelope.t(),
           required(:sinks) => [{module(), keyword()}],
-          optional(:dedupe_ttl_ms) => pos_integer() | nil
+          optional(:dedupe_ttl_ms) => pos_integer() | nil,
+          # set on every delivery row as `replay:` (a released quarantine hook)
+          optional(:replay_id) => String.t()
         }
 
   @doc """
@@ -42,13 +44,36 @@ defmodule Ankusa.Queue do
   @spec enqueue(atom(), [entry()], integer() | :infinity) ::
           {:ok, [{:committed, Envelope.t()} | {:duplicate, Envelope.t()}]} | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do
-    items =
-      Enum.map(entries, fn %{envelope: env, sinks: sinks} = entry ->
-        {env, Envelope.to_binary(%{env | seq: nil}), Enum.map(sinks, &elem(&1, 0)),
-         Map.get(entry, :dedupe_ttl_ms)}
-      end)
+    GenServer.call(
+      Ankusa.via(instance, :queue_writer),
+      {:enqueue, items(entries), deadline, []},
+      :infinity
+    )
+  end
 
-    GenServer.call(Ankusa.via(instance, :queue_writer), {:enqueue, items, deadline}, :infinity)
+  @doc """
+  Commit hooks released from the quarantine pen: `enqueue/3` semantics (dedupe,
+  archive obligation, fresh seqs) plus `replay: replay_id` on every delivery
+  row, with `extra_ops` (the pen deletes and the job's cursor) in the same
+  synced batch — so a crash cannot leave a hook both committed and still held,
+  or held and gone. `extra_ops` commit even when every entry is a duplicate.
+  Never deadline-bound.
+  """
+  @spec release(atom(), [entry()], [Ankusa.Store.op()]) ::
+          {:ok, [{:committed, Envelope.t()} | {:duplicate, Envelope.t()}]} | {:error, term()}
+  def release(instance, entries, extra_ops) do
+    GenServer.call(
+      Ankusa.via(instance, :queue_writer),
+      {:enqueue, items(entries), :infinity, extra_ops},
+      :infinity
+    )
+  end
+
+  defp items(entries) do
+    Enum.map(entries, fn %{envelope: env, sinks: sinks} = entry ->
+      {env, Envelope.to_binary(%{env | seq: nil}), Enum.map(sinks, &elem(&1, 0)),
+       Map.get(entry, :dedupe_ttl_ms), Map.get(entry, :replay_id)}
+    end)
   end
 
   @type redrive_entry :: %{

@@ -160,12 +160,17 @@ export interface paths {
          * Create a replay job
          * @description Creates a durable, paced replay job. `kind: dlq` re-sends dead delivery
          *     rows; `kind: archive` re-sends archived hooks over a `received_at`
-         *     window. Rows are dripped in at `rate` items per second, only while the
-         *     dispatch pipeline's oldest-due lag is at most `max_lag_ms` and its
-         *     in-flight window is not full, so a replay only uses capacity live
-         *     traffic leaves free. A `dlq` job touches only rows dead-lettered at or
-         *     before its own creation time. Every replayed delivery keeps the hook's
-         *     original `id` and `dedupe_key` and carries the job id as `replay_id`.
+         *     window; `kind: quarantine` re-verifies hooks held in this node's
+         *     quarantine pen against each source's current verifier (the timestamp
+         *     window judged at the hook's receive time) and commits the ones that now
+         *     pass as new hooks, with the hook's original `id`. Held hooks that still
+         *     fail stay in the pen. Rows are dripped in at `rate` items per second,
+         *     only while the dispatch pipeline's oldest-due lag is at most
+         *     `max_lag_ms` and its in-flight window is not full, so a replay only
+         *     uses capacity live traffic leaves free. A `dlq` or `quarantine` job
+         *     touches only entries dead-lettered or quarantined at or before its own
+         *     creation time. Every replayed delivery keeps the hook's original `id`
+         *     and `dedupe_key` and carries the job id as `replay_id`.
          *     Posting the same spec again while a `running` or `paused` job with the
          *     same kind and filter exists returns that job (200), so a proxy retry
          *     is idempotent.
@@ -211,13 +216,22 @@ export interface paths {
         /**
          * Recent quarantined hooks
          * @description The newest quarantined entries from this node's store, newest first.
-         *     Metadata only — bodies are never returned; the headers and body stay in
-         *     the store.
+         *     Metadata only — bodies are never returned; the whole request stays in
+         *     the store until a `quarantine` replay job releases it or a purge
+         *     deletes it.
          */
         get: operations["listQuarantined"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete quarantined hooks
+         * @description Deletes up to `limit` entries matching every given filter, oldest
+         *     first, in one synced batch, and frees their bytes against
+         *     `quarantine.max_bytes`. No filter deletes the oldest `limit` entries.
+         *     Deleted hooks are gone for good — to keep the ones that now verify, run
+         *     a `quarantine` replay job first.
+         */
+        delete: operations["purgeQuarantined"];
         options?: never;
         head?: never;
         patch?: never;
@@ -473,27 +487,45 @@ export interface components {
         QuarantineEntry: {
             id: string;
             source_id: string;
+            /** @description The hook's tenant (`default` unless the source or a tenant route set one); `null` only for entries held before the pen recorded it. */
+            tenant_id?: string | null;
             /** @description When the edge received the hook, unix milliseconds. */
             received_at: number;
             /** @description `inspect/1` of the verifier failure, e.g. `:no_match`. */
             reason: string;
+            /** @description Bytes the entry holds against `quarantine.max_bytes`; `null` for entries held before the pen recorded it. */
+            size?: number | null;
         };
         QuarantinePage: {
             entries: components["schemas"]["QuarantineEntry"][];
         };
+        QuarantinePurge: {
+            /** @description Entries deleted. */
+            deleted: number;
+            /** @description The bytes they held against `quarantine.max_bytes`. */
+            bytes: number;
+        };
         ReplaySpec: {
             /**
-             * @description `dlq` re-sends dead rows; `archive` re-sends archived hooks over a time window.
+             * @description `dlq` re-sends dead rows; `archive` re-sends archived hooks over a
+             *     time window; `quarantine` re-verifies hooks held in the quarantine
+             *     pen and commits the ones that now pass.
              * @enum {string}
              */
-            kind: "dlq" | "archive";
+            kind: "dlq" | "archive" | "quarantine";
             /** @description Exact source id to filter on. */
             source_id?: string;
-            /** @description Exact envelope id to filter on (`dlq` only). */
+            /** @description Exact envelope id to filter on (`dlq` and `quarantine` only). */
             id?: string;
-            /** @description Inclusive lower bound on the dead-letter timestamp, unix milliseconds (`dlq` only). */
+            /**
+             * @description Inclusive lower bound, unix milliseconds: on the dead-letter
+             *     timestamp (`dlq`) or on `received_at` (`quarantine`).
+             */
             since?: number;
-            /** @description Inclusive upper bound on the dead-letter timestamp, unix milliseconds (`dlq` only). Must not be less than `since`. */
+            /**
+             * @description Inclusive upper bound, unix milliseconds, on the same timestamp as
+             *     `since` (`dlq` and `quarantine` only). Must not be less than `since`.
+             */
             until?: number;
             /** @description Inclusive lower bound on `received_at`, unix milliseconds (`archive` only). */
             from?: number;
@@ -507,7 +539,7 @@ export interface components {
             /** @description Indexes into the source's current sinks; omitted means every current sink (`archive` only). */
             sinks?: number[];
             /**
-             * @description Items per second — delivery rows for `dlq`, hooks for `archive`.
+             * @description Items per second — delivery rows for `dlq`, hooks for `archive` and `quarantine`.
              * @default 1000
              */
             rate: number;
@@ -532,7 +564,7 @@ export interface components {
             /** @description UUIDv7 job id; also the `replay_id` on every replayed delivery. */
             id: string;
             /** @enum {string} */
-            kind: "dlq" | "archive";
+            kind: "dlq" | "archive" | "quarantine";
             /** @enum {string} */
             state: "running" | "paused" | "done" | "cancelled" | "failed";
             /** @description Exactly the filter keys given at creation. */
@@ -547,11 +579,17 @@ export interface components {
             updated_at: number;
             /** @description Unix milliseconds, `null` until the job finishes. */
             finished_at: number | null;
-            /** @description Rows revived (`dlq`) or hooks re-enqueued (`archive`). */
+            /** @description Rows revived (`dlq`), hooks re-enqueued (`archive`), or held hooks committed after passing verification again (`quarantine`). */
             moved: number;
             /** @description Keys or records examined. */
             scanned: number;
-            /** @description Archive records with no source, no bound sink, or an undecodable frame. */
+            /**
+             * @description Archive records with no source, no bound sink, or an undecodable
+             *     frame (`archive`); held hooks that still fail verification, whose
+             *     source is gone, or that were a duplicate of a hook already
+             *     accepted (`quarantine` — the duplicates leave the pen, the rest
+             *     stay in it).
+             */
             skipped: number;
             /** @description Deliveries this job's rows got through, per pipeline outcome reports. */
             delivered: number;
@@ -818,7 +856,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description `400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key. */
+        /** @description `400`. `invalid_filter`: a non-integer `since`, `until` or `limit`, a negative `since`/`until` or an `until` before `since` on a quarantine purge, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key. */
         InvalidFilter: {
             headers: {
                 [name: string]: unknown;
@@ -1150,11 +1188,12 @@ export interface operations {
         };
         /**
          * @description `kind` is required. Unknown keys are refused with `invalid_filter`.
-         *     `since`/`until` are inclusive dead-letter-time bounds (unix ms) for
-         *     `dlq`; `from`/`to` are inclusive `received_at` bounds (unix ms) for
-         *     `archive`, and `to` must be old enough that the compactor has
-         *     archived the whole window. `sinks` indexes into the source's current
-         *     sinks; omitted means every current sink.
+         *     `since`/`until` are inclusive bounds (unix ms) on the dead-letter time
+         *     for `dlq` and on `received_at` for `quarantine`; `from`/`to` are
+         *     inclusive `received_at` bounds (unix ms) for `archive`, and `to` must
+         *     be old enough that the compactor has archived the whole window.
+         *     `sinks` indexes into the source's current sinks; omitted means every
+         *     current sink.
          */
         requestBody: {
             content: {
@@ -1182,8 +1221,9 @@ export interface operations {
             };
             400: components["responses"]["InvalidFilter"];
             /**
-             * @description `role_not_enabled` (an `archive` job on a node without a queue
-             *     writer) or `too_many_replays` (16 jobs already running or paused).
+             * @description `role_not_enabled` (an `archive` or `quarantine` job on a node
+             *     without a queue writer — both roles, `edge` and `dispatch`, must
+             *     run) or `too_many_replays` (16 jobs already running or paused).
              */
             409: {
                 headers: {
@@ -1278,6 +1318,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["QuarantinePage"];
+                };
+            };
+            400: components["responses"]["InvalidFilter"];
+            409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    purgeQuarantined: {
+        parameters: {
+            query?: {
+                /** @description Exact source id. */
+                source_id?: string;
+                /** @description Exact envelope id. */
+                id?: string;
+                /** @description Inclusive lower bound on `received_at`, unix milliseconds. */
+                since?: number;
+                /** @description Inclusive upper bound on `received_at`, unix milliseconds. Must not be less than `since`. */
+                until?: number;
+                /** @description Maximum entries deleted. Values outside 1..10000 are clamped to that range. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What was deleted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuarantinePurge"];
                 };
             };
             400: components["responses"]["InvalidFilter"];

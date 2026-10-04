@@ -65,6 +65,7 @@ Every top-level section, with its keys and defaults:
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent`; `persistent` adds API-managed sources kept in this node's store). See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
+| `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `lifecycle` | `sinks` (none: off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
@@ -80,7 +81,7 @@ One source per provider endpoint; the key is the catch-URL segment
 | Key | Meaning |
 | --- | --- |
 | `tenant` | The storage/retention scope. With `routing: tenant_path` the URL wins. Default `default`. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300). `hmac` takes the descriptor keys below. |
+| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`: a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300). `hmac` takes the descriptor keys below. |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
 | `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. |
@@ -189,8 +190,9 @@ Never `Application.get_env/2` scattered through call sites:
 
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
-`:dispatch`, `:storage`, `:claim_check`, and `:admin` are maps and get **deep-merged**
-over the defaults. Pass only the keys you want to change.
+`:dispatch`, `:storage`, `:claim_check`, `:admin`, `:rate_limits`,
+`:quarantine` and `:lifecycle` are maps and get **deep-merged** over the
+defaults. Pass only the keys you want to change.
 
 ```elixir
 config :ankusa,
@@ -236,7 +238,8 @@ config :ankusa,
     ip_denied_status: 403,
     seed: []
   },
-  rate_limits: %{default: nil, tenants: %{}}
+  rate_limits: %{default: nil, tenants: %{}},
+  quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
 ```
 
 | Key | Default | Meaning |
@@ -280,6 +283,7 @@ config :ankusa,
 | `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. With `403` a sender can tell a route that has its own `ip_rules` (which denied it) from a path that does not exist (`404`); `404` removes that distinction. |
 | `routes.seed` | `[]` | Route definitions loaded at boot (see below). With the ETS store they are loaded on **every** boot. |
 | `rate_limits.default`, `rate_limits.tenants` | `nil`, `%{}` | Per-tenant ingest limits, `%{rate: hooks_per_second, burst: hooks}`; fractions are allowed (`0.5` is one every two seconds) and both keys are required. Precedence is a runtime override, then the tenant's own entry, then `default`; no limit means unlimited. See [Rate limits](#rate-limits). |
+| `quarantine.burst`, `quarantine.rate`, `quarantine.max_bytes` | `100`, `20`, `1_073_741_824` | The quarantine pen: one token bucket per source (`burst` hooks back to back, refilled `rate` per second; over it, `429 quarantine_rate_limited`) and a cap on the pen's total bytes (a hook that would cross it is `503 quarantine_full`; the pen never evicts). See [`delivery.md#quarantine`](delivery.md#quarantine). |
 
 #### The admin API
 
@@ -288,10 +292,13 @@ With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
 `GET /v1/wal` (this node's store stats: `next_seq`, and the `hooks`,
 `deliveries` and `disk_bytes` estimates; `{}` when the store cannot be read,
 `409 wal_disabled` under `wal.type: none`), `GET /v1/dlq`, the replay jobs API
-— `POST /v1/replays`, `GET /v1/replays`, `GET|PATCH /v1/replays/{id}` — and
-`GET /v1/quarantine` (`:edge` role) on `admin.port`, independent of the node's
-roles. Replay jobs are per node, so a fleet replay is one `POST /v1/replays`
-per dispatch node. Source management is
+— `POST /v1/replays`, `GET /v1/replays`, `GET|PATCH /v1/replays/{id}`; `kind`
+is `dlq`, `archive` or `quarantine` — and `GET|DELETE /v1/quarantine` (`:edge`
+role: list the pen, or purge entries by `source_id`, `id`, `since`/`until`,
+`limit`) on `admin.port`, independent of the node's roles. Replay jobs are per
+node, so a fleet replay is one `POST /v1/replays` per dispatch node; a
+`quarantine` job also needs the `:edge` role, since it releases this node's
+pen into this node's queue. Source management is
 node-agnostic: `GET|POST /v1/tenants/{tenant}/sources` and
 `GET|PUT|DELETE /v1/tenants/{tenant}/sources/{name}`, on a writable source
 store (`409 source_store_read_only` otherwise). The `:edge` role also gets
@@ -476,8 +483,8 @@ config :ankusa,
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `tenant_id` | `"default"` | The storage/retention scope. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. |
-| `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen) / `:accept_flag` (commits, envelope flagged). |
+| `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. `Ankusa.Verifier.Hmac`'s `:secret` is a binary or a list of binaries, newest first — every key is tried, so a rotation is `secret: [new, old]`. |
+| `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen; see [`delivery.md#quarantine`](delivery.md#quarantine)) / `:accept_flag` (commits, envelope flagged). |
 | `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`, delivered to in order, independently retried. |
 
 A source can override the dispatch-wide retry policy by putting a

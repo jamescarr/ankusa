@@ -57,6 +57,7 @@ defmodule AnkusaServer.ConfigTest do
     config = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).config
 
     assert config.admin == %{enabled: true, port: 4002}
+    assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
     assert config.route_resolver == {Ankusa.RouteResolver.Path, [prefix: ["webhooks"]]}
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) |> Enum.sort() == ["github", "open", "standard", "stripe"]
@@ -492,6 +493,41 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ ~s(sources.a.verify: missing required key "secret")
   end
 
+  test "a verifier secret may be a list, for a rotation window" do
+    path =
+      tmp_config("""
+      sources:
+        a:
+          verify: {type: stripe, secret: ["${A}", "${B}"]}
+          sinks: [{type: log}]
+      """)
+
+    config = Config.load!(path: path, env: %{"A" => "a", "B" => "b"}).config
+    assert %{verifier: {Ankusa.Verifier.Hmac, opts}} = source_from(config, "a")
+    assert opts[:secret] == ["a", "b"]
+  end
+
+  test "a verifier secret must be a non-empty string or a list of them" do
+    for {secret, message} <- [
+          {"[]", "sources.a.verify.secret: expected a string or a list of strings, got []"},
+          {"[a, 1]",
+           ~s(sources.a.verify.secret: expected a string or a list of strings, got ["a", 1])},
+          {"[a, b, c, d, e, f, g, h, i]", "sources.a.verify.secret: at most 8 secrets, got 9"},
+          # An empty HMAC key verifies whatever anyone signs with it, so an
+          # unset `${VAR:-}` is a load error, not a skipped rotation slot.
+          {~s("${UNSET:-}"), "sources.a.verify.secret: must not be empty"},
+          {~s(["${A}", "${UNSET:-}"]), "sources.a.verify.secret[1]: must not be empty"}
+        ] do
+      path =
+        tmp_config(
+          "sources: {a: {verify: {type: stripe, secret: #{secret}}, sinks: [{type: log}]}}\n"
+        )
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{"A" => "a"}) end
+      assert error.message == message
+    end
+  end
+
   test "a source with no sinks is rejected" do
     path = tmp_config("sources: {a: {verify: {type: none}, sinks: []}}\n")
 
@@ -835,6 +871,26 @@ defmodule AnkusaServer.ConfigTest do
            ~s(rate_limits.tenants: expected a mapping of tenant id to limit, got ["acme"])},
           {"rate_limits: {default: {rate: 0, burst: 1}}",
            "rate_limits.default.rate must be a number greater than 0, got 0"}
+        ] do
+      path = tmp_config(yaml <> "\n")
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
+  end
+
+  test "a quarantine section maps to core's quarantine config" do
+    path = tmp_config("quarantine: {burst: 5, rate: 0.5, max_bytes: 1024}\n")
+
+    assert Config.load!(path: path, env: %{}).config.quarantine ==
+             %{burst: 5, rate: 0.5, max_bytes: 1024}
+  end
+
+  test "a bad quarantine key names it, and core's ranges come back as core's message" do
+    for {yaml, message} <- [
+          {"quarantine: {max_byte: 1}", ~s(quarantine: unknown key "max_byte")},
+          {"quarantine: {rate: slow}", ~s(quarantine.rate: expected a number, got "slow")},
+          {"quarantine: {burst: 0}", "quarantine.burst must be a positive integer, got 0"},
+          {"quarantine: {max_bytes: 0}", "quarantine.max_bytes must be a positive integer, got 0"}
         ] do
       path = tmp_config(yaml <> "\n")
       error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end

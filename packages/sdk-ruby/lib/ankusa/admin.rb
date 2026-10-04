@@ -83,8 +83,9 @@ module Ankusa
 
     # POST /v1/replays -> the created Replay, as a Hash.
     #
-    # `spec` is the replay spec: `{"kind" => "dlq", ...}` or
-    # `{"kind" => "archive", "from" => ms, "to" => ms, ...}`. A retried POST
+    # `spec` is the replay spec: `{"kind" => "dlq", ...}`,
+    # `{"kind" => "archive", "from" => ms, "to" => ms, ...}` or
+    # `{"kind" => "quarantine", ...}`. A retried POST
     # with the same normalized filter returns the running job with 200 instead
     # of starting a second one.
     def create_replay(spec)

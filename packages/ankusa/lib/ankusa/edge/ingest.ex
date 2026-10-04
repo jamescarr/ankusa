@@ -23,7 +23,12 @@ defmodule Ankusa.Edge.Ingest do
           | {:quarantined, term()}
           | {:rejected, term()}
           | {:error,
-             :unknown_source | :overload | :store_unavailable | {:rate_limited, pos_integer()}}
+             :unknown_source
+             | :overload
+             | :store_unavailable
+             | :quarantine_full
+             | {:rate_limited, pos_integer()}
+             | {:quarantine_rate_limited, pos_integer()}}
 
   @type request :: %{
           required(:source_id) => String.t(),
@@ -75,7 +80,7 @@ defmodule Ankusa.Edge.Ingest do
 
   # The charge comes after verification, and only for hooks verification
   # accepted: a forged flood is free, so it can never lock a tenant out of its
-  # own budget. Quarantine has its own global bucket and never spends a
+  # own budget. Quarantine has its own per-source bucket and never spends a
   # tenant's.
   defp admit(instance, source, env) do
     # A forged, flag-accepted request must not claim a provider event key and
@@ -105,7 +110,7 @@ defmodule Ankusa.Edge.Ingest do
   # ── verification + policy ─────────────────────────────────────────────────
 
   defp verify(instance, %Source{verifier: {mod, opts}} = source, env) do
-    scheme = verifier_scheme(mod, opts)
+    scheme = Ankusa.Verifier.scheme_name(mod, opts)
 
     outcome =
       Ankusa.Telemetry.span([:verify], %{instance: instance, source_id: source.id}, fn ->
@@ -127,14 +132,6 @@ defmodule Ankusa.Edge.Ingest do
           :accept_flag -> {:accept, %{env | verification: %{v | flagged: true}}}
         end
     end
-  end
-
-  # `function_exported?/3` is false for a module nothing has loaded yet, which
-  # would label the first verification with the module name instead of the scheme.
-  defp verifier_scheme(mod, opts) do
-    if Code.ensure_loaded?(mod) and function_exported?(mod, :scheme_name, 1),
-      do: mod.scheme_name(opts),
-      else: inspect(mod)
   end
 
   defp verify_status(:ok), do: :ok
@@ -179,7 +176,8 @@ defmodule Ankusa.Edge.Ingest do
   defp quarantine(instance, env, reason) do
     case Quarantine.put(instance, env, reason) do
       :ok -> {:quarantined, reason}
-      :rate_limited -> {:rejected, {:quarantine_rate_limited, reason}}
+      {:rate_limited, retry_after_ms} -> {:error, {:quarantine_rate_limited, retry_after_ms}}
+      :full -> {:error, :quarantine_full}
       {:error, :store_unavailable} -> {:error, :store_unavailable}
     end
   end
@@ -211,5 +209,6 @@ defmodule Ankusa.Edge.Ingest do
   defp tag({:quarantined, _}), do: :quarantined
   defp tag({:rejected, _}), do: :rejected
   defp tag({:error, {:rate_limited, _retry_after_ms}}), do: :rate_limited
+  defp tag({:error, {:quarantine_rate_limited, _retry_after_ms}}), do: :quarantine_rate_limited
   defp tag({:error, reason}), do: reason
 end

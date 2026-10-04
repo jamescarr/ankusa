@@ -2,7 +2,8 @@ defmodule Ankusa.Admin.Router do
   @moduledoc """
   The operator HTTP API: health, Prometheus metrics, the redacted config, the
   AsyncAPI document of the channels this instance publishes to, the
-  dead-letter queue, and this node's recent quarantine list.
+  dead-letter queue, replay jobs, and this node's quarantine pen (list and
+  purge).
 
   It exists so operating Ankusa does not require an Elixir shell. Everything
   here had an IEx-only affordance before (`Ankusa.Dispatch.replay/2`,
@@ -43,6 +44,10 @@ defmodule Ankusa.Admin.Router do
   @max_rate_limit_body 65_536
   @default_limit 100
   @max_limit 1000
+  # A purge is one synced store batch: big enough to clear a flood in a few
+  # calls, small enough that one call never holds the pen for long.
+  @default_purge_limit 1000
+  @max_purge_limit 10_000
 
   # Same rule as `Ankusa.SourceStore` (and `ClaimCheck.Ref`): a tenant or source
   # name is a URL path segment and a storage partition, so it must not need
@@ -119,6 +124,10 @@ defmodule Ankusa.Admin.Router do
 
   get "/v1/quarantine" do
     require_role(conn, :edge, &quarantine_index/1)
+  end
+
+  delete "/v1/quarantine" do
+    require_role(conn, :edge, &quarantine_purge/1)
   end
 
   get "/v1/tenants/:tenant/sources" do
@@ -201,6 +210,39 @@ defmodule Ankusa.Admin.Router do
       end
     else
       {:error, field} -> invalid_filter(conn, field)
+    end
+  end
+
+  # `since`/`until` are inclusive bounds on `received_at` (ms). No filter at
+  # all purges the oldest `limit` entries.
+  defp quarantine_purge(conn) do
+    params = Plug.Conn.fetch_query_params(conn).query_params
+
+    with {:ok, source_id} <- string_param(params, "source_id"),
+         {:ok, id} <- string_param(params, "id"),
+         {:ok, since} <- non_neg_param(params, "since"),
+         {:ok, until} <- non_neg_param(params, "until"),
+         :ok <- if(since && until && until < since, do: {:error, "until"}, else: :ok),
+         {:ok, limit} <- int_param(params, "limit", @default_purge_limit) do
+      filter = %{source_id: source_id, id: id, since: since, until: until}
+      limit = limit |> max(1) |> min(@max_purge_limit)
+
+      case Ankusa.Edge.Quarantine.purge(instance(conn), filter, limit) do
+        {:ok, %{deleted: deleted, bytes: bytes}} ->
+          send_json(conn, 200, %{deleted: deleted, bytes: bytes})
+
+        {:error, :store_unavailable} ->
+          send_json(conn, 503, %{error: "store_unavailable"})
+      end
+    else
+      {:error, field} -> invalid_filter(conn, field)
+    end
+  end
+
+  defp non_neg_param(params, key) do
+    case int_param(params, key, nil) do
+      {:ok, value} when is_integer(value) and value < 0 -> {:error, key}
+      other -> other
     end
   end
 
@@ -423,7 +465,7 @@ defmodule Ankusa.Admin.Router do
 
   # ── replay jobs ────────────────────────────────────────────────────────────
 
-  @kind_map %{"dlq" => :dlq, "archive" => :archive}
+  @kind_map %{"dlq" => :dlq, "archive" => :archive, "quarantine" => :quarantine}
   @state_map %{"running" => :running, "paused" => :paused, "cancelled" => :cancelled}
   @replay_spec_keys ~w(kind source_id id since until from to sinks rate max_lag_ms)
   @replay_patch_keys ~w(state rate max_lag_ms)
@@ -629,8 +671,19 @@ defmodule Ankusa.Admin.Router do
     }
   end
 
-  defp quarantine_entry(%{id: id, source_id: source_id, received_at: received_at, reason: reason}) do
-    %{id: id, source_id: source_id, received_at: received_at, reason: inspect(reason)}
+  # `tenant_id` and `size` are absent from entries written before the pen kept
+  # them (0.4): `null`.
+  defp quarantine_entry(
+         %{id: id, source_id: source_id, received_at: received_at, reason: reason} = e
+       ) do
+    %{
+      id: id,
+      source_id: source_id,
+      tenant_id: Map.get(e, :tenant_id),
+      received_at: received_at,
+      reason: inspect(reason),
+      size: Map.get(e, :size)
+    }
   end
 
   # ── request bits ────────────────────────────────────────────────────────────

@@ -463,6 +463,8 @@ A verification failure under `on_verify_failure: :quarantine` writes the full en
 
 **Fix:** answer non-2xx (`503` with `Retry-After` lets the provider hold the event until the secret is fixed), or ship a re-verify/replay path that feeds the pen back through ingest. Add a `secrets: [current, previous]` rotation window to the verifiers.
 
+**Status (2026-10-03).** Fixed, keeping `202`. Each pen entry holds the whole envelope (method, path, headers, body, tenant), and `POST /v1/replays {"kind":"quarantine"}` re-verifies held hooks against each source's *current* verifier — judging the timestamp window at the hook's receive time, so a release hours later still passes a hook that was on time — and commits the ones that pass through the queue writer: original `id`, `replay_id` on every delivery row, dedupe, the archive obligation, and the pen deletes in the same synced batch (`Ankusa.Queue.release/3`). Hooks that still fail stay held and count as `skipped`; `DELETE /v1/quarantine` purges them. `Ankusa.Verifier.Hmac` takes a list of secrets (`secret: [new, old]` in YAML too), so a rotation window keeps hooks out of the pen in the first place. Entries a 0.3/0.4 node quarantined (headers and body only) are releasable, rebuilt as a `POST /`. Under `wal: none` there is no Replayer, so the pen there is inspect and purge only.
+
 <a id="c3"></a>
 ### C3 · Low · Code — Fallback check-ins are dated by `received_at`
 
@@ -759,6 +761,8 @@ The token bucket (100 burst, 20/s, hard-coded) is one field in one GenServer for
 
 **Fix:** per-source buckets, `429`/`503` + `Retry-After` on exhaustion, a byte cap with rotation, and I/O errors handled as values.
 
+**Status (2026-10-03).** Fixed. One token bucket per source (`quarantine.burst`/`quarantine.rate`, defaults unchanged at 100 and 20 per second), so a flood on one source never spends another's tokens, and exhaustion is `429 quarantine_rate_limited` with `Retry-After` — never `401`, which now always means a definite signature failure. The pen's bytes are counted (summed back from the store at boot) and capped by `quarantine.max_bytes` (default 1 GiB): a write that would cross it is `503 quarantine_full` with `Retry-After: 60`. Refusing rather than rotating is deliberate: every held hook was answered `202`, so evicting one is the silent loss E1 is about. The cap is one budget for the whole pen: a single source flooding at its bucket's rate can fill it, after which every source's failures are refused with `503` (retryable; nothing acked is lost) until an operator purges that source. The pen has lived in the store since G1, so its I/O errors are values: a store that cannot take the write is a `503` that spends no token. New event `[:ankusa, :quarantine, :full]`, exported as `ankusa_quarantine_full_total`.
+
 <a id="o2"></a>
 ### O2 · High · Code — Unauthenticated control planes on every interface, leaky redaction, secrets in crash reports
 
@@ -790,6 +794,8 @@ The token bucket (100 burst, 20/s, hard-coded) is one field in one GenServer for
 `verifier/hmac.ex:247-253`
 
 `Keyword.get(opts, :secret, "")`: a library user who forgets `:secret` gets a verifier that accepts any hook signed with the empty key, which anyone can compute. An explicit `nil` raises per request instead, a `500` loop. Validate at boot and refuse empty secrets.
+
+**Status (2026-10-03).** Fixed to fail closed, at verify time rather than at boot. `Ankusa.Verifier.Hmac` treats a missing, `nil` or empty `:secret` — and an empty list, or a list element that is empty or does not decode — as `{:error, :bad_secret}` for every hook, instead of an HMAC with the empty key (or a per-request raise). The image's loader refuses an empty `verify.secret`, or an empty list element such as an unset `${OLD:-}`, at load, so `check-config` names it. A boot-time check for embedded `Ankusa.Source` definitions is still open.
 
 <a id="k2"></a>
 ### K2 · Medium · Code — The HTTP hand-off is unauthenticated on both ends
@@ -919,10 +925,10 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 | Claim | Where | Reality |
 |---|---|---|
-| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `202` for quarantine with no way back (E1); `201` for a non-UTF-8 header no queue sink can ever take (B8). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed. The drop of unroutable RabbitMQ publishes, B1, is fixed: they are retried, then dead-lettered.) |
+| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `201` for a non-UTF-8 header no queue sink can ever take (B8). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed. The drop of unroutable RabbitMQ publishes, B1, is fixed: they are retried, then dead-lettered. The `202` for quarantine with no way back, E1, is fixed: a `quarantine` replay job re-verifies and releases held hooks.) |
 | "Take the compactor down: ingest keeps acking, the WAL grows, an alarm fires, nothing is lost." | `architecture.md:62-73`, `Ankusa.Instance` module doc | Ingest does keep acking and nothing is lost, and the compactor no longer rebuilds the instance (S1 fixed) — but **an alarm still does not fire**: no store-size or cursor-lag metric is exposed (O5). |
-| Quarantine: "a flood of forged requests can't fill the disk". | `delivery.md:442-444` | Still false: the pen's total size is uncapped, and moving it into the store only makes each write durable — a flood can still fill the disk (E2). |
-| "A hook in the pen was never acked." | `delivery.md:459-460` | Still false: the provider received a `202`, and the pen is still write-only — nothing re-verifies a held hook back into ingest (E1). |
+| Quarantine: "a flood of forged requests can't fill the disk". | `delivery.md:442-444` | Fixed: the pen's bytes are capped by `quarantine.max_bytes`, and a full pen refuses with `503 quarantine_full` instead of growing (E2). |
+| "A hook in the pen was never acked." | `delivery.md:459-460` | Fixed: the claim is gone from `delivery.md`, which now says the provider got a `202`, and the pen has a way back — a `quarantine` replay job re-verifies held hooks against the current secret and commits the ones that pass (E1). |
 | "There are no global process names anywhere in the framework." | `architecture.md:220-221` | Every adapter registers fixed node-global supervisors (B7). |
 | One claim-check gateway serves N ingest nodes. | `architecture.md:288-331` | Per-node buckets make other nodes' claims `404` (C1). |
 | "The dynamic store itself isn't shipped yet." | `multi-tenancy.md:127` | `SourceStore.Persistent` and tenant source CRUD ship. |

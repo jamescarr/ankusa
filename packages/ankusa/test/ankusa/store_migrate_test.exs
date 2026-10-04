@@ -220,6 +220,13 @@ defmodule Ankusa.StoreMigrateTest do
       assert entry.id == "q-1"
       assert entry.source_id == "demo"
       assert entry.reason == {:verification_failed, :bad_signature}
+      assert entry.size > 0
+
+      # 0.3 kept only headers and body; a release rebuilds the hook around
+      # them and commits it under its original id.
+      assert {:ok, :created, _job} = Ankusa.Replay.start(inst, kind: :quarantine)
+      assert_receive {:delivered, "q-1", _attempt}, 5_000
+      assert {:ok, []} = Quarantine.recent(inst, 10)
 
       assert {:ok, %{tenant: "acme", name: "billing"}} = SourceStore.get(inst, "acme", "billing")
       assert RateLimiter.effective(inst, "acme") == {%{rate: 2, burst: 4}, :override}

@@ -48,20 +48,39 @@ defmodule Ankusa.Verifier do
   end
 
   @doc """
+  The scheme name a verification is attributed to: `mod.scheme_name(opts)`
+  when the verifier implements it, else the module name.
+  """
+  @spec scheme_name(module(), keyword()) :: String.t() | nil
+  def scheme_name(mod, opts) do
+    # `function_exported?/3` is false for a module nothing has loaded yet, which
+    # would label the first verification with the module name instead of the
+    # scheme.
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :scheme_name, 1),
+      do: mod.scheme_name(opts),
+      else: inspect(mod)
+  end
+
+  @doc """
   Check a Unix-seconds timestamp from a signature header against a tolerance
   window.
 
   Every verifier that carries a signed timestamp needs this, so the window
   semantics are defined once instead of per adapter. `opts` may set `:tolerance`
-  in seconds (default #{@default_tolerance_seconds}, i.e. ±5 minutes).
+  in seconds (default #{@default_tolerance_seconds}, i.e. ±5 minutes), and
+  `:now` (Unix seconds) to judge the window against a fixed instant instead of
+  the clock: `Ankusa.Dispatch.Replayer` sets it to the hook's receive time when
+  it re-verifies a quarantined hook, so a release hours later holds the hook to
+  the window it arrived in, not one it can no longer meet.
   """
   @spec check_timestamp(String.t(), keyword()) :: :ok | {:error, atom()}
   def check_timestamp(ts, opts) do
     tolerance = Keyword.get(opts, :tolerance, @default_tolerance_seconds)
+    now = Keyword.get_lazy(opts, :now, fn -> System.system_time(:second) end)
 
     case Integer.parse(ts) do
       {ts_int, _} ->
-        if abs(System.system_time(:second) - ts_int) <= tolerance do
+        if abs(now - ts_int) <= tolerance do
           :ok
         else
           {:error, :timestamp_out_of_tolerance}

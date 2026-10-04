@@ -89,6 +89,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   restart used to leave the store and every supervisor running but
   unregistered (`Ankusa.whereis/2` returned `nil`). The application's own
   supervisor is now `:rest_for_one` for the same reason.
+- **Quarantine release.** `kind: :quarantine` replay jobs (`POST /v1/replays
+  {"kind":"quarantine"}`, `Ankusa.Replay.start/2`) re-verify hooks held in the
+  quarantine pen against each source's current verifier, judging the
+  timestamp window at the hook's receive time, and commit the ones that pass
+  through the queue writer with their original `id` and `replay_id` on every
+  delivery row; the rest stay in the pen. Optional `source_id`, `id`,
+  `since`/`until` (on `received_at`) filters. Needs the `:edge` and
+  `:dispatch` roles. `Ankusa.Queue.release/3` commits such hooks with the pen
+  deletes and the job's cursor in one synced batch.
+- `DELETE /v1/quarantine` (`Ankusa.Edge.Quarantine.purge/3`) deletes held
+  hooks by `source_id`, `id`, `since`/`until` and `limit` and reports
+  `{deleted, bytes}`. `GET /v1/quarantine` entries gain `tenant_id` and
+  `size`.
+- `quarantine` config section: `burst` and `rate` (one token bucket per
+  source, defaults 100 and 20/s) and `max_bytes` (the pen's byte cap, default
+  1 GiB). New telemetry event `[:ankusa, :quarantine, :full]` and metric
+  `ankusa_quarantine_full_total`.
+- `Ankusa.Verifier.Hmac` accepts `secret: [new, old]`: every key is tried, so
+  a secret rotation needs no cut-over. An empty list or an element that is not
+  a usable key is `{:error, :bad_secret}`.
+- `Ankusa.Verifier.check_timestamp/2` takes `now:` (Unix seconds) to judge the
+  window against a fixed instant; `Ankusa.Verifier.scheme_name/2` is the
+  shared scheme label.
 
 ### Changed
 
@@ -108,6 +131,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - `Ankusa.Sink.safe_deliver/4` returns `{:error, {:bad_return, value}}` for
   any return value other than `:ok` or `{:error, _}`. Dispatch, lifecycle
   events and the `wal: :none` ack path all deliver through it.
+- **Breaking: the quarantine bucket is per source and refuses with `429`.**
+  A source over its bucket answers `429 quarantine_rate_limited` with
+  `Retry-After` instead of `401 verification_failed`; `401` now always means a
+  failed signature. `Ankusa.Edge.Quarantine.put/3` returns
+  `{:rate_limited, retry_after_ms}` or `:full` instead of `:rate_limited`, and
+  `Ankusa.Edge.Ingest.ingest/2` returns
+  `{:error, {:quarantine_rate_limited, ms}}` or `{:error, :quarantine_full}`
+  (outcome tags `:quarantine_rate_limited` and `:quarantine_full`).
+- The quarantine pen keeps the whole envelope (method, path, headers, body,
+  tenant) instead of headers and body, and refuses a write that would cross
+  `quarantine.max_bytes` with `503 quarantine_full` (`Retry-After: 60`); it
+  never evicts a held hook. Entries held by earlier versions stay readable and
+  releasable (rebuilt as `POST /`).
 
 ### Removed
 
@@ -116,6 +152,11 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Fixed
 
+- `Ankusa.Verifier.Hmac` fails closed on an empty key. A missing, `nil` or
+  empty `:secret`, an empty list, or a list element that is empty or does not
+  decode is `{:error, :bad_secret}` for every hook. It used to HMAC with the
+  empty key, which verified anything signed with it (a forgery anyone can
+  compute); an explicit `nil` raised on every request.
 - A stalled store no longer answers `503` for hooks it then commits. It used to
   answer `503` after 5 s for hooks the writer committed afterwards; now a batch
   the writer has started is waited out, one it has not is refused, and one

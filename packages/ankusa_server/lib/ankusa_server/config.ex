@@ -57,7 +57,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes rate_limits batcher dispatch wal storage claim_check sources source_store lifecycle)
+  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check sources source_store lifecycle)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -83,6 +83,10 @@ defmodule AnkusaServer.Config do
   @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants)
   @rate_limit_keys ~w(rate burst)
+  @quarantine_keys ~w(burst rate max_bytes)
+  # A rotation window needs two keys; a handful covers any overlap a provider
+  # forces. More is a misconfiguration (each key costs an HMAC per hook).
+  @max_secrets 8
   @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
@@ -298,6 +302,7 @@ defmodule AnkusaServer.Config do
         admin_section(doc) ++
         routes_section(doc) ++
         rate_limits_section(doc) ++
+        quarantine_section(doc) ++
         batcher_section(doc) ++
         dispatch_section(doc) ++
         wal_section(doc) ++
@@ -314,6 +319,7 @@ defmodule AnkusaServer.Config do
       # same message.
       Ankusa.Routes.validate_config!(config)
       Ankusa.Edge.RateLimiter.validate_config!(config)
+      Ankusa.Edge.Quarantine.validate_config!(config)
       Ankusa.Queue.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
       config
@@ -723,6 +729,23 @@ defmodule AnkusaServer.Config do
     %{rate: required_number!(limit, "rate", path), burst: required_int!(limit, "burst", path)}
   end
 
+  # ── quarantine ──────────────────────────────────────────────────────────────
+
+  # Types only; ranges are core's (`Ankusa.Edge.Quarantine.validate_config!/1`),
+  # so `check-config` and an embedded boot fail with the same message.
+  defp quarantine_section(doc) do
+    path = ["quarantine"]
+    quarantine = section!(doc, "quarantine", @quarantine_keys, [])
+
+    [
+      quarantine:
+        []
+        |> put_opt(:burst, int_opt(quarantine, "burst", path))
+        |> put_opt(:rate, number_opt(quarantine, "rate", path))
+        |> put_opt(:max_bytes, int_opt(quarantine, "max_bytes", path))
+    ]
+  end
+
   # ── sources ─────────────────────────────────────────────────────────────────
 
   defp source_store_section(doc) do
@@ -913,7 +936,7 @@ defmodule AnkusaServer.Config do
 
         opts =
           []
-          |> put_opt(:secret, string_opt(verify, "secret", path))
+          |> put_opt(:secret, secret_opt(verify, path))
           |> put_opt(:tolerance, int_opt(verify, "tolerance_seconds", path))
 
         {verify_module(type), verify_opts(type, verify, path, opts)}
@@ -931,7 +954,7 @@ defmodule AnkusaServer.Config do
   defp verify_opts(type, verify, path, opts) do
     # The signature verifiers are useless without a secret, and a silently-empty
     # HMAC key would accept everything an attacker signs.
-    required_string!(verify, "secret", path)
+    required_secret!(verify, path)
 
     scheme =
       case type do
@@ -941,6 +964,56 @@ defmodule AnkusaServer.Config do
 
     [{:scheme, scheme} | opts]
   end
+
+  # `secret` is a string, or a list of strings for a rotation window (newest
+  # first; `Ankusa.Verifier.Hmac` tries every one).
+  defp secret_opt(verify, path) do
+    case verify["secret"] do
+      nil -> nil
+      value -> secret!(value, path ++ ["secret"])
+    end
+  end
+
+  # An empty string or element is refused, never dropped: `${OLD:-}` for an
+  # unset rotation slot is the easy way to write an empty HMAC key.
+  defp required_secret!(verify, path) do
+    case verify["secret"] do
+      nil ->
+        raise ConfigError, message: "#{render_path(path)}: missing required key \"secret\""
+
+      value ->
+        value |> secret!(path ++ ["secret"]) |> non_empty_secret!(path ++ ["secret"])
+    end
+  end
+
+  defp non_empty_secret!(secrets, path) when is_list(secrets) do
+    secrets
+    |> Enum.with_index()
+    |> Enum.each(fn {secret, i} -> non_empty_secret!(secret, path ++ [i]) end)
+  end
+
+  defp non_empty_secret!("", path),
+    do: raise(ConfigError, message: "#{render_path(path)}: must not be empty")
+
+  defp non_empty_secret!(_secret, _path), do: :ok
+
+  defp secret!(secret, _path) when is_binary(secret), do: secret
+
+  defp secret!([_ | _] = secrets, path) when length(secrets) <= @max_secrets do
+    if Enum.all?(secrets, &is_binary/1) do
+      secrets
+    else
+      raise ConfigError, message: type_error(path, "a string or a list of strings", secrets)
+    end
+  end
+
+  defp secret!(secrets, path) when is_list(secrets) and secrets != [] do
+    raise ConfigError,
+      message: "#{render_path(path)}: at most #{@max_secrets} secrets, got #{length(secrets)}"
+  end
+
+  defp secret!(value, path),
+    do: raise(ConfigError, message: type_error(path, "a string or a list of strings", value))
 
   defp hmac_scheme(verify, path) do
     timestamp_header = string_opt(verify, "timestamp_header", path)
@@ -1197,6 +1270,16 @@ defmodule AnkusaServer.Config do
       value when is_integer(value) -> value
       value when is_binary(value) -> parse_int!(value, path ++ [key])
       value -> raise ConfigError, message: type_error(path ++ [key], "an integer", value)
+    end
+  end
+
+  # Like `int_opt/3`, for keys that take fractions (`quarantine.rate`).
+  defp number_opt(map, key, path) do
+    case map[key] do
+      nil -> nil
+      value when is_number(value) -> value
+      value when is_binary(value) -> parse_number!(value, path ++ [key])
+      value -> raise ConfigError, message: type_error(path ++ [key], "a number", value)
     end
   end
 

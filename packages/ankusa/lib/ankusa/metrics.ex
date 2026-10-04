@@ -31,8 +31,9 @@ defmodule Ankusa.Metrics do
   through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
   modules become strings (`"Ankusa.Sink.Http"`), and anything else
   becomes `:other`. `:outcome` on ingest is already one of a fixed set —
-  `:committed | :duplicate | :quarantined | :rejected | :rate_limited`, or an
-  `{:error, reason}` tag — because `Ankusa.Edge.Ingest` tags it before emitting.
+  `:committed | :duplicate | :quarantined | :rejected | :rate_limited |
+  :quarantine_rate_limited | :quarantine_full`, or an `{:error, reason}` tag —
+  because `Ankusa.Edge.Ingest` tags it before emitting.
   """
 
   import Telemetry.Metrics
@@ -129,6 +130,13 @@ defmodule Ankusa.Metrics do
         "ankusa.quarantine.rate_limited.total",
         scoped(own,
           event_name: [:ankusa, :quarantine, :rate_limited],
+          tags: [:instance, :source_id]
+        )
+      ),
+      counter(
+        "ankusa.quarantine.full.total",
+        scoped(own,
+          event_name: [:ankusa, :quarantine, :full],
           tags: [:instance, :source_id]
         )
       ),

@@ -37,8 +37,9 @@ The always-on tests cover:
 - **Migration** (`store_migrate_test.exs`): a 0.3 data dir imports once — only
   what 0.3 had not finished (undelivered hooks deliver, unarchived hooks
   archive), dead letters carry over and replay to the current sinks, the
-  quarantine pen, API sources, rate-limit overrides and the segment index all
-  carry over, and the next seq clears everything imported. An artifact that
+  quarantine pen (whose 0.3 entries a `quarantine` replay job still releases
+  under their original ids), API sources, rate-limit overrides and the segment
+  index all carry over, and the next seq clears everything imported. An artifact that
   cannot be trusted stops the boot: damage in the middle of the 0.3 WAL with acked
   frames after it, or a cursor file 0.3 did not write, refuses to start rather
   than guess; a torn final frame imports every complete frame before it. An
@@ -59,7 +60,11 @@ The always-on tests cover:
 - **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with
   `503` once the batcher's queue fills while a commit is in flight, pluggable
   route resolvers (`Path` and `TenantPath`), and that the same body posted
-  twice is stored twice (two ids, two stored hooks). A commit is never
+  twice is stored twice (two ids, two stored hooks). The quarantine bucket is
+  per source (`429 quarantine_rate_limited` with `Retry-After` on one source
+  leaves another's `202`), and a full pen is `503 quarantine_full` that evicts
+  nothing, frees room on a purge, and still counts its bytes after a restart.
+  A commit is never
   abandoned: a record still buffered at its deadline behind a stuck commit is
   answered `503` and never stored, the writer refuses a batch whose deadline
   passed before it could start, a commit stuck longer than the old 5 s writer
@@ -94,7 +99,11 @@ The always-on tests cover:
   restart while a delivered row is not (D7); a row that became visible below
   the scan floor (a stalled commit) is delivered when its wake arrives; and a
   window that drained is refilled even when housekeeping flushes the outcomes
-  first. Ordering is not asserted: lanes are gone.
+  first. Ordering is not asserted: lanes are gone. `replay_test.exs` covers
+  the replay jobs, including a `quarantine` job that leaves a hook failing the
+  current secret in the pen, releases it once the secret is rotated (past the
+  timestamp tolerance: the window is judged at receive time) with its original
+  id and the job's `replay_id`, and finds nothing left on a second run.
 - **Filesystem durability** (`fsync_test.exs`): the helpers return an error
   for a path they cannot open, write or rename, never raise, and `write_file`
   replaces content in one step and leaves no temp file. The fsync order on

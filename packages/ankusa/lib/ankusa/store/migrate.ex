@@ -261,14 +261,21 @@ defmodule Ankusa.Store.Migrate do
     result =
       import_log(ctx, Path.join(path, "quarantine.log"), :unsafe, fn
         %{id: id, received_at: at} = record ->
-          summary = Map.take(record, [:id, :source_id, :received_at, :reason])
-          held = Map.take(record, [:headers, :body])
+          # The body value stays the 0.4 map; `Quarantine.envelope/2` rebuilds
+          # an envelope from it. The summary gains the keys a current one has,
+          # so the pen's byte cap counts imported entries too.
+          held = :erlang.term_to_binary(Map.take(record, [:headers, :body]))
+
+          summary =
+            record
+            |> Map.take([:id, :source_id, :received_at, :reason])
+            |> Map.put(:tenant_id, nil)
+            |> Ankusa.Edge.Quarantine.encode_summary(held)
 
           {:ok,
            [
-             {:put, :quarantine, Keys.quarantine_summary(at, id),
-              :erlang.term_to_binary(summary)},
-             {:put, :quarantine, Keys.quarantine_body(at, id), :erlang.term_to_binary(held)}
+             {:put, :quarantine, Keys.quarantine_summary(at, id), summary},
+             {:put, :quarantine, Keys.quarantine_body(at, id), held}
            ], 0}
 
         _other ->

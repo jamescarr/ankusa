@@ -17,7 +17,7 @@ info:
     people read it.
 
     Responses are node-local by design: the DLQ is the dispatch node's disk and
-    the quarantine list is the edge node's memory. A route that needs a role
+    the quarantine pen is the edge node's. A route that needs a role
     this node does not run answers `409 role_not_enabled` so an operator can
     tell "wrong node" from "nothing there". Scrape every node's admin port to
     see the fleet.
@@ -54,7 +54,9 @@ tags:
   - name: dlq
     description: Inspect and replay dead-lettered hooks. `:dispatch` role only.
   - name: quarantine
-    description: Recent quarantined hooks. `:edge` role only.
+    description: |
+      The quarantine pen: list and purge held hooks. `:edge` role only;
+      node-local. Release them with a `quarantine` replay job (`replays` tag).
   - name: rate_limits
     description: |
       Per-tenant ingest rate limits: config values plus this node's runtime
@@ -242,12 +244,17 @@ paths:
       description: |
         Creates a durable, paced replay job. `kind: dlq` re-sends dead delivery
         rows; `kind: archive` re-sends archived hooks over a `received_at`
-        window. Rows are dripped in at `rate` items per second, only while the
-        dispatch pipeline's oldest-due lag is at most `max_lag_ms` and its
-        in-flight window is not full, so a replay only uses capacity live
-        traffic leaves free. A `dlq` job touches only rows dead-lettered at or
-        before its own creation time. Every replayed delivery keeps the hook's
-        original `id` and `dedupe_key` and carries the job id as `replay_id`.
+        window; `kind: quarantine` re-verifies hooks held in this node's
+        quarantine pen against each source's current verifier (the timestamp
+        window judged at the hook's receive time) and commits the ones that now
+        pass as new hooks, with the hook's original `id`. Held hooks that still
+        fail stay in the pen. Rows are dripped in at `rate` items per second,
+        only while the dispatch pipeline's oldest-due lag is at most
+        `max_lag_ms` and its in-flight window is not full, so a replay only
+        uses capacity live traffic leaves free. A `dlq` or `quarantine` job
+        touches only entries dead-lettered or quarantined at or before its own
+        creation time. Every replayed delivery keeps the hook's original `id`
+        and `dedupe_key` and carries the job id as `replay_id`.
         Posting the same spec again while a `running` or `paused` job with the
         same kind and filter exists returns that job (200), so a proxy retry
         is idempotent.
@@ -255,11 +262,12 @@ paths:
         required: true
         description: |
           `kind` is required. Unknown keys are refused with `invalid_filter`.
-          `since`/`until` are inclusive dead-letter-time bounds (unix ms) for
-          `dlq`; `from`/`to` are inclusive `received_at` bounds (unix ms) for
-          `archive`, and `to` must be old enough that the compactor has
-          archived the whole window. `sinks` indexes into the source's current
-          sinks; omitted means every current sink.
+          `since`/`until` are inclusive bounds (unix ms) on the dead-letter time
+          for `dlq` and on `received_at` for `quarantine`; `from`/`to` are
+          inclusive `received_at` bounds (unix ms) for `archive`, and `to` must
+          be old enough that the compactor has archived the whole window.
+          `sinks` indexes into the source's current sinks; omitted means every
+          current sink.
         content:
           application/json:
             schema:
@@ -281,8 +289,9 @@ paths:
           $ref: '#/components/responses/InvalidFilter'
         '409':
           description: |
-            `role_not_enabled` (an `archive` job on a node without a queue
-            writer) or `too_many_replays` (16 jobs already running or paused).
+            `role_not_enabled` (an `archive` or `quarantine` job on a node
+            without a queue writer — both roles, `edge` and `dispatch`, must
+            run) or `too_many_replays` (16 jobs already running or paused).
           content:
             application/json:
               schema:
@@ -376,8 +385,9 @@ paths:
       summary: Recent quarantined hooks
       description: |
         The newest quarantined entries from this node's store, newest first.
-        Metadata only — bodies are never returned; the headers and body stay in
-        the store.
+        Metadata only — bodies are never returned; the whole request stays in
+        the store until a `quarantine` replay job releases it or a purge
+        deletes it.
       parameters:
         - name: limit
           in: query
@@ -393,6 +403,63 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QuarantinePage'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '409':
+          $ref: '#/components/responses/RoleNotEnabled'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
+    delete:
+      operationId: purgeQuarantined
+      tags: [quarantine]
+      summary: Delete quarantined hooks
+      description: |
+        Deletes up to `limit` entries matching every given filter, oldest
+        first, in one synced batch, and frees their bytes against
+        `quarantine.max_bytes`. No filter deletes the oldest `limit` entries.
+        Deleted hooks are gone for good — to keep the ones that now verify, run
+        a `quarantine` replay job first.
+      parameters:
+        - name: source_id
+          in: query
+          required: false
+          description: Exact source id.
+          schema:
+            type: string
+        - name: id
+          in: query
+          required: false
+          description: Exact envelope id.
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: Inclusive lower bound on `received_at`, unix milliseconds.
+          schema:
+            type: integer
+            minimum: 0
+        - name: until
+          in: query
+          required: false
+          description: Inclusive upper bound on `received_at`, unix milliseconds. Must not be less than `since`.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          description: Maximum entries deleted. Values outside 1..10000 are clamped to that range.
+          schema:
+            type: integer
+            default: 1000
+      responses:
+        '200':
+          description: What was deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuarantinePurge'
         '400':
           $ref: '#/components/responses/InvalidFilter'
         '409':
@@ -962,12 +1029,18 @@ components:
           type: string
         source_id:
           type: string
+        tenant_id:
+          type: [string, 'null']
+          description: The hook's tenant (`default` unless the source or a tenant route set one); `null` only for entries held before the pen recorded it.
         received_at:
           type: integer
           description: When the edge received the hook, unix milliseconds.
         reason:
           type: string
           description: '`inspect/1` of the verifier failure, e.g. `:no_match`.'
+        size:
+          type: [integer, 'null']
+          description: Bytes the entry holds against `quarantine.max_bytes`; `null` for entries held before the pen recorded it.
     QuarantinePage:
       type: object
       required: [entries]
@@ -976,26 +1049,43 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/QuarantineEntry'
+    QuarantinePurge:
+      type: object
+      required: [deleted, bytes]
+      properties:
+        deleted:
+          type: integer
+          description: Entries deleted.
+        bytes:
+          type: integer
+          description: The bytes they held against `quarantine.max_bytes`.
     ReplaySpec:
       type: object
       required: [kind]
       properties:
         kind:
           type: string
-          enum: [dlq, archive]
-          description: '`dlq` re-sends dead rows; `archive` re-sends archived hooks over a time window.'
+          enum: [dlq, archive, quarantine]
+          description: |
+            `dlq` re-sends dead rows; `archive` re-sends archived hooks over a
+            time window; `quarantine` re-verifies hooks held in the quarantine
+            pen and commits the ones that now pass.
         source_id:
           type: string
           description: Exact source id to filter on.
         id:
           type: string
-          description: Exact envelope id to filter on (`dlq` only).
+          description: Exact envelope id to filter on (`dlq` and `quarantine` only).
         since:
           type: integer
-          description: Inclusive lower bound on the dead-letter timestamp, unix milliseconds (`dlq` only).
+          description: |
+            Inclusive lower bound, unix milliseconds: on the dead-letter
+            timestamp (`dlq`) or on `received_at` (`quarantine`).
         until:
           type: integer
-          description: Inclusive upper bound on the dead-letter timestamp, unix milliseconds (`dlq` only). Must not be less than `since`.
+          description: |
+            Inclusive upper bound, unix milliseconds, on the same timestamp as
+            `since` (`dlq` and `quarantine` only). Must not be less than `since`.
         from:
           type: integer
           minimum: 0
@@ -1020,7 +1110,7 @@ components:
           minimum: 1
           maximum: 100000
           default: 1000
-          description: Items per second — delivery rows for `dlq`, hooks for `archive`.
+          description: Items per second — delivery rows for `dlq`, hooks for `archive` and `quarantine`.
         max_lag_ms:
           type: integer
           minimum: 100
@@ -1056,7 +1146,7 @@ components:
           description: UUIDv7 job id; also the `replay_id` on every replayed delivery.
         kind:
           type: string
-          enum: [dlq, archive]
+          enum: [dlq, archive, quarantine]
         state:
           type: string
           enum: [running, paused, done, cancelled, failed]
@@ -1080,13 +1170,18 @@ components:
           description: Unix milliseconds, `null` until the job finishes.
         moved:
           type: integer
-          description: Rows revived (`dlq`) or hooks re-enqueued (`archive`).
+          description: Rows revived (`dlq`), hooks re-enqueued (`archive`), or held hooks committed after passing verification again (`quarantine`).
         scanned:
           type: integer
           description: Keys or records examined.
         skipped:
           type: integer
-          description: Archive records with no source, no bound sink, or an undecodable frame.
+          description: |
+            Archive records with no source, no bound sink, or an undecodable
+            frame (`archive`); held hooks that still fail verification, whose
+            source is gone, or that were a duplicate of a hook already
+            accepted (`quarantine` — the duplicates leave the pen, the rest
+            stay in it).
         delivered:
           type: integer
           description: Deliveries this job's rows got through, per pipeline outcome reports.
@@ -1431,7 +1526,7 @@ components:
           description: Present on `too_many_routes`; the configured cap.
   responses:
     InvalidFilter:
-      description: '`400`. `invalid_filter`: a non-integer `since` or `limit`, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key.'
+      description: '`400`. `invalid_filter`: a non-integer `since`, `until` or `limit`, a negative `since`/`until` or an `until` before `since` on a quarantine purge, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key.'
       content:
         application/json:
           schema:
