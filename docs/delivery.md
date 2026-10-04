@@ -95,8 +95,9 @@ in the DLQ instead of in the provider's retry loop).
 
 The one piece of local state this mode has is the quarantine pen: entries are
 written to the store only for a source whose `on_verify_failure` is
-`quarantine` — the default, `reject`, appends nothing. See
-[Quarantine](#quarantine).
+`quarantine` — the default, `reject`, appends nothing. With no dispatch role
+there is no replay job to release them, only `GET` and `DELETE
+/v1/quarantine`. See [Quarantine](#quarantine).
 
 ## `Ankusa.Sink`
 
@@ -522,39 +523,91 @@ again). It needs the `:dispatch` role on this node. Filters (`:source_id`,
 `:id`, `:since`, `:until`, unix-ms bounds) are all optional and combine as
 AND; a `dlq` job touches only rows dead-lettered at or before its own
 creation, so rows that die again during the replay are never picked up twice.
-`kind: :archive` re-sends archived hooks over a `received_at` window instead.
+`kind: :archive` re-sends archived hooks over a `received_at` window instead,
+and `kind: :quarantine` releases held hooks that now verify (see
+[Quarantine](#quarantine)).
 Delivery is at-least-once, so a replayed hook is a redelivery.
 
 ## Quarantine
 
-A rate-limited durable holding pen for envelopes whose source has
+A durable holding pen for envelopes whose source has
 `on_verify_failure: :quarantine`. The point: a bad secret rotation should
 never silently eat real events, so a quarantined hook is answered `202` (the
-provider will not retry it) and kept for an operator to inspect or re-inject.
+provider will not retry it), kept, and released once its source verifies it.
 
-- Token bucket: 100 burst, refills 20/s. Over the limit, `Ankusa.Edge.Quarantine.put/3`
-  returns `:rate_limited` (surfaced to the caller as `401`, not `202`; the
-  request is refused outright rather than silently dropped) instead of
-  writing. The bucket caps the rate, not the pen's total size: nothing evicts
-  or expires held entries, so size the volume for the quarantine you intend
-  to keep.
-- Stored in this node's `Ankusa.Store` (two keys per entry in one synced batch:
-  a summary, and the headers and body), so `put/3` answers `:ok` only once
-  both are on disk. A store that cannot take the write makes ingest answer
-  `503` and spends no token.
-- `Ankusa.Edge.Quarantine.recent/2` lists the newest entries (id, source, time,
-  reason; the headers and body stay in the store) for a dashboard or operator
-  inspection. It reads the store, so a restart does not empty it.
+**Keep it out of the pen.** Rotate a secret with a window instead of a cut-over:
+`secret` takes a list, newest first, and every key is tried, so hooks signed
+with either secret verify while the provider switches over. Every entry must be
+non-empty: an empty HMAC key would verify whatever anyone signs with it, so an
+unset `${OLD:-}` is a load error, not a skipped slot.
 
-Under `wal.type: none` this pen, the API-managed sources and the rate-limit
-overrides are the node's only local state: nothing is committed, so there is
-no queue and no DLQ. Entries are written only when a source opts in with
-`on_verify_failure: quarantine`; the `reject` default writes nothing. A
-quarantined hook was not delivered by this node, but the provider *was*
-answered `202`, so the pen is the only copy — inspect or re-inject it
-deliberately. See [Direct mode](#direct-mode).
+```yaml
+verify: {type: stripe, secret: ["${STRIPE_WHSEC_NEW}", "${STRIPE_WHSEC}"]}
+```
+
+**Bounded twice**, by the `quarantine` config section, so a flood of forged
+requests can't fill the disk, and one source's flood never spends another
+source's tokens:
+
+- One token bucket per source: `burst` (default 100) back to back, refilled
+  `rate` per second (default 20). Over it, the hook is refused with
+  `429 quarantine_rate_limited` and a `Retry-After`; nothing is stored.
+- A cap on the pen's total bytes, `max_bytes` (default 1 GiB). A hook that
+  would cross it is refused with `503 quarantine_full` and `Retry-After: 60`.
+  A full pen refuses new hooks; it never evicts one it already answered `202`
+  for. It clears only when an operator releases or purges entries.
+
+The byte cap is shared, though. One flooding source can fill it — a burst of
+100 bodies of up to `max_body_bytes`, then 20 a second — and from then on every
+source's failed hooks are refused with `503` (providers retry, and nothing
+already acked is lost) until you purge the flood with
+`DELETE /v1/quarantine?source_id=…`.
+
+Entries are stored in this node's `Ankusa.Store`, two keys per entry in one
+synced batch: a summary (id, source, tenant, time, reason, size) and the whole
+envelope — method, path, headers, body. `put/3` answers `:ok` only once both
+are on disk; a store that cannot take the write makes ingest answer `503` and
+spends no token. A restart neither empties the pen nor forgets its size.
+
+**Inspect** with `GET /v1/quarantine` on the admin port (newest first, no
+bodies) or `Ankusa.Edge.Quarantine.recent/2`.
+
+**Release** with a `quarantine` replay job, after fixing the source's secret:
+
+```sh
+curl -XPOST localhost:4002/v1/replays -d '{"kind":"quarantine","source_id":"stripe"}'
+```
+
+The job re-verifies each held hook against its source's *current* verifier,
+judging the signature's timestamp window at the hook's receive time (a release
+hours later still passes a hook that was on time). A hook that passes is
+committed through the normal queue path with its original `id`: dedupe applies,
+the archive gets it, and every delivery carries the job's id as `replay_id`.
+The commit and the pen delete are one synced batch. A hook that still fails
+stays in the pen and counts as `skipped`; one that is a duplicate of a hook
+already accepted (the provider's own retry got through) leaves the pen and
+counts as `skipped` too. Filters (`source_id`, `id`, `since`/`until` on
+`received_at`) are optional, and, like a `dlq` job, a `quarantine` job only
+touches hooks quarantined at or before its creation. The job runs in the
+Replayer, so it needs the `:dispatch` and `:edge` roles on the node that holds
+the pen.
+
+**Purge** what will never verify with `DELETE /v1/quarantine` — the same
+filters plus `limit` (default 1000, at most 10 000 per call), oldest first.
+It answers `{"deleted": n, "bytes": b}` and frees those bytes against the cap.
 
 ```elixir
 {:ok, entries} = Ankusa.Edge.Quarantine.recent(:default, 50)
-# entries: [%{id: "...", source_id: "stripe", received_at: ..., reason: :no_match}, ...]
+# entries: [%{id: "...", source_id: "stripe", tenant_id: "default", received_at: ...,
+#             reason: :no_match, size: 1834}, ...]
+{:ok, :created, job} = Ankusa.Replay.start(:default, kind: :quarantine)
+{:ok, %{deleted: n, bytes: b}} = Ankusa.Edge.Quarantine.purge(:default, %{source_id: "stripe"}, 1_000)
 ```
+
+Under `wal.type: none` this pen, the API-managed sources and the rate-limit
+overrides are the node's only local state: nothing is committed, so there is
+no queue, no DLQ, and no Replayer to release from — the pen is inspect and
+purge only there, which is why `config-examples/direct.yml` recommends
+`reject`. Entries are written only when a source opts in with
+`on_verify_failure: quarantine`; the `reject` default writes nothing. See
+[Direct mode](#direct-mode).

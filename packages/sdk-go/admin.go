@@ -53,17 +53,18 @@ type QuarantinePage struct {
 }
 
 // ReplaySpec is a replay-job creation body. Kind is "dlq" (default a
-// dead-letter replay) or "archive" (a time-range redrive); the rest of the
+// dead-letter replay), "archive" (a time-range redrive) or "quarantine"
+// (re-verify held hooks, release the ones that now pass); the rest of the
 // fields narrow or pace it. See conformance/README.md for the rules.
 type ReplaySpec struct {
-	// Kind is "dlq" or "archive".
+	// Kind is "dlq", "archive" or "quarantine".
 	Kind string `json:"kind"`
 	// SourceID limits the job to one source.
 	SourceID string `json:"source_id,omitempty"`
-	// ID limits a dlq job to one dead-lettered hook id.
+	// ID limits a dlq or quarantine job to one hook id.
 	ID string `json:"id,omitempty"`
-	// Since and Until are inclusive dead-letter-time bounds (unix ms), dlq
-	// only.
+	// Since and Until are inclusive bounds (unix ms): on the dead-letter
+	// time for dlq, on received_at for quarantine.
 	Since int64 `json:"since,omitempty"`
 	Until int64 `json:"until,omitempty"`
 	// From and To are inclusive received_at bounds (unix ms), archive only.

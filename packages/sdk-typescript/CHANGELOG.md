@@ -30,6 +30,10 @@ this project follows [Semantic Versioning](https://semver.org/).
   and `updateReplay(id, patch)`, with the `Replay`, `ReplayList`, `ReplaySpec`,
   and `ReplayPatch` types. A `404` is `AdminRejectedError` with code
   `replay_not_found`; a `409 replay_finished` is `AdminRejectedError` too.
+- The generated admin types follow `admin.v1.yaml`: `ReplaySpec.kind` and
+  `Replay.kind` accept `"quarantine"`, quarantine entries carry nullable
+  `tenant_id` and `size`, and the schema gains `purgeQuarantined`
+  (`DELETE /v1/quarantine`).
 
 ### Removed
 

@@ -142,6 +142,22 @@ rate_limits:
   tenants: {}
   #   acme: {rate: 500, burst: 1000}
 
+quarantine:
+  # The holding pen for hooks that fail verification on a source with
+  # on_verify_failure: quarantine. Each edge node keeps its own, in its store.
+  #
+  # One token bucket per source: `burst` hooks back to back, refilled `rate`
+  # per second. Over it, the hook gets 429 quarantine_rate_limited with a
+  # Retry-After header, and nothing is stored.
+  burst: 100
+  rate: 20
+  # A cap on the bytes the whole pen holds (default 1 GiB). A hook that would
+  # cross it gets 503 quarantine_full with Retry-After: 60. A full pen refuses
+  # new hooks; it never evicts one it already answered 202 for. Release
+  # (POST /v1/replays {"kind": "quarantine"}) or purge (DELETE /v1/quarantine)
+  # on the admin port to make room.
+  max_bytes: 1073741824
+
 batcher:
   # The WAL serializes commits itself, so partitions beyond a couple only
   # add contention.
@@ -242,6 +258,10 @@ sources:
     verify:
       type: stripe
       secret: "${STRIPE_WHSEC}"
+      # To rotate, list both secrets, newest first: every one is tried, so
+      # hooks signed with either verify while the provider switches over.
+      # Every entry must be non-empty: an unset ${OLD:-} is a load error.
+      # secret: ["${STRIPE_WHSEC_NEW}", "${STRIPE_WHSEC}"]
       tolerance_seconds: 300
     # At least one. Every sink is tried on every delivered hook.
     sinks:

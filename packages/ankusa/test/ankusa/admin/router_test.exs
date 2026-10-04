@@ -165,11 +165,17 @@ defmodule Ankusa.Admin.RouterTest do
     assert %{"error" => "role_not_enabled", "role" => "dispatch"} = JSON.decode!(conn.resp_body)
   end
 
-  test "the rate-limit routes are edge-only, like the quarantine list", %{inst: inst} do
-    conn = call(inst, :get, "/v1/rate-limits")
+  test "the rate-limit routes are edge-only, like the quarantine pen", %{inst: inst} do
+    for {method, path} <- [
+          get: "/v1/rate-limits",
+          get: "/v1/quarantine",
+          delete: "/v1/quarantine"
+        ] do
+      conn = call(inst, method, path)
 
-    assert conn.status == 409
-    assert %{"error" => "role_not_enabled", "role" => "edge"} = JSON.decode!(conn.resp_body)
+      assert conn.status == 409
+      assert %{"error" => "role_not_enabled", "role" => "edge"} = JSON.decode!(conn.resp_body)
+    end
   end
 
   # ── DLQ ────────────────────────────────────────────────────────────────────
@@ -568,6 +574,56 @@ defmodule Ankusa.Admin.RouterTest do
     assert entry["source_id"] == "strict"
     assert entry["reason"] =~ "missing_signature"
     refute Map.has_key?(entry, "body")
+  end
+
+  test "DELETE /v1/quarantine purges the matching entries and reports their bytes" do
+    sources =
+      Map.new(["strict", "other"], fn id ->
+        {id,
+         [
+           verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
+           on_verify_failure: :quarantine
+         ]}
+      end)
+
+    config =
+      test_config(
+        roles: [:edge],
+        admin: %{enabled: true, port: 0},
+        source_store: {Ankusa.SourceStore.Static, sources: sources}
+      )
+
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+
+    for id <- ["strict", "strict", "other"] do
+      assert {:quarantined, _reason} =
+               Ankusa.Edge.Ingest.ingest(config.instance, request(id, ~s({"id":"q"})))
+    end
+
+    %{"entries" => listed} = JSON.decode!(call(config.instance, :get, "/v1/quarantine").resp_body)
+    strict_bytes = for %{"source_id" => "strict", "size" => size} <- listed, do: size
+    assert [_, _] = strict_bytes
+
+    for {query, field} <- [
+          {"until=-1", "until"},
+          {"since=10&until=5", "until"},
+          {"limit=x", "limit"}
+        ] do
+      conn = call(config.instance, :delete, "/v1/quarantine?" <> query)
+      assert conn.status == 400
+      assert JSON.decode!(conn.resp_body) == %{"error" => "invalid_filter", "field" => field}
+    end
+
+    conn = call(config.instance, :delete, "/v1/quarantine?source_id=strict")
+    assert conn.status == 200
+    assert JSON.decode!(conn.resp_body) == %{"deleted" => 2, "bytes" => Enum.sum(strict_bytes)}
+
+    %{"entries" => [left]} = JSON.decode!(call(config.instance, :get, "/v1/quarantine").resp_body)
+    assert left["source_id"] == "other"
+
+    conn = call(config.instance, :delete, "/v1/quarantine?source_id=strict")
+    assert JSON.decode!(conn.resp_body) == %{"deleted" => 0, "bytes" => 0}
   end
 
   # ── config redaction ───────────────────────────────────────────────────────

@@ -182,6 +182,8 @@ curl -XPOST localhost:4002/v1/replays -d '{"kind":"dlq","id":"<id from GET /v1/d
 curl localhost:4002/v1/replays                # every replay job, newest first
 curl -XPATCH localhost:4002/v1/replays/<job-id> -d '{"state":"cancelled"}'
 curl localhost:4002/v1/quarantine             # hooks held after a failed verification
+curl -XPOST localhost:4002/v1/replays -d '{"kind":"quarantine"}'   # release the ones that verify now
+curl -XDELETE 'localhost:4002/v1/quarantine?source_id=stripe'      # purge what never will
 curl localhost:4002/metrics                   # Prometheus
 ```
 

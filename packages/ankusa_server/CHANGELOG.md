@@ -13,6 +13,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   and RabbitMQ, Kafka and NATS send `ankusa_idempotency_key`. It is
   `tenant:source_id:dedupe_key` when the source has a dedupe key, else the hook
   `id`. Consumers should dedupe on it; the SDK helpers read it.
+- A `quarantine:` section (`burst`, `rate`, `max_bytes`): one quarantine
+  bucket per source, and a cap on the pen's bytes. A full pen answers
+  `503 quarantine_full`; a source over its bucket answers
+  `429 quarantine_rate_limited` (it used to be `401 verification_failed`).
+- `verify.secret` takes a list of strings (at most 8), newest first, for a
+  secret rotation with no cut-over: `secret: ["${NEW}", "${OLD}"]`.
+- Release held hooks with `POST /v1/replays {"kind":"quarantine"}`, and purge
+  them with `DELETE /v1/quarantine`. See `docs/delivery.md#quarantine`.
 
 ### Changed
 
@@ -20,6 +28,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `SinkMessageHeadersV1` requires `ankusa_idempotency_key`. A consumer that
   validates messages against the previous document rejects the new field only
   if it also forbids additional properties.
+- **Breaking: an empty `verify.secret` is a load error.** An empty string, or
+  an empty element of a secret list (an unset `${OLD:-}` included), fails
+  `check-config` and the boot, naming the key (`sources.a.verify.secret[1]:
+  must not be empty`). It used to load and verify with the empty HMAC key,
+  which accepts anything signed with it.
+- A source over its quarantine bucket answers `429 quarantine_rate_limited`
+  with `Retry-After`, not `401 verification_failed`; a full pen answers
+  `503 quarantine_full` with `Retry-After: 60`.
 
 ## [0.4.0] - 2026-10-02
 

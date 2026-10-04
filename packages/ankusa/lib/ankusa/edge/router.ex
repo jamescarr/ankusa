@@ -94,6 +94,23 @@ defmodule Ankusa.Edge.Router do
     |> send_json(429, %{error: "rate_limited"})
   end
 
+  defp respond(conn, {:error, {:quarantine_rate_limited, retry_after_ms}}) do
+    conn
+    |> Plug.Conn.put_resp_header(
+      "retry-after",
+      Integer.to_string(div(retry_after_ms + 999, 1000))
+    )
+    |> send_json(429, %{error: "quarantine_rate_limited"})
+  end
+
+  # The pen clears only by operator action (a release or a purge), so the hint
+  # is a minute, not a second.
+  defp respond(conn, {:error, :quarantine_full}) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "60")
+    |> send_json(503, %{error: "quarantine_full"})
+  end
+
   defp respond(conn, {:error, reason}) when reason in [:overload, :store_unavailable] do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "1")

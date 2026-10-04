@@ -84,7 +84,7 @@ final class AdminClient
      * `POST /v1/replays` -> the created (202) or already-active (200) replay
      * job.
      *
-     * `$spec` is the JSON body verbatim: `kind` (`dlq` or `archive`) plus its
+     * `$spec` is the JSON body verbatim: `kind` (`dlq`, `archive` or `quarantine`) plus its
      * filter keys, and the optional `rate`/`max_lag_ms`. Posting the same spec
      * twice while the job is running or paused returns that job, so a proxy
      * retry is idempotent. The body always goes out as the spec object, never

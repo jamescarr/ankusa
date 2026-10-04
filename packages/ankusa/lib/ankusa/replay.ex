@@ -5,10 +5,13 @@ defmodule Ankusa.Replay do
   A replay re-sends dead delivery rows (`kind: :dlq`) or archived hooks over a
   time window (`kind: :archive`) through the normal dispatch pipeline, keeping
   each hook's original `id` and `dedupe_key` and stamping the delivery with the
-  job's `replay_id`. It only ever uses dispatch capacity live traffic leaves
-  free: rows are dripped in at `rate` items per second, and only while the
-  Pipeline's oldest-due lag is at most `max_lag_ms` and its in-flight window is
-  not full.
+  job's `replay_id`. A third kind, `kind: :quarantine`, re-verifies hooks held
+  in the quarantine pen (`Ankusa.Edge.Quarantine`) against the source's
+  current verifier and commits the ones that now pass, as new hooks with their
+  original `id`; the rest stay in the pen. Every kind only ever uses dispatch
+  capacity live traffic leaves free: rows are dripped in at `rate` items per
+  second, and only while the Pipeline's oldest-due lag is at most `max_lag_ms`
+  and its in-flight window is not full.
 
   Jobs are durable and resumable: every job is a store record, its cursor is
   committed in the same batch as the rows it moved, and a restart resumes from
@@ -28,6 +31,10 @@ defmodule Ankusa.Replay do
     5. A `kind: :archive` job covers only what the compactor has already
        archived: `to` must be at least `storage.roll_ms + storage.interval_ms`
        in the past.
+    6. A `kind: :quarantine` job, like `:dlq`, only touches entries quarantined
+       at or before its own creation. Fix the source's secret first (or add the
+       new one: `secret: [new, old]`), then start the job; an entry that still
+       fails verification stays in the pen and counts as `skipped`.
   """
 
   @default_rate 1_000
@@ -43,16 +50,16 @@ defmodule Ankusa.Replay do
 
   @doc """
   Create a replay job. `spec` (map or keyword) takes the admin API's keys as
-  atoms: for `kind: :dlq` the optional `:source_id`, `:id`, `:since`, `:until`;
-  for `kind: :archive` the required `:from`, `:to`, and the optional
-  `:source_id` and `:sinks`; plus `:rate` and `:max_lag_ms`.
+  atoms: for `kind: :dlq` and `kind: :quarantine` the optional `:source_id`,
+  `:id`, `:since`, `:until`; for `kind: :archive` the required `:from`, `:to`,
+  and the optional `:source_id` and `:sinks`; plus `:rate` and `:max_lag_ms`.
 
   Returns `{:ok, :created, job}`, or `{:ok, :existing, job}` when a `running`
   or `paused` job with the same kind and filter already exists (a proxy retry
   is idempotent). `{:error, {:invalid, field}}` names a bad field,
   `{:error, :too_many_replays}` the 16-job cap, and
-  `{:error, {:role_not_enabled, :edge}}` an archive job on a node without a
-  queue writer.
+  `{:error, {:role_not_enabled, :edge}}` an archive or quarantine job on a
+  node without a queue writer.
   """
   @spec start(atom(), map() | keyword()) ::
           {:ok, :created | :existing, map()}
@@ -130,11 +137,11 @@ defmodule Ankusa.Replay do
       # Keys are validated per kind: a `from`/`to` on a dlq spec (or a
       # `since`/`until` on an archive spec) is a typo, not a silently dropped
       # bound — the former would otherwise replay the whole DLQ.
-      keys = if kind == :dlq, do: @dlq_keys, else: @archive_keys
+      keys = if kind == :archive, do: @archive_keys, else: @dlq_keys
 
       with :ok <- reject_unknown(spec, keys) do
         case kind do
-          :dlq ->
+          kind when kind in [:dlq, :quarantine] ->
             with :ok <- optional_field(spec, :source_id, :string),
                  :ok <- optional_field(spec, :id, :string),
                  :ok <- optional_field(spec, :since, :integer),
@@ -142,7 +149,7 @@ defmodule Ankusa.Replay do
                  :ok <- until_ok(spec) do
               {:ok,
                %{
-                 kind: :dlq,
+                 kind: kind,
                  filter: Map.take(spec, [:source_id, :id, :since, :until]),
                  rate: Map.get(spec, :rate, @default_rate),
                  max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
@@ -186,6 +193,7 @@ defmodule Ankusa.Replay do
   end
 
   defp kind_ok(:dlq), do: :ok
+  defp kind_ok(:quarantine), do: :ok
   defp kind_ok(:archive), do: :ok
   defp kind_ok(_), do: {:error, {:invalid, "kind"}}
 

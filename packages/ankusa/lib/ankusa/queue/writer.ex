@@ -77,7 +77,7 @@ defmodule Ankusa.Queue.Writer do
   end
 
   @impl true
-  def handle_call({:enqueue, items, deadline}, {caller, _tag}, state) do
+  def handle_call({:enqueue, items, deadline, extra_ops}, {caller, _tag}, state) do
     cond do
       expired?(deadline) ->
         # Not started, so nothing to undo: no seq consumed, no store touched.
@@ -91,7 +91,7 @@ defmodule Ankusa.Queue.Writer do
         {:reply, {:error, :caller_gone}, state}
 
       true ->
-        commit_batch(items, state)
+        commit_batch(items, extra_ops, state)
     end
   end
 
@@ -163,7 +163,10 @@ defmodule Ankusa.Queue.Writer do
     end
   end
 
-  defp commit_batch(items, state) do
+  # `extra_ops` (a quarantine release's pen deletes and job cursor) ride in the
+  # same synced batch as the hooks, and commit even when every item was a
+  # duplicate.
+  defp commit_batch(items, extra_ops, state) do
     # Never behind a previous batch, even if the wall clock steps back: dispatch
     # keeps its scan floor just under the stamps it has seen, and relies on
     # stamps never going down.
@@ -175,15 +178,22 @@ defmodule Ankusa.Queue.Writer do
         # acked. Callers see the store error, not a guessed commit.
         {:reply, {:error, reason}, state}
 
-      {:ok, %{fresh: []} = checked} ->
+      {:ok, %{fresh: []} = checked} when extra_ops == [] ->
         # Every item was a duplicate: write nothing, don't wake dispatch.
         {:reply, {:ok, checked.results}, state}
+
+      {:ok, %{fresh: []} = checked} ->
+        # No hook to commit, but the caller's own ops must still land.
+        case Store.write(state.instance, extra_ops, sync: true) do
+          :ok -> {:reply, {:ok, checked.results}, state}
+          {:error, reason} -> {:reply, {:error, reason}, maybe_reopen(state)}
+        end
 
       {:ok, checked} ->
         {ops, batch_size, bytes} =
           build_ops(checked.fresh, state.next_seq, now, state.archive?)
 
-        ops = checked.dedupe_ops ++ ops
+        ops = checked.dedupe_ops ++ ops ++ extra_ops
 
         result = commit(state.instance, ops, batch_size, bytes)
 
@@ -194,7 +204,7 @@ defmodule Ankusa.Queue.Writer do
             committed =
               checked.fresh
               |> Enum.with_index(state.next_seq)
-              |> Enum.map(fn {{env, _bin, _mods, _ttl}, seq} ->
+              |> Enum.map(fn {{env, _bin, _mods, _ttl, _replay_id}, seq} ->
                 {:committed, %{env | seq: seq}}
               end)
 
@@ -224,9 +234,9 @@ defmodule Ankusa.Queue.Writer do
   # that will commit) plus the fresh items, their dedupe ops, and the count.
   # A stored entry counts as a duplicate only while `expires_at > now`.
   defp dedupe_check(instance, items, now) do
-    keyed = Enum.filter(items, fn {env, _bin, _mods, ttl} -> dedupe?(env, ttl) end)
+    keyed = Enum.filter(items, fn {env, _bin, _mods, ttl, _replay_id} -> dedupe?(env, ttl) end)
 
-    keys = Enum.map(keyed, fn {env, _bin, _mods, _ttl} -> u_key(env) end)
+    keys = Enum.map(keyed, fn {env, _bin, _mods, _ttl, _replay_id} -> u_key(env) end)
 
     case read_stored(instance, keys) do
       {:error, reason} ->
@@ -236,11 +246,13 @@ defmodule Ankusa.Queue.Writer do
         stored =
           keyed
           |> Enum.zip(stored_results)
-          |> Map.new(fn {{env, _bin, _mods, _ttl}, result} -> {u_key(env), result} end)
+          |> Map.new(fn {{env, _bin, _mods, _ttl, _replay_id}, result} ->
+            {u_key(env), result}
+          end)
 
         {_seen, results, fresh, dedupe_ops, fresh_count} =
           Enum.reduce(items, {%{}, [], [], [], 0}, fn item, {seen, results, fresh, ops, n} ->
-            {env, _bin, _mods, ttl} = item
+            {env, _bin, _mods, ttl, _replay_id} = item
 
             key = if dedupe?(env, ttl), do: u_key(env)
 
@@ -429,22 +441,20 @@ defmodule Ankusa.Queue.Writer do
   defp build_ops(items, first_seq, now, archive?) do
     items
     |> Enum.with_index(first_seq)
-    |> Enum.reduce({[], 0, 0}, fn {{_env, bin, mods, _ttl}, seq}, {ops, count, bytes} ->
+    |> Enum.reduce({[], 0, 0}, fn {{_env, bin, mods, _ttl, replay_id}, seq},
+                                  {ops, count, bytes} ->
       size = byte_size(bin)
+
+      # A row without `:replay` is a live delivery; a released quarantine hook's
+      # rows carry the job's id, like a replayed dead letter's.
+      base = %{module: nil, state: :pending, attempts: 0, at: now, error: nil, size: size}
+      base = if is_binary(replay_id), do: Map.put(base, :replay, replay_id), else: base
 
       row_ops =
         mods
         |> Enum.with_index()
         |> Enum.flat_map(fn {mod, i} ->
-          row =
-            :erlang.term_to_binary(%{
-              module: mod,
-              state: :pending,
-              attempts: 0,
-              at: now,
-              error: nil,
-              size: size
-            })
+          row = :erlang.term_to_binary(%{base | module: mod})
 
           [
             {:put, :deliveries, Keys.delivery(seq, i), row},

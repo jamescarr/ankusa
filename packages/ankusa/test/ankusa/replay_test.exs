@@ -583,4 +583,117 @@ defmodule Ankusa.ReplayTest do
     assert {:error, {:invalid, "since"}} =
              Replay.start(inst, %{kind: :archive, from: 0, to: 1_000, since: 5})
   end
+
+  # ── quarantine release ─────────────────────────────────────────────────────
+
+  defp swh_secret, do: "whsec_" <> Base.encode64(:crypto.strong_rand_bytes(24))
+
+  # A writable source store whose spec carries the secret, so a test can
+  # rotate it with `SourceStore.put/5`.
+  defp start_quarantining do
+    pid = self()
+
+    decoder = fn _source_id, spec ->
+      [
+        verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: spec["secret"]},
+        on_verify_failure: :quarantine,
+        sinks: [{RecordSink, pid: pid}]
+      ]
+    end
+
+    start(%{}, source_store: {Ankusa.SourceStore.Persistent, decoder: decoder})
+  end
+
+  test "quarantine release: re-verified against the current secret, original id, replay_id" do
+    config = start_quarantining()
+    inst = config.instance
+    {old, new} = {swh_secret(), swh_secret()}
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => old}, :create)
+
+    # The provider already signs with the new secret; the source still has the old one.
+    body = ~s({"type":"invoice.paid"})
+    headers = standard_webhooks_headers("msg_1", body, new)
+
+    assert {:quarantined, :no_match} =
+             Ankusa.Edge.Ingest.ingest(inst, request("acme.billing", body, headers))
+
+    assert {:ok, [held]} = Ankusa.Edge.Quarantine.recent(inst, 10)
+    assert held.tenant_id == "acme"
+
+    # Still the old secret: the job re-checks, finds nothing that passes, and
+    # leaves the hook in the pen.
+    assert {:ok, :created, first} = Replay.start(inst, kind: :quarantine)
+    first = poll_job_state(inst, first.id, &(&1.state == :done))
+    assert {first.moved, first.skipped, first.scanned} == {0, 1, 1}
+    assert {:ok, [^held]} = Ankusa.Edge.Quarantine.recent(inst, 10)
+
+    assert {:ok, _} = Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => new}, :update)
+
+    assert {:ok, :created, second} = Replay.start(inst, kind: :quarantine)
+    second = poll_job_state(inst, second.id, &(&1.state == :done))
+    assert {second.moved, second.skipped} == {1, 0}
+
+    held_id = held.id
+    second_id = second.id
+    assert_receive {:replayed, ^held_id, ^second_id}, 5_000
+    assert {:ok, []} = Ankusa.Edge.Quarantine.recent(inst, 10)
+    assert {:ok, %{total: 0}} = Ankusa.Queue.dead(inst, limit: 10)
+
+    # Nothing is left to release, and nothing is delivered twice.
+    assert {:ok, :created, third} = Replay.start(inst, kind: :quarantine)
+    third = poll_job_state(inst, third.id, &(&1.state == :done))
+    assert {third.moved, third.scanned} == {0, 0}
+    refute_receive {:replayed, _, _}, 200
+  end
+
+  test "quarantine release judges the signature's timestamp at the hook's receive time" do
+    config = start_quarantining()
+    inst = config.instance
+    secret = swh_secret()
+
+    assert {:ok, _} =
+             Ankusa.SourceStore.put(inst, "acme", "billing", %{"secret" => secret}, :create)
+
+    # Both arrived an hour ago, signed with the source's secret. The first was
+    # on time when it arrived; the second was already an hour stale then — a
+    # replayed old request, which no release may let through.
+    received_at = System.system_time(:millisecond) - 3_600_000
+    arrived = div(received_at, 1000)
+    on_time = held(received_at, standard_webhooks_headers("msg_1", "{}", secret, arrived))
+    stale = held(received_at, standard_webhooks_headers("msg_2", "{}", secret, arrived - 3_600))
+
+    for env <- [on_time, stale], do: :ok = Ankusa.Edge.Quarantine.put(inst, env, :no_match)
+
+    assert {:ok, :created, job} = Replay.start(inst, kind: :quarantine)
+    job = poll_job_state(inst, job.id, &(&1.state == :done))
+    assert {job.moved, job.skipped} == {1, 1}
+
+    {on_time_id, job_id} = {on_time.id, job.id}
+    assert_receive {:replayed, ^on_time_id, ^job_id}, 5_000
+    assert {:ok, [%{id: still_held}]} = Ankusa.Edge.Quarantine.recent(inst, 10)
+    assert still_held == stale.id
+  end
+
+  defp held(received_at, headers) do
+    %Envelope{
+      id: UUIDv7.generate(),
+      source_id: "acme.billing",
+      tenant_id: "acme",
+      received_at: received_at,
+      method: "POST",
+      path: "/webhooks/acme.billing",
+      headers: headers,
+      content_type: nil,
+      body: "{}",
+      size: 2
+    }
+  end
+
+  test "quarantine release needs the queue writer: an edge-less node refuses it" do
+    config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]}, roles: [:dispatch])
+
+    assert {:error, {:role_not_enabled, :edge}} =
+             Replay.start(config.instance, kind: :quarantine)
+  end
 end
