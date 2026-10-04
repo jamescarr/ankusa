@@ -100,7 +100,7 @@ curl -XPATCH localhost:4002/v1/replays/<job-id> -d '{"state":"cancelled"}'
 
 Redelivery is still at-least-once, so the receiver stays idempotent: a hook
 that reached the sink before it failed is delivered again with the same
-`x-ankusa-id` and the same `x-ankusa-dedupe-key`, and the worker dedupes on
+`x-ankusa-id` and the same `x-ankusa-idempotency-key`, and the worker dedupes on
 the latter — here with an in-memory set, which
 a real worker replaces with a unique key in its database. In this drill the
 worker was down for every attempt, so replay delivers evt_3 once and never

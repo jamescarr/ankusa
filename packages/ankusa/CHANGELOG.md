@@ -49,8 +49,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `x-ankusa-dedupe-key`/`x-ankusa-replay-id`; RabbitMQ carries the hook id as
   AMQP `message_id` plus the dedupe/replay AMQP headers; Kafka and NATS carry
   them as record headers. All 8 SDKs decode the message, verify its integrity,
-  and compute the idempotency key (`source:dedupe_key` when set, else `id`,
-  plus `#replay:<replay_id>` when asked); the conformance suite covers it.
+  and read the idempotency key (below; `#replay:<replay_id>` is appended when
+  asked); the conformance suite covers it.
+- **Idempotency key, computed once.** `Ankusa.Envelope.idempotency_key/1`
+  returns the tenant-scoped key a consumer dedupes on:
+  `tenant:source_id:dedupe_key` when the hook has a dedupe key (`default` when
+  it has no tenant), else its `id`. It ships as the message's
+  `idempotency_key` field (additive, still `v: 1`; required in `SinkMessageV1`),
+  the `x-ankusa-idempotency-key` header on `Sink.Http`, and the
+  `ankusa_idempotency_key` header on RabbitMQ, Kafka and NATS. Ingest dedupe
+  scopes by tenant and source, so two tenants' hooks with one provider event id
+  are two hooks; the tenant in the key keeps them two keys at the consumer. The
+  SDK `idempotency_key` helpers read the shipped value and compute the same
+  formula only for a message or delivery that predates the field.
 - **Direct-mode deadline.** With `wal.type: none`, `Ankusa.Edge.Publish`
   publishes to every sink concurrently under one overall deadline
   (`direct_publish_timeout_ms`, default 8 000, configurable as

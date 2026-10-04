@@ -8,16 +8,20 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `Ankusa.SDK.Message.decode/1` now carries `dedupe_key`, `replay_id` and
-  `headers`, verifies an inline body's length and sha256, checks a claim's
-  tenant against `tenant_id`, and rejects a claim that isn't a well-formed
-  ref. `Ankusa.SDK.InvalidMessageError` gains `code` and `field`.
+- `Ankusa.SDK.Message.decode/1` now carries `dedupe_key`, `replay_id`,
+  `idempotency_key` and `headers`, verifies an inline body's length and sha256,
+  checks a claim's tenant against `tenant_id`, and rejects a claim that isn't a
+  well-formed ref. `Ankusa.SDK.InvalidMessageError` gains `code` and `field`.
 - `Ankusa.SDK.Idempotency.key/2`: the idempotency key for a message, parsed
-  webhook headers, or a hook (`source_id:dedupe_key` when a provider event key
-  is present, else the hook id; `include_replay: true` appends the replay id).
-- `Ankusa.SDK.Hook` carries `dedupe_key`, `replay_id` and `headers`;
-  `Ankusa.SDK.Webhook.Headers` parses `x-ankusa-dedupe-key` and
-  `x-ankusa-replay-id` and keeps every request header.
+  webhook headers, or a hook. It returns the key Ankusa shipped (the message's
+  `idempotency_key`, the `x-ankusa-idempotency-key` header) and, for a message
+  or delivery that predates it, computes `tenant:source_id:dedupe_key` (tenant
+  `default` when there is none) when a provider event key is present, else the
+  hook id; `include_replay: true` appends the replay id.
+- `Ankusa.SDK.Hook` carries `dedupe_key`, `replay_id`, `idempotency_key` and
+  `headers`; `Ankusa.SDK.Webhook.Headers` parses `x-ankusa-dedupe-key`,
+  `x-ankusa-replay-id` and `x-ankusa-idempotency-key` and keeps every request
+  header.
 - `Ankusa.SDK.Admin.create_replay/2`, `get_replay/2`, `list_replays/1` and
   `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`).
 

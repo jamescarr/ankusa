@@ -129,17 +129,19 @@ end
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
 so the same hook can arrive twice after a retry. When the source extracted the
 provider's own event key, `HookHeaders#dedupe_key` carries it (and `replay_id`
-marks a replay); `#idempotency_key` folds both into the key to store — see
-"Consuming queue messages". Header lookup is always case-insensitive,
-regardless of whether the mapping passed in already is.
+marks a replay); `HookHeaders#idempotency_key` returns the tenant-scoped key
+Ankusa computed and shipped in `x-ankusa-idempotency-key` — see "Consuming
+queue messages". Header lookup is always case-insensitive, regardless of
+whether the mapping passed in already is.
 
 ## Consuming queue messages
 
 Every sink — HTTP, RabbitMQ, Kafka, NATS — delivers one JSON message per hook:
 the identity fields, the body (inline `body_base64` or a claim-check `claim`),
-`sha256`, and, when present, `dedupe_key`, `replay_id` and the forwarded
-provider `headers`. `Ankusa.decode_message` validates all of it and
-`Message#idempotency_key` gives the value to store in a processed-ids table:
+`sha256`, and, when present, `dedupe_key`, `replay_id`, `idempotency_key` and
+the forwarded provider `headers`. `Ankusa.decode_message` validates all of it
+and `Message#idempotency_key` gives the value to store in a processed-ids
+table:
 
 ```ruby
 require "ankusa/sdk"
@@ -157,7 +159,7 @@ def consume(raw)
     raise
   end
 
-  key = message.idempotency_key   # source_id:dedupe_key, else id
+  key = message.idempotency_key   # the key Ankusa shipped (tenant:source_id:dedupe_key, else id)
   return if DB.exec_params("SELECT 1 FROM processed WHERE key = $1", [key]).any?
 
   body = message.claim ? CLAIM_CHECK.redeem(message.claim, message.sha256) : message.body
@@ -166,9 +168,13 @@ def consume(raw)
 end
 ```
 
-- `idempotency_key` is `source_id:dedupe_key` when the source extracted the
-  provider's own event key, else `id` — so a provider retry that arrives with a
-  fresh Ankusa `id` still collapses onto the same row.
+- `idempotency_key` is the key Ankusa computed once for the hook:
+  `tenant:source_id:dedupe_key` when the source extracted the provider's own
+  event key, else `id` — so a provider retry that arrives with a fresh Ankusa
+  `id` still collapses onto the same row, and two tenants that share a provider
+  event id do not. For a message from a node that predates the field the
+  helper computes the same key itself (tenant `default` when there is none).
+  The decoded field alone is `message.to_h[:idempotency_key]`.
 - A replayed delivery is dropped by default. To reprocess replays instead, pass
   `include_replay: true`: the key then ends in `#replay:<replay_id>`.
 - `message.body` is the decoded inline bytes (nil for the claim form);
@@ -181,8 +187,9 @@ end
   differs from `tenant_id`.
 
 A webhook receiver can take the same shortcut straight off the HTTP sink's
-headers with `Ankusa.parse_headers(headers).idempotency_key`, where `source`
-plays the part of `source_id`.
+headers with `Ankusa.parse_headers(headers).idempotency_key`, which reads
+`x-ankusa-idempotency-key` (falling back to computing it, where `source` and
+`tenant` play `source_id` and `tenant_id`).
 
 When a sink has grown a backlog, or a downstream processor failed after the
 sink accepted a batch, re-drive it with a replay job over the admin client (see

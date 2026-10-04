@@ -2,6 +2,7 @@ package io.github.jamescarr.ankusa.message;
 
 import io.github.jamescarr.ankusa.claimcheck.InvalidClaimRefError;
 import io.github.jamescarr.ankusa.claimcheck.ParsedClaimRef;
+import io.github.jamescarr.ankusa.internal.IdempotencyKey;
 import io.github.jamescarr.ankusa.internal.Json;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -53,6 +54,8 @@ import tools.jackson.databind.JsonNode;
  * @param sha256 the body's lowercase-hex SHA-256, or null when an inline message carries none
  * @param dedupeKey the provider's event key, or null when the source extracts none
  * @param replayId the replay job id when this delivery is a replay, else null
+ * @param idempotencyKey the tenant-scoped key Ankusa computed for the hook, or null for a message
+ *     from a node that predates the field; read it through {@link #idempotencyKey(boolean)}
  * @param headers the forwarded provider request headers, lower-cased names, never null
  */
 public record Message(
@@ -68,6 +71,7 @@ public record Message(
     @Nullable String sha256,
     @Nullable String dedupeKey,
     @Nullable String replayId,
+    @Nullable String idempotencyKey,
     Map<String, String> headers) {
 
   /** A lowercase-hex SHA-256, the only digest shape a message may carry. */
@@ -126,6 +130,7 @@ public record Message(
     String contentType = nullableText(root, "content_type");
     String dedupeKey = nullableText(root, "dedupe_key");
     String replayId = nullableText(root, "replay_id");
+    String idempotencyKey = nullableText(root, "idempotency_key");
     Map<String, String> headers = headers(root);
     String sha256 = sha256(root);
 
@@ -165,6 +170,7 @@ public record Message(
           sha256,
           dedupeKey,
           replayId,
+          idempotencyKey,
           headers);
     }
 
@@ -202,28 +208,29 @@ public record Message(
         sha256,
         dedupeKey,
         replayId,
+        idempotencyKey,
         headers);
   }
 
   /**
    * The key a worker dedupes on.
    *
-   * <p>When the message carries a non-empty {@link #dedupeKey()}, the key is {@code
-   * source_id:dedupe_key}, which collapses provider retries of one event; otherwise it is the
-   * delivery {@link #id()}, which collapses broker redeliveries of one delivery. With {@code
-   * includeReplay} and a {@link #replayId()}, the key gains a {@code #replay:<replay_id>} suffix,
-   * so a replay of an event the worker already processed is processed again — omit it (false) to
-   * drop replays, which is what a consumer that keeps a processed-ids table usually wants.
+   * <p>Ankusa computes the key once per hook and ships it as {@code idempotency_key}; when that is
+   * a non-empty string it is the key. For a message from a node that predates the field the key is
+   * computed: {@code tenant:source_id:dedupe_key} (tenant {@code default} when there is none) when
+   * the message carries a non-empty {@link #dedupeKey()}, which collapses provider retries of one
+   * event, otherwise the delivery {@link #id()}, which collapses broker redeliveries of one
+   * delivery. With {@code includeReplay} and a {@link #replayId()}, the key gains a {@code
+   * #replay:<replay_id>} suffix, so a replay of an event the worker already processed is processed
+   * again — omit it (false) to drop replays, which is what a consumer that keeps a processed-ids
+   * table usually wants.
    *
    * @param includeReplay whether a replay should get a distinct key
    * @return the idempotency key
    */
   public String idempotencyKey(boolean includeReplay) {
-    String key = dedupeKey != null && !dedupeKey.isEmpty() ? sourceId + ":" + dedupeKey : id;
-    if (includeReplay && replayId != null) {
-      key = key + "#replay:" + replayId;
-    }
-    return key;
+    return IdempotencyKey.resolve(
+        idempotencyKey, tenantId, sourceId, dedupeKey, id, replayId, includeReplay);
   }
 
   /**

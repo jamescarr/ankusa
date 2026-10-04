@@ -14,13 +14,18 @@ this project follows [Semantic Versioning](https://semver.org/).
   an `InvalidMessageError` with `retryable: false`, a `code`, and the
   offending `field`. The decoded `Message` also carries the inline bytes as a
   non-enumerable `body`.
-- `idempotencyKey(messageOrHeaders, { includeReplay? })`: `source_id:dedupe_key`
-  when a non-empty `dedupe_key` is set, else `id`, plus `#replay:<replay_id>`
-  when `includeReplay` is set and the delivery is a replay. Accepts a decoded
-  `Message` or the `HookHeaders` of an HTTP delivery.
-- `HookHeaders` gains `dedupeKey` (from `x-ankusa-dedupe-key`) and `replayId`
-  (from `x-ankusa-replay-id`); each is `null` when the header is absent or
-  empty.
+- `idempotencyKey(messageOrHeaders, { includeReplay? })`: returns the key
+  Ankusa shipped (the message's `idempotency_key`, or the
+  `x-ankusa-idempotency-key` header), and for a message or delivery that
+  predates the field computes it: `tenant:source_id:dedupe_key` (tenant
+  `default` when there is none) for a non-empty `dedupe_key`, else `id`, plus
+  `#replay:<replay_id>` when `includeReplay` is set and the delivery is a
+  replay. Accepts a decoded `Message` or the `HookHeaders` of an HTTP delivery.
+- `Message` gains `idempotency_key` (`string | null`, validated like
+  `replay_id`), and `HookHeaders` gains `dedupeKey` (from
+  `x-ankusa-dedupe-key`), `replayId` (from `x-ankusa-replay-id`) and
+  `idempotencyKey` (from `x-ankusa-idempotency-key`); each is `null` when the
+  header is absent or empty.
 - Admin replay jobs: `createReplay(spec)`, `getReplay(id)`, `listReplays()`,
   and `updateReplay(id, patch)`, with the `Replay`, `ReplayList`, `ReplaySpec`,
   and `ReplayPatch` types. A `404` is `AdminRejectedError` with code

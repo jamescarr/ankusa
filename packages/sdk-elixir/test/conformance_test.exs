@@ -153,7 +153,8 @@ defmodule Ankusa.SDK.ConformanceTest do
       "tenant" => headers.tenant,
       "content_type" => headers.content_type,
       "dedupe_key" => headers.dedupe_key,
-      "replay_id" => headers.replay_id
+      "replay_id" => headers.replay_id,
+      "idempotency_key" => headers.idempotency_key
     }
   end
 
@@ -173,6 +174,7 @@ defmodule Ankusa.SDK.ConformanceTest do
       "sha256" => message.sha256,
       "dedupe_key" => message.dedupe_key,
       "replay_id" => message.replay_id,
+      "idempotency_key" => message.idempotency_key,
       "headers" => message.headers
     }
   end

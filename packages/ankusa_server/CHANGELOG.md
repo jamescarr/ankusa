@@ -6,6 +6,21 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Added
+
+- Every sink now sends the tenant-scoped idempotency key: the message gains
+  `idempotency_key` (still `v: 1`), `Sink.Http` sends `x-ankusa-idempotency-key`,
+  and RabbitMQ, Kafka and NATS send `ankusa_idempotency_key`. It is
+  `tenant:source_id:dedupe_key` when the source has a dedupe key, else the hook
+  `id`. Consumers should dedupe on it; the SDK helpers read it.
+
+### Changed
+
+- `GET /asyncapi.json`: `SinkMessageV1` now requires `idempotency_key`, and
+  `SinkMessageHeadersV1` requires `ankusa_idempotency_key`. A consumer that
+  validates messages against the previous document rejects the new field only
+  if it also forbids additional properties.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

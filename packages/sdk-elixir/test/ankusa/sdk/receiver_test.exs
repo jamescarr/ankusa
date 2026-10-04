@@ -59,6 +59,7 @@ defmodule Ankusa.SDK.ReceiverTest do
     assert hook.size == byte_size(@body)
     assert hook.dedupe_key == nil
     assert hook.replay_id == nil
+    assert hook.idempotency_key == nil
     assert hook.headers["x-ankusa-id"] == "01a0"
     assert hook.headers["x-ankusa-source"] == "demo"
   end
@@ -70,6 +71,7 @@ defmodule Ankusa.SDK.ReceiverTest do
         "x-ankusa-source": "demo",
         "x-ankusa-dedupe-key": "evt_9",
         "x-ankusa-replay-id": "rid-1",
+        "x-ankusa-idempotency-key": "default:demo:evt_9",
         "x-github-event": "push"
       )
       |> Receiver.call(receiver_opts())
@@ -79,6 +81,7 @@ defmodule Ankusa.SDK.ReceiverTest do
 
     assert hook.dedupe_key == "evt_9"
     assert hook.replay_id == "rid-1"
+    assert hook.idempotency_key == "default:demo:evt_9"
     assert hook.headers["x-github-event"] == "push"
   end
 

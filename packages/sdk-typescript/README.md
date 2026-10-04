@@ -173,7 +173,7 @@ import { parseHeaders } from "ankusa";
 // `req.headers` is whatever your framework hands you (`http.IncomingHttpHeaders`,
 // an Express `req.headers`, a WHATWG `Headers`, ...).
 const hook = parseHeaders(req.headers);
-// hook = { id, source, tenant, contentType, dedupeKey, replayId }
+// hook = { id, source, tenant, contentType, dedupeKey, replayId, idempotencyKey }
 
 // Dedupe on `idempotencyKey(hook)`: delivery is at-least-once, so a retried
 // hook arrives twice. `x-ankusa-id` is always the identity, so a delivery
@@ -182,11 +182,14 @@ const hook = parseHeaders(req.headers);
 ```
 
 Every other header is optional — `tenant` is `null` unless the source has
-one, `source`/`contentType` default to `""`/`null`, and `dedupeKey`/`replayId`
-are `null` when absent. See "HTTP handoff" in
+one, `source`/`contentType` default to `""`/`null`, and
+`dedupeKey`/`replayId`/`idempotencyKey` are `null` when absent. See "HTTP
+handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)
 for the full contract. `dedupeKey` is the provider's event key when the source
-has a dedupe rule; `replayId` is set only on replayed deliveries.
+has a dedupe rule; `replayId` is set only on replayed deliveries;
+`idempotencyKey` is the tenant-scoped key Ankusa computed and shipped in
+`x-ankusa-idempotency-key`.
 
 ## Consuming queue messages
 
@@ -201,14 +204,16 @@ import { decodeMessage, idempotencyKey, InvalidMessageError } from "ankusa";
 try {
   const message = decodeMessage(raw);            // raw: string | Uint8Array
   // message = { v, id, source_id, tenant_id, received_at, content_type, size,
-  //             body_base64, claim, sha256, dedupe_key, replay_id, headers }
+  //             body_base64, claim, sha256, dedupe_key, replay_id,
+  //             idempotency_key, headers }
   const body = message.body ??                     // decoded inline bytes (Uint8Array)
     await claimCheck.redeem(message.claim!, message.sha256!);   // or the claim gateway
 
-  // The key is `source_id:dedupe_key` when a provider event key is set, else
-  // `id` — so provider retries (same event key) collapse to one row. Replays
-  // keep the original key, so dedupe drops them unless you pass
-  // `{ includeReplay: true }`.
+  // Ankusa computes the key once per hook and ships it as
+  // `message.idempotency_key`: `tenant:source_id:dedupe_key` when a provider
+  // event key is set, else `id` — so provider retries (same event key)
+  // collapse to one row. `idempotencyKey` reads it. Replays keep the original
+  // key, so dedupe drops them unless you pass `{ includeReplay: true }`.
   const key = idempotencyKey(message);
 
   await db.query(
@@ -231,10 +236,14 @@ try {
 `missing_body`, `invalid_body_base64`, `size_mismatch`, `integrity`,
 `tenant_mismatch`), and the offending `field` when the rule is about one key.
 Body delivery is at-least-once, so every consumer must dedupe on the key —
-`source_id:dedupe_key` when `dedupe_key` is set, else `id`.
+`message.idempotency_key`, which `idempotencyKey(message)` returns. For a
+message from a node older than the field the helper computes the same key
+itself: `tenant:source_id:dedupe_key` (tenant `default` when there is none)
+when `dedupe_key` is set, else `id`.
 
 `idempotencyKey` also takes the `HookHeaders` an HTTP receiver already has
-(`parseHeaders(req.headers)`), where `source` plays `source_id`.
+(`parseHeaders(req.headers)`), where it reads `x-ankusa-idempotency-key`
+(falling back to computing it, with `source` playing `source_id`).
 
 ## Layout
 

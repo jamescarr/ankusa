@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Ankusa\Webhook;
 
+use Ankusa\Internal\IdempotencyKey;
 use Psr\Http\Message\MessageInterface;
 
 /**
@@ -13,13 +14,13 @@ use Psr\Http\Message\MessageInterface;
  * https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md for the
  * full contract this mirrors: the raw body arrives verbatim, and identity
  * travels in `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-tenant` (only when the
- * source has a tenant), and `content-type`. A provider dedupe key
- * (`x-ankusa-dedupe-key`) and a replay marker (`x-ankusa-replay-id`) travel
- * alongside when the delivery has them.
+ * source has a tenant), `content-type` and `x-ankusa-idempotency-key`. A
+ * provider dedupe key (`x-ankusa-dedupe-key`) and a replay marker
+ * (`x-ankusa-replay-id`) travel alongside when the delivery has them.
  *
  * A receiver dedupes with {@see self::idempotencyKey()}, not `x-ankusa-id`
  * alone: delivery is at-least-once, so the same hook can arrive twice after a
- * retry, and a provider retry collapses onto the same `dedupe_key`.
+ * retry, and a provider retry collapses onto the same key.
  */
 final readonly class HookHeaders
 {
@@ -29,6 +30,7 @@ final readonly class HookHeaders
         'x-ankusa-tenant',
         'x-ankusa-dedupe-key',
         'x-ankusa-replay-id',
+        'x-ankusa-idempotency-key',
         'content-type',
     ];
 
@@ -42,6 +44,12 @@ final readonly class HookHeaders
         public ?string $dedupeKey,
         /** Set only when this delivery is a replay of an archived hook. */
         public ?string $replayId,
+        /**
+         * The tenant-scoped key Ankusa computed for the hook, from
+         * `x-ankusa-idempotency-key`; `null` when absent or empty (a sender
+         * that predates the header). Read it through {@see self::idempotencyKey()}.
+         */
+        public ?string $idempotencyKey,
     ) {}
 
     /**
@@ -84,29 +92,33 @@ final readonly class HookHeaders
             contentType: $lowered['content-type'] ?? null,
             dedupeKey: self::optional($lowered['x-ankusa-dedupe-key'] ?? null),
             replayId: self::optional($lowered['x-ankusa-replay-id'] ?? null),
+            idempotencyKey: self::optional($lowered['x-ankusa-idempotency-key'] ?? null),
         );
     }
 
     /**
      * The key a receiver dedupes on.
      *
-     * `source:dedupe_key` when the delivery carries a non-empty
-     * `x-ankusa-dedupe-key`, else the `id`; with `$includeReplay` and a
-     * `x-ankusa-replay-id`, `#replay:<replay_id>` is appended. The default
-     * ignores replays, so an ordinary receiver drops a replayed hook it
-     * already processed; pass `true` to reprocess them.
+     * The key Ankusa shipped in `x-ankusa-idempotency-key` when it is
+     * non-empty. For a delivery from a sender that predates the header it is
+     * computed: `tenant:source:dedupe_key` (tenant `default` when there is
+     * none) when the delivery carries a non-empty `x-ankusa-dedupe-key`, else
+     * the `id`. With `$includeReplay` and a `x-ankusa-replay-id`,
+     * `#replay:<replay_id>` is appended. The default ignores replays, so an
+     * ordinary receiver drops a replayed hook it already processed; pass
+     * `true` to reprocess them.
      */
     public function idempotencyKey(bool $includeReplay = false): string
     {
-        $key = ($this->dedupeKey !== null && $this->dedupeKey !== '')
-            ? $this->source . ':' . $this->dedupeKey
-            : $this->id;
-
-        if ($includeReplay && $this->replayId !== null) {
-            $key .= '#replay:' . $this->replayId;
-        }
-
-        return $key;
+        return IdempotencyKey::build(
+            $this->idempotencyKey,
+            $this->tenant,
+            $this->source,
+            $this->dedupeKey,
+            $this->id,
+            $this->replayId,
+            $includeReplay,
+        );
     }
 
     private static function optional(?string $value): ?string

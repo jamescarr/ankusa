@@ -331,7 +331,7 @@ final class ConformanceTest extends TestCase
     /**
      * @param array<string, mixed> $inp
      *
-     * @return array{id: string, source: string, tenant: string|null, content_type: string|null, dedupe_key: string|null, replay_id: string|null}
+     * @return array{id: string, source: string, tenant: string|null, content_type: string|null, dedupe_key: string|null, replay_id: string|null, idempotency_key: string|null}
      */
     private static function hookHeaders(array $inp): array
     {
@@ -344,6 +344,7 @@ final class ConformanceTest extends TestCase
             'content_type' => $headers->contentType,
             'dedupe_key' => $headers->dedupeKey,
             'replay_id' => $headers->replayId,
+            'idempotency_key' => $headers->idempotencyKey,
         ];
     }
 
@@ -370,6 +371,7 @@ final class ConformanceTest extends TestCase
             'sha256' => $message->sha256,
             'dedupe_key' => $message->dedupeKey,
             'replay_id' => $message->replayId,
+            'idempotency_key' => $message->idempotencyKey,
             'headers' => $message->headers,
         ];
     }

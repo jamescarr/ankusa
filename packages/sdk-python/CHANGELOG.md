@@ -14,10 +14,15 @@ this project follows [Semantic Versioning](https://semver.org/).
   claim-check (`claim`) body forms, `sha256`, `dedupe_key`, `replay_id`, and
   the forwarded `headers`, ignoring unknown keys.
 - `message.idempotency_key()`, the key to store in a processed-ids table: the
-  provider's `dedupe_key` folded with `source_id` when set, else `id`, with an
-  optional `#replay:<replay_id>` suffix (`include_replay=True`).
-- `HookHeaders.dedupe_key` / `HookHeaders.replay_id`, parsed from
-  `x-ankusa-dedupe-key` / `x-ankusa-replay-id`.
+  key Ankusa shipped (the message's `idempotency_key`, or the
+  `x-ankusa-idempotency-key` header), and for a message or delivery that
+  predates the field `tenant:source_id:dedupe_key` (tenant `default` when there
+  is none) when `dedupe_key` is set, else `id`, with an optional
+  `#replay:<replay_id>` suffix (`include_replay=True`).
+- `Message.idempotency_key`, decoded like `replay_id`, and
+  `HookHeaders.dedupe_key` / `HookHeaders.replay_id` /
+  `HookHeaders.idempotency_key`, parsed from `x-ankusa-dedupe-key` /
+  `x-ankusa-replay-id` / `x-ankusa-idempotency-key`.
 - `AdminClient.create_replay()`, `get_replay()`, `list_replays()` and
   `update_replay()` for the `POST/GET/PATCH /v1/replays` replay-job API.
 

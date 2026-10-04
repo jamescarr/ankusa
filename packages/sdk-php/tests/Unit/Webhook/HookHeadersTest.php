@@ -41,6 +41,7 @@ final class HookHeadersTest extends TestCase
             'x-ankusa-id' => '01a0',
             'x-ankusa-source' => 'stripe',
             'x-ankusa-tenant' => 'acme',
+            'x-ankusa-idempotency-key' => 'acme:stripe:evt_1',
             'content-type' => 'application/json',
         ];
 
@@ -144,6 +145,18 @@ final class HookHeadersTest extends TestCase
         self::assertNull($headers->replayId);
     }
 
+    public function testShippedIdempotencyKeyIsParsedAndEmptyIsNull(): void
+    {
+        $shipped = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'X-Ankusa-Idempotency-Key' => 'acme:stripe:evt_1',
+        ]);
+        self::assertSame('acme:stripe:evt_1', $shipped->idempotencyKey);
+
+        $empty = HookHeaders::fromHeaders(['x-ankusa-id' => '01a0', 'x-ankusa-idempotency-key' => '']);
+        self::assertNull($empty->idempotencyKey);
+    }
+
     public function testIdempotencyKeyPrefersTheDedupeKeyAndCanIncludeTheReplay(): void
     {
         $plain = HookHeaders::fromHeaders(['x-ankusa-id' => '01a0', 'x-ankusa-source' => 'stripe']);
@@ -155,14 +168,37 @@ final class HookHeadersTest extends TestCase
             'x-ankusa-dedupe-key' => 'evt_1',
             'x-ankusa-replay-id' => 'rid-1',
         ]);
-        self::assertSame('stripe:evt_1', $deduped->idempotencyKey());
-        self::assertSame('stripe:evt_1#replay:rid-1', $deduped->idempotencyKey(true));
+        self::assertSame('default:stripe:evt_1', $deduped->idempotencyKey());
+        self::assertSame('default:stripe:evt_1#replay:rid-1', $deduped->idempotencyKey(true));
+
+        $tenanted = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'x-ankusa-source' => 'stripe',
+            'x-ankusa-tenant' => 'acme',
+            'x-ankusa-dedupe-key' => 'evt_1',
+        ]);
+        self::assertSame('acme:stripe:evt_1', $tenanted->idempotencyKey());
+    }
+
+    public function testTheShippedIdempotencyKeyWinsOverRecomputingIt(): void
+    {
+        $headers = HookHeaders::fromHeaders([
+            'x-ankusa-id' => '01a0',
+            'x-ankusa-source' => 'stripe',
+            'x-ankusa-tenant' => 'globex',
+            'x-ankusa-dedupe-key' => 'evt_1',
+            'x-ankusa-replay-id' => 'rid-1',
+            'x-ankusa-idempotency-key' => 'acme:stripe:evt_1',
+        ]);
+
+        self::assertSame('acme:stripe:evt_1', $headers->idempotencyKey());
+        self::assertSame('acme:stripe:evt_1#replay:rid-1', $headers->idempotencyKey(true));
     }
 
     /* --- helpers ------------------------------------------------------------ */
 
     /**
-     * @return array{id: string, source: string, tenant: ?string, contentType: ?string, dedupeKey: ?string, replayId: ?string}
+     * @return array{id: string, source: string, tenant: ?string, contentType: ?string, dedupeKey: ?string, replayId: ?string, idempotencyKey: ?string}
      */
     private static function flatten(HookHeaders $headers): array
     {
@@ -173,6 +209,7 @@ final class HookHeadersTest extends TestCase
             'contentType' => $headers->contentType,
             'dedupeKey' => $headers->dedupeKey,
             'replayId' => $headers->replayId,
+            'idempotencyKey' => $headers->idempotencyKey,
         ];
     }
 

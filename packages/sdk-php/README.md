@@ -116,18 +116,21 @@ try {
 }
 
 $body = file_get_contents('php://input');
-// $hook->id, $hook->source, $hook->tenant, $hook->contentType
+// $hook->id, $hook->source, $hook->tenant, $hook->contentType, $hook->idempotencyKey
 ```
 
-`HookHeaders->id` is what a receiver dedupes on: delivery is at-least-once (see
-"HTTP handoff" in
+`HookHeaders->id` is what a receiver identifies a delivery by: delivery is
+at-least-once (see "HTTP handoff" in
 [docs/integrations.md](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
-so the same hook can arrive twice after a retry.
+so the same hook can arrive twice after a retry. Dedupe on
+`$hook->idempotencyKey()`: it returns the tenant-scoped key Ankusa shipped in
+`x-ankusa-idempotency-key` (`$hook->idempotencyKey` is the parsed header, `null`
+for a sender that predates it, in which case the method computes the key).
 
 ## Consuming queue messages
 
 A queue consumer (Redis, a broker, or an HTTP-sink body) decodes one v1
-message, verifies its integrity, and computes the key it dedupes on before it
+message, verifies its integrity, and reads the key it dedupes on before it
 touches the effect. `Message::decode()` is the whole decoder — it refuses
 anything that doesn't verify, so a decoded message is safe to act on:
 
@@ -147,12 +150,16 @@ $body = $message->body ?? $claimCheck->redeem($message->claim, $message->sha256)
 $key  = $message->idempotencyKey();
 ```
 
-`idempotencyKey()` is `source_id:dedupe_key` when the provider event key is
-present, else the `id`; delivery is at-least-once, so this is the stable handle
-when a provider retries. It ignores `replay_id` by default — a replayed event
-you already processed stays deduped. A consumer that must reprocess replays
-calls `idempotencyKey(includeReplay: true)`, which appends
-`#replay:<replay_id>`.
+`idempotencyKey()` returns the key Ankusa computed once for the hook and shipped
+as the message's `idempotency_key` (`$message->idempotencyKey` is that field):
+`tenant:source_id:dedupe_key` when the provider event key is present, else the
+`id`; delivery is at-least-once, so this is the stable handle when a provider
+retries, and two tenants that share a provider event id keep distinct keys. For
+a message from a node that predates the field the method computes the same key
+itself (tenant `default` when there is none). It ignores `replay_id` by
+default — a replayed event you already processed stays deduped. A consumer that
+must reprocess replays calls `idempotencyKey(includeReplay: true)`, which
+appends `#replay:<replay_id>`.
 
 The key is meant to be a row in a processed-ids table, written with the effect:
 

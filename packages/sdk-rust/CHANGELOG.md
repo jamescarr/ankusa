@@ -10,8 +10,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 - `decode_message` and `Message`, for consumers of Ankusa's queue: the inline
   (`body_base64`) and claim (`claim`) body forms, `sha256`/size/tenant
-  validation, forwarded `headers`, and `Message::idempotency_key(include_replay)`.
-- `HookHeaders` gains `dedupe_key`, `replay_id`, and `idempotency_key`.
+  validation, forwarded `headers`, the shipped `idempotency_key` field, and
+  `Message::idempotency_key(include_replay)`, which returns it (computing
+  `tenant:source_id:dedupe_key`, tenant `default` when none, else `id`, only for
+  a message that predates the field).
+- `HookHeaders` gains `dedupe_key`, `replay_id`, `idempotency_key` (the shipped
+  `x-ankusa-idempotency-key`) and `idempotency_key(include_replay)`.
 - `AdminClient` gains `create_replay`, `get_replay`, `list_replays`, and
   `update_replay`, with the `Replay`, `ReplayList`, `ReplaySpec`, and
   `ReplayPatch` models.

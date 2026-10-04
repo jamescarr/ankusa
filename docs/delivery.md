@@ -52,9 +52,10 @@ durable: the cursor commits in the same batch as the rows it moved, a restart
 resumes it, and a job whose deliveries keep dead-lettering pauses itself.
 A `dlq` job touches only rows dead-lettered at or before its own creation, so
 rows that die again during the replay are never picked up twice by one job.
-Replayed deliveries keep the hook's original `id` and `dedupe_key` and carry
-the job's `replay_id` in the message, the broker headers, and the HTTP
-headers. Manage jobs with `GET /v1/replays`, `GET|PATCH /v1/replays/{id}`.
+Replayed deliveries keep the hook's original `id`, `dedupe_key` and
+`idempotency_key` and carry the job's `replay_id` in the message, the broker
+headers, and the HTTP headers. Manage jobs with `GET /v1/replays`,
+`GET|PATCH /v1/replays/{id}`.
 See the runbook in [`Ankusa.Replay`](https://hexdocs.pm/ankusa/Ankusa.Replay.html).
 
 ## Direct mode
@@ -136,7 +137,7 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -148,22 +149,34 @@ sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5
 
 ### Idempotent receivers
 
-Delivery is at-least-once, so every consumer is an idempotent receiver. Two
-distinct ids can refer to the same provider event, and they are deduped
-differently:
+Delivery is at-least-once, so every consumer is an idempotent receiver. Dedupe
+on the idempotency key; the ids it is built from mean different things:
 
+- `x-ankusa-idempotency-key` (the message's `idempotency_key` on a queue sink)
+  is the key to dedupe on. Ankusa computes it once per hook:
+  `tenant:source_id:dedupe_key` when the source extracts the provider's event
+  key (`dedupe:` on the source), else the hook's `id`. The full rule is under
+  [`Sink.RabbitMQ`](#sinkrabbitmq-queue-delivery) below.
 - `x-ankusa-id`, the message `id` on a queue sink, identifies **one stored
   hook**. Every redelivery of that hook (a retry, a DLQ replay, a dispatch
-  restart) carries the same `id`, so dedupe on it.
-- A provider retry is a **different stored hook** with a different `id`,
-  because ingest does no deduplication. Dedupe those on the provider's own
-  event id in the body (e.g. Stripe's `id`).
+  restart) carries the same `id`.
+- A provider retry is a **different stored hook** with a different `id`. With
+  no provider event key configured the idempotency key is that `id` and cannot
+  collapse them: configure the source's `dedupe`, or dedupe on the provider's
+  own event id in the body (e.g. Stripe's `id`).
 
-The original request headers are **not forwarded**: `Sink.Http` sends only
-`x-ankusa-id`/`x-ankusa-source`/`x-ankusa-tenant`, and
-`Sink.Message` carries only `id`, `source_id`, `tenant_id`, `received_at`,
-`content_type`, `size`, and the body (or claim). A header-borne id such as
-`X-GitHub-Delivery` or `webhook-id` is therefore not available downstream.
+Provider request headers are forwarded to every sink per the source's
+`forward_headers` option (see [`configuration.md`](configuration.md#sources)):
+`Sink.Http` sends them as request headers, and the queue sinks carry them in
+the message's `headers` object. Authentication and framing headers and every
+`x-ankusa-*` name are never forwarded. So a header-borne id such as
+`X-GitHub-Delivery` or `webhook-id` reaches the consumer as a forwarded header,
+and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
+`x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key` and (when set)
+`x-ankusa-tenant`, `x-ankusa-dedupe-key` and `x-ankusa-replay-id`; a message
+carries `id`, `source_id`, `tenant_id`, `received_at`, `content_type`, `size`,
+`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `headers` and the body
+(or claim).
 
 ### `Sink.RabbitMQ`: queue delivery
 
@@ -207,12 +220,13 @@ Message shape (`Ankusa.Sink.Message`, byte-identical for `Sink.Kafka`):
 // inline
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/json", "size": 245, "dedupe_key": "evt_1", "replay_id": null,
+ "idempotency_key": "acme:stripe:evt_1",
  "headers": {"x-github-event": "push"}, "sha256": "2cf24d...", "body_base64": "eyJpZCI6..."}
 
 // fat payload
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728, "dedupe_key": "evt_1",
- "replay_id": null, "headers": {},
+ "replay_id": null, "idempotency_key": "acme:stripe:evt_1", "headers": {},
  "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002", "sha256": "3bea8a..."}
 ```
 
@@ -221,11 +235,27 @@ consumers must ignore keys they don't know.
 
 Every message carries `sha256` (lowercase hex, inline bodies too), the
 provider event `dedupe_key` (or `null`), the `replay_id` of the replay job when
-this delivery is a replay (else `null`), and the forwarded provider request
-`headers` (lowercased; the source's `forward_headers` option decides which —
-see [`configuration.md`](configuration.md#sources)). Consumers dedupe on the
-idempotency key: `source_id:dedupe_key` when the key is set, else `id`; append
-`#replay:<replay_id>` to the key when a replay must be reprocessed rather than
+this delivery is a replay (else `null`), the `idempotency_key` (below), and the
+forwarded provider request `headers` (lowercased; the source's
+`forward_headers` option decides which — see
+[`configuration.md`](configuration.md#sources)).
+
+**Idempotency key.** Consumers dedupe on `idempotency_key`, which Ankusa
+computes once per hook and ships everywhere the hook goes: the message's
+`idempotency_key` field, the `x-ankusa-idempotency-key` header on `Sink.Http`
+deliveries, and the `ankusa_idempotency_key` header on RabbitMQ, Kafka and NATS
+messages. It is `tenant:source_id:dedupe_key` when the source extracted a
+provider event key (`tenant` is `default` for a hook with no tenant), else the
+hook's `id`. Tenant and source ids are `[A-Za-z0-9_-]`, so the first `:` always
+ends the tenant; the key is otherwise opaque, so don't parse it. The tenant is
+in the key because ingest dedupe scopes by tenant and source: under a
+`tenant_path` source, two tenants' hooks with the same provider event id are
+two hooks and must stay two keys at the consumer.
+
+Read the key; don't rebuild it. Every SDK's `idempotency_key` helper returns the
+shipped value and computes the same formula only for a message or delivery from
+a node older than the field. Append `#replay:<replay_id>` to the key (the
+helper's `include_replay` option) when a replay must be reprocessed rather than
 dropped. Every SDK ships the decoder and the helper; see its README's
 "Consuming queue messages".
 
@@ -298,7 +328,7 @@ single-partition topic.
 `:produce_timeout_ms`, default 5s), the Kafka equivalent of RabbitMQ's
 publisher confirms. brod's producer is not idempotent, so a produce retried
 after a lost ack can duplicate a record. Delivery is at-least-once anyway,
-and consumers dedupe on `id`.
+and consumers dedupe on the `idempotency_key`.
 
 **Client lifecycle**: one brod client per `(instance, :client)`, started on
 demand by the first `deliver/3` call under `ankusa_kafka`'s own
@@ -367,7 +397,7 @@ nothing crash-loops, and the next `deliver/3` reconnects inside the source's
 retry policy. Server names are tried in the order given.
 
 **At-least-once, as everywhere else.** A publish whose ack is lost can still
-have been stored, so consumers dedupe on `id`. JetStream's own
+have been stored, so consumers dedupe on the `idempotency_key`. JetStream's own
 `Nats-Msg-Id` duplicate window is the consumer's tool, deliberately not set
 here: a hook replayed from the DLQ is a *new*, intended publish.
 
@@ -418,7 +448,7 @@ Redis consumer that can't reach the claim-check gateway should ask for a
 larger `inline_max_bytes` instead.
 
 **Delivery is at-least-once, as everywhere else**, and a retry or a DLQ replay
-republishes to every live subscriber, so consumers dedupe on `id`.
+republishes to every live subscriber, so consumers dedupe on the `idempotency_key`.
 
 **Connection lifecycle**: one Redix connection per `(instance, url)`, started
 on demand by the first `deliver/3` under `ankusa_redis`'s own
@@ -481,7 +511,8 @@ oldest-due lag stays under `max_lag_ms`, 2 s by default), so it can be left
 running against live traffic. It is durable — the cursor commits in the same
 batch as the rows it moves — so a restart resumes it; a job whose deliveries
 keep dead-lettering pauses itself. Replayed deliveries keep the hook's
-original `id` and `dedupe_key` and carry the job id as `replay_id`.
+original `id`, `dedupe_key` and `idempotency_key` and carry the job id as
+`replay_id`.
 `Ankusa.Replay.get/2` and `update/3` watch and steer it
 (`:running | :paused | :cancelled`); the admin API exposes the same jobs as
 `POST /v1/replays`, `GET /v1/replays[/:id]`, `PATCH /v1/replays/:id`. Delivery

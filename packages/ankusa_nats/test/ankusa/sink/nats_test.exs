@@ -95,6 +95,7 @@ defmodule Ankusa.Sink.NATSTest do
              "ankusa_id" => env.id,
              "ankusa_source_id" => "src",
              "ankusa_tenant_id" => "t1",
+             "ankusa_idempotency_key" => "t1:src:evt_1",
              "ankusa_message_version" => "1",
              "content_type" => "application/json",
              "ankusa_dedupe_key" => "evt_1",

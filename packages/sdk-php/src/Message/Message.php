@@ -6,6 +6,7 @@ namespace Ankusa\Message;
 
 use Ankusa\ClaimCheck\InvalidClaimRefError;
 use Ankusa\ClaimCheck\ParsedClaimRef;
+use Ankusa\Internal\IdempotencyKey;
 
 /**
  * One decoded v1 queue message — what an Ankusa consumer reads off Redis, a
@@ -32,9 +33,9 @@ use Ankusa\ClaimCheck\ParsedClaimRef;
  * 2. `v` missing or not the integer 1 -> `unsupported_version`.
  * 3. field types -> `invalid_field` with `field` set to the key: `id` a
  *    non-empty string; `source_id` a string; `received_at` an integer; `size`
- *    an integer >= 0; `tenant_id`/`content_type`/`dedupe_key`/`replay_id` a
- *    string, null, or absent; `headers` absent or an object of strings;
- *    `sha256` absent or 64 lowercase hex characters.
+ *    an integer >= 0; `tenant_id`/`content_type`/`dedupe_key`/`replay_id`/
+ *    `idempotency_key` a string, null, or absent; `headers` absent or an object
+ *    of strings; `sha256` absent or 64 lowercase hex characters.
  * 4. body form: both `body_base64` and `claim` -> `ambiguous_body`; neither ->
  *    `missing_body`; invalid base64 -> `invalid_body_base64`; an unparsable
  *    `claim` -> `invalid_field` (`claim`); a `claim` without `sha256` ->
@@ -44,8 +45,8 @@ use Ankusa\ClaimCheck\ParsedClaimRef;
  * 6. claim: `tenant_id` set and different from the claim's tenant ->
  *    `tenant_mismatch`.
  *
- * Unknown keys are ignored. Absent `dedupe_key`/`replay_id`/`sha256` are
- * `null`; absent `headers` is `[]`.
+ * Unknown keys are ignored. Absent `dedupe_key`/`replay_id`/`idempotency_key`/
+ * `sha256` are `null`; absent `headers` is `[]`.
  */
 final readonly class Message
 {
@@ -66,6 +67,12 @@ final readonly class Message
         public ?string $sha256,
         public ?string $dedupeKey,
         public ?string $replayId,
+        /**
+         * The tenant-scoped key Ankusa computed for the hook; `null` for a
+         * message from a node that predates the field. Read it through
+         * {@see self::idempotencyKey()}.
+         */
+        public ?string $idempotencyKey,
         public array $headers,
     ) {}
 
@@ -113,6 +120,7 @@ final readonly class Message
         $contentType = self::optionalString($raw, 'content_type');
         $dedupeKey = self::optionalString($raw, 'dedupe_key');
         $replayId = self::optionalString($raw, 'replay_id');
+        $idempotencyKey = self::optionalString($raw, 'idempotency_key');
 
         $headers = self::headers($raw);
 
@@ -156,6 +164,7 @@ final readonly class Message
                 sha256: $sha256,
                 dedupeKey: $dedupeKey,
                 replayId: $replayId,
+                idempotencyKey: $idempotencyKey,
                 headers: $headers,
             );
         }
@@ -188,6 +197,7 @@ final readonly class Message
             sha256: $sha256,
             dedupeKey: $dedupeKey,
             replayId: $replayId,
+            idempotencyKey: $idempotencyKey,
             headers: $headers,
         );
     }
@@ -195,23 +205,25 @@ final readonly class Message
     /**
      * The key a consumer dedupes on.
      *
-     * `source_id:dedupe_key` when the message carries a non-empty
-     * `dedupe_key`, else the `id`; with `$includeReplay` and a `replay_id`,
-     * `#replay:<replay_id>` is appended. The default ignores replays, so an
-     * ordinary consumer drops a replayed event it already processed; pass
-     * `true` to reprocess them.
+     * The key Ankusa shipped in `idempotency_key` when it is a non-empty
+     * string. For a message from a node that predates the field it is
+     * computed: `tenant:source_id:dedupe_key` (tenant `default` when there is
+     * none) when the message carries a non-empty `dedupe_key`, else the `id`.
+     * With `$includeReplay` and a `replay_id`, `#replay:<replay_id>` is
+     * appended. The default ignores replays, so an ordinary consumer drops a
+     * replayed event it already processed; pass `true` to reprocess them.
      */
     public function idempotencyKey(bool $includeReplay = false): string
     {
-        $key = ($this->dedupeKey !== null && $this->dedupeKey !== '')
-            ? $this->sourceId . ':' . $this->dedupeKey
-            : $this->id;
-
-        if ($includeReplay && $this->replayId !== null) {
-            $key .= '#replay:' . $this->replayId;
-        }
-
-        return $key;
+        return IdempotencyKey::build(
+            $this->idempotencyKey,
+            $this->tenantId,
+            $this->sourceId,
+            $this->dedupeKey,
+            $this->id,
+            $this->replayId,
+            $includeReplay,
+        );
     }
 
     private static function field(\stdClass $raw, string $key): mixed

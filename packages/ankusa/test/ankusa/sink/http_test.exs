@@ -146,6 +146,7 @@ defmodule Ankusa.Sink.HttpTest do
     h = Map.new(headers)
     assert h["x-github-event"] == "push"
     assert h["x-ankusa-dedupe-key"] == "evt_1"
+    assert h["x-ankusa-idempotency-key"] == "acme:stripe:evt_1"
     assert h["x-ankusa-replay-id"] == "rid"
     refute Map.has_key?(h, "authorization")
     refute Map.has_key?(h, "x-ankusa-whatever")
@@ -184,10 +185,12 @@ defmodule Ankusa.Sink.HttpTest do
   end
 
   test "no dedupe key or replay id means no such headers", %{capture: capture} do
-    assert :ok = Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/hooks"))
+    env = envelope()
+    assert :ok = Sink.Http.deliver(env, %{attempt: 1}, opts("/hooks"))
 
     assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
     h = Map.new(headers)
+    assert h["x-ankusa-idempotency-key"] == env.id
     refute Map.has_key?(h, "x-ankusa-dedupe-key")
     refute Map.has_key?(h, "x-ankusa-replay-id")
   end

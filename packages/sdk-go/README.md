@@ -109,10 +109,13 @@ hook, err := ankusa.ParseHeaders(r.Header)
 if err != nil {
     return err // *MissingHookIdError
 }
-// hook.ID, hook.Source, hook.Tenant, hook.ContentType, hook.DedupeKey, hook.ReplayID
+// hook.ID, hook.Source, hook.Tenant, hook.ContentType, hook.DedupeKey,
+// hook.ReplayID, hook.ShippedIdempotencyKey
 
-// The key to dedupe on: the source-scoped dedupe key when the sink set one,
-// else the hook id. Pass true to reprocess replays instead of dropping them.
+// The key to dedupe on: the tenant-scoped key Ankusa shipped in
+// x-ankusa-idempotency-key (computed from the hook's own fields only for a
+// sender that predates the header). Pass true to reprocess replays instead of
+// dropping them.
 key := hook.IdempotencyKey(false)
 
 // A delivery without x-ankusa-id is a framework bug, so ParseHeaders returns
@@ -120,9 +123,10 @@ key := hook.IdempotencyKey(false)
 ```
 
 `x-ankusa-id` is required; `x-ankusa-source`, `x-ankusa-tenant`,
-`content-type`, `x-ankusa-dedupe-key`, and `x-ankusa-replay-id` are optional
-(`Source` defaults to `""`; `Tenant`, `ContentType`, `DedupeKey`, and
-`ReplayID` are `nil` when absent or empty).
+`content-type`, `x-ankusa-dedupe-key`, `x-ankusa-replay-id`, and
+`x-ankusa-idempotency-key` are optional (`Source` defaults to `""`; `Tenant`,
+`ContentType`, `DedupeKey`, `ReplayID`, and `ShippedIdempotencyKey` are `nil`
+when absent or empty).
 
 ## Consuming queue messages
 
@@ -143,7 +147,7 @@ if err != nil {
     return err
 }
 
-key := message.IdempotencyKey(false) // source_id:dedupe_key, else id
+key := message.IdempotencyKey(false) // the key Ankusa shipped, else computed
 
 // One transaction: insert the processed-ids row and, only if it was new, run
 // the effect.
@@ -156,10 +160,14 @@ key := message.IdempotencyKey(false) // source_id:dedupe_key, else id
 
 `Message.Body` holds the decoded inline body; for a claim message it is nil
 and `Claim`/`Sha256` go to `ClaimCheckClient.Redeem`. Absent `dedupe_key`,
-`replay_id`, and `sha256` decode to nil, and absent `headers` decodes to an
-empty map. `IdempotencyKey(true)` appends `#replay:<replay_id>`, so a replay
-of an event already processed is reprocessed rather than dropped; leave it
-false (the default) to drop replays.
+`replay_id`, `idempotency_key`, and `sha256` decode to nil, and absent
+`headers` decodes to an empty map. `Message.ShippedIdempotencyKey` is the
+wire's `idempotency_key`: the tenant-scoped key Ankusa computed once
+(`tenant:source_id:dedupe_key`, else `id`). `IdempotencyKey` returns it, and
+for a message from a node that predates the field computes the same key itself
+(tenant `default` when there is none). `IdempotencyKey(true)` appends
+`#replay:<replay_id>`, so a replay of an event already processed is reprocessed
+rather than dropped; leave it false (the default) to drop replays.
 
 ## Errors
 

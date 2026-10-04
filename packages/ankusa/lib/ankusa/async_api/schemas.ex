@@ -24,6 +24,7 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         "sha256",
         "dedupe_key",
         "replay_id",
+        "idempotency_key",
         "headers"
       ],
       "properties" => %{
@@ -31,7 +32,7 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         "id" => %{
           "type" => "string",
           "description" =>
-            "The hook's id (a UUIDv7). Delivery is at-least-once: dedupe on `dedupe_key` when set, else `id`."
+            "The hook's id (a UUIDv7). Delivery is at-least-once: dedupe on `idempotency_key`."
         },
         "source_id" => %{"type" => "string"},
         "tenant_id" => %{"type" => ["string", "null"]},
@@ -57,6 +58,12 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         "replay_id" => %{
           "type" => ["string", "null"],
           "description" => "The replay job id when this delivery is a replay, else `null`."
+        },
+        "idempotency_key" => %{
+          "type" => "string",
+          "description" =>
+            "The tenant-scoped key a consumer dedupes on: `tenant:source_id:dedupe_key` when a " <>
+              "dedupe key was extracted, else `id`. Read this; do not rebuild it."
         },
         "headers" => %{
           "type" => "object",
@@ -103,6 +110,7 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
         "ankusa_source_id",
         "ankusa_tenant_id",
         "ankusa_message_version",
+        "ankusa_idempotency_key",
         "content_type"
       ],
       "properties" => %{
@@ -114,6 +122,10 @@ defmodule Ankusa.AsyncApi.SinkMessageHeaders do
         },
         "ankusa_message_version" => %{"const" => "1"},
         "content_type" => %{"const" => "application/json"},
+        "ankusa_idempotency_key" => %{
+          "type" => "string",
+          "description" => "Same value as the message's `idempotency_key`."
+        },
         "ankusa_dedupe_key" => %{
           "type" => "string",
           "description" => "The provider event key, when the hook carries one."
