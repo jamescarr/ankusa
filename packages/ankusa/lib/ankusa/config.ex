@@ -46,6 +46,12 @@ defmodule Ankusa.Config do
               max_inflight: 4096,
               # ...and the max sum of their stored hook sizes in bytes
               max_inflight_bytes: 134_217_728,
+              # a delivery attempt (the sink call, plus the fallback claim check-in
+              # when a pack failed) that has not returned after this is killed and
+              # counts as a failed attempt. Keep it above every sink's own timeout
+              # (http `timeout_ms` 5 s, nats/redis `publish_timeout_ms` 5 s, kafka
+              # produce 5 s, the rabbitmq connection call 15 s).
+              attempt_timeout_ms: 30_000,
               retry: {Ankusa.RetryPolicy.Exponential, []}
             },
             # segment compaction

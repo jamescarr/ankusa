@@ -39,6 +39,12 @@ the next hook. A sink that **raises, throws, or exits** is treated exactly
 like one returning `{:error, reason}`: the retry policy still applies, and the
 pipeline keeps running.
 
+An attempt that has not returned after `dispatch.attempt_timeout_ms` (default
+30 s) is killed and counts as a failed attempt, `{:attempt_timeout, ms}`, so a
+hung sink frees its slot; the fallback claim check-in runs inside the same
+deadline. The sink may still complete the delivery after the kill; consumers
+dedupe on the idempotency key.
+
 ### Replay jobs
 
 Dead rows and archived hooks can be re-sent with a replay job
@@ -474,9 +480,14 @@ capped binary exponential backoff with optional full jitter.
 | Opt | Default |
 | --- | --- |
 | `:base_ms` | `100` |
-| `:max_ms` | `30_000` (ceiling before jitter) |
-| `:max_attempts` | `12` |
+| `:max_ms` | `300_000` (ceiling before jitter) |
+| `:max_attempts` | `84` |
 | `:jitter` | `true`. Multiplies the delay by a random factor in `[0.5, 1.0]` |
+
+The defaults retry for about 6 hours: 100 ms doubling to the 5-minute cap by
+attempt 13, then 5 minutes apart until attempt 84 (21 709.5 s without jitter;
+jitter halves a delay at worst, so 3–6 h). Set `max_attempts` lower to
+dead-letter sooner.
 
 Set dispatch-wide via `config.dispatch.retry`; there's currently no
 per-source override (see [`configuration.md`](configuration.md)).

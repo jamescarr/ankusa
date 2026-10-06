@@ -488,6 +488,21 @@ The invariant: every `2xx` ends either delivered to every sink configured when i
 <a id="g4"></a>
 ## G4 · Dispatch: every resource is shared across tenants and sinks
 
+**Status (2026-10-04).** D4 and D6 implemented; D1 was closed earlier by the
+delivery-row scheduler (a retry is a row due later, so it costs no slot). D6:
+every delivery attempt the node runs off the request path, dispatch and
+lifecycle alike, is killed at `dispatch.attempt_timeout_ms` (default 30 000) and
+counts as a failed attempt, `{:attempt_timeout, ms}`, so a hung sink frees its
+slot. D4: the default retry policy is now 100 ms doubling to a 5-minute cap
+with 84 attempts, about 6 hours (3–6 h with jitter). That horizon applies to
+every failure: nothing classifies errors yet, so a permanent one (an HTTP
+`400`, `404` or `410`, a Kafka non-retriable error) now retries 84 times over
+3–6 hours before it reaches the DLQ, where it took twelve attempts before.
+Error classes and `Retry-After` stay open under G6 (B9). Still open in G4:
+per-sink concurrency limits and windows (the pipeline still has one pool of
+`dispatch.concurrency` slots and one `max_inflight` window for every sink),
+per-sink circuit breakers, and the adapter findings B2, B4, B5 and B7.
+
 One pipeline holds one pool of concurrency slots, one admission window and one watermark for every tenant and sink, and the broker adapters open connections through node-global supervisors. Whatever is slowest, dead or hung (a sink, a lane, a broker connect, one bad record) holds a shared resource, and everything behind it waits.
 
 <a id="d1"></a>
@@ -518,6 +533,8 @@ Under the default policy a dead hook gives up after 55–111 s of jittered backo
 
 Defaults: base 100 ms, cap 30 s, 12 attempts, which is 111 s of sleeps without jitter and 55–111 s (mean ~83 s) with it. During an outage of length T, only jobs whose budget elapses inside T are dead-lettered: about 32 × ⌊T / 83 s⌋ with unordered sinks (a three-minute downstream deploy dead-letters ~64), about one per 83 s per lane with ordered ones. Everything else waits behind them (D1) and delivers after recovery. The costs are elsewhere: the dead-lettered hooks depend on a replay path that is broken (D5); the WAL, the component built to absorb outages, absorbs nothing past ~90 s per hook; and nothing classifies errors, so a `400` or an oversized message gets twelve attempts and `Retry-After` on a `429` or `503` is ignored.
 
+**Status (2026-10-04).** Fixed for the horizon: the defaults are `max_ms: 300_000` and `max_attempts: 84`, which retry for about 6 hours (21 709.5 s of sleeps without jitter). Not fixed: error classification and `Retry-After` (G6, B9). A `400` or any other permanent failure now takes every one of the 84 attempts, 3–6 hours, before it is dead-lettered, where the "twelve attempts" quoted in this section and in B3, B5 and G6 are the counts as recorded at `42b6f5a`.
+
 <a id="d6"></a>
 ### D6 · High · Code — No delivery deadline: a hung sink pins a slot and the watermark forever
 
@@ -526,6 +543,8 @@ Defaults: base 100 ms, cap 30 s, 12 attempts, which is 111 s of sleeps without j
 Nothing bounds a `deliver/3` call. A custom sink blocked in `GenServer.call(_, _, :infinity)`, a socket without a timeout, or Kafka's `:brod.produce/5` (which waits for the producer's "buffered" reply in a bare `receive` while the partition buffer is full during a broker brown-out [INFERENCE from brod's source]) holds a slot permanently. Its seq stays the smallest in `pending`, so the durable cursor never passes it, the WAL cannot be truncated beyond it, and a restart redelivers everything after it.
 
 **Fix:** a per-attempt deadline enforced by the pipeline (`Task.yield/2` + `Task.shutdown/2`, or a timer that kills the task and counts an attempt).
+
+**Status (2026-10-04).** Fixed: the pipeline arms one timer per running attempt; on expiry it calls `Task.shutdown(task, :brutal_kill)`, and a sink that had already replied still counts as delivered. Otherwise the attempt fails with `{:attempt_timeout, ms}` and the row's retry policy decides what happens next. `Ankusa.Lifecycle.Publisher` applies the same deadline. The sink may still complete a killed delivery, so consumers dedupe on the idempotency key; a killed `GenServer.call` into a broker adapter leaves its request in that GenServer's mailbox (B2).
 
 <a id="b2"></a>
 ### B2 · High · Code — RabbitMQ publishes one message at a time per exchange, and still runs abandoned calls

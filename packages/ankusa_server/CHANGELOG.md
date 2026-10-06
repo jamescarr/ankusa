@@ -13,6 +13,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   and RabbitMQ, Kafka and NATS send `ankusa_idempotency_key`. It is
   `tenant:source_id:dedupe_key` when the source has a dedupe key, else the hook
   `id`. Consumers should dedupe on it; the SDK helpers read it.
+- `dispatch.attempt_timeout_ms` (default `30000`): a delivery attempt that has
+  not returned after it is killed and counts as a failed attempt
+  (`{:attempt_timeout, ms}` in the retry error or the DLQ reason), so a hung
+  sink frees its slot. A value that is not a positive integer fails
+  `check-config`.
 - A `quarantine:` section (`burst`, `rate`, `max_bytes`): one quarantine
   bucket per source, and a cap on the pen's bytes. A full pen answers
   `503 quarantine_full`; a source over its bucket answers
@@ -36,6 +41,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - A source over its quarantine bucket answers `429 quarantine_rate_limited`
   with `Retry-After`, not `401 verification_failed`; a full pen answers
   `503 quarantine_full` with `Retry-After: 60`.
+- **The default retry policy retries for about 6 hours:** `dispatch.retry`
+  defaults to `max_ms: 300000` and `max_attempts: 84` (they were `30000` and
+  `12`, about 83 s). A deployment that relied on the old default to
+  dead-letter within minutes should set `max_attempts` explicitly. Errors are
+  not classified yet, so a permanent failure (an HTTP `400`, say) also takes
+  every attempt before it reaches the DLQ.
 
 ## [0.4.0] - 2026-10-02
 
