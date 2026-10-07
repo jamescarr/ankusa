@@ -1,9 +1,12 @@
 defmodule Ankusa.Edge.Router do
   @moduledoc """
-  The Bandit edge. Minimal work on the hot path: enforce a size limit, capture
-  the exact raw body and headers, and hand off to `Ankusa.Edge.Ingest`. No JSON
-  parsing here. The catch-URL scheme is pluggable via `Ankusa.RouteResolver`
-  (default `POST /webhooks/:source_id`); it maps the request to a `Ankusa.Route`.
+  The Bandit edge. Minimal work on the hot path, in the order that keeps
+  an unauthenticated caller from costing anything: resolve the catch URL
+  (`Ankusa.RouteResolver`, default `POST /webhooks/:source_id`) to a
+  `Ankusa.Route`, refuse on a `Content-Length` over the limit, look the source
+  up (`Ankusa.Edge.Ingest.lookup/2`), only then read the body (bounded), and
+  hand off to `Ankusa.Edge.Ingest`. A request refused at any step before the
+  read is answered without its body being read. No JSON parsing here.
 
   The instance name is passed through `init/1` (`plug: {Ankusa.Edge.Router,
   instance: :default}`) and is available as `opts` inside each route.
@@ -39,33 +42,82 @@ defmodule Ankusa.Edge.Router do
   # ── capture ───────────────────────────────────────────────────────────────
 
   defp capture(conn, instance) do
+    with {:ok, route} <- resolve(conn, instance),
+         max = Ankusa.config(instance).max_body_bytes,
+         :ok <- check_content_length(conn, instance, max),
+         {:ok, source, tenant_id} <- lookup(conn, instance, route),
+         {:ok, body, conn} <- read_body(conn, instance, max) do
+      respond(
+        conn,
+        Ingest.ingest(instance, source, tenant_id, %{
+          method: conn.method,
+          path: conn.request_path,
+          headers: conn.req_headers,
+          body: body
+        })
+      )
+    else
+      {:refused, %Plug.Conn{} = conn} -> conn
+    end
+  end
+
+  defp resolve(conn, instance) do
     case Ankusa.RouteResolver.resolve(instance, conn) do
       {:ok, route} ->
-        max = Ankusa.config(instance).max_body_bytes
-
-        case Ankusa.Http.read_body_limited(conn, max) do
-          {:ok, body, conn} ->
-            req = %{
-              source_id: route.source_id,
-              tenant_id: route.tenant_id,
-              method: conn.method,
-              path: conn.request_path,
-              headers: conn.req_headers,
-              body: body
-            }
-
-            conn |> respond(Ingest.ingest(instance, req))
-
-          {:too_large, conn} ->
-            send_json(conn, 413, %{error: "payload_too_large", limit: max})
-
-          {:error, reason, conn} ->
-            send_json(conn, 400, %{error: "body_read_failed", reason: inspect(reason)})
-        end
+        {:ok, route}
 
       :error ->
-        send_json(conn, 404, %{error: "unknown_source"})
+        {:refused, refuse(conn, instance, :unknown_source, 404, %{error: "unknown_source"})}
     end
+  end
+
+  # A declared length over the limit is refused on the header alone, so the
+  # body is never pulled off the socket. Any other shape (absent, chunked,
+  # malformed) falls through to the bounded read, which enforces the limit on
+  # the bytes actually received; Bandit already rejects malformed framing.
+  defp check_content_length(conn, instance, max) do
+    with [value] <- Plug.Conn.get_req_header(conn, "content-length"),
+         {declared, ""} when declared > max <- Integer.parse(value) do
+      {:refused, too_large(conn, instance, max)}
+    else
+      _ -> :ok
+    end
+  end
+
+  # `lookup/2` has already counted the refusal.
+  defp lookup(conn, instance, route) do
+    case Ingest.lookup(instance, route) do
+      {:ok, source, tenant_id} ->
+        {:ok, source, tenant_id}
+
+      {:error, :unknown_source} ->
+        {:refused, send_json(conn, 404, %{error: "unknown_source"})}
+    end
+  end
+
+  defp read_body(conn, instance, max) do
+    case Ankusa.Http.read_body_limited(conn, max) do
+      {:ok, body, conn} ->
+        {:ok, body, conn}
+
+      {:too_large, conn} ->
+        {:refused, too_large(conn, instance, max)}
+
+      {:error, reason, conn} ->
+        {:refused,
+         refuse(conn, instance, :body_read_failed, 400, %{
+           error: "body_read_failed",
+           reason: inspect(reason)
+         })}
+    end
+  end
+
+  defp too_large(conn, instance, max),
+    do: refuse(conn, instance, :payload_too_large, 413, %{error: "payload_too_large", limit: max})
+
+  defp refuse(conn, instance, reason, status, payload) do
+    Ingest.refused(instance, reason)
+    send_json(conn, status, payload)
   end
 
   # ── response mapping ──────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ defmodule Ankusa.Telemetry do
   | Event | Measurements | Metadata |
   | --- | --- | --- |
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome` |
+  | `[:ankusa, :ingest, :refused]` | — | `:instance`, `:reason` (`:unknown_source`, `:payload_too_large`, `:body_read_failed`) |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
   | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
@@ -31,10 +32,13 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` |
   | `[:ankusa, :instance, :subtree_up]` | — | `:instance`, `:domain` |
 
-  `:outcome` on `:ingest` is `:committed | :quarantined | :rejected | :rate_limited |
-  :quarantine_rate_limited | :quarantine_full`,
-  or the `{:error, reason}` tag. `:status` on `:verify` is `:ok` or `:failed`,
-  independent of what the source's `on_verify_failure` policy then decides.
+  `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
+  `:rejected`, `:rate_limited`, `:quarantine_rate_limited`, `:quarantine_full`,
+  `:overload` or `:store_unavailable`. `:source_id` on `[:ankusa, :ingest]` is
+  always a configured source's id: a request for a source that does not exist
+  is a refusal, emitted as `[:ankusa, :ingest, :refused]`, never on the span.
+  `:status` on `:verify` is `:ok` or `:failed`, independent of what the
+  source's `on_verify_failure` policy then decides.
 
   `Ankusa.Metrics` is the built-in Prometheus mapping of these events, served by
   the admin API's `GET /metrics`.

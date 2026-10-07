@@ -2,7 +2,7 @@ defmodule Ankusa.EdgeTest do
   use ExUnit.Case, async: false
 
   import Ankusa.TestHelpers
-  alias Ankusa.Edge.{Batcher, Ingest, Router}
+  alias Ankusa.Edge.{Batcher, Ingest}
   alias Ankusa.Envelope
 
   @secret "whsec_" <> Base.encode64("supersecret-key")
@@ -26,19 +26,9 @@ defmodule Ankusa.EdgeTest do
     config
   end
 
-  defp route(config, req) do
-    conn =
-      Plug.Test.conn(:post, req.path, req.body)
-      |> then(fn c ->
-        Enum.reduce(req.headers, c, fn {k, v}, c -> Plug.Conn.put_req_header(c, k, v) end)
-      end)
-
-    Router.call(conn, Router.init(instance: config.instance))
-  end
-
   test "accepts and durably commits a hook, returning 201 with id after commit" do
     config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]})
-    conn = route(config, request("demo", ~s({"hello":"world"})))
+    conn = route_through_edge(config, request("demo", ~s({"hello":"world"})))
 
     assert conn.status == 201
     assert %{"status" => "accepted", "id" => id} = JSON.decode!(conn.resp_body)
@@ -52,7 +42,7 @@ defmodule Ankusa.EdgeTest do
 
   test "unknown source returns 404 and stores nothing" do
     config = start_edge(%{})
-    conn = route(config, request("nope", "x"))
+    conn = route_through_edge(config, request("nope", "x"))
     assert conn.status == 404
     assert stored_ids(config.instance) == []
   end
@@ -61,8 +51,8 @@ defmodule Ankusa.EdgeTest do
     config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]})
 
     body = ~s({"id":"evt_123"})
-    first = route(config, request("demo", body))
-    second = route(config, request("demo", body))
+    first = route_through_edge(config, request("demo", body))
+    second = route_through_edge(config, request("demo", body))
 
     assert first.status == 201
     assert second.status == 201
@@ -84,11 +74,11 @@ defmodule Ankusa.EdgeTest do
     body = ~s({"event":"ok"})
     headers = standard_webhooks_headers("msg_1", body, @secret)
 
-    good = route(config, request("swh", body, headers))
+    good = route_through_edge(config, request("swh", body, headers))
     assert good.status == 201
 
     bad =
-      route(
+      route_through_edge(
         config,
         request("swh", body, [
           {"webhook-id", "msg_2"},
@@ -113,7 +103,7 @@ defmodule Ankusa.EdgeTest do
     }
 
     config = start_edge(sources)
-    conn = route(config, request("q", "forged", [{"webhook-signature", "v1,nope"}]))
+    conn = route_through_edge(config, request("q", "forged", [{"webhook-signature", "v1,nope"}]))
 
     assert conn.status == 202
     assert %{"status" => "quarantined"} = JSON.decode!(conn.resp_body)
@@ -133,7 +123,7 @@ defmodule Ankusa.EdgeTest do
   end
 
   defp forged(config, source_id, body \\ "forged"),
-    do: route(config, request(source_id, body, [{"webhook-signature", "v1,nope"}]))
+    do: route_through_edge(config, request(source_id, body, [{"webhook-signature", "v1,nope"}]))
 
   test "each source has its own quarantine bucket; over it is 429 with Retry-After" do
     config = start_edge(quarantining(["q1", "q2"]), quarantine: %{burst: 2, rate: 1})
@@ -201,7 +191,7 @@ defmodule Ankusa.EdgeTest do
     # max_queue: 0 sheds every request
     assert {:error, :overload} = Ingest.ingest(config.instance, request("demo", "x"))
 
-    conn = route(config, request("demo", "x"))
+    conn = route_through_edge(config, request("demo", "x"))
     assert conn.status == 503
     assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
   end
@@ -470,7 +460,58 @@ defmodule Ankusa.EdgeTest do
       )
 
     start_supervised!({Ankusa.Instance, config})
-    conn = route(config, request("demo", String.duplicate("x", 100)))
+    conn = route_through_edge(config, request("demo", String.duplicate("x", 100)))
     assert conn.status == 413
+  end
+
+  # One request over a real socket: the request head, then `sent` bytes of a
+  # body that claims to be `declared` long. The rest is never sent, so a reply
+  # can only come from a server that did not wait for it.
+  defp raw_post(port, path, declared, sent) do
+    {:ok, sock} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
+
+    :ok =
+      :gen_tcp.send(
+        sock,
+        "POST #{path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: #{declared}\r\n\r\n#{sent}"
+      )
+
+    reply = :gen_tcp.recv(sock, 0, 2_000)
+    :ok = :gen_tcp.close(sock)
+    reply
+  end
+
+  test "an oversize Content-Length is refused before any of the body is read" do
+    config =
+      start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]},
+        max_body_bytes: 16,
+        port: free_port()
+      )
+
+    assert {:ok, "HTTP/1.1 413" <> _} = raw_post(config.port, "/webhooks/demo", 100, "x")
+    assert stored_ids(config.instance) == []
+  end
+
+  test "an unknown source is refused before the body is read" do
+    config = start_edge(%{}, port: free_port())
+
+    assert {:ok, "HTTP/1.1 404" <> _} = raw_post(config.port, "/webhooks/nope", 10, "")
+    assert stored_ids(config.instance) == []
+  end
+
+  test "the envelope body is copied only when it is a sub-binary" do
+    config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]})
+
+    # Over 64 bytes, or the VM copies the slice onto the heap itself and there is
+    # no parent to pin.
+    slice = :binary.part(String.duplicate("y", 2_000), 0, 100)
+    assert :binary.referenced_byte_size(slice) == 2_000
+
+    assert {:ok, env} = Ingest.ingest(config.instance, request("demo", slice))
+    assert env.body == String.duplicate("y", 100)
+    assert :binary.referenced_byte_size(env.body) == 100
+
+    assert {:ok, env} = Ingest.ingest(config.instance, request("demo", "plain"))
+    assert env.body == "plain"
   end
 end

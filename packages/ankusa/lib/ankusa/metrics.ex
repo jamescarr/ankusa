@@ -30,10 +30,15 @@ defmodule Ankusa.Metrics do
   modules. Both would be an unbounded or unusable label, so every tag value goes
   through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
   modules become strings (`"Ankusa.Sink.Http"`), and anything else
-  becomes `:other`. `:outcome` on ingest is already one of a fixed set —
-  `:committed | :duplicate | :quarantined | :rejected | :rate_limited |
-  :quarantine_rate_limited | :quarantine_full`, or an `{:error, reason}` tag —
-  because `Ankusa.Edge.Ingest` tags it before emitting.
+  becomes `:other`. `:outcome` on ingest is already one of a fixed set
+  (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
+  `:quarantine_rate_limited`, `:quarantine_full`, `:overload` or
+  `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
+  `:source_id` is bounded because it is only ever a configured source's id: a
+  request for a source that does not exist is counted on
+  `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
+  `:payload_too_large` or `:body_read_failed`, never on a series that carries
+  the id from the URL.
   """
 
   import Telemetry.Metrics
@@ -92,6 +97,10 @@ defmodule Ankusa.Metrics do
           tags: [:instance, :source_id],
           reporter_options: [buckets: @seconds_buckets]
         )
+      ),
+      counter(
+        "ankusa.ingest.refused.total",
+        scoped(own, event_name: [:ankusa, :ingest, :refused], tags: [:instance, :reason])
       ),
       counter(
         "ankusa.verify.failures.total",
