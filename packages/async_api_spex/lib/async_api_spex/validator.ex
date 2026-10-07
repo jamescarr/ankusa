@@ -18,6 +18,8 @@ defmodule AsyncApiSpex.Validator do
        resolves, and its message references are messages of that channel.
     7. Every component schema and message reference resolves.
     8. Every extension key starts with `x-`.
+    9. No component schema contains a module that does not use
+       `AsyncApiSpex.Schema` (a typo in a `fields:` type, for example).
   """
 
   alias AsyncApiSpex.{Channel, Document, Operation, Reference}
@@ -43,6 +45,7 @@ defmodule AsyncApiSpex.Validator do
       |> check_channel_servers(doc)
       |> check_operations(doc)
       |> check_component_refs(doc)
+      |> check_schema_atoms(doc)
       |> check_extensions(doc)
       |> Enum.reverse()
 
@@ -253,6 +256,39 @@ defmodule AsyncApiSpex.Validator do
   end
 
   defp collect_refs(_other, acc), do: acc
+
+  defp check_schema_atoms(errors, %Document{components: %{schemas: schemas}}) do
+    Enum.reduce(sorted(schemas), errors, fn {name, schema}, errors ->
+      schema
+      |> collect_module_atoms([])
+      |> Enum.uniq()
+      |> Enum.sort()
+      |> Enum.reduce(errors, fn atom, errors ->
+        error(
+          errors,
+          "components.schemas.#{name}: #{inspect(atom)} is not a module using AsyncApiSpex.Schema"
+        )
+      end)
+    end)
+  end
+
+  # Resolution replaces every schema module with a reference, so a module-like
+  # atom that is still in a schema names something that is not one.
+  defp collect_module_atoms(%{__struct__: _}, acc), do: acc
+
+  defp collect_module_atoms(map, acc) when is_map(map) do
+    Enum.reduce(map, acc, fn {_key, value}, acc -> collect_module_atoms(value, acc) end)
+  end
+
+  defp collect_module_atoms(list, acc) when is_list(list) do
+    Enum.reduce(list, acc, fn value, acc -> collect_module_atoms(value, acc) end)
+  end
+
+  defp collect_module_atoms(atom, acc) when is_atom(atom) do
+    if String.starts_with?(Atom.to_string(atom), "Elixir."), do: [atom | acc], else: acc
+  end
+
+  defp collect_module_atoms(_other, acc), do: acc
 
   defp check_extensions(errors, doc), do: walk_extensions(doc, "document", errors)
 

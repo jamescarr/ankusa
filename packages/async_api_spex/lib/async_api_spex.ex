@@ -4,7 +4,10 @@ defmodule AsyncApiSpex do
 
   Build an `AsyncApiSpex.Document` from structs, optionally declaring reusable
   schemas with `use AsyncApiSpex.Schema` and messages with
-  `use AsyncApiSpex.Message`, then:
+  `use AsyncApiSpex.Message`, or decorate the structs and publishing modules an
+  application already has: `use AsyncApiSpex.Schema, fields: [...]` on a struct,
+  `use AsyncApiSpex.Channel` on a module that publishes to a topic, and
+  `use AsyncApiSpex.Spec` to assemble the document from them. Then:
 
     * `resolve/1` extracts those modules into `components` and replaces their
       uses with references;

@@ -207,7 +207,7 @@ the bucket/container bootstrap, runs `mix test --include integration` in
 ## `async_api_spex`: `mix test`
 
 ```sh
-mise run check:package async_api_spex    # 16 tests, no external infra needed
+mise run check:package async_api_spex    # 57 tests, no external infra needed
 ```
 
 Covers: a document declared with `use AsyncApiSpex.Schema` / `Message` encoding
@@ -216,7 +216,13 @@ to the exact AsyncAPI 3.0 JSON (lowerCamel keys, no nulls, `$ref`s into
 raising, each validator rule failing with one error that names its JSON path,
 bad macro options raising at compile time, `AsyncApiSpex.Plug.RenderSpec`
 answering `application/asyncapi+json`, and `mix async_api_spex.gen` writing a
-decodable file.
+decodable file. The decorators (`Schema` `fields:`, `use AsyncApiSpex.Channel`,
+`use AsyncApiSpex.Spec`) are covered by the README's shop example producing the
+exact server, channel, operation, message, and schema JSON, `otp_app:` discovery,
+server and message sharing and conflicts between channel modules, a struct
+schema that references itself, channel options that fail only when the
+document is built (a server host that evaluates to `nil`, colliding message
+keys), and the main compile-time option errors.
 
 ## `ankusa_rabbitmq`: `mix test`
 
