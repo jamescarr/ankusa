@@ -96,11 +96,17 @@ defmodule AsyncApiSpex.Resolver do
   defp resolve_value(acc, module) when is_atom(module) and module not in [nil, true, false] do
     if schema_module?(module) do
       {name, schema} = module.__async_api_schema__()
-      acc = register!(acc, :schema, name, module)
-      {acc, schema} = resolve_value(acc, schema)
+      reference = %Reference{ref: "#/components/schemas/#{name}"}
 
-      {%{acc | schemas: Map.put(acc.schemas, name, schema)},
-       %Reference{ref: "#/components/schemas/#{name}"}}
+      # A schema that refers to itself reaches this clause again while its own
+      # schema is still being resolved; the reference ends the recursion.
+      if acc.owners[{:schema, name}] == module do
+        {acc, reference}
+      else
+        acc = register!(acc, :schema, name, module)
+        {acc, schema} = resolve_value(acc, schema)
+        {%{acc | schemas: Map.put(acc.schemas, name, schema)}, reference}
+      end
     else
       {acc, module}
     end

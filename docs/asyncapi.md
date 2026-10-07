@@ -144,7 +144,10 @@ from the URL). A description must not carry credentials.
 The document is built with [`async_api_spex`](https://hexdocs.pm/async_api_spex),
 a small, dependency-free library in this repo for any Elixir app: AsyncAPI 3.0
 structs, `use AsyncApiSpex.Schema` and `use AsyncApiSpex.Message` to declare
-payloads once and reference them by name, a validator, a Plug
+payloads once and reference them by name (`Schema` can also derive a schema from
+an existing struct), `use AsyncApiSpex.Channel` and `use AsyncApiSpex.Spec` to
+declare a publishing module's topic and broker and assemble the document from
+those modules, a validator, a Plug
 (`AsyncApiSpex.Plug.RenderSpec`) that serves a document as
 `application/asyncapi+json`, and `mix async_api_spex.gen` to write one to a file.
 Its README shows an app declaring its channels.

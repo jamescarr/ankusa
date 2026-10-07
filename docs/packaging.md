@@ -57,10 +57,12 @@ packages/
   ankusa_server               the jamescarr/ankusa Docker image: core + every
                               adapter, configured by YAML. Not on Hex.
   async_api_spex              generic AsyncAPI 3.0 library: document structs,
-                              `use AsyncApiSpex.Schema`/`Message`, a validator,
-                              a Plug, `mix async_api_spex.gen`. No Ankusa code;
-                              core depends on it for `Ankusa.AsyncApi`. Any
-                              Elixir app can use it on its own.
+                              `use AsyncApiSpex.Schema`/`Message`/`Channel`/`Spec`
+                              (decorate an app's own structs and publishers), a
+                              validator, a Plug, `mix async_api_spex.gen`. No
+                              Ankusa code; core depends on it for
+                              `Ankusa.AsyncApi`. Any Elixir app can use it on
+                              its own.
   sdk-typescript              the `ankusa` npm client SDK.
   sdk-python                  the `ankusa` PyPI client SDK.
   sdk-rust                    the `ankusa` crates.io client SDK.
