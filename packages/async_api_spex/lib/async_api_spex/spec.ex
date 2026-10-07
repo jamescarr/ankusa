@@ -97,7 +97,10 @@ defmodule AsyncApiSpex.Spec do
             raise ArgumentError, "use AsyncApiSpex.Spec :info must be a keyword list"
           end
 
-        _ ->
+        {:ok, _other} ->
+          raise ArgumentError, "use AsyncApiSpex.Spec :info must be a keyword list literal"
+
+        :error ->
           raise ArgumentError, "use AsyncApiSpex.Spec :info requires :title and :version"
       end
 

@@ -173,6 +173,49 @@ defmodule Shop.Test.CustomChannel do
     messages: [Shop.Test.CustomEvent]
 end
 
+defmodule Shop.Test.ShadowingMessage do
+  use AsyncApiSpex.Message, name: "OrderShipped", payload: %{"type" => "object"}
+end
+
+defmodule Shop.Test.ShadowingChannel do
+  use AsyncApiSpex.Channel,
+    address: "shadow",
+    server: [id: "kafka", host: "k:9092", protocol: "kafka"],
+    messages: [Shop.Test.ShadowingMessage]
+end
+
+defmodule Shop.Test.CustomEventSchema do
+  defstruct [:a]
+  use AsyncApiSpex.Schema, name: "Custom_Event", fields: []
+end
+
+defmodule Shop.Test.UnsetHostChannel do
+  use AsyncApiSpex.Channel,
+    address: "unset",
+    server: [host: System.get_env("ASYNC_API_SPEX_TEST_UNSET_HOST"), protocol: "kafka"],
+    messages: [Shop.Events.OrderShipped]
+end
+
+defmodule Shop.Test.NotAMessageChannel do
+  use AsyncApiSpex.Channel,
+    address: "not-a-message",
+    server: [host: "k:9092", protocol: "kafka"],
+    messages: [Enum]
+end
+
+defmodule Shop.Test.CollidingKeysChannel do
+  use AsyncApiSpex.Channel,
+    address: "colliding",
+    server: [host: "k:9092", protocol: "kafka"],
+    messages: [Shop.Test.CustomEvent, Shop.Test.CustomEventSchema]
+end
+
+defmodule Shop.AsyncApiEmptyApp do
+  use AsyncApiSpex.Spec,
+    otp_app: :shop_empty,
+    info: [title: "Empty", version: "1"]
+end
+
 defmodule Shop.Test.CustomSpec do
   use AsyncApiSpex.Spec,
     channels: [Shop.Test.CustomChannel],
@@ -201,7 +244,9 @@ defmodule AsyncApiSpexDecoratorsTest do
     end
 
     test "declares the broker as a server", %{encoded: encoded} do
-      assert encoded["servers"] == %{"kafka" => %{"host" => "kafka:9092", "protocol" => "kafka"}}
+      # The README's producer reads KAFKA_BOOTSTRAP when the document is built.
+      host = System.get_env("KAFKA_BOOTSTRAP", "kafka:9092")
+      assert encoded["servers"] == %{"kafka" => %{"host" => host, "protocol" => "kafka"}}
     end
 
     test "declares the topic as a channel on that server", %{encoded: encoded} do
@@ -348,7 +393,7 @@ defmodule AsyncApiSpexDecoratorsTest do
              [
                description: ~c"fake",
                vsn: ~c"0.0.0",
-               modules: [Shop.Kafka.OrderProducer, Shop.Events.OrderCreated, Enum],
+               modules: context.modules,
                registered: [],
                applications: []
              ]}
@@ -360,7 +405,7 @@ defmodule AsyncApiSpexDecoratorsTest do
       :ok
     end
 
-    @tag app: :shop_fake
+    @tag app: :shop_fake, modules: [Shop.Kafka.OrderProducer, Shop.Events.OrderCreated, Enum]
     test "otp_app: includes exactly the channel modules of the application" do
       spec = Shop.AsyncApiByApp.spec()
 
@@ -411,6 +456,31 @@ defmodule AsyncApiSpexDecoratorsTest do
       assert encoded["x-team"] == "payments"
       assert Map.keys(encoded["channels"]) == ["shop_orders"]
     end
+
+    test "a message module cannot take the name of a derived message" do
+      assert_raise ArgumentError, ~r/message id OrderShipped is declared differently/, fn ->
+        build_spec(channels: [Shop.Test.ChannelA, Shop.Test.ShadowingChannel])
+      end
+
+      assert_raise ArgumentError, ~r/message id OrderShipped is declared differently/, fn ->
+        build_spec(channels: [Shop.Test.ShadowingChannel, Shop.Test.ChannelA])
+      end
+    end
+
+    test "listing a channel module twice includes it once" do
+      spec = build_spec(channels: [Shop.Test.ChannelA, Shop.Test.ChannelA])
+
+      assert Map.keys(spec.channels) == ["a_events"]
+    end
+
+    @tag app: :shop_empty, modules: [Shop.Events.OrderCreated, Enum]
+    test "otp_app: with no channel modules yields a valid document without channels" do
+      spec = Shop.AsyncApiEmptyApp.spec()
+
+      assert spec.channels == %{}
+      assert spec.servers == %{}
+      assert AsyncApiSpex.validate(spec) == :ok
+    end
   end
 
   describe "use AsyncApiSpex.Channel" do
@@ -432,6 +502,36 @@ defmodule AsyncApiSpexDecoratorsTest do
                [%{"$ref" => "#/channels/custom/messages/Custom_Event"}]
 
       assert AsyncApiSpex.validate(spec) == :ok
+    end
+
+    test ":content_type reaches the derived message" do
+      encoded =
+        build_spec(channels: [Shop.Test.ChannelOtherContentType])
+        |> AsyncApiSpex.encode!()
+        |> JSON.decode!()
+
+      assert encoded["components"]["messages"]["OrderShipped"]["contentType"] ==
+               "application/cbor"
+    end
+
+    test "a server host that evaluates to nil raises when the document is built" do
+      assert_raise ArgumentError,
+                   ~r/UnsetHostChannel: server host must be a non-empty string/,
+                   fn ->
+                     Shop.Test.UnsetHostChannel.__async_api_channel__()
+                   end
+    end
+
+    test "a message that is neither a schema nor a message module raises" do
+      assert_raise ArgumentError, ~r/message Enum does not use AsyncApiSpex.Schema/, fn ->
+        Shop.Test.NotAMessageChannel.__async_api_channel__()
+      end
+    end
+
+    test "two messages whose names map to one channel key raise" do
+      assert_raise ArgumentError, ~r/both map to channel key Custom_Event/, fn ->
+        Shop.Test.CollidingKeysChannel.__async_api_channel__()
+      end
     end
 
     test ":receive, parameters, and operation options reach the document" do

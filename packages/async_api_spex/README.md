@@ -186,8 +186,10 @@ each record with the schemas under `components.schemas`. The AsyncAPI
 
 ### Writing the document by hand
 
-A channel that cannot be decorated (its address is computed, or you want full
-control) is declared with the structs directly. `use AsyncApiSpex.Schema` with
+A channel that cannot be decorated (it is not published from one module of
+yours, or you want full control) is declared with the structs directly. A
+decorated channel whose address is computed at runtime takes `address: nil` and
+an explicit `id:`. `use AsyncApiSpex.Schema` with
 `schema:` takes a JSON Schema map, and `use AsyncApiSpex.Message` declares a
 message with headers or a correlation id:
 

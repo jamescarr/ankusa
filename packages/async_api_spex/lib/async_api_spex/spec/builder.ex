@@ -3,7 +3,7 @@ defmodule AsyncApiSpex.Spec.Builder do
   # Runtime assembly for `use AsyncApiSpex.Spec`: folds every channel module's
   # `__async_api_channel__/0` into one `AsyncApiSpex.Document`.
 
-  alias AsyncApiSpex.{Components, Document, Info}
+  alias AsyncApiSpex.{Components, Document, Info, Message}
 
   @doc """
   Builds the document from the evaluated options of `use AsyncApiSpex.Spec`.
@@ -25,7 +25,7 @@ defmodule AsyncApiSpex.Spec.Builder do
         servers: strip_owners(servers),
         channels: strip_owners(channels),
         operations: operations,
-        components: %Components{messages: strip_owners(messages)}
+        components: %Components{messages: derived_messages(messages)}
       ] ++ present(Keyword.take(opts, [:id, :default_content_type, :extensions]))
     )
   end
@@ -39,7 +39,7 @@ defmodule AsyncApiSpex.Spec.Builder do
           end
         end)
 
-        modules
+        Enum.uniq(modules)
 
       :error ->
         app = Keyword.fetch!(opts, :otp_app)
@@ -79,12 +79,22 @@ defmodule AsyncApiSpex.Spec.Builder do
         :ok
     end
 
+    # A `use AsyncApiSpex.Message` module stays on the channel (the resolver
+    # moves it into components) but still claims its name here, so it cannot
+    # silently replace a derived message of the same name.
+    claims =
+      Map.to_list(messages) ++
+        for {_key, message} <- channel.messages, is_atom(message) do
+          {name, _message} = message.__async_api_message__()
+          {name, message}
+        end
+
     %{
       servers: share!(acc.servers, "server", server_id, server, module),
       channels: Map.put(acc.channels, id, {module, channel}),
       operations: Map.put(acc.operations, operation_id, operation),
       messages:
-        Enum.reduce(messages, acc.messages, fn {name, message}, owned ->
+        Enum.reduce(claims, acc.messages, fn {name, message}, owned ->
           share!(owned, "message", name, message, module)
         end)
     }
@@ -107,6 +117,12 @@ defmodule AsyncApiSpex.Spec.Builder do
   end
 
   defp strip_owners(map), do: Map.new(map, fn {id, {_module, value}} -> {id, value} end)
+
+  # Only derived messages belong in components; message modules are moved
+  # there by `AsyncApiSpex.resolve/1`.
+  defp derived_messages(map) do
+    for {name, {_module, %Message{} = message}} <- map, into: %{}, do: {name, message}
+  end
 
   defp present(opts), do: Enum.reject(opts, fn {_key, value} -> is_nil(value) end)
 end
