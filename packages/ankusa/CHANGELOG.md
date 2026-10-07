@@ -120,6 +120,13 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   The sink may still complete a killed delivery, so consumers dedupe on the
   idempotency key. `Ankusa.Dispatch.Pipeline.validate_config!/1` rejects a value
   that is not a positive integer.
+- `Ankusa.Edge.Ingest.lookup/2`, `ingest/4` and `refused/2`. The edge looks
+  the source up with `lookup/2` before it reads the body, then calls
+  `ingest/4` with the source it found; `ingest/2` is `lookup/2` followed by
+  `ingest/4`. `refused/2` emits the new telemetry event
+  `[:ankusa, :ingest, :refused]` (`:instance`, `:reason` of
+  `:unknown_source | :payload_too_large | :body_read_failed`), and
+  `Ankusa.Metrics` counts it as `ankusa_ingest_refused_total{instance,reason}`.
 
 ### Changed
 
@@ -160,6 +167,17 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   sink is down. Set `max_attempts` lower to dead-letter sooner. Errors are not
   classified yet, so a permanent failure (an HTTP `400`, say) also takes every
   attempt before it reaches the DLQ.
+- **Breaking for dashboards: refused requests are no longer on
+  `ankusa_ingest_requests_total`.** A request for a source that does not
+  exist used to be counted there as `outcome="unknown_source"` under a
+  `source_id` taken from the URL; it is now
+  `ankusa_ingest_refused_total{reason="unknown_source"}`, as are `413`
+  (`payload_too_large`) and unreadable-body `400` (`body_read_failed`)
+  refusals. A panel that sums `ankusa_ingest_requests_total` for "all
+  traffic" must add the refused counter. `source_id` on `[:ankusa, :ingest]`
+  and on the metrics built from it is now always a configured source's id.
+  `Ankusa.Edge.Ingest.ingest/2` is unchanged and still returns
+  `{:error, :unknown_source}`.
 
 ### Removed
 
@@ -198,6 +216,15 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `:sys.get_status/1` on a supervisor (and observer) still shows it, and so
   would supervisor reports if SASL reports were enabled (Logger's
   `handle_sasl_reports`, off by default).
+- Unauthenticated requests no longer mint Prometheus series: 20 000 `POST`s to
+  random paths used to add 280 000 `ankusa_ingest_*` series (the lookup ran
+  inside the `[:ankusa, :ingest]` span, with the URL's `source_id` as a label);
+  they are now one `ankusa_ingest_refused_total` series.
+- The edge answers a request it will refuse without reading its body: a
+  `Content-Length` above `max_body_bytes` is `413` and an unknown source (or a
+  tenant that is not valid) is `404` immediately, where each used to buffer up
+  to `max_body_bytes` first. The envelope copies the body only when it is a
+  slice of a larger binary, not on every request.
 
 ## [0.4.0] - 2026-10-02
 

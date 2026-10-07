@@ -96,14 +96,20 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
 ## Request path, step by step
 
 1. **`Ankusa.Edge.Router`** (`Plug.Router` under Bandit) matches any path via a
-   catch-all `POST`, enforces `max_body_bytes` while reading the body, and
-   hands off to `Ankusa.RouteResolver.resolve/2`, the pluggable seam that
-   turns a URL into `%Ankusa.Route{source_id, tenant_id}`. See
-   [`multi-tenancy.md`](multi-tenancy.md).
-2. **`Ankusa.Edge.Ingest`** looks the resolved `source_id` up via
-   `Ankusa.SourceStore`, builds a `%Ankusa.Envelope{}` (raw body kept
-   byte-for-byte verbatim: signature checks need the exact bytes, not a
-   re-serialized copy), and runs the source's `Ankusa.Verifier`.
+   catch-all `POST` and hands it to `Ankusa.RouteResolver.resolve/2`, the
+   pluggable seam that turns a URL into `%Ankusa.Route{source_id, tenant_id}`
+   (see [`multi-tenancy.md`](multi-tenancy.md)). It then does everything that
+   can refuse the request *before reading its body*: a `Content-Length` above
+   `max_body_bytes` is `413`, and a source that does not exist is `404`. Only
+   then does it read the body, still bounded by `max_body_bytes` as it streams
+   (a chunked body has no length to check up front). Refusals are counted on
+   `ankusa_ingest_refused_total{instance,reason}` and never create a
+   per-source series, so an unauthenticated caller cannot grow `/metrics`.
+2. **`Ankusa.Edge.Ingest`** builds a `%Ankusa.Envelope{}` for the source the
+   router looked up via `Ankusa.SourceStore` (raw body kept byte-for-byte
+   verbatim: signature checks need the exact bytes, not a re-serialized copy;
+   it is copied only when it is a slice of a larger binary), and runs the
+   source's `Ankusa.Verifier`.
    - Verification failure follows the source's `on_verify_failure` policy:
      `:reject` (`401`, nothing stored), `:quarantine` (`202`, held in a
      durable pen with a per-source rate limit and a byte cap — `429` or `503`

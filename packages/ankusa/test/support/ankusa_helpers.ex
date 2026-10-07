@@ -106,6 +106,21 @@ defmodule Ankusa.TestHelpers do
     }
   end
 
+  @doc """
+  Send a `request/3` map through `Ankusa.Edge.Router` for `config`'s instance
+  and return the `Plug.Conn`. No socket: the router runs on a `Plug.Test` conn.
+  """
+  def route_through_edge(config, req) do
+    conn =
+      Enum.reduce(
+        req.headers,
+        Plug.Test.conn(:post, req.path, req.body),
+        fn {k, v}, conn -> Plug.Conn.put_req_header(conn, k, v) end
+      )
+
+    Ankusa.Edge.Router.call(conn, Ankusa.Edge.Router.init(instance: config.instance))
+  end
+
   @doc "Build valid Standard Webhooks signature headers for `body` and `secret`."
   def standard_webhooks_headers(id, body, secret, ts \\ nil) do
     ts = ts || System.system_time(:second)

@@ -56,6 +56,40 @@ defmodule Ankusa.MetricsTest do
     assert scrape =~ ~s(instance="#{config.instance}")
   end
 
+  test "unknown sources never mint a source_id series" do
+    config = start_instance()
+    ids = for _ <- 1..50, do: Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    for id <- ids do
+      assert route_through_edge(config, request(id, "{}")).status == 404
+    end
+
+    scrape = Ankusa.Metrics.scrape(config.instance)
+
+    for id <- ids, do: refute(scrape =~ id)
+
+    assert [refused] =
+             scrape
+             |> String.split("\n")
+             |> Enum.filter(&String.starts_with?(&1, "ankusa_ingest_refused_total{"))
+
+    assert refused =~ ~s(instance="#{config.instance}")
+    assert refused =~ ~s(reason="unknown_source")
+    assert String.ends_with?(refused, "} 50")
+    refute scrape =~ ~s(outcome="unknown_source")
+  end
+
+  test "an oversize body is a refusal, not a request" do
+    config = start_instance(max_body_bytes: 16)
+
+    assert route_through_edge(config, request("demo", String.duplicate("x", 100))).status == 413
+
+    scrape = Ankusa.Metrics.scrape(config.instance)
+
+    assert scrape =~ ~r/^ankusa_ingest_refused_total\{[^}]*reason="payload_too_large"[^}]*\} 1$/m
+    refute scrape =~ ~s(source_id="demo")
+  end
+
   test "only failed verifications count as verify failures" do
     config = start_instance()
 

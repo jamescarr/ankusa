@@ -26,6 +26,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   secret rotation with no cut-over: `secret: ["${NEW}", "${OLD}"]`.
 - Release held hooks with `POST /v1/replays {"kind":"quarantine"}`, and purge
   them with `DELETE /v1/quarantine`. See `docs/delivery.md#quarantine`.
+- `ankusa_ingest_refused_total{instance,reason}` on `GET /metrics`: requests
+  the edge answered without ingesting them (`unknown_source`,
+  `payload_too_large`, `body_read_failed`).
 
 ### Changed
 
@@ -47,6 +50,19 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   dead-letter within minutes should set `max_attempts` explicitly. Errors are
   not classified yet, so a permanent failure (an HTTP `400`, say) also takes
   every attempt before it reaches the DLQ.
+
+### Fixed
+
+- `GET /metrics` no longer grows with unauthenticated traffic: requests for
+  sources that do not exist are one `ankusa_ingest_refused_total` series, not
+  a `source_id` series per URL. They also no longer count under
+  `ankusa_ingest_requests_total{outcome="unknown_source"}`; a panel that sums
+  that counter for all traffic must add the refused counter.
+- A `Content-Length` above `http.max_body_bytes`, or a source that does not
+  exist, is answered before the request body is read.
+- The image's HTTP client stack is `mint 1.11.0` (was `1.10.1`, which has
+  three published advisories: EEF-CVE-2026-91043, EEF-CVE-2026-94194 and
+  EEF-CVE-2026-92103) and `hpax 1.1.0`.
 
 ## [0.4.0] - 2026-10-02
 

@@ -771,6 +771,8 @@ The same requests are expensive before they are refused. `read_body(length: max)
 
 **Fix:** label by source only after the lookup succeeds (an `unknown` bucket otherwise); reject on `Content-Length > max_body_bytes` before reading any of the body; look the source up before reading; copy only when `:binary.referenced_byte_size(body) > byte_size(body)`.
 
+**Status (2026-10-07).** Fixed. The edge now resolves the catch URL, refuses a `Content-Length` above `max_body_bytes` (`413`), looks the source up (`Ingest.lookup/2`, `404`), and only then reads the body, so an oversize declared length or an unknown source is answered without a byte of the body being read (tested over a raw socket that never sends the rest of the body). `source_id` on `[:ankusa, :ingest]`, and so on `ankusa.ingest.requests.total` and `ankusa.ingest.duration.seconds`, is always a configured source's id. Refusals take a different route than the review's "`unknown` bucket": they are not on the span at all but on a new counter, `ankusa.ingest.refused.total{instance,reason}` with `reason` one of `unknown_source | payload_too_large | body_read_failed`, defined once in `Ingest.refused/2`. Probe 5 re-run: 2,000 POSTs to random paths, all `404`, leave one refused series. A chunked body has no length to check, so it is still read up to `max_body_bytes` before it is refused, which Bandit's connection limit bounds; and `build_envelope/3` copies the body only when it is a sub-binary. Dashboards that sum `requests_total` for "all traffic" must add the refused counter.
+
 <a id="e2"></a>
 ### E2 · High · Code — The quarantine bucket is global, its refusal is a `401`, and its log is unbounded
 
@@ -836,6 +838,8 @@ The token bucket (100 burst, 20/s, hard-coded) is one field in one GenServer for
 `packages/ankusa/mix.lock` and others
 
 `mix deps.get` in a copy of `packages/ankusa` flagged `mint 1.10.1` with three advisories: EEF-CVE-2026-91043 (High: HPACK-indexed cookie fields bypass `max_header_list_size` and exhaust client memory), EEF-CVE-2026-94194 and EEF-CVE-2026-92103 (Medium). The same version is locked in `ankusa_server` (the Docker image), `ankusa_kafka`, `ankusa_nats`, `ankusa_rabbitmq`, three examples and `tools/loadgen`; `ankusa_redis` and `sdk-elixir` already lock `1.11.0`, which the same check does not flag. Mint sits under Finch/Req, which every HTTP sink and remote blob store uses, and the HTTP sink talks to operator- or API-supplied URLs. Bump it and run `mise run deps`.
+
+**Status (2026-10-07).** Fixed. All nine lockfiles that held `mint 1.10.1` (and `hpax 1.0.4`) now lock `mint 1.11.0` and `hpax 1.1.0`, moved with `mix deps.update mint` in each project (`mise run deps` only runs `deps.get` and leaves a locked entry alone). Failing CI on Hex advisories, the other half of the G7 item, is still open.
 
 <a id="c4"></a>
 ### C4 · Low · Code — Refs are bearer capabilities with partly derivable ids
@@ -977,7 +981,7 @@ Each group's fix includes rewriting the claims below that it disproves.
 6. RabbitMQ `mandatory` with a return handler, a channel monitor, and `durable?/1` false until both exist (B1, B3).
 7. Quarantine stops answering `202` without a way back; per-source buckets, `429` on exhaustion, a byte cap (E1, E2).
 8. Retries as pipeline-owned timers that free the slot, and per-attempt deadlines: the cheapest relief for D1 until Phase 1 replaces the pipeline (D1, D4, D6).
-9. Validate header bytes at the edge (B8); label metrics after the source lookup (E3); bind the admin, route and claim listeners to loopback (O2); bump `mint` (B10).
+9. Validate header bytes at the edge (B8); label metrics after the source lookup (E3, done); bind the admin, route and claim listeners to loopback (O2); bump `mint` (B10, done).
 
 **Phase 1: replace the storage layer.** Run option C's go/no-go tests (D's if C fails them), then build the store and the per-sink scheduler on it. G1, G3, G4 and G5 land together, because they share the schema.
 

@@ -12,6 +12,15 @@ defmodule Ankusa.Edge.Ingest do
   The only place a `2xx`-worthy result is produced is *after* one of those
   durable accepts returns, or after a durable quarantine write. Everything
   else is a non-2xx.
+
+  ## Lookup precedes the body
+
+  The source is looked up (`lookup/2`) before the request body is read, and
+  `ingest/4` only ever runs on a source that exists. A request for a source that
+  does not exist is a refusal (`refused/2`), counted on its own bounded counter
+  and never on the `[:ankusa, :ingest]` span, so an unauthenticated caller
+  cannot mint a metric series per URL it invents. `ingest/2` is the
+  transport-less entry point (tests, benches, embedding): lookup, then ingest.
   """
 
   alias Ankusa.{Envelope, Source, Verification}
@@ -30,6 +39,19 @@ defmodule Ankusa.Edge.Ingest do
              | {:rate_limited, pos_integer()}
              | {:quarantine_rate_limited, pos_integer()}}
 
+  @typedoc """
+  Why a request was answered before it reached `ingest/4`. The whole set: every
+  refusal goes through `refused/2`, so a metric label built from it is bounded.
+  """
+  @type refusal :: :unknown_source | :payload_too_large | :body_read_failed
+
+  @type raw_request :: %{
+          required(:method) => String.t(),
+          required(:path) => String.t(),
+          required(:headers) => [{String.t(), String.t()}],
+          required(:body) => binary()
+        }
+
   @type request :: %{
           required(:source_id) => String.t(),
           required(:method) => String.t(),
@@ -41,31 +63,56 @@ defmodule Ankusa.Edge.Ingest do
           optional(:tenant_id) => String.t()
         }
 
-  @spec ingest(atom(), request()) :: result()
-  def ingest(instance, %{source_id: source_id} = req) do
-    Ankusa.Telemetry.span([:ingest], %{instance: instance, source_id: source_id}, fn ->
-      result =
-        case Ankusa.SourceStore.fetch(instance, source_id) do
-          {:ok, source} -> do_ingest(instance, source, req)
-          :error -> {:error, :unknown_source}
-        end
+  @doc """
+  Resolve a route to its source and the tenant the hook is stored under.
 
-      {result, %{size: byte_size(req.body), outcome: tag(result)}}
-    end)
+  The tenant names a storage partition and a gateway path segment, so it is
+  checked here, before anything is written: a bad one from any RouteResolver is
+  a 404, like an unknown source, not a dispatch failure after the provider was
+  already acked. A miss is counted as a `:unknown_source` refusal.
+  """
+  @spec lookup(atom(), Ankusa.Route.t()) ::
+          {:ok, Source.t(), tenant_id :: String.t()} | {:error, :unknown_source}
+  def lookup(instance, %Ankusa.Route{} = route) do
+    with {:ok, %Source{} = source} <- Ankusa.SourceStore.fetch(instance, route.source_id),
+         tenant_id = route.tenant_id || source.tenant_id,
+         true <- Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
+      {:ok, source, tenant_id}
+    else
+      _ ->
+        refused(instance, :unknown_source)
+        {:error, :unknown_source}
+    end
   end
 
-  defp do_ingest(instance, %Source{} = source, req) do
-    tenant_id = Map.get(req, :tenant_id) || source.tenant_id
+  @doc """
+  Count a request answered without being ingested. Emits
+  `[:ankusa, :ingest, :refused]` with the `:reason`; the one place a refusal is
+  counted.
+  """
+  @spec refused(atom(), refusal()) :: :ok
+  def refused(instance, reason) do
+    Ankusa.Telemetry.emit([:ingest, :refused], %{}, %{instance: instance, reason: reason})
+  end
 
-    # The tenant names a storage partition and a gateway path segment, so it is
-    # checked here, before anything is written: a bad one from any
-    # RouteResolver is a 404, like an unknown source, not a dispatch failure
-    # after the provider was already acked.
-    if Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
-      accept(instance, source, tenant_id, req)
-    else
-      {:error, :unknown_source}
+  @doc "Look the source up, then `ingest/4`."
+  @spec ingest(atom(), request()) :: result()
+  def ingest(instance, %{source_id: source_id} = req) do
+    route = %Ankusa.Route{source_id: source_id, tenant_id: Map.get(req, :tenant_id)}
+
+    case lookup(instance, route) do
+      {:ok, source, tenant_id} -> ingest(instance, source, tenant_id, req)
+      {:error, :unknown_source} = error -> error
     end
+  end
+
+  @doc "Ingest one hook for a source `lookup/2` returned."
+  @spec ingest(atom(), Source.t(), String.t(), raw_request()) :: result()
+  def ingest(instance, %Source{} = source, tenant_id, req) do
+    Ankusa.Telemetry.span([:ingest], %{instance: instance, source_id: source.id}, fn ->
+      result = accept(instance, source, tenant_id, req)
+      {result, %{size: byte_size(req.body), outcome: tag(result)}}
+    end)
   end
 
   defp accept(instance, source, tenant_id, req) do
@@ -194,14 +241,22 @@ defmodule Ankusa.Edge.Ingest do
       path: req.path,
       headers: req.headers,
       content_type: nil,
-      # keep raw bytes verbatim; copy so a small slice can't pin a large binary
-      body: :binary.copy(req.body),
+      # keep raw bytes verbatim; a slice of a larger binary is copied so it
+      # can't pin its parent (the socket buffer)
+      body: standalone(req.body),
       size: byte_size(req.body)
     }
 
     # Read it back through the envelope so "the content-type header" is defined
     # in exactly one place, `Ankusa.Envelope.header/2`.
     %{env | content_type: Envelope.header(env, "content-type")}
+  end
+
+  # A sub-binary of the socket buffer pins that whole buffer for as long as the
+  # envelope lives, so it is copied. A body that already owns its bytes (a
+  # multi-chunk read produces one) is not copied a second time.
+  defp standalone(bin) do
+    if :binary.referenced_byte_size(bin) > byte_size(bin), do: :binary.copy(bin), else: bin
   end
 
   defp tag({:ok, _}), do: :committed
