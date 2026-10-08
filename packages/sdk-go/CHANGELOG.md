@@ -7,6 +7,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
 ### Added
 
 - `DecodeMessage` and the `Message` type: decode a v1 queue message with the
@@ -62,5 +64,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   encoded as JSON (an unencodable `Metadata` value in `CreateRoute`,
   `ReplaceRoute`, or `UpdateRoute`).
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.3.0...sdk-go-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.3.0

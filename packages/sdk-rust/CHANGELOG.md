@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
 ### Added
 
 - `decode_message` and `Message`, for consumers of Ankusa's queue: the inline
@@ -56,5 +58,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   the crate drives its own HTTP client or none at all), and `ClientBuilder`
   for shared base URL, headers, and timeout.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.3.0...sdk-rust-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-rust-v0.3.0

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-08
+
 ### Added
 
 - `use AsyncApiSpex.Schema, fields: [...]` derives a schema from an existing
@@ -46,5 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mix async_api_spex.gen` to validate a spec module and write its document to
   a file.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/async_api_spex-v0.1.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/async_api_spex-v0.2.0...HEAD
+[0.2.0]: https://github.com/jamescarr/ankusa/releases/tag/async_api_spex-v0.2.0
 [0.1.0]: https://hex.pm/packages/async_api_spex/0.1.0
