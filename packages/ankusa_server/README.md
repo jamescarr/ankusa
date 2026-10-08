@@ -20,7 +20,7 @@ never arrived.
 
 ```sh
 docker run -d --name ankusa \
-  -p 4000:4000 -p 127.0.0.1:4002:4002 \
+  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 \
   -v ankusa-data:/var/lib/ankusa \
   jamescarr/ankusa:edge
 
@@ -45,7 +45,7 @@ Mount a YAML file at `/etc/ankusa/ankusa.yml` (or point `ANKUSA_CONFIG` at it):
 
 ```sh
 docker run -d --name ankusa \
-  -p 4000:4000 -p 127.0.0.1:4002:4002 \
+  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 \
   -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -v ankusa-data:/var/lib/ankusa \
   -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
@@ -108,6 +108,8 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+| `ANKUSA_ADMIN_IP` | `admin.ip` |
+| `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` (`true`/`false`) |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_WAL_TYPE` | `wal.type` (`disk` \| `none`) |
@@ -166,7 +168,7 @@ the walkthrough with outages, dead letters, and replay is
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
 | 4003 | route management API (`routes.enabled` on an `edge` node) | your own proxy or network policy |
 
-Every surface is on its own port so it can be firewalled on its own. 4003 only
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` (or `admin.ip` / `claim_check.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. 4003 only
 listens when `routes.enabled` is set and the node runs the `edge` role; without
 both, nothing binds it.
 

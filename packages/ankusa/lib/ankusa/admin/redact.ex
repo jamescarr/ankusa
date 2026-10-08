@@ -3,45 +3,60 @@ defmodule Ankusa.Admin.Redact do
   Turn a `%Ankusa.Config{}` into a JSON-encodable map safe to hand to anyone
   who can reach the admin API.
 
-  Redaction is by key name and by URI shape, since nothing in the config marks
-  an opt as secret:
+  Adapter options are an open vocabulary (every adapter, and every third-party
+  adapter, names its own credentials), so redaction is an allowlist, not a
+  blocklist. There are two modes.
 
-    * a key named `secret`, `password`, `secret_access_key`, `token`, `sasl`,
-      or `nkey_seed` becomes `"[REDACTED]"` (the last is the NATS sink's private
-      key);
-    * a string that parses as a URI with `user:pass` userinfo keeps the user
-      and loses the password.
+  **Open** covers `%Ankusa.Config{}`'s own fields and a source entry's own
+  fields (`tenant`, `name`, `source_id`, `ingest_path`, `on_verify_failure`):
+  none of them holds a secret, so values are converted as they are. Maps and
+  keyword lists become string-keyed maps, atoms become strings (module atoms
+  via `inspect/1`), numbers, booleans, `nil` and binaries stay, functions
+  become `"#Function"`, and any other term goes through `inspect/1`.
 
-  Two more things are hidden. Under a `headers` key every header value becomes
-  `"[REDACTED]"` and the names stay, because headers are where a sink's
-  credentials live. A `{module, fun, args}` callback, such as a GCS
-  `token_provider`, becomes `"Module.fun/arity"`, never its args.
+  **Closed** covers everything inside a `{module, opts}` pair (sinks,
+  verifiers, source store, blob store, codec, retry policy, route resolver,
+  routes store, lifecycle sinks) and a source's stored JSON spec. For each
+  key/value, the first matching rule wins:
 
-  A new secret-shaped opt is covered by adding its key to `@secret_keys`.
+    1. under `headers`, names stay and values become `"[REDACTED]"`;
+    2. a `{module, opts}` pair (or a list of them) becomes
+       `%{"module" => "Ankusa.Sink.Log", "opts" => %{}}`, its opts closed;
+    3. a `{module, fun, args}` callback becomes `"Module.fun/arity"`, never its
+       args (a static GCS token is a bare arg);
+    4. numbers, booleans, `nil` and atoms stay; functions become `"#Function"`;
+    5. structs, maps and non-empty keyword lists become closed maps;
+    6. a list made only of such maps, keyword lists and pairs is converted
+       element by element;
+    7. under `url`, `endpoint` or `resource` a binary is shown with the
+       password of `user:pass@` userinfo hidden, a lone `token@` userinfo
+       hidden, and every query value hidden (names stay);
+    8. a value under a key on the shown-key allowlist (ids, names, regions,
+       topics and other non-secret identifiers) is shown;
+    9. anything else, strings and charlists included, is `"[REDACTED]"`.
 
-  The shape matches the config's own nesting, so no reading logic is needed to
-  find a field:
-
-    * `{module, opts}` becomes `%{"module" => "Ankusa.Sink.Log", "opts" => %{}}`
-      (module names as `inspect/1` strings, so no `Elixir.` prefix).
-    * Keyword lists become maps; other lists stay lists.
-    * Atoms become strings, functions become `"#Function"`.
-
-  Sources need no special case: `config.source_store` is
-  `{Ankusa.SourceStore.Static, sources: %{...}}`, so they appear under that
-  module's `"opts"` — exactly where the operator declared them.
+  A new adapter option is therefore hidden until its key is added to
+  `@shown_keys`. Path and host of a URL are shown, so a capability URL whose
+  secret sits in the path is not protected.
   """
 
   @redacted "[REDACTED]"
 
-  @secret_keys ~w(secret password secret_access_key token sasl nkey_seed)
+  @url_keys ~w(url endpoint resource)
+
+  @shown_keys ~w(tenant_id id forward_headers prefix header json preset from
+                 signature_header sig_prefix sig_key version signed timestamp timestamp_header
+                 bucket region namespace container account_name client_id tenancy_ocid user_ocid
+                 key_fingerprint exchange routing_key topic brokers servers subject channel
+                 client_name inbox_prefix username mechanism
+                 type method exchange_type parse hash encoding secret_decode on_verify_failure)
 
   @doc "A redacted, JSON-encodable view of the whole config."
   @spec config(Ankusa.Config.t()) :: map()
   def config(%Ankusa.Config{} = config) do
     config
     |> Map.from_struct()
-    |> redact_map()
+    |> open_map()
   end
 
   @doc """
@@ -50,86 +65,148 @@ defmodule Ankusa.Admin.Redact do
   return and the `data` of a source lifecycle event.
 
   The stored spec is plain JSON (string keys, plus strings, numbers, maps, and
-  lists), so it takes exactly the same rules as `config/1`: a secret-named key
-  at any depth and a value under a `headers` map become `"[REDACTED]"`, and a
-  URL userinfo password is hidden.
+  lists), so its `verify` and `sinks` take the closed-mode rules of the module
+  doc.
   """
   @spec source_entry(Ankusa.SourceStore.stored()) :: map()
   def source_entry(%{tenant: tenant, name: name, source_id: source_id, spec: spec}) do
-    redact_map(%{
-      tenant: tenant,
-      name: name,
-      source_id: source_id,
-      ingest_path: "/webhooks/#{source_id}",
-      verify: Map.get(spec, "verify") || %{"type" => "none"},
-      on_verify_failure: Map.get(spec, "on_verify_failure"),
-      sinks: Map.get(spec, "sinks", [])
-    })
+    %{
+      "tenant" => open(tenant),
+      "name" => open(name),
+      "source_id" => open(source_id),
+      "ingest_path" => "/webhooks/#{source_id}",
+      "verify" => closed("verify", Map.get(spec, "verify") || %{"type" => "none"}),
+      "on_verify_failure" => open(Map.get(spec, "on_verify_failure")),
+      "sinks" => closed("sinks", Map.get(spec, "sinks", []))
+    }
   end
 
-  defp redact_map(map), do: Map.new(map, fn {k, v} -> {to_string(k), redact(to_string(k), v)} end)
+  defp key_string(key) when is_binary(key) or is_atom(key), do: to_string(key)
+  defp key_string(key), do: inspect(key)
 
-  defp redact(key, value) do
-    cond do
-      key in @secret_keys -> @redacted
-      key == "headers" -> redact_headers(value)
-      true -> convert(value)
-    end
+  # -- open mode ------------------------------------------------------------
+
+  defp open_map(map), do: Map.new(map, fn {k, v} -> {key_string(k), open(v)} end)
+
+  defp open({module, opts} = pair) when is_atom(module) do
+    if module_atom?(module), do: closed_pair(pair), else: inspect({module, opts})
   end
 
-  # Header names are kept, so an operator can see a sink sends `authorization`
-  # without seeing the credential. Anything that isn't name/value pairs is
-  # hidden whole.
-  defp redact_headers(headers) when is_list(headers) or is_map(headers) do
-    if Enum.all?(headers, &match?({_name, _value}, &1)) do
-      Map.new(headers, fn {name, _value} -> {to_string(name), @redacted} end)
-    else
-      @redacted
-    end
-  end
-
-  defp redact_headers(_headers), do: @redacted
-
-  # The framework's `{module, opts}` pair, everywhere it appears: the route
-  # resolver, source store, verifiers, and sinks.
-  defp convert({module, opts}) when is_atom(module) do
-    %{"module" => inspect(module), "opts" => convert_opts(opts)}
-  end
-
-  # A callback's args can be the credential itself (a static GCS token), so
-  # only the function it names is shown.
-  defp convert({module, fun, args}) when is_atom(module) and is_atom(fun) and is_list(args) do
+  defp open({module, fun, args}) when is_atom(module) and is_atom(fun) and is_list(args) do
     Exception.format_mfa(module, fun, length(args))
   end
 
-  defp convert(%_{} = struct), do: struct |> Map.from_struct() |> redact_map()
+  defp open(%_{} = struct), do: struct |> Map.from_struct() |> open_map()
+  defp open(map) when is_map(map), do: open_map(map)
 
-  defp convert(map) when is_map(map), do: redact_map(map)
-
-  defp convert(list) when is_list(list) do
+  defp open(list) when is_list(list) do
     cond do
-      module_pairs?(list) -> Enum.map(list, &convert/1)
-      list != [] and Keyword.keyword?(list) -> redact_map(Map.new(list))
-      true -> Enum.map(list, &convert/1)
+      module_pairs?(list) -> Enum.map(list, &open/1)
+      list != [] and Keyword.keyword?(list) -> list |> Map.new() |> open_map()
+      true -> Enum.map(list, &open/1)
     end
   end
 
-  defp convert(binary) when is_binary(binary), do: redact_userinfo(binary)
+  defp open(binary) when is_binary(binary), do: binary
 
   # Before the atom clause: `true`/`false`/`nil` are atoms, and stringifying
   # them would turn `enabled: true` into `"true"`.
-  defp convert(other) when is_number(other) or is_boolean(other) or is_nil(other), do: other
+  defp open(other) when is_number(other) or is_boolean(other) or is_nil(other), do: other
 
-  defp convert(atom) when is_atom(atom) do
+  defp open(atom) when is_atom(atom) do
     case Atom.to_string(atom) do
       "Elixir." <> _ -> inspect(atom)
       _ -> Atom.to_string(atom)
     end
   end
 
-  defp convert(fun) when is_function(fun), do: "#Function"
+  defp open(fun) when is_function(fun), do: "#Function"
+  defp open(other), do: inspect(other)
 
-  defp convert(other), do: inspect(other)
+  # -- closed mode ----------------------------------------------------------
+
+  defp closed_map(map), do: Map.new(map, fn {k, v} -> {key_string(k), closed_entry(k, v)} end)
+
+  defp closed_entry(key, value), do: closed(key_string(key), value)
+
+  defp closed("headers", value), do: redact_headers(value)
+
+  defp closed(key, value) do
+    case structural(value) do
+      {:ok, converted} -> converted
+      :error -> leaf(key, value)
+    end
+  end
+
+  # Rules 2-6: shapes whose contents are walked in closed mode.
+  defp structural({module, _opts} = pair) when is_atom(module) do
+    if module_atom?(module), do: {:ok, closed_pair(pair)}, else: :error
+  end
+
+  defp structural({module, fun, args}) when is_atom(module) and is_atom(fun) and is_list(args) do
+    {:ok, Exception.format_mfa(module, fun, length(args))}
+  end
+
+  defp structural(value)
+       when is_number(value) or is_boolean(value) or is_nil(value) or is_atom(value) or
+              is_function(value),
+       do: {:ok, open(value)}
+
+  defp structural(%_{} = struct), do: {:ok, struct |> Map.from_struct() |> closed_map()}
+  defp structural(map) when is_map(map), do: {:ok, closed_map(map)}
+
+  defp structural(list) when is_list(list) do
+    cond do
+      module_pairs?(list) ->
+        {:ok, Enum.map(list, &closed_pair/1)}
+
+      list != [] and Keyword.keyword?(list) ->
+        {:ok, list |> Map.new() |> closed_map()}
+
+      Enum.all?(list, &structured?/1) ->
+        {:ok, Enum.map(list, &closed("", &1))}
+
+      true ->
+        :error
+    end
+  end
+
+  defp structural(_other), do: :error
+
+  defp structured?(%_{}), do: true
+  defp structured?(map) when is_map(map), do: true
+  defp structured?(list) when is_list(list), do: list != [] and Keyword.keyword?(list)
+
+  defp structured?({module, _opts}) when is_atom(module), do: module_atom?(module)
+
+  defp structured?(_other), do: false
+
+  # Rules 7-9.
+  defp leaf(key, value) when key in @url_keys and is_binary(value), do: redact_url(value)
+  defp leaf(key, value) when key in @shown_keys, do: open(value)
+  defp leaf(_key, _value), do: @redacted
+
+  defp closed_pair({module, opts}) do
+    %{"module" => inspect(module), "opts" => closed_opts(opts)}
+  end
+
+  defp closed_opts([]), do: %{}
+  defp closed_opts(opts) when is_list(opts), do: closed("opts", opts)
+  defp closed_opts(opts) when is_map(opts), do: closed_map(opts)
+  defp closed_opts(opts), do: closed("opts", opts)
+
+  # Header names are kept, so an operator can see a sink sends `authorization`
+  # without seeing the credential. Anything that isn't name/value pairs is
+  # hidden whole.
+  defp redact_headers(headers) when is_list(headers) or is_map(headers) do
+    if Enum.all?(headers, &match?({_name, _value}, &1)) do
+      Map.new(headers, fn {name, _value} -> {key_string(name), @redacted} end)
+    else
+      @redacted
+    end
+  end
+
+  defp redact_headers(_headers), do: @redacted
 
   # A list of `{module, opts}` pairs — `sinks: [{Ankusa.Sink.Log, []}]` — is
   # also a valid keyword list (a module *is* an atom), so it has to be
@@ -151,30 +228,42 @@ defmodule Ankusa.Admin.Redact do
     end
   end
 
-  # Keyword-list opts keep their own key-based redaction; a `{mod, opts}` pair
-  # always carries a keyword list (or a map, from a hand-built config).
-  defp convert_opts(opts) when is_list(opts) do
-    if opts == [], do: %{}, else: redact_map(Map.new(opts))
+  # Userinfo and query values are credentials in practice (`user:pass@`,
+  # `https://token@host`, `?token=...&sig=...`). Done by string replacement of
+  # the parsed parts, so the rest of the URL is shown exactly as written.
+  defp redact_url(binary) do
+    %URI{userinfo: userinfo, query: query} = URI.parse(binary)
+
+    binary
+    |> redact_query(query)
+    |> redact_userinfo(userinfo)
   end
 
-  defp convert_opts(opts) when is_map(opts), do: redact_map(opts)
-  defp convert_opts(opts), do: convert(opts)
-
-  defp redact_userinfo(binary) do
-    case URI.parse(binary) do
-      %URI{userinfo: userinfo} when is_binary(userinfo) ->
-        case String.split(userinfo, ":", parts: 2) do
-          [user, _password] ->
-            String.replace(binary, userinfo <> "@", user <> ":" <> @redacted <> "@",
-              global: false
-            )
-
-          _no_password ->
-            binary
+  defp redact_query(binary, query) when is_binary(query) and query != "" do
+    redacted =
+      query
+      |> String.split("&")
+      |> Enum.map_join("&", fn part ->
+        case String.split(part, "=", parts: 2) do
+          [name, _value] -> name <> "=" <> @redacted
+          [_value] -> @redacted
         end
+      end)
 
-      _ ->
-        binary
-    end
+    String.replace(binary, "?" <> query, "?" <> redacted, global: false)
   end
+
+  defp redact_query(binary, _query), do: binary
+
+  defp redact_userinfo(binary, userinfo) when is_binary(userinfo) do
+    replacement =
+      case String.split(userinfo, ":", parts: 2) do
+        [user, _password] -> user <> ":" <> @redacted
+        [_token] -> @redacted
+      end
+
+    String.replace(binary, userinfo <> "@", replacement <> "@", global: false)
+  end
+
+  defp redact_userinfo(binary, _userinfo), do: binary
 end

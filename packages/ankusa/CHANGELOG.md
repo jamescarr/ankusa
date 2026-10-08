@@ -125,8 +125,17 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `ingest/4` with the source it found; `ingest/2` is `lookup/2` followed by
   `ingest/4`. `refused/2` emits the new telemetry event
   `[:ankusa, :ingest, :refused]` (`:instance`, `:reason` of
-  `:unknown_source | :payload_too_large | :body_read_failed`), and
+  `:unknown_source | :payload_too_large | :body_read_failed | :invalid_header`), and
   `Ankusa.Metrics` counts it as `ankusa_ingest_refused_total{instance,reason}`.
+- **An `ip` option for the admin API, the route management API and the
+  claim gateway.** `admin.ip`, `routes.admin.ip` and `claim_check.ip` take a
+  strict IPv4 or IPv6 literal (or an `:inet` address tuple) and default to
+  `"127.0.0.1"`; `Ankusa.Config.new/1` raises `ArgumentError` for anything else
+  (`"10"` and `"localhost"` included), through `Ankusa.Config.listen_ip!/2`.
+  The edge listener has no `ip` and stays on every interface.
+- `Ankusa.Store.report_write_failure/2`: tell the store a write failed, so it
+  reopens itself (at most once per 5 s) to clear RocksDB's latched error.
+  `Ankusa.Store.write/3` calls it on every failed batch.
 
 ### Changed
 
@@ -178,6 +187,43 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   and on the metrics built from it is now always a configured source's id.
   `Ankusa.Edge.Ingest.ingest/2` is unchanged and still returns
   `{:error, :unknown_source}`.
+- **Breaking: the admin API (4002), route management API (4003) and claim
+  gateway (4001) listen on `127.0.0.1` by default.** They used to bind every
+  interface and are unauthenticated. A deployment that reaches one from another
+  host or container must set `admin.ip`, `routes.admin.ip` or `claim_check.ip`
+  to `"0.0.0.0"` (or one interface's address) and keep fronting it with its own
+  proxy or network policy.
+- **Breaking: the edge refuses header bytes no sink can carry.** A request is
+  answered `400 {"error":"invalid_header","header":"<name>"}` before its body is
+  read when a header name holds a byte outside `0x21..0x7E` or a value one
+  outside `0x20..0x7E` and tab (RFC 9110 field-value without `obs-text`); a
+  non-ASCII value such as `café` is refused too, because `Sink.Http` (Mint)
+  cannot send it and queue sinks need UTF-8. `header` is `null` when the name is
+  itself not printable. Such a request used to be acked `201` and then retried
+  for hours and dead-lettered. `Ankusa.Edge.Ingest.ingest/2` returns
+  `{:error, {:invalid_header, name | nil}}`, and the refusal is counted as
+  `ankusa_ingest_refused_total{reason="invalid_header"}`. New
+  `Ankusa.Edge.Ingest.check_headers/1`.
+- **Breaking for anything that reads `GET /v1/config`: redaction is an
+  allowlist inside adapter options.** An option of a `{module, opts}` pair
+  (sinks, verifiers, blob store, source store, codec, retry policy, route
+  resolver, route store, lifecycle sinks) is shown only under a known
+  non-secret key (`bucket`, `region`, `topic`, `exchange`, …); every other
+  value, `sas_token`, `private_key`, `jwt` and `access_key_id` included, is
+  `"[REDACTED]"`. A URL (`url`, `endpoint`, `resource`) keeps its host and
+  path, loses the password of `user:pass@` (or a lone `token@`), and every
+  query value becomes `[REDACTED]`. The same view feeds `print-config` and the
+  source lifecycle events.
+- **Breaking for callers: `Ankusa.Sink.inline_max_bytes/2` returns
+  `{:ok, max | nil} | {:error, reason}`** (it returned `max | nil`). A raise,
+  exit, throw or invalid return from a sink's `inline_max_bytes/1` is an
+  `{:error, _}`; dispatch fails that delivery with `{:inline_max_bytes, reason}`
+  (the retry policy runs, the DLQ reason names it) and `wal: :none` answers
+  `503`.
+- `Ankusa.Fsync.mkdir_p/1` is `mkdir_p/2`: it takes the root the path may be
+  created under, and fsyncs the parent of every directory from the root down on
+  every call. A LocalFS put costs one extra directory fsync per level between
+  its root and the object.
 
 ### Removed
 
@@ -225,6 +271,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   tenant that is not valid) is `404` immediately, where each used to buffer up
   to `max_body_bytes` first. The envelope copies the body only when it is a
   slice of a larger binary, not on every request.
+- The compactor backs off. After a failed tick it retries at
+  `storage.interval_ms` doubled per consecutive failure (jittered, capped at
+  60 s) instead of every interval, and a blob store whose `put/4` exits,
+  throws or returns something other than `:ok` or `{:error, _}` fails the tick
+  instead of crashing the compactor.
+- Any failed store write now makes the store reopen itself to clear the error
+  RocksDB latches on a full disk, not only a failed ingest commit: dispatch
+  outcomes, the compactor, quarantine, the replayer, rate-limit overrides and
+  the source store recover on their own once space frees. `Queue.Writer` no
+  longer blocks ingest on a synchronous reopen.
+- Concurrent first writes into a new LocalFS directory (a claim pack's
+  `tenant=*/dt=*` partition at UTC midnight) no longer return before the
+  directory is durable, and a parent fsync that failed once is retried by the
+  next write.
+- A custom sink whose `inline_max_bytes/1` raises no longer crash-loops the
+  dispatch domain, which stopped delivery for every tenant.
+- A quarantine pen write that does not answer within 5 s is `503
+  store_unavailable` with `Retry-After: 1`, not a crashed request.
+- `Ankusa.Dispatch.Replayer` keeps only the codec module in its state, so its
+  crash reports and `:sys.get_status/1` no longer print the config.
 
 ## [0.4.0] - 2026-10-02
 

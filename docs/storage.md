@@ -79,9 +79,11 @@ stored.
   corruption surfaces as an error, never as a silently shorter list. The
   Writer, the source store and the rate limiter refuse to start when they
   cannot read their state.
-- Full disk: commits fail (`503 store_unavailable`, nothing acked); the Writer
-  asks the Store to close and reopen, which clears RocksDB's latched write
-  error, so ingest resumes by itself once space frees.
+- Full disk: commits fail (`503 store_unavailable`, nothing acked). Any failed
+  store write (ingest, dispatch, the archive, the quarantine pen, source and
+  rate-limit edits) tells the Store, which closes and reopens itself at most
+  once every 5 s. That clears RocksDB's latched write error, so every writer
+  resumes by itself once space frees.
 - Stop an instance cleanly (supervisor shutdown, `docker stop`'s SIGTERM) and
   the store closes with it. SIGKILL keeps the data (RocksDB WAL recovery), but a
   node halted mid-write-load with the DB open can segfault at exit.
@@ -289,7 +291,8 @@ obligation*. Each tick (default every `storage.interval_ms`, 1s) clears some:
    a hook's last obligation is gone, the hook is deleted.
 
 A failed blob write ends the tick without crashing: nothing moves, and the
-same hooks are written again next tick under the same keys. This is why
+same hooks are written again under the same keys, after `storage.interval_ms`
+doubled per consecutive failure (jittered, capped at 60 s). This is why
 segments are never one-object-per-hook: PUT cost amortizes over however many
 records landed in one tick, and archive-tier storage (which bills a minimum
 object size) stays cheap at scale.

@@ -11,8 +11,10 @@
 # is documented in config-examples/reference.yml.
 #
 # SECURITY: nothing here is authenticated. The admin API on 4002 and the
-# claim-check gateway on 4001 are open by design (see README) — do NOT publish
-# those ports publicly; front them with your own proxy or network policy.
+# claim-check gateway on 4001 listen on 127.0.0.1 inside the container unless
+# ANKUSA_ADMIN_IP / ANKUSA_CLAIM_CHECK_IP (or admin.ip / claim_check.ip) say
+# otherwise — do NOT publish those ports publicly; front them with your own
+# proxy or network policy.
 
 node:
   data_dir: /var/lib/ankusa

@@ -205,12 +205,18 @@ defmodule Ankusa.Instance do
   defp routes_admin_children(config) do
     if routes?(config) do
       Logger.warning(
-        "[ankusa] route management API on :#{config.routes.admin.port} is unauthenticated; " <>
+        "[ankusa] route management API on " <>
+          "#{listen_addr(config.routes.admin, "routes.admin.ip")} is unauthenticated; " <>
           "do not expose it publicly, front it with your own proxy or network policy"
       )
 
       isolated(config, :routes_admin, [
-        bandit_child(Ankusa.Routes.Router, config.instance, config.routes.admin.port)
+        bandit_child(
+          Ankusa.Routes.Router,
+          config.instance,
+          config.routes.admin,
+          "routes.admin.ip"
+        )
       ])
     else
       []
@@ -241,12 +247,18 @@ defmodule Ankusa.Instance do
   defp claim_check_children(config) do
     if Config.role?(config, :claim_check) do
       Logger.warning(
-        "[ankusa] claim-check API on :#{config.claim_check.port} performs no authentication; " <>
+        "[ankusa] claim-check API on #{listen_addr(config.claim_check, "claim_check.ip")} " <>
+          "performs no authentication; " <>
           "front it with your own proxy, mesh, or network policy"
       )
 
       isolated(config, :claim_check, [
-        bandit_child(Ankusa.ClaimCheck.Router, config.instance, config.claim_check.port)
+        bandit_child(
+          Ankusa.ClaimCheck.Router,
+          config.instance,
+          config.claim_check,
+          "claim_check.ip"
+        )
       ])
     else
       []
@@ -284,22 +296,31 @@ defmodule Ankusa.Instance do
   defp admin_children(config) do
     if config.admin.enabled do
       Logger.warning(
-        "[ankusa] admin API on :#{config.admin.port} is unauthenticated; do not expose it " <>
+        "[ankusa] admin API on #{listen_addr(config.admin, "admin.ip")} is unauthenticated; " <>
+          "do not expose it " <>
           "publicly, front it with your own proxy or network policy"
       )
 
       isolated(config, :admin, [
-        bandit_child(Ankusa.Admin.Router, config.instance, config.admin.port)
+        bandit_child(Ankusa.Admin.Router, config.instance, config.admin, "admin.ip")
       ])
     else
       []
     end
   end
 
-  defp bandit_child(plug_module, instance, port) do
+  defp bandit_child(plug_module, instance, %{port: port, ip: ip}, key) do
     Supervisor.child_spec(
-      {Bandit, plug: {plug_module, [instance: instance]}, scheme: :http, port: port},
+      {Bandit,
+       plug: {plug_module, [instance: instance]},
+       scheme: :http,
+       ip: Config.listen_ip!(ip, key),
+       port: port},
       id: plug_module
     )
+  end
+
+  defp listen_addr(%{ip: ip, port: port}, key) do
+    "#{:inet.ntoa(Config.listen_ip!(ip, key))}:#{port}"
   end
 end

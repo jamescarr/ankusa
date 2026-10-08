@@ -383,7 +383,7 @@ defmodule Ankusa.Admin.RouterTest do
   end
 
   test "GET /v1/replays/:id is 404 replay_not_found for an unknown id" do
-    config = test_config(roles: [:dispatch], admin: %{enabled: true})
+    config = test_config(roles: [:dispatch], admin: %{enabled: true, port: 0})
     put_config(config)
     start_supervised!({Ankusa.Instance, config})
     wait_loaded(config.instance)
@@ -426,7 +426,7 @@ defmodule Ankusa.Admin.RouterTest do
   end
 
   test "an archive job on a node without a queue writer is 409 role_not_enabled/edge" do
-    config = test_config(roles: [:dispatch], admin: %{enabled: true})
+    config = test_config(roles: [:dispatch], admin: %{enabled: true, port: 0})
     put_config(config)
     start_supervised!({Ankusa.Instance, config})
     wait_loaded(config.instance)
@@ -706,6 +706,43 @@ defmodule Ankusa.Admin.RouterTest do
              JSON.decode!(conn.resp_body)["source_store"]["opts"]["sources"]["a"]["sinks"]
 
     assert headers == %{"authorization" => "[REDACTED]", "x-team" => "[REDACTED]"}
+  end
+
+  test "GET /v1/config shows only allowlisted adapter options and hides the rest" do
+    custom =
+      {MyApp.CustomSink,
+       credentials: "LEAK",
+       region: "us-1",
+       ssl: [keyfile: "/k/LEAK", password: ~c"LEAK"],
+       sasl: {:plain, "u", "LEAK"}}
+
+    config =
+      test_config(
+        roles: [:dispatch],
+        admin: %{enabled: true},
+        storage: %{
+          blob_store:
+            {Ankusa.BlobStore.Azure,
+             account_name: "acct", container: "c", sas_token: "sv=1&sig=LEAK"}
+        },
+        source_store:
+          {Ankusa.SourceStore.Static,
+           sources: %{
+             "a" => [
+               sinks: [{Ankusa.Sink.Http, url: "https://h.example/p?token=LEAK&x=1"}, custom]
+             ]
+           }}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+    assert conn.status == 200
+
+    refute conn.resp_body =~ "LEAK"
+    assert conn.resp_body =~ ~s("acct")
+    assert conn.resp_body =~ ~s("us-1")
+    assert conn.resp_body =~ "https://h.example/p?token=[REDACTED]&x=[REDACTED]"
   end
 
   # ── AsyncAPI ───────────────────────────────────────────────────────────────

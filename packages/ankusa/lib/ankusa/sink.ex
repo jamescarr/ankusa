@@ -86,14 +86,31 @@ defmodule Ankusa.Sink do
   end
 
   @doc """
-  Resolve the inline threshold for `mod` with `opts`; `nil` for sinks that
-  don't implement `c:inline_max_bytes/1`.
+  Resolve the inline threshold for `mod` with `opts`: `{:ok, nil}` for sinks
+  that don't implement `c:inline_max_bytes/1`.
+
+  The callback is user code. A raise, exit, throw or a value other than `nil`
+  or a positive integer is an `{:error, reason}` — never a crash of the caller,
+  which may be the dispatch pipeline or a request process.
   """
-  @spec inline_max_bytes(module(), keyword()) :: pos_integer() | nil
+  @spec inline_max_bytes(module(), keyword()) :: {:ok, pos_integer() | nil} | {:error, term()}
   def inline_max_bytes(mod, opts) do
     Code.ensure_loaded(mod)
 
-    if function_exported?(mod, :inline_max_bytes, 1), do: mod.inline_max_bytes(opts), else: nil
+    if function_exported?(mod, :inline_max_bytes, 1) do
+      case mod.inline_max_bytes(opts) do
+        nil -> {:ok, nil}
+        max when is_integer(max) and max > 0 -> {:ok, max}
+        other -> {:error, {:bad_return, other}}
+      end
+    else
+      {:ok, nil}
+    end
+  rescue
+    error -> {:error, {:raised, error}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+    :throw, value -> {:error, {:throw, value}}
   end
 
   @doc """

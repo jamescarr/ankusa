@@ -28,7 +28,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   them with `DELETE /v1/quarantine`. See `docs/delivery.md#quarantine`.
 - `ankusa_ingest_refused_total{instance,reason}` on `GET /metrics`: requests
   the edge answered without ingesting them (`unknown_source`,
-  `payload_too_large`, `body_read_failed`).
+  `payload_too_large`, `body_read_failed`, `invalid_header`).
+- `admin.ip`, `claim_check.ip` and `routes.admin.ip`: the address each listener
+  binds (a strict IPv4 or IPv6 literal, default `127.0.0.1`), and the
+  `ANKUSA_ADMIN_IP` and `ANKUSA_CLAIM_CHECK_IP` overrides. `check-config`
+  rejects anything that is not an IP address, naming the key.
 
 ### Changed
 
@@ -50,6 +54,20 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   dead-letter within minutes should set `max_attempts` explicitly. Errors are
   not classified yet, so a permanent failure (an HTTP `400`, say) also takes
   every attempt before it reaches the DLQ.
+- **Breaking: the image's admin API (4002) and claim gateway (4001) listen on
+  `127.0.0.1` inside the container.** `-p 127.0.0.1:4002:4002` alone no longer
+  reaches the admin API, and the claim gateway is unreachable from other
+  containers. Set `ANKUSA_ADMIN_IP=0.0.0.0` and `ANKUSA_CLAIM_CHECK_IP=0.0.0.0`
+  (or `admin.ip` and `claim_check.ip`) to listen on the container's interface;
+  the Docker `HEALTHCHECK` keeps working. The compose files, the smoke script
+  and the examples set it where they publish or share a port.
+- **Breaking: a request with a header name or value outside visible ASCII (and
+  space and tab in a value) is `400 invalid_header`.** It used to be acked and
+  then dead-lettered when a sink could not carry it; see the core changelog.
+- **Breaking for anything that reads `GET /v1/config`:** adapter options are
+  shown only under known non-secret keys, and every other value (a
+  `sas_token`, a `private_key`, an NATS `jwt`) is `"[REDACTED]"`; URL query
+  values are redacted too. `print-config` uses the same view.
 
 ### Fixed
 
@@ -63,6 +81,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - The image's HTTP client stack is `mint 1.11.0` (was `1.10.1`, which has
   three published advisories: EEF-CVE-2026-91043, EEF-CVE-2026-94194 and
   EEF-CVE-2026-92103) and `hpax 1.1.0`.
+- An unreachable object store is retried with backoff (up to 60 s) instead of
+  every second, and a full disk no longer needs ingest traffic to recover: any
+  failed store write reopens the store. See the core changelog.
 
 ## [0.4.0] - 2026-10-02
 

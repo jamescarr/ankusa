@@ -70,11 +70,13 @@ storage:
 
 claim_check:
   port: 4001            # [env ANKUSA_CLAIM_CHECK_PORT]
+  ip: 127.0.0.1         # [env ANKUSA_CLAIM_CHECK_IP] 0.0.0.0 to reach it from outside the container
   pack_max_bytes: 16777216
 ```
 
 ```sh
-docker run -p 127.0.0.1:4001:4001 -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml" \
+docker run -p 127.0.0.1:4001:4001 -e ANKUSA_CLAIM_CHECK_IP=0.0.0.0 \
+  -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml" \
   -e S3_BUCKET -e S3_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   jamescarr/ankusa:edge
 curl localhost:4001/health    # {"status":"ok"}

@@ -4,7 +4,8 @@ defmodule Ankusa.Edge.Router do
   an unauthenticated caller from costing anything: resolve the catch URL
   (`Ankusa.RouteResolver`, default `POST /webhooks/:source_id`) to a
   `Ankusa.Route`, refuse on a `Content-Length` over the limit, look the source
-  up (`Ankusa.Edge.Ingest.lookup/2`), only then read the body (bounded), and
+  up (`Ankusa.Edge.Ingest.lookup/2`), refuse header bytes no sink can carry
+  (`400 invalid_header`), only then read the body (bounded), and
   hand off to `Ankusa.Edge.Ingest`. A request refused at any step before the
   read is answered without its body being read. No JSON parsing here.
 
@@ -46,6 +47,7 @@ defmodule Ankusa.Edge.Router do
          max = Ankusa.config(instance).max_body_bytes,
          :ok <- check_content_length(conn, instance, max),
          {:ok, source, tenant_id} <- lookup(conn, instance, route),
+         :ok <- check_headers(conn, instance),
          {:ok, body, conn} <- read_body(conn, instance, max) do
       respond(
         conn,
@@ -92,6 +94,17 @@ defmodule Ankusa.Edge.Router do
 
       {:error, :unknown_source} ->
         {:refused, send_json(conn, 404, %{error: "unknown_source"})}
+    end
+  end
+
+  defp check_headers(conn, instance) do
+    case Ingest.check_headers(conn.req_headers) do
+      :ok ->
+        :ok
+
+      {:invalid_header, name} ->
+        {:refused,
+         refuse(conn, instance, :invalid_header, 400, %{error: "invalid_header", header: name})}
     end
   end
 

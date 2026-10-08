@@ -41,7 +41,28 @@ defmodule Ankusa.ConfigTest do
       refute config.routes.enabled
       assert config.routes.store == {Ankusa.Routes.Store.ETS, []}
       assert config.routes.trusted_proxies == []
-      assert config.routes.admin == %{port: 4003}
+      assert config.routes.admin == %{port: 4003, ip: "127.0.0.1"}
+    end
+
+    test "listeners bind loopback by default" do
+      config = Config.new()
+      assert config.admin.ip == "127.0.0.1"
+      assert config.claim_check.ip == "127.0.0.1"
+      assert config.routes.admin.ip == "127.0.0.1"
+    end
+
+    test "listener ip must be a strict IP address" do
+      assert_raise ArgumentError, ~r/admin\.ip must be an IP address/, fn ->
+        Config.new(admin: [ip: "10"])
+      end
+
+      assert_raise ArgumentError, ~r/admin\.ip must be an IP address/, fn ->
+        Config.new(admin: [ip: "localhost"])
+      end
+
+      for ip <- ["0.0.0.0", "::1", {0, 0, 0, 0}] do
+        assert Config.new(admin: [ip: ip]).admin.ip == ip
+      end
     end
 
     test "merges one nested level, so routes.cache.max_size keeps the other cache keys" do

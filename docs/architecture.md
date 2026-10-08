@@ -137,7 +137,9 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    order. The edge maps this to
    `201`/`202`/`401`/`404`/`413`/`429`/`503`; a body it cannot read at all
    (client disconnect, read timeout) is `400`, kept distinct from `413` rather
-   than reported as "too large".
+   than reported as "too large". A header name or value holding a byte outside
+   visible ASCII (space and tab allowed in values) is also `400 invalid_header`,
+   refused before the body is read: no sink can carry it.
 
 Under `wal: :none` steps 3 and 4 do not exist: **`Ankusa.Edge.Publish`** asks
 each of the source's `Ankusa.Sink`s, in declaration order, in the request
@@ -285,7 +287,8 @@ A crash report prints a process's state and the message it was handling. The
 processes whose state holds sink options (dispatch, lifecycle, storage, the
 sweeper, the rate limiter, the writable source store, the batchers) redact them
 from the state they report; the batchers and the writable source store also
-from the message, since their calls carry a hook's or a source's sinks.
+from the message, since their calls carry a hook's or a source's sinks. The
+replayer keeps only the codec module, so its state holds no configuration.
 Supervisors cannot: their child specs carry the config, so
 `:sys.get_status/1` on a supervisor, or a supervisor report when SASL reports
 are turned on (`handle_sasl_reports`, off by default), still prints it.

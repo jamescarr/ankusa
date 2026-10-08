@@ -66,6 +66,8 @@ defmodule Ankusa.Config do
             claim_check: %{
               # :claim_check role only
               port: 4001,
+              # address the claim gateway binds; "0.0.0.0" exposes it on every interface
+              ip: "127.0.0.1",
               # target size of one pack object; a body larger than this still
               # gets a pack of its own
               pack_max_bytes: 16 * 1024 * 1024,
@@ -75,7 +77,7 @@ defmodule Ankusa.Config do
             },
             # operator HTTP API + Prometheus /metrics, unauthenticated; off by
             # default for embedded use
-            admin: %{enabled: false, port: 4002},
+            admin: %{enabled: false, port: 4002, ip: "127.0.0.1"},
             # route management: the allowlist guard plus its admin API. Off by
             # default, and off means "capture every POST", as it always has. On
             # means deny-by-default: a request is captured only if it matches an
@@ -102,7 +104,7 @@ defmodule Ankusa.Config do
               # its own listener; unauthenticated by design, same stance as
               # the operator admin API — front it with your own proxy or
               # network policy
-              admin: %{port: 4003},
+              admin: %{port: 4003, ip: "127.0.0.1"},
               # 1 in log_sample rejections is logged at :debug (0 = silent)
               log_sample: 100,
               # 403, or 404 for uniformity with :no_route
@@ -218,6 +220,33 @@ defmodule Ankusa.Config do
       end
     end)
     |> normalize_wal()
+    |> validate_listen_ips!()
+  end
+
+  @doc "The address a listener binds: a strict IPv4/IPv6 literal string, or an `:inet` address tuple."
+  @spec listen_ip!(term(), String.t()) :: :inet.ip_address()
+  def listen_ip!(ip, key) when is_binary(ip) do
+    case :inet.parse_strict_address(String.to_charlist(ip)) do
+      {:ok, addr} -> addr
+      {:error, _} -> raise ArgumentError, bad_ip(ip, key)
+    end
+  end
+
+  def listen_ip!(ip, key) when is_tuple(ip) do
+    if :inet.is_ip_address(ip), do: ip, else: raise(ArgumentError, bad_ip(ip, key))
+  end
+
+  def listen_ip!(ip, key), do: raise(ArgumentError, bad_ip(ip, key))
+
+  defp bad_ip(ip, key) do
+    "#{key} must be an IP address such as \"127.0.0.1\" or \"0.0.0.0\", got: #{inspect(ip)}"
+  end
+
+  defp validate_listen_ips!(config) do
+    listen_ip!(config.admin.ip, "admin.ip")
+    listen_ip!(config.claim_check.ip, "claim_check.ip")
+    listen_ip!(config.routes.admin.ip, "routes.admin.ip")
+    config
   end
 
   # `:dispatch` and `:storage` read the queue and nothing else, so with no queue

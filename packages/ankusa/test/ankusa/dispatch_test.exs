@@ -110,6 +110,27 @@ defmodule Ankusa.DispatchTest do
     end
   end
 
+  # The threshold callback is user code and raises; `deliver/3` itself is fine.
+  defmodule RaisingThresholdSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def inline_max_bytes(_opts), do: raise("threshold")
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: :ok
+  end
+
+  defmodule ReportingSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:delivered, env.id})
+      :ok
+    end
+  end
+
   # ── helpers ────────────────────────────────────────────────────────────────
 
   defp retry(overrides \\ []) do
@@ -490,6 +511,30 @@ defmodule Ankusa.DispatchTest do
              ])
 
     assert stored_ids(inst) == [env.id]
+  end
+
+  test "a sink whose inline_max_bytes/1 raises is dead-lettered, not fatal to dispatch (D3)" do
+    inst =
+      start(
+        %{"src1" => %{sinks: [{RaisingThresholdSink, []}, {ReportingSink, pid: self()}]}},
+        dispatch: %{retry: retry(max_attempts: 1)}
+      )
+
+    pid = Ankusa.whereis(inst, :dispatch)
+
+    env = enqueue!(inst, build_env("src1"))
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert Process.alive?(pid)
+    assert Ankusa.whereis(inst, :dispatch) == pid
+
+    id = env.id
+    assert_receive {:delivered, ^id}
+
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == id
+    assert entry.reason =~ "inline_max_bytes"
+    assert entry.reason =~ "threshold"
   end
 
   # ── source gone ────────────────────────────────────────────────────────────

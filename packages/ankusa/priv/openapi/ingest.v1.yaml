@@ -185,6 +185,7 @@ components:
             - verification_failed
             - payload_too_large
             - body_read_failed
+            - invalid_header
             - not_found
             - overload
             - store_unavailable
@@ -197,6 +198,9 @@ components:
         limit:
           type: integer
           description: Present on `payload_too_large`; the configured `max_body_bytes`.
+        header:
+          type: [string, "null"]
+          description: Present on `invalid_header`; the offending header name, or null when the name itself is not printable.
     Health:
       type: object
       required: [status, instance]
@@ -219,7 +223,9 @@ components:
           schema:
             $ref: '#/components/schemas/Quarantined'
     BadRequest:
-      description: '`400`. `body_read_failed`: the body could not be read at all (client disconnect, read timeout). Retry.'
+      description: >-
+        `400`. `body_read_failed`: the body could not be read at all (client disconnect, read timeout). Retry.
+        `invalid_header`: a header name or value holds a byte outside visible ASCII, space and tab; no sink could carry it. Permanent for this request.
       content:
         application/json:
           schema:

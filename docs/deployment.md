@@ -65,7 +65,7 @@ node's data directory needs a persistent volume.
 | 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
 
-Every surface is on its own port so it can be firewalled on its own.
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` (or `admin.ip` / `claim_check.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them.
 
 `/var/lib/ankusa` holds the node's store (`store/`: hooks, delivery rows, the
 quarantine pen, API-managed sources, rate-limit overrides, the archive
@@ -76,8 +76,8 @@ problem anymore. Under `wal.type: none` no hook is committed, but the store
 directory still holds the quarantine pen, API-managed sources and rate-limit
 overrides, so mount a volume if you use any of those; without one they are lost
 on restart. A full volume fails commits with `503 store_unavailable` and acks
-nothing; the writer reopens the store once space frees, so ingest resumes with
-no restart.
+nothing; any write the store refuses makes it reopen itself (at most every 5 s),
+so every writer, not only ingest, resumes once space frees, with no restart.
 
 Config lives at `/etc/ankusa/ankusa.yml` (mount yours over it) or wherever
 `ANKUSA_CONFIG` points. Every key, plus the env overrides:

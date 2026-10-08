@@ -9,9 +9,12 @@ node:
 admin:
   enabled: true
   port: 4002
+  ip: 0.0.0.0
 
 claim_check:
   port: 4001
+  # the worker calls http://ankusa:4001
+  ip: 0.0.0.0
 
 # Short on purpose, so a missing stream dead-letters in seconds, not minutes:
 # 6 attempts over roughly 8-15s. The default is 84 attempts, backing off to 5 min (about 6 hours).

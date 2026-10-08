@@ -17,7 +17,7 @@ defmodule Ankusa.BlobStore.LocalFS do
   def put(instance, key, data, _opts) do
     path = abs(instance, key)
 
-    with :ok <- Ankusa.Fsync.mkdir_p(Path.dirname(path)) do
+    with :ok <- Ankusa.Fsync.mkdir_p(Path.dirname(path), root(instance)) do
       Ankusa.Fsync.write_file(path, data)
     end
   end

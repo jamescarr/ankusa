@@ -635,13 +635,16 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   # A body over the sink's inline limit needs a claim, unless the hook already
-  # has a stored one.
+  # has a stored one. Runs in the pipeline process: a sink whose threshold
+  # callback fails needs no claim here — the job runs, and its task reports the
+  # failure (`ensure_claim/2`).
   defp needs_claim?(%{claim: claim}) when claim != nil, do: false
 
   defp needs_claim?(%{spec: {mod, opts}, env: env}) do
     case Sink.inline_max_bytes(mod, opts) do
-      nil -> false
-      max -> env.size > max
+      {:ok, nil} -> false
+      {:ok, max} -> env.size > max
+      {:error, _reason} -> false
     end
   end
 
@@ -759,19 +762,29 @@ defmodule Ankusa.Dispatch.Pipeline do
         {result, fresh}
 
       {:error, reason} ->
-        {{:error, {:claim_check, reason}}, nil}
+        {{:error, reason}, nil}
     end
   end
 
   # A job that has no ref yet but needs one (its pack failed) checks its body in
-  # here, once; the new ref is reported back and persisted with the outcome.
+  # here, once; the new ref is reported back and persisted with the outcome. The
+  # sink's threshold callback is user code: evaluated here, in the task, its
+  # failure is this attempt's failure (retry policy, DLQ), never the pipeline's.
   defp ensure_claim(%{claim: claim}, _instance) when claim != nil, do: {:ok, claim, nil}
 
-  defp ensure_claim(job, instance) do
-    if needs_claim?(job) do
-      with {:ok, claim} <- Message.check_in(instance, job.env), do: {:ok, claim, claim}
-    else
-      {:ok, nil, nil}
+  defp ensure_claim(%{spec: {mod, opts}, env: %{size: size} = env}, instance) do
+    case Sink.inline_max_bytes(mod, opts) do
+      {:ok, max} when is_integer(max) and size > max ->
+        case Message.check_in(instance, env) do
+          {:ok, claim} -> {:ok, claim, claim}
+          {:error, reason} -> {:error, {:claim_check, reason}}
+        end
+
+      {:ok, _max} ->
+        {:ok, nil, nil}
+
+      {:error, reason} ->
+        {:error, {:inline_max_bytes, reason}}
     end
   end
 

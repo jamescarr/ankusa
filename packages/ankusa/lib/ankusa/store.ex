@@ -41,6 +41,11 @@ defmodule Ankusa.Store do
   # How long a store that failed to reopen waits before trying again by itself.
   @retry_open_ms 5_000
 
+  # The least time between two reopens a failed write asks for. A reopen
+  # replays the WAL and many writers fail together, so one reopen answers them
+  # all.
+  @reopen_interval_ms 5_000
+
   # `tolerate_corrupted_tail_records` drops a torn tail and fails the open on
   # any damage before it. `paranoid_checks` makes every read report corruption
   # instead of returning possibly-wrong bytes.
@@ -80,12 +85,19 @@ defmodule Ankusa.Store do
     Process.flag(:trap_exit, true)
 
     retry_open_ms = Keyword.get(opts, :retry_open_ms, @retry_open_ms)
+    reopen_interval_ms = Keyword.get(opts, :reopen_interval_ms, @reopen_interval_ms)
 
-    with :ok <- Ankusa.Fsync.mkdir_p(path) do
+    with :ok <- Ankusa.Fsync.mkdir_p(path, config.data_dir) do
       case :rocksdb.new_cache(:lru, @cache_bytes) do
         {:ok, cache} ->
           with {:ok, state} <- open_and_publish(instance, path, cache, config) do
-            {:ok, Map.merge(state, %{retry_open_ms: retry_open_ms, retry_ref: nil})}
+            {:ok,
+             Map.merge(state, %{
+               retry_open_ms: retry_open_ms,
+               retry_ref: nil,
+               reopen_interval_ms: reopen_interval_ms,
+               last_reopen: nil
+             })}
           end
 
         {:error, reason} ->
@@ -219,6 +231,37 @@ defmodule Ankusa.Store do
     end
   end
 
+  # A write failed in some process (see `report_write_failure/2`). A closed
+  # store is already retrying by itself, and a reopen that just ran has done
+  # what another one would.
+  @impl true
+  def handle_cast({:write_failed, _reason}, %{db: nil} = state), do: {:noreply, state}
+
+  def handle_cast({:write_failed, reason}, state) do
+    if reopen_due?(state) do
+      Logger.warning(
+        "[ankusa] store write failed (#{inspect(reason)}); reopening to clear a latched error"
+      )
+
+      state =
+        case reopen_db(state) do
+          {:ok, state} -> state
+          {:error, _reason, state} -> state
+        end
+
+      # Stamped once the reopen is over: a slow WAL replay must not make every
+      # report that queued up behind it look overdue.
+      {:noreply, %{state | last_reopen: System.monotonic_time(:millisecond)}}
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp reopen_due?(%{last_reopen: nil}), do: true
+
+  defp reopen_due?(%{last_reopen: last, reopen_interval_ms: interval}),
+    do: System.monotonic_time(:millisecond) - last >= interval
+
   # A store left closed by a failed reopen opens itself again. With no ingest
   # nothing else would ask, and dispatch, the pen and the admin API all answer
   # `:store_unavailable` until something does.
@@ -289,8 +332,8 @@ defmodule Ankusa.Store do
 
   RocksDB latches a background error after a failed WAL append (the disk was
   full) and keeps rejecting writes after space is freed. Reopening replays the
-  WAL, drops a torn tail, and clears the latch. `Ankusa.Queue.Writer` calls
-  this after a failed commit, at most once every few seconds. A failed reopen
+  WAL, drops a torn tail, and clears the latch. `write/3` asks for it itself
+  through `report_write_failure/2`, at most once every few seconds. A failed reopen
   leaves the store unavailable, not crashed, and the store then retries by
   itself every few seconds until it opens.
   """
@@ -298,6 +341,16 @@ defmodule Ankusa.Store do
   def reopen(instance) do
     GenServer.call(Ankusa.via(instance, :store), :reopen, 60_000)
   end
+
+  @doc """
+  Tell the store a write failed. RocksDB latches a background error after a
+  failed WAL append (a full disk) and keeps refusing writes after space is
+  freed; the store reopens itself to clear it, at most once per
+  `reopen_interval_ms` (5 s), whichever process saw the failure. Never blocks.
+  """
+  @spec report_write_failure(atom(), term()) :: :ok
+  def report_write_failure(instance, reason),
+    do: GenServer.cast(Ankusa.via(instance, :store), {:write_failed, reason})
 
   defp descriptors(cache) do
     block = [block_based_table_options: [block_cache: cache]]
@@ -356,12 +409,25 @@ defmodule Ankusa.Store do
       with {:ok, batch} <- :rocksdb.batch() do
         try do
           Enum.each(ops, &add_op(batch, handles.cfs, &1))
-          :rocksdb.write_batch(handles.db, batch, sync: sync)
+          write_batch(instance, handles.db, batch, sync)
         after
           :rocksdb.release_batch(batch)
         end
       end
     end)
+  end
+
+  # A refused batch may be the latched error a full disk leaves behind, which
+  # only a reopen clears: tell the store, whichever process saw the failure.
+  defp write_batch(instance, db, batch, sync) do
+    case :rocksdb.write_batch(db, batch, sync: sync) do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        report_write_failure(instance, reason)
+        error
+    end
   end
 
   defp add_op(batch, cfs, {:put, cf, k, v}) when is_binary(k) and is_binary(v),

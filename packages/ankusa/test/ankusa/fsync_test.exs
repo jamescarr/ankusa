@@ -17,12 +17,27 @@ defmodule Ankusa.FsyncTest do
     %{dir: dir}
   end
 
-  test "mkdir_p creates every missing level, and is a no-op when they exist", %{dir: dir} do
+  test "mkdir_p creates every missing level, and succeeds when they exist", %{dir: dir} do
     deep = Path.join([dir, "a", "b", "c"])
 
-    assert :ok = Fsync.mkdir_p(deep)
+    assert :ok = Fsync.mkdir_p(deep, dir)
     assert File.dir?(deep)
-    assert :ok = Fsync.mkdir_p(deep)
+    assert :ok = Fsync.mkdir_p(deep, dir)
+  end
+
+  # W7: a caller that finds the directories already there (made by a concurrent
+  # caller, or by an earlier call whose fsync failed) must still fsync them.
+  test "mkdir_p fsyncs every parent from root down on every call", %{dir: dir} do
+    root = Path.expand(dir)
+    deep = Path.join([root, "a", "b", "c"])
+
+    assert :ok = Fsync.mkdir_p(deep, root)
+
+    {result, fsynced} = fsynced_during(fn -> Fsync.mkdir_p(deep, root) end)
+    expected = [Path.dirname(root), root, Path.join(root, "a"), Path.join([root, "a", "b"])]
+
+    assert result == :ok
+    assert fsynced == expected
   end
 
   test "fsync_dir answers an error for a path it cannot open instead of raising", %{dir: dir} do
@@ -61,5 +76,52 @@ defmodule Ankusa.FsyncTest do
     refute File.exists?(from)
 
     assert {:error, :enoent} = Fsync.rename(from, Path.join(dir, "again"))
+  end
+
+  # `{result, dirs}`: what `fun` returned, and the directories `Fsync.fsync_dir/1`
+  # was called with while it ran in this process, in order. The calls are local
+  # to the module, so the trace pattern must be `:local`. A process cannot trace
+  # itself, so a helper process is the tracer and forwards each call here; the
+  # `:done` round trip proves it has forwarded every one before they are read.
+  defp fsynced_during(fun) do
+    me = self()
+    {:module, Fsync} = Code.ensure_loaded(Fsync)
+    tracer = spawn_link(fn -> forward_fsyncs(me) end)
+
+    :erlang.trace_pattern({Fsync, :fsync_dir, 1}, true, [:local])
+    :erlang.trace(me, true, [:call, {:tracer, tracer}])
+
+    result =
+      try do
+        fun.()
+      after
+        :erlang.trace(me, false, [:call])
+        :erlang.trace_pattern({Fsync, :fsync_dir, 1}, false, [:local])
+      end
+
+    ref = make_ref()
+    send(tracer, {:done, me, ref})
+    assert_receive {:done, ^ref}
+
+    {result, fsynced_dirs([])}
+  end
+
+  defp forward_fsyncs(to) do
+    receive do
+      {:trace, _pid, :call, {Fsync, :fsync_dir, [dir]}} ->
+        send(to, {:fsynced, dir})
+        forward_fsyncs(to)
+
+      {:done, from, ref} ->
+        send(from, {:done, ref})
+    end
+  end
+
+  defp fsynced_dirs(acc) do
+    receive do
+      {:fsynced, dir} -> fsynced_dirs([dir | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 end

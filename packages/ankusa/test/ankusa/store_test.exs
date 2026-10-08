@@ -247,6 +247,42 @@ defmodule Ankusa.StoreTest do
     end
   end
 
+  describe "report_write_failure/2" do
+    test "reopens the store, at most once per interval, whichever process reports" do
+      cfg = test_config(roles: [:edge])
+      inst = cfg.instance
+
+      opts = [instance: inst, config: cfg, retry_open_ms: 20, reopen_interval_ms: 60_000]
+      pid = start_supervised!({Store, opts})
+
+      :ok = Store.write(inst, [{:put, :hooks, Keys.hook(1), "kept"}], sync: true)
+
+      good = :sys.get_state(pid).path
+      blocker = Path.join(cfg.data_dir, "blocker")
+      File.write!(blocker, "a file where a directory has to be")
+      bad = Path.join(blocker, "store")
+
+      # The reopen the report asks for fails on a path RocksDB cannot open (its
+      # parent is a file), which leaves the store closed: reads prove it ran.
+      :sys.replace_state(pid, fn state -> %{state | path: bad} end)
+      assert :ok = Store.report_write_failure(inst, :enospc)
+
+      assert eventually(fn ->
+               Store.get(inst, :hooks, Keys.hook(1)) == {:error, :store_unavailable}
+             end)
+
+      # The store's own retry gets in once the path is good again.
+      :sys.replace_state(pid, fn state -> %{state | path: good} end)
+      assert eventually(fn -> Store.get(inst, :hooks, Keys.hook(1)) == {:ok, "kept"} end)
+
+      # A second report inside the interval is dropped: the store is not closed.
+      :sys.replace_state(pid, fn state -> %{state | path: bad} end)
+      assert :ok = Store.report_write_failure(inst, :enospc)
+      _ = :sys.get_state(pid)
+      assert Store.get(inst, :hooks, Keys.hook(1)) == {:ok, "kept"}
+    end
+  end
+
   describe "effective settings" do
     # RocksDB ignores an option value it cannot parse and keeps the default, and
     # for `wal_recovery_mode` the default is the mode that silently drops every

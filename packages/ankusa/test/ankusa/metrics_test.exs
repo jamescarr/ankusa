@@ -90,6 +90,17 @@ defmodule Ankusa.MetricsTest do
     refute scrape =~ ~s(source_id="demo")
   end
 
+  test "a header no sink can carry is a refusal" do
+    config = start_instance()
+
+    conn = route_through_edge(config, request("demo", "x", [{"x-note", "caf\xC3\xA9"}]))
+    assert conn.status == 400
+
+    scrape = Ankusa.Metrics.scrape(config.instance)
+
+    assert scrape =~ ~r/^ankusa_ingest_refused_total\{[^}]*reason="invalid_header"[^}]*\} 1$/m
+  end
+
   test "only failed verifications count as verify failures" do
     config = start_instance()
 

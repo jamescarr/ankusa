@@ -7,6 +7,8 @@ node:
 admin:
   enabled: true
   port: 4002
+  # the other containers and the host's published port reach it
+  ip: 0.0.0.0
 
 # Short on purpose, so the dead-letter drill takes seconds, not minutes:
 # 6 attempts over roughly 8-15s. The default is 84 attempts, backing off to 5 min (about 6 hours).
