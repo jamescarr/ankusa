@@ -26,20 +26,7 @@ reverse.
 npm install ankusa
 ```
 
-Not published yet. Until the first release, depend on it as a local path,
-the same way the Elixir packages in this monorepo depend on `ankusa` core
-before their first Hex release:
-
-```json
-{
-  "dependencies": {
-    "ankusa": "file:../../sdks/typescript"
-  }
-}
-```
-
-A `file:` dependency resolves to compiled output (`dist/`), so run `npm run
-build` here at least once before a consumer installs it that way.
+Node 20 or newer (ESM only).
 
 ### Use
 

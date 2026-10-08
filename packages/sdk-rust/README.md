@@ -303,5 +303,5 @@ mise run check:package sdk-rust # format, clippy -D warnings, tests, docs, cargo
 
 The conformance suite runs the language-neutral vectors in
 [`conformance/`](https://github.com/jamescarr/ankusa/tree/main/conformance)
-against this crate's public API, so `ankusa` passes the same 124 cases the
+against this crate's public API, so `ankusa` passes the same conformance cases the
 TypeScript and Python SDKs do.

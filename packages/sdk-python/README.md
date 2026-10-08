@@ -11,26 +11,13 @@ here as they're built.
 
 ## Install
 
-Not published yet. Until the first release, depend on it as a local path,
-the same way the Elixir packages in this monorepo depend on `ankusa` core
-before their first Hex release, and `packages/sdk-typescript` depends on
-itself via `file:`.
-
-With [`uv`](https://docs.astral.sh/uv/):
-
-```toml
-[project]
-dependencies = ["ankusa"]
-
-[tool.uv.sources]
-ankusa = { path = "../../packages/sdk-python" }
-```
-
-Or with plain `pip`:
-
 ```sh
-pip install -e ../../packages/sdk-python
+pip install ankusa
+# or
+uv add ankusa
 ```
+
+Python 3.11 or newer.
 
 ## Claim-check client
 

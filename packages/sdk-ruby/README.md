@@ -26,14 +26,6 @@ then, in code:
 require "ankusa/sdk"
 ```
 
-Before the first RubyGems release, depend on it as a path gem the same way the
-Elixir packages in this monorepo depend on `ankusa` core before their first Hex
-release:
-
-```ruby
-gem "ankusa-sdk", path: "packages/sdk-ruby"
-```
-
 Everything the SDK exposes lives under `Ankusa::`.
 
 ## Claim-check client
