@@ -146,7 +146,7 @@ write — which the `Ankusa.SourceStore` behaviour is the seam for.
 
 One consequence for `wal.type: none`: its boot check — every statically
 configured source needs at least one sink whose `:ok` means durable
-(`Ankusa.Sink.durable?/1`, enforced by `Ankusa.Queue.validate_config!/1`) —
+(`c:Ankusa.Sink.durable?/1`, enforced by `Ankusa.Queue.validate_config!/1`) —
 only sees sources in the config. A source created at runtime through the admin
 API is not checked, because the store's decoder has no instance config, so a
 `wal: :none` node with a writable source store can be handed a log-only source

@@ -196,7 +196,7 @@ Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `:quarantine` and `:lifecycle` are maps and get **deep-merged** over the
 defaults. Pass only the keys you want to change.
 
-The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance (`Ankusa.Application`) reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
+The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
 
 ```elixir
 config :ankusa,
@@ -259,7 +259,7 @@ config :ankusa,
 | `max_body_bytes` | `8_000_000` | Hard cap on a request body. A `Content-Length` over it is `413` before any of the body is read; a body without one (chunked) is cut off at the cap while streaming. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); the rest is read-only. |
-| `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/1`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
+| `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
 | `direct_publish_timeout_ms` | `8_000` | `wal: :none` only: the one deadline every sink must confirm under (YAML `wal.publish_timeout_ms`). Keep it below the provider's own timeout. |
 | `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The queue writer serializes commits itself, so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
@@ -548,7 +548,7 @@ vars on top of whatever `config.exs` sets:
   obligation clears: `edge,dispatch` reclaims delivered hooks without the
   archive, so dropping `storage` no longer strands them.
 
-The autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources` from the application env (`Ankusa.Application`); every other `Ankusa.Config` key takes effect only when passed to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
+The autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources` from the application env; every other `Ankusa.Config` key takes effect only when passed to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
 
 `autostart` (application env, default `false`) gates whether
 Ankusa.Application boots its built-in default instance at all. A library
