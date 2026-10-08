@@ -59,14 +59,14 @@ Every top-level section, with its keys and defaults:
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`) |
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
-| `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, keys), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`) |
+| `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
-| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`). See [Route management](#route-management) |
+| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent`; `persistent` adds API-managed sources kept in this node's store). See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
-| `lifecycle` | `sinks` (none: off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
+| `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -85,7 +85,7 @@ One source per provider endpoint; the key is the catch-URL segment
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
 | `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. |
-| `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or `:default`/absent for every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. |
+| `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or absent for the default set: every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. (`:default` is the Elixir value only; YAML takes a list or nothing.) |
 
 ### Custom HMAC schemes
 
@@ -135,8 +135,8 @@ URL), cannot be described by this engine. They need a bespoke
 | `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000). Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536). |
 | `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
-| `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats--subject-delivery). |
-| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `publish_timeout_ms` (5000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis--pubsub-delivery). |
+| `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
+| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `publish_timeout_ms` (5000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
 
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
 the message carries a claim reference. See [`claim-check.md`](claim-check.md).
@@ -196,6 +196,8 @@ Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `:quarantine` and `:lifecycle` are maps and get **deep-merged** over the
 defaults. Pass only the keys you want to change.
 
+The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance (`Ankusa.Application`) reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
+
 ```elixir
 config :ankusa,
   instance: :default,
@@ -206,6 +208,7 @@ config :ankusa,
   route_resolver: {Ankusa.RouteResolver.Path, []},
   source_store: {Ankusa.SourceStore.Static, sources: %{}},
   wal: :disk,
+  direct_publish_timeout_ms: 8_000,
   batcher: %{partitions: 2, max_batch: 256, max_delay_ms: 0, max_queue: 10_000},
   dispatch: %{
     batch: 128,
@@ -243,7 +246,8 @@ config :ankusa,
     seed: []
   },
   rate_limits: %{default: nil, tenants: %{}},
-  quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
+  quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824},
+  lifecycle: %{sinks: []}
 ```
 
 | Key | Default | Meaning |
@@ -255,7 +259,8 @@ config :ankusa,
 | `max_body_bytes` | `8_000_000` | Hard cap on a request body. A `Content-Length` over it is `413` before any of the body is read; a body without one (chunked) is cut off at the cap while streaming. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); the rest is read-only. |
-| `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
+| `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/1`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
+| `direct_publish_timeout_ms` | `8_000` | `wal: :none` only: the one deadline every sink must confirm under (YAML `wal.publish_timeout_ms`). Keep it below the provider's own timeout. |
 | `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The queue writer serializes commits itself, so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
 | `batcher.max_delay_ms` | `0` | Commit immediately. The store commit runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
@@ -265,7 +270,7 @@ config :ankusa,
 | `dispatch.max_inflight` | `4096` | Max claimed, unfinished deliveries. Bounds how much a stalled destination can hold. |
 | `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their stored hook sizes. |
 | `dispatch.attempt_timeout_ms` | `30_000` | A delivery attempt that has not returned after this is killed and counts as a failed attempt (`{:attempt_timeout, ms}`). Keep it above every sink's own timeout. |
-| `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: the **default**, overridable per source (see below). |
+| `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: dispatch-wide; there is no per-source retry policy. |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec`: segment record framing. |
 | `storage.roll_bytes` | `16 MiB` | Roll a new segment past this size. |
@@ -495,14 +500,14 @@ config :ankusa,
 | `tenant_id` | `"default"` | The storage/retention scope. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. `Ankusa.Verifier.Hmac`'s `:secret` is a binary or a list of binaries, newest first — every key is tried, so a rotation is `secret: [new, old]`. |
 | `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen; see [`delivery.md#quarantine`](delivery.md#quarantine)) / `:accept_flag` (commits, envelope flagged). |
-| `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`, delivered to in order, independently retried. |
+| `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink, each retried independently. |
+| `dedupe` | `nil` | Collapse provider retries at ingest: `:github \| :standard_webhooks \| :svix \| :shopify \| :stripe`, or `%{header: "X-Event-Id"}` / `%{json: "data.id"}`, each with an optional `ttl_ms` (default `259_200_000`). |
+| `forward_headers` | `:default` | `:default` (every header except the never-forwarded set; see [Sources](#sources)) or a list of header names. |
 
-A source can override the dispatch-wide retry policy by putting a
-`:retry` opt directly in a sink tuple's opts if that sink's module reads it
-(none of the shipped sinks do. `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka`/`Sink.NATS`/`Sink.Redis` retries are all
-driven by `config.dispatch.retry`, applied uniformly per source by
-`Ankusa.Dispatch.Pipeline`). Per-source retry policy override is not currently
-supported; it's dispatch-wide.
+A source cannot override the dispatch-wide retry policy: there is no per-source
+retry policy. `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka`/`Sink.NATS`/`Sink.Redis`
+retries are all driven by `config.dispatch.retry`, applied uniformly per source
+by `Ankusa.Dispatch.Pipeline`.
 
 ### Every behaviour, at a glance
 
@@ -542,6 +547,8 @@ vars on top of whatever `config.exs` sets:
   them, `storage` archives them, and a hook is deleted once its last
   obligation clears: `edge,dispatch` reclaims delivered hooks without the
   archive, so dropping `storage` no longer strands them.
+
+The autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources` from the application env (`Ankusa.Application`); every other `Ankusa.Config` key takes effect only when passed to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
 
 `autostart` (application env, default `false`) gates whether
 Ankusa.Application boots its built-in default instance at all. A library

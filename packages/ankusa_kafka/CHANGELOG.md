@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
   0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
   which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+- `ankusa_dedupe_key` and `ankusa_replay_id` record headers when present.
 
 ## [0.4.0] - 2026-10-02
 

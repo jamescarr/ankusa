@@ -81,7 +81,7 @@ same `Ankusa.SDK.Hook` to the same handler.
 
 [`examples/oban-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/oban-consumer/)
 is the full worked deployment: a Kubernetes (kind) cluster running three
-self-contained all-role Ankusa nodes (each with its own disk WAL on a
+self-contained all-role Ankusa nodes (each with its own RocksDB store on a
 persistent volume) and a two-replica consumer service that receives the HTTP
 handoff and enqueues Oban jobs, proven zero-loss under normal load, chaos pod
 kills, and burst. Ankusa and its `ingest_app` wrapper know nothing about Oban;
@@ -306,9 +306,10 @@ while it was away, and a publish no live subscriber receives is an error
 rather than a stored job — use it for consumers that may miss messages, not
 for durable work. See
 [`delivery.md`](delivery.md) for the full
-message contract and reconnection/confirm semantics, and the two existing
+message contract and reconnection/confirm semantics, and the three existing
 worked examples,
-[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/)
+[`examples/rabbitmq-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/rabbitmq-consumer/),
+[`examples/nats-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/nats-consumer/)
 and
 [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/),
 for end-to-end deployments where the worker is itself the consumer (rather

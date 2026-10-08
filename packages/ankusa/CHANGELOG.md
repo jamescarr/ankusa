@@ -47,7 +47,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   option, `:default` forwards everything except auth/framing/hop-by-hop and
   `x-ankusa-*` headers). `Sink.Http` forwards them as request headers, with
   `x-ankusa-dedupe-key`/`x-ankusa-replay-id`; RabbitMQ carries the hook id as
-  AMQP `message_id` plus the dedupe/replay AMQP headers; Kafka and NATS carry
+  AMQP `message_id` plus the dedupe/replay AMQP headers; NATS sets `Nats-Msg-Id`
+  on every publish (the hook `id`, or `id:replay:<replay_id>` on a replay); Kafka and NATS carry
   them as record headers. All 8 SDKs decode the message, verify its integrity,
   and read the idempotency key (below; `#replay:<replay_id>` is appended when
   asked); the conformance suite covers it.
@@ -55,7 +56,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   returns the tenant-scoped key a consumer dedupes on:
   `tenant:source_id:dedupe_key` when the hook has a dedupe key (`default` when
   it has no tenant), else its `id`. It ships as the message's
-  `idempotency_key` field (additive, still `v: 1`; required in `SinkMessageV1`),
+  `idempotency_key` field (additive, still `v: 1`; `SinkMessageV1` now requires
+  `sha256`, `dedupe_key`, `replay_id`, `idempotency_key` and `headers`, and
+  `SinkMessageHeadersV1` gains `ankusa_dedupe_key`, `ankusa_replay_id` and
+  `Nats-Msg-Id`),
   the `x-ankusa-idempotency-key` header on `Sink.Http`, and the
   `ankusa_idempotency_key` header on RabbitMQ, Kafka and NATS. Ingest dedupe
   scopes by tenant and source, so two tenants' hooks with one provider event id
@@ -106,6 +110,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   source, defaults 100 and 20/s) and `max_bytes` (the pen's byte cap, default
   1 GiB). New telemetry event `[:ankusa, :quarantine, :full]` and metric
   `ankusa_quarantine_full_total`.
+- Metrics `ankusa_replay_moved_total{instance,kind}` and
+  `ankusa_replay_throttled_total{instance,reason}`, telemetry events
+  `[:ankusa, :replay, :moved | :throttled | :state]`, and
+  `outcome="duplicate"` on `ankusa_ingest_requests_total`.
 - `Ankusa.Verifier.Hmac` accepts `secret: [new, old]`: every key is tried, so
   a secret rotation needs no cut-over. An empty list or an element that is not
   a usable key is `{:error, :bad_secret}`.
@@ -141,8 +149,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 - Delivery rows may carry `replay: replay_id`, the job a replayed delivery is
   attributed to.
-- `GET /v1/dlq` is unchanged; `POST /v1/dlq/replay` is replaced by the replay
-  jobs API above.
 - `Ankusa.Queue.enqueue/3` takes an optional `deadline` (a
   `System.monotonic_time(:millisecond)` value) and waits for the commit's
   outcome instead of timing out after 5 s. The writer refuses, without
@@ -185,8 +191,24 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   refusals. A panel that sums `ankusa_ingest_requests_total` for "all
   traffic" must add the refused counter. `source_id` on `[:ankusa, :ingest]`
   and on the metrics built from it is now always a configured source's id.
-  `Ankusa.Edge.Ingest.ingest/2` is unchanged and still returns
-  `{:error, :unknown_source}`.
+  `Ankusa.Edge.Ingest.ingest/2` still returns `{:error, :unknown_source}` for
+  one.
+- **Breaking for callers that match exhaustively: a duplicate is a new
+  result.** `Ankusa.Edge.Ingest.ingest/2` and `ingest/4` may return
+  `{:duplicate, env}` (besides `{:ok, env}`), `Ankusa.Edge.Batcher.commit/4`
+  returns `{:duplicate, env}` besides `{:committed, env}`, and
+  `Ankusa.Queue.enqueue/3` returns
+  `{:ok, [{:committed, env} | {:duplicate, env}]}`.
+- **Breaking for embedders: the supervision tree is split into failure
+  domains.** The batcher, queue writer, quarantine, rate limiter, routes and
+  ingress listener now live under `Ankusa.via(instance, :edge)`; dispatch,
+  storage, lifecycle, metrics and the listeners under `Ankusa.Instance.Isolated`
+  subtrees, so `Supervisor.terminate_child/2` / `which_children/1` on the
+  instance root no longer finds them. See "Failure domains" under Added.
+- **Breaking for HTTP-sink receivers and queue consumers: provider request
+  headers are forwarded by default.** `forward_headers: :default` forwards
+  every header except auth/framing/hop-by-hop and `x-ankusa-*`; set
+  `forward_headers: [...]` to narrow it.
 - **Breaking: the admin API (4002), route management API (4003) and claim
   gateway (4001) listen on `127.0.0.1` by default.** They used to bind every
   interface and are unauthenticated. A deployment that reaches one from another
@@ -227,7 +249,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Removed
 
-- `Ankusa.Dispatch` (`Ankusa.Dispatch.replay/2`) — replaced by
+- **Breaking: `POST /v1/dlq/replay`.** Replaced by `POST /v1/replays` with
+  `kind: "dlq"`; `GET /v1/dlq` is unchanged.
+- `Ankusa.Dispatch` (`replay/1`, `replay/2`) — replaced by
   `Ankusa.Replay.start/2`.
 
 ### Fixed
@@ -291,8 +315,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   dispatch domain, which stopped delivery for every tenant.
 - A quarantine pen write that does not answer within 5 s is `503
   store_unavailable` with `Retry-After: 1`, not a crashed request.
-- `Ankusa.Dispatch.Replayer` keeps only the codec module in its state, so its
-  crash reports and `:sys.get_status/1` no longer print the config.
 
 ## [0.4.0] - 2026-10-02
 

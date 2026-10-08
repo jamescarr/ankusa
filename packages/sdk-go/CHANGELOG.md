@@ -25,7 +25,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   `HookHeaders.ShippedIdempotencyKey`, read from `x-ankusa-dedupe-key`,
   `x-ankusa-replay-id`, and `x-ankusa-idempotency-key` by `ParseHeaders`.
 - `AdminClient.CreateReplay`, `GetReplay`, `ListReplays`, and `UpdateReplay`,
-  with the `Replay`, `ReplayList`, `ReplaySpec`, and `ReplayPatch` types.
+  with the `Replay`, `ReplayList`, `ReplaySpec`, and `ReplayPatch` types. Kinds
+  are `dlq`, `archive` and `quarantine`; `ReplaySpec.ID`, `Since` and `Until`
+  cover `quarantine` too.
 
 ### Removed
 

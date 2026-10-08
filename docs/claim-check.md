@@ -25,7 +25,7 @@ The machine-readable contract is
 ## The reference
 
 A queue message carries either `body_base64` or a `claim` plus its `sha256`
-([full message format](delivery.md#sinkrabbitmq--queue-delivery)):
+([full message format](delivery.md#sinkrabbitmq-queue-delivery)):
 
 ```json
 {"claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
@@ -307,7 +307,7 @@ Elixir consumers: alongside the claim-check client sit `Ankusa.SDK.Receiver`
 clients.
 
 ```elixir
-# mix.exs: {:ankusa_sdk, "~> 0.3"}
+# mix.exs: {:ankusa_sdk, "~> 0.4"}
 claim_check = Ankusa.SDK.ClaimCheck.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
 
 case Ankusa.SDK.ClaimCheck.redeem(claim_check, claim, sha256) do

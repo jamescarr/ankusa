@@ -30,8 +30,11 @@ router.
             {:ok, Ankusa.Route.t()} | :error
 ```
 
-The router (`Ankusa.Edge.Router`) is a catch-all `POST` that does nothing but
-call the configured resolver, then hand the result to `Ankusa.Edge.Ingest`. A
+The router (`Ankusa.Edge.Router`) is a catch-all `POST`. In order it: runs the
+route guard (when routes are enabled), calls the configured resolver, checks
+`Content-Length` against `max_body_bytes` (`413`), looks the source up before
+reading any body (`404`), checks header bytes (`400 invalid_header`), reads
+the body within the bound, then hands the result to `Ankusa.Edge.Ingest`. A
 resolver does **URL-scheme work only**: it never reads the body, verifies a
 signature, or touches storage. It answers "which endpoint is this?" and
 nothing else; policy (verify/sinks) still comes from `Ankusa.SourceStore`
@@ -143,7 +146,7 @@ write — which the `Ankusa.SourceStore` behaviour is the seam for.
 
 One consequence for `wal.type: none`: its boot check — every statically
 configured source needs at least one sink whose `:ok` means durable
-(`Ankusa.Sink.durable?/2`, enforced by `Ankusa.Queue.validate_config!/1`) —
+(`Ankusa.Sink.durable?/1`, enforced by `Ankusa.Queue.validate_config!/1`) —
 only sees sources in the config. A source created at runtime through the admin
 API is not checked, because the store's decoder has no instance config, so a
 `wal: :none` node with a writable source store can be handed a log-only source

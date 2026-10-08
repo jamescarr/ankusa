@@ -252,6 +252,7 @@ container as they do on disk:
 # examples/rabbitmq-consumer/ingest_app/Dockerfile
 WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa                   # ankusa core
+COPY packages/async_api_spex ./packages/async_api_spex
 COPY packages/ankusa_rabbitmq ./packages/ankusa_rabbitmq
 COPY examples/rabbitmq-consumer/ingest_app ./examples/rabbitmq-consumer/ingest_app
 WORKDIR /repo/examples/rabbitmq-consumer/ingest_app
@@ -269,7 +270,7 @@ services:
 
 **Depending on `ankusa` directly *and* transitively through an adapter
 package needs `override: true`.** Each adapter package's own
-`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.1`) whenever Mix
+`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.5` for rabbitmq/kafka/nats, `~> 0.4` for redis) whenever Mix
 evaluates it as a nested dependency: Mix builds dependencies under `:prod`
 by default regardless of *your* project's `Mix.env()`, so the adapter
 package's dev/test-only path-dep branch never gets hit there. A wrapper app
@@ -283,6 +284,7 @@ mix.exs is overriding a child dependency." Fix: mark your direct entry
 defp deps do
   [
     {:ankusa, path: "../../../packages/ankusa", override: true},
+    {:async_api_spex, path: "../../../packages/async_api_spex", override: true},
     {:ankusa_rabbitmq, path: "../../../packages/ankusa_rabbitmq"}
   ]
 end

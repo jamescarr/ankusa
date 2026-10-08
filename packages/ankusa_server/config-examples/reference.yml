@@ -19,7 +19,7 @@ node:
   # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
   # to start with; split for scale (edge in front, dispatch+storage behind).
   roles: [edge, dispatch, storage]
-  # [env ANKUSA_DATA_DIR] WAL, quarantine, DLQ, and local segments land here.
+  # [env ANKUSA_DATA_DIR] the RocksDB store (hooks, delivery rows and DLQ, quarantine pen, API-managed sources, rate-limit overrides) and local segments land here.
   data_dir: /var/lib/ankusa
 
 log:
@@ -112,8 +112,9 @@ routes:
     ip: 127.0.0.1
 
   # Routes an operator cannot wait for the API to create: a standalone node
-  # (no Redis) loses API-created routes on restart, but not these. Loaded only
-  # on a first boot, and only when routes are enabled.
+  # (no Redis) loses API-created routes on restart, but not these. Applied on
+  # every boot with the default ETS store; the Redis store seeds once per
+  # namespace. Only when routes are enabled.
   seed: []
   # - id: stripe
   #   path: /webhooks/stripe
@@ -164,7 +165,7 @@ quarantine:
   max_bytes: 1073741824
 
 batcher:
-  # The WAL serializes commits itself, so partitions beyond a couple only
+  # The queue writer serializes commits itself, so partitions beyond a couple only
   # add contention.
   partitions: 2
   max_batch: 256
@@ -198,9 +199,11 @@ dispatch:
 wal:
   # [env ANKUSA_WAL_TYPE] disk — the local RocksDB store; every hook is on disk before the ack, so it survives process crash and power loss on this host, not the loss of the host.
   #                        none — no local queue: ingest publishes to the source's sinks in the request and acks on
-  #                               their confirm. The node keeps no hook state, runs only the `edge` role, and every
+  #                               their confirm. The node keeps no hook state, drops the `dispatch` and `storage` roles, and every
   #                               source must have a durable sink (a broker ack, a publisher confirm, an upstream 2xx).
   type: disk
+  # wal.type: none only: the deadline every sink must confirm under; keep it below the provider's timeout.
+  publish_timeout_ms: 8000
 
 storage:
   # [env ANKUSA_STORAGE_TYPE] local | s3 | gcs
@@ -255,6 +258,10 @@ lifecycle:
       brokers: ["${KAFKA_BROKERS}"]
       topic: ankusa.lifecycle
 
+# static | persistent (adds API-managed, tenant-scoped sources kept in this node's store)
+source_store:
+  type: static
+
 sources:
   # One source per provider endpoint. The id is the catch-URL segment:
   # POST /webhooks/stripe here.
@@ -275,6 +282,8 @@ sources:
       # Every entry must be non-empty: an unset ${OLD:-} is a load error.
       # secret: ["${STRIPE_WHSEC_NEW}", "${STRIPE_WHSEC}"]
       tolerance_seconds: 300
+    # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
+    # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
     # At least one. Every sink is tried on every delivered hook.
     sinks:
       - {type: log}
@@ -369,4 +378,6 @@ sources:
   #     sig_prefix: "sha256="
   #     timestamp_header: "X-Custom-Timestamp"
   #     tolerance_seconds: 300
+  #     parse: whole            # whole | csv_pairs (with sig_key: v1) | space_versions (with version: "v1,")
+  #     secret_decode: raw      # raw | whsec_base64
   #   sinks: [{type: log}]

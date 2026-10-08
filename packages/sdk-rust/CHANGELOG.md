@@ -18,12 +18,13 @@ this project follows [Semantic Versioning](https://semver.org/).
   `x-ankusa-idempotency-key`) and `idempotency_key(include_replay)`.
 - `AdminClient` gains `create_replay`, `get_replay`, `list_replays`, and
   `update_replay`, with the `Replay`, `ReplayList`, `ReplaySpec`, and
-  `ReplayPatch` models.
+  `ReplayPatch` models. Kinds are `dlq`, `archive` and `quarantine`;
+  `ReplaySpec`'s `id`/`since`/`until` apply to `quarantine` too.
 
-### Changed
+### Removed
 
-- Replaced `AdminClient::replay_dead_letters` and its `ReplayFilter`/`Replayed`
-  models with the replay-job API above.
+- `AdminClient::replay_dead_letters` and its `ReplayFilter`/`Replayed` models,
+  replaced by the replay-job API above.
 
 ## [0.3.0] - 2026-10-01
 

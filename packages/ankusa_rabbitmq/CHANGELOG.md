@@ -13,14 +13,22 @@ follows [Semantic Versioning](https://semver.org/).
   (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
   0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
   which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+- AMQP `message_id` is the hook id; the `ankusa_dedupe_key` and
+  `ankusa_replay_id` AMQP headers are set when present.
 
-### Fixed
+### Changed
 
-- A publish no queue is bound to receive is no longer reported as delivered:
-  every publish is `mandatory`, and `deliver/3` answers
+- **Breaking: `Ankusa.Sink.RabbitMQ.Connection.publish/4`'s fourth argument is
+  a keyword list of properties** (`message_id:`, `headers:`), not a header
+  list.
+- **Breaking: every publish is mandatory.** A publish no queue is bound to
+  receive is no longer reported as delivered: `deliver/3` answers
   `{:error, {:unroutable, routing_key}}` instead of `:ok`, so the hook is
   retried and then dead-lettered (a `503` under `wal.type: none`) rather than
   settled while the broker kept nothing. There is no option to turn this off.
+
+### Fixed
+
 - A channel the broker closes (a `404` publishing to a deleted exchange, a `406`)
   is reopened at once on the same connection, re-declaring the exchange. The
   publish it interrupted answers `{:error, {:channel_closed, reason}}`.

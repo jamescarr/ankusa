@@ -27,17 +27,18 @@ SASL password, no header value.
 | operation | channel | `send`: Ankusa is the publisher |
 
 Every message's payload is [`SinkMessageV1`](delivery.md): the `Ankusa.Sink.Message`
-envelope (`id`, `source_id`, `tenant_id`, `received_at`, `size`, and `body_base64`
-or `claim` + `sha256`), narrowed to the source. The provider's own body is opaque
+envelope (`id`, `source_id`, `tenant_id`, `received_at`, `content_type`, `size`,
+`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `headers`, and `body_base64`
+or `claim`), narrowed to the source. The provider's own body is opaque
 bytes inside it; the document does not describe it.
 
 What a consumer learns per transport:
 
 | Sink | Address | Bindings and headers |
 | --- | --- | --- |
-| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), the five `ankusa_*` headers |
-| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; no headers |
-| `nats` | the `subject` | the five `ankusa_*` headers |
+| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), six always-present headers (`ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key`, `content_type`) plus optional `ankusa_dedupe_key` and `ankusa_replay_id` |
+| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; the document advertises no headers, though the wire carries AMQP `message_id` and an `ankusa_idempotency_key` header (plus optional `ankusa_dedupe_key` and `ankusa_replay_id`), which it does not describe |
+| `nats` | the `subject` | the same six always-present headers and optional `ankusa_dedupe_key`/`ankusa_replay_id` as Kafka, plus `Nats-Msg-Id` |
 | `redis` | the `channel` | none: pub/sub has no headers |
 
 Kafka is one topic with the source in the record key, not a topic per source, so

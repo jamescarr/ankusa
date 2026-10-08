@@ -24,7 +24,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `HookHeaders#dedupe_key` / `#replay_id` / `#idempotency_key`'s field, parsed
   from `x-ankusa-dedupe-key` / `x-ankusa-replay-id` / `x-ankusa-idempotency-key`.
 - `AdminClient#create_replay`, `#get_replay`, `#list_replays` and
-  `#update_replay` for the `POST/GET/PATCH /v1/replays` replay-job API.
+  `#update_replay` for the `POST/GET/PATCH /v1/replays` replay-job API (kinds
+  `dlq`, `archive`, `quarantine`).
 
 ### Removed
 

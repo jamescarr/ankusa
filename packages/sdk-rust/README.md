@@ -213,7 +213,8 @@ println!("{} of {} dead letters", page.entries.len(), page.total);
 ```
 
 Replay jobs are managed on the same listener. `create_replay` starts one (a
-`dlq` job over dead-lettered rows, or an `archive` job over a time window) and
+`dlq` job over dead-lettered rows, an `archive` job over a time window, or a
+`quarantine` job that re-verifies held hooks and releases those that pass) and
 returns the running job when the same spec is posted twice, so a proxy retry is
 safe:
 

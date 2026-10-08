@@ -11,10 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Every message carries the `ankusa_idempotency_key` header: the same
   tenant-scoped key as the message's `idempotency_key`
-  (`Ankusa.Envelope.idempotency_key/1`), always present. `Nats-Msg-Id` is
-  unchanged. **Requires `ankusa` 0.5 or newer**: the key comes from
+  (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
+  0.5 or newer**: the key comes from
   `Ankusa.Envelope.idempotency_key/1`, which 0.4.x does not have, so the Hex
   requirement is now `~> 0.5`.
+- `ankusa_dedupe_key` and `ankusa_replay_id` headers when present.
+
+### Changed
+
+- **Breaking: every publish sets `Nats-Msg-Id`** to the hook `id`
+  (`id:replay:<replay_id>` on a replay), so a stream's duplicate window drops
+  a re-publish of the same delivery inside the window (0.4.0 set none).
 
 ## [0.4.0] - 2026-10-02
 

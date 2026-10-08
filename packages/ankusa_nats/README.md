@@ -11,8 +11,8 @@ deployments that opt into a NATS sink need this package.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.2"},
-    {:ankusa_nats, "~> 0.2"}
+    {:ankusa, "~> 0.5"},
+    {:ankusa_nats, "~> 0.5"}
   ]
 end
 ```
@@ -28,13 +28,20 @@ nats stream add ANKUSA --subjects="ankusa.>"
 ```
 
 ```elixir
-config :ankusa, :default,
-  sinks: [
-    {Ankusa.Sink.NATS,
-     servers: ["localhost:4222"],
-     subject: "ankusa.stripe"}
-  ]
+config :ankusa,
+  sources: %{
+    "orders" => [
+      sinks: [
+        {Ankusa.Sink.NATS,
+         servers: ["localhost:4222"],
+         subject: "ankusa.stripe"}
+      ]
+    ]
+  }
 ```
+
+Sinks belong to a source. `Ankusa.Config.new/1` takes the same `sources` for a
+non-default instance.
 
 ## Testing
 

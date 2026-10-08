@@ -32,7 +32,7 @@ Queue sinks   Ankusa --> your consumer --> Message.decode/1       +--> MyApp.Hoo
 # mix.exs
 def deps do
   [
-    {:ankusa_sdk, "~> 0.3"}
+    {:ankusa_sdk, "~> 0.4"}
   ]
 end
 ```
@@ -294,7 +294,7 @@ unfollowed redirect, a non-JSON success body, or unreachable; retryable).
 ## Admin client
 
 The operator API on `admin.port` (default `4002`): health, Prometheus metrics,
-the redacted config, the DLQ, and the quarantine list.
+the redacted config, the DLQ, replay jobs, and the quarantine list.
 
 ```elixir
 admin = Ankusa.SDK.Admin.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
@@ -304,7 +304,8 @@ admin = Ankusa.SDK.Admin.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
 {:ok, %{"total" => total}} = Ankusa.SDK.Admin.list_dead_letters(admin, limit: 10)
 {:ok, _} = Ankusa.SDK.Admin.list_quarantined(admin)
 
-# Replay jobs: re-send the dead-letter queue, or an archived time window.
+# Replay jobs: re-send the dead-letter queue ("dlq"), an archived time window
+# ("archive"), or re-verify held hooks and release those that pass ("quarantine").
 {:ok, replay} = Ankusa.SDK.Admin.create_replay(admin, %{"kind" => "dlq", "rate" => 500})
 {:ok, replay} = Ankusa.SDK.Admin.get_replay(admin, replay["id"])
 {:ok, %{"replays" => replays}} = Ankusa.SDK.Admin.list_replays(admin)

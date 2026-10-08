@@ -23,7 +23,8 @@ follows [Semantic Versioning](https://semver.org/).
   `x-ankusa-replay-id` and `x-ankusa-idempotency-key` and keeps every request
   header.
 - `Ankusa.SDK.Admin.create_replay/2`, `get_replay/2`, `list_replays/1` and
-  `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`).
+  `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`;
+  kinds `dlq`, `archive`, `quarantine`).
 
 ### Removed
 

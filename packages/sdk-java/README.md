@@ -15,7 +15,7 @@ immutable and safe to share across threads.
 
 ## Install
 
-Not on Maven Central until the first release (0.3.0). Until then, build it
+Not on Maven Central until its first Maven Central release. Until then, build it
 into your local Maven repository and depend on version `0.0.0`:
 
 ```sh
@@ -28,14 +28,14 @@ Maven:
 <dependency>
   <groupId>io.github.jamescarr</groupId>
   <artifactId>ankusa-sdk</artifactId>
-  <version>0.0.0</version> <!-- 0.3.0 from Maven Central once released -->
+  <version>0.0.0</version> <!-- the Maven Central version once released -->
 </dependency>
 ```
 
 Gradle (with `mavenLocal()` in `repositories` until the release):
 
 ```kotlin
-implementation("io.github.jamescarr:ankusa-sdk:0.0.0") // 0.3.0 once released
+implementation("io.github.jamescarr:ankusa-sdk:0.0.0") // the Maven Central version once released
 ```
 
 On the module path the jar is the automatic module `io.github.jamescarr.ankusa`.
@@ -102,7 +102,7 @@ String metrics = admin.metrics();                       // Prometheus text
 DlqPage dlq = admin.listDeadLetters(ListDeadLettersParams.builder().limit(10).build());
 QuarantinePage quarantine = admin.listQuarantined();
 
-// Replay dead letters, or redrive an archived time window, without flooding live traffic.
+// Replay dead letters ("dlq"), redrive an archived time window ("archive"), or re-verify and release held hooks ("quarantine"), without flooding live traffic.
 Replay replay = admin.createReplay(ReplaySpec.builder().kind("dlq").sourceId("demo").rate(500).build());
 Replay state = admin.getReplay(replay.id());
 Replay paused = admin.updateReplay(replay.id(), ReplayPatch.builder().state("paused").build());
@@ -155,14 +155,17 @@ String key = hook.idempotencyKey(false); // the key Ankusa shipped; same rule as
 
 `HookHeaders.parse` also takes a `Map<String, List<String>>` (header names
 matched case-insensitively). `x-ankusa-id` is required — a missing or empty
-one is `MissingHookIdError`; dedupe on it, since delivery is at-least-once.
+one is `MissingHookIdError`. Delivery is at-least-once: dedupe on
+`idempotencyKey(false)`, not the hook id.
 `source()` defaults to `""`; `tenant()`, `contentType()`, `dedupeKey()`,
 `replayId()` and `idempotencyKey()` are null when absent (a `dedupeKey`,
 `replayId` or `idempotencyKey` header that is present but empty is also null).
 
 ## Consuming queue messages
 
-Ankusa publishes each delivery as a JSON v1 message over the configured sink.
+Ankusa publishes each delivery as a JSON v1 message over the configured
+messaging sink (RabbitMQ, Kafka, NATS, Redis); the HTTP sink sends the
+original body plus `x-ankusa-*` headers instead.
 Decode it, verify the body, and dedupe before doing any work: delivery is
 at-least-once, and a provider retry or a replay must not re-run the effect.
 

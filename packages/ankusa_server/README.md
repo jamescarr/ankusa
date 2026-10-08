@@ -144,15 +144,16 @@ sources:
 
 - The raw body verbatim, with the provider's `content-type`.
 - `x-ankusa-id`, `x-ankusa-source`, and `x-ankusa-tenant` when set.
+- `x-ankusa-idempotency-key` always; `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when present.
+- The provider's own request headers, per the source's `forward_headers` (by default every header except auth, framing, hop-by-hop and `x-ankusa-*`).
 - `2xx` means delivered. Anything else, a timeout, or a redirect is retried, then dead-lettered.
-- **Dedupe on `x-ankusa-id`.** Delivery is at-least-once, so consumers are
-  idempotent receivers: `x-ankusa-id` identifies one stored hook, and every
-  redelivery of it, a retry, a DLQ replay, a restart, carries the same id. A
-  provider retry is a *different* stored hook with a different id, because
-  ingest does no deduplication, so dedupe those on the provider's event id in
-  the body (e.g. Stripe's `id`). The original request headers are not
-  forwarded, so header-borne ids like `X-GitHub-Delivery` or `webhook-id` are
-  not available downstream.
+- **Dedupe on `x-ankusa-idempotency-key`.** Delivery is at-least-once, so consumers are
+  idempotent receivers. The key is `tenant:source:dedupe_key` when the source
+  has `dedupe:` set, else the hook id, and every redelivery of the hook (a
+  retry, a DLQ replay, a restart) carries the same key. `x-ankusa-id`
+  identifies one stored hook. Without a source `dedupe:` setting, a provider
+  retry is a *different* stored hook with a different id; with one, ingest
+  collapses hooks that share the provider's event key within the TTL.
 
 A runnable version, the image plus a Python worker, one `docker compose up`, is
 [`examples/quickstart/`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/);
@@ -205,8 +206,9 @@ and
 
 ## Security
 
-Ankusa verifies provider signatures on ingest, Stripe, GitHub, and Standard
-Webhooks, and does no other authentication. It does not manage users, API keys,
+Ankusa verifies provider signatures on ingest (`stripe`, `github`, `standard_webhooks`,
+`shopify`, `slack`, and `hmac` for any body-HMAC provider), and does no other
+authentication. It does not manage users, API keys,
 or tokens; that is your identity provider's job, and pretending otherwise would
 be worse.
 

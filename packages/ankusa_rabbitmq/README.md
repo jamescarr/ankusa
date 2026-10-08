@@ -11,8 +11,8 @@ deployments that opt into a RabbitMQ sink need this package.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.2"},
-    {:ankusa_rabbitmq, "~> 0.2"}
+    {:ankusa, "~> 0.5"},
+    {:ankusa_rabbitmq, "~> 0.5"}
   ]
 end
 ```
@@ -22,13 +22,20 @@ end
 See `Ankusa.Sink.RabbitMQ` moduledoc for configuration and semantics.
 
 ```elixir
-config :ankusa, :default,
-  sinks: [
-    {Ankusa.Sink.RabbitMQ,
-     exchange: "ankusa.events",
-     url: "amqp://guest:guest@localhost:5672"}
-  ]
+config :ankusa,
+  sources: %{
+    "orders" => [
+      sinks: [
+        {Ankusa.Sink.RabbitMQ,
+         exchange: "ankusa.events",
+         url: "amqp://guest:guest@localhost:5672"}
+      ]
+    ]
+  }
 ```
+
+Sinks belong to a source. `Ankusa.Config.new/1` takes the same `sources` for a
+non-default instance.
 
 ## Testing
 

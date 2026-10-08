@@ -39,7 +39,8 @@ The `201` returns only after the hook is durably accepted, that is
 
 ## 3. Provider retries are stored again
 
-Ingest does no deduplication. Send the identical request again and it is a new
+Without a source [`dedupe:`](configuration.md#sources) setting, ingest does not
+collapse repeats. Send the identical request again and it is a new
 hook and a new `id`, stored and delivered a second time:
 
 ```sh
@@ -48,7 +49,7 @@ curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' -d 
 ```
 
 That is at-least-once on purpose: the provider's retry contract is honored
-without an ingest-side dedup table, and your worker is the idempotent receiver
+without an ingest-side dedup table (the demo source has no `dedupe`), and your worker is the idempotent receiver
 (see [Replay is safe](#replay-is-safe) below, and
 [`delivery.md`](delivery.md#idempotent-receivers)).
 
@@ -155,7 +156,9 @@ GitHub and Standard Webhooks sources are the same shape with a different
 
 ## Ingest responses
 
-- `201`: accepted, durably so
+- `201`: accepted, durably so; a repeat of an event on a source with
+  `dedupe:` answers `201 {"status":"accepted","id":…,"duplicate":true}` with the
+  original `id` and stores nothing new
 - `202`: quarantined after a failed verification
 - `400`: body unreadable, or a header holds a byte outside visible ASCII, space
   and tab (`invalid_header`; no sink could carry it, so retrying is pointless)
@@ -172,9 +175,10 @@ GitHub and Standard Webhooks sources are the same shape with a different
 
 `201 accepted` is the only committed response, and it comes back only after a
 durable accept: the store's synced commit (`wal.type: disk`, the default) or
-every sink's confirm (`wal.type: none`); there is no `200`. Every accepted POST
-is a new hook with a new `id`, and a provider retry after a lost ack is stored
-and delivered again. Ingest does no deduplication.
+every sink's confirm (`wal.type: none`); there is no `200`. Without a source
+[`dedupe:`](configuration.md#sources) setting, every accepted POST is a new
+hook with a new `id`, and a provider retry after a lost ack is stored
+and delivered again.
 
 The catch URL is `/webhooks/:source_id` by default; a tenant-in-the-URL scheme
 is one config line away, see [`multi-tenancy.md`](multi-tenancy.md).

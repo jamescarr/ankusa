@@ -64,6 +64,7 @@ node's data directory needs a persistent volume.
 | 4000 | ingest | publish it: providers post here |
 | 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
+| 4003 | route management API (`routes.admin.ip`, default `127.0.0.1`; only when `routes.enabled`) | your own proxy or network policy |
 
 Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` (or `admin.ip` / `claim_check.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them.
 
