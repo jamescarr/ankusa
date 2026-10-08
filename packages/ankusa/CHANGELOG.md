@@ -276,11 +276,13 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   60 s) instead of every interval, and a blob store whose `put/4` exits,
   throws or returns something other than `:ok` or `{:error, _}` fails the tick
   instead of crashing the compactor.
-- Any failed store write now makes the store reopen itself to clear the error
-  RocksDB latches on a full disk, not only a failed ingest commit: dispatch
-  outcomes, the compactor, quarantine, the replayer, rate-limit overrides and
-  the source store recover on their own once space frees. `Queue.Writer` no
-  longer blocks ingest on a synchronous reopen.
+- Any failed store write now asks the store for a reopen (at most once per
+  5 s), whichever process saw it (dispatch outcomes, the compactor,
+  quarantine, the replayer, rate-limit overrides, the source store), not only
+  an ingest commit: a fallback for a latched RocksDB write error left by a full
+  disk. RocksDB recovered from a full disk on its own in a container drill, so
+  this is a safety net, not a measured fix. `Queue.Writer` no longer reopens
+  the store itself, so ingest no longer blocks on a synchronous reopen.
 - Concurrent first writes into a new LocalFS directory (a claim pack's
   `tenant=*/dt=*` partition at UTC midnight) no longer return before the
   directory is durable, and a parent fsync that failed once is retried by the

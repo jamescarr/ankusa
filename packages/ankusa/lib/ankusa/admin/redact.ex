@@ -12,7 +12,10 @@ defmodule Ankusa.Admin.Redact do
   none of them holds a secret, so values are converted as they are. Maps and
   keyword lists become string-keyed maps, atoms become strings (module atoms
   via `inspect/1`), numbers, booleans, `nil` and binaries stay, functions
-  become `"#Function"`, and any other term goes through `inspect/1`.
+  become `"#Function"`, and any other term goes through `inspect/1`. A value
+  shaped like a `{module, opts}` pair (an atom head, an Erlang module included,
+  with list or map opts), or a list of them, is never converted as it is: its
+  opts switch to closed mode.
 
   **Closed** covers everything inside a `{module, opts}` pair (sinks,
   verifiers, source store, blob store, codec, retry policy, route resolver,
@@ -88,8 +91,13 @@ defmodule Ankusa.Admin.Redact do
 
   defp open_map(map), do: Map.new(map, fn {k, v} -> {key_string(k), open(v)} end)
 
+  # A `{module, opts}` pair is where an adapter's credentials live, so anything
+  # shaped like one is walked in closed mode, an Erlang module (`:my_sink`)
+  # included: `inspect/1` would print its opts as written.
   defp open({module, opts} = pair) when is_atom(module) do
-    if module_atom?(module), do: closed_pair(pair), else: inspect({module, opts})
+    if module_atom?(module) or is_list(opts) or is_map(opts),
+      do: closed_pair(pair),
+      else: inspect(pair)
   end
 
   defp open({module, fun, args}) when is_atom(module) and is_atom(fun) and is_list(args) do
@@ -101,7 +109,7 @@ defmodule Ankusa.Admin.Redact do
 
   defp open(list) when is_list(list) do
     cond do
-      module_pairs?(list) -> Enum.map(list, &open/1)
+      module_pairs?(list) or pairs?(list) -> Enum.map(list, &open/1)
       list != [] and Keyword.keyword?(list) -> list |> Map.new() |> open_map()
       true -> Enum.map(list, &open/1)
     end
@@ -220,6 +228,17 @@ defmodule Ankusa.Admin.Redact do
   end
 
   defp module_pairs?(_list), do: false
+
+  # A list whose every element is an `{atom, list | map}` pair is a list of
+  # adapters, not a keyword list of settings, whatever the atoms are called.
+  defp pairs?([_ | _] = list) do
+    Enum.all?(list, fn
+      {module, opts} when is_atom(module) -> is_list(opts) or is_map(opts)
+      _ -> false
+    end)
+  end
+
+  defp pairs?(_list), do: false
 
   defp module_atom?(atom) do
     case Atom.to_string(atom) do

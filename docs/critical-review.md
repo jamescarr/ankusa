@@ -99,7 +99,7 @@ C in detail" design: one store per instance holding the hooks, one delivery row
 per hook and sink, the quarantine pen, API-managed sources, rate-limit overrides
 and the archive catalogue. It closes W1 W2 S3 W8 S4 W7 W3 S7 W6 D9 W5 S2, and
 also D1 via the delivery-row scheduler (a retry frees its concurrency slot
-instead of sleeping in it, and a commit wakes dispatch). *Correction (2026-10-07): S3 and W7 are only partly closed; see their notes — both closed later the same day; see their notes.* It does not do the rest
+instead of sleeping in it, and a commit wakes dispatch). *Correction (2026-10-07): S3 and W7 are only partly closed — both closed later the same day; see their notes.* It does not do the rest
 of G4 (per-sink windows, circuit breakers, attempt deadlines), G5 (dedupe,
 message v2), quarantine re-verify, or the G2 supervision tree. The analysis
 below is the review as recorded at commit `42b6f5a` and is not edited; where it
@@ -172,9 +172,9 @@ The system produces the disk-full event on its own: the WAL without `:storage` (
 
 - the DLQ, index and pen are RocksDB column families;
 - a commit on a full disk is an error and nothing is acked (`queue/writer.ex`);
-- every failed store write reports itself: `Store.write/3` calls `Store.report_write_failure/2`, and the store reopens itself to clear RocksDB's latched error, at most once per 5 s, whichever process saw the failure. Dispatch outcomes, the compactor, quarantine, the replayer, rate-limit overrides and the source store all write through `Store.write/3`, so a node without `:edge`, or an edge with no traffic, recovers too. The writer no longer reopens the store itself, so ingest is no longer blocked on a synchronous reopen.
+- every failed store write asks for a reopen: `Store.write/3` calls `Store.report_write_failure/2`, and the store reopens itself, at most once per 5 s, whichever process saw the failure, as a fallback for a latched RocksDB error. Dispatch outcomes, the compactor, quarantine, the replayer, rate-limit overrides and the source store all write through `Store.write/3`, so the reopen no longer depends on the edge's `Queue.Writer` seeing a failure. The writer no longer reopens the store itself, so ingest is no longer blocked on a synchronous reopen.
 
-Container drill (256 MiB tmpfs for `/var/lib/ankusa`, a 200 MiB filler, 1 MiB forged hooks into a `quarantine` source, so no write goes through `Queue.Writer`): both images answered `503` once the disk was full. The image from before the fix did **not** stay stuck: it answered `202` 6 s after the filler was deleted and never reopened the store, so RocksDB's own recovery from `ENOSPC` cleared the error in that setup. The fixed image answered `202` after 2 s and logged one `reopening to clear a latched error`. The fix does not depend on RocksDB's auto-recovery, which is why the reopen stays.
+Container drill (256 MiB tmpfs for `/var/lib/ankusa`, a 200 MiB filler, 1 MiB forged hooks into a `quarantine` source, so no write goes through `Queue.Writer`): both images answered `503` once the disk was full. The image from before the fix did **not** stay stuck: it answered `202` 6 s after the filler was deleted and never reopened the store, so RocksDB's own recovery from `ENOSPC` cleared the error in that setup, and the residual recorded above (a store that stays failed until a restart) was not reproduced. The fixed image answered `202` after 2 s and logged one `reopening to clear a latched error`. The drill produced no latched error that RocksDB's own recovery leaves in place, so the reopen is a fallback for that case, not a measured fix for it.
 
 <a id="w8"></a>
 ### W8 · Medium · Code — A corrupt sidecar crash-loops the WAL

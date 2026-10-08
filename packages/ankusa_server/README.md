@@ -229,6 +229,12 @@ So:
   `routes.enabled` is set on an `edge` node, and publishing it is your call.
 - **Point Prometheus at 4002 through your proxy, with read-only credentials.**
 
+All three listeners bind `127.0.0.1` by default. A proxy or a Prometheus in
+another container, pod or host reaches them only after `admin.ip`,
+`claim_check.ip` or `routes.admin.ip` is set to an address it can route to
+(`0.0.0.0` inside a container); the bind decides who can connect, and the
+proxy in front still decides who may.
+
 The proxy compose file is the worked example:
 [`compose/docker-compose.proxy.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/compose/docker-compose.proxy.yml)
 runs one all-role node with no published ports, and an nginx in front that

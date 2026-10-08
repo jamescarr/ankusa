@@ -343,10 +343,10 @@ defmodule Ankusa.Store do
   end
 
   @doc """
-  Tell the store a write failed. RocksDB latches a background error after a
-  failed WAL append (a full disk) and keeps refusing writes after space is
-  freed; the store reopens itself to clear it, at most once per
-  `reopen_interval_ms` (5 s), whichever process saw the failure. Never blocks.
+  Tell the store a write failed. A failed WAL append (a full disk) can leave
+  RocksDB with a latched background error that outlives the freed space; the
+  store reopens itself to clear it, at most once per `reopen_interval_ms`
+  (5 s), whichever process saw the failure. Never blocks.
   """
   @spec report_write_failure(atom(), term()) :: :ok
   def report_write_failure(instance, reason),

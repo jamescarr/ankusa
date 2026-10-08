@@ -119,7 +119,8 @@ curl -XPOST localhost:4002/v1/replays -d '{"kind":"quarantine"}'
 ```
 
 Port 4002 is unauthenticated, so never publish it: the compose file binds it to
-`127.0.0.1` only on the host (and sets `ANKUSA_ADMIN_IP=0.0.0.0` so the published port reaches the container).
+`127.0.0.1` on the host, and `ankusa.yml` sets `admin.ip: 0.0.0.0` so that
+published port reaches the API inside the container.
 
 ## 6. Point a real provider at it
 

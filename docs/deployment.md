@@ -76,8 +76,9 @@ problem anymore. Under `wal.type: none` no hook is committed, but the store
 directory still holds the quarantine pen, API-managed sources and rate-limit
 overrides, so mount a volume if you use any of those; without one they are lost
 on restart. A full volume fails commits with `503 store_unavailable` and acks
-nothing; any write the store refuses makes it reopen itself (at most every 5 s),
-so every writer, not only ingest, resumes once space frees, with no restart.
+nothing, and ingest resumes with no restart once space frees. A write the store
+refuses, from any process, also asks it to reopen itself (at most every 5 s),
+which clears a latched RocksDB write error if one is left.
 
 Config lives at `/etc/ankusa/ankusa.yml` (mount yours over it) or wherever
 `ANKUSA_CONFIG` points. Every key, plus the env overrides:
@@ -99,7 +100,11 @@ way out. To back up, stop the node and copy the whole `<data_dir>`;
 S3/GCS, the store directory is all you need.
 
 The image reports `healthy` via `:4002/health`, so orchestrators can gate on it
-instead of racing the listener.
+instead of racing the listener. That check runs inside the container, where the
+admin API's loopback bind is reachable. A probe that arrives from outside it (a
+Kubernetes `httpGet` hits the pod address) cannot reach `:4002` unless
+`admin.ip` is set to an address it can route to; probe `:4000/health` instead,
+which the edge answers too.
 
 Both compose files are worked examples:
 

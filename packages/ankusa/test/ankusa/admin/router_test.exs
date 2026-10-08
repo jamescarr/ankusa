@@ -745,6 +745,36 @@ defmodule Ankusa.Admin.RouterTest do
     assert conn.resp_body =~ "https://h.example/p?token=[REDACTED]&x=[REDACTED]"
   end
 
+  test "GET /v1/config closes a pair headed by an Erlang module, alone or in a list" do
+    config =
+      test_config(
+        roles: [:dispatch],
+        admin: %{enabled: true},
+        storage: %{blob_store: {:erl_blob, secret_key: "LEAK", region: "us-1"}},
+        lifecycle: %{sinks: [{:erl_sink, password: "LEAK", topic: "t"}]}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+    assert conn.status == 200
+    refute conn.resp_body =~ "LEAK"
+
+    body = JSON.decode!(conn.resp_body)
+
+    assert body["storage"]["blob_store"] == %{
+             "module" => ":erl_blob",
+             "opts" => %{"secret_key" => "[REDACTED]", "region" => "us-1"}
+           }
+
+    assert body["lifecycle"]["sinks"] == [
+             %{
+               "module" => ":erl_sink",
+               "opts" => %{"password" => "[REDACTED]", "topic" => "t"}
+             }
+           ]
+  end
+
   # ── AsyncAPI ───────────────────────────────────────────────────────────────
 
   test "GET /asyncapi.json serves the channels the sources publish to, without credentials" do

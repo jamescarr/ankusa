@@ -82,8 +82,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   three published advisories: EEF-CVE-2026-91043, EEF-CVE-2026-94194 and
   EEF-CVE-2026-92103) and `hpax 1.1.0`.
 - An unreachable object store is retried with backoff (up to 60 s) instead of
-  every second, and a full disk no longer needs ingest traffic to recover: any
-  failed store write reopens the store. See the core changelog.
+  every second, and any failed store write asks the store for a rate-limited
+  reopen, not only ingest's: a fallback for a latched RocksDB write error after
+  a full disk. See the core changelog.
 
 ## [0.4.0] - 2026-10-02
 

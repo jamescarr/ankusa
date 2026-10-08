@@ -81,8 +81,10 @@ defmodule Ankusa.FsyncTest do
   # `{result, dirs}`: what `fun` returned, and the directories `Fsync.fsync_dir/1`
   # was called with while it ran in this process, in order. The calls are local
   # to the module, so the trace pattern must be `:local`. A process cannot trace
-  # itself, so a helper process is the tracer and forwards each call here; the
-  # `:done` round trip proves it has forwarded every one before they are read.
+  # itself, so a helper process is the tracer and forwards each call here.
+  # Trace messages are delivered late relative to ordinary sends, so
+  # `trace_delivered/1` first waits until every one has reached the tracer, and
+  # the `:done` round trip then until the tracer has forwarded them all.
   defp fsynced_during(fun) do
     me = self()
     {:module, Fsync} = Code.ensure_loaded(Fsync)
@@ -99,9 +101,12 @@ defmodule Ankusa.FsyncTest do
         :erlang.trace_pattern({Fsync, :fsync_dir, 1}, false, [:local])
       end
 
+    delivered = :erlang.trace_delivered(me)
+    assert_receive {:trace_delivered, ^me, ^delivered}, 1_000
+
     ref = make_ref()
     send(tracer, {:done, me, ref})
-    assert_receive {:done, ^ref}
+    assert_receive {:done, ^ref}, 1_000
 
     {result, fsynced_dirs([])}
   end

@@ -24,6 +24,10 @@ admin:
 
 claim_check:
   port: 4001
+  # The address the gateway binds (default 127.0.0.1). Consumers on other
+  # hosts redeem claims here, so listen on every interface and keep the port
+  # on your internal network.
+  ip: 0.0.0.0
   # Target size of one pack object; a body larger than this still gets a pack
   # of its own. Core defaults this to 16 MiB.
   pack_max_bytes: 16777216
