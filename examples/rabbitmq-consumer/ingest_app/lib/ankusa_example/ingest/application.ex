@@ -50,7 +50,9 @@ defmodule AnkusaExample.Ingest.Application do
       storage: %{blob_store: {Ankusa.BlobStore.S3, s3_opts()}},
       source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}},
       claim_check: %{
-        port: env_int("CLAIM_CHECK_PORT", 4001)
+        port: env_int("CLAIM_CHECK_PORT", 4001),
+        # reached as http://claim-check:4001 from the other containers
+        ip: "0.0.0.0"
       }
     )
   end

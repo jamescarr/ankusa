@@ -65,7 +65,7 @@ node's data directory needs a persistent volume.
 | 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
 
-Every surface is on its own port so it can be firewalled on its own.
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` (or `admin.ip` / `claim_check.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them.
 
 `/var/lib/ankusa` holds the node's store (`store/`: hooks, delivery rows, the
 quarantine pen, API-managed sources, rate-limit overrides, the archive
@@ -76,8 +76,9 @@ problem anymore. Under `wal.type: none` no hook is committed, but the store
 directory still holds the quarantine pen, API-managed sources and rate-limit
 overrides, so mount a volume if you use any of those; without one they are lost
 on restart. A full volume fails commits with `503 store_unavailable` and acks
-nothing; the writer reopens the store once space frees, so ingest resumes with
-no restart.
+nothing, and ingest resumes with no restart once space frees. A write the store
+refuses, from any process, also asks it to reopen itself (at most every 5 s),
+which clears a latched RocksDB write error if one is left.
 
 Config lives at `/etc/ankusa/ankusa.yml` (mount yours over it) or wherever
 `ANKUSA_CONFIG` points. Every key, plus the env overrides:
@@ -99,7 +100,11 @@ way out. To back up, stop the node and copy the whole `<data_dir>`;
 S3/GCS, the store directory is all you need.
 
 The image reports `healthy` via `:4002/health`, so orchestrators can gate on it
-instead of racing the listener.
+instead of racing the listener. That check runs inside the container, where the
+admin API's loopback bind is reachable. A probe that arrives from outside it (a
+Kubernetes `httpGet` hits the pod address) cannot reach `:4002` unless
+`admin.ip` is set to an address it can route to; probe `:4000/health` instead,
+which the edge answers too.
 
 Both compose files are worked examples:
 

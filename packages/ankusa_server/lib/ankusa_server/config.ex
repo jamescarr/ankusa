@@ -35,6 +35,8 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
   | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
+  | `ANKUSA_ADMIN_IP` | `admin.ip` |
+  | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
   | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
   | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
   | `ANKUSA_WAL_TYPE` | `wal.type` |
@@ -61,7 +63,7 @@ defmodule AnkusaServer.Config do
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
-  @admin_keys ~w(enabled port)
+  @admin_keys ~w(enabled port ip)
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
   @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
@@ -69,7 +71,7 @@ defmodule AnkusaServer.Config do
   @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
   @gcs_keys ~w(bucket endpoint auth token)
-  @claim_check_keys ~w(port retention_days pack_max_bytes)
+  @claim_check_keys ~w(port retention_days pack_max_bytes ip)
   @source_store_keys ~w(type)
   @lifecycle_keys ~w(sinks)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
@@ -79,7 +81,7 @@ defmodule AnkusaServer.Config do
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
-  @routes_admin_keys ~w(port)
+  @routes_admin_keys ~w(port ip)
   @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants)
   @rate_limit_keys ~w(rate burst)
@@ -244,7 +246,9 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_DATA_DIR", ["node", "data_dir"]},
     {"ANKUSA_LOG_LEVEL", ["log", "level"]},
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
+    {"ANKUSA_ADMIN_IP", ["admin", "ip"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
+    {"ANKUSA_CLAIM_CHECK_IP", ["claim_check", "ip"]},
     {"ANKUSA_ROUTES_ENABLED", ["routes", "enabled"]},
     {"ANKUSA_ROUTES_STORE_URL", ["routes", "store", "url"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
@@ -391,6 +395,7 @@ defmodule AnkusaServer.Config do
       admin:
         [enabled: bool!(Map.get(admin, "enabled", true), ["admin", "enabled"])]
         |> put_opt(:port, int_opt(admin, "port", ["admin"]))
+        |> put_opt(:ip, string_opt(admin, "ip", ["admin"]))
     ]
   end
 
@@ -519,6 +524,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:port, int_opt(claim_check, "port", ["claim_check"]))
         |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", ["claim_check"]))
         |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
+        |> put_opt(:ip, string_opt(claim_check, "ip", ["claim_check"]))
     ]
   end
 
@@ -622,6 +628,7 @@ defmodule AnkusaServer.Config do
 
     []
     |> put_opt(:port, int_opt(admin, "port", path))
+    |> put_opt(:ip, string_opt(admin, "ip", path))
   end
 
   defp routes_ip_rules(routes, path) do

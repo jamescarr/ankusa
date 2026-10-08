@@ -26,6 +26,9 @@
 services:
   ankusa:
     image: ${ANKUSA_IMAGE:-jamescarr/ankusa:edge}
+    environment:
+      # nginx reaches the container interface, not its loopback.
+      ANKUSA_ADMIN_IP: "0.0.0.0"
     volumes:
       # The data volume: WAL, quarantine log, DLQ, local segments. Losing it
       # loses un-dispatched hooks, so back it.

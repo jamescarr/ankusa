@@ -25,8 +25,9 @@ The always-on tests cover:
   sentinel; a corrupt blob or SST block fails the scan and the point read
   instead of silently shortening results, and a damaged WAL record refuses to
   open while a torn tail drops cleanly; `reopen/1` republishes working handles
-  and keeps every committed key, and a store left closed by a failed reopen
-  opens again by itself; the database opens with the recovery, blob and buffer
+  and keeps every committed key, a store left closed by a failed reopen opens
+  again by itself, and a reported write failure reopens the store at most once
+  per interval; the database opens with the recovery, blob and buffer
   settings asked for (read back from the `OPTIONS` file RocksDB writes, since
   RocksDB keeps its default for a value it cannot parse). The queue writer
   assigns dense, strictly
@@ -106,8 +107,10 @@ The always-on tests cover:
   id and the job's `replay_id`, and finds nothing left on a second run.
 - **Filesystem durability** (`fsync_test.exs`): the helpers return an error
   for a path they cannot open, write or rename, never raise, and `write_file`
-  replaces content in one step and leaves no temp file. The fsync order on
-  disk is checked by `strace` on Linux, not in the suite.
+  replaces content in one step and leaves no temp file. `mkdir_p/2` fsyncs the
+  parent of every directory from the root down to the target on every call,
+  even when the directories already exist (traced, in order). The fsync order
+  on disk is checked by `strace` on Linux, not in the suite.
 - **Storage** (`storage_test.exs`): compaction round-trips every hook
   byte-for-byte with its seq, and a tick writes one segment plus one index
   object; a hook survives one cleared obligation and is reclaimed once both

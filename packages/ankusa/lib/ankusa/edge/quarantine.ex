@@ -82,6 +82,8 @@ defmodule Ankusa.Edge.Quarantine do
           :ok | {:rate_limited, pos_integer()} | :full | {:error, :store_unavailable}
   def put(instance, env, reason) do
     GenServer.call(Ankusa.via(instance, :quarantine), {:put, env, reason})
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
   end
 
   @doc """

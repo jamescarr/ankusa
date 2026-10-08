@@ -47,7 +47,6 @@ defmodule Ankusa.Queue.Writer do
          instance: instance,
          next_seq: next_seq,
          archive?: Config.role?(config, :storage),
-         last_reopen: nil,
          last_at: 0
        }}
     else
@@ -157,8 +156,6 @@ defmodule Ankusa.Queue.Writer do
           "[ankusa] store commit of #{count} replayed hook(s) failed, nothing acked: #{inspect(reason)}"
         )
 
-        state = maybe_reopen(state)
-
         {:reply, {:error, reason}, %{state | next_seq: state.next_seq + count, last_at: now}}
     end
   end
@@ -186,7 +183,7 @@ defmodule Ankusa.Queue.Writer do
         # No hook to commit, but the caller's own ops must still land.
         case Store.write(state.instance, extra_ops, sync: true) do
           :ok -> {:reply, {:ok, checked.results}, state}
-          {:error, reason} -> {:reply, {:error, reason}, maybe_reopen(state)}
+          {:error, reason} -> {:reply, {:error, reason}, state}
         end
 
       {:ok, checked} ->
@@ -217,8 +214,6 @@ defmodule Ankusa.Queue.Writer do
             Logger.error(
               "[ankusa] store commit of #{length(items)} hook(s) failed, nothing acked: #{inspect(reason)}"
             )
-
-            state = maybe_reopen(state)
 
             {:reply, {:error, reason},
              %{state | next_seq: state.next_seq + length(checked.fresh), last_at: now}}
@@ -496,33 +491,6 @@ defmodule Ankusa.Queue.Writer do
     end)
   catch
     :throw, {:store_commit_failed, reason} -> {:error, reason}
-  end
-
-  # After a failed commit the database may be latched in a background error
-  # (ENOSPC on the WAL) that survives freeing the space. Reopening clears it.
-  # At most once per interval, and a missing store never crashes the Writer.
-  @reopen_interval_ms 5_000
-
-  defp maybe_reopen(state) do
-    now = System.monotonic_time(:millisecond)
-
-    if state.last_reopen == nil or now - state.last_reopen >= @reopen_interval_ms do
-      result =
-        try do
-          Store.reopen(state.instance)
-        catch
-          :exit, reason -> {:error, {:store_down, reason}}
-        end
-
-      case result do
-        :ok -> Logger.warning("[ankusa] store reopened after a failed commit")
-        {:error, reason} -> Logger.error("[ankusa] store reopen failed: #{inspect(reason)}")
-      end
-
-      %{state | last_reopen: now}
-    else
-      state
-    end
   end
 
   # The stamp tells dispatch the earliest due time this batch can have: its rows

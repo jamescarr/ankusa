@@ -133,6 +133,30 @@ defmodule Ankusa.StorageTest do
     def list(instance, prefix, _opts), do: LocalFS.list(instance, prefix, [])
   end
 
+  # A blob store whose write exits, the way a `GenServer.call` into a dead
+  # token provider does.
+  defmodule ExitingBlobStore do
+    @behaviour Ankusa.BlobStore
+
+    alias Ankusa.BlobStore.LocalFS
+
+    @impl true
+    def put(_instance, _key, _data, _opts), do: exit(:boom)
+
+    @impl true
+    def get(instance, key, _opts), do: LocalFS.get(instance, key, [])
+
+    @impl true
+    def get_range(instance, key, offset, length, _opts),
+      do: LocalFS.get_range(instance, key, offset, length, [])
+
+    @impl true
+    def delete(instance, key, _opts), do: LocalFS.delete(instance, key, [])
+
+    @impl true
+    def list(instance, prefix, _opts), do: LocalFS.list(instance, prefix, [])
+  end
+
   # ── a once-raising codec ───────────────────────────────────────────────────
 
   # Raises on its first `encode/1` and delegates to `Raw` afterwards. The
@@ -198,6 +222,26 @@ defmodule Ankusa.StorageTest do
   end
 
   defp commit!(inst, envelopes), do: Enum.map(envelopes, &enqueue!(inst, &1))
+
+  # Poll `fun` every 10 ms until it is truthy or `timeout` ms pass.
+  defp eventually(fun, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(10)
+        do_eventually(fun, deadline)
+    end
+  end
 
   # ── tests ──────────────────────────────────────────────────────────────────
 
@@ -341,6 +385,43 @@ defmodule Ankusa.StorageTest do
     assert {:ok, fetched} = Storage.fetch(inst, env.id)
     assert fetched.body == env.body
     assert fetched.seq == env.seq
+  end
+
+  test "consecutive failures back the timer off instead of retrying every interval" do
+    agent = start_supervised!({Agent, fn -> 5 end})
+
+    config =
+      start(
+        roles: [:edge, :storage],
+        storage: %{interval_ms: 10, blob_store: {FailingBlobStore, [agent: agent]}}
+      )
+
+    inst = config.instance
+    [env] = commit!(inst, [envelope("backoff")])
+
+    # Retried every 10 ms, the sixth write (the first to succeed) lands within
+    # ~60 ms. Backed off (interval·2^n, jittered to at least half), it cannot
+    # come before ~310 ms.
+    Process.sleep(250)
+    assert :error == Storage.fetch(inst, env.id)
+
+    assert eventually(fn -> match?({:ok, _}, Storage.fetch(inst, env.id)) end, 3_000)
+    assert {:ok, fetched} = Storage.fetch(inst, env.id)
+    assert fetched.body == "backoff"
+  end
+
+  test "a blob store that exits fails the tick without crashing the compactor" do
+    config =
+      start(roles: [:edge, :storage], storage: %{blob_store: {ExitingBlobStore, []}})
+
+    inst = config.instance
+    [env] = commit!(inst, [envelope("exit-me")])
+    compactor = Ankusa.whereis(inst, :compactor)
+
+    assert {:ok, 0} == Compactor.tick(inst)
+    assert Ankusa.whereis(inst, :compactor) == compactor
+    assert Process.alive?(compactor)
+    assert :error == Storage.fetch(inst, env.id)
   end
 
   test "a stored hook that does not decode is skipped; the rest are archived and the compactor lives" do

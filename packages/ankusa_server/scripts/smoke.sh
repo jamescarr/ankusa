@@ -42,7 +42,8 @@ http_code() {
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo "==> starting $IMAGE"
-docker run -d --name "$NAME" -p 127.0.0.1:4000:4000 -p 127.0.0.1:4002:4002 "$IMAGE" >/dev/null
+docker run -d --name "$NAME" -p 127.0.0.1:4000:4000 -p 127.0.0.1:4002:4002 \
+  -e ANKUSA_ADMIN_IP=0.0.0.0 "$IMAGE" >/dev/null
 
 echo "==> waiting for the admin API"
 ready=false

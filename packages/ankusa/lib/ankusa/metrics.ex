@@ -37,7 +37,7 @@ defmodule Ankusa.Metrics do
   `:source_id` is bounded because it is only ever a configured source's id: a
   request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
-  `:payload_too_large` or `:body_read_failed`, never on a series that carries
+  `:payload_too_large`, `:body_read_failed` or `:invalid_header`, never on a series that carries
   the id from the URL.
   """
 

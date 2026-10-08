@@ -93,25 +93,41 @@ defmodule Ankusa.Edge.Publish do
       forward_headers: source.forward_headers
     }
 
-    if Enum.any?(source.sinks, fn {mod, opts} -> needs_claim?(mod, opts, env) end) do
-      case Message.check_in(instance, env) do
-        {:ok, claim} ->
-          {:ok, Map.put(ctx, :claim, claim)}
+    case claim_needed(source.sinks, env) do
+      {:ok, true} ->
+        case Message.check_in(instance, env) do
+          {:ok, claim} ->
+            {:ok, Map.put(ctx, :claim, claim)}
 
-        {:error, reason} ->
-          Logger.warning("[ankusa] claim check failed for hook #{env.id}: #{inspect(reason)}")
-          {:error, :store_unavailable}
-      end
-    else
-      {:ok, ctx}
+          {:error, reason} ->
+            Logger.warning("[ankusa] claim check failed for hook #{env.id}: #{inspect(reason)}")
+            {:error, :store_unavailable}
+        end
+
+      {:ok, false} ->
+        {:ok, ctx}
+
+      {:error, mod, reason} ->
+        Logger.warning(
+          "[ankusa] sink #{inspect(mod)} inline_max_bytes/1 failed for hook #{env.id}: " <>
+            inspect(reason)
+        )
+
+        {:error, :store_unavailable}
     end
   end
 
-  defp needs_claim?(mod, opts, env) do
-    case Sink.inline_max_bytes(mod, opts) do
-      nil -> false
-      max -> env.size > max
-    end
+  # Whether any sink's threshold is below the body. Every sink is asked, so a
+  # callback that fails is reported even when an earlier sink already needs the
+  # claim: the request is answered `503` rather than delivered to some sinks.
+  defp claim_needed(sinks, env) do
+    Enum.reduce_while(sinks, {:ok, false}, fn {mod, opts}, {:ok, needed?} ->
+      case Sink.inline_max_bytes(mod, opts) do
+        {:ok, nil} -> {:cont, {:ok, needed?}}
+        {:ok, max} -> {:cont, {:ok, needed? or env.size > max}}
+        {:error, reason} -> {:halt, {:error, mod, reason}}
+      end
+    end)
   end
 
   # Same event dispatch emits, so `/metrics` counts this path with no change:

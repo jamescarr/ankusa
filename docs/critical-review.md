@@ -10,6 +10,8 @@ Paths below are relative to `packages/ankusa/lib/ankusa/` unless they start with
 
 **Layout.** Findings are grouped by root cause, not by pipeline stage. [Root causes](#root-causes) maps the nine causes to their findings; each group's section states the cause, lists its findings as the review recorded them, and ends with a solution scope. [Where it breaks](#where-it-breaks) keeps the stage view.
 
+**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-07, no Critical finding is still open.
+
 ## Verdict
 
 The hot path is honest and fast. A request blocks in the batcher until the group commit's `fdatasync` returns, a full queue is a `503`, and nothing on that path answers `2xx` early. With 32 concurrent clients on a laptop the edge acked 14–16k small hooks per second, every one a `201` (probe 3, control run). The GCRA rate limiter (one ETS row per tenant, compare-and-swap through `:ets.select_replace/2`, no process on the hot path) is the best OTP in the tree.
@@ -29,25 +31,25 @@ Architecturally, the ceiling is one `GenServer` per node that owns every byte: a
 
 ## Top findings
 
-| ID | Severity | Group | Finding | Evidence |
-|---|---|---|---|---|
-| [W1](#w1) | Critical | [G1](#g1) | A WAL one `pread` cannot return is truncated to 0 bytes at boot; otherwise boot needs RAM ≥ the WAL | Reproduced (macOS, Linux) |
-| [W2](#w2) | Critical | [G1](#g1) | One bad byte mid-log truncates every acked record after it | Reproduced |
-| [S1](#s1) | Critical | [G2](#g2) | An object-store outage rebuilds the whole instance, listener included, every 4.5–6.5 s | Reproduced |
-| [S3](#s3) | Critical | [G1](#g1) | A full disk tears the DLQ and the storage index: later dead letters vanish, and the node stops booting | Reproduced |
-| [S4](#s4) | Critical | [G1](#g1) | LocalFS segments and claim packs are never fsynced, yet the WAL floor moves past them | Code |
-| [D1](#d1) | Critical | [G4](#g4) | One tenant's dead sink stops delivery for every tenant | Reproduced |
-| [D2](#d2) | Critical | [G3](#g3) | Hooks whose source is gone at dispatch time are dropped silently | Code |
-| [D3](#d3) | Critical | [G2](#g2) | One hook to a sink with a non-conforming return value halts the node | Reproduced |
-| [B1](#b1) | Critical | [G3](#g3) | RabbitMQ confirms unroutable publishes; `durable?` says true | Reproduced |
-| [O1](#o1) | Critical | [G2](#g2) | One flat supervisor and one restart budget for every component | Code (S1, D3 reproduce it) |
-| [W4](#w4) | High | [G5](#g5) | A stalled WAL answers `503` for records it then commits | Reproduced |
-| [E1](#e1) | High | [G3](#g3) | Quarantine answers `202`; nothing can read the pen back | Code |
-| [B8](#b8) | High | [G3](#g3) | A non-UTF-8 `Content-Type`: `201`, never deliverable to a queue sink, and it breaks every unfiltered DLQ replay | Reproduced |
-| [E3](#e3) | High | [G7](#g7) | Unauthenticated POSTs mint Prometheus series: 20k requests → 280k series | Reproduced |
-| [S7](#s7) | High | [G1](#g1) | The compactor reads up to ~85× what it compacts, inside the WAL process | Reproduced (26× at 4 MB) |
-| [W5](#w5) | High | [G1](#g1) | Without `:storage` the WAL is never truncated, and the docs use that role set as the example | Code |
-| [K1](#k1) | High | [G5](#g5) | Headers stop at the queue boundary: header-borne provider ids cannot be deduped downstream | Code + docs |
+| ID | Severity | Group | Finding | Evidence | Status (2026-10-07) |
+|---|---|---|---|---|---|
+| [W1](#w1) | Critical | [G1](#g1) | A WAL one `pread` cannot return is truncated to 0 bytes at boot; otherwise boot needs RAM ≥ the WAL | Reproduced (macOS, Linux) | Fixed |
+| [W2](#w2) | Critical | [G1](#g1) | One bad byte mid-log truncates every acked record after it | Reproduced | Fixed |
+| [S1](#s1) | Critical | [G2](#g2) | An object-store outage rebuilds the whole instance, listener included, every 4.5–6.5 s | Reproduced | Fixed |
+| [S3](#s3) | Critical | [G1](#g1) | A full disk tears the DLQ and the storage index: later dead letters vanish, and the node stops booting | Reproduced | Fixed |
+| [S4](#s4) | Critical | [G1](#g1) | LocalFS segments and claim packs are never fsynced, yet the WAL floor moves past them | Code | Fixed |
+| [D1](#d1) | Critical | [G4](#g4) | One tenant's dead sink stops delivery for every tenant | Reproduced | Partly fixed: no per-sink limits or breakers |
+| [D2](#d2) | Critical | [G3](#g3) | Hooks whose source is gone at dispatch time are dropped silently | Code | Fixed |
+| [D3](#d3) | Critical | [G2](#g2) | One hook to a sink with a non-conforming return value halts the node | Reproduced | Fixed |
+| [B1](#b1) | Critical | [G3](#g3) | RabbitMQ confirms unroutable publishes; `durable?` says true | Reproduced | Fixed |
+| [O1](#o1) | Critical | [G2](#g2) | One flat supervisor and one restart budget for every component | Code (S1, D3 reproduce it) | Fixed |
+| [W4](#w4) | High | [G5](#g5) | A stalled WAL answers `503` for records it then commits | Reproduced | Fixed |
+| [E1](#e1) | High | [G3](#g3) | Quarantine answers `202`; nothing can read the pen back | Code | Fixed |
+| [B8](#b8) | High | [G3](#g3) | A non-UTF-8 `Content-Type`: `201`, never deliverable to a queue sink, and it breaks every unfiltered DLQ replay | Reproduced | Fixed |
+| [E3](#e3) | High | [G7](#g7) | Unauthenticated POSTs mint Prometheus series: 20k requests → 280k series | Reproduced | Fixed |
+| [S7](#s7) | High | [G1](#g1) | The compactor reads up to ~85× what it compacts, inside the WAL process | Reproduced (26× at 4 MB) | Fixed |
+| [W5](#w5) | High | [G1](#g1) | Without `:storage` the WAL is never truncated, and the docs use that role set as the example | Code | Fixed |
+| [K1](#k1) | High | [G5](#g5) | Headers stop at the queue boundary: header-borne provider ids cannot be deduped downstream | Code + docs | Fixed |
 
 ## Where it breaks
 
@@ -97,7 +99,7 @@ C in detail" design: one store per instance holding the hooks, one delivery row
 per hook and sink, the quarantine pen, API-managed sources, rate-limit overrides
 and the archive catalogue. It closes W1 W2 S3 W8 S4 W7 W3 S7 W6 D9 W5 S2, and
 also D1 via the delivery-row scheduler (a retry frees its concurrency slot
-instead of sleeping in it, and a commit wakes dispatch). It does not do the rest
+instead of sleeping in it, and a commit wakes dispatch). *Correction (2026-10-07): S3 and W7 are only partly closed — both closed later the same day; see their notes.* It does not do the rest
 of G4 (per-sink windows, circuit breakers, attempt deadlines), G5 (dedupe,
 message v2), quarantine re-verify, or the G2 supervision tree. The analysis
 below is the review as recorded at commit `42b6f5a` and is not edited; where it
@@ -166,6 +168,14 @@ The system produces the disk-full event on its own: the WAL without `:storage` (
 
 **Fix:** a CRC per frame, truncation of a torn tail before the first append after open, and I/O errors handled as values.
 
+**Status (2026-10-07).** Fixed:
+
+- the DLQ, index and pen are RocksDB column families;
+- a commit on a full disk is an error and nothing is acked (`queue/writer.ex`);
+- every failed store write asks for a reopen: `Store.write/3` calls `Store.report_write_failure/2`, and the store reopens itself, at most once per 5 s, whichever process saw the failure, as a fallback for a latched RocksDB error. Dispatch outcomes, the compactor, quarantine, the replayer, rate-limit overrides and the source store all write through `Store.write/3`, so the reopen no longer depends on the edge's `Queue.Writer` seeing a failure. The writer no longer reopens the store itself, so ingest is no longer blocked on a synchronous reopen.
+
+Container drill (256 MiB tmpfs for `/var/lib/ankusa`, a 200 MiB filler, 1 MiB forged hooks into a `quarantine` source, so no write goes through `Queue.Writer`): both images answered `503` once the disk was full. The image from before the fix did **not** stay stuck: it answered `202` 6 s after the filler was deleted and never reopened the store, so RocksDB's own recovery from `ENOSPC` cleared the error in that setup, and the residual recorded above (a store that stays failed until a restart) was not reproduced. The fixed image answered `202` after 2 s and logged one `reopening to clear a latched error`. The drill produced no latched error that RocksDB's own recovery leaves in place, so the reopen is a fallback for that case, not a measured fix for it.
+
 <a id="w8"></a>
 ### W8 · Medium · Code — A corrupt sidecar crash-loops the WAL
 
@@ -185,12 +195,22 @@ The system produces the disk-full event on its own: the WAL without `:storage` (
 
 `architecture.md:27-28` and `storage.md:84` say `WAL.DiskLog` + `BlobStore.LocalFS` survive power loss on the box.
 
+**Status (2026-10-07).** Fixed for the common path:
+
+- `LocalFS.put` writes a temp file, fsyncs it, renames it and fsyncs the directory (`blob_store/local_fs.ex:17-23`, `fsync.ex:85-117`);
+- the compactor deletes a hook only after the segment and its `.idx` returned `:ok` (`storage/compactor.ex:200-205`);
+- claim refs are published only after `check_in` returns (`claim_check.ex:89-95`).
+
+The W7 directory race is closed.
+
 <a id="w7"></a>
 ### W7 · Medium · Code — No directory `fsync` anywhere
 
 `wal/disk_log.ex:83,359,507-520`, `blob_store/local_fs.ex:16-23`, `source_store/persistent.ex:317-336`
 
 The WAL file's creation, the rewrite's rename, the `.cursors`/`.truncated` renames, LocalFS segment and claim renames, and `sources.json` all rely on the filesystem to persist the directory entry. POSIX does not promise that without an `fsync` of the parent directory. For the WAL itself (a freshly created file, or a renamed rewrite followed by acked appends) that is an acked-data hole on filesystems that do not order directory metadata [INFERENCE].
+
+**Status (2026-10-07).** Fixed. `Fsync.mkdir_p/2` takes the root a path may be created under and, on every call, fsyncs the parent of each directory from the root down to the target (`fsync.ex`). A caller that finds the directory already created by a concurrent caller still waits for the fsyncs that make it durable, and a parent fsync that failed once is retried by the next call. Cost: one extra directory fsync per level between the LocalFS root and the object (2 for `seg/…`, 4 for `claims/tenant=…/dt=…/…`).
 
 <a id="w3"></a>
 ### W3 · High · Code — One process owns every byte, and reclamation fsyncs and rewrites on the append path
@@ -337,7 +357,7 @@ so a stall never answers `503` for a hook it then commits; a process dying
 while the writer is mid-commit (commit task, batcher, or writer) still can. O2
 (the `format_status/1` part only): every process whose state holds sink options
 redacts them from the state `format_status/1` reports, and the batchers and the
-writable source store also from the message they were handling.
+writable source store also from the message they were handling. *Correction (2026-10-07): `Dispatch.Replayer`, added later (#59), keeps the config in its state and defines no `format_status/1` (O2) — fixed later the same day: it keeps only the codec module.*
 Still open: supervisors' child specs carry the config, so `:sys.get_status/1`
 on a supervisor and SASL supervisor reports (off by default) print it; the
 adapter packages are not covered. O7 (the Registry bullet only): an instance
@@ -394,6 +414,12 @@ Each rebuild replays the whole, growing WAL (W1) and kills every in-flight deliv
 
 **Fix:** treat store errors as values, with exponential backoff in the compactor; never `:ok =` an I/O call in an optional tier.
 
+**Status (2026-10-07).** Fixed:
+
+- `put/3` turns blob-store errors, raises, exits and throws into values (`storage/compactor.ex`);
+- a failed tick logs and retries the same keys, after `storage.interval_ms` doubled per consecutive failure (jittered, capped at 60 s, never below the interval), so an unreachable store is no longer hit every second;
+- the compactor runs in an isolated domain (`instance.ex`), so the listener no longer flaps.
+
 <a id="d3"></a>
 ### D3 · Critical · Reproduced — One hook to a sink with a non-conforming return value halts the node
 
@@ -404,6 +430,8 @@ Each rebuild replays the whole, growing WAL (W1) and kills every in-flight deliv
 Not every crash in this family trips the budget. `DLQ.write/3` on a full disk (`DurableLog.append_synced/2` is `:ok = :file.write/2` and `:ok = :file.datasync/1`, run inline in `handle_info/2`) crashes only at give-up, 55–111 s after each restart: a livelock that redelivers the window and pins the watermark, not an instance kill. By then the WAL is answering `503` anyway, and the failed write has torn the DLQ (S3).
 
 **Fix:** normalize unexpected returns to `{:error, {:bad_return, value}}`, wrap the whole task body, and treat a DLQ write failure as "hold the cursor", not a crash.
+
+**Status (2026-10-07).** Fixed. `Sink.inline_max_bytes/2` is guarded like `safe_deliver/4`: a raise, exit, throw or invalid return is `{:error, _}`, never a caller crash. The pipeline process treats an error as "no claim needed" and carries on; the job's task evaluates the callback again and fails the attempt with `{:inline_max_bytes, reason}`, so the retry policy runs and the DLQ reason names the callback. Under `wal.type: none` the same failure is a `503`.
 
 <a id="w9"></a>
 ### W9 · Low · Code — The batcher's defensive `:DOWN` clause is unreachable
@@ -436,6 +464,17 @@ The edge answers `2xx` once a hook is durable, and durable is not the same as de
 
 **Fix:** "no sinks configured" and "no such source" must be different outcomes. Hold or dead-letter the latter, or snapshot the sink list into the envelope at ack time.
 
+**Status (2026-10-07).** Fixed. Ingest sends the source's sinks with the hook, and the writer stores one delivery row per sink in the same synced batch (`edge/ingest.ex` `buffered_commit`, `queue/writer.ex:119-130`). At dispatch:
+
+- a source that is gone is dead-lettered as `{:source_gone, id}`;
+- a sink removed from a live source is dead-lettered as `{:sink_gone, index, module}` (`dispatch/pipeline.ex:494-525`);
+- the hook is kept and can be replayed.
+
+Still open from the G3 scope:
+
+- `DELETE` of a source answers `204` even with undelivered hooks; there is no `409` or drain option (`admin/router.ex:149-151`, `source_store/persistent.ex:148-179`);
+- a source re-created with the same name and a sink at the same index and module receives the old backlog.
+
 <a id="b1"></a>
 ### B1 · Critical · Reproduced — RabbitMQ confirms unroutable publishes, and `durable?` says that is durable
 
@@ -453,6 +492,8 @@ The edge answers `2xx` once a hook is durable, and durable is not the same as de
 `edge/ingest.ex:180-182`, `sink/message.ex:55-78`
 
 `Sink.Message.encode/3` puts the raw header into a map and calls `JSON.encode!/1`; Kafka, RabbitMQ, NATS and Redis all encode through it. Probe 6 sent `content-type: text/plain; charset=latin1; x=\xFF`: the edge answered `201 Created`, the envelope was in the WAL, and `encode/3` raised `ErlangError {:invalid_byte, 255}`. In dispatch that is not a crash: `safe_deliver/4` rescues it, the hook spends its retry budget, and it is dead-lettered (`term_to_binary/1` does not care about UTF-8). The damage comes after: no queue sink can ever take it, and its DLQ entry makes every unfiltered replay fail (D5, probe 14). Under `wal.type: none` the provider gets `503` forever. Validate or escape header-derived strings at the edge, or carry them as bytes.
+
+**Status (2026-10-07).** Fixed. The edge refuses a request with `400 invalid_header` when a header name holds a byte outside `0x21..0x7E`, or a value one outside `0x20..0x7E` and tab (RFC 9110 field-value without `obs-text`): `Ingest.check_headers/1`, called by the router after the source lookup and before the body is read, and by `Ingest.ingest/2`. The rule is not "valid UTF-8": Mint rejects every other byte in an outbound header, so non-ASCII UTF-8 was undeliverable over HTTP too, and `forward_headers` defaults to every header. The response names the header, or `null` when the name is not itself printable, and the refusal is counted as `ankusa.ingest.refused.total{reason="invalid_header"}`. Hooks stored before this change are not re-checked.
 
 <a id="e1"></a>
 ### E1 · High · Code — Quarantine acks with `202`, and the pen is write-only
@@ -571,6 +612,8 @@ Only `conn.pid` is monitored. A channel-level error (the exchange deleted or red
 
 `remaining` counts outstanding jobs per seq and the cursor is a single watermark. If sink A succeeded and sink B is retrying when the node restarts, A gets the hook again, and so does every envelope admitted after the stuck one: up to the 4,096-envelope window, per sink, on every deploy that lands during a retry. `max_inflight_bytes` (128 MiB) is checked only before a read of up to 128 envelopes, so one read of 8 MB bodies overshoots it eightfold.
 
+**Status (2026-10-07).** Fixed by the delivery-row redesign. Progress is per (seq, sink) row, and the byte window is enforced per row; it overshoots by at most one hook (`queue/deliveries.ex:55-70`).
+
 <a id="b4"></a>
 ### B4 · Medium · Code — RabbitMQ funnels every delivery through a `DynamicSupervisor`
 
@@ -648,6 +691,16 @@ All three entries remained. Every unfiltered replay re-delivers everything ahead
 
 **Fix:** replay through the pipeline (re-append to the WAL with a replay marker, or keep a DLQ cursor), so it inherits `safe_deliver/4`, ordering, retries and at-least-once bookkeeping.
 
+**Status (2026-10-07).** Fixed:
+
+- `Dispatch.replay/2` and `POST /v1/dlq/replay` are gone;
+- replay jobs (`POST /v1/replays`) revive dead rows into the pipeline, so delivery goes through `safe_deliver/4` with the normal retries and DLQ (`dispatch/replayer.ex:391-447`);
+- jobs are paced by a token bucket and throttled by dispatch lag and window (`:316-383`);
+- a job is idempotent: a revived row is no longer dead, and a duplicate job returns the existing one (`:185-190`);
+- one raising sink is one failed row.
+
+Stale moduledoc references to the removed API remain in `routes/router.ex:17-19` and `admin/router.ex:9`.
+
 <a id="k1"></a>
 ### K1 · High · Code + docs — Original headers stop at the queue boundary
 
@@ -657,12 +710,22 @@ The WAL stores every request header. The wire format (`v`, `id`, `source_id`, `t
 
 **Fix:** carry an allowlisted set of headers (or all of them) in the message.
 
+**Status (2026-10-07).** Fixed:
+
+- the message carries the forwarded `headers` (per-source `forward_headers`), `idempotency_key`, `dedupe_key`, `replay_id` and `sha256` (`sink/message.ex:66-80`);
+- `Sink.Http` forwards the headers and adds `x-ankusa-idempotency-key`;
+- the Kafka, NATS and RabbitMQ sinks set `ankusa_idempotency_key`.
+
+Residual: B8 applied to `headers`; the edge now refuses undeliverable header bytes (B8, fixed).
+
 <a id="e7"></a>
 ### E7 · Medium · Code — Direct mode publishes sequentially with no overall deadline
 
 `edge/publish.ex:29-50`, `sink.ex:118-126`
 
 Under `wal.type: none` the request process publishes to each sink in turn. Each has its own ~5 s timeout and `safe_deliver/4` adds none, so three slow sinks make a 15 s request, past GitHub's 10 s delivery timeout. The provider times out and retries while sink 1 already holds the hook and a later sink may still confirm late. Publish concurrently under one deadline shorter than the provider's timeout.
+
+**Status (2026-10-07).** Fixed. Direct mode delivers to every sink concurrently under one `direct_publish_timeout_ms` deadline, default 8 000 ms (`edge/publish.ex:31-40`). The claim check-in runs before that deadline starts.
 
 <a id="k3"></a>
 ### K3 · Medium · Code — The Oban example's dedupe does not survive production
@@ -671,6 +734,8 @@ Under `wal.type: none` the request process publishes to each sink in turn. Each 
 
 Jobs are unique on `ankusa_id` with `period: :infinity`, which holds only while completed jobs stay in `oban_jobs`. The config runs no `Pruner` (only `Lifeline`), so the table grows forever, and adding the standard pruner silently re-enables duplicate jobs for later redeliveries. The worker's `ON CONFLICT … deliveries = deliveries + 1` counts duplicates instead of skipping the business effect, and the full body is stored in job args. As a reference implementation, it teaches the pattern that fails.
 
+**Status (2026-10-07).** Fixed. The Oban example dedupes on a `processed_webhooks` row keyed by `idempotency_key`, and the worker runs the effect under `SELECT … FOR UPDATE` only once. The table has no TTL.
+
 <a id="b6"></a>
 ### B6 · Low · Code — NATS deliberately skips `Nats-Msg-Id`
 
@@ -678,12 +743,16 @@ Jobs are unique on `ankusa_id` with `period: :infinity`, which holds only while 
 
 Retries of one delivery carry the same `env.id`; sending it as `Nats-Msg-Id` would collapse lost-ack retries inside JetStream's duplicate window for free. The stated reason (a DLQ replay must be a new publish) is served by suffixing replays, not by giving up broker-side dedupe for every retry.
 
+**Status (2026-10-07).** Fixed in `ankusa_nats`: `Nats-Msg-Id` is the hook `id`, or `id:replay:<replay_id>` on a replay (`packages/ankusa_nats/lib/ankusa/sink/nats.ex:210-218`). `docs/delivery.md:389-392,407-409` still describes the old behaviour.
+
 <a id="k5"></a>
 ### K5 · Low · Code — Conformance covers refs and status codes, not the wire format
 
 `conformance/features.json`
 
 There is no operation for decoding the queue message (`v`, `body_base64` versus `claim` + `sha256`, an unknown `v`, a missing body), no integrity check for inline bodies (no digest is carried and `size` is never compared with the decoded body), and nothing on id-based dedupe or a tenant mismatch between ref and message. The eight SDKs agree on HTTP classification; nothing proves they agree on the message they all consume.
+
+**Status (2026-10-07).** Fixed. `conformance/cases/message.json` covers `decode_message` and `message.integrity` (size, sha256, tenant mismatch) and the `idempotency_key` cases.
 
 <a id="g5-scope"></a>
 ### G5 solution scope
@@ -715,12 +784,25 @@ Providers treat `4xx` as permanent, and several disable an endpoint after repeat
 
 **Fix:** a three-valued store contract (`{:ok, _} | :error | {:error, :unavailable}`, the last mapped to `503`); fail boot instead of quarantining on read errors that are not corruption; keep last-known-good routes and alarm when the namespace empties; a shared source store whenever more than one node serves ingest.
 
+**Status (2026-10-07).** Partly fixed. `SourceStore.Persistent` reads from the store and stops boot on a read error (`source_store/persistent.ex:101-107`); `sources.json` is gone. Still open:
+
+- `SourceStore.fetch/2` has two values, so a transient store failure is a `404` (`source_store.ex:32-33`, `edge/ingest.ex` `lookup/2`);
+- the Redis route store follows its version down and resets IP rules to allow on a missing key (`packages/ankusa_redis/lib/ankusa/routes/store/redis.ex:420-423,442,564-568`);
+- API-managed sources are per node.
+
 <a id="c2"></a>
 ### C2 · Medium · Code — The gateway buffers whole claims, mislabels missing keys, and leaks store errors
 
 `claim_check/router.ex:30,39-48,63-68`, `claim_check.ex:271-279`
 
 Each `GET` reads the full claim into one binary before `send_resp/3`: no streaming, no `Range`, no `HEAD` (a proxy's `HEAD` gets a `404`, which clients treat as permanent), no in-flight limit. Any store error other than `:not_found` becomes a `503` with `reason: inspect(reason)` in the body; for S3 that is the raw error XML (`SignatureDoesNotMatch` bodies include the access-key id and the canonical request), served to unauthenticated callers. S3 answers `403` for a missing key when the credential lacks `s3:ListBucket`, so an expired claim behind a least-privilege gateway is a `503` that workers retry forever. Responses carry `Cache-Control: public, max-age=31536000, immutable`, inviting shared caches to keep tenant payloads.
+
+**Status (2026-10-07).** Partly fixed. `ClaimCheck.read/3` reads the pack index and then the claim by range. Still open:
+
+- the gateway returns the whole claim with `send_resp` and no `Range`;
+- it sends `Cache-Control: public, …, immutable`;
+- `inspect(reason)` is still in `503` bodies;
+- S3 `403` is still a `503`.
 
 <a id="s6"></a>
 ### S6 · Medium · Code — The blob-store adapters are single-shot and lossy on listing
@@ -782,7 +864,9 @@ The token bucket (100 burst, 20/s, hard-coded) is one field in one GenServer for
 
 **Fix:** per-source buckets, `429`/`503` + `Retry-After` on exhaustion, a byte cap with rotation, and I/O errors handled as values.
 
-**Status (2026-10-03).** Fixed. One token bucket per source (`quarantine.burst`/`quarantine.rate`, defaults unchanged at 100 and 20 per second), so a flood on one source never spends another's tokens, and exhaustion is `429 quarantine_rate_limited` with `Retry-After` — never `401`, which now always means a definite signature failure. The pen's bytes are counted (summed back from the store at boot) and capped by `quarantine.max_bytes` (default 1 GiB): a write that would cross it is `503 quarantine_full` with `Retry-After: 60`. Refusing rather than rotating is deliberate: every held hook was answered `202`, so evicting one is the silent loss E1 is about. The cap is one budget for the whole pen: a single source flooding at its bucket's rate can fill it, after which every source's failures are refused with `503` (retryable; nothing acked is lost) until an operator purges that source. The pen has lived in the store since G1, so its I/O errors are values: a store that cannot take the write is a `503` that spends no token. New event `[:ankusa, :quarantine, :full]`, exported as `ankusa_quarantine_full_total`.
+**Status (2026-10-03).** Fixed. One token bucket per source (`quarantine.burst`/`quarantine.rate`, defaults unchanged at 100 and 20 per second), so a flood on one source never spends another's tokens, and exhaustion is `429 quarantine_rate_limited` with `Retry-After` — never `401`, which now always means a definite signature failure. The pen's bytes are counted (summed back from the store at boot) and capped by `quarantine.max_bytes` (default 1 GiB): a write that would cross it is `503 quarantine_full` with `Retry-After: 60`. Refusing rather than rotating is deliberate: every held hook was answered `202`, so evicting one is the silent loss E1 is about. The cap is one budget for the whole pen: a single source flooding at its bucket's rate can fill it, after which every source's failures are refused with `503` (retryable; nothing acked is lost) until an operator purges that source. The pen has lived in the store since G1, so its I/O errors are values: a store that cannot take the write is a `503` that spends no token. New event `[:ankusa, :quarantine, :full]`, exported as `ankusa_quarantine_full_total`. Not covered: `Ingest.quarantine/3` does not catch an exit from `Quarantine.put/3`'s 5 s call, so a slow pen write is a `500`, not a `503` (`edge/ingest.ex:223-230`).
+
+**Status (2026-10-07).** A stuck pen write is a `503 store_unavailable` with `Retry-After: 1`: `Quarantine.put/3` catches the exit of its 5 s call, as `purge/3` already did, instead of crashing the request.
 
 <a id="o2"></a>
 ### O2 · High · Code — Unauthenticated control planes on every interface, leaky redaction, secrets in crash reports
@@ -794,6 +878,14 @@ The token bucket (100 burst, 20/s, hard-coded) is one field in one GenServer for
 - No module defines `format_status/1` (grep finds none). `Dispatch.Pipeline` keeps the whole `%Ankusa.Config{}` (source secrets, SASL passwords, broker URLs) in its state and stops itself deliberately on task crashes, so every such crash report prints them.
 
 **Fix:** default to loopback and add an `ip` option; invert redaction to an allowlist; implement `format_status/1` wherever config lives in state.
+
+**Status (2026-10-07).** Fixed, with one residual:
+
+- the admin API, route management and claim gateway take an `ip` option (`admin.ip`, `routes.admin.ip`, `claim_check.ip`; `ANKUSA_ADMIN_IP` and `ANKUSA_CLAIM_CHECK_IP` in the image) and bind `127.0.0.1` by default, in core and in the image. The edge listener stays on every interface. A published port needs the opt-in to `0.0.0.0`. No authentication was added: front these listeners with your own proxy;
+- `Admin.Redact` is an allowlist inside adapter options: a value is shown only under a known non-secret key (`bucket`, `region`, `topic`, …); a URL loses its userinfo and every query value;
+- `Dispatch.Replayer` keeps only the codec module in its state, so a crash report no longer carries the config.
+
+Residual: supervisor child specs still carry the `%Ankusa.Config{}`, so a supervisor crash report can print it.
 
 <a id="e5"></a>
 ### E5 · Medium · Code — The URL tenant is not bound to the source, and `accept_flag` spends budget
@@ -934,6 +1026,8 @@ There are counters and histograms of events only: no gauges for WAL bytes or rec
 - `application.ex:10-14`: `Ankusa.Registry` is a `one_for_one` sibling of the instance. If the Registry restarts, every `via` lookup fails while the instance's processes keep running unregistered.
 - The release ships no `vm.args`/`env.sh` (scheduler counts under CPU quotas, busy-wait), and `RELEASE_DISTRIBUTION=none` (`ankusa_server/Dockerfile:44`) removes `bin/ankusa remote`, so a live container cannot be inspected.
 
+**Status (2026-10-07).** Partly fixed. `Ankusa.Application` restarts the instance with the Registry (`rest_for_one`), but `ankusa_server` supervises its instance outside that tree. The GCS token fetch, `${` handling and `vm.args` items are open.
+
 <a id="g9-scope"></a>
 ### G9 solution scope
 
@@ -948,7 +1042,7 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 | Claim | Where | Reality |
 |---|---|---|
-| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `201` for a non-UTF-8 header no queue sink can ever take (B8). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed. The drop of unroutable RabbitMQ publishes, B1, is fixed: they are retried, then dead-lettered. The `202` for quarantine with no way back, E1, is fixed: a `quarantine` replay job re-verifies and releases held hooks.) |
+| "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `201` for a non-UTF-8 header no queue sink can ever take (B8, fixed: the edge answers `400 invalid_header`). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed. The drop of unroutable RabbitMQ publishes, B1, is fixed: they are retried, then dead-lettered. The `202` for quarantine with no way back, E1, is fixed: a `quarantine` replay job re-verifies and releases held hooks.) |
 | "Take the compactor down: ingest keeps acking, the WAL grows, an alarm fires, nothing is lost." | `architecture.md:62-73`, `Ankusa.Instance` module doc | Ingest does keep acking and nothing is lost, and the compactor no longer rebuilds the instance (S1 fixed) — but **an alarm still does not fire**: no store-size or cursor-lag metric is exposed (O5). |
 | Quarantine: "a flood of forged requests can't fill the disk". | `delivery.md:442-444` | Fixed: the pen's bytes are capped by `quarantine.max_bytes`, and a full pen refuses with `503 quarantine_full` instead of growing (E2). |
 | "A hook in the pen was never acked." | `delivery.md:459-460` | Fixed: the claim is gone from `delivery.md`, which now says the provider got a `202`, and the pen has a way back — a `quarantine` replay job re-verifies held hooks against the current secret and commits the ones that pass (E1). |
@@ -973,21 +1067,44 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 **Phase 0: stop losing acked hooks and stop taking ingest down, on today's code.** Each item closes live loss or an outage, and none waits for the storage decision.
 
-1. Option A for the WAL and the `<<len::32, term>>` logs: assert `{:ok, _}` and replay in bounded chunks; refuse to start on damage before the tail and name the range; CRC and torn-tail truncation; checksummed sidecars (W1, W2, W8, S3).
-2. Fsync the file and its parent directory before anything moves past a write: LocalFS objects, claim packs, every create and rename (S4, W7).
-3. Reclaim the WAL through the minimum cursor of the roles that run (W5).
-4. G2 in full: failure domains, errors as values with backoff in the compactor, pipeline, quarantine and DLQ paths, normalized sink returns (O1, S1, D3, W9).
-5. Dead-letter a hook whose source is gone instead of completing it (D2); replay through `safe_deliver/4`, counting only successes (D5).
-6. RabbitMQ `mandatory` with a return handler, a channel monitor, and `durable?/1` false until both exist (B1, B3).
-7. Quarantine stops answering `202` without a way back; per-source buckets, `429` on exhaustion, a byte cap (E1, E2).
-8. Retries as pipeline-owned timers that free the slot, and per-attempt deadlines: the cheapest relief for D1 until Phase 1 replaces the pipeline (D1, D4, D6).
-9. Validate header bytes at the edge (B8); label metrics after the source lookup (E3, done); bind the admin, route and claim listeners to loopback (O2); bump `mint` (B10, done).
+1. Option A for the WAL and the `<<len::32, term>>` logs: assert `{:ok, _}` and replay in bounded chunks; refuse to start on damage before the tail and name the range; CRC and torn-tail truncation; checksummed sidecars (W1, W2, W8, S3). — **Done** (#54).
+2. Fsync the file and its parent directory before anything moves past a write: LocalFS objects, claim packs, every create and rename (S4, W7). — **Done** (#54).
+3. Reclaim the WAL through the minimum cursor of the roles that run (W5). — **Done** (#54).
+4. G2 in full: failure domains, errors as values with backoff in the compactor, pipeline, quarantine and DLQ paths, normalized sink returns (O1, S1, D3, W9). — **Done** (#57).
+5. Dead-letter a hook whose source is gone instead of completing it (D2); replay through `safe_deliver/4`, counting only successes (D5). — **Done** (D2 via delivery rows in #54; D5 via replay jobs in #59).
+6. RabbitMQ `mandatory` with a return handler, a channel monitor, and `durable?/1` false until both exist (B1, B3). — **Done** (#58).
+7. Quarantine stops answering `202` without a way back; per-source buckets, `429` on exhaustion, a byte cap (E1, E2). — **Done** (#61).
+8. Retries as pipeline-owned timers that free the slot, and per-attempt deadlines: the cheapest relief for D1 until Phase 1 replaces the pipeline (D1, D4, D6). — **Done** (#54, #62); per-sink limits and breakers remain G4.
+9. Validate header bytes at the edge (B8); label metrics after the source lookup (E3); bind the admin, route and claim listeners to loopback (O2); bump `mint` (B10). — B8 **done**; E3 **done** (#64); O2 **done**; B10 **done** (#64).
 
 **Phase 1: replace the storage layer.** Run option C's go/no-go tests (D's if C fails them), then build the store and the per-sink scheduler on it. G1, G3, G4 and G5 land together, because they share the schema.
 
+*Status (2026-10-07): the store and per-sink delivery rows shipped as option D (#54); G3 is done except C3; G5 is done (#59, #60); G4 is partly done.*
+
 **Phase 2: contracts and operations.** G6 with its conformance changes, the rest of G7, and G9.
 
+*Status: G6 and G9 open; G7 partly done (E2, E3, E8, B10).*
+
 **Phase 3: the fleet.** Choose G8's shape, and ship option F as an explicit mode for broker-only deployments.
+
+*Status: open.*
+
+## Remaining work, re-assessed
+
+Re-rated against the code on 2026-10-07 with this review's own severity definitions. No Critical remains. Every former Critical is fixed or reduced to a residual that needs a rarer trigger (a power loss inside a millisecond window, a custom sink whose callback raises, a node without ingest traffic during a full disk).
+
+| Rank | Findings | Now (recorded) | What still fails | Size |
+|---|---|---|---|---|
+| 1 · Done (this PR) | B8 | High (High) | A non-UTF-8 byte in any forwarded header: `201`, ~6 h of retries, dead-letter; `503` forever under `wal: none`. Fix: reject with `400` at the edge, or base64 non-UTF-8 header values in the message. | S |
+| 2 · Done (this PR) | O2 | High (High) | Admin, route and claim listeners on every interface, unauthenticated; redaction misses `sas_token`, `private_key` and query tokens; Replayer crash reports print the config. | S–M |
+| 3 · Done (this PR) | S1, S3, W7, D3, E2 residuals | Medium (Critical/High) | No compactor backoff; full-disk recovery only through ingest; `mkdir_p` race; unguarded `inline_max_bytes`; quarantine call exit is a `500`. Each is a few lines. | S each |
+| 4 | O5, D8, O3 | Medium (Medium) | No gauges and a constant `/health`, so none of rank 3's failures raises an alarm. | S–M |
+| 5 | D1 residual, B2, B5, B4, B7 | High (Critical/High) | One global slot pool and window: a hanging sink holds slots 30 s per attempt in waves. RabbitMQ publishes serially and still publishes after the caller timed out. Kafka produces are not cancelled. | M |
+| 6 | E4, B9, C2, S6, K4 | High/Medium (High/Medium) | Transient store failures are `404`; the Redis route store regresses its version; every HTTP non-2xx is retried with no body cap; blob listing errors look like empty buckets; SDKs treat `429` as permanent. | M |
+| 7 | E5, E6, K2, O4, C4, C3 | Medium/Low | URL tenant not bound to source; `accept_flag` spends budget; no byte bound on the ingest queue; unsigned outbound; no config ranges; derivable single-claim ids; claim retention by receive time. | S each |
+| 8 | C1, S5, O6 | High (High), multi-node only | The documented one-gateway claim topology `404`s other nodes' claims; segment keys collide in a shared bucket. Needs G8's decision first. | M–L |
+
+Phase 0 is complete: ranks 1–3 are done. Rank 4 is next: it makes the remaining failures visible, so do it before rank 5.
 
 ## Decisions that choose between the options
 

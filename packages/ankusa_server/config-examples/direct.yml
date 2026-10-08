@@ -17,7 +17,7 @@
 #
 # Run it with:
 #
-#   docker run --rm -p 4000:4000 -p 127.0.0.1:4002:4002 \
+#   docker run --rm -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 \
 #     -v "$PWD/direct.yml:/etc/ankusa/ankusa.yml" \
 #     -e STRIPE_WHSEC -e RABBITMQ_URL -e RABBITMQ_EXCHANGE \
 #     jamescarr/ankusa

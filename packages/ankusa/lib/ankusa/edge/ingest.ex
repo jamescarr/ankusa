@@ -36,6 +36,7 @@ defmodule Ankusa.Edge.Ingest do
              | :overload
              | :store_unavailable
              | :quarantine_full
+             | {:invalid_header, String.t() | nil}
              | {:rate_limited, pos_integer()}
              | {:quarantine_rate_limited, pos_integer()}}
 
@@ -43,7 +44,8 @@ defmodule Ankusa.Edge.Ingest do
   Why a request was answered before it reached `ingest/4`. The whole set: every
   refusal goes through `refused/2`, so a metric label built from it is bounded.
   """
-  @type refusal :: :unknown_source | :payload_too_large | :body_read_failed
+  @type refusal ::
+          :unknown_source | :payload_too_large | :body_read_failed | :invalid_header
 
   @type raw_request :: %{
           required(:method) => String.t(),
@@ -95,18 +97,55 @@ defmodule Ankusa.Edge.Ingest do
     Ankusa.Telemetry.emit([:ingest, :refused], %{}, %{instance: instance, reason: reason})
   end
 
-  @doc "Look the source up, then `ingest/4`."
+  @doc "Look the source up, refuse undeliverable header bytes, then `ingest/4`."
   @spec ingest(atom(), request()) :: result()
   def ingest(instance, %{source_id: source_id} = req) do
     route = %Ankusa.Route{source_id: source_id, tenant_id: Map.get(req, :tenant_id)}
 
-    case lookup(instance, route) do
-      {:ok, source, tenant_id} -> ingest(instance, source, tenant_id, req)
-      {:error, :unknown_source} = error -> error
+    with {:ok, source, tenant_id} <- lookup(instance, route),
+         :ok <- check_headers(req.headers) do
+      ingest(instance, source, tenant_id, req)
+    else
+      {:error, :unknown_source} = error ->
+        error
+
+      {:invalid_header, name} ->
+        refused(instance, :invalid_header)
+        {:error, {:invalid_header, name}}
     end
   end
 
-  @doc "Ingest one hook for a source `lookup/2` returned."
+  @doc """
+  Refuse header bytes no sink can carry: a name must be visible ASCII
+  (`0x21..0x7E`), a value visible ASCII, space or tab (RFC 9110 field-value
+  without `obs-text`). Returns the offending name when it is itself printable.
+  """
+  @spec check_headers([{String.t(), String.t()}]) :: :ok | {:invalid_header, String.t() | nil}
+  def check_headers([]), do: :ok
+
+  def check_headers([{name, value} | rest]) do
+    cond do
+      not name_bytes?(name) -> {:invalid_header, nil}
+      not value_bytes?(value) -> {:invalid_header, name}
+      true -> check_headers(rest)
+    end
+  end
+
+  defp name_bytes?(<<>>), do: true
+  defp name_bytes?(<<c, rest::binary>>) when c in 0x21..0x7E, do: name_bytes?(rest)
+  defp name_bytes?(_), do: false
+
+  defp value_bytes?(<<>>), do: true
+
+  defp value_bytes?(<<c, rest::binary>>) when c in 0x20..0x7E or c == ?\t,
+    do: value_bytes?(rest)
+
+  defp value_bytes?(_), do: false
+
+  @doc """
+  Ingest one hook for a source `lookup/2` returned. The caller has already run
+  `check_headers/1`.
+  """
   @spec ingest(atom(), Source.t(), String.t(), raw_request()) :: result()
   def ingest(instance, %Source{} = source, tenant_id, req) do
     Ankusa.Telemetry.span([:ingest], %{instance: instance, source_id: source.id}, fn ->

@@ -40,6 +40,18 @@ defmodule Ankusa.Edge.DirectTest do
     def inline_max_bytes(opts), do: Keyword.get(opts, :inline_max_bytes)
   end
 
+  # The threshold callback is user code and raises; `deliver/3` itself is fine.
+  defmodule RaisingThresholdSink do
+    @moduledoc false
+    @behaviour Sink
+
+    @impl true
+    def inline_max_bytes(_opts), do: raise("threshold")
+
+    @impl true
+    def deliver(_env, _ctx, _opts), do: :ok
+  end
+
   # A blob store whose write misbehaves the way user code can: a
   # `:token_provider` that exits (a `GenServer.call` into a dead process), or a
   # return the behaviour does not allow.
@@ -139,6 +151,21 @@ defmodule Ankusa.Edge.DirectTest do
     assert conn.status == 503
     assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
     assert_received {:delivered, _, _}
+  end
+
+  test "a sink whose inline_max_bytes/1 raises is a 503, and no sink runs" do
+    config =
+      start_direct([
+        {RaisingThresholdSink, []},
+        {CaptureSink, [to: self(), outcome: :ok]}
+      ])
+
+    conn = route(config, "demo", "{}")
+
+    assert conn.status == 503
+    assert %{"error" => "store_unavailable"} = JSON.decode!(conn.resp_body)
+    assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+    refute_received {:delivered, _, _}
   end
 
   test "publishes to every sink concurrently, even when one refuses" do

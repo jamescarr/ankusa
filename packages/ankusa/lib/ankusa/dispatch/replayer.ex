@@ -68,7 +68,7 @@ defmodule Ankusa.Dispatch.Replayer do
     {:ok,
      %{
        instance: instance,
-       config: config,
+       codec: elem(config.storage.codec, 0),
        loaded?: false,
        jobs: %{},
        buckets: %{},
@@ -610,7 +610,7 @@ defmodule Ankusa.Dispatch.Replayer do
 
     from = Map.fetch!(job.filter, :from)
     to = Map.fetch!(job.filter, :to)
-    {codec, _opts} = state.config.storage.codec
+    codec = state.codec
 
     {kept, skipped, scanned, done_all?, last_offset} =
       Enum.reduce_while(

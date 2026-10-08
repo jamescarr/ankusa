@@ -139,6 +139,10 @@ A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`) returns 
 any sink runs, when it is larger than at least one of its source's sinks'
 thresholds, and hands the resulting claim reference to every sink and every
 retry in `ctx.claim`. A sink that returns `nil` never uses the claim check.
+The callback is user code: if it raises, exits, throws or returns something
+other than `nil` or a positive integer, that delivery attempt fails (retried,
+then dead-lettered with the reason `inline_max_bytes`); under `wal.type: none`
+the request is answered `503`. It never stops dispatch.
 See [`claim-check.md`](claim-check.md).
 
 | Adapter | Deps | What it does |

@@ -280,6 +280,7 @@ defmodule Ankusa.InstanceTest do
           :rate_limiter,
           :lifecycle,
           :source_store,
+          :replayer,
           {:isolated, :dispatch}
         ] do
       refute printed.(key) =~ @canary, "#{inspect(key)} printed the config in its status"

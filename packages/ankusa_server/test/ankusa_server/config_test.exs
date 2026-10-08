@@ -56,7 +56,7 @@ defmodule AnkusaServer.ConfigTest do
   test "the reference config spells out the whole schema" do
     config = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).config
 
-    assert config.admin == %{enabled: true, port: 4002}
+    assert config.admin == %{enabled: true, port: 4002, ip: "127.0.0.1"}
     assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
     assert config.route_resolver == {Ankusa.RouteResolver.Path, [prefix: ["webhooks"]]}
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
@@ -82,7 +82,7 @@ defmodule AnkusaServer.ConfigTest do
   test "the baked image config is the demo: admin on, one open source" do
     config = Config.load!(path: "rel/ankusa.yml", env: %{}).config
 
-    assert config.admin == %{enabled: true, port: 4002}
+    assert config.admin == %{enabled: true, port: 4002, ip: "127.0.0.1"}
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) == ["demo"]
   end
@@ -172,6 +172,32 @@ defmodule AnkusaServer.ConfigTest do
     assert config.data_dir == "/data"
     assert config.admin.port == 9000
     assert config.wal == :disk
+  end
+
+  test "ANKUSA_ADMIN_IP and ANKUSA_CLAIM_CHECK_IP set the listener addresses" do
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+    assert Config.load!(path: path, env: %{}).config.admin.ip == "127.0.0.1"
+
+    config =
+      Config.load!(
+        path: path,
+        env: %{"ANKUSA_ADMIN_IP" => "0.0.0.0", "ANKUSA_CLAIM_CHECK_IP" => "::"}
+      ).config
+
+    assert config.admin.ip == "0.0.0.0"
+    assert config.claim_check.ip == "::"
+  end
+
+  test "a listener ip that is not an address fails load! naming the key" do
+    path =
+      tmp_config("""
+      admin: {ip: nope}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "admin.ip"
   end
 
   # ── wal.type: none ──────────────────────────────────────────────────────────
@@ -610,7 +636,7 @@ defmodule AnkusaServer.ConfigTest do
              rules: [%{action: :allow, cidr: "203.0.113.0/24"}]
            }
 
-    assert routes.admin == %{port: 4100}
+    assert routes.admin == %{port: 4100, ip: "127.0.0.1"}
 
     assert [%{"id" => "seed", "path" => "/hooks/seed", "metadata" => %{"owner" => "acme"}}] =
              routes.seed
@@ -757,7 +783,7 @@ defmodule AnkusaServer.ConfigTest do
     assert routes.enabled
     assert routes.max_routes == 10_000
     assert routes.store == {Ankusa.Routes.Store.ETS, []}
-    assert routes.admin == %{port: 4003}
+    assert routes.admin == %{port: 4003, ip: "127.0.0.1"}
     assert routes.ip_denied_status == 403
     assert routes.log_sample == 100
     assert routes.trusted_proxies == []
@@ -1023,7 +1049,7 @@ defmodule AnkusaServer.ConfigTest do
     printed = print_config(tmp_config(nats_sink("auth: {nkey_seed: SUAseed, jwt: eyJacc}")))
 
     refute printed =~ "SUAseed"
-    assert printed =~ "eyJacc"
+    refute printed =~ "eyJacc"
     assert printed =~ "[REDACTED]"
   end
 

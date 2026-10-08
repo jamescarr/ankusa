@@ -467,13 +467,14 @@ defmodule Ankusa.EdgeTest do
   # One request over a real socket: the request head, then `sent` bytes of a
   # body that claims to be `declared` long. The rest is never sent, so a reply
   # can only come from a server that did not wait for it.
-  defp raw_post(port, path, declared, sent) do
+  defp raw_post(port, path, declared, sent, extra_headers \\ []) do
     {:ok, sock} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
+    extra = Enum.map_join(extra_headers, &"#{&1}\r\n")
 
     :ok =
       :gen_tcp.send(
         sock,
-        "POST #{path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: #{declared}\r\n\r\n#{sent}"
+        "POST #{path} HTTP/1.1\r\nHost: localhost\r\n#{extra}Content-Length: #{declared}\r\n\r\n#{sent}"
       )
 
     reply = :gen_tcp.recv(sock, 0, 2_000)
@@ -497,6 +498,43 @@ defmodule Ankusa.EdgeTest do
 
     assert {:ok, "HTTP/1.1 404" <> _} = raw_post(config.port, "/webhooks/nope", 10, "")
     assert stored_ids(config.instance) == []
+  end
+
+  test "header bytes no sink can carry are refused before the body is read" do
+    config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]}, port: free_port())
+
+    for {line, header} <- [
+          {"x-note: caf\xC3\xA9", "x-note"},
+          {"content-type: text/plain; x=\xFF", "content-type"}
+        ] do
+      assert {:ok, "HTTP/1.1 400" <> _ = reply} =
+               raw_post(config.port, "/webhooks/demo", 1_000, "", [line])
+
+      assert reply =~ JSON.encode!(%{error: "invalid_header", header: header})
+      assert stored_ids(config.instance) == []
+    end
+  end
+
+  test "Ingest.ingest/2 refuses a header with an undeliverable byte" do
+    config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]})
+    req = request("demo", "x", [{"x-note", "caf\xC3\xA9"}])
+
+    assert {:error, {:invalid_header, "x-note"}} = Ingest.ingest(config.instance, req)
+    assert stored_ids(config.instance) == []
+  end
+
+  test "a pen that does not answer is a 503, not a crashed request" do
+    config = start_edge(quarantining(["q"]))
+    pen = Ankusa.whereis(config.instance, :quarantine)
+    :ok = :sys.suspend(pen)
+    on_exit(fn -> if Process.alive?(pen), do: :sys.resume(pen) end)
+
+    conn = forged(config, "q")
+
+    assert conn.status == 503
+    assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+    assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+    :ok = :sys.resume(pen)
   end
 
   test "the envelope body is copied only when it is a sub-binary" do

@@ -17,6 +17,13 @@ services:
       # compose/docker-compose.proxy.yml shows nginx basic auth doing exactly
       # that.
       - "127.0.0.1:4002:4002"
+    environment:
+      # The published loopback port reaches the container's interface, not its
+      # loopback, so the admin API has to listen on every interface in here.
+      ANKUSA_ADMIN_IP: "0.0.0.0"
+      # Secrets are injected, never baked: mount ${VAR}s in the config file and
+      # pass the values here.
+      #   STRIPE_WHSEC: ${STRIPE_WHSEC}
     volumes:
       # The data volume: WAL, quarantine log, DLQ, local segments. Losing it
       # loses un-dispatched hooks, so back it.
@@ -24,10 +31,6 @@ services:
       # Your config. The image's baked-in demo config is used until you mount
       # one.
       # - ../config-examples/single-node.yml:/etc/ankusa/ankusa.yml:ro
-    # Secrets are injected, never baked: mount ${VAR}s in the config file and
-    # pass the values here.
-    # environment:
-    #   STRIPE_WHSEC: ${STRIPE_WHSEC}
     restart: unless-stopped
 
 volumes:

@@ -119,7 +119,8 @@ curl -XPOST localhost:4002/v1/replays -d '{"kind":"quarantine"}'
 ```
 
 Port 4002 is unauthenticated, so never publish it: the compose file binds it to
-`127.0.0.1` only.
+`127.0.0.1` on the host, and `ankusa.yml` sets `admin.ip: 0.0.0.0` so that
+published port reaches the API inside the container.
 
 ## 6. Point a real provider at it
 
@@ -156,7 +157,8 @@ GitHub and Standard Webhooks sources are the same shape with a different
 
 - `201`: accepted, durably so
 - `202`: quarantined after a failed verification
-- `400`: body unreadable
+- `400`: body unreadable, or a header holds a byte outside visible ASCII, space
+  and tab (`invalid_header`; no sink could carry it, so retrying is pointless)
 - `401`: verification failed
 - `404`: unknown source
 - `413`: body over `max_body_bytes`

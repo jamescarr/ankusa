@@ -18,8 +18,9 @@ defmodule Ankusa.Storage.Compactor do
   an archive that is behind or switched off never blocks delivery, and delivery
   never blocks the archive.
 
-  A failed write ends the tick, nothing crashes, and the same hooks are
-  written again next tick under the same keys.
+  A failed write ends the tick, nothing crashes, and the same hooks are written
+  again — after `storage.interval_ms` doubled per consecutive failure (jittered,
+  capped at 60 s) — under the same keys.
   """
 
   use GenServer
@@ -57,7 +58,7 @@ defmodule Ankusa.Storage.Compactor do
     end
 
     schedule(interval)
-    {:ok, %{instance: instance, config: config, interval: interval, after_seq: 0}}
+    {:ok, %{instance: instance, config: config, interval: interval, after_seq: 0, failures: 0}}
   end
 
   # Crash reports print the state; the config carries the object store's
@@ -79,8 +80,20 @@ defmodule Ankusa.Storage.Compactor do
   @impl true
   def handle_info(:tick, state) do
     {_n, state} = compact(state)
-    schedule(state.interval)
+    schedule(next_delay(state))
     {:noreply, state}
+  end
+
+  # Same shape as Ankusa.Instance.Isolated's restart backoff, plus the jitter
+  # RetryPolicy.Exponential uses: an unreachable object store is retried at
+  # interval·2^n, capped at a minute, never faster than the interval.
+  @max_backoff_ms 60_000
+
+  defp next_delay(%{failures: 0, interval: interval}), do: interval
+
+  defp next_delay(%{failures: n, interval: interval}) do
+    capped = (interval * Integer.pow(2, min(n, 16))) |> min(@max_backoff_ms) |> max(interval)
+    max(interval, round(capped * (0.5 + :rand.uniform() * 0.5)))
   end
 
   # ── compaction ────────────────────────────────────────────────────────────
@@ -90,21 +103,21 @@ defmodule Ankusa.Storage.Compactor do
   defp compact(state, written) do
     case archive_batch(state) do
       {:ok, :none} ->
-        {written, state}
+        {written, %{state | failures: 0}}
 
       {:ok, {last_seq, more?}} ->
-        state = %{state | after_seq: last_seq}
+        state = %{state | after_seq: last_seq, failures: 0}
         if more?, do: compact(state, written + 1), else: {written + 1, state}
 
       {:error, reason} ->
         # `after_seq` did not move, so the same hooks (and the same segment
         # key) are written again next tick.
         Logger.warning(
-          "[ankusa] archive segment after seq #{state.after_seq} not written, " <>
-            "retried next tick: #{inspect(reason)}"
+          "[ankusa] archive segment after seq #{state.after_seq} not written " <>
+            "(#{state.failures + 1} in a row), retried with backoff: #{inspect(reason)}"
         )
 
-        {written, state}
+        {written, %{state | failures: state.failures + 1}}
     end
   end
 
@@ -232,15 +245,20 @@ defmodule Ankusa.Storage.Compactor do
     error -> {:error, {:raised, error}}
   end
 
-  # A blob store is user code (S3, GCS, a custom adapter): an error return and a
-  # raise are the same failure — this tick is retried, nothing crashes.
+  # A blob store is user code (S3, GCS, a custom adapter): an error return, a
+  # raise, an exit and a throw are the same failure — this tick is retried,
+  # nothing crashes.
   defp put(instance, key, data) do
     case Ankusa.BlobStore.put(instance, key, data) do
       :ok -> :ok
-      {:error, reason} -> {:error, reason}
+      {:error, _reason} = error -> error
+      other -> {:error, {:bad_return, other}}
     end
   rescue
     error -> {:error, {:raised, error}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+    :throw, value -> {:error, {:throw, value}}
   end
 
   defp schedule(interval) when is_integer(interval) and interval > 0 do

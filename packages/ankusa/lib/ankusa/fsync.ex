@@ -40,31 +40,25 @@ defmodule Ankusa.Fsync do
   end
 
   @doc """
-  Creates `dir` and every missing ancestor, fsyncing the parent of each
-  created directory top-down, so the creation survives power loss.
+  Creates `dir` — `root` or a directory below it — and every missing
+  ancestor, then fsyncs the parent of every directory from `root` down to
+  `dir`, on every call. A caller that finds the directory already created by a
+  concurrent caller still waits for the fsyncs that make it durable, and a
+  parent fsync that failed once is retried by the next call.
   """
-  def mkdir_p(dir) do
-    case missing_dirs(dir) do
-      [] ->
-        :ok
-
-      dirs ->
-        with :ok <- File.mkdir_p(dir),
-             :ok <- fsync_parents(dirs) do
-          :ok
-        end
+  def mkdir_p(dir, root) do
+    with :ok <- File.mkdir_p(dir) do
+      fsync_parents(chain(Path.expand(dir), Path.expand(root)))
     end
   end
 
-  # The missing directories, outermost first: `do_missing_dirs/2` walks up from
-  # `dir` prepending as it goes, so the list already comes out that way.
-  defp missing_dirs(dir), do: do_missing_dirs(dir, [])
-
-  defp do_missing_dirs(dir, acc) do
-    if File.dir?(dir) do
-      acc
-    else
-      do_missing_dirs(Path.dirname(dir), [dir | acc])
+  # `root`, then each directory below it down to `dir` (both absolute: data_dir
+  # defaults to the relative "./data"). A `dir` outside `root` is just itself.
+  defp chain(dir, root) do
+    case Path.relative_to(dir, root) do
+      "." -> [root]
+      ^dir -> [dir]
+      rel -> [root | rel |> Path.split() |> Enum.scan(root, &Path.join(&2, &1))]
     end
   end
 

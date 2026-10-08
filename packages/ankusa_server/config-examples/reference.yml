@@ -43,6 +43,9 @@ admin:
   enabled: true
   # [env ANKUSA_ADMIN_PORT] unauthenticated — do not publish it.
   port: 4002
+  # [env ANKUSA_ADMIN_IP] the address it binds. Loopback by default, so inside
+  # a container `-p 4002:4002` does not reach it; set 0.0.0.0 to publish it.
+  ip: 127.0.0.1
 
 routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
@@ -105,6 +108,8 @@ routes:
     # above): front it with your own proxy or network policy before exposing
     # it.
     port: 4003
+    # The address it binds; 0.0.0.0 exposes it on every interface.
+    ip: 127.0.0.1
 
   # Routes an operator cannot wait for the API to create: a standalone node
   # (no Redis) loses API-created routes on restart, but not these. Loaded only
@@ -225,6 +230,9 @@ storage:
 claim_check:
   # [env ANKUSA_CLAIM_CHECK_PORT] the gateway listener (:claim_check role).
   port: 4001
+  # [env ANKUSA_CLAIM_CHECK_IP] the address the gateway binds. Loopback by
+  # default; set 0.0.0.0 to reach it from outside the container.
+  ip: 127.0.0.1
   # Target size of one pack object; a body larger than this still gets a pack
   # of its own. Core defaults this to 16 MiB.
   pack_max_bytes: 16777216
