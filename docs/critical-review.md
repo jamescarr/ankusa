@@ -10,7 +10,7 @@ Paths below are relative to `packages/ankusa/lib/ankusa/` unless they start with
 
 **Layout.** Findings are grouped by root cause, not by pipeline stage. [Root causes](#root-causes) maps the nine causes to their findings; each group's section states the cause, lists its findings as the review recorded them, and ends with a solution scope. [Where it breaks](#where-it-breaks) keeps the stage view.
 
-**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-07, no Critical finding is still open.
+**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-09, no Critical or High finding is still open; the residuals that remain are listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
 
 ## Verdict
 
@@ -31,14 +31,14 @@ Architecturally, the ceiling is one `GenServer` per node that owns every byte: a
 
 ## Top findings
 
-| ID | Severity | Group | Finding | Evidence | Status (2026-10-07) |
+| ID | Severity | Group | Finding | Evidence | Status (2026-10-09) |
 |---|---|---|---|---|---|
 | [W1](#w1) | Critical | [G1](#g1) | A WAL one `pread` cannot return is truncated to 0 bytes at boot; otherwise boot needs RAM ≥ the WAL | Reproduced (macOS, Linux) | Fixed |
 | [W2](#w2) | Critical | [G1](#g1) | One bad byte mid-log truncates every acked record after it | Reproduced | Fixed |
 | [S1](#s1) | Critical | [G2](#g2) | An object-store outage rebuilds the whole instance, listener included, every 4.5–6.5 s | Reproduced | Fixed |
 | [S3](#s3) | Critical | [G1](#g1) | A full disk tears the DLQ and the storage index: later dead letters vanish, and the node stops booting | Reproduced | Fixed |
 | [S4](#s4) | Critical | [G1](#g1) | LocalFS segments and claim packs are never fsynced, yet the WAL floor moves past them | Code | Fixed |
-| [D1](#d1) | Critical | [G4](#g4) | One tenant's dead sink stops delivery for every tenant | Reproduced | Partly fixed: no per-sink limits or breakers |
+| [D1](#d1) | Critical | [G4](#g4) | One tenant's dead sink stops delivery for every tenant | Reproduced | Fixed |
 | [D2](#d2) | Critical | [G3](#g3) | Hooks whose source is gone at dispatch time are dropped silently | Code | Fixed |
 | [D3](#d3) | Critical | [G2](#g2) | One hook to a sink with a non-conforming return value halts the node | Reproduced | Fixed |
 | [B1](#b1) | Critical | [G3](#g3) | RabbitMQ confirms unroutable publishes; `durable?` says true | Reproduced | Fixed |
@@ -363,6 +363,18 @@ on a supervisor and SASL supervisor reports (off by default) print it; the
 adapter packages are not covered. O7 (the Registry bullet only): an instance
 stops, and is restarted, when `Ankusa.Registry` or one of its partitions
 restarts. The other O2 and O7 items remain open. Circuit breakers are G4.
+
+**Status (2026-10-09).** The adapter part of O2 and the rest of O7 are done.
+`Ankusa.Sink.RabbitMQ.Connection` defines `format_status/1` (the URL, which
+can carry a password, is redacted) and registers under a sha256 digest of the
+URL, so the password is in no process name either. O7: `AnkusaServer.GcsToken`
+fetches the metadata token single-flight with `retry: false` and caches it;
+an unresolved `${…}` is a `ConfigError` naming the key; the release ships
+`rel/vm.args.eex` and `rel/env.sh.eex`, so distribution stays on but bound to
+loopback (epmd too) and `docker-entrypoint remote` / `rpc` work. Accepted, not
+fixed: supervisors' child specs still carry `%Ankusa.Config{}` — SASL
+supervisor reports are off by default, and redacting them would mean every
+child re-reading its config from `:persistent_term`.
 The analysis below is the review as recorded at commit `42b6f5a`.
 
 This is the Verdict's inverted assertiveness at the scale of the supervision tree. A `503` from S3, a full disk or a sink's odd return value crashes a process, and every process in the instance shares one `one_for_one` budget of 3 restarts in 5 seconds, so how far a failure spreads depends only on how fast it repeats (O1's table).
@@ -513,6 +525,14 @@ A verification failure under `on_verify_failure: :quarantine` writes the full en
 
 When a pack fails, each job checks its body in under a pack id derived from the envelope's receive time. After a backlog older than `retention_days`, the claim lands in a `dt=` partition the next sweep deletes while its message is still queued. `retention_days` is not validated (0 or a negative value deletes yesterday's or today's partition), and `File.rm_rf!/1` raises on the first error, skipping the rest of the sweep.
 
+**Status (2026-10-09).** Fixed. A fallback check-in's pack id is
+`Ref.new_pack_id()` — the check-in time plus 64 random bits — so the `dt=`
+partition is the check-in date and retention counts from it, not from the
+hook's receipt (`sink/message.ex` `check_in/2`). `retention_days` must be
+`nil` or ≥ 1 and `sweep_interval_ms` ≥ 1 at boot, and the sweeper deletes
+with `File.rm_rf/1`, logging a partition it cannot delete and moving on
+(`claim_check/sweeper.ex`).
+
 <a id="g3-scope"></a>
 ### G3 solution scope
 
@@ -544,6 +564,18 @@ per-sink concurrency limits and windows (the pipeline still has one pool of
 `dispatch.concurrency` slots and one `max_inflight` window for every sink),
 per-sink circuit breakers, and the adapter findings B2, B4, B5 and B7.
 
+**Status (2026-10-09).** Done. Dispatch queues claimed rows per sink key
+`{source_id, sink index, sink module}` and hands slots round-robin across the
+keys with work; `dispatch.sink_concurrency` caps one key's running attempts;
+each key has a circuit breaker (`dispatch.breaker_failures`, default 5,
+opening for `breaker_open_ms` 30 s doubling to `breaker_max_open_ms` 5 min,
+then one probe) that parks the key's rows without spending attempts
+(`dispatch/pipeline.ex`, "Per-sink isolation"). Error classes and
+`Retry-After` landed with G6, so a permanent failure no longer takes the
+6-hour horizon. B2, B4, B5 and B7 are fixed in their adapters; what is left
+(no idle-connection reaping, no Kafka produce cancellation) is in
+[Remaining work](#remaining-work-re-assessed).
+
 One pipeline holds one pool of concurrency slots, one admission window and one watermark for every tenant and sink, and the broker adapters open connections through node-global supervisors. Whatever is slowest, dead or hung (a sink, a lane, a broker connect, one bad record) holds a shared resource, and everything behind it waits.
 
 <a id="d1"></a>
@@ -567,6 +599,28 @@ Under the default policy a dead hook gives up after 55–111 s of jittered backo
 
 **Fix:** retries as pipeline-owned timers (`Process.send_after/3` re-enqueues the job and the slot is free while it waits); per-sink concurrency caps and admission windows; a per-sink circuit breaker that parks a dead destination's work instead of burning attempts.
 
+**Status (2026-10-09).** Fixed. Retries were already pipeline-owned rows
+(2026-10-04). Now each sink key has its own queue and round-robin share of
+the slots, an optional cap (`dispatch.sink_concurrency`) and a circuit
+breaker that parks a failing key's rows, attempts unchanged, instead of
+letting every wave hold slots for `attempt_timeout_ms`. Breaker transitions
+emit `[:ankusa, :dispatch, :breaker]` and `ankusa_dispatch_breakers_open` is
+a gauge. `test/ankusa/dispatch/isolation_test.exs` checks that a source whose
+sink hangs leaves slots for another source's sink, that a breaker opens after
+`breaker_failures`, parks rows without spending attempts, probes and closes,
+and that `{:permanent, _}` never opens one. Breakers live in the pipeline's memory: a restart closes them,
+and the first wave after one can again hold slots for one
+`attempt_timeout_ms`.
+
+Probe 4's shape, re-run as a throwaway test against `Ankusa.Instance`
+(`concurrency: 32`, `sink_concurrency: 8`, `attempt_timeout_ms: 5_000`,
+`breaker_failures: 5`): 500 acme hooks to a sink that sleeps 60 s, then 100
+globex hooks to a healthy sink. All 100 globex hooks were delivered within
+953 ms of being enqueued. The acme breaker opened about 5 s after acme's
+first attempts started (their attempt timeout); 492 of the 500 acme rows were
+still at 0 attempts and parked, and the 4 acme attempts that had started
+before the breaker opened ran on to their own timeout.
+
 <a id="d4"></a>
 ### D4 · High · Code — The retry budget is ~83 s per hook; past that the WAL stops absorbing an outage
 
@@ -575,6 +629,13 @@ Under the default policy a dead hook gives up after 55–111 s of jittered backo
 Defaults: base 100 ms, cap 30 s, 12 attempts, which is 111 s of sleeps without jitter and 55–111 s (mean ~83 s) with it. During an outage of length T, only jobs whose budget elapses inside T are dead-lettered: about 32 × ⌊T / 83 s⌋ with unordered sinks (a three-minute downstream deploy dead-letters ~64), about one per 83 s per lane with ordered ones. Everything else waits behind them (D1) and delivers after recovery. The costs are elsewhere: the dead-lettered hooks depend on a replay path that is broken (D5); the WAL, the component built to absorb outages, absorbs nothing past ~90 s per hook; and nothing classifies errors, so a `400` or an oversized message gets twelve attempts and `Retry-After` on a `429` or `503` is ignored.
 
 **Status (2026-10-04).** Fixed for the horizon: the defaults are `max_ms: 300_000` and `max_attempts: 84`, which retry for about 6 hours (21 709.5 s of sleeps without jitter). Not fixed: error classification and `Retry-After` (G6, B9). A `400` or any other permanent failure now takes every one of the 84 attempts, 3–6 hours, before it is dead-lettered, where the "twelve attempts" quoted in this section and in B3, B5 and G6 are the counts as recorded at `42b6f5a`.
+
+**Status (2026-10-09).** Error classes landed (G6): a sink's
+`{:permanent, _}` dead-letters after the attempt that returned it, and
+`{:retry_after, ms, _}` delays the next attempt (capped at an hour).
+`Sink.Http` maps `400`/`401`/`403`/`404`/`410`/`413`/`422` to permanent and
+honours `Retry-After`; `Sink.Kafka` classifies `message_too_large`,
+`invalid_message` and `invalid_record` as permanent.
 
 <a id="d6"></a>
 ### D6 · High · Code — No delivery deadline: a hung sink pins a slot and the watermark forever
@@ -595,6 +656,18 @@ Nothing bounds a `deliver/3` call. A custom sink blocked in `GenServer.call(_, _
 Every delivery for an exchange goes through one GenServer whose `handle_call/3` publishes and then blocks in `wait_for_confirms(chan, 5_000)`. Throughput per exchange is one message per confirm round-trip, with all 32 dispatch slots, or in direct mode every request process, queued in one mailbox. Probe 15 measured 2,748 msg/s from 32 concurrent callers against a broker on loopback; that is an upper bound, since a network round-trip and the broker's disk sync for persistent messages both add to every message. Callers time out after 15 s, but their requests stay in the mailbox and are published later while the retry enqueues a fresh copy: duplicates beyond one per retry, and a mailbox that stays full after the broker recovers.
 
 **Fix:** asynchronous confirms (track delivery tags, reply on `basic.ack`/`basic.nack`) with a bounded in-flight window and a channel pool.
+
+**Status (2026-10-09).** Fixed in `ankusa_rabbitmq`
+(`sink/rabbitmq/connection.ex`): confirms are asynchronous — each publish is
+parked under its sequence number and answered by its own `basic.ack`/`nack`,
+with up to `:max_inflight` (256) outstanding, past which a publish answers
+`{:error, :busy}` unsent. Every call carries its caller's deadline; one still
+in the mailbox when that passed answers `{:error, :expired}` and is never
+published. One channel per connection, no pool. Probe 15's shape re-run
+against the package's compose broker on loopback (`rabbitmq:4-management-alpine`):
+2,000 `deliver/3` calls from 32 tasks, all `:ok`, in 75 ms (about 26,700
+msg/s, against 2,748 msg/s recorded); up to 32 publishes were awaiting
+confirms at once.
 
 <a id="b3"></a>
 ### B3 · High · Code — RabbitMQ never notices a dead channel
@@ -621,6 +694,12 @@ Only `conn.pid` is monitored. A channel-level error (the exchange deleted or red
 
 There is no `whereis` fast path: every `deliver/3` calls `DynamicSupervisor.start_child/2`, spawning a process that fails registration with `already_started`, and `Connection.init/1` opens the AMQP connection synchronously. One unreachable broker blocks the supervisor, and every RabbitMQ delivery in the VM including healthy exchanges, for the connect timeout. Connections are keyed by `{instance, exchange}`, so two sinks with different URLs and the same exchange name share one connection.
 
+**Status (2026-10-09).** Fixed. `deliver/3` looks the connection up in the
+instance's registry before starting one; the connection dials in
+`handle_continue/2`, so starting it never blocks the supervisor; and the key
+is `{instance, sha256(url), exchange}`, so two URLs never share a connection
+and the password is in no process name.
+
 <a id="b5"></a>
 ### B5 · Medium · Code — Kafka: abandoned produces still land, and one bad record kills a partition producer
 
@@ -628,12 +707,30 @@ There is no `whereis` fast path: every `deliver/3` calls `DynamicSupervisor.star
 
 A `sync_produce_request/2` timeout does not cancel the record; it is written when the broker returns, while dispatch enqueues a fresh copy per retry. brod's producer exits on a non-retriable error such as `message_too_large` (reachable whenever `:inline_max_bytes` exceeds the topic's `max.message.bytes`), failing every co-buffered hook for that partition, while the poison record retries twelve times on its lane [INFERENCE from brod's source]. The producer is not idempotent (documented at `delivery.md:265-267`).
 
+**Status (2026-10-09).** Fixed where it can be: a record whose value plus key
+exceeds `:max_record_bytes` (default 1,000,000) is refused before it reaches
+brod, and a broker `message_too_large`, `invalid_message` or `invalid_record`
+is `{:permanent, _}`, dead-lettered on that attempt instead of retried.
+Cancelling a produce that timed out is not possible (brod has no cancel and
+no idempotent producer), so an abandoned produce can still land; consumers
+dedupe on `idempotency_key`. Recorded as a residual.
+
 <a id="b7"></a>
 ### B7 · Medium · Code — Lazy connects run inside one node-global `DynamicSupervisor` per adapter
 
 `ankusa_nats/lib/ankusa/sink/nats.ex:219-240`, `ankusa_redis/lib/ankusa/sink/redis.ex:155-178`, `ankusa_kafka/lib/ankusa/sink/kafka/application.ex:14-21`
 
 NATS (`Gnat.start_link/1` handshakes in `init`), Redis (`sync_connect: true`) and Kafka start connections on first delivery through a single named supervisor, so a down server serializes every waiting task's connect attempt and blocks unrelated connections. Connections are keyed by URL and never reaped; with API-managed sources their number is bounded only by what callers submit. These fixed names also contradict `architecture.md:220-221` ("There are no global process names anywhere in the framework").
+
+**Status (2026-10-09).** Fixed for the blocking connects. NATS starts a
+`Gnat.ConnectionSupervisor` registered through the instance's registry (no
+global atom), whose start returns at once and which handshakes and
+reconnects (2 s backoff) on its own; Redis connects with
+`sync_connect: false`; Kafka's brod client already connected asynchronously.
+`architecture.md`'s claim is rewritten to what is true: nothing is
+`:global`, and the node-local names left (each adapter's
+`DynamicSupervisor`, brod's atom client id, the S3 credential cache) are
+named. Still open, Low: idle connections are never reaped.
 
 <a id="g4-scope"></a>
 ### G4 solution scope
@@ -770,6 +867,13 @@ There is no operation for decoding the queue message (`v`, `body_base64` versus 
 
 `SourceStore.fetch/2` returns `{:ok, source} | :error`, sinks return `:ok | {:error, _}`, and `BlobStore.list/3` returns a list. None of them can tell "try later" from "never", so every boundary guesses: a store outage becomes a `404` (E4), a missing claim becomes a `503` that workers retry forever (C2), a failed listing looks like an empty bucket (S6), an HTTP `400` gets twelve attempts while `Retry-After` is ignored (B9), and a throttled redemption is a permanent rejection (K4).
 
+**Status (2026-10-09).** All three contracts are three-valued now:
+`SourceStore.fetch/2` may answer `{:error, :unavailable}` (E4), a sink's
+error may be `{:permanent, _}` or `{:retry_after, ms, _}` beside the
+transient default (`Ankusa.Sink.classify/1`; B9 and the Kafka adapter use
+them), and `BlobStore.list/3` answers `{:ok, keys} | {:error, reason}` (S6).
+The claim gateway and every SDK classify throttling as retryable (C2, K4).
+
 <a id="e4"></a>
 ### E4 · High · Code — Transient infrastructure failures are answered with `404`
 
@@ -790,6 +894,19 @@ Providers treat `4xx` as permanent, and several disable an endpoint after repeat
 - the Redis route store follows its version down and resets IP rules to allow on a missing key (`packages/ankusa_redis/lib/ankusa/routes/store/redis.ex:420-423,442,564-568`);
 - API-managed sources are per node.
 
+**Status (2026-10-09).** Fixed, except the last bullet. `fetch/2` is
+three-valued; ingest answers `503 store_unavailable` (`Retry-After: 1`) for
+`{:error, :unavailable}`, dispatch writes the row back due a second later
+with its attempts unchanged instead of dead-lettering it `:source_gone`, and
+the replayer fails the step and retries its page next tick
+(`edge/ingest.ex` `lookup/2`, `dispatch/pipeline.ex`, `dispatch/replayer.ex`).
+The Redis route store keeps its last known table, and its IP rules, when the
+namespace's version key is missing, logs it once, and reloads when the
+namespace is written again (`ankusa_redis/.../routes/store/redis.ex` `sync/1`).
+API-managed sources are still per node: that needs a shared source store, the
+second G8 shape, and is listed under
+[Remaining work](#remaining-work-re-assessed).
+
 <a id="c2"></a>
 ### C2 · Medium · Code — The gateway buffers whole claims, mislabels missing keys, and leaks store errors
 
@@ -804,12 +921,34 @@ Each `GET` reads the full claim into one binary before `send_resp/3`: no streami
 - `inspect(reason)` is still in `503` bodies;
 - S3 `403` is still a `503`.
 
+**Status (2026-10-09).** Fixed, except streaming. `cache-control` is
+`private, max-age=31536000, immutable`; `HEAD` answers the status and
+`content-length` with no body; `503` bodies carry only the error code and
+the reason is logged with the tenant and claim id; a store `403` is
+`503 store_forbidden` with `Retry-After: 60` and `claim-check.md` says the
+gateway credential needs `s3:ListBucket`, so with the documented policy a
+missing key is a `404`. The `403` stays retryable on purpose: a permission
+fix makes the same request succeed, and calling it permanent would
+dead-letter every claim during a policy rollout. The claim is still read
+whole (bounded by `max_body_bytes`) with no `Range` support.
+
 <a id="s6"></a>
 ### S6 · Medium · Code — The blob-store adapters are single-shot and lossy on listing
 
 `blob_store/s3.ex:62-66,83-125`, `blob_store/{gcs,azure,oci}.ex`
 
 One attempt per call, no retryable/permanent classification, and a 10 s default timeout for a 16 MiB whole-body PUT (`IO.iodata_to_binary/1` copies the segment first). `list/3` is unpaginated (S3 returns at most 1,000 keys) and returns `[]` on any error, so an outage is indistinguishable from an empty bucket. S3 credentials come only from options or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` via `System.fetch_env!/1` (`s3.ex:104-105`): no session tokens, IRSA or instance roles, and a missing variable raises at the call site.
+
+**Status (2026-10-09).** Fixed for listing and credentials. `list/3` returns
+`{:ok, keys} | {:error, reason}`; S3 follows continuation tokens, GCS
+`pageToken`, Azure `NextMarker` and OCI `nextStartWith`, and a failed page
+fails the listing. The S3 adapter reads options, then
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, then web
+identity (IRSA via STS `AssumeRoleWithWebIdentity`), then IMDSv2, caching
+temporary credentials (`blob_store/s3/credentials.ex`), and signs the session
+token. Nothing in the shipped pipeline calls `BlobStore.list` (only tests and
+embedders), so its pagination is library surface, exercised by the adapter
+tests. Still open: one attempt per call and the whole-body PUT copy.
 
 <a id="b9"></a>
 ### B9 · Medium · Code — `Sink.Http` neither signs nor bounds
@@ -818,12 +957,24 @@ One attempt per call, no retryable/permanent classification, and a 10 s default 
 
 Outbound requests carry the `x-ankusa-*` identity headers and the operator's static headers, but no HMAC over body and timestamp, so the receiver can neither authenticate Ankusa nor bound replays (K2). Every non-2xx, including `400`, `404` and `410`, gets the full retry policy; `Retry-After` is ignored; the response body is read whole, with no size cap, before the status is checked.
 
+**Status (2026-10-09).** Fixed. With `:secret` every delivery carries a
+Standard Webhooks signature (`sink/http/signer.ex`; one `v1,` entry per
+secret while rotating), and every SDK verifies it against the shared vectors
+(K2). `400`/`401`/`403`/`404`/`410`/`413`/`422` are `{:permanent, _}`;
+`408`/`429`/`5xx` with `Retry-After` (seconds or an HTTP-date) are
+`{:retry_after, ms, _}`; the response is read up to `:max_response_bytes`
+(64 KiB) and the connection closed past it (`HttpClient.request_with_headers/6`).
+
 <a id="k4"></a>
 ### K4 · Low · Code — Claim redemption treats `429` and `408` as permanent
 
 `sdk-elixir/lib/ankusa/sdk/claim_check.ex:79-87`, `conformance/cases/redeem.json:221-233`
 
 Every 4xx except 404 is `ClaimRejectedError` with `retryable: false`, and the shared conformance vector pins `429 → retryable: false`, so every SDK dead-letters a message when a proxy in front of the gateway throttles.
+
+**Status (2026-10-09).** Fixed. `conformance/cases/redeem.json` pins `408`
+and `429` to `ClaimCheckUnavailableError` (`retryable: true`), and all eight
+SDKs pass it (`mise run check:conformance`).
 
 <a id="g6-scope"></a>
 ### G6 solution scope
@@ -841,6 +992,14 @@ Every 4xx except 404 is `ClaimRejectedError` with `retryable: false`, and the sh
 ## G7 · Trust boundary: untrusted input reaches shared and unbounded resources
 
 Requests nobody authenticated decide the Prometheus label set and how much memory a request holds (E3), how many bodies the ingest queue holds (E6), whose tenant a hook is filed under (E5), and how fast the shared quarantine bucket drains (E2). On the other side of the boundary, the admin, route and claim listeners bind every interface without authentication, redaction misses shipped credential options and crash reports print secrets (O2); the HTTP hand-off and claim refs authenticate nothing (K2, C4); secrets and numeric config are not validated (E8, O4); and the HTTP client stack carries published advisories (B10).
+
+**Status (2026-10-09).** Every G7 item is addressed: E5 (tenant binding,
+flagged hooks spend the quarantine bucket), E6 (`batcher.max_queue_bytes`),
+E8 (boot-time secret check for embedded sources), K2 (signed HTTP deliveries
+and an SDK verifier in all eight SDKs), O4 (range validation), B10
+(`mix hex.audit` in CI), C4 (64 random bits in every pack id), and O2's
+adapter residual. Accepted: supervisors' child specs still carry the config
+(O2), and refs stay bearer capabilities behind the gateway's front layer.
 
 <a id="e3"></a>
 ### E3 · High · Reproduced — Unauthenticated requests control Prometheus label cardinality and buffer full bodies
@@ -887,6 +1046,12 @@ The token bucket (100 burst, 20/s, hard-coded) is one field in one GenServer for
 
 Residual: supervisor child specs still carry the `%Ankusa.Config{}`, so a supervisor crash report can print it.
 
+**Status (2026-10-09).** `Ankusa.Sink.RabbitMQ.Connection` now redacts its
+URL in `format_status/1` and is registered under a digest of it. The
+supervisor child-spec residual is accepted (Low): SASL supervisor reports are
+off by default, and closing it would mean every child re-reading its config
+from `:persistent_term`. See [Remaining work](#remaining-work-re-assessed).
+
 <a id="e5"></a>
 ### E5 · Medium · Code — The URL tenant is not bound to the source, and `accept_flag` spends budget
 
@@ -894,12 +1059,25 @@ Residual: supervisor child specs still carry the `%Ankusa.Config{}`, so a superv
 
 `tenant_id = Map.get(req, :tenant_id) || source.tenant_id` with only a format check. Under `RouteResolver.TenantPath`, `POST /webhooks/<any-tenant>/<source>` files the hook under any tenant's storage partition, claim-check namespace and rate-limit bucket. For sources with `Verifier.None` (the `Source.new/2` default) or `accept_flag`, an anonymous sender can throttle a tenant with traffic aimed at another tenant's source. Separately, `accept_flag` routes failed verifications through `admit/3` and charges the tenant's budget, contradicting the comment at `ingest.ex:75-78` that a forged flood is free.
 
+**Status (2026-10-09).** Fixed (`edge/ingest.ex` `lookup/2`, `admit/3`). A
+source whose `tenant_id` is not `"default"` answers only routes naming that
+tenant; any other is the same `404` as a missing source. A `"default"` source
+stays shared — that is the value every source gets when none is set, and the
+one-source-per-provider-for-every-customer setup `multi-tenancy.md`
+describes depends on it. A hook accepted flagged spends its source's
+quarantine bucket, not the tenant's rate limit, and gets no dedupe key.
+
 <a id="e6"></a>
 ### E6 · Medium · Code — Ingest backpressure counts records, not bytes
 
 `edge/batcher.ex:81-92`, `config.ex:28-36`
 
 `max_queue` is 10,000 *records* per partition, two partitions by default: up to 20,000 blocked request processes, each holding a body of up to 8 MB. The dispatch side bounds bytes (`max_inflight_bytes`); the side that actually holds request memory does not.
+
+**Status (2026-10-09).** Fixed. `batcher.max_queue_bytes` (default 256 MiB)
+bounds the body bytes a partition holds, buffered and in flight, beside the
+record count; past it ingest sheds with `503`, and `[:ankusa, :load_shed]`
+carries `bytes` (`edge/batcher.ex`).
 
 <a id="e8"></a>
 ### E8 · Medium · Code — An omitted HMAC secret is the empty key
@@ -910,6 +1088,12 @@ Residual: supervisor child specs still carry the `%Ankusa.Config{}`, so a superv
 
 **Status (2026-10-03).** Fixed to fail closed, at verify time rather than at boot. `Ankusa.Verifier.Hmac` treats a missing, `nil` or empty `:secret` — and an empty list, or a list element that is empty or does not decode — as `{:error, :bad_secret}` for every hook, instead of an HMAC with the empty key (or a per-request raise). The image's loader refuses an empty `verify.secret`, or an empty list element such as an unset `${OLD:-}`, at load, so `check-config` names it. A boot-time check for embedded `Ankusa.Source` definitions is still open.
 
+**Status (2026-10-09).** The boot-time check is done:
+`Ankusa.Verifier.validate_config!/1` (through
+`Ankusa.Verifier.Hmac.validate_opts/1`) runs for every static source when the
+instance starts and in the image's loader, and fails with `source <id>:
+verifier secret is missing or undecodable`.
+
 <a id="k2"></a>
 ### K2 · Medium · Code — The HTTP hand-off is unauthenticated on both ends
 
@@ -917,12 +1101,31 @@ Residual: supervisor child specs still carry the `%Ankusa.Config{}`, so a superv
 
 `Ankusa.SDK.Receiver` "verifies nothing itself" and accepts any POST carrying `x-ankusa-id`. `Sink.Http` signs nothing, the SDK ships no constant-time compare, HMAC or timestamp-skew helper, and `integrations.md` gives no guidance. Anyone who can reach the receiver injects hooks the application treats as verified. Sign outbound requests (ingest already implements the Standard Webhooks scheme) and verify them in the SDK.
 
+**Status (2026-10-09).** Fixed on both ends. `Sink.Http` signs with
+`:secret` (Standard Webhooks, `sink/http/signer.ex`; a test checks the signer
+against the scheme's reference vector, the same one
+`conformance/cases/signature.json` pins). Every SDK ships a verifier — HMAC
+over `id.timestamp.body`, constant-time compare, 300 s tolerance, several
+secrets for rotation — that passes those vectors (`mise run
+check:conformance`), and `Ankusa.SDK.Receiver` takes `:secret` and answers
+`401` to a delivery that does not verify. `integrations.md` documents the
+receiver side.
+
 <a id="o4"></a>
 ### O4 · Medium · Code — Numeric config is type-checked, not range-checked
 
 `ankusa_server/lib/ankusa_server/config.ex`, `edge/batcher_supervisor.ex`, `dispatch/pipeline.ex:405`
 
 `batcher.partitions: 0` makes `:erlang.phash2(key, 0)` raise on every request, so every hook gets a `500`. `dispatch.concurrency: 0` starts nothing, pins the cursor, and lets the WAL grow while ingest keeps answering `201`. `check-config` passes both.
+
+**Status (2026-10-09).** Fixed. `Ankusa.Config.new/1` checks ranges after
+types: ports `0..65535`; sizes, counts and most intervals ≥ 1;
+`batcher.max_delay_ms`, `storage.roll_ms` and `storage.interval_ms` ≥ 0
+(each has a meaning at 0); `claim_check.retention_days` `nil` or ≥ 1;
+`storage.key_prefix` shape; the dispatch breaker keys in
+`Pipeline.validate_config!/1`. The message is `"<dotted.key> must be
+<constraint>, got <value>"`, and the image's loader turns it into a
+`ConfigError`, so `check-config` fails on `batcher.partitions: 0`.
 
 <a id="b10"></a>
 ### B10 · Medium · Reproduced — Most lockfiles pin a `mint` with published advisories
@@ -933,12 +1136,23 @@ Residual: supervisor child specs still carry the `%Ankusa.Config{}`, so a superv
 
 **Status (2026-10-07).** Fixed. All nine lockfiles that held `mint 1.10.1` (and `hpax 1.0.4`) now lock `mint 1.11.0` and `hpax 1.1.0`, moved with `mix deps.update mint` in each project (`mise run deps` only runs `deps.get` and leaves a locked entry alone). Failing CI on Hex advisories, the other half of the G7 item, is still open.
 
+**Status (2026-10-09).** CI fails on advisories: `mix hex.audit` runs in
+`.mise/tasks/check/{package,examples,tools}` after `deps.get --check-locked`.
+
 <a id="c4"></a>
 ### C4 · Low · Code — Refs are bearer capabilities with partly derivable ids
 
 `sink/message.ex:87-89`
 
 Refs carry no MAC. Batch packs use 64 random bits, but single-claim packs derive their entropy from `sha256(env.id)` and `received_at`, so anyone who knows a hook id and its receive time can construct the gateway URL. The gateway has no authentication by design, which leaves these ids as the only protection.
+
+**Status (2026-10-09).** Fixed for derivability. A single-claim pack id is
+`Ref.new_pack_id()` — the check-in time plus 64 random bits, the same as a
+batch pack — so neither the hook id nor its receive time yields a URL. 64
+bits rather than the scope's 128: the id has to stay a ULID (48-bit time +
+80 bits, of which the position takes 16), and 2^64 guesses per pack against
+a gateway behind an authorizer is not the weak point. Refs remain bearer
+capabilities.
 
 <a id="g7-scope"></a>
 ### G7 solution scope
@@ -960,6 +1174,13 @@ Refs carry no MAC. Batch packs use 64 random bits, but single-claim packs derive
 
 Seqs start at 1 on every node, segment keys name no node, blob adapters take no key prefix (S5), API-managed sources live in a node-local file (E4), and adapters register node-global names (B7). The docs draw N edge nodes behind a load balancer and one claim gateway for all of them; with per-node identity, that gateway cannot redeem other nodes' claims (C1), and every route write republishes the whole table through `:persistent_term` on every node (O6).
 
+**Status (2026-10-09).** The first shape, independent nodes stated
+honestly, is shipped: `storage.key_prefix` (S5), claims in their own scope
+and optionally their own store (C1), the route snapshot in ETS (O6), and
+adapters registered through the instance's registry (B7). The second shape,
+a shared store, is not; with it go fleet-wide API-managed sources (E4's last
+bullet).
+
 <a id="c1"></a>
 ### C1 · High · Code — The documented multi-node claim-check topology cannot work
 
@@ -969,6 +1190,14 @@ Claims are written through `config.storage.blob_store`, the same store as segmen
 
 **Fix:** give claims their own store with a node-independent namespace, and validate the combination at boot.
 
+**Status (2026-10-09).** Fixed. `Ankusa.BlobStore` takes a scope on every
+call: `:segments` goes to `storage.blob_store` under `storage.key_prefix`,
+`:claims` to `claim_check.blob_store` (or the segment store) with no prefix.
+Claim ids are unique across nodes (time plus random bits), so every node can
+write one claim store and one gateway serves it; `claim_check.store` in YAML.
+A gateway-only node whose claim store is `LocalFS` warns at boot that it only
+sees its own disk. Topology 3 and `deployment.md` describe this shape.
+
 <a id="o6"></a>
 ### O6 · Medium · Code — Route mutations republish the whole snapshot through `:persistent_term`
 
@@ -976,12 +1205,27 @@ Claims are written through `config.storage.blob_store`, the same store as segmen
 
 Every route mutation (ETS store), and every version change each node observes (Redis store), rebuilds and re-sorts every route and calls `:persistent_term.put/2` with a changed value. Each such put starts a global GC pass that copies the old snapshot into every process still referencing it, in-flight ingest requests included [INFERENCE: documented `persistent_term` semantics]. The module doc assumes "writes are rare (route changes)"; API-driven provisioning breaks that assumption: 10,000 route writes are O(n²) rebuild work in the store process plus 10,000 global GC passes on every node. A `put/2` with an equal value is a no-op, so instance restarts do not trigger this. An ETS table with a versioned swap fits an API-mutable table.
 
+**Status (2026-10-09).** Fixed. The snapshot is a per-instance `:protected`
+ETS table (`read_concurrency: true`) owned by the routes store. One route
+change is applied in place — the route's rows plus a fresh `:meta` row —
+instead of a rebuild (`Routes.Snapshot.mutate/3`); a whole-table publish
+(boot, seed, a Redis reload) writes a new generation, flips `:meta` to it and
+then drops the old one (`publish/1`, `drop_generation/2`), so readers see one
+generation or the other. Nothing touches `:persistent_term`. `routes_test.exs`
+resolves the first and last of 1,000 API-created routes and checks readers
+during a concurrent whole-table republish.
+
 <a id="s5"></a>
 ### S5 · Medium · Code — Segment keys collide across nodes, and there is no key prefix
 
 `storage/compactor.ex:180`, `blob_store/s3.ex`
 
 `seg/<first_seq>-<last_seq>.seg` names no node, seqs start at 1 on every node, and the S3/GCS/Azure/OCI adapters take a bucket but no key prefix, so every node needs its own bucket (`deployment.md:126-129`). That requirement is what breaks the claim-check topology (C1).
+
+**Status (2026-10-09).** Fixed. `storage.key_prefix` (`""` or `name/`
+parts; env `ANKUSA_STORAGE_KEY_PREFIX`) is prepended to every segment key by
+the `BlobStore` facade, and `list` strips it, so adapters stay
+prefix-unaware. Nodes sharing a bucket set distinct prefixes.
 
 <a id="g8-scope"></a>
 ### G8 solution scope
@@ -997,12 +1241,23 @@ Pick one shape and document it.
 
 Every metric is an event counter or a histogram. Nothing reports a level: WAL size, cursor lag, the age of the oldest undelivered hook, DLQ or pen size (O5, D8). Health endpoints return `200` without touching anything (O3), so D1, D6 and W5 look like a healthy node until the disk fills, and a live container cannot be inspected (O7).
 
+**Status (2026-10-09).** Fixed: gauges for the store, the queue (pending,
+scheduled, in flight, dead, archive backlog, oldest-due age), the pen, disk
+and dispatch (D8, O5); `/ready` that writes to the store (O3); and the O7
+release items.
+
 <a id="d8"></a>
 ### D8 · Medium · Code — The watermark is invisible
 
 `telemetry.ex`, `metrics.ex`, `dispatch/pipeline.ex:447-476,539-559`
 
 Dispatch emits only `[:dispatch, :stop]` (with no sink or source tag) and `[:dispatch, :dlq]`. There is no gauge for cursor lag against `max_seq`, the age of the oldest undelivered hook, pending/running/retrying counts, window saturation, or cursor-persist failures (a `Logger.warning` only). D1, D6 and W5 all look like healthy throughput to an operator until the disk fills.
+
+**Status (2026-10-09).** Fixed. Dispatch emits `[:ankusa, :dispatch,
+:state]` on every housekeeping tick (running, claimed, claimed bytes,
+runnable, open breakers), and `[:dispatch, :stop]` carries `sink` and
+`source_id`; `ankusa_queue_oldest_due_age_seconds` and the per-family queue
+gauges come from `Ankusa.Metrics.Gauges`.
 
 <a id="o3"></a>
 ### O3 · Medium · Code — Health is a constant
@@ -1011,12 +1266,30 @@ Dispatch emits only `[:dispatch, :stop]` (with no sink or source tag) and `[:dis
 
 Both `/health` endpoints return `200` without touching the WAL, the disk or any child. A full volume (every hook a `503`) or a crash-looping WAL leaves the container healthy in the load balancer's eyes. The image's `HEALTHCHECK` targets the admin port, so `admin.enabled: false` in YAML makes a working node unhealthy. Add a readiness check that reflects WAL writability and free space.
 
+**Status (2026-10-09).** Fixed. `GET /ready` on the ingest and admin
+listeners asks `Ankusa.Health.ready/1`: a synced write of a meta key in the
+store (cached for a second, and a failure reopens the store), and no write
+any process reported failing in the last 5 s — on a full tmpfs a RocksDB
+WAL with preallocated space still took the probe while a 270 KB hook got
+`503`, so the probe alone was not enough. `200` or `503`
+with `Retry-After: 1` and `store: "write_failed" | "store_unavailable"`. The
+image's `HEALTHCHECK` runs `docker-entrypoint healthcheck`, which asks the
+ingest port first and the admin port for a node without `:edge`.
+
 <a id="o5"></a>
 ### O5 · Medium · Code — The metrics an operator needs do not exist
 
 `metrics.ex:71-187`
 
 There are counters and histograms of events only: no gauges for WAL bytes or records, cursor lag (dispatch or compactor), oldest undelivered age, DLQ size, quarantine size, retrying jobs or window saturation. WAL stats exist only as `GET /v1/wal` (a call into the WAL process), and the DLQ count only by reading the whole DLQ file. The "alarm fires" in `architecture.md:62` has nothing to fire on.
+
+**Status (2026-10-09).** Fixed. `Ankusa.Metrics.Gauges` runs a
+`telemetry_poller` every `admin.gauge_interval_ms` (15 s) and emits
+`[:ankusa, :store | :queue | :quarantine | :disk, :state]`; `/metrics`
+exports them as `last_value` gauges (`ankusa_store_hooks`,
+`ankusa_queue_pending`, `ankusa_queue_dead`, `ankusa_quarantine_bytes`,
+`ankusa_disk_free_bytes`, …), plus `ankusa_dispatch_breaker_transitions_total`.
+A probe that fails keeps the gauge's last value and logs at `:debug`.
 
 <a id="o7"></a>
 ### O7 · Low · Code — Smaller operational defects
@@ -1027,6 +1300,15 @@ There are counters and histograms of events only: no gauges for WAL bytes or rec
 - The release ships no `vm.args`/`env.sh` (scheduler counts under CPU quotas, busy-wait), and `RELEASE_DISTRIBUTION=none` (`ankusa_server/Dockerfile:44`) removes `bin/ankusa remote`, so a live container cannot be inspected.
 
 **Status (2026-10-07).** Partly fixed. `Ankusa.Application` restarts the instance with the Registry (`rest_for_one`), but `ankusa_server` supervises its instance outside that tree. The GCS token fetch, `${` handling and `vm.args` items are open.
+
+**Status (2026-10-09).** Fixed. The Registry bullet is closed by
+`Ankusa.Instance.RegistryWatch`, which stops the instance when the Registry
+restarts so `AnkusaServer.Supervisor` starts it again. `AnkusaServer.GcsToken`
+fetches with `retry: false`, one request in flight, and caches the token
+until shortly before expiry. Any `${` the loader cannot resolve is a
+`ConfigError`. `rel/vm.args.eex` turns off scheduler busy-wait and binds
+distribution to loopback, `rel/env.sh.eex` pins epmd to loopback and keeps
+`RELEASE_DISTRIBUTION=name`, so `docker-entrypoint remote` and `rpc` work.
 
 <a id="g9-scope"></a>
 ### G9 solution scope
@@ -1043,11 +1325,11 @@ Each group's fix includes rewriting the claims below that it disproves.
 | Claim | Where | Reality |
 |---|---|---|
 | "Never return `2xx` until the hook is durably accepted." | `architecture.md:5` | `201` for a non-UTF-8 header no queue sink can ever take (B8, fixed: the edge answers `400 invalid_header`). (The silent drop for a source deleted before dispatch, D2, is fixed: the hook is dead-lettered as `{:source_gone, id}` and can be replayed. The drop of unroutable RabbitMQ publishes, B1, is fixed: they are retried, then dead-lettered. The `202` for quarantine with no way back, E1, is fixed: a `quarantine` replay job re-verifies and releases held hooks.) |
-| "Take the compactor down: ingest keeps acking, the WAL grows, an alarm fires, nothing is lost." | `architecture.md:62-73`, `Ankusa.Instance` module doc | Ingest does keep acking and nothing is lost, and the compactor no longer rebuilds the instance (S1 fixed) — but **an alarm still does not fire**: no store-size or cursor-lag metric is exposed (O5). |
+| "Take the compactor down: ingest keeps acking, the WAL grows, an alarm fires, nothing is lost." | `architecture.md:62-73`, `Ankusa.Instance` module doc | Fixed: ingest keeps acking, nothing is lost, the compactor no longer rebuilds the instance (S1), and there is now something to alarm on — `ankusa_queue_archive_pending`, `ankusa_store_disk_bytes` and `ankusa_disk_free_bytes` gauges, and `/ready` turning `503` when the store refuses writes (O5, O3). |
 | Quarantine: "a flood of forged requests can't fill the disk". | `delivery.md:442-444` | Fixed: the pen's bytes are capped by `quarantine.max_bytes`, and a full pen refuses with `503 quarantine_full` instead of growing (E2). |
 | "A hook in the pen was never acked." | `delivery.md:459-460` | Fixed: the claim is gone from `delivery.md`, which now says the provider got a `202`, and the pen has a way back — a `quarantine` replay job re-verifies held hooks against the current secret and commits the ones that pass (E1). |
-| "There are no global process names anywhere in the framework." | `architecture.md:220-221` | Every adapter registers fixed node-global supervisors (B7). |
-| One claim-check gateway serves N ingest nodes. | `architecture.md:288-331` | Per-node buckets make other nodes' claims `404` (C1). |
+| "There are no global process names anywhere in the framework." | `architecture.md:220-221` | Fixed by rewriting the claim: nothing is `:global`; instance-scoped processes, adapter connections included, register through the instance's registry, and `architecture.md` names the node-local exceptions (each adapter's `DynamicSupervisor`, brod's atom client id, the S3 credential cache) (B7). |
+| One claim-check gateway serves N ingest nodes. | `architecture.md:288-331` | Fixed: claims are never prefixed and may live in their own store, segments take a per-node `storage.key_prefix`, so N nodes share one claim store and one gateway (C1, S5). |
 | "The dynamic store itself isn't shipped yet." | `multi-tenancy.md:127` | `SourceStore.Persistent` and tenant source CRUD ship. |
 
 ## What is done well
@@ -1074,44 +1356,41 @@ Each group's fix includes rewriting the claims below that it disproves.
 5. Dead-letter a hook whose source is gone instead of completing it (D2); replay through `safe_deliver/4`, counting only successes (D5). — **Done** (D2 via delivery rows in #54; D5 via replay jobs in #59).
 6. RabbitMQ `mandatory` with a return handler, a channel monitor, and `durable?/1` false until both exist (B1, B3). — **Done** (#58).
 7. Quarantine stops answering `202` without a way back; per-source buckets, `429` on exhaustion, a byte cap (E1, E2). — **Done** (#61).
-8. Retries as pipeline-owned timers that free the slot, and per-attempt deadlines: the cheapest relief for D1 until Phase 1 replaces the pipeline (D1, D4, D6). — **Done** (#54, #62); per-sink limits and breakers remain G4.
+8. Retries as pipeline-owned timers that free the slot, and per-attempt deadlines: the cheapest relief for D1 until Phase 1 replaces the pipeline (D1, D4, D6). — **Done** (#54, #62); per-sink queues, caps and breakers followed with G4 (2026-10-09).
 9. Validate header bytes at the edge (B8); label metrics after the source lookup (E3); bind the admin, route and claim listeners to loopback (O2); bump `mint` (B10). — B8 **done**; E3 **done** (#64); O2 **done**; B10 **done** (#64).
 
 **Phase 1: replace the storage layer.** Run option C's go/no-go tests (D's if C fails them), then build the store and the per-sink scheduler on it. G1, G3, G4 and G5 land together, because they share the schema.
 
-*Status (2026-10-07): the store and per-sink delivery rows shipped as option D (#54); G3 is done except C3; G5 is done (#59, #60); G4 is partly done.*
+*Status (2026-10-09): the store and per-sink delivery rows shipped as option D (#54); G3 is done (C3: claims are dated and retained from check-in); G5 is done (#59, #60); G4 is done: per-sink queues and caps, circuit breakers, and the adapter fixes B2, B4, B5 and B7.*
 
 **Phase 2: contracts and operations.** G6 with its conformance changes, the rest of G7, and G9.
 
-*Status: G6 and G9 open; G7 partly done (E2, E3, E8, B10).*
+*Status (2026-10-09): G6, G7 and G9 are done. Accepted residuals are listed below.*
 
 **Phase 3: the fleet.** Choose G8's shape, and ship option F as an explicit mode for broker-only deployments.
 
-*Status: open.*
+*Status (2026-10-09): G8's first shape — independent nodes, stated honestly — is shipped (key prefixes, a shared claim store, the ETS route snapshot, registry-scoped adapters). The shared-store shape and option F as a separate mode are not shipped; `wal.type: none` remains the broker-first deployment.*
 
 ## Remaining work, re-assessed
 
-Re-rated against the code on 2026-10-07 with this review's own severity definitions. No Critical remains. Every former Critical is fixed or reduced to a residual that needs a rarer trigger (a power loss inside a millisecond window, a custom sink whose callback raises, a node without ingest traffic during a full disk).
+Re-rated against the code on 2026-10-09 with this review's own severity definitions. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
 
-| Rank | Findings | Now (recorded) | What still fails | Size |
-|---|---|---|---|---|
-| 1 · Done (this PR) | B8 | High (High) | A non-UTF-8 byte in any forwarded header: `201`, ~6 h of retries, dead-letter; `503` forever under `wal: none`. Fix: reject with `400` at the edge, or base64 non-UTF-8 header values in the message. | S |
-| 2 · Done (this PR) | O2 | High (High) | Admin, route and claim listeners on every interface, unauthenticated; redaction misses `sas_token`, `private_key` and query tokens; Replayer crash reports print the config. | S–M |
-| 3 · Done (this PR) | S1, S3, W7, D3, E2 residuals | Medium (Critical/High) | No compactor backoff; full-disk recovery only through ingest; `mkdir_p` race; unguarded `inline_max_bytes`; quarantine call exit is a `500`. Each is a few lines. | S each |
-| 4 | O5, D8, O3 | Medium (Medium) | No gauges and a constant `/health`, so none of rank 3's failures raises an alarm. | S–M |
-| 5 | D1 residual, B2, B5, B4, B7 | High (Critical/High) | One global slot pool and window: a hanging sink holds slots 30 s per attempt in waves. RabbitMQ publishes serially and still publishes after the caller timed out. Kafka produces are not cancelled. | M |
-| 6 | E4, B9, C2, S6, K4 | High/Medium (High/Medium) | Transient store failures are `404`; the Redis route store regresses its version; every HTTP non-2xx is retried with no body cap; blob listing errors look like empty buckets; SDKs treat `429` as permanent. | M |
-| 7 | E5, E6, K2, O4, C4, C3 | Medium/Low | URL tenant not bound to source; `accept_flag` spends budget; no byte bound on the ingest queue; unsigned outbound; no config ranges; derivable single-claim ids; claim retention by receive time. | S each |
-| 8 | C1, S5, O6 | High (High), multi-node only | The documented one-gateway claim topology `404`s other nodes' claims; segment keys collide in a shared bucket. Needs G8's decision first. | M–L |
-
-Phase 0 is complete: ranks 1–3 are done. Rank 4 is next: it makes the remaining failures visible, so do it before rank 5.
+| Finding | Severity now | What still fails | Why it stays |
+|---|---|---|---|
+| O2 residual | Low | Supervisors' child specs carry `%Ankusa.Config{}`, so `:sys.get_status/1` on a supervisor, or a SASL supervisor report, prints it. | SASL reports are off by default; closing it means every child re-reading config from `:persistent_term`. Accepted. |
+| B7 residual | Low | Adapter connections are never reaped: a connection whose sink was removed (or a URL an API-managed source used once) stays up until the node restarts. | Bounded by distinct `(instance, URL, exchange/connection)` keys; reaping needs an idle timer per adapter. |
+| B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | brod has no cancel and no idempotent producer; consumers dedupe on `idempotency_key`. |
+| E4 residual | Medium, multi-node only | API-managed sources live in each node's store, so a source created through one node's admin API is a `404` on the others. | Needs a shared source store, G8's second shape. |
+| C2 residual | Low | The gateway reads a claim whole (bounded by `max_body_bytes`) and has no `Range`. | Claims are at most `max_body_bytes`; streaming is an optimisation. |
+| S6 residual | Low | Blob-store calls are single-shot; a segment PUT copies the iodata into one binary first. | The compactor retries on its next tick with backoff; `list` is not on any shipped path. |
+| E5 deviation | — | A source with `tenant_id: "default"` is shared and answers any URL tenant. | `"default"` is every source's default; binding it would break one-source-for-every-customer setups. Give a source a real tenant to bind it. |
 
 ## Decisions that choose between the options
 
-1. **Per-key ordering.** Keep ordering lanes (a custom scheduler on the store), or drop them, which makes Oban an option ([G4](#g4-scope))?
-2. **Durability before the `2xx`.** Is "this host" enough (option C, optionally with E′), or must an acked hook survive losing its host (option E, a shared Postgres store, or option F)?
-3. **Native code in core.** Is a NIF acceptable (options C and D)? If not, the remaining path is option B, which this review advises against.
-4. **Default deployment.** A single container with nothing else to run (option C), or broker-first (option F)?
+1. **Per-key ordering.** Keep ordering lanes (a custom scheduler on the store), or drop them, which makes Oban an option ([G4](#g4-scope))? — *Decided: lanes dropped. Deliveries are unordered and scheduled per sink key on the store.*
+2. **Durability before the `2xx`.** Is "this host" enough (option C, optionally with E′), or must an acked hook survive losing its host (option E, a shared Postgres store, or option F)? — *Open. "This host" is what ships; `wal.type: none` moves durability to the broker.*
+3. **Native code in core.** Is a NIF acceptable (options C and D)? If not, the remaining path is option B, which this review advises against. — *Decided: yes, RocksDB (option D).*
+4. **Default deployment.** A single container with nothing else to run (option C), or broker-first (option F)? — *Decided: a single container.*
 
 ## Appendix A: probes
 

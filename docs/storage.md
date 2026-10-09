@@ -132,11 +132,13 @@ config :ankusa, wal: :disk   # the default
 
 One node is one local store. To scale, run **N independent all-role
 nodes behind a load balancer**. Each with its own data volume and its own
-DLQ/admin API. Each node also needs **its own bucket** (or its own LocalFS
-root) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg` (with
-the sibling `.idx` object), which name no instance or node, and remote blob
-stores ignore the `instance` argument, so two nodes sharing a bucket silently
-overwrite each other's segments. See [`deployment.md`](deployment.md) for the
+DLQ/admin API. Segment keys are `seg/<first_seq>-<last_seq>.seg` (with the
+sibling `.idx` object), which name no instance or node, so two nodes writing
+the same keys would silently overwrite each other's segments: give each node
+its own `storage.key_prefix` (`node-a/`, `node-b/`) and they can share one
+bucket, or give each its own bucket or LocalFS root. Claims are never
+prefixed — pack ids carry 64 random bits, so every node's claims can share
+one place and one gateway. See [`deployment.md`](deployment.md) for the
 operational shape.
 
 Under `wal: :none` none of this applies: there is no queue, no segment story
@@ -151,8 +153,20 @@ whatever answers the sink) is the only shared state. See
 @callback get(instance, key, opts) :: {:ok, binary()} | {:error, term()}
 @callback get_range(instance, key, offset, length, opts) :: {:ok, binary()} | {:error, term()}
 @callback delete(instance, key, opts) :: :ok
-@callback list(instance, prefix :: String.t(), opts) :: [String.t()]
+@callback list(instance, prefix :: String.t(), opts) :: {:ok, [String.t()]} | {:error, term()}
 ```
+
+Callers go through the facade, which names a **scope** on every call —
+`Ankusa.BlobStore.put(instance, :segments | :claims, key, data)` and so on.
+`:segments` resolves `storage.blob_store` and puts every key under
+`storage.key_prefix` (`list/3` strips it again from what it returns);
+`:claims` resolves `claim_check.blob_store`, else the segment store, with no
+prefix. Adapters see full keys and stay prefix-unaware.
+
+`list/3` returns `{:ok, keys}` or `{:error, reason}` — a listing that failed
+halfway is an error, never a shorter list — and every remote adapter follows
+its store's pagination (S3 continuation tokens, GCS page tokens, Azure
+markers, OCI `nextStartWith`) to the end.
 
 `get_range/5` exists because the compactor never writes one object per
 hook. Segments hold many records, and a single range `GET` reads exactly
@@ -166,15 +180,16 @@ claim consistently regardless of which store is configured.
 
 Two independent namespaces share one `BlobStore` by default and never
 collide: `seg/...` (each segment written by `Ankusa.Storage.Compactor`, plus
-its sibling `.idx` index object) and `claims/...` (`Ankusa.ClaimCheck`, packed
-per tenant per dispatch batch, one object holding many claims under
-`claims/tenant=<t>/dt=<day>/<pack_id>`). Retention differs per namespace
-too. See [`claim-check.md#retention`](claim-check.md#retention).
+its sibling `.idx` index object, under `storage.key_prefix`) and `claims/...`
+(`Ankusa.ClaimCheck`, packed per tenant per dispatch batch, one object holding
+many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`; or in their own
+store with `claim_check.blob_store`). Retention differs per namespace too. See
+[`claim-check.md#retention`](claim-check.md#retention).
 
 | Adapter | Deps | Notes |
 | --- | --- | --- |
 | `BlobStore.LocalFS` | none | Default. Durable writes: temp file fsync, rename, directory fsync; `put` returns `{:error, reason}` instead of raising. `get_range` uses `:file.pread/3`, never slurps the whole segment. |
-| `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
+| `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. Credentials: `:access_key_id`/`:secret_access_key` (+ `:session_token`), else `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, else web identity (IRSA: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, through STS `AssumeRoleWithWebIdentity`), else the EC2 instance profile (IMDSv2); temporary credentials are cached until shortly before they expire. |
 | `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS. The adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
 | `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
 | `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |

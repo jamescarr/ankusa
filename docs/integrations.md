@@ -38,8 +38,12 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
   `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the hook carries them.
 - Respond `2xx` only after the job is durably enqueued: a `202` after an
   in-transaction insert commits, not before.
-- A non-`2xx` response or a timeout is retried per `dispatch.retry`, then
-  dead-lettered (see [`delivery.md`](delivery.md)).
+- `408`, `429`, any other `4xx` not listed next, `5xx` and a timeout are
+  retried per `dispatch.retry` (no sooner than a `Retry-After` you send), then
+  dead-lettered; `400`, `401`, `403`, `404`, `410`, `413` and `422` are
+  permanent and dead-letter at once — fix the cause and replay the DLQ (see
+  [`delivery.md`](delivery.md)). Only the status is read: the sink reads at
+  most `max_response_bytes` (64 KiB) of your response body.
 - Dedupe on `x-ankusa-idempotency-key`: consumers are idempotent receivers.
   Delivery is at-least-once, so your endpoint can see the same key twice (a
   `2xx` that was lost in transit, a dispatch retry after a timeout that
@@ -57,7 +61,46 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
   carried in `Sink.Message`'s `headers`), minus authentication and framing
   headers and every `x-ankusa-*` name. They arrive beside the `x-ankusa-*`
   headers above; when the source extracts one as its dedupe key it is also
-  `x-ankusa-dedupe-key`.
+  `x-ankusa-dedupe-key`. With a signing `secret` (below) the sink's own
+  `webhook-id`, `webhook-timestamp` and `webhook-signature` replace any
+  forwarded headers of those names.
+
+### Signed deliveries
+
+Give the sink a `secret` and every delivery carries a
+[Standard Webhooks](https://www.standardwebhooks.com/) signature:
+`webhook-id` (the hook id), `webhook-timestamp` (unix seconds at send time)
+and `webhook-signature` (`v1,<base64 HMAC-SHA256>` over
+`<webhook-id>.<webhook-timestamp>.<raw body>`; one entry per secret while you
+rotate).
+
+```yaml
+sinks:
+  - type: http
+    url: https://jobs.internal/deliveries
+    secret: ${DELIVERIES_WHSEC}          # whsec_ + base64, or a list while rotating
+```
+
+Every SDK verifies it the same way — `whsec_` secrets decode from base64, any
+other string is its own bytes; a constant-time compare; a 300-second timestamp
+window by default — and fails with a never-retryable `InvalidSignatureError`
+(`code`: `invalid_secret`, `missing_header`, `invalid_timestamp`,
+`timestamp_out_of_tolerance`, `no_matching_signature`). Answer `401`: it
+dead-letters at once, and a fixed secret plus a DLQ replay redelivers.
+
+| SDK | Verify |
+| --- | --- |
+| TypeScript (`ankusa`) | `verifySignature({ headers, body, secrets })` |
+| Python (`ankusa`) | `verify_signature(headers, body, secrets)` |
+| Go | `ankusa.VerifySignature(headers, body, secrets, ankusa.VerifyOptions{})` |
+| Rust | `verify_signature(&headers, body, &secrets, VerifyOptions::default())` |
+| Ruby (`ankusa-sdk`) | `Ankusa.verify_signature(headers, body, secrets)` |
+| PHP | `Ankusa\Webhook\Signature::verify($headers, $body, $secrets)` |
+| Java | `Signature.verify(headers, body, secrets)` |
+| Elixir (`ankusa_sdk`) | `Ankusa.SDK.Signature.verify/4`, or `Ankusa.SDK.Receiver`'s `:secret` option |
+
+Verify the raw bytes, before any JSON parser touches them. The shared vectors
+are `conformance/cases/signature.json`.
 
 Elixir consumers get this contract as a `Plug`: `Ankusa.SDK.Receiver` (Hex
 package

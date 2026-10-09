@@ -100,12 +100,33 @@ way out. To back up, stop the node and copy the whole `<data_dir>`;
 `segments/` is immutable and can be copied while it runs. If segments live in
 S3/GCS, the store directory is all you need.
 
-The image reports `healthy` via `:4002/health`, so orchestrators can gate on it
-instead of racing the listener. That check runs inside the container, where the
-admin API's loopback bind is reachable. A probe that arrives from outside it (a
-Kubernetes `httpGet` hits the pod address) cannot reach `:4002` unless
-`admin.ip` is set to an address it can route to; probe `:4000/health` instead,
-which the edge answers too.
+**Liveness and readiness are two probes.** `GET /health` says the process
+answers. `GET /ready` says this node can take a hook: its store accepted a
+synced write in the last second and no write has failed in the last 5 s
+(`200`, `{"status":"ready","store":"ok",…}`), or not (`503`,
+`Retry-After: 1`, `store` = `write_failed` or
+`store_unavailable` — a full volume, a latched RocksDB error, a store that is
+reopening). A node with no store (`wal.type: none`, a gateway) is ready while
+it runs (`store: "none"`). Both
+are on the ingest port and on the admin port. Point a Kubernetes
+`livenessProbe` at `/health` and the `readinessProbe` at `:4000/ready` (a
+probe from outside the pod hits the pod address, and `:4002` binds loopback
+unless `admin.ip` says otherwise), so a node with a full disk leaves the
+load balancer instead of being restarted in a loop. The image's
+`HEALTHCHECK` runs `docker-entrypoint healthcheck`, which asks `/ready` on the
+ingest port and falls back to the admin port for a node without `:edge`, so
+`docker ps` shows `unhealthy` while the store refuses writes and `healthy`
+again once space frees.
+
+**Attaching to a running node.** `docker exec -it <ctr> docker-entrypoint
+remote` opens an IEx shell inside the node; `docker exec <ctr>
+docker-entrypoint rpc 'IO.inspect(Ankusa.Health.ready(:default))'` evaluates
+one expression. Distribution is on, and both it and epmd listen on
+`127.0.0.1` only, so nothing outside the container's network namespace can
+connect. The release cookie is baked into the image, so anything that shares
+that namespace (a sidecar in the same pod) and knows the image could attach:
+set `RELEASE_COOKIE` per deployment, or `RELEASE_DISTRIBUTION=none` to turn
+distribution off (and lose `remote`/`rpc`).
 
 Both compose files are worked examples:
 
@@ -147,10 +168,14 @@ Two things to get right once you run more than one node:
 - **Every queue role in one node.** The store is local to a BEAM node, so
   `edge`, `dispatch`, and `storage` cannot be split across hosts (see above).
   `:claim_check` is the exception and can run anywhere.
-- **Its own bucket per node.** Segment keys are `seg/<first_seq>-<last_seq>.seg`
-  and remote blob stores ignore the instance, so nodes sharing one bucket
-  overwrite each other's segments. Give each node its own bucket (or its own
-  LocalFS directory).
+- **Distinct segment keys per node.** Segment keys are
+  `seg/<first_seq>-<last_seq>.seg` and remote blob stores ignore the
+  instance, so nodes writing the same keys overwrite each other's segments.
+  Give each node its own `storage.key_prefix` (`node-a/`, `node-b/`; env
+  `ANKUSA_STORAGE_KEY_PREFIX`) and they can share one bucket — or give each
+  its own bucket or LocalFS directory. Claims are never prefixed (claim ids
+  are unique across nodes), so one claim-check gateway serves the claims of
+  every node; see [`claim-check.md`](claim-check.md#a-dedicated-claim-store).
 
 If per-node state is what you want to get rid of, `wal.type: none` moves the
 durable copy to the broker: replicas then share no queue at all — no hook

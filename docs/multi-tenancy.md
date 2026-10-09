@@ -52,9 +52,10 @@ config :ankusa, route_resolver: {Ankusa.RouteResolver.Path, prefix: ["webhooks"]
 ```
 
 **`Ankusa.RouteResolver.TenantPath`** resolves `POST /webhooks/:tenant_id/:source_id`.
-The tenant is carried in the URL and is **authoritative**: it wins over
-whatever the resolved source's own `tenant_id` says. One instance serves
-many tenants over one path scheme.
+The tenant is carried in the URL and names the tenant a *shared* source (one
+whose `tenant_id` is `"default"`) stores the hook under: one instance serves
+many tenants over one path scheme. A source that belongs to a tenant answers
+only that tenant's URL; see [binding](#tenant-scoping-what-tenant_id-actually-does).
 
 ```elixir
 config :ankusa, route_resolver: {Ankusa.RouteResolver.TenantPath, prefix: ["webhooks"]}
@@ -115,9 +116,18 @@ An unresolvable URL shape returns `:error`, which the router turns into a
 
 Resolution order for a given request: `route.tenant_id` (if the resolver set
 one) wins; otherwise `source.tenant_id` (if the source's config set one);
-otherwise `"default"`. This means `TenantPath` and per-source `tenant_id`
-can coexist: a resolver-provided tenant always overrides a source's
-declared one, never the reverse.
+otherwise `"default"`.
+
+**A tenant's source answers only its tenant.** A source whose `tenant_id` is
+anything but `"default"` is bound to that tenant: a route naming another
+tenant (`POST /webhooks/globex/acme-stripe` for a source owned by `acme`) is
+the same `404` as a source that does not exist, so one tenant cannot write
+into another's storage scope and the URL reveals nothing about which sources
+other tenants have. A `"default"` source is shared — the one `stripe` source
+behind `/webhooks/:tenant/stripe` for every customer — and stores each hook
+under the URL's tenant. (`"default"` is what a source gets when none is set,
+which is why it means "shared" rather than "owned by a tenant called
+default".)
 
 ## Dynamic sources
 

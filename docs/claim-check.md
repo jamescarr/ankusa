@@ -88,6 +88,35 @@ A single container can run it next to the other roles
 does. Either way, keep port 4001 on your internal network: it serves webhook
 payloads.
 
+**The gateway's credential needs read and list.** On S3 that is
+`s3:GetObject` *and* `s3:ListBucket` on the bucket: without `ListBucket`, S3
+answers a missing key with `403`, not `404`, and an expired claim would look
+like a permission problem. A `403` from the store is answered
+`503 store_forbidden` with `Retry-After: 60` — retryable, because a fixed
+policy makes the same request succeed.
+
+### A dedicated claim store
+
+Claims go to the `storage` bucket by default. `claim_check.store` (same shape
+as `storage`: `type: local|s3|gcs`, its `s3:`/`gcs:` block, plus `root` for
+`local`) sends them somewhere else — a bucket with its own lifecycle rule and
+its own read-only policy for the gateway:
+
+```yaml
+claim_check:
+  store:
+    type: s3
+    s3:
+      bucket: "${CLAIMS_BUCKET}"
+      region: "${S3_REGION}"
+```
+
+Set it the same on every node that writes claims and on the gateway. Claim
+keys never take `storage.key_prefix` (claim ids are already unique), so one
+gateway serves claims written by every node of a fleet. A gateway-only node
+whose claim store is `local` logs a warning at boot: it reads its own disk, and
+other nodes' claims are only there if that directory is shared.
+
 **The gateway does no authentication or authorization.** Who may read what is
 decided in front of it: a service mesh, Envoy, an API gateway, a cloud load
 balancer with OIDC. It logs a warning saying so at startup, the same as the
@@ -100,8 +129,10 @@ GET /v1/claims/{tenant}/{claim_id}
 ```
 
 A `200` returns exactly the claim's bytes, as `application/octet-stream`,
-with `cache-control: public, max-age=31536000, immutable`. Claims are written
-once and never rewritten, so they're safe to cache forever.
+with `cache-control: private, max-age=31536000, immutable`. Claims are written
+once and never rewritten, so a client may cache them forever; `private` keeps
+a shared cache from storing one tenant's payload. `HEAD` on the same path
+answers the same status and `content-length` with no body.
 
 **The gateway doesn't check integrity**: the path carries no digest, so only
 the holder of the message can. Compare the bytes' sha256 against the
@@ -118,11 +149,16 @@ Errors are JSON: `{"error": "not_found"}`.
 
 | Status | `error` | Cause | Retry? |
 | --- | --- | --- | --- |
-| `200` |  | the bytes, cacheable forever |  |
+| `200` |  | the bytes, cacheable forever by the client |  |
 | `400` | `invalid_tenant`, `invalid_id` | tenant outside `[A-Za-z0-9_-]{1,64}`; claim id not a canonical ULID | No, a bug |
 | `404` | `not_found` | no such claim: expired by retention, or never written | No, dead-letter |
+| `408`, `429` |  | a front layer (proxy, API gateway) timing out or throttling | Yes, retry |
 | `503` | `store_unavailable` | the object store is unreachable; `Retry-After: 1` | Yes |
+| `503` | `store_forbidden` | the object store refused the gateway's credential; `Retry-After: 60` | Yes, after fixing the policy |
 |  |  | bytes don't match the message's sha256 (your check) | No, dead-letter |
+
+The `503` body is only the `error` code; the store's own error (which can name
+the bucket) goes to the gateway's log.
 
 Redeeming doesn't delete. Several consumers can redeem one claim, every queue
 bound to a fanout exchange, say, and claims go away only through
@@ -140,7 +176,8 @@ Anything else can be refused at the edge. The tenant is a path segment, so an
 authorizer compares it to the caller's identity without reading a body. One
 rule matters more than the rest: **a shared cache must sit behind the
 authorizer, never in front of it**. A cache in front would serve one tenant's
-payload to another tenant's request.
+payload to another tenant's request; the gateway's `cache-control: private`
+tells a standards-following shared cache not to store claims at all.
 
 ### From TypeScript, with the SDK
 
@@ -412,19 +449,25 @@ Claims live at
 claims/tenant=acme/dt=2026-09-24/01M39VMD8RA3C5HR4RBV67Y000
 ```
 
-in the storage bucket, beside the `seg/` segments. The last segment is the
-pack id: any of its claim ids with the position bits (the last three
-characters, plus the lowest bit of the fourth-from-last) zeroed. `dt` is the
-UTC date of the id's timestamp, so the key is computable from the reference.
-Hive-style `key=value` folders are what Spark and Databricks partition
-discovery, BigQuery, and Athena read without configuration.
+in the claim store (the storage bucket unless `claim_check.store` is set),
+beside the `seg/` segments and never under `storage.key_prefix`. The last
+segment is the pack id: any of its claim ids with the position bits (the last
+three characters, plus the lowest bit of the fourth-from-last) zeroed. A pack
+id is the check-in time plus 64 random bits, for a batch pack and a
+single-claim pack alike, so an id can't be derived from a hook id. `dt` is the
+UTC date of the id's timestamp — the check-in date, not the hook's receive
+date — so the key is computable from the reference. Hive-style `key=value`
+folders are what Spark and Databricks partition discovery, BigQuery, and
+Athena read without configuration.
 
 ## Retention
 
 **Retention has to outlast your slowest consumer.** A claim that expires before
 it's redeemed is the one way a claim check loses data: the worker gets `404`.
 Cover the longest a message can sit in any queue, plus however long you might
-wait before replaying a dead letter.
+wait before replaying a dead letter. Retention counts from **check-in**, the
+`dt=` date: a hook that sat in a backlog for a week before its first delivery
+gets the full retention window from that delivery, not from its arrival.
 
 - **S3 or GCS:** add a lifecycle rule on the `claims/` prefix. Ankusa doesn't
   expire these for you.
@@ -435,9 +478,11 @@ wait before replaying a dead letter.
       "Filter":{"Prefix":"claims/"},"Expiration":{"Days":14}}]}'
   ```
 
-- **Local storage:** set `claim_check.retention_days` on the node running the
-  `storage` role. It deletes whole `dt=` day directories once everything in them
-  is past retention, every hour.
+- **Local storage:** set `claim_check.retention_days` (≥ 1) on the node running
+  the `storage` role. It deletes whole `dt=` day directories once everything in
+  them is past retention, every hour; a directory it can't delete is logged and
+  the sweep moves on. Setting `retention_days` with a non-local claim store is a
+  boot error: the sweeper never touches a bucket.
 
 ## Reading claims from a data platform
 
