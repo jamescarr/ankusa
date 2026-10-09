@@ -59,6 +59,11 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **Circuit breakers are on by default** (`dispatch.breaker_failures: 5`): a
+  sink that keeps failing has its rows parked, without spending attempts,
+  instead of each retrying on the policy's schedule, so they reach the DLQ
+  later than before. `breaker_failures: 0` keeps the old behaviour. A replay
+  job counts its rows parked behind an open breaker toward auto-pause.
 - `Sink.Http` maps `400`, `401`, `403`, `404`, `410`, `413`, `422` to
   `{:permanent, {:status, s}}` (dead-letter now) and honours `Retry-After` on
   `408`, `429` and `5xx`.
@@ -91,6 +96,18 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - The claim sweeper no longer stops at a partition it cannot delete
   (`File.rm_rf/1`, logged); `claim_check.retention_days` must be `nil` or
   ≥ 1, and `sweep_interval_ms` positive.
+- The S3 and Azure managed-identity credential caches are created when the
+  `:ankusa` application starts; they used to belong to whichever request or task
+  filled them first and vanished with it, so temporary credentials were
+  fetched again on almost every call.
+- The route snapshot table is owned by `Ankusa.Routes.TableOwner` and lent to
+  the routes store, so a store crash no longer deletes it: the guard keeps
+  enforcing the last published routes while the store restarts.
+- A `{:permanent, _}` answer to a breaker's probe closes the breaker; it used
+  to leave the probe slot taken, parking the key forever.
+- `storage.key_prefix` is applied when a segment is named and the catalogue
+  keeps the full key, so changing the prefix no longer strands archived
+  segments.
 
 ## [0.5.0] - 2026-10-08
 

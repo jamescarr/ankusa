@@ -125,11 +125,12 @@ defmodule Ankusa.Dispatch.Replayer do
                 dead: job.dead + Map.get(counts, :dead, 0)
             }
 
-            win = Map.get(state.windows, id, %{delivered: 0, dead: 0})
+            win = Map.get(state.windows, id, %{delivered: 0, dead: 0, parked: 0})
 
             win = %{
               delivered: win.delivered + Map.get(counts, :delivered, 0),
-              dead: win.dead + Map.get(counts, :dead, 0)
+              dead: win.dead + Map.get(counts, :dead, 0),
+              parked: Map.get(win, :parked, 0) + Map.get(counts, :parked, 0)
             }
 
             state = %{
@@ -987,15 +988,20 @@ defmodule Ankusa.Dispatch.Replayer do
     case Map.fetch(state.jobs, id) do
       {:ok, %{state: :running} = job} ->
         win = Map.fetch!(state.windows, id)
+        # Parked rows count as failures: a replay into a destination whose
+        # breaker is open would otherwise never dead-letter again, and so never
+        # pause, while it drains the whole DLQ into rows waiting on the breaker.
+        failed = win.dead + Map.get(win, :parked, 0)
 
-        if win.dead >= @auto_pause_min_dead and win.dead > win.delivered do
+        if failed >= @auto_pause_min_dead and failed > win.delivered do
           now = System.system_time(:millisecond)
 
           job = %{
             job
             | state: :paused,
               error:
-                "auto-paused: #{win.dead} replayed deliveries dead-lettered again, " <>
+                "auto-paused: #{win.dead} replayed deliveries dead-lettered again and " <>
+                  "#{Map.get(win, :parked, 0)} parked behind an open circuit breaker, " <>
                   "#{win.delivered} delivered, since it last resumed",
               updated_at: now
           }

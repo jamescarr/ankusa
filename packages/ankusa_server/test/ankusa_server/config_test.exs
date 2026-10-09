@@ -176,6 +176,20 @@ defmodule AnkusaServer.ConfigTest do
                "use ${NAME:-} for an empty default)"
   end
 
+  test "a substituted value may itself contain ${" do
+    path =
+      tmp_config("""
+      sources:
+        stripe:
+          verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
+          sinks: [{type: log}]
+      """)
+
+    loaded = Config.load!(path: path, env: %{"STRIPE_WHSEC" => "whsec_a${b}c"})
+    %{verifier: {_hmac, opts}} = source_from(loaded.config, "stripe")
+    assert opts[:secret] == "whsec_a${b}c"
+  end
+
   test "a verify secret that does not decode fails the load, naming the source" do
     path =
       tmp_config("""

@@ -588,6 +588,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
         case admit(state, key) do
           {:park, at, state} ->
+            state = bump_replay(state, item.row, :parked)
             {state, park_ops(item, at) ++ ops, pairs, jobs, sources}
 
           {:pass, state} ->
@@ -870,9 +871,12 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   # A claimed job goes back to its row, due at `at`, with its attempt count
   # unchanged, and leaves the window.
+  # A replayed row parked behind an open breaker is reported as `:parked`, so a
+  # replay job aimed at a destination that is still down auto-pauses instead of
+  # moving the whole DLQ into rows that wait on the breaker.
   defp park(state, job, at) do
     state = %{state | claimed: state.claimed - 1, claimed_bytes: state.claimed_bytes - job.size}
-    append(state, park_ops(job, at))
+    state |> bump_replay(job.row, :parked) |> append(park_ops(job, at))
   end
 
   defp park_ops(%{seq: seq, sink: sink, row: row}, at),
@@ -888,6 +892,9 @@ defmodule Ankusa.Dispatch.Pipeline do
   # Every attempt's outcome moves its key's breaker. `:ok` closes it. A failure
   # that is not `{:permanent, _}` counts; the `breaker_failures`-th in a row, or
   # a failed probe, opens it, and whatever of the key is still queued is parked.
+  # A `{:permanent, _}` answer to a probe closes it: the destination answered,
+  # it just refused that one hook (and leaving the probe slot set would park
+  # the key forever).
   defp trip(state, job, :ok, _probe?) do
     case Map.pop(state.breakers, job.key) do
       {nil, _breakers} ->
@@ -908,6 +915,9 @@ defmodule Ankusa.Dispatch.Pipeline do
     cond do
       dispatch.breaker_failures == 0 ->
         state
+
+      match?({:permanent, _}, Sink.classify(reason)) and probe? ->
+        trip(state, job, :ok, probe?)
 
       match?({:permanent, _}, Sink.classify(reason)) ->
         state
@@ -1251,7 +1261,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   defp bump_replay(state, row, kind) do
     case Map.get(row, :replay) do
       r when is_binary(r) ->
-        counts = Map.get(state.replay_outcomes, r, %{delivered: 0, dead: 0})
+        counts = Map.get(state.replay_outcomes, r, %{delivered: 0, dead: 0, parked: 0})
         counts = Map.update!(counts, kind, &(&1 + 1))
         %{state | replay_outcomes: Map.put(state.replay_outcomes, r, counts)}
 

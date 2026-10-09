@@ -8,16 +8,19 @@ defmodule Ankusa.BlobStore do
   names a scope:
 
     * `:segments` — compacted hook segments (`Ankusa.Storage`): the
-      `storage.blob_store`, with every key under `storage.key_prefix`. Nodes
-      that share one bucket give themselves distinct prefixes (`"node-a/"`),
-      because a segment key (`seg/<first>-<last>`) is only unique per node.
+      `storage.blob_store`, with every new key under `storage.key_prefix`.
+      Nodes that share one bucket give themselves distinct prefixes
+      (`"node-a/"`), because a segment key (`seg/<first>-<last>`) is only
+      unique per node.
     * `:claims` — claim-check packs (`Ankusa.ClaimCheck`): the
       `claim_check.blob_store` when set, else the segment store, with **no**
       prefix. Pack ids are time plus random bits, so claims from every node
       can share one place, and one gateway serves them all.
 
-  The prefix is applied here: adapters see full keys, callers see keys
-  relative to their scope (`list/3` strips the prefix from what it returns).
+  The prefix is applied once, when a new object is named (`object_key/3`);
+  the full key is what the archive catalogue records, and `put`/`get`/
+  `get_range`/`delete` take full keys verbatim. Changing `storage.key_prefix`
+  therefore moves only new segments, never strands written ones.
   """
 
   alias Ankusa.Config
@@ -52,38 +55,49 @@ defmodule Ankusa.BlobStore do
     {mod, opts}
   end
 
+  @doc """
+  The full key a new object in `scope` is written under: `key` behind
+  `storage.key_prefix` for `:segments`, `key` itself for `:claims`. The
+  compactor names each segment with it and records the result in the archive
+  catalogue, so a later prefix change only moves new segments; the ones
+  already written are read back under the key they were written with.
+  """
+  @spec object_key(atom(), scope(), String.t()) :: String.t()
+  def object_key(instance, scope, key) do
+    {_mod, _opts, prefix} = resolve(instance, scope)
+    prefix <> key
+  end
+
   @spec put(atom(), scope(), String.t(), iodata()) :: :ok | {:error, term()}
   def put(instance, scope, key, data) do
-    {mod, opts, prefix} = resolve(instance, scope)
-    mod.put(instance, prefix <> key, data, opts)
+    {mod, opts, _prefix} = resolve(instance, scope)
+    mod.put(instance, key, data, opts)
   end
 
   @spec get(atom(), scope(), String.t()) :: {:ok, binary()} | {:error, term()}
   def get(instance, scope, key) do
-    {mod, opts, prefix} = resolve(instance, scope)
-    mod.get(instance, prefix <> key, opts)
+    {mod, opts, _prefix} = resolve(instance, scope)
+    mod.get(instance, key, opts)
   end
 
   @spec get_range(atom(), scope(), String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, binary()} | {:error, term()}
   def get_range(instance, scope, key, offset, length) do
-    {mod, opts, prefix} = resolve(instance, scope)
-    mod.get_range(instance, prefix <> key, offset, length, opts)
+    {mod, opts, _prefix} = resolve(instance, scope)
+    mod.get_range(instance, key, offset, length, opts)
   end
 
   @spec delete(atom(), scope(), String.t()) :: :ok
   def delete(instance, scope, key) do
-    {mod, opts, prefix} = resolve(instance, scope)
-    mod.delete(instance, prefix <> key, opts)
+    {mod, opts, _prefix} = resolve(instance, scope)
+    mod.delete(instance, key, opts)
   end
 
+  @doc "Every key of this node's objects in `scope` under `prefix` (behind `storage.key_prefix` for `:segments`), as full keys."
   @spec list(atom(), scope(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
   def list(instance, scope, prefix) do
     {mod, opts, key_prefix} = resolve(instance, scope)
-
-    with {:ok, keys} <- mod.list(instance, key_prefix <> prefix, opts) do
-      {:ok, Enum.map(keys, &String.replace_prefix(&1, key_prefix, ""))}
-    end
+    mod.list(instance, key_prefix <> prefix, opts)
   end
 
   defp resolve(instance, scope), do: resolve_config(Ankusa.config(instance), scope)

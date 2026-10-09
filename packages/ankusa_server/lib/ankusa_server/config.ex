@@ -223,32 +223,30 @@ defmodule AnkusaServer.Config do
   end
 
   defp interpolate(value, env, path) when is_binary(value) do
-    interpolated =
-      Regex.replace(@var_re, value, fn _match, name, marker, default ->
-        case Map.fetch(env, name) do
-          {:ok, replacement} ->
-            replacement
-
-          # The marker, not the default, decides: `${NAME:-}` has an empty one.
-          :error when marker != "" ->
-            default
-
-          :error ->
-            raise ConfigError, message: "#{render_path(path)}: ${#{name}} is not set"
-        end
-      end)
-
-    # Whatever still reads `${` did not match the variable grammar
-    # (`${stripe_secret}`, `${A-B}`): left alone it would become a literal
-    # secret or URL, so it is an error instead.
-    if String.contains?(interpolated, "${") do
+    # Whatever in the file still reads `${` once the variable references are
+    # taken out did not match the grammar (`${stripe_secret}`, `${A-B}`): left
+    # alone it would become a literal secret or URL, so it is an error. Only
+    # the template is checked: a substituted value may contain `${` itself.
+    if value |> then(&Regex.replace(@var_re, &1, "")) |> String.contains?("${") do
       raise ConfigError,
         message:
           "#{render_path(path)}: unresolved ${…} (variable names are [A-Z0-9_]+; " <>
             "use ${NAME:-} for an empty default)"
     end
 
-    interpolated
+    Regex.replace(@var_re, value, fn _match, name, marker, default ->
+      case Map.fetch(env, name) do
+        {:ok, replacement} ->
+          replacement
+
+        # The marker, not the default, decides: `${NAME:-}` has an empty one.
+        :error when marker != "" ->
+          default
+
+        :error ->
+          raise ConfigError, message: "#{render_path(path)}: ${#{name}} is not set"
+      end
+    end)
   end
 
   defp interpolate(value, _env, _path), do: value

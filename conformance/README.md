@@ -127,7 +127,8 @@ then runs every registered SDK's native runner.
   "secrets": [string], "now": int, "tolerance_seconds"?: int}` → `ok` is
   `{"id": string, "timestamp": int}`. `now` is unix seconds and replaces the
   clock; `tolerance_seconds` defaults to 300. A secret that starts with
-  `whsec_` is the standard-base64 key after the prefix; any other string is
+  `whsec_` is the standard, padded base64 key after the prefix (unpadded is
+  `invalid_secret`, as core decodes it); any other string is
   its own UTF-8 bytes. The signed content is
   `<webhook-id>.<webhook-timestamp>.` followed by the raw body bytes. Every
   failure is `InvalidSignatureError` with `retryable=false`, `code`, and

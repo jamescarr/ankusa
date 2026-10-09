@@ -27,8 +27,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - The image's `HEALTHCHECK` asks `GET /ready` (`docker-entrypoint
   healthcheck`, ingest port first, then admin), so a node whose store refuses
   writes reports `unhealthy`.
-- An unresolved `${…}` is a load error naming the key; a static source whose
+- An unresolved `${…}` in the file is a load error naming the key (a
+  substituted value that itself contains `${` is fine); a static source whose
   verifier secret is missing or undecodable fails `check-config` and boot.
+- `AnkusaServer.GcsToken` answers `:error` to every caller for a second after
+  a failed metadata fetch, so a queue of callers behind a dead metadata server
+  costs one request.
 - `:os_mon` runs (disk gauges); only `disksup` is configured. The image adds
   `coreutils`: `disksup` runs `df -lk -x squashfs`, which busybox's `df`
   rejects.

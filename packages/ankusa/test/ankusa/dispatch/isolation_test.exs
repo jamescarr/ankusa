@@ -58,6 +58,9 @@ defmodule Ankusa.Dispatch.IsolationTest do
 
         :fail ->
           {:error, :down}
+
+        :gone ->
+          {:error, {:permanent, :gone}}
       end
     end
   end
@@ -248,6 +251,29 @@ defmodule Ankusa.Dispatch.IsolationTest do
       seqs = for _ <- 1..5, do: enqueue!(inst, build_env("s")).seq
       assert {:ok, _} = Pipeline.tick(inst)
       assert Enum.all?(rows(inst, seqs), &(&1.state == :dead and &1.attempts == 1))
+    end
+
+    test "a {:permanent, _} answer to the probe closes the breaker", %{agent: agent} do
+      inst =
+        start(
+          %{"s" => %{sinks: [{SwitchSink, agent: agent, pid: self()}]}},
+          %{concurrency: 1, breaker_failures: 2, breaker_open_ms: 300, breaker_max_open_ms: 300}
+        )
+
+      seqs = for _ <- 1..5, do: enqueue!(inst, build_env("s")).seq
+      assert {:ok, 0} = Pipeline.tick(inst)
+      assert Enum.count(rows(inst, seqs), &(&1.attempts == 0)) == 3
+
+      # The destination is back, and refuses these hooks for good: the probe's
+      # answer closes the breaker, so every parked row runs and dead-letters
+      # instead of being parked again behind a probe that already finished.
+      Agent.update(agent, fn _ -> :gone end)
+      Process.sleep(350)
+      assert {:ok, _} = Pipeline.tick(inst)
+      Process.sleep(350)
+      assert {:ok, _} = Pipeline.tick(inst)
+
+      assert Enum.all?(rows(inst, seqs), &(&1.state == :dead))
     end
   end
 

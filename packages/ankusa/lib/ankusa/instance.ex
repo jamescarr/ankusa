@@ -196,6 +196,8 @@ defmodule Ankusa.Instance do
       cache_name = Ankusa.via(config.instance, :routes_cache)
 
       [
+        # Owns the snapshot table across store restarts (see TableOwner).
+        {Ankusa.Routes.TableOwner, opts},
         {store_mod, opts},
         {Ankusa.Routes.Cache, [name: cache_name] ++ cache_opts(config)}
       ]

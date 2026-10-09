@@ -382,7 +382,11 @@ defmodule Ankusa.BlobStore.S3SigningTest do
 
       env = %{"AWS_WEB_IDENTITY_TOKEN_FILE" => file, "AWS_ROLE_ARN" => "arn:aws:iam::1:role/r"}
 
-      assert :ok = S3.put(:i, "seg/x", "x", base ++ [env: env])
+      # Filled by a short-lived process (as a claim upload or a gateway request
+      # would): the cache must outlive it.
+      assert :ok =
+               Task.async(fn -> S3.put(:i, "seg/x", "x", base ++ [env: env]) end) |> Task.await()
+
       assert_receive {:request, "GET", "sts.test", "/", query, _headers, _body}
       assert URI.decode_query(query)["WebIdentityToken"] == "the-jwt"
       h = s3_headers()

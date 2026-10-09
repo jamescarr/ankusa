@@ -88,7 +88,8 @@ max 100 000), and only while dispatch's oldest-due lag is at most `max_lag_ms`
 (default 2 000) and its in-flight window is not full, so a replay uses only
 the capacity live traffic leaves free and can be left running. Jobs are
 durable: the cursor commits in the same batch as the rows it moved, a restart
-resumes it, and a job whose deliveries keep dead-lettering pauses itself.
+resumes it, and a job whose deliveries keep dead-lettering, or keep being
+parked behind an open circuit breaker, pauses itself.
 A `dlq` job touches only rows dead-lettered at or before its own creation, so
 rows that die again during the replay are never picked up twice by one job.
 Replayed deliveries keep the hook's original `id`, `dedupe_key` and
@@ -620,7 +621,8 @@ The job drips rows into the delivery queue at `rate` items per second (default
 oldest-due lag stays under `max_lag_ms`, 2 s by default), so it can be left
 running against live traffic. It is durable — the cursor commits in the same
 batch as the rows it moves — so a restart resumes it; a job whose deliveries
-keep dead-lettering pauses itself. Replayed deliveries keep the hook's
+keep dead-lettering, or keep being parked behind an open breaker, pauses
+itself. Replayed deliveries keep the hook's
 original `id`, `dedupe_key` and `idempotency_key` and carry the job id as
 `replay_id`.
 `Ankusa.Replay.get/2` and `update/3` watch and steer it

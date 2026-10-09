@@ -199,7 +199,7 @@ defmodule Ankusa.ReplayTest do
       job
     else
       if System.monotonic_time(:millisecond) > deadline do
-        flunk("replay job #{id} never reached the expected state")
+        flunk("replay job #{id} never reached the expected state: #{inspect(job)}")
       else
         Process.sleep(50)
         poll_job_until(inst, id, fun, deadline)
@@ -365,6 +365,30 @@ defmodule Ankusa.ReplayTest do
     assert paused.error =~ "auto-paused"
     assert paused.error =~ "replayed deliveries dead-lettered again"
     assert paused.dead >= 100
+    assert paused.moved < 500
+  end
+
+  test "auto-pause: a replay into a destination whose breaker opens pauses itself" do
+    config =
+      start(%{"src" => [sinks: [{AlwaysFail, []}]]},
+        dispatch: %{
+          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
+          breaker_failures: 5,
+          breaker_open_ms: 60_000,
+          breaker_max_open_ms: 60_000
+        }
+      )
+
+    inst = config.instance
+    dead_rows(inst, 500, AlwaysFail)
+
+    assert {:ok, :created, job} = Replay.start(inst, %{kind: :dlq, rate: 100})
+
+    # Five attempts open the breaker; every row after them is parked, never
+    # dead-lettered, so only the parked count can pause the job.
+    paused = poll_job_state(inst, job.id, fn job -> job.state == :paused end, 20_000)
+
+    assert paused.error =~ "parked behind an open circuit breaker"
     assert paused.moved < 500
   end
 

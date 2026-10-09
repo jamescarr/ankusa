@@ -141,10 +141,14 @@ An HTTP sink with a `secret` signs every delivery the
 [Standard Webhooks](https://www.standardwebhooks.com/) way:
 
 ```ruby
-# the raw request body, exactly as received
-Ankusa.verify_signature(header_map(env), request.body.read, [ENV.fetch("ANKUSA_WHSEC")])
+# Inside a Rack app's `call(env)`, before anything parses the body:
+begin
+  body = env["rack.input"].read # the raw request body, exactly as received
+  Ankusa.verify_signature(header_map(env), body, [ENV.fetch("ANKUSA_WHSEC")])
 rescue Ankusa::InvalidSignatureError => e
-  [401, {"content-type" => "application/json"}, [JSON.generate(error: "invalid_signature", code: e.code)]]
+  return [401, {"content-type" => "application/json"},
+    [JSON.generate(error: "invalid_signature", code: e.code)]]
+end
 ```
 
 Secrets are `whsec_` + base64, or any other string used as its own bytes;

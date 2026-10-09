@@ -12,7 +12,12 @@ defmodule AnkusaServer.GcsTokenTest do
 
   setup do
     test = self()
-    pid = start_supervised!({GcsToken, req_options: [plug: {Req.Test, GcsToken}]})
+
+    pid =
+      start_supervised!(
+        {GcsToken, req_options: [plug: {Req.Test, GcsToken}], failure_backoff_ms: 300}
+      )
+
     Req.Test.allow(GcsToken, test, pid)
     %{server: pid}
   end
@@ -51,14 +56,30 @@ defmodule AnkusaServer.GcsTokenTest do
     assert requests() == 1
   end
 
-  test "a failed fetch is :error after exactly one request, and the next call tries again" do
+  test "a failed fetch is :error after exactly one request, and a later call tries again" do
     stub(fn conn -> Plug.Conn.send_resp(conn, 500, "boom") end)
 
     assert GcsToken.metadata() == :error
     assert requests() == 1
 
     stub(fn conn -> Req.Test.json(conn, %{"access_token" => "late", "expires_in" => "120"}) end)
+    Process.sleep(300)
     assert {:ok, "late"} = GcsToken.metadata()
+  end
+
+  test "callers queued behind a failing fetch share its failure" do
+    stub(fn conn ->
+      Process.sleep(200)
+      Plug.Conn.send_resp(conn, 500, "boom")
+    end)
+
+    results =
+      1..10
+      |> Enum.map(fn _ -> Task.async(&GcsToken.metadata/0) end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert results == List.duplicate(:error, 10)
+    assert requests() == 1
   end
 
   test "a token close to expiry is refreshed" do

@@ -610,7 +610,11 @@ sink hangs leaves slots for another source's sink, that a breaker opens after
 `breaker_failures`, parks rows without spending attempts, probes and closes,
 and that `{:permanent, _}` never opens one. Breakers live in the pipeline's memory: a restart closes them,
 and the first wave after one can again hold slots for one
-`attempt_timeout_ms`.
+`attempt_timeout_ms`. A `{:permanent, _}` answer to the probe closes the
+breaker (the destination answered), and a replay job counts its rows parked
+behind an open breaker toward auto-pause, so a DLQ replay into a sink that is
+still down pauses instead of draining the DLQ into parked rows; both have
+tests (`isolation_test.exs`, `replay_test.exs`).
 
 Probe 4's shape, re-run as a throwaway test against `Ankusa.Instance`
 (`concurrency: 32`, `sink_concurrency: 8`, `attempt_timeout_ms: 5_000`,
@@ -1206,14 +1210,19 @@ sees its own disk. Topology 3 and `deployment.md` describe this shape.
 Every route mutation (ETS store), and every version change each node observes (Redis store), rebuilds and re-sorts every route and calls `:persistent_term.put/2` with a changed value. Each such put starts a global GC pass that copies the old snapshot into every process still referencing it, in-flight ingest requests included [INFERENCE: documented `persistent_term` semantics]. The module doc assumes "writes are rare (route changes)"; API-driven provisioning breaks that assumption: 10,000 route writes are O(n²) rebuild work in the store process plus 10,000 global GC passes on every node. A `put/2` with an equal value is a no-op, so instance restarts do not trigger this. An ETS table with a versioned swap fits an API-mutable table.
 
 **Status (2026-10-09).** Fixed. The snapshot is a per-instance `:protected`
-ETS table (`read_concurrency: true`) owned by the routes store. One route
+ETS table (`read_concurrency: true`) the routes store writes. One route
 change is applied in place — the route's rows plus a fresh `:meta` row —
 instead of a rebuild (`Routes.Snapshot.mutate/3`); a whole-table publish
 (boot, seed, a Redis reload) writes a new generation, flips `:meta` to it and
 then drops the old one (`publish/1`, `drop_generation/2`), so readers see one
 generation or the other. Nothing touches `:persistent_term`. `routes_test.exs`
 resolves the first and last of 1,000 API-created routes and checks readers
-during a concurrent whole-table republish.
+during a concurrent whole-table republish. The table belongs to
+`Ankusa.Routes.TableOwner`, which lends it to the store and is its heir, so a
+store crash leaves the last published routes in place while it restarts
+(the store's predecessor, `:persistent_term`, had that property; a
+store-owned table would have lost it). `routes_test.exs` kills the store with
+its supervisor held and reads through the gap.
 
 <a id="s5"></a>
 ### S5 · Medium · Code — Segment keys collide across nodes, and there is no key prefix
@@ -1223,9 +1232,11 @@ during a concurrent whole-table republish.
 `seg/<first_seq>-<last_seq>.seg` names no node, seqs start at 1 on every node, and the S3/GCS/Azure/OCI adapters take a bucket but no key prefix, so every node needs its own bucket (`deployment.md:126-129`). That requirement is what breaks the claim-check topology (C1).
 
 **Status (2026-10-09).** Fixed. `storage.key_prefix` (`""` or `name/`
-parts; env `ANKUSA_STORAGE_KEY_PREFIX`) is prepended to every segment key by
-the `BlobStore` facade, and `list` strips it, so adapters stay
-prefix-unaware. Nodes sharing a bucket set distinct prefixes.
+parts; env `ANKUSA_STORAGE_KEY_PREFIX`) is prepended when the compactor names
+a new segment (`BlobStore.object_key/3`), and the catalogue records the full
+key, so adapters stay prefix-unaware and a prefix change never strands
+archived segments (`storage_test.exs` restarts a node with a new prefix and
+fetches both old and new). Nodes sharing a bucket set distinct prefixes.
 
 <a id="g8-scope"></a>
 ### G8 solution scope
@@ -1383,7 +1394,7 @@ Re-rated against the code on 2026-10-09 with this review's own severity definiti
 | E4 residual | Medium, multi-node only | API-managed sources live in each node's store, so a source created through one node's admin API is a `404` on the others. | Needs a shared source store, G8's second shape. |
 | C2 residual | Low | The gateway reads a claim whole (bounded by `max_body_bytes`) and has no `Range`. | Claims are at most `max_body_bytes`; streaming is an optimisation. |
 | S6 residual | Low | Blob-store calls are single-shot; a segment PUT copies the iodata into one binary first. | The compactor retries on its next tick with backoff; `list` is not on any shipped path. |
-| E5 deviation | — | A source with `tenant_id: "default"` is shared and answers any URL tenant. | `"default"` is every source's default; binding it would break one-source-for-every-customer setups. Give a source a real tenant to bind it. |
+| E5 deviation | Medium for unverified shared sources | A source with `tenant_id: "default"` is shared and answers any URL tenant, so with `Verifier.None` a sender can file hooks under any tenant and spend that tenant's rate limit. | `"default"` is every source's default; binding it would break one-source-for-every-customer setups. `multi-tenancy.md` says to give a shared source a real verifier, or each tenant its own (bound) source. |
 
 ## Decisions that choose between the options
 

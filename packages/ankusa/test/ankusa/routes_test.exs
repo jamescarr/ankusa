@@ -1161,6 +1161,34 @@ defmodule Ankusa.RoutesTest do
       assert Ankusa.Routes.Snapshot.count(config.instance) == 1_000
     end
 
+    test "the last published routes keep answering while a crashed store restarts" do
+      config = start(seed: seed())
+      instance = config.instance
+      edge = Ankusa.whereis(instance, :edge)
+      store = Ankusa.whereis(instance, :routes_store)
+      assert authorize(config, "POST", "/hooks/s") == {:ok, "s"}
+
+      # Hold the restart, so the window between the crash and the new store's
+      # first publish stays open while we read through it.
+      :ok = :sys.suspend(edge)
+      ref = Process.monitor(store)
+      Process.exit(store, :kill)
+      assert_receive {:DOWN, ^ref, :process, _, :killed}
+
+      assert authorize(config, "POST", "/hooks/s") == {:ok, "s"}
+
+      :ok = :sys.resume(edge)
+      # The supervisor restarts the store, and the cache after it, while
+      # handling the exit; a sys call returns once that is done.
+      _ = :sys.get_state(edge)
+      new_store = Ankusa.whereis(instance, :routes_store)
+      assert new_store != store
+
+      table = Ankusa.Routes.Snapshot.table(instance)
+      assert :ets.info(table, :owner) == new_store
+      assert authorize(config, "POST", "/hooks/s") == {:ok, "s"}
+    end
+
     test "a route whose path is replaced matches its new path and not its old one" do
       config = start([])
       assert {:ok, _} = create(config.instance, %{"id" => "r", "path" => "/hooks/old"})

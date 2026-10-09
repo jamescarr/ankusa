@@ -129,6 +129,13 @@ under the URL's tenant. (`"default"` is what a source gets when none is set,
 which is why it means "shared" rather than "owned by a tenant called
 default".)
 
+A shared source trusts the URL's tenant: anyone who can post to
+`/webhooks/<victim>/stripe` files hooks under `<victim>`'s storage scope and
+spends its rate limit. Give a shared source a real verifier (the provider's
+signature), so only the provider's hooks get in, or give each tenant a source
+of its own, which the binding above then protects. A source created through
+the admin API under the tenant `default` is shared the same way.
+
 ## Dynamic sources
 
 Everything above is a store decision, not a boot-time one: the router resolves

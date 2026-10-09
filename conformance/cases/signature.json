@@ -418,6 +418,34 @@
       }
     },
     {
+      "id": "signature.error.unpadded_secret",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "description": "A whsec_ secret is strict, padded base64 (as core decodes it): an unpadded one is invalid_secret, never a key some SDKs accept and others refuse.",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_dGVzdA"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    },
+    {
       "id": "signature.error.no_secrets",
       "feature": "webhook.verify_signature.errors",
       "operation": "verify_signature",

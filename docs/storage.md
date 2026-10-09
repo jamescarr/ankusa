@@ -158,10 +158,14 @@ whatever answers the sink) is the only shared state. See
 
 Callers go through the facade, which names a **scope** on every call —
 `Ankusa.BlobStore.put(instance, :segments | :claims, key, data)` and so on.
-`:segments` resolves `storage.blob_store` and puts every key under
-`storage.key_prefix` (`list/3` strips it again from what it returns);
-`:claims` resolves `claim_check.blob_store`, else the segment store, with no
-prefix. Adapters see full keys and stay prefix-unaware.
+`:segments` resolves `storage.blob_store`; `:claims` resolves
+`claim_check.blob_store`, else the segment store. `storage.key_prefix` is
+applied once, when the compactor names a new segment
+(`Ankusa.BlobStore.object_key/3`), and the archive catalogue records the full
+key, which every later read uses verbatim: changing the prefix moves new
+segments only and never strands archived ones. `list/3` lists this node's
+segments under its prefix and returns full keys. Claims are never prefixed.
+Adapters see full keys and stay prefix-unaware.
 
 `list/3` returns `{:ok, keys}` or `{:error, reason}` — a listing that failed
 halfway is an error, never a shorter list — and every remote adapter follows

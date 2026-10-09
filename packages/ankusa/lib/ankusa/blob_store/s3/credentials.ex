@@ -214,20 +214,15 @@ defmodule Ankusa.BlobStore.S3.Credentials do
     end
   end
 
-  defp table do
-    case :ets.whereis(@table) do
-      :undefined ->
-        # Two processes can race to create it; the loser adopts the winner's.
-        try do
-          :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
-        rescue
-          ArgumentError -> :ets.whereis(@table)
-        end
-
-      tid ->
-        tid
-    end
+  @doc false
+  # Created once by `Ankusa.Application`, so the cache outlives the short-lived
+  # request and task processes that fill it (a table dies with its owner).
+  def create_table do
+    :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
+    :ok
   end
+
+  defp table, do: @table
 
   @doc false
   # Drop every cached credential (tests).

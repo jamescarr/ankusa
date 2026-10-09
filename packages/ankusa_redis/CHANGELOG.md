@@ -8,6 +8,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Requires `ankusa ~> 0.6` (the ETS route snapshot API); publish core first.
 - The Redis route store keeps serving its last known table when the
   namespace's version key disappears (a flushed or evicted Redis) instead of
   publishing an empty table that rejects every webhook; it logs a warning

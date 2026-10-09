@@ -139,10 +139,10 @@ public final class Signature {
     List<byte[]> candidates = new ArrayList<>();
     for (String entry : signature.split(" ", -1)) {
       if (entry.startsWith("v1,")) {
-        try {
-          candidates.add(Base64.getDecoder().decode(entry.substring(3)));
-        } catch (IllegalArgumentException e) {
-          // Not base64: it cannot match, and another entry still might.
+        // Not base64: it cannot match, and another entry still might.
+        byte[] candidate = strictBase64(entry.substring(3));
+        if (candidate != null) {
+          candidates.add(candidate);
         }
       }
     }
@@ -169,6 +169,21 @@ public final class Signature {
     return value;
   }
 
+  /**
+   * Padded base64 only, as core and every other SDK decode it: the JDK decoder alone also takes
+   * unpadded input.
+   */
+  private static byte @Nullable [] strictBase64(String encoded) {
+    if (encoded.length() % 4 != 0) {
+      return null;
+    }
+    try {
+      return Base64.getDecoder().decode(encoded);
+    } catch (IllegalArgumentException e) {
+      return null;
+    }
+  }
+
   private static List<byte[]> keys(List<String> secrets) {
     if (secrets.isEmpty()) {
       throw new InvalidSignatureError("invalid_secret", null, "no secret configured");
@@ -177,10 +192,8 @@ public final class Signature {
     List<byte[]> keys = new ArrayList<>(secrets.size());
     for (String secret : secrets) {
       if (secret.startsWith("whsec_")) {
-        byte[] key;
-        try {
-          key = Base64.getDecoder().decode(secret.substring(6));
-        } catch (IllegalArgumentException e) {
+        byte[] key = strictBase64(secret.substring(6));
+        if (key == null) {
           key = new byte[0];
         }
         if (key.length == 0) {

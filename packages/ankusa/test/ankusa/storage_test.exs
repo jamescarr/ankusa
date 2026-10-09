@@ -483,7 +483,7 @@ defmodule Ankusa.StorageTest do
   end
 
   describe "storage.key_prefix and a shared claim store (one bucket, several nodes)" do
-    test "segments go under the node's prefix, list strips it, and fetch finds them" do
+    test "segments go under the node's prefix, list lists the node's own, and fetch finds them" do
       config = start(roles: [:edge, :storage], storage: %{key_prefix: "node-a/"})
       inst = config.instance
       [original] = commit!(inst, [envelope(~s({"n":1}))])
@@ -494,10 +494,31 @@ defmodule Ankusa.StorageTest do
       assert [_seg] = Path.wildcard(Path.join(root, "node-a/seg/*.seg"))
       assert Path.wildcard(Path.join(root, "seg/*")) == []
 
-      assert {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
-      assert Enum.all?(keys, &String.starts_with?(&1, "seg/"))
+      assert {:ok, [_, _] = keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+      assert Enum.all?(keys, &String.starts_with?(&1, "node-a/seg/"))
       assert {:ok, fetched} = Storage.fetch(inst, original.id)
       assert fetched.body == original.body
+    end
+
+    test "changing the prefix moves new segments only; archived ones still fetch" do
+      config = start(roles: [:edge, :storage])
+      [before] = commit!(config.instance, [envelope(~s({"n":1}))])
+      assert {:ok, 1} == Compactor.tick(config.instance)
+      stop_supervised!({Ankusa.Instance, config.instance})
+
+      # The same node and data directory, restarted with a prefix.
+      config = %{config | storage: %{config.storage | key_prefix: "node-a/"}}
+      put_config(config)
+      start_supervised!({Ankusa.Instance, config})
+
+      [later] = commit!(config.instance, [envelope(~s({"n":2}))])
+      assert {:ok, 1} == Compactor.tick(config.instance)
+
+      assert {:ok, %{body: ~s({"n":1})}} = Storage.fetch(config.instance, before.id)
+      assert {:ok, %{body: ~s({"n":2})}} = Storage.fetch(config.instance, later.id)
+      root = Ankusa.Config.path(config, "segments")
+      assert [_] = Path.wildcard(Path.join(root, "seg/*.seg"))
+      assert [_] = Path.wildcard(Path.join(root, "node-a/seg/*.seg"))
     end
 
     test "two nodes sharing one root keep their segments apart and read each other's claims" do
@@ -522,7 +543,12 @@ defmodule Ankusa.StorageTest do
       assert {:ok, 1} == Compactor.tick(b.instance)
 
       assert {:ok, [_, _] = keys_a} = Ankusa.BlobStore.list(a.instance, :segments, "seg/")
-      assert {:ok, ^keys_a} = Ankusa.BlobStore.list(b.instance, :segments, "seg/")
+      assert {:ok, [_, _] = keys_b} = Ankusa.BlobStore.list(b.instance, :segments, "seg/")
+      assert Enum.all?(keys_a, &String.starts_with?(&1, "a/seg/"))
+
+      assert Enum.map(keys_a, &String.replace_prefix(&1, "a/", "")) ==
+               Enum.map(keys_b, &String.replace_prefix(&1, "b/", ""))
+
       assert {:ok, %{body: ~s({"node":"a"})}} = Storage.fetch(a.instance, env_a.id)
       assert {:ok, %{body: ~s({"node":"b"})}} = Storage.fetch(b.instance, env_b.id)
 

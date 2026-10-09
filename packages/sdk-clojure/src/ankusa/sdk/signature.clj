@@ -38,11 +38,13 @@
   (.getBytes s StandardCharsets/UTF_8))
 
 (defn- decode-base64
-  "The decoded bytes, or `nil` when `s` is not base64."
+  "The decoded bytes, or `nil` when `s` is not padded base64 (the JDK decoder
+  also takes unpadded input, which the other SDKs and core refuse)."
   [^String s]
-  (try
-    (.decode (Base64/getDecoder) s)
-    (catch IllegalArgumentException _ nil)))
+  (when (zero? (mod (count s) 4))
+    (try
+      (.decode (Base64/getDecoder) s)
+      (catch IllegalArgumentException _ nil))))
 
 (defn- key-bytes
   ^bytes [secret]

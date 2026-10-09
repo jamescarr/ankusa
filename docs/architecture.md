@@ -268,7 +268,8 @@ supervision tree at start (`Ankusa.Instance`'s `init/1`), then cached in
 buried in call sites, and instance-scoped config falls out of the struct for
 free. Data that changes at runtime stays out of `:persistent_term` (whose
 every update copies into every process that read it): the route table is an
-ETS table the routes store owns. One route edit rewrites that route's rows and
+ETS table the routes store writes (a small owner process keeps it across a
+store restart, so the guard still has the last routes). One route edit rewrites that route's rows and
 a `:meta` row; a whole-table publish (boot, seed, a Redis reload) writes a new
 generation and flips `:meta` to it, so readers see one table or the other.
 A thousand route edits cost a thousand small inserts, not a thousand global

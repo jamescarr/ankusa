@@ -116,7 +116,9 @@ final class Signature
         $keys = [];
         foreach ($secrets as $secret) {
             if (str_starts_with($secret, 'whsec_')) {
-                $key = base64_decode(substr($secret, 6), true);
+                $encoded = substr($secret, 6);
+                // Padded base64 only, as core and every other SDK decode it.
+                $key = \strlen($encoded) % 4 === 0 ? base64_decode($encoded, true) : false;
                 if ($key === false || $key === '') {
                     throw new InvalidSignatureError('a whsec_ secret is not valid base64', 'invalid_secret');
                 }

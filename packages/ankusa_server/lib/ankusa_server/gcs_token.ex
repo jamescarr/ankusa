@@ -18,7 +18,10 @@ defmodule AnkusaServer.GcsToken do
   Refreshes are single-flight: callers queue on the one process, the first
   fetches, the rest get the token it fetched. A fetch is one request (1 s to
   connect, 5 s to answer, no retries); a failure is `:error`, which the blob
-  store reports as an unauthenticated request, and the next call tries again.
+  store reports as an unauthenticated request. For a second after a failure
+  every caller gets `:error` without another request, so a queue of callers
+  behind a dead metadata server costs one fetch, not one each; after that the
+  next call tries again.
 
   Anything else (Goth, workload identity, a vault agent) stays a matter of
   writing one function — the adapter's contract is `{:ok, token} | :error`.
@@ -38,9 +41,13 @@ defmodule AnkusaServer.GcsToken do
   # behind a refresh gets its result rather than a timeout.
   @call_timeout_ms 10_000
 
+  # How long a failed fetch answers for everyone before the next one is tried.
+  @failure_backoff_ms 1_000
+
   @doc """
   Start the token cache. `:req_options` are merged into the metadata request
-  (tests point it at a `Req.Test` stub).
+  (tests point it at a `Req.Test` stub); `:failure_backoff_ms` (default 1 000)
+  is how long a failed fetch answers for every caller.
   """
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -65,23 +72,40 @@ defmodule AnkusaServer.GcsToken do
 
   @impl true
   def init(opts) do
-    {:ok, %{token: nil, expires_at: 0, req_options: Keyword.get(opts, :req_options, [])}}
+    {:ok,
+     %{
+       token: nil,
+       expires_at: 0,
+       failed_until: nil,
+       failure_backoff_ms: Keyword.get(opts, :failure_backoff_ms, @failure_backoff_ms),
+       req_options: Keyword.get(opts, :req_options, [])
+     }}
   end
 
   @impl true
   def handle_call(:token, _from, state) do
     now = System.monotonic_time(:second)
+    now_ms = System.monotonic_time(:millisecond)
 
-    if state.token != nil and state.expires_at - now > @refresh_margin_seconds do
-      {:reply, {:ok, state.token}, state}
-    else
-      case fetch(state.req_options) do
-        {:ok, token, expires_in} ->
-          {:reply, {:ok, token}, %{state | token: token, expires_at: now + expires_in}}
+    cond do
+      state.token != nil and state.expires_at - now > @refresh_margin_seconds ->
+        {:reply, {:ok, state.token}, state}
 
-        :error ->
-          {:reply, :error, state}
-      end
+      # Callers queued behind a failed fetch get its answer instead of each
+      # running another one against a metadata server that is down.
+      state.failed_until != nil and now_ms < state.failed_until ->
+        {:reply, :error, state}
+
+      true ->
+        case fetch(state.req_options) do
+          {:ok, token, expires_in} ->
+            {:reply, {:ok, token},
+             %{state | token: token, expires_at: now + expires_in, failed_until: nil}}
+
+          :error ->
+            failed_until = System.monotonic_time(:millisecond) + state.failure_backoff_ms
+            {:reply, :error, %{state | failed_until: failed_until}}
+        end
     end
   end
 

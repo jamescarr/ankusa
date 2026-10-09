@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A broker `message_too_large`, `invalid_message` or `invalid_record` is
   `{:error, {:permanent, reason}}`: dead-lettered at once instead of retried
-  for the whole retry policy. Requires `ankusa` with sink error classes.
+  for the whole retry policy. Requires `ankusa ~> 0.6` (sink error classes);
+  publish core first.
 
 ## [0.5.0] - 2026-10-08
 

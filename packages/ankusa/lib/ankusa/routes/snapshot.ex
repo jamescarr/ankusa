@@ -10,12 +10,14 @@ defmodule Ankusa.Routes.Snapshot do
   ## Where it lives
 
   One named `:protected` ETS table per instance (`ordered_set`,
-  `read_concurrency: true`), owned by the routes store process: readers never
-  take a GenServer call or a network round trip per request, and a mutation
-  writes the rows it changes, not the whole table. (It used to be one
+  `read_concurrency: true`), written by the routes store process: readers
+  never take a GenServer call or a network round trip per request, and a
+  mutation writes the rows it changes, not the whole table. (It used to be one
   `:persistent_term` value rebuilt and rewritten per mutation, which costs a
-  global GC pass and a full copy each time.) The table dies with its owner;
-  the store restarting writes it again.
+  global GC pass and a full copy each time.) `Ankusa.Routes.TableOwner`
+  creates it and lends it to the store, and gets it back if the store dies, so
+  the guard keeps reading the last published routes until the restarted store
+  publishes again.
 
   Rows, all tagged with a *generation*:
 
@@ -110,8 +112,8 @@ defmodule Ankusa.Routes.Snapshot do
 
   @doc """
   Write a whole new generation without telemetry (boot, seed, reload), from
-  the process that owns the table (it is created, owned by the caller, if it
-  does not exist yet). The caller must handle `{:drop_generation, gen}` with
+  the routes store (which takes the table from `Ankusa.Routes.TableOwner`, or
+  creates its own when it runs without one). The caller must handle `{:drop_generation, gen}` with
   `drop_generation/2`.
   """
   @spec publish(map()) :: :ok
@@ -353,6 +355,9 @@ defmodule Ankusa.Routes.Snapshot do
   @spec table(atom()) :: atom()
   def table(instance), do: :"ankusa_routes_#{instance}"
 
+  # The instance's `Ankusa.Routes.TableOwner` creates the table and lends it to
+  # the store, so a store restart finds the last published routes still there.
+  # A store running without one (on its own, in tests) creates its own.
   defp ensure_table(instance) do
     name = table(instance)
 
@@ -361,6 +366,18 @@ defmodule Ankusa.Routes.Snapshot do
         :ets.new(name, [:named_table, :protected, :ordered_set, read_concurrency: true])
 
       _tid ->
+        if :ets.info(name, :owner) != self() do
+          :ok = Ankusa.Routes.TableOwner.hand_over(instance, self())
+
+          # `give_away` announces itself with a message the owner sent before
+          # its reply, so it is already here: take it, so no store has to.
+          receive do
+            {:"ETS-TRANSFER", _tid, _from, :routes} -> :ok
+          after
+            0 -> :ok
+          end
+        end
+
         name
     end
   end
