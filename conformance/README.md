@@ -123,6 +123,28 @@ then runs every registered SDK's native runner.
   `RoleNotEnabledError(role)`; every other 4xx is `AdminRejectedError(status,
   code = the body's error)`; anything else that isn't 2xx (5xx, an unfollowed
   3xx redirect, 1xx) or a transport failure is `AdminUnavailableError`.
+- `verify_signature`: `{"headers": {string: string}, "body": Body,
+  "secrets": [string], "now": int, "tolerance_seconds"?: int}` → `ok` is
+  `{"id": string, "timestamp": int}`. `now` is unix seconds and replaces the
+  clock; `tolerance_seconds` defaults to 300. A secret that starts with
+  `whsec_` is the standard-base64 key after the prefix; any other string is
+  its own UTF-8 bytes. The signed content is
+  `<webhook-id>.<webhook-timestamp>.` followed by the raw body bytes. Every
+  failure is `InvalidSignatureError` with `retryable=false`, `code`, and
+  `field` (string or null); the checks run in this order and the first
+  failure wins:
+  1. No secrets, or a `whsec_` secret that isn't valid base64 →
+     `invalid_secret` (`field: null`).
+  2. `webhook-id`, `webhook-timestamp`, `webhook-signature` (names
+     case-insensitive), in that order, missing or empty → `missing_header`
+     with `field` set to the lowercase name.
+  3. Timestamp not all decimal digits → `invalid_timestamp`; more than
+     `tolerance_seconds` from `now` in either direction →
+     `timestamp_out_of_tolerance` (both `field: "webhook-timestamp"`).
+  4. `webhook-signature` split on spaces; entries that don't start with `v1,`
+     are ignored; no `v1,` entry equal (constant-time) to the base64
+     HMAC-SHA256 of any secret → `no_matching_signature`
+     (`field: "webhook-signature"`).
 
 ### Helpers
 

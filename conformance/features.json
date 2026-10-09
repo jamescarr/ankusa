@@ -24,14 +24,15 @@
     "admin_replay_update",
     "admin_quarantine",
     "decode_message",
-    "idempotency_key"
+    "idempotency_key",
+    "verify_signature"
   ],
   "features": [
     {"id": "claim_ref.parse", "description": "Parse urn:ankusa:claim:v1:<tenant>:<claim_id> into tenant_id, claim_id, and the /v1/claims/{tenant_id}/{claim_id} path; anything else raises InvalidClaimRefError."},
     {"id": "claim_check.redeem", "description": "GET /v1/claims/{tenant_id}/{claim_id} and return the body bytes verbatim (text, binary, empty)."},
     {"id": "claim_check.redeem.input_validation", "description": "A malformed ref, or a sha256 that isn't 64 lowercase hex chars, raises InvalidClaimRefError before any request is made."},
     {"id": "claim_check.redeem.integrity", "description": "Returned bytes are verified against the expected sha256; a mismatch raises ClaimIntegrityError."},
-    {"id": "claim_check.redeem.error_classification", "description": "404 -> ClaimNotFoundError; other 4xx -> ClaimRejectedError(status, body); 5xx, any other non-200, an unfollowed redirect, or no connection -> ClaimCheckUnavailableError (retryable)."},
+    {"id": "claim_check.redeem.error_classification", "description": "404 -> ClaimNotFoundError; 408 and 429 -> ClaimCheckUnavailableError (retryable, like 5xx); other 4xx -> ClaimRejectedError(status, body); 5xx, any other non-200, an unfollowed redirect, or no connection -> ClaimCheckUnavailableError (retryable)."},
     {"id": "claim_check.health", "description": "GET /health returns the JSON body on 200; anything else raises ClaimCheckUnavailableError."},
     {"id": "claim_check.client.headers", "description": "Client-level headers ride on every request."},
     {"id": "claim_check.client.timeout", "description": "A per-client request timeout; exceeding it raises ClaimCheckUnavailableError."},
@@ -40,6 +41,8 @@
     {"id": "message.decode", "description": "Decode a v1 queue message: the inline (body_base64) and claim body forms, the optional fields (sha256, dedupe_key, replay_id, idempotency_key, headers), and unknown keys are ignored."},
     {"id": "message.integrity", "description": "Size mismatch -> InvalidMessageError(size_mismatch); sha256 mismatch -> InvalidMessageError(integrity); claim tenant != tenant_id -> InvalidMessageError(tenant_mismatch)."},
     {"id": "message.idempotency_key", "description": "The idempotency key: the message's idempotency_key field (or the x-ankusa-idempotency-key header) when present; otherwise computed as tenant:source_id:dedupe_key (tenant 'default' when null) for a non-empty dedupe_key, else id. With include_replay and a replay_id, append #replay:<replay_id>."},
+    {"id": "webhook.verify_signature", "description": "Verify a Standard Webhooks signature: webhook-signature holds space-separated v1,<base64> entries, each an HMAC-SHA256 over <webhook-id>.<webhook-timestamp>.<body> with one configured secret (whsec_ + base64 key, or the raw UTF-8 bytes of any other string); any matching entry for any secret passes (constant-time compare); webhook-timestamp must be within tolerance_seconds (default 300) of now. Header names are case-insensitive. Returns the id and the timestamp."},
+    {"id": "webhook.verify_signature.errors", "description": "Failures raise InvalidSignatureError(retryable=false, code, field), checked in this order: no secret, or a whsec_ secret whose remainder is not valid base64 -> invalid_secret (field null); a missing or empty webhook-id, webhook-timestamp, webhook-signature (in that order) -> missing_header (field = that header); a timestamp that is not all decimal digits -> invalid_timestamp; |now - timestamp| > tolerance -> timestamp_out_of_tolerance (both field webhook-timestamp); no matching v1 entry (other versions are ignored) -> no_matching_signature (field webhook-signature)."},
     {"id": "routes.crud", "description": "Create, list, read, replace, update, and delete route definitions over the route-management listener (routes.admin.port)."},
     {"id": "routes.ip_rules", "description": "Get and replace the global IP rules."},
     {"id": "routes.dry_run", "description": "Dry-run a request against the route table and return the decision without capturing anything."},
