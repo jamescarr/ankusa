@@ -33,6 +33,12 @@ this project follows [Semantic Versioning](https://semver.org/).
   `x-ankusa-tenant`, `content-type`, `x-ankusa-dedupe-key`,
   `x-ankusa-replay-id`, and `x-ankusa-idempotency-key` headers of a delivery,
   and `MissingHookIdError` when `x-ankusa-id` is absent.
+- `Signature.verify` for receivers of a signed HTTP sink: the Standard Webhooks
+  `webhook-id`/`webhook-timestamp`/`webhook-signature` check, compared with
+  `MessageDigest.isEqual`, raising `InvalidSignatureError` (`code()`,
+  `field()`, never retryable).
+- A gateway `408` or `429` on `redeem` is a `ClaimCheckUnavailableError`
+  (retryable), not a `ClaimRejectedError`.
 - `SourcesClient`: the tenant-scoped source API — `serverVersion`, `listSources`,
   `getSource`, `createSource`, `updateSource`, and `deleteSource`. A client built
   with an `expectedVersion` fetches `/health` once, caches the reported version,

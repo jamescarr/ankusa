@@ -90,6 +90,11 @@ func (c *ClaimCheckClient) Redeem(ctx context.Context, ref, sha256Hex string) ([
 	case resp.status == http.StatusNotFound:
 		return nil, &ClaimNotFoundError{TenantID: parsed.TenantID, ClaimID: parsed.ClaimID}
 
+	case resp.status == http.StatusRequestTimeout || resp.status == http.StatusTooManyRequests:
+		// A gateway (or a proxy in front of it) that is throttling or timing
+		// out is telling the caller to come back, not that the claim is gone.
+		return nil, &ClaimCheckUnavailableError{Message: fmt.Sprintf("claim-check gateway busy (%d)", resp.status)}
+
 	case resp.status >= 400 && resp.status <= 499:
 		return nil, &ClaimRejectedError{Status: resp.status, Body: errorBody(resp)}
 

@@ -104,6 +104,10 @@ class ClaimCheckClient:
         status = response.status_code
         if status == 404:
             raise ClaimNotFoundError(f"claim not found: {parsed.tenant_id}/{parsed.claim_id}")
+        # A gateway (or a proxy in front of it) that is throttling or timing out
+        # is telling the caller to come back, not that the claim is gone.
+        if status in (408, 429):
+            raise ClaimCheckUnavailableError(f"claim-check gateway busy ({status}): {_error_body(response)!r}")
         if 400 <= status < 500:
             raise ClaimRejectedError(
                 f"claim-check rejected redeem ({status}): {_error_body(response)!r}", status, _error_body(response)

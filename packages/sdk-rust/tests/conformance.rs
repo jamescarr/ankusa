@@ -23,10 +23,11 @@ use ankusa::bytes::Bytes;
 use ankusa::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use ankusa::{
     AdminClient, AdminError, ClaimCheckClient, ClaimCheckError, ClientBuilder, DryRunRequest,
-    InvalidClaimRefError, InvalidMessageError, IpRules, ListDeadLettersParams,
-    ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError, ReplayPatch, ReplaySpec,
-    RouteInput, RoutePatch, RoutesClient, RoutesError, Transport, TransportError, decode_message,
-    parse_claim_ref, parse_headers,
+    InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules,
+    ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError,
+    ReplayPatch, ReplaySpec, RouteInput, RoutePatch, RoutesClient, RoutesError, Transport,
+    TransportError, VerifyOptions, decode_message, parse_claim_ref, parse_headers,
+    verify_signature,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -250,6 +251,21 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "path": parsed.path(),
             }))
         }
+        "verify_signature" => {
+            let headers = input_headers(case);
+            let body = body_bytes(case.input.get("body"));
+            let secrets: Vec<String> = input_required(case, "secrets");
+            let mut options = VerifyOptions {
+                now: Some(input_required(case, "now")),
+                ..VerifyOptions::default()
+            };
+            if case.input.get("tolerance_seconds").is_some() {
+                options.tolerance_seconds = input_required(case, "tolerance_seconds");
+            }
+            let verified =
+                verify_signature(&headers, &body, &secrets, options).map_err(OpError::Signature)?;
+            Ok(json!({ "id": verified.id, "timestamp": verified.timestamp }))
+        }
         "parse_headers" => {
             let headers = input_headers(case);
             let parsed = parse_headers(&headers).map_err(OpError::Hook)?;
@@ -450,6 +466,7 @@ enum OpError {
     ),
     Hook(MissingHookIdError),
     Message(InvalidMessageError),
+    Signature(InvalidSignatureError),
     Claim(ClaimCheckError),
     Routes(RoutesError),
     Admin(AdminError),
@@ -464,6 +481,11 @@ fn error_json(err: &OpError) -> Value {
         }
         OpError::Hook(_) => {
             map.insert("class".to_owned(), json!("MissingHookIdError"));
+        }
+        OpError::Signature(err) => {
+            entry(&mut map, "InvalidSignatureError", err.is_retryable());
+            map.insert("code".to_owned(), json!(err.code));
+            map.insert("field".to_owned(), json!(err.field));
         }
         OpError::Message(err) => {
             entry(&mut map, "InvalidMessageError", err.is_retryable());

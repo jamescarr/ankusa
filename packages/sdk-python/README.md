@@ -71,9 +71,9 @@ so a consumer needs exactly one bit to decide dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `False` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64-char lowercase hex |
 | `ClaimNotFoundError` | `False` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `False` | gateway `4xx` other than `404` (`.status`, `.body`) |
+| `ClaimRejectedError` | `False` | gateway `4xx` other than `404`, `408`, `429` (`.status`, `.body`) |
 | `ClaimIntegrityError` | `False` | sha256 of the returned bytes doesn't match |
-| `ClaimCheckUnavailableError` | `True` | gateway `5xx`/`503`, or unreachable |
+| `ClaimCheckUnavailableError` | `True` | gateway `5xx`, `408`, `429`, or unreachable |
 
 `health()` hits `GET /health` for a liveness probe.
 
@@ -117,6 +117,26 @@ already is.
 
 [`examples/quickstart/worker.py`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/worker.py)
 uses this.
+
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way:
+
+```python
+from ankusa import InvalidSignatureError, verify_signature
+
+try:
+    # the raw request body, exactly as received
+    verify_signature(request.headers, raw_body, [os.environ["ANKUSA_WHSEC"]])
+except InvalidSignatureError as err:
+    return 401, {"error": "invalid_signature", "code": err.code}
+```
+
+`secrets` is one secret or several during a rotation (`whsec_` + base64, or
+any other string used as its own bytes); `tolerance_seconds` (default 300)
+bounds the `webhook-timestamp` window. Failures carry `code`, `field` and
+`retryable=False`.
 
 ## Consuming queue messages
 

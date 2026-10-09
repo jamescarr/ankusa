@@ -6,6 +6,18 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `verify_signature(headers, body, secrets, VerifyOptions)` verifies the
+  Standard Webhooks signature an HTTP sink with a `secret` adds, comparing in
+  constant time (`hmac`); failures are `InvalidSignatureError` (`code`,
+  `field`, never retryable). New dependency: `hmac`.
+
+### Changed
+
+- `ClaimCheckClient::redeem` returns `ClaimCheckError::Unavailable`
+  (retryable) for a gateway `408` or `429` instead of `Rejected`.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

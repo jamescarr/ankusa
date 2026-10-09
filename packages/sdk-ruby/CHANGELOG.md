@@ -6,6 +6,18 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.verify_signature(headers, body, secrets, tolerance_seconds: 300, now: nil)`
+  verifies the Standard Webhooks signature an HTTP sink with a `secret` adds,
+  comparing with `OpenSSL.fixed_length_secure_compare`; failures raise
+  `Ankusa::InvalidSignatureError` (`code`, `field`, never retryable).
+
+### Changed
+
+- `ClaimCheckClient#redeem` raises `ClaimCheckUnavailableError` (retryable)
+  for a gateway `408` or `429` instead of `ClaimRejectedError`.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

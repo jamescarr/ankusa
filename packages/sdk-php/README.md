@@ -89,9 +89,9 @@ needs exactly one bit to decide dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `$ref` isn't a well-formed claim-check URN, or `$sha256` isn't 64-char lowercase hex |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (public `$status`, `$body`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (public `$status`, `$body`) |
 | `ClaimIntegrityError` | `false` | sha256 of the returned bytes doesn't match |
-| `ClaimCheckUnavailableError` | `true` | gateway `5xx`/`503`, or unreachable |
+| `ClaimCheckUnavailableError` | `true` | gateway `5xx`, `408`, `429`, or unreachable |
 
 `health()` hits `GET /health` for a liveness probe.
 
@@ -126,6 +126,30 @@ so the same hook can arrive twice after a retry. Dedupe on
 `$hook->idempotencyKey()`: it returns the tenant-scoped key Ankusa shipped in
 `x-ankusa-idempotency-key` (`$hook->idempotencyKey` is the parsed header, `null`
 for a sender that predates it, in which case the method computes the key).
+
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way:
+
+```php
+use Ankusa\Webhook\InvalidSignatureError;
+use Ankusa\Webhook\Signature;
+
+try {
+    // the raw request body, exactly as received
+    Signature::verify(getallheaders(), file_get_contents('php://input'), [getenv('ANKUSA_WHSEC')]);
+} catch (InvalidSignatureError $e) {
+    http_response_code(401);
+    echo json_encode(['error' => 'invalid_signature', 'code' => $e->errorCode]);
+    exit;
+}
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own bytes;
+pass several during a rotation. `$toleranceSeconds` (default 300) bounds the
+`webhook-timestamp` window. Signatures are compared with `hash_equals`;
+failures carry `$errorCode` and `$field`, never retryable.
 
 ## Consuming queue messages
 

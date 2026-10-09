@@ -40,7 +40,7 @@ from .sources import (
     SourcesUnavailableError,
     VersionMismatchError,
 )
-from .webhook import HookHeaders, MissingHookIdError, parse_headers
+from .webhook import HookHeaders, InvalidSignatureError, MissingHookIdError, parse_headers, verify_signature
 
 __all__ = [
     "AdminClient",
@@ -76,6 +76,8 @@ __all__ = [
     "HookHeaders",
     "MissingHookIdError",
     "parse_headers",
+    "InvalidSignatureError",
+    "verify_signature",
     "Message",
     "InvalidMessageError",
     "decode_message",

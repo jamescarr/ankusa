@@ -182,5 +182,71 @@ defmodule Ankusa.SDK.ReceiverTest do
     assert_raise ArgumentError, ~r/:max_body_bytes must be a positive integer/, fn ->
       Receiver.init(handler: Ankusa.SDK.ReceiverTestHandler, max_body_bytes: 0)
     end
+
+    assert_raise ArgumentError, ~r/a whsec_ secret must be base64/, fn ->
+      Receiver.init(handler: Ankusa.SDK.ReceiverTestHandler, secret: "whsec_!!!")
+    end
+  end
+
+  describe "with :secret" do
+    @secret "whsec_" <> Base.encode64("receiver-test-key")
+
+    defp signed(body, opts \\ []) do
+      id = "msg_1"
+      timestamp = Integer.to_string(Keyword.get(opts, :timestamp, System.system_time(:second)))
+      mac = :crypto.mac(:hmac, :sha256, "receiver-test-key", "#{id}.#{timestamp}.#{body}")
+
+      [
+        "x-ankusa-id": "01a0",
+        "webhook-id": id,
+        "webhook-timestamp": timestamp,
+        "webhook-signature": "v1,bm90LXRoaXMtb25l v1," <> Base.encode64(mac)
+      ]
+    end
+
+    test "a delivery signed with the secret reaches the handler" do
+      conn = post("/", @body, signed(@body)) |> Receiver.call(receiver_opts(secret: @secret))
+
+      assert conn.status == 202
+      assert_received {:hook, %Hook{body: @body}}
+    end
+
+    test "a tampered body is answered 401 and never reaches the handler" do
+      conn =
+        post("/", @body <> " ", signed(@body)) |> Receiver.call(receiver_opts(secret: @secret))
+
+      assert conn.status == 401
+
+      assert JSON.decode!(conn.resp_body) == %{
+               "error" => "invalid_signature",
+               "code" => "no_matching_signature"
+             }
+
+      refute_received {:hook, _hook}
+    end
+
+    test "a stale timestamp is refused even when the signature matches" do
+      headers = signed(@body, timestamp: System.system_time(:second) - 301)
+      conn = post("/", @body, headers) |> Receiver.call(receiver_opts(secret: @secret))
+
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["code"] == "timestamp_out_of_tolerance"
+    end
+
+    test "an unsigned delivery is refused" do
+      conn =
+        post("/", @body, "x-ankusa-id": "01a0") |> Receiver.call(receiver_opts(secret: @secret))
+
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["code"] == "missing_header"
+    end
+
+    test "any secret of a rotation verifies" do
+      conn =
+        post("/", @body, signed(@body))
+        |> Receiver.call(receiver_opts(secret: ["whsec_" <> Base.encode64("old"), @secret]))
+
+      assert conn.status == 202
+    end
   end
 end

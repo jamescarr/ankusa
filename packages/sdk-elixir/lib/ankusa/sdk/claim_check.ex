@@ -18,9 +18,9 @@ defmodule Ankusa.SDK.ClaimCheck do
   | --- | --- | --- |
   | `Ankusa.SDK.InvalidClaimRefError` | `false` | bad ref, or `sha256` not 64-char lowercase hex |
   | `Ankusa.SDK.ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-  | `Ankusa.SDK.ClaimRejectedError` | `false` | gateway `4xx` other than `404` |
+  | `Ankusa.SDK.ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` |
   | `Ankusa.SDK.ClaimIntegrityError` | `false` | sha256 of the returned bytes doesn't match |
-  | `Ankusa.SDK.ClaimCheckUnavailableError` | `true` | gateway unreachable, or answered anything else |
+  | `Ankusa.SDK.ClaimCheckUnavailableError` | `true` | gateway unreachable, `408`, `429`, or anything else |
 
   ```elixir
   client = Ankusa.SDK.ClaimCheck.new("http://localhost:4001")
@@ -76,7 +76,10 @@ defmodule Ankusa.SDK.ClaimCheck do
              message: "claim not found: #{parsed.tenant_id}/#{parsed.claim_id}"
            }}
 
-        {:ok, %{status: status, body: body}} when status >= 400 and status <= 499 ->
+        # A gateway (or a proxy in front of it) that is throttling or timing
+        # out is telling the caller to come back, not that the claim is gone.
+        {:ok, %{status: status, body: body}}
+        when status >= 400 and status <= 499 and status not in [408, 429] ->
           {:error,
            %ClaimRejectedError{
              message:

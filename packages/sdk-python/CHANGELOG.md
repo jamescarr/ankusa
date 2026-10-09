@@ -6,6 +6,18 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `verify_signature(headers, body, secrets, *, tolerance_seconds=300, now=None)`
+  verifies the Standard Webhooks signature an HTTP sink with a `secret` adds,
+  comparing in constant time; failures raise `InvalidSignatureError` (`code`,
+  `field`, `retryable=False`).
+
+### Changed
+
+- `ClaimCheckClient.redeem()` raises `ClaimCheckUnavailableError` (retryable)
+  for a gateway `408` or `429` instead of `ClaimRejectedError`.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

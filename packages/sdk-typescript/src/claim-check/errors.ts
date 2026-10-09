@@ -4,10 +4,11 @@
  * dead-letter or retry — and nothing here requires it to know the gateway's
  * status codes to get that right.
  *
- * Non-retryable: the ref is malformed, the gateway said `404`/other `4xx`, or
- * the bytes that came back don't match the expected sha256.
- * Retryable: the gateway said `5xx`/`503`, or the request never completed
- * (network error, timeout).
+ * Non-retryable: the ref is malformed, the gateway said `404` or another
+ * `4xx` (except `408`/`429`), or the bytes that came back don't match the
+ * expected sha256.
+ * Retryable: the gateway said `5xx`, `408` or `429`, or the request never
+ * completed (network error, timeout).
  */
 export abstract class ClaimCheckError extends Error {
   abstract readonly retryable: boolean;
@@ -26,7 +27,7 @@ export class ClaimNotFoundError extends ClaimCheckError {
   readonly retryable = false;
 }
 
-/** The gateway rejected the request (`400` or any other non-404 `4xx`). */
+/** The gateway rejected the request (`400` or any other `4xx` but `404`, `408` and `429`). */
 export class ClaimRejectedError extends ClaimCheckError {
   readonly retryable = false;
 

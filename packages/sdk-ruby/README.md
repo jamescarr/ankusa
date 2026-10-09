@@ -81,9 +81,9 @@ consumer needs exactly one bit to decide dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64-char lowercase hex |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`.status`, `.body`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`.status`, `.body`) |
 | `ClaimIntegrityError` | `false` | sha256 of the returned bytes doesn't match |
-| `ClaimCheckUnavailableError` | `true` | gateway `5xx`/`503`, or unreachable |
+| `ClaimCheckUnavailableError` | `true` | gateway `5xx`, `408`, `429`, or unreachable |
 
 `health` hits `GET /health` for a liveness probe. There's no `close`: the
 default transport opens one connection per request.
@@ -134,6 +134,23 @@ marks a replay); `HookHeaders#idempotency_key` returns the tenant-scoped key
 Ankusa computed and shipped in `x-ankusa-idempotency-key` — see "Consuming
 queue messages". Header lookup is always case-insensitive, regardless of
 whether the mapping passed in already is.
+
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way:
+
+```ruby
+# the raw request body, exactly as received
+Ankusa.verify_signature(header_map(env), request.body.read, [ENV.fetch("ANKUSA_WHSEC")])
+rescue Ankusa::InvalidSignatureError => e
+  [401, {"content-type" => "application/json"}, [JSON.generate(error: "invalid_signature", code: e.code)]]
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own bytes;
+pass several during a rotation. `tolerance_seconds:` (default 300) bounds the
+`webhook-timestamp` window. Failures are `Ankusa::InvalidSignatureError` with
+`code` and `field`, never retryable.
 
 ## Consuming queue messages
 

@@ -39,6 +39,7 @@ ERROR_CLASSES: dict[str, type[BaseException]] = {
         "ClaimIntegrityError",
         "ClaimCheckUnavailableError",
         "MissingHookIdError",
+        "InvalidSignatureError",
         "RoutesError",
         "InvalidRouteIdError",
         "RoutesUnavailableError",
@@ -209,6 +210,15 @@ def _run_parse_claim_ref(case: dict[str, Any], requests: list[RecordedRequest]) 
 def _run_parse_headers(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     return dataclasses.asdict(ankusa.parse_headers(case["input"]["headers"]))
 
+def _run_verify_signature(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    kwargs: dict[str, Any] = {"now": inp["now"]}
+    if "tolerance_seconds" in inp:
+        kwargs["tolerance_seconds"] = inp["tolerance_seconds"]
+    verified = ankusa.verify_signature(inp["headers"], _body_bytes(inp["body"]), inp["secrets"], **kwargs)
+    return {"id": verified.id, "timestamp": verified.timestamp}
+
+
 
 def _run_decode_message(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     return dataclasses.asdict(ankusa.decode_message(case["input"]["message"]))
@@ -355,6 +365,7 @@ def _run_admin_quarantine(case: dict[str, Any], requests: list[RecordedRequest])
 RUNNERS: dict[str, Runner] = {
     "parse_claim_ref": _run_parse_claim_ref,
     "parse_headers": _run_parse_headers,
+    "verify_signature": _run_verify_signature,
     "decode_message": _run_decode_message,
     "idempotency_key": _run_idempotency_key,
     "redeem": _run_redeem,
