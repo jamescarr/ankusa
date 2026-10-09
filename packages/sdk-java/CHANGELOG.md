@@ -18,9 +18,13 @@ this project follows [Semantic Versioning](https://semver.org/).
   `getIpRules`, `putIpRules`, and `testRoute`. Every call is one request, no
   retries, and a redirect is never followed: a `3xx` is a `RoutesUnavailableError`.
 - `AdminClient`: the DLQ and quarantine client — `health`, `metrics`, `config`,
-  `listDeadLetters`, `listQuarantined`, and the replay jobs `createReplay`,
-  `getReplay`, `listReplays`, and `updateReplay` (kinds `dlq`, `archive`,
-  `quarantine`).
+  `asyncApi` (the `GET /asyncapi.json` AsyncAPI 3.0 document),
+  `listDeadLetters`, `listQuarantined`, `purgeQuarantined`
+  (`DELETE /v1/quarantine`, filtered by `PurgeQuarantinedParams`, answering a
+  `QuarantinePurge` of `deleted` and `bytes`), and the replay jobs
+  `createReplay`, `getReplay`, `listReplays`, and `updateReplay` (kinds `dlq`,
+  `archive`, `quarantine`). A `QuarantineEntry` carries a nullable `tenantId`
+  and `size`, both null for an entry held before the listener recorded them.
 - `Message.decode`, the queue-message decoder: it validates the v1 message
   (including the shipped `idempotency_key`, the `idempotencyKey` record
   component), decodes and verifies the body, and raises `InvalidMessageError`
