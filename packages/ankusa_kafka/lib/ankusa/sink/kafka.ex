@@ -20,11 +20,17 @@ defmodule Ankusa.Sink.Kafka do
     * **timestamp** — `env.received_at` (event time, not dispatch time).
 
   `deliver/3` returns `:ok` only after every in-sync replica has the record
-  (`required_acks: -1`, not configurable). Anything else — unreachable broker,
-  unknown topic, oversized message, timeout, failed claim check — returns
-  `{:error, reason}` into the source's `Ankusa.RetryPolicy`, then the DLQ.
+  (`required_acks: -1`, not configurable). A record the broker will never take
+  is `{:error, {:permanent, reason}}`, dead-lettered at once (see "Error
+  classes" in `Ankusa.Sink`): a value plus key over `:max_record_bytes` is
+  refused before it is produced, and a produce the broker answers with
+  `message_too_large`, `invalid_message` or `invalid_record` is permanent too.
+  Anything else — unreachable broker, unknown topic, timeout, failed claim
+  check — returns `{:error, reason}` into the source's `Ankusa.RetryPolicy`,
+  then the DLQ.
 
-  brod's producer is not idempotent, so a produce retried after a lost ack
+  A produce that times out may still land: brod cannot cancel one in flight,
+  and its producer is not idempotent, so a produce retried after a lost ack
   can write the record twice. Delivery is at-least-once anyway; consumers
   dedupe on the `idempotency_key`.
 
@@ -57,6 +63,10 @@ defmodule Ankusa.Sink.Kafka do
     * `:key`                — a string, or `(Envelope.t() -> String.t())`;
                               default `"\#{tenant_id}/\#{source_id}"`
     * `:inline_max_bytes`   — default 64 KiB (65,536), configurable
+    * `:max_record_bytes`   — the largest value + key produced; default
+                              `1_000_000` (the broker's `message.max.bytes`
+                              default, 1 MiB, less batch overhead). Raise it
+                              with the topic's `max.message.bytes`
     * `:produce_timeout_ms` — broker ack timeout and the longest `deliver/3`
                               waits for it; default `5_000`
     * `:client`             — atom naming the brod client; default `:default`
@@ -69,21 +79,50 @@ defmodule Ankusa.Sink.Kafka do
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
 
+  @default_max_record_bytes 1_000_000
+
+  # Produce error codes no retry can fix.
+  @permanent_codes [:message_too_large, :invalid_message, :invalid_record]
+
   @impl true
   def deliver(%Envelope{} = env, ctx, opts) do
     topic = Keyword.fetch!(opts, :topic)
     timeout = Keyword.get(opts, :produce_timeout_ms, 5_000)
     client = client_id(ctx.instance, Keyword.get(opts, :client, :default))
+    max = Keyword.get(opts, :max_record_bytes, @default_max_record_bytes)
 
-    with :ok <- ensure_client(client, opts, timeout),
-         {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
+    with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
          key = key(env, opts),
+         :ok <- fits(payload, key, max),
+         :ok <- ensure_client(client, opts, timeout),
          {:ok, partition} <- partition(client, topic, key),
          {:ok, call_ref} <-
            :brod.produce(client, topic, partition, key, record(env, ctx, payload)) do
-      :brod.sync_produce_request(call_ref, timeout)
+      case :brod.sync_produce_request(call_ref, timeout) do
+        :ok -> :ok
+        {:error, reason} -> {:error, classify(reason)}
+      end
     end
   end
+
+  defp fits(payload, key, max) do
+    size = byte_size(payload) + byte_size(key || "")
+
+    if size > max,
+      do: {:error, {:permanent, {:message_too_large, size, max}}},
+      else: :ok
+  end
+
+  # brod reports a broker's error code as an atom somewhere inside the reason
+  # (`{:producer_down, {:not_retriable, {_, :message_too_large}}}` and the like).
+  defp classify(reason) do
+    if permanent?(reason), do: {:permanent, reason}, else: reason
+  end
+
+  defp permanent?(code) when code in @permanent_codes, do: true
+  defp permanent?(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> permanent?()
+  defp permanent?(list) when is_list(list), do: Enum.any?(list, &permanent?/1)
+  defp permanent?(_other), do: false
 
   @impl true
   def inline_max_bytes(opts), do: Message.inline_max_bytes(opts)

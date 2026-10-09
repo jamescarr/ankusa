@@ -59,6 +59,14 @@ defmodule Ankusa.Routes.Store.RedisTest do
     route
   end
 
+  # The ids in a node's route table, sorted.
+  defp route_ids(instance) do
+    case Routes.meta(instance) do
+      nil -> []
+      meta -> instance |> Ankusa.Routes.Snapshot.routes(meta) |> Enum.map(& &1.id) |> Enum.sort()
+    end
+  end
+
   # Polling, because the assertion is "this arrives without a tick" — a sleep
   # long enough to be safe would also be long enough for the 60s tick to be
   # irrelevant, so a deadline is the honest way to express it.
@@ -159,7 +167,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
     # route stays deleted: seeding is a first-boot event, not a boot event.
     second = start_node()
     assert {:error, :not_found} = Routes.get(second.instance, "s")
-    assert Routes.snapshot(second.instance).by_id == %{}
+    assert route_ids(second.instance) == []
   end
 
   test "the cap is enforced against the shared hash" do
@@ -179,11 +187,11 @@ defmodule Ankusa.Routes.Store.RedisTest do
     node_a = start_node(tick_ms: 3_600_000, seed: [%{"id" => "s", "path" => "/hooks/s"}])
     node_b = start_node(tick_ms: 3_600_000)
 
-    assert Map.keys(Routes.snapshot(node_b.instance).by_id) == ["s"]
+    assert route_ids(node_b.instance) == ["s"]
 
     assert {:ok, _} = Routes.create(node_a.instance, %{"id" => "n", "path" => "/hooks/n"})
 
-    eventually(fn -> Map.has_key?(Routes.snapshot(node_b.instance).by_id, "n") end)
+    eventually(fn -> "n" in route_ids(node_b.instance) end)
 
     # The mirror is complete, not just appended to: the decision and the
     # definition both have to be there.
@@ -198,7 +206,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # ... and a delete travels the same way.
     assert :ok = Routes.delete(node_a.instance, "n")
-    eventually(fn -> not Map.has_key?(Routes.snapshot(node_b.instance).by_id, "n") end)
+    eventually(fn -> "n" not in route_ids(node_b.instance) end)
   end
 
   test "a global rule change reaches another node over pub/sub" do
@@ -224,7 +232,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
     {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:routes", "x", encoded_route("x")])
     {:ok, _} = Redix.command(conn, ["INCR", "#{@namespace}:version"])
 
-    eventually(fn -> Map.has_key?(Routes.snapshot(node_b.instance).by_id, "x") end, 3_000)
+    eventually(fn -> "x" in route_ids(node_b.instance) end, 3_000)
     assert {:ok, %{id: "x"}} = Routes.get(node_b.instance, "x")
   end
 
@@ -234,7 +242,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
     config = start_node()
 
     assert {:ok, _} = Routes.create(config.instance, %{"id" => "a", "path" => "/hooks/a"})
-    before = Routes.snapshot(config.instance)
+    before = Routes.meta(config.instance)
 
     # Every hash write now fails with WRONGTYPE. A disconnection arrives as the
     # same `{:error, %Redix.Error{} | %Redix.ConnectionError{}}` from Redix, so
@@ -245,9 +253,9 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert {:error, :store_unavailable} =
              Routes.create(config.instance, %{"id" => "b", "path" => "/hooks/b"})
 
-    snapshot = Routes.snapshot(config.instance)
-    assert snapshot.version == before.version
-    assert Map.keys(snapshot.by_id) == ["a"]
+    meta = Routes.meta(config.instance)
+    assert meta.version == before.version
+    assert route_ids(config.instance) == ["a"]
 
     assert Routes.authorize(config.instance, "POST", ["hooks", "a"], {1, 2, 3, 4}) ==
              {:ok, "a"}
@@ -350,13 +358,9 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # Neither write was lost. A took Redis's table instead of applying its own
     # change to a copy that did not have B's, and B hears about A's in turn.
-    assert node_a.instance |> Routes.snapshot() |> Map.fetch!(:by_id) |> Map.keys() |> Enum.sort() ==
-             ["from-a", "from-b"]
+    assert route_ids(node_a.instance) == ["from-a", "from-b"]
 
-    eventually(fn ->
-      node_b.instance |> Routes.snapshot() |> Map.fetch!(:by_id) |> Map.keys() |> Enum.sort() ==
-        ["from-a", "from-b"]
-    end)
+    eventually(fn -> route_ids(node_b.instance) == ["from-a", "from-b"] end)
   end
 
   test "two nodes creating the same id: exactly one wins", %{conn: conn} do
@@ -442,15 +446,37 @@ defmodule Ankusa.Routes.Store.RedisTest do
     node = start_node(tick_ms: 100, seed: [%{"id" => "s", "path" => "/hooks/s"}])
     assert {:ok, _} = Routes.create(node.instance, %{"id" => "a", "path" => "/hooks/a"})
     assert {:ok, _} = Routes.create(node.instance, %{"id" => "b", "path" => "/hooks/b"})
-    assert Routes.snapshot(node.instance).version == 3
+    assert Routes.meta(node.instance).version == 3
 
     # A restore from an older backup: a different table at a LOWER version.
     {:ok, _} = Redix.command(conn, ["DEL", "#{@namespace}:routes"])
     {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:routes", "old", encoded_route("old")])
     {:ok, _} = Redix.command(conn, ["SET", "#{@namespace}:version", "1"])
 
-    eventually(fn -> Map.keys(Routes.snapshot(node.instance).by_id) == ["old"] end, 3_000)
-    assert Routes.snapshot(node.instance).version == 1
+    eventually(fn -> route_ids(node.instance) == ["old"] end, 3_000)
+    assert Routes.meta(node.instance).version == 1
+  end
+
+  test "a namespace emptied under a node keeps its last table until a version reappears", %{
+    conn: conn
+  } do
+    node = start_node(tick_ms: 50)
+    assert {:ok, _} = Routes.create(node.instance, %{"id" => "a", "path" => "/hooks/a"})
+    assert {:ok, _} = Routes.create(node.instance, %{"id" => "b", "path" => "/hooks/b"})
+    before = Routes.meta(node.instance)
+
+    {:ok, _} = Redix.command(conn, ["FLUSHDB"])
+    # Several ticks, none of which may empty the table.
+    Process.sleep(300)
+
+    assert route_ids(node.instance) == ["a", "b"]
+    assert Routes.meta(node.instance).epoch == before.epoch
+    assert Routes.authorize(node.instance, "POST", ["hooks", "a"], {1, 2, 3, 4}) == {:ok, "a"}
+
+    # A deliberate restore (a version and a definition) is followed.
+    {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:routes", "c", encoded_route("c")])
+    {:ok, _} = Redix.command(conn, ["SET", "#{@namespace}:version", "1"])
+    eventually(fn -> route_ids(node.instance) == ["c"] end, 3_000)
   end
 
   test "a node booting with a different seed leaves an existing namespace alone" do
@@ -462,7 +488,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # Neither the new seed's route nor the deleted one appears: the namespace
     # already existed, so the seed was not applied.
-    assert Map.keys(Routes.snapshot(second.instance).by_id) == ["n"]
+    assert route_ids(second.instance) == ["n"]
   end
 
   test "a pub/sub connection that dies is replaced and subscribed again" do
@@ -486,7 +512,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # The tick is an hour away: only a live subscription can bring this to A.
     assert {:ok, _} = Routes.create(node_b.instance, %{"id" => "n", "path" => "/hooks/n"})
-    eventually(fn -> Map.has_key?(Routes.snapshot(node_a.instance).by_id, "n") end)
+    eventually(fn -> "n" in route_ids(node_a.instance) end)
   end
 
   defp encoded_route(id) do

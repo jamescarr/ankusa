@@ -104,11 +104,14 @@ defmodule Ankusa.Edge.Batcher do
        max_batch: b.max_batch,
        max_delay_ms: b.max_delay_ms,
        max_queue: b.max_queue,
+       max_queue_bytes: b.max_queue_bytes,
        task_sup: task_sup,
        # newest-first: [{from, record, deadline}]
        buffer: [],
        count: 0,
-       # nil | %{ref: reference, entries: [{from, record, deadline}]}
+       # the body bytes in `buffer`
+       bytes: 0,
+       # nil | %{ref: reference, entries: [{from, record, deadline}], bytes: n}
        inflight: nil,
        timer: nil,
        # The timer that answers buffered records at their deadline, and the
@@ -138,8 +141,17 @@ defmodule Ankusa.Edge.Batcher do
 
   @impl true
   def handle_call({:enqueue, record, deadline}, from, state) do
-    if state.count + inflight_size(state) >= state.max_queue do
-      Ankusa.Telemetry.emit([:load_shed], %{queue: state.count + inflight_size(state)}, %{
+    size = record_bytes(record)
+    queued = state.count + inflight_size(state)
+    queued_bytes = state.bytes + inflight_bytes(state)
+
+    # A record bigger than the byte bound on its own is still admitted into an
+    # empty batcher: `max_body_bytes` is the per-record limit, this one bounds
+    # how much a partition holds.
+    over_bytes? = queued > 0 and queued_bytes + size > state.max_queue_bytes
+
+    if queued >= state.max_queue or over_bytes? do
+      Ankusa.Telemetry.emit([:load_shed], %{queue: queued, bytes: queued_bytes}, %{
         instance: state.instance
       })
 
@@ -148,7 +160,8 @@ defmodule Ankusa.Edge.Batcher do
       state = %{
         state
         | buffer: [{from, record, deadline} | state.buffer],
-          count: state.count + 1
+          count: state.count + 1,
+          bytes: state.bytes + size
       }
 
       {:noreply, state |> maybe_flush() |> ensure_expiry(from, deadline)}
@@ -231,6 +244,16 @@ defmodule Ankusa.Edge.Batcher do
   defp inflight_size(%{inflight: nil}), do: 0
   defp inflight_size(%{inflight: %{entries: entries}}), do: length(entries)
 
+  defp inflight_bytes(%{inflight: nil}), do: 0
+  defp inflight_bytes(%{inflight: %{bytes: bytes}}), do: bytes
+
+  defp record_bytes(%{envelope: %{body: body}}) when is_binary(body), do: byte_size(body)
+  defp record_bytes(_record), do: 0
+
+  defp entries_bytes(entries),
+    do:
+      Enum.reduce(entries, 0, fn {_from, record, _deadline}, acc -> acc + record_bytes(record) end)
+
   # A commit in flight already owns the batcher's turn; the new record waits
   # in `buffer` and the completion flushes it immediately.
   defp maybe_flush(%{inflight: inflight} = state) when inflight != nil, do: state
@@ -261,11 +284,14 @@ defmodule Ankusa.Edge.Batcher do
           safe_enqueue(instance, records, deadline)
         end)
 
+      batch_bytes = entries_bytes(entries)
+
       %{
         state
         | buffer: remainder,
           count: length(remainder),
-          inflight: %{ref: task.ref, entries: entries}
+          bytes: state.bytes - batch_bytes,
+          inflight: %{ref: task.ref, entries: entries, bytes: batch_bytes}
       }
     end
   end
@@ -313,7 +339,8 @@ defmodule Ankusa.Edge.Batcher do
       GenServer.reply(from, {:error, :store_unavailable})
     end)
 
-    {length(expired), %{state | buffer: live, count: length(live)}}
+    {length(expired),
+     %{state | buffer: live, count: length(live), bytes: state.bytes - entries_bytes(expired)}}
   end
 
   # Only a record that is still buffered (it is the newest entry) needs the

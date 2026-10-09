@@ -49,7 +49,7 @@ sources:
       - type: nats
         # A list of host:port, or one comma-separated string — so
         # `servers: "${NATS_SERVERS}"` takes "host:port,host:port" from env.
-        # More than one is failover order, not fan-out.
+        # More than one is failover (one at a time, picked at random), not fan-out.
         servers: "${NATS_SERVERS}"
         # Subject, not stream: the stream that covers it already exists.
         subject: "${NATS_SUBJECT:-ankusa.stripe}"

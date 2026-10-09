@@ -22,6 +22,7 @@ for f in examples/*/*/mix.exs; do
     cd "$d"
     mix deps.get --check-locked
     mix deps.unlock --check-unused
+    mix hex.audit
     if [ -f .formatter.exs ]; then mix format --check-formatted; fi
     MIX_ENV=prod mix compile --warnings-as-errors
   )

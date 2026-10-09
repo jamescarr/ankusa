@@ -34,7 +34,11 @@ defmodule Ankusa.Config do
               # Task, so waiting costs a scheduling hop, not head-of-line
               # blocking.
               max_delay_ms: 0,
-              max_queue: 10_000
+              # load shedding: a partition refuses (503 overload) once it holds
+              # max_queue records, or max_queue_bytes of bodies, counting both
+              # the buffer and the batch being committed
+              max_queue: 10_000,
+              max_queue_bytes: 268_435_456
             },
             # dispatch pipeline
             dispatch: %{
@@ -52,11 +56,25 @@ defmodule Ankusa.Config do
               # (http `timeout_ms` 5 s, nats/redis `publish_timeout_ms` 5 s, kafka
               # produce 5 s, the rabbitmq connection call 15 s).
               attempt_timeout_ms: 30_000,
+              # per-sink isolation, keyed by {source_id, sink index, sink module}:
+              # at most sink_concurrency attempts of one sink run at once (nil =
+              # only the global `concurrency` cap)...
+              sink_concurrency: nil,
+              # ...and a sink that fails breaker_failures times in a row (0 =
+              # never) is skipped for breaker_open_ms, doubling per consecutive
+              # open up to breaker_max_open_ms. Rows parked by an open breaker
+              # keep their attempt count.
+              breaker_failures: 5,
+              breaker_open_ms: 30_000,
+              breaker_max_open_ms: 300_000,
               retry: {Ankusa.RetryPolicy.Exponential, []}
             },
             # segment compaction
             storage: %{
               blob_store: {Ankusa.BlobStore.LocalFS, []},
+              # prepended to every segment key ("" or "a/b/" — segments of
+              # fleet nodes sharing one bucket must not collide)
+              key_prefix: "",
               codec: {Ankusa.Codec.Raw, []},
               roll_bytes: 16 * 1024 * 1024,
               roll_ms: 30_000,
@@ -73,11 +91,14 @@ defmodule Ankusa.Config do
               pack_max_bytes: 16 * 1024 * 1024,
               # LocalFS retention only; nil disables the sweeper
               retention_days: nil,
-              sweep_interval_ms: 3_600_000
+              sweep_interval_ms: 3_600_000,
+              # {module, opts} for claim packs; nil = storage.blob_store. Claim
+              # keys are never prefixed, so one gateway reads every node's claims.
+              blob_store: nil
             },
             # operator HTTP API + Prometheus /metrics, unauthenticated; off by
             # default for embedded use
-            admin: %{enabled: false, port: 4002, ip: "127.0.0.1"},
+            admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
             # route management: the allowlist guard plus its admin API. Off by
             # default, and off means "capture every POST", as it always has. On
             # means deny-by-default: a request is captured only if it matches an
@@ -221,6 +242,7 @@ defmodule Ankusa.Config do
     end)
     |> normalize_wal()
     |> validate_listen_ips!()
+    |> validate_ranges!()
   end
 
   @doc "The address a listener binds: a strict IPv4/IPv6 literal string, or an `:inet` address tuple."
@@ -247,6 +269,90 @@ defmodule Ankusa.Config do
     listen_ip!(config.claim_check.ip, "claim_check.ip")
     listen_ip!(config.routes.admin.ip, "routes.admin.ip")
     config
+  end
+
+  # Types and ranges of the numeric keys, so `0` partitions or a negative
+  # concurrency fail at boot with the key's name instead of misbehaving later.
+  # Module-specific rules (dispatch breakers, claim retention, quarantine
+  # buckets, routes) stay with their modules' `validate_config!/1`.
+  @ports [
+    {[:port], "port"},
+    {[:admin, :port], "admin.port"},
+    {[:claim_check, :port], "claim_check.port"},
+    {[:routes, :admin, :port], "routes.admin.port"}
+  ]
+
+  @positive [
+    {[:max_body_bytes], "max_body_bytes"},
+    {[:direct_publish_timeout_ms], "direct_publish_timeout_ms"},
+    {[:batcher, :partitions], "batcher.partitions"},
+    {[:batcher, :max_batch], "batcher.max_batch"},
+    {[:batcher, :max_queue], "batcher.max_queue"},
+    {[:batcher, :max_queue_bytes], "batcher.max_queue_bytes"},
+    {[:dispatch, :batch], "dispatch.batch"},
+    {[:dispatch, :concurrency], "dispatch.concurrency"},
+    {[:dispatch, :max_inflight], "dispatch.max_inflight"},
+    {[:dispatch, :max_inflight_bytes], "dispatch.max_inflight_bytes"},
+    {[:storage, :roll_bytes], "storage.roll_bytes"},
+    {[:claim_check, :sweep_interval_ms], "claim_check.sweep_interval_ms"},
+    {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
+    {[:routes, :max_routes], "routes.max_routes"}
+  ]
+
+  # `0` means something for these: no linger before a commit, roll at once,
+  # and a compactor that only runs when asked (`Compactor.tick/1`).
+  @non_negative [
+    {[:batcher, :max_delay_ms], "batcher.max_delay_ms"},
+    {[:storage, :roll_ms], "storage.roll_ms"},
+    {[:storage, :interval_ms], "storage.interval_ms"}
+  ]
+
+  @key_prefix ~r"\A([A-Za-z0-9._-]+/)+\z"
+
+  defp validate_ranges!(config) do
+    for {path, key} <- @ports do
+      check!(
+        config,
+        path,
+        key,
+        "an integer from 0 to 65535",
+        &(is_integer(&1) and &1 in 0..65_535)
+      )
+    end
+
+    for {path, key} <- @positive do
+      check!(config, path, key, "a positive integer", &(is_integer(&1) and &1 >= 1))
+    end
+
+    for {path, key} <- @non_negative do
+      check!(config, path, key, "a non-negative integer", &(is_integer(&1) and &1 >= 0))
+    end
+
+    check!(
+      config,
+      [:claim_check, :retention_days],
+      "claim_check.retention_days",
+      "nil or an integer >= 1",
+      &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    check!(
+      config,
+      [:storage, :key_prefix],
+      "storage.key_prefix",
+      ~s(\"\" or path segments each ending in "/" such as "node-a/"),
+      &(&1 == "" or (is_binary(&1) and Regex.match?(@key_prefix, &1)))
+    )
+
+    config
+  end
+
+  defp check!(config, path, key, constraint, valid?) do
+    value = get_in(config, Enum.map(path, &Access.key/1))
+
+    unless valid?.(value) do
+      raise ArgumentError, "#{key} must be #{constraint}, got #{inspect(value)}"
+    end
   end
 
   # `:dispatch` and `:storage` read the queue and nothing else, so with no queue

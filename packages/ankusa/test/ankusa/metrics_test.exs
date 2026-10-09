@@ -166,4 +166,87 @@ defmodule Ankusa.MetricsTest do
     refute scrape_a =~ ~s(instance="#{b.instance}")
     assert Ankusa.Metrics.scrape(b.instance) =~ ~s(instance="#{b.instance}")
   end
+
+  defmodule OkSink do
+    @behaviour Ankusa.Sink
+    @impl true
+    def deliver(_env, _ctx, _opts), do: :ok
+  end
+
+  test "deliveries are counted per sink under dispatch and in direct mode" do
+    sources = %{"q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]}
+
+    queued = start_instance(roles: [:edge, :dispatch], source_store: {Static, sources: sources})
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(queued.instance, request("q", ~s({"id":"1"})))
+    assert {:ok, _} = Ankusa.Dispatch.Pipeline.tick(queued.instance)
+
+    direct = start_instance(wal: :none, source_store: {Static, sources: sources})
+    assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(direct.instance, request("q", ~s({"id":"2"})))
+
+    for config <- [queued, direct] do
+      assert Ankusa.Metrics.scrape(config.instance) =~
+               ~r/^ankusa_dispatch_deliveries_total\{[^}]*result="ok"[^}]*sink="Ankusa.MetricsTest.OkSink"[^}]*\} 1$/m
+    end
+  end
+
+  describe "gauges" do
+    defp gauge(scrape, name, instance) do
+      case Regex.run(~r/^#{name}\{instance="#{instance}"\} (\S+)$/m, scrape) do
+        [_, value] -> value |> Float.parse() |> elem(0)
+        nil -> nil
+      end
+    end
+
+    test "the store, queue and pen gauges report what is held" do
+      config = start_instance()
+      inst = config.instance
+
+      for i <- 1..3 do
+        assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, request("demo", ~s({"id":"g#{i}"})))
+      end
+
+      # A forged hook for a quarantining source goes to the pen.
+      assert {:quarantined, _} = Ankusa.Edge.Ingest.ingest(inst, request("strict", "{}"))
+
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      # No dispatch role here: the three hooks' rows are due and stay due.
+      assert gauge(scrape, "ankusa_queue_pending", inst) == 3.0
+      assert gauge(scrape, "ankusa_queue_scheduled", inst) == 0.0
+      assert gauge(scrape, "ankusa_queue_inflight", inst) == 0.0
+      assert gauge(scrape, "ankusa_queue_dead", inst) == 0.0
+      assert gauge(scrape, "ankusa_queue_oldest_due_age_seconds", inst) >= 0.0
+      assert gauge(scrape, "ankusa_store_hooks", inst) != nil
+      assert gauge(scrape, "ankusa_store_disk_bytes", inst) != nil
+      assert gauge(scrape, "ankusa_quarantine_entries", inst) == 1.0
+      assert gauge(scrape, "ankusa_quarantine_bytes", inst) > 0.0
+    end
+
+    test "a probe that fails emits nothing and the others still run" do
+      config = start_instance()
+      inst = config.instance
+      pen = Ankusa.whereis(inst, :quarantine)
+      :ok = :sys.suspend(pen)
+      on_exit(fn -> if Process.alive?(pen), do: :sys.resume(pen) end)
+
+      task = Task.async(fn -> Ankusa.Metrics.Gauges.measure(inst) end)
+      assert Task.await(task, 10_000) == :ok
+      :ok = :sys.resume(pen)
+
+      scrape = Ankusa.Metrics.scrape(inst)
+      assert gauge(scrape, "ankusa_quarantine_entries", inst) == nil
+      assert gauge(scrape, "ankusa_queue_pending", inst) == 0.0
+    end
+
+    test "dispatch reports its scheduler on every housekeeping tick" do
+      config = start_instance(roles: [:edge, :dispatch])
+      Process.sleep(1_200)
+
+      scrape = Ankusa.Metrics.scrape(config.instance)
+      assert gauge(scrape, "ankusa_dispatch_running", config.instance) == 0.0
+      assert gauge(scrape, "ankusa_dispatch_breakers_open", config.instance) == 0.0
+      assert gauge(scrape, "ankusa_dispatch_runnable", config.instance) == 0.0
+    end
+  end
 end

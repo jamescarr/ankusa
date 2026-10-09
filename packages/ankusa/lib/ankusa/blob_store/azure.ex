@@ -88,14 +88,25 @@ defmodule Ankusa.BlobStore.Azure do
     :ok
   end
 
+  # Every page (`NextMarker`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts) do
-    query = [{"restype", "container"}, {"comp", "list"}, {"prefix", prefix}]
+  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
+
+  defp list_pages(opts, prefix, marker, acc) do
+    query =
+      [{"restype", "container"}, {"comp", "list"}, {"prefix", prefix}] ++
+        if(marker, do: [{"marker", marker}], else: [])
+
     url = endpoint(opts) <> "/" <> container(opts) <> query_suffix(query, opts)
 
-    case request(opts, :get, url, nil, []) do
-      {:ok, body} -> parse_list_keys(body)
-      {:error, _reason} -> []
+    with {:ok, body} <- request(opts, :get, url, nil, []),
+         {:ok, keys, next} <- parse_list_page(body) do
+      acc = [keys | acc]
+
+      case next do
+        nil -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+        marker -> list_pages(opts, prefix, marker, acc)
+      end
     end
   end
 
@@ -180,17 +191,27 @@ defmodule Ankusa.BlobStore.Azure do
   # ── ListBlobs XML (stdlib :xmerl, the same approach as S3's ListObjectsV2) ──
 
   # A 200 body is not guaranteed to be ListBlobs XML — a proxy error page or an
-  # emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document,
-  # and this runs inside the claim-check sweeper, so a bad body has to read as
-  # "no keys" instead of taking that process down.
-  defp parse_list_keys(xml_body) do
+  # emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document;
+  # that is an error for the listing, never a crash of the caller.
+  defp parse_list_page(xml_body) do
     {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
 
-    ~c"//Blob/Name/text()"
-    |> :xmerl_xpath.string(doc)
-    |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
-    |> Enum.sort()
+    keys =
+      ~c"//Blob/Name/text()"
+      |> :xmerl_xpath.string(doc)
+      |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
+
+    next =
+      case :xmerl_xpath.string(~c"//NextMarker/text()", doc) do
+        [{:xmlText, _parents, _pos, _lang, value, _type} | _] when value != [] ->
+          List.to_string(value)
+
+        _ ->
+          nil
+      end
+
+    {:ok, keys, next}
   catch
-    :exit, _not_xml -> []
+    :exit, _not_xml -> {:error, :list_unreadable}
   end
 end

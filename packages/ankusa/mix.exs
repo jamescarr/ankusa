@@ -139,6 +139,9 @@ defmodule Ankusa.MixProject do
       # adapter package.
       {:telemetry_metrics, "~> 1.2"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
+      # Periodic gauge measurements for `Ankusa.Metrics` (`Ankusa.Metrics.Gauges`:
+      # queue depth, oldest-due age, pen and disk usage).
+      {:telemetry_poller, "~> 1.1"},
       # The route-management decision cache (`Ankusa.Routes.Cache`). Every
       # deployment that turns routes on wants a decision cache, so it lives in
       # core rather than an adapter package — the Redis *definitions* store is

@@ -21,8 +21,12 @@ defmodule Ankusa.ClaimCheck do
 
   Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
   `:invalid_tenant`, `:invalid_id`) mean retrying won't help —
-  callers should dead-letter. `{:unavailable, reason}` is transient.
+  callers should dead-letter. `{:unavailable, reason}` is transient, and so is
+  `:forbidden` (the object store refused this node's credential: a
+  configuration fault to fix, not a reason to drop the claim).
   """
+
+  require Logger
 
   alias Ankusa.ClaimCheck.{Pack, Ref}
   alias Ankusa.{BlobStore, Config, Telemetry}
@@ -46,6 +50,7 @@ defmodule Ankusa.ClaimCheck do
           | :invalid_id
           | :not_found
           | :integrity_mismatch
+          | :forbidden
           | {:unavailable, term()}
 
   @typedoc "A checked-in claim: its ref, and the lowercase hex sha256 of its bytes."
@@ -65,8 +70,7 @@ defmodule Ankusa.ClaimCheck do
   Returns a `t:claim/0` per item id once the write is durable. opts:
 
     * `:pack_id` — the pack's id (`Ankusa.ClaimCheck.Ref.pack_id/2`); default
-      a freshly minted one. A one-claim pack can derive it from its envelope
-      so a retried check-in rewrites the same object instead of orphaning one.
+      a freshly minted one (`Ref.new_pack_id/0`: now plus 64 random bits).
   """
   @spec check_in(atom(), String.t(), [item()], keyword()) ::
           {:ok, %{String.t() => claim()}} | {:error, reason()}
@@ -208,9 +212,15 @@ defmodule Ankusa.ClaimCheck do
   misconfiguration at runtime:
 
     * `claim_check.pack_max_bytes` must be a positive integer
-    * `claim_check.retention_days` set with a non-`LocalFS` blob store (the
+    * `claim_check.retention_days` must be `nil` or an integer >= 1, and
+      `claim_check.sweep_interval_ms` an integer >= 1
+    * `claim_check.retention_days` set with a non-`LocalFS` claim store (the
       sweeper only ever covers `LocalFS`; S3/GCS need a bucket lifecycle rule)
     * `max_body_bytes` of 4 GiB or more: a pack can't hold a body that large
+
+  A `:claim_check`-only node whose claim store is `LocalFS` boots with a
+  warning: the gateway reads its own disk, and other nodes' claims are only
+  there if that directory is shared with them.
   """
   @spec validate_config!(Config.t()) :: :ok
   def validate_config!(%Config{claim_check: cc} = config) do
@@ -219,25 +229,50 @@ defmodule Ankusa.ClaimCheck do
             "claim_check.pack_max_bytes must be a positive integer, got #{inspect(cc.pack_max_bytes)}"
     end
 
+    unless cc.retention_days == nil or (is_integer(cc.retention_days) and cc.retention_days >= 1) do
+      raise ArgumentError,
+            "claim_check.retention_days must be nil or an integer >= 1, got #{inspect(cc.retention_days)}"
+    end
+
+    unless is_integer(cc.sweep_interval_ms) and cc.sweep_interval_ms >= 1 do
+      raise ArgumentError,
+            "claim_check.sweep_interval_ms must be a positive integer, got #{inspect(cc.sweep_interval_ms)}"
+    end
+
     if config.max_body_bytes >= 0xFFFFFFFF do
       raise ArgumentError,
             "max_body_bytes must be under 4 GiB: a claim pack can't hold a larger body"
     end
 
-    if cc.retention_days != nil do
-      case config.storage.blob_store do
-        {Ankusa.BlobStore.LocalFS, _} ->
-          :ok
+    {store, _opts} = claim_store(config)
 
-        {other, _} ->
-          raise ArgumentError,
-                "claim_check.retention_days is set but the blob store is #{inspect(other)} — " <>
-                  "the LocalFS sweeper doesn't cover it. Use a bucket lifecycle rule on the " <>
-                  "claims/ prefix instead, and leave retention_days nil."
-      end
+    if cc.retention_days != nil and store != Ankusa.BlobStore.LocalFS do
+      raise ArgumentError,
+            "claim_check.retention_days is set but the claim store is #{inspect(store)} — " <>
+              "the LocalFS sweeper doesn't cover it. Use a bucket lifecycle rule on the " <>
+              "claims/ prefix instead, and leave retention_days nil."
+    end
+
+    if store == Ankusa.BlobStore.LocalFS and Config.role?(config, :claim_check) and
+         not Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
+      Logger.warning(
+        "[ankusa] the claim gateway reads claims from local disk (LocalFS); other nodes' " <>
+          "claims are not here unless this directory is shared with them. Point " <>
+          "claim_check.blob_store at the store the dispatch nodes write to."
+      )
     end
 
     :ok
+  end
+
+  @doc """
+  The store claim packs live in: `claim_check.blob_store`, else
+  `storage.blob_store`. Claim keys are never prefixed.
+  """
+  @spec claim_store(Config.t()) :: {module(), keyword()}
+  def claim_store(%Config{} = config) do
+    {mod, opts, _prefix} = BlobStore.resolve_config(config, :claims)
+    {mod, opts}
   end
 
   # ── internals ─────────────────────────────────────────────────────────────
@@ -265,15 +300,18 @@ defmodule Ankusa.ClaimCheck do
 
   # A read that starts past the end of an object comes back empty (LocalFS
   # answers :eof; S3 and GCS answer 416), and one that runs past the end comes
-  # back short; the caller decides what a short read means.
+  # back short; the caller decides what a short read means. A 403 is the store
+  # refusing the gateway's credential (an S3 credential without
+  # `s3:ListBucket` answers 403 for a missing key, too).
   defp get_range(_instance, _key, _offset, 0), do: {:ok, <<>>}
 
   defp get_range(instance, key, offset, length) do
-    case BlobStore.get_range(instance, key, offset, length) do
+    case BlobStore.get_range(instance, :claims, key, offset, length) do
       {:ok, bin} -> {:ok, bin}
       {:error, :not_found} -> {:error, :not_found}
       {:error, :eof} -> {:ok, <<>>}
       {:error, {:status, 416, _body}} -> {:ok, <<>>}
+      {:error, {:status, 403, _body}} -> {:error, :forbidden}
       {:error, reason} -> {:error, {:unavailable, reason}}
     end
   end
@@ -310,7 +348,7 @@ defmodule Ankusa.ClaimCheck do
   # return in its write is an unavailable store, not a crashed caller. Under
   # `wal: :none` the caller is the request.
   defp put(instance, key, data) do
-    case BlobStore.put(instance, key, data) do
+    case BlobStore.put(instance, :claims, key, data) do
       :ok -> :ok
       {:error, _reason} = error -> error
       other -> {:error, {:bad_return, other}}

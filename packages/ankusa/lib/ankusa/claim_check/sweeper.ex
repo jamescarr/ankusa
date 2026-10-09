@@ -17,6 +17,8 @@ defmodule Ankusa.ClaimCheck.Sweeper do
 
   use GenServer
 
+  require Logger
+
   alias Ankusa.{Config, Telemetry}
   alias Ankusa.ClaimCheck.Ref
 
@@ -82,24 +84,46 @@ defmodule Ankusa.ClaimCheck.Sweeper do
     partitions = partitions(config)
     expired = Enum.filter(partitions, fn {_dir, date} -> Date.compare(date, cutoff) == :lt end)
 
-    Enum.each(expired, fn {dir, _date} -> File.rm_rf!(dir) end)
+    deleted = Enum.count(expired, fn {dir, _date} -> remove(dir) end)
 
     Telemetry.emit(
       [:claim_check, :sweep],
       %{
-        deleted: length(expired),
+        deleted: deleted,
         scanned: length(partitions),
         duration: System.monotonic_time() - started
       },
       %{instance: state.instance}
     )
 
-    {length(expired), length(partitions)}
+    {deleted, length(partitions)}
   end
 
-  # Every `claims/tenant=*/dt=*` directory under the LocalFS root, with its date.
+  # One partition that cannot be removed (a permission, a busy mount) is
+  # logged and skipped; the sweep goes on to the next, and the next tick tries
+  # it again.
+  defp remove(dir) do
+    case File.rm_rf(dir) do
+      {:ok, _removed} ->
+        true
+
+      {:error, reason, path} ->
+        Logger.warning(
+          "[ankusa] claim retention could not remove #{path} (#{inspect(reason)}); " <>
+            "retrying on the next sweep"
+        )
+
+        false
+    end
+  end
+
+  # Every `claims/tenant=*/dt=*` directory under the claim store's root, with
+  # its date.
   defp partitions(config) do
-    [Config.path(config, "segments"), Ref.claims_prefix(), "tenant=*", "dt=*"]
+    {_local_fs, opts} = Ankusa.ClaimCheck.claim_store(config)
+    root = Keyword.get(opts, :root) || Config.path(config, "segments")
+
+    [root, Ref.claims_prefix(), "tenant=*", "dt=*"]
     |> Path.join()
     |> Path.wildcard()
     |> Enum.filter(&File.dir?/1)

@@ -224,6 +224,36 @@ defmodule Ankusa.StoreTest do
     end
   end
 
+  describe "ready/1" do
+    test "writes the probe key synced, and reuses the answer for a second", %{instance: inst} do
+      assert :ok = Store.ready(inst)
+      assert {:ok, <<first::64>>} = Store.get(inst, :default, Keys.meta("ready_probe"))
+
+      # Inside the cache window: no second write, the same timestamp.
+      Process.sleep(5)
+      assert :ok = Store.ready(inst)
+      assert {:ok, <<^first::64>>} = Store.get(inst, :default, Keys.meta("ready_probe"))
+
+      Process.sleep(1_050)
+      assert :ok = Store.ready(inst)
+      assert {:ok, <<second::64>>} = Store.get(inst, :default, Keys.meta("ready_probe"))
+      assert second > first
+    end
+
+    test "a store that is not running answers :store_unavailable" do
+      assert Store.ready(:no_such_instance) == {:error, :store_unavailable}
+    end
+
+    test "a write another process saw fail turns it unready even while the probe fits",
+         %{instance: inst} do
+      assert :ok = Store.ready(inst)
+
+      # What a refused ingest batch reports; the cached `:ok` must not hide it.
+      Store.report_write_failure(inst, :enospc)
+      assert Store.ready(inst) == {:error, :write_failed}
+    end
+  end
+
   describe "a store that failed to reopen" do
     test "opens again by itself once whatever blocked it is gone" do
       cfg = test_config(roles: [:edge])

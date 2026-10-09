@@ -82,7 +82,7 @@ defmodule Ankusa.RoutesTest do
   end
 
   defp await_snapshot_after(instance, epoch, attempts \\ 100) do
-    snapshot = Routes.snapshot(instance)
+    snapshot = Routes.meta(instance)
 
     cond do
       snapshot != nil and snapshot.epoch != epoch ->
@@ -157,17 +157,17 @@ defmodule Ankusa.RoutesTest do
 
     test "seeds publish a snapshot the guard can read" do
       config = start(seed: [%{"id" => "s", "path" => "/hooks/s"}])
-      snapshot = Routes.snapshot(config.instance)
+      meta = Routes.meta(config.instance)
 
-      assert snapshot.version == 1
-      assert Map.keys(snapshot.by_id) == ["s"]
+      assert meta.version == 1
+      assert config.instance |> Ankusa.Routes.Snapshot.routes(meta) |> Enum.map(& &1.id) == ["s"]
     end
 
     test "routes off means no store and no snapshot" do
       config = start(enabled: false)
 
       assert Routes.enabled?(config.instance) == false
-      assert Routes.snapshot(config.instance) == nil
+      assert Routes.meta(config.instance) == nil
     end
   end
 
@@ -410,7 +410,7 @@ defmodule Ankusa.RoutesTest do
       assert {{:ok, "a"}, true} = decide(config, "POST", "/hooks/a", "1.2.3.4")
 
       old_pid = Ankusa.whereis(instance, :routes_store)
-      old_epoch = Routes.snapshot(instance).epoch
+      old_epoch = Routes.meta(instance).epoch
       ref = Process.monitor(old_pid)
       Process.exit(old_pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^old_pid, :killed}, 5_000
@@ -642,7 +642,7 @@ defmodule Ankusa.RoutesTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      before = Routes.snapshot(config.instance)
+      before = Routes.meta(config.instance)
 
       assert create(config.instance, %{"id" => "x", "path" => "/hooks/x"}) ==
                {:error, :too_many_routes}
@@ -658,7 +658,7 @@ defmodule Ankusa.RoutesTest do
       assert {:error, {:invalid, "default", _message}} =
                Routes.put_ip_rules(config.instance, %{"default" => "maybe", "rules" => []})
 
-      refused = Routes.snapshot(config.instance)
+      refused = Routes.meta(config.instance)
       assert {refused.version, refused.epoch} == {before.version, before.epoch}
       refute_receive {:telemetry, _, _, _}
     end
@@ -1145,6 +1145,83 @@ defmodule Ankusa.RoutesTest do
       assert_receive {:telemetry, _, _, %{action: :delete, route_id: "a", version: 5}}
 
       refute_receive {:telemetry, _, _, _}
+    end
+  end
+
+  describe "the snapshot table" do
+    test "after 1,000 API creates the first and the last route still resolve" do
+      config = start(max_routes: 2_000)
+
+      for i <- 1..1_000 do
+        assert {:ok, _} = create(config.instance, %{"id" => "r#{i}", "path" => "/hooks/r#{i}"})
+      end
+
+      assert authorize(config, "POST", "/hooks/r1") == {:ok, "r1"}
+      assert authorize(config, "POST", "/hooks/r1000") == {:ok, "r1000"}
+      assert Ankusa.Routes.Snapshot.count(config.instance) == 1_000
+    end
+
+    test "a route whose path is replaced matches its new path and not its old one" do
+      config = start([])
+      assert {:ok, _} = create(config.instance, %{"id" => "r", "path" => "/hooks/old"})
+      assert authorize(config, "POST", "/hooks/old") == {:ok, "r"}
+
+      assert {:ok, _} = Routes.replace(config.instance, "r", %{"path" => "/hooks/new/:id"})
+
+      assert authorize(config, "POST", "/hooks/new/1") == {:ok, "r"}
+      assert authorize(config, "POST", "/hooks/old") == {:reject, :no_route}
+    end
+
+    test "readers see one generation or the other while a whole table is republished" do
+      config = start(max_routes: 10_000)
+      instance = config.instance
+      store = Ankusa.whereis(instance, :routes_store)
+
+      table = fn tag ->
+        routes =
+          for i <- 1..5_000, into: %{} do
+            {:ok, route} =
+              Route.from_attrs(%{"id" => "#{tag}#{i}", "path" => "/hooks/#{tag}/#{i}"})
+
+            {route.id, route}
+          end
+
+        {:ok, probe} = Route.from_attrs(%{"id" => "probe", "path" => "/hooks/probe/:id"})
+        Map.put(routes, "probe", probe)
+      end
+
+      # A Redis-style reload: the owner writes a whole new generation.
+      republish = fn routes ->
+        :sys.replace_state(store, fn state ->
+          state = %{state | routes: routes, version: state.version + 1}
+          :ok = Ankusa.Routes.Snapshot.publish(state)
+          state
+        end)
+      end
+
+      republish.(table.("a"))
+      assert authorize(config, "POST", "/hooks/probe/1") == {:ok, "probe"}
+
+      stop = :atomics.new(1, [])
+
+      readers =
+        for _ <- 1..8 do
+          Task.async(fn ->
+            # The first answer that is not the probe, or the last one once the
+            # republishing is over.
+            Stream.repeatedly(fn ->
+              {authorize(config, "POST", "/hooks/probe/7"), :atomics.get(stop, 1)}
+            end)
+            |> Enum.find(fn {result, stopped} -> result != {:ok, "probe"} or stopped == 1 end)
+            |> elem(0)
+          end)
+        end
+
+      for tag <- ["b", "c", "d"], do: republish.(table.(tag))
+      :atomics.put(stop, 1, 1)
+
+      assert Enum.map(readers, &Task.await(&1, 30_000)) == List.duplicate({:ok, "probe"}, 8)
+      assert authorize(config, "POST", "/hooks/d/5000") == {:ok, "d5000"}
     end
   end
 end

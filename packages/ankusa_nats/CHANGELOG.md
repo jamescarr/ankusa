@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The connection is a `Gnat.ConnectionSupervisor` registered through the
+  instance's registry: starting it returns at once and the handshake runs in
+  that supervisor, so a slow or dead server no longer stalls the
+  `DynamicSupervisor` (and every other delivery) behind it. It reconnects on
+  its own with a 2 s backoff; `deliver/3` returns `{:error, :not_connected}`
+  meanwhile.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

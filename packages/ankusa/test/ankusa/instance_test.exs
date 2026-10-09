@@ -286,4 +286,21 @@ defmodule Ankusa.InstanceTest do
       refute printed.(key) =~ @canary, "#{inspect(key)} printed the config in its status"
     end
   end
+
+  test "a configured source whose HMAC secret is empty refuses to boot, naming the source" do
+    config =
+      test_config(
+        roles: [:edge],
+        source_store:
+          {Ankusa.SourceStore.Static,
+           sources: %{"gh" => [verifier: {Ankusa.Verifier.Hmac, scheme: :github, secret: ""}]}}
+      )
+
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {%ArgumentError{message: message}, _stack}} =
+             Ankusa.Instance.start_link(config)
+
+    assert message == "source gh: verifier secret is missing or undecodable"
+  end
 end

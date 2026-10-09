@@ -37,8 +37,8 @@ defmodule Ankusa.Metrics do
   `:source_id` is bounded because it is only ever a configured source's id: a
   request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
-  `:payload_too_large`, `:body_read_failed` or `:invalid_header`, never on a series that carries
-  the id from the URL.
+  `:payload_too_large`, `:body_read_failed`, `:invalid_header` or
+  `:store_unavailable`, never on a series that carries the id from the URL.
   """
 
   import Telemetry.Metrics
@@ -160,7 +160,14 @@ defmodule Ankusa.Metrics do
         "ankusa.dispatch.deliveries.total",
         scoped(own,
           event_name: [:ankusa, :dispatch, :stop],
-          tags: [:instance, :result]
+          tags: [:instance, :result, :sink]
+        )
+      ),
+      counter(
+        "ankusa.dispatch.breaker.transitions.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :breaker],
+          tags: [:instance, :sink, :state]
         )
       ),
       counter(
@@ -230,7 +237,40 @@ defmodule Ankusa.Metrics do
           tags: [:instance, :type, :reason]
         )
       )
-    ]
+    ] ++ gauges(own)
+  end
+
+  # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue
+  # index, the pen and the disk every `admin.gauge_interval_ms`, and dispatch
+  # reports its scheduler on every housekeeping tick. A gauge whose probe fails
+  # keeps its last value (the probe logs at `:debug`).
+  defp gauges(own) do
+    for {name, event, measurement, unit} <- [
+          {"ankusa.store.hooks", [:ankusa, :store, :state], :hooks, :unit},
+          {"ankusa.store.deliveries", [:ankusa, :store, :state], :deliveries, :unit},
+          {"ankusa.store.disk.bytes", [:ankusa, :store, :state], :disk_bytes, :byte},
+          {"ankusa.queue.pending", [:ankusa, :queue, :state], :pending, :unit},
+          {"ankusa.queue.scheduled", [:ankusa, :queue, :state], :scheduled, :unit},
+          {"ankusa.queue.inflight", [:ankusa, :queue, :state], :inflight, :unit},
+          {"ankusa.queue.dead", [:ankusa, :queue, :state], :dead, :unit},
+          {"ankusa.queue.archive_pending", [:ankusa, :queue, :state], :archive_pending, :unit},
+          {"ankusa.queue.oldest_due_age.seconds", [:ankusa, :queue, :state],
+           &oldest_due_age_seconds/1, :second},
+          {"ankusa.quarantine.bytes", [:ankusa, :quarantine, :state], :bytes, :byte},
+          {"ankusa.quarantine.entries", [:ankusa, :quarantine, :state], :entries, :unit},
+          {"ankusa.disk.free.bytes", [:ankusa, :disk, :state], :free_bytes, :byte},
+          {"ankusa.disk.total.bytes", [:ankusa, :disk, :state], :total_bytes, :byte},
+          {"ankusa.dispatch.running", [:ankusa, :dispatch, :state], :running, :unit},
+          {"ankusa.dispatch.claimed", [:ankusa, :dispatch, :state], :claimed, :unit},
+          {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
+          {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
+          {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit}
+        ] do
+      last_value(
+        name,
+        scoped(own, event_name: event, measurement: measurement, unit: unit, tags: [:instance])
+      )
+    end
   end
 
   # What every definition shares: only this instance's events (ANDed with a
@@ -259,6 +299,8 @@ defmodule Ankusa.Metrics do
 
   defp normalize_value({tag, _rest}), do: tag
   defp normalize_value(_other), do: :other
+
+  defp oldest_due_age_seconds(%{oldest_due_age_ms: ms}), do: ms / 1000
 
   defp duration_seconds(%{duration: native}) when is_integer(native) do
     System.convert_time_unit(native, :native, :microsecond) / 1_000_000

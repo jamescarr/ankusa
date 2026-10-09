@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `:max_record_bytes` (default `1_000_000`): a record whose value plus key is
+  larger is refused before it is produced, as `{:error, {:permanent, _}}`.
+
+### Changed
+
+- A broker `message_too_large`, `invalid_message` or `invalid_record` is
+  `{:error, {:permanent, reason}}`: dead-lettered at once instead of retried
+  for the whole retry policy. Requires `ankusa` with sink error classes.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

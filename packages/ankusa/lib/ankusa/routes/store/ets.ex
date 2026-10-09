@@ -5,9 +5,10 @@ defmodule Ankusa.Routes.Store.ETS do
 
   `config.routes.seed` loads at boot, which is what makes a standalone (no
   Redis) deployment survivable across restarts: a route an operator added
-  *through the API* is gone on restart, but the seed is not. Every mutation
-  rebuilds the snapshot and republishes it to `:persistent_term`, so the guard
-  sees the change on the very next request — no TTL wait, no polling.
+  *through the API* is gone on restart, but the seed is not. The process owns
+  the instance's snapshot table (`Ankusa.Routes.Snapshot`), and every mutation
+  writes the rows it changes there, so the guard sees the change on the very
+  next request — no TTL wait, no polling.
 
   Seeding happens **only at boot**, into an empty store — and it happens on
   *every* boot: a seed route deleted through the API returns at the next restart
@@ -59,7 +60,7 @@ defmodule Ankusa.Routes.Store.ETS do
           version: 1
         }
 
-        Snapshot.put(instance, Snapshot.build(state))
+        :ok = Snapshot.publish(state)
         {:ok, state}
 
       {:error, reason} ->
@@ -83,13 +84,19 @@ defmodule Ankusa.Routes.Store.ETS do
       {:reply, {:error, :too_many_routes}, state}
     else
       {:reply, :ok,
-       state |> put_route(route) |> bump_version() |> Snapshot.publish({:insert, route.id})}
+       state
+       |> put_route(route)
+       |> bump_version()
+       |> Snapshot.mutate({:put, route}, {:insert, route.id})}
     end
   end
 
   def handle_call({:replace, route, _version}, _from, state) do
     {:reply, :ok,
-     state |> put_route(route) |> bump_version() |> Snapshot.publish({:replace, route.id})}
+     state
+     |> put_route(route)
+     |> bump_version()
+     |> Snapshot.mutate({:put, route}, {:replace, route.id})}
   end
 
   def handle_call({:delete, id}, _from, state) do
@@ -99,13 +106,19 @@ defmodule Ankusa.Routes.Store.ETS do
 
       {:ok, _route} ->
         state = %{state | routes: Map.delete(state.routes, id)} |> bump_version()
-        {:reply, :ok, Snapshot.publish(state, {:delete, id})}
+        {:reply, :ok, Snapshot.mutate(state, {:delete, id}, {:delete, id})}
     end
   end
 
   def handle_call({:put_ip_rules, ip_rules}, _from, state) do
     state = %{state | ip_rules: ip_rules} |> bump_version()
-    {:reply, :ok, Snapshot.publish(state, {:ip_rules, nil})}
+    {:reply, :ok, Snapshot.mutate(state, :ip_rules, {:ip_rules, nil})}
+  end
+
+  @impl true
+  def handle_info({:drop_generation, gen}, state) do
+    Snapshot.drop_generation(state.instance, gen)
+    {:noreply, state}
   end
 
   # ── state transitions ───────────────────────────────────────────────────────

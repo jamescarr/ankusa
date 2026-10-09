@@ -61,15 +61,18 @@ defmodule Ankusa.Sink.MessageTest do
     assert {:ok, ^body} = ClaimCheck.redeem(ctx.instance, decoded["claim"], decoded["sha256"])
   end
 
-  test "checking the same envelope in again rewrites its object instead of adding one",
+  test "each check-in gets a fresh, random pack id dated by check-in time, not receive time",
        %{ctx: ctx} do
-    env = envelope(:crypto.strong_rand_bytes(101))
+    month_ago = System.system_time(:millisecond) - 30 * 86_400_000
+    env = %{envelope(:crypto.strong_rand_bytes(101)) | received_at: month_ago}
 
-    assert {:ok, first} = Message.encode(env, ctx, 100)
-    assert {:ok, second} = Message.encode(env, ctx, 100)
+    assert {:ok, first} = Message.check_in(ctx.instance, env)
+    assert {:ok, second} = Message.check_in(ctx.instance, env)
+    assert first.ref != second.ref
 
-    assert JSON.decode!(first)["claim"] == JSON.decode!(second)["claim"]
-    assert [_one] = Ankusa.BlobStore.list(ctx.instance, "claims/")
+    today = Date.utc_today() |> Date.to_iso8601()
+    assert {:ok, [_, _] = keys} = Ankusa.BlobStore.list(ctx.instance, :claims, "claims/")
+    assert Enum.all?(keys, &String.contains?(&1, "/dt=#{today}/"))
   end
 
   test "a claim dispatch already checked in is used as-is, with no second write", %{ctx: ctx} do
@@ -83,7 +86,7 @@ defmodule Ankusa.Sink.MessageTest do
     assert {:ok, json} = Message.encode(env, Map.put(ctx, :claim, claim), 100)
     decoded = JSON.decode!(json)
     assert {decoded["claim"], decoded["sha256"]} == {Ref.to_string(claim.ref), claim.sha256}
-    assert Ankusa.BlobStore.list(ctx.instance, "claims/") == []
+    assert Ankusa.BlobStore.list(ctx.instance, :claims, "claims/") == {:ok, []}
   end
 
   test "a failed check-in is tagged :claim_check", %{ctx: ctx} do

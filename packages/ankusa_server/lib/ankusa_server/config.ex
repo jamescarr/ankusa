@@ -63,15 +63,16 @@ defmodule AnkusaServer.Config do
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
-  @admin_keys ~w(enabled port ip)
-  @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
-  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms retry)
+  @admin_keys ~w(enabled port ip gauge_interval_ms)
+  @batcher_keys ~w(partitions max_batch max_delay_ms max_queue max_queue_bytes)
+  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type publish_timeout_ms)
-  @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
-  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
+  @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs)
+  @blob_store_keys ~w(type root s3 gcs)
+  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token)
   @gcs_keys ~w(bucket endpoint auth token)
-  @claim_check_keys ~w(port retention_days pack_max_bytes ip)
+  @claim_check_keys ~w(port retention_days pack_max_bytes ip store)
   @source_store_keys ~w(type)
   @lifecycle_keys ~w(sinks)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
@@ -101,9 +102,9 @@ defmodule AnkusaServer.Config do
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes)
-  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes ssl sasl)
+  @http_sink_keys ~w(type url method headers timeout_ms secret max_response_bytes)
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight)
+  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl)
   @sasl_keys ~w(mechanism username password)
   @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
@@ -222,19 +223,32 @@ defmodule AnkusaServer.Config do
   end
 
   defp interpolate(value, env, path) when is_binary(value) do
-    Regex.replace(@var_re, value, fn _match, name, marker, default ->
-      case Map.fetch(env, name) do
-        {:ok, replacement} ->
-          replacement
+    interpolated =
+      Regex.replace(@var_re, value, fn _match, name, marker, default ->
+        case Map.fetch(env, name) do
+          {:ok, replacement} ->
+            replacement
 
-        # The marker, not the default, decides: `${NAME:-}` has an empty one.
-        :error when marker != "" ->
-          default
+          # The marker, not the default, decides: `${NAME:-}` has an empty one.
+          :error when marker != "" ->
+            default
 
-        :error ->
-          raise ConfigError, message: "#{render_path(path)}: ${#{name}} is not set"
-      end
-    end)
+          :error ->
+            raise ConfigError, message: "#{render_path(path)}: ${#{name}} is not set"
+        end
+      end)
+
+    # Whatever still reads `${` did not match the variable grammar
+    # (`${stripe_secret}`, `${A-B}`): left alone it would become a literal
+    # secret or URL, so it is an error instead.
+    if String.contains?(interpolated, "${") do
+      raise ConfigError,
+        message:
+          "#{render_path(path)}: unresolved ${…} (variable names are [A-Z0-9_]+; " <>
+            "use ${NAME:-} for an empty default)"
+    end
+
+    interpolated
   end
 
   defp interpolate(value, _env, _path), do: value
@@ -255,8 +269,8 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
     {"ANKUSA_S3_REGION", ["storage", "s3", "region"]},
-    {"ANKUSA_S3_ENDPOINT", ["storage", "s3", "endpoint"]},
-    {"ANKUSA_GCS_BUCKET", ["storage", "gcs", "bucket"]}
+    {"ANKUSA_GCS_BUCKET", ["storage", "gcs", "bucket"]},
+    {"ANKUSA_STORAGE_KEY_PREFIX", ["storage", "key_prefix"]}
   ]
 
   defp apply_env_overrides(doc, env) do
@@ -318,6 +332,7 @@ defmodule AnkusaServer.Config do
     try do
       config = Ankusa.Config.new(opts)
       Ankusa.ClaimCheck.validate_config!(config)
+      Ankusa.Verifier.validate_config!(config)
       # The image validates what core validates, at the same moment: a route
       # config that would refuse to boot must fail `check-config` too, with the
       # same message.
@@ -396,6 +411,7 @@ defmodule AnkusaServer.Config do
         [enabled: bool!(Map.get(admin, "enabled", true), ["admin", "enabled"])]
         |> put_opt(:port, int_opt(admin, "port", ["admin"]))
         |> put_opt(:ip, string_opt(admin, "ip", ["admin"]))
+        |> put_opt(:gauge_interval_ms, int_opt(admin, "gauge_interval_ms", ["admin"]))
     ]
   end
 
@@ -411,6 +427,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:max_batch, int_opt(batcher, "max_batch", ["batcher"]))
         |> put_opt(:max_delay_ms, int_opt(batcher, "max_delay_ms", ["batcher"]))
         |> put_opt(:max_queue, int_opt(batcher, "max_queue", ["batcher"]))
+        |> put_opt(:max_queue_bytes, int_opt(batcher, "max_queue_bytes", ["batcher"]))
     ]
   end
 
@@ -426,6 +443,10 @@ defmodule AnkusaServer.Config do
         |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
         |> put_opt(:max_inflight_bytes, int_opt(dispatch, "max_inflight_bytes", ["dispatch"]))
         |> put_opt(:attempt_timeout_ms, int_opt(dispatch, "attempt_timeout_ms", ["dispatch"]))
+        |> put_opt(:sink_concurrency, int_opt(dispatch, "sink_concurrency", ["dispatch"]))
+        |> put_opt(:breaker_failures, int_opt(dispatch, "breaker_failures", ["dispatch"]))
+        |> put_opt(:breaker_open_ms, int_opt(dispatch, "breaker_open_ms", ["dispatch"]))
+        |> put_opt(:breaker_max_open_ms, int_opt(dispatch, "breaker_max_open_ms", ["dispatch"]))
         |> put_opt(:retry, retry_policy(retry))
     ]
   end
@@ -464,27 +485,40 @@ defmodule AnkusaServer.Config do
 
   defp storage_section(doc) do
     storage = section!(doc, "storage", @storage_keys, [])
-    s3 = section!(storage, "s3", @s3_keys, ["storage"])
-    gcs = section!(storage, "gcs", @gcs_keys, ["storage"])
-
-    blob_store =
-      case enum!(storage["type"] || "local", ~w(local s3 gcs), ["storage", "type"]) do
-        "local" -> {Ankusa.BlobStore.LocalFS, []}
-        "s3" -> {Ankusa.BlobStore.S3, s3_opts!(s3)}
-        "gcs" -> {Ankusa.BlobStore.GCS, gcs_opts!(gcs)}
-      end
 
     [
       storage:
-        [blob_store: blob_store]
+        [blob_store: blob_store!(storage, ["storage"], false)]
         |> put_opt(:roll_bytes, int_opt(storage, "roll_bytes", ["storage"]))
         |> put_opt(:roll_ms, int_opt(storage, "roll_ms", ["storage"]))
+        |> put_opt(:key_prefix, string_opt(storage, "key_prefix", ["storage"]))
     ]
   end
 
-  defp s3_opts!(s3) do
-    path = ["storage", "s3"]
+  # `{module, opts}` from a `type: local|s3|gcs` section with its `s3:`/`gcs:`
+  # children: `storage` itself, and `claim_check.store`. `root?` allows a
+  # LocalFS `root` (only a dedicated claim store has one; segments live under
+  # `data_dir`).
+  defp blob_store!(section, path, root?) do
+    s3 = section!(section, "s3", @s3_keys, path)
+    gcs = section!(section, "gcs", @gcs_keys, path)
 
+    case enum!(section["type"] || "local", ~w(local s3 gcs), path ++ ["type"]) do
+      "local" ->
+        case root? && string_opt(section, "root", path) do
+          root when is_binary(root) -> {Ankusa.BlobStore.LocalFS, [root: root]}
+          _ -> {Ankusa.BlobStore.LocalFS, []}
+        end
+
+      "s3" ->
+        {Ankusa.BlobStore.S3, s3_opts!(s3, path ++ ["s3"])}
+
+      "gcs" ->
+        {Ankusa.BlobStore.GCS, gcs_opts!(gcs, path ++ ["gcs"])}
+    end
+  end
+
+  defp s3_opts!(s3, path) do
     [
       bucket: required_string!(s3, "bucket", path),
       region: required_string!(s3, "region", path)
@@ -492,10 +526,10 @@ defmodule AnkusaServer.Config do
     |> put_opt(:endpoint, string_opt(s3, "endpoint", path))
     |> put_opt(:access_key_id, string_opt(s3, "access_key_id", path))
     |> put_opt(:secret_access_key, string_opt(s3, "secret_access_key", path))
+    |> put_opt(:session_token, string_opt(s3, "session_token", path))
   end
 
-  defp gcs_opts!(gcs) do
-    path = ["storage", "gcs"]
+  defp gcs_opts!(gcs, path) do
     bucket = required_string!(gcs, "bucket", path)
 
     opts = [bucket: bucket] |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))
@@ -518,6 +552,16 @@ defmodule AnkusaServer.Config do
   defp claim_check_section(doc) do
     claim_check = section!(doc, "claim_check", @claim_check_keys, [])
 
+    blob_store =
+      case claim_check["store"] do
+        nil ->
+          nil
+
+        _store ->
+          store = section!(claim_check, "store", @blob_store_keys, ["claim_check"])
+          blob_store!(store, ["claim_check", "store"], true)
+      end
+
     [
       claim_check:
         []
@@ -525,6 +569,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", ["claim_check"]))
         |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
         |> put_opt(:ip, string_opt(claim_check, "ip", ["claim_check"]))
+        |> put_opt(:blob_store, blob_store)
     ]
   end
 
@@ -1098,11 +1143,24 @@ defmodule AnkusaServer.Config do
       "http" ->
         check_keys!(sink, @http_sink_keys, path)
 
+        secret =
+          case sink["secret"] do
+            nil ->
+              nil
+
+            value ->
+              secrets = secret!(value, path ++ ["secret"])
+              non_empty_secret!(secrets, path ++ ["secret"])
+              secrets
+          end
+
         {Ankusa.Sink.Http,
          [url: required_string!(sink, "url", path)]
          |> put_opt(:method, atom_enum_opt(sink, "method", ~w(post put patch), path))
          |> put_opt(:headers, headers(sink["headers"], path ++ ["headers"]))
-         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))}
+         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+         |> put_opt(:secret, secret)
+         |> put_opt(:max_response_bytes, int_opt(sink, "max_response_bytes", path))}
 
       "rabbitmq" ->
         check_keys!(sink, @rabbitmq_sink_keys, path)
@@ -1112,7 +1170,8 @@ defmodule AnkusaServer.Config do
          |> put_opt(:url, string_opt(sink, "url", path))
          |> put_opt(:exchange_type, atom_enum_opt(sink, "exchange_type", @exchange_types, path))
          |> put_opt(:routing_key, string_opt(sink, "routing_key", path))
-         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))}
+         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_inflight, int_opt(sink, "max_inflight", path))}
 
       "kafka" ->
         check_keys!(sink, @kafka_sink_keys, path)
@@ -1124,6 +1183,7 @@ defmodule AnkusaServer.Config do
          ]
          |> put_opt(:key, string_opt(sink, "key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_record_bytes, int_opt(sink, "max_record_bytes", path))
          |> put_opt(:ssl, bool_opt(sink, "ssl", path))
          |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))}
 

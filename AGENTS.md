@@ -114,7 +114,8 @@ after adding or removing one, run `mise run deps` and commit every `mix.lock`
 it changes. CI runs `mix deps.get --check-locked` and
 `mix deps.unlock --check-unused` everywhere — including the examples — so a
 `deps.get` that rewrites a stale lock, or a lock entry for a dependency nobody
-declares, fails the build instead of passing quietly.
+declares, fails the build instead of passing quietly. `mix hex.audit` runs
+beside them, so a locked version with a published advisory fails it too.
 
 What each suite covers: [`docs/testing.md`](docs/testing.md).
 

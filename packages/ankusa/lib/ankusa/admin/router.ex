@@ -69,6 +69,18 @@ defmodule Ankusa.Admin.Router do
     })
   end
 
+  # Readiness, not liveness: 503 while this node's store cannot take a synced
+  # write. See `Ankusa.Health`.
+  get "/ready" do
+    case Ankusa.Health.ready(instance(conn)) do
+      {:ok, body} ->
+        send_json(conn, 200, body)
+
+      {:error, body} ->
+        conn |> Plug.Conn.put_resp_header("retry-after", "1") |> send_json(503, body)
+    end
+  end
+
   get "/metrics" do
     conn
     # Prometheus's text exposition format version is a parameter, not a

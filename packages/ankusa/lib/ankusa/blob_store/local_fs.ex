@@ -1,12 +1,16 @@
 defmodule Ankusa.BlobStore.LocalFS do
   @moduledoc """
-  Default `Ankusa.BlobStore`: immutable segments on the local filesystem.
+  Default `Ankusa.BlobStore`: immutable objects on the local filesystem.
 
-  Segments live under `Config.path(config, "segments")`. Writes are atomic
-  (temp file + rename) and durable (file and directory fsyncs), so a reader
-  never sees a half-written segment and a committed segment survives power
-  loss. Reads use `:file.pread/3` for a single-record range `GET` without
-  slurping the whole segment into memory.
+  Objects live under `opts[:root]` (an absolute path), by default
+  `Config.path(config, "segments")`. A dedicated claim store
+  (`claim_check.blob_store: {LocalFS, root: "/shared/claims"}`) points it
+  elsewhere — at a directory every node and the gateway mount, say.
+
+  Writes are atomic (temp file + rename) and durable (file and directory
+  fsyncs), so a reader never sees a half-written object and a committed one
+  survives power loss. Reads use `:file.pread/3` for a single-record range
+  `GET` without slurping the whole object into memory.
   """
 
   @behaviour Ankusa.BlobStore
@@ -14,17 +18,18 @@ defmodule Ankusa.BlobStore.LocalFS do
   alias Ankusa.Config
 
   @impl true
-  def put(instance, key, data, _opts) do
-    path = abs(instance, key)
+  def put(instance, key, data, opts) do
+    root = root(instance, opts)
+    path = Path.join(root, key)
 
-    with :ok <- Ankusa.Fsync.mkdir_p(Path.dirname(path), root(instance)) do
+    with :ok <- Ankusa.Fsync.mkdir_p(Path.dirname(path), root) do
       Ankusa.Fsync.write_file(path, data)
     end
   end
 
   @impl true
-  def get(instance, key, _opts) do
-    case File.read(abs(instance, key)) do
+  def get(instance, key, opts) do
+    case File.read(Path.join(root(instance, opts), key)) do
       {:ok, bin} -> {:ok, bin}
       {:error, :enoent} -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
@@ -32,8 +37,8 @@ defmodule Ankusa.BlobStore.LocalFS do
   end
 
   @impl true
-  def get_range(instance, key, offset, length, _opts) do
-    case :file.open(abs(instance, key), [:read, :raw, :binary]) do
+  def get_range(instance, key, offset, length, opts) do
+    case :file.open(Path.join(root(instance, opts), key), [:read, :raw, :binary]) do
       {:ok, fd} ->
         result = :file.pread(fd, offset, length)
         :file.close(fd)
@@ -53,23 +58,36 @@ defmodule Ankusa.BlobStore.LocalFS do
   end
 
   @impl true
-  def delete(instance, key, _opts) do
-    _ = File.rm(abs(instance, key))
+  def delete(instance, key, opts) do
+    _ = File.rm(Path.join(root(instance, opts), key))
     :ok
   end
 
+  # A root that does not exist yet holds no keys.
   @impl true
-  def list(instance, prefix, _opts) do
-    root = root(instance)
+  def list(instance, prefix, opts) do
+    root = root(instance, opts)
 
-    root
-    |> Path.join(prefix_dir(prefix))
-    |> Path.join("**")
-    |> Path.wildcard()
-    |> Enum.filter(&File.regular?/1)
-    |> Enum.map(&Path.relative_to(&1, root))
-    |> Enum.filter(&String.starts_with?(&1, prefix))
-    |> Enum.sort()
+    keys =
+      root
+      |> Path.join(prefix_dir(prefix))
+      |> Path.join("**")
+      |> Path.wildcard()
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.map(&Path.relative_to(&1, root))
+      |> Enum.filter(&String.starts_with?(&1, prefix))
+      |> Enum.sort()
+
+    {:ok, keys}
+  end
+
+  @doc "The directory objects live under: `opts[:root]`, else the instance's `segments` dir."
+  @spec root(atom(), keyword()) :: String.t()
+  def root(instance, opts) do
+    case Keyword.get(opts, :root) do
+      nil -> Config.path(Ankusa.config(instance), "segments")
+      root -> root
+    end
   end
 
   # Walk only the prefix's containing directory, not the whole store root —
@@ -82,8 +100,4 @@ defmodule Ankusa.BlobStore.LocalFS do
       dir -> dir
     end
   end
-
-  defp abs(instance, key), do: Path.join(root(instance), key)
-
-  defp root(instance), do: Config.path(Ankusa.config(instance), "segments")
 end

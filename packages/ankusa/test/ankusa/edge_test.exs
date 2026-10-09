@@ -178,22 +178,62 @@ defmodule Ankusa.EdgeTest do
   end
 
   test "load shed: a full batcher queue returns 503 with Retry-After" do
-    # a batcher whose queue is full replies :overload immediately
+    # A batch that lingers a minute holds the one record max_queue allows, so
+    # the next request is shed at once.
     config =
       test_config(
         roles: [:edge],
-        source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => []}},
-        batcher: %{partitions: 1, max_batch: 100_000, max_delay_ms: 60_000, max_queue: 0}
+        source_store:
+          {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
+        batcher: %{partitions: 1, max_batch: 100_000, max_delay_ms: 60_000, max_queue: 1}
       )
 
     start_supervised!({Ankusa.Instance, config})
+    held = Task.async(fn -> Ingest.ingest(config.instance, request("demo", "x")) end)
+    batcher = Ankusa.whereis(config.instance, {:batcher, 0})
+    eventually(fn -> :sys.get_state(batcher).count == 1 end)
 
-    # max_queue: 0 sheds every request
     assert {:error, :overload} = Ingest.ingest(config.instance, request("demo", "x"))
 
     conn = route_through_edge(config, request("demo", "x"))
     assert conn.status == 503
     assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+
+    Task.shutdown(held, :brutal_kill)
+  end
+
+  test "sheds with 503 once the bodies held pass max_queue_bytes, in flight included" do
+    config =
+      test_config(
+        roles: [:edge],
+        source_store:
+          {Ankusa.SourceStore.Static, sources: %{"demo" => [sinks: [{Ankusa.Sink.Log, []}]]}},
+        batcher: %{partitions: 1, max_batch: 1, max_delay_ms: 0, max_queue_bytes: 10_000}
+      )
+
+    start_supervised!({Ankusa.Instance, config})
+    inst = config.instance
+    writer = Ankusa.whereis(inst, :queue_writer)
+    :ok = :sys.suspend(writer)
+
+    body = String.duplicate("x", 8_000)
+    first = Task.async(fn -> Ingest.ingest(inst, request("demo", body)) end)
+
+    # The first 8 KB body is the commit in flight (stuck on the writer)...
+    batcher = Ankusa.whereis(inst, {:batcher, 0})
+    eventually(fn -> :sys.get_state(batcher).inflight != nil end)
+
+    # ...so a second one would hold 16 KB: refused, though one record is far
+    # below `max_queue`.
+    shed = route_through_edge(config, request("demo", body))
+    assert shed.status == 503
+    assert JSON.decode!(shed.resp_body) == %{"error" => "overload"}
+
+    :ok = :sys.resume(writer)
+    assert {:ok, _env} = Task.await(first, 30_000)
+
+    # Once the commit is done the bytes are released.
+    assert route_through_edge(config, request("demo", body)).status == 201
   end
 
   test "sheds with 503 once max_queue is reached while a commit is in flight" do
@@ -551,5 +591,140 @@ defmodule Ankusa.EdgeTest do
 
     assert {:ok, env} = Ingest.ingest(config.instance, request("demo", "plain"))
     assert env.body == "plain"
+  end
+
+  describe "GET /ready" do
+    defp get_edge(config, path) do
+      Ankusa.Edge.Router.call(
+        Plug.Test.conn(:get, path),
+        Ankusa.Edge.Router.init(instance: config.instance)
+      )
+    end
+
+    test "is 200 while the store takes writes, 503 without it, 200 again once it is back" do
+      config = start_edge(%{})
+      name = to_string(config.instance)
+
+      ready = get_edge(config, "/ready")
+      assert ready.status == 200
+
+      assert JSON.decode!(ready.resp_body) == %{
+               "status" => "ready",
+               "instance" => name,
+               "store" => "ok"
+             }
+
+      sup = Ankusa.whereis(config.instance, :instance)
+      :ok = Supervisor.terminate_child(sup, {Ankusa.Store, config.instance})
+
+      down = get_edge(config, "/ready")
+      assert down.status == 503
+      assert Plug.Conn.get_resp_header(down, "retry-after") == ["1"]
+
+      assert JSON.decode!(down.resp_body) == %{
+               "status" => "unavailable",
+               "instance" => name,
+               "store" => "store_unavailable"
+             }
+
+      # Liveness is unaffected.
+      assert get_edge(config, "/health").status == 200
+
+      {:ok, _pid} = Supervisor.restart_child(sup, {Ankusa.Store, config.instance})
+      assert get_edge(config, "/ready").status == 200
+    end
+  end
+
+  defmodule DownStore do
+    @behaviour Ankusa.SourceStore
+
+    @impl true
+    def fetch(_instance, _source_id), do: {:error, :unavailable}
+
+    @impl true
+    def list(_instance), do: []
+  end
+
+  test "a source store that cannot answer is a 503 the provider retries, not a 404" do
+    config = test_config(roles: [:edge], source_store: {DownStore, []})
+    start_supervised!({Ankusa.Instance, config})
+
+    ref = make_ref()
+    me = self()
+
+    :telemetry.attach(
+      "refused-#{inspect(ref)}",
+      [:ankusa, :ingest, :refused],
+      fn _event, _measurements, meta, _ -> send(me, {:refused, meta.reason}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("refused-#{inspect(ref)}") end)
+
+    conn = route_through_edge(config, request("demo", "{}"))
+
+    assert conn.status == 503
+    assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+    assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+    assert_receive {:refused, :store_unavailable}
+    assert stored_ids(config.instance) == []
+  end
+
+  describe "tenant binding" do
+    defp tenant_post(config, tenant, source_id, body \\ "{}", headers \\ []) do
+      req = %{request(source_id, body, headers) | path: "/webhooks/#{tenant}/#{source_id}"}
+      route_through_edge(config, req)
+    end
+
+    test "a tenant's source answers only under its own tenant; a shared one under any" do
+      config =
+        start_edge(
+          %{
+            "billing" => [verifier: {Ankusa.Verifier.None, []}, tenant_id: "acme"],
+            "shared" => [verifier: {Ankusa.Verifier.None, []}]
+          },
+          route_resolver: {Ankusa.RouteResolver.TenantPath, []}
+        )
+
+      other = tenant_post(config, "globex", "billing")
+      assert other.status == 404
+      assert JSON.decode!(other.resp_body) == %{"error" => "unknown_source"}
+
+      assert tenant_post(config, "acme", "billing").status == 201
+      assert tenant_post(config, "acme", "shared").status == 201
+      assert tenant_post(config, "globex", "shared").status == 201
+
+      {:ok, envs} = Ankusa.Queue.hooks(config.instance, 0, 10)
+
+      assert Enum.map(envs, &{&1.source_id, &1.tenant_id}) ==
+               [{"billing", "acme"}, {"shared", "acme"}, {"shared", "globex"}]
+    end
+
+    test "flag-accepted forgeries spend the source's quarantine bucket, never the tenant's budget" do
+      config =
+        start_edge(
+          %{
+            "flag" => [
+              verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: @secret},
+              on_verify_failure: :accept_flag
+            ]
+          },
+          quarantine: %{burst: 2, rate: 1},
+          # One hook, then nothing for a very long time.
+          rate_limits: %{default: %{rate: 0.001, burst: 1}}
+        )
+
+      assert forged(config, "flag").status == 201
+      assert forged(config, "flag").status == 201
+
+      limited = forged(config, "flag")
+      assert limited.status == 429
+      assert JSON.decode!(limited.resp_body) == %{"error" => "quarantine_rate_limited"}
+
+      # The tenant's single token is still there for a genuine hook.
+      body = ~s({"genuine":true})
+      headers = standard_webhooks_headers("msg_genuine", body, @secret)
+      assert route_through_edge(config, request("flag", body, headers)).status == 201
+    end
   end
 end

@@ -249,7 +249,7 @@ defmodule Ankusa.Storage.Compactor do
   # raise, an exit and a throw are the same failure — this tick is retried,
   # nothing crashes.
   defp put(instance, key, data) do
-    case Ankusa.BlobStore.put(instance, key, data) do
+    case Ankusa.BlobStore.put(instance, :segments, key, data) do
       :ok -> :ok
       {:error, _reason} = error -> error
       other -> {:error, {:bad_return, other}}

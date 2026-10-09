@@ -593,10 +593,7 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
       %{routes: routes_config} = Keyword.fetch!(opts, :config)
       {:ok, %{routes: routes, ip_rules: ip_rules}} = Snapshot.initial_table(routes_config)
 
-      Snapshot.put(
-        instance,
-        Snapshot.build(%{instance: instance, routes: routes, ip_rules: ip_rules, version: 1})
-      )
+      Snapshot.publish(%{instance: instance, routes: routes, ip_rules: ip_rules, version: 1})
 
       Agent.start_link(fn -> nil end, name: Ankusa.via(instance, :routes_store))
     end

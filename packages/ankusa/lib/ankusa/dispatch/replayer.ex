@@ -550,10 +550,10 @@ defmodule Ankusa.Dispatch.Replayer do
   defp fetch_segment(state, job, row) do
     instance = state.instance
 
-    with {:ok, idx_bin} <- BlobStore.get(instance, row.idx_key),
+    with {:ok, idx_bin} <- BlobStore.get(instance, :segments, row.idx_key),
          {:ok, index} <- decode_index(idx_bin),
          entries <- window_entries(index, job.filter),
-         {:ok, bin} <- BlobStore.get(instance, row.key) do
+         {:ok, bin} <- BlobStore.get(instance, :segments, row.key) do
       cache = %{row: row, entries: entries, bin: bin}
       {:ok, %{state | segments: Map.put(state.segments, job.id, cache)}, job, entries, bin, row}
     else
@@ -670,29 +670,46 @@ defmodule Ankusa.Dispatch.Replayer do
   end
 
   defp commit_archive(state, job, kept, skipped, scanned, row, done_all?, last_offset) do
-    instance = state.instance
-    now = System.system_time(:millisecond)
+    # Resolve each kept hook's source once, and keep only entries that bind to
+    # at least one current sink. A source store that cannot answer fails the
+    # step before anything moves: the cursor stays, the next tick retries it.
+    case resolve_archive_entries(state.instance, job, kept, skipped) do
+      {:ok, entries, skipped} ->
+        commit_archive(state, job, entries, skipped, scanned, row, done_all?, last_offset, :go)
+
+      :unavailable ->
+        {:error, state, job, :source_store_unavailable}
+    end
+  end
+
+  defp resolve_archive_entries(instance, job, kept, skipped) do
     filter = job.filter
 
-    # Resolve each kept hook's source once, and keep only entries that bind to
-    # at least one current sink.
-    {entries, skipped} =
-      Enum.reduce(kept, {[], skipped}, fn %{env: env, bin: bin, size: size}, {entries, skipped} ->
-        case SourceStore.fetch(instance, env.source_id) do
-          {:ok, source} ->
-            case filter_sinks(filter, source.sinks) do
-              [] ->
-                {entries, skipped + 1}
+    Enum.reduce_while(kept, {:ok, [], skipped}, fn %{env: env, bin: bin, size: size},
+                                                   {:ok, entries, skipped} ->
+      case SourceStore.fetch(instance, env.source_id) do
+        {:ok, source} ->
+          case filter_sinks(filter, source.sinks) do
+            [] ->
+              {:cont, {:ok, entries, skipped + 1}}
 
-              indexes ->
-                {[%{bin: bin, size: size, sinks: indexes, replay_id: job.id} | entries], skipped}
-            end
+            indexes ->
+              entry = %{bin: bin, size: size, sinks: indexes, replay_id: job.id}
+              {:cont, {:ok, [entry | entries], skipped}}
+          end
 
-          :error ->
-            {entries, skipped + 1}
-        end
-      end)
+        {:error, :unavailable} ->
+          {:halt, :unavailable}
 
+        :error ->
+          {:cont, {:ok, entries, skipped + 1}}
+      end
+    end)
+  end
+
+  defp commit_archive(state, job, entries, skipped, scanned, row, done_all?, last_offset, :go) do
+    instance = state.instance
+    now = System.system_time(:millisecond)
     moved = length(entries)
 
     job = %{
@@ -785,8 +802,9 @@ defmodule Ankusa.Dispatch.Replayer do
 
   # Each hit's envelope, re-verified. Returns the queue entries, the deletes for
   # their pen entries, the bytes those held, and how many hits stay held (a
-  # failed check, an unknown source, a body gone or unreadable). A store error
-  # fails the page so the tick retries it.
+  # failed check, an unknown source, a body gone or unreadable). A store error,
+  # or a source store that cannot answer, fails the page so the tick retries
+  # it: nothing is released and nothing is counted as held.
   defp release_page(instance, hits, replay_id) do
     result =
       Enum.reduce_while(hits, {[], [], 0, 0}, fn {key, summary} = hit,
@@ -803,6 +821,9 @@ defmodule Ankusa.Dispatch.Replayer do
 
               :failed ->
                 {:cont, {entries, ops, bytes, failed + 1}}
+
+              :unavailable ->
+                {:halt, {:error, :source_store_unavailable}}
             end
 
           held when held in [:not_found, {:error, :undecodable}] ->
@@ -849,6 +870,7 @@ defmodule Ankusa.Dispatch.Replayer do
       end
     else
       :error -> :failed
+      {:error, :unavailable} -> :unavailable
     end
   end
 

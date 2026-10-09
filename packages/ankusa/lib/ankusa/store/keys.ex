@@ -16,6 +16,7 @@ defmodule Ankusa.Store.Keys do
 
   def meta("next_seq"), do: "m:next_seq"
   def meta("migration"), do: "m:migration"
+  def meta("ready_probe"), do: "m:ready_probe"
   def meta("imported:" <> artifact), do: "m:imported:" <> artifact
 
   def source(tenant, name) when is_binary(tenant) and is_binary(name),

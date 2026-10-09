@@ -13,3 +13,8 @@ config :ankusa_server, autostart: config_env() != :test
 # Deliberately no `config :ankusa, autostart: true`. Core defaults to false and
 # AnkusaServer.Application owns the instance: it builds the config from YAML and
 # starts exactly one instance, so nothing ever binds a port behind its back.
+
+# `:os_mon` runs for `:disksup` alone, which `Ankusa.Metrics.Gauges` asks for
+# the data volume's free space (`ankusa_disk_free_bytes`). Its own periodic
+# check and 80% alarm log line are left at their defaults.
+config :os_mon, start_memsup: false, start_cpu_sup: false, start_os_sup: false

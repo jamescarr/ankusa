@@ -70,13 +70,13 @@ defmodule Ankusa.ClaimCheckTest do
     {:ok, claims} = ClaimCheck.check_in(inst, "acme", [a])
     %{ref: ref, sha256: sha256} = claims[a.id]
 
-    {:ok, packed} = Ankusa.BlobStore.get(inst, Ref.key(ref))
+    {:ok, packed} = Ankusa.BlobStore.get(inst, :claims, Ref.key(ref))
     tampered = :binary.replace(packed, "original", "ORIGINAL")
-    :ok = Ankusa.BlobStore.put(inst, Ref.key(ref), tampered)
+    :ok = Ankusa.BlobStore.put(inst, :claims, Ref.key(ref), tampered)
 
     assert {:error, :integrity_mismatch} = ClaimCheck.redeem(inst, ref, sha256)
 
-    :ok = Ankusa.BlobStore.put(inst, Ref.key(ref), packed)
+    :ok = Ankusa.BlobStore.put(inst, :claims, Ref.key(ref), packed)
     assert {:error, :integrity_mismatch} = ClaimCheck.redeem(inst, ref, String.upcase(sha256))
   end
 
@@ -182,6 +182,65 @@ defmodule Ankusa.ClaimCheckTest do
 
     test "accepts the defaults and LocalFS retention" do
       assert :ok = ClaimCheck.validate_config!(Config.new(claim_check: %{retention_days: 7}))
+    end
+
+    test "rejects a retention of less than a day, and a non-positive sweep interval" do
+      assert_raise ArgumentError,
+                   "claim_check.retention_days must be nil or an integer >= 1, got 0",
+                   fn ->
+                     ClaimCheck.validate_config!(Config.new(claim_check: %{retention_days: 0}))
+                   end
+
+      assert_raise ArgumentError,
+                   ~r/claim_check.sweep_interval_ms must be a positive integer/,
+                   fn ->
+                     ClaimCheck.validate_config!(Config.new(claim_check: %{sweep_interval_ms: 0}))
+                   end
+    end
+
+    test "retention is judged against the claim store, not the segment store" do
+      s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
+
+      dedicated_local =
+        Config.new(
+          storage: %{blob_store: s3},
+          claim_check: %{retention_days: 7, blob_store: {Ankusa.BlobStore.LocalFS, root: "/x"}}
+        )
+
+      assert :ok = ClaimCheck.validate_config!(dedicated_local)
+
+      dedicated_s3 = Config.new(claim_check: %{retention_days: 7, blob_store: s3})
+
+      assert_raise ArgumentError, ~r/bucket lifecycle rule/, fn ->
+        ClaimCheck.validate_config!(dedicated_s3)
+      end
+    end
+  end
+
+  describe "a dedicated claim store" do
+    test "packs land there, and read/3 reads them back", %{inst: inst} do
+      claims_root =
+        Path.join(System.tmp_dir!(), "ankusa_claims_#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf(claims_root) end)
+
+      config = Ankusa.config(inst)
+
+      Ankusa.put_config(%{
+        config
+        | claim_check: %{
+            config.claim_check
+            | blob_store: {Ankusa.BlobStore.LocalFS, root: claims_root}
+          }
+      })
+
+      a = item("acme", "dedicated bytes")
+      {:ok, claims} = ClaimCheck.check_in(inst, "acme", [a])
+      %{ref: ref} = claims[a.id]
+
+      assert File.exists?(Path.join(claims_root, Ref.key(ref)))
+      refute File.exists?(Path.join(Config.path(config, "segments"), Ref.key(ref)))
+      assert {:ok, "dedicated bytes"} = ClaimCheck.read(inst, "acme", ref.claim_id)
     end
   end
 

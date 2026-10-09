@@ -42,7 +42,7 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     assert %{"status" => "ok"} = JSON.decode!(conn.resp_body)
   end
 
-  test "GET on a ref's path returns exactly its bytes, cacheable forever", %{inst: inst} do
+  test "GET on a ref's path returns exactly its bytes, privately cacheable forever", %{inst: inst} do
     body = :crypto.strong_rand_bytes(4096)
     ref = check_in(inst, body)
 
@@ -53,8 +53,35 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     assert Plug.Conn.get_resp_header(conn, "content-type") == ["application/octet-stream"]
 
     assert Plug.Conn.get_resp_header(conn, "cache-control") == [
-             "public, max-age=31536000, immutable"
+             "private, max-age=31536000, immutable"
            ]
+  end
+
+  test "HEAD answers the size without the body", %{inst: inst} do
+    body = :crypto.strong_rand_bytes(4096)
+    ref = check_in(inst, body)
+
+    conn = call(inst, :head, Ref.path(ref))
+
+    assert conn.status == 200
+    assert conn.resp_body == ""
+    assert Plug.Conn.get_resp_header(conn, "content-length") == ["4096"]
+  end
+
+  test "a store that refuses the credential is 503 store_forbidden, its body kept out", %{
+    inst: inst,
+    config: config
+  } do
+    Ankusa.put_config(%{
+      config
+      | storage: %{config.storage | blob_store: {__MODULE__.ForbiddenStore, []}}
+    })
+
+    conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+
+    assert {conn.status, JSON.decode!(conn.resp_body)} == {503, %{"error" => "store_forbidden"}}
+    assert Plug.Conn.get_resp_header(conn, "retry-after") == ["60"]
+    refute conn.resp_body =~ "AccessDenied"
   end
 
   test "a malformed tenant or claim id is 400", %{inst: inst} do
@@ -104,7 +131,7 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
     conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
 
-    assert {conn.status, error(conn)} == {503, "store_unavailable"}
+    assert {conn.status, JSON.decode!(conn.resp_body)} == {503, %{"error" => "store_unavailable"}}
     assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
   end
 
@@ -119,6 +146,22 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     @impl true
     def delete(_, _, _), do: :ok
     @impl true
-    def list(_, _, _), do: []
+    def list(_, _, _), do: {:ok, []}
+  end
+
+  defmodule ForbiddenStore do
+    @behaviour Ankusa.BlobStore
+    @impl true
+    def put(_, _, _, _), do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+    @impl true
+    def get(_, _, _), do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+    @impl true
+    def get_range(_, _, _, _, _),
+      do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+
+    @impl true
+    def delete(_, _, _), do: :ok
+    @impl true
+    def list(_, _, _), do: {:ok, []}
   end
 end

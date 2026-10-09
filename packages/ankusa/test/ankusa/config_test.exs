@@ -355,4 +355,36 @@ defmodule Ankusa.ConfigTest do
       end
     end
   end
+
+  describe "ranges" do
+    test "a numeric key out of range fails at Config.new/1, naming the key" do
+      assert_raise ArgumentError, "batcher.partitions must be a positive integer, got 0", fn ->
+        Config.new(batcher: %{partitions: 0})
+      end
+
+      assert_raise ArgumentError, "dispatch.concurrency must be a positive integer, got 0", fn ->
+        Config.new(dispatch: %{concurrency: 0})
+      end
+
+      assert_raise ArgumentError, "port must be an integer from 0 to 65535, got 70000", fn ->
+        Config.new(port: 70_000)
+      end
+
+      assert_raise ArgumentError,
+                   "batcher.max_delay_ms must be a non-negative integer, got -1",
+                   fn ->
+                     Config.new(batcher: %{max_delay_ms: -1})
+                   end
+    end
+
+    test "a key prefix is empty or slash-terminated segments" do
+      assert %Config{} = Config.new(storage: %{key_prefix: "fleet/node-a/"})
+
+      for bad <- ["node-a", "/node-a/", "a//", "a b/"] do
+        assert_raise ArgumentError, ~r/storage.key_prefix must be/, fn ->
+          Config.new(storage: %{key_prefix: bad})
+        end
+      end
+    end
+  end
 end

@@ -63,7 +63,9 @@ defmodule Ankusa.Admin.RouterTest do
         admin: %{enabled: true, port: 0},
         source_store: {Ankusa.SourceStore.Static, sources: sources},
         dispatch: %{
-          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false}
+          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
+          # These tests fill the DLQ: a breaker would park the rows instead.
+          breaker_failures: 0
         }
       )
 

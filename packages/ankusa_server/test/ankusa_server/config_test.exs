@@ -22,6 +22,7 @@ defmodule AnkusaServer.ConfigTest do
     "GCS_BUCKET" => "fixture-gcs-bucket",
     "STRIPE_WHSEC" => "whsec_fixture-stripe-secret",
     "SINK_URL" => "http://sink.fixture.invalid/hooks",
+    "SINK_WHSEC" => "whsec_c2luay1maXh0dXJl",
     "RABBITMQ_URL" => "amqp://ankusa:fixture-rabbit-password@rabbitmq:5672",
     "RABBITMQ_EXCHANGE" => "ankusa.hooks",
     "KAFKA_BROKERS" => "redpanda:9092",
@@ -42,7 +43,7 @@ defmodule AnkusaServer.ConfigTest do
                       whsec_fixture-stripe-secret fixture-rabbit-password
                       fixture-kafka-password fixture-nats-password fixture-github-secret
                       fixture-redis-password
-                      whsec_Zml4dHVyZQ==)
+                      whsec_Zml4dHVyZQ== whsec_c2luay1maXh0dXJl)
 
   # ── the shipped configs ─────────────────────────────────────────────────────
 
@@ -56,7 +57,13 @@ defmodule AnkusaServer.ConfigTest do
   test "the reference config spells out the whole schema" do
     config = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).config
 
-    assert config.admin == %{enabled: true, port: 4002, ip: "127.0.0.1"}
+    assert config.admin == %{
+             enabled: true,
+             port: 4002,
+             ip: "127.0.0.1",
+             gauge_interval_ms: 15_000
+           }
+
     assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
     assert config.route_resolver == {Ankusa.RouteResolver.Path, [prefix: ["webhooks"]]}
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
@@ -77,12 +84,32 @@ defmodule AnkusaServer.ConfigTest do
              Ankusa.Sink.NATS,
              Ankusa.Sink.Redis
            ]
+
+    {Ankusa.Sink.Http, http_opts} = Enum.at(sinks, 1)
+    assert http_opts[:secret] == @fixture_env["SINK_WHSEC"]
+    assert http_opts[:max_response_bytes] == 65_536
+
+    assert %{
+             sink_concurrency: nil,
+             breaker_failures: 5,
+             breaker_open_ms: 30_000,
+             breaker_max_open_ms: 300_000
+           } = config.dispatch
+
+    assert config.batcher.max_queue_bytes == 268_435_456
+    assert config.storage.key_prefix == ""
   end
 
   test "the baked image config is the demo: admin on, one open source" do
     config = Config.load!(path: "rel/ankusa.yml", env: %{}).config
 
-    assert config.admin == %{enabled: true, port: 4002, ip: "127.0.0.1"}
+    assert config.admin == %{
+             enabled: true,
+             port: 4002,
+             ip: "127.0.0.1",
+             gauge_interval_ms: 15_000
+           }
+
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) == ["demo"]
   end
@@ -131,6 +158,65 @@ defmodule AnkusaServer.ConfigTest do
     path = tmp_config("node: {data_dir: \"${DATA_DIR:-}\"}\n")
 
     assert Config.load!(path: path, env: %{}).config.data_dir == ""
+  end
+
+  test "a ${…} that is not a variable reference fails instead of staying literal" do
+    path =
+      tmp_config("""
+      sources:
+        stripe:
+          verify: {type: stripe, secret: "${stripe_secret}"}
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+
+    assert error.message ==
+             "sources.stripe.verify.secret: unresolved ${…} (variable names are [A-Z0-9_]+; " <>
+               "use ${NAME:-} for an empty default)"
+  end
+
+  test "a verify secret that does not decode fails the load, naming the source" do
+    path =
+      tmp_config("""
+      sources:
+        hooks:
+          verify: {type: standard_webhooks, secret: "whsec_!!!"}
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "source hooks: verifier secret is missing or undecodable"
+  end
+
+  test "an out-of-range number fails the load with core's message" do
+    path =
+      tmp_config(
+        "batcher: {partitions: 0}\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+      )
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "batcher.partitions must be a positive integer, got 0"
+  end
+
+  test "claim_check.store and storage.key_prefix land in core's config" do
+    path =
+      tmp_config("""
+      storage: {key_prefix: "node-a/"}
+      claim_check:
+        store:
+          type: s3
+          s3: {bucket: claims, region: us-east-1, session_token: tok}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+    assert config.storage.key_prefix == "node-a/"
+
+    assert {Ankusa.BlobStore.S3, opts} = config.claim_check.blob_store
+    assert opts[:bucket] == "claims"
+    assert opts[:session_token] == "tok"
+    assert config.storage.blob_store == {Ankusa.BlobStore.LocalFS, []}
   end
 
   # ── env overrides ───────────────────────────────────────────────────────────
@@ -962,7 +1048,7 @@ defmodule AnkusaServer.ConfigTest do
         full:
           tenant: acme
           on_verify_failure: accept_flag
-          verify: {type: standard_webhooks, secret: "whsec_abc", tolerance_seconds: 60}
+          verify: {type: standard_webhooks, secret: "whsec_YWJj", tolerance_seconds: 60}
           sinks:
             - {type: http, url: "http://sink.invalid/h", method: put, timeout_ms: 250,
                headers: {x-one: "1"}}
@@ -986,7 +1072,7 @@ defmodule AnkusaServer.ConfigTest do
 
     assert source.verifier ==
              {Ankusa.Verifier.Hmac,
-              [scheme: :standard_webhooks, secret: "whsec_abc", tolerance: 60]}
+              [scheme: :standard_webhooks, secret: "whsec_YWJj", tolerance: 60]}
 
     assert [
              {Ankusa.Sink.Http,

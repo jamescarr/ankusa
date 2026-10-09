@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The Redis route store keeps serving its last known table when the
+  namespace's version key disappears (a flushed or evicted Redis) instead of
+  publishing an empty table that rejects every webhook; it logs a warning
+  once and reloads when the namespace is written again. It publishes through
+  core's ETS route snapshot and drops retired generations on request.
+- The Redis sink's connection dials on its own (`sync_connect: false`), so a
+  dead Redis never blocks the supervisor that starts it.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

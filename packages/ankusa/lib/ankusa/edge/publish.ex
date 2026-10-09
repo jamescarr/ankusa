@@ -72,7 +72,7 @@ defmodule Ankusa.Edge.Publish do
           end
         end)
 
-      Enum.each(outcomes, fn {_mod, outcome} -> emit(instance, outcome) end)
+      Enum.each(outcomes, fn {mod, outcome} -> emit(instance, env, mod, outcome) end)
 
       if Enum.all?(outcomes, &match?({_mod, :ok}, &1)) do
         {:ok, env}
@@ -130,13 +130,16 @@ defmodule Ankusa.Edge.Publish do
     end)
   end
 
-  # Same event dispatch emits, so `/metrics` counts this path with no change:
-  # one attempt, no retry — the provider is the retry.
-  defp emit(instance, result) do
+  # Same event, and the same metadata, dispatch emits, so `/metrics` counts this
+  # path with no change (a missing `sink` tag would drop the event): one
+  # attempt, no retry — the provider is the retry.
+  defp emit(instance, env, mod, result) do
     Ankusa.Telemetry.emit([:dispatch, :stop], %{}, %{
       instance: instance,
       result: result,
-      attempts: 1
+      attempts: 1,
+      sink: mod,
+      source_id: env.source_id
     })
   end
 end

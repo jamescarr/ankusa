@@ -87,6 +87,21 @@ defmodule Ankusa.Edge.Quarantine do
   end
 
   @doc """
+  Spend one token of `source_id`'s bucket without writing anything: the charge
+  for a hook a source accepts *flagged* (`on_verify_failure: :accept_flag`),
+  which is committed like any hook but must not be free to forge. Same bucket,
+  same arithmetic as `put/3`. `{:rate_limited, retry_after_ms}` when it is
+  empty; `{:error, :store_unavailable}` when the pen does not answer.
+  """
+  @spec hit(atom(), String.t()) ::
+          :ok | {:rate_limited, pos_integer()} | {:error, :store_unavailable}
+  def hit(instance, source_id) do
+    GenServer.call(Ankusa.via(instance, :quarantine), {:hit, source_id})
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
+  end
+
+  @doc """
   Tell the pen `bytes` left it outside `purge/3` — a release commit deleted
   their entries. A no-op when the pen is not running on this node.
   """
@@ -110,6 +125,27 @@ defmodule Ankusa.Edge.Quarantine do
           | {:error, :store_unavailable}
   def purge(instance, filter, limit) when is_map(filter) and is_integer(limit) and limit > 0 do
     GenServer.call(Ankusa.via(instance, :quarantine), {:purge, filter, limit}, @purge_timeout_ms)
+  catch
+    :exit, _reason -> {:error, :store_unavailable}
+  end
+
+  @doc """
+  What the pen holds: `bytes` (the count the `max_bytes` cap is enforced
+  against) and `entries`. The entry count is a scan of the pen's summary keys, run
+  in the caller, so it never queues a write behind it. A pen that is not running
+  is `{:error, :store_unavailable}`.
+  """
+  @spec held(atom()) ::
+          {:ok, %{bytes: non_neg_integer(), entries: non_neg_integer()}}
+          | {:error, :store_unavailable}
+  def held(instance) do
+    bytes = GenServer.call(Ankusa.via(instance, :quarantine), :held)
+    %{lo: lo, hi: hi} = Keys.family(:quarantine)
+
+    case Store.fold(instance, :quarantine, {lo, hi}, 0, fn _key, _value, n -> {:cont, n + 1} end) do
+      {:ok, entries} -> {:ok, %{bytes: bytes, entries: entries}}
+      {:error, _reason} -> {:error, :store_unavailable}
+    end
   catch
     :exit, _reason -> {:error, :store_unavailable}
   end
@@ -276,6 +312,22 @@ defmodule Ankusa.Edge.Quarantine do
   end
 
   @impl true
+  def handle_call({:hit, source_id}, _from, state) do
+    bucket = refill(Map.get(state.buckets, source_id), state, mono_ms())
+
+    if bucket.tokens < 1.0 do
+      Ankusa.Telemetry.emit([:quarantine, :rate_limited], %{}, %{
+        instance: state.instance,
+        source_id: source_id
+      })
+
+      retry_after_ms = max(ceil((1.0 - bucket.tokens) * 1000 / state.rate), 1)
+      {:reply, {:rate_limited, retry_after_ms}, put_bucket(state, source_id, bucket)}
+    else
+      {:reply, :ok, put_bucket(state, source_id, %{bucket | tokens: bucket.tokens - 1.0})}
+    end
+  end
+
   def handle_call({:put, env, reason}, _from, state) do
     source_id = env.source_id
     bucket = refill(Map.get(state.buckets, source_id), state, mono_ms())
@@ -323,6 +375,8 @@ defmodule Ankusa.Edge.Quarantine do
       end
     end
   end
+
+  def handle_call(:held, _from, state), do: {:reply, state.bytes, state}
 
   def handle_call({:purge, filter, limit}, _from, state) do
     {since, until} = {Map.get(filter, :since), Map.get(filter, :until)}

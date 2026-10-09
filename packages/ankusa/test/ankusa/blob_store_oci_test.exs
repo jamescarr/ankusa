@@ -78,7 +78,7 @@ defmodule Ankusa.BlobStore.OCITest do
     capture: capture,
     opts: opts
   } do
-    assert ["seg/a", "seg/b"] = OCI.list(:i, "seg/", opts)
+    assert {:ok, ["seg/a", "seg/b"]} = OCI.list(:i, "seg/", opts)
 
     assert [{"GET", path, query, _headers}] = Agent.get(capture, & &1)
     assert path == "/n/ns/b/b/o"
@@ -91,7 +91,7 @@ defmodule Ankusa.BlobStore.OCITest do
       Plug.Conn.send_resp(conn, 200, "not json at all")
     end)
 
-    assert [] = OCI.list(:i, "seg/", opts)
+    assert {:error, _not_json} = OCI.list(:i, "seg/", opts)
   end
 
   test "a 404 is :not_found; any other non-2xx keeps its status", %{opts: opts} do

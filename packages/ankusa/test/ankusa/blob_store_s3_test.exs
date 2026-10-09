@@ -44,10 +44,12 @@ defmodule Ankusa.BlobStore.S3Test do
     key = key("listed")
     assert :ok = S3.put(:i, key, "x", @opts)
 
-    assert key in S3.list(:i, "seg/it-listed", @opts)
+    assert {:ok, keys} = S3.list(:i, "seg/it-listed", @opts)
+    assert key in keys
 
     assert :ok = S3.delete(:i, key, @opts)
     assert {:error, :not_found} = S3.get(:i, key, @opts)
-    refute key in S3.list(:i, "seg/it-listed", @opts)
+    assert {:ok, keys} = S3.list(:i, "seg/it-listed", @opts)
+    refute key in keys
   end
 end

@@ -262,7 +262,7 @@ defmodule Ankusa.StorageTest do
 
     assert {:ok, 1} == Compactor.tick(inst)
 
-    keys = Ankusa.BlobStore.list(inst, "seg/")
+    {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
     assert [seg_key] = Enum.filter(keys, &String.ends_with?(&1, ".seg"))
     assert String.starts_with?(seg_key, "seg/")
     assert [_idx_key] = Enum.filter(keys, &String.ends_with?(&1, ".idx"))
@@ -355,7 +355,8 @@ defmodule Ankusa.StorageTest do
 
     # one tick writes every segment the backlog needs, not one holding it all
     assert {:ok, 3} == Compactor.tick(inst)
-    assert length(Ankusa.BlobStore.list(inst, "seg/")) == 6
+    assert {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+    assert length(keys) == 6
 
     for original <- originals do
       assert {:ok, fetched} = Storage.fetch(inst, original.id)
@@ -377,7 +378,7 @@ defmodule Ankusa.StorageTest do
     compactor = Ankusa.whereis(inst, :compactor)
     assert is_pid(compactor)
     assert Process.alive?(compactor)
-    assert Ankusa.BlobStore.list(inst, "seg/") == []
+    assert Ankusa.BlobStore.list(inst, :segments, "seg/") == {:ok, []}
     assert :error == Storage.fetch(inst, env.id)
 
     # the same hooks are written again under the same keys next tick
@@ -479,5 +480,59 @@ defmodule Ankusa.StorageTest do
   test "fetch of an unknown id is :error" do
     config = start(roles: [:edge, :storage])
     assert :error == Storage.fetch(config.instance, "no-such-event")
+  end
+
+  describe "storage.key_prefix and a shared claim store (one bucket, several nodes)" do
+    test "segments go under the node's prefix, list strips it, and fetch finds them" do
+      config = start(roles: [:edge, :storage], storage: %{key_prefix: "node-a/"})
+      inst = config.instance
+      [original] = commit!(inst, [envelope(~s({"n":1}))])
+
+      assert {:ok, 1} == Compactor.tick(inst)
+
+      root = Ankusa.Config.path(config, "segments")
+      assert [_seg] = Path.wildcard(Path.join(root, "node-a/seg/*.seg"))
+      assert Path.wildcard(Path.join(root, "seg/*")) == []
+
+      assert {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+      assert Enum.all?(keys, &String.starts_with?(&1, "seg/"))
+      assert {:ok, fetched} = Storage.fetch(inst, original.id)
+      assert fetched.body == original.body
+    end
+
+    test "two nodes sharing one root keep their segments apart and read each other's claims" do
+      shared = Path.join(System.tmp_dir!(), "ankusa_shared_#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(shared) end)
+
+      node = fn prefix ->
+        start(
+          roles: [:edge, :storage],
+          storage: %{key_prefix: prefix, blob_store: {Ankusa.BlobStore.LocalFS, root: shared}},
+          claim_check: %{blob_store: {Ankusa.BlobStore.LocalFS, root: shared}}
+        )
+      end
+
+      a = node.("a/")
+      b = node.("b/")
+
+      # The same seqs on both nodes, so the same segment names.
+      [env_a] = commit!(a.instance, [envelope(~s({"node":"a"}))])
+      [env_b] = commit!(b.instance, [envelope(~s({"node":"b"}))])
+      assert {:ok, 1} == Compactor.tick(a.instance)
+      assert {:ok, 1} == Compactor.tick(b.instance)
+
+      assert {:ok, [_, _] = keys_a} = Ankusa.BlobStore.list(a.instance, :segments, "seg/")
+      assert {:ok, ^keys_a} = Ankusa.BlobStore.list(b.instance, :segments, "seg/")
+      assert {:ok, %{body: ~s({"node":"a"})}} = Storage.fetch(a.instance, env_a.id)
+      assert {:ok, %{body: ~s({"node":"b"})}} = Storage.fetch(b.instance, env_b.id)
+
+      # A claim one node checks in, the other node's gateway reads.
+      item = %{id: "evt_claim", body: "claimed bytes"}
+
+      {:ok, %{"evt_claim" => %{ref: ref}}} =
+        Ankusa.ClaimCheck.check_in(a.instance, "acme", [item])
+
+      assert {:ok, "claimed bytes"} = Ankusa.ClaimCheck.read(b.instance, "acme", ref.claim_id)
+    end
   end
 end
