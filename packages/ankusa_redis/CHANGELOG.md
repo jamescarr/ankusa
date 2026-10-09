@@ -16,11 +16,11 @@ follows [Semantic Versioning](https://semver.org/).
   core's ETS route snapshot and drops retired generations on request.
 - The Redis sink's connection dials on its own (`sync_connect: false`), so a
   dead Redis never blocks the supervisor that starts it.
-- A route store restarted after the instance has published a table boots from
-  that table when Redis is unreachable (the connections dial in the
-  background), logs a warning, and reloads on its tick and on the
-  subscription's confirmation once Redis answers. A first boot still fails
-  loudly. New store option `redis_timeout_ms` (default 5000).
+- A route store restarted after the instance has published a table resumes from
+  that table without waiting on Redis (its connections dial in the background),
+  so a store that crashes during a Redis outage does not hold the edge down. It
+  loads once the subscription is confirmed and on every tick. A first boot
+  still fails loudly.
 
 ## [0.4.0] - 2026-10-02
 

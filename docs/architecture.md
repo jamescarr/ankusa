@@ -270,8 +270,8 @@ free. Data that changes at runtime stays out of `:persistent_term` (whose
 every update copies into every process that read it): the route table is an
 ETS table the routes store writes (a small owner process keeps it across a
 store restart, and the restarted store resumes from it: API-created routes
-survive a store crash, and the Redis store boots from it while Redis is
-unreachable). One route edit rewrites that route's rows and
+survive a store crash, and the Redis store resumes from it without waiting on
+Redis). One route edit rewrites that route's rows and
 a `:meta` row; a whole-table publish (boot, seed, a Redis reload) writes a new
 generation and flips `:meta` to it, so readers see one table or the other.
 A thousand route edits cost a thousand small inserts, not a thousand global

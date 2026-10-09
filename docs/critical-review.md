@@ -1221,13 +1221,14 @@ during a concurrent whole-table republish. The table belongs to
 `Ankusa.Routes.TableOwner`, which lends it to the store and is its heir, and a
 restarted store takes it over (`Snapshot.adopt/1`) and resumes from the routes
 in it: the ETS store keeps API-created routes across a store crash, and the
-Redis store boots from it while Redis is unreachable, reloading once it
+Redis store resumes from it without waiting on Redis and loads once Redis
 answers. (The edge subtree is `:rest_for_one`, so the listener restarts with
 the store; the point is that the restarted node does not come back with a
 different or empty table. Whole-instance restarts still re-seed.)
 `routes_test.exs` kills the store and checks the API-created route and the
-version survive; `redis_test.exs` restarts the Redis store behind a paused
-Redis.
+version survive; `redis_test.exs` restarts the Redis store while its Redis
+refuses connections (a TCP forwarder that is shut down), and checks the edge is
+back within 2s on the old table and catches up when Redis returns.
 
 <a id="s5"></a>
 ### S5 · Medium · Code — Segment keys collide across nodes, and there is no key prefix

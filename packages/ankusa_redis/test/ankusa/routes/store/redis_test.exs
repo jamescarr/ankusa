@@ -31,13 +31,13 @@ defmodule Ankusa.Routes.Store.RedisTest do
   end
 
   defp store(tick_ms, extra \\ []),
-    do: {Redis, [url: @url, namespace: @namespace, tick_ms: tick_ms] ++ extra}
+    do: {Redis, Keyword.merge([url: @url, namespace: @namespace, tick_ms: tick_ms], extra)}
 
   # Both nodes point at the same namespace; only the tick interval differs, so
   # each test can say whether it is proving pub/sub or the tick.
   defp start_node(opts \\ []) do
     {tick_ms, opts} = Keyword.pop(opts, :tick_ms, 60_000)
-    {store_opts, routes} = Keyword.split(opts, [:redis_timeout_ms])
+    {store_opts, routes} = Keyword.split(opts, [:url])
     instance = :"redis#{System.unique_integer([:positive])}"
 
     config =
@@ -287,58 +287,51 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert %Redix.ConnectionError{reason: :econnrefused} = reason
   end
 
-  test "a store restarted while Redis is unreachable boots from the last table and reloads when Redis answers",
-       %{conn: conn} do
-    node = start_node(tick_ms: 100, redis_timeout_ms: 300)
+  test "a store restarted while Redis is unreachable resumes from the last table and reloads when Redis answers" do
+    {forwarder, port} = start_forwarder()
+    node = start_node(tick_ms: 100, url: "redis://127.0.0.1:#{port}")
     instance = node.instance
     edge = Ankusa.whereis(instance, :edge)
 
     assert {:ok, _} = Routes.create(instance, %{"id" => "api", "path" => "/hooks/api"})
     version = Routes.meta(instance).version
+    other = start_node()
+
+    # Redis goes away for `node` only, and `other` changes the table meanwhile.
+    Process.exit(forwarder, :kill)
+    assert {:ok, _} = Routes.create(other.instance, %{"id" => "other", "path" => "/hooks/other"})
 
     {_id, sup, _type, _modules} =
       edge
       |> Supervisor.which_children()
       |> Enum.find(&match?({Redis, _pid, _type, _modules}, &1))
 
-    # The store and its connections go down together; Redis then stops
-    # answering for 1.5s, so the restarted store cannot load anything.
     members = [sup | sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 1))]
     refs = Enum.map(members, &Process.monitor/1)
-    {:ok, "OK"} = Redix.command(conn, ["CLIENT", "PAUSE", "1500", "ALL"])
+    Process.exit(sup, :kill)
+    for ref <- refs, do: assert_receive({:DOWN, ^ref, :process, _pid, _reason}, 5_000)
 
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        Process.exit(sup, :kill)
-        for ref <- refs, do: assert_receive({:DOWN, ^ref, :process, _pid, _reason}, 5_000)
-        _ = :sys.get_state(edge)
-      end)
+    # The supervisor restarts the store and everything after it. Nothing waits
+    # on the unreachable Redis, so the edge is back at once, on the table the
+    # old store left.
+    started = System.monotonic_time(:millisecond)
+    _ = :sys.get_state(edge)
+    assert System.monotonic_time(:millisecond) - started < 2_000
 
-    # Still paused: the new store is up, on the table the old one left, and said so.
-    assert log =~ "serving the last published route table"
     assert is_pid(Ankusa.whereis(instance, :routes_store))
-    assert "api" in route_ids(instance)
+    assert route_ids(instance) == ["api"]
     assert Routes.meta(instance).version == version
     assert Routes.authorize(instance, "POST", ["hooks", "api"], {1, 2, 3, 4}) == {:ok, "api"}
 
-    # Once Redis answers, the subscription is confirmed and writes work again.
-    eventually(
-      fn ->
-        {:ok, [_channel, subscribers]} = Redix.command(conn, ["PUBSUB", "NUMSUB", @namespace])
-        subscribers >= 1
-      end,
-      5_000
-    )
+    assert {:error, :store_unavailable} =
+             Routes.create(instance, %{"id" => "x", "path" => "/hooks/x"})
 
-    eventually(
-      fn ->
-        match?({:ok, _}, Routes.create(instance, %{"id" => "after", "path" => "/hooks/after"}))
-      end,
-      5_000
-    )
+    # Redis is reachable again: the node catches up on what it missed, and writes work.
+    start_forwarder(port)
+    eventually(fn -> route_ids(instance) == ["api", "other"] end, 15_000)
 
-    assert "after" in route_ids(instance)
-    assert "api" in route_ids(instance)
+    assert {:ok, _} = Routes.create(instance, %{"id" => "after", "path" => "/hooks/after"})
+    eventually(fn -> "after" in route_ids(other.instance) end)
   end
 
   test "a stored definition that no longer parses stops the node rather than loading garbage", %{
@@ -582,5 +575,54 @@ defmodule Ankusa.Routes.Store.RedisTest do
     {:ok, port} = :inet.port(socket)
     :ok = :gen_tcp.close(socket)
     port
+  end
+
+  # A TCP forwarder in front of the compose Redis. Killing it makes Redis
+  # unreachable for the one node pointed at it: the listener closes (a new
+  # connection is refused) and every open connection drops. Listening again on
+  # the same port brings it back.
+  defp start_forwarder(port \\ 0) do
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        {:ok, listen} =
+          :gen_tcp.listen(port, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+        {:ok, bound} = :inet.port(listen)
+        send(parent, {:forwarder, self(), bound})
+        forward_loop(listen)
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+
+    receive do
+      {:forwarder, ^pid, bound} -> {pid, bound}
+    after
+      2_000 -> flunk("the forwarder did not start")
+    end
+  end
+
+  defp forward_loop(listen) do
+    {:ok, client} = :gen_tcp.accept(listen)
+    %URI{host: host, port: port} = URI.parse(@url)
+    {:ok, upstream} = :gen_tcp.connect(String.to_charlist(host), port, [:binary, active: false])
+
+    for {from, to} <- [{client, upstream}, {upstream, client}] do
+      spawn_link(fn -> pipe(from, to) end)
+    end
+
+    forward_loop(listen)
+  end
+
+  defp pipe(from, to) do
+    with {:ok, data} <- :gen_tcp.recv(from, 0),
+         :ok <- :gen_tcp.send(to, data) do
+      pipe(from, to)
+    else
+      _closed ->
+        :gen_tcp.close(from)
+        :gen_tcp.close(to)
+    end
   end
 end
