@@ -101,8 +101,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   filled them first and vanished with it, so temporary credentials were
   fetched again on almost every call.
 - The route snapshot table is owned by `Ankusa.Routes.TableOwner` and lent to
-  the routes store, so a store crash no longer deletes it: the guard keeps
-  enforcing the last published routes while the store restarts.
+  the routes store, so a store crash no longer deletes it, and the restarted
+  store resumes from it (`Ankusa.Routes.Snapshot.adopt/1`): the ETS store keeps
+  API-created routes across a store crash instead of re-seeding from config.
 - A `{:permanent, _}` answer to a breaker's probe closes the breaker; it used
   to leave the probe slot taken, parking the key forever.
 - `storage.key_prefix` is applied when a segment is named and the catalogue

@@ -80,9 +80,12 @@ defmodule Ankusa.Routes.Store.Redis do
 
   ## Failing loudly
 
-  The store refuses to boot against a Redis it cannot reach — `sync_connect` on
-  the connection, and a load in the state process's `init/1` — because the
-  alternative is an edge that quietly denies every webhook. Once running, a Redis
+  The store refuses to *first* boot against a Redis it cannot reach —
+  `sync_connect` on the connection, and a load in the state process's `init/1` —
+  because the alternative is an edge that quietly denies every webhook. A store
+  that is *restarted* once the instance has published a table does not: it boots
+  from that table, logs a warning, and reloads on its tick (and on the
+  subscription's confirmation) once Redis answers. Once running, a Redis
   error on a write is `{:error, :store_unavailable}` (the admin API reports it as
   a `503`, and the connection reconnects on its own); reads keep being served
   from the in-memory snapshot, so a Redis outage does not start rejecting
@@ -102,10 +105,12 @@ defmodule Ankusa.Routes.Store.Redis do
   alias Ankusa.Routes.Store.Redis.State
 
   @default_tick_ms 30_000
+  @default_redis_timeout_ms 5_000
 
   @doc """
-  Options: `url` (required), `namespace`, and `tick_ms` — the store options of
-  `config.routes.store`'s `{module, opts}` pair.
+  Options: `url` (required), `namespace`, `tick_ms` and `redis_timeout_ms` (how
+  long one Redis command, or the wait for a subscription, may take; default
+  5000) — the store options of `config.routes.store`'s `{module, opts}` pair.
   """
   @impl Ankusa.Routes.Store
   def start_link(opts), do: Supervisor.start_link(__MODULE__, opts)
@@ -120,9 +125,14 @@ defmodule Ankusa.Routes.Store.Redis do
     namespace = Keyword.get(store_opts, :namespace) || "ankusa:routes:#{instance}"
     tick_ms = Keyword.get(store_opts, :tick_ms, @default_tick_ms)
 
-    # `sync_connect: true` on both connections: a store that cannot reach Redis
-    # must fail the boot instead of running with nothing loaded.
-    connection = [name: Ankusa.via(instance, :routes_redis), sync_connect: true]
+    # A first boot connects synchronously on both connections: a store that
+    # cannot reach Redis must fail the boot instead of running with nothing
+    # loaded. A restart after the instance has published a table connects in the
+    # background, and the state process resumes from that table (see
+    # `State.init/1`), so a crash during a Redis outage does not take the edge's
+    # route table down with it.
+    sync? = is_nil(Ankusa.Routes.Snapshot.meta(instance))
+    connection = [name: Ankusa.via(instance, :routes_redis), sync_connect: sync?]
 
     children = [
       {Redix, {url, connection}},
@@ -131,9 +141,14 @@ defmodule Ankusa.Routes.Store.Redis do
         id: Redix.PubSub,
         start:
           {Redix.PubSub, :start_link,
-           [url, [name: Ankusa.via(instance, :routes_redis_pubsub), sync_connect: true]]}
+           [url, [name: Ankusa.via(instance, :routes_redis_pubsub), sync_connect: sync?]]}
       },
-      {State, instance: instance, config: config, namespace: namespace, tick_ms: tick_ms}
+      {State,
+       instance: instance,
+       config: config,
+       namespace: namespace,
+       tick_ms: tick_ms,
+       redis_timeout_ms: Keyword.get(store_opts, :redis_timeout_ms, @default_redis_timeout_ms)}
     ]
 
     # `:rest_for_one`: the state process depends on both connections, and holds a
@@ -178,7 +193,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # A write is at most three round trips — the script, a reload if it raced, the
   # publish — each bounded by Redix's own timeout. The call has to outlast all of
   # them, or its caller would give up on a write Redis is about to apply.
-  @redis_timeout 5_000
+  # (The Redis timeout is the `redis_timeout_ms` store option, 5s by default.)
   @call_timeout 20_000
 
   # Every script reads the version first: a wrong-typed version key aborts the
@@ -265,9 +280,13 @@ defmodule Ankusa.Routes.Store.Redis.State do
       conn: Ankusa.via(instance, :routes_redis),
       pubsub: Ankusa.via(instance, :routes_redis_pubsub),
       tick_ms: Keyword.fetch!(opts, :tick_ms),
+      redis_timeout: Keyword.fetch!(opts, :redis_timeout_ms),
       version: 0,
       routes: %{},
       ip_rules: %{default: :allow, rules: []},
+      # whether Redis has confirmed this node's subscription (false while it
+      # runs from a surviving table because Redis was unreachable at restart)
+      subscribed?: false,
       # said once per outage: the namespace lost its version key while this
       # node holds a table
       warned_missing?: false
@@ -279,9 +298,9 @@ defmodule Ankusa.Routes.Store.Redis.State do
     with :ok <- subscribe(state),
          {:ok, state} <- bootstrap(state, config.routes) do
       Process.send_after(self(), :tick, state.tick_ms)
-      {:ok, state}
+      {:ok, %{state | subscribed?: true}}
     else
-      {:error, reason} -> {:stop, reason}
+      {:error, reason} -> resume_or_stop(state, reason)
     end
   end
 
@@ -322,6 +341,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
   @impl true
   def handle_info(:tick, state) do
+    state = resubscribe(state)
     state = sync(state)
     Process.send_after(self(), :tick, state.tick_ms)
     {:noreply, state}
@@ -341,6 +361,12 @@ defmodule Ankusa.Routes.Store.Redis.State do
     Logger.debug("[ankusa] route pub/sub disconnected: #{inspect(properties)}")
     {:noreply, state}
   end
+
+  # A subscription requested while Redis was away (a restart that booted from
+  # the last table) is confirmed once the pub/sub connection is back: from then
+  # on broadcasts reach this node, and one load catches up on what it missed.
+  def handle_info({:redix_pubsub, _pid, _ref, :subscribed, _properties}, state),
+    do: {:noreply, sync(%{state | subscribed?: true})}
 
   def handle_info({:redix_pubsub, _pid, _ref, _type, _properties}, state), do: {:noreply, state}
 
@@ -363,11 +389,43 @@ defmodule Ankusa.Routes.Store.Redis.State do
         receive do
           {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
         after
-          @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
+          state.redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
         end
 
       {:error, reason} ->
         {:error, {:pubsub_subscribe_failed, reason}}
+    end
+  end
+
+  # Boot failed. With no table ever published (the instance's first boot) that
+  # is the loud failure the moduledoc promises. With one — the store crashed
+  # and was restarted — the surviving table is what the edge was enforcing, so
+  # serve it and let the tick (and the late `:subscribed`) catch up once Redis
+  # answers, instead of turning a Redis outage into an edge that cannot restart.
+  defp resume_or_stop(state, reason) do
+    case Snapshot.adopt(state.instance) do
+      {:ok, %{routes: routes, ip_rules: ip_rules, version: version}} ->
+        Logger.warning(
+          "[ankusa_redis] Redis unavailable at restart (#{inspect(reason)}); serving the " <>
+            "last published route table (#{map_size(routes)} routes) until it answers"
+        )
+
+        Process.send_after(self(), :tick, state.tick_ms)
+        {:ok, %{state | routes: routes, ip_rules: ip_rules, version: version}}
+
+      :none ->
+        {:stop, reason}
+    end
+  end
+
+  # A node that booted from its table has no confirmed subscription: ask again,
+  # waiting for the confirmation as at boot so the load that follows is covered.
+  defp resubscribe(%{subscribed?: true} = state), do: state
+
+  defp resubscribe(state) do
+    case subscribe(state) do
+      :ok -> %{state | subscribed?: true}
+      {:error, _reason} -> state
     end
   end
 
@@ -624,14 +682,14 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # Every Redis failure — a disconnected client, a wrong-type key, a timeout —
   # arrives here the same way and is reported the same way.
   defp command(state, command) do
-    case Redix.command(state.conn, command, timeout: @redis_timeout) do
+    case Redix.command(state.conn, command, timeout: state.redis_timeout) do
       {:ok, value} -> {:ok, value}
       {:error, reason} -> {:error, {:redis_unavailable, reason}}
     end
   end
 
   defp transaction(state, commands) do
-    case Redix.transaction_pipeline(state.conn, commands, timeout: @redis_timeout) do
+    case Redix.transaction_pipeline(state.conn, commands, timeout: state.redis_timeout) do
       {:ok, results} -> {:ok, results}
       {:error, reason} -> {:error, {:redis_unavailable, reason}}
     end

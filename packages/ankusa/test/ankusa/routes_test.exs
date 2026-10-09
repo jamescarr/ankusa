@@ -81,22 +81,6 @@ defmodule Ankusa.RoutesTest do
     Enum.count(messages, &match?({:"$gen_call", _from, _request}, &1))
   end
 
-  defp await_snapshot_after(instance, epoch, attempts \\ 100) do
-    snapshot = Routes.meta(instance)
-
-    cond do
-      snapshot != nil and snapshot.epoch != epoch ->
-        :ok
-
-      attempts == 0 ->
-        flunk("the store never published a new snapshot")
-
-      true ->
-        Process.sleep(20)
-        await_snapshot_after(instance, epoch, attempts - 1)
-    end
-  end
-
   defmodule AlwaysStale do
     @moduledoc false
     # A store that answers every versioned write with `:stale`, the way a store
@@ -403,21 +387,22 @@ defmodule Ankusa.RoutesTest do
       assert {{:reject, :ip_denied}, false} = decide(config, "POST", "/hooks/s", "1.2.3.4")
     end
 
-    test "a store restart, though its version counter starts over", %{config: config} do
+    test "a table whose version counter starts over (a flushed Redis reloaded)", %{config: config} do
       instance = config.instance
       assert {:ok, _} = create(instance, %{"id" => "a", "path" => "/hooks/a"})
       assert {{:ok, "a"}, false} = decide(config, "POST", "/hooks/a", "1.2.3.4")
       assert {{:ok, "a"}, true} = decide(config, "POST", "/hooks/a", "1.2.3.4")
 
-      old_pid = Ankusa.whereis(instance, :routes_store)
-      old_epoch = Routes.meta(instance).epoch
-      ref = Process.monitor(old_pid)
-      Process.exit(old_pid, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^old_pid, :killed}, 5_000
+      # The store publishes an empty table at version 1 again, as a Redis store
+      # does when its namespace was flushed and reloaded. (The process owns the
+      # table, so the republish runs inside it.)
+      store = Ankusa.whereis(instance, :routes_store)
 
-      # The supervisor restarts the store from the seed, which has no "a", and its
-      # version counter begins again at 1.
-      await_snapshot_after(instance, old_epoch)
+      :sys.replace_state(store, fn state ->
+        state = %{state | routes: %{}, version: 1}
+        :ok = Ankusa.Routes.Snapshot.publish(state)
+        state
+      end)
 
       # Walk the new counter back up to the version the stale entry was cached under.
       assert {:ok, _} = create(instance, %{"id" => "b", "path" => "/hooks/b"})
@@ -1161,32 +1146,33 @@ defmodule Ankusa.RoutesTest do
       assert Ankusa.Routes.Snapshot.count(config.instance) == 1_000
     end
 
-    test "the last published routes keep answering while a crashed store restarts" do
+    test "a routes store that crashes comes back with the routes it had, API-created ones included" do
       config = start(seed: seed())
       instance = config.instance
       edge = Ankusa.whereis(instance, :edge)
       store = Ankusa.whereis(instance, :routes_store)
-      assert authorize(config, "POST", "/hooks/s") == {:ok, "s"}
 
-      # Hold the restart, so the window between the crash and the new store's
-      # first publish stays open while we read through it.
-      :ok = :sys.suspend(edge)
+      assert {:ok, _} = create(instance, %{"id" => "api", "path" => "/hooks/api"})
+      version = Ankusa.Routes.Snapshot.meta(instance).version
+
       ref = Process.monitor(store)
       Process.exit(store, :kill)
       assert_receive {:DOWN, ^ref, :process, _, :killed}
 
-      assert authorize(config, "POST", "/hooks/s") == {:ok, "s"}
-
-      :ok = :sys.resume(edge)
-      # The supervisor restarts the store, and the cache after it, while
+      # The supervisor restarts the store, and everything after it, while
       # handling the exit; a sys call returns once that is done.
       _ = :sys.get_state(edge)
       new_store = Ankusa.whereis(instance, :routes_store)
       assert new_store != store
 
-      table = Ankusa.Routes.Snapshot.table(instance)
-      assert :ets.info(table, :owner) == new_store
+      assert authorize(config, "POST", "/hooks/api") == {:ok, "api"}
       assert authorize(config, "POST", "/hooks/s") == {:ok, "s"}
+      assert Ankusa.Routes.Snapshot.meta(instance).version == version
+      assert :ets.info(Ankusa.Routes.Snapshot.table(instance), :owner) == new_store
+
+      # The adopted store can still write the table.
+      assert {:ok, _} = create(instance, %{"id" => "after", "path" => "/hooks/after"})
+      assert authorize(config, "POST", "/hooks/after") == {:ok, "after"}
     end
 
     test "a route whose path is replaced matches its new path and not its old one" do

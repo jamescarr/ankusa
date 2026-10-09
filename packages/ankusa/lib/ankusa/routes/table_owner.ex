@@ -3,9 +3,9 @@ defmodule Ankusa.Routes.TableOwner do
   Keeps an instance's route snapshot table alive across a routes-store
   restart. It creates the table and is its heir: the store writes into it
   (`Ankusa.Routes.Snapshot` asks for it with `hand_over/2`), and when the
-  store dies the table comes back here instead of being deleted. The guard
-  therefore keeps enforcing the last published routes while the store
-  restarts, rather than failing closed on a missing table.
+  store dies the table comes back here instead of being deleted. The
+  restarted store takes it over with `Ankusa.Routes.Snapshot.adopt/1` and
+  resumes from the routes in it, rather than starting again from its config.
 
   Started by `Ankusa.Instance` just before the routes store; nothing else
   needs to call it.

@@ -15,9 +15,9 @@ defmodule Ankusa.Routes.Snapshot do
   mutation writes the rows it changes, not the whole table. (It used to be one
   `:persistent_term` value rebuilt and rewritten per mutation, which costs a
   global GC pass and a full copy each time.) `Ankusa.Routes.TableOwner`
-  creates it and lends it to the store, and gets it back if the store dies, so
-  the guard keeps reading the last published routes until the restarted store
-  publishes again.
+  creates it and lends it to the store, and gets it back if the store dies. A
+  restarted store takes the table over with `adopt/1` and resumes from the
+  routes in it, rather than starting from its config again.
 
   Rows, all tagged with a *generation*:
 
@@ -400,6 +400,39 @@ defmodule Ankusa.Routes.Snapshot do
     end
   rescue
     ArgumentError -> nil
+  end
+
+  @doc """
+  Take over the table a previous routes store left behind (it survives the
+  store through `Ankusa.Routes.TableOwner`): the caller becomes its owner, any
+  generation other than the current one is dropped, and the current one comes
+  back as a store's state fields. `:none` when no table has been published yet
+  (an instance's first boot).
+  """
+  @spec adopt(atom()) ::
+          {:ok, %{routes: %{String.t() => Route.t()}, ip_rules: map(), version: pos_integer()}}
+          | :none
+  def adopt(instance) do
+    case meta(instance) do
+      nil ->
+        :none
+
+      %{gen: gen} = meta ->
+        table = ensure_table(instance)
+
+        # The old owner's `{:drop_generation, old}` timer died with it.
+        :ets.select_delete(table, [
+          {{{:pattern, :"$1", :_, :_}, :_, :_}, [{:"/=", :"$1", gen}], [true]},
+          {{{:id, :"$1", :_}, :_}, [{:"/=", :"$1", gen}], [true]}
+        ])
+
+        {:ok,
+         %{
+           routes: Map.new(routes(instance, meta), &{&1.id, &1}),
+           ip_rules: meta.ip_rules,
+           version: meta.version
+         }}
+    end
   end
 
   @doc "One route of `meta`'s generation."

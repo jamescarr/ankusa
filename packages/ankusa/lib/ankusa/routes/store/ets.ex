@@ -10,10 +10,12 @@ defmodule Ankusa.Routes.Store.ETS do
   writes the rows it changes there, so the guard sees the change on the very
   next request — no TTL wait, no polling.
 
-  Seeding happens **only at boot**, into an empty store — and it happens on
-  *every* boot: a seed route deleted through the API returns at the next restart
+  Seeding happens **only at boot**, into an empty store — on every *instance*
+  boot: a seed route deleted through the API returns at the next restart
   unless it is also removed from `config.routes.seed`. (Only the Redis store
-  seeds once per namespace.)
+  seeds once per namespace.) A store process that crashes and is restarted
+  inside a running instance does not seed again: it resumes from the snapshot
+  table it left, API-created routes included.
 
   The process registers under `Ankusa.via(instance, :routes_store)`; there is
   no global name, so two instances in one VM never collide.
@@ -50,21 +52,36 @@ defmodule Ankusa.Routes.Store.ETS do
     instance = Keyword.fetch!(opts, :instance)
     %{routes: routes_config} = Keyword.fetch!(opts, :config)
 
-    case Snapshot.initial_table(routes_config) do
-      {:ok, %{routes: routes, ip_rules: ip_rules}} ->
-        state = %{
-          instance: instance,
-          max_routes: routes_config.max_routes,
-          routes: routes,
-          ip_rules: ip_rules,
-          version: 1
-        }
+    case Snapshot.adopt(instance) do
+      {:ok, %{routes: routes, ip_rules: ip_rules, version: version}} ->
+        # A restarted store: the table a crashed one left already is the state
+        # (API-created routes included), so nothing is seeded or published.
+        {:ok,
+         %{
+           instance: instance,
+           max_routes: routes_config.max_routes,
+           routes: routes,
+           ip_rules: ip_rules,
+           version: version
+         }}
 
-        :ok = Snapshot.publish(state)
-        {:ok, state}
+      :none ->
+        case Snapshot.initial_table(routes_config) do
+          {:ok, %{routes: routes, ip_rules: ip_rules}} ->
+            state = %{
+              instance: instance,
+              max_routes: routes_config.max_routes,
+              routes: routes,
+              ip_rules: ip_rules,
+              version: 1
+            }
 
-      {:error, reason} ->
-        {:stop, reason}
+            :ok = Snapshot.publish(state)
+            {:ok, state}
+
+          {:error, reason} ->
+            {:stop, reason}
+        end
     end
   end
 

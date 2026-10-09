@@ -30,12 +30,14 @@ defmodule Ankusa.Routes.Store.RedisTest do
     |> Ankusa.Config.new()
   end
 
-  defp store(tick_ms), do: {Redis, [url: @url, namespace: @namespace, tick_ms: tick_ms]}
+  defp store(tick_ms, extra \\ []),
+    do: {Redis, [url: @url, namespace: @namespace, tick_ms: tick_ms] ++ extra}
 
   # Both nodes point at the same namespace; only the tick interval differs, so
   # each test can say whether it is proving pub/sub or the tick.
   defp start_node(opts \\ []) do
-    {tick_ms, routes} = Keyword.pop(opts, :tick_ms, 60_000)
+    {tick_ms, opts} = Keyword.pop(opts, :tick_ms, 60_000)
+    {store_opts, routes} = Keyword.split(opts, [:redis_timeout_ms])
     instance = :"redis#{System.unique_integer([:positive])}"
 
     config =
@@ -45,7 +47,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
         routes:
           routes
           |> Keyword.merge(enabled: true, admin: [port: 0])
-          |> Keyword.put(:store, store(tick_ms))
+          |> Keyword.put(:store, store(tick_ms, store_opts))
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -283,6 +285,60 @@ defmodule Ankusa.Routes.Store.RedisTest do
              Redis.start_link(instance: instance, config: config)
 
     assert %Redix.ConnectionError{reason: :econnrefused} = reason
+  end
+
+  test "a store restarted while Redis is unreachable boots from the last table and reloads when Redis answers",
+       %{conn: conn} do
+    node = start_node(tick_ms: 100, redis_timeout_ms: 300)
+    instance = node.instance
+    edge = Ankusa.whereis(instance, :edge)
+
+    assert {:ok, _} = Routes.create(instance, %{"id" => "api", "path" => "/hooks/api"})
+    version = Routes.meta(instance).version
+
+    {_id, sup, _type, _modules} =
+      edge
+      |> Supervisor.which_children()
+      |> Enum.find(&match?({Redis, _pid, _type, _modules}, &1))
+
+    # The store and its connections go down together; Redis then stops
+    # answering for 1.5s, so the restarted store cannot load anything.
+    members = [sup | sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 1))]
+    refs = Enum.map(members, &Process.monitor/1)
+    {:ok, "OK"} = Redix.command(conn, ["CLIENT", "PAUSE", "1500", "ALL"])
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Process.exit(sup, :kill)
+        for ref <- refs, do: assert_receive({:DOWN, ^ref, :process, _pid, _reason}, 5_000)
+        _ = :sys.get_state(edge)
+      end)
+
+    # Still paused: the new store is up, on the table the old one left, and said so.
+    assert log =~ "serving the last published route table"
+    assert is_pid(Ankusa.whereis(instance, :routes_store))
+    assert "api" in route_ids(instance)
+    assert Routes.meta(instance).version == version
+    assert Routes.authorize(instance, "POST", ["hooks", "api"], {1, 2, 3, 4}) == {:ok, "api"}
+
+    # Once Redis answers, the subscription is confirmed and writes work again.
+    eventually(
+      fn ->
+        {:ok, [_channel, subscribers]} = Redix.command(conn, ["PUBSUB", "NUMSUB", @namespace])
+        subscribers >= 1
+      end,
+      5_000
+    )
+
+    eventually(
+      fn ->
+        match?({:ok, _}, Routes.create(instance, %{"id" => "after", "path" => "/hooks/after"}))
+      end,
+      5_000
+    )
+
+    assert "after" in route_ids(instance)
+    assert "api" in route_ids(instance)
   end
 
   test "a stored definition that no longer parses stops the node rather than loading garbage", %{
