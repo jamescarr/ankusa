@@ -13,5 +13,5 @@ namespace Ankusa;
  */
 final class Version
 {
-    public const string VERSION = '0.3.0';
+    public const string VERSION = '0.4.0';
 }

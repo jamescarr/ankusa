@@ -22,10 +22,10 @@ Column families, all in that one database:
 
 | Family | Holds |
 | --- | --- |
-| `default` | the next-seq marker, migration markers, API-managed sources, rate-limit overrides |
+| `default` | the next-seq marker, migration markers, API-managed sources, rate-limit overrides, replay jobs (`j:<id>`) |
 | `hooks` | each committed hook, keyed by its `seq` |
 | `deliveries` | one delivery row per hook and sink |
-| `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs |
+| `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs, ingest dedupe keys (`?u`) and their expiry index (`?e`) |
 | `archive` | the segment catalogue, and locations imported from a 0.3 node's index |
 | `quarantine` | the quarantine pen: one summary and one body key per held envelope |
 
@@ -42,7 +42,7 @@ entry = %{envelope: envelope, sinks: [{Ankusa.Sink.Http, url: "https://example.i
 
 {:ok, hooks} = Ankusa.Queue.hooks(:default, 0, 100)            # seq > 0, ascending
 {:ok, %{next_seq: _, hooks: _, deliveries: _, disk_bytes: _}} = Ankusa.Queue.stats(:default)
-{:ok, %{total: _, entries: _}} = Ankusa.Queue.dead(:default, source_id: "stripe")
+{:ok, %{total: _, entries: _}} = Ankusa.Queue.dead(:default, source_id: "stripe", limit: 100)
 ```
 
 ### The commit: one synced batch
@@ -54,6 +54,7 @@ entry = %{envelope: envelope, sinks: [{Ankusa.Sink.Http, url: "https://example.i
 - one pending delivery row and one due key per sink of its source, bound by
   sink index and module at ack time;
 - an archive obligation, but only while the `:storage` role runs;
+- the dedupe key and its expiry entry, for a hook with a dedupe key;
 - the next-seq marker.
 
 The batch is atomic: a commit either lands whole or nothing is acked, and a

@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
 ### Added
 
 - `Ankusa.SDK.Message.decode/1` now carries `dedupe_key`, `replay_id`,
@@ -23,7 +25,8 @@ follows [Semantic Versioning](https://semver.org/).
   `x-ankusa-replay-id` and `x-ankusa-idempotency-key` and keeps every request
   header.
 - `Ankusa.SDK.Admin.create_replay/2`, `get_replay/2`, `list_replays/1` and
-  `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`).
+  `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`;
+  kinds `dlq`, `archive`, `quarantine`).
 
 ### Removed
 
@@ -71,5 +74,6 @@ follows [Semantic Versioning](https://semver.org/).
 - The language-neutral conformance runner
   (`test/conformance_test.exs`), passing every vector in `conformance/cases`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...sdk-elixir-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-elixir-v0.3.0

@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
 ### Added
 
 - `message.Message`, `message.decode_message()`, and `message.InvalidMessageError`
@@ -24,7 +26,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `HookHeaders.idempotency_key`, parsed from `x-ankusa-dedupe-key` /
   `x-ankusa-replay-id` / `x-ankusa-idempotency-key`.
 - `AdminClient.create_replay()`, `get_replay()`, `list_replays()` and
-  `update_replay()` for the `POST/GET/PATCH /v1/replays` replay-job API.
+  `update_replay()` for the `POST/GET/PATCH /v1/replays` replay-job API (kinds
+  `dlq`, `archive`, `quarantine`).
 
 ### Removed
 
@@ -121,7 +124,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `content-type` into a `HookHeaders` dataclass, raising
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...sdk-python-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...sdk-python-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1

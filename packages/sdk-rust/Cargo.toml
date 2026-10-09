@@ -3,7 +3,7 @@ name = "ankusa"
 # Release tooling reads this line with line regexes (`.mise/lib/pkg.sh`
 # `pkg_version` and `release.exs` `toml_version!`), so keep it the only
 # column-0 `version = "..."` line, with nothing after the closing quote.
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Client SDK for Ankusa, the self-hosted webhook receiver: claim-check redemption, webhook header parsing, and the route-management and operator APIs."

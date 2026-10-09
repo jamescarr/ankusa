@@ -34,6 +34,7 @@ New here? Start with the [quickstart](quickstart.md).
 | --- | --- |
 | [`testing.md`](testing.md) | running the suites, local infra, what each one covers |
 | [`packaging.md`](packaging.md) | why adapters are separate packages, and how to add one |
+| [`critical-review.md`](critical-review.md) | the 2026-10 end-to-end review: findings by root cause, and which are fixed |
 | [`releasing.md`](releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, Packagist, or Maven Central |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | before opening a PR |
 

@@ -26,21 +26,6 @@ reverse.
 npm install ankusa
 ```
 
-Not published yet. Until the first release, depend on it as a local path,
-the same way the Elixir packages in this monorepo depend on `ankusa` core
-before their first Hex release:
-
-```json
-{
-  "dependencies": {
-    "ankusa": "file:../../sdks/typescript"
-  }
-}
-```
-
-A `file:` dependency resolves to compiled output (`dist/`), so run `npm run
-build` here at least once before a consumer installs it that way.
-
 ### Use
 
 ```ts
@@ -141,7 +126,8 @@ await admin.listDeadLetters({ limit: 10 });
 await admin.listQuarantined();
 
 // A replay job re-sends dead rows (`kind: "dlq"`) or archived hooks over a
-// `received_at` window (`kind: "archive"`), at `rate` items per second and
+// `received_at` window (`kind: "archive"`), or held hooks re-verified and
+// released when they pass (`kind: "quarantine"`), at `rate` items per second and
 // only while live traffic leaves dispatch capacity free.
 const job = await admin.createReplay({ kind: "dlq", source_id: "demo", rate: 500 });
 await admin.getReplay(job.id);
@@ -193,9 +179,10 @@ has a dedupe rule; `replayId` is set only on replayed deliveries;
 
 ## Consuming queue messages
 
-Ankusa's sinks carry a JSON envelope (`v: 1`) alongside the body — as the
-broker payload for RabbitMQ/Kafka/NATS/Redis, or as the HTTP body for the
-webhook helper. `decodeMessage` parses it and verifies the bytes it names, so
+Ankusa's broker sinks (RabbitMQ, Kafka, NATS, Redis) carry a JSON envelope
+(`v: 1`) alongside the body as the broker payload. The HTTP sink sends the
+original body verbatim plus `x-ankusa-*` headers; read those with the webhook
+helper. `decodeMessage` parses the envelope and verifies the bytes it names, so
 a consumer never touches a corrupt or truncated body:
 
 ```ts
@@ -256,7 +243,6 @@ src/
     ref.ts
     errors.ts
     claim-check-schema.d.ts   # generated, see "Develop"
-    client.test.ts
   routes/              # the route-management client (routes.admin.port)
     index.ts
     client.ts
@@ -275,6 +261,8 @@ src/
   message/             # the queue-message decoder + idempotency-key helper
     index.ts
     message.test.ts
+  conformance/         # shared SDK conformance suite
+    conformance.test.ts
 ```
 
 A future client (say, an ingest helper) gets its own `src/<name>/` directory

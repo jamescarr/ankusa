@@ -6,6 +6,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 
 - Every sink now sends the tenant-scoped idempotency key: the message gains
@@ -21,7 +23,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - A `quarantine:` section (`burst`, `rate`, `max_bytes`): one quarantine
   bucket per source, and a cap on the pen's bytes. A full pen answers
   `503 quarantine_full`; a source over its bucket answers
-  `429 quarantine_rate_limited` (it used to be `401 verification_failed`).
+  `429 quarantine_rate_limited`.
 - `verify.secret` takes a list of strings (at most 8), newest first, for a
   secret rotation with no cut-over: `secret: ["${NEW}", "${OLD}"]`.
 - Release held hooks with `POST /v1/replays {"kind":"quarantine"}`, and purge
@@ -33,21 +35,31 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   binds (a strict IPv4 or IPv6 literal, default `127.0.0.1`), and the
   `ANKUSA_ADMIN_IP` and `ANKUSA_CLAIM_CHECK_IP` overrides. `check-config`
   rejects anything that is not an IP address, naming the key.
+- Replay jobs: `POST /v1/replays` (`kind: dlq | archive | quarantine`),
+  `GET /v1/replays` and `GET|PATCH /v1/replays/{id}`.
+- Source key `dedupe` (a preset, or `{preset|header|json, ttl_seconds}`): a
+  repeat of an event inside the TTL answers `201` with the original `id` and
+  `"duplicate": true`. Source key `forward_headers`.
+- `wal.publish_timeout_ms` (default `8000`): the deadline every sink must
+  confirm under with `wal.type: none`.
+- Metrics `ankusa_replay_moved_total`, `ankusa_replay_throttled_total` and
+  `ankusa_quarantine_full_total`.
 
 ### Changed
 
-- `GET /asyncapi.json`: `SinkMessageV1` now requires `idempotency_key`, and
-  `SinkMessageHeadersV1` requires `ankusa_idempotency_key`. A consumer that
-  validates messages against the previous document rejects the new field only
-  if it also forbids additional properties.
+- `GET /asyncapi.json`: `SinkMessageV1` now requires `sha256`, `dedupe_key`,
+  `replay_id`, `idempotency_key` and `headers`, and `SinkMessageHeadersV1`
+  requires `ankusa_idempotency_key`. A consumer that validates messages
+  against the previous document rejects the new fields only if it also
+  forbids additional properties.
 - **Breaking: an empty `verify.secret` is a load error.** An empty string, or
   an empty element of a secret list (an unset `${OLD:-}` included), fails
   `check-config` and the boot, naming the key (`sources.a.verify.secret[1]:
   must not be empty`). It used to load and verify with the empty HMAC key,
   which accepts anything signed with it.
-- A source over its quarantine bucket answers `429 quarantine_rate_limited`
-  with `Retry-After`, not `401 verification_failed`; a full pen answers
-  `503 quarantine_full` with `Retry-After: 60`.
+- **Breaking: a source over its quarantine bucket answers `429
+  quarantine_rate_limited`** with `Retry-After`, not `401 verification_failed`;
+  a full pen answers `503 quarantine_full` with `Retry-After: 60`.
 - **The default retry policy retries for about 6 hours:** `dispatch.retry`
   defaults to `max_ms: 300000` and `max_attempts: 84` (they were `30000` and
   `12`, about 83 s). A deployment that relied on the old default to
@@ -68,14 +80,30 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   shown only under known non-secret keys, and every other value (a
   `sas_token`, a `private_key`, an NATS `jwt`) is `"[REDACTED]"`; URL query
   values are redacted too. `print-config` uses the same view.
+- **Breaking for dashboards: refused requests are no longer on
+  `ankusa_ingest_requests_total`.** Requests for sources that do not exist no
+  longer count under `ankusa_ingest_requests_total{outcome="unknown_source"}`;
+  a panel that sums that counter for all traffic must add
+  `ankusa_ingest_refused_total`.
+- **Breaking: `POST /v1/dlq/replay` is removed.** Use
+  `POST /v1/replays {"kind":"dlq"}`.
+- `Sink.Http` forwards the provider's request headers by default (per the
+  source's `forward_headers`) and adds `x-ankusa-dedupe-key` and
+  `x-ankusa-replay-id` when present.
+- `wal.type: none` publishes to all of a source's sinks concurrently under
+  `wal.publish_timeout_ms`; any failure or timeout is a `503`.
+- **Breaking: every RabbitMQ publish is `mandatory`.** A publish to an
+  exchange with no bound queue now retries and then dead-letters instead of
+  silently answering `201`. RabbitMQ also sets AMQP `message_id` to the hook
+  id.
+- NATS sets `Nats-Msg-Id` on every publish (the hook `id`, or
+  `id:replay:<replay_id>` on a replay).
 
 ### Fixed
 
 - `GET /metrics` no longer grows with unauthenticated traffic: requests for
   sources that do not exist are one `ankusa_ingest_refused_total` series, not
-  a `source_id` series per URL. They also no longer count under
-  `ankusa_ingest_requests_total{outcome="unknown_source"}`; a panel that sums
-  that counter for all traffic must add the refused counter.
+  a `source_id` series per URL.
 - A `Content-Length` above `http.max_body_bytes`, or a source that does not
   exist, is answered before the request body is read.
 - The image's HTTP client stack is `mint 1.11.0` (was `1.10.1`, which has
@@ -220,7 +248,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `publish_timeout_ms` (`5000`), `tls`, and an `auth` block taking one scheme
   (`username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream has
   to exist: the sink never creates one.
-- [`config-examples/nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml),
+- [`config-examples/nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/nats-fanout.yml),
   and a `nats` sink in `reference.yml`.
 - `dispatch.concurrency` (default 32), `dispatch.max_inflight` (4096) and
   `dispatch.max_inflight_bytes` (134217728), for the now-concurrent dispatch
@@ -253,7 +281,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...ankusa_server-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...ankusa_server-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...ankusa_server-v0.2.4

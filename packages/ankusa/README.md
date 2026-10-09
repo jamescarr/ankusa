@@ -1,6 +1,6 @@
 # ankusa
 
-A loosely coupled, high-throughput webhook ingestion framework: durable WAL,
+A loosely coupled, high-throughput webhook ingestion framework: durable local RocksDB store,
 pluggable verification/storage/delivery, multi-tenant catch-URL routing.
 
 ## Installation
@@ -8,7 +8,7 @@ pluggable verification/storage/delivery, multi-tenant catch-URL routing.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.2"}
+    {:ankusa, "~> 0.5"}
   ]
 end
 ```

@@ -11,8 +11,8 @@ need this package.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.2"},
-    {:ankusa_kafka, "~> 0.2"}
+    {:ankusa, "~> 0.5"},
+    {:ankusa_kafka, "~> 0.5"}
   ]
 end
 ```
@@ -22,13 +22,20 @@ end
 See `Ankusa.Sink.Kafka` moduledoc for configuration and semantics.
 
 ```elixir
-config :ankusa, :default,
-  sinks: [
-    {Ankusa.Sink.Kafka,
-     brokers: ["localhost:9092"],
-     topic: "ankusa.events"}
-  ]
+config :ankusa,
+  sources: %{
+    "orders" => [
+      sinks: [
+        {Ankusa.Sink.Kafka,
+         brokers: ["localhost:9092"],
+         topic: "ankusa.events"}
+      ]
+    ]
+  }
 ```
+
+Sinks belong to a source. `Ankusa.Config.new/1` takes the same `sources` for a
+non-default instance.
 
 ## Testing
 

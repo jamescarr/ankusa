@@ -129,7 +129,8 @@ for a sender that predates it, in which case the method computes the key).
 
 ## Consuming queue messages
 
-A queue consumer (Redis, a broker, or an HTTP-sink body) decodes one v1
+A queue consumer (Redis or a broker; the HTTP sink sends the original body
+plus `x-ankusa-*` headers, read with `HookHeaders`) decodes one v1
 message, verifies its integrity, and reads the key it dedupes on before it
 touches the effect. `Message::decode()` is the whole decoder — it refuses
 anything that doesn't verify, so a decoded message is safe to act on:

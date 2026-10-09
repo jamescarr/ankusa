@@ -30,7 +30,7 @@ services:
       # nginx reaches the container interface, not its loopback.
       ANKUSA_ADMIN_IP: "0.0.0.0"
     volumes:
-      # The data volume: WAL, quarantine log, DLQ, local segments. Losing it
+      # The data volume: the RocksDB store (hooks, DLQ, quarantine pen), local segments. Losing it
       # loses un-dispatched hooks, so back it.
       - ankusa-data:/var/lib/ankusa
     restart: unless-stopped

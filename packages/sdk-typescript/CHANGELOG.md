@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
 ### Added
 
 - `decodeMessage(data: string | Uint8Array)`, the queue-message decoder: parses
@@ -138,7 +140,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `ClaimCheckUnavailableError`), each carrying a `retryable` boolean, so a
   consumer needs exactly one bit to route a failure to dead-letter or retry.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.4.0...HEAD
+[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.3.0...sdk-typescript-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.2.4...sdk-typescript-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.2.1...sdk-typescript-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.1.0...sdk-typescript-v0.2.1

@@ -11,25 +11,16 @@ here as they're built.
 
 ## Install
 
-Not published yet. Until the first release, depend on it as a local path,
-the same way the Elixir packages in this monorepo depend on `ankusa` core
-before their first Hex release, and `packages/sdk-typescript` depends on
-itself via `file:`.
-
-With [`uv`](https://docs.astral.sh/uv/):
-
-```toml
-[project]
-dependencies = ["ankusa"]
-
-[tool.uv.sources]
-ankusa = { path = "../../packages/sdk-python" }
-```
-
-Or with plain `pip`:
+From PyPI:
 
 ```sh
-pip install -e ../../packages/sdk-python
+pip install ankusa
+```
+
+Or with [`uv`](https://docs.astral.sh/uv/):
+
+```sh
+uv add ankusa
 ```
 
 ## Claim-check client
@@ -112,7 +103,8 @@ def do_POST(self):
     ...
 ```
 
-`HookHeaders.id` is what a receiver dedupes on: delivery is at-least-once
+`HookHeaders.idempotency_key` (via `idempotency_key(hook)`) is what a receiver
+dedupes on, not the hook id (`x-ankusa-id` stays required): delivery is at-least-once
 (see "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
 so the same hook can arrive twice after a retry. When the source extracts the
@@ -128,8 +120,9 @@ uses this.
 
 ## Consuming queue messages
 
-Every sink — HTTP, RabbitMQ, Kafka, NATS — delivers one JSON message per
-hook: the identity fields, the body (inline `body_base64` or a claim-check
+Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message
+per hook (the HTTP sink sends the original body plus `x-ankusa-*` headers
+instead): the identity fields, the body (inline `body_base64` or a claim-check
 `claim`), `sha256`, and, when present, `dedupe_key`, `replay_id`,
 `idempotency_key` and the forwarded provider `headers`. `decode_message`
 validates all of it and `idempotency_key` gives the value to store in a
@@ -188,8 +181,9 @@ and `hook.tenant` playing `source_id` and `tenant_id`).
 
 When a sink has grown a backlog, or a downstream processor failed after the
 sink accepted a batch, re-drive it with a replay job over the admin client
-(see "Admin client" above): `kind: "dlq"` re-sends rows that dead-lettered,
-`kind: "archive"` re-sends hooks over a time window. Replays keep the original
+(see "Admin client" below): `kind: "dlq"` re-sends rows that dead-lettered,
+`kind: "archive"` re-sends hooks over a time window, `kind: "quarantine"`
+re-verifies held hooks and releases those that pass. Replays keep the original
 `id` and `dedupe_key` and add `replay_id`.
 
 ## Routes client

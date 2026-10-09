@@ -13,8 +13,8 @@ that one sentence.
 - **Crash before the accept:** no `2xx` was sent. The provider retries. Nothing
   was lost because nothing was promised.
 - **Crash after the accept, before the HTTP response leaves:** the provider
-  retries anyway (it never saw the `2xx`). Ingest does no deduplication, so
-  that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
+  retries anyway (it never saw the `2xx`). Without a source
+  [`dedupe:`](configuration.md#sources) setting, that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
   is at-least-once; consumers are idempotent receivers.
 - **Store slow or down:** `503` with `Retry-After`. Under `wal.type: disk` that
   is the store refusing a commit; under `wal.type: none` it is a sink refusing
@@ -80,16 +80,16 @@ honest ack:
 flowchart LR
     P[Provider] -->|POST catch URL| E[Edge: Bandit + Router]
     E --> IG[Ingest: verify]
-    IG -->|in the request| SK[Sinks, declaration order]
+    IG -->|in the request| SK[Sinks, concurrently]
     SK -->|every sink confirmed| A[201 accepted]
-    SK -->|first refusal| R[503 + Retry-After]
+    SK -->|any failure or timeout| R[503 + Retry-After]
 ```
 
 No batcher, no queue, no compactor, no dispatch pipeline, no DLQ. The request
 process publishes to each of the source's sinks and answers only once all have
 confirmed (`Kafka` `acks=all`, a publisher confirm, a JetStream ack, an HTTP
-`2xx`); the first refusal is the `503`, and the provider — not a retry policy —
-is the retry. `Ankusa.Sink.durable?/2` is the contract behind that promise, and
+`2xx`); any failure or timeout is the `503`, and the provider — not a retry policy —
+is the retry. `c:Ankusa.Sink.durable?/1` is the contract behind that promise, and
 boot refuses a `wal: :none` config in which no sink of a static source can make
 it. Detail in [`delivery.md`](delivery.md#direct-mode).
 
@@ -133,7 +133,8 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    10,000, counting buffered *and* in-flight records): full means `503` with
    `Retry-After`, never a promise the store can't back.
 4. **`Ankusa.Queue`** commits the batch to the store durably and returns
-   `{:committed, envelope}` (with `seq` assigned) per record, in the original
+   `{:committed, envelope}` (with `seq` assigned) or `{:duplicate, envelope}`
+   (the original's `id`; nothing stored) per record, in the original
    order. The edge maps this to
    `201`/`202`/`401`/`404`/`413`/`429`/`503`; a body it cannot read at all
    (client disconnect, read timeout) is `400`, kept distinct from `413` rather
@@ -142,10 +143,11 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    refused before the body is read: no sink can carry it.
 
 Under `wal: :none` steps 3 and 4 do not exist: **`Ankusa.Edge.Publish`** asks
-each of the source's `Ankusa.Sink`s, in declaration order, in the request
-process. The status mapping below is unchanged, but the `201` now waits on
-every sink's confirm instead of the store commit. A sink refusing — or raising,
-or throwing, or exiting — is the `503`, and nothing is retried here.
+all of the source's `Ankusa.Sink`s at once, concurrently, in the request
+process, under one deadline (`direct_publish_timeout_ms`, default 8 s). The
+status mapping below is unchanged, but the `201` now waits on
+every sink's confirm instead of the store commit. A sink refusing, raising,
+throwing, exiting or missing the deadline is the `503`, and nothing is retried here.
 
 From here, ingest is done. Two independent consumers work off the same store:
 
@@ -168,10 +170,10 @@ From here, ingest is done. Two independent consumers work off the same store:
 
 | Component | Guarantee |
 | --- | --- |
-| `Ankusa.Store` (the `wal.type: disk` queue) | One RocksDB database per instance. A commit is one synced batch: the hook, one pending delivery row per sink, an archive obligation while `:storage` runs, and the seq marker. A torn tail (an unacked write) is dropped on open; damage before it refuses to start (`{:store_open_failed, …}`) rather than silently shortening a read. LocalFS blob writes are fsynced (temp file, rename, directory). |
+| `Ankusa.Store` (the `wal.type: disk` queue) | One RocksDB database per instance. A commit is one synced batch: the hook, one pending delivery row per sink, an archive obligation while `:storage` runs, the seq marker, and, for a hook with a dedupe key, the dedupe key and its expiry key. A torn tail (an unacked write) is dropped on open; damage before it refuses to start (`{:store_open_failed, …}`) rather than silently shortening a read. LocalFS blob writes are fsynced (temp file, rename, directory). |
 | Group-commit batcher | One process per partition; the store commit runs in a supervised task, so commits pipeline while callers block until their own commit returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. Every record carries a deadline (15 s by default) for its batch to *start* committing: a record still buffered at its deadline behind a stalled commit is answered `503` and dropped, and the writer refuses a batch that missed its deadline. A batch the writer has started is never abandoned, so a stall never answers `503` for a hook it then commits; a process dying while the writer is mid-commit (the commit task, the batcher, or the writer after its sync) still can, and the provider's retry stores that hook again. |
-| Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `wal.type: none` it is every sink's confirm. Ingest does no deduplication, so a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
-| `wal: :none` (direct ack) | Ingest publishes to every sink in the request and answers `201` only after each confirmed; the first refusal is a `503` with `Retry-After`, with no internal retry. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `Ankusa.Sink.durable?/2` is the per-sink promise, checked at boot for every static source. The quarantine pen is the only local state this mode has at all; it lives in the store, and rows appear only for a source that asks for it. |
+| Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `wal.type: none` it is every sink's confirm. A source with [`dedupe:`](configuration.md#sources) collapses hooks sharing a provider event key within the TTL (default 72 h): the repeat gets `201` with the original `id` and `"duplicate": true`, and nothing new is stored. Without it, a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
+| `wal: :none` (direct ack) | Ingest publishes to every sink concurrently in the request, under one deadline (`direct_publish_timeout_ms`, default 8 s), and answers `201` only after each confirmed; any sink failure, crash or timeout is a `503` with `Retry-After`, with no internal retry, and sinks that confirmed keep their copy. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `c:Ankusa.Sink.durable?/1` is the per-sink promise, checked at boot for every static source. The local state this mode keeps is the quarantine pen (rows appear only for a source that asks for it), API-managed sources and rate-limit overrides, all in the store. |
 | Compactor | Never writes one object per hook: it takes archive obligations byte-sized up to `storage.roll_bytes` and packs them into one immutable segment plus one index object. A failed blob write ends the tick and the same hooks are retried next tick. |
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and bounded by `dispatch.max_inflight`/`max_inflight_bytes`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal. Not ordered: ordering lanes are gone, and a consumer that needs order has to rebuild it from data it receives. DLQ entries are dead delivery rows; a replay moves them back to pending, so a replayed hook leaves the DLQ. |
 | Quarantine | A durable pen in the store, bounded twice: a token bucket per source (`quarantine.burst`/`rate`, default 100 / 20 per s; over it, `429 quarantine_rate_limited`) and a cap on its total bytes (`quarantine.max_bytes`, default 1 GiB; a full pen answers `503 quarantine_full` and never evicts a held hook). It survives a restart, its byte count too, and a store that cannot write is a `503` that spends no token. A `quarantine` replay job re-verifies held hooks against the source's current verifier and commits the ones that pass with their original `id`; `DELETE /v1/quarantine` purges the rest. A secret list (`secret: [new, old]`) keeps a rotation out of the pen in the first place. |
@@ -410,15 +412,16 @@ flowchart LR
 
 The trade is the retry: with no queue there is no retry policy, no dead-letter
 queue, and no replay — a `503` with `Retry-After` is the whole retry mechanism,
-so the provider must retry and consumers must dedupe on the provider's own
-event id, as they always have. Every statically configured source needs at
-least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`); boot
+so the provider must retry and consumers must dedupe on the idempotency key,
+which is the hook `id` unless the source sets
+[`dedupe`](configuration.md#sources). Every statically configured source needs at
+least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`); boot
 refuses the config otherwise, and a source created at runtime through the admin
 API is not checked. Every sink in the list still has to confirm, so a
 non-durable one that cannot — Redis pub/sub with no subscriber — is a `503`
-for every request, not a silently skipped hop. The quarantine pen is the only
-local state this topology has: rows in the store, added only for a source
-that asks for it. See
+for every request, not a silently skipped hop. The local state this topology
+has is the quarantine pen (rows in the store, added only for a source that
+asks for it), API-managed sources and rate-limit overrides. See
 [`delivery.md#direct-mode`](delivery.md#direct-mode) and
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 
@@ -426,7 +429,7 @@ that asks for it. See
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix:
 `ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `quarantine`,
-`rate_limit`, `claim_check`, `instance` (a failure domain going down or coming
+`rate_limit`, `claim_check`, `replay`, `lifecycle`, `routes`, `instance` (a failure domain going down or coming
 back). Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
 code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for

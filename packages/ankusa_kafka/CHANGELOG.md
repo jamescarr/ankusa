@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 
 - Every record carries the `ankusa_idempotency_key` header: the same
@@ -14,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
   0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
   which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+- `ankusa_dedupe_key` and `ankusa_replay_id` record headers when present.
 
 ## [0.4.0] - 2026-10-02
 
@@ -83,7 +86,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - Synchronous produce with `acks=all`
 - Kafka headers: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `content_type`
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.4.0...ankusa_kafka-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.3.0...ankusa_kafka-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.1...ankusa_kafka-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.0...ankusa_kafka-v0.2.1

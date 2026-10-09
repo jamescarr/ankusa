@@ -98,7 +98,8 @@ end
 defmodule Ankusa.AsyncApi.SinkMessageHeaders do
   @moduledoc """
   The application headers Kafka and NATS carry beside a `SinkMessageV1` body.
-  RabbitMQ and Redis carry none.
+  Redis carries none; RabbitMQ sends `ankusa_idempotency_key` (and the optional
+  dedupe/replay keys) as AMQP headers, which this schema does not describe for it.
   """
 
   use AsyncApiSpex.Schema,

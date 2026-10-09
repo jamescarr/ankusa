@@ -13,7 +13,7 @@ _**Don't fight the traffic. Steer it.**_
 
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
 at it: every hook is written to a durable local store before Ankusa answers
-`2xx`, every accepted POST is stored under a fresh `id`, and each hook is
+`2xx`, every accepted POST is stored under a fresh `id` (unless the source sets `dedupe`), and each hook is
 delivered to your own worker over HTTP, RabbitMQ, Kafka, NATS JetStream, or
 Redis pub/sub, with retries, a dead-letter queue, and replay. Start with one
 container. Grow into a fleet by changing config, not code.
@@ -84,8 +84,8 @@ accepts it is one config key. By default (`wal.type: disk` — the queue's mode,
 named for the log it replaced) the hook is written to the node's RocksDB store,
 the fsync lands first, and `201 accepted` is the only committed response —
 there is no `200`. If a node dies before the write, the provider never got an
-ack and retries; that retry is a new hook with a new `id`, stored and delivered
-again, because ingest does no deduplication and delivery is at-least-once.
+ack and retries; unless the source sets [`dedupe`](docs/configuration.md#sources), that retry is a new hook with a new `id`, stored and delivered
+again, and delivery is at-least-once.
 Under `wal.type: none` the node keeps no store at all: it publishes to the
 source's sinks inside the request and acks on the broker's confirm. Either way,
 when the destination slows down,

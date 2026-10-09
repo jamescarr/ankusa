@@ -52,7 +52,7 @@ COPY --from=build --chown=ankusa:ankusa /repo/packages/ankusa_server/_build/prod
 COPY packages/ankusa_server/rel/ankusa.yml /etc/ankusa/ankusa.yml
 COPY --chmod=0755 packages/ankusa_server/rel/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 
-# Never root: the WAL, quarantine log, and DLQ are all written under the data
+# Never root: the RocksDB store (hooks, DLQ, quarantine pen) is written under the data
 # volume, and a container compromise should not own the host.
 USER ankusa
 

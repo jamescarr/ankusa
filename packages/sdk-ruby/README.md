@@ -124,7 +124,8 @@ def call(env)
 end
 ```
 
-`HookHeaders#id` is what a receiver dedupes on: delivery is at-least-once (see
+`HookHeaders#idempotency_key` is what a receiver dedupes on, not the hook id
+(`x-ankusa-id` stays required): delivery is at-least-once (see
 "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
 so the same hook can arrive twice after a retry. When the source extracted the
@@ -136,7 +137,9 @@ whether the mapping passed in already is.
 
 ## Consuming queue messages
 
-Every sink — HTTP, RabbitMQ, Kafka, NATS — delivers one JSON message per hook:
+Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message
+per hook (the HTTP sink sends the original body plus `x-ankusa-*` headers
+instead):
 the identity fields, the body (inline `body_base64` or a claim-check `claim`),
 `sha256`, and, when present, `dedupe_key`, `replay_id`, `idempotency_key` and
 the forwarded provider `headers`. `Ankusa.decode_message` validates all of it
@@ -194,7 +197,8 @@ headers with `Ankusa.parse_headers(headers).idempotency_key`, which reads
 When a sink has grown a backlog, or a downstream processor failed after the
 sink accepted a batch, re-drive it with a replay job over the admin client (see
 "Admin client" below): `"kind" => "dlq"` re-sends rows that dead-lettered,
-`"kind" => "archive"` re-sends hooks over a time window. Replays keep the
+`"kind" => "archive"` re-sends hooks over a time window, `"kind" => "quarantine"`
+re-verifies held hooks and releases those that pass. Replays keep the
 original `id` and `dedupe_key` and add `replay_id`.
 
 ## Routes client
@@ -319,10 +323,10 @@ lib/ankusa/
   sources.rb            # the tenant-scoped source-management client (admin.port)
 test/
   test_helper.rb
-  test_conformance.rb     # runs the language-neutral vectors in conformance/
-  test_routes.rb
-  test_admin.rb
-  test_sources.rb
+  conformance_test.rb     # runs the language-neutral vectors in conformance/
+  routes_test.rb
+  admin_test.rb
+  sources_test.rb
 ```
 
 ## Develop

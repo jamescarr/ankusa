@@ -73,12 +73,13 @@ every sink of the source **concurrently**, all under one overall deadline
 timeout), and answers `201` only once every sink has confirmed. No polling, no
 concurrency window — and **the rest of this section does not apply**:
 
-- no retry policy: the first sink refusal is the answer, a `503` with
-  `Retry-After`, and the provider's retry *is* the retry;
+- no retry policy: any sink failure, crash or timeout makes the answer a `503`
+  with `Retry-After`, and the provider's retry *is* the retry; sinks that
+  already confirmed keep their copy;
 - no dead-letter queue and no replay: nothing is committed, so there are no
   rows to replay from;
-- no `dispatch.*` limits — publishes happen inside the request and never
-  overlap, so the destination's own keying is the only ordering in this mode.
+- no `dispatch.*` limits — publishes to a hook's sinks overlap, so the
+  destination's own keying is the only ordering in this mode.
 
 What still applies is the sink contract below, plus one optional callback:
 `c:Ankusa.Sink.durable?/1`. A sink's `:ok` must mean the hook is accepted by
@@ -93,16 +94,17 @@ checked, so keep the source store static when you can.
 The check is "at least one durable sink", not "every sink is durable": a
 non-durable sink is still a required confirmer. A source with `[Kafka, Redis]`
 boots, yet every request is a `503` while Redis has no subscribers — and
-because sinks run in declaration order, Kafka has already stored the hook each
+because sinks publish concurrently, Kafka has already stored the hook each
 time, so every provider retry duplicates it there. Put a pub/sub sink in a
 `wal: none` source only where that is what you want (replayable hooks are
 better served by `wal.type: disk`, which keeps the non-durable sink's failures
 in the DLQ instead of in the provider's retry loop).
 
-The one piece of local state this mode has is the quarantine pen: entries are
+Local state in this mode is small: the quarantine pen (entries are
 written to the store only for a source whose `on_verify_failure` is
-`quarantine` — the default, `reject`, appends nothing. With no dispatch role
-there is no replay job to release them, only `GET` and `DELETE
+`quarantine` — the default, `reject`, appends nothing), API-managed sources, and
+rate-limit overrides. With no dispatch role
+there is no replay job to release pen entries, only `GET` and `DELETE
 /v1/quarantine`. See [Quarantine](#quarantine).
 
 ## `Ankusa.Sink`
@@ -123,15 +125,20 @@ order, and a retry runs after whatever is due before it. A consumer that needs
 order has to rebuild it from data it receives (not from the sink's key, which
 only keeps the order hooks were published in) and tolerate redelivery.
 
-Sinks may also implement two optional callbacks: `inline_max_bytes/1`, which
-tells dispatch how large a body this sink sends inline, and `durable?/1`,
+Sinks may also implement three optional callbacks: `inline_max_bytes/1`, which
+tells dispatch how large a body this sink sends inline; `durable?/1`,
 which says whether `:ok` means the hook is durably accepted (`wal.type: none`
-acks on that promise; default `true`):
+acks on that promise; default `true`); and `describe/2`, where the sink
+publishes, for the AsyncAPI document (only messaging sinks implement it):
 
 ```elixir
 @callback inline_max_bytes(opts :: keyword()) :: pos_integer() | nil
 @callback durable?(opts :: keyword()) :: boolean()
-@optional_callbacks inline_max_bytes: 1, durable?: 1
+@callback describe(
+            subject :: %{source_id: String.t(), tenant_id: String.t() | nil},
+            opts :: keyword()
+          ) :: Ankusa.Sink.Description.t()
+@optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
 ```
 
 A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`) returns its
@@ -171,10 +178,12 @@ on the idempotency key; the ids it is built from mean different things:
 - `x-ankusa-id`, the message `id` on a queue sink, identifies **one stored
   hook**. Every redelivery of that hook (a retry, a DLQ replay, a dispatch
   restart) carries the same `id`.
-- A provider retry is a **different stored hook** with a different `id`. With
-  no provider event key configured the idempotency key is that `id` and cannot
-  collapse them: configure the source's `dedupe`, or dedupe on the provider's
-  own event id in the body (e.g. Stripe's `id`).
+- A provider retry is a **different stored hook** with a different `id`
+  unless the source sets `dedupe` (see [`dedupe`](configuration.md#sources)),
+  which collapses a repeat within the TTL into the original. Without it the
+  idempotency key is that `id` and cannot collapse them: configure the
+  source's `dedupe`, or dedupe on the provider's own event id in the body
+  (e.g. Stripe's `id`).
 
 Provider request headers are forwarded to every sink per the source's
 `forward_headers` option (see [`configuration.md`](configuration.md#sources)):
@@ -391,9 +400,11 @@ a permission violation, or no answering stream all come back as
 sequence would report a refused hook as delivered.
 
 **The subject is the address, the headers are the metadata.** Each message
-carries the same five headers the Kafka sink sets (`ankusa_id`,
+carries the same headers the Kafka sink sets — always `ankusa_id`,
 `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`,
-`content_type`), so a consumer parses one set of fields regardless of
+`ankusa_idempotency_key` and `content_type`, plus `ankusa_dedupe_key` and
+`ankusa_replay_id` when present — and `Nats-Msg-Id` (below), so a consumer
+parses one set of fields regardless of
 transport. Unlike Kafka, there is no separate record key: NATS has no
 partition-ordering contract to lean on and no partition count to change under
 you. Order within a subject is the order the stream received it.
@@ -408,9 +419,10 @@ nothing crash-loops, and the next `deliver/3` reconnects inside the source's
 retry policy. Server names are tried in the order given.
 
 **At-least-once, as everywhere else.** A publish whose ack is lost can still
-have been stored, so consumers dedupe on the `idempotency_key`. JetStream's own
-`Nats-Msg-Id` duplicate window is the consumer's tool, deliberately not set
-here: a hook replayed from the DLQ is a *new*, intended publish.
+have been stored, so consumers dedupe on the `idempotency_key`. Every publish
+also sets `Nats-Msg-Id` to the hook's `id` — or `id:replay:<replay_id>` on a
+replay — so JetStream's duplicate window collapses a re-publish of one
+delivery, while a deliberate replay carries a distinct id and is stored.
 
 ### `Sink.Redis`: pub/sub delivery
 
@@ -449,8 +461,9 @@ moment later — never sees the message. Two consequences:
   :no_subscribers}` still turns every ingest into a `503`.
 
 **The channel is the address, the JSON is the metadata.** Pub/sub has no
-headers, so the five fields the Kafka and NATS sinks put in headers (`id`,
-`source_id`, `tenant_id`, message version, content type) travel only inside
+headers, so the fields the Kafka and NATS sinks put in headers (`id`,
+`source_id`, `tenant_id`, message version, content type, idempotency key, and
+the dedupe key and replay id when present) travel only inside
 the `Ankusa.Sink.Message` body; a consumer decodes it and reads them there.
 The same applies to a claim ticket for a fat payload: redeem it with
 `Ankusa.ClaimCheck.redeem/3` or

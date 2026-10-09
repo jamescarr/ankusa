@@ -31,6 +31,12 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:not_running`, `:queue_full`, `:gave_up`) |
   | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` |
   | `[:ankusa, :instance, :subtree_up]` | — | `:instance`, `:domain` |
+  | `[:ankusa, :replay, :moved]` | `:count` | `:instance`, `:replay_id`, `:kind` |
+  | `[:ankusa, :replay, :throttled]` | — | `:instance`, `:replay_id`, `:reason` (`:unavailable`, `:lag`, `:window_full`) |
+  | `[:ankusa, :replay, :state]` | — | `:instance`, `:replay_id`, `:kind`, `:state` |
+  | `[:ankusa, :routes, :match]` | — | `:instance`, `:route_id`, `:cached`, `:cacheable` |
+  | `[:ankusa, :routes, :reject]` | — | `:instance`, `:reason`, `:method`, `:path` |
+  | `[:ankusa, :routes, :changed]` | — | `:instance`, `:action`, `:route_id`, `:version` |
 
   `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
   `:rejected`, `:rate_limited`, `:quarantine_rate_limited`, `:quarantine_full`,

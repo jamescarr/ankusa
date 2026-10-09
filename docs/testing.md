@@ -18,6 +18,11 @@ mise run test:integration             # +16 tests against the floci emulators (s
 
 The always-on tests cover:
 
+- **Ingest dedupe and metrics** (`dedupe_test.exs`, `metrics_test.exs`):
+  `dedupe_test.exs` covers a provider retry collapsing to the original id with
+  `duplicate: true`, a key past its TTL committing again, two entries sharing
+  a key in one batch, per-tenant keys and the writer's expiry sweep;
+  `metrics_test.exs` covers the scrape's bounded labels and series.
 - **Store and queue** (`store_test.exs`, `queue_test.exs`): the RocksDB store
   applies one batch across column families (puts, deletes, range deletes) and
   refuses an unreadable or missing store with `:store_unavailable` rather than
@@ -233,14 +238,17 @@ Same pattern: every test needs live RabbitMQ (on :5673 AMQP, :15673
 management UI):
 
 ```sh
-mise run check:package ankusa_rabbitmq   # 8 tests
+mise run check:package ankusa_rabbitmq   # 11 tests
 ```
 
+Seven tests are in `rabbitmq_test.exs` and four in `rabbitmq_describe_test.exs`.
 Covers: inline-payload publish + decode, fat-payload claim check-in (message
 carries a claim reference and its sha256, the claim round-trips through `Ankusa.ClaimCheck.redeem/3`
 against a real `BlobStore`), routing key as both a static string and a
-function, and a fast-fail check (`:econnrefused`, not a hang) against an
-unreachable broker.
+function, `{:error, {:unroutable, key}}` for a mandatory publish with no bound
+queue, a broker-closed channel being reopened with the exchange re-declared,
+`{:error, :nacked}`, and an unreachable broker asserting
+`{:error, :not_connected}` (not `:econnrefused`, and not a hang).
 
 ## `ankusa_kafka`: `mix test`
 
@@ -277,7 +285,10 @@ Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
 (`subjects: ["ankusa.test.<n>.>"]`, memory storage) and deletes it in
 `on_exit`, so nothing depends on a stream being pre-provisioned. Covers:
 
-- an inline message: the subject it landed on, the five headers, the
+- an inline message: the subject it landed on, the nine headers asserted in
+  `nats_test.exs` (`nats-msg-id`, `ankusa_id`, `ankusa_source_id`,
+  `ankusa_tenant_id`, `ankusa_idempotency_key`, `ankusa_message_version`,
+  `content_type`, `ankusa_dedupe_key`, `ankusa_replay_id`), the
   `Ankusa.Sink.Message` body, **and** `Gnat.Jetstream.API.Stream.info` reporting
   the message as stored, which is what proves the `:ok` came from JetStream's
   publish ack rather than from a successful socket write;

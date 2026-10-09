@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 
 - Every publish carries the `ankusa_idempotency_key` AMQP header: the same
@@ -13,14 +15,22 @@ follows [Semantic Versioning](https://semver.org/).
   (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
   0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
   which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+- AMQP `message_id` is the hook id; the `ankusa_dedupe_key` and
+  `ankusa_replay_id` AMQP headers are set when present.
 
-### Fixed
+### Changed
 
-- A publish no queue is bound to receive is no longer reported as delivered:
-  every publish is `mandatory`, and `deliver/3` answers
+- **Breaking: `Ankusa.Sink.RabbitMQ.Connection.publish/4`'s fourth argument is
+  a keyword list of properties** (`message_id:`, `headers:`), not a header
+  list.
+- **Breaking: every publish is mandatory.** A publish no queue is bound to
+  receive is no longer reported as delivered: `deliver/3` answers
   `{:error, {:unroutable, routing_key}}` instead of `:ok`, so the hook is
   retried and then dead-lettered (a `503` under `wal.type: none`) rather than
   settled while the broker kept nothing. There is no option to turn this off.
+
+### Fixed
+
 - A channel the broker closes (a `404` publishing to a deleted exchange, a `406`)
   is reopened at once on the same connection, re-declaring the exchange. The
   publish it interrupted answers `{:error, {:channel_closed, reason}}`.
@@ -109,7 +119,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - The message is built by `Ankusa.Sink.Message` (in `ankusa`), shared
   with `ankusa_kafka`, so both sinks publish byte-identical messages.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.4.0...ankusa_rabbitmq-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.3.0...ankusa_rabbitmq-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.1...ankusa_rabbitmq-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.0...ankusa_rabbitmq-v0.2.1
