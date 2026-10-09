@@ -343,8 +343,9 @@ messages.
 
 `packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`,
 `packages/sdk-ruby`, `packages/sdk-go`, `packages/sdk-php`,
-`packages/sdk-elixir`, and `packages/sdk-java` are the eight client SDKs.
-Rather than hand-write each one's edge-case tests, all eight are checked
+`packages/sdk-elixir`, `packages/sdk-java`, and `packages/sdk-clojure` are the
+nine client SDKs.
+Rather than hand-write each one's edge-case tests, all nine are checked
 against the same language-neutral vectors in `conformance/`: a feature manifest
 (`features.json`), JSON cases (`cases/*.json`), and a native runner per SDK
 (`packages/sdk-python/tests/test_conformance.py`,
@@ -356,10 +357,13 @@ against the same language-neutral vectors in `conformance/`: a feature manifest
 stands up PHP's built-in server on a free port to answer as the mock gateway —
 `packages/sdk-elixir/test/conformance_test.exs`, whose runner hand-writes a
 `:gen_tcp` gateway so it can abandon a delayed response mid-flight the way the
-timeout vectors require, and
+timeout vectors require,
 `packages/sdk-java/src/test/java/io/github/jamescarr/ankusa/conformance/ConformanceTest.java`,
 a JUnit Jupiter `@TestFactory` that starts the JDK's own
-`com.sun.net.httpserver.HttpServer` for the mock gateway).
+`com.sun.net.httpserver.HttpServer` for the mock gateway, and
+`packages/sdk-clojure/test/ankusa/sdk/conformance_test.clj`, which registers
+one `clojure.test` var per case and uses the same JDK `HttpServer` as the mock
+gateway).
 
 ```sh
 mise run check:conformance    # validate conformance/, then run every SDK

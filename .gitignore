@@ -57,6 +57,13 @@ packages/sdk-java/.project
 packages/sdk-java/.classpath
 packages/sdk-java/.settings/
 
+# Clojure CLI (packages/sdk-clojure).
+packages/sdk-clojure/target/
+packages/sdk-clojure/.cpcache/
+packages/sdk-clojure/.clj-kondo/.cache/
+packages/sdk-clojure/.lsp/
+packages/sdk-clojure/.nrepl-port
+
 # Python (packages/sdk-python, examples/quickstart).
 **/.venv/
 **/__pycache__/
