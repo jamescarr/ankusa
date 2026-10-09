@@ -17,6 +17,7 @@
      "ClaimIntegrityError" {:retryable false}
      "ClaimCheckUnavailableError" {:retryable true :status nil :reason nil}
      "MissingHookIdError" {:retryable false}
+     "InvalidSignatureError" {:retryable false :code nil :field nil}
      "InvalidRouteIdError" {:retryable false}
      "RouteNotFoundError" {:retryable false}
      "RoutesRejectedError" {:retryable false :status nil :code nil :field nil

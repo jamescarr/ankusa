@@ -14,6 +14,7 @@
   | `ClaimIntegrityError` | false | |
   | `ClaimCheckUnavailableError` | true | `:status`, `:reason` |
   | `MissingHookIdError` | false | |
+  | `InvalidSignatureError` | false | `:code`, `:field` |
   | `InvalidRouteIdError` | false | |
   | `RouteNotFoundError` | false | |
   | `RoutesRejectedError` | false | `:status`, `:code`, `:field`, `:message`, `:conflicting-id`, `:max-routes` |

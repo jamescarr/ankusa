@@ -9,6 +9,7 @@
             [ankusa.sdk.idempotency :as idempotency]
             [ankusa.sdk.message :as message]
             [ankusa.sdk.routes :as routes]
+            [ankusa.sdk.signature :as signature]
             [ankusa.sdk.support.gateway :as gateway]
             [ankusa.sdk.webhook :as webhook]
             [clojure.data.json :as json]
@@ -75,6 +76,12 @@
   (case op
     "parse_claim_ref" (claim-ref/parse (get input "ref"))
     "parse_headers" (webhook/parse-headers (get input "headers"))
+    "verify_signature" (signature/verify (get input "headers")
+                                         (gateway/body-bytes (get input "body"))
+                                         (get input "secrets")
+                                         (cond-> {:now (get input "now")}
+                                           (contains? input "tolerance_seconds")
+                                           (assoc :tolerance-seconds (get input "tolerance_seconds"))))
     "decode_message" (message/decode (get input "message"))
     "idempotency_key" (let [m (if (contains? input "message")
                                 (message/decode (get input "message"))

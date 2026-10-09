@@ -973,8 +973,8 @@ secret while rotating), and every SDK verifies it against the shared vectors
 Every 4xx except 404 is `ClaimRejectedError` with `retryable: false`, and the shared conformance vector pins `429 → retryable: false`, so every SDK dead-letters a message when a proxy in front of the gateway throttles.
 
 **Status (2026-10-09).** Fixed. `conformance/cases/redeem.json` pins `408`
-and `429` to `ClaimCheckUnavailableError` (`retryable: true`), and all eight
-SDKs pass it (`mise run check:conformance`).
+and `429` to `ClaimCheckUnavailableError` (`retryable: true`), and all nine
+SDKs (Clojure joined after the review) pass it (`mise run check:conformance`).
 
 <a id="g6-scope"></a>
 ### G6 solution scope
@@ -996,7 +996,7 @@ Requests nobody authenticated decide the Prometheus label set and how much memor
 **Status (2026-10-09).** Every G7 item is addressed: E5 (tenant binding,
 flagged hooks spend the quarantine bucket), E6 (`batcher.max_queue_bytes`),
 E8 (boot-time secret check for embedded sources), K2 (signed HTTP deliveries
-and an SDK verifier in all eight SDKs), O4 (range validation), B10
+and an SDK verifier in all nine SDKs), O4 (range validation), B10
 (`mix hex.audit` in CI), C4 (64 random bits in every pack id), and O2's
 adapter residual. Accepted: supervisors' child specs still carry the config
 (O2), and refs stay bearer capabilities behind the gateway's front layer.

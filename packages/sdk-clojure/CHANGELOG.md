@@ -42,6 +42,12 @@ this project follows [Semantic Versioning](https://semver.org/).
   `x-ankusa-replay-id`, and `x-ankusa-idempotency-key` headers of a delivery,
   from Ring's header map or a seq of pairs, and `MissingHookIdError` when
   `x-ankusa-id` is absent.
+- `ankusa.sdk.signature/verify` for receivers of a signed HTTP sink: the
+  Standard Webhooks `webhook-id`/`webhook-timestamp`/`webhook-signature` check,
+  compared with `MessageDigest/isEqual`, throwing
+  `:ankusa.sdk/InvalidSignatureError` (`:code`, `:field`, never retryable).
+- A gateway `408` or `429` on `redeem` is a `ClaimCheckUnavailableError`
+  (retryable), not a `ClaimRejectedError`.
 - `ankusa.sdk.errors`: every failure is an `ex-info` whose `ex-data` has a
   `:ankusa.sdk/...` `:type` and that type's keys, always present. `error-type`
   names it and `retryable?` is the dead-letter-or-retry bit, true only on the

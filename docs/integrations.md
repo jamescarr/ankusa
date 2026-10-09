@@ -98,6 +98,7 @@ dead-letters at once, and a fixed secret plus a DLQ replay redelivers.
 | PHP | `Ankusa\Webhook\Signature::verify($headers, $body, $secrets)` |
 | Java | `Signature.verify(headers, body, secrets)` |
 | Elixir (`ankusa_sdk`) | `Ankusa.SDK.Signature.verify/4`, or `Ankusa.SDK.Receiver`'s `:secret` option |
+| Clojure (`ankusa-clj`) | `(ankusa.sdk.signature/verify headers body secrets)` |
 
 Verify the raw bytes, before any JSON parser touches them. The shared vectors
 are `conformance/cases/signature.json`.
