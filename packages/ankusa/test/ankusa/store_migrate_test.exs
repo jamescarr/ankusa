@@ -112,7 +112,9 @@ defmodule Ankusa.StoreMigrateTest do
       Legacy.wal!(config, [envelope(1)], cursors: %{dispatch: 0, compactor: 0})
       inst = boot(config)
 
-      {:ok, 1} = Pipeline.tick(inst)
+      # The pipeline may deliver on its own wake before this call; `tick/1`
+      # still blocks until nothing is due, so only the count it reports races.
+      {:ok, _} = Pipeline.tick(inst)
 
       assert_received {:delivered, _id, 1}
       # Delivered and (no archive obligation without :storage) reclaimed.
@@ -388,7 +390,7 @@ defmodule Ankusa.StoreMigrateTest do
       config = config()
       Legacy.wal!(config, [envelope(1)])
       inst = boot(config)
-      {:ok, 1} = Pipeline.tick(inst)
+      {:ok, _} = Pipeline.tick(inst)
       assert_received {:delivered, _, 1}
 
       stop_supervised!({Ankusa.Instance, config.instance})
