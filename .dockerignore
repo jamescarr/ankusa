@@ -18,3 +18,4 @@ erl_crash.dump
 packages/sdk-typescript/dist
 packages/sdk-rust
 packages/sdk-java
+packages/sdk-clojure

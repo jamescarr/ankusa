@@ -1,4 +1,5 @@
 {"sdks": {
+  "sdk-clojure":    {"setup": [["clojure", "-P", "-X:test"]],                                 "run": ["clojure", "-X:test", ":nses", "[ankusa.sdk.conformance-test]"]},
   "sdk-elixir":     {"setup": [["mix", "local.hex", "--force", "--if-missing"], ["mix", "local.rebar", "--force", "--if-missing"], ["mix", "deps.get", "--check-locked"]], "run": ["mix", "test", "test/conformance_test.exs"]},
   "sdk-go":         {"setup": [],                                                             "run": ["go", "test", "-count=1", "-run", "^TestConformance$", "."]},
   "sdk-java":       {"setup": [["sbt", "--server", "--batch", "Test/compile"]],              "run": ["sbt", "--server", "--batch", "testOnly io.github.jamescarr.ankusa.conformance.ConformanceTest"]},

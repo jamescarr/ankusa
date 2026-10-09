@@ -1,0 +1,5 @@
+# packages/sdk-clojure's toolchain: the Clojure CLI and the JDK it runs on
+# (same java pin as sdk-java.toml; keep the two in step).
+[tools]
+java = "temurin-25.0.4+101.0.LTS"
+clojure = "1.12.6.1673"

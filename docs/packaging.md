@@ -82,6 +82,13 @@ packages/
                               the JDK's HttpClient plus Jackson 3 and the
                               JSpecify annotations; a pure HTTP client like
                               the other SDKs.
+  sdk-clojure                 the `io.github.jamescarr/ankusa-clj` Clojars
+                              client SDK, built with the Clojure CLI and
+                              tools.build. Native Clojure on the JDK's
+                              HttpClient plus `org.clojure/data.json`; a pure
+                              HTTP client like the other SDKs. The `ankusa-clj`
+                              name keeps it apart from the Java SDK's
+                              `ankusa-sdk` on Maven Central.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker
