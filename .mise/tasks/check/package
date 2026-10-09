@@ -79,6 +79,18 @@ case "$kind" in
     rm -rf target/sona-staging
     sbt --server --batch "javafmtCheckAll; testFull; doc; publish"
     ;;
+  clojure)
+    clojure -M:fmt check src test build.clj
+    clojure -M:lint --lint src build.clj --fail-level warning
+    clojure -M:lint --lint test --fail-level warning --config '{:linters {:missing-docstring {:level :off} :warn-on-reflection {:level :off}}}'
+    # The source namespaces set *warn-on-reflection*; loading them in the test
+    # run prints a warning to stderr for any interop call left unhinted.
+    tmp=$(mktemp -d)
+    clojure -X:test 2>&1 | tee "$tmp/test.log"
+    if grep -q 'Reflection warning' "$tmp/test.log"; then fail "reflection warnings in the test run (above)"; fi
+    # The jar and POM release-clojars.yml attests and uploads.
+    clojure -T:build jar
+    ;;
 esac
 
 if [ "$kind" = hex ]; then
@@ -136,4 +148,21 @@ if [ "$kind" = java ]; then
   if grep -qi scala "$staged/$artifact-$v.pom"; then fail "the POM mentions Scala"; fi
   leaked=$(unzip -Z1 "$jar" | grep -vE '^(META-INF/|io/$|io/github/$|io/github/jamescarr/$|io/github/jamescarr/ankusa/)' || true)
   [ -z "$leaked" ] || fail "the jar ships files outside io/github/jamescarr/ankusa: $(echo $leaked)"
+fi
+
+if [ "$kind" = clojure ]; then
+  lib=$(_pkg_clj_lib "$dir")
+  artifact=${lib#*/}
+  v=$(pkg_version "$pkg")
+  jar="target/$artifact-$v.jar"
+  pom="target/classes/META-INF/maven/$lib/pom.xml"
+  [ -f "$jar" ] && [ -f "$pom" ] || fail "clojure -T:build jar left no $jar and $pom"
+  grep -q "<groupId>${lib%/*}</groupId>" "$pom" && grep -q "<artifactId>$artifact</artifactId>" "$pom" ||
+    fail "$pom does not carry the coordinate $lib"
+  # A build-tool dependency in the POM would be pulled into every consumer.
+  if grep -Eq 'cljfmt|clj-kondo|test-runner|tools.build|deps-deploy' "$pom"; then
+    fail "$pom lists a build or test tool as a dependency"
+  fi
+  leaked=$(unzip -Z1 "$jar" | grep -vE '^(META-INF/|ankusa/$|ankusa/sdk/)' || true)
+  [ -z "$leaked" ] || fail "the jar ships files outside ankusa/sdk: $(echo $leaked)"
 fi

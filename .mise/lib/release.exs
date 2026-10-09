@@ -10,7 +10,8 @@
 #     Sets @version in mix.exs, `version` in Cargo.toml for a Cargo package,
 #     VERSION in lib/**/version.rb for a gem, `const Version` in version.go
 #     for a Go module, `VERSION` in src/Version.php for the PHP SDK, or
-#     `version :=` in build.sbt for an sbt package (npm
+#     `version :=` in build.sbt for an sbt package, `(def version` in build.clj
+#     for a Clojure (deps.edn) package (npm
 #     versions are `npm version`'s job; pyproject.toml versions are
 #     `uv version`'s job), opens
 #     `## [NEW] - DATE` under [Unreleased] in CHANGELOG.md, and points the
@@ -24,6 +25,7 @@ defmodule Release do
   @go_version_re ~r/^const Version = "([^"]+)"$/m
   @php_version_re ~r/^    public const string VERSION = '([^']+)';$/m
   @sbt_version_re ~r/^version := "([^"]+)"$/m
+  @clj_version_re ~r/^\(def version "([^"]+)"\)$/m
 
   def main(["plan", dir, bump]) do
     current = current_version(dir)
@@ -81,8 +83,14 @@ defmodule Release do
         _ = sbt_version!(source, file)
         File.write!(file, Regex.replace(@sbt_version_re, source, ~s(version := "#{new}")))
 
+      File.exists?(Path.join(dir, "deps.edn")) ->
+        file = Path.join(dir, "build.clj")
+        source = File.read!(file)
+        _ = clj_version!(source, file)
+        File.write!(file, Regex.replace(@clj_version_re, source, ~s[(def version "#{new}")]))
+
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, version.go, or build.sbt")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, version.go, build.sbt, or deps.edn")
     end
 
     changelog = Path.join(dir, "CHANGELOG.md")
@@ -111,6 +119,7 @@ defmodule Release do
     mix = Path.join(dir, "mix.exs")
     version_go = Path.join(dir, "version.go")
     build_sbt = Path.join(dir, "build.sbt")
+    deps_edn = Path.join(dir, "deps.edn")
 
     cond do
       File.exists?(package_json) ->
@@ -142,8 +151,12 @@ defmodule Release do
       File.exists?(build_sbt) ->
         build_sbt |> File.read!() |> sbt_version!(build_sbt)
 
+      File.exists?(deps_edn) ->
+        build_clj = Path.join(dir, "build.clj")
+        build_clj |> File.read!() |> clj_version!(build_clj)
+
       true ->
-        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, version.go, or build.sbt")
+        die("#{dir} has none of package.json, pyproject.toml, Cargo.toml, composer.json, mix.exs, *.gemspec, version.go, build.sbt, or deps.edn")
     end
   end
 
@@ -177,6 +190,14 @@ defmodule Release do
       [[_, v]] -> v
       [] -> die(~s(#{path} has no `version := "..."` line))
       _ -> die(~s(#{path} has more than one `version := "..."` line))
+    end
+  end
+
+  defp clj_version!(source, path) do
+    case Regex.scan(@clj_version_re, source) do
+      [[_, v]] -> v
+      [] -> die(~s[#{path} has no `(def version "...")` line])
+      _ -> die(~s[#{path} has more than one `(def version "...")` line])
     end
   end
 
