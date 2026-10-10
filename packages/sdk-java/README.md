@@ -92,7 +92,8 @@ percent-encoded as one path segment.
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, replay jobs, and the quarantine list.
+the redacted config, the AsyncAPI document, the DLQ, replay jobs, and the
+quarantine pen (list and purge).
 
 ```java
 AdminClient admin = new AdminClient("http://localhost:4002");
@@ -101,6 +102,10 @@ AdminHealth health = admin.health();                    // status, instance, rol
 String metrics = admin.metrics();                       // Prometheus text
 DlqPage dlq = admin.listDeadLetters(ListDeadLettersParams.builder().limit(10).build());
 QuarantinePage quarantine = admin.listQuarantined();
+
+// Delete held hooks for good. Run a "quarantine" replay first to keep the ones that now verify.
+QuarantinePurge purged = admin.purgeQuarantined(PurgeQuarantinedParams.builder().sourceId("demo").limit(100).build());
+Map<String, Object> asyncApi = admin.asyncApi();        // AsyncAPI 3.0 document, no credentials
 
 // Replay dead letters ("dlq"), redrive an archived time window ("archive"), or re-verify and release held hooks ("quarantine"), without flooding live traffic.
 Replay replay = admin.createReplay(ReplaySpec.builder().kind("dlq").sourceId("demo").rate(500).build());
@@ -116,6 +121,13 @@ delaying live hooks; `updateReplay` pauses, resumes, cancels, or re-paces one.
 `getReplay` on a missing id is an `AdminRejectedError(404, "replay_not_found")`,
 and `updateReplay` on a finished job is an
 `AdminRejectedError(409, "replay_finished")`.
+
+`purgeQuarantined` ANDs its filters and the listener clamps `limit` to
+1..10000 (default 1000), so an empty `PurgeQuarantinedParams` deletes the
+oldest 1000 held hooks; there is no no-argument overload on purpose. The SDK
+does not validate the bounds: a negative one, or `until` before `since`, is an
+`AdminRejectedError(400, "invalid_filter")`. A `QuarantineEntry` from before the
+listener recorded a tenant and size has `tenantId()` and `size()` null.
 
 `metrics()` is empty on a node that has not captured, dispatched, or redeemed
 anything yet: a Prometheus series only exists once its first event fires.
