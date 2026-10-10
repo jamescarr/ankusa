@@ -39,6 +39,7 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
   | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
   | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
+  | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
   | `ANKUSA_WAL_TYPE` | `wal.type` |
   | `ANKUSA_STORAGE_TYPE` | `storage.type` |
   | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
@@ -75,12 +76,13 @@ defmodule AnkusaServer.Config do
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes ip store)
   @backup_keys ~w(enabled interval_ms keep store)
-  @source_store_keys ~w(type)
+  @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms)
-  # Keys the Redis store owns; the ETS store must not silently drop them.
-  @routes_redis_only_keys ~w(url namespace tick_ms)
+  # Keys a Redis store owns (`routes.store`, `source_store`); the other store
+  # types must not silently drop them.
+  @redis_only_keys ~w(url namespace tick_ms)
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
@@ -265,6 +267,7 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_CLAIM_CHECK_IP", ["claim_check", "ip"]},
     {"ANKUSA_ROUTES_ENABLED", ["routes", "enabled"]},
     {"ANKUSA_ROUTES_STORE_URL", ["routes", "store", "url"]},
+    {"ANKUSA_SOURCE_STORE_URL", ["source_store", "url"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
@@ -668,7 +671,7 @@ defmodule AnkusaServer.Config do
   end
 
   defp reject_redis_only_keys!(store, path) do
-    case Enum.filter(@routes_redis_only_keys, &(Map.get(store, &1) != nil)) do
+    case Enum.filter(@redis_only_keys, &(Map.get(store, &1) != nil)) do
       [] ->
         :ok
 
@@ -832,20 +835,37 @@ defmodule AnkusaServer.Config do
 
   # ── sources ─────────────────────────────────────────────────────────────────
 
+  # A URL with no `type` means Redis, as for `routes.store`: a file that sets
+  # one has said it wants sources shared, and the other types have no URL.
   defp source_store_section(doc) do
     sources = sources!(doc)
     store = section!(doc, "source_store", @source_store_keys, [])
+    path = ["source_store"]
+    decoder = &AnkusaServer.Config.source_from_map!/2
 
-    case enum!(store["type"] || "static", ~w(static persistent), ["source_store", "type"]) do
+    type =
+      enum!(
+        store["type"] || (store["url"] && "redis") || "static",
+        ~w(static persistent redis),
+        path ++ ["type"]
+      )
+
+    case type do
       "static" ->
+        reject_redis_only_keys!(store, path)
         [source_store: {Ankusa.SourceStore.Static, sources: sources}]
 
       "persistent" ->
-        [
-          source_store:
-            {Ankusa.SourceStore.Persistent,
-             sources: sources, decoder: &AnkusaServer.Config.source_from_map!/2}
-        ]
+        reject_redis_only_keys!(store, path)
+        [source_store: {Ankusa.SourceStore.Persistent, sources: sources, decoder: decoder}]
+
+      "redis" ->
+        opts =
+          [url: required_string!(store, "url", path), sources: sources, decoder: decoder]
+          |> put_opt(:namespace, string_opt(store, "namespace", path))
+          |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))
+
+        [source_store: {Ankusa.SourceStore.Redis, opts}]
     end
   end
 

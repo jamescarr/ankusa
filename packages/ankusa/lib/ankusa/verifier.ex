@@ -22,6 +22,8 @@ defmodule Ankusa.Verifier do
     * `:bad_scheme` — an unknown or missing scheme name (`Verifier.Hmac`)
   """
 
+  require Logger
+
   alias Ankusa.Envelope
 
   @default_tolerance_seconds 300
@@ -89,6 +91,32 @@ defmodule Ankusa.Verifier do
       _other ->
         :ok
     end)
+  end
+
+  @doc """
+  Log one warning per configured source that is shared (`tenant_id`
+  `"default"`) and has no verifier, when the edge takes the tenant from the
+  URL (any `Ankusa.RouteResolver` but `Ankusa.RouteResolver.Path`). Such a
+  source trusts the URL's tenant: any sender can file hooks under any tenant
+  and spend that tenant's rate limit. It is allowed — a deliberate open
+  endpoint is a valid choice — so this only says so, once, at boot.
+  """
+  @spec warn_unverified_shared(Ankusa.Config.t()) :: :ok
+  def warn_unverified_shared(%Ankusa.Config{} = config) do
+    if Ankusa.Config.role?(config, :edge) and
+         not match?({Ankusa.RouteResolver.Path, _}, config.route_resolver) do
+      for {id, %Ankusa.Source{tenant_id: "default", verifier: {Ankusa.Verifier.None, _}}} <-
+            Ankusa.Queue.static_sources(config) do
+        Logger.warning(
+          "[ankusa] source #{id} is shared (tenant_id \"default\") and has no verifier: any " <>
+            "sender can file hooks under any tenant via the URL's tenant segment and spend " <>
+            "that tenant's rate limit. Give it the provider's verifier, or a tenant of its own " <>
+            "(docs/multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does)."
+        )
+      end
+    end
+
+    :ok
   end
 
   @doc """

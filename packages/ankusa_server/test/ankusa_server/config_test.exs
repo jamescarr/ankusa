@@ -1319,6 +1319,51 @@ defmodule AnkusaServer.ConfigTest do
     assert is_function(opts[:decoder], 2)
   end
 
+  test "source_store: redis carries the URL, namespace, tick, seeds and decoder" do
+    path =
+      tmp_config("""
+      source_store: {type: redis, url: "redis://cache:6379", namespace: "ankusa:sources", tick_ms: 5000}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert {Ankusa.SourceStore.Redis, opts} = config.source_store
+    assert opts[:url] == "redis://cache:6379"
+    assert opts[:namespace] == "ankusa:sources"
+    assert opts[:tick_ms] == 5000
+    assert Map.keys(opts[:sources]) == ["demo"]
+    assert is_function(opts[:decoder], 2)
+  end
+
+  test "source_store: a URL alone, from the file or ANKUSA_SOURCE_STORE_URL, means redis" do
+    path = tmp_config("source_store: {url: \"redis://cache:6379\"}")
+    assert {Ankusa.SourceStore.Redis, _} = Config.load!(path: path, env: %{}).config.source_store
+
+    path = tmp_config("sources: {}")
+    env = %{"ANKUSA_SOURCE_STORE_URL" => "redis://from-env:6379"}
+
+    assert {Ankusa.SourceStore.Redis, opts} =
+             Config.load!(path: path, env: env).config.source_store
+
+    assert opts[:url] == "redis://from-env:6379"
+  end
+
+  test "source_store: Redis keys on another type are an error, not dropped" do
+    path = tmp_config("source_store: {type: persistent, url: \"redis://cache:6379\"}")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(source_store: "url" is only valid with type: redis)
+
+    path = tmp_config("source_store: {type: static}")
+    env = %{"ANKUSA_SOURCE_STORE_URL" => "redis://from-env:6379"}
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: env) end
+    assert error.message =~ ~s(source_store: "url" is only valid with type: redis)
+
+    path = tmp_config("source_store: {type: redis}")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(source_store: missing required key "url")
+  end
+
   test "source_from_map!/2 is the YAML validation, wrapped" do
     opts =
       Config.source_from_map!("acme.new", %{"sinks" => [%{"type" => "log"}]})
@@ -1344,12 +1389,12 @@ defmodule AnkusaServer.ConfigTest do
   test "an unknown source_store type is rejected by name" do
     path =
       tmp_config(
-        "source_store: {type: redis}\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}"
+        "source_store: {type: postgres}\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}"
       )
 
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "source_store.type"
-    assert error.message =~ ~s(unknown value "redis")
+    assert error.message =~ ~s(unknown value "postgres")
   end
 
   test "an unknown source_store key is rejected" do

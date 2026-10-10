@@ -11,7 +11,31 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Fixed
+
+- A store restored from backup (or created fresh with a backup configured)
+  keeps its `RESTORE-IN-PROGRESS` marker until `reconcile_archive` has
+  succeeded. A node that died, or whose reconcile failed, between the restore
+  and the reconcile now reconciles on its next boot instead of opening as an
+  existing store and reusing archived seqs.
+- A backup refuses to run when the prefix's latest backup belongs to another
+  store (`{:foreign_backup, theirs, ours}`, logged at error level): each store
+  gets an id (`m:store_id`) on its first backup, carried by its checkpoints
+  and recorded in every manifest. Two nodes on one prefix no longer purge each
+  other's backups.
+- Blob files of the hooks and quarantine column families are capped at 64 MiB
+  (`blob_file_size`; RocksDB's default is 256 MiB), bounding what one backup
+  upload or restore holds in memory.
+
 ### Added
+
+- `Ankusa.Verifier.warn_unverified_shared/1`, run at boot: under a resolver
+  that takes the tenant from the URL, each configured source that is shared
+  (`tenant_id: "default"`) and has no verifier is named in a warning.
+- An internal `SourceStore.Table` module: the ETS layout and spec handling
+  `SourceStore.Persistent` and `ankusa_redis`'s `SourceStore.Redis` share.
+  A source-store read while the store restarts answers
+  `{:error, :unavailable}` instead of raising.
 
 - **Store backup and restore** (`Ankusa.Store.Backup`, `backup.*`, off by
   default). Every `backup.interval_ms` (60 s) the store writes a RocksDB

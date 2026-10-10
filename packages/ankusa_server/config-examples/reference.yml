@@ -141,7 +141,7 @@ rate_limits:
   #
   # Limits can also be adjusted per tenant at runtime, without a restart:
   # `PUT /v1/tenants/{tenant}/rate-limit` on the admin port, persisted in the
-  # node's store (the same node-local model as API-managed sources). A runtime
+  # node's store (node-local, like `source_store.type: persistent`). A runtime
   # value beats the ones below.
   #
   # `rate` is hooks per second (fractions are allowed: 0.5 is one every two
@@ -297,7 +297,10 @@ backup:
   # Where backups live: unset = the storage bucket above. Same shape as
   # `claim_check.store` (type local | s3 | gcs, its s3:/gcs: block, plus `root`
   # for a local store). Keys are always under storage.key_prefix: backups are
-  # per node, so give each node sharing a bucket its own prefix.
+  # per node, so give each node sharing a bucket its own prefix (a node whose
+  # prefix holds another store's backups refuses to back up, and logs why).
+  # Keep <key_prefix>backup/ out of any bucket expiration rule: `keep` is the
+  # retention, and an expired shared file breaks every backup that lists it.
   # store:
   #   type: s3
   #   s3: {bucket: "${BACKUP_BUCKET}", region: "${S3_REGION}"}
@@ -315,9 +318,23 @@ lifecycle:
       brokers: ["${KAFKA_BROKERS}"]
       topic: ankusa.lifecycle
 
-# static | persistent (adds API-managed, tenant-scoped sources kept in this node's store)
+# static     -> sources from `sources:` below only; the admin API cannot write.
+# persistent -> plus API-managed, tenant-scoped sources kept in this node's
+#               store (node-local: another node's admin API does not see them).
+# redis      -> plus API-managed sources kept in Redis and shared by every node
+#               with the same namespace (ankusa_redis); a `url` with no `type`
+#               means redis.
 source_store:
   type: static
+  # The three keys below are only valid with `type: redis`.
+  # [env ANKUSA_SOURCE_STORE_URL]
+  # url: redis://cache:6379
+  # Share sources across nodes by giving them the same namespace; defaults to
+  # ankusa:sources:<instance>.
+  # namespace: ankusa:sources
+  # How often a node re-reads the version in case it missed a broadcast: the
+  # worst-case staleness after a disconnect.
+  # tick_ms: 30000
 
 sources:
   # One source per provider endpoint. The id is the catch-URL segment:

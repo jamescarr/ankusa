@@ -8,6 +8,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- `source_store.type: redis` (`url`, `namespace`, `tick_ms`; env
+  `ANKUSA_SOURCE_STORE_URL`; a `url` with no `type` means `redis`): sources
+  created through the admin API are shared by every node through
+  `ankusa_redis`'s `Ankusa.SourceStore.Redis`. The three keys are rejected on
+  `static`/`persistent`.
 - YAML keys for everything core added: `admin.gauge_interval_ms`,
   `batcher.max_queue_bytes`, `dispatch.sink_concurrency`,
   `dispatch.breaker_failures` / `breaker_open_ms` / `breaker_max_open_ms`,

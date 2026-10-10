@@ -11,6 +11,7 @@ defmodule Ankusa.Test.CountingBlobStore do
     * `:failures` — an `Agent` holding how many upcoming puts to fail
     * `:put_delay_ms` — sleep before each put, to hold a pack upload open
     * `:get_error` — every `get/3` answers `{:error, value}`, an unreachable store
+    * `:list_error` — every `list/3` answers `{:error, value}`
   """
 
   @behaviour Ankusa.BlobStore
@@ -61,7 +62,12 @@ defmodule Ankusa.Test.CountingBlobStore do
   def delete(instance, key, opts), do: LocalFS.delete(instance, key, local(opts))
 
   @impl true
-  def list(instance, prefix, opts), do: LocalFS.list(instance, prefix, local(opts))
+  def list(instance, prefix, opts) do
+    case Keyword.fetch(opts, :list_error) do
+      {:ok, reason} -> {:error, reason}
+      :error -> LocalFS.list(instance, prefix, local(opts))
+    end
+  end
 
   defp local(opts), do: Keyword.take(opts, [:root])
 end

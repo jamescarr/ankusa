@@ -18,7 +18,7 @@ defmodule AnkusaRedis.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
-        "Ankusa Redis adapters: a route store shared across edge nodes, and a pub/sub sink.",
+        "Ankusa Redis adapters: route and source stores shared across edge nodes, and a pub/sub sink.",
       package: package(),
       source_url: @source_url,
       homepage_url: @source_url,
