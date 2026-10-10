@@ -72,9 +72,11 @@ impl<T: Transport> ClaimCheckClient<T> {
     ///   the arguments are malformed; no request is sent.
     /// - [`ClaimCheckError::NotFound`]: the claim is gone (already redeemed, or
     ///   swept after its TTL).
-    /// - [`ClaimCheckError::Rejected`]: the gateway refused the request.
+    /// - [`ClaimCheckError::Rejected`]: the gateway refused the request (a
+    ///   `4xx` other than `404`, `408` and `429`).
     /// - [`ClaimCheckError::Integrity`]: the bytes do not match `sha256`.
-    /// - [`ClaimCheckError::Unavailable`]: no usable answer; retryable.
+    /// - [`ClaimCheckError::Unavailable`]: no usable answer (`5xx`, `408`,
+    ///   `429`, transport failure); retryable.
     pub async fn redeem(&self, claim_ref: &str, sha256: &str) -> Result<Bytes, ClaimCheckError> {
         let parsed = parse_claim_ref(claim_ref)?;
         let expected = decode_sha256(sha256)?;
@@ -101,7 +103,11 @@ impl<T: Transport> ClaimCheckClient<T> {
         if status == http::StatusCode::NOT_FOUND {
             return Err(ClaimCheckError::NotFound);
         }
-        if status.is_client_error() {
+        // A gateway (or a proxy in front of it) that is throttling or timing
+        // out is telling the caller to come back, not that the claim is gone.
+        let busy = status == http::StatusCode::REQUEST_TIMEOUT
+            || status == http::StatusCode::TOO_MANY_REQUESTS;
+        if status.is_client_error() && !busy {
             return Err(ClaimCheckError::Rejected {
                 status,
                 body: error_body(response.body()),

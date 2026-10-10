@@ -103,6 +103,22 @@ defmodule Ankusa.Verifier.Hmac do
     end
   end
 
+  @doc """
+  Check `opts` the way `verify/2` would use them, without a request: the
+  scheme resolves and every secret decodes to a non-empty key. `:ok`, or the
+  error `verify/2` would return for every hook. Used at boot for sources
+  declared in config (`Ankusa.Verifier.validate_config!/1`).
+  """
+  @spec validate_opts(keyword()) :: :ok | {:error, :bad_secret | :bad_scheme}
+  def validate_opts(opts) do
+    with {:ok, scheme} <- resolve_scheme(opts),
+         {:ok, _keys} <- secret_keys(opts, scheme) do
+      :ok
+    end
+  rescue
+    ArgumentError -> {:error, :bad_scheme}
+  end
+
   defp resolve_scheme(opts) do
     case opts[:scheme] do
       nil ->
@@ -277,9 +293,15 @@ defmodule Ankusa.Verifier.Hmac do
 
   defp decode_secret(_secret, _decode), do: :error
 
-  defp raw_key(secret, :raw), do: {:ok, secret}
+  @doc """
+  The HMAC key a configured secret stands for: the string itself (`:raw`), or
+  the base64 after an optional `whsec_` prefix (`:whsec_base64`, Standard
+  Webhooks). `:error` when the base64 does not decode.
+  """
+  @spec raw_key(String.t(), :raw | :whsec_base64) :: {:ok, binary()} | :error
+  def raw_key(secret, :raw), do: {:ok, secret}
 
-  defp raw_key(secret, :whsec_base64),
+  def raw_key(secret, :whsec_base64),
     do: secret |> String.replace_prefix("whsec_", "") |> Base.decode64()
 
   defp encode(mac, :hex), do: Base.encode16(mac, case: :lower)

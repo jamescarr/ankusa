@@ -194,4 +194,136 @@ defmodule Ankusa.Sink.HttpTest do
     refute Map.has_key?(h, "x-ankusa-dedupe-key")
     refute Map.has_key?(h, "x-ankusa-replay-id")
   end
+
+  describe "responses" do
+    defp respond(status, headers \\ [], body \\ "") do
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn = Enum.reduce(headers, conn, fn {k, v}, c -> Plug.Conn.put_resp_header(c, k, v) end)
+        Plug.Conn.send_resp(conn, status, body)
+      end)
+    end
+
+    test "a status no retry can fix is permanent" do
+      for status <- [400, 401, 403, 404, 410, 413, 422] do
+        respond(status)
+
+        assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) ==
+                 {:error, {:permanent, {:status, status}}}
+      end
+    end
+
+    test "Retry-After on 408, 429 and 5xx becomes a minimum delay" do
+      respond(503, [{"retry-after", "7"}])
+
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) ==
+               {:error, {:retry_after, 7_000, {:status, 503}}}
+
+      respond(429, [{"retry-after", "1"}])
+
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) ==
+               {:error, {:retry_after, 1_000, {:status, 429}}}
+
+      later = DateTime.utc_now() |> DateTime.add(120, :second)
+      date = Calendar.strftime(later, "%a, %d %b %Y %H:%M:%S GMT")
+      respond(503, [{"retry-after", date}])
+
+      assert {:error, {:retry_after, ms, {:status, 503}}} =
+               Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h"))
+
+      assert ms in 100_000..120_000
+    end
+
+    test "a 5xx without Retry-After, or with an unusable one, is transient" do
+      respond(502)
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) == {:error, {:status, 502}}
+
+      respond(503, [{"retry-after", "Sun, 06 Nov 1994 08:49:37 GMT"}])
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h")) == {:error, {:status, 503}}
+    end
+
+    test "a response body past max_response_bytes is cut off, and the status still counts" do
+      respond(200, [], :binary.copy("x", 1_048_576))
+
+      assert :ok =
+               Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/h", max_response_bytes: 1_024))
+
+      assert {:ok, 200, {:truncated, read}} =
+               Ankusa.HttpClient.request(:post, "http://sink.test/h", [], "x", 5_000,
+                 plug: {Req.Test, __MODULE__},
+                 max_response_bytes: 1_024
+               )
+
+      assert read > 1_024
+    end
+  end
+
+  describe "signing" do
+    @key :crypto.strong_rand_bytes(32)
+    @secret "whsec_" <> Base.encode64(@key)
+
+    test "a signed delivery verifies with the Standard Webhooks verifier", %{capture: capture} do
+      env = envelope()
+      assert :ok = Sink.Http.deliver(env, %{attempt: 1}, opts("/hooks", secret: @secret))
+
+      assert [{"POST", "/hooks", headers, body}] = Agent.get(capture, & &1)
+      h = Map.new(headers)
+      assert h["webhook-id"] == env.id
+      assert ["v1," <> _] = String.split(h["webhook-signature"], " ")
+
+      received = %{env | headers: headers, body: body}
+
+      assert :ok =
+               Ankusa.Verifier.Hmac.verify(received, scheme: :standard_webhooks, secret: @secret)
+    end
+
+    test "two secrets sign twice; a forwarded webhook-* header never overrides them", %{
+      capture: capture
+    } do
+      other = "whsec_" <> Base.encode64(:crypto.strong_rand_bytes(32))
+      env = envelope(%{headers: [{"webhook-signature", "v1,forged"}]})
+
+      assert :ok =
+               Sink.Http.deliver(
+                 env,
+                 %{attempt: 1, forward_headers: ["webhook-signature"]},
+                 opts("/hooks", secret: [@secret, other])
+               )
+
+      assert [{"POST", "/hooks", headers, body}] = Agent.get(capture, & &1)
+      assert [signature] = for({"webhook-signature", v} <- headers, do: v)
+      assert [_, _] = String.split(signature, " ")
+
+      received = %{env | headers: headers, body: body}
+
+      assert :ok =
+               Ankusa.Verifier.Hmac.verify(received, scheme: :standard_webhooks, secret: other)
+    end
+
+    test "a secret that does not decode is a permanent failure, and nothing is sent", %{
+      capture: capture
+    } do
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/hooks", secret: "whsec_!!!")) ==
+               {:error, {:permanent, :bad_secret}}
+
+      assert Agent.get(capture, & &1) == []
+    end
+
+    test "signs exactly what the SDK conformance vectors expect" do
+      %{"cases" => cases} =
+        "../../conformance/cases/signature.json" |> File.read!() |> JSON.decode!()
+
+      %{"input" => input} = Enum.find(cases, &(&1["id"] == "signature.ok.reference"))
+      %{"headers" => headers, "body" => %{"text" => body}, "secrets" => [secret]} = input
+
+      assert {:ok, signed} =
+               Sink.Http.Signer.headers(
+                 headers["webhook-id"],
+                 body,
+                 secret,
+                 String.to_integer(headers["webhook-timestamp"])
+               )
+
+      assert Map.new(signed)["webhook-signature"] == headers["webhook-signature"]
+    end
+  end
 end

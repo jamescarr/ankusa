@@ -50,6 +50,17 @@ defmodule Ankusa.Queue.Deliveries do
 
   # ── reads ─────────────────────────────────────────────────────────────────
 
+  @doc false
+  # One delivery row, decoded. For tests and probes; dispatch reads rows in
+  # batches through `load/2`.
+  @spec row(atom(), pos_integer(), integer()) :: {:ok, map()} | :not_found | {:error, term()}
+  def row(instance, seq, sink) do
+    case Store.get(instance, :deliveries, Keys.delivery(seq, sink)) do
+      {:ok, bin} -> {:ok, decode_row(bin)}
+      other -> other
+    end
+  end
+
   @doc """
   Pending rows due at or before `now`, oldest first, from `floor` on. Stops at
   `limit` rows, or before the row that would push the total stored size past

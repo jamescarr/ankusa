@@ -173,6 +173,26 @@ at-least-once: dedupe on `idempotency/key`, not the hook id. `:source` defaults
 to `""`; `:tenant` and `:content-type` are `nil` when absent, as are
 `:dedupe-key`, `:replay-id` and `:idempotency-key` (also when present but empty).
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way. Verify the raw
+body before trusting it; answer `401` when it fails:
+
+```clojure
+(require '[ankusa.sdk.signature :as signature])
+
+(try
+  (signature/verify (:headers request) raw-body-bytes [secret])
+  (catch clojure.lang.ExceptionInfo e
+    {:status 401 :body (str "invalid signature: " (:code (ex-data e)))}))
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own UTF-8
+bytes; pass several during a rotation. `{:tolerance-seconds 300}` (the
+default) bounds the `webhook-timestamp` window. Signatures are compared with
+`MessageDigest/isEqual`.
+
 ## Consuming queue messages
 
 Ankusa publishes each delivery as a JSON v1 message over the configured
@@ -294,10 +314,11 @@ the keyword (or `nil` for an exception that is not the SDK's) and
 | --- | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64 lowercase hex chars | |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written | |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` | `:status`, `:body` |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` | `:status`, `:body` |
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` | |
-| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, an unfollowed `3xx`, or any other non-`200` | `:status`, `:reason` |
+| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, `408`, `429`, an unfollowed `3xx`, or any other non-`200` | `:status`, `:reason` |
 | `MissingHookIdError` | `false` | `x-ankusa-id` is absent or empty | |
+| `InvalidSignatureError` | `false` | a signed delivery does not verify | `:code`, `:field` |
 | `InvalidMessageError` | `false` | a queue message is not a valid v1 message | `:code`, `:field` |
 | `InvalidRouteIdError` | `false` | route id is not a string, empty, or exactly `.`/`..` | |
 | `RouteNotFoundError` | `false` | routes listener `404` | |

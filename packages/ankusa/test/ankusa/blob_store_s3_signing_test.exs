@@ -211,7 +211,8 @@ defmodule Ankusa.BlobStore.S3SigningTest do
     } do
       # a non-ASCII key in the listing: the scanner decodes the declared UTF-8,
       # so handing it codepoints instead of bytes would drop every key
-      assert ["claims/a b/1", "claims/a b/2", "claims/café/3"] = S3.list(:i, "claims/a b/", opts)
+      assert {:ok, ["claims/a b/1", "claims/a b/2", "claims/café/3"]} =
+               S3.list(:i, "claims/a b/", opts)
 
       assert [{method, path, query, _headers, _body}] = Agent.get(capture, & &1)
       assert method == "GET"
@@ -220,22 +221,61 @@ defmodule Ankusa.BlobStore.S3SigningTest do
       assert query == "list-type=2&prefix=claims%2Fa%20b%2F"
     end
 
-    test "a 200 that isn't ListObjectsV2 XML reads as no keys instead of crashing", %{opts: opts} do
+    test "a 200 that isn't ListObjectsV2 XML is an error, never a crash", %{opts: opts} do
       Req.Test.stub(__MODULE__, fn conn ->
         Plug.Conn.send_resp(conn, 200, "not xml at all")
       end)
 
-      # the claim-check sweeper calls this: a bad body must not take it down
-      assert [] = S3.list(:i, "claims/", opts)
+      assert {:error, :list_unreadable} = S3.list(:i, "claims/", opts)
     end
 
-    test "a 200 whose body isn't even valid UTF-8 reads as no keys too", %{opts: opts} do
+    test "a 200 whose body isn't even valid UTF-8 is an error too", %{opts: opts} do
       Req.Test.stub(__MODULE__, fn conn ->
         # an HTML error page out of a proxy, in latin1
         Plug.Conn.send_resp(conn, 200, <<"<html>caf", 0xE9, "</html>">>)
       end)
 
-      assert [] = S3.list(:i, "claims/", opts)
+      assert {:error, :list_unreadable} = S3.list(:i, "claims/", opts)
+    end
+
+    defp page(keys, next) do
+      contents = Enum.map_join(keys, "", &"<Contents><Key>#{&1}</Key></Contents>")
+
+      truncated =
+        if next,
+          do:
+            "<IsTruncated>true</IsTruncated><NextContinuationToken>#{next}</NextContinuationToken>",
+          else: "<IsTruncated>false</IsTruncated>"
+
+      ~s(<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>#{truncated}#{contents}</ListBucketResult>)
+    end
+
+    test "list follows continuation tokens to the end", %{opts: opts} do
+      first = for i <- 1..1000, do: "seg/#{String.pad_leading("#{i}", 5, "0")}"
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        query = URI.decode_query(conn.query_string)
+
+        case query["continuation-token"] do
+          nil -> Plug.Conn.send_resp(conn, 200, page(first, "tok/2"))
+          "tok/2" -> Plug.Conn.send_resp(conn, 200, page(["seg/01001"], nil))
+        end
+      end)
+
+      assert {:ok, keys} = S3.list(:i, "seg/", opts)
+      assert length(keys) == 1001
+      assert List.last(keys) == "seg/01001"
+    end
+
+    test "a failed page fails the listing instead of returning a partial one", %{opts: opts} do
+      Req.Test.stub(__MODULE__, fn conn ->
+        case URI.decode_query(conn.query_string)["continuation-token"] do
+          nil -> Plug.Conn.send_resp(conn, 200, page(["seg/1"], "next"))
+          _ -> Plug.Conn.send_resp(conn, 500, "slow down")
+        end
+      end)
+
+      assert {:error, {:status, 500, "slow down"}} = S3.list(:i, "seg/", opts)
     end
 
     test "the adapter signs S3's way: the path exactly as sent", %{capture: capture, opts: opts} do
@@ -272,6 +312,97 @@ defmodule Ankusa.BlobStore.S3SigningTest do
     test "a 404 is :not_found; any other non-2xx keeps its status", %{opts: opts} do
       assert {:error, :not_found} = S3.get(:i, "missing/x", opts)
       assert {:error, {:status, 500, "kaboom"}} = S3.get(:i, "boom", opts)
+    end
+  end
+
+  describe "credentials" do
+    setup do
+      Ankusa.BlobStore.S3.Credentials.clear()
+      on_exit(&Ankusa.BlobStore.S3.Credentials.clear/0)
+      test = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        send(
+          test,
+          {:request, conn.method, conn.host, conn.request_path, conn.query_string,
+           conn.req_headers, body}
+        )
+
+        cond do
+          conn.host == "sts.test" ->
+            Plug.Conn.send_resp(conn, 200, """
+            <AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials>
+            <AccessKeyId>ASIAWEB</AccessKeyId><SecretAccessKey>websecret</SecretAccessKey>
+            <SessionToken>webtoken</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>
+            </Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>
+            """)
+
+          true ->
+            Plug.Conn.send_resp(conn, 200, "ok")
+        end
+      end)
+
+      base = [
+        bucket: "b",
+        region: "us-east-1",
+        endpoint: "http://s3.test",
+        sts_endpoint: "http://sts.test",
+        imds_endpoint: "http://imds.test",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      %{base: base}
+    end
+
+    defp s3_headers do
+      assert_receive {:request, _method, "s3.test", _path, _query, headers, _body}
+      Map.new(headers)
+    end
+
+    test "environment keys sign; a session token rides as a signed header", %{base: base} do
+      env = %{"AWS_ACCESS_KEY_ID" => "AKIAENV", "AWS_SECRET_ACCESS_KEY" => "envsecret"}
+      assert :ok = S3.put(:i, "seg/x", "x", base ++ [env: env])
+      h = s3_headers()
+      assert h["authorization"] =~ "Credential=AKIAENV/"
+      refute Map.has_key?(h, "x-amz-security-token")
+
+      env = Map.put(env, "AWS_SESSION_TOKEN", "envtoken")
+      assert :ok = S3.put(:i, "seg/x", "x", base ++ [env: env])
+      h = s3_headers()
+      assert h["x-amz-security-token"] == "envtoken"
+      assert h["authorization"] =~ "x-amz-security-token"
+    end
+
+    test "web identity is exchanged at STS once, then served from the cache", %{base: base} do
+      file = Path.join(System.tmp_dir!(), "ankusa_wit_#{System.unique_integer([:positive])}")
+      File.write!(file, "the-jwt\n")
+      on_exit(fn -> File.rm(file) end)
+
+      env = %{"AWS_WEB_IDENTITY_TOKEN_FILE" => file, "AWS_ROLE_ARN" => "arn:aws:iam::1:role/r"}
+
+      # Filled by a short-lived process (as a claim upload or a gateway request
+      # would): the cache must outlive it.
+      assert :ok =
+               Task.async(fn -> S3.put(:i, "seg/x", "x", base ++ [env: env]) end) |> Task.await()
+
+      assert_receive {:request, "GET", "sts.test", "/", query, _headers, _body}
+      assert URI.decode_query(query)["WebIdentityToken"] == "the-jwt"
+      h = s3_headers()
+      assert h["authorization"] =~ "Credential=ASIAWEB/"
+      assert h["x-amz-security-token"] == "webtoken"
+
+      assert :ok = S3.put(:i, "seg/y", "y", base ++ [env: env])
+      _ = s3_headers()
+      refute_received {:request, _, "sts.test", _, _, _, _}
+    end
+
+    test "with no source at all a request is {:error, :no_credentials}, never a raise", %{
+      base: base
+    } do
+      Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 404, "") end)
+      assert {:error, :no_credentials} = S3.put(:i, "seg/x", "x", base ++ [env: %{}])
     end
   end
 end

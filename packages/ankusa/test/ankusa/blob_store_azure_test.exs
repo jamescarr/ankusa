@@ -111,19 +111,19 @@ defmodule Ankusa.BlobStore.AzureTest do
     capture: capture,
     opts: opts
   } do
-    assert ["seg/a", "seg/b", "seg/café"] = Azure.list(:i, "seg/", opts)
+    assert {:ok, ["seg/a", "seg/b", "seg/café"]} = Azure.list(:i, "seg/", opts)
 
     assert [{"GET", path, query, _headers, _body}] = Agent.get(capture, & &1)
     assert path == "/acct/cont"
     assert query == "restype=container&comp=list&prefix=seg%2F"
   end
 
-  test "a 200 that isn't ListBlobs XML reads as no keys instead of crashing", %{opts: opts} do
+  test "a 200 that isn't ListBlobs XML is an error, never a crash", %{opts: opts} do
     Req.Test.stub(__MODULE__, fn conn ->
       Plug.Conn.send_resp(conn, 200, "not xml at all")
     end)
 
-    assert [] = Azure.list(:i, "seg/", opts)
+    assert {:error, :list_unreadable} = Azure.list(:i, "seg/", opts)
   end
 
   test "a 404 is :not_found; any other non-2xx keeps its status", %{opts: opts} do

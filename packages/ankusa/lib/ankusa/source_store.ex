@@ -13,6 +13,17 @@ defmodule Ankusa.SourceStore do
   only reads (like `Ankusa.SourceStore.Static`) leaves them out and the facade
   answers `{:error, :read_only}` / `:error` / `[]`. See
   `Ankusa.SourceStore.Persistent` for the writable implementation.
+
+  ## Three answers to `fetch/2`
+
+  `{:ok, source}` and `:error` are verdicts: the source exists, or it does not
+  (the edge answers `404`, dispatch dead-letters the source's rows as
+  `{:source_gone, id}`). A store backed by something that can fail — a
+  database, a network service — returns `{:error, :unavailable}` when it could
+  not tell: the edge answers `503 store_unavailable` with `Retry-After: 1`,
+  dispatch reschedules the row without spending an attempt, and a replay
+  stops at that entry and retries it on its next tick. Never answer `:error`
+  for "I could not look": that turns an outage into lost hooks.
   """
 
   alias Ankusa.{Config, Source}
@@ -30,7 +41,7 @@ defmodule Ankusa.SourceStore do
         }
 
   @callback fetch(instance :: atom(), source_id :: String.t()) ::
-              {:ok, Source.t()} | :error
+              {:ok, Source.t()} | :error | {:error, :unavailable}
   @callback list(instance :: atom()) :: [String.t()]
 
   @callback put(
@@ -57,7 +68,7 @@ defmodule Ankusa.SourceStore do
   # a storage partition and a URL path segment must not need encoding.
   @identity_regex ~r/\A[A-Za-z0-9_-]{1,64}\z/
 
-  @spec fetch(atom(), String.t()) :: {:ok, Source.t()} | :error
+  @spec fetch(atom(), String.t()) :: {:ok, Source.t()} | :error | {:error, :unavailable}
   def fetch(instance, source_id) do
     %Config{source_store: {mod, _}} = Ankusa.config(instance)
     mod.fetch(instance, source_id)

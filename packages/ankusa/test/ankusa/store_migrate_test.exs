@@ -112,9 +112,13 @@ defmodule Ankusa.StoreMigrateTest do
       Legacy.wal!(config, [envelope(1)], cursors: %{dispatch: 0, compactor: 0})
       inst = boot(config)
 
-      {:ok, 1} = Pipeline.tick(inst)
+      # The pipeline may deliver on its own wake before this call; `tick/1`
+      # still blocks until nothing is due, so only the count it reports races.
+      {:ok, _} = Pipeline.tick(inst)
 
-      assert_received {:delivered, _id, 1}
+      # The sink task and the pipeline are different senders: no ordering
+      # between the delivery message and the tick reply.
+      assert_receive {:delivered, _id, 1}, 1_000
       # Delivered and (no archive obligation without :storage) reclaimed.
       assert stored_ids(inst) == []
     end
@@ -388,13 +392,13 @@ defmodule Ankusa.StoreMigrateTest do
       config = config()
       Legacy.wal!(config, [envelope(1)])
       inst = boot(config)
-      {:ok, 1} = Pipeline.tick(inst)
-      assert_received {:delivered, _, 1}
+      {:ok, _} = Pipeline.tick(inst)
+      assert_receive {:delivered, _, 1}, 1_000
 
       stop_supervised!({Ankusa.Instance, config.instance})
       boot(config)
-      {:ok, 0} = Pipeline.tick(inst)
-      refute_received {:delivered, _, _}
+      {:ok, _} = Pipeline.tick(inst)
+      refute_receive {:delivered, _, _}, 200
     end
 
     test "under wal: :none the queue artifacts are left for a node that has a queue" do

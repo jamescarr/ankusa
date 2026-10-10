@@ -55,12 +55,12 @@ Every top-level section, with its keys and defaults:
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
 | `log` | `level` (`info`) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
-| `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it) |
-| `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000) |
-| `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`) |
+| `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled) |
+| `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
+| `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) |
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
-| `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
-| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper) |
+| `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
+| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent`; `persistent` adds API-managed sources kept in this node's store). See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
@@ -132,10 +132,10 @@ URL), cannot be described by this engine. They need a bespoke
 | `type` | Keys |
 | --- | --- |
 | `log` | none |
-| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000). Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
-| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536). |
-| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
-| `nats` | `servers` (a list, or one comma-separated string, tried in order), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
+| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (a `whsec_` secret, or a list while rotating: signs every delivery the Standard Webhooks way), `max_response_bytes` (65536; only the status is used). Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
+| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried). |
+| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a larger record is dead-lettered at once), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
+| `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
 | `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `publish_timeout_ms` (5000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
 
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
@@ -162,9 +162,17 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
+| `ANKUSA_STORAGE_KEY_PREFIX` | `storage.key_prefix` |
 
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are read by the S3 adapter
-directly when the config does not name static keys.
+When the config names no static keys, the S3 adapter looks for credentials in
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), then web
+identity (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, as IRSA sets them),
+then the EC2 instance profile (IMDSv2), caching each until shortly before it
+expires.
+
+A `${VAR}` the loader cannot resolve (an unset variable without a `:-`
+default, or a `${` that is not a variable reference) is a load error naming the
+key, never a literal string.
 
 Sources and sinks are not env-overridable: they carry behaviour, so they live in
 the file, with secrets injected through `${VAR}`.
@@ -209,17 +217,28 @@ config :ankusa,
   source_store: {Ankusa.SourceStore.Static, sources: %{}},
   wal: :disk,
   direct_publish_timeout_ms: 8_000,
-  batcher: %{partitions: 2, max_batch: 256, max_delay_ms: 0, max_queue: 10_000},
+  batcher: %{
+    partitions: 2,
+    max_batch: 256,
+    max_delay_ms: 0,
+    max_queue: 10_000,
+    max_queue_bytes: 268_435_456
+  },
   dispatch: %{
     batch: 128,
     concurrency: 32,
     max_inflight: 4096,
     max_inflight_bytes: 134_217_728,
     attempt_timeout_ms: 30_000,
+    sink_concurrency: nil,
+    breaker_failures: 5,
+    breaker_open_ms: 30_000,
+    breaker_max_open_ms: 300_000,
     retry: {Ankusa.RetryPolicy.Exponential, []}
   },
   storage: %{
     blob_store: {Ankusa.BlobStore.LocalFS, []},
+    key_prefix: "",
     codec: {Ankusa.Codec.Raw, []},
     roll_bytes: 16 * 1024 * 1024,
     roll_ms: 30_000,
@@ -230,9 +249,10 @@ config :ankusa,
     ip: "127.0.0.1",
     pack_max_bytes: 16_777_216,
     retention_days: nil,
-    sweep_interval_ms: 3_600_000
+    sweep_interval_ms: 3_600_000,
+    blob_store: nil
   },
-  admin: %{enabled: false, port: 4002, ip: "127.0.0.1"},
+  admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
   routes: %{
     enabled: false,
     max_routes: 10_000,
@@ -265,13 +285,18 @@ config :ankusa,
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
 | `batcher.max_delay_ms` | `0` | Commit immediately. The store commit runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
 | `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
+| `batcher.max_queue_bytes` | `268_435_456` (256 MiB) | The same bound in body bytes, buffered and in flight, so a burst of large hooks sheds load (`503`) before it exhausts memory. |
 | `dispatch.batch` | `128` | Delivery rows claimed per store scan. |
 | `dispatch.concurrency` | `32` | Max sink deliveries in flight at once. Keep Req's Finch pool (default 50) at least this large for `Sink.Http`. |
 | `dispatch.max_inflight` | `4096` | Max claimed, unfinished deliveries. Bounds how much a stalled destination can hold. |
 | `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their stored hook sizes. |
 | `dispatch.attempt_timeout_ms` | `30_000` | A delivery attempt that has not returned after this is killed and counts as a failed attempt (`{:attempt_timeout, ms}`). Keep it above every sink's own timeout. |
+| `dispatch.sink_concurrency` | `nil` | Each sink of each source (`{source_id, sink index, module}`) has its own queue; at most this many of its attempts run at once. `nil` leaves only the global `concurrency` cap. |
+| `dispatch.breaker_failures` | `5` | Consecutive failures that open a sink's breaker; `0` never opens one. An open sink's rows wait without spending attempts. |
+| `dispatch.breaker_open_ms`, `dispatch.breaker_max_open_ms` | `30_000`, `300_000` | How long a breaker stays open, doubling per consecutive open up to the max; one probe attempt then closes it or reopens it. In memory: a restart closes every breaker. |
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: dispatch-wide; there is no per-source retry policy. |
 | `storage.blob_store` | `{Ankusa.BlobStore.LocalFS, []}` | `{module, opts}` implementing `Ankusa.BlobStore`. See [`storage.md`](storage.md). |
+| `storage.key_prefix` | `""` | Prepended to the key of every new segment: `""`, or one or more `name/` parts (`[A-Za-z0-9._-]`). Nodes sharing one bucket each take their own. The archive catalogue records each segment's full key, so changing the prefix moves only new segments; archived ones are still read where they were written. Claims are never prefixed. |
 | `storage.codec` | `{Ankusa.Codec.Raw, []}` | `{module, opts}` implementing `Ankusa.Codec`: segment record framing. |
 | `storage.roll_bytes` | `16 MiB` | Roll a new segment past this size. |
 | `storage.roll_ms` | `30_000` | ...or after this long, whichever comes first. |
@@ -281,9 +306,11 @@ config :ankusa,
 | `claim_check.pack_max_bytes` | `16_777_216` | Target size of one claim pack; a body larger than this still gets a pack of its own. Must be a positive integer. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
+| `claim_check.blob_store` | `nil` | `{module, opts}` for claim packs; `nil` uses `storage.blob_store`. A `LocalFS` claim store takes `root:` (an absolute path). |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
+| `admin.gauge_interval_ms` | `15_000` | How often `Ankusa.Metrics.Gauges` samples store/queue/quarantine depth, disk free, dispatch in-flight and open breakers for `/metrics`. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
 | `routes.max_routes` | `10_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. |
 | `routes.store` | `{Ankusa.Routes.Store.ETS, []}` | `{module, opts}` implementing `Ankusa.Routes.Store`. `Ankusa.Routes.Store.Redis` (package `ankusa_redis`) shares definitions across nodes. |
@@ -298,9 +325,27 @@ config :ankusa,
 | `rate_limits.default`, `rate_limits.tenants` | `nil`, `%{}` | Per-tenant ingest limits, `%{rate: hooks_per_second, burst: hooks}`; fractions are allowed (`0.5` is one every two seconds) and both keys are required. Precedence is a runtime override, then the tenant's own entry, then `default`; no limit means unlimited. See [Rate limits](#rate-limits). |
 | `quarantine.burst`, `quarantine.rate`, `quarantine.max_bytes` | `100`, `20`, `1_073_741_824` | The quarantine pen: one token bucket per source (`burst` hooks back to back, refilled `rate` per second; over it, `429 quarantine_rate_limited`) and a cap on the pen's total bytes (a hook that would cross it is `503 quarantine_full`; the pen never evicts). See [`delivery.md#quarantine`](delivery.md#quarantine). |
 
+Boot checks ranges, not only types, and fails with `"<dotted.key> must be
+<constraint>, got <value>"`: every port is `0..65535`; `max_body_bytes`,
+`direct_publish_timeout_ms`, the `batcher` and `dispatch` sizes and counts,
+`storage.roll_bytes`, `claim_check.sweep_interval_ms`,
+`admin.gauge_interval_ms` and `routes.max_routes` must be positive;
+`batcher.max_delay_ms`, `storage.roll_ms` and `storage.interval_ms` may be `0`
+(no linger, roll at once, a compactor that runs only when asked);
+`claim_check.retention_days` is `nil` or ≥ 1; `storage.key_prefix` is `""` or
+`name/` parts; `dispatch.sink_concurrency` is `nil` or `1..concurrency`,
+`dispatch.breaker_failures` ≥ 0, `breaker_open_ms` positive and
+`breaker_max_open_ms` ≥ `breaker_open_ms`. An embedded source whose verifier secret is missing or
+undecodable fails boot too (`source <id>: verifier secret is missing or
+undecodable`), instead of rejecting every hook later.
+
 #### The admin API
 
-With `admin.enabled: true`, every node serves `GET /health`, `GET /metrics`
+With `admin.enabled: true`, every node serves `GET /health` (the process
+answers), `GET /ready` (this node's store takes a synced write, checked at
+most once a second, and no write failed in the last 5 s; `503` with
+`Retry-After: 1` otherwise — the ingest
+port serves the same `/ready`), `GET /metrics`
 (Prometheus text), `GET /v1/config` (the effective config; adapter option
 values are hidden unless on an allowlist of non-secret keys such as `region`,
 `bucket` or `topic`, and URL passwords and query values are hidden),

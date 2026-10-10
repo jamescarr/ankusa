@@ -74,7 +74,7 @@ defmodule Ankusa.Edge.DirectTest do
     @impl true
     def delete(_, _, _), do: :ok
     @impl true
-    def list(_, _, _), do: []
+    def list(_, _, _), do: {:ok, []}
   end
 
   defp start_direct(sinks, overrides \\ []) do

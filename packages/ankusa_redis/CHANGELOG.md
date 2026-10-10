@@ -6,6 +6,22 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `ankusa ~> 0.6` (the ETS route snapshot API); publish core first.
+- The Redis route store keeps serving its last known table when the
+  namespace's version key disappears (a flushed or evicted Redis) instead of
+  publishing an empty table that rejects every webhook; it logs a warning
+  once and reloads when the namespace is written again. It publishes through
+  core's ETS route snapshot and drops retired generations on request.
+- The Redis sink's connection dials on its own (`sync_connect: false`), so a
+  dead Redis never blocks the supervisor that starts it.
+- A route store restarted after the instance has published a table resumes from
+  that table without waiting on Redis (its connections dial in the background),
+  so a store that crashes during a Redis outage does not hold the edge down. It
+  loads once the subscription is confirmed and on every tick. A first boot
+  still fails loudly.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

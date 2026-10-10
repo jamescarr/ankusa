@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.SDK.Signature.verify/4` verifies the Standard Webhooks signature an
+  HTTP sink with a `secret` adds, comparing with `:crypto.hash_equals/2`;
+  failures are `Ankusa.SDK.InvalidSignatureError` (`code`, `field`, never
+  retryable). `Ankusa.SDK.Receiver` takes `:secret` (one or a list) and
+  `:tolerance_seconds`, and answers `401`
+  `{"error":"invalid_signature","code":...}` to a delivery that doesn't
+  verify.
+
+### Changed
+
+- `Ankusa.SDK.ClaimCheck.redeem/3` returns `ClaimCheckUnavailableError`
+  (retryable) for a gateway `408` or `429` instead of `ClaimRejectedError`.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

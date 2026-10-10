@@ -50,35 +50,29 @@ defmodule Ankusa.Sink.NATS do
 
   ## Process model
 
-  The first `deliver/3` for an `{instance, connection}` pair starts a gnat
-  connection under this package's `DynamicSupervisor`, **synchronously** —
-  gnat completes the NATS handshake before its start call returns — so by the
-  time `deliver/3` has a connection to publish through, the socket is up or
-  the start already returned the reason it isn't. Servers are tried in the
-  order given; a failed connect is `{:error, reason}` (`:econnrefused`,
-  `:timeout`, a rejected credential), retried by the source's
-  `Ankusa.RetryPolicy`, then dead-lettered, exactly like any other sink
-  failure.
+  The first `deliver/3` for an `{instance, connection}` pair starts a
+  `Gnat.ConnectionSupervisor` under this package's `DynamicSupervisor`. The
+  start returns at once: the NATS handshake runs in that supervisor, never in
+  the caller or the `DynamicSupervisor`, so a slow or dead server cannot stall
+  other deliveries behind it. It connects to one of `:servers`, picked at
+  random per attempt (gnat's behaviour), and reconnects with a 2 s backoff
+  whenever the socket closes.
 
-  gnat stops its process when the socket closes, and the child is
-  `:temporary`: nothing crash-loops trying to reach a server that is gone, and
-  the next `deliver/3` reconnects inside the retry policy. There is no
-  separate reconnect policy to get wrong. In the narrow window where the
-  connection dies between that check and the publish, `deliver/3` returns
-  `{:error, :not_connected}` — also just a retry.
-
-  The connection has to register a name, and a name has to be an atom, so it
-  is `:"ankusa_nats.<instance>.<connection>"`: both parts come from config, so
-  the atom count is bounded and two instances never share a connection.
-  Servers and credentials are fixed by the first delivery that starts it; use
-  a different `:connection` for a different cluster.
+  Both processes are found through the instance's registry
+  (`Ankusa.via(instance, {:nats_conn, connection})`): nothing is registered
+  globally, and two instances never share a connection. While the connection
+  is not up — the first delivery, a reconnect — `deliver/3` returns
+  `{:error, :not_connected}`, retried by the source's `Ankusa.RetryPolicy`
+  like any other sink failure. Servers and credentials are fixed by the first
+  delivery that starts it; use a different `:connection` for a different
+  cluster.
 
   ## opts
 
     * `:servers`             — required; `"host:port"` strings or `{host, port}`
-                               tuples, tried in order. More than one is
-                               failover, not fan-out: one connection to one
-                               server at a time.
+                               tuples. More than one is failover, not fan-out:
+                               one connection to one server (picked at random
+                               per attempt) at a time.
     * `:subject`             — required; a string, or `(Envelope.t() -> String.t())`
     * `:inline_max_bytes`    — default 64 KiB (65,536), configurable
     * `:publish_timeout_ms`  — how long `deliver/3` waits for the JetStream
@@ -114,9 +108,9 @@ defmodule Ankusa.Sink.NATS do
   def deliver(%Envelope{} = env, ctx, opts) do
     subject = subject(env, opts)
     timeout = Keyword.get(opts, :publish_timeout_ms, @default_publish_timeout_ms)
-    conn = connection(ctx.instance, Keyword.get(opts, :connection, :default))
+    connection = Keyword.get(opts, :connection, :default)
 
-    with :ok <- ensure_connection(conn, opts),
+    with {:ok, conn} <- ensure_connection(ctx.instance, connection, opts),
          {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
       publish(conn, subject, payload, headers(env, ctx), timeout)
     end
@@ -173,9 +167,9 @@ defmodule Ankusa.Sink.NATS do
     end
   end
 
-  # The connection is addressed by its registered name, not a pid: gnat stops
-  # that process when the socket closes, so the name is unregistered and the
-  # call exits. That is this sink's "not connected", and it is the caller's to
+  # gnat stops the connection process when the socket closes (its supervisor
+  # starts a new one), so a pid looked up a moment ago may be gone and the call
+  # exits. That is this sink's "not connected", and it is the caller's to
   # absorb — the dispatch pipeline retries it like any other sink error.
   defp request(conn, subject, payload, headers, timeout) do
     Gnat.request(conn, subject, payload, headers: headers, receive_timeout: timeout)
@@ -239,36 +233,46 @@ defmodule Ankusa.Sink.NATS do
 
   # ── connection lifecycle ────────────────────────────────────────────────
 
-  defp connection(instance, connection), do: :"ankusa_nats.#{instance}.#{connection}"
-
   # `whereis` first: the common case must not serialize every delivery through
-  # the DynamicSupervisor.
-  defp ensure_connection(conn, opts) do
-    if Process.whereis(conn), do: :ok, else: start_connection(conn, opts)
+  # the DynamicSupervisor. The supervisor answers its start at once and
+  # connects (and reconnects) on its own; the connection is there or it is not.
+  @doc false
+  @spec ensure_connection(atom(), atom(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def ensure_connection(instance, connection, opts) do
+    with :ok <- ensure_supervisor(instance, connection, opts) do
+      case Ankusa.whereis(instance, {:nats_conn, connection}) do
+        nil -> {:error, :not_connected}
+        pid -> {:ok, pid}
+      end
+    end
   end
 
-  # Servers in order, first one that connects wins. gnat handshakes inside
-  # `init/1`, so `start_link` answers once the socket is either up or
-  # definitively not.
-  defp start_connection(conn, opts) do
-    Enum.reduce_while(servers(opts), {:error, :no_servers}, fn settings, _last_error ->
-      child = %{
-        id: conn,
-        start: {Gnat, :start_link, [settings, [name: conn]]},
-        # :temporary: a connection that drops, or a server that is down, must
-        # not be restarted here — restarting a synchronous connect that keeps
-        # failing would crash-loop past the supervisor's intensity and take the
-        # application down. The next `deliver/3` starts it again, inside the
-        # source's retry policy.
-        restart: :temporary
-      }
+  defp ensure_supervisor(instance, connection, opts) do
+    if Ankusa.whereis(instance, {:nats_sup, connection}),
+      do: :ok,
+      else: start_supervisor(instance, connection, opts)
+  end
 
-      case DynamicSupervisor.start_child(Ankusa.Sink.NATS.Supervisor, child) do
-        {:ok, _pid} -> {:halt, :ok}
-        {:error, {:already_started, _pid}} -> {:halt, :ok}
-        {:error, reason} -> {:cont, {:error, reason}}
-      end
-    end)
+  defp start_supervisor(instance, connection, opts) do
+    settings = %{
+      connection_settings: servers(opts),
+      name: Ankusa.via(instance, {:nats_conn, connection}),
+      backoff_period: 2_000
+    }
+
+    child = %{
+      id: {Gnat.ConnectionSupervisor, instance, connection},
+      start:
+        {Gnat.ConnectionSupervisor, :start_link,
+         [settings, [name: Ankusa.via(instance, {:nats_sup, connection})]]},
+      restart: :permanent
+    }
+
+    case DynamicSupervisor.start_child(Ankusa.Sink.NATS.Supervisor, child) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp servers(opts) do

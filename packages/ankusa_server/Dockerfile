@@ -41,10 +41,12 @@ RUN mix deps.get --only prod && mix release ankusa
 # arrive through curl anyway, which is not a reason to rely on it): curl is for
 # the healthcheck, tini reaps the BEAM's children as PID 1. liblksctp is not for
 # SCTP sockets (nothing here uses one) — ERTS dlopens it at boot and prints an
-# alarming stderr warning without it on every `eval` and `start`.
+# alarming stderr warning without it on every `eval` and `start`. coreutils is
+# for `:disksup` (the disk gauges): it runs `/bin/df -lk -x squashfs`, which
+# busybox's `df` rejects, so without GNU `df` every disk reading is zero.
 FROM alpine:3.24
 
-RUN apk add --no-cache libstdc++ libgcc zstd-libs ncurses-libs openssl ca-certificates tini curl liblksctp \
+RUN apk add --no-cache libstdc++ libgcc zstd-libs ncurses-libs openssl ca-certificates tini curl liblksctp coreutils \
  && addgroup -S ankusa && adduser -S -G ankusa -h /var/lib/ankusa ankusa \
  && mkdir -p /var/lib/ankusa /etc/ankusa && chown ankusa:ankusa /var/lib/ankusa
 
@@ -56,8 +58,11 @@ COPY --chmod=0755 packages/ankusa_server/rel/docker-entrypoint.sh /usr/local/bin
 # volume, and a container compromise should not own the host.
 USER ankusa
 
+# Distribution is on, bound to loopback only (`rel/env.sh.eex`,
+# `rel/vm.args.eex`), so `docker exec … docker-entrypoint remote|rpc` works and
+# nothing outside the container can reach it.
 ENV ANKUSA_CONFIG=/etc/ankusa/ankusa.yml ANKUSA_DATA_DIR=/var/lib/ankusa \
-    RELEASE_DISTRIBUTION=none LANG=C.UTF-8 HOME=/var/lib/ankusa
+    LANG=C.UTF-8 HOME=/var/lib/ankusa
 
 VOLUME /var/lib/ankusa
 
@@ -67,8 +72,10 @@ VOLUME /var/lib/ankusa
 # 4003 are unauthenticated (see README).
 EXPOSE 4000 4001 4002 4003
 
+# Readiness, not liveness: unhealthy while the store cannot take a synced write
+# (a full disk), healthy again on its own once it can.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s \
-  CMD curl -fsS "http://127.0.0.1:${ANKUSA_ADMIN_PORT:-4002}/health" || exit 1
+  CMD /usr/local/bin/docker-entrypoint healthcheck || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint"]
 CMD ["start"]

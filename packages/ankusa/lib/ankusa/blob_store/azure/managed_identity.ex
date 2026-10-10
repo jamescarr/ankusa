@@ -69,27 +69,22 @@ defmodule Ankusa.BlobStore.Azure.ManagedIdentity do
     end
   end
 
-  defp table do
-    case :ets.whereis(@table) do
-      :undefined ->
-        # First token fetch of the VM's life: two processes can race here, so
-        # the loser of `:ets.new` (name already taken) just adopts the winner's.
-        try do
-          :ets.new(@table, [
-            :named_table,
-            :public,
-            :set,
-            read_concurrency: true,
-            write_concurrency: true
-          ])
-        rescue
-          ArgumentError -> :ets.whereis(@table)
-        end
+  @doc false
+  # Created once by `Ankusa.Application`, so the cache outlives the short-lived
+  # request and task processes that fill it (a table dies with its owner).
+  def create_table do
+    :ets.new(@table, [
+      :named_table,
+      :public,
+      :set,
+      read_concurrency: true,
+      write_concurrency: true
+    ])
 
-      tid ->
-        tid
-    end
+    :ok
   end
+
+  defp table, do: @table
 
   defp fetch(opts) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)

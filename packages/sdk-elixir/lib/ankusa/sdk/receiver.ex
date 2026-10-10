@@ -4,9 +4,10 @@ defmodule Ankusa.SDK.Receiver do
   your handler module.
 
   Mount it **before** any body parser (`Plug.Parsers`), so the raw bytes can be
-  read: the SDK hands the handler exactly what the sink sent, and it verifies
-  nothing itself — signature verification, if the source sets it up, is the
-  handler's job.
+  read: the SDK hands the handler exactly what the sink sent. With `:secret`
+  set it first verifies the Standard Webhooks signature a sink configured with
+  the same `secret` adds (`Ankusa.SDK.Signature`); without it, nothing is
+  verified.
 
   ```elixir
   # Bandit, standalone
@@ -26,6 +27,7 @@ defmodule Ankusa.SDK.Receiver do
   | `x-ankusa-id` missing | `400`, `{"error":"missing x-ankusa-id"}` |
   | body unreadable | `400`, `{"error":"body unreadable"}` |
   | body over `:max_body_bytes` | `413`, `{"error":"body too large"}` |
+  | signature does not verify (`:secret` set) | `401`, `{"error":"invalid_signature","code":"..."}` |
 
   Anything else the handler does — a different return value, a raise — is not
   rescued: Plug turns it into a `500`, which the dispatcher retries exactly
@@ -43,6 +45,10 @@ defmodule Ankusa.SDK.Receiver do
     through untouched, so the plug can sit in a shared endpoint.
   * `:max_body_bytes` (optional) — default `8_000_000`, the same cap core's
     ingest applies to a raw webhook body.
+  * `:secret` (optional) — the sink's secret (`whsec_` + base64, or any other
+    string used as its own bytes), or a list of them during a rotation.
+  * `:tolerance_seconds` (optional) — how far `webhook-timestamp` may be from
+    now; default `300`. Only meaningful with `:secret`.
   """
 
   @behaviour Plug
@@ -51,11 +57,11 @@ defmodule Ankusa.SDK.Receiver do
 
   require Logger
 
-  alias Ankusa.SDK.{Hook, Webhook}
+  alias Ankusa.SDK.{Hook, Signature, Webhook}
 
   @default_max_body_bytes 8_000_000
   @read_chunk 1_000_000
-  @options [:handler, :path, :max_body_bytes]
+  @options [:handler, :path, :max_body_bytes, :secret, :tolerance_seconds]
 
   @impl Plug
   def init(opts) when is_list(opts) do
@@ -93,26 +99,54 @@ defmodule Ankusa.SDK.Receiver do
             ":max_body_bytes must be a positive integer, got: #{inspect(max_body_bytes)}"
     end
 
-    {handler, path, max_body_bytes}
+    {handler, path, max_body_bytes, verification(opts)}
   end
 
   def init(other) do
     raise ArgumentError, "options must be a keyword list, got: #{inspect(other)}"
   end
 
+  defp verification(opts) do
+    tolerance = Keyword.get(opts, :tolerance_seconds, 300)
+
+    unless is_integer(tolerance) and tolerance >= 0 do
+      raise ArgumentError,
+            ":tolerance_seconds must be a non-negative integer, got: #{inspect(tolerance)}"
+    end
+
+    case Keyword.fetch(opts, :secret) do
+      :error ->
+        nil
+
+      {:ok, secret} ->
+        secrets = List.wrap(secret)
+
+        # Secrets are checked before anything else, so verifying an empty
+        # request reports a bad secret here, at boot, instead of on every hook.
+        case Signature.verify(%{}, "", secrets) do
+          {:error, %{code: "invalid_secret"}} ->
+            raise ArgumentError,
+                  ":secret must be a non-empty string (or a list of them); a whsec_ secret must be base64"
+
+          {:error, _missing_header} ->
+            {secrets, tolerance}
+        end
+    end
+  end
+
   @impl Plug
-  def call(conn, {handler, path, max_body_bytes}) do
+  def call(conn, {handler, path, max_body_bytes, verification}) do
     if is_nil(path) or conn.request_path == path do
-      receive_hook(conn, handler, max_body_bytes)
+      receive_hook(conn, handler, max_body_bytes, verification)
     else
       conn
     end
   end
 
-  defp receive_hook(conn, handler, max_body_bytes) do
+  defp receive_hook(conn, handler, max_body_bytes, verification) do
     case conn.body_params do
       %Plug.Conn.Unfetched{} ->
-        handle(conn, handler, max_body_bytes)
+        handle(conn, handler, max_body_bytes, verification)
 
       _parsed ->
         raise ArgumentError,
@@ -120,7 +154,7 @@ defmodule Ankusa.SDK.Receiver do
     end
   end
 
-  defp handle(conn, handler, max_body_bytes) do
+  defp handle(conn, handler, max_body_bytes, verification) do
     case Webhook.parse_headers(conn.req_headers) do
       {:error, %Ankusa.SDK.MissingHookIdError{}} ->
         error_response(conn, 400, "missing x-ankusa-id")
@@ -128,7 +162,16 @@ defmodule Ankusa.SDK.Receiver do
       {:ok, headers} ->
         case read_whole_body(conn, max_body_bytes) do
           {:ok, body, conn} ->
-            dispatch(conn, handler, headers, body)
+            case verify(conn, body, verification) do
+              :ok ->
+                dispatch(conn, handler, headers, body)
+
+              {:error, code} ->
+                conn
+                |> put_resp_content_type("application/json")
+                |> send_resp(401, JSON.encode!(%{error: "invalid_signature", code: code}))
+                |> halt()
+            end
 
           {:too_large, conn} ->
             error_response(conn, 413, "body too large")
@@ -136,6 +179,15 @@ defmodule Ankusa.SDK.Receiver do
           {:error, _reason, conn} ->
             error_response(conn, 400, "body unreadable")
         end
+    end
+  end
+
+  defp verify(_conn, _body, nil), do: :ok
+
+  defp verify(conn, body, {secrets, tolerance}) do
+    case Signature.verify(conn.req_headers, body, secrets, tolerance_seconds: tolerance) do
+      {:ok, _verified} -> :ok
+      {:error, error} -> {:error, error.code}
     end
   end
 

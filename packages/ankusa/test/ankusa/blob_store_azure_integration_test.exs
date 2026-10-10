@@ -46,10 +46,12 @@ defmodule Ankusa.BlobStore.AzureIntegrationTest do
     key = key("listed")
     assert :ok = Azure.put(:i, key, "x", @opts)
 
-    assert key in Azure.list(:i, "seg/it-listed", @opts)
+    assert {:ok, keys} = Azure.list(:i, "seg/it-listed", @opts)
+    assert key in keys
 
     assert :ok = Azure.delete(:i, key, @opts)
     assert {:error, :not_found} = Azure.get(:i, key, @opts)
-    refute key in Azure.list(:i, "seg/it-listed", @opts)
+    assert {:ok, keys} = Azure.list(:i, "seg/it-listed", @opts)
+    refute key in keys
   end
 end

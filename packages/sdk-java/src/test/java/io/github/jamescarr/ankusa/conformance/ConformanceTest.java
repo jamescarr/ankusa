@@ -34,11 +34,14 @@ import io.github.jamescarr.ankusa.routes.RoutesClient;
 import io.github.jamescarr.ankusa.routes.RoutesRejectedError;
 import io.github.jamescarr.ankusa.routes.RoutesUnavailableError;
 import io.github.jamescarr.ankusa.webhook.HookHeaders;
+import io.github.jamescarr.ankusa.webhook.InvalidSignatureError;
 import io.github.jamescarr.ankusa.webhook.MissingHookIdError;
+import io.github.jamescarr.ankusa.webhook.Signature;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -91,6 +94,7 @@ public final class ConformanceTest {
           Map.entry("ClaimCheckUnavailableError", ClaimCheckUnavailableError.class),
           Map.entry("InvalidMessageError", InvalidMessageError.class),
           Map.entry("MissingHookIdError", MissingHookIdError.class),
+          Map.entry("InvalidSignatureError", InvalidSignatureError.class),
           Map.entry("InvalidRouteIdError", InvalidRouteIdError.class),
           Map.entry("RouteNotFoundError", RouteNotFoundError.class),
           Map.entry("RoutesRejectedError", RoutesRejectedError.class),
@@ -206,6 +210,7 @@ public final class ConformanceTest {
     return switch (vector.operation()) {
       case "parse_claim_ref" -> ParsedClaimRef.parse(text(vector, "ref"));
       case "parse_headers" -> HookHeaders.parse(headerMap(vector));
+      case "verify_signature" -> verifySignature(vector);
       case "decode_message" -> Message.decode(text(vector, "message"));
       case "idempotency_key" -> Map.of("key", idempotencyKey(vector));
       case "redeem" ->
@@ -370,6 +375,30 @@ public final class ConformanceTest {
   }
 
   /**
+   * Runs {@code verify_signature} with the vector's headers, body, secrets, clock and tolerance.
+   */
+  private static Map<String, Object> verifySignature(CaseSpec vector) {
+    JsonNode body = vector.input().get("body");
+    byte[] bytes =
+        body == null
+            ? new byte[0]
+            : Gateway.bodyBytes(MAPPER.treeToValue(body, BodySpec.class), MAPPER);
+    List<String> secrets =
+        MAPPER.treeToValue(vector.input().get("secrets"), new TypeReference<List<String>>() {});
+    JsonNode tolerance = vector.input().get("tolerance_seconds");
+    Signature.Verified verified =
+        Signature.verify(
+            headerMap(vector),
+            bytes,
+            secrets,
+            tolerance == null
+                ? Signature.DEFAULT_TOLERANCE
+                : Duration.ofSeconds(tolerance.asLong()),
+            Instant.ofEpochSecond(vector.input().get("now").asLong()));
+    return Map.of("id", verified.id(), "timestamp", verified.timestamp());
+  }
+
+  /**
    * Runs the {@code idempotency_key} operation: decode the message (or parse the headers), then
    * compute the key with the vector's {@code include_replay}.
    */
@@ -481,6 +510,15 @@ public final class ConformanceTest {
           return rejected.status();
         case "code":
           return rejected.code();
+        default:
+          break;
+      }
+    } else if (error instanceof InvalidSignatureError invalid) {
+      switch (key) {
+        case "code":
+          return invalid.code();
+        case "field":
+          return invalid.field();
         default:
           break;
       }

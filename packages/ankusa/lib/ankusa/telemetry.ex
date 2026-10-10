@@ -14,15 +14,21 @@ defmodule Ankusa.Telemetry do
   | Event | Measurements | Metadata |
   | --- | --- | --- |
   | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome` |
-  | `[:ankusa, :ingest, :refused]` | — | `:instance`, `:reason` (`:unknown_source`, `:payload_too_large`, `:body_read_failed`, `:invalid_header`) |
+  | `[:ankusa, :ingest, :refused]` | — | `:instance`, `:reason` (`:unknown_source`, `:payload_too_large`, `:body_read_failed`, `:invalid_header`, `:store_unavailable`) |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
-  | `[:ankusa, :load_shed]` | `:queue` | `:instance` |
+  | `[:ankusa, :load_shed]` | `:queue`, `:bytes` | `:instance` |
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :quarantine, :full]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :rate_limit, :rejected]` | — | `:instance`, `:tenant_id`, `:source_id` |
-  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts` |
+  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id` |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
+  | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:state` (`:open`, `:closed`) |
+  | `[:ankusa, :dispatch, :state]` | `:running`, `:claimed`, `:claimed_bytes`, `:runnable`, `:breakers_open` | `:instance` |
+  | `[:ankusa, :store, :state]` | `:hooks`, `:deliveries`, `:disk_bytes`, `:next_seq` | `:instance` |
+  | `[:ankusa, :queue, :state]` | `:pending`, `:scheduled`, `:inflight`, `:dead`, `:archive_pending`, `:oldest_due_age_ms` | `:instance` |
+  | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
+  | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
   | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id`, `:result` |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |

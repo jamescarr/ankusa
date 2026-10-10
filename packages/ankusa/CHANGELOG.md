@@ -11,6 +11,105 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **Readiness.** `GET /ready` on the ingest and admin listeners
+  (`Ankusa.Health.ready/1`): `200` while this node's store takes a synced
+  write (`Ankusa.Store.ready/1`, checked at most once a second, reopening the
+  store when a write fails) and no write has failed in the last 5 s, else
+  `503` with `Retry-After: 1` and
+  `store: "write_failed" | "store_unavailable"`. `/health` stays liveness.
+- **State gauges.** `Ankusa.Metrics.Gauges` (a `telemetry_poller`, new
+  dependency) samples the store, the queue index, the quarantine pen and disk
+  space every `admin.gauge_interval_ms` (15 s), and dispatch reports its
+  scheduler, as `[:ankusa, :store | :queue | :quarantine | :disk | :dispatch,
+  :state]` events and `/metrics` gauges (`ankusa_queue_pending`,
+  `ankusa_queue_oldest_due_age_seconds`, `ankusa_disk_free_bytes`,
+  `ankusa_dispatch_breakers_open`, …). `[:ankusa, :dispatch, :stop]` carries
+  `sink` and `source_id`; delivery counters gain a `sink` label.
+- **Per-sink isolation and circuit breakers.** Dispatch queues claimed rows
+  per `{source_id, sink index, module}` and hands slots round-robin across
+  them; `dispatch.sink_concurrency` caps one key's concurrent attempts. A key
+  that fails `dispatch.breaker_failures` (5) times in a row is parked for
+  `breaker_open_ms` (30 s), doubling up to `breaker_max_open_ms` (5 min), then
+  probed; parked rows spend no attempts. `[:ankusa, :dispatch, :breaker]` on
+  every transition.
+- **Sink error classes.** `{:error, {:permanent, term}}` dead-letters after
+  the attempt; `{:error, {:retry_after, ms, term}}` delays the next attempt
+  (capped at an hour). `Ankusa.Sink.classify/1`.
+- **Signed HTTP deliveries.** `Sink.Http` `:secret` (a `whsec_` secret or a
+  list) adds Standard Webhooks `webhook-id`/`webhook-timestamp`/
+  `webhook-signature` headers (`Ankusa.Sink.Http.Signer`).
+  `:max_response_bytes` (64 KiB) caps what is read of a response.
+- **Shared buckets.** `storage.key_prefix` puts every segment key under a
+  per-node prefix; `claim_check.blob_store` gives claims a store of their own
+  (a `LocalFS` one takes `:root`). Claim keys are never prefixed, so one
+  gateway serves every node.
+- **S3 credential chain.** With no static keys the S3 adapter reads
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, then web
+  identity (IRSA, STS `AssumeRoleWithWebIdentity`), then IMDSv2, caching
+  temporary credentials until shortly before expiry; `:session_token` is
+  signed when set.
+- Claim gateway: `HEAD /v1/claims/{tenant}/{claim_id}`.
+- `batcher.max_queue_bytes` (256 MiB): load shedding by buffered body bytes
+  as well as records; `[:ankusa, :load_shed]` carries `bytes`.
+- Boot-time range validation of every numeric config key (`"<key> must be
+  <constraint>, got <value>"`), and of embedded sources' verifier secrets
+  (`Ankusa.Verifier.validate_config!/1`, `Ankusa.Verifier.Hmac.validate_opts/1`).
+
+### Changed
+
+- **Circuit breakers are on by default** (`dispatch.breaker_failures: 5`): a
+  sink that keeps failing has its rows parked, without spending attempts,
+  instead of each retrying on the policy's schedule, so they reach the DLQ
+  later than before. `breaker_failures: 0` keeps the old behaviour. A replay
+  job counts its rows parked behind an open breaker toward auto-pause.
+- `Sink.Http` maps `400`, `401`, `403`, `404`, `410`, `413`, `422` to
+  `{:permanent, {:status, s}}` (dead-letter now) and honours `Retry-After` on
+  `408`, `429` and `5xx`.
+- **Breaking:** `Ankusa.BlobStore` calls take a scope —
+  `put(instance, :segments | :claims, key, data)` and so on — and the
+  `list/3` callback returns `{:ok, keys} | {:error, reason}`, following every
+  adapter's pagination (S3, GCS, Azure, OCI) to the end.
+- **Breaking:** `c:Ankusa.SourceStore.fetch/2` may return
+  `{:error, :unavailable}`: ingest answers `503 store_unavailable` instead of
+  `404`, dispatch reschedules the row a second later with attempts unchanged
+  instead of dead-lettering it as `:source_gone`, and a replay job retries
+  its page.
+- **Breaking:** the route snapshot lives in a per-instance ETS table
+  published in generations (`Ankusa.Routes.Snapshot`), not
+  `:persistent_term`; the removed `Ankusa.Routes.snapshot` function is replaced by
+  `Ankusa.Routes.meta/1`.
+- A source with a `tenant_id` other than `"default"` answers only routes
+  naming that tenant (any other is `404`); `"default"` sources stay shared.
+- A hook accepted flagged (`accept_flag`) spends its source's quarantine
+  bucket.
+- Single-claim pack ids are the check-in time plus 64 random bits (no longer
+  derived from the hook id and its receive time); retention counts from
+  check-in.
+- Claim gateway: `cache-control: private, max-age=31536000, immutable`; `503`
+  bodies carry only the error code; a store `403` is
+  `503 store_forbidden` with `Retry-After: 60`.
+
+### Fixed
+
+- The claim sweeper no longer stops at a partition it cannot delete
+  (`File.rm_rf/1`, logged); `claim_check.retention_days` must be `nil` or
+  ≥ 1, and `sweep_interval_ms` positive.
+- The S3 and Azure managed-identity credential caches are created when the
+  `:ankusa` application starts; they used to belong to whichever request or task
+  filled them first and vanished with it, so temporary credentials were
+  fetched again on almost every call.
+- The route snapshot table is owned by `Ankusa.Routes.TableOwner` and lent to
+  the routes store, so a store crash no longer deletes it, and the restarted
+  store resumes from it (`Ankusa.Routes.Snapshot.adopt/1`): the ETS store keeps
+  API-created routes across a store crash instead of re-seeding from config.
+- A `{:permanent, _}` answer to a breaker's probe closes the breaker; it used
+  to leave the probe slot taken, parking the key forever.
+- `storage.key_prefix` is applied when a segment is named and the catalogue
+  keeps the full key, so changing the prefix no longer strands archived
+  segments.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

@@ -100,7 +100,10 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    pluggable seam that turns a URL into `%Ankusa.Route{source_id, tenant_id}`
    (see [`multi-tenancy.md`](multi-tenancy.md)). It then does everything that
    can refuse the request *before reading its body*: a `Content-Length` above
-   `max_body_bytes` is `413`, and a source that does not exist is `404`. Only
+   `max_body_bytes` is `413`, and a source that does not exist is `404` — so
+   is a source owned by one tenant asked for under another tenant's URL (a
+   source with the default tenant `"default"` is shared and answers any
+   tenant), and a source store that cannot answer is `503`, never `404`. Only
    then does it read the body, still bounded by `max_body_bytes` as it streams
    (a chunked body has no length to check up front). Refusals are counted on
    `ankusa_ingest_refused_total{instance,reason}` and never create a
@@ -120,7 +123,10 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
      (`rate_limits`) before anything is written. Over the limit is `429` with
      `Retry-After`, nothing stored — and because the charge comes after
      verification, a flood of forged requests spends no budget and can never
-     lock a tenant out. See
+     lock a tenant out. A forged hook is not free either: one accepted
+     *flagged* (`accept_flag`) or quarantined spends its source's quarantine
+     bucket (`429 quarantine_rate_limited` past it), and a flagged hook gets
+     no dedupe key, so it cannot suppress the real event. See
      [`configuration.md#rate-limits`](configuration.md#rate-limits).
 3. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default two)
    receives the envelope and **blocks the caller** until the batch it lands
@@ -129,8 +135,9 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    it and commits the instant the previous one returns. `max_batch`
    (default 256) bounds one batch, `max_delay_ms` (default 0) adds no linger.
    Every blocked caller is replied to only after that commit returns; that's
-   what makes the ack honest. The queue is bounded (`max_queue`, default
-   10,000, counting buffered *and* in-flight records): full means `503` with
+   what makes the ack honest. The queue is bounded twice — `max_queue`
+   (default 10,000) records and `max_queue_bytes` (default 256 MiB) of body,
+   both counting buffered *and* in-flight records: full means `503` with
    `Retry-After`, never a promise the store can't back.
 4. **`Ankusa.Queue`** commits the batch to the store durably and returns
    `{:committed, envelope}` (with `seq` assigned) or `{:duplicate, envelope}`
@@ -161,10 +168,12 @@ From here, ingest is done. Two independent consumers work off the same store:
 - **`Ankusa.Dispatch.Pipeline`** is a scheduler over delivery rows: it claims
   due rows (up to `dispatch.concurrency` at a time, bounded by
   `dispatch.max_inflight` claims and `dispatch.max_inflight_bytes` of stored
-  hook bodies), delivers each to the sink its row was bound to, retries per
-  the source's `Ankusa.RetryPolicy`, and dead-letters on give-up. Delivery is
-  not ordered; a consumer that needs order has to rebuild it from data it
-  receives and tolerate redelivery. Detail in [`delivery.md`](delivery.md).
+  hook bodies), queues them per sink key, hands slots round-robin across the
+  keys, delivers each to the sink its row was bound to, retries per the
+  source's `Ankusa.RetryPolicy`, parks a key whose circuit breaker is open,
+  and dead-letters on give-up. Delivery is not ordered; a consumer that needs
+  order has to rebuild it from data it receives and tolerate redelivery.
+  Detail in [`delivery.md`](delivery.md).
 
 ## Guarantees, by component
 
@@ -238,9 +247,18 @@ aws s3api put-bucket-lifecycle-configuration --bucket ankusa-archive \
 
 ## Instance model
 
-Every process is registered through a single `Registry` (`Ankusa.Registry`)
-with a `via` tuple keyed by instance name (`Ankusa.via(instance, key)`). There
-are no global process names anywhere in the framework. That's what makes two
+Every instance-scoped process is registered through a single `Registry`
+(`Ankusa.Registry`) with a `via` tuple keyed by instance name
+(`Ankusa.via(instance, key)`) — the adapters' connections too
+(`Sink.RabbitMQ` keys its connection by a digest of the URL, `Sink.NATS` by
+its `:connection`). Nothing registers a `:global` or cluster-wide name. The
+node-local names left are shared by every instance on purpose: each adapter
+package's own `DynamicSupervisor` (started by its `Application`); brod's
+client id, an atom that `Sink.Kafka` scopes as
+`:"ankusa_kafka.<instance>.<client>"`; the S3 credential cache
+(`:ankusa_s3_credentials`), one ETS table keyed by credential source; and, in
+the image only, `AnkusaServer.GcsToken`. Each instance's route snapshot is
+its own named ETS table. That's what makes two
 independent instances runnable in one VM (and what makes the test suite
 `async: true`-safe for anything that doesn't share on-disk state).
 
@@ -248,7 +266,16 @@ Config is a `%Ankusa.Config{}` struct built once and passed down the
 supervision tree at start (`Ankusa.Instance`'s `init/1`), then cached in
 `:persistent_term` for read-mostly access. No `Application.get_env/2`
 buried in call sites, and instance-scoped config falls out of the struct for
-free.
+free. Data that changes at runtime stays out of `:persistent_term` (whose
+every update copies into every process that read it): the route table is an
+ETS table the routes store writes (a small owner process keeps it across a
+store restart, and the restarted store resumes from it: API-created routes
+survive a store crash, and the Redis store resumes from it without waiting on
+Redis). One route edit rewrites that route's rows and
+a `:meta` row; a whole-table publish (boot, seed, a Redis reload) writes a new
+generation and flips `:meta` to it, so readers see one table or the other.
+A thousand route edits cost a thousand small inserts, not a thousand global
+copies.
 
 **Roles** (`:edge`, `:dispatch`, `:storage`) boot independently based on
 `config.roles`. The same release runs all three on a laptop, and `roles` is
@@ -357,11 +384,13 @@ instead, and one that wants SQS or another broker in between runs a bridge
 (see [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)).
 
 Each ingest node here is an ordinary all-role node, the topology-1 shape, with
-its own store, and the nodes share nothing but the broker and the
-provider's traffic. Give each node **its own bucket** (or its own LocalFS
-directory) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg` and
-remote blob stores ignore the instance, so nodes sharing one bucket overwrite
-each other's segments.
+its own store, and the nodes share nothing but the broker, the provider's
+traffic, and — if you like — one bucket. Segment keys are
+`seg/<first_seq>-<last_seq>.seg`, so nodes sharing a bucket each set their
+own `storage.key_prefix` (`node-a/`, …) or they overwrite each other's
+segments. Claim keys are never prefixed — claim ids are unique across nodes —
+so the claim store (the bucket, or a dedicated `claim_check.store`) is shared
+by every node and one gateway serves them all.
 
 ```mermaid
 flowchart LR
@@ -434,3 +463,16 @@ back). Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
 code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for
 the full event list and measurement/metadata shapes.
+
+Counters say what happened; the `:state` events (`[:ankusa, :store | :queue |
+:quarantine | :disk | :dispatch, :state]`) say where the node stands.
+`Ankusa.Metrics.Gauges` samples the store, the queue index, the quarantine
+pen and the data volume's disk every `admin.gauge_interval_ms` (15 s), and
+dispatch reports its scheduler on every housekeeping tick, so `/metrics`
+carries `ankusa_store_hooks`, `ankusa_queue_pending` / `_scheduled` /
+`_inflight` / `_dead` / `_archive_pending`, `ankusa_queue_oldest_due_age_seconds`,
+`ankusa_quarantine_bytes`, `ankusa_disk_free_bytes`, `ankusa_dispatch_running`
+/ `_claimed` / `_runnable` and `ankusa_dispatch_breakers_open` — enough to
+alert on a growing backlog, a filling disk or an open breaker before a
+provider sees a `503`. Per-delivery counters carry the sink module as a
+`sink` label.

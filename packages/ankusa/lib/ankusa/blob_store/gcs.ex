@@ -70,20 +70,24 @@ defmodule Ankusa.BlobStore.GCS do
     :ok
   end
 
+  # Every page (`nextPageToken`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts) do
-    url = media_url(opts, "o", [{"prefix", prefix}])
+  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
 
-    case request(opts, :get, url, nil, [], nil) do
-      {:ok, body} ->
-        case JSON.decode(body) do
-          {:ok, %{"items" => items}} -> items |> Enum.map(& &1["name"]) |> Enum.sort()
-          {:ok, _no_items} -> []
-          {:error, _reason} -> []
-        end
+  defp list_pages(opts, prefix, token, acc) do
+    query = [{"prefix", prefix}] ++ if(token, do: [{"pageToken", token}], else: [])
 
-      {:error, _reason} ->
-        []
+    with {:ok, body} <- request(opts, :get, media_url(opts, "o", query), nil, [], nil),
+         {:ok, page} when is_map(page) <- JSON.decode(body) do
+      acc = [page |> Map.get("items", []) |> Enum.map(& &1["name"]) | acc]
+
+      case page["nextPageToken"] do
+        next when is_binary(next) and next != "" -> list_pages(opts, prefix, next, acc)
+        _ -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      {:ok, _not_a_page} -> {:error, :list_unreadable}
     end
   end
 

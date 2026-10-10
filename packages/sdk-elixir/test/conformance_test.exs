@@ -16,6 +16,7 @@ defmodule Ankusa.SDK.ConformanceTest do
     Message,
     Recorder,
     Routes,
+    Signature,
     Webhook
   }
 
@@ -28,6 +29,7 @@ defmodule Ankusa.SDK.ConformanceTest do
     "ClaimIntegrityError" => Ankusa.SDK.ClaimIntegrityError,
     "ClaimCheckUnavailableError" => Ankusa.SDK.ClaimCheckUnavailableError,
     "MissingHookIdError" => Ankusa.SDK.MissingHookIdError,
+    "InvalidSignatureError" => Ankusa.SDK.InvalidSignatureError,
     "InvalidRouteIdError" => Ankusa.SDK.InvalidRouteIdError,
     "RouteNotFoundError" => Ankusa.SDK.RouteNotFoundError,
     "RoutesRejectedError" => Ankusa.SDK.RoutesRejectedError,
@@ -142,6 +144,18 @@ defmodule Ankusa.SDK.ConformanceTest do
   defp run("parse_claim_ref", _case, _params_by_id, input, _base_url, _recorder) do
     ref = unwrap!(ClaimRef.parse(input["ref"]))
     %{"tenant_id" => ref.tenant_id, "claim_id" => ref.claim_id, "path" => ref.path}
+  end
+
+  defp run("verify_signature", _case, _params_by_id, input, _base_url, _recorder) do
+    opts =
+      case Map.fetch(input, "tolerance_seconds") do
+        {:ok, tolerance} -> [now: input["now"], tolerance_seconds: tolerance]
+        :error -> [now: input["now"]]
+      end
+
+    body = if input["body"], do: ConformanceGateway.body_bytes(input["body"]), else: ""
+    verified = unwrap!(Signature.verify(input["headers"], body, input["secrets"], opts))
+    %{"id" => verified.id, "timestamp" => verified.timestamp}
   end
 
   defp run("parse_headers", _case, _params_by_id, input, _base_url, _recorder) do

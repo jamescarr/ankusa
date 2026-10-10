@@ -7,7 +7,7 @@
 #
 #   S3_BUCKET  S3_REGION  S3_ENDPOINT
 #   AWS_ACCESS_KEY_ID         AWS_SECRET_ACCESS_KEY  GCS_BUCKET
-#   STRIPE_WHSEC  SINK_URL  RABBITMQ_URL
+#   STRIPE_WHSEC  SINK_URL  SINK_WHSEC  RABBITMQ_URL
 #   RABBITMQ_EXCHANGE         KAFKA_BROKERS  KAFKA_TOPIC  KAFKA_USERNAME
 #   KAFKA_SASL_PASSWORD       NATS_SERVERS  NATS_SUBJECT  NATS_USERNAME
 #   NATS_PASSWORD             STANDARD_WEBHOOKS_SECRET   GITHUB_WEBHOOK_SECRET
@@ -46,6 +46,11 @@ admin:
   # [env ANKUSA_ADMIN_IP] the address it binds. Loopback by default, so inside
   # a container `-p 4002:4002` does not reach it; set 0.0.0.0 to publish it.
   ip: 127.0.0.1
+  # How often the /metrics gauges (store, queue and quarantine depth, disk
+  # free, dispatch in-flight, open breakers) are sampled. Health is GET
+  # /health (the process answers) and GET /ready (the store takes a synced
+  # write; 503 + Retry-After otherwise) on this port and on the ingest port.
+  gauge_interval_ms: 15000
 
 routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
@@ -175,6 +180,9 @@ batcher:
   # Full queue = shed load with 503 rather than grow without bound. Counts
   # buffered *and* in-flight records.
   max_queue: 10000
+  # The same bound in bytes of body (default 256 MiB): a burst of large hooks
+  # sheds load before it can exhaust memory, whatever the record count.
+  max_queue_bytes: 268435456
 
 dispatch:
   batch: 128
@@ -189,6 +197,17 @@ dispatch:
   # as a failed attempt (the sink may still complete it; consumers dedupe on
   # the idempotency key). Keep it above every sink's own timeout.
   attempt_timeout_ms: 30000
+  # Per-sink isolation. Each sink of each source has its own queue; at most
+  # sink_concurrency attempts of one sink run at once (null = only the global
+  # `concurrency`), so a slow destination cannot take every slot.
+  sink_concurrency: null
+  # A sink that fails breaker_failures times in a row (0 = never) is skipped
+  # for breaker_open_ms, doubling on each consecutive open up to
+  # breaker_max_open_ms; its rows wait (attempts unchanged) and one probe
+  # closes it. Breaker state is in memory: a restart closes every breaker.
+  breaker_failures: 5
+  breaker_open_ms: 30000
+  breaker_max_open_ms: 300000
   retry:
     base_ms: 100
     max_ms: 300000
@@ -211,15 +230,22 @@ storage:
   # Segment rollover: whichever comes first.
   roll_bytes: 16777216
   roll_ms: 30000
-  # Used only when type: s3. Omit access_key_id/secret_access_key to fall back
-  # to AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (static keys only: instance
-  # profiles and IRSA are not supported by this adapter yet).
+  # [env ANKUSA_STORAGE_KEY_PREFIX] prepended to every segment key ("" or one
+  # or more `name/` parts), so several nodes can share one bucket: give each
+  # its own, e.g. "node-a/". Claims are never prefixed (see claim_check.store).
+  key_prefix: ""
+  # Used only when type: s3. Credentials come from, in order: these keys, the
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN env vars,
+  # web identity (IRSA: AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN), then the
+  # EC2 instance profile (IMDSv2).
   s3:
     bucket: "${S3_BUCKET}"
     region: "${S3_REGION}"
     endpoint: "${S3_ENDPOINT}"
     access_key_id: "${AWS_ACCESS_KEY_ID}"
     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+    # Temporary credentials only, beside the two keys above.
+    # session_token: "${AWS_SESSION_TOKEN}"
   # Used only when type: gcs.
   gcs:
     bucket: "${GCS_BUCKET}"
@@ -242,6 +268,14 @@ claim_check:
   # LocalFS retention only. nil disables the sweeper; use a bucket lifecycle
   # rule for S3/GCS.
   retention_days: null
+  # Where claims live: unset = the storage bucket above. Same shape as
+  # `storage` (type local | s3 | gcs, its s3:/gcs: block, plus `root` for a
+  # local store). Set it identically on every claim-writing node and on the
+  # gateway; give the gateway's credential read *and* list (s3:ListBucket), or
+  # a missing claim reads as 403 instead of 404.
+  # store:
+  #   type: s3
+  #   s3: {bucket: "${CLAIMS_BUCKET}", region: "${S3_REGION}"}
   # The gateway performs no authentication. Keep 4001 internal and put your
   # proxy, mesh, or network policy in front of it, the same as 4002.
 
@@ -294,6 +328,12 @@ sources:
         timeout_ms: 5000
         headers:
           x-ankusa-env: prod
+        # Sign every delivery (Standard Webhooks: webhook-id, -timestamp,
+        # -signature); a whsec_ secret, or a list while rotating. Every SDK
+        # verifies it (see docs/integrations.md).
+        secret: "${SINK_WHSEC}"
+        # Only the status is used; at most this much of the response is read.
+        max_response_bytes: 65536
       - type: rabbitmq
         url: "${RABBITMQ_URL}"
         exchange: "${RABBITMQ_EXCHANGE}"
@@ -301,6 +341,9 @@ sources:
         exchange_type: topic
         routing_key: "ankusa.stripe"
         inline_max_bytes: 8192
+        # Publishes awaiting a broker confirm on this connection; past it a
+        # publish fails fast as busy (retried) instead of queueing.
+        max_inflight: 256
       - type: kafka
         # A list of host:port, or one comma-separated string — so
         # `brokers: "${KAFKA_BROKERS}"` takes "host:port,host:port" from env.
@@ -309,6 +352,9 @@ sources:
         # Static string only (a fun is an embedding API, not a config surface).
         key: stripe
         inline_max_bytes: 8192
+        # The largest value + key produced; a bigger record is dead-lettered at
+        # once instead of being retried against the broker's message.max.bytes.
+        max_record_bytes: 1000000
         # Omit both to talk to a plaintext broker.
         ssl: false
         sasl:
@@ -319,7 +365,7 @@ sources:
       - type: nats
         # A list of host:port, or one comma-separated string — so
         # `servers: "${NATS_SERVERS}"` takes "host:port,host:port" from env.
-        # More than one is failover order, not fan-out.
+        # More than one is failover (one at a time, picked at random), not fan-out.
         servers: ["${NATS_SERVERS}"]
         # A subject, not a stream: the sink never creates one, so a stream that
         # covers this subject has to exist.

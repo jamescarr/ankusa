@@ -35,21 +35,17 @@ defmodule Ankusa.Sink.Redis do
   ## Process model
 
   The first `deliver/3` for an `{instance, url}` pair starts a `Redix`
-  connection under this package's `DynamicSupervisor`, **synchronously**
-  (`sync_connect: true`): by the time `deliver/3` has a connection to publish
-  through, the socket is up or the start already returned the reason it
-  isn't. A failed first connect is `{:error, {:connection, reason}}`
-  (`:econnrefused`, `:timeout`, a rejected credential), retried by the
-  source's `Ankusa.RetryPolicy`, then dead-lettered, exactly like any other
-  sink failure; errors answered by a live server (NOAUTH, WRONGPASS) are
-  `{:error, {:redis, message}}`.
+  connection under this package's `DynamicSupervisor` and returns at once
+  (`sync_connect: false`): the connect runs in the connection, never in the
+  caller or the `DynamicSupervisor`, so a slow or dead server cannot stall
+  other deliveries behind it. A publish before the socket is up is `{:error,
+  {:connection, :closed}}`, retried by the source's `Ankusa.RetryPolicy`, then
+  dead-lettered, exactly like any other sink failure; errors answered by a
+  live server (NOAUTH, WRONGPASS) are `{:error, {:redis, message}}`.
 
-  The child is `:temporary` — a server that is down must not crash-loop
-  against the supervisor — so nothing is restarted here, and the next
-  `deliver/3` tries again inside the retry policy. Once connected, Redix
-  reconnects on its own with backoff, and a publish sent meanwhile is
-  `{:error, {:connection, :closed}}`. In the narrow window where the
-  connection dies between the registry lookup and the call, `deliver/3`
+  Redix keeps (re)connecting on its own with backoff, and a publish sent
+  meanwhile is `{:error, {:connection, :closed}}`. In the narrow window where
+  the connection dies between the registry lookup and the call, `deliver/3`
   returns `{:error, :not_connected}` — also just a retry.
 
   Connections are keyed by URL and registered as `{:redis_sink, url}` under
@@ -177,17 +173,15 @@ defmodule Ankusa.Sink.Redis do
     end
   end
 
-  # `sync_connect: true`: the socket is up, or this returns the reason it
-  # isn't — no "connected" connection that is still dialing.
+  # `sync_connect: false`: the connection dials on its own, and keeps doing so
+  # with backoff; the start never waits on the network. `:temporary` because a
+  # connection that does exit (a bad URL) is started again by the next
+  # `deliver/3`, not crash-looped here.
   defp start_connection(instance, url) do
     child = %{
       id: key(url),
       start:
-        {Redix, :start_link, [url, [name: Ankusa.via(instance, key(url)), sync_connect: true]]},
-      # :temporary: restarting a synchronous connect that keeps failing would
-      # crash-loop past the supervisor's intensity and take the application
-      # down. The next `deliver/3` starts it again, inside the source's retry
-      # policy.
+        {Redix, :start_link, [url, [name: Ankusa.via(instance, key(url)), sync_connect: false]]},
       restart: :temporary
     }
 

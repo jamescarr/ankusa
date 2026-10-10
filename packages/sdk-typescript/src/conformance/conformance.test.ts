@@ -54,6 +54,7 @@ const ERROR_CLASSES: Record<string, unknown> = {
   ClaimIntegrityError: sdk.ClaimIntegrityError,
   ClaimCheckUnavailableError: sdk.ClaimCheckUnavailableError,
   MissingHookIdError: sdk.MissingHookIdError,
+  InvalidSignatureError: sdk.InvalidSignatureError,
   RoutesError: sdk.RoutesError,
   RoutesUnavailableError: sdk.RoutesUnavailableError,
   RouteNotFoundError: sdk.RouteNotFoundError,
@@ -223,6 +224,15 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
     case "parse_claim_ref": {
       const parsed = sdk.parseClaimRef(input.ref as string);
       return { tenant_id: parsed.tenantId, claim_id: parsed.claimId, path: parsed.path };
+    }
+    case "verify_signature": {
+      return sdk.verifySignature({
+        headers: input.headers ?? {},
+        body: bodyBytes(input.body as Body | undefined),
+        secrets: input.secrets as string[],
+        now: input.now as number,
+        ...(input.tolerance_seconds === undefined ? {} : { toleranceSeconds: input.tolerance_seconds as number }),
+      });
     }
     case "parse_headers": {
       const parsed = sdk.parseHeaders(input.headers ?? {});

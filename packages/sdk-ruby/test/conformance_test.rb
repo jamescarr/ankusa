@@ -23,6 +23,7 @@ CONFORMANCE_ERROR_CLASSES = %w[
   ClaimIntegrityError
   ClaimCheckUnavailableError
   MissingHookIdError
+  InvalidSignatureError
   RoutesError
   InvalidRouteIdError
   RoutesUnavailableError
@@ -100,6 +101,11 @@ class ConformanceTest < Minitest::Test
     when "parse_claim_ref"
       ref = Ankusa.parse_claim_ref(input.fetch("ref"))
       {"tenant_id" => ref.tenant_id, "claim_id" => ref.claim_id, "path" => ref.path}
+    when "verify_signature"
+      options = {now: input.fetch("now")}
+      options[:tolerance_seconds] = input.fetch("tolerance_seconds") if input.key?("tolerance_seconds")
+      verified = Ankusa.verify_signature(input.fetch("headers"), body_bytes(input["body"]), input.fetch("secrets"), **options)
+      {"id" => verified.id, "timestamp" => verified.timestamp}
     when "parse_headers"
       headers = Ankusa.parse_headers(input.fetch("headers"))
       {

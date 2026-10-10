@@ -15,8 +15,11 @@ defmodule Ankusa.BlobStore.S3 do
 
     * `:bucket`            — required
     * `:region`            — required, e.g. `"us-east-1"`
-    * `:access_key_id`     — default `System.get_env("AWS_ACCESS_KEY_ID")`
-    * `:secret_access_key` — default `System.get_env("AWS_SECRET_ACCESS_KEY")`
+    * `:access_key_id`, `:secret_access_key`, `:session_token` — static
+                              credentials. Without them the chain in
+                              `Ankusa.BlobStore.S3.Credentials` runs: the
+                              `AWS_*` environment, web identity (IRSA), then
+                              the EC2 instance role (IMDSv2)
     * `:endpoint`          — default `"https://s3.\#{region}.amazonaws.com"`;
                               point at `http://localhost:4566` for floci/MinIO
     * `:timeout_ms`        — default `10_000`, for both connect and response
@@ -80,15 +83,27 @@ defmodule Ankusa.BlobStore.S3 do
     :ok
   end
 
+  # ListObjectsV2 pages hold at most 1,000 keys: follow the continuation token
+  # to the end. A failed page fails the listing — a short list would read as
+  # "these are all the keys".
   @impl true
-  def list(_instance, prefix, opts) do
-    url =
-      endpoint(opts) <>
-        "/" <> bucket(opts) <> "?" <> URI.encode_query(list_query(prefix), :rfc3986)
+  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
 
-    case signed_request(opts, :get, url, nil, []) do
-      {:ok, body} -> parse_list_keys(body)
-      {:error, _reason} -> []
+  defp list_pages(opts, prefix, token, acc) do
+    query =
+      [{"list-type", "2"}, {"prefix", prefix}] ++
+        if(token, do: [{"continuation-token", token}], else: [])
+
+    url = endpoint(opts) <> "/" <> bucket(opts) <> "?" <> URI.encode_query(query, :rfc3986)
+
+    with {:ok, body} <- signed_request(opts, :get, url, nil, []),
+         {:ok, keys, next} <- parse_list_page(body) do
+      acc = [keys | acc]
+
+      case next do
+        nil -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+        token -> list_pages(opts, prefix, token, acc)
+      end
     end
   end
 
@@ -100,19 +115,26 @@ defmodule Ankusa.BlobStore.S3 do
   end
 
   defp signed_request(opts, method, url, body, extra_headers) do
+    with {:ok, creds} <- Ankusa.BlobStore.S3.Credentials.get(opts) do
+      send_signed(opts, creds, method, url, body, extra_headers)
+    end
+  end
+
+  defp send_signed(opts, creds, method, url, body, extra_headers) do
     region = Keyword.fetch!(opts, :region)
-    access_key = Keyword.get(opts, :access_key_id) || System.fetch_env!("AWS_ACCESS_KEY_ID")
-    secret = Keyword.get(opts, :secret_access_key) || System.fetch_env!("AWS_SECRET_ACCESS_KEY")
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
 
     # The signature covers the host header, so it has to be derived from the same
     # URL handed to the signer — not from anything the HTTP client might do.
-    headers = [{"host", authority(url)} | stringify(extra_headers)]
+    # Temporary credentials add their session token as a signed header.
+    headers =
+      [{"host", authority(url)} | stringify(extra_headers)] ++
+        if(creds.session_token, do: [{"x-amz-security-token", creds.session_token}], else: [])
 
     signed =
       :aws_signature.sign_v4(
-        access_key,
-        secret,
+        creds.access_key_id,
+        creds.secret_access_key,
         region,
         "s3",
         :calendar.universal_time(),
@@ -155,8 +177,6 @@ defmodule Ankusa.BlobStore.S3 do
     |> Enum.map_join("/", &URI.encode(&1, unreserved))
   end
 
-  defp list_query(prefix), do: [{"list-type", "2"}, {"prefix", prefix}]
-
   defp authority(url) do
     %URI{host: host, port: port, scheme: scheme} = URI.parse(url)
     default = if scheme == "https", do: 443, else: 80
@@ -176,22 +196,35 @@ defmodule Ankusa.BlobStore.S3 do
   # ── ListObjectsV2 XML (stdlib :xmerl, no dependency needed for one xpath) ──
 
   # A 200 body is not guaranteed to be ListObjectsV2 XML — a proxy error page or
-  # an emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document,
-  # and this runs inside the claim-check sweeper, so a bad body has to read as
-  # "no keys" instead of taking that process down.
+  # an emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document;
+  # that is an error for the listing, never a crash of the caller.
   #
   # The scanner is handed the raw bytes, not a charlist: it decodes the UTF-8 the
   # document declares, so codepoints above 127 read as illegal characters and a
   # listing containing one non-ASCII key would come back empty. Bytes that are not
   # valid UTF-8 in the first place exit the same way.
-  defp parse_list_keys(xml_body) do
+  defp parse_list_page(xml_body) do
     {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
 
-    ~c"//Contents/Key/text()"
-    |> :xmerl_xpath.string(doc)
-    |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
-    |> Enum.sort()
+    keys =
+      ~c"//Contents/Key/text()"
+      |> :xmerl_xpath.string(doc)
+      |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
+
+    truncated? = text(doc, ~c"//IsTruncated/text()") == "true"
+    next = if truncated?, do: text(doc, ~c"//NextContinuationToken/text()")
+
+    if truncated? and next == nil,
+      do: {:error, :list_truncated_without_token},
+      else: {:ok, keys, next}
   catch
-    :exit, _not_xml -> []
+    :exit, _not_xml -> {:error, :list_unreadable}
+  end
+
+  defp text(doc, path) do
+    case :xmerl_xpath.string(path, doc) do
+      [{:xmlText, _parents, _pos, _lang, value, _type} | _] -> List.to_string(value)
+      _ -> nil
+    end
   end
 end

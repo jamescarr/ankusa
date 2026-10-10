@@ -173,6 +173,25 @@ one is `MissingHookIdError`. Delivery is at-least-once: dedupe on
 `replayId()` and `idempotencyKey()` are null when absent (a `dedupeKey`,
 `replayId` or `idempotencyKey` header that is present but empty is also null).
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way. Verify the raw
+body before trusting it; answer `401` when it fails:
+
+```java
+try {
+  Signature.verify(
+      request::getHeader, body, List.of(secret), Signature.DEFAULT_TOLERANCE, Instant.now());
+} catch (InvalidSignatureError e) {
+  response.setStatus(401); // e.code(), e.field()
+}
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own UTF-8
+bytes; pass several during a rotation. `DEFAULT_TOLERANCE` is 5 minutes.
+Signatures are compared with `MessageDigest.isEqual`.
+
 ## Consuming queue messages
 
 Ankusa publishes each delivery as a JSON v1 message over the configured
@@ -265,10 +284,11 @@ its own subtypes (`ClaimCheckError`, `RoutesError`, `AdminError`,
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64 lowercase hex chars |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`status()`, `body()`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`status()`, `body()`) |
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
-| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, an unfollowed `3xx`, or any other non-`200` |
+| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, `408`, `429`, an unfollowed `3xx`, or any other non-`200` |
 | `MissingHookIdError` | `false` | `x-ankusa-id` is absent or empty |
+| `InvalidSignatureError` | `false` | a signed delivery does not verify (`code()`, `field()`) |
 | `InvalidMessageError` | `false` | a queue message is not a valid v1 message (`code()`, `field()`) |
 | `InvalidRouteIdError` | `false` | route id is null, empty, or exactly `.`/`..` |
 | `RouteNotFoundError` | `false` | routes listener `404` |

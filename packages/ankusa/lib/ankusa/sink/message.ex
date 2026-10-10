@@ -134,15 +134,20 @@ defmodule Ankusa.Sink.Message do
   end
 
   @doc """
-  Check `env`'s body in on its own, as a one-claim pack. The pack id is
-  derived from the envelope (its receive time and a hash of its id), so a
-  retry rewrites the same object instead of orphaning one.
+  Check `env`'s body in on its own, as a one-claim pack under a fresh pack id
+  (`Ref.new_pack_id/0`: the current time and 64 random bits, the entropy every
+  batch pack has). Nothing about the id is derivable from the hook, and its
+  date partition is the check-in day, so retention counts from when the object
+  was written.
+
+  Dispatch persists the ref with the attempt's outcome (`fresh_claim`, see
+  `Ankusa.Dispatch.Pipeline`), so a retry reuses it. A crash between the
+  check-in and that write orphans one object, which retention sweeps.
   """
   @spec check_in(atom(), Envelope.t()) ::
           {:ok, ClaimCheck.claim()} | {:error, ClaimCheck.reason()}
   def check_in(instance, %Envelope{} = env) do
-    <<entropy::binary-8, _::binary>> = :crypto.hash(:sha256, env.id)
-    opts = [pack_id: Ref.pack_id(env.received_at, entropy)]
+    opts = [pack_id: Ref.new_pack_id()]
 
     with {:ok, claims} <- ClaimCheck.check_in(instance, env.tenant_id, [claim_item(env)], opts) do
       {:ok, Map.fetch!(claims, env.id)}

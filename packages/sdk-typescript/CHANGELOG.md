@@ -6,6 +6,20 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `verifySignature({ headers, body, secrets, toleranceSeconds?, now? })`
+  verifies the Standard Webhooks signature an HTTP sink with a `secret` adds
+  (`webhook-id`, `webhook-timestamp`, `webhook-signature`), comparing in
+  constant time and checking the timestamp window (default 300 s). Failures
+  are `InvalidSignatureError` (`code`, `field`, `retryable: false`).
+
+### Changed
+
+- `redeem()` treats a gateway `408` or `429` as `ClaimCheckUnavailableError`
+  (retryable) instead of `ClaimRejectedError`: a throttled or timed-out
+  gateway is a reason to come back, not a missing claim.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

@@ -46,6 +46,15 @@ defmodule Ankusa.Store do
   # all.
   @reopen_interval_ms 5_000
 
+  # A readiness answer is reused for this long, so a probe storm from load
+  # balancers and the container healthcheck costs one synced write a second.
+  @ready_cache_ms 1_000
+
+  # A write any process saw fail keeps the node unready this long. The probe
+  # alone is not enough: on a full disk RocksDB's preallocated WAL still takes
+  # its few bytes while an ingest batch of real hooks is refused.
+  @write_failure_window_ms 5_000
+
   # `tolerate_corrupted_tail_records` drops a torn tail and fails the open on
   # any damage before it. `paranoid_checks` makes every read report corruption
   # instead of returning possibly-wrong bytes.
@@ -96,7 +105,10 @@ defmodule Ankusa.Store do
                retry_open_ms: retry_open_ms,
                retry_ref: nil,
                reopen_interval_ms: reopen_interval_ms,
-               last_reopen: nil
+               last_reopen: nil,
+               ready_at: nil,
+               ready_result: :ok,
+               last_write_failure: nil
              })}
           end
 
@@ -231,13 +243,70 @@ defmodule Ankusa.Store do
     end
   end
 
+  def handle_call(:ready, _from, %{db: nil} = state),
+    do: {:reply, {:error, :store_unavailable}, state}
+
+  def handle_call(:ready, _from, state) do
+    now = System.monotonic_time(:millisecond)
+
+    cond do
+      state.last_write_failure != nil and
+          now - state.last_write_failure < @write_failure_window_ms ->
+        {:reply, {:error, :write_failed}, state}
+
+      state.ready_at != nil and now - state.ready_at < @ready_cache_ms ->
+        {:reply, state.ready_result, state}
+
+      true ->
+        {result, state} = probe_write(state)
+
+        {:reply, result,
+         %{state | ready_at: System.monotonic_time(:millisecond), ready_result: result}}
+    end
+  end
+
+  # One synced write of a meta key: the cheapest operation that exercises the
+  # same path an ingest commit does (WAL append + fsync). A failure takes the
+  # reopen path a failed commit report takes, so a latched background error is
+  # cleared by the probe as well.
+  defp probe_write(state) do
+    value = <<System.system_time(:millisecond)::64>>
+    cf = Map.fetch!(state.cfs, :default)
+
+    case :rocksdb.put(state.db, cf, Keys.meta("ready_probe"), value, sync: true) do
+      :ok ->
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.warning("[ankusa] readiness probe write failed: #{inspect(reason)}")
+
+        state =
+          if reopen_due?(state) do
+            state =
+              case reopen_db(state) do
+                {:ok, state} -> state
+                {:error, _reason, state} -> state
+              end
+
+            %{state | last_reopen: System.monotonic_time(:millisecond)}
+          else
+            state
+          end
+
+        {{:error, reason}, state}
+    end
+  end
+
   # A write failed in some process (see `report_write_failure/2`). A closed
   # store is already retrying by itself, and a reopen that just ran has done
   # what another one would.
   @impl true
-  def handle_cast({:write_failed, _reason}, %{db: nil} = state), do: {:noreply, state}
+  def handle_cast({:write_failed, _reason}, %{db: nil} = state),
+    do: {:noreply, %{state | last_write_failure: System.monotonic_time(:millisecond)}}
 
   def handle_cast({:write_failed, reason}, state) do
+    state = %{state | last_write_failure: System.monotonic_time(:millisecond)}
+
     if reopen_due?(state) do
       Logger.warning(
         "[ankusa] store write failed (#{inspect(reason)}); reopening to clear a latched error"
@@ -340,6 +409,25 @@ defmodule Ankusa.Store do
   @spec reopen(atom()) :: :ok | {:error, term()}
   def reopen(instance) do
     GenServer.call(Ankusa.via(instance, :store), :reopen, 60_000)
+  end
+
+  @doc """
+  Readiness: whether the store can take a synced write right now.
+
+  `{:error, :write_failed}` while any write reported through
+  `report_write_failure/2` failed in the last 5 s: a full disk can refuse an
+  ingest batch while a few bytes still fit. Otherwise writes one meta key with
+  `sync: true` (the same WAL append and fsync an ingest commit needs) and
+  answers `:ok`, or `{:error, reason}` when the write fails — in which case the
+  store also reopens itself, as for any failed write. `{:error,
+  :store_unavailable}` when the store is closed or does not answer within 5 s.
+  The probe's answer is cached for 1 s.
+  """
+  @spec ready(atom()) :: :ok | {:error, term()}
+  def ready(instance) do
+    GenServer.call(Ankusa.via(instance, :store), :ready, 5_000)
+  catch
+    :exit, _ -> {:error, :store_unavailable}
   end
 
   @doc """

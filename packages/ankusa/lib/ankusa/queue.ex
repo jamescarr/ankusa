@@ -241,7 +241,11 @@ defmodule Ankusa.Queue do
 
   def validate_config!(%Ankusa.Config{}), do: :ok
 
-  defp static_sources(config) do
+  @doc false
+  # The sources declared in `config.source_store`'s `:sources`, built. Shared
+  # with `Ankusa.Verifier.validate_config!/1`.
+  @spec static_sources(Ankusa.Config.t()) :: [{String.t(), Ankusa.Source.t()}]
+  def static_sources(config) do
     {_mod, opts} = config.source_store
 
     opts

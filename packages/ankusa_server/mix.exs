@@ -18,7 +18,9 @@ defmodule AnkusaServer.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger], mod: {AnkusaServer.Application, []}]
+    # `:os_mon` for `:disksup` only (see config/config.exs): the disk gauges in
+    # `Ankusa.Metrics.Gauges`.
+    [extra_applications: [:logger, :os_mon], mod: {AnkusaServer.Application, []}]
   end
 
   # One image with every adapter: the operator picks the WAL and sink they need

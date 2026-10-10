@@ -62,6 +62,36 @@ defmodule Ankusa.Verifier do
   end
 
   @doc """
+  Refuse to boot with a source declared in config whose `Ankusa.Verifier.Hmac`
+  secret is missing, empty or undecodable (or whose scheme is unknown): such a
+  source would fail every hook with `:bad_secret`, which `on_verify_failure`
+  then quarantines, flags or rejects — silently, at runtime. Sources a
+  writable store holds are checked when they are written. Raises
+  `ArgumentError` naming the source.
+  """
+  @spec validate_config!(Ankusa.Config.t()) :: :ok
+  def validate_config!(%Ankusa.Config{} = config) do
+    config
+    |> Ankusa.Queue.static_sources()
+    |> Enum.each(fn
+      {id, %Ankusa.Source{verifier: {Ankusa.Verifier.Hmac, opts}}} ->
+        case Ankusa.Verifier.Hmac.validate_opts(opts) do
+          :ok ->
+            :ok
+
+          {:error, :bad_scheme} ->
+            raise ArgumentError, "source #{id}: verifier scheme is missing or unknown"
+
+          {:error, :bad_secret} ->
+            raise ArgumentError, "source #{id}: verifier secret is missing or undecodable"
+        end
+
+      _other ->
+        :ok
+    end)
+  end
+
+  @doc """
   Check a Unix-seconds timestamp from a signature header against a tolerance
   window.
 

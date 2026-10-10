@@ -26,7 +26,9 @@ use Ankusa\Routes\RoutesRejectedError;
 use Ankusa\Routes\RoutesUnavailableError;
 use Ankusa\Tests\Support\RecordingHttpClient;
 use Ankusa\Webhook\HookHeaders;
+use Ankusa\Webhook\InvalidSignatureError;
 use Ankusa\Webhook\MissingHookIdError;
+use Ankusa\Webhook\Signature;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -53,6 +55,7 @@ final class ConformanceTest extends TestCase
         'ClaimIntegrityError' => ClaimIntegrityError::class,
         'ClaimCheckUnavailableError' => ClaimCheckUnavailableError::class,
         'MissingHookIdError' => MissingHookIdError::class,
+        'InvalidSignatureError' => InvalidSignatureError::class,
         'InvalidMessageError' => InvalidMessageError::class,
         'RoutesError' => RoutesError::class,
         'InvalidRouteIdError' => InvalidRouteIdError::class,
@@ -229,6 +232,13 @@ final class ConformanceTest extends TestCase
         return match ($operation) {
             'parse_claim_ref' => self::parsedClaimRef($inp),
             'parse_headers' => self::hookHeaders($inp),
+            'verify_signature' => Signature::verify(
+                self::stringMap($inp['headers'] ?? null),
+                self::bodyBytes($inp['body'] ?? null),
+                self::secrets($inp),
+                \array_key_exists('tolerance_seconds', $inp) ? self::int($inp, 'tolerance_seconds') : Signature::DEFAULT_TOLERANCE_SECONDS,
+                self::int($inp, 'now'),
+            ),
             'redeem' => self::redeem($inp, $conn),
             'health' => self::claimCheck($conn)->health(),
             'routes_health' => self::routes($conn)->health(),
@@ -715,6 +725,24 @@ final class ConformanceTest extends TestCase
         }
 
         return $map;
+    }
+
+    /**
+     * @param array<string, mixed> $inp
+     *
+     * @return list<string>
+     */
+    private static function secrets(array $inp): array
+    {
+        $secrets = [];
+        foreach (\is_array($inp['secrets'] ?? null) ? $inp['secrets'] : [] as $secret) {
+            if (!\is_string($secret)) {
+                self::fail('input.secrets has a non-string entry: ' . self::show($inp['secrets']));
+            }
+            $secrets[] = $secret;
+        }
+
+        return $secrets;
     }
 
     /**

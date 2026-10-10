@@ -55,6 +55,7 @@ defmodule Ankusa.Instance do
     # read-mostly config for every call site, no Application.get_env buried deep
     Ankusa.put_config(config)
     Ankusa.ClaimCheck.validate_config!(config)
+    Ankusa.Verifier.validate_config!(config)
     Ankusa.Routes.validate_config!(config)
     Ankusa.Queue.validate_config!(config)
     Ankusa.Lifecycle.validate_config!(config)
@@ -91,9 +92,12 @@ defmodule Ankusa.Instance do
   # The admin API's Prometheus reporter, first of all: it attaches its handlers
   # synchronously (`start_async: false`), so the events every later child emits
   # while starting — boot-time dispatch of the stored backlog, ingest the edge
-  # accepts before the rest of the tree is up — are counted.
+  # accepts before the rest of the tree is up — are counted. The gauge poller
+  # beside it samples state (queue depth, pen, disk) on its own interval.
   defp metrics_children(config, opts) do
-    if config.admin.enabled, do: isolated(config, :metrics, [{Ankusa.Metrics, opts}]), else: []
+    if config.admin.enabled,
+      do: isolated(config, :metrics, [{Ankusa.Metrics, opts}, {Ankusa.Metrics.Gauges, opts}]),
+      else: []
   end
 
   # The node's local store. Roles that read or write hooks, deliveries or the
@@ -101,12 +105,17 @@ defmodule Ankusa.Instance do
   # the sources live. It must start before every child that reads from it: the
   # source store, the edge, dispatch and storage.
   defp store_children(config, opts) do
-    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
-         match?({Ankusa.SourceStore.Persistent, _}, config.source_store) do
-      [{Ankusa.Store, opts}]
-    else
-      []
-    end
+    if store?(config), do: [{Ankusa.Store, opts}], else: []
+  end
+
+  @doc """
+  Whether this instance runs the node-local store (`Ankusa.Store`): any of the
+  `:edge`, `:dispatch` or `:storage` roles, or a persistent source store.
+  """
+  @spec store?(Config.t()) :: boolean()
+  def store?(%Config{} = config) do
+    Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
+      match?({Ankusa.SourceStore.Persistent, _}, config.source_store)
   end
 
   # The one process that assigns seqs and commits hooks, in the edge subtree
@@ -187,6 +196,8 @@ defmodule Ankusa.Instance do
       cache_name = Ankusa.via(config.instance, :routes_cache)
 
       [
+        # Owns the snapshot table across store restarts (see TableOwner).
+        {Ankusa.Routes.TableOwner, opts},
         {store_mod, opts},
         {Ankusa.Routes.Cache, [name: cache_name] ++ cache_opts(config)}
       ]

@@ -6,6 +6,37 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Added
+
+- YAML keys for everything core added: `admin.gauge_interval_ms`,
+  `batcher.max_queue_bytes`, `dispatch.sink_concurrency`,
+  `dispatch.breaker_failures` / `breaker_open_ms` / `breaker_max_open_ms`,
+  `storage.key_prefix` (env `ANKUSA_STORAGE_KEY_PREFIX`), `claim_check.store`
+  (a dedicated claim store, same shape as `storage` plus `root`),
+  `storage.s3.session_token`, http sink `secret` and `max_response_bytes`,
+  rabbitmq sink `max_inflight`, kafka sink `max_record_bytes`.
+- `docker-entrypoint remote` (an IEx shell in the running node) and
+  `docker-entrypoint rpc EXPR`. Distribution stays on, bound to loopback with
+  epmd (`rel/vm.args.eex`, `rel/env.sh.eex`); `RELEASE_DISTRIBUTION=none`
+  turns it off.
+- GCS metadata tokens come from `AnkusaServer.GcsToken`, one cached token
+  fetched single-flight and refreshed before expiry.
+
+### Changed
+
+- The image's `HEALTHCHECK` asks `GET /ready` (`docker-entrypoint
+  healthcheck`, ingest port first, then admin), so a node whose store refuses
+  writes reports `unhealthy`.
+- An unresolved `${…}` in the file is a load error naming the key (a
+  substituted value that itself contains `${` is fine); a static source whose
+  verifier secret is missing or undecodable fails `check-config` and boot.
+- `AnkusaServer.GcsToken` answers `:error` to every caller for a second after
+  a failed metadata fetch, so a queue of callers behind a dead metadata server
+  costs one request.
+- `:os_mon` runs (disk gauges); only `disksup` is configured. The image adds
+  `coreutils`: `disksup` runs `df -lk -x squashfs`, which busybox's `df`
+  rejects.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

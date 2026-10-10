@@ -68,9 +68,9 @@ consumer needs exactly one bit to decide dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64 lowercase hex chars |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`.status`, `.body`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`.status`, `.body`) |
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
-| `ClaimCheckUnavailableError` | `true` | gateway `5xx`/`503`, or unreachable |
+| `ClaimCheckUnavailableError` | `true` | gateway `5xx`, `408`, `429`, or unreachable |
 
 `health()` hits `GET /health` for a liveness probe.
 
@@ -176,6 +176,31 @@ for the full contract. `dedupeKey` is the provider's event key when the source
 has a dedupe rule; `replayId` is set only on replayed deliveries;
 `idempotencyKey` is the tenant-scoped key Ankusa computed and shipped in
 `x-ankusa-idempotency-key`.
+
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way. Verify before you
+trust the body:
+
+```ts
+import { InvalidSignatureError, verifySignature } from "ankusa";
+
+try {
+  // `rawBody` is the request body exactly as received, not re-serialized JSON.
+  verifySignature({ headers: req.headers, body: rawBody, secrets: [process.env.ANKUSA_WHSEC!] });
+} catch (err) {
+  if (err instanceof InvalidSignatureError) return res.status(401).json({ error: "invalid_signature", code: err.code });
+  throw err;
+}
+```
+
+`secrets` is one secret or several during a rotation (`whsec_` + base64, or
+any other string used as its own bytes). `toleranceSeconds` (default 300)
+bounds how old or new `webhook-timestamp` may be. Failures are
+`InvalidSignatureError` with `code` (`invalid_secret`, `missing_header`,
+`invalid_timestamp`, `timestamp_out_of_tolerance`, `no_matching_signature`),
+the offending header in `field`, and `retryable: false`.
 
 ## Consuming queue messages
 

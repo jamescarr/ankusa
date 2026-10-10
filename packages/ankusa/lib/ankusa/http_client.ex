@@ -38,6 +38,12 @@ defmodule Ankusa.HttpClient do
   `timeout_ms` is applied to both the connection and the response. A
   `:connect_options` in `req_options` is merged over it, so supplying a proxy
   never drops the timeout.
+
+  `:max_response_bytes` in `opts` (not a transport option; it is taken out
+  before the request is built) stops reading the response once its body passes
+  that many bytes: the body is then `{:truncated, bytes_read}` and the
+  connection is closed rather than drained. Without it the whole body is read,
+  which the blob stores need.
   """
   @spec request(
           atom(),
@@ -48,6 +54,26 @@ defmodule Ankusa.HttpClient do
           keyword()
         ) :: {:ok, non_neg_integer(), term()} | {:error, term()}
   def request(method, url, headers, body, timeout_ms, opts \\ []) do
+    case request_with_headers(method, url, headers, body, timeout_ms, opts) do
+      {:ok, status, _headers, body} -> {:ok, status, body}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  `request/6`, plus the response headers (`%{lowercase_name => [value]}`), for
+  callers that read one such as `retry-after`.
+  """
+  @spec request_with_headers(
+          atom(),
+          String.t(),
+          [{String.t(), String.t()}],
+          iodata() | nil,
+          timeout(),
+          keyword()
+        ) :: {:ok, non_neg_integer(), %{String.t() => [String.t()]}, term()} | {:error, term()}
+  def request_with_headers(method, url, headers, body, timeout_ms, opts \\ []) do
+    {max_bytes, opts} = Keyword.pop(opts, :max_response_bytes)
     validate!(opts)
 
     request =
@@ -62,16 +88,37 @@ defmodule Ankusa.HttpClient do
         receive_timeout: timeout_ms,
         connect_options:
           Keyword.merge([timeout: timeout_ms], Keyword.get(opts, :connect_options, []))
-      ] ++ Keyword.drop(opts, [:connect_options]) ++ body_option(body)
+      ] ++ Keyword.drop(opts, [:connect_options]) ++ body_option(body) ++ cap_option(max_bytes)
 
     case Req.request(request) do
-      {:ok, %Req.Response{status: status, body: body}} -> {:ok, status, body}
-      {:error, reason} -> {:error, reason}
+      {:ok, %Req.Response{status: status, headers: headers, body: body}} ->
+        {:ok, status, headers, body}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp body_option(nil), do: []
   defp body_option(body), do: [body: body]
+
+  defp cap_option(nil), do: []
+
+  # Accumulate into the response body until it passes `max`, then stop reading
+  # (`:halt` closes the connection instead of returning it to the pool).
+  defp cap_option(max) when is_integer(max) and max >= 0 do
+    [
+      into: fn {:data, data}, {req, resp} ->
+        body = if is_binary(resp.body), do: resp.body <> data, else: data
+
+        if byte_size(body) > max do
+          {:halt, {req, %{resp | body: {:truncated, byte_size(body)}}}}
+        else
+          {:cont, {req, %{resp | body: body}}}
+        end
+      end
+    ]
+  end
 
   defp validate!(opts) do
     case Keyword.keys(opts) -- @transport_options do

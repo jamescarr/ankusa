@@ -152,4 +152,57 @@ defmodule Ankusa.Sink.KafkaTest do
     assert {:error, _} = result
     assert elapsed_us < 2_000_000
   end
+
+  defp high_watermark(topic) do
+    {:ok, {hw, _messages}} = :brod.fetch(@hosts, topic, 0, 0)
+    hw
+  end
+
+  test "a record over max_record_bytes is permanent and never produced", %{
+    instance: inst,
+    topic: topic
+  } do
+    # Inline, base64 in the message: about 1.2 MB of value.
+    body = :crypto.strong_rand_bytes(900_000)
+    env = envelope(%{body: body, size: byte_size(body)})
+
+    assert {:error, {:permanent, {:message_too_large, size, 1_000_000}}} =
+             Kafka.deliver(env, ctx(inst), opts(topic, inline_max_bytes: 4_000_000))
+
+    assert size > 1_000_000
+    assert high_watermark(topic) == 0
+  end
+
+  test "raising max_record_bytes (with the topic's limit) produces it", %{instance: inst} do
+    topic = "ankusa.big.#{System.unique_integer([:positive])}"
+
+    :ok =
+      :brod.create_topics(
+        @hosts,
+        [
+          %{
+            name: topic,
+            num_partitions: 1,
+            replication_factor: 1,
+            assignments: [],
+            configs: [%{name: "max.message.bytes", value: "4000000"}]
+          }
+        ],
+        %{timeout: 5_000}
+      )
+
+    on_exit(fn -> :brod.delete_topics(@hosts, [topic], 5_000) end)
+
+    body = :crypto.strong_rand_bytes(900_000)
+    env = envelope(%{body: body, size: byte_size(body)})
+
+    assert :ok =
+             Kafka.deliver(
+               env,
+               ctx(inst),
+               opts(topic, inline_max_bytes: 4_000_000, max_record_bytes: 2_000_000)
+             )
+
+    assert high_watermark(topic) == 1
+  end
 end

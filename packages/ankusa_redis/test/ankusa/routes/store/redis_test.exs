@@ -30,12 +30,14 @@ defmodule Ankusa.Routes.Store.RedisTest do
     |> Ankusa.Config.new()
   end
 
-  defp store(tick_ms), do: {Redis, [url: @url, namespace: @namespace, tick_ms: tick_ms]}
+  defp store(tick_ms, extra \\ []),
+    do: {Redis, Keyword.merge([url: @url, namespace: @namespace, tick_ms: tick_ms], extra)}
 
   # Both nodes point at the same namespace; only the tick interval differs, so
   # each test can say whether it is proving pub/sub or the tick.
   defp start_node(opts \\ []) do
-    {tick_ms, routes} = Keyword.pop(opts, :tick_ms, 60_000)
+    {tick_ms, opts} = Keyword.pop(opts, :tick_ms, 60_000)
+    {store_opts, routes} = Keyword.split(opts, [:url])
     instance = :"redis#{System.unique_integer([:positive])}"
 
     config =
@@ -45,7 +47,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
         routes:
           routes
           |> Keyword.merge(enabled: true, admin: [port: 0])
-          |> Keyword.put(:store, store(tick_ms))
+          |> Keyword.put(:store, store(tick_ms, store_opts))
       )
 
     start_supervised!({Ankusa.Instance, config})
@@ -57,6 +59,14 @@ defmodule Ankusa.Routes.Store.RedisTest do
       Ankusa.Routes.Route.from_attrs(Map.merge(%{"id" => id, "path" => path}, attrs))
 
     route
+  end
+
+  # The ids in a node's route table, sorted.
+  defp route_ids(instance) do
+    case Routes.meta(instance) do
+      nil -> []
+      meta -> instance |> Ankusa.Routes.Snapshot.routes(meta) |> Enum.map(& &1.id) |> Enum.sort()
+    end
   end
 
   # Polling, because the assertion is "this arrives without a tick" — a sleep
@@ -159,7 +169,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
     # route stays deleted: seeding is a first-boot event, not a boot event.
     second = start_node()
     assert {:error, :not_found} = Routes.get(second.instance, "s")
-    assert Routes.snapshot(second.instance).by_id == %{}
+    assert route_ids(second.instance) == []
   end
 
   test "the cap is enforced against the shared hash" do
@@ -179,11 +189,11 @@ defmodule Ankusa.Routes.Store.RedisTest do
     node_a = start_node(tick_ms: 3_600_000, seed: [%{"id" => "s", "path" => "/hooks/s"}])
     node_b = start_node(tick_ms: 3_600_000)
 
-    assert Map.keys(Routes.snapshot(node_b.instance).by_id) == ["s"]
+    assert route_ids(node_b.instance) == ["s"]
 
     assert {:ok, _} = Routes.create(node_a.instance, %{"id" => "n", "path" => "/hooks/n"})
 
-    eventually(fn -> Map.has_key?(Routes.snapshot(node_b.instance).by_id, "n") end)
+    eventually(fn -> "n" in route_ids(node_b.instance) end)
 
     # The mirror is complete, not just appended to: the decision and the
     # definition both have to be there.
@@ -198,7 +208,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # ... and a delete travels the same way.
     assert :ok = Routes.delete(node_a.instance, "n")
-    eventually(fn -> not Map.has_key?(Routes.snapshot(node_b.instance).by_id, "n") end)
+    eventually(fn -> "n" not in route_ids(node_b.instance) end)
   end
 
   test "a global rule change reaches another node over pub/sub" do
@@ -224,7 +234,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
     {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:routes", "x", encoded_route("x")])
     {:ok, _} = Redix.command(conn, ["INCR", "#{@namespace}:version"])
 
-    eventually(fn -> Map.has_key?(Routes.snapshot(node_b.instance).by_id, "x") end, 3_000)
+    eventually(fn -> "x" in route_ids(node_b.instance) end, 3_000)
     assert {:ok, %{id: "x"}} = Routes.get(node_b.instance, "x")
   end
 
@@ -234,7 +244,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
     config = start_node()
 
     assert {:ok, _} = Routes.create(config.instance, %{"id" => "a", "path" => "/hooks/a"})
-    before = Routes.snapshot(config.instance)
+    before = Routes.meta(config.instance)
 
     # Every hash write now fails with WRONGTYPE. A disconnection arrives as the
     # same `{:error, %Redix.Error{} | %Redix.ConnectionError{}}` from Redix, so
@@ -245,9 +255,9 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert {:error, :store_unavailable} =
              Routes.create(config.instance, %{"id" => "b", "path" => "/hooks/b"})
 
-    snapshot = Routes.snapshot(config.instance)
-    assert snapshot.version == before.version
-    assert Map.keys(snapshot.by_id) == ["a"]
+    meta = Routes.meta(config.instance)
+    assert meta.version == before.version
+    assert route_ids(config.instance) == ["a"]
 
     assert Routes.authorize(config.instance, "POST", ["hooks", "a"], {1, 2, 3, 4}) ==
              {:ok, "a"}
@@ -275,6 +285,53 @@ defmodule Ankusa.Routes.Store.RedisTest do
              Redis.start_link(instance: instance, config: config)
 
     assert %Redix.ConnectionError{reason: :econnrefused} = reason
+  end
+
+  test "a store restarted while Redis is unreachable resumes from the last table and reloads when Redis answers" do
+    {forwarder, port} = start_forwarder()
+    node = start_node(tick_ms: 100, url: "redis://127.0.0.1:#{port}")
+    instance = node.instance
+    edge = Ankusa.whereis(instance, :edge)
+
+    assert {:ok, _} = Routes.create(instance, %{"id" => "api", "path" => "/hooks/api"})
+    version = Routes.meta(instance).version
+    other = start_node()
+
+    # Redis goes away for `node` only, and `other` changes the table meanwhile.
+    Process.exit(forwarder, :kill)
+    assert {:ok, _} = Routes.create(other.instance, %{"id" => "other", "path" => "/hooks/other"})
+
+    {_id, sup, _type, _modules} =
+      edge
+      |> Supervisor.which_children()
+      |> Enum.find(&match?({Redis, _pid, _type, _modules}, &1))
+
+    members = [sup | sup |> Supervisor.which_children() |> Enum.map(&elem(&1, 1))]
+    refs = Enum.map(members, &Process.monitor/1)
+    Process.exit(sup, :kill)
+    for ref <- refs, do: assert_receive({:DOWN, ^ref, :process, _pid, _reason}, 5_000)
+
+    # The supervisor restarts the store and everything after it. Nothing waits
+    # on the unreachable Redis, so the edge is back at once, on the table the
+    # old store left.
+    started = System.monotonic_time(:millisecond)
+    _ = :sys.get_state(edge)
+    assert System.monotonic_time(:millisecond) - started < 2_000
+
+    assert is_pid(Ankusa.whereis(instance, :routes_store))
+    assert route_ids(instance) == ["api"]
+    assert Routes.meta(instance).version == version
+    assert Routes.authorize(instance, "POST", ["hooks", "api"], {1, 2, 3, 4}) == {:ok, "api"}
+
+    assert {:error, :store_unavailable} =
+             Routes.create(instance, %{"id" => "x", "path" => "/hooks/x"})
+
+    # Redis is reachable again: the node catches up on what it missed, and writes work.
+    start_forwarder(port)
+    eventually(fn -> route_ids(instance) == ["api", "other"] end, 15_000)
+
+    assert {:ok, _} = Routes.create(instance, %{"id" => "after", "path" => "/hooks/after"})
+    eventually(fn -> "after" in route_ids(other.instance) end)
   end
 
   test "a stored definition that no longer parses stops the node rather than loading garbage", %{
@@ -350,13 +407,9 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # Neither write was lost. A took Redis's table instead of applying its own
     # change to a copy that did not have B's, and B hears about A's in turn.
-    assert node_a.instance |> Routes.snapshot() |> Map.fetch!(:by_id) |> Map.keys() |> Enum.sort() ==
-             ["from-a", "from-b"]
+    assert route_ids(node_a.instance) == ["from-a", "from-b"]
 
-    eventually(fn ->
-      node_b.instance |> Routes.snapshot() |> Map.fetch!(:by_id) |> Map.keys() |> Enum.sort() ==
-        ["from-a", "from-b"]
-    end)
+    eventually(fn -> route_ids(node_b.instance) == ["from-a", "from-b"] end)
   end
 
   test "two nodes creating the same id: exactly one wins", %{conn: conn} do
@@ -442,15 +495,37 @@ defmodule Ankusa.Routes.Store.RedisTest do
     node = start_node(tick_ms: 100, seed: [%{"id" => "s", "path" => "/hooks/s"}])
     assert {:ok, _} = Routes.create(node.instance, %{"id" => "a", "path" => "/hooks/a"})
     assert {:ok, _} = Routes.create(node.instance, %{"id" => "b", "path" => "/hooks/b"})
-    assert Routes.snapshot(node.instance).version == 3
+    assert Routes.meta(node.instance).version == 3
 
     # A restore from an older backup: a different table at a LOWER version.
     {:ok, _} = Redix.command(conn, ["DEL", "#{@namespace}:routes"])
     {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:routes", "old", encoded_route("old")])
     {:ok, _} = Redix.command(conn, ["SET", "#{@namespace}:version", "1"])
 
-    eventually(fn -> Map.keys(Routes.snapshot(node.instance).by_id) == ["old"] end, 3_000)
-    assert Routes.snapshot(node.instance).version == 1
+    eventually(fn -> route_ids(node.instance) == ["old"] end, 3_000)
+    assert Routes.meta(node.instance).version == 1
+  end
+
+  test "a namespace emptied under a node keeps its last table until a version reappears", %{
+    conn: conn
+  } do
+    node = start_node(tick_ms: 50)
+    assert {:ok, _} = Routes.create(node.instance, %{"id" => "a", "path" => "/hooks/a"})
+    assert {:ok, _} = Routes.create(node.instance, %{"id" => "b", "path" => "/hooks/b"})
+    before = Routes.meta(node.instance)
+
+    {:ok, _} = Redix.command(conn, ["FLUSHDB"])
+    # Several ticks, none of which may empty the table.
+    Process.sleep(300)
+
+    assert route_ids(node.instance) == ["a", "b"]
+    assert Routes.meta(node.instance).epoch == before.epoch
+    assert Routes.authorize(node.instance, "POST", ["hooks", "a"], {1, 2, 3, 4}) == {:ok, "a"}
+
+    # A deliberate restore (a version and a definition) is followed.
+    {:ok, _} = Redix.command(conn, ["HSET", "#{@namespace}:routes", "c", encoded_route("c")])
+    {:ok, _} = Redix.command(conn, ["SET", "#{@namespace}:version", "1"])
+    eventually(fn -> route_ids(node.instance) == ["c"] end, 3_000)
   end
 
   test "a node booting with a different seed leaves an existing namespace alone" do
@@ -462,7 +537,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # Neither the new seed's route nor the deleted one appears: the namespace
     # already existed, so the seed was not applied.
-    assert Map.keys(Routes.snapshot(second.instance).by_id) == ["n"]
+    assert route_ids(second.instance) == ["n"]
   end
 
   test "a pub/sub connection that dies is replaced and subscribed again" do
@@ -486,7 +561,7 @@ defmodule Ankusa.Routes.Store.RedisTest do
 
     # The tick is an hour away: only a live subscription can bring this to A.
     assert {:ok, _} = Routes.create(node_b.instance, %{"id" => "n", "path" => "/hooks/n"})
-    eventually(fn -> Map.has_key?(Routes.snapshot(node_a.instance).by_id, "n") end)
+    eventually(fn -> "n" in route_ids(node_a.instance) end)
   end
 
   defp encoded_route(id) do
@@ -500,5 +575,54 @@ defmodule Ankusa.Routes.Store.RedisTest do
     {:ok, port} = :inet.port(socket)
     :ok = :gen_tcp.close(socket)
     port
+  end
+
+  # A TCP forwarder in front of the compose Redis. Killing it makes Redis
+  # unreachable for the one node pointed at it: the listener closes (a new
+  # connection is refused) and every open connection drops. Listening again on
+  # the same port brings it back.
+  defp start_forwarder(port \\ 0) do
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        {:ok, listen} =
+          :gen_tcp.listen(port, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+        {:ok, bound} = :inet.port(listen)
+        send(parent, {:forwarder, self(), bound})
+        forward_loop(listen)
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+
+    receive do
+      {:forwarder, ^pid, bound} -> {pid, bound}
+    after
+      2_000 -> flunk("the forwarder did not start")
+    end
+  end
+
+  defp forward_loop(listen) do
+    {:ok, client} = :gen_tcp.accept(listen)
+    %URI{host: host, port: port} = URI.parse(@url)
+    {:ok, upstream} = :gen_tcp.connect(String.to_charlist(host), port, [:binary, active: false])
+
+    for {from, to} <- [{client, upstream}, {upstream, client}] do
+      spawn_link(fn -> pipe(from, to) end)
+    end
+
+    forward_loop(listen)
+  end
+
+  defp pipe(from, to) do
+    with {:ok, data} <- :gen_tcp.recv(from, 0),
+         :ok <- :gen_tcp.send(to, data) do
+      pipe(from, to)
+    else
+      _closed ->
+        :gen_tcp.close(from)
+        :gen_tcp.close(to)
+    end
   end
 end

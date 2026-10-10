@@ -102,8 +102,13 @@ defmodule Ankusa.BlobStore.OCI do
     :ok
   end
 
+  # Every page (`nextStartWith` → `start`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts) do
+  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
+
+  defp list_pages(opts, prefix, start, acc) do
+    query = [{"prefix", prefix}] ++ if(start, do: [{"start", start}], else: [])
+
     url =
       endpoint(opts) <>
         "/n/" <>
@@ -111,18 +116,19 @@ defmodule Ankusa.BlobStore.OCI do
         "/b/" <>
         bucket(opts) <>
         "/o" <>
-        "?" <> URI.encode_query([{"prefix", prefix}], :rfc3986)
+        "?" <> URI.encode_query(query, :rfc3986)
 
-    case request(opts, :get, url, nil, []) do
-      {:ok, body} ->
-        case JSON.decode(body) do
-          {:ok, %{"objects" => objects}} -> objects |> Enum.map(& &1["name"]) |> Enum.sort()
-          {:ok, _no_objects} -> []
-          {:error, _reason} -> []
-        end
+    with {:ok, body} <- request(opts, :get, url, nil, []),
+         {:ok, page} when is_map(page) <- JSON.decode(body) do
+      acc = [page |> Map.get("objects", []) |> Enum.map(& &1["name"]) | acc]
 
-      {:error, _reason} ->
-        []
+      case page["nextStartWith"] do
+        next when is_binary(next) and next != "" -> list_pages(opts, prefix, next, acc)
+        _ -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      {:ok, _not_a_page} -> {:error, :list_unreadable}
     end
   end
 

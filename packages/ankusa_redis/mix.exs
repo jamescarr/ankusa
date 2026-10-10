@@ -83,7 +83,10 @@ defmodule AnkusaRedis.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      [{:ankusa, "~> 0.4"}]
+      # `~> 0.6`, not older: the route store publishes through the ETS
+      # `Ankusa.Routes.Snapshot` (`publish/1,2`, `mutate/3`,
+      # `drop_generation/2`), which core ships from 0.6.0. Publish core first.
+      [{:ankusa, "~> 0.6"}]
     end
   end
 end

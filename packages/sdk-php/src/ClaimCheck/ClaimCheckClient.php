@@ -102,6 +102,14 @@ final class ClaimCheckClient
             throw new ClaimNotFoundError("claim not found: {$parsed->tenantId}/{$parsed->claimId}");
         }
 
+        // A gateway (or a proxy in front of it) that is throttling or timing out
+        // is telling the caller to come back, not that the claim is gone.
+        if ($status === 408 || $status === 429) {
+            throw new ClaimCheckUnavailableError(
+                "claim-check gateway busy ({$status}): " . HttpTransport::describe(HttpTransport::errorBody(self::raw($response))),
+            );
+        }
+
         if ($status >= 400 && $status < 500) {
             $body = HttpTransport::errorBody(self::raw($response));
 

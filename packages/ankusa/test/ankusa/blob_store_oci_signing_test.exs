@@ -79,7 +79,7 @@ defmodule Ankusa.BlobStore.OCISigningTest do
     end
 
     test "GET signs exactly (request-target), date, and host", %{capture: capture, opts: opts} do
-      assert ["seg/a", "seg/b", "seg/café"] = OCI.list(:i, "seg/", opts)
+      assert {:ok, ["seg/a", "seg/b", "seg/café"]} = OCI.list(:i, "seg/", opts)
 
       assert [{"GET", path, query, headers, _body}] = Agent.get(capture, & &1)
       assert path == "/n/ns/b/b/o"

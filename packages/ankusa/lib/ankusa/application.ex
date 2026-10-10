@@ -7,6 +7,12 @@ defmodule Ankusa.Application do
 
   @impl true
   def start(_type, _args) do
+    # Node-wide credential caches: owned by the application's own process, so
+    # they live as long as `:ankusa` does, not as long as whichever request or
+    # task filled them first.
+    :ok = Ankusa.BlobStore.S3.Credentials.create_table()
+    :ok = Ankusa.BlobStore.Azure.ManagedIdentity.create_table()
+
     children =
       [{Registry, keys: :unique, name: Ankusa.Registry}] ++ default_instance()
 

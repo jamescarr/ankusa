@@ -70,9 +70,10 @@
 
   Nothing is requested when `ref` or `sha256` is malformed
   (`:ankusa.sdk/InvalidClaimRefError`). Otherwise: `ClaimNotFoundError` on a
-  `404`, `ClaimRejectedError` on any other `4xx`, `ClaimIntegrityError` when the
-  digest differs, and `ClaimCheckUnavailableError` (retryable) for any other
-  status or an unreachable gateway."
+  `404`, `ClaimRejectedError` on any other `4xx` but `408` and `429`,
+  `ClaimIntegrityError` when the digest differs, and
+  `ClaimCheckUnavailableError` (retryable) for a `408`, a `429` (a front layer
+  throttling or timing out), any other status, or an unreachable gateway."
   [client ref sha256]
   (let [parsed (claim-ref/parse ref)
         _ (validate-sha256! sha256)
@@ -83,10 +84,11 @@
       (= 404 status) (throw (error/error "ClaimNotFoundError"
                                          (str "claim not found: " (:tenant-id parsed) "/" (:claim-id parsed))
                                          {}))
-      (<= 400 status 499) (let [decoded (http/error-body body)]
-                            (throw (error/error "ClaimRejectedError"
-                                                (str "claim-check rejected redeem (" status "): " (pr-str decoded))
-                                                {:status status :body decoded})))
+      (and (<= 400 status 499) (not (#{408 429} status)))
+      (let [decoded (http/error-body body)]
+        (throw (error/error "ClaimRejectedError"
+                            (str "claim-check rejected redeem (" status "): " (pr-str decoded))
+                            {:status status :body decoded})))
       :else (throw (unavailable (str "claim-check gateway error (" status "): "
                                      (pr-str (http/error-body body)))
                                 {:status status :reason :status}

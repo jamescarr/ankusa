@@ -42,7 +42,8 @@ defmodule AnkusaServer.Application do
         "sources=#{sources(config)}"
     )
 
-    Supervisor.start_link([{Ankusa.Instance, config}],
+    # The GCS token cache first: the instance's blob store asks it for tokens.
+    Supervisor.start_link([AnkusaServer.GcsToken, {Ankusa.Instance, config}],
       strategy: :one_for_one,
       name: AnkusaServer.Supervisor
     )

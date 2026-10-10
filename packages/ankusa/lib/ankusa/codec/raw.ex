@@ -11,7 +11,7 @@ defmodule Ankusa.Codec.Raw do
   concatenates the frames into one segment binary and returns a per-record index
   of `{key, offset, length}` — `offset` is the frame start byte within the
   segment and `length` is the full frame length (payload plus the 8-byte header),
-  exactly the byte range `Ankusa.BlobStore.get_range/4` must fetch for
+  exactly the byte range `Ankusa.BlobStore.get_range/5` must fetch for
   `decode_record/1`.
   """
 

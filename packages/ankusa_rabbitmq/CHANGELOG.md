@@ -6,6 +6,23 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `:max_inflight` (default 256): publishes awaiting a confirm per connection;
+  past it a publish answers `{:error, :busy}` without being sent.
+
+### Changed
+
+- Confirms are asynchronous: many publishes are outstanding on the channel at
+  once and each caller is answered on its own confirm, so one slow confirm no
+  longer serializes every delivery on the connection.
+- A publish still queued in the connection when its caller's deadline passed
+  answers `{:error, :expired}` and is never sent.
+- The connection dials after it starts (`handle_continue`), so a dead broker
+  never blocks the supervisor; it is registered under a digest of the URL,
+  and its `format_status/1` redacts the URL, so a password never appears in a
+  process name, `:sys.get_state/1` or a crash report.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added

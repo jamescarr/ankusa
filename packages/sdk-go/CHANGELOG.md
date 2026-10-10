@@ -7,6 +7,18 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `VerifySignature(header, body, secrets, VerifyOptions)` verifies the
+  Standard Webhooks signature an HTTP sink with a `secret` adds, comparing
+  with `hmac.Equal`; failures are `*InvalidSignatureError` (`Code`, `Field`,
+  not retryable).
+
+### Changed
+
+- `Redeem` returns `*ClaimCheckUnavailableError` (retryable) for a gateway
+  `408` or `429` instead of `*ClaimRejectedError`.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

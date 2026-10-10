@@ -26,6 +26,26 @@ defmodule Ankusa.Dispatch.Pipeline do
   hung sink frees its slot; the fallback claim check-in runs inside the same
   deadline.
 
+  ## Per-sink isolation
+
+  Claimed jobs wait in one queue per sink key `{source_id, sink index, sink
+  module}`, and slots go round-robin across the keys that have work, so one
+  source's backlog cannot queue ahead of every other source's. With
+  `dispatch.sink_concurrency` set, one key never runs more than that many
+  attempts at once.
+
+  Each key has a circuit breaker. `dispatch.breaker_failures` consecutive
+  failures (`0` disables breakers; a `{:permanent, _}` error does not count, see
+  `Ankusa.Sink`) open it: the key's queued rows and every row of it claimed
+  while it is open are *parked* — written back due when the breaker closes,
+  with their attempt count unchanged — for `dispatch.breaker_open_ms`, doubling
+  per consecutive open up to `dispatch.breaker_max_open_ms`. After that one
+  attempt runs as a probe (rows claimed meanwhile are parked for
+  `breaker_open_ms`): success closes the breaker, failure opens it again for
+  longer. Breakers live in this process's memory; a restart closes them all.
+  Parked rows spend no attempts, so while a breaker stays open a row's retry
+  horizon is not bounded by wall-clock time.
+
   ## Binding
 
   A row binds to `(sink index, module)` at ack time. Its opts always come from
@@ -57,6 +77,8 @@ defmodule Ankusa.Dispatch.Pipeline do
   alias Ankusa.Store.Keys
 
   @housekeeping_ms 1_000
+  # The longest pause a sink's `{:retry_after, ms, _}` can impose.
+  @max_retry_after_ms 3_600_000
   # Housekeeping ticks between `Reclaim.sweep/1` runs.
   @sweep_every 60
   # Outcome writes are buffered and written as one batch: one store write and one
@@ -117,12 +139,48 @@ defmodule Ankusa.Dispatch.Pipeline do
     :exit, _ -> {:error, :unavailable}
   end
 
-  @doc "Check `config.dispatch.attempt_timeout_ms`; raises `ArgumentError` naming the key."
+  @doc """
+  Check the `config.dispatch` keys this module reads; raises `ArgumentError`
+  naming the key.
+  """
   @spec validate_config!(Ankusa.Config.t()) :: :ok
-  def validate_config!(%Ankusa.Config{dispatch: %{attempt_timeout_ms: ms}}) do
+  def validate_config!(%Ankusa.Config{dispatch: dispatch}) do
+    ms = dispatch.attempt_timeout_ms
+
     unless is_integer(ms) and ms >= 1 do
       raise ArgumentError,
             "dispatch.attempt_timeout_ms must be a positive integer, got #{inspect(ms)}"
+    end
+
+    cap = Map.get(dispatch, :sink_concurrency)
+    concurrency = dispatch.concurrency
+
+    unless cap == nil or (is_integer(cap) and is_integer(concurrency) and cap in 1..concurrency) do
+      raise ArgumentError,
+            "dispatch.sink_concurrency must be nil or an integer from 1 to " <>
+              "dispatch.concurrency (#{inspect(concurrency)}), got #{inspect(cap)}"
+    end
+
+    failures = Map.get(dispatch, :breaker_failures, 0)
+
+    unless is_integer(failures) and failures >= 0 do
+      raise ArgumentError,
+            "dispatch.breaker_failures must be a non-negative integer, got #{inspect(failures)}"
+    end
+
+    open = Map.get(dispatch, :breaker_open_ms, 1)
+
+    unless is_integer(open) and open >= 1 do
+      raise ArgumentError,
+            "dispatch.breaker_open_ms must be a positive integer, got #{inspect(open)}"
+    end
+
+    max_open = Map.get(dispatch, :breaker_max_open_ms, open)
+
+    unless is_integer(max_open) and max_open >= open do
+      raise ArgumentError,
+            "dispatch.breaker_max_open_ms must be an integer >= dispatch.breaker_open_ms " <>
+              "(#{inspect(open)}), got #{inspect(max_open)}"
     end
 
     :ok
@@ -159,8 +217,15 @@ defmodule Ankusa.Dispatch.Pipeline do
        window_full?: false,
        # a failed scan backs off instead of spinning
        holdoff?: false,
-       runnable: :queue.new(),
+       # sink key => queue of claimed jobs ready to run; `ring` holds every key
+       # whose queue is non-empty, once, in round-robin order
+       queues: %{},
+       ring: :queue.new(),
+       queued: 0,
        running: %{},
+       running_by_key: %{},
+       # sink key => breaker; a key without an entry is closed with no failures
+       breakers: %{},
        # pack task ref => the jobs it will give claims to
        packing: %{},
        packing_seqs: MapSet.new(),
@@ -183,7 +248,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   # A crash report prints the state. `config` carries every sink's options
-  # (credentials), and the jobs in `runnable`/`running`/`waiting`/`packing`
+  # (credentials), and the jobs in `queues`/`running`/`waiting`/`packing`
   # carry the same options plus the hook's body: report sizes, not contents.
   @impl true
   def format_status(%{state: %{config: _} = state} = status) do
@@ -192,8 +257,10 @@ defmodule Ankusa.Dispatch.Pipeline do
       | state: %{
           state
           | config: :redacted,
-            runnable: :queue.len(state.runnable),
+            queues: state.queued,
+            ring: :queue.len(state.ring),
             running: map_size(state.running),
+            breakers: breakers_open(state),
             waiting: map_size(state.waiting),
             packing: map_size(state.packing)
         }
@@ -278,6 +345,7 @@ defmodule Ankusa.Dispatch.Pipeline do
       |> flush()
       |> flush_unrecorded()
       |> report_replay_outcomes()
+      |> report_state()
       |> schedule_next()
 
     ticks = state.sweep_ticks + 1
@@ -498,28 +566,52 @@ defmodule Ankusa.Dispatch.Pipeline do
       source == :error ->
         dead(item, {:source_gone, item.env.source_id}, {state, ops, pairs, jobs, sources}, now)
 
+      # The source store could not answer: neither a delivery nor a verdict.
+      # The row waits a moment and keeps its attempt count.
+      source == :unavailable ->
+        later =
+          Deliveries.retry_ops(
+            item.seq,
+            item.sink,
+            item.row,
+            now + @holdoff_ms,
+            "source store unavailable"
+          )
+
+        {state, later ++ ops, pairs, jobs, sources}
+
       Deliveries.unresolved?(item.sink) ->
         expand(item, source, {state, ops, pairs, jobs, sources}, now)
 
       true ->
-        case bind(source.sinks, item.sink, item.row.module) do
-          {:ok, spec} ->
-            job = %{
-              seq: item.seq,
-              sink: item.sink,
-              size: item.size,
-              row: item.row,
-              env: item.env,
-              spec: spec,
-              claim: item.claim,
-              forward_headers: source.forward_headers
-            }
+        key = {item.env.source_id, item.sink, item.row.module}
 
-            {state, ops, pairs, [job | jobs], sources}
+        case admit(state, key) do
+          {:park, at, state} ->
+            state = bump_replay(state, item.row, :parked)
+            {state, park_ops(item, at) ++ ops, pairs, jobs, sources}
 
-          :error ->
-            reason = {:sink_gone, item.sink, item.row.module}
-            dead(item, reason, {state, ops, pairs, jobs, sources}, now)
+          {:pass, state} ->
+            case bind(source.sinks, item.sink, item.row.module) do
+              {:ok, spec} ->
+                job = %{
+                  key: key,
+                  seq: item.seq,
+                  sink: item.sink,
+                  size: item.size,
+                  row: item.row,
+                  env: item.env,
+                  spec: spec,
+                  claim: item.claim,
+                  forward_headers: source.forward_headers
+                }
+
+                {state, ops, pairs, [job | jobs], sources}
+
+              :error ->
+                reason = {:sink_gone, item.sink, item.row.module}
+                dead(item, reason, {state, ops, pairs, jobs, sources}, now)
+            end
         end
     end
   end
@@ -562,7 +654,9 @@ defmodule Ankusa.Dispatch.Pipeline do
     Telemetry.emit([:dispatch, :stop], %{}, %{
       instance: state.instance,
       result: :dlq,
-      attempts: attempts
+      attempts: attempts,
+      sink: module,
+      source_id: env.source_id
     })
 
     Telemetry.emit([:dispatch, :dlq], %{}, %{
@@ -574,6 +668,9 @@ defmodule Ankusa.Dispatch.Pipeline do
     %{state | settled: state.settled + 1}
   end
 
+  # Sources are looked up once per scan (`sources` is the scan's cache). A store
+  # that cannot answer is cached as `:unavailable` for the rest of the scan,
+  # and said once.
   defp fetch_source(instance, source_id, sources) do
     case sources do
       %{^source_id => source} ->
@@ -582,8 +679,19 @@ defmodule Ankusa.Dispatch.Pipeline do
       _ ->
         source =
           case SourceStore.fetch(instance, source_id) do
-            {:ok, source} -> source
-            :error -> :error
+            {:ok, source} ->
+              source
+
+            :error ->
+              :error
+
+            {:error, :unavailable} ->
+              Logger.warning(
+                "[ankusa] source store unavailable for #{inspect(source_id)}; " <>
+                  "its deliveries wait #{@holdoff_ms} ms"
+              )
+
+              :unavailable
           end
 
         {source, Map.put(sources, source_id, source)}
@@ -712,44 +820,279 @@ defmodule Ankusa.Dispatch.Pipeline do
     end)
   end
 
-  defp enqueue(state, job), do: %{state | runnable: :queue.in(job, state.runnable)}
+  defp enqueue(state, job) do
+    case admit(state, job.key) do
+      {:park, at, state} -> park(state, job, at)
+      {:pass, state} -> push(state, job)
+    end
+  end
 
-  # ── running ───────────────────────────────────────────────────────────────
+  defp push(state, %{key: key} = job) do
+    queue = Map.get(state.queues, key, :queue.new())
+    ring = if :queue.is_empty(queue), do: :queue.in(key, state.ring), else: state.ring
 
-  defp start_jobs(state) do
-    cond do
-      map_size(state.running) >= state.config.dispatch.concurrency ->
+    %{
+      state
+      | queues: Map.put(state.queues, key, :queue.in(job, queue)),
+        ring: ring,
+        queued: state.queued + 1
+    }
+  end
+
+  # ── breakers ──────────────────────────────────────────────────────────────
+
+  # Whether a key may run now, or its rows are parked until `at` (wall clock).
+  # An open breaker whose period is over turns half-open here: the next job of
+  # the key to start is its probe.
+  defp admit(state, key) do
+    case Map.get(state.breakers, key) do
+      %{state: :open, until: until} = breaker ->
+        now = mono_ms()
+
+        if now < until do
+          {:park, now_ms() + (until - now), state}
+        else
+          {:pass, put_breaker(state, key, %{breaker | state: :half_open, probe: nil})}
+        end
+
+      %{state: :half_open, probe: probe} when probe != nil ->
+        {:park, now_ms() + state.config.dispatch.breaker_open_ms, state}
+
+      _closed_or_unprobed ->
+        {:pass, state}
+    end
+  end
+
+  defp put_breaker(state, key, breaker),
+    do: %{state | breakers: Map.put(state.breakers, key, breaker)}
+
+  defp breakers_open(state),
+    do: Enum.count(state.breakers, fn {_key, b} -> b.state != :closed end)
+
+  # A claimed job goes back to its row, due at `at`, with its attempt count
+  # unchanged, and leaves the window.
+  # A replayed row parked behind an open breaker is reported as `:parked`, so a
+  # replay job aimed at a destination that is still down auto-pauses instead of
+  # moving the whole DLQ into rows that wait on the breaker.
+  defp park(state, job, at) do
+    state = %{state | claimed: state.claimed - 1, claimed_bytes: state.claimed_bytes - job.size}
+    state |> bump_replay(job.row, :parked) |> append(park_ops(job, at))
+  end
+
+  defp park_ops(%{seq: seq, sink: sink, row: row}, at),
+    do: Deliveries.retry_ops(seq, sink, row, at, "breaker open")
+
+  # Buffer outcome ops without the refill a full buffer otherwise triggers:
+  # parking runs while a scan is still being resolved.
+  defp append(state, ops) do
+    state = %{state | buffer: [{ops, []} | state.buffer], buffered: state.buffered + 1}
+    if state.buffered >= @flush_entries, do: flush(state), else: arm_flush(state)
+  end
+
+  # Every attempt's outcome moves its key's breaker. `:ok` closes it. A failure
+  # that is not `{:permanent, _}` counts; the `breaker_failures`-th in a row, or
+  # a failed probe, opens it, and whatever of the key is still queued is parked.
+  # A `{:permanent, _}` answer to a probe closes it: the destination answered,
+  # it just refused that one hook (and leaving the probe slot set would park
+  # the key forever).
+  defp trip(state, job, :ok, _probe?) do
+    case Map.pop(state.breakers, job.key) do
+      {nil, _breakers} ->
         state
 
-      :queue.is_empty(state.runnable) ->
+      {%{state: :closed}, breakers} ->
+        %{state | breakers: breakers}
+
+      {_open_or_half_open, breakers} ->
+        breaker_event(state, job, :closed)
+        %{state | breakers: breakers}
+    end
+  end
+
+  defp trip(state, job, {:error, reason}, probe?) do
+    dispatch = state.config.dispatch
+
+    cond do
+      dispatch.breaker_failures == 0 ->
+        state
+
+      match?({:permanent, _}, Sink.classify(reason)) and probe? ->
+        trip(state, job, :ok, probe?)
+
+      match?({:permanent, _}, Sink.classify(reason)) ->
         state
 
       true ->
-        {{:value, job}, runnable} = :queue.out(state.runnable)
+        breaker =
+          Map.get(state.breakers, job.key, %{
+            state: :closed,
+            failures: 0,
+            opens: 0,
+            until: 0,
+            probe: nil
+          })
 
-        # Bind what the task needs *before* building the closure. Reaching into
-        # `state.instance`/`state.config` inside it captures the whole state
-        # map, so every spawn would copy `runnable` — thousands of admitted
-        # envelopes — into the new process. That copy, not the delivery, was
-        # what capped throughput (measured: ~580µs per spawn, 1.5k/s; 46µs and
-        # 5.1k/s once hoisted).
-        instance = state.instance
-        timeout = state.config.dispatch.attempt_timeout_ms
+        breaker = %{breaker | failures: breaker.failures + 1}
 
-        task =
-          Task.Supervisor.async_nolink(state.task_sup, fn ->
-            run_job(job, instance)
-          end)
+        open? =
+          probe? or (breaker.state == :closed and breaker.failures >= dispatch.breaker_failures)
 
-        timer = Process.send_after(self(), {:attempt_timeout, task.ref}, timeout)
-        entry = %{job: job, task: task, timer: timer}
-
-        start_jobs(%{
-          state
-          | runnable: runnable,
-            running: Map.put(state.running, task.ref, entry)
-        })
+        if open?,
+          do: open_breaker(state, job, breaker),
+          else: put_breaker(state, job.key, breaker)
     end
+  end
+
+  defp open_breaker(state, job, breaker) do
+    dispatch = state.config.dispatch
+    opens = breaker.opens + 1
+
+    period =
+      min(dispatch.breaker_open_ms * Integer.pow(2, opens - 1), dispatch.breaker_max_open_ms)
+
+    until = mono_ms() + period
+
+    breaker_event(state, job, :open)
+
+    {mod, _opts} = job.spec
+
+    Logger.warning(
+      "[ankusa] sink #{inspect(mod)} of source #{inspect(job.env.source_id)} failed " <>
+        "#{breaker.failures} time(s) in a row; its deliveries pause for #{period} ms"
+    )
+
+    state =
+      put_breaker(state, job.key, %{
+        breaker
+        | state: :open,
+          opens: opens,
+          until: until,
+          probe: nil
+      })
+
+    park_queued(state, job.key, now_ms() + period)
+  end
+
+  defp park_queued(state, key, at) do
+    case Map.pop(state.queues, key) do
+      {nil, _queues} ->
+        state
+
+      {queue, queues} ->
+        jobs = :queue.to_list(queue)
+        ring = :queue.delete(key, state.ring)
+        state = %{state | queues: queues, ring: ring, queued: state.queued - length(jobs)}
+        Enum.reduce(jobs, state, &park(&2, &1, at))
+    end
+  end
+
+  defp breaker_event(state, job, to) do
+    {mod, _opts} = job.spec
+
+    Telemetry.emit([:dispatch, :breaker], %{}, %{
+      instance: state.instance,
+      sink: mod,
+      source_id: job.env.source_id,
+      state: to
+    })
+  end
+
+  # ── running ───────────────────────────────────────────────────────────────
+
+  # Round-robin over the keys with queued jobs: one job per key per turn. A key
+  # at its `sink_concurrency` cap, or half-open with its probe running, is
+  # skipped; a full turn that starts nothing stops the loop.
+  defp start_jobs(state), do: start_jobs(state, :queue.len(state.ring))
+
+  defp start_jobs(state, 0), do: state
+
+  defp start_jobs(state, budget) do
+    if map_size(state.running) >= state.config.dispatch.concurrency do
+      state
+    else
+      case :queue.out(state.ring) do
+        {:empty, _ring} ->
+          state
+
+        {{:value, key}, ring} ->
+          state = %{state | ring: ring}
+
+          case admit(state, key) do
+            {:park, at, state} ->
+              state |> park_queued_from_ring(key, at) |> start_jobs(budget - 1)
+
+            {:pass, state} ->
+              if at_sink_cap?(state, key) do
+                start_jobs(%{state | ring: :queue.in(key, state.ring)}, budget - 1)
+              else
+                state = start_one(state, key)
+                start_jobs(state, :queue.len(state.ring))
+              end
+          end
+      end
+    end
+  end
+
+  # `key` is already out of the ring.
+  defp park_queued_from_ring(state, key, at) do
+    {queue, queues} = Map.pop(state.queues, key)
+    jobs = :queue.to_list(queue)
+    state = %{state | queues: queues, queued: state.queued - length(jobs)}
+    Enum.reduce(jobs, state, &park(&2, &1, at))
+  end
+
+  defp at_sink_cap?(state, key) do
+    case state.config.dispatch.sink_concurrency do
+      nil -> false
+      cap -> Map.get(state.running_by_key, key, 0) >= cap
+    end
+  end
+
+  # `key` is out of the ring and has a non-empty queue.
+  defp start_one(state, key) do
+    {{:value, job}, queue} = :queue.out(Map.fetch!(state.queues, key))
+
+    {queues, ring} =
+      if :queue.is_empty(queue),
+        do: {Map.delete(state.queues, key), state.ring},
+        else: {Map.put(state.queues, key, queue), :queue.in(key, state.ring)}
+
+    # Bind what the task needs *before* building the closure. Reaching into
+    # `state.instance`/`state.config` inside it captures the whole state
+    # map, so every spawn would copy the queued jobs — thousands of admitted
+    # envelopes — into the new process. That copy, not the delivery, was
+    # what capped throughput (measured: ~580µs per spawn, 1.5k/s; 46µs and
+    # 5.1k/s once hoisted).
+    instance = state.instance
+    timeout = state.config.dispatch.attempt_timeout_ms
+
+    task =
+      Task.Supervisor.async_nolink(state.task_sup, fn ->
+        run_job(job, instance)
+      end)
+
+    timer = Process.send_after(self(), {:attempt_timeout, task.ref}, timeout)
+
+    # The first job of a half-open key is its probe.
+    {probe?, state} =
+      case Map.get(state.breakers, key) do
+        %{state: :half_open, probe: nil} = breaker ->
+          {true, put_breaker(state, key, %{breaker | probe: task.ref})}
+
+        _ ->
+          {false, state}
+      end
+
+    entry = %{job: job, task: task, timer: timer, probe?: probe?}
+
+    %{
+      state
+      | queues: queues,
+        ring: ring,
+        queued: state.queued - 1,
+        running: Map.put(state.running, task.ref, entry),
+        running_by_key: Map.update(state.running_by_key, key, 1, &(&1 + 1))
+    }
   end
 
   # Runs in the task. Returns `{result, fresh_claim}` and never raises or
@@ -809,12 +1152,19 @@ defmodule Ankusa.Dispatch.Pipeline do
   # ── outcomes ──────────────────────────────────────────────────────────────
 
   defp outcome(state, ref, result, fresh_claim) do
-    {%{job: job, timer: timer}, running} = Map.pop!(state.running, ref)
+    {%{job: job, timer: timer, probe?: probe?}, running} = Map.pop!(state.running, ref)
     Process.cancel_timer(timer)
+
+    running_by_key =
+      case Map.fetch!(state.running_by_key, job.key) do
+        1 -> Map.delete(state.running_by_key, job.key)
+        n -> Map.put(state.running_by_key, job.key, n - 1)
+      end
 
     state = %{
       state
       | running: running,
+        running_by_key: running_by_key,
         claimed: state.claimed - 1,
         claimed_bytes: state.claimed_bytes - job.size
     }
@@ -826,10 +1176,14 @@ defmodule Ankusa.Dispatch.Pipeline do
     {state, ops, pairs} =
       case result do
         :ok ->
+          {mod, _opts} = job.spec
+
           Telemetry.emit([:dispatch, :stop], %{}, %{
             instance: state.instance,
             result: :ok,
-            attempts: attempts
+            attempts: attempts,
+            sink: mod,
+            source_id: job.env.source_id
           })
 
           {%{state | settled: state.settled + 1} |> bump_replay(job.row, :delivered),
@@ -838,6 +1192,8 @@ defmodule Ankusa.Dispatch.Pipeline do
         {:error, reason} ->
           failed(state, job, reason, attempts, now)
       end
+
+    state = trip(state, job, result, probe?)
 
     state =
       state
@@ -855,7 +1211,22 @@ defmodule Ankusa.Dispatch.Pipeline do
     {rmod, ropts} = state.config.dispatch.retry
     row = %{job.row | attempts: attempts}
 
-    case rmod.backoff(attempts, ropts) do
+    decision =
+      case Sink.classify(reason) do
+        {:permanent, _term} ->
+          :give_up
+
+        {:retry_after, ms, _term} ->
+          case rmod.backoff(attempts, ropts) do
+            {:retry, delay} -> {:retry, max(delay, min(ms, @max_retry_after_ms))}
+            :give_up -> :give_up
+          end
+
+        {:transient, _reason} ->
+          rmod.backoff(attempts, ropts)
+      end
+
+    case decision do
       {:retry, delay} ->
         error = inspect(reason, limit: 50, printable_limit: 4096)
         {state, Deliveries.retry_ops(job.seq, job.sink, row, now + delay, error), []}
@@ -868,12 +1239,29 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
+  # Dispatch's own gauges (`Ankusa.Metrics`), once per housekeeping tick.
+  defp report_state(state) do
+    Telemetry.emit(
+      [:dispatch, :state],
+      %{
+        running: map_size(state.running),
+        claimed: state.claimed,
+        claimed_bytes: state.claimed_bytes,
+        runnable: state.queued,
+        breakers_open: breakers_open(state)
+      },
+      %{instance: state.instance}
+    )
+
+    state
+  end
+
   # A delivery belonging to a replay job: counted so the Replayer can report
   # and auto-pause. Rows without a `replay` key are live deliveries and skip.
   defp bump_replay(state, row, kind) do
     case Map.get(row, :replay) do
       r when is_binary(r) ->
-        counts = Map.get(state.replay_outcomes, r, %{delivered: 0, dead: 0})
+        counts = Map.get(state.replay_outcomes, r, %{delivered: 0, dead: 0, parked: 0})
         counts = Map.update!(counts, kind, &(&1 + 1))
         %{state | replay_outcomes: Map.put(state.replay_outcomes, r, counts)}
 
@@ -1066,7 +1454,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   defp quiet?(state) do
     state.recovered? and state.claimed == 0 and map_size(state.running) == 0 and
-      map_size(state.packing) == 0 and :queue.is_empty(state.runnable)
+      map_size(state.packing) == 0 and state.queued == 0
   end
 
   defp idle?(state), do: quiet?(state) and state.buffered == 0 and not due_now?(state)

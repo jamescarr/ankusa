@@ -75,10 +75,11 @@ defmodule AnkusaKafka.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      # `~> 0.5`, not older: `deliver/3` calls `Ankusa.Envelope.idempotency_key/1`,
-      # which core ships from 0.5.0 (it is not in 0.4.x), so Hex must never pair
-      # this with an older core.
-      [{:ankusa, "~> 0.5"}]
+      # `~> 0.6`, not older: a record the broker will never take is returned as
+      # `{:error, {:permanent, _}}`, which only core 0.6 dead-letters at once
+      # (0.5 would retry it for the whole policy), so Hex must never pair this
+      # with an older core. Publish core first.
+      [{:ankusa, "~> 0.6"}]
     end
   end
 end

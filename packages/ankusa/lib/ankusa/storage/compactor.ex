@@ -180,8 +180,11 @@ defmodule Ankusa.Storage.Compactor do
     ids = Enum.map(entries, &elem(&1, 1))
     first_seq = hd(seqs)
     last_seq = List.last(seqs)
-    key = "seg/#{pad(first_seq)}-#{pad(last_seq)}.seg"
-    idx_key = "seg/#{pad(first_seq)}-#{pad(last_seq)}.idx"
+    # Full keys, `storage.key_prefix` included: the catalogue records exactly
+    # what was written, so a later prefix change never strands this segment.
+    name = "seg/#{pad(first_seq)}-#{pad(last_seq)}"
+    key = Ankusa.BlobStore.object_key(instance, :segments, name <> ".seg")
+    idx_key = Ankusa.BlobStore.object_key(instance, :segments, name <> ".idx")
 
     idx =
       entries
@@ -249,7 +252,7 @@ defmodule Ankusa.Storage.Compactor do
   # raise, an exit and a throw are the same failure — this tick is retried,
   # nothing crashes.
   defp put(instance, key, data) do
-    case Ankusa.BlobStore.put(instance, key, data) do
+    case Ankusa.BlobStore.put(instance, :segments, key, data) do
       :ok -> :ok
       {:error, _reason} = error -> error
       other -> {:error, {:bad_return, other}}

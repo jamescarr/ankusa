@@ -99,6 +99,7 @@ jobs:
     name: Run full test suite
     if: ${{ github.ref_type == 'tag' }}
     uses: ./.github/workflows/ci.yml
+    secrets: inherit
 
   build:
     name: Build and smoke (${{ matrix.platform }})
@@ -107,6 +108,9 @@ jobs:
     # itself skipped — so the condition is explicit rather than implied.
     if: ${{ always() && needs.resolve.result == 'success' && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
+    env:
+      # Fork PRs get no secrets; skip the login there rather than fail it.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -121,6 +125,15 @@ jobs:
             arch: arm64
     steps:
       - uses: actions/checkout@v4
+
+      # Before buildx: setup-buildx pulls moby/buildkit and the build pulls
+      # the base images, all from Docker Hub. Also the push credentials below.
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -140,13 +153,6 @@ jobs:
       # config. An image that fails this never reaches Docker Hub.
       - name: Smoke test
         run: packages/ankusa_server/scripts/smoke.sh ${{ env.IMAGE }}:test
-
-      - name: Log in to Docker Hub
-        if: ${{ needs.resolve.outputs.push == 'true' }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Push per-architecture digests; the `merge` job below combines them into
       # one multi-arch tag set, which is what makes `docker pull` pick the right

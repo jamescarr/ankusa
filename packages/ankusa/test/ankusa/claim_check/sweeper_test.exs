@@ -55,16 +55,44 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
 
   test "never touches compaction segments under seg/", %{inst: inst} do
     key = "seg/00000000000000000001-00000000000000000002.seg"
-    :ok = Ankusa.BlobStore.put(inst, key, "segment bytes")
+    :ok = Ankusa.BlobStore.put(inst, :segments, key, "segment bytes")
     _old = claim_at(inst, days_ago(30), "old claim")
 
     assert {1, 1} = Sweeper.sweep(inst)
-    assert {:ok, "segment bytes"} = Ankusa.BlobStore.get(inst, key)
+    assert {:ok, "segment bytes"} = Ankusa.BlobStore.get(inst, :segments, key)
   end
 
   test "a second sweep with nothing expired deletes nothing", %{inst: inst} do
     _fresh = claim_at(inst, days_ago(0), "x")
     assert {0, 1} = Sweeper.sweep(inst)
     assert {0, 1} = Sweeper.sweep(inst)
+  end
+
+  @tag :capture_log
+  test "a partition that cannot be removed is skipped, and the sweep goes on", %{inst: inst} do
+    {uid, 0} = System.cmd("id", ["-u"])
+
+    if String.trim(uid) == "0" do
+      # root ignores directory permissions: nothing to prove here.
+      :ok
+    else
+      stuck = claim_at(inst, days_ago(20), "stuck")
+      gone = claim_at(inst, days_ago(10), "gone")
+
+      root = Ankusa.Config.path(Ankusa.config(inst), "segments")
+
+      [stuck_dir] =
+        Path.wildcard(Path.join(root, "claims/tenant=acme/dt=*")) |> Enum.sort() |> Enum.take(1)
+
+      # Its contents cannot be listed, so `rm -rf` fails on it.
+      File.chmod!(stuck_dir, 0o000)
+      on_exit(fn -> File.chmod(stuck_dir, 0o755) end)
+
+      assert {1, 2} = Sweeper.sweep(inst)
+      File.chmod!(stuck_dir, 0o755)
+
+      assert {:ok, "stuck"} = redeem(inst, stuck)
+      assert {:error, :not_found} = redeem(inst, gone)
+    end
   end
 end

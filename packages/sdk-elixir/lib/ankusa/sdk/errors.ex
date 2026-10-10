@@ -22,7 +22,8 @@ end
 
 defmodule Ankusa.SDK.ClaimRejectedError do
   @moduledoc """
-  The gateway rejected the request (`400`, `403`, `429` — any non-404 `4xx`).
+  The gateway rejected the request (`400`, `403` — any `4xx` but `404`, `408`
+  and `429`).
 
   `:status` is the HTTP status; `:body` is the decoded body when it was JSON,
   else the raw text (`""` for an empty body).
@@ -50,7 +51,8 @@ end
 
 defmodule Ankusa.SDK.ClaimCheckUnavailableError do
   @moduledoc """
-  The gateway is unreachable, or answered a status other than `200` that
+  The gateway is unreachable, answered `408` or `429` (throttled or timed
+  out), or answered a status other than `200` that
   `Ankusa.SDK.ClaimCheck.redeem/3` cannot classify as a rejection. Safe to
   retry.
 
@@ -72,6 +74,21 @@ defmodule Ankusa.SDK.MissingHookIdError do
   @type t :: %__MODULE__{}
 
   defexception [:message]
+end
+
+defmodule Ankusa.SDK.InvalidSignatureError do
+  @moduledoc """
+  A delivery's Standard Webhooks signature does not verify
+  (`Ankusa.SDK.Signature.verify/4`). Always `retryable: false`: answer `401`.
+
+  `:code` is `"invalid_secret"`, `"missing_header"`, `"invalid_timestamp"`,
+  `"timestamp_out_of_tolerance"` or `"no_matching_signature"`; `:field` names
+  the header at fault (`nil` for `"invalid_secret"`).
+  """
+
+  @type t :: %__MODULE__{code: String.t(), field: String.t() | nil}
+
+  defexception [:message, :code, :field, retryable: false]
 end
 
 defmodule Ankusa.SDK.InvalidRouteIdError do

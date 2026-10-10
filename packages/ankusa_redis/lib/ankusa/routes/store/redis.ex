@@ -80,9 +80,13 @@ defmodule Ankusa.Routes.Store.Redis do
 
   ## Failing loudly
 
-  The store refuses to boot against a Redis it cannot reach — `sync_connect` on
-  the connection, and a load in the state process's `init/1` — because the
-  alternative is an edge that quietly denies every webhook. Once running, a Redis
+  The store refuses to *first* boot against a Redis it cannot reach —
+  `sync_connect` on the connection, and a load in the state process's `init/1` —
+  because the alternative is an edge that quietly denies every webhook. A store
+  that is *restarted* once the instance has published a table does not: it
+  resumes from that table without waiting on Redis, and loads once the
+  subscription is confirmed (and on every tick) — so a store that crashes during
+  a Redis outage comes back with the routes it had. Once running, a Redis
   error on a write is `{:error, :store_unavailable}` (the admin API reports it as
   a `503`, and the connection reconnects on its own); reads keep being served
   from the in-memory snapshot, so a Redis outage does not start rejecting
@@ -120,9 +124,14 @@ defmodule Ankusa.Routes.Store.Redis do
     namespace = Keyword.get(store_opts, :namespace) || "ankusa:routes:#{instance}"
     tick_ms = Keyword.get(store_opts, :tick_ms, @default_tick_ms)
 
-    # `sync_connect: true` on both connections: a store that cannot reach Redis
-    # must fail the boot instead of running with nothing loaded.
-    connection = [name: Ankusa.via(instance, :routes_redis), sync_connect: true]
+    # A first boot connects synchronously on both connections: a store that
+    # cannot reach Redis must fail the boot instead of running with nothing
+    # loaded. A restart after the instance has published a table connects in the
+    # background, and the state process resumes from that table (see
+    # `State.init/1`), so a crash during a Redis outage does not take the edge's
+    # route table down with it.
+    sync? = is_nil(Ankusa.Routes.Snapshot.meta(instance))
+    connection = [name: Ankusa.via(instance, :routes_redis), sync_connect: sync?]
 
     children = [
       {Redix, {url, connection}},
@@ -131,7 +140,7 @@ defmodule Ankusa.Routes.Store.Redis do
         id: Redix.PubSub,
         start:
           {Redix.PubSub, :start_link,
-           [url, [name: Ankusa.via(instance, :routes_redis_pubsub), sync_connect: true]]}
+           [url, [name: Ankusa.via(instance, :routes_redis_pubsub), sync_connect: sync?]]}
       },
       {State, instance: instance, config: config, namespace: namespace, tick_ms: tick_ms}
     ]
@@ -267,18 +276,27 @@ defmodule Ankusa.Routes.Store.Redis.State do
       tick_ms: Keyword.fetch!(opts, :tick_ms),
       version: 0,
       routes: %{},
-      ip_rules: %{default: :allow, rules: []}
+      ip_rules: %{default: :allow, rules: []},
+      # said once per outage: the namespace lost its version key while this
+      # node holds a table
+      warned_missing?: false
     }
 
-    # Subscribe, and wait until Redis has confirmed it, BEFORE loading: a write
-    # that lands after that is a message in the mailbox as well as (maybe) in the
-    # load, never in neither.
-    with :ok <- subscribe(state),
-         {:ok, state} <- bootstrap(state, config.routes) do
-      Process.send_after(self(), :tick, state.tick_ms)
-      {:ok, state}
-    else
-      {:error, reason} -> {:stop, reason}
+    case Snapshot.adopt(instance) do
+      {:ok, table} ->
+        resume(state, table)
+
+      :none ->
+        # First boot: subscribe, and wait until Redis has confirmed it, BEFORE
+        # loading: a write that lands after that is a message in the mailbox as
+        # well as (maybe) in the load, never in neither.
+        with :ok <- subscribe(state),
+             {:ok, state} <- bootstrap(state, config.routes) do
+          Process.send_after(self(), :tick, state.tick_ms)
+          {:ok, state}
+        else
+          {:error, reason} -> {:stop, reason}
+        end
     end
   end
 
@@ -339,7 +357,21 @@ defmodule Ankusa.Routes.Store.Redis.State do
     {:noreply, state}
   end
 
+  # The subscription is confirmed (at boot this is consumed by `subscribe/1`;
+  # a resumed store gets it here, once Redis is reachable, and again after every
+  # reconnect): from now on broadcasts reach this node, and one load catches up
+  # on whatever it missed.
+  def handle_info({:redix_pubsub, _pid, _ref, :subscribed, _properties}, state),
+    do: {:noreply, sync(state)}
+
   def handle_info({:redix_pubsub, _pid, _ref, _type, _properties}, state), do: {:noreply, state}
+
+  # The snapshot table is this process's: an old generation goes a second after
+  # a reload replaced it (`Ankusa.Routes.Snapshot.publish/1`).
+  def handle_info({:drop_generation, gen}, state) do
+    Snapshot.drop_generation(state.instance, gen)
+    {:noreply, state}
+  end
 
   # ── boot ────────────────────────────────────────────────────────────────────
 
@@ -358,6 +390,30 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
       {:error, reason} ->
         {:error, {:pubsub_subscribe_failed, reason}}
+    end
+  end
+
+  # A store restarted inside a running instance finds the table its predecessor
+  # published (`Ankusa.Routes.Snapshot.adopt/1`): that is what the edge was
+  # enforcing, so resume from it instead of loading first. The subscription is
+  # requested without waiting — Redix keeps it and confirms it as soon as the
+  # pub/sub connection is up, which may be after Redis comes back from an
+  # outage — and the confirmation triggers a load (`handle_info/2`), so the
+  # subscribe-before-load order still holds. Nothing here blocks on Redis, so
+  # a restart during an outage does not hold the edge down for a timeout.
+  defp resume(state, %{routes: routes, ip_rules: ip_rules, version: version}) do
+    case Redix.PubSub.subscribe(state.pubsub, state.namespace, self()) do
+      {:ok, _ref} ->
+        Logger.info(
+          "[ankusa_redis] restarted with a published route table (#{map_size(routes)} " <>
+            "routes); serving it and loading from Redis once the subscription is confirmed"
+        )
+
+        Process.send_after(self(), :tick, state.tick_ms)
+        {:ok, %{state | routes: routes, ip_rules: ip_rules, version: version}}
+
+      {:error, reason} ->
+        {:stop, {:pubsub_subscribe_failed, reason}}
     end
   end
 
@@ -407,6 +463,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
     ]
 
     with {:ok, [raw_version, raw_routes, raw_rules]} <- transaction(state, commands),
+         :ok <- not_emptied(state, raw_version, raw_routes),
          {:ok, version} <- parse_version(raw_version || "1"),
          {:ok, routes} <- decode_routes(raw_routes),
          {:ok, rules} <- decode_rules(raw_rules) do
@@ -414,12 +471,20 @@ defmodule Ankusa.Routes.Store.Redis.State do
     end
   end
 
-  # The version key is written on first boot; a namespace without one (hand
-  # written, or partially restored) is read as version 1 rather than treated as
-  # empty, so the definitions that *are* there stay enforced.
+  # No version key and no definitions, while this node is enforcing a table: a
+  # FLUSHDB, an evicted or expired namespace, a restore that has not landed yet.
+  # Reading that as "the operator deleted every route" would open (or close,
+  # with `default: :deny` rules gone) every catch URL at once, so the reload is
+  # refused and the mirror keeps serving.
+  defp not_emptied(state, nil, []) when map_size(state.routes) > 0, do: {:error, :namespace_empty}
+  defp not_emptied(_state, _raw_version, _raw_routes), do: :ok
+
+  # The version key is written on first boot. Its absence is reported as
+  # `:missing`, for `sync/1` to decide: a node that holds a table keeps it (see
+  # `not_emptied/3`), one that holds nothing reads what is there as version 1.
   defp stored_version(state) do
     case command(state, ["GET", version_key(state)]) do
-      {:ok, nil} -> {:ok, 1}
+      {:ok, nil} -> {:ok, :missing}
       {:ok, raw} -> parse_version(raw)
       {:error, reason} -> {:error, reason}
     end
@@ -558,20 +623,36 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # ── sync ────────────────────────────────────────────────────────────────────
 
   # The tick and every broadcast take the same path: read the version, and reload
-  # if it is not the one this node holds — `!=`, so a Redis that was flushed or
-  # restored to an older state is followed down as well as up. A reload that
-  # fails keeps the mirror that is serving traffic.
+  # if it is not the one this node holds — `!=`, so a Redis restored to an older
+  # state is followed down as well as up. A namespace whose version key is gone
+  # while this node holds a table is not followed: the mirror keeps serving
+  # (said once) until a version appears again. A reload that fails keeps the
+  # mirror that is serving traffic.
   defp sync(state) do
     case stored_version(state) do
+      {:ok, :missing} when map_size(state.routes) > 0 -> keep_mirror(state)
+      {:ok, :missing} -> if state.version == 1, do: state, else: reload(state)
       {:ok, version} when version != state.version -> reload(state)
       {:ok, _same} -> state
       {:error, reason} -> warn_unavailable(reason, state)
     end
   end
 
+  defp keep_mirror(%{warned_missing?: true} = state), do: state
+
+  defp keep_mirror(state) do
+    Logger.warning(
+      "[ankusa_redis] routes namespace #{state.namespace} has no version key; keeping the " <>
+        "last known table (#{map_size(state.routes)} routes)"
+    )
+
+    %{state | warned_missing?: true}
+  end
+
   defp reload(state) do
     case fetch_table(state) do
-      {:ok, state} -> Snapshot.publish(state, {:reloaded, nil})
+      {:ok, state} -> Snapshot.publish(%{state | warned_missing?: false}, {:reloaded, nil})
+      {:error, :namespace_empty} -> keep_mirror(state)
       {:error, reason} -> warn_unavailable(reason, state)
     end
   end

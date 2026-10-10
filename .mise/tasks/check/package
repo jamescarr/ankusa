@@ -30,6 +30,8 @@ case "$kind" in
   hex | docker)
     mix deps.get --check-locked
     mix deps.unlock --check-unused
+    # Retired packages and published security advisories fail the build.
+    mix hex.audit
     mix format --check-formatted
     mix compile --warnings-as-errors
     mix test
