@@ -38,9 +38,10 @@ defmodule Ankusa.SourceStore.Persistent do
   alias Ankusa.{Config, SourceStore.Table, Store}
   alias Ankusa.Store.Keys
 
-  @spec start_link(Config.t()) :: GenServer.on_start()
-  def start_link(%Config{} = config) do
-    GenServer.start_link(__MODULE__, config, name: Ankusa.via(config.instance, :source_store))
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts) do
+    instance = Keyword.fetch!(opts, :instance)
+    GenServer.start_link(__MODULE__, instance, name: Ankusa.via(instance, :source_store))
   end
 
   # ── reads, straight from ETS (`Ankusa.SourceStore.Table`) ──────────────────
@@ -72,14 +73,16 @@ defmodule Ankusa.SourceStore.Persistent do
   # ── GenServer ───────────────────────────────────────────────────────────────
 
   @impl true
-  def init(%Config{source_store: {__MODULE__, opts}} = config) do
-    table = Table.new(config.instance)
+  def init(instance) do
+    %Config{source_store: {__MODULE__, opts}} = config = Ankusa.config(instance)
+    table = Table.new(instance)
     decoder = Keyword.get(opts, :decoder)
     Table.insert_seeds(table, Keyword.get(opts, :sources, %{}))
 
-    case load_persisted(config.instance, table, decoder) do
+    case load_persisted(instance, table, decoder) do
       :ok ->
-        {:ok, %{config: config, table: table, decoder: decoder}}
+        Ankusa.Verifier.warn_stored_shared(config, Table.stored_sources(table))
+        {:ok, %{instance: instance, table: table, decoder: decoder}}
 
       # Booting without the persisted sources would 404 every hook for them.
       {:error, reason} ->
@@ -87,15 +90,11 @@ defmodule Ankusa.SourceStore.Persistent do
     end
   end
 
-  # A crash report prints the state and the last message: the config is the
-  # whole instance config (its seeded sources carry sink options), and a `put`
-  # carries the new source's sinks.
+  # A crash report prints the last message: a `put` carries the new source's
+  # sinks and secrets.
   @impl true
   def format_status(status) do
     Map.new(status, fn
-      {:state, %{config: _} = state} ->
-        {:state, %{state | config: :redacted}}
-
       {:message, {:put, tenant, name, _spec, mode}} ->
         {:message, {:put, tenant, name, :redacted, mode}}
 
@@ -145,7 +144,7 @@ defmodule Ankusa.SourceStore.Persistent do
   defp apply_delete(state, tenant, name, source_id) do
     ops = [{:delete, :default, Keys.source(tenant, name)}]
 
-    case Store.write(state.config.instance, ops, sync: true) do
+    case Store.write(state.instance, ops, sync: true) do
       :ok ->
         Table.delete_rows(state.table, tenant, name)
         :ok
@@ -175,10 +174,11 @@ defmodule Ankusa.SourceStore.Persistent do
   defp write(state, tenant, name, source_id, spec, current) do
     spec = Table.normalize(spec, current)
 
-    with {:ok, stored, source} <- Table.build(state.decoder, tenant, name, spec) do
+    with {:ok, stored, source} <- Table.build(state.decoder, tenant, name, spec),
+         :ok <- Table.check_write(state.instance, source) do
       ops = [{:put, :default, Keys.source(tenant, name), JSON.encode!(spec)}]
 
-      case Store.write(state.config.instance, ops, sync: true) do
+      case Store.write(state.instance, ops, sync: true) do
         :ok ->
           Table.put_rows(state.table, stored, source)
           {:ok, stored}

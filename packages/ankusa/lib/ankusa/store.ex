@@ -94,7 +94,7 @@ defmodule Ankusa.Store do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
     path = Config.path(config, "store")
 
     Process.flag(:trap_exit, true)

@@ -271,11 +271,14 @@ its own named ETS table. That's what makes two
 independent instances runnable in one VM (and what makes the test suite
 `async: true`-safe for anything that doesn't share on-disk state).
 
-Config is a `%Ankusa.Config{}` struct built once and passed down the
-supervision tree at start (`Ankusa.Instance`'s `init/1`), then cached in
-`:persistent_term` for read-mostly access. No `Application.get_env/2`
-buried in call sites, and instance-scoped config falls out of the struct for
-free. Data that changes at runtime stays out of `:persistent_term` (whose
+Config is a `%Ankusa.Config{}` struct built once and cached in
+`:persistent_term` when the instance is started (`Ankusa.Instance`'s
+`child_spec/1` or `start_link/1`). Children are handed only the instance's
+name and read the struct back with `Ankusa.config/1`, so no supervisor's child
+specs, crash reports or `:sys.get_status/1` carry the secrets in it. No
+`Application.get_env/2` buried in call sites, and instance-scoped config falls
+out of the struct for free. Data that changes at runtime stays out of
+`:persistent_term` (whose
 every update copies into every process that read it): the route table is an
 ETS table the routes store writes (a small owner process keeps it across a
 store restart, and the restarted store resumes from it: API-created routes

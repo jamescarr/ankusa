@@ -287,18 +287,18 @@ defmodule Ankusa.Edge.Quarantine do
 
   @impl true
   def init(opts) do
-    config = Keyword.fetch!(opts, :config)
-    %{burst: burst, rate: rate, max_bytes: max_bytes} = config.quarantine
+    instance = Keyword.fetch!(opts, :instance)
+    %{burst: burst, rate: rate, max_bytes: max_bytes} = Ankusa.config(instance).quarantine
 
     # The cap is only as good as the count: refuse to start rather than guess
     # an empty pen.
-    case held_bytes(config.instance) do
+    case held_bytes(instance) do
       {:ok, bytes} ->
         schedule_sweep()
 
         {:ok,
          %{
-           instance: config.instance,
+           instance: instance,
            burst: burst * 1.0,
            rate: rate * 1.0,
            max_bytes: max_bytes,

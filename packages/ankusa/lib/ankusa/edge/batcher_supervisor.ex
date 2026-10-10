@@ -23,13 +23,13 @@ defmodule Ankusa.Edge.BatcherSupervisor do
 
   @impl true
   def init(opts) do
-    config = Keyword.fetch!(opts, :config)
-    partitions = config.batcher.partitions
+    instance = Keyword.fetch!(opts, :instance)
+    partitions = Ankusa.config(instance).batcher.partitions
 
     children =
       for p <- 0..(partitions - 1) do
         Supervisor.child_spec(
-          {Ankusa.Edge.Batcher, instance: config.instance, config: config, partition: p},
+          {Ankusa.Edge.Batcher, instance: instance, partition: p},
           id: {Ankusa.Edge.Batcher, p}
         )
       end

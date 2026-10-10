@@ -104,6 +104,12 @@ defmodule Ankusa.SourceStore.Table do
     :ets.select(table, [{{{:stored, :"$1", :"$2"}, :_}, [], [{{:"$1", :"$2"}}]}])
   end
 
+  @doc "Every API-managed source in the table (seeds excluded)."
+  @spec stored_sources(:ets.table()) :: [Source.t()]
+  def stored_sources(table) do
+    :ets.select(table, [{{{:source, :_}, {:"$1", :"$2"}}, [{:"=/=", :"$1", nil}], [:"$2"]}])
+  end
+
   @spec source_id(String.t(), String.t()) :: String.t()
   def source_id(tenant, name), do: "#{tenant}.#{name}"
 
@@ -161,6 +167,20 @@ defmodule Ankusa.SourceStore.Table do
     with {:ok, source_opts} <- decode(decoder, source_id, spec) do
       stored = %{tenant: tenant, name: name, source_id: source_id, spec: spec}
       {:ok, stored, Source.new(source_id, Keyword.put(source_opts, :tenant_id, tenant))}
+    end
+  end
+
+  @doc """
+  Refuse a write of a source the instance's config would not run
+  (`Ankusa.Verifier.check_shared/2`). `build/4` and `load_spec/5` stay
+  permissive: refusing a stored source at load would `404` it, and dispatch
+  would dead-letter its pending hooks as `source_gone`.
+  """
+  @spec check_write(atom(), Source.t()) :: :ok | {:error, :invalid, String.t()}
+  def check_write(instance, %Source{} = source) do
+    case Ankusa.Verifier.check_shared(Ankusa.config(instance), source) do
+      :ok -> :ok
+      {:error, message} -> {:error, :invalid, message}
     end
   end
 

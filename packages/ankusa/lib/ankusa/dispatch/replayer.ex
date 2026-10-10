@@ -61,7 +61,7 @@ defmodule Ankusa.Dispatch.Replayer do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
 
     send(self(), :load)
 

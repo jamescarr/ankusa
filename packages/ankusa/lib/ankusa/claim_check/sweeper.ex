@@ -41,7 +41,7 @@ defmodule Ankusa.ClaimCheck.Sweeper do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    %Config{} = config = Keyword.fetch!(opts, :config)
+    %Config{} = config = Ankusa.config(instance)
     interval = config.claim_check.sweep_interval_ms
     schedule(interval)
     {:ok, %{instance: instance, config: config, interval: interval}}

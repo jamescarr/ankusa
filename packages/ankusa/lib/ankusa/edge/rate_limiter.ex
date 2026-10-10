@@ -60,8 +60,8 @@ defmodule Ankusa.Edge.RateLimiter do
 
   @impl true
   def init(opts) do
-    config = Keyword.fetch!(opts, :config)
-    instance = config.instance
+    instance = Keyword.fetch!(opts, :instance)
+    config = Ankusa.config(instance)
 
     overrides =
       :ets.new(overrides_table(instance), [

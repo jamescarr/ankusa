@@ -376,7 +376,7 @@ defmodule Ankusa.LifecycleTest do
 
       config = test_config(lifecycle: %{sinks: [{GateSink, to: self()}]})
       put_config(config)
-      start_supervised!({Publisher, instance: config.instance, config: config, max_pending: 1})
+      start_supervised!({Publisher, instance: config.instance, max_pending: 1})
 
       :ok =
         Publisher.publish(config.instance, envelope("one"), "io.ankusa.source.created", "acme.a")

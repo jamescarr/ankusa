@@ -117,12 +117,16 @@ defmodule Ankusa.Routes.Store.Redis do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
     {_mod, store_opts} = config.routes.store
 
     url = Keyword.fetch!(store_opts, :url)
     namespace = Keyword.get(store_opts, :namespace) || "ankusa:routes:#{instance}"
     tick_ms = Keyword.get(store_opts, :tick_ms, @default_tick_ms)
+
+    # The children's start arguments are printed by this supervisor's reports
+    # and status: they carry the password as an MFA, read back on connect.
+    redis = Ankusa.Redis.Options.start_opts(url, {__MODULE__, :password, [instance]})
 
     # A first boot connects synchronously on both connections: a store that
     # cannot reach Redis must fail the boot instead of running with nothing
@@ -134,20 +138,28 @@ defmodule Ankusa.Routes.Store.Redis do
     connection = [name: Ankusa.via(instance, :routes_redis), sync_connect: sync?]
 
     children = [
-      {Redix, {url, connection}},
+      {Redix, redis ++ connection},
       # `Redix.PubSub` ships no `child_spec/1`, so the spec is spelled out.
       %{
         id: Redix.PubSub,
         start:
           {Redix.PubSub, :start_link,
-           [url, [name: Ankusa.via(instance, :routes_redis_pubsub), sync_connect: sync?]]}
+           [redis ++ [name: Ankusa.via(instance, :routes_redis_pubsub), sync_connect: sync?]]}
       },
-      {State, instance: instance, config: config, namespace: namespace, tick_ms: tick_ms}
+      {State, instance: instance, namespace: namespace, tick_ms: tick_ms}
     ]
 
     # `:rest_for_one`: the state process depends on both connections, and holds a
     # subscription that only lives as long as the pub/sub connection it was made on.
     Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  @doc false
+  # Redix calls this on every connect (the `:password` MFA above).
+  @spec password(atom()) :: String.t() | nil
+  def password(instance) do
+    {_mod, opts} = Ankusa.config(instance).routes.store
+    opts |> Keyword.fetch!(:url) |> Ankusa.Redis.Options.password()
   end
 
   # The store's address is the state process, so the facade calls it exactly as
@@ -264,7 +276,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
     namespace = Keyword.fetch!(opts, :namespace)
 
     state = %{

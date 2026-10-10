@@ -94,7 +94,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers trust_url_tenant)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -340,6 +340,7 @@ defmodule AnkusaServer.Config do
       config = Ankusa.Config.new(opts)
       Ankusa.ClaimCheck.validate_config!(config)
       Ankusa.Verifier.validate_config!(config)
+      Ankusa.Verifier.validate_shared!(config)
       # The image validates what core validates, at the same moment: a route
       # config that would refuse to boot must fail `check-config` too, with the
       # same message.
@@ -936,6 +937,7 @@ defmodule AnkusaServer.Config do
     |> Keyword.put(:sinks, sinks!(source, path))
     |> put_opt(:dedupe, dedupe(source, path))
     |> put_opt(:forward_headers, forward_headers(source, path))
+    |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
   end
 
   # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of

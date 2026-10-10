@@ -38,26 +38,41 @@ defmodule Ankusa.Instance do
   alias Ankusa.Config
   alias Ankusa.Instance.Isolated
 
-  @spec start_link(Config.t()) :: Supervisor.on_start()
+  @spec start_link(Config.t() | atom()) :: Supervisor.on_start()
   def start_link(%Config{} = config) do
-    Supervisor.start_link(__MODULE__, config, name: Ankusa.via(config.instance, :instance))
+    Ankusa.put_config(config)
+    start_link(config.instance)
   end
 
+  def start_link(instance) when is_atom(instance) do
+    Supervisor.start_link(__MODULE__, instance, name: Ankusa.via(instance, :instance))
+  end
+
+  @doc """
+  The child spec for the instance `config` describes. Building it stores the
+  config (`Ankusa.put_config/1`), so the parent's spec, its supervisor reports
+  and `:sys.get_status/1` name only the instance, and every (re)start reads the
+  config back. Build it only for an instance you are about to start: it
+  replaces that name's stored config.
+  """
   def child_spec(%Config{} = config) do
+    Ankusa.put_config(config)
+
     %{
       id: {__MODULE__, config.instance},
-      start: {__MODULE__, :start_link, [config]},
+      start: {__MODULE__, :start_link, [config.instance]},
       type: :supervisor
     }
   end
 
   @impl true
-  def init(%Config{} = config) do
-    # read-mostly config for every call site, no Application.get_env buried deep
-    Ankusa.put_config(config)
+  def init(instance) when is_atom(instance) do
+    # Every child reads the config back by name (`Ankusa.config/1`): a
+    # supervisor prints its children's start arguments.
+    config = Ankusa.config(instance)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Verifier.validate_config!(config)
-    Ankusa.Verifier.warn_unverified_shared(config)
+    Ankusa.Verifier.validate_shared!(config)
     Ankusa.Routes.validate_config!(config)
     Ankusa.Queue.validate_config!(config)
     Ankusa.Lifecycle.validate_config!(config)
@@ -65,7 +80,7 @@ defmodule Ankusa.Instance do
     Ankusa.Edge.Quarantine.validate_config!(config)
     Ankusa.Dispatch.Pipeline.validate_config!(config)
     Ankusa.Store.Backup.validate_config!(config)
-    opts = [instance: config.instance, config: config]
+    opts = [instance: config.instance]
 
     children =
       [{Ankusa.Instance.RegistryWatch, config.instance}] ++
@@ -141,11 +156,11 @@ defmodule Ankusa.Instance do
   # edge accepts a request, since every ingest reads through it. A read-only
   # store is config-only and has no process: `function_exported?/1` on a module
   # that may not be loaded yet needs `Code.ensure_loaded/1` first.
-  defp source_store_children(config, _opts) do
+  defp source_store_children(config, opts) do
     {store_mod, _store_opts} = config.source_store
 
     if Code.ensure_loaded?(store_mod) and function_exported?(store_mod, :start_link, 1) do
-      [{store_mod, config}]
+      [{store_mod, opts}]
     else
       []
     end

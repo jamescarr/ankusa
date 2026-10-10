@@ -50,7 +50,7 @@ defmodule Ankusa.Routes.Store.ETS do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    %{routes: routes_config} = Keyword.fetch!(opts, :config)
+    %{routes: routes_config} = Ankusa.config(instance)
 
     case Snapshot.adopt(instance) do
       {:ok, %{routes: routes, ip_rules: ip_rules, version: version}} ->

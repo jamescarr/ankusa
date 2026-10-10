@@ -400,41 +400,40 @@ defmodule Ankusa.VerifierTest do
     end
   end
 
-  describe "warn_unverified_shared/1" do
-    import ExUnit.CaptureLog
-
-    defp warning(resolver, source_opts, roles \\ [:edge]) do
-      config =
-        Ankusa.Config.new(
-          instance: :"verifier_warn_#{System.unique_integer([:positive])}",
-          data_dir: System.tmp_dir!(),
-          roles: roles,
-          route_resolver: resolver,
-          source_store: {Ankusa.SourceStore.Static, sources: %{"e5-probe" => source_opts}}
-        )
-
-      capture_log(fn -> assert Ankusa.Verifier.warn_unverified_shared(config) == :ok end)
+  describe "validate_shared!/1" do
+    defp shared_config(resolver, source_opts, roles \\ [:edge]) do
+      Ankusa.Config.new(
+        instance: :"verifier_shared_#{System.unique_integer([:positive])}",
+        data_dir: System.tmp_dir!(),
+        roles: roles,
+        route_resolver: resolver,
+        source_store: {Ankusa.SourceStore.Static, sources: %{"e5-probe" => source_opts}}
+      )
     end
 
-    test "names a shared source with no verifier when the URL carries the tenant" do
-      assert warning({Ankusa.RouteResolver.TenantPath, []}, []) =~
-               "source e5-probe is shared"
+    test "refuses a shared source with no verifier when the request names the tenant, whatever the node's roles" do
+      for roles <- [[:edge], [:dispatch]] do
+        config = shared_config({Ankusa.RouteResolver.TenantPath, []}, [], roles)
+
+        assert_raise ArgumentError,
+                     ~r/^source e5-probe is shared \(tenant_id "default"\) and has no verifier/,
+                     fn -> Ankusa.Verifier.validate_shared!(config) end
+      end
     end
 
-    test "says nothing when the tenant does not come from the URL, or the source is bound or verified" do
-      # `refute =~`, not `== ""`: capture_log also sees other async tests' logs.
-      refute warning({Ankusa.RouteResolver.Path, []}, []) =~ "source e5-probe is shared"
-
-      refute warning({Ankusa.RouteResolver.TenantPath, []}, tenant_id: "acme") =~
-               "source e5-probe is shared"
-
+    test "accepts a source that trusts the request's tenant, is bound, or is verified, and any source when the tenant does not come from the request" do
+      tenant_path = {Ankusa.RouteResolver.TenantPath, []}
       verified = [verifier: {Hmac, scheme: :stripe, secret: "whsec_x"}]
 
-      refute warning({Ankusa.RouteResolver.TenantPath, []}, verified) =~
-               "source e5-probe is shared"
-
-      refute warning({Ankusa.RouteResolver.TenantPath, []}, [], [:dispatch]) =~
-               "source e5-probe is shared"
+      for {resolver, source_opts} <- [
+            {tenant_path, [trust_url_tenant: true]},
+            {tenant_path, [tenant_id: "acme"]},
+            {tenant_path, verified},
+            {{Ankusa.RouteResolver.Path, []}, []}
+          ] do
+        config = shared_config(resolver, source_opts)
+        assert Ankusa.Verifier.validate_shared!(config) == :ok
+      end
     end
   end
 end

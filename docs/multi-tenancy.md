@@ -134,10 +134,25 @@ A shared source trusts the URL's tenant: anyone who can post to
 spends its rate limit. Give a shared source a real verifier (the provider's
 signature), so only the provider's hooks get in, or give each tenant a source
 of its own, which the binding above then protects. A source created through
-the admin API under the tenant `default` is shared the same way. When the
-edge takes the tenant from the URL (any resolver but `RouteResolver.Path`),
-the node logs a warning at boot for each configured source that is shared and
-has no verifier.
+the admin API under the tenant `default` is shared the same way.
+
+When the tenant comes from the request (any resolver but `RouteResolver.Path`),
+a shared source with no verifier (`verify: {type: none}`, or
+`Ankusa.Verifier.None`) has to say that it means it: `trust_url_tenant: true`,
+the same key in YAML, an admin API spec and the Elixir source options.
+Without it:
+
+- a source in the config refuses to boot, and the image's `check-config`
+  exits 78, naming the source — on every node that reads that config,
+  whatever its roles;
+- an admin API write (`POST`/`PUT` under `/v1/tenants/default/sources`) is
+  `400 invalid_source` with the same message;
+- a source the store already held from before the rule (an API-managed one
+  written by an older node) keeps serving as it did, and the node logs a
+  warning naming it at boot. Saving it again needs the flag, or a verifier.
+
+A source that sets the flag behaves exactly as an unflagged one did before:
+the request's tenant is taken as given.
 
 ## Dynamic sources
 

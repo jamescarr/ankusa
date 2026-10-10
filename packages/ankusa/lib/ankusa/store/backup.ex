@@ -109,7 +109,7 @@ defmodule Ankusa.Store.Backup do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    %Config{} = config = Keyword.fetch!(opts, :config)
+    %Config{} = config = Ankusa.config(instance)
     interval = config.backup.interval_ms
 
     # What a crash mid-upload left behind.

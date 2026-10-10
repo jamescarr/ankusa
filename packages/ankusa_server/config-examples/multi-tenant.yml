@@ -40,5 +40,8 @@ sources:
 
   demo:
     verify: {type: none}
+    # No verifier and no tenant of its own: required with routing:
+    # tenant_path. Any sender can file hooks under any tenant through it.
+    trust_url_tenant: true
     on_verify_failure: accept_flag
     sinks: [{type: log}]

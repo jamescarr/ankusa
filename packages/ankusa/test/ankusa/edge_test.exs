@@ -681,7 +681,7 @@ defmodule Ankusa.EdgeTest do
         start_edge(
           %{
             "billing" => [verifier: {Ankusa.Verifier.None, []}, tenant_id: "acme"],
-            "shared" => [verifier: {Ankusa.Verifier.None, []}]
+            "shared" => [verifier: {Ankusa.Verifier.None, []}, trust_url_tenant: true]
           },
           route_resolver: {Ankusa.RouteResolver.TenantPath, []}
         )

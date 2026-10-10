@@ -18,7 +18,7 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
       )
 
     Ankusa.put_config(config)
-    start_supervised!({Sweeper, instance: inst, config: config})
+    start_supervised!({Sweeper, instance: inst})
 
     %{inst: inst}
   end

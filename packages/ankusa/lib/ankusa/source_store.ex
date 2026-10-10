@@ -29,6 +29,11 @@ defmodule Ankusa.SourceStore do
   `delete/3` answers `{:error, :store_unavailable}` (the admin API's
   `503 store_unavailable`), never `{:error, :invalid, _}`, which tells the
   caller its request is wrong.
+
+  A store that runs a process exports `start_link/1`. `Ankusa.Instance` starts
+  it with `[instance: instance]`, and it reads its options from
+  `Ankusa.config(instance).source_store`. Never put configuration in a child
+  spec: a supervisor prints its children's start arguments.
   """
 
   alias Ankusa.{Config, Source}

@@ -208,7 +208,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
 
     # Linked to us on purpose: nobody else knows about it, and it must not
     # outlive the pipeline. Tests that start the Pipeline alone still get it.

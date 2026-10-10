@@ -53,8 +53,8 @@ defmodule Ankusa.Lifecycle.Publisher do
   end
 
   @doc """
-  Start the publisher for `opts[:instance]`. `opts[:config]` is the instance's
-  `Ankusa.Config`; `opts[:max_pending]` overrides the queue bound.
+  Start the publisher for `opts[:instance]`. `opts[:max_pending]` overrides the
+  queue bound.
   """
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts,
@@ -88,7 +88,7 @@ defmodule Ankusa.Lifecycle.Publisher do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
     {:ok, sup} = Task.Supervisor.start_link()
 
     {:ok,
