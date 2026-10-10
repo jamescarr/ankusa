@@ -73,7 +73,8 @@ jobs:
       - run: mise run check:package ${{ matrix.package }}
 
   # Core's object-store adapters (and the S3 backup round trip) against the
-  # floci emulators: `mix test --include integration`.
+  # floci emulators: `mix test --only integration` (the rest of core's suite
+  # runs in the `ankusa` package job).
   integration:
     name: core integration (floci)
     runs-on: ubuntu-latest

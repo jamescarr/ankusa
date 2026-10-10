@@ -24,6 +24,11 @@ defmodule Ankusa.SourceStore do
   dispatch reschedules the row without spending an attempt, and a replay
   stops at that entry and retries it on its next tick. Never answer `:error`
   for "I could not look": that turns an outage into lost hooks.
+
+  Writes follow the same rule: a store that could not persist a `put/5` or
+  `delete/3` answers `{:error, :store_unavailable}` (the admin API's
+  `503 store_unavailable`), never `{:error, :invalid, _}`, which tells the
+  caller its request is wrong.
   """
 
   alias Ankusa.{Config, Source}
@@ -55,12 +60,16 @@ defmodule Ankusa.SourceStore do
               | {:error, :invalid, String.t()}
               | {:error, :exists}
               | {:error, :not_found}
+              | {:error, :store_unavailable}
   @callback get(instance :: atom(), tenant :: String.t(), name :: String.t()) ::
               {:ok, stored()} | :error
   @callback list_tenant(instance :: atom(), tenant :: String.t()) :: [stored()]
 
   @callback delete(instance :: atom(), tenant :: String.t(), name :: String.t()) ::
-              :ok | {:error, :not_found} | {:error, :invalid, String.t()}
+              :ok
+              | {:error, :not_found}
+              | {:error, :invalid, String.t()}
+              | {:error, :store_unavailable}
 
   @optional_callbacks put: 5, get: 3, list_tenant: 2, delete: 3
 
@@ -92,6 +101,7 @@ defmodule Ankusa.SourceStore do
           | {:error, :invalid, String.t()}
           | {:error, :exists}
           | {:error, :not_found}
+          | {:error, :store_unavailable}
           | {:error, :read_only}
   def put(instance, tenant, name, spec, mode) do
     with :ok <- validate_identity(tenant, "tenant"),
@@ -137,7 +147,11 @@ defmodule Ankusa.SourceStore do
   A store that does not export `delete/3` is read-only: `{:error, :read_only}`.
   """
   @spec delete(atom(), String.t(), String.t()) ::
-          :ok | {:error, :not_found} | {:error, :invalid, String.t()} | {:error, :read_only}
+          :ok
+          | {:error, :not_found}
+          | {:error, :invalid, String.t()}
+          | {:error, :store_unavailable}
+          | {:error, :read_only}
   def delete(instance, tenant, name) do
     with :ok <- validate_identity(tenant, "tenant"),
          :ok <- validate_identity(name, "name") do

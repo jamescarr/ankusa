@@ -357,6 +357,30 @@ defmodule Ankusa.Store.BackupTest do
     assert third != second
   end
 
+  test "two live nodes with the same store id: the one whose LATEST was moved stops" do
+    root = blob_root()
+    a = start(root)
+    commit!(a.instance, 10)
+    assert {:ok, _} = Backup.run(a.instance)
+
+    # B boots on an empty volume with A's prefix while A runs: it restores A's
+    # backup and inherits A's store id, so the id alone cannot tell them apart.
+    b = start(root)
+    assert {:ok, %{id: from_b}} = Backup.run(b.instance)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:prefix_shared, ^from_b}} = Backup.run(a.instance)
+      end)
+
+    assert log =~ "did not write"
+    assert File.read!(Path.join([root, "backup", "LATEST"])) == from_b
+    assert File.exists?(Path.join([root, "backup", from_b, "manifest.json"]))
+
+    # B wrote LATEST itself, so it carries on.
+    assert {:ok, _} = Backup.run(b.instance)
+  end
+
   test "a checkpoint in flight does not block readiness" do
     config = start(blob_root())
     inst = config.instance

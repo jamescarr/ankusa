@@ -14,11 +14,12 @@ follows [Semantic Versioning](https://semver.org/).
   a `tick_ms` safety net). Reads go to an ETS mirror that survives a restart of
   the store's state process. Seeds stay config-only. A first boot against an
   unreachable Redis fails; a write during an outage answers
-  `{:error, :invalid, "could not persist source: store unavailable"}`.
+  `{:error, :store_unavailable}` (the admin API's `503 store_unavailable`).
 
 ### Changed
 
-- Requires `ankusa ~> 0.6` (the ETS route snapshot API); publish core first.
+- Requires `ankusa ~> 0.6` (the ETS route snapshot API, and the source table
+  `SourceStore.Redis` shares with `SourceStore.Persistent`); publish core first.
 - The Redis route store keeps serving its last known table when the
   namespace's version key disappears (a flushed or evicted Redis) instead of
   publishing an empty table that rejects every webhook; it logs a warning

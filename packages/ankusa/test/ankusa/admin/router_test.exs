@@ -1111,6 +1111,28 @@ defmodule Ankusa.Admin.RouterTest do
       assert conn.status == 400
       assert %{"error" => "invalid_source"} = JSON.decode!(conn.resp_body)
     end
+
+    test "a write the store cannot persist is 503 store_unavailable, not 400", %{
+      inst: inst
+    } do
+      body = JSON.encode!(spec(%{"name" => "billing"}))
+      assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
+
+      # The source table survives; the store it persists to is gone.
+      stop_supervised!({Ankusa.Store, inst})
+
+      for conn <- [
+            call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "x"}))),
+            call(inst, :put, "/v1/tenants/acme/sources/billing", JSON.encode!(spec(%{}))),
+            call(inst, :delete, "/v1/tenants/acme/sources/billing")
+          ] do
+        assert conn.status == 503
+        assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+        assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+      end
+
+      assert call(inst, :get, "/v1/tenants/acme/sources/billing").status == 200
+    end
   end
 
   describe "per-tenant rate limits" do

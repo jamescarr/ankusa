@@ -22,7 +22,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   store (`{:foreign_backup, theirs, ours}`, logged at error level): each store
   gets an id (`m:store_id`) on its first backup, carried by its checkpoints
   and recorded in every manifest. Two nodes on one prefix no longer purge each
-  other's backups.
+  other's backups. A node whose `LATEST` was moved by another writer of the
+  same store (an old host beside its replacement) refuses too
+  (`{:prefix_shared, latest}`).
 - Blob files of the hooks and quarantine column families are capped at 64 MiB
   (`blob_file_size`; RocksDB's default is 256 MiB), bounding what one backup
   upload or restore holds in memory.

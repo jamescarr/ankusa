@@ -214,7 +214,8 @@ mise run test:integration
 
 It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 and SQS on
 :4566, floci-gcp on :4588, floci-az on :4577, floci-oci on :4599), waits for
-the bucket/container bootstrap, runs `mix test --include integration` in
+the bucket/container bootstrap, runs `mix test --only integration` (the tagged tests alone; the rest is
+`check:package ankusa`'s) in
 `packages/ankusa`, and tears the emulators down. CI runs it as the
 `core integration (floci)` job.
 

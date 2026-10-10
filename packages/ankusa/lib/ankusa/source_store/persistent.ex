@@ -152,7 +152,7 @@ defmodule Ankusa.SourceStore.Persistent do
 
       {:error, reason} ->
         Logger.error("[ankusa] could not persist source #{source_id}: #{inspect(reason)}")
-        {:error, :invalid, "could not persist source: #{inspect(reason)}"}
+        {:error, :store_unavailable}
     end
   end
 
@@ -185,7 +185,7 @@ defmodule Ankusa.SourceStore.Persistent do
 
         {:error, reason} ->
           Logger.error("[ankusa] could not persist source #{source_id}: #{inspect(reason)}")
-          {:error, :invalid, "could not persist source: #{inspect(reason)}"}
+          {:error, :store_unavailable}
       end
     end
   end

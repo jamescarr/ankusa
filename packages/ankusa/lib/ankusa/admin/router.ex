@@ -342,6 +342,7 @@ defmodule Ankusa.Admin.Router do
           :ok -> Plug.Conn.send_resp(conn, 204, "")
           {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
           {:error, :invalid, message} -> invalid_source(conn, message)
+          {:error, :store_unavailable} -> source_store_unavailable(conn)
           {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
         end
     end
@@ -373,6 +374,7 @@ defmodule Ankusa.Admin.Router do
       {:error, :invalid, message} -> invalid_source(conn, message)
       {:error, :exists} -> send_json(conn, 409, %{error: "source_exists"})
       {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
+      {:error, :store_unavailable} -> source_store_unavailable(conn)
       {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
     end
   end
@@ -467,6 +469,14 @@ defmodule Ankusa.Admin.Router do
 
   defp invalid_source(conn, message),
     do: send_json(conn, 400, %{error: "invalid_source", message: message})
+
+  # The store could not persist the write (a Redis outage, a failed sync): the
+  # request was fine, so the client retries rather than fixes it.
+  defp source_store_unavailable(conn) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "1")
+    |> send_json(503, %{error: "store_unavailable"})
+  end
 
   defp invalid_rate_limit(conn, message),
     do: send_json(conn, 400, %{error: "invalid_rate_limit", message: message})

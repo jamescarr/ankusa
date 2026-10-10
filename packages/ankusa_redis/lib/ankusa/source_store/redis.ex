@@ -57,9 +57,9 @@ defmodule Ankusa.SourceStore.Redis do
   an empty mirror would `404` every API-managed source. A store process that
   crashes while the node runs keeps its mirror (the table survives in
   `Ankusa.SourceStore.Redis.TableOwner`) and resumes from it without waiting on
-  Redis. A Redis error on a write answers
-  `{:error, :invalid, "could not persist source: store unavailable"}`, and
-  nothing is written; reads keep serving the mirror.
+  Redis. A Redis error on a write answers `{:error, :store_unavailable}`
+  (the admin API's `503`), and nothing is written; reads keep serving the
+  mirror.
   """
 
   use Supervisor
@@ -227,8 +227,6 @@ defmodule Ankusa.SourceStore.Redis.State do
   @redis_timeout 5_000
   @call_timeout 20_000
 
-  @unavailable "could not persist source: store unavailable"
-
   # KEYS: sources hash, version. ARGV: source id, entry JSON, mode.
   @put_source """
   local exists = redis.call('HEXISTS', KEYS[1], ARGV[1])
@@ -258,11 +256,15 @@ defmodule Ankusa.SourceStore.Redis.State do
           | {:error, :invalid, String.t()}
           | {:error, :exists}
           | {:error, :not_found}
+          | {:error, :store_unavailable}
   def put(instance, tenant, name, spec, mode),
     do: GenServer.call(server(instance), {:put, tenant, name, spec, mode}, @call_timeout)
 
   @spec delete(atom(), String.t(), String.t()) ::
-          :ok | {:error, :not_found} | {:error, :invalid, String.t()}
+          :ok
+          | {:error, :not_found}
+          | {:error, :invalid, String.t()}
+          | {:error, :store_unavailable}
   def delete(instance, tenant, name),
     do: GenServer.call(server(instance), {:delete, tenant, name}, @call_timeout)
 
@@ -335,11 +337,17 @@ defmodule Ankusa.SourceStore.Redis.State do
         {:reply, {:error, :invalid, "spec must be a JSON object"}, state}
 
       true ->
-        spec = Table.normalize(spec, Table.lookup_stored(state.table, tenant, name))
+        case current_entry(state, tenant, name, mode) do
+          {:ok, current} ->
+            spec = Table.normalize(spec, current)
 
-        case Table.build(state.decoder, tenant, name, spec) do
-          {:ok, stored, source} -> write(state, stored, source, mode)
-          {:error, :invalid, message} -> {:reply, {:error, :invalid, message}, state}
+            case Table.build(state.decoder, tenant, name, spec) do
+              {:ok, stored, source} -> write(state, stored, source, mode)
+              {:error, :invalid, message} -> {:reply, {:error, :invalid, message}, state}
+            end
+
+          {:error, reason} ->
+            {:reply, {:error, :store_unavailable}, warn_unavailable(reason, state)}
         end
     end
   end
@@ -358,7 +366,7 @@ defmodule Ankusa.SourceStore.Redis.State do
           {:reply, {:error, :not_found}, state}
 
         {:error, reason} ->
-          {:reply, {:error, :invalid, @unavailable}, warn_unavailable(reason, state)}
+          {:reply, {:error, :store_unavailable}, warn_unavailable(reason, state)}
       end
     end
   end
@@ -502,6 +510,27 @@ defmodule Ankusa.SourceStore.Redis.State do
 
   # ── writes ──────────────────────────────────────────────────────────────────
 
+  # The entry an update merges its secret from. Redis's copy, not the mirror's:
+  # the mirror trails another node's write by a pub/sub hop, and merging
+  # against a missing or older entry would store the update without the secret.
+  defp current_entry(_state, _tenant, _name, :create), do: {:ok, nil}
+
+  defp current_entry(state, tenant, name, :update) do
+    case command(state, ["HGET", sources_key(state), Table.source_id(tenant, name)]) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, json} ->
+        case JSON.decode(json) do
+          {:ok, %{"spec" => spec}} when is_map(spec) -> {:ok, %{spec: spec}}
+          _not_an_entry -> {:ok, nil}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp write(state, stored, source, mode) do
     entry =
       JSON.encode!(%{"tenant" => stored.tenant, "name" => stored.name, "spec" => stored.spec})
@@ -517,7 +546,7 @@ defmodule Ankusa.SourceStore.Redis.State do
         {:reply, {:error, :not_found}, state}
 
       {:error, reason} ->
-        {:reply, {:error, :invalid, @unavailable}, warn_unavailable(reason, state)}
+        {:reply, {:error, :store_unavailable}, warn_unavailable(reason, state)}
     end
   end
 

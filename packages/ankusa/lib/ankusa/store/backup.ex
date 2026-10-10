@@ -28,7 +28,10 @@ defmodule Ankusa.Store.Backup do
   every manifest records it. When `LATEST` names another store's backup, the
   attempt fails with `{:foreign_backup, theirs, ours}` — nothing uploaded,
   nothing purged — because two stores on one prefix would delete each
-  other's backups as stale.
+  other's backups as stale. Two live nodes can also share one id (an old
+  host back beside the replacement that restored its backup): once this
+  process has written a backup, `LATEST` naming one it did not write fails
+  the attempt with `{:prefix_shared, latest}`, so one of the two stops.
 
   At boot, `Ankusa.Store` calls `restore/2` when its directory holds no
   database: the `LATEST` backup is downloaded, every file checked against
@@ -123,6 +126,11 @@ defmodule Ankusa.Store.Backup do
       # after init, so a slow object store does not hold up the boot
       known: nil,
       last_success_ms: nil,
+      # ids of the last backups this process attempted, and whether one of
+      # them succeeded: once it has, `LATEST` naming any other backup means a
+      # second writer shares the prefix (`check_owner/3`)
+      own_ids: [],
+      wrote?: false,
       started_ms: System.system_time(:millisecond)
     }
 
@@ -207,10 +215,13 @@ defmodule Ankusa.Store.Backup do
     started = System.monotonic_time()
     dir = checkpoint_dir(state.config)
     known = state.known || load_known(state)
+    id = new_id()
+    # Recorded before the attempt: a LATEST put that timed out may still land.
+    state = %{state | own_ids: Enum.take([id | state.own_ids], 8)}
 
     result =
       try do
-        take(state, dir, known)
+        take(state, dir, known, id)
       rescue
         error -> {:error, {:raised, error}}
       catch
@@ -236,7 +247,13 @@ defmodule Ankusa.Store.Backup do
           purge(state, id)
 
           {{:ok, %{id: id, uploaded: uploaded, bytes: bytes}},
-           %{state | failures: 0, known: shared_entries(manifest), last_success_ms: now}}
+           %{
+             state
+             | failures: 0,
+               known: shared_entries(manifest),
+               last_success_ms: now,
+               wrote?: true
+           }}
 
         {:error, reason} ->
           log_failure(state, store_root(state), reason)
@@ -267,6 +284,16 @@ defmodule Ankusa.Store.Backup do
     )
   end
 
+  defp log_failure(state, root, {:prefix_shared, latest}) do
+    Logger.error(
+      "[ankusa] backup refused: #{root}LATEST names #{latest}, a backup of this store that " <>
+        "this node did not write (#{state.failures + 1} in a row). Another node with the same " <>
+        "store (an old host beside the replacement that restored it?) is backing up there; " <>
+        "retire one of them and restart the other, or give it its own storage.key_prefix or " <>
+        "backup store."
+    )
+  end
+
   defp log_failure(state, _root, reason) do
     Logger.warning(
       "[ankusa] store backup failed (#{state.failures + 1} in a row), " <>
@@ -284,14 +311,13 @@ defmodule Ankusa.Store.Backup do
     )
   end
 
-  defp take(state, dir, known) do
+  defp take(state, dir, known, id) do
     store = BlobStore.resolve_config(state.config, :backup)
-    id = new_id()
 
     # The id goes into the store before the checkpoint, so a restore of this
     # backup inherits it and carries on backing up to the same place.
     with {:ok, store_id} <- ensure_store_id(state.instance),
-         :ok <- check_owner(state.instance, store, store_id),
+         :ok <- check_owner(state, store, store_id),
          :ok <- remove(dir),
          :ok <- Store.checkpoint(state.instance, dir),
          {:ok, names} <- checkpoint_files(dir),
@@ -337,11 +363,19 @@ defmodule Ankusa.Store.Backup do
   # Two stores backing up under one prefix would each purge the other's
   # backups as stale. The latest backup there must be this store's (or
   # predate store ids, or not exist); otherwise nothing is uploaded and
-  # nothing is deleted. A store restored from a backup inherits its id.
-  defp check_owner(instance, store, store_id) do
-    case load_latest(instance, store) do
+  # nothing is deleted. A store restored from a backup inherits its id, so two
+  # live nodes can share one (the old host back beside its replacement): once
+  # this process has written a backup, `LATEST` naming any other backup of
+  # the same store means another writer moved it, and this one stops.
+  defp check_owner(state, store, store_id) do
+    case load_latest(state.instance, store) do
       {:ok, %{"store_id" => other}} when other != store_id ->
         {:error, {:foreign_backup, other, store_id}}
+
+      {:ok, %{"id" => latest}} ->
+        if state.wrote? and latest not in state.own_ids,
+          do: {:error, {:prefix_shared, latest}},
+          else: :ok
 
       _ ->
         :ok
