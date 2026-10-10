@@ -381,6 +381,35 @@ defmodule Ankusa.Store.BackupTest do
     assert {:ok, _} = Backup.run(b.instance)
   end
 
+  test "a LATEST put of our own that landed but failed never locks this node out" do
+    root = blob_root()
+    {:ok, lost} = Agent.start_link(fn -> 0 end)
+    {:ok, failures} = Agent.start_link(fn -> 0 end)
+    store = {CountingBlobStore, root: root, lost_acks: lost, failures: failures}
+    config = start(root, blob_store: store)
+    inst = config.instance
+
+    commit!(inst, 5)
+    assert {:ok, _} = Backup.run(inst)
+
+    # Our LATEST lands but the answer is lost, then a run of failed attempts.
+    Agent.update(lost, fn _ -> 1 end)
+    commit!(inst, 5)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, :timeout} = Backup.run(inst)
+
+      for _ <- 1..10 do
+        Agent.update(failures, fn _ -> 1 end)
+        commit!(inst, 1)
+        assert {:error, _} = Backup.run(inst)
+      end
+    end)
+
+    # LATEST still names a backup this process wrote: the next run goes ahead.
+    assert {:ok, _} = Backup.run(inst)
+  end
+
   test "a checkpoint in flight does not block readiness" do
     config = start(blob_root())
     inst = config.instance

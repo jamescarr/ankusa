@@ -126,10 +126,12 @@ defmodule Ankusa.Store.Backup do
       # after init, so a slow object store does not hold up the boot
       known: nil,
       last_success_ms: nil,
-      # ids of the last backups this process attempted, and whether one of
-      # them succeeded: once it has, `LATEST` naming any other backup means a
-      # second writer shares the prefix (`check_owner/3`)
-      own_ids: [],
+      # This process's writer nonce, recorded in every manifest it writes, and
+      # whether one of its backups succeeded: once one has, a `LATEST` whose
+      # manifest carries another writer means a second node moved it
+      # (`check_owner/3`). An upload of ours that failed after `LATEST` landed
+      # still carries our nonce, so it can never trip the check.
+      writer: Base.encode32(:crypto.strong_rand_bytes(10), case: :lower, padding: false),
       wrote?: false,
       started_ms: System.system_time(:millisecond)
     }
@@ -216,8 +218,6 @@ defmodule Ankusa.Store.Backup do
     dir = checkpoint_dir(state.config)
     known = state.known || load_known(state)
     id = new_id()
-    # Recorded before the attempt: a LATEST put that timed out may still land.
-    state = %{state | own_ids: Enum.take([id | state.own_ids], 8)}
 
     result =
       try do
@@ -329,6 +329,7 @@ defmodule Ankusa.Store.Backup do
            "id" => id,
            "created_at_ms" => System.system_time(:millisecond),
            "store_id" => store_id,
+           "writer" => state.writer,
            "files" => shared_entries ++ private_entries
          },
          :ok <-
@@ -365,17 +366,15 @@ defmodule Ankusa.Store.Backup do
   # predate store ids, or not exist); otherwise nothing is uploaded and
   # nothing is deleted. A store restored from a backup inherits its id, so two
   # live nodes can share one (the old host back beside its replacement): once
-  # this process has written a backup, `LATEST` naming any other backup of
-  # the same store means another writer moved it, and this one stops.
+  # this process has written a backup, a `LATEST` written by another process
+  # of the same store means another writer moved it, and this one stops.
   defp check_owner(state, store, store_id) do
     case load_latest(state.instance, store) do
       {:ok, %{"store_id" => other}} when other != store_id ->
         {:error, {:foreign_backup, other, store_id}}
 
-      {:ok, %{"id" => latest}} ->
-        if state.wrote? and latest not in state.own_ids,
-          do: {:error, {:prefix_shared, latest}},
-          else: :ok
+      {:ok, %{"id" => latest, "writer" => writer}} when state.wrote? and writer != state.writer ->
+        {:error, {:prefix_shared, latest}}
 
       _ ->
         :ok

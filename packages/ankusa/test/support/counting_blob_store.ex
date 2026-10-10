@@ -12,6 +12,8 @@ defmodule Ankusa.Test.CountingBlobStore do
     * `:put_delay_ms` — sleep before each put, to hold a pack upload open
     * `:get_error` — every `get/3` answers `{:error, value}`, an unreachable store
     * `:list_error` — every `list/3` answers `{:error, value}`
+    * `:lost_acks` — an `Agent` holding how many upcoming `LATEST` puts land
+      but answer `{:error, :timeout}`, as a put whose response was lost
   """
 
   @behaviour Ankusa.BlobStore
@@ -23,9 +25,28 @@ defmodule Ankusa.Test.CountingBlobStore do
     if pid = Keyword.get(opts, :pid), do: send(pid, {:blob_put, key})
     if delay = Keyword.get(opts, :put_delay_ms), do: Process.sleep(delay)
 
-    if fail?(key, opts),
-      do: {:error, :injected_failure},
-      else: LocalFS.put(instance, key, data, local(opts))
+    cond do
+      fail?(key, opts) ->
+        {:error, :injected_failure}
+
+      lost_ack?(key, opts) ->
+        with(:ok <- LocalFS.put(instance, key, data, local(opts)), do: {:error, :timeout})
+
+      true ->
+        LocalFS.put(instance, key, data, local(opts))
+    end
+  end
+
+  defp lost_ack?(key, opts) do
+    with true <- String.ends_with?(key, "/LATEST"),
+         agent when agent != nil <- Keyword.get(opts, :lost_acks) do
+      Agent.get_and_update(agent, fn
+        n when n > 0 -> {true, n - 1}
+        n -> {false, n}
+      end)
+    else
+      _ -> false
+    end
   end
 
   defp fail?(key, opts) do
