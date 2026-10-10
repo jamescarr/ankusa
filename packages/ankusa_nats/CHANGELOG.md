@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Requires `ankusa ~> 0.6` (`Ankusa.Sink.Reaper`); publish core first.
 - The connection is a `Gnat.ConnectionSupervisor` registered through the
   instance's registry: starting it returns at once and the handshake runs in
   that supervisor, so a slow or dead server no longer stalls the

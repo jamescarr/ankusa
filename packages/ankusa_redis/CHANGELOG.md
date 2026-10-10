@@ -31,6 +31,15 @@ follows [Semantic Versioning](https://semver.org/).
   core's ETS route snapshot and drops retired generations on request.
 - The Redis sink's connection dials on its own (`sync_connect: false`), so a
   dead Redis never blocks the supervisor that starts it.
+- `Ankusa.Routes.Store.Redis` and `Ankusa.SourceStore.Redis` start with
+  `[instance: instance]` (core's new store contract) and read their options
+  from `Ankusa.config(instance)`: no child spec of theirs carries the config,
+  the seeds or the decoder. Their Redix connections get the URL's password as
+  Redix's `{m, f, a}` form, so neither a child spec nor Redix's state holds it.
+- `SourceStore.Redis` refuses a write of a shared source with no verifier
+  under a resolver that takes the tenant from the request unless it sets
+  `trust_url_tenant: true` (`{:error, :invalid, message}`), and names one
+  already in Redis in a warning at first boot.
 - A route store restarted after the instance has published a table resumes from
   that table without waiting on Redis (its connections dial in the background),
   so a store that crashes during a Redis outage does not hold the edge down. It

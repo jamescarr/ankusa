@@ -279,7 +279,7 @@ defmodule Ankusa.SourceStorePersistentTest do
     config = test_config(source_store: {Persistent, [decoder: &decoder/2]})
     put_config(config)
     instance = config.instance
-    start_supervised!({Store, instance: instance, config: config})
+    start_supervised!({Store, instance: instance})
 
     :ok =
       Store.write(
@@ -291,7 +291,7 @@ defmodule Ankusa.SourceStorePersistentTest do
         sync: true
       )
 
-    {:ok, pid} = Persistent.start_link(config)
+    {:ok, pid} = Persistent.start_link(instance: instance)
     on_exit(fn -> stop(pid) end)
 
     assert SourceStore.list_tenant(instance, "acme") == []
@@ -312,7 +312,7 @@ defmodule Ankusa.SourceStorePersistentTest do
     Process.flag(:trap_exit, true)
 
     assert {:error, {:source_store_load_failed, :store_unavailable}} =
-             Persistent.start_link(config)
+             Persistent.start_link(instance: config.instance)
   end
 
   test "a persisted entry that collides with a seed never shadows it" do
@@ -321,7 +321,7 @@ defmodule Ankusa.SourceStorePersistentTest do
     put_config(config)
     instance = config.instance
 
-    start_supervised!({Store, instance: instance, config: config})
+    start_supervised!({Store, instance: instance})
 
     :ok =
       Store.write(
@@ -330,7 +330,7 @@ defmodule Ankusa.SourceStorePersistentTest do
         sync: true
       )
 
-    {:ok, pid} = Persistent.start_link(config)
+    {:ok, pid} = Persistent.start_link(instance: instance)
     on_exit(fn -> stop(pid) end)
 
     # The seed still wins: unlisted by tenant, read-only, and not deletable.
@@ -408,6 +408,54 @@ defmodule Ankusa.SourceStorePersistentTest do
     assert SourceStore.list_tenant(instance, "acme") == []
   end
 
+  # ── shared sources, when the request names the tenant ───────────────────────
+
+  test "an unverified shared source is refused unless it trusts the request's tenant" do
+    {config, _pid} = start_store(route_resolver: {Ankusa.RouteResolver.TenantPath, []})
+    inst = config.instance
+
+    assert {:error, :invalid, message} =
+             SourceStore.put(inst, "default", "open", @log_spec, :create)
+
+    assert message =~ "source default.open is shared"
+    assert SourceStore.get(inst, "default", "open") == :error
+
+    trusted = Map.put(@log_spec, "trust_url_tenant", true)
+    assert {:ok, _} = SourceStore.put(inst, "default", "open", trusted, :create)
+    assert {:ok, %Source{trust_url_tenant: true}} = SourceStore.fetch(inst, "default.open")
+
+    # A source with a tenant of its own is bound to it: nothing to trust.
+    assert {:ok, _} = SourceStore.put(inst, "acme", "own", @log_spec, :create)
+  end
+
+  test "a stored unverified shared source keeps serving, with a warning at boot" do
+    config =
+      test_config(
+        route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+        source_store: {Persistent, [decoder: &decoder/2]}
+      )
+
+    put_config(config)
+    inst = config.instance
+    start_supervised!({Store, instance: inst})
+
+    :ok =
+      Store.write(
+        inst,
+        [{:put, :default, Keys.source("default", "legacy"), JSON.encode!(@log_spec)}],
+        sync: true
+      )
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, pid} = Persistent.start_link(instance: inst)
+        on_exit(fn -> stop(pid) end)
+      end)
+
+    assert log =~ "stored source default.legacy is shared"
+    assert {:ok, %Source{trust_url_tenant: false}} = SourceStore.fetch(inst, "default.legacy")
+  end
+
   # ── helpers ─────────────────────────────────────────────────────────────────
 
   defp start_store(overrides \\ []) do
@@ -421,8 +469,8 @@ defmodule Ankusa.SourceStorePersistentTest do
 
     put_config(config)
     # The sources live in the node's store, which must be up first.
-    start_supervised!({Store, instance: config.instance, config: config})
-    {:ok, pid} = Persistent.start_link(config)
+    start_supervised!({Store, instance: config.instance})
+    {:ok, pid} = Persistent.start_link(instance: config.instance)
     on_exit(fn -> stop(pid) end)
     {config, pid}
   end
@@ -434,8 +482,8 @@ defmodule Ankusa.SourceStorePersistentTest do
     stop(pid)
     stop_supervised!({Store, config.instance})
     put_config(config)
-    start_supervised!({Store, instance: config.instance, config: config})
-    {:ok, pid2} = Persistent.start_link(config)
+    start_supervised!({Store, instance: config.instance})
+    {:ok, pid2} = Persistent.start_link(instance: config.instance)
     on_exit(fn -> stop(pid2) end)
     pid2
   end
@@ -459,8 +507,14 @@ defmodule Ankusa.SourceStorePersistentTest do
   # that the decoder returns source options or raises.
   defp decoder(_source_id, spec) do
     case Map.get(spec, "sinks") do
-      [_ | _] = sinks -> [sinks: Enum.map(sinks, &sink/1)]
-      _ -> raise ArgumentError, "sinks must be a non-empty list"
+      [_ | _] = sinks ->
+        [
+          sinks: Enum.map(sinks, &sink/1),
+          trust_url_tenant: Map.get(spec, "trust_url_tenant", false)
+        ]
+
+      _ ->
+        raise ArgumentError, "sinks must be a non-empty list"
     end
   end
 

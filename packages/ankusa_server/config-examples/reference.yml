@@ -342,6 +342,7 @@ sources:
   stripe:
     # Scopes storage. With routing: tenant_path the URL wins.
     tenant: default
+    # trust_url_tenant: false   # with routing: tenant_path, a tenant: default source with verify type none must set this to true
     # reject | quarantine | accept_flag (what happens when verification fails)
     on_verify_failure: reject
     # none | stripe | github | standard_webhooks | shopify | slack | hmac.

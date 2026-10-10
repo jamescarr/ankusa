@@ -18,6 +18,7 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Requires `ankusa ~> 0.6` (`Ankusa.Sink.Reaper`); publish core first.
 - Stopping a connection process closes its AMQP connection: `amqp_client`
   owns that connection, so it used to outlive the process. Publishes waiting
   on it answer `{:error, :not_connected}`.

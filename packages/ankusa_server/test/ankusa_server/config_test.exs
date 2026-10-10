@@ -1357,11 +1357,32 @@ defmodule AnkusaServer.ConfigTest do
     path =
       tmp_config("""
       http: {routing: tenant_path, prefix: /hooks}
-      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      sources: {demo: {verify: {type: none}, trust_url_tenant: true, sinks: [{type: log}]}}
       """)
 
     assert Config.load!(path: path, env: %{}).config.route_resolver ==
              {Ankusa.RouteResolver.TenantPath, [prefix: ["hooks"]]}
+  end
+
+  test "routing tenant_path refuses an unverified shared source unless it trusts the URL's tenant" do
+    open =
+      tmp_config("""
+      http: {routing: tenant_path}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    assert_raise ConfigError,
+                 ~r/source demo is shared \(tenant_id "default"\) and has no verifier/,
+                 fn -> Config.load!(path: open, env: %{}) end
+
+    trusted =
+      tmp_config("""
+      http: {routing: tenant_path}
+      sources: {demo: {verify: {type: none}, trust_url_tenant: true, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: trusted, env: %{}).config
+    assert source_from(config, "demo").trust_url_tenant == true
   end
 
   # ── source_store ────────────────────────────────────────────────────────────

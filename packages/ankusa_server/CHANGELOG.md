@@ -11,6 +11,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - `idle_timeout_ms` on `rabbitmq`, `kafka`, `nats` and `redis` sinks: close a
   broker connection after that long with no delivery (default 10 minutes, `0`
   never).
+- Source key `trust_url_tenant` (default `false`). With
+  `routing: tenant_path`, a source with `tenant: default` and
+  `verify: {type: none}` files hooks under whatever tenant the URL names:
+  boot and `check-config` now refuse it (exit 78, naming the source) unless it
+  sets `trust_url_tenant: true`, and an admin API write of one is
+  `400 invalid_source`. One `source_store: persistent`/`redis` already held
+  keeps serving, with a warning at boot. `config-examples/multi-tenant.yml`'s
+  `demo` source sets it.
 - `source_store.type: redis` (`url`, `namespace`, `tick_ms`; env
   `ANKUSA_SOURCE_STORE_URL`; a `url` with no `type` means `redis`): sources
   created through the admin API are shared by every node through

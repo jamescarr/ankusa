@@ -55,6 +55,10 @@ defmodule Ankusa.Routes.Store do
           | :stale
           | :store_unavailable
 
+  @doc """
+  Called by `Ankusa.Instance` with `[instance: instance]`; read the store's own
+  options from `Ankusa.config(instance).routes.store`.
+  """
   @callback start_link(keyword()) :: GenServer.on_start()
 
   @callback insert(atom(), Route.t(), pos_integer()) :: :ok | {:error, error()}

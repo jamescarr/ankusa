@@ -39,7 +39,7 @@ defmodule Ankusa.Metrics.Gauges do
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
 
     Supervisor.child_spec(
       {:telemetry_poller,

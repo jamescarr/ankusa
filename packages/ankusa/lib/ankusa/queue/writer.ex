@@ -30,7 +30,7 @@ defmodule Ankusa.Queue.Writer do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
+    config = Ankusa.config(instance)
 
     # A seq is never reused: if either read fails, refuse to start rather than
     # guess a floor.

@@ -91,8 +91,8 @@ defmodule Ankusa.Edge.Batcher do
 
   @impl true
   def init(opts) do
-    config = Keyword.fetch!(opts, :config)
-    b = config.batcher
+    instance = Keyword.fetch!(opts, :instance)
+    b = Ankusa.config(instance).batcher
 
     # Linked on purpose, like `Dispatch.Pipeline`: the commit tasks must not
     # outlive the batcher.
@@ -100,7 +100,7 @@ defmodule Ankusa.Edge.Batcher do
 
     {:ok,
      %{
-       instance: config.instance,
+       instance: instance,
        max_batch: b.max_batch,
        max_delay_ms: b.max_delay_ms,
        max_queue: b.max_queue,

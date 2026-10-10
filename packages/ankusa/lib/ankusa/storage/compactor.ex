@@ -49,7 +49,7 @@ defmodule Ankusa.Storage.Compactor do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    %Config{} = config = Keyword.fetch!(opts, :config)
+    %Config{} = config = Ankusa.config(instance)
     interval = config.storage.interval_ms
 
     # Markers a crash left between "obligation cleared" and "hook deleted".

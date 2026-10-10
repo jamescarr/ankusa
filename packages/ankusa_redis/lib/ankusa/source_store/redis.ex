@@ -66,24 +66,30 @@ defmodule Ankusa.SourceStore.Redis do
 
   @behaviour Ankusa.SourceStore
 
-  alias Ankusa.Config
   alias Ankusa.SourceStore.Redis.{Connections, State, TableOwner}
   alias Ankusa.SourceStore.Table
 
-  @spec start_link(Config.t()) :: Supervisor.on_start()
-  def start_link(%Config{} = config) do
-    Supervisor.start_link(__MODULE__, config,
-      name: Ankusa.via(config.instance, :source_store_sup)
-    )
+  @spec start_link(keyword()) :: Supervisor.on_start()
+  def start_link(opts) do
+    instance = Keyword.fetch!(opts, :instance)
+    Supervisor.start_link(__MODULE__, instance, name: Ankusa.via(instance, :source_store_sup))
   end
 
   @impl true
-  def init(%Config{} = config) do
-    opts = [instance: config.instance, config: config]
+  def init(instance) do
+    opts = [instance: instance]
 
     # The table owner outlives the connections and the state process, so a
     # restart of either finds the mirror the edge has been serving.
     Supervisor.init([{TableOwner, opts}, {Connections, opts}], strategy: :rest_for_one)
+  end
+
+  @doc false
+  # Redix calls this on every connect (the `:password` MFA in `Connections`).
+  @spec password(atom()) :: String.t() | nil
+  def password(instance) do
+    {_mod, opts} = Ankusa.config(instance).source_store
+    opts |> Keyword.fetch!(:url) |> Ankusa.Redis.Options.password()
   end
 
   # ── reads, from the mirror ──────────────────────────────────────────────────
@@ -173,12 +179,18 @@ defmodule Ankusa.SourceStore.Redis.Connections do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    config = Keyword.fetch!(opts, :config)
-    {_mod, store_opts} = config.source_store
+    {_mod, store_opts} = Ankusa.config(instance).source_store
 
     url = Keyword.fetch!(store_opts, :url)
     namespace = Keyword.get(store_opts, :namespace) || "ankusa:sources:#{instance}"
     tick_ms = Keyword.get(store_opts, :tick_ms, @default_tick_ms)
+
+    # The children's start arguments are printed by this supervisor's reports
+    # and status: they carry the password as an MFA, read back on connect, and
+    # never the seeds (sink options, verifier secrets), which the state process
+    # reads from the config itself.
+    redis =
+      Ankusa.Redis.Options.start_opts(url, {Ankusa.SourceStore.Redis, :password, [instance]})
 
     # A first boot connects synchronously, so an unreachable Redis fails the
     # boot instead of an edge running on an empty mirror. A restart once the
@@ -187,20 +199,15 @@ defmodule Ankusa.SourceStore.Redis.Connections do
     sync? = not loaded?(instance)
 
     children = [
-      {Redix, {url, [name: Ankusa.via(instance, :source_redis), sync_connect: sync?]}},
+      {Redix, redis ++ [name: Ankusa.via(instance, :source_redis), sync_connect: sync?]},
       # `Redix.PubSub` ships no `child_spec/1`, so the spec is spelled out.
       %{
         id: Redix.PubSub,
         start:
           {Redix.PubSub, :start_link,
-           [url, [name: Ankusa.via(instance, :source_redis_pubsub), sync_connect: sync?]]}
+           [redis ++ [name: Ankusa.via(instance, :source_redis_pubsub), sync_connect: sync?]]}
       },
-      {State,
-       instance: instance,
-       namespace: namespace,
-       tick_ms: tick_ms,
-       seeds: Keyword.get(store_opts, :sources, %{}),
-       decoder: Keyword.get(store_opts, :decoder)}
+      {State, instance: instance, namespace: namespace, tick_ms: tick_ms}
     ]
 
     Supervisor.init(children, strategy: :rest_for_one)
@@ -274,13 +281,15 @@ defmodule Ankusa.SourceStore.Redis.State do
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
     namespace = Keyword.fetch!(opts, :namespace)
+    config = Ankusa.config(instance)
+    {_mod, store_opts} = config.source_store
 
     with {:ok, table} <- take_table(instance) do
       state = %{
         instance: instance,
         namespace: namespace,
         table: table,
-        decoder: Keyword.get(opts, :decoder),
+        decoder: Keyword.get(store_opts, :decoder),
         conn: Ankusa.via(instance, :source_redis),
         pubsub: Ankusa.via(instance, :source_redis_pubsub),
         tick_ms: Keyword.fetch!(opts, :tick_ms),
@@ -297,10 +306,13 @@ defmodule Ankusa.SourceStore.Redis.State do
         [] ->
           # First boot: subscribe, and wait for Redis to confirm it, BEFORE
           # loading, so a write in between is a message in the mailbox.
-          Table.insert_seeds(table, Keyword.get(opts, :seeds, %{}))
+          Table.insert_seeds(table, Keyword.get(store_opts, :sources, %{}))
 
           with :ok <- subscribe(state),
                {:ok, state} <- load(state) do
+            # Once per boot, not on every reload: a resumed store and every
+            # later sync load the same entries again.
+            Ankusa.Verifier.warn_stored_shared(config, Table.stored_sources(table))
             Process.send_after(self(), :tick, state.tick_ms)
             {:ok, state}
           else
@@ -341,8 +353,10 @@ defmodule Ankusa.SourceStore.Redis.State do
           {:ok, current} ->
             spec = Table.normalize(spec, current)
 
-            case Table.build(state.decoder, tenant, name, spec) do
-              {:ok, stored, source} -> write(state, stored, source, mode)
+            with {:ok, stored, source} <- Table.build(state.decoder, tenant, name, spec),
+                 :ok <- Table.check_write(state.instance, source) do
+              write(state, stored, source, mode)
+            else
               {:error, :invalid, message} -> {:reply, {:error, :invalid, message}, state}
             end
 

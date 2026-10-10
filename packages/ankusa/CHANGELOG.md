@@ -52,9 +52,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
-- `Ankusa.Verifier.warn_unverified_shared/1`, run at boot: under a resolver
-  that takes the tenant from the URL, each configured source that is shared
-  (`tenant_id: "default"`) and has no verifier is named in a warning.
+- `trust_url_tenant` on `%Ankusa.Source{}` (default `false`), and
+  `Ankusa.Verifier.check_shared/2`, `validate_shared!/1` and
+  `warn_stored_shared/2`: see the E5 entry under Changed.
 - An internal `SourceStore.Table` module: the ETS layout and spec handling
   `SourceStore.Persistent` and `ankusa_redis`'s `SourceStore.Redis` share.
   A source-store read while the store restarts answers
@@ -192,6 +192,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - Claim gateway: `cache-control: private, max-age=31536000, immutable`; `503`
   bodies carry only the error code; a store `403` is
   `503 store_forbidden` with `Retry-After: 60`.
+- **Breaking (E5):** under a resolver that takes the tenant from the request
+  (any but `Ankusa.RouteResolver.Path`), a source that is shared
+  (`tenant_id: "default"`), has `Ankusa.Verifier.None` and does not set
+  `trust_url_tenant: true` is refused: a configured one stops the instance
+  from starting (`ArgumentError` naming the source, on every node whatever
+  its roles), and a `SourceStore.Persistent` write of one is
+  `{:error, :invalid, message}` (the admin API's `400 invalid_source`). One
+  the store already held keeps serving, and is named in a warning at boot.
+  Set `trust_url_tenant: true` to keep a deliberately open shared endpoint.
+- **Breaking (O2):** no supervisor in the instance tree holds the
+  `%Ankusa.Config{}` any more. `Ankusa.Instance.child_spec/1` and
+  `start_link/1` store the config (`Ankusa.put_config/1`) and pass only the
+  instance name; every child is started with `[instance: instance]` and reads
+  `Ankusa.config(instance)`. A custom `Ankusa.SourceStore` or
+  `Ankusa.Routes.Store` that runs a process now gets `start_link([instance:
+  instance])` instead of `start_link(%Ankusa.Config{})` /
+  `opts[:config]`, and reads its options from `Ankusa.config(instance)`.
+  `SourceStore.Persistent.start_link/1` takes `[instance: instance]`.
+  `:sys.get_status/1` of the instance's parent, the instance and its
+  subtrees no longer prints sink options or verifier secrets.
 
 ### Fixed
 

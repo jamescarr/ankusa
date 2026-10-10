@@ -36,18 +36,20 @@ defmodule Ankusa.SourceStore.RedisTest do
 
   # Both nodes point at the same namespace, with a tick far longer than any
   # deadline below: a change that arrives in time arrived by pub/sub.
-  defp node_config(opts) do
+  defp node_config(opts, config_opts \\ []) do
     store_opts =
       Keyword.merge(
         [url: @url, namespace: @namespace, tick_ms: 60_000, decoder: &decoder/2],
         opts
       )
 
-    build_config(
+    [
       instance: :"redis_src#{System.unique_integer([:positive])}",
       roles: [:edge],
       source_store: {Redis, store_opts}
-    )
+    ]
+    |> Keyword.merge(config_opts)
+    |> build_config()
   end
 
   defp start_node(opts \\ []) do
@@ -59,7 +61,10 @@ defmodule Ankusa.SourceStore.RedisTest do
   defp decoder(_source_id, spec) do
     case Map.get(spec, "sinks") do
       [_ | _] = sinks ->
-        [sinks: Enum.map(sinks, fn %{"type" => "log"} -> {Ankusa.Sink.Log, []} end)]
+        [
+          sinks: Enum.map(sinks, fn %{"type" => "log"} -> {Ankusa.Sink.Log, []} end),
+          trust_url_tenant: Map.get(spec, "trust_url_tenant", false)
+        ]
 
       _ ->
         raise ArgumentError, "sinks must be a non-empty list"
@@ -235,6 +240,36 @@ defmodule Ankusa.SourceStore.RedisTest do
     Process.flag(:trap_exit, true)
 
     assert {:error, _reason} = Ankusa.Instance.start_link(config)
+  end
+
+  test "no process of the store prints the seeded sources in its status" do
+    canary = "s3cr3t-canary"
+    inst = start_node(sources: %{"seeded" => [sinks: [{Ankusa.Sink.Log, [token: canary]}]]})
+    sup = Ankusa.whereis(inst, :source_store_sup)
+
+    nested =
+      for {_id, pid, :supervisor, _modules} <- Supervisor.which_children(sup), do: pid
+
+    for pid <- [sup, Ankusa.whereis(inst, :source_store) | nested] do
+      assert is_pid(pid)
+      printed = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+      refute printed =~ canary, "#{inspect(pid)} printed the seeded sources in its status"
+    end
+  end
+
+  test "under a resolver that takes the tenant from the request, an unverified shared source must trust it" do
+    config = node_config([], route_resolver: {Ankusa.RouteResolver.TenantPath, []})
+    start_supervised!({Ankusa.Instance, config}, id: config.instance)
+    inst = config.instance
+
+    assert {:error, :invalid, message} =
+             SourceStore.put(inst, "default", "open", @log_spec, :create)
+
+    assert message =~ "trust_url_tenant"
+
+    trusted = Map.put(@log_spec, "trust_url_tenant", true)
+    assert {:ok, _} = SourceStore.put(inst, "default", "open", trusted, :create)
+    assert {:ok, %Source{trust_url_tenant: true}} = SourceStore.fetch(inst, "default.open")
   end
 
   test "during an outage the connections restart on the mirror, writes are store_unavailable, and the node catches up" do

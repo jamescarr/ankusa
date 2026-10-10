@@ -73,7 +73,7 @@ defmodule Ankusa.RouteResolverTest do
     test "the URL tenant is threaded onto the envelope" do
       config =
         start({Ankusa.RouteResolver.TenantPath, []}, %{
-          "stripe" => []
+          "stripe" => [trust_url_tenant: true]
         })
 
       body = ~s({"id":"evt_1","type":"x"})
@@ -105,12 +105,15 @@ defmodule Ankusa.RouteResolverTest do
     end
 
     test "an unresolvable URL shape is a 404" do
-      config = start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => []})
+      config =
+        start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => [trust_url_tenant: true]})
+
       assert post(config, "/webhooks/stripe", "x").status == 404
     end
 
     test "a URL tenant outside the grammar is a 404 and nothing is stored" do
-      config = start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => []})
+      config =
+        start({Ankusa.RouteResolver.TenantPath, []}, %{"stripe" => [trust_url_tenant: true]})
 
       for tenant <- ["ac.me", "ac%2Fme", String.duplicate("a", 65)] do
         assert post(config, "/webhooks/#{tenant}/stripe", "x").status == 404, tenant

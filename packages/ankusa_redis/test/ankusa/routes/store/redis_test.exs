@@ -281,8 +281,10 @@ defmodule Ankusa.Routes.Store.RedisTest do
         ]
       )
 
+    Ankusa.put_config(config)
+
     assert {:error, {:shutdown, {:failed_to_start_child, Redix, reason}}} =
-             Redis.start_link(instance: instance, config: config)
+             Redis.start_link(instance: instance)
 
     assert %Redix.ConnectionError{reason: :econnrefused} = reason
   end
@@ -357,8 +359,10 @@ defmodule Ankusa.Routes.Store.RedisTest do
         routes: [enabled: true, admin: [port: 0], store: store(60_000)]
       )
 
+    Ankusa.put_config(config)
+
     assert {:error, {:shutdown, {:failed_to_start_child, State, reason}}} =
-             Redis.start_link(instance: fresh, config: config)
+             Redis.start_link(instance: fresh)
 
     assert {:invalid_stored_route, "inserted_at", _message} = reason
   end
@@ -369,6 +373,35 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert is_pid(Ankusa.whereis(config.instance, :routes_store))
     assert is_pid(Ankusa.whereis(config.instance, :routes_redis))
     assert is_pid(Ankusa.whereis(config.instance, :routes_redis_pubsub))
+  end
+
+  test "neither the store's supervisor nor its state process prints the config in its status" do
+    canary = "s3cr3t-canary"
+    instance = :"redis#{System.unique_integer([:positive])}"
+
+    config =
+      build_config(
+        instance: instance,
+        roles: [:edge],
+        routes: [enabled: true, admin: [port: 0], store: store(60_000)],
+        source_store:
+          {Ankusa.SourceStore.Static,
+           sources: %{"x" => [sinks: [{Ankusa.Sink.Log, [token: canary]}]]}}
+      )
+
+    start_supervised!({Ankusa.Instance, config})
+
+    {_id, sup, _type, _modules} =
+      instance
+      |> Ankusa.whereis(:edge)
+      |> Supervisor.which_children()
+      |> Enum.find(&match?({Redis, _pid, _type, _modules}, &1))
+
+    for pid <- [sup, Ankusa.whereis(instance, :routes_store)] do
+      assert is_pid(pid)
+      printed = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+      refute printed =~ canary, "#{inspect(pid)} printed the config in its status"
+    end
   end
 
   test "a node that has booted is already subscribed", %{conn: conn} do

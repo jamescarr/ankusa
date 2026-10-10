@@ -94,29 +94,75 @@ defmodule Ankusa.Verifier do
   end
 
   @doc """
-  Log one warning per configured source that is shared (`tenant_id`
-  `"default"`) and has no verifier, when the edge takes the tenant from the
-  URL (any `Ankusa.RouteResolver` but `Ankusa.RouteResolver.Path`). Such a
-  source trusts the URL's tenant: any sender can file hooks under any tenant
-  and spend that tenant's rate limit. It is allowed — a deliberate open
-  endpoint is a valid choice — so this only says so, once, at boot.
+  Whether `source` may run under `config`: `{:error, message}` when it is shared
+  (`tenant_id` `"default"`), has no verifier (`Ankusa.Verifier.None`), does not
+  set `trust_url_tenant: true`, and the edge takes the tenant from the request
+  (any `Ankusa.RouteResolver` but `Ankusa.RouteResolver.Path`). Such a source
+  would file hooks under whatever tenant the request names, and spend that
+  tenant's rate limit, with nothing to say the sender may. The verdict depends
+  on the config alone, never on the node's roles, so every node reading one
+  config agrees.
   """
-  @spec warn_unverified_shared(Ankusa.Config.t()) :: :ok
-  def warn_unverified_shared(%Ankusa.Config{} = config) do
-    if Ankusa.Config.role?(config, :edge) and
-         not match?({Ankusa.RouteResolver.Path, _}, config.route_resolver) do
-      for {id, %Ankusa.Source{tenant_id: "default", verifier: {Ankusa.Verifier.None, _}}} <-
-            Ankusa.Queue.static_sources(config) do
-        Logger.warning(
-          "[ankusa] source #{id} is shared (tenant_id \"default\") and has no verifier: any " <>
-            "sender can file hooks under any tenant via the URL's tenant segment and spend " <>
-            "that tenant's rate limit. Give it the provider's verifier, or a tenant of its own " <>
-            "(docs/multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does)."
-        )
+  @spec check_shared(Ankusa.Config.t(), Ankusa.Source.t()) :: :ok | {:error, String.t()}
+  def check_shared(%Ankusa.Config{} = config, %Ankusa.Source{} = source) do
+    if refused?(config, source) do
+      {:error,
+       "source #{source.id} is shared (tenant_id \"default\") and has no verifier, so it " <>
+         "would file hooks under whatever tenant the request names: give it the provider's " <>
+         "verifier, a tenant of its own, or trust_url_tenant: true to accept that " <>
+         "(docs/multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does)"}
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  Refuse to boot with a source declared in config that `check_shared/2`
+  refuses. Sources a writable store holds are checked when they are written
+  (and a stored one written before the check existed is named by
+  `warn_stored_shared/2`). Raises `ArgumentError` naming the source.
+  """
+  @spec validate_shared!(Ankusa.Config.t()) :: :ok
+  def validate_shared!(%Ankusa.Config{} = config) do
+    config
+    |> Ankusa.Queue.static_sources()
+    |> Enum.each(fn {_id, source} ->
+      with {:error, message} <- check_shared(config, source) do
+        raise ArgumentError, message
       end
+    end)
+  end
+
+  @doc """
+  Log one warning per stored (API-managed) source that `check_shared/2`
+  refuses. Such a source was written before writes were checked: it keeps
+  serving as it did, and only a write that still lacks `trust_url_tenant: true`
+  is refused.
+  """
+  @spec warn_stored_shared(Ankusa.Config.t(), [Ankusa.Source.t()]) :: :ok
+  def warn_stored_shared(%Ankusa.Config{} = config, sources) do
+    for source <- sources, refused?(config, source) do
+      Logger.warning(
+        "[ankusa] stored source #{source.id} is shared (tenant_id \"default\") and has no " <>
+          "verifier: it still files hooks under whatever tenant the request names, but a " <>
+          "write without trust_url_tenant: true is refused now. Save it with the provider's " <>
+          "verifier, or with trust_url_tenant: true " <>
+          "(docs/multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does)."
+      )
     end
 
     :ok
+  end
+
+  defp refused?(config, source) do
+    match?(
+      %Ankusa.Source{
+        tenant_id: "default",
+        verifier: {Ankusa.Verifier.None, _},
+        trust_url_tenant: false
+      },
+      source
+    ) and not match?({Ankusa.RouteResolver.Path, _}, config.route_resolver)
   end
 
   @doc """

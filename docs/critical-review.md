@@ -10,7 +10,7 @@ Paths below are relative to `packages/ankusa/lib/ankusa/` unless they start with
 
 **Layout.** Findings are grouped by root cause, not by pipeline stage. [Root causes](#root-causes) maps the nine causes to their findings; each group's section states the cause, lists its findings as the review recorded them, and ends with a solution scope. [Where it breaks](#where-it-breaks) keeps the stage view.
 
-**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, E4 is closed, and so are D2's two open bullets and the B7, C2 and S6 residuals; what remains (the O2 residual, B5, which is inherent, and the E5 deviation) is listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
+**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, E4 and E5 are closed, and so are D2's two open bullets and the B7, C2, S6 and O2 residuals; what remains (B5, which is inherent, and the sink adapters' connection credentials, a Low residual of O2) is listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
 
 ## Verdict
 
@@ -738,6 +738,18 @@ Cancelling a produce that timed out is not possible (brod has no cancel and
 no idempotent producer), so an abandoned produce can still land; consumers
 dedupe on `idempotency_key`. Recorded as a residual.
 
+**Status (2026-10-10).** Re-checked; stays the one inherent residual. brod
+4.7.0, the latest release on Hex, still has no idempotent producer (its
+changelog adds `create_partitions`, a metadata refresh interval and a
+stale-response fix). `brod_transaction`, which the locked 4.6.3 already ships,
+was considered and rejected [INFERENCE from Kafka's transaction semantics]:
+an aborted per-hook transaction only hides the record from `read_committed`
+consumers, and clients default to `read_uncommitted`; it adds round trips to
+every hook; and a produce that lands after the abort leaves the partition's
+last stable offset hanging on brokers without KIP-890. An idempotent producer
+would not dedupe dispatch's own retry anyway: the retry is a new produce with a
+new sequence number. Consumers dedupe on `idempotency_key`.
+
 <a id="b7"></a>
 ### B7 · Medium · Code — Lazy connects run inside one node-global `DynamicSupervisor` per adapter
 
@@ -1117,6 +1129,23 @@ supervisor child-spec residual is accepted (Low): SASL supervisor reports are
 off by default, and closing it would mean every child re-reading its config
 from `:persistent_term`. See [Remaining work](#remaining-work-re-assessed).
 
+**Status (2026-10-10).** Closed for the instance tree. Every process the
+instance runs is started with `[instance: name]` and reads the config back
+with `Ankusa.config/1`; `Ankusa.Instance.child_spec/1` and `start_link/1`
+store it first, so the instance's own spec in its parent names only the
+instance too. `Ankusa.Instance.Isolated` no longer needs a `format_status/1`,
+and `SourceStore.Persistent` keeps no config in its state. In `ankusa_redis`,
+the route and source stores start the same way, their state processes read
+their options (seeds and decoder included) from the config, and their Redix
+connections get the password as Redix's `{m, f, a}` form, so neither a child
+spec nor Redix's own state holds it. Tests: `:sys.get_status/1` of the
+instance's parent, the instance, the edge, the batcher pool and every isolated
+subtree (`instance_test.exs`), and of each Redis store's supervisors and state
+process, holds no canary token planted in sink options. New residual, Low: the
+sink adapters' connection supervisors (`Ankusa.Sink.{Kafka,NATS,RabbitMQ,Redis}.Supervisor`)
+hold connection credentials in their children's start arguments, and brod,
+gnat and Redix keep them in their own process state.
+
 <a id="e5"></a>
 ### E5 · Medium · Code — The URL tenant is not bound to the source, and `accept_flag` spends budget
 
@@ -1131,6 +1160,17 @@ stays shared — that is the value every source gets when none is set, and the
 one-source-per-provider-for-every-customer setup `multi-tenancy.md`
 describes depends on it. A hook accepted flagged spends its source's
 quarantine bucket, not the tenant's rate limit, and gets no dedupe key.
+
+**Status (2026-10-10).** The shared-source deviation is closed by an opt-in.
+When the resolver takes the tenant from the request (any but
+`RouteResolver.Path`), a source that is shared (`tenant_id: "default"`), has
+`Verifier.None` and does not set `trust_url_tenant: true` is refused
+(`Ankusa.Verifier.check_shared/2`): a configured one refuses to boot and the
+image's `check-config` exits 78 (`validate_shared!/1`, on every node whatever
+its roles); an admin API write is `400 invalid_source`; a stored one written
+before the rule keeps serving, and the node names it in a warning at boot
+(`warn_stored_shared/2`). A source that sets the flag behaves as before.
+`multi-tenancy.md` documents the rule.
 
 <a id="e6"></a>
 ### E6 · Medium · Code — Ingest backpressure counts records, not bytes
@@ -1455,13 +1495,12 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 ## Remaining work, re-assessed
 
-Re-rated against the code on 2026-10-09 with this review's own severity definitions; updated 2026-10-10, when the B7, C2 and S6 residuals and D2's open bullets were closed. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
+Re-rated against the code on 2026-10-09 with this review's own severity definitions; updated 2026-10-10, when the B7, C2, S6 and O2 residuals, D2's open bullets and the E5 deviation were closed. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
 
 | Finding | Severity now | What still fails | Why it stays |
 |---|---|---|---|
-| O2 residual | Low | Supervisors' child specs carry `%Ankusa.Config{}`, so `:sys.get_status/1` on a supervisor, or a SASL supervisor report, prints it. | SASL reports are off by default; closing it means every child re-reading config from `:persistent_term`. Accepted. |
-| B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | brod has no cancel and no idempotent producer; consumers dedupe on `idempotency_key`. |
-| E5 deviation | Medium for unverified shared sources | A source with `tenant_id: "default"` is shared and answers any URL tenant, so with `Verifier.None` a sender can file hooks under any tenant and spend that tenant's rate limit. | `"default"` is every source's default; binding it would break one-source-for-every-customer setups. `multi-tenancy.md` says to give a shared source a real verifier, or each tenant its own (bound) source. Since 2026-10-10 the node also warns at boot for each such source when the resolver takes the tenant from the URL (`Ankusa.Verifier.warn_unverified_shared/1`). |
+| O2 residual (sink adapters) | Low | `Ankusa.Sink.{Kafka,NATS,RabbitMQ,Redis}.Supervisor` hold connection credentials in their children's start arguments, so `:sys.get_status/1` on one, or a SASL supervisor report, prints them; brod, gnat and Redix keep them in their own process state. | The instance tree is closed; these connections are started per sink by each adapter, and the clients' own state is theirs. SASL reports are off by default. |
+| B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | Re-checked 2026-10-10: brod (4.7.0) has no cancel and no idempotent producer, and a per-hook transaction does not hide the record from `read_uncommitted` consumers; consumers dedupe on `idempotency_key`. |
 
 ## Decisions that choose between the options
 
