@@ -28,6 +28,27 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - Blob files of the hooks and quarantine column families are capped at 64 MiB
   (`blob_file_size`; RocksDB's default is 256 MiB), bounding what one backup
   upload or restore holds in memory.
+- `DELETE /v1/tenants/:tenant/sources/:name` no longer answers `204` while
+  this node's queue still holds undelivered rows for the source: it is
+  `409 source_has_deliveries` (`{"pending": n, "inflight": m}`) and nothing is
+  deleted. `?deliveries=dead_letter` dead-letters the pending rows first, as
+  `{:source_gone, source_id}` (needs the `:dispatch` role, `409
+  role_not_enabled` otherwise; `503 dispatch_unavailable` if the pipeline
+  cannot answer), then deletes; rows in flight settle on their own. A source
+  re-created under the same name no longer inherits the old backlog.
+- Delivery rows record their `source_id`, so one source's rows are found
+  without reading every hook. Rows written before keep working: they are
+  matched by their hook's source.
+- The claim gateway serves one `Range: bytes=` range as `206` with
+  `Content-Range` (`416` past the end), from one ranged store read, and every
+  claim response says `Accept-Ranges: bytes`. Several ranges, other units and
+  any `If-Range` get the whole claim. `HEAD` reads only the pack's index, not
+  the claim.
+- The S3, GCS, Azure and OCI blob stores retry a transport error or a `408`,
+  `429`, `500`, `502`, `503` or `504` (`:retries`, default 2 extra attempts,
+  200 ms then 1 s apart), re-signing each attempt; any other answer is
+  returned at once, mapped as before. `put` sends its iodata as is instead of
+  copying a segment into one binary first.
 
 ### Added
 
@@ -38,6 +59,16 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `SourceStore.Persistent` and `ankusa_redis`'s `SourceStore.Redis` share.
   A source-store read while the store restarts answers
   `{:error, :unavailable}` instead of raising.
+- `Ankusa.Queue.pending_for_source/2`: one source's pending and in-flight
+  delivery rows in this node's queue.
+- `Ankusa.Dispatch.Pipeline.dead_letter_source/2`: dead-letter one source's
+  pending rows now, inside the pipeline.
+- `Ankusa.ClaimCheck.locate/3` and `read_bytes/4`: find a claim, and read any
+  range of it, without reading it whole.
+- `Ankusa.BlobStore.Retry`, the retry loop the HTTP blob stores share.
+- `Ankusa.Sink.Reaper`: stops a sink adapter's connection after its
+  `:idle_timeout_ms` without a delivery. The broker adapters (`ankusa_rabbitmq`,
+  `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`) run one each.
 - **`Ankusa.Sink.GooglePubSub`**: publishes hooks to a Google Cloud Pub/Sub
   topic with one `topics.publish` `POST` per delivery, the same
   `Ankusa.Sink.Message` data as the other queue sinks and the same metadata

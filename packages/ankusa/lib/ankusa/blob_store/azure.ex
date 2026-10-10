@@ -34,6 +34,8 @@ defmodule Ankusa.BlobStore.Azure do
     * `:req_options`    — transport options for the HTTP client, e.g. a custom
                            Finch pool, a proxy, or `plug:` for `Req.Test` in
                            tests. See `Ankusa.HttpClient` for the accepted keys
+    * `:retries`        — default `2`: extra attempts after a transport error
+                           or a `408`/`429`/`5xx`. See `Ankusa.BlobStore.Retry`
 
   ## Local dev
 
@@ -56,6 +58,7 @@ defmodule Ankusa.BlobStore.Azure do
   # See Ankusa.BlobStore.S3 for why this false-positive suppression exists.
   @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
 
+  alias Ankusa.BlobStore.Retry
   alias Ankusa.HttpClient
 
   @api_version "2024-11-04"
@@ -67,7 +70,7 @@ defmodule Ankusa.BlobStore.Azure do
       {"content-type", "application/octet-stream"}
     ]
 
-    case request(opts, :put, blob_url(opts, key), IO.iodata_to_binary(data), headers) do
+    case request(opts, :put, blob_url(opts, key), data, headers) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -114,15 +117,15 @@ defmodule Ankusa.BlobStore.Azure do
 
   defp request(opts, method, url, body, headers) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
+    req_options = Keyword.get(opts, :req_options, [])
 
-    case HttpClient.request(
-           method,
-           url,
-           auth_headers(opts) ++ version_header(opts) ++ headers,
-           body,
-           timeout,
-           Keyword.get(opts, :req_options, [])
-         ) do
+    result =
+      Retry.run(opts, fn ->
+        all_headers = auth_headers(opts) ++ version_header(opts) ++ headers
+        HttpClient.request(method, url, all_headers, body, timeout, req_options)
+      end)
+
+    case result do
       # Keep the status visible so 404 can mean :not_found.
       {:ok, status, body} when status in 200..299 -> {:ok, body}
       {:ok, 404, _body} -> {:error, :not_found}

@@ -129,10 +129,21 @@ GET /v1/claims/{tenant}/{claim_id}
 ```
 
 A `200` returns exactly the claim's bytes, as `application/octet-stream`,
-with `cache-control: private, max-age=31536000, immutable`. Claims are written
-once and never rewritten, so a client may cache them forever; `private` keeps
-a shared cache from storing one tenant's payload. `HEAD` on the same path
-answers the same status and `content-length` with no body.
+with `cache-control: private, max-age=31536000, immutable` and
+`accept-ranges: bytes`. Claims are written once and never rewritten, so a
+client may cache them forever; `private` keeps a shared cache from storing one
+tenant's payload. `HEAD` on the same path answers the same status and
+`content-length` with no body, and reads only the pack's index.
+
+A `Range` header with one byte range — `bytes=0-1023`, `bytes=1024-`, or
+`bytes=-1024` for the last 1 KiB — gets `206` with those bytes and
+`content-range: bytes 0-1023/<length>`, read from the object store as one
+ranged read; an end past the claim is clamped to it. A range that starts at or
+past the end is `416` with `content-range: bytes */<length>`. Several ranges,
+another unit, a malformed spec, or any `If-Range` are ignored and get the
+whole claim (`200`). The sha256 covers the whole claim, so check it once the
+ranges are reassembled. Responses are not streamed: each is read into memory
+whole, which a claim's `max_body_bytes` bound keeps finite.
 
 **The gateway doesn't check integrity**: the path carries no digest, so only
 the holder of the message can. Compare the bytes' sha256 against the
@@ -150,8 +161,10 @@ Errors are JSON: `{"error": "not_found"}`.
 | Status | `error` | Cause | Retry? |
 | --- | --- | --- | --- |
 | `200` |  | the bytes, cacheable forever by the client |  |
+| `206` |  | the requested `Range` of the bytes |  |
 | `400` | `invalid_tenant`, `invalid_id` | tenant outside `[A-Za-z0-9_-]{1,64}`; claim id not a canonical ULID | No, a bug |
 | `404` | `not_found` | no such claim: expired by retention, or never written | No, dead-letter |
+| `416` |  | the `Range` starts past the claim's end; `content-range: bytes */<length>` | No, fix the range |
 | `408`, `429` |  | a front layer (proxy, API gateway) timing out or throttling | Yes, retry |
 | `503` | `store_unavailable` | the object store is unreachable; `Retry-After: 1` | Yes |
 | `503` | `store_forbidden` | the object store refused the gateway's credential; `Retry-After: 60` | Yes, after fixing the policy |
@@ -458,7 +471,8 @@ Every claim object is an uncompressed ZIP, in this order:
    content type, and receive time.
 
 The gateway serves a claim with two ranged reads: the start of the pack
-through the claim's index row, then the claim's bytes. The index comes first
+through the claim's index row, then the claim's bytes (or the requested range
+of them; `HEAD` stops after the first). The index comes first
 so no read needs the pack's size. `unzip`, Python's `zipfile`, Java, Go, and
 Erlang all read the pack with no Ankusa code, through the ZIP central
 directory at the end. Entries stay uncompressed because a compressed entry

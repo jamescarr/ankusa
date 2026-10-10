@@ -34,6 +34,11 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
   that were waiting when it dropped). Every one of these errors flows into the
   source's `Ankusa.RetryPolicy` exactly like any other sink failure, so there
   is no separate reconnect policy to get wrong.
+
+  The AMQP connection belongs to `amqp_client`'s own supervisor, not to this
+  process, so stopping this process (its supervisor's shutdown, or the idle
+  sweep of `Ankusa.Sink.Reaper`) closes it explicitly and answers every
+  waiting publish `{:error, :not_connected}`.
   """
 
   use GenServer
@@ -98,10 +103,17 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
   @spec default_url() :: String.t()
   def default_url, do: "amqp://guest:guest@localhost:5672"
 
+  @doc "The longest `publish/4` waits, in milliseconds."
+  @spec call_timeout_ms() :: pos_integer()
+  def call_timeout_ms, do: @call_timeout_ms
+
   # ── GenServer ───────────────────────────────────────────────────────────
 
   @impl true
   def init(opts) do
+    # So a shutdown runs `terminate/2`, which closes the AMQP connection.
+    Process.flag(:trap_exit, true)
+
     state = %{
       instance: Keyword.fetch!(opts, :instance),
       url: Keyword.get(opts, :url, default_url()),
@@ -157,6 +169,12 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
   end
 
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
+  # Trapping exits only to close the connection on a shutdown: a linked exit
+  # still stops this process exactly when it did before (any reason but
+  # `:normal`).
+  def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
+  def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
 
   def handle_info(basic_ack(delivery_tag: tag, multiple: multiple), state) do
     {:noreply, settle(state, tag, multiple, &ack_result/1)}
@@ -228,6 +246,13 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
             {:reply, error, state}
         end
     end
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    fail_pending(state, {:error, :not_connected})
+    if state.conn, do: safely(fn -> AMQP.Connection.close(state.conn) end)
+    :ok
   end
 
   # ── confirms ────────────────────────────────────────────────────────────

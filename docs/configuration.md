@@ -134,10 +134,10 @@ URL), cannot be described by this engine. They need a bespoke
 | --- | --- |
 | `log` | none |
 | `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (a `whsec_` secret, or a list while rotating: signs every delivery the Standard Webhooks way), `max_response_bytes` (65536; only the status is used). Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
-| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried). |
-| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a larger record is dead-lettered at once), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`). |
-| `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
-| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `publish_timeout_ms` (5000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
+| `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least 16000). |
+| `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a larger record is dead-lettered at once), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`), `idle_timeout_ms` (600000; the client closes after this long with no delivery, `0` never; at least the produce timeout plus 1000). |
+| `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
+| `redis` | `url` (credentials and db go in it: `redis://:password@host:6379/0`, `rediss://` for TLS), `channel` (a static string), `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). Pub/sub keeps no copy, so a publish nobody is subscribed to is an error and the sink is never durable. See [`delivery.md`](delivery.md#sinkredis-pubsub-delivery). |
 | `sqs` | `queue_url`, `region`, `endpoint` (default: the queue URL's origin; set it for a VPC endpoint or an emulator), `message_group_id` (a static string), `inline_max_bytes` (65536), `max_message_bytes` (1048576, SQS's limit; body plus message attributes, a larger message is dead-lettered at once), `timeout_ms` (5000), `access_key_id` / `secret_access_key` / `session_token` (omit for the `AWS_*` env, IRSA, or the EC2 instance role). FIFO when `queue_url` ends `.fifo`: the group defaults to `tenant/source` and the deduplication id is the hook id (SQS dedupes for 5 minutes). The queue must already exist. See [`delivery.md`](delivery.md#sinksqs-queue-delivery). |
 | `google_pubsub` | `project`, `topic` (the id, not `projects/…/topics/…`), `endpoint` (default `https://pubsub.googleapis.com`; set it for a regional endpoint or an emulator), `ordering_key` (a static string; default none), `inline_max_bytes` (65536), `max_message_bytes` (10000000, Pub/Sub's limit; data plus attributes plus ordering key, a larger message is dead-lettered at once), `timeout_ms` (5000), `auth` = `metadata` \| `token` \| `none` (default `metadata`: the GCE/GKE metadata server; `token` is required when `auth: token`; `none` sends no credential, for an emulator). The topic must already exist, and a topic with no subscription drops the message. See [`delivery.md`](delivery.md#sinkgooglepubsub-google-cloud-pubsub-delivery). |
 
@@ -373,7 +373,14 @@ node-agnostic: `GET|POST /v1/tenants/{tenant}/sources` and
 `GET|PUT|DELETE /v1/tenants/{tenant}/sources/{name}`, on a writable source
 store (`409 source_store_read_only` otherwise; a write the store could not
 persist, such as during a Redis outage, is `503 store_unavailable` with
-`Retry-After: 1`). The `:edge` role also gets
+`Retry-After: 1`). `DELETE` of a source that still has undelivered rows in
+this node's queue (pending or in flight) is `409 source_has_deliveries`
+(`{"pending": n, "inflight": m}`) and deletes nothing;
+`?deliveries=dead_letter` dead-letters its pending rows as
+`{:source_gone, source_id}` first (needs the `:dispatch` role,
+`409 role_not_enabled` otherwise), then deletes; rows in flight settle on
+their own. The check is this node's queue only, like the DLQ. The `:edge`
+role also gets
 `GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit`,
 which read and adjust this node's per-tenant ingest limits
 ([Rate limits](#rate-limits)); a store that cannot be read or written answers

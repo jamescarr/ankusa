@@ -15,6 +15,10 @@ follows [Semantic Versioning](https://semver.org/).
   the store's state process. Seeds stay config-only. A first boot against an
   unreachable Redis fails; a write during an outage answers
   `{:error, :store_unavailable}` (the admin API's `503 store_unavailable`).
+- `Ankusa.Sink.Redis`: `:idle_timeout_ms` (default `600_000`, `0` never, at
+  least `:publish_timeout_ms` plus 1 s): a connection with no delivery for that
+  long is closed (`Ankusa.Sink.Reaper`, requires core's) and the next delivery
+  opens a new one.
 
 ### Changed
 

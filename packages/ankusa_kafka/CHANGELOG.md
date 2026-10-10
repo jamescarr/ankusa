@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `:max_record_bytes` (default `1_000_000`): a record whose value plus key is
   larger is refused before it is produced, as `{:error, {:permanent, _}}`.
+- `:idle_timeout_ms` (default `600_000`, `0` never, at least
+  `:produce_timeout_ms` plus 1 s): a brod client with no delivery for that
+  long is stopped (`Ankusa.Sink.Reaper`, requires core's) and the next
+  delivery starts a new one.
 
 ### Changed
 

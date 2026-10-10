@@ -28,6 +28,15 @@ defmodule Ankusa.BlobStore.S3Test do
     assert {:ok, ^body} = S3.get(:i, key, @opts)
   end
 
+  test "put of iodata stores its bytes, signed over the same bytes" do
+    key = key("iodata")
+    chunk = :crypto.strong_rand_bytes(2048)
+
+    assert :ok = S3.put(:i, key, [chunk, ["tail", ?!]], @opts)
+    assert {:ok, body} = S3.get(:i, key, @opts)
+    assert body == chunk <> "tail!"
+  end
+
   test "get_range returns exactly the requested byte slice" do
     key = key("range")
     body = for i <- 0..255, into: <<>>, do: <<i>>

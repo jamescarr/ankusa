@@ -107,12 +107,12 @@ defmodule AnkusaServer.Config do
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @log_sink_keys ~w(type)
   @http_sink_keys ~w(type url method headers timeout_ms secret max_response_bytes)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight)
-  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl)
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
+  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms)
   @sasl_keys ~w(mechanism username password)
-  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth idle_timeout_ms)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
-  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms)
+  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms)
   @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token)
   @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token)
 
@@ -1229,7 +1229,8 @@ defmodule AnkusaServer.Config do
          |> put_opt(:exchange_type, atom_enum_opt(sink, "exchange_type", @exchange_types, path))
          |> put_opt(:routing_key, string_opt(sink, "routing_key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
-         |> put_opt(:max_inflight, int_opt(sink, "max_inflight", path))}
+         |> put_opt(:max_inflight, int_opt(sink, "max_inflight", path))
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
       "kafka" ->
         check_keys!(sink, @kafka_sink_keys, path)
@@ -1243,7 +1244,8 @@ defmodule AnkusaServer.Config do
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
          |> put_opt(:max_record_bytes, int_opt(sink, "max_record_bytes", path))
          |> put_opt(:ssl, bool_opt(sink, "ssl", path))
-         |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))}
+         |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
       "nats" ->
         check_keys!(sink, @nats_sink_keys, path)
@@ -1256,6 +1258,7 @@ defmodule AnkusaServer.Config do
           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
           |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
           |> put_opt(:tls, bool_opt(sink, "tls", path))
+          |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
 
         {Ankusa.Sink.NATS, connection ++ nats_auth(sink["auth"], path ++ ["auth"])}
 
@@ -1268,7 +1271,8 @@ defmodule AnkusaServer.Config do
            channel: required_string!(sink, "channel", path)
          ]
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
-         |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))}
+         |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
       "sqs" ->
         check_keys!(sink, @sqs_sink_keys, path)

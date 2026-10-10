@@ -23,6 +23,9 @@ defmodule Ankusa.BlobStore.GCS do
     * `:req_options`    — transport options for the HTTP client, e.g. a custom
                            Finch pool, a proxy, or `plug:` for `Req.Test` in
                            tests. See `Ankusa.HttpClient` for the accepted keys
+    * `:retries`        — default `2`: extra attempts after a transport error
+                           or a `408`/`429`/`5xx`, each with a fresh token from
+                           `:token_provider`. See `Ankusa.BlobStore.Retry`
 
   ## Local dev
 
@@ -38,13 +41,14 @@ defmodule Ankusa.BlobStore.GCS do
 
   @behaviour Ankusa.BlobStore
 
+  alias Ankusa.BlobStore.Retry
   alias Ankusa.HttpClient
 
   @impl true
   def put(_instance, key, data, opts) do
     url = media_url(opts, "o", [{"uploadType", "media"}, {"name", key}])
 
-    case request(opts, :post, url, IO.iodata_to_binary(data), [], "application/octet-stream") do
+    case request(opts, :post, url, data, [], "application/octet-stream") do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -114,15 +118,15 @@ defmodule Ankusa.BlobStore.GCS do
 
   defp request(opts, method, url, body, headers, content_type) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
+    req_options = Keyword.get(opts, :req_options, [])
 
-    case HttpClient.request(
-           method,
-           url,
-           auth_headers(opts) ++ headers ++ content_type_header(content_type),
-           body,
-           timeout,
-           Keyword.get(opts, :req_options, [])
-         ) do
+    result =
+      Retry.run(opts, fn ->
+        all_headers = auth_headers(opts) ++ headers ++ content_type_header(content_type)
+        HttpClient.request(method, url, all_headers, body, timeout, req_options)
+      end)
+
+    case result do
       # Keep the status visible so 404 can mean :not_found.
       {:ok, status, body} when status in 200..299 -> {:ok, body}
       {:ok, 404, _body} -> {:error, :not_found}

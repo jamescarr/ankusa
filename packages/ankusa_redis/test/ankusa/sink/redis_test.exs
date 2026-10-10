@@ -174,6 +174,38 @@ defmodule Ankusa.Sink.RedisTest do
     assert micros < 100_000
   end
 
+  test "an idle connection is closed, and the next delivery opens a new one", %{
+    instance: inst,
+    channel: channel
+  } do
+    {ps, ref} = subscribe!(channel)
+    opts = [url: @url, channel: channel, idle_timeout_ms: 1_000, publish_timeout_ms: 5_000]
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+    assert receive_message(ps, ref) == channel
+
+    old = Ankusa.whereis(inst, {:redis_sink, @url})
+    mon = Process.monitor(old)
+    reaper = Ankusa.Sink.Redis.Reaper
+
+    # Keyed by a digest of the URL, never the URL (it may carry a password);
+    # floored at the publish timeout plus a second.
+    assert [{{^inst, {:redis_sink, digest}} = key, ^old, _last, 6_000}] =
+             Enum.filter(:ets.tab2list(reaper), &match?({{^inst, _}, _, _, _}, &1))
+
+    refute digest =~ "localhost"
+
+    true = :ets.update_element(reaper, key, {3, System.monotonic_time(:millisecond) - 6_000})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+
+    assert_receive {:DOWN, ^mon, :process, ^old, _reason}, 5_000
+    assert Ankusa.whereis(inst, {:redis_sink, @url}) == nil
+
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+    assert receive_message(ps, ref) == channel
+    assert Ankusa.whereis(inst, {:redis_sink, @url}) not in [nil, old]
+  end
+
   defp receive_message(ps, ref) do
     assert_receive {:redix_pubsub, ^ps, ^ref, :message, %{channel: channel}}, 2_000
     channel

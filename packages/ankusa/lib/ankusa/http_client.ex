@@ -1,8 +1,8 @@
 defmodule Ankusa.HttpClient do
   @moduledoc """
-  The one place the outbound adapters issue HTTP requests: `Ankusa.BlobStore.S3`,
-  `Ankusa.BlobStore.GCS`, `Ankusa.Sink.Http`, `Ankusa.Sink.SQS`, and
-  `Ankusa.Sink.GooglePubSub`.
+  The one place the outbound adapters issue HTTP requests: the object stores
+  (`Ankusa.BlobStore.S3`, `GCS`, `Azure`, `OCI`), `Ankusa.Sink.Http`,
+  `Ankusa.Sink.SQS`, and `Ankusa.Sink.GooglePubSub`.
 
   Those adapters share more than a client. Every request they send is a *function
   of its own bytes* — a signed S3 URL, a signed `SendMessage`, a forwarded hook
@@ -10,8 +10,9 @@ defmodule Ankusa.HttpClient do
   preference:
 
     * `retry: false` — retries belong to the framework's own loops
-      (`Ankusa.RetryPolicy`, the batcher's backoff). Req's default retry would
-      add hidden latency inside the retry it is already being wrapped in.
+      (`Ankusa.RetryPolicy` for the sinks, `Ankusa.BlobStore.Retry` around one
+      object-store request, re-signed per attempt). Req's default retry would
+      add hidden latency inside those, and resend a signature as it ages.
     * `redirect: false` — a followed redirect re-issues a POST as a GET, so a
       302 from a sink endpoint would be reported as a successful delivery. A
       redirect on a signed request is never more useful: the signature covers the

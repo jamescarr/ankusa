@@ -184,26 +184,51 @@ defmodule Ankusa.ClaimCheck do
     result
   end
 
+  @typedoc "A claim's pack (object key), and the claim's offset and length in it."
+  @type location :: %{key: String.t(), offset: non_neg_integer(), length: non_neg_integer()}
+
   @doc """
-  Read a claim's bytes, with no digest check: the gateway's byte transport.
-  Two ranged reads: the pack's index up to the claim's row, then the claim.
-  A claim id past the end of its pack's index, or a missing pack, is
-  `:not_found`.
+  Read a claim's bytes, with no digest check: `locate/3`, then `read_bytes/4`
+  over the whole claim. A claim id past the end of its pack's index, a missing
+  pack, or a pack that ends before the claim does is `:not_found`.
   """
   @spec read(atom(), String.t(), String.t()) :: {:ok, binary()} | {:error, reason()}
   def read(instance, tenant_id, claim_id) do
+    with {:ok, location} <- locate(instance, tenant_id, claim_id) do
+      read_bytes(instance, location, 0, location.length)
+    end
+  end
+
+  @doc """
+  Find a claim without reading it: one ranged read of its pack's index, up to
+  the claim's row. A claim id past the end of the index, or a missing pack, is
+  `:not_found`.
+  """
+  @spec locate(atom(), String.t(), String.t()) :: {:ok, location()} | {:error, reason()}
+  def locate(instance, tenant_id, claim_id) do
     with :ok <- Ref.validate_tenant(tenant_id),
          {:ok, pack_id, index} <- Ref.locate(claim_id) do
       key = Ref.object_key(tenant_id, pack_id)
 
       with {:ok, prefix} <- get_range(instance, key, 0, Pack.index_prefix_bytes(index)),
-           {:ok, offset, length} <- locate(prefix, index),
-           {:ok, bin} when byte_size(bin) == length <- get_range(instance, key, offset, length) do
-        {:ok, bin}
-      else
-        {:ok, _short} -> {:error, :not_found}
-        {:error, reason} -> {:error, reason}
+           {:ok, offset, length} <- pack_entry(prefix, index) do
+        {:ok, %{key: key, offset: offset, length: length}}
       end
+    end
+  end
+
+  @doc """
+  `length` bytes of a located claim, starting `first` bytes into it: one
+  ranged read. The caller keeps the range inside the claim's `length`; a pack
+  that ends before the range does is `:not_found`.
+  """
+  @spec read_bytes(atom(), location(), non_neg_integer(), non_neg_integer()) ::
+          {:ok, binary()} | {:error, reason()}
+  def read_bytes(instance, %{key: key, offset: offset}, first, length) do
+    case get_range(instance, key, offset + first, length) do
+      {:ok, bin} when byte_size(bin) == length -> {:ok, bin}
+      {:ok, _short} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -291,7 +316,7 @@ defmodule Ankusa.ClaimCheck do
   defp checked_in(tenant_id, claim),
     do: %{ref: %Ref{tenant_id: tenant_id, claim_id: claim.claim_id}, sha256: claim.sha256}
 
-  defp locate(prefix, index) do
+  defp pack_entry(prefix, index) do
     case Pack.locate(prefix, index) do
       {:ok, offset, length} -> {:ok, offset, length}
       :error -> {:error, :not_found}

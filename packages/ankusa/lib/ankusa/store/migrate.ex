@@ -584,7 +584,7 @@ defmodule Ankusa.Store.Migrate do
 
     ops =
       [{:put, :hooks, Keys.hook(seq), bin}] ++
-        if(deliver?, do: pending_ops(seq, size), else: []) ++
+        if(deliver?, do: pending_ops(seq, size, env.source_id), else: []) ++
         if archive?, do: [{:put, :index, Keys.archive_pending(seq), <<size::32>>}], else: []
 
     acc = %{
@@ -599,7 +599,7 @@ defmodule Ankusa.Store.Migrate do
 
   # The sink a 0.3 hook was bound to was never recorded; the Pipeline expands
   # this row into one per current sink of the source when it claims it.
-  defp pending_ops(seq, size) do
+  defp pending_ops(seq, size, source_id) do
     unresolved = Deliveries.unresolved_pending()
 
     row =
@@ -609,7 +609,8 @@ defmodule Ankusa.Store.Migrate do
         attempts: 0,
         at: 0,
         error: nil,
-        size: size
+        size: size,
+        source_id: source_id
       })
 
     [

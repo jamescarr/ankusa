@@ -68,6 +68,126 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     assert Plug.Conn.get_resp_header(conn, "content-length") == ["4096"]
   end
 
+  defp get_range(inst, path, range) do
+    Plug.Test.conn(:get, path)
+    |> Plug.Conn.put_req_header("range", range)
+    |> Router.call(Router.init(instance: inst))
+  end
+
+  defp header(conn, name), do: Plug.Conn.get_resp_header(conn, name)
+
+  describe "Range" do
+    setup %{inst: inst} do
+      body = :crypto.strong_rand_bytes(4096)
+      %{body: body, path: Ref.path(check_in(inst, body))}
+    end
+
+    test "bytes=a-b is 206 with exactly those bytes", %{inst: inst, body: body, path: path} do
+      conn = get_range(inst, path, "bytes=10-13")
+
+      assert conn.status == 206
+      assert conn.resp_body == binary_part(body, 10, 4)
+      assert header(conn, "content-range") == ["bytes 10-13/4096"]
+      assert header(conn, "accept-ranges") == ["bytes"]
+      assert header(conn, "cache-control") == ["private, max-age=31536000, immutable"]
+    end
+
+    test "an open or overlong end runs to the claim's last byte", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      for range <- ["bytes=4000-", "bytes=4000-99999"] do
+        conn = get_range(inst, path, range)
+
+        assert conn.status == 206
+        assert conn.resp_body == binary_part(body, 4000, 96)
+        assert header(conn, "content-range") == ["bytes 4000-4095/4096"]
+      end
+    end
+
+    test "bytes=-n is the last n bytes, all of it when n exceeds the claim", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      conn = get_range(inst, path, "bytes=-100")
+      assert conn.status == 206
+      assert conn.resp_body == binary_part(body, 3996, 100)
+      assert header(conn, "content-range") == ["bytes 3996-4095/4096"]
+
+      conn = get_range(inst, path, "bytes=-5000")
+      assert conn.status == 206
+      assert conn.resp_body == body
+      assert header(conn, "content-range") == ["bytes 0-4095/4096"]
+    end
+
+    test "a range past the end, or bytes=-0, is 416 with the claim's length", %{
+      inst: inst,
+      path: path
+    } do
+      for range <- ["bytes=5000-", "bytes=4096-4100", "bytes=-0"] do
+        conn = get_range(inst, path, range)
+
+        assert conn.status == 416, "#{range} returned #{conn.status}"
+        assert conn.resp_body == ""
+        assert header(conn, "content-range") == ["bytes */4096"]
+        assert header(conn, "accept-ranges") == ["bytes"]
+      end
+    end
+
+    test "several ranges, another unit, or a malformed spec is ignored: 200 whole", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      for range <- ["bytes=0-1,3-4", "items=0-1", "bytes=5-3", "bytes=-", "bytes=a-b", "bytes"] do
+        conn = get_range(inst, path, range)
+
+        assert conn.status == 200, "#{range} returned #{conn.status}"
+        assert conn.resp_body == body
+        assert header(conn, "content-range") == []
+        assert header(conn, "accept-ranges") == ["bytes"]
+      end
+    end
+
+    test "an If-Range makes the request whole: claims carry no validator", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      conn =
+        Plug.Test.conn(:get, path)
+        |> Plug.Conn.put_req_header("range", "bytes=10-13")
+        |> Plug.Conn.put_req_header("if-range", ~s("abc"))
+        |> Router.call(Router.init(instance: inst))
+
+      assert conn.status == 200
+      assert conn.resp_body == body
+    end
+
+    test "HEAD ignores Range and answers the whole length", %{inst: inst, path: path} do
+      conn =
+        Plug.Test.conn(:head, path)
+        |> Plug.Conn.put_req_header("range", "bytes=10-13")
+        |> Router.call(Router.init(instance: inst))
+
+      assert conn.status == 200
+      assert conn.resp_body == ""
+      assert header(conn, "content-length") == ["4096"]
+      assert header(conn, "accept-ranges") == ["bytes"]
+      assert header(conn, "content-range") == []
+    end
+
+    test "a range of a missing claim is still 404", %{inst: inst} do
+      path = "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}"
+      conn = get_range(inst, path, "bytes=0-1")
+
+      assert conn.status == 404
+      assert error(conn) == "not_found"
+    end
+  end
+
   test "a store that refuses the credential is 503 store_forbidden, its body kept out", %{
     inst: inst,
     config: config

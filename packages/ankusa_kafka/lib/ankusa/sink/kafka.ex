@@ -70,6 +70,10 @@ defmodule Ankusa.Sink.Kafka do
     * `:produce_timeout_ms` — broker ack timeout and the longest `deliver/3`
                               waits for it; default `5_000`
     * `:client`             — atom naming the brod client; default `:default`
+    * `:idle_timeout_ms`    — stop the brod client after this long without a
+                              delivery through it, default `600_000` (10 min);
+                              `0` never. Never under `:produce_timeout_ms` plus
+                              1 s. See `Ankusa.Sink.Reaper`
     * `:ssl`, `:sasl`       — passed to brod's client config when given
   """
 
@@ -78,6 +82,7 @@ defmodule Ankusa.Sink.Kafka do
   alias Ankusa.Envelope
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
+  alias Ankusa.Sink.Reaper
 
   @default_max_record_bytes 1_000_000
 
@@ -94,7 +99,8 @@ defmodule Ankusa.Sink.Kafka do
     with {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)),
          key = key(env, opts),
          :ok <- fits(payload, key, max),
-         :ok <- ensure_client(client, opts, timeout),
+         {:ok, pid} <- ensure_client(client, opts, timeout),
+         :ok <- Reaper.touch(Ankusa.Sink.Kafka.Reaper, client, pid, idle_ms(opts, timeout)),
          {:ok, partition} <- partition(client, topic, key),
          {:ok, call_ref} <-
            :brod.produce(client, topic, partition, key, record(env, ctx, payload)) do
@@ -104,6 +110,10 @@ defmodule Ankusa.Sink.Kafka do
       end
     end
   end
+
+  # A produce waits up to `timeout` for its ack; the client is never stopped
+  # under one.
+  defp idle_ms(opts, timeout), do: Reaper.idle_ms(opts, timeout + 1_000)
 
   defp fits(payload, key, max) do
     size = byte_size(payload) + byte_size(key || "")
@@ -219,7 +229,10 @@ defmodule Ankusa.Sink.Kafka do
   # `whereis` first: the common case must not serialize every delivery
   # through the DynamicSupervisor.
   defp ensure_client(client, opts, timeout) do
-    if Process.whereis(client), do: :ok, else: start_client(client, opts, timeout)
+    case Process.whereis(client) do
+      pid when is_pid(pid) -> {:ok, pid}
+      nil -> start_client(client, opts, timeout)
+    end
   end
 
   defp start_client(client, opts, timeout) do
@@ -243,8 +256,8 @@ defmodule Ankusa.Sink.Kafka do
     }
 
     case DynamicSupervisor.start_child(Ankusa.Sink.Kafka.Supervisor, child) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
       {:error, reason} -> {:error, reason}
     end
   end

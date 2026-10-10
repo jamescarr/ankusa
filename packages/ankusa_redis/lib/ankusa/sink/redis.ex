@@ -62,6 +62,10 @@ defmodule Ankusa.Sink.Redis do
     * `:inline_max_bytes`   — default 64 KiB (65,536), configurable
     * `:publish_timeout_ms` — how long `deliver/3` waits for the `PUBLISH`
                               reply; default `5_000`
+    * `:idle_timeout_ms`    — close the connection after this long without a
+                              delivery through it, default `600_000` (10 min);
+                              `0` never. Never under `:publish_timeout_ms` plus
+                              1 s. See `Ankusa.Sink.Reaper`
   """
 
   @behaviour Ankusa.Sink
@@ -69,6 +73,7 @@ defmodule Ankusa.Sink.Redis do
   alias Ankusa.Envelope
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
+  alias Ankusa.Sink.Reaper
 
   @default_publish_timeout_ms 5_000
 
@@ -79,6 +84,8 @@ defmodule Ankusa.Sink.Redis do
 
     with {:ok, conn} <- ensure_connection(ctx.instance, url),
          {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
+      idle = Reaper.idle_ms(opts, timeout + 1_000)
+      :ok = Reaper.touch(Ankusa.Sink.Redis.Reaper, reaper_key(ctx.instance, url), conn, idle)
       publish(conn, channel(env, opts), payload, timeout)
     end
   end
@@ -194,4 +201,9 @@ defmodule Ankusa.Sink.Redis do
   end
 
   defp key(url), do: {:redis_sink, url}
+
+  # The reaper prints its key when it closes a connection, and the URL may
+  # carry a password: a digest of it, as the RabbitMQ sink names connections.
+  defp reaper_key(instance, url),
+    do: {instance, {:redis_sink, Base.encode16(binary_part(:crypto.hash(:sha256, url), 0, 8))}}
 end

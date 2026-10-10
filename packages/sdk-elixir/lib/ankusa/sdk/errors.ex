@@ -215,7 +215,11 @@ defmodule Ankusa.SDK.SourceNotFoundError do
 end
 
 defmodule Ankusa.SDK.SourceConflictError do
-  @moduledoc "`409`: a source with that name already exists."
+  @moduledoc """
+  `409`: a source with that name already exists (`source_exists`), or a delete
+  found the source still has undelivered hooks (`source_has_deliveries`); the
+  body's `"error"` says which.
+  """
 
   @type t :: %__MODULE__{status: non_neg_integer() | nil, body: term()}
 
