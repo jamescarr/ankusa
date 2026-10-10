@@ -10,7 +10,7 @@ Paths below are relative to `packages/ankusa/lib/ankusa/` unless they start with
 
 **Layout.** Findings are grouped by root cause, not by pipeline stage. [Root causes](#root-causes) maps the nine causes to their findings; each group's section states the cause, lists its findings as the review recorded them, and ends with a solution scope. [Where it breaks](#where-it-breaks) keeps the stage view.
 
-**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-09, no Critical or High finding is still open; the residuals that remain are listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
+**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, and E4 is closed; the residuals that remain are listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
 
 ## Verdict
 
@@ -911,6 +911,15 @@ API-managed sources are still per node: that needs a shared source store, the
 second G8 shape, and is listed under
 [Remaining work](#remaining-work-re-assessed).
 
+**Status (2026-10-10).** Fixed. `Ankusa.SourceStore.Redis` (`ankusa_redis`;
+the image's `source_store.type: redis`) keeps API-managed sources in Redis,
+shared by every node with the same namespace: Lua-scripted writes, a version
+counter with pub/sub invalidation and a `tick_ms` safety net, and reads from
+an ETS mirror (`Ankusa.SourceStore.Table`, shared with `Persistent`) that
+survives a restart of the store process. A first boot against an unreachable
+Redis fails; once running, an outage keeps the mirror serving. A source read
+while the store restarts is `{:error, :unavailable}`, not a crash.
+
 <a id="c2"></a>
 ### C2 · Medium · Code — The gateway buffers whole claims, mislabels missing keys, and leaks store errors
 
@@ -1185,6 +1194,10 @@ adapters registered through the instance's registry (B7). The second shape,
 a shared store, is not; with it go fleet-wide API-managed sources (E4's last
 bullet).
 
+**Status (2026-10-10).** Fleet-wide API-managed sources ship without the shared
+hook store: `Ankusa.SourceStore.Redis` shares sources the way the Redis route
+store shares routes (E4). Hooks, deliveries and seqs remain per node.
+
 <a id="c1"></a>
 ### C1 · High · Code — The documented multi-node claim-check topology cannot work
 
@@ -1397,15 +1410,14 @@ Re-rated against the code on 2026-10-09 with this review's own severity definiti
 | O2 residual | Low | Supervisors' child specs carry `%Ankusa.Config{}`, so `:sys.get_status/1` on a supervisor, or a SASL supervisor report, prints it. | SASL reports are off by default; closing it means every child re-reading config from `:persistent_term`. Accepted. |
 | B7 residual | Low | Adapter connections are never reaped: a connection whose sink was removed (or a URL an API-managed source used once) stays up until the node restarts. | Bounded by distinct `(instance, URL, exchange/connection)` keys; reaping needs an idle timer per adapter. |
 | B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | brod has no cancel and no idempotent producer; consumers dedupe on `idempotency_key`. |
-| E4 residual | Medium, multi-node only | API-managed sources live in each node's store, so a source created through one node's admin API is a `404` on the others. | Needs a shared source store, G8's second shape. |
 | C2 residual | Low | The gateway reads a claim whole (bounded by `max_body_bytes`) and has no `Range`. | Claims are at most `max_body_bytes`; streaming is an optimisation. |
 | S6 residual | Low | Blob-store calls are single-shot; a segment PUT copies the iodata into one binary first. | The compactor retries on its next tick with backoff; `list` is not on any shipped path. |
-| E5 deviation | Medium for unverified shared sources | A source with `tenant_id: "default"` is shared and answers any URL tenant, so with `Verifier.None` a sender can file hooks under any tenant and spend that tenant's rate limit. | `"default"` is every source's default; binding it would break one-source-for-every-customer setups. `multi-tenancy.md` says to give a shared source a real verifier, or each tenant its own (bound) source. |
+| E5 deviation | Medium for unverified shared sources | A source with `tenant_id: "default"` is shared and answers any URL tenant, so with `Verifier.None` a sender can file hooks under any tenant and spend that tenant's rate limit. | `"default"` is every source's default; binding it would break one-source-for-every-customer setups. `multi-tenancy.md` says to give a shared source a real verifier, or each tenant its own (bound) source. Since 2026-10-10 the node also warns at boot for each such source when the resolver takes the tenant from the URL (`Ankusa.Verifier.warn_unverified_shared/1`). |
 
 ## Decisions that choose between the options
 
 1. **Per-key ordering.** Keep ordering lanes (a custom scheduler on the store), or drop them, which makes Oban an option ([G4](#g4-scope))? — *Decided: lanes dropped. Deliveries are unordered and scheduled per sink key on the store.*
-2. **Durability before the `2xx`.** Is "this host" enough (option C, optionally with E′), or must an acked hook survive losing its host (option E, a shared Postgres store, or option F)? — *Narrowed. "This host" is what the ack means; `wal.type: none` moves durability to the broker. `backup.enabled` (`Ankusa.Store.Backup`) uploads a checkpoint of the store every `backup.interval_ms` (60 s) and restores it at boot into an empty `data_dir`, refusing to start when the backup can't be read: a lost host loses at most the hooks acked since the last backup, not the store. A zero-loss answer to host loss is still option E or F.*
+2. **Durability before the `2xx`.** Is "this host" enough (option C, optionally with E′), or must an acked hook survive losing its host (option E, a shared Postgres store, or option F)? — *Narrowed. "This host" is what the ack means; `wal.type: none` moves durability to the broker. `backup.enabled` (`Ankusa.Store.Backup`) uploads a checkpoint of the store every `backup.interval_ms` (60 s) and restores it at boot into an empty `data_dir`, refusing to start when the backup can't be read: a lost host loses at most the hooks acked since the last backup, not the store. A zero-loss answer to host loss is still option E or F. Since 2026-10-10 a restored store keeps its restore marker until the archive is reconciled, so a crash in between reconciles on the next boot instead of reusing archived seqs; a node refuses to back up over another store's backups (a store id in every manifest); and blob files are capped at 64 MiB, bounding what an upload holds in memory. Bucket expiration rules must exclude `backup/` (`storage.md`).*
 3. **Native code in core.** Is a NIF acceptable (options C and D)? If not, the remaining path is option B, which this review advises against. — *Decided: yes, RocksDB (option D).*
 4. **Default deployment.** A single container with nothing else to run (option C), or broker-first (option F)? — *Decided: a single container.*
 

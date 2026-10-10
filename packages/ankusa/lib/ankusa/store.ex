@@ -132,15 +132,27 @@ defmodule Ankusa.Store do
   # A directory with no `CURRENT` holds no database: a new node, or one whose
   # disk was replaced. With a backup configured that is never taken as "empty"
   # on faith: the latest backup is restored, or the backup location is shown
-  # to hold none, before RocksDB creates a fresh store there.
+  # to hold none, before RocksDB creates a fresh store there. A database whose
+  # restore marker is still there was restored (or created fresh) by a boot
+  # that died before reconciling it with the archive: reconcile it now.
   defp maybe_restore(%Config{backup: %{enabled: true}} = config, path) do
-    if File.exists?(Path.join(path, "CURRENT")) do
-      {:ok, :existing}
-    else
-      case Backup.restore(config, path) do
-        {:ok, origin} -> {:ok, origin}
-        {:error, reason} -> {:restore_failed, reason}
-      end
+    cond do
+      not File.exists?(Path.join(path, "CURRENT")) ->
+        case Backup.restore(config, path) do
+          {:ok, origin} -> {:ok, origin}
+          {:error, reason} -> {:restore_failed, reason}
+        end
+
+      Backup.reconcile_pending?(path) ->
+        Logger.warning(
+          "[ankusa] store at #{path}: a restore finished but the archive was not reconciled; " <>
+            "reconciling now"
+        )
+
+        {:ok, :restored}
+
+      true ->
+        {:ok, :existing}
     end
   end
 
@@ -226,10 +238,16 @@ defmodule Ankusa.Store do
 
   # A store that started over (restored, or fresh with a backup configured)
   # may be behind the bucket: segments archived after its backup carry seqs it
-  # never handed out, and catalogue rows it never wrote.
+  # never handed out, and catalogue rows it never wrote. The restore marker
+  # goes only once that is done; a marker that cannot be removed just means
+  # the next boot reconciles again, which changes nothing a second time.
   defp reconcile_archive(config, origin, path) when origin in [:restored, :fresh] do
     case Backup.reconcile_archive(config) do
       :ok ->
+        with {:error, reason} <- Backup.clear_restore_marker(path) do
+          Logger.warning("[ankusa] could not clear the restore marker: #{inspect(reason)}")
+        end
+
         :ok
 
       {:error, reason} ->
@@ -594,12 +612,16 @@ defmodule Ankusa.Store do
     [compression: :none, write_buffer_size: buffer_size(name)]
   end
 
+  # Blob files are capped at 64 MiB (RocksDB's default is 256 MiB), like the
+  # SST files: a backup uploads one whole file at a time, so this bounds the
+  # memory an upload or a restore holds.
   defp large_cf_opts(name) do
     [
       compression: :zstd,
       write_buffer_size: buffer_size(name),
       enable_blob_files: true,
       min_blob_size: 4096,
+      blob_file_size: 64 * 1024 * 1024,
       blob_compression_type: :zstd,
       enable_blob_garbage_collection: true
     ]

@@ -166,18 +166,32 @@ is the hooks acked since the last backup.
   highest archived seq, so no new segment key overwrites one, and every
   segment without a catalogue row is catalogued from its `.idx` object (with
   the restored hooks' archive obligations it settles), so `Ankusa.Storage.fetch/2`
-  finds those hooks again. Their delivery state is gone with the host.
+  finds those hooks again. Their delivery state is gone with the host. The
+  restore leaves a `RESTORE-IN-PROGRESS` marker beside `CURRENT` until this
+  reconcile succeeds: a boot that finds both (the node died, or the reconcile
+  failed, in between) logs "reconciling now" and reconciles before serving,
+  instead of opening the database as an existing, reconciled store.
 - **Where to point it.** With `LocalFS` the backup lives on the same disk as the
   store, and the node logs a warning saying so. Use a bucket: `storage.type:
   s3|gcs`, or a `backup.store` of its own. Backups are per node, so nodes
   sharing a bucket need distinct `storage.key_prefix`es, exactly as for
-  segments (two nodes on one prefix would purge each other's backups).
-  A replacement node takes over by starting with the same config on an empty
-  volume.
+  segments. Each store gets an id (`m:store_id`) on its first backup, carried
+  by every checkpoint and recorded in each manifest; a node whose prefix
+  already holds the latest backup of another store refuses to back up (no
+  upload, no purge), logs `backup refused … already holds backups of store
+  …` at error level, and counts it as a failed run. A replacement node takes
+  over by starting with the same config on an empty volume: it restores the
+  latest backup and inherits the id. The guard cannot tell the old host from
+  its replacement — both hold the same id — so retire the old one.
+- **Bucket lifecycle rules.** Keep `<key_prefix>backup/` out of every
+  expiration rule. Retention is `backup.keep`; a shared `backup/sst/*` file is
+  listed by every later backup that still uses it, whatever its age, and an
+  expired one makes the restore fail (`{:download_failed, key, _}`) and the
+  node refuse to boot.
 - **Costs.** An upload reads one file into memory at a time; RocksDB files here
-  are bounded by the 64 MiB write buffers and its default blob file size
-  (256 MiB). Each backup uploads the files written since the previous one, plus
-  a few small per-backup files.
+  are bounded by the 64 MiB write buffers and the 64 MiB blob file size the
+  store sets. Each backup uploads the files written since the previous one,
+  plus a few small per-backup files.
 - **Watching it.** `ankusa_backup_age_seconds` is the time since the last
   successful backup — the data a lost host would take with it — and
   `ankusa_backup_runs_total{result}` counts attempts.

@@ -134,13 +134,17 @@ A shared source trusts the URL's tenant: anyone who can post to
 spends its rate limit. Give a shared source a real verifier (the provider's
 signature), so only the provider's hooks get in, or give each tenant a source
 of its own, which the binding above then protects. A source created through
-the admin API under the tenant `default` is shared the same way.
+the admin API under the tenant `default` is shared the same way. When the
+edge takes the tenant from the URL (any resolver but `RouteResolver.Path`),
+the node logs a warning at boot for each configured source that is shared and
+has no verifier.
 
 ## Dynamic sources
 
 Everything above is a store decision, not a boot-time one: the router resolves
 a `source_id` and asks the configured `Ankusa.SourceStore` for it, so a source
-can appear at runtime with no redeploy. Two stores ship:
+can appear at runtime with no redeploy. Core ships two stores, and
+`ankusa_redis` a third (below):
 
 - **`SourceStore.Static`** (the default) reads sources declared in `config.exs`
   and nothing else. The admin API's write routes answer
@@ -157,9 +161,18 @@ can appear at runtime with no redeploy. Two stores ship:
 
 `SourceStore.Persistent` keeps its sources in this node's store, so it is
 node-local like the rest of it: that node's admin API writes, that node's edge
-reads. A fleet wants either one node serving the source API, or an external
-store — a DB-backed `SourceStore.Ecto`, read-through cached, invalidated on
-write — which the `Ankusa.SourceStore` behaviour is the seam for.
+reads. A fleet whose nodes all serve the source API uses
+**`SourceStore.Redis`** (package `ankusa_redis`; the image's
+`source_store.type: redis` with `url`, and optionally `namespace` and
+`tick_ms`): the same API and validation, but API-managed sources live in
+Redis, and every node configured with the same `namespace` serves them. Each
+node reads from an in-memory mirror, never from Redis on the request path; a
+write bumps a version and publishes it, and the other nodes reload within a
+pub/sub round trip (or the `tick_ms` check, if they missed it). Seeds from
+`sources:` stay this node's config and are never written to Redis. A node
+that cannot reach Redis on its first boot refuses to start rather than run
+with no sources; once running, an outage leaves the mirror serving hooks, and
+source writes fail until Redis is back.
 
 One consequence for `wal.type: none`: its boot check — every statically
 configured source needs at least one sink whose `:ok` means durable

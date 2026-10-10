@@ -185,6 +185,53 @@ defmodule Ankusa.Store.BackupTest do
     refute File.exists?(Path.join(store_dir, "RESTORE-IN-PROGRESS"))
   end
 
+  test "a restore whose archive reconcile failed is reconciled by the next boot" do
+    root = blob_root()
+    config = start(root, roles: [:edge, :storage])
+    inst = config.instance
+
+    before = commit!(inst, 5)
+    assert {:ok, _} = Backup.run(inst)
+    later = commit!(inst, 5)
+    assert {:ok, 1} = Compactor.tick(inst)
+
+    # The restore succeeds, then the segment listing the reconcile needs fails:
+    # the database is whole (CURRENT is there) but behind the bucket.
+    unreachable = %{
+      config
+      | storage: %{
+          config.storage
+          | blob_store: {CountingBlobStore, root: root, list_error: :econnrefused}
+        }
+    }
+
+    stop_supervised!({Ankusa.Instance, inst})
+    File.rm_rf!(config.data_dir)
+    Process.flag(:trap_exit, true)
+
+    assert {:store_restore_failed, _path, {:archive_reconcile_failed, _}} =
+             restore_reason(Ankusa.Instance.start_link(unreachable))
+
+    store_dir = Ankusa.Config.path(config, "store")
+    assert File.exists?(Path.join(store_dir, "CURRENT"))
+    assert File.exists?(Path.join(store_dir, "RESTORE-IN-PROGRESS"))
+
+    # The next boot must not take that database as an existing, reconciled one.
+    log =
+      ExUnit.CaptureLog.capture_log(fn -> start_supervised!({Ankusa.Instance, config}) end)
+
+    assert log =~ "reconciling now"
+    refute File.exists?(Path.join(store_dir, "RESTORE-IN-PROGRESS"))
+
+    for env <- before ++ later do
+      assert {:ok, fetched} = Storage.fetch(inst, env.id)
+      assert fetched.seq == env.seq
+    end
+
+    next = enqueue!(inst, envelope())
+    assert next.seq > Enum.max(Enum.map(later, & &1.seq))
+  end
+
   test "database files without CURRENT that no restore left are refused, not deleted" do
     root = blob_root()
     config = start(root)
@@ -279,6 +326,35 @@ defmodule Ankusa.Store.BackupTest do
     for env <- later do
       assert {:ok, _} = Storage.fetch(inst, env.id)
     end
+  end
+
+  test "a node refuses to back up over another store's backups; a restored store carries on" do
+    root = blob_root()
+
+    # Two nodes booted on one prefix before either backed up: two stores.
+    a = start(root)
+    b = start(root)
+    commit!(a.instance, 20)
+    commit!(b.instance, 5)
+    assert {:ok, %{id: first}} = Backup.run(a.instance)
+
+    # The second must neither upload over A's backups nor purge them.
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:foreign_backup, _a_id, _b_id}} = Backup.run(b.instance)
+      end)
+
+    assert log =~ "backup refused"
+    assert File.read!(Path.join([root, "backup", "LATEST"])) == first
+    assert File.exists?(Path.join([root, "backup", first, "manifest.json"]))
+
+    assert {:ok, %{id: second}} = Backup.run(a.instance)
+    stop_supervised!({Ankusa.Instance, b.instance})
+
+    # A's host is lost: the restored store inherits A's id and backs up again.
+    lose_host_and_restart(a)
+    assert {:ok, %{id: third}} = Backup.run(a.instance)
+    assert third != second
   end
 
   test "a checkpoint in flight does not block readiness" do

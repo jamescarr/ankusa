@@ -10,7 +10,7 @@ defmodule Ankusa.Edge.RateLimiter do
 
     1. a runtime override set through the admin API (`PUT
        /v1/tenants/:tenant/rate-limit`), persisted to this node's `Ankusa.Store`
-       and node-local, exactly like API-managed sources;
+       and node-local, exactly like `Ankusa.SourceStore.Persistent`'s sources;
     2. `rate_limits.tenants[tenant]`;
     3. `rate_limits.default`.
 

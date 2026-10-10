@@ -23,13 +23,23 @@ defmodule Ankusa.Store.Backup do
   retried after the interval doubled per consecutive failure (jittered,
   capped at a minute), like the compactor.
 
+  One store per prefix: the first backup gives the store an id (the
+  `m:store_id` row, so every checkpoint and every restore carries it) and
+  every manifest records it. When `LATEST` names another store's backup, the
+  attempt fails with `{:foreign_backup, theirs, ours}` — nothing uploaded,
+  nothing purged — because two stores on one prefix would delete each
+  other's backups as stale.
+
   At boot, `Ankusa.Store` calls `restore/2` when its directory holds no
   database: the `LATEST` backup is downloaded, every file checked against
   its size and sha256, `CURRENT` written last (a restore that fails part-way
   leaves no database, and the next boot starts it over). No backup at all
   starts an empty store; a backup location that cannot be read refuses the
   boot instead. `reconcile_archive/1` then squares the new store with the
-  segments in the bucket.
+  segments in the bucket. A restore (or a fresh start) leaves a
+  `RESTORE-IN-PROGRESS` marker in the directory until that reconcile has
+  succeeded, so a node that dies in between reconciles on its next boot
+  (`reconcile_pending?/1`) rather than booting as an existing store.
 
   The recovery point is the last backup: hooks acked after it are lost with
   the host, except for the archive copies `reconcile_archive/1` finds.
@@ -229,10 +239,7 @@ defmodule Ankusa.Store.Backup do
            %{state | failures: 0, known: shared_entries(manifest), last_success_ms: now}}
 
         {:error, reason} ->
-          Logger.warning(
-            "[ankusa] store backup failed (#{state.failures + 1} in a row), " <>
-              "retried with backoff: #{inspect(reason)}"
-          )
+          log_failure(state, store_root(state), reason)
 
           emit_stop(state, %{duration: duration, files: 0, bytes: 0}, %{
             result: :error,
@@ -251,6 +258,24 @@ defmodule Ankusa.Store.Backup do
     {reply, state}
   end
 
+  defp log_failure(state, root, {:foreign_backup, other, store_id}) do
+    Logger.error(
+      "[ankusa] backup refused: #{root} already holds backups of store #{other} " <>
+        "(this node is #{store_id}; #{state.failures + 1} in a row). Two nodes must not share " <>
+        "a backup prefix: give this node its own storage.key_prefix or backup store, " <>
+        "or delete #{root} there to start over."
+    )
+  end
+
+  defp log_failure(state, _root, reason) do
+    Logger.warning(
+      "[ankusa] store backup failed (#{state.failures + 1} in a row), " <>
+        "retried with backoff: #{inspect(reason)}"
+    )
+  end
+
+  defp store_root(state), do: key(BlobStore.resolve_config(state.config, :backup), "")
+
   defp emit_stop(state, measurements, meta) do
     Ankusa.Telemetry.emit(
       [:backup, :stop],
@@ -263,7 +288,11 @@ defmodule Ankusa.Store.Backup do
     store = BlobStore.resolve_config(state.config, :backup)
     id = new_id()
 
-    with :ok <- remove(dir),
+    # The id goes into the store before the checkpoint, so a restore of this
+    # backup inherits it and carries on backing up to the same place.
+    with {:ok, store_id} <- ensure_store_id(state.instance),
+         :ok <- check_owner(state.instance, store, store_id),
+         :ok <- remove(dir),
          :ok <- Store.checkpoint(state.instance, dir),
          {:ok, names} <- checkpoint_files(dir),
          {shared, private} = Enum.split_with(names, &shared?/1),
@@ -273,12 +302,49 @@ defmodule Ankusa.Store.Backup do
            "version" => @manifest_version,
            "id" => id,
            "created_at_ms" => System.system_time(:millisecond),
+           "store_id" => store_id,
            "files" => shared_entries ++ private_entries
          },
          :ok <-
            put(state.instance, store, key(store, "#{id}/manifest.json"), JSON.encode!(manifest)),
          :ok <- put(state.instance, store, key(store, "LATEST"), id) do
       {:ok, %{id: id, uploaded: n1 + n2, bytes: b1 + b2, manifest: manifest}}
+    end
+  end
+
+  # Which store this is, for `check_owner/3`: written once, by the first
+  # backup, and carried by every checkpoint from then on.
+  defp ensure_store_id(instance) do
+    key = Keys.meta("store_id")
+
+    case Store.get(instance, :default, key) do
+      {:ok, id} ->
+        {:ok, id}
+
+      :not_found ->
+        id = Base.encode32(:crypto.strong_rand_bytes(10), case: :lower, padding: false)
+
+        case Store.write(instance, [{:put, :default, key, id}], sync: true) do
+          :ok -> {:ok, id}
+          {:error, reason} -> {:error, {:store_id, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:store_id, reason}}
+    end
+  end
+
+  # Two stores backing up under one prefix would each purge the other's
+  # backups as stale. The latest backup there must be this store's (or
+  # predate store ids, or not exist); otherwise nothing is uploaded and
+  # nothing is deleted. A store restored from a backup inherits its id.
+  defp check_owner(instance, store, store_id) do
+    case load_latest(instance, store) do
+      {:ok, %{"store_id" => other}} when other != store_id ->
+        {:error, {:foreign_backup, other, store_id}}
+
+      _ ->
+        :ok
     end
   end
 
@@ -426,6 +492,13 @@ defmodule Ankusa.Store.Backup do
 
   # ── restore ───────────────────────────────────────────────────────────────
 
+  # Written before the first file of a restore (or before a fresh store is
+  # created), and removed only once the archive has been reconciled with the
+  # new store (`clear_restore_marker/1`). Without `CURRENT` beside it,
+  # whatever sits there is a restore's own leftovers, safe to clear; with
+  # `CURRENT`, the database is whole but has not been reconciled yet.
+  @restore_marker "RESTORE-IN-PROGRESS"
+
   @doc """
   Restore the latest backup into `path`, a store directory that holds no
   database. `{:ok, :restored}`; `{:ok, :fresh}` when the backup location is
@@ -452,7 +525,8 @@ defmodule Ankusa.Store.Backup do
           restore_files(instance, store, manifest, path)
 
         :none ->
-          with :ok <- clear_dir(path) do
+          with :ok <- clear_dir(path),
+               :ok <- write_local(Path.join(path, @restore_marker), "fresh") do
             Logger.info(
               "[ankusa] no backup under #{key(store, "")}; starting with an empty store"
             )
@@ -466,9 +540,22 @@ defmodule Ankusa.Store.Backup do
     end
   end
 
-  # Written before the first file of a restore and removed after `CURRENT`:
-  # whatever sits beside it is a restore's own leftovers, safe to clear.
-  @restore_marker "RESTORE-IN-PROGRESS"
+  @doc """
+  Whether the store directory `path` holds a database that a restore (or a
+  fresh start) created and the archive has not been reconciled with yet: the
+  node died between the two. `Ankusa.Store` then reconciles before serving.
+  """
+  @spec reconcile_pending?(Path.t()) :: boolean()
+  def reconcile_pending?(path), do: File.exists?(Path.join(path, @restore_marker))
+
+  @doc "Remove the marker `reconcile_pending?/1` looks for, once the reconcile succeeded."
+  @spec clear_restore_marker(Path.t()) :: :ok | {:error, term()}
+  def clear_restore_marker(path) do
+    case File.rm(Path.join(path, @restore_marker)) do
+      ok when ok in [:ok, {:error, :enoent}] -> Ankusa.Fsync.fsync_dir(path)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp check_restorable(path) do
     with {:ok, names} <- File.ls(path) do
@@ -492,9 +579,9 @@ defmodule Ankusa.Store.Backup do
     with :ok <- clear_dir(path),
          :ok <- write_local(marker, manifest["id"]),
          {:ok, bytes} <- restore_all(instance, store, rest ++ current, path) do
-      # CURRENT is down, so the directory is a database now; a marker that
-      # outlives a crash here is ignored by RocksDB and by the next boot.
-      _ = File.rm(marker)
+      # CURRENT is down, so the directory is a database now. The marker stays
+      # until the archive is reconciled (`Ankusa.Store` clears it): RocksDB
+      # ignores it, and a boot that finds it beside CURRENT reconciles.
       _ = Ankusa.Fsync.fsync_dir(path)
 
       age_s = div(System.system_time(:millisecond) - manifest["created_at_ms"], 1000)

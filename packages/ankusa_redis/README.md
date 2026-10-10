@@ -1,13 +1,14 @@
 # ankusa_redis
 
 Redis adapters for the Ankusa webhook ingestion framework: the multi-node
-route store (`Ankusa.Routes.Store.Redis`) and the pub/sub sink
-(`Ankusa.Sink.Redis`).
+route store (`Ankusa.Routes.Store.Redis`), the multi-node source store
+(`Ankusa.SourceStore.Redis`), and the pub/sub sink (`Ankusa.Sink.Redis`).
 
 This package exists so `ankusa` core stays free of the `:redix` dependency. It
-is needed only by deployments that keep route definitions in Redis so every edge
-node enforces the same set (a single node can use core's default in-memory store
-with a `routes.seed`), or that deliver hooks to a Redis pub/sub channel.
+is needed only by deployments that keep route definitions or API-managed
+sources in Redis so every edge node serves the same set (a single node can use
+core's in-memory route store and `SourceStore.Persistent`), or that deliver
+hooks to a Redis pub/sub channel.
 
 ## Installation
 
@@ -42,6 +43,30 @@ config =
 
 See `Ankusa.Routes.Store.Redis` for the key layout, invalidation, and what
 happens when Redis is unavailable.
+
+## Source store
+
+`Ankusa.SourceStore.Redis` implements the writable `Ankusa.SourceStore`
+callbacks: sources created, updated or deleted through any node's admin API
+(`/v1/tenants/{tenant}/sources`) live in one Redis hash, and every node with
+the same `namespace` serves them. Ingest reads each node's ETS mirror, never
+Redis; a version counter plus pub/sub keeps the mirrors current, with
+`tick_ms` as the safety net. Seeds from `sources:` stay config-only.
+
+```elixir
+config =
+  Ankusa.Config.new(
+    source_store:
+      {Ankusa.SourceStore.Redis,
+       url: "redis://localhost:6379",
+       namespace: "ankusa:sources",
+       decoder: &MyApp.Sources.decode!/2}
+  )
+```
+
+The `decoder` turns a stored JSON spec into `Ankusa.Source` options, as for
+`Ankusa.SourceStore.Persistent`. In the server image this is
+`source_store: {type: redis, url: ...}`.
 
 ## Pub/sub sink
 
@@ -79,5 +104,5 @@ mix test
 docker compose down -v
 ```
 
-`REDIS_URL` overrides the default `redis://localhost:6399`; both suites — the
-route store's and `Ankusa.Sink.Redis`'s — run against it.
+`REDIS_URL` overrides the default `redis://localhost:6399`; every suite — the
+route store's, the source store's and `Ankusa.Sink.Redis`'s — runs against it.

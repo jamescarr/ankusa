@@ -399,4 +399,35 @@ defmodule Ankusa.VerifierTest do
       assert Hmac.verify(env([], "body"), scheme: :twilio, secret: "x") == {:error, :bad_scheme}
     end
   end
+
+  describe "warn_unverified_shared/1" do
+    import ExUnit.CaptureLog
+
+    defp warning(resolver, source_opts, roles \\ [:edge]) do
+      config =
+        Ankusa.Config.new(
+          instance: :"verifier_warn_#{System.unique_integer([:positive])}",
+          data_dir: System.tmp_dir!(),
+          roles: roles,
+          route_resolver: resolver,
+          source_store: {Ankusa.SourceStore.Static, sources: %{"stripe" => source_opts}}
+        )
+
+      capture_log(fn -> assert Ankusa.Verifier.warn_unverified_shared(config) == :ok end)
+    end
+
+    test "names a shared source with no verifier when the URL carries the tenant" do
+      assert warning({Ankusa.RouteResolver.TenantPath, []}, []) =~
+               "source stripe is shared"
+    end
+
+    test "says nothing when the tenant does not come from the URL, or the source is bound or verified" do
+      assert warning({Ankusa.RouteResolver.Path, []}, []) == ""
+      assert warning({Ankusa.RouteResolver.TenantPath, []}, tenant_id: "acme") == ""
+
+      verified = [verifier: {Hmac, scheme: :stripe, secret: "whsec_x"}]
+      assert warning({Ankusa.RouteResolver.TenantPath, []}, verified) == ""
+      assert warning({Ankusa.RouteResolver.TenantPath, []}, [], [:dispatch]) == ""
+    end
+  end
 end

@@ -72,6 +72,37 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: mise run check:package ${{ matrix.package }}
 
+  # Core's object-store adapters (and the S3 backup round trip) against the
+  # floci emulators: `mix test --include integration`.
+  integration:
+    name: core integration (floci)
+    runs-on: ubuntu-latest
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+        with:
+          version: 2026.9.11
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - name: cache mix deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock') }}
+      - name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: mise run test:integration
+
   conformance:
     name: sdk conformance
     runs-on: ubuntu-latest

@@ -112,6 +112,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` (`true`/`false`) |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
+| `ANKUSA_SOURCE_STORE_URL` | `source_store.url` (a URL with no `type` means `redis`) |
 | `ANKUSA_WAL_TYPE` | `wal.type` (`disk` \| `none`) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |

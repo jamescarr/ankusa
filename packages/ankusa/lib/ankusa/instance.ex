@@ -57,6 +57,7 @@ defmodule Ankusa.Instance do
     Ankusa.put_config(config)
     Ankusa.ClaimCheck.validate_config!(config)
     Ankusa.Verifier.validate_config!(config)
+    Ankusa.Verifier.warn_unverified_shared(config)
     Ankusa.Routes.validate_config!(config)
     Ankusa.Queue.validate_config!(config)
     Ankusa.Lifecycle.validate_config!(config)

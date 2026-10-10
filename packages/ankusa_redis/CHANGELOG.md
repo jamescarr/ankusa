@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.SourceStore.Redis`: API-managed, tenant-scoped sources kept in Redis
+  and shared by every node configured with the same `namespace` (a hash of
+  sources and a version counter; Lua-scripted writes; pub/sub invalidation with
+  a `tick_ms` safety net). Reads go to an ETS mirror that survives a restart of
+  the store's state process. Seeds stay config-only. A first boot against an
+  unreachable Redis fails; a write during an outage answers
+  `{:error, :invalid, "could not persist source: store unavailable"}`.
+
 ### Changed
 
 - Requires `ankusa ~> 0.6` (the ETS route snapshot API); publish core first.

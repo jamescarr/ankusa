@@ -10,4 +10,5 @@ trap '"${compose[@]}" down -v' EXIT
 # The bootstrap containers create the buckets/containers and exit; the suite
 # needs them finished, not just started.
 "${compose[@]}" wait s3-bootstrap gcs-bootstrap azure-bootstrap oci-bootstrap
+mix deps.get --check-locked
 mix test --include integration

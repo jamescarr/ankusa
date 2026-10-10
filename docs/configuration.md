@@ -64,7 +64,7 @@ Every top-level section, with its keys and defaults:
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
-| `source_store` | `type` (`static` \| `persistent`; `persistent` adds API-managed sources kept in this node's store). See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
+| `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
@@ -160,6 +160,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
+| `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
 | `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `none`; the queue's mode) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
@@ -282,7 +283,7 @@ config :ankusa,
 | `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in the default Ankusa.Application. |
 | `max_body_bytes` | `8_000_000` | Hard cap on a request body. A `Content-Length` over it is `413` before any of the body is read; a body without one (chunked) is cut off at the cap while streaming. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); the rest is read-only. |
+| `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); `Ankusa.SourceStore.Redis` (`ankusa_redis`, the image's `source_store.type: redis`) keeps them in Redis, shared across nodes; the rest is read-only. |
 | `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
 | `direct_publish_timeout_ms` | `8_000` | `wal: :none` only: the one deadline every sink must confirm under (YAML `wal.publish_timeout_ms`). Keep it below the provider's own timeout. |
 | `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The queue writer serializes commits itself, so more partitions only add contention. |
@@ -314,7 +315,7 @@ config :ankusa,
 | `backup.enabled` | `false` | Back the store up to an object store while it runs, and restore the latest backup at boot when the store directory holds no database. A backup location that can't be read then refuses the boot (`{:store_restore_failed, path, reason}`) instead of starting empty. See [`storage.md`](storage.md#backup-and-restore). |
 | `backup.interval_ms` | `60_000` | How often a checkpoint is uploaded: the most a lost host loses. Only files the last backup doesn't already have are uploaded. |
 | `backup.keep` | `3` | Backups kept; older ones, and the files only they used, are deleted after each successful backup. |
-| `backup.blob_store` | `nil` | `{module, opts}` for backup objects; `nil` uses `storage.blob_store`. Keys are under `storage.key_prefix` either way: a backup is one node's. With `LocalFS` the backup shares the host's fate, and the node logs a warning saying so. |
+| `backup.blob_store` | `nil` | `{module, opts}` for backup objects; `nil` uses `storage.blob_store`. Keys are under `storage.key_prefix` either way: a backup is one node's, and a node whose prefix holds another store's backups refuses to back up. With `LocalFS` the backup shares the host's fate, and the node logs a warning saying so. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
@@ -523,7 +524,8 @@ Limits can also be adjusted per tenant at runtime, with no restart:
 `GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit` on
 `admin.port` (`:edge` role only, `409 role_not_enabled` elsewhere). An override
 lives on **the node that accepted it** and is persisted in this node's store
-(one key per tenant), the same node-local model as API-managed sources — put
+(one key per tenant), the same node-local model as `source_store.type:
+persistent`'s API-managed sources — put
 durable limits in the config. `PUT` and `DELETE`
 reset that tenant's bucket, so a raised limit is not held back by the old
 limit's accumulated debt. There is no "unlimited" value: to exempt a tenant
