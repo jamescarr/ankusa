@@ -370,7 +370,9 @@ node, so a fleet replay is one `POST /v1/replays` per dispatch node; a
 pen into this node's queue. Source management is
 node-agnostic: `GET|POST /v1/tenants/{tenant}/sources` and
 `GET|PUT|DELETE /v1/tenants/{tenant}/sources/{name}`, on a writable source
-store (`409 source_store_read_only` otherwise). The `:edge` role also gets
+store (`409 source_store_read_only` otherwise; a write the store could not
+persist, such as during a Redis outage, is `503 store_unavailable` with
+`Retry-After: 1`). The `:edge` role also gets
 `GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit`,
 which read and adjust this node's per-tenant ingest limits
 ([Rate limits](#rate-limits)); a store that cannot be read or written answers

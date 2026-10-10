@@ -410,7 +410,7 @@ defmodule Ankusa.VerifierTest do
           data_dir: System.tmp_dir!(),
           roles: roles,
           route_resolver: resolver,
-          source_store: {Ankusa.SourceStore.Static, sources: %{"stripe" => source_opts}}
+          source_store: {Ankusa.SourceStore.Static, sources: %{"e5-probe" => source_opts}}
         )
 
       capture_log(fn -> assert Ankusa.Verifier.warn_unverified_shared(config) == :ok end)
@@ -418,16 +418,23 @@ defmodule Ankusa.VerifierTest do
 
     test "names a shared source with no verifier when the URL carries the tenant" do
       assert warning({Ankusa.RouteResolver.TenantPath, []}, []) =~
-               "source stripe is shared"
+               "source e5-probe is shared"
     end
 
     test "says nothing when the tenant does not come from the URL, or the source is bound or verified" do
-      assert warning({Ankusa.RouteResolver.Path, []}, []) == ""
-      assert warning({Ankusa.RouteResolver.TenantPath, []}, tenant_id: "acme") == ""
+      # `refute =~`, not `== ""`: capture_log also sees other async tests' logs.
+      refute warning({Ankusa.RouteResolver.Path, []}, []) =~ "source e5-probe is shared"
+
+      refute warning({Ankusa.RouteResolver.TenantPath, []}, tenant_id: "acme") =~
+               "source e5-probe is shared"
 
       verified = [verifier: {Hmac, scheme: :stripe, secret: "whsec_x"}]
-      assert warning({Ankusa.RouteResolver.TenantPath, []}, verified) == ""
-      assert warning({Ankusa.RouteResolver.TenantPath, []}, [], [:dispatch]) == ""
+
+      refute warning({Ankusa.RouteResolver.TenantPath, []}, verified) =~
+               "source e5-probe is shared"
+
+      refute warning({Ankusa.RouteResolver.TenantPath, []}, [], [:dispatch]) =~
+               "source e5-probe is shared"
     end
   end
 end

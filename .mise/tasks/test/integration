@@ -11,4 +11,4 @@ trap '"${compose[@]}" down -v' EXIT
 # needs them finished, not just started.
 "${compose[@]}" wait s3-bootstrap gcs-bootstrap azure-bootstrap oci-bootstrap
 mix deps.get --check-locked
-mix test --include integration
+mix test --only integration

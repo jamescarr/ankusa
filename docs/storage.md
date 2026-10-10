@@ -181,8 +181,12 @@ is the hooks acked since the last backup.
   upload, no purge), logs `backup refused … already holds backups of store
   …` at error level, and counts it as a failed run. A replacement node takes
   over by starting with the same config on an empty volume: it restores the
-  latest backup and inherits the id. The guard cannot tell the old host from
-  its replacement — both hold the same id — so retire the old one.
+  latest backup and inherits the id. If the old host comes back beside its
+  replacement, both hold that id; the first of them to find `LATEST` moved
+  by the other (after it has backed up once itself) refuses with
+  `backup refused: … a backup of this store that this node did not write`.
+  Retire one of them and restart the one you keep (it stays refused until
+  then).
 - **Bucket lifecycle rules.** Keep `<key_prefix>backup/` out of every
   expiration rule. Retention is `backup.keep`; a shared `backup/sst/*` file is
   listed by every later backup that still uses it, whatever its age, and an
@@ -340,7 +344,7 @@ Local dev/test emulators via [floci](https://floci.io) (no cloud account):
 # floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599),
 # buckets/containers auto-created
 docker compose -f packages/ankusa/docker-compose.integration.yml up -d
-(cd packages/ankusa && mix test --include integration)
+(cd packages/ankusa && mix test --only integration)
 docker compose -f packages/ankusa/docker-compose.integration.yml down -v
 ```
 

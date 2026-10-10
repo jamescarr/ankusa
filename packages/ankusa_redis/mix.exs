@@ -85,7 +85,9 @@ defmodule AnkusaRedis.MixProject do
     else
       # `~> 0.6`, not older: the route store publishes through the ETS
       # `Ankusa.Routes.Snapshot` (`publish/1,2`, `mutate/3`,
-      # `drop_generation/2`), which core ships from 0.6.0. Publish core first.
+      # `drop_generation/2`), and the source store reads and writes through
+      # core's internal `Ankusa.SourceStore.Table`; core ships both from 0.6.0.
+      # Publish core first.
       [{:ankusa, "~> 0.6"}]
     end
   end

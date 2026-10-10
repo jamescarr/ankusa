@@ -236,4 +236,101 @@ defmodule Ankusa.SourceStore.RedisTest do
 
     assert {:error, _reason} = Ankusa.Instance.start_link(config)
   end
+
+  test "during an outage the connections restart on the mirror, writes are store_unavailable, and the node catches up" do
+    {forwarder, port} = start_forwarder()
+    a = start_node(url: "redis://127.0.0.1:#{port}", tick_ms: 100)
+    b = start_node()
+
+    assert {:ok, _} = SourceStore.put(a, "acme", "billing", @log_spec, :create)
+
+    # Redis goes away for A only; B keeps writing.
+    Process.exit(forwarder, :kill)
+    assert {:ok, _} = SourceStore.put(b, "acme", "other", @log_spec, :create)
+
+    # The connections and the state process die together and come back
+    # without Redis: no crash loop past the restart limit, the mirror intact.
+    sup = Ankusa.whereis(a, :source_store_sup)
+
+    {_id, connections, _type, _modules} =
+      sup
+      |> Supervisor.which_children()
+      |> Enum.find(&match?({Ankusa.SourceStore.Redis.Connections, _, _, _}, &1))
+
+    old_state = Ankusa.whereis(a, :source_store)
+    refs = Enum.map([connections, old_state], &Process.monitor/1)
+    Process.exit(connections, :kill)
+    for ref <- refs, do: assert_receive({:DOWN, ^ref, :process, _, _})
+
+    eventually(
+      fn ->
+        pid = Ankusa.whereis(a, :source_store)
+        is_pid(pid) and pid != old_state
+      end,
+      5_000
+    )
+
+    assert Process.alive?(sup)
+    assert {:ok, _} = SourceStore.fetch(a, "acme.billing")
+
+    assert SourceStore.put(a, "acme", "during", @log_spec, :create) ==
+             {:error, :store_unavailable}
+
+    assert SourceStore.delete(a, "acme", "billing") == {:error, :store_unavailable}
+    assert {:ok, _} = SourceStore.fetch(a, "acme.billing")
+
+    # Redis is back: A loads what it missed, and writes work again.
+    start_forwarder(port)
+    eventually(fn -> match?({:ok, _}, SourceStore.fetch(a, "acme.other")) end, 15_000)
+    assert {:ok, _} = SourceStore.put(a, "acme", "after", @log_spec, :create)
+    eventually(fn -> match?({:ok, _}, SourceStore.fetch(b, "acme.after")) end)
+  end
+
+  # A TCP forwarder in front of the compose Redis, as in the route store's
+  # suite: killing it makes Redis unreachable for the one node pointed at it,
+  # and listening again on the same port brings it back.
+  defp start_forwarder(port \\ 0) do
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        {:ok, listen} =
+          :gen_tcp.listen(port, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+        {:ok, bound} = :inet.port(listen)
+        send(parent, {:forwarder, self(), bound})
+        forward_loop(listen)
+      end)
+
+    on_exit(fn -> Process.exit(pid, :kill) end)
+
+    receive do
+      {:forwarder, ^pid, bound} -> {pid, bound}
+    after
+      2_000 -> flunk("the forwarder did not start")
+    end
+  end
+
+  defp forward_loop(listen) do
+    {:ok, client} = :gen_tcp.accept(listen)
+    %URI{host: host, port: port} = URI.parse(@url)
+    {:ok, upstream} = :gen_tcp.connect(String.to_charlist(host), port, [:binary, active: false])
+
+    for {from, to} <- [{client, upstream}, {upstream, client}] do
+      spawn_link(fn -> pipe(from, to) end)
+    end
+
+    forward_loop(listen)
+  end
+
+  defp pipe(from, to) do
+    with {:ok, data} <- :gen_tcp.recv(from, 0),
+         :ok <- :gen_tcp.send(to, data) do
+      pipe(from, to)
+    else
+      _closed ->
+        :gen_tcp.close(from)
+        :gen_tcp.close(to)
+    end
+  end
 end
