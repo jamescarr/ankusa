@@ -255,6 +255,7 @@ defmodule Ankusa.InstanceTest do
       test_config(
         roles: [:edge, :dispatch, :storage],
         claim_check: %{retention_days: 7},
+        backup: %{enabled: true},
         lifecycle: %{sinks: [sink]},
         source_store: {Ankusa.SourceStore.Persistent, sources: %{"demo" => [sinks: [sink]]}}
       )
@@ -281,7 +282,9 @@ defmodule Ankusa.InstanceTest do
           :lifecycle,
           :source_store,
           :replayer,
-          {:isolated, :dispatch}
+          :backup,
+          {:isolated, :dispatch},
+          {:isolated, :backup}
         ] do
       refute printed.(key) =~ @canary, "#{inspect(key)} printed the config in its status"
     end

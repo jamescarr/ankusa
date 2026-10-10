@@ -279,6 +279,29 @@ claim_check:
   # The gateway performs no authentication. Keep 4001 internal and put your
   # proxy, mesh, or network policy in front of it, the same as 4002.
 
+backup:
+  # [env ANKUSA_BACKUP_ENABLED] continuous backup of this node's store to an
+  # object store, and restore at boot: a node that starts with an empty data_dir
+  # restores the latest backup before it opens the store, and refuses to start
+  # if the backup location cannot be read (never starts empty). Off by default.
+  # With `storage.type: local` and no `store` below, the backup lives on the
+  # same disk as the store and does not survive losing the host; point
+  # `backup.store` (or `storage`) at a bucket.
+  enabled: false
+  # How often a checkpoint is uploaded: a lost host loses at most the hooks
+  # acked since the last backup. Files already uploaded are not uploaded again.
+  interval_ms: 60000
+  # Backups kept; older ones, and the files only they used, are deleted after
+  # each successful upload.
+  keep: 3
+  # Where backups live: unset = the storage bucket above. Same shape as
+  # `claim_check.store` (type local | s3 | gcs, its s3:/gcs: block, plus `root`
+  # for a local store). Keys are always under storage.key_prefix: backups are
+  # per node, so give each node sharing a bucket its own prefix.
+  # store:
+  #   type: s3
+  #   s3: {bucket: "${BACKUP_BUCKET}", region: "${S3_REGION}"}
+
 lifecycle:
   # Where a lifecycle event goes when a source or route is created, updated, or
   # deleted (through the admin API or the route-management API): a CloudEvents

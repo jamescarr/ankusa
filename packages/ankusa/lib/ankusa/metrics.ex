@@ -236,6 +236,10 @@ defmodule Ankusa.Metrics do
           event_name: [:ankusa, :lifecycle, :dropped],
           tags: [:instance, :type, :reason]
         )
+      ),
+      counter(
+        "ankusa.backup.runs.total",
+        scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
       )
     ] ++ gauges(own)
   end
@@ -264,7 +268,8 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.claimed", [:ankusa, :dispatch, :state], :claimed, :unit},
           {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
-          {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit}
+          {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
+          {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}
         ] do
       last_value(
         name,

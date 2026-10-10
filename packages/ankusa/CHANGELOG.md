@@ -13,6 +13,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Store backup and restore** (`Ankusa.Store.Backup`, `backup.*`, off by
+  default). Every `backup.interval_ms` (60 s) the store writes a RocksDB
+  checkpoint (`Ankusa.Store.checkpoint/2`, off the store process so `/ready`
+  keeps answering) and the uploader puts it in the `:backup` blob-store scope
+  (`backup.blob_store`, else `storage.blob_store`, under `storage.key_prefix`):
+  `.sst`/`.blob` files once each, the rest per backup, a sha256 manifest, then
+  `backup/LATEST`. `backup.keep` (3) backups are kept. A store directory with
+  no database restores `LATEST` at boot, every file checked, and refuses to
+  start (`{:store_restore_failed, path, reason}`) when the backup can't be read
+  instead of starting empty. A restored or new store is then reconciled with
+  the segment store: `m:next_seq` moves past the highest archived seq and
+  uncatalogued segments are catalogued from their `.idx`. New telemetry
+  `[:ankusa, :backup, :stop | :state]` and metrics `ankusa_backup_runs_total`,
+  `ankusa_backup_age_seconds`.
+
 - **Readiness.** `GET /ready` on the ingest and admin listeners
   (`Ankusa.Health.ready/1`): `200` while this node's store takes a synced
   write (`Ankusa.Store.ready/1`, checked at most once a second, reopening the

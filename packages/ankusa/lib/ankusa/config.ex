@@ -96,6 +96,20 @@ defmodule Ankusa.Config do
               # keys are never prefixed, so one gateway reads every node's claims.
               blob_store: nil
             },
+            # continuous backup of the store to an object store, and restore into
+            # an empty data_dir at boot (see Ankusa.Store.Backup). Off by default.
+            backup: %{
+              enabled: false,
+              # a checkpoint is uploaded this often; a lost host loses at most
+              # the hooks acked since the last one
+              interval_ms: 60_000,
+              # backups kept in the object store (older ones and the files only
+              # they referenced are deleted after each successful upload)
+              keep: 3,
+              # {module, opts} for backup objects; nil = storage.blob_store.
+              # Keys go under storage.key_prefix either way: backups are per node.
+              blob_store: nil
+            },
             # operator HTTP API + Prometheus /metrics, unauthenticated; off by
             # default for embedded use
             admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
@@ -192,8 +206,9 @@ defmodule Ankusa.Config do
 
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
-  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:admin`,
-  `:routes`, `:rate_limits`, `:quarantine`, `:lifecycle`) over the defaults.
+  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:backup`,
+  `:admin`, `:routes`, `:rate_limits`, `:quarantine`, `:lifecycle`) over the
+  defaults.
 
   `:routes` is nested one level deeper than the rest (`:routes` has its own
   `:cache`, `:ip_rules`, and `:admin` sections), so `put_routes/2` merges those
@@ -226,6 +241,7 @@ defmodule Ankusa.Config do
           :dispatch,
           :storage,
           :claim_check,
+          :backup,
           :admin,
           :rate_limits,
           :quarantine,
@@ -295,6 +311,8 @@ defmodule Ankusa.Config do
     {[:dispatch, :max_inflight_bytes], "dispatch.max_inflight_bytes"},
     {[:storage, :roll_bytes], "storage.roll_bytes"},
     {[:claim_check, :sweep_interval_ms], "claim_check.sweep_interval_ms"},
+    {[:backup, :interval_ms], "backup.interval_ms"},
+    {[:backup, :keep], "backup.keep"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
     {[:routes, :max_routes], "routes.max_routes"}
   ]

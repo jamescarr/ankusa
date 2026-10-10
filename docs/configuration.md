@@ -61,6 +61,7 @@ Every top-level section, with its keys and defaults:
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) |
+| `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent`; `persistent` adds API-managed sources kept in this node's store). See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
@@ -163,6 +164,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
 | `ANKUSA_STORAGE_KEY_PREFIX` | `storage.key_prefix` |
+| `ANKUSA_BACKUP_ENABLED` | `backup.enabled` |
 
 When the config names no static keys, the S3 adapter looks for credentials in
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), then web
@@ -200,7 +202,7 @@ Never `Application.get_env/2` scattered through call sites:
 
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
-`:dispatch`, `:storage`, `:claim_check`, `:admin`, `:rate_limits`,
+`:dispatch`, `:storage`, `:claim_check`, `:backup`, `:admin`, `:rate_limits`,
 `:quarantine` and `:lifecycle` are maps and get **deep-merged** over the
 defaults. Pass only the keys you want to change.
 
@@ -252,6 +254,7 @@ config :ankusa,
     sweep_interval_ms: 3_600_000,
     blob_store: nil
   },
+  backup: %{enabled: false, interval_ms: 60_000, keep: 3, blob_store: nil},
   admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
   routes: %{
     enabled: false,
@@ -307,6 +310,10 @@ config :ankusa,
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
 | `claim_check.blob_store` | `nil` | `{module, opts}` for claim packs; `nil` uses `storage.blob_store`. A `LocalFS` claim store takes `root:` (an absolute path). |
+| `backup.enabled` | `false` | Back the store up to an object store while it runs, and restore the latest backup at boot when the store directory holds no database. A backup location that can't be read then refuses the boot (`{:store_restore_failed, path, reason}`) instead of starting empty. See [`storage.md`](storage.md#backup-and-restore). |
+| `backup.interval_ms` | `60_000` | How often a checkpoint is uploaded: the most a lost host loses. Only files the last backup doesn't already have are uploaded. |
+| `backup.keep` | `3` | Backups kept; older ones, and the files only they used, are deleted after each successful backup. |
+| `backup.blob_store` | `nil` | `{module, opts}` for backup objects; `nil` uses `storage.blob_store`. Keys are under `storage.key_prefix` either way: a backup is one node's. With `LocalFS` the backup shares the host's fate, and the node logs a warning saying so. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
@@ -328,8 +335,8 @@ config :ankusa,
 Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 <constraint>, got <value>"`: every port is `0..65535`; `max_body_bytes`,
 `direct_publish_timeout_ms`, the `batcher` and `dispatch` sizes and counts,
-`storage.roll_bytes`, `claim_check.sweep_interval_ms`,
-`admin.gauge_interval_ms` and `routes.max_routes` must be positive;
+`storage.roll_bytes`, `claim_check.sweep_interval_ms`, `backup.interval_ms`,
+`backup.keep`, `admin.gauge_interval_ms` and `routes.max_routes` must be positive;
 `batcher.max_delay_ms`, `storage.roll_ms` and `storage.interval_ms` may be `0`
 (no linger, roll at once, a compactor that runs only when asked);
 `claim_check.retention_days` is `nil` or ≥ 1; `storage.key_prefix` is `""` or

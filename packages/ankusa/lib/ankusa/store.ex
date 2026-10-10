@@ -24,6 +24,11 @@ defmodule Ankusa.Store do
   RocksDB is one WAL per store, so a `sync: false` writer's bytes are durable
   as soon as any later synced commit lands. Every write is atomic, and the
   recovery mode tolerates only a torn tail, never earlier damage.
+
+  `checkpoint/2` is how `Ankusa.Store.Backup` snapshots the store: a consistent
+  copy (hard links where it can) in a directory that must not exist yet. With
+  `backup.enabled`, a store directory that holds no database is restored from
+  the latest backup before it is opened (see `Ankusa.Store.Backup.restore/2`).
   """
 
   use GenServer
@@ -31,6 +36,7 @@ defmodule Ankusa.Store do
   require Logger
 
   alias Ankusa.Config
+  alias Ankusa.Store.Backup
   alias Ankusa.Store.Keys
   alias Ankusa.Store.Migrate
 
@@ -96,10 +102,11 @@ defmodule Ankusa.Store do
     retry_open_ms = Keyword.get(opts, :retry_open_ms, @retry_open_ms)
     reopen_interval_ms = Keyword.get(opts, :reopen_interval_ms, @reopen_interval_ms)
 
-    with :ok <- Ankusa.Fsync.mkdir_p(path, config.data_dir) do
+    with :ok <- Ankusa.Fsync.mkdir_p(path, config.data_dir),
+         {:ok, origin} <- maybe_restore(config, path) do
       case :rocksdb.new_cache(:lru, @cache_bytes) do
         {:ok, cache} ->
-          with {:ok, state} <- open_and_publish(instance, path, cache, config) do
+          with {:ok, state} <- open_and_publish(instance, path, cache, config, origin) do
             {:ok,
              Map.merge(state, %{
                retry_open_ms: retry_open_ms,
@@ -108,7 +115,8 @@ defmodule Ankusa.Store do
                last_reopen: nil,
                ready_at: nil,
                ready_result: :ok,
-               last_write_failure: nil
+               last_write_failure: nil,
+               checkpoint: nil
              })}
           end
 
@@ -116,17 +124,44 @@ defmodule Ankusa.Store do
           open_failed(path, reason)
       end
     else
+      {:restore_failed, reason} -> restore_failed(path, reason)
       {:error, reason} -> open_failed(path, reason)
     end
   end
 
-  defp open_and_publish(instance, path, cache, config) do
+  # A directory with no `CURRENT` holds no database: a new node, or one whose
+  # disk was replaced. With a backup configured that is never taken as "empty"
+  # on faith: the latest backup is restored, or the backup location is shown
+  # to hold none, before RocksDB creates a fresh store there.
+  defp maybe_restore(%Config{backup: %{enabled: true}} = config, path) do
+    if File.exists?(Path.join(path, "CURRENT")) do
+      {:ok, :existing}
+    else
+      case Backup.restore(config, path) do
+        {:ok, origin} -> {:ok, origin}
+        {:error, reason} -> {:restore_failed, reason}
+      end
+    end
+  end
+
+  defp maybe_restore(_config, _path), do: {:ok, :existing}
+
+  defp restore_failed(path, reason) do
+    Logger.error(
+      "[ankusa] store at #{path} could not be restored from backup: #{inspect(reason)}. " <>
+        "Refusing to start: an empty store directory with a backup configured is never treated as empty."
+    )
+
+    {:stop, {:store_restore_failed, path, reason}}
+  end
+
+  defp open_and_publish(instance, path, cache, config, origin) do
     case :rocksdb.open(String.to_charlist(path), @db_opts, descriptors(cache)) do
       {:ok, db, cf_handles} ->
         cfs = @cf_names |> Enum.zip(cf_handles) |> Map.new()
 
         case put_sentinels(db, cfs) do
-          :ok -> publish(instance, path, cache, db, cfs, config)
+          :ok -> publish(instance, path, cache, db, cfs, config, origin)
           {:error, reason} -> close_and_fail(path, cache, db, cfs, {:sentinels, reason})
         end
 
@@ -136,7 +171,7 @@ defmodule Ankusa.Store do
     end
   end
 
-  defp publish(instance, path, cache, db, cfs, config) do
+  defp publish(instance, path, cache, db, cfs, config, origin) do
     table = :"ankusa_store_#{instance}"
 
     created =
@@ -150,18 +185,20 @@ defmodule Ankusa.Store do
     if created do
       true = :ets.insert(table, {:handles, %{db: db, cache: cache, cfs: cfs}})
 
-      Logger.info("[ankusa] store at #{path}. Durable to power loss on THIS host only.")
+      Logger.info("[ankusa] store at #{path}. #{durability(config)}")
 
-      # Handles are published, so the import can use `write/3` and `get/3`.
-      case run_migration(config) do
+      # Handles are published, so the import and the archive reconciliation
+      # can use `write/3` and `get/3`.
+      case after_open(config, origin, path) do
         :ok ->
           {:ok, %{db: db, cache: cache, cfs: cfs, table: table, path: path}}
 
         {:error, reason} ->
           # A 0.3 data dir this node could not read completely and trustworthily
-          # must not boot as if it were the whole story. The reason names the
-          # file and byte; the artifact is untouched. Nobody else has the handles
-          # yet, so the table can go after the close.
+          # must not boot as if it were the whole story, and neither must a
+          # restored store whose archive could not be squared with the bucket.
+          # The reason names what failed; the artifact is untouched. Nobody
+          # else has the handles yet, so the table can go after the close.
           {_, _} = close_db(db, cfs)
           :ets.delete(table)
           :rocksdb.release_cache(cache)
@@ -171,6 +208,43 @@ defmodule Ankusa.Store do
       close_and_fail(path, cache, db, cfs, :ets_table_exists)
     end
   end
+
+  defp durability(%Config{backup: %{enabled: true, interval_ms: interval}} = config) do
+    {mod, _opts, _prefix} = Ankusa.BlobStore.resolve_config(config, :backup)
+
+    "Durable to power loss on this host; backed up to #{inspect(mod)} every #{interval} ms " <>
+      "— a lost host loses at most the hooks acked since the last backup."
+  end
+
+  defp durability(_config), do: "Durable to power loss on THIS host only."
+
+  defp after_open(config, origin, path) do
+    with :ok <- run_migration(config) do
+      reconcile_archive(config, origin, path)
+    end
+  end
+
+  # A store that started over (restored, or fresh with a backup configured)
+  # may be behind the bucket: segments archived after its backup carry seqs it
+  # never handed out, and catalogue rows it never wrote.
+  defp reconcile_archive(config, origin, path) when origin in [:restored, :fresh] do
+    case Backup.reconcile_archive(config) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        reason = {:archive_reconcile_failed, reason}
+
+        Logger.error(
+          "[ankusa] store at #{path} could not be reconciled with the archive: #{inspect(reason)}. " <>
+            "Refusing to start: new segments could overwrite archived ones."
+        )
+
+        {:error, {:store_restore_failed, path, reason}}
+    end
+  end
+
+  defp reconcile_archive(_config, :existing, _path), do: :ok
 
   # The import reads files 0.3 wrote, any of which may be damaged in ways no
   # parser anticipates (a valid CRC around a term that will not decode, an I/O
@@ -265,6 +339,25 @@ defmodule Ankusa.Store do
     end
   end
 
+  def handle_call({:checkpoint, _dir}, _from, %{db: nil} = state),
+    do: {:reply, {:error, :store_unavailable}, state}
+
+  def handle_call({:checkpoint, _dir}, _from, %{checkpoint: %{}} = state),
+    do: {:reply, {:error, :checkpoint_in_progress}, state}
+
+  # The NIF runs in a process of its own, on the published handle (every
+  # `write/3` caller uses it from its own process too), so `ready/1` and the
+  # write-failure reports keep being answered while the memtables flush.
+  def handle_call({:checkpoint, dir}, from, state) do
+    db = state.db
+    path = dir |> Path.expand() |> String.to_charlist()
+
+    {pid, ref} =
+      spawn_monitor(fn -> exit({:checkpoint_result, :rocksdb.checkpoint(db, path)}) end)
+
+    {:noreply, %{state | checkpoint: %{pid: pid, ref: ref, from: from}}}
+  end
+
   # One synced write of a meta key: the cheapest operation that exercises the
   # same path an ingest commit does (WAL append + fsync). A failure takes the
   # reopen path a failed commit report takes, so a latched background error is
@@ -348,15 +441,40 @@ defmodule Ankusa.Store do
 
   def handle_info(:retry_open, state), do: {:noreply, %{state | retry_ref: nil}}
 
+  def handle_info({:DOWN, ref, :process, _pid, exit}, %{checkpoint: %{ref: ref}} = state) do
+    GenServer.reply(state.checkpoint.from, checkpoint_reply(exit))
+    {:noreply, %{state | checkpoint: nil}}
+  end
+
   def handle_info(message, state) do
     Logger.warning("[ankusa] store received an unexpected message: #{inspect(message)}")
     {:noreply, state}
   end
 
+  defp checkpoint_reply({:checkpoint_result, :ok}), do: :ok
+  defp checkpoint_reply({:checkpoint_result, {:error, reason}}), do: {:error, reason}
+  defp checkpoint_reply(other), do: {:error, {:checkpoint_crashed, other}}
+
+  # A checkpoint in flight holds the database handle, and closing a handle a
+  # NIF is still using is the use-after-close `close_db/2` guards against: the
+  # close waits for the checkpoint to end. Killing it would not be quicker, a
+  # kill lands only once the NIF returns. The caller gets the real result: a
+  # checkpoint that finished before the close is a complete one.
+  defp await_checkpoint(%{checkpoint: %{ref: ref, from: from}} = state) do
+    receive do
+      {:DOWN, ^ref, :process, _pid, exit} -> GenServer.reply(from, checkpoint_reply(exit))
+    end
+
+    %{state | checkpoint: nil}
+  end
+
+  defp await_checkpoint(state), do: state
+
   @impl true
   def terminate(_reason, state) do
     # First, so callers see `:store_unavailable` rather than a closing database.
     _ = :ets.delete(state.table)
+    state = await_checkpoint(state)
     if state.db, do: {_, _} = close_db(state.db, state.cfs)
     _ = :rocksdb.release_cache(state.cache)
     :ok
@@ -367,6 +485,7 @@ defmodule Ankusa.Store do
     # instead of racing the close. `state.cfs` keeps them alive until the close
     # is done (see `close_db/2`).
     :ets.delete(state.table, :handles)
+    state = await_checkpoint(state)
     if state.db, do: {_, _} = close_db(state.db, state.cfs)
 
     case :rocksdb.open(String.to_charlist(state.path), @db_opts, descriptors(state.cache)) do
@@ -426,6 +545,22 @@ defmodule Ankusa.Store do
   @spec ready(atom()) :: :ok | {:error, term()}
   def ready(instance) do
     GenServer.call(Ankusa.via(instance, :store), :ready, 5_000)
+  catch
+    :exit, _ -> {:error, :store_unavailable}
+  end
+
+  @doc """
+  Writes a consistent snapshot of the store to `dir`, which must not exist
+  (RocksDB creates it). Memtables are flushed first, so the snapshot is SST and
+  blob files plus the manifest — hard links when `dir` is on the store's
+  filesystem, copies otherwise. Runs off the store process: readiness keeps
+  answering while it does. One at a time: `{:error, :checkpoint_in_progress}`
+  while another runs; `{:error, :store_unavailable}` when the store is closed
+  or does not answer within 120 s.
+  """
+  @spec checkpoint(atom(), Path.t()) :: :ok | {:error, term()}
+  def checkpoint(instance, dir) do
+    GenServer.call(Ankusa.via(instance, :store), {:checkpoint, dir}, 120_000)
   catch
     :exit, _ -> {:error, :store_unavailable}
   end

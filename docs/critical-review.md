@@ -844,7 +844,7 @@ Jobs are unique on `ankusa_id` with `period: :infinity`, which holds only while 
 
 Retries of one delivery carry the same `env.id`; sending it as `Nats-Msg-Id` would collapse lost-ack retries inside JetStream's duplicate window for free. The stated reason (a DLQ replay must be a new publish) is served by suffixing replays, not by giving up broker-side dedupe for every retry.
 
-**Status (2026-10-07).** Fixed in `ankusa_nats`: `Nats-Msg-Id` is the hook `id`, or `id:replay:<replay_id>` on a replay (`packages/ankusa_nats/lib/ankusa/sink/nats.ex:210-218`). `docs/delivery.md:389-392,407-409` still describes the old behaviour.
+**Status (2026-10-07).** Fixed in `ankusa_nats`: `Nats-Msg-Id` is the hook `id`, or `id:replay:<replay_id>` on a replay (`packages/ankusa_nats/lib/ankusa/sink/nats.ex:210-218`). `docs/delivery.md` (the NATS section) describes it.
 
 <a id="k5"></a>
 ### K5 · Low · Code — Conformance covers refs and status codes, not the wire format
@@ -1405,7 +1405,7 @@ Re-rated against the code on 2026-10-09 with this review's own severity definiti
 ## Decisions that choose between the options
 
 1. **Per-key ordering.** Keep ordering lanes (a custom scheduler on the store), or drop them, which makes Oban an option ([G4](#g4-scope))? — *Decided: lanes dropped. Deliveries are unordered and scheduled per sink key on the store.*
-2. **Durability before the `2xx`.** Is "this host" enough (option C, optionally with E′), or must an acked hook survive losing its host (option E, a shared Postgres store, or option F)? — *Open. "This host" is what ships; `wal.type: none` moves durability to the broker.*
+2. **Durability before the `2xx`.** Is "this host" enough (option C, optionally with E′), or must an acked hook survive losing its host (option E, a shared Postgres store, or option F)? — *Narrowed. "This host" is what the ack means; `wal.type: none` moves durability to the broker. `backup.enabled` (`Ankusa.Store.Backup`) uploads a checkpoint of the store every `backup.interval_ms` (60 s) and restores it at boot into an empty `data_dir`, refusing to start when the backup can't be read: a lost host loses at most the hooks acked since the last backup, not the store. A zero-loss answer to host loss is still option E or F.*
 3. **Native code in core.** Is a NIF acceptable (options C and D)? If not, the remaining path is option B, which this review advises against. — *Decided: yes, RocksDB (option D).*
 4. **Default deployment.** A single container with nothing else to run (option C), or broker-first (option F)? — *Decided: a single container.*
 

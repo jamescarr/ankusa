@@ -16,6 +16,10 @@ defmodule Ankusa.BlobStore do
       `claim_check.blob_store` when set, else the segment store, with **no**
       prefix. Pack ids are time plus random bits, so claims from every node
       can share one place, and one gateway serves them all.
+    * `:backup` — store backups (`Ankusa.Store.Backup`): the
+      `backup.blob_store` when set, else the segment store, **with**
+      `storage.key_prefix`. A backup belongs to one node's store, like its
+      segments.
 
   The prefix is applied once, when a new object is named (`object_key/3`);
   the full key is what the archive catalogue records, and `put`/`get`/
@@ -25,7 +29,7 @@ defmodule Ankusa.BlobStore do
 
   alias Ankusa.Config
 
-  @type scope :: :segments | :claims
+  @type scope :: :segments | :claims | :backup
 
   @callback put(instance :: atom(), key :: String.t(), data :: iodata(), opts :: keyword()) ::
               :ok | {:error, term()}
@@ -57,10 +61,10 @@ defmodule Ankusa.BlobStore do
 
   @doc """
   The full key a new object in `scope` is written under: `key` behind
-  `storage.key_prefix` for `:segments`, `key` itself for `:claims`. The
-  compactor names each segment with it and records the result in the archive
-  catalogue, so a later prefix change only moves new segments; the ones
-  already written are read back under the key they were written with.
+  `storage.key_prefix` for `:segments` and `:backup`, `key` itself for
+  `:claims`. The compactor names each segment with it and records the result
+  in the archive catalogue, so a later prefix change only moves new segments;
+  the ones already written are read back under the key they were written with.
   """
   @spec object_key(atom(), scope(), String.t()) :: String.t()
   def object_key(instance, scope, key) do
@@ -93,7 +97,7 @@ defmodule Ankusa.BlobStore do
     mod.delete(instance, key, opts)
   end
 
-  @doc "Every key of this node's objects in `scope` under `prefix` (behind `storage.key_prefix` for `:segments`), as full keys."
+  @doc "Every key of this node's objects in `scope` under `prefix` (behind `storage.key_prefix` for `:segments` and `:backup`), as full keys."
   @spec list(atom(), scope(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
   def list(instance, scope, prefix) do
     {mod, opts, key_prefix} = resolve(instance, scope)
@@ -113,5 +117,10 @@ defmodule Ankusa.BlobStore do
   def resolve_config(%Config{claim_check: claim_check, storage: storage}, :claims) do
     {mod, opts} = Map.get(claim_check, :blob_store) || storage.blob_store
     {mod, opts, ""}
+  end
+
+  def resolve_config(%Config{backup: backup, storage: storage}, :backup) do
+    {mod, opts} = Map.get(backup, :blob_store) || storage.blob_store
+    {mod, opts, Map.get(storage, :key_prefix, "")}
   end
 end
