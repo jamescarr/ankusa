@@ -317,8 +317,8 @@ defmodule Ankusa.BlobStore.S3SigningTest do
 
   describe "credentials" do
     setup do
-      Ankusa.BlobStore.S3.Credentials.clear()
-      on_exit(&Ankusa.BlobStore.S3.Credentials.clear/0)
+      Ankusa.AWS.Credentials.clear()
+      on_exit(&Ankusa.AWS.Credentials.clear/0)
       test = self()
 
       Req.Test.stub(__MODULE__, fn conn ->

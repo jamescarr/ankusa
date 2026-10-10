@@ -19,7 +19,7 @@ constructed in memory doesn't. `{:error, reason}` triggers the source's
 [`delivery.md`](delivery.md)). A sink never talks to a job framework's SDK
 directly unless it's your own in-process sink (see the Oban section below);
 the shipped sinks (`Sink.Log`, `Sink.Http`, `Sink.RabbitMQ`, `Sink.Kafka`,
-`Sink.NATS`, `Sink.Redis`) are all framework-neutral.
+`Sink.NATS`, `Sink.Redis`, `Sink.SQS`) are all framework-neutral.
 
 ## HTTP handoff (any language)
 
@@ -340,10 +340,11 @@ consumer" rule that applies to every sink on this page.
 
 ## Queue handoff
 
-Consumers already on RabbitMQ, Kafka, or NATS JetStream don't need an HTTP hop
-at all: `Ankusa.Sink.RabbitMQ`, `Ankusa.Sink.Kafka`, and `Ankusa.Sink.NATS`
-publish `Ankusa.Sink.Message` (the same wire format on all three transports)
-directly to a broker your worker fleet already consumes from. Redis pub/sub
+Consumers already on RabbitMQ, Kafka, NATS JetStream, or Amazon SQS don't need
+an HTTP hop at all: `Ankusa.Sink.RabbitMQ`, `Ankusa.Sink.Kafka`,
+`Ankusa.Sink.NATS`, and `Ankusa.Sink.SQS` publish `Ankusa.Sink.Message` (the
+same wire format on every transport) directly to a broker or queue your worker
+fleet already consumes from. Redis pub/sub
 (`Ankusa.Sink.Redis`) publishes the same message, with a caveat: it is
 fan-out, not a queue. A worker that is down misses whatever was published
 while it was away, and a publish no live subscriber receives is an error

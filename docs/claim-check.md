@@ -424,7 +424,7 @@ runs, shared by every sink of that source. Two more levers keep writes cheap:
 
 - **The threshold is configurable per sink.** The 64 KiB default is chosen so
   most webhook bodies ride inline: base64 turns it into about 88 KiB, under
-  Kafka's 1 MiB `max.message.bytes` and SQS's 256 KiB. Raise or lower
+  Kafka's 1 MiB `max.message.bytes` and SQS's 1 MiB. Raise or lower
   `inline_max_bytes` per sink; the cost moves to broker bytes.
 - **Claims are packed.** Dispatch claims up to `dispatch.batch` (128) delivery
   rows per store scan, checks each batch's claims in per tenant as one object,

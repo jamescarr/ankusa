@@ -17,7 +17,7 @@ defmodule Ankusa.BlobStore.S3 do
     * `:region`            — required, e.g. `"us-east-1"`
     * `:access_key_id`, `:secret_access_key`, `:session_token` — static
                               credentials. Without them the chain in
-                              `Ankusa.BlobStore.S3.Credentials` runs: the
+                              `Ankusa.AWS.Credentials` runs: the
                               `AWS_*` environment, web identity (IRSA), then
                               the EC2 instance role (IMDSv2)
     * `:endpoint`          — default `"https://s3.\#{region}.amazonaws.com"`;
@@ -115,7 +115,7 @@ defmodule Ankusa.BlobStore.S3 do
   end
 
   defp signed_request(opts, method, url, body, extra_headers) do
-    with {:ok, creds} <- Ankusa.BlobStore.S3.Credentials.get(opts) do
+    with {:ok, creds} <- Ankusa.AWS.Credentials.get(opts) do
       send_signed(opts, creds, method, url, body, extra_headers)
     end
   end

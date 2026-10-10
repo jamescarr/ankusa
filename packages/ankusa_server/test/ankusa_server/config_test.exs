@@ -35,6 +35,7 @@ defmodule AnkusaServer.ConfigTest do
     "NATS_PASSWORD" => "fixture-nats-password",
     # A password in the URL userinfo: the printed config must redact it.
     "REDIS_SINK_URL" => "redis://:fixture-redis-password@redis:6379",
+    "SQS_QUEUE_URL" => "https://sqs.us-east-1.amazonaws.com/000000000000/fixture.fifo",
     "STANDARD_WEBHOOKS_SECRET" => "whsec_Zml4dHVyZQ==",
     "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret"
   }
@@ -82,7 +83,8 @@ defmodule AnkusaServer.ConfigTest do
              Ankusa.Sink.RabbitMQ,
              Ankusa.Sink.Kafka,
              Ankusa.Sink.NATS,
-             Ankusa.Sink.Redis
+             Ankusa.Sink.Redis,
+             Ankusa.Sink.SQS
            ]
 
     {Ankusa.Sink.Http, http_opts} = Enum.at(sinks, 1)
@@ -1105,6 +1107,8 @@ defmodule AnkusaServer.ConfigTest do
                auth: {username: nu, password: np}}
             - {type: redis, url: "redis://redis:6379", channel: ankusa.full,
                inline_max_bytes: 2048, publish_timeout_ms: 300}
+            - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h.fifo",
+               region: us-east-1, message_group_id: g, max_message_bytes: 262144}
       """)
 
     env = %{"NATS_SERVERS" => "n1:4222,n2:4222"}
@@ -1130,7 +1134,8 @@ defmodule AnkusaServer.ConfigTest do
               ]},
              {Ankusa.Sink.Kafka, kafka},
              {Ankusa.Sink.NATS, nats},
-             {Ankusa.Sink.Redis, redis}
+             {Ankusa.Sink.Redis, redis},
+             {Ankusa.Sink.SQS, sqs}
            ] = source.sinks
 
     assert kafka[:brokers] == ["b:9092"]
@@ -1149,6 +1154,34 @@ defmodule AnkusaServer.ConfigTest do
     assert redis[:channel] == "ankusa.full"
     assert redis[:inline_max_bytes] == 2048
     assert redis[:publish_timeout_ms] == 300
+
+    assert sqs[:queue_url] == "https://sqs.us-east-1.amazonaws.com/1/h.fifo"
+    assert sqs[:region] == "us-east-1"
+    assert sqs[:message_group_id] == "g"
+    assert sqs[:max_message_bytes] == 262_144
+  end
+
+  test "an sqs sink requires queue_url and names an unknown key" do
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: sqs, region: us-east-1}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.a.sinks[0]"
+    assert error.message =~ "queue_url"
+
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h", region: us-east-1, queue: x}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(unknown key "queue")
   end
 
   test "a NATS auth block takes exactly one scheme, and only whole ones" do

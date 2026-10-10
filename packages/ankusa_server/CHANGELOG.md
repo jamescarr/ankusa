@@ -27,6 +27,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   turns it off.
 - GCS metadata tokens come from `AnkusaServer.GcsToken`, one cached token
   fetched single-flight and refreshed before expiry.
+- `type: sqs` sinks (`Ankusa.Sink.SQS`): `queue_url`, `region`, `endpoint`,
+  `message_group_id`, `inline_max_bytes`, `max_message_bytes`, `timeout_ms`,
+  and optional static `access_key_id` / `secret_access_key` /
+  `session_token` (else the `AWS_*` env, IRSA, or the instance role).
+  `reference.yml` documents it.
 
 ### Changed
 

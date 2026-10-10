@@ -13,7 +13,7 @@ suite — `mise run check:conformance`, below.
 
 ```sh
 mise run check:package ankusa         # no external infra needed
-mise run test:integration             # +16 tests against the floci emulators (see below)
+mise run test:integration             # +21 tests against the floci emulators (see below)
 ```
 
 The always-on tests cover:
@@ -195,11 +195,16 @@ The always-on tests cover:
   validates. The adapters' `*_describe_test.exs` pin what each sink advertises
   (and that no credential reaches it) without a broker.
 
-The 16 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+The 21 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,
-`:not_found`, `list`+`delete`. Excluded by default
+`:not_found`, `list`+`delete`. `store/backup_s3_integration_test.exs` runs a
+store backup and restore through floci S3. `sink/sqs_integration_test.exs`
+delivers through `Sink.SQS` to floci's SQS and reads the queue back: the
+`Ankusa.Sink.Message` body, the message attributes and FIFO group, one stored
+message for a retried FIFO delivery and a second for a replay, a missing queue
+as an `{:sqs, 400, _, _}` error, and a standard queue. Excluded by default
 (`test_helper.exs`:`ExUnit.start(exclude: [:integration])`) because they
 need live infra:
 
@@ -207,7 +212,7 @@ need live infra:
 mise run test:integration
 ```
 
-It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 on
+It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 and SQS on
 :4566, floci-gcp on :4588, floci-az on :4577, floci-oci on :4599), waits for
 the bucket/container bootstrap, runs `mix test --include integration` in
 `packages/ankusa`, and tears the emulators down.

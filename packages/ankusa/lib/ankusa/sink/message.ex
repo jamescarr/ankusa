@@ -1,7 +1,7 @@
 defmodule Ankusa.Sink.Message do
   @moduledoc """
   The wire format every queue-style sink publishes (`Sink.RabbitMQ`,
-  `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`), so a consumer parses one format
+  `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`), so a consumer parses one format
   regardless of transport.
 
   A body of at most `inline_max_bytes` (default 64 KiB) rides inline,
@@ -31,7 +31,7 @@ defmodule Ankusa.Sink.Message do
   Base64 inflates the inline body by 4/3, so `inline_max_bytes * 4/3` plus
   ~1 KiB of envelope must stay under the smallest message limit on the path
   (Kafka `max.message.bytes`, 1 MiB by default; NATS `max_payload`, 1 MiB;
-  SQS, 256 KiB). The 64 KiB default is about 88 KiB encoded, under all of
+  SQS, 1 MiB). The 64 KiB default is about 88 KiB encoded, under all of
   them. Nothing here enforces it: an oversized message fails at the broker and
   goes through the source's retry policy like any other sink error.
   """

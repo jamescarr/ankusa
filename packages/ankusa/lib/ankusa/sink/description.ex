@@ -5,7 +5,7 @@ defmodule Ankusa.Sink.Description do
 
   `Ankusa.AsyncApi` folds these into the AsyncAPI document the admin API serves.
 
-    * `:protocol` / `:host` — the broker (`"kafka"`, `"amqp"`, `"nats"`, `"redis"`
+    * `:protocol` / `:host` — the broker (`"kafka"`, `"amqp"`, `"nats"`, `"redis"`, `"sqs"`
       and `"host:port"`, comma-joined when the sink has several). Never carries
       userinfo: a description is served to anyone who can reach the admin port.
     * `:pathname` — the broker's path (a RabbitMQ vhost as `"/prod"`, a Redis

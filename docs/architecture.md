@@ -264,8 +264,8 @@ its `:connection`). Nothing registers a `:global` or cluster-wide name. The
 node-local names left are shared by every instance on purpose: each adapter
 package's own `DynamicSupervisor` (started by its `Application`); brod's
 client id, an atom that `Sink.Kafka` scopes as
-`:"ankusa_kafka.<instance>.<client>"`; the S3 credential cache
-(`:ankusa_s3_credentials`), one ETS table keyed by credential source; and, in
+`:"ankusa_kafka.<instance>.<client>"`; the AWS credential cache
+(`:ankusa_aws_credentials`), one ETS table keyed by credential source; and, in
 the image only, `AnkusaServer.GcsToken`. Each instance's route snapshot is
 its own named ETS table. That's what makes two
 independent instances runnable in one VM (and what makes the test suite
@@ -382,15 +382,17 @@ there is no queue, only `:edge` runs, and every replica is independent
 An ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
 `ankusa_rabbitmq` package), a Kafka topic (`Sink.Kafka`, separate
 `ankusa_kafka` package), a NATS JetStream subject (`Sink.NATS`, separate
-`ankusa_nats` package), or a Redis pub/sub channel (`Sink.Redis`, separate
-`ankusa_redis` package); either way fat payloads are checked in through
+`ankusa_nats` package), a Redis pub/sub channel (`Sink.Redis`, separate
+`ankusa_redis` package), or an SQS queue (`Sink.SQS`, in core); either way fat
+payloads are checked in through
 `Ankusa.ClaimCheck` with only a claim reference on the queue, and the message
 itself is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its
 **own** queue and binding. The framework never declares one, so adding a
 fifth consumer later is a change on the consumer side only, not a config
 change here. Kafka has no bindings: the consumer side owns a consumer group
-instead, and one that wants SQS or another broker in between runs a bridge
-(see [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)).
+instead. SQS is a direct sink; a consumer that wants another broker in between
+runs a bridge (see [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)
+for the shape).
 
 Each ingest node here is an ordinary all-role node, the topology-1 shape, with
 its own store, and the nodes share nothing but the broker, the provider's

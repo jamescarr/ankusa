@@ -1,7 +1,8 @@
 name: ankusa
 
 # Local emulators for developing/testing the object-store blob adapters
-# (`Ankusa.BlobStore.{S3,GCS,Azure,OCI}`) without a cloud account. See
+# (`Ankusa.BlobStore.{S3,GCS,Azure,OCI}`) and `Ankusa.Sink.SQS` without a cloud
+# account. See
 # https://floci.io.
 #
 #   # start the emulators + bucket/container bootstrap
@@ -14,8 +15,8 @@ name: ankusa
 # test/ankusa/blob_store_*_test.exs and the README examples.
 
 services:
-  # S3-compatible object store (AWS emulator; also fronts SQS/Kafka/etc if
-  # you need them later — we only use S3 here).
+  # AWS emulator: serves S3 (the blob store) and SQS (`Sink.SQS`; its
+  # integration test creates its own queues) on one port.
   floci:
     image: floci/floci:latest
     ports:

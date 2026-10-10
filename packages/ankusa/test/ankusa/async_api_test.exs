@@ -114,6 +114,33 @@ defmodule Ankusa.AsyncApiTest do
     refute Map.has_key?(map, "operations")
   end
 
+  test "an SQS sink is an sqs server and a queue channel with the sqs binding" do
+    queue_url = "https://sqs.us-east-1.amazonaws.com/1/hooks.fifo"
+
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [sinks: [{Ankusa.Sink.SQS, queue_url: queue_url, region: "us-east-1"}]]
+          })
+      )
+
+    assert [{_server_id, %{"host" => "sqs.us-east-1.amazonaws.com", "protocol" => "sqs"}}] =
+             Map.to_list(map["servers"])
+
+    assert [{_channel_id, channel}] = Map.to_list(map["channels"])
+    assert channel["address"] == "hooks.fifo"
+
+    assert channel["bindings"] == %{
+             "sqs" => %{
+               "queue" => %{"name" => "hooks.fifo", "fifoQueue" => true},
+               "bindingVersion" => "0.3.0"
+             }
+           }
+
+    refute Map.has_key?(channel["messages"]["stripe"], "headers")
+  end
+
   test "an address a function computes per hook is a channel of its own, with no address" do
     map =
       document_map(

@@ -111,6 +111,7 @@ defmodule AnkusaServer.Config do
   @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
   @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms)
+  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token)
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -120,7 +121,7 @@ defmodule AnkusaServer.Config do
   @scheme_hashes ~w(sha256 sha512 sha1)
   @scheme_encodings ~w(hex base64)
   @scheme_secret_decodes ~w(raw whsec_base64)
-  @sink_types ~w(log http rabbitmq kafka nats redis)
+  @sink_types ~w(log http rabbitmq kafka nats redis sqs)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
@@ -1241,6 +1242,23 @@ defmodule AnkusaServer.Config do
          ]
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
          |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))}
+
+      "sqs" ->
+        check_keys!(sink, @sqs_sink_keys, path)
+
+        {Ankusa.Sink.SQS,
+         [
+           queue_url: required_string!(sink, "queue_url", path),
+           region: required_string!(sink, "region", path)
+         ]
+         |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+         |> put_opt(:message_group_id, string_opt(sink, "message_group_id", path))
+         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+         |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
+         |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
+         |> put_opt(:session_token, string_opt(sink, "session_token", path))}
     end
   end
 
