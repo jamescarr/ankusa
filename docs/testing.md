@@ -195,7 +195,7 @@ The always-on tests cover:
   validates. The adapters' `*_describe_test.exs` pin what each sink advertises
   (and that no credential reaches it) without a broker.
 
-The 21 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+The 24 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,
@@ -204,7 +204,11 @@ store backup and restore through floci S3. `sink/sqs_integration_test.exs`
 delivers through `Sink.SQS` to floci's SQS and reads the queue back: the
 `Ankusa.Sink.Message` body, the message attributes and FIFO group, one stored
 message for a retried FIFO delivery and a second for a replay, a missing queue
-as an `{:sqs, 400, _, _}` error, and a standard queue. Excluded by default
+as an `{:sqs, 400, _, _}` error, and a standard queue.
+`sink/google_pubsub_integration_test.exs` publishes through
+`Sink.GooglePubSub` to floci-gcp's Pub/Sub and pulls the subscription back:
+the `Ankusa.Sink.Message` data and attributes, an ordering key, and a missing
+topic as a transient error. Excluded by default
 (`test_helper.exs`:`ExUnit.start(exclude: [:integration])`) because they
 need live infra:
 
@@ -213,7 +217,7 @@ mise run test:integration
 ```
 
 It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 and SQS on
-:4566, floci-gcp on :4588, floci-az on :4577, floci-oci on :4599), waits for
+:4566, floci-gcp (GCS and Pub/Sub) on :4588, floci-az on :4577, floci-oci on :4599), waits for
 the bucket/container bootstrap, runs `mix test --only integration` (the tagged tests alone; the rest is
 `check:package ankusa`'s) in
 `packages/ankusa`, and tears the emulators down. CI runs it as the

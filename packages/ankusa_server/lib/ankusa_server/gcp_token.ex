@@ -1,15 +1,17 @@
-defmodule AnkusaServer.GcsToken do
+defmodule AnkusaServer.GcpToken do
   @moduledoc """
-  Bearer-token sources for `Ankusa.BlobStore.GCS`, wired up by `storage.gcs.auth`
-  in the config file.
+  Bearer-token sources for the Google Cloud adapters: `Ankusa.BlobStore.GCS`
+  (`storage.gcs.auth`, `claim_check.store.gcs.auth`) and
+  `Ankusa.Sink.GooglePubSub` (`auth` on a `google_pubsub` sink), wired up in the
+  config file.
 
-  Core's GCS adapter deliberately carries no credential dependency: it takes a
+  Core's GCP adapters deliberately carry no credential dependency: each takes a
   `:token_provider` callback and calls it per request. For the container there is
   exactly one sensible default implementation, so it ships here rather than
   asking every operator to write one:
 
     * `static/1` — the operator set `auth: token`, and the token came from
-      `${GCS_TOKEN}` or their secret store.
+      `${GCP_TOKEN}` or their secret store.
     * `metadata/0` — the node runs on GCE/GKE and gets a token from the instance
       metadata server.
 
@@ -18,7 +20,8 @@ defmodule AnkusaServer.GcsToken do
   Refreshes are single-flight: callers queue on the one process, the first
   fetches, the rest get the token it fetched. A fetch is one request (1 s to
   connect, 5 s to answer, no retries); a failure is `:error`, which the blob
-  store reports as an unauthenticated request. For a second after a failure
+  store sends as an unauthenticated request and the Pub/Sub sink reports as
+  `:no_credentials` (retried, no request sent). For a second after a failure
   every caller gets `:error` without another request, so a queue of callers
   behind a dead metadata server costs one fetch, not one each; after that the
   next call tries again.
@@ -66,7 +69,7 @@ defmodule AnkusaServer.GcsToken do
     GenServer.call(__MODULE__, :token, @call_timeout_ms)
   catch
     :exit, reason ->
-      Logger.warning("[ankusa] GCS metadata token unavailable: #{inspect(reason)}")
+      Logger.warning("[ankusa] GCP metadata token unavailable: #{inspect(reason)}")
       :error
   end
 
@@ -128,16 +131,16 @@ defmodule AnkusaServer.GcsToken do
             {:ok, token, expires_in}
 
           :error ->
-            Logger.warning("[ankusa] GCS metadata token response had no access_token/expires_in")
+            Logger.warning("[ankusa] GCP metadata token response had no access_token/expires_in")
             :error
         end
 
       {:ok, %{status: status}} ->
-        Logger.warning("[ankusa] GCS metadata token request failed: HTTP #{status}")
+        Logger.warning("[ankusa] GCP metadata token request failed: HTTP #{status}")
         :error
 
       {:error, reason} ->
-        Logger.warning("[ankusa] GCS metadata token request failed: #{inspect(reason)}")
+        Logger.warning("[ankusa] GCP metadata token request failed: #{inspect(reason)}")
         :error
     end
   end
