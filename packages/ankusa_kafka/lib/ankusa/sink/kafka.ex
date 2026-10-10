@@ -236,6 +236,28 @@ defmodule Ankusa.Sink.Kafka do
   end
 
   defp start_client(client, opts, timeout) do
+    case DynamicSupervisor.start_child(
+           Ankusa.Sink.Kafka.Supervisor,
+           client_child_spec(client, opts, timeout)
+         ) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  # The client's config carries `:sasl` credentials and `:ssl` key material:
+  # the child spec holds it only inside a closure, which `inspect` prints
+  # without its captured values, so the DynamicSupervisor's status and reports
+  # never show it. brod's own client process still holds it in its state.
+  #
+  # :temporary: brod's client exits during init when no broker answers.
+  # Restarting it here would crash-loop past the supervisor's restart
+  # intensity and take the application down; the next `deliver/3` starts it
+  # again instead, inside the source's retry policy.
+  @spec client_child_spec(atom(), keyword(), pos_integer()) :: Supervisor.child_spec()
+  def client_child_spec(client, opts, timeout) do
     endpoints = opts |> Keyword.fetch!(:brokers) |> Enum.map(&endpoint/1)
 
     config =
@@ -245,22 +267,18 @@ defmodule Ankusa.Sink.Kafka do
         default_producer_config: [required_acks: -1, ack_timeout: timeout]
       ] ++ Keyword.take(opts, [:ssl, :sasl])
 
-    # :temporary: brod's client exits during init when no broker answers.
-    # Restarting it here would crash-loop past the supervisor's restart
-    # intensity and take the application down; the next `deliver/3` starts
-    # it again instead, inside the source's retry policy.
-    child = %{
+    %{
       id: client,
-      start: {:brod_client, :start_link, [endpoints, client, config]},
+      start: {__MODULE__, :start_client_process, [endpoints, client, fn -> config end]},
       restart: :temporary
     }
-
-    case DynamicSupervisor.start_child(Ankusa.Sink.Kafka.Supervisor, child) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, reason} -> {:error, reason}
-    end
   end
+
+  @doc false
+  @spec start_client_process([{charlist(), :inet.port_number()}], atom(), (-> keyword())) ::
+          {:ok, pid()} | {:error, term()}
+  def start_client_process(endpoints, client, config_fun) when is_function(config_fun, 0),
+    do: :brod_client.start_link(endpoints, client, config_fun.())
 
   defp endpoint({host, port}), do: {to_charlist(host), port}
 

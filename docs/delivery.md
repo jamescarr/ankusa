@@ -123,13 +123,15 @@ concurrency window — and **the rest of this section does not apply**:
 
 What still applies is the sink contract below, plus one optional callback:
 `c:Ankusa.Sink.durable?/1`. A sink's `:ok` must mean the hook is accepted by
-something that outlives this node, and boot refuses a `wal: :none` config in
-which no sink of a statically configured source can promise that
-(`Ankusa.Queue.validate_config!/1`). `Sink.Log` returns `false` — nothing durable
+something that outlives this node, and under `wal: :none` a source none of
+whose sinks can promise that is refused: at boot for a statically configured
+source (`Ankusa.Queue.validate_config!/1`), and on write for one created or
+updated at runtime — the admin API answers `400 invalid_source`
+(`Ankusa.Queue.check_durable/2`). A source already stored before that check
+keeps serving. `Sink.Log` returns `false` — nothing durable
 happened — and so does `Sink.Redis`: pub/sub keeps no copy, so a subscriber
 that disconnects after the publish loses the message. Every other shipped sink
-confirms durably. A source created at runtime through the admin API is not
-checked, so keep the source store static when you can.
+confirms durably.
 
 The check is "at least one durable sink", not "every sink is durable": a
 non-durable sink is still a required confirmer. A source with `[Kafka, Redis]`

@@ -572,6 +572,45 @@ defmodule Ankusa.DispatchTest do
              committed |> Enum.map(& &1.id) |> Enum.sort()
   end
 
+  test "D2: a row rebinds to its sink's module after a reorder, and is dead-lettered as sink_gone once the module is gone" do
+    inst = unique_instance()
+    dir = unique_data_dir(inst)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    dispatch = %{retry: retry()}
+    original = [{TagSink, tag: :a, pid: self()}, {ReportingSink, pid: self()}]
+
+    # Enqueue on an edge-only node, so the rows wait for a later dispatcher.
+    cfg = restart_config(inst, dir, original, dispatch, [:edge])
+    start_supervised!({Ankusa.Instance, cfg})
+    %{id: id} = enqueue!(inst, build_env("src1"))
+    stop_supervised!({Ankusa.Instance, inst})
+
+    # Same modules, reordered, with new opts: row 0 (TagSink) now binds to
+    # index 1, and delivers with the current opts.
+    reordered = [{ReportingSink, pid: self()}, {TagSink, tag: :b, pid: self()}]
+    start_supervised!({Ankusa.Instance, restart_config(inst, dir, reordered, dispatch)})
+    assert {:ok, _} = Pipeline.tick(inst)
+    assert_receive {:delivered, :b, ^id}, 1_000
+    assert_receive {:delivered, ^id}, 1_000
+    refute_receive {:delivered, :a, _}
+    stop_supervised!({Ankusa.Instance, inst})
+
+    start_supervised!({Ankusa.Instance, restart_config(inst, dir, original, dispatch, [:edge])})
+    %{id: id2} = enqueue!(inst, build_env("src1"))
+    stop_supervised!({Ankusa.Instance, inst})
+
+    # TagSink is gone: its row is dead-lettered, the surviving sink delivers.
+    remaining = [{ReportingSink, pid: self()}]
+    start_supervised!({Ankusa.Instance, restart_config(inst, dir, remaining, dispatch)})
+    assert {:ok, _} = Pipeline.tick(inst)
+    assert_receive {:delivered, ^id2}, 1_000
+
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.envelope.id == id2
+    assert entry.reason == inspect({:sink_gone, 0, TagSink}, limit: 50, printable_limit: 4096)
+  end
+
   # ── crash recovery ─────────────────────────────────────────────────────────
 
   test "D7: a claimed row is retried after a restart; a delivered row is not" do
@@ -640,12 +679,12 @@ defmodule Ankusa.DispatchTest do
     )
   end
 
-  defp restart_config(inst, dir, sinks, dispatch) do
+  defp restart_config(inst, dir, sinks, dispatch, roles \\ [:edge, :dispatch]) do
     Ankusa.Config.new(
       instance: inst,
       data_dir: dir,
       port: 0,
-      roles: [:edge, :dispatch],
+      roles: roles,
       dispatch: dispatch,
       source_store: {Ankusa.SourceStore.Static, sources: %{"src1" => %{sinks: sinks}}}
     )

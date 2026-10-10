@@ -31,6 +31,10 @@ follows [Semantic Versioning](https://semver.org/).
   never blocks the supervisor; it is registered under a digest of the URL,
   and its `format_status/1` redacts the URL, so a password never appears in a
   process name, `:sys.get_state/1` or a crash report.
+- The connection's child spec carries only the options the connection reads,
+  with the URL inside a closure, so `:sys.get_status/1` of
+  `Ankusa.Sink.RabbitMQ.Supervisor`, or a supervisor report, never prints
+  the password.
 
 ## [0.5.0] - 2026-10-08
 

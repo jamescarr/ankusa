@@ -48,11 +48,16 @@ defmodule Ankusa.Sink.Redis do
   the connection dies between the registry lookup and the call, `deliver/3`
   returns `{:error, :not_connected}` — also just a retry.
 
-  Connections are keyed by URL and registered as `{:redis_sink, url}` under
-  the instance's registry, so two sinks pointed at the same server share one
-  connection, and two pointed at different servers never do. Servers,
-  credentials, and database are fixed by the first delivery that starts the
-  connection; use a different `:url` for a different server.
+  Connections are keyed by URL and registered under a digest of it
+  (`connection_key/1`) in the instance's registry, so two sinks pointed at the
+  same server share one connection, and two pointed at different servers never
+  do. Servers, credentials, and database are fixed by the first delivery that
+  starts the connection; use a different `:url` for a different server.
+
+  The URL's password is in neither the registry key nor the connection's child
+  spec: Redix is started with host/port/database options and a password MFA
+  whose argument is a closure, so `:sys.get_status/1` of the supervisor or the
+  connection, and a supervisor report, never print it.
 
   ## opts
 
@@ -174,7 +179,7 @@ defmodule Ankusa.Sink.Redis do
   # The registry lookup first: the common case must not serialize every
   # delivery through the DynamicSupervisor.
   defp ensure_connection(instance, url) do
-    case Ankusa.whereis(instance, key(url)) do
+    case Ankusa.whereis(instance, connection_key(url)) do
       pid when is_pid(pid) -> {:ok, pid}
       nil -> start_connection(instance, url)
     end
@@ -185,10 +190,17 @@ defmodule Ankusa.Sink.Redis do
   # connection that does exit (a bad URL) is started again by the next
   # `deliver/3`, not crash-looped here.
   defp start_connection(instance, url) do
+    key = connection_key(url)
+    password = {__MODULE__, :connection_password, [fn -> Ankusa.Redis.Options.password(url) end]}
+
     child = %{
-      id: key(url),
+      id: key,
       start:
-        {Redix, :start_link, [url, [name: Ankusa.via(instance, key(url)), sync_connect: false]]},
+        {Redix, :start_link,
+         [
+           Ankusa.Redis.Options.start_opts(url, password) ++
+             [name: Ankusa.via(instance, key), sync_connect: false]
+         ]},
       restart: :temporary
     }
 
@@ -200,7 +212,16 @@ defmodule Ankusa.Sink.Redis do
     end
   end
 
-  defp key(url), do: {:redis_sink, url}
+  @doc false
+  # The registry key (and child id) of the connection for `url`: a digest, so a
+  # password in the URL never lands in the registry.
+  @spec connection_key(String.t()) :: {:redis_sink, binary()}
+  def connection_key(url), do: {:redis_sink, binary_part(:crypto.hash(:sha256, url), 0, 16)}
+
+  @doc false
+  # Redix's password MFA: the closure resolves the password when Redix dials.
+  @spec connection_password((-> String.t() | nil)) :: String.t() | nil
+  def connection_password(fun) when is_function(fun, 0), do: fun.()
 
   # The reaper prints its key when it closes a connection, and the URL may
   # carry a password: a digest of it, as the RabbitMQ sink names connections.

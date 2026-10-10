@@ -264,6 +264,10 @@ defmodule Ankusa.Sink.NATS do
     end
   end
 
+  # The settings carry credentials (password, token, nkey seed): the child spec
+  # holds them only inside a closure, which `inspect` prints without its
+  # captured values, so the DynamicSupervisor's status and reports never show
+  # them. Gnat's own processes still hold them in their state.
   defp start_supervisor(instance, connection, opts) do
     settings = %{
       connection_settings: servers(opts),
@@ -274,8 +278,8 @@ defmodule Ankusa.Sink.NATS do
     child = %{
       id: {Gnat.ConnectionSupervisor, instance, connection},
       start:
-        {Gnat.ConnectionSupervisor, :start_link,
-         [settings, [name: Ankusa.via(instance, {:nats_sup, connection})]]},
+        {__MODULE__, :start_connection_supervisor,
+         [fn -> settings end, [name: Ankusa.via(instance, {:nats_sup, connection})]]},
       restart: :permanent
     }
 
@@ -285,6 +289,11 @@ defmodule Ankusa.Sink.NATS do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  @doc false
+  @spec start_connection_supervisor((-> map()), keyword()) :: GenServer.on_start()
+  def start_connection_supervisor(settings_fun, opts) when is_function(settings_fun, 0),
+    do: Gnat.ConnectionSupervisor.start_link(settings_fun.(), opts)
 
   defp servers(opts) do
     overrides =

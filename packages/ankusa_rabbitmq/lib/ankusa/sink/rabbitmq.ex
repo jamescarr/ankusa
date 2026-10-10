@@ -139,8 +139,10 @@ defmodule Ankusa.Sink.RabbitMQ do
   # the DynamicSupervisor. One connection per `{url, exchange}`: two sinks for
   # one exchange on different brokers never share one. The URL is in the key
   # as a digest, because a registered name is printed by crash reports and
-  # `:sys.get_status/1` and the URL may carry a password. The start returns
-  # before the connection dials, so a first publish may be `:not_connected`.
+  # `:sys.get_status/1` and the URL may carry a password; for the same reason
+  # the child spec carries it only inside a closure, which `inspect` prints
+  # without its captured values. The start returns before the connection
+  # dials, so a first publish may be `:not_connected`.
   defp ensure_started(instance, exchange, opts) do
     url = Keyword.get(opts, :url, Connection.default_url())
     key = connection_key(url, exchange)
@@ -151,9 +153,13 @@ defmodule Ankusa.Sink.RabbitMQ do
         {:ok, name, pid, key}
 
       nil ->
+        conn_opts =
+          [instance: instance, name: name, exchange: exchange, url: fn -> url end] ++
+            Keyword.take(opts, [:exchange_type, :retry_ms, :confirm_timeout_ms, :max_inflight])
+
         child = %{
           id: {Connection, instance, key},
-          start: {Connection, :start_link, [Keyword.merge(opts, instance: instance, name: name)]}
+          start: {Connection, :start_link, [conn_opts]}
         }
 
         case DynamicSupervisor.start_child(Ankusa.Sink.RabbitMQ.Supervisor, child) do

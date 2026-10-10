@@ -105,8 +105,9 @@ dispatch pipeline, no DLQ. Ingest verifies, publishes to the source's sinks
 inside the request (`Ankusa.Edge.Publish`), and answers `201` only once every
 sink has confirmed. `c:Ankusa.Sink.durable?/1` is the promise that makes a
 sink's `:ok` mean "something that outlives this node accepted it" — true for
-every shipped sink except `Sink.Log` and `Sink.Redis` — and boot refuses a
-`wal: :none` config in which a static source has no durable sink. One durable
+every shipped sink except `Sink.Log` and `Sink.Redis` — and a `wal: :none`
+node refuses a source with no durable sink: at boot for a static one, on write
+for one managed through the admin API. One durable
 sink is enough to pass that check, but *every* sink still has to confirm, so a
 non-durable sink that cannot (Redis with no subscriber) turns every ingest
 into a `503`. Nothing is committed and no segment is written, so the two-tier

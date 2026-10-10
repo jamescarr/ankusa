@@ -234,24 +234,36 @@ defmodule Ankusa.Queue do
   `Ankusa.Sink.durable?/2`. Raises `ArgumentError` naming the first source that
   cannot make that promise.
 
-  Only sources in `config.source_store` are checked. A source created at
-  runtime through the admin API is not: the store's decoder has no instance
-  config, so `Ankusa.SourceStore.put/5` is the place runtime enforcement would
-  have to live. Use `wal.type: disk` if sources are edited at runtime and a
-  log-only sink cannot be ruled out.
+  This covers the sources in `config.source_store`. A source written at runtime
+  (the admin API, `Ankusa.SourceStore.put/5`) is refused by the same rule when
+  it is written, by every writable source store; see `check_durable/2`.
   """
   @spec validate_config!(Ankusa.Config.t()) :: :ok
-  def validate_config!(%Ankusa.Config{wal: :none} = config) do
-    Enum.each(static_sources(config), fn {id, %Ankusa.Source{sinks: sinks}} ->
-      unless Enum.any?(sinks, fn {mod, opts} -> Ankusa.Sink.durable?(mod, opts) end) do
-        raise ArgumentError,
-              "source #{inspect(id)}: wal: :none acks the provider on a sink's confirm, " <>
-                "but none of its sinks is durable. Configure a durable sink, or use wal.type: disk."
-      end
+  def validate_config!(%Ankusa.Config{} = config) do
+    config
+    |> static_sources()
+    |> Enum.each(fn {_id, source} ->
+      with {:error, message} <- check_durable(config, source), do: raise(ArgumentError, message)
     end)
   end
 
-  def validate_config!(%Ankusa.Config{}), do: :ok
+  @doc """
+  `:ok` unless `config` runs `wal: :none` and none of `source`'s sinks is
+  durable (`Ankusa.Sink.durable?/2`) — such a source would answer the provider
+  `2xx` with no durable copy anywhere. Any other WAL mode always passes.
+  """
+  @spec check_durable(Ankusa.Config.t(), Ankusa.Source.t()) :: :ok | {:error, String.t()}
+  def check_durable(%Ankusa.Config{wal: :none}, %Ankusa.Source{id: id, sinks: sinks}) do
+    if Enum.any?(sinks, fn {mod, opts} -> Ankusa.Sink.durable?(mod, opts) end) do
+      :ok
+    else
+      {:error,
+       "source #{inspect(id)}: wal: :none acks the provider on a sink's confirm, " <>
+         "but none of its sinks is durable. Configure a durable sink, or use wal.type: disk."}
+    end
+  end
+
+  def check_durable(%Ankusa.Config{}, %Ankusa.Source{}), do: :ok
 
   @doc false
   # The sources declared in `config.source_store`'s `:sources`, built. Shared

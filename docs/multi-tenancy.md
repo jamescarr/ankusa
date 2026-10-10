@@ -192,11 +192,10 @@ that cannot reach Redis on its first boot refuses to start rather than run
 with no sources; once running, an outage leaves the mirror serving hooks, and
 source writes fail until Redis is back.
 
-One consequence for `wal.type: none`: its boot check — every statically
-configured source needs at least one sink whose `:ok` means durable
-(`c:Ankusa.Sink.durable?/1`, enforced by `Ankusa.Queue.validate_config!/1`) —
-only sees sources in the config. A source created at runtime through the admin
-API is not checked, because the store's decoder has no instance config, so a
-`wal: :none` node with a writable source store can be handed a log-only source
-at runtime. Give runtime-created sources durable sinks, or run `wal.type: disk`
-on the node that serves the admin API's source routes.
+One consequence for `wal.type: none`: every source needs at least one sink
+whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`). Boot enforces it for
+sources in the config (`Ankusa.Queue.validate_config!/1`), and a source
+write enforces it for the rest: the admin API refuses to create a source, or
+update one, into a source with no durable sink (`400 invalid_source`), whichever
+writable store holds it. A source stored before that check existed keeps
+serving; update it to give it a durable sink.

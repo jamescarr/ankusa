@@ -116,7 +116,7 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
 
     state = %{
       instance: Keyword.fetch!(opts, :instance),
-      url: Keyword.get(opts, :url, default_url()),
+      url: resolve_url(Keyword.get(opts, :url)),
       exchange: Keyword.fetch!(opts, :exchange),
       exchange_type: Keyword.get(opts, :exchange_type, :topic),
       retry_ms: Keyword.get(opts, :retry_ms, @default_retry_ms),
@@ -132,6 +132,12 @@ defmodule Ankusa.Sink.RabbitMQ.Connection do
 
     {:ok, state, {:continue, :connect}}
   end
+
+  # `:url` is a string, or a zero-arity fun returning one: the sink passes a
+  # fun so its child spec never holds the URL (and the password in it).
+  defp resolve_url(nil), do: default_url()
+  defp resolve_url(fun) when is_function(fun, 0), do: fun.()
+  defp resolve_url(url) when is_binary(url), do: url
 
   # A crash report prints the state: the URL may carry a password, and pending
   # publishes carry hook bodies.

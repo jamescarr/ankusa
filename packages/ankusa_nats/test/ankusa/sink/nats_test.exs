@@ -231,6 +231,18 @@ defmodule Ankusa.Sink.NATSTest do
     assert elapsed_us < 100_000
   end
 
+  test "the supervisor's child spec never prints the connection's credentials" do
+    canary = "s3cr3t-canary"
+    inst = :"nats_canary_#{System.unique_integer([:positive])}"
+    opts = [servers: ["127.0.0.1:1"], subject: "whatever", password: canary, token: canary]
+
+    assert {:error, :not_connected} = NATS.deliver(envelope(), ctx(inst), opts)
+    assert is_pid(Ankusa.whereis(inst, {:nats_sup, :default}))
+
+    status = :sys.get_status(Ankusa.Sink.NATS.Supervisor)
+    refute inspect(status, limit: :infinity, printable_limit: :infinity) =~ canary
+  end
+
   test "the connection is registered in the instance's registry, not as a global atom", %{
     instance: inst,
     subject: subject
