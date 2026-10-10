@@ -3,7 +3,9 @@ package io.github.jamescarr.ankusa.sources;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The admin API answered 409: a source with that name already exists for the tenant.
+ * The admin API answered 409: a source with that name already exists for the tenant ({@code
+ * source_exists}), or a delete found the source still has undelivered hooks ({@code
+ * source_has_deliveries}); the body's {@code error} says which.
  *
  * <p>Never retryable — an identical request would be refused the same way.
  */

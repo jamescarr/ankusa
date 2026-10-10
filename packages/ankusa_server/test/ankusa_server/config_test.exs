@@ -1100,13 +1100,15 @@ defmodule AnkusaServer.ConfigTest do
           sinks:
             - {type: http, url: "http://sink.invalid/h", method: put, timeout_ms: 250,
                headers: {x-one: "1"}}
+            - {type: rabbitmq, exchange: ankusa.full, idle_timeout_ms: 0}
             - {type: kafka, brokers: ["b:9092"], topic: t, ssl: true,
-               sasl: {mechanism: scram_sha_512, username: u, password: p}}
+               sasl: {mechanism: scram_sha_512, username: u, password: p},
+               idle_timeout_ms: 120000}
             - {type: nats, servers: "${NATS_SERVERS}", subject: "ankusa.full",
                inline_max_bytes: 4096, publish_timeout_ms: 250,
-               auth: {username: nu, password: np}}
+               auth: {username: nu, password: np}, idle_timeout_ms: 30000}
             - {type: redis, url: "redis://redis:6379", channel: ankusa.full,
-               inline_max_bytes: 2048, publish_timeout_ms: 300}
+               inline_max_bytes: 2048, publish_timeout_ms: 300, idle_timeout_ms: "60000"}
             - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h.fifo",
                region: us-east-1, message_group_id: g, max_message_bytes: 262144}
       """)
@@ -1132,6 +1134,7 @@ defmodule AnkusaServer.ConfigTest do
                 headers: [{"x-one", "1"}],
                 timeout_ms: 250
               ]},
+             {Ankusa.Sink.RabbitMQ, [exchange: "ankusa.full", idle_timeout_ms: 0]},
              {Ankusa.Sink.Kafka, kafka},
              {Ankusa.Sink.NATS, nats},
              {Ankusa.Sink.Redis, redis},
@@ -1141,6 +1144,7 @@ defmodule AnkusaServer.ConfigTest do
     assert kafka[:brokers] == ["b:9092"]
     assert kafka[:ssl] == true
     assert kafka[:sasl] == {:scram_sha_512, "u", "p"}
+    assert kafka[:idle_timeout_ms] == 120_000
 
     # The comma-separated env var form of `servers` too.
     assert nats[:servers] == ["n1:4222", "n2:4222"]
@@ -1149,11 +1153,13 @@ defmodule AnkusaServer.ConfigTest do
     assert nats[:publish_timeout_ms] == 250
     assert nats[:username] == "nu"
     assert nats[:password] == "np"
+    assert nats[:idle_timeout_ms] == 30_000
 
     assert redis[:url] == "redis://redis:6379"
     assert redis[:channel] == "ankusa.full"
     assert redis[:inline_max_bytes] == 2048
     assert redis[:publish_timeout_ms] == 300
+    assert redis[:idle_timeout_ms] == 60_000
 
     assert sqs[:queue_url] == "https://sqs.us-east-1.amazonaws.com/1/h.fifo"
     assert sqs[:region] == "us-east-1"

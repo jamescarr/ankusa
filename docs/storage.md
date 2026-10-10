@@ -270,6 +270,19 @@ store with `claim_check.blob_store`). Retention differs per namespace too. See
 | `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
 | `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
 
+**The HTTP adapters retry a transient failure** (`Ankusa.BlobStore.Retry`): a
+transport error (refused, reset, timed out) or a `408`, `429`, `500`, `502`,
+`503` or `504` is sent again after 200 ms, then after 1 s — three attempts in
+all by default — and S3 and OCI re-sign each attempt. Anything else (`404`,
+`403`, another `4xx`) is answered at once. The adapter option `:retries` is
+the number of extra attempts (`2`; `0` for a single attempt); like
+`:timeout_ms` it is Elixir config only. Each call is idempotent, a `PUT`
+writing the same bytes to the same key, so a timed-out write that did land is
+safe to repeat. A worst-case call is three timeouts plus the waits. `put`
+hands the adapter's iodata to the HTTP client as is: a segment is not copied
+into one binary first. `LocalFS` does neither: a POSIX error is not
+transient.
+
 ```elixir
 # S3 / MinIO / R2
 config :ankusa,

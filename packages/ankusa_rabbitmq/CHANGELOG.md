@@ -10,9 +10,17 @@ follows [Semantic Versioning](https://semver.org/).
 
 - `:max_inflight` (default 256): publishes awaiting a confirm per connection;
   past it a publish answers `{:error, :busy}` without being sent.
+- `:idle_timeout_ms` (default `600_000`, `0` never, at least 16 s): a
+  connection with no delivery for that long is closed (`Ankusa.Sink.Reaper`,
+  requires core's) and the next delivery opens a new one, so a deleted or
+  re-pointed source no longer leaves its connection open for the life of the
+  node.
 
 ### Changed
 
+- Stopping a connection process closes its AMQP connection: `amqp_client`
+  owns that connection, so it used to outlive the process. Publishes waiting
+  on it answer `{:error, :not_connected}`.
 - Confirms are asynchronous: many publishes are outstanding on the channel at
   once and each caller is answered on its own confirm, so one slow confirm no
   longer serializes every delivery on the connection.

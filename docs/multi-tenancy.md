@@ -157,7 +157,10 @@ can appear at runtime with no redeploy. Core ships two stores, and
   store, so a created or updated source works immediately and survives a
   restart. That is what makes a product minting per-customer catch URLs
   possible without a redeploy: `RouteResolver`/`Route` gave you the URL shape,
-  this gives you the runtime endpoint.
+  this gives you the runtime endpoint. Deleting a source that still has
+  undelivered hooks on the node is `409 source_has_deliveries`; add
+  `?deliveries=dead_letter` to dead-letter them first, so a source re-created
+  under the same name starts with an empty queue.
 
 `SourceStore.Persistent` keeps its sources in this node's store, so it is
 node-local like the rest of it: that node's admin API writes, that node's edge

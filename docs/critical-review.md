@@ -10,7 +10,7 @@ Paths below are relative to `packages/ankusa/lib/ankusa/` unless they start with
 
 **Layout.** Findings are grouped by root cause, not by pipeline stage. [Root causes](#root-causes) maps the nine causes to their findings; each group's section states the cause, lists its findings as the review recorded them, and ends with a solution scope. [Where it breaks](#where-it-breaks) keeps the stage view.
 
-**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, and E4 is closed; the residuals that remain are listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
+**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, E4 is closed, and so are D2's two open bullets and the B7, C2 and S6 residuals; what remains (the O2 residual, B5, which is inherent, and the E5 deviation) is listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
 
 ## Verdict
 
@@ -487,6 +487,25 @@ Still open from the G3 scope:
 - `DELETE` of a source answers `204` even with undelivered hooks; there is no `409` or drain option (`admin/router.ex:149-151`, `source_store/persistent.ex:148-179`);
 - a source re-created with the same name and a sink at the same index and module receives the old backlog.
 
+**Status (2026-10-10).** Both closed. `DELETE /v1/tenants/:tenant/sources/:name`
+checks this node's queue first: a source with pending or in-flight rows is
+`409 source_has_deliveries` (`{"pending": n, "inflight": m}`) and nothing is
+deleted; `?deliveries=dead_letter` has the dispatch pipeline dead-letter the
+source's pending rows as `{:source_gone, source_id}` — inside the pipeline
+process, the only one that moves pending rows, with the same telemetry and
+replay counts as dispatch — and then deletes (`admin/router.ex`
+`delete_source/4`, `Dispatch.Pipeline.dead_letter_source/2`). Without the
+`:dispatch` role that is `409 role_not_enabled`. Delivery rows now carry
+`source_id`, so the check reads no hooks; rows written before it are matched
+by their hook (`Queue.Deliveries.fold_source/5`). After a successful delete no
+row for the id is pending on the node, so a source re-created under the name
+starts empty. What remains is a window, not a gap: a hook whose source lookup
+ran before the delete and whose commit lands after it, or an in-flight row
+that fails and returns to pending, is dead-lettered as `source_gone` when it
+is next claimed — unless the name is re-created first, in which case it is
+delivered to the new source. The check is node-local, like the DLQ: with
+`SourceStore.Redis` a delete on one node does not see another node's queue.
+
 <a id="b1"></a>
 ### B1 · Critical · Reproduced — RabbitMQ confirms unroutable publishes, and `durable?` says that is durable
 
@@ -736,6 +755,19 @@ reconnects (2 s backoff) on its own; Redis connects with
 `DynamicSupervisor`, brod's atom client id, the S3 credential cache) are
 named. Still open, Low: idle connections are never reaped.
 
+**Status (2026-10-10).** Closed. `Ankusa.Sink.Reaper` (core) is one ETS table
+and a sweep per adapter: each broker adapter (`ankusa_rabbitmq`,
+`ankusa_kafka`, `ankusa_nats`, `ankusa_redis`) touches its connection's row
+before every publish, and a connection unused for `idle_timeout_ms` (default
+10 minutes, `0` never, never under the adapter's publish timeout plus 1 s) is
+stopped through the adapter's `DynamicSupervisor`. RabbitMQ's connection
+process now closes its AMQP connection when stopped (`amqp_client` owns it,
+so it used to outlive the process). Accepted race: a delivery that looked the
+connection up just before the sweep stopped it fails that attempt and is
+retried on a fresh connection. Checked against a live broker: one delivery,
+`closed idle … after 16000 ms` 29 s later, `rabbitmqctl list_connections`
+empty, and the next delivery `:ok` on a new connection.
+
 <a id="g4-scope"></a>
 ### G4 solution scope
 
@@ -945,6 +977,16 @@ fix makes the same request succeed, and calling it permanent would
 dead-letter every claim during a policy rollout. The claim is still read
 whole (bounded by `max_body_bytes`) with no `Range` support.
 
+**Status (2026-10-10).** `Range` closed; streaming stays out. One
+`bytes=a-b`, `bytes=a-` or `bytes=-n` is `206` with `Content-Range`, served by
+one ranged store read (`ClaimCheck.locate/3` + `read_bytes/4`); a range past
+the end is `416 bytes */length`; several ranges, other units and any
+`If-Range` get the whole claim, as RFC 9110 allows. Every claim response says
+`Accept-Ranges: bytes`, and `HEAD` reads only the pack's index. A response is
+still one binary: a claim is at most `max_body_bytes` and no blob store has a
+streaming `get`, so a ranged read is the way to bound what one response
+holds.
+
 <a id="s6"></a>
 ### S6 · Medium · Code — The blob-store adapters are single-shot and lossy on listing
 
@@ -962,6 +1004,16 @@ temporary credentials (`blob_store/s3/credentials.ex`), and signs the session
 token. Nothing in the shipped pipeline calls `BlobStore.list` (only tests and
 embedders), so its pagination is library surface, exercised by the adapter
 tests. Still open: one attempt per call and the whole-body PUT copy.
+
+**Status (2026-10-10).** Closed. `Ankusa.BlobStore.Retry` wraps the one
+request of every S3, GCS, Azure and OCI call: a transport error or a `408`,
+`429`, `500`, `502`, `503` or `504` is sent again after 200 ms and 1 s
+(`:retries`, default 2 extra attempts), and S3 and OCI sign each attempt
+afresh; any other answer is returned at once, so the adapters' status
+mapping is unchanged. `put` hands its iodata to the signer and the HTTP
+client as is: SigV4 and OCI's body digest hash iodata, and Req sends it, so
+a segment is no longer copied into one binary first. Verified against the
+floci emulators, including an iodata round-trip on S3.
 
 <a id="b9"></a>
 ### B9 · Medium · Code — `Sink.Http` neither signs nor bounds
@@ -1403,15 +1455,12 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 ## Remaining work, re-assessed
 
-Re-rated against the code on 2026-10-09 with this review's own severity definitions. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
+Re-rated against the code on 2026-10-09 with this review's own severity definitions; updated 2026-10-10, when the B7, C2 and S6 residuals and D2's open bullets were closed. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
 
 | Finding | Severity now | What still fails | Why it stays |
 |---|---|---|---|
 | O2 residual | Low | Supervisors' child specs carry `%Ankusa.Config{}`, so `:sys.get_status/1` on a supervisor, or a SASL supervisor report, prints it. | SASL reports are off by default; closing it means every child re-reading config from `:persistent_term`. Accepted. |
-| B7 residual | Low | Adapter connections are never reaped: a connection whose sink was removed (or a URL an API-managed source used once) stays up until the node restarts. | Bounded by distinct `(instance, URL, exchange/connection)` keys; reaping needs an idle timer per adapter. |
 | B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | brod has no cancel and no idempotent producer; consumers dedupe on `idempotency_key`. |
-| C2 residual | Low | The gateway reads a claim whole (bounded by `max_body_bytes`) and has no `Range`. | Claims are at most `max_body_bytes`; streaming is an optimisation. |
-| S6 residual | Low | Blob-store calls are single-shot; a segment PUT copies the iodata into one binary first. | The compactor retries on its next tick with backoff; `list` is not on any shipped path. |
 | E5 deviation | Medium for unverified shared sources | A source with `tenant_id: "default"` is shared and answers any URL tenant, so with `Verifier.None` a sender can file hooks under any tenant and spend that tenant's rate limit. | `"default"` is every source's default; binding it would break one-source-for-every-customer setups. `multi-tenancy.md` says to give a shared source a real verifier, or each tenant its own (bound) source. Since 2026-10-10 the node also warns at boot for each such source when the resolver takes the tenant from the URL (`Ankusa.Verifier.warn_unverified_shared/1`). |
 
 ## Decisions that choose between the options

@@ -80,7 +80,8 @@ defmodule Ankusa.Queue do
           bin: binary(),
           size: non_neg_integer(),
           sinks: [{non_neg_integer(), module()}],
-          replay_id: String.t()
+          replay_id: String.t(),
+          source_id: String.t()
         }
 
   @doc """
@@ -176,6 +177,17 @@ defmodule Ankusa.Queue do
   @spec dead(atom(), keyword()) ::
           {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}
   def dead(instance, opts), do: Deliveries.dead(instance, opts)
+
+  @doc """
+  The undelivered rows of one source in this node's queue: `pending` waiting
+  in the due index (due now or after a backoff) and `inflight` claimed by
+  dispatch. Walks both indexes; rows written before delivery rows recorded
+  their source are matched by reading their hook.
+  """
+  @spec pending_for_source(atom(), String.t()) ::
+          {:ok, %{pending: non_neg_integer(), inflight: non_neg_integer()}} | {:error, term()}
+  def pending_for_source(instance, source_id),
+    do: Deliveries.pending_for_source(instance, source_id)
 
   defp next_seq(instance) do
     case Store.get(instance, :default, Keys.meta("next_seq")) do

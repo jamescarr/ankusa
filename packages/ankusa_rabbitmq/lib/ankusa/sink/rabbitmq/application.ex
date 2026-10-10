@@ -17,7 +17,10 @@ defmodule Ankusa.Sink.RabbitMQ.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {DynamicSupervisor, name: Ankusa.Sink.RabbitMQ.Supervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Ankusa.Sink.RabbitMQ.Supervisor, strategy: :one_for_one},
+      # Stops a connection no delivery has used for its `:idle_timeout_ms`.
+      {Ankusa.Sink.Reaper,
+       name: Ankusa.Sink.RabbitMQ.Reaper, supervisor: Ankusa.Sink.RabbitMQ.Supervisor}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.RabbitMQ.TopSup)

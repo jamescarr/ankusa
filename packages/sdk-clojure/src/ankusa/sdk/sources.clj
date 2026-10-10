@@ -292,7 +292,10 @@
 
 (defn delete-source
   "Delete a source: `DELETE /v1/tenants/{tenant}/sources/{name}`. Returns `nil`
-  on `2xx` (`204` with an empty body)."
+  on `2xx` (`204` with an empty body). A source that still has undelivered
+  hooks on the server's node raises `SourceConflictError` whose body's `error`
+  is `source_has_deliveries` (with `pending`/`inflight` counts); this never
+  sends the admin API's `?deliveries=dead_letter`."
   [client tenant name]
   (validate-tenant! tenant)
   (validate-name! name)

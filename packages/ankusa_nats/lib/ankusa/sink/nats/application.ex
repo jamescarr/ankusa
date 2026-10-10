@@ -14,7 +14,9 @@ defmodule Ankusa.Sink.NATS.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {DynamicSupervisor, name: Ankusa.Sink.NATS.Supervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Ankusa.Sink.NATS.Supervisor, strategy: :one_for_one},
+      # Stops a connection no delivery has used for its `:idle_timeout_ms`.
+      {Ankusa.Sink.Reaper, name: Ankusa.Sink.NATS.Reaper, supervisor: Ankusa.Sink.NATS.Supervisor}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.NATS.TopSup)

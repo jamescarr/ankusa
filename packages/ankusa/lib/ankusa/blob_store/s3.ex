@@ -29,6 +29,9 @@ defmodule Ankusa.BlobStore.S3 do
                               `Req.Test` in tests. See `Ankusa.HttpClient` —
                               an allowlist, because a redirected or re-tuned
                               request would no longer match its signature.
+    * `:retries`           — default `2`: extra attempts after a transport
+                              error or a `408`/`429`/`5xx`, each re-signed.
+                              See `Ankusa.BlobStore.Retry`
 
   Addressing is always path-style (`{endpoint}/{bucket}/{key}`) — the one
   scheme every target (AWS, MinIO, R2, floci) accepts unambiguously.
@@ -59,11 +62,12 @@ defmodule Ankusa.BlobStore.S3 do
   # OTP stdlib apps that aren't themselves Mix dependencies.
   @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
 
+  alias Ankusa.BlobStore.Retry
   alias Ankusa.HttpClient
 
   @impl true
   def put(_instance, key, data, opts) do
-    case request(opts, :put, key, IO.iodata_to_binary(data), []) do
+    case request(opts, :put, key, data, []) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -121,9 +125,26 @@ defmodule Ankusa.BlobStore.S3 do
   end
 
   defp send_signed(opts, creds, method, url, body, extra_headers) do
-    region = Keyword.fetch!(opts, :region)
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
+    req_options = Keyword.get(opts, :req_options, [])
 
+    # Signed per attempt: the signature carries the time it was made.
+    result =
+      Retry.run(opts, fn ->
+        headers = sign(opts, creds, method, url, body, extra_headers)
+        HttpClient.request(method, url, headers, body, timeout, req_options)
+      end)
+
+    case result do
+      # Keep the status visible so 404 can mean :not_found.
+      {:ok, status, body} when status in 200..299 -> {:ok, body}
+      {:ok, 404, _body} -> {:error, :not_found}
+      {:ok, status, body} -> {:error, {:status, status, body}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp sign(opts, creds, method, url, body, extra_headers) do
     # The signature covers the host header, so it has to be derived from the same
     # URL handed to the signer — not from anything the HTTP client might do.
     # Temporary credentials add their session token as a signed header.
@@ -131,38 +152,23 @@ defmodule Ankusa.BlobStore.S3 do
       [{"host", authority(url)} | stringify(extra_headers)] ++
         if(creds.session_token, do: [{"x-amz-security-token", creds.session_token}], else: [])
 
-    signed =
-      :aws_signature.sign_v4(
-        creds.access_key_id,
-        creds.secret_access_key,
-        region,
-        "s3",
-        :calendar.universal_time(),
-        method |> Atom.to_string() |> String.upcase(),
-        url,
-        headers,
-        # A bodyless request signs the empty string — the hash S3 expects as
-        # `x-amz-content-sha256` on a GET or DELETE.
-        body || "",
-        # S3 signs the path exactly as sent; every other service wants it
-        # URI-encoded a second time.
-        uri_encode_path: false
-      )
-
-    case HttpClient.request(
-           method,
-           url,
-           signed,
-           body,
-           timeout,
-           Keyword.get(opts, :req_options, [])
-         ) do
-      # Keep the status visible so 404 can mean :not_found.
-      {:ok, status, body} when status in 200..299 -> {:ok, body}
-      {:ok, 404, _body} -> {:error, :not_found}
-      {:ok, status, body} -> {:error, {:status, status, body}}
-      {:error, reason} -> {:error, reason}
-    end
+    :aws_signature.sign_v4(
+      creds.access_key_id,
+      creds.secret_access_key,
+      Keyword.fetch!(opts, :region),
+      "s3",
+      :calendar.universal_time(),
+      method |> Atom.to_string() |> String.upcase(),
+      url,
+      headers,
+      # A bodyless request signs the empty string — the hash S3 expects as
+      # `x-amz-content-sha256` on a GET or DELETE. A body may be iodata: the
+      # signer hashes it as is.
+      body || "",
+      # S3 signs the path exactly as sent; every other service wants it
+      # URI-encoded a second time.
+      uri_encode_path: false
+    )
   end
 
   # ── URL building ──────────────────────────────────────────────────────────

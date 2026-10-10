@@ -40,6 +40,10 @@ defmodule Ankusa.Sink.RabbitMQ do
     * `:inline_max_bytes`  — default 64 KiB (65,536), configurable
     * `:retry_ms`          — reconnect backoff in milliseconds, default `5_000`
     * `:confirm_timeout_ms` — publisher-confirm wait in milliseconds, default `5_000`
+    * `:idle_timeout_ms`   — close the connection after this long without a
+                              delivery, default `600_000` (10 min); `0` never.
+                              Never under the publish call's 15 s plus 1 s.
+                              See `Ankusa.Sink.Reaper`
   """
 
   @behaviour Ankusa.Sink
@@ -48,19 +52,27 @@ defmodule Ankusa.Sink.RabbitMQ do
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
   alias Ankusa.Sink.RabbitMQ.Connection
+  alias Ankusa.Sink.Reaper
 
   @impl true
   def deliver(%Envelope{} = env, ctx, opts) do
     exchange = Keyword.fetch!(opts, :exchange)
     inline_max_bytes = Message.inline_max_bytes(opts)
 
-    with {:ok, name} <- ensure_started(ctx.instance, exchange, opts),
+    with {:ok, name, pid, key} <- ensure_started(ctx.instance, exchange, opts),
          {:ok, payload} <- Message.encode(env, ctx, inline_max_bytes) do
+      :ok = Reaper.touch(Ankusa.Sink.RabbitMQ.Reaper, {ctx.instance, key}, pid, idle_ms(opts))
+
       Connection.publish(name, routing_key(env, opts), payload,
         message_id: env.id,
         headers: amqp_headers(env, ctx)
       )
     end
+  end
+
+  defp idle_ms(opts) do
+    confirm = Keyword.get(opts, :confirm_timeout_ms, 0)
+    Reaper.idle_ms(opts, max(confirm, Connection.call_timeout_ms()) + 1_000)
   end
 
   # `env.id` rides as `message_id`; the idempotency key always travels as an
@@ -136,7 +148,7 @@ defmodule Ankusa.Sink.RabbitMQ do
 
     case Ankusa.whereis(instance, key) do
       pid when is_pid(pid) ->
-        {:ok, name}
+        {:ok, name, pid, key}
 
       nil ->
         child = %{
@@ -145,8 +157,8 @@ defmodule Ankusa.Sink.RabbitMQ do
         }
 
         case DynamicSupervisor.start_child(Ankusa.Sink.RabbitMQ.Supervisor, child) do
-          {:ok, _pid} -> {:ok, name}
-          {:error, {:already_started, _pid}} -> {:ok, name}
+          {:ok, pid} -> {:ok, name, pid, key}
+          {:error, {:already_started, pid}} -> {:ok, name, pid, key}
           {:error, reason} -> {:error, reason}
         end
     end

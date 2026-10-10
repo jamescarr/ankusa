@@ -71,7 +71,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   require Logger
 
-  alias Ankusa.{ClaimCheck, Sink, SourceStore, Store, Telemetry}
+  alias Ankusa.{ClaimCheck, Envelope, Sink, SourceStore, Store, Telemetry}
   alias Ankusa.Queue.{Deliveries, Reclaim}
   alias Ankusa.Sink.Message
   alias Ankusa.Store.Keys
@@ -135,6 +135,23 @@ defmodule Ankusa.Dispatch.Pipeline do
           {:ok, %{lag_ms: non_neg_integer(), window_full: boolean()}} | {:error, :unavailable}
   def pressure(instance) do
     GenServer.call(Ankusa.via(instance, :dispatch), :pressure, 1_000)
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  @doc """
+  Dead-letter every pending row of `source_id` now, as `{:source_gone,
+  source_id}` (what dispatch does to a deleted source's rows), and return how
+  many; for deleting a source that still has a backlog. A row whose hook is
+  gone is dropped and not counted. Rows claimed by a running attempt are left
+  to settle: one that comes back pending after the source is deleted is
+  dead-lettered when it is next claimed. Runs inside this process, the only
+  one that moves pending rows, so no claim can race it. `{:error,
+  :unavailable}` while the pipeline is down or busy past the call's deadline.
+  """
+  @spec dead_letter_source(atom(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def dead_letter_source(instance, source_id) do
+    GenServer.call(Ankusa.via(instance, :dispatch), {:dead_letter_source, source_id}, 60_000)
   catch
     :exit, _ -> {:error, :unavailable}
   end
@@ -284,6 +301,29 @@ defmodule Ankusa.Dispatch.Pipeline do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:dead_letter_source, source_id}, _from, state) do
+    # A buffered retry outcome is a row about to be pending again: write it
+    # first, so the scan below sees that row too.
+    state = flush(state)
+    now = now_ms()
+    error = inspect({:source_gone, source_id}, limit: 50, printable_limit: 4096)
+
+    result =
+      Deliveries.fold_source(state.instance, :due, source_id, {state, 0, :ok}, fn
+        rows, {state, n, :ok} ->
+          case dead_letter_rows(state, rows, now, error) do
+            {:ok, state, dead} -> {:cont, {state, n + dead, :ok}}
+            {:error, reason} -> {:halt, {state, n, {:error, reason}}}
+          end
+      end)
+
+    case result do
+      {:ok, {state, n, :ok}} -> {:reply, {:ok, n}, state}
+      {:ok, {state, _n, error}} -> {:reply, error, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   # Stopped by its supervisor: write what is buffered, so a graceful stop does
@@ -624,7 +664,15 @@ defmodule Ankusa.Dispatch.Pipeline do
         send(self(), :wake)
 
         expansion =
-          Deliveries.expand_ops(item.seq, item.sink, item.size, source.sinks, existing, now)
+          Deliveries.expand_ops(
+            item.seq,
+            item.sink,
+            item.size,
+            item.env.source_id,
+            source.sinks,
+            existing,
+            now
+          )
 
         pairs =
           if source.sinks == [], do: [cleared(item.seq, item.sink) | pairs], else: pairs
@@ -648,6 +696,50 @@ defmodule Ankusa.Dispatch.Pipeline do
       |> bump_replay(item.row, :dead)
 
     {state, dead_ops ++ ops, pairs, jobs, sources}
+  end
+
+  # Pending rows of a source being deleted (`dead_letter_source/2`): the same
+  # dead row, dead key, telemetry and replay count as `dead/4`, from the due
+  # index instead of a claim, in one synced batch. A row whose hook is missing
+  # is dropped, as `resolve_one/3` drops it.
+  defp dead_letter_rows(state, rows, now, error) do
+    seqs = rows |> Enum.map(& &1.seq) |> Enum.uniq()
+
+    with {:ok, hooks} <- Store.multi_get(state.instance, :hooks, Enum.map(seqs, &Keys.hook/1)) do
+      envs =
+        seqs
+        |> Enum.zip(hooks)
+        |> Map.new(fn
+          {seq, {:ok, bin}} -> {seq, %{Envelope.from_binary(bin) | seq: seq}}
+          {seq, :not_found} -> {seq, nil}
+        end)
+
+      {ops, dead} =
+        Enum.reduce(rows, {[], []}, fn %{seq: seq, sink: sink, key: key, row: row}, {ops, dead} ->
+          case Map.fetch!(envs, seq) do
+            nil ->
+              Logger.error("[ankusa] hook #{seq} is missing; dropping its delivery row #{sink}")
+
+              {[{:delete, :index, key}, {:delete, :deliveries, Keys.delivery(seq, sink)} | ops],
+               dead}
+
+            env ->
+              dead_ops = Deliveries.dead_ops(seq, sink, row, now, error, env)
+              {[{:delete, :index, key} | dead_ops] ++ ops, [{env, row} | dead]}
+          end
+        end)
+
+      with :ok <- Store.write(state.instance, ops, sync: true) do
+        state =
+          Enum.reduce(dead, state, fn {env, row}, state ->
+            state
+            |> settle_dead(env, row.module, row.attempts)
+            |> bump_replay(row, :dead)
+          end)
+
+        {:ok, state, length(dead)}
+      end
+    end
   end
 
   defp settle_dead(state, env, module, attempts) do

@@ -1,6 +1,7 @@
 defmodule Ankusa.Sink.RabbitMQTest do
   @moduledoc """
   Requires a live RabbitMQ: `docker compose up -d --wait` in this directory.
+  `AMQP_URL` (default `amqp://guest:guest@localhost:5673`) points elsewhere.
   """
 
   use ExUnit.Case, async: false
@@ -8,7 +9,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
   alias Ankusa.{Envelope, UUIDv7}
   alias Ankusa.Sink.RabbitMQ
 
-  @amqp_url "amqp://guest:guest@localhost:5673"
+  @amqp_url System.get_env("AMQP_URL", "amqp://guest:guest@localhost:5673")
 
   setup do
     instance = :"rmq_#{System.unique_integer([:positive])}"
@@ -321,6 +322,52 @@ defmodule Ankusa.Sink.RabbitMQTest do
     assert is_pid(a) and is_pid(b) and a != b
   end
 
+  # Makes the reaper's row for `key` look idle for its whole `idle_ms`, then
+  # runs one sweep to completion.
+  defp sweep_as_idle(key) do
+    reaper = Ankusa.Sink.RabbitMQ.Reaper
+    [{^key, _pid, _last, idle}] = :ets.lookup(reaper, key)
+    true = :ets.update_element(reaper, key, {3, System.monotonic_time(:millisecond) - idle})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+  end
+
+  test "an idle connection is closed at the broker, and the next delivery opens a new one", %{
+    instance: inst,
+    exchange: exch,
+    chan: chan,
+    queue: queue
+  } do
+    opts = [exchange: exch, url: @amqp_url, idle_timeout_ms: 1_000]
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+    get_message(chan, queue)
+
+    old = connection(inst, exch)
+    amqp = :sys.get_state(old).conn.pid
+    ref = Process.monitor(amqp)
+    key = {inst, RabbitMQ.connection_key(@amqp_url, exch)}
+
+    # Floored at the publish call's 15 s plus a second.
+    assert [{^key, ^old, _last, 16_000}] = :ets.lookup(Ankusa.Sink.RabbitMQ.Reaper, key)
+
+    sweep_as_idle(key)
+
+    assert_receive {:DOWN, ^ref, :process, ^amqp, _reason}, 5_000
+    assert connection(inst, exch) == nil
+
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+    get_message(chan, queue)
+    assert is_pid(connection(inst, exch)) and connection(inst, exch) != old
+  end
+
+  test "idle_timeout_ms: 0 keeps the connection for good", %{instance: inst, exchange: exch} do
+    opts = [exchange: exch, url: @amqp_url, idle_timeout_ms: 0]
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+
+    key = {inst, RabbitMQ.connection_key(@amqp_url, exch)}
+    assert :ets.lookup(Ankusa.Sink.RabbitMQ.Reaper, key) == []
+  end
+
   test "a crash report never prints the URL's password or the pending bodies", %{
     instance: inst,
     exchange: exch
@@ -330,6 +377,6 @@ defmodule Ankusa.Sink.RabbitMQTest do
     printed = inspect(items, limit: :infinity)
 
     refute printed =~ "guest:guest"
-    assert printed =~ "amqp://localhost:5673"
+    assert printed =~ @amqp_url |> URI.parse() |> Map.put(:userinfo, nil) |> URI.to_string()
   end
 end

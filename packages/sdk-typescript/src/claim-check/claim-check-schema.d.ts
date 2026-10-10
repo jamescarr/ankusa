@@ -21,7 +21,12 @@ export interface paths {
          * @description Returns exactly the claim's bytes. Claims are written once and never
          *     rewritten, so a response is cacheable forever. The server does not
          *     verify integrity: the reader MUST check the bytes against the
-         *     message's `sha256`.
+         *     message's `sha256` (a ranged read can only be checked once the whole
+         *     claim has been reassembled).
+         *
+         *     One `bytes` range is served as `206`; several ranges, another unit, a
+         *     malformed `Range`, or any `If-Range` (claims carry no validator) are
+         *     ignored and answered `200` with the whole claim.
          */
         get: operations["readClaim"];
         put?: never;
@@ -116,7 +121,15 @@ export interface components {
         ClaimId: components["schemas"]["ClaimId"];
     };
     requestBodies: never;
-    headers: never;
+    headers: {
+        /**
+         * @description Always `private, max-age=31536000, immutable`: the path is a
+         *     capability, so only the reader may cache it.
+         */
+        CacheControl: string;
+        /** @description Always `bytes`. */
+        AcceptRanges: "bytes";
+    };
     pathItems: never;
 }
 export type $defs = Record<string, never>;
@@ -124,7 +137,14 @@ export interface operations {
     readClaim: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description One byte range: `bytes=first-last`, `bytes=first-` or
+                 *     `bytes=-suffix_length` (RFC 9110 §14.1.2). `last` past the claim's
+                 *     end is clamped to it.
+                 */
+                Range?: string;
+            };
             path: {
                 /** @description The claim's tenant. Never needs encoding. */
                 tenant_id: components["parameters"]["TenantId"];
@@ -138,8 +158,21 @@ export interface operations {
             /** @description The claim's bytes. */
             200: {
                 headers: {
-                    /** @description Always `public, max-age=31536000, immutable`. */
-                    "Cache-Control"?: string;
+                    "Cache-Control": components["headers"]["CacheControl"];
+                    "Accept-Ranges": components["headers"]["AcceptRanges"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            /** @description The requested range of the claim's bytes. */
+            206: {
+                headers: {
+                    "Cache-Control": components["headers"]["CacheControl"];
+                    "Accept-Ranges": components["headers"]["AcceptRanges"];
+                    /** @description `bytes first-last/length`, `length` the whole claim's size. */
+                    "Content-Range"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -148,6 +181,19 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
+            /**
+             * @description The range starts at or past the claim's end (or is `bytes=-0`, or
+             *     the claim is empty). Empty body.
+             */
+            416: {
+                headers: {
+                    "Accept-Ranges": components["headers"]["AcceptRanges"];
+                    /** @description `bytes *\/length`, `length` the whole claim's size. */
+                    "Content-Range"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             503: components["responses"]["StoreUnavailable"];
         };
     };

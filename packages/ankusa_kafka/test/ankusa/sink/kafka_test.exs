@@ -153,6 +153,33 @@ defmodule Ankusa.Sink.KafkaTest do
     assert elapsed_us < 2_000_000
   end
 
+  test "an idle brod client is stopped, and the next delivery starts a new one", %{
+    instance: inst,
+    topic: topic
+  } do
+    opts = opts(topic, idle_timeout_ms: 1_000, produce_timeout_ms: 5_000)
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), opts)
+
+    client = :"ankusa_kafka.#{inst}.default"
+    old = Process.whereis(client)
+    ref = Process.monitor(old)
+    reaper = Ankusa.Sink.Kafka.Reaper
+
+    # Floored at the produce timeout plus a second.
+    assert [{^client, ^old, _last, 6_000}] = :ets.lookup(reaper, client)
+
+    true = :ets.update_element(reaper, client, {3, System.monotonic_time(:millisecond) - 6_000})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+
+    assert_receive {:DOWN, ^ref, :process, ^old, _reason}, 5_000
+    assert Process.whereis(client) == nil
+
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), opts)
+    assert is_pid(Process.whereis(client)) and Process.whereis(client) != old
+    assert length(fetch_all(topic)) == 2
+  end
+
   defp high_watermark(topic) do
     {:ok, {hw, _messages}} = :brod.fetch(@hosts, topic, 0, 0)
     hw

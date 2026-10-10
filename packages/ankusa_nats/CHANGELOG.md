@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `:idle_timeout_ms` (default `600_000`, `0` never, at least
+  `:publish_timeout_ms` plus 1 s): a connection with no delivery for that long
+  is closed (`Ankusa.Sink.Reaper`, requires core's) and the next delivery
+  opens a new one.
+
 ### Changed
 
 - The connection is a `Gnat.ConnectionSupervisor` registered through the

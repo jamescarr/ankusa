@@ -78,6 +78,10 @@ defmodule Ankusa.Sink.NATS do
     * `:publish_timeout_ms`  — how long `deliver/3` waits for the JetStream
                                publish ack; default `5_000`
     * `:connection`          — atom naming the gnat connection; default `:default`
+    * `:idle_timeout_ms`     — close the connection after this long without a
+                               delivery through it, default `600_000` (10 min);
+                               `0` never. Never under `:publish_timeout_ms` plus
+                               1 s. See `Ankusa.Sink.Reaper`
     * `:client_name`         — the name this client reports to NATS monitoring
     * `:tls`, `:ssl_opts`, `:tcp_opts`, `:connection_timeout`, `:ping_interval`,
       `:inbox_prefix`        — passed to gnat's connection settings
@@ -97,6 +101,7 @@ defmodule Ankusa.Sink.NATS do
   alias Ankusa.Envelope
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
+  alias Ankusa.Sink.Reaper
 
   @default_publish_timeout_ms 5_000
 
@@ -110,7 +115,7 @@ defmodule Ankusa.Sink.NATS do
     timeout = Keyword.get(opts, :publish_timeout_ms, @default_publish_timeout_ms)
     connection = Keyword.get(opts, :connection, :default)
 
-    with {:ok, conn} <- ensure_connection(ctx.instance, connection, opts),
+    with {:ok, conn} <- ensure_connection(ctx.instance, connection, opts, timeout),
          {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
       publish(conn, subject, payload, headers(env, ctx), timeout)
     end
@@ -236,10 +241,15 @@ defmodule Ankusa.Sink.NATS do
   # `whereis` first: the common case must not serialize every delivery through
   # the DynamicSupervisor. The supervisor answers its start at once and
   # connects (and reconnects) on its own; the connection is there or it is not.
+  # The idle sweep stops the supervisor, which takes its connection with it.
   @doc false
-  @spec ensure_connection(atom(), atom(), keyword()) :: {:ok, pid()} | {:error, term()}
-  def ensure_connection(instance, connection, opts) do
-    with :ok <- ensure_supervisor(instance, connection, opts) do
+  @spec ensure_connection(atom(), atom(), keyword(), pos_integer()) ::
+          {:ok, pid()} | {:error, term()}
+  def ensure_connection(instance, connection, opts, timeout) do
+    with {:ok, sup} <- ensure_supervisor(instance, connection, opts) do
+      idle = Reaper.idle_ms(opts, timeout + 1_000)
+      :ok = Reaper.touch(Ankusa.Sink.NATS.Reaper, {instance, {:nats_sup, connection}}, sup, idle)
+
       case Ankusa.whereis(instance, {:nats_conn, connection}) do
         nil -> {:error, :not_connected}
         pid -> {:ok, pid}
@@ -248,9 +258,10 @@ defmodule Ankusa.Sink.NATS do
   end
 
   defp ensure_supervisor(instance, connection, opts) do
-    if Ankusa.whereis(instance, {:nats_sup, connection}),
-      do: :ok,
-      else: start_supervisor(instance, connection, opts)
+    case Ankusa.whereis(instance, {:nats_sup, connection}) do
+      pid when is_pid(pid) -> {:ok, pid}
+      nil -> start_supervisor(instance, connection, opts)
+    end
   end
 
   defp start_supervisor(instance, connection, opts) do
@@ -269,8 +280,8 @@ defmodule Ankusa.Sink.NATS do
     }
 
     case DynamicSupervisor.start_child(Ankusa.Sink.NATS.Supervisor, child) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
       {:error, reason} -> {:error, reason}
     end
   end

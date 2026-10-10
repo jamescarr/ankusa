@@ -9,13 +9,15 @@ defmodule Ankusa.Queue.Deliveries do
   #   dead (the DLQ)          deliveries(seq, i)  +  ?x(dead_at, seq, i)
   #
   # Every transition is one batch, so a row always has exactly one index key.
-  # The row value is a term: `%{module, state, attempts, at, error, size}`;
-  # `at` is the due time while pending and the dead-letter time once dead, and
-  # `size` the stored hook's byte size. A row revived by a replay job
-  # (`Ankusa.Dispatch.Replayer`) additionally carries `replay: replay_id`, the
-  # job id the delivery is attributed to. Rows bind to `(sink index, module)`;
-  # their opts are resolved from the *current* source at delivery time, so a
-  # config fix applies to the backlog and no fun or secret is ever persisted.
+  # The row value is a term: `%{module, state, attempts, at, error, size,
+  # source_id}`; `at` is the due time while pending and the dead-letter time
+  # once dead, `size` the stored hook's byte size, and `source_id` the hook's
+  # source (rows written before it existed lack the key: read the hook). A row
+  # revived by a replay job (`Ankusa.Dispatch.Replayer`) additionally carries
+  # `replay: replay_id`, the job id the delivery is attributed to. Rows bind to
+  # `(sink index, module)`; their opts are resolved from the *current* source
+  # at delivery time, so a config fix applies to the backlog and no fun or
+  # secret is ever persisted.
   #
   # Op builders are pure and return `[Ankusa.Store.op()]`; the caller decides
   # when (and with what durability) to write them.
@@ -159,6 +161,126 @@ defmodule Ankusa.Queue.Deliveries do
     end)
   end
 
+  # ── one source's rows ─────────────────────────────────────────────────────
+
+  # Index keys examined per read of their rows (and of the hooks of rows that
+  # predate `source_id`).
+  @source_chunk 1_000
+
+  @type source_row :: %{key: binary(), seq: pos_integer(), sink: integer(), row: map()}
+
+  @doc """
+  The undelivered rows of `source_id` in this node's queue: `pending` rows sit
+  in the due index (due now or waiting out a backoff), `inflight` rows are
+  claimed by the Pipeline. Walks both indexes, the cost of one queue-gauge
+  tick.
+  """
+  @spec pending_for_source(atom(), String.t()) ::
+          {:ok, %{pending: non_neg_integer(), inflight: non_neg_integer()}} | {:error, term()}
+  def pending_for_source(instance, source_id) do
+    count = fn rows, n -> {:cont, n + length(rows)} end
+
+    with {:ok, pending} <- fold_source(instance, :due, source_id, 0, count),
+         {:ok, inflight} <- fold_source(instance, :inflight, source_id, 0, count) do
+      {:ok, %{pending: pending, inflight: inflight}}
+    end
+  end
+
+  @doc """
+  Folds the rows of `source_id` held in index `family` (`:due` or
+  `:inflight`): `fun.(rows, acc)` runs once per #{@source_chunk} index keys
+  examined, with the matching rows decoded, and returns `{:cont, acc}` or
+  `{:halt, acc}`. A row written before rows carried `source_id` is matched by
+  its hook's; an index key whose row or hook is gone is skipped. The scan
+  reads a snapshot, so `fun` may move the rows it is given.
+  """
+  @spec fold_source(
+          atom(),
+          :due | :inflight,
+          String.t(),
+          acc,
+          ([source_row()], acc -> {:cont, acc} | {:halt, acc})
+        ) :: {:ok, acc} | {:error, term()}
+        when acc: term()
+  def fold_source(instance, family, source_id, acc, fun) when family in [:due, :inflight] do
+    %{lo: lo, hi: hi} = Keys.family(family)
+
+    scan =
+      Store.fold(instance, family, {lo, hi}, {[], 0, acc}, fn key, _value, {chunk, n, acc} ->
+        chunk = [index_entry(family, key) | chunk]
+
+        if n + 1 < @source_chunk do
+          {:cont, {chunk, n + 1, acc}}
+        else
+          case source_step(instance, chunk, source_id, acc, fun) do
+            {:cont, acc} -> {:cont, {[], 0, acc}}
+            {:halt, acc} -> {:halt, {:halted, acc}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end
+      end)
+
+    case scan do
+      {:ok, {:halted, acc}} ->
+        {:ok, acc}
+
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:ok, {chunk, _n, acc}} ->
+        case source_step(instance, chunk, source_id, acc, fun) do
+          {:error, reason} -> {:error, reason}
+          {_cont_or_halt, acc} -> {:ok, acc}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp index_entry(:due, key) do
+    {_at, seq, sink} = Keys.decode_due(key)
+    %{key: key, seq: seq, sink: sink}
+  end
+
+  defp index_entry(:inflight, key) do
+    {seq, sink} = Keys.decode_inflight(key)
+    %{key: key, seq: seq, sink: sink}
+  end
+
+  # `chunk` is newest-first, as the fold built it.
+  defp source_step(_instance, [], _source_id, acc, _fun), do: {:cont, acc}
+
+  defp source_step(instance, chunk, source_id, acc, fun) do
+    entries = Enum.reverse(chunk)
+    keys = Enum.map(entries, &Keys.delivery(&1.seq, &1.sink))
+
+    with {:ok, rows} <- Store.multi_get(instance, :deliveries, keys),
+         found = for({entry, {:ok, bin}} <- Enum.zip(entries, rows), do: with_row(entry, bin)),
+         {tagged, legacy} = Enum.split_with(found, &Map.has_key?(&1.row, :source_id)),
+         {:ok, legacy} <- legacy_of_source(instance, legacy, source_id) do
+      fun.(Enum.filter(tagged, &(&1.row.source_id == source_id)) ++ legacy, acc)
+    end
+  end
+
+  defp with_row(entry, bin), do: Map.put(entry, :row, decode_row(bin))
+
+  defp legacy_of_source(_instance, [], _source_id), do: {:ok, []}
+
+  defp legacy_of_source(instance, entries, source_id) do
+    seqs = entries |> Enum.map(& &1.seq) |> Enum.uniq()
+
+    with {:ok, hooks} <- Store.multi_get(instance, :hooks, Enum.map(seqs, &Keys.hook/1)) do
+      mine =
+        for {seq, {:ok, bin}} <- Enum.zip(seqs, hooks),
+            Envelope.from_binary(bin).source_id == source_id,
+            into: MapSet.new(),
+            do: seq
+
+      {:ok, Enum.filter(entries, &MapSet.member?(mine, &1.seq))}
+    end
+  end
+
   # ── transitions ───────────────────────────────────────────────────────────
 
   @doc """
@@ -233,13 +355,21 @@ defmodule Ankusa.Queue.Deliveries do
   every current sink of its source that has none yet. A source with no sinks
   has nothing to deliver, so the row just clears.
   """
-  def expand_ops(seq, unresolved_sink, size, source_sinks, existing, now) do
+  def expand_ops(seq, unresolved_sink, size, source_id, source_sinks, existing, now) do
     rows =
       source_sinks
       |> Enum.with_index()
       |> Enum.reject(fn {_sink, index} -> MapSet.member?(existing, index) end)
       |> Enum.flat_map(fn {{mod, _opts}, index} ->
-        row = %{module: mod, state: :pending, attempts: 0, at: now, error: nil, size: size}
+        row = %{
+          module: mod,
+          state: :pending,
+          attempts: 0,
+          at: now,
+          error: nil,
+          size: size,
+          source_id: source_id
+        }
 
         [
           {:put, :deliveries, Keys.delivery(seq, index), encode_row(row)},

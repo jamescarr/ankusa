@@ -239,4 +239,35 @@ defmodule Ankusa.Sink.NATSTest do
     assert is_pid(Ankusa.whereis(inst, {:nats_conn, :default}))
     refute Process.whereis(:"ankusa_nats.#{inst}.default")
   end
+
+  test "an idle connection is closed, and the next delivery opens a new one", %{
+    instance: inst,
+    subject: subject,
+    stream: stream,
+    admin: admin
+  } do
+    opts = opts(subject, idle_timeout_ms: 1_000, publish_timeout_ms: 5_000)
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+
+    sup = Ankusa.whereis(inst, {:nats_sup, :default})
+    conn = Ankusa.whereis(inst, {:nats_conn, :default})
+    conn_ref = Process.monitor(conn)
+    key = {inst, {:nats_sup, :default}}
+    reaper = Ankusa.Sink.NATS.Reaper
+
+    # Floored at the publish timeout plus a second.
+    assert [{^key, ^sup, _last, 6_000}] = :ets.lookup(reaper, key)
+
+    true = :ets.update_element(reaper, key, {3, System.monotonic_time(:millisecond) - 6_000})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+
+    assert_receive {:DOWN, ^conn_ref, :process, ^conn, _reason}, 5_000
+    assert Ankusa.whereis(inst, {:nats_sup, :default}) == nil
+    assert Ankusa.whereis(inst, {:nats_conn, :default}) == nil
+
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+    assert Ankusa.whereis(inst, {:nats_conn, :default}) not in [nil, conn]
+    assert {:ok, %{state: %{messages: 2}}} = Stream.info(admin, stream)
+  end
 end

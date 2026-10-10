@@ -164,7 +164,11 @@ final class SourcesClient
      * Delete a source: `DELETE /v1/tenants/<tenant>/sources/<name>`.
      *
      * Succeeds with no return value (the server answers `204` with an empty
-     * body); a missing source raises {@see SourceNotFoundError}.
+     * body); a missing source raises {@see SourceNotFoundError}. A source that
+     * still has undelivered hooks on the server's node raises
+     * {@see SourceConflictError} whose body's `error` is
+     * `source_has_deliveries` (with `pending`/`inflight` counts); this method
+     * never sends the admin API's `?deliveries=dead_letter`.
      *
      * @throws SourcesError
      */

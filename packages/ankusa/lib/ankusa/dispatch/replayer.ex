@@ -695,7 +695,14 @@ defmodule Ankusa.Dispatch.Replayer do
               {:cont, {:ok, entries, skipped + 1}}
 
             indexes ->
-              entry = %{bin: bin, size: size, sinks: indexes, replay_id: job.id}
+              entry = %{
+                bin: bin,
+                size: size,
+                sinks: indexes,
+                replay_id: job.id,
+                source_id: env.source_id
+              }
+
               {:cont, {:ok, [entry | entries], skipped}}
           end
 

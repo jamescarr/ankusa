@@ -115,7 +115,13 @@ defmodule Ankusa.Queue.Writer do
     ops =
       entries
       |> Enum.with_index(state.next_seq)
-      |> Enum.reduce([], fn {%{bin: bin, size: size, sinks: sinks, replay_id: replay_id}, seq},
+      |> Enum.reduce([], fn {%{
+                               bin: bin,
+                               size: size,
+                               sinks: sinks,
+                               replay_id: replay_id,
+                               source_id: source_id
+                             }, seq},
                             ops ->
         row_ops =
           Enum.flat_map(sinks, fn {index, mod} ->
@@ -127,6 +133,7 @@ defmodule Ankusa.Queue.Writer do
                 at: now,
                 error: nil,
                 size: size,
+                source_id: source_id,
                 replay: replay_id
               })
 
@@ -436,13 +443,21 @@ defmodule Ankusa.Queue.Writer do
   defp build_ops(items, first_seq, now, archive?) do
     items
     |> Enum.with_index(first_seq)
-    |> Enum.reduce({[], 0, 0}, fn {{_env, bin, mods, _ttl, replay_id}, seq},
-                                  {ops, count, bytes} ->
+    |> Enum.reduce({[], 0, 0}, fn {{env, bin, mods, _ttl, replay_id}, seq}, {ops, count, bytes} ->
       size = byte_size(bin)
 
       # A row without `:replay` is a live delivery; a released quarantine hook's
       # rows carry the job's id, like a replayed dead letter's.
-      base = %{module: nil, state: :pending, attempts: 0, at: now, error: nil, size: size}
+      base = %{
+        module: nil,
+        state: :pending,
+        attempts: 0,
+        at: now,
+        error: nil,
+        size: size,
+        source_id: env.source_id
+      }
+
       base = if is_binary(replay_id), do: Map.put(base, :replay, replay_id), else: base
 
       row_ops =

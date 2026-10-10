@@ -17,7 +17,13 @@ is *now*, so a config fix applies to the backlog and no fun or secret is ever
 persisted. If the sinks were reordered a row falls back to the one sink with
 its module; if it cannot be bound it is dead-lettered as
 `{:sink_gone, index, module}`, and a deleted source as
-`{:source_gone, source_id}`.
+`{:source_gone, source_id}`. The admin API refuses to delete a source with
+rows still queued on the node (`409 source_has_deliveries`) unless asked to
+dead-letter them (`?deliveries=dead_letter`): dispatch then writes them to the
+DLQ as `{:source_gone, source_id}` at once, so no later source of the same
+name inherits them. A hook accepted while the delete runs can still be queued
+after it; dispatch dead-letters it the same way when it claims it, unless the
+name was re-created first.
 
 **Deliveries are not ordered.** Two hooks for one sink may run in either
 order, and a retry runs after whatever is due before it. A Kafka partition key
@@ -228,6 +234,14 @@ entry per secret); a secret that does not decode fails the attempt as
 `{:permanent, :bad_secret}`, and boot rejects one in a static source. Every
 SDK verifies the signature; see
 [`integrations.md`](integrations.md#signed-deliveries).
+
+The broker sinks (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`)
+open one connection per broker on first use and close it after
+`idle_timeout_ms` with no delivery through it (default 10 minutes, `0`
+keeps it for good; `Ankusa.Sink.Reaper`), so a deleted or re-pointed source
+does not leave its connection open for the life of the node. The next
+delivery opens a new one; a delivery caught by the close fails that attempt
+and is retried.
 
 ### Idempotent receivers
 

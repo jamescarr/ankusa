@@ -37,7 +37,9 @@ class SourceNotFoundError(SourcesError):
 
 
 class SourceConflictError(SourcesError):
-    """``409 source_exists``: a source with that name already exists."""
+    """``409 source_exists``: a source with that name already exists; or
+    ``409 source_has_deliveries``: a delete found the source still has
+    undelivered hooks. The body's ``error`` says which."""
 
 
 class SourceStoreReadOnlyError(SourcesError):
