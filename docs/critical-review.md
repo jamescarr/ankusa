@@ -1170,7 +1170,12 @@ image's `check-config` exits 78 (`validate_shared!/1`, on every node whatever
 its roles); an admin API write is `400 invalid_source`; a stored one written
 before the rule keeps serving, and the node names it in a warning at boot
 (`warn_stored_shared/2`). A source that sets the flag behaves as before.
-`multi-tenancy.md` documents the rule.
+Not covered: a shared source *with* a verifier and `on_verify_failure:
+accept_flag` still commits a forged hook, flagged, under whatever tenant the
+URL names (it spends the source's quarantine bucket, not that tenant's rate
+limit). The flag is on the envelope (`verification.flagged`, which an Elixir
+sink sees); the HTTP and queue sinks' messages do not carry it, so their
+consumers cannot tell. `multi-tenancy.md` documents the rule and this case.
 
 <a id="e6"></a>
 ### E6 · Medium · Code — Ingest backpressure counts records, not bytes
