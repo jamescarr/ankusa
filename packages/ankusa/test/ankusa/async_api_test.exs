@@ -141,6 +141,37 @@ defmodule Ankusa.AsyncApiTest do
     refute Map.has_key?(channel["messages"]["stripe"], "headers")
   end
 
+  test "a Google Pub/Sub sink is a googlepubsub server and a topic channel with the ordering key" do
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [
+              sinks: [{Ankusa.Sink.GooglePubSub, project: "p", topic: "hooks", ordering_key: "k"}]
+            ]
+          })
+      )
+
+    assert [{_server_id, server}] = Map.to_list(map["servers"])
+
+    assert Map.take(server, ["host", "protocol"]) == %{
+             "host" => "pubsub.googleapis.com",
+             "protocol" => "googlepubsub"
+           }
+
+    assert [{_channel_id, channel}] = Map.to_list(map["channels"])
+    assert channel["address"] == "projects/p/topics/hooks"
+    assert channel["bindings"] == %{"googlepubsub" => %{"bindingVersion" => "0.2.0"}}
+
+    message = channel["messages"]["stripe"]
+
+    assert message["bindings"] == %{
+             "googlepubsub" => %{"orderingKey" => "k", "bindingVersion" => "0.2.0"}
+           }
+
+    refute Map.has_key?(message, "headers")
+  end
+
   test "an address a function computes per hook is a channel of its own, with no address" do
     map =
       document_map(

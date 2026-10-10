@@ -455,6 +455,28 @@ sources:
         # access_key_id: "${AWS_ACCESS_KEY_ID}"
         # secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
         # session_token: "${AWS_SESSION_TOKEN}"
+      - type: google_pubsub
+        # The topic must exist: the sink never creates a topic or a
+        # subscription, so a missing topic is an error (retried, then
+        # dead-lettered). A topic with no subscription accepts the publish and
+        # drops the message.
+        project: my-project
+        topic: ankusa-hooks
+        # Default: https://pubsub.googleapis.com. Set it for a regional
+        # endpoint or the floci-gcp emulator (http://localhost:4588).
+        # endpoint: https://pubsub.googleapis.com
+        # Static string only. Orders messages only on a subscription with
+        # message ordering enabled; default: no ordering key.
+        # ordering_key: stripe
+        inline_max_bytes: 8192
+        # The largest data + attributes + ordering key sent; a bigger message
+        # is dead-lettered at once. Pub/Sub's limit, 10 MB.
+        max_message_bytes: 10000000
+        timeout_ms: 5000
+        # metadata (default): the GCE/GKE metadata server. token: the bearer
+        # token below. none: no credential, for an emulator.
+        auth: token
+        token: "${GCP_TOKEN}"
 
   # A second source, showing the other verifier and the quarantine policy.
   standard:
