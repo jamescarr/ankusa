@@ -154,6 +154,16 @@ Without it:
 A source that sets the flag behaves exactly as an unflagged one did before:
 the request's tenant is taken as given.
 
+The rule does not cover a shared source that has a verifier but
+`on_verify_failure: accept_flag`: a request that fails verification is still
+committed, flagged, under whatever tenant the URL names. It spends the
+source's quarantine bucket rather than that tenant's rate limit, but it lands
+in the tenant's storage scope. The flag is on the envelope
+(`verification.flagged`, which an Elixir sink sees); the HTTP and queue
+sinks' messages do not carry it, so their consumers cannot tell such a hook
+from a verified one. Under tenant routing, give a shared source `reject` or
+`quarantine` instead.
+
 ## Dynamic sources
 
 Everything above is a store decision, not a boot-time one: the router resolves
