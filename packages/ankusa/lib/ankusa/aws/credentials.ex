@@ -1,7 +1,7 @@
-defmodule Ankusa.BlobStore.S3.Credentials do
+defmodule Ankusa.AWS.Credentials do
   @moduledoc """
-  Where `Ankusa.BlobStore.S3` gets the credentials it signs with, in the order
-  the AWS SDKs look:
+  Where `Ankusa.BlobStore.S3` and `Ankusa.Sink.SQS` get the credentials they
+  sign with, in the order the AWS SDKs look:
 
     1. `opts`: `:access_key_id` and `:secret_access_key` (plus an optional
        `:session_token`).
@@ -16,7 +16,7 @@ defmodule Ankusa.BlobStore.S3.Credentials do
 
   Temporary credentials (3 and 4) are cached per source in a public ETS table
   until 5 minutes before they expire. Nothing here raises: no source at all is
-  `{:error, :no_credentials}`, which the blob store returns like any failed
+  `{:error, :no_credentials}`, which the caller returns like any failed
   request.
 
   The STS and IMDS endpoints can be overridden with `:sts_endpoint` and
@@ -27,7 +27,7 @@ defmodule Ankusa.BlobStore.S3.Credentials do
 
   alias Ankusa.HttpClient
 
-  @table :ankusa_s3_credentials
+  @table :ankusa_aws_credentials
   @refresh_window_s 300
   @imds_endpoint "http://169.254.169.254"
   @imds_ttl_s "21600"

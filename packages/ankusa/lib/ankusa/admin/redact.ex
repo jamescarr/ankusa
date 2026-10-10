@@ -51,7 +51,7 @@ defmodule Ankusa.Admin.Redact do
                  signature_header sig_prefix sig_key version signed timestamp timestamp_header
                  bucket region namespace container account_name client_id tenancy_ocid user_ocid
                  key_fingerprint exchange routing_key topic brokers servers subject channel
-                 client_name inbox_prefix username mechanism
+                 queue_url message_group_id client_name inbox_prefix username mechanism
                  type method exchange_type parse hash encoding secret_decode on_verify_failure)
 
   @doc "A redacted, JSON-encodable view of the whole config."

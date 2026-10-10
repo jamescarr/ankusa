@@ -71,9 +71,24 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - Boot-time range validation of every numeric config key (`"<key> must be
   <constraint>, got <value>"`), and of embedded sources' verifier secrets
   (`Ankusa.Verifier.validate_config!/1`, `Ankusa.Verifier.Hmac.validate_opts/1`).
+- **`Ankusa.Sink.SQS`**: delivers hooks to an Amazon SQS queue with one
+  SigV4-signed `SendMessage` per delivery, the same `Ankusa.Sink.Message`
+  body as the other queue sinks, and the Kafka header set as message
+  attributes. No new dependency (`req` + `aws_signature`). `:ok` only on a
+  `200` whose `MD5OfMessageBody` matches the body sent. A `.fifo` queue gets
+  `MessageGroupId` (`:message_group_id`, default `"tenant/source"`) and
+  `MessageDeduplicationId` (the hook id, `id:replay:<replay_id>` on a
+  replay). A message over `:max_message_bytes` (1 MiB), `InvalidMessageContents`
+  and `InvalidParameterValue` are permanent; every other SQS error (a missing
+  queue included: the sink never creates one) is retried. `describe/2`
+  reports the AsyncAPI `sqs` channel binding. The admin config view shows
+  `queue_url` and `message_group_id`.
 
 ### Changed
 
+- `Ankusa.BlobStore.S3.Credentials` is now `Ankusa.AWS.Credentials` (ETS table
+  `:ankusa_aws_credentials`), shared by `BlobStore.S3` and `Sink.SQS`. The
+  chain and its options are unchanged.
 - **Circuit breakers are on by default** (`dispatch.breaker_failures: 5`): a
   sink that keeps failing has its rows parked, without spending attempts,
   instead of each retrying on the policy's schedule, so they reach the DLQ

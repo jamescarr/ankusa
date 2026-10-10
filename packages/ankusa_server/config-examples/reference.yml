@@ -415,6 +415,29 @@ sources:
         inline_max_bytes: 8192
         # How long to wait for Redis to answer the PUBLISH.
         publish_timeout_ms: 5000
+      - type: sqs
+        # The queue must exist: the sink never creates one, so a missing queue
+        # is an error (retried, then dead-lettered). A URL ending .fifo is a
+        # FIFO queue: MessageDeduplicationId is the hook id (SQS dedupes for
+        # 5 minutes), MessageGroupId the message_group_id below.
+        queue_url: "${SQS_QUEUE_URL}"
+        region: us-east-1
+        # Default: the queue URL's origin. Set it for a VPC endpoint or an
+        # emulator (http://localhost:4566).
+        # endpoint: https://sqs.us-east-1.amazonaws.com
+        # Static string only. Default "<tenant>/<source>" on a FIFO queue; on a
+        # standard queue it is sent only when set (fair queues).
+        # message_group_id: stripe
+        inline_max_bytes: 8192
+        # The largest body + message attributes sent; a bigger message is
+        # dead-lettered at once. SQS's limit, 1 MiB; lower it to the queue's
+        # MaximumMessageSize.
+        max_message_bytes: 1048576
+        timeout_ms: 5000
+        # Omit all three to use AWS_* env vars, IRSA, or the EC2 instance role.
+        # access_key_id: "${AWS_ACCESS_KEY_ID}"
+        # secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+        # session_token: "${AWS_SESSION_TOKEN}"
 
   # A second source, showing the other verifier and the quarantine policy.
   standard:

@@ -127,12 +127,12 @@ defmodule Ankusa.MixProject do
       # the prefix bit math is the package's.
       {:cidr, "~> 1.2"},
       # HTTP client for the S3/GCS blob stores, the claim-check Remote adapter,
-      # and Sink.Http. Replaces hand-rolled :httpc plumbing (and starts its own
+      # Sink.Http and Sink.SQS. Replaces hand-rolled :httpc plumbing (and starts its own
       # Finch pool, so embedders configure nothing).
       {:req, "~> 0.7"},
       # AWS Signature V4 — the signing implementation behind the official
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
-      # string-to-sign / HMAC-chain code in Ankusa.BlobStore.S3.
+      # string-to-sign / HMAC-chain code; signs Ankusa.BlobStore.S3 and Ankusa.Sink.SQS.
       {:aws_signature, "~> 0.4"},
       # Built-in Prometheus mapping of Ankusa.Telemetry (Ankusa.Metrics).
       # Every deployment wants metrics, so they live in core rather than an

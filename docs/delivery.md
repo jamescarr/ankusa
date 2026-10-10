@@ -185,7 +185,7 @@ publishes, for the AsyncAPI document (only messaging sinks implement it):
 @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
 ```
 
-A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`) returns its
+A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`) returns its
 `inline_max_bytes` (default 64 KiB). Dispatch checks a body in **once**, before
 any sink runs, when it is larger than at least one of its source's sinks'
 thresholds, and hands the resulting claim reference to every sink and every
@@ -204,6 +204,7 @@ See [`claim-check.md`](claim-check.md).
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
 | `Sink.Redis` | `:redix`, separate `ankusa_redis` package | Publishes to a Redis pub/sub channel (`PUBLISH`) and reports zero subscribers as an error. Detailed below. |
+| `Sink.SQS` | none (core: `req` + `aws_signature`) | Sends to an SQS queue (`SendMessage`, SigV4), standard or FIFO, confirmed by SQS's `200`. Detailed below. |
 
 ```elixir
 sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
@@ -566,6 +567,69 @@ for a server that isn't there, `{:connection, :timeout}`, or
 Redix reconnects on its own with backoff and a publish sent meanwhile is
 `{:error, {:connection, :closed}}`; the child is `:temporary`, so nothing
 crash-loops against a server that is gone.
+
+### `Sink.SQS`: queue delivery
+
+The same `Ankusa.Sink.Message`, sent to an Amazon SQS queue, standard or FIFO.
+Consumers on SQS (Lambda, Celery's SQS transport, a worker polling
+`ReceiveMessage`) read it directly, with no Kafka-to-SQS bridge in between. The
+sink lives in `ankusa` core: it is one SigV4-signed HTTPS `POST` per delivery
+through `Ankusa.HttpClient`, with the signer `BlobStore.S3` already uses and
+the same credential chain (`Ankusa.AWS.Credentials`), so it adds no
+dependency and starts no process.
+
+```elixir
+sinks: [
+  {Ankusa.Sink.SQS,
+   queue_url: "https://sqs.us-east-1.amazonaws.com/123456789012/hooks.fifo",
+   region: "us-east-1",
+   message_group_id: "stripe",                  # FIFO default: "tenant/source"; or a 1-arity fun
+   inline_max_bytes: 65_536,                    # above this the message carries a claim reference
+   max_message_bytes: 1_048_576,                # body + attributes; larger is dead-lettered at once
+   timeout_ms: 5_000}
+   # endpoint: "http://localhost:4566"          # default: the queue URL's origin
+   # access_key_id:/secret_access_key:/session_token: — else AWS_* env, IRSA, IMDSv2
+]
+```
+
+**It never creates the queue.** A queue's type, retention, visibility timeout,
+redrive policy and encryption are an operator's contract. A queue that does
+not exist is `{:error, {:sqs, 400, "QueueDoesNotExist", message}}`, into the
+retry policy and then the DLQ, the way `Sink.NATS` treats a missing stream.
+
+**`deliver/3` returns `:ok` only once SQS has the message.** That is a `200`
+from `SendMessage` whose `MD5OfMessageBody` matches the MD5 of the body sent;
+SQS answers `200` after storing the message redundantly, so the sink is
+durable for [direct mode](#direct-mode). The other outcomes:
+
+| Outcome | Result |
+| --- | --- |
+| body + attributes over `max_message_bytes` (1 MiB, SQS's limit) | permanent `{:message_too_large, size, max}`, before any request |
+| SQS refuses the message itself: `InvalidMessageContents`, `InvalidParameterValue` | permanent `{:sqs, status, code, message}`: dead-lettered at once |
+| any other SQS error: `QueueDoesNotExist`, `AccessDenied`, throttling, a 5xx | transient `{:sqs, status, code, message}`: the retry policy |
+| a non-2xx that is not an SQS error document (a proxy) | transient `{:status, status, body}` |
+| a `200` with a mismatched MD5, no credentials, a transport failure | transient |
+
+**FIFO when the queue URL ends `.fifo`** (AWS requires the suffix). Each send
+carries a `MessageGroupId`, `message_group_id` or by default
+`"tenant_id/source_id"` (`"/source_id"` without a tenant), the scope of the
+Kafka sink's default key: one group's messages are received in order. Its
+`MessageDeduplicationId` is the hook's `id`, or `id:replay:<replay_id>` on a
+replay (the `Nats-Msg-Id` rule), so SQS collapses a retry after a lost
+response while a deliberate replay is stored. SQS's deduplication window is
+**5 minutes**: a retry later than that can store a second copy, so consumers
+still dedupe on the `idempotency_key`. On a standard queue the sink sends no
+deduplication id, and a `MessageGroupId` only when `message_group_id` is set
+(fair queues).
+
+**The queue is the address, message attributes are the metadata.** Each
+message carries `String` attributes `ankusa_id`, `ankusa_source_id`,
+`ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key` and
+`content_type`, plus `ankusa_dedupe_key` and `ankusa_replay_id` when present:
+the Kafka header set, at most 8 of SQS's 10 attributes. `ankusa_tenant_id` is
+left out when the hook has no tenant, because SQS refuses an empty attribute
+value. SQS counts attributes toward the size limit, so `max_message_bytes`
+checks body plus attributes.
 
 ## `Ankusa.RetryPolicy`
 

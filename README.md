@@ -14,8 +14,8 @@ _**Don't fight the traffic. Steer it.**_
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
 at it: every hook is written to a durable local store before Ankusa answers
 `2xx`, every accepted POST is stored under a fresh `id` (unless the source sets `dedupe`), and each hook is
-delivered to your own worker over HTTP, RabbitMQ, Kafka, NATS JetStream, or
-Redis pub/sub, with retries, a dead-letter queue, and replay. Start with one
+delivered to your own worker over HTTP, RabbitMQ, Kafka, NATS JetStream,
+Redis pub/sub, or Amazon SQS, with retries, a dead-letter queue, and replay. Start with one
 container. Grow into a fleet by changing config, not code.
 
 ## Quickstart
@@ -112,7 +112,7 @@ flowchart LR
 
 - Signature verification via a configurable HMAC engine, with named schemes for Stripe, GitHub, Standard Webhooks, Shopify, and Slack, plus any body-HMAC scheme you describe in config
 - Multi-tenant catch URLs, with a pluggable resolver for custom schemes
-- Delivery over HTTP, RabbitMQ, Kafka, NATS JetStream, and Redis pub/sub, with
+- Delivery over HTTP, RabbitMQ, Kafka, NATS JetStream, Redis pub/sub, and Amazon SQS, with
   retries, backoff, a dead letter queue, and replay
 - Quarantine for hooks that fail verification, so nothing is silently dropped
 - Archiving to S3, GCS, Azure Blob Storage, OCI Object Storage, Cloudflare R2, or MinIO
@@ -126,8 +126,8 @@ replace that piece and keep the rest.
 
 When one box is not enough, run N independent all-role nodes behind a load
 balancer. Each node has its own data volume, its own store, and its own
-DLQ/admin API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ, or
-Redis pub/sub.
+DLQ/admin API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ,
+Redis pub/sub, or SQS.
 A disk-mode node keeps `edge`, `dispatch`, and `storage` in one BEAM node, so a
 node is the unit of scale: add nodes, not roles. Give each node **its own
 bucket** (or LocalFS) for segments. Segment keys are
@@ -143,7 +143,7 @@ flowchart LR
     E1 --> ST1[("own store\n+ volume")]
     E2 --> ST2[("own store\n+ volume")]
     E3 --> ST3[("own store\n+ volume")]
-    ST1 & ST2 & ST3 --> Q[Kafka / NATS / RabbitMQ / HTTP]
+    ST1 & ST2 & ST3 --> Q[Kafka / NATS / RabbitMQ / SQS / HTTP]
     ST1 & ST2 & ST3 --> S[(S3 / GCS)]
     Q --> W[Your workers]
 ```

@@ -40,6 +40,7 @@ What a consumer learns per transport:
 | `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; the document advertises no headers, though the wire carries AMQP `message_id` and an `ankusa_idempotency_key` header (plus optional `ankusa_dedupe_key` and `ankusa_replay_id`), which it does not describe |
 | `nats` | the `subject` | the same six always-present headers and optional `ankusa_dedupe_key`/`ankusa_replay_id` as Kafka, plus `Nats-Msg-Id` |
 | `redis` | the `channel` | none: pub/sub has no headers |
+| `sqs` | the queue name (`hooks.fifo`) | the `sqs` channel binding (`queue.name`, `queue.fifoQueue`); the document advertises no headers, though each message carries the Kafka header set as SQS message attributes (`ankusa_tenant_id` only when the hook has a tenant), which it does not describe |
 
 Kafka is one topic with the source in the record key, not a topic per source, so
 two Kafka sources on one topic are one channel with two messages. When a

@@ -44,7 +44,7 @@ packages/
                               zero-external-dep default adapter
                               (BlobStore.{LocalFS,S3,GCS,Azure,OCI},
                               Codec.Raw, all Verifiers,
-                              Sink.{Log,Http}, RetryPolicy.Exponential,
+                              Sink.{Log,Http,SQS}, RetryPolicy.Exponential,
                               RouteResolver.{Path,TenantPath})
   ankusa_rabbitmq             path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
   ankusa_kafka                path-dep on ankusa + brod. Ankusa.Sink.Kafka.

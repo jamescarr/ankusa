@@ -1,11 +1,12 @@
 defmodule Ankusa.HttpClient do
   @moduledoc """
   The one place the outbound adapters issue HTTP requests: `Ankusa.BlobStore.S3`,
-  `Ankusa.BlobStore.GCS`, and `Ankusa.Sink.Http`.
+  `Ankusa.BlobStore.GCS`, `Ankusa.Sink.Http`, and `Ankusa.Sink.SQS`.
 
-  Those three share more than a client. Every request they send is a *function of
-  its own bytes* — a signed S3 URL, a forwarded hook body — which makes four
-  options part of each adapter's contract rather than a preference:
+  Those adapters share more than a client. Every request they send is a *function
+  of its own bytes* — a signed S3 URL, a signed `SendMessage`, a forwarded hook
+  body — which makes four options part of each adapter's contract rather than a
+  preference:
 
     * `retry: false` — retries belong to the framework's own loops
       (`Ankusa.RetryPolicy`, the batcher's backoff). Req's default retry would
@@ -17,7 +18,8 @@ defmodule Ankusa.HttpClient do
     * `http_errors: :return` — a non-2xx status is a value each adapter maps
       (`{:error, :not_found}`), not an exception.
     * `decode_body: false` — these bodies are segments, claims and hook payloads,
-      not JSON.
+      not JSON; the one JSON reply (SQS's) is checked against the bytes sent, so
+      its adapter decodes it itself.
 
   ## `:req_options` is an allowlist
 
