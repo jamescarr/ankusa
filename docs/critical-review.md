@@ -517,8 +517,10 @@ the admin API was not checked, so a log-only source answered `201` with no
 durable copy anywhere. `Ankusa.SourceStore.Table.check_write/2`, which both
 writable stores (`SourceStore.Persistent`, `SourceStore.Redis`) call before
 a write, now applies `Ankusa.Queue.check_durable/2` — the same rule as boot —
-so the write is `400 invalid_source` and nothing is stored. A source stored
-before the check keeps serving.
+so the write is `400 invalid_source` and nothing is stored. A source that
+reaches the node without that check — stored before it existed, or written
+to a shared `SourceStore.Redis` by a `wal: :disk` node — is refused at the
+ack instead: `Edge.Publish` answers `503` for a source with no durable sink.
 
 <a id="b1"></a>
 ### B1 · Critical · Reproduced — RabbitMQ confirms unroutable publishes, and `durable?` says that is durable
@@ -1161,22 +1163,24 @@ hold connection credentials in their children's start arguments, and brod,
 gnat and Redix keep them in their own process state.
 
 **Status (2026-10-10, audit).** The sink-adapter residual is closed, and was
-worse than recorded for Redis: `Sink.Redis` registered its connection under
-`{:redis_sink, url}`, so the URL's password was in the instance registry's
-key as well. Now no adapter puts a credential in a child spec or a registry
-key. RabbitMQ passes the connection only the options it reads, with the URL
-inside a zero-arity closure (`Connection.init/1` resolves it); NATS starts
+worse than recorded for Redis but narrower than recorded for Kafka. A
+`DynamicSupervisor` keeps no start arguments for a `:temporary` child (its
+state holds `{m, f, :undefined}`), and the Kafka and Redis connections are
+`:temporary`, so their supervisors never printed them. The RabbitMQ and NATS
+connections restart, so their supervisors did. And `Sink.Redis` registered its
+connection under `{:redis_sink, url}`, so the URL's password was in the
+instance registry's key, and Redix, given the URL, kept the password in its
+state. Now RabbitMQ passes the connection only the options it reads, with the
+URL inside a zero-arity closure (`Connection.init/1` resolves it); NATS starts
 `Gnat.ConnectionSupervisor` through `Sink.NATS.start_connection_supervisor/2`
-with the settings in a closure; Kafka starts brod through
-`Sink.Kafka.start_client_process/3` with the client config (`:sasl`, `:ssl`)
-in a closure; Redis registers under a digest of the URL
+with the settings in a closure (`inspect` prints a closure without its
+captured values); Redis registers under a digest of the URL
 (`Sink.Redis.connection_key/1`) and starts Redix with the password as an MFA
-over a closure, like the Redis stores. `inspect` prints a closure without its
-captured values. Tests plant a canary credential and refute it in
-`:sys.get_status/1` of each adapter's supervisor (and, for Redis, of the
-Redix connection and the registry's keys); Kafka's test also checks the
-closure still yields the SASL tuple. What stays is the clients' own state:
-amqp_client, brod and gnat keep the credentials they were given.
+over a closure, like the Redis stores. Tests plant a canary credential and
+refute it in `:sys.get_status/1` of the RabbitMQ and NATS supervisors, and of
+the Redix connection and the registry's keys; each first asserts it found the
+child or key it inspects. What stays is the clients' own state: amqp_client,
+brod and gnat keep the credentials they were given.
 
 <a id="e5"></a>
 ### E5 · Medium · Code — The URL tenant is not bound to the source, and `accept_flag` spends budget
@@ -1531,7 +1535,7 @@ Re-rated against the code on 2026-10-09 with this review's own severity definiti
 
 | Finding | Severity now | What still fails | Why it stays |
 |---|---|---|---|
-| O2 residual (client-library state) | Low | amqp_client, brod and gnat keep the connection credentials they were given in their own process state, so `:sys.get_status/1` on one of their processes prints them. | Nothing Ankusa starts or registers holds them (child specs, registry keys, its own state); the clients' state is theirs. |
+| O2 residual (client-library state) | Low | amqp_client, brod and gnat keep the connection credentials they were given in their own process state, so `:sys.get_status/1` on one of their processes prints them. | Nothing Ankusa starts prints them: no child spec or registry key holds them, and `Sink.RabbitMQ.Connection`, which keeps the URL in its state to dial, redacts it in `format_status/1`. The clients' state is theirs. |
 | B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | Re-checked 2026-10-10: brod (4.7.0) has no cancel and no idempotent producer, and a per-hook transaction does not hide the record from `read_uncommitted` consumers; consumers dedupe on `idempotency_key`. |
 
 ## Decisions that choose between the options

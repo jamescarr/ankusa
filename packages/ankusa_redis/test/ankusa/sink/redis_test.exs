@@ -206,7 +206,7 @@ defmodule Ankusa.Sink.RedisTest do
     assert Ankusa.whereis(inst, Redis.connection_key(@url)) not in [nil, old]
   end
 
-  test "the URL's password is in no registry key, child spec, or connection state", %{
+  test "the URL's password is in no registry key or connection state", %{
     instance: inst
   } do
     canary = "s3cr3t-canary"
@@ -218,9 +218,16 @@ defmodule Ankusa.Sink.RedisTest do
     pid = Ankusa.whereis(inst, Redis.connection_key(url))
     assert is_pid(pid)
 
-    refute printed.(:sys.get_status(Ankusa.Sink.Redis.Supervisor)) =~ canary
-    refute printed.(:sys.get_status(pid)) =~ canary
-    refute printed.(Registry.select(Ankusa.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])) =~ canary
+    # The connection is `:temporary`, so its DynamicSupervisor keeps no start
+    # args; what can print the password is Redix's state and the registry key.
+    # Each check first finds what it looks at, so the refutes are not vacuous.
+    connection = printed.(:sys.get_status(pid))
+    assert connection =~ "connection_password"
+    refute connection =~ canary
+
+    keys = Registry.select(Ankusa.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    assert {inst, Redis.connection_key(url)} in keys
+    refute printed.(keys) =~ canary
   end
 
   defp receive_message(ps, ref) do

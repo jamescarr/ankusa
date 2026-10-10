@@ -240,7 +240,10 @@ defmodule Ankusa.Sink.NATSTest do
     assert is_pid(Ankusa.whereis(inst, {:nats_sup, :default}))
 
     status = :sys.get_status(Ankusa.Sink.NATS.Supervisor)
-    refute inspect(status, limit: :infinity, printable_limit: :infinity) =~ canary
+    printed = inspect(status, limit: :infinity, printable_limit: :infinity)
+    # The child spec is in the status, so the refute below is not vacuous.
+    assert printed =~ "start_connection_supervisor"
+    refute printed =~ canary
   end
 
   test "the connection is registered in the instance's registry, not as a global atom", %{

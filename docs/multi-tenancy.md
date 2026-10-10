@@ -197,5 +197,7 @@ whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`). Boot enforces it for
 sources in the config (`Ankusa.Queue.validate_config!/1`), and a source
 write enforces it for the rest: the admin API refuses to create a source, or
 update one, into a source with no durable sink (`400 invalid_source`), whichever
-writable store holds it. A source stored before that check existed keeps
-serving; update it to give it a durable sink.
+writable store holds it. A source that arrives without that check — stored
+before it existed, or written to a shared Redis source store by a node that
+runs `wal.type: disk` — is answered `503` at ingest until it is updated to have
+a durable sink.

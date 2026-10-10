@@ -185,21 +185,24 @@ defmodule Ankusa.Edge.DirectTest do
     assert_received {:delivered, _, _}
   end
 
-  test "a source with no sinks cannot ack" do
-    # Boot validation already refuses a statically configured sinkless source
-    # under `wal: :none`; this pins the runtime guard the publish path keeps for
-    # a source that arrives some other way (the admin API).
+  test "a source with no durable sink cannot ack" do
+    # Boot refuses such a static source under `wal: :none`, and a source write
+    # is refused the same way; this pins the publish-time guard for a source
+    # that arrives without either check (stored before the write check, or
+    # written to a shared source store by a `wal: :disk` node).
     config = start_direct([{CaptureSink, [to: self(), outcome: :ok]}])
 
     assert route(config, "demo", "{}").status == 201
     assert_received {:delivered, env, _ctx}
 
-    assert {:error, :store_unavailable} =
-             Ankusa.Edge.Publish.publish(
-               config.instance,
-               %Ankusa.Source{id: "demo", sinks: []},
-               env
-             )
+    for sinks <- [[], [{Ankusa.Sink.Log, []}]] do
+      assert {:error, :store_unavailable} =
+               Ankusa.Edge.Publish.publish(
+                 config.instance,
+                 %Ankusa.Source{id: "demo", sinks: sinks},
+                 env
+               )
+    end
   end
 
   test "nothing is queued on this node: no queue writer, no stored hook" do

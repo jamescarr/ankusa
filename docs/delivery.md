@@ -127,8 +127,9 @@ something that outlives this node, and under `wal: :none` a source none of
 whose sinks can promise that is refused: at boot for a statically configured
 source (`Ankusa.Queue.validate_config!/1`), and on write for one created or
 updated at runtime — the admin API answers `400 invalid_source`
-(`Ankusa.Queue.check_durable/2`). A source already stored before that check
-keeps serving. `Sink.Log` returns `false` — nothing durable
+(`Ankusa.Queue.check_durable/2`). A source that arrives without that check
+(stored before it existed, or written to a shared source store by a
+`wal: disk` node) is answered `503` at ingest. `Sink.Log` returns `false` — nothing durable
 happened — and so does `Sink.Redis`: pub/sub keeps no copy, so a subscriber
 that disconnects after the publish loses the message. Every other shipped sink
 confirms durably.

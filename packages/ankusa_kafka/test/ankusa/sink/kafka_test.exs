@@ -153,19 +153,6 @@ defmodule Ankusa.Sink.KafkaTest do
     assert elapsed_us < 2_000_000
   end
 
-  test "the client's child spec never prints SASL credentials, and still carries them" do
-    canary = "s3cr3t-canary"
-    opts = [brokers: ["localhost:1"], sasl: {:plain, "u", canary}]
-    spec = Kafka.client_child_spec(:canary_client, opts, 5_000)
-
-    refute inspect(spec, limit: :infinity, printable_limit: :infinity) =~ canary
-
-    assert {Kafka, :start_client_process, [[{~c"localhost", 1}], :canary_client, config]} =
-             spec.start
-
-    assert Keyword.fetch!(config.(), :sasl) == {:plain, "u", canary}
-  end
-
   test "an idle brod client is stopped, and the next delivery starts a new one", %{
     instance: inst,
     topic: topic

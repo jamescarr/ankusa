@@ -22,9 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:error, {:permanent, reason}}`: dead-lettered at once instead of retried
   for the whole retry policy. Requires `ankusa ~> 0.6` (sink error classes);
   publish core first.
-- The brod client's child spec holds the client config inside a closure, so
-  `:sys.get_status/1` of `Ankusa.Sink.Kafka.Supervisor`, or a supervisor
-  report, never prints `:sasl` credentials or `:ssl` key material.
 
 ## [0.5.0] - 2026-10-08
 
