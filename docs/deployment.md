@@ -96,9 +96,16 @@ layer; you only meet this if you build your own image or run core from source.
 the supervisor lets `Ankusa.Store` close the database cleanly. SIGKILL is safe
 for data — the store recovers from its write-ahead log and loses no acked hook
 — but a VM killed under write load with the database open can segfault on the
-way out. To back up, stop the node and copy the whole `<data_dir>`;
-`segments/` is immutable and can be copied while it runs. If segments live in
-S3/GCS, the store directory is all you need.
+way out. For a host you can lose, turn on [`backup`](configuration.md#backup)
+with segments (or `backup.store`) in a bucket: the node uploads a checkpoint
+every `backup.interval_ms` (60 s) while it runs, and a replacement started on
+an empty volume with the same config (same `storage.key_prefix`) restores the
+latest one before it accepts a hook — losing at most the hooks acked since that
+backup. A node that cannot read the backup location refuses to start rather
+than start empty; watch `ankusa_backup_age_seconds`. Details:
+[`storage.md`](storage.md#backup-and-restore). Without `backup`, stop the node
+and copy the whole `<data_dir>`; `segments/` is immutable and can be copied
+while it runs. If segments live in S3/GCS, the store directory is all you need.
 
 **Liveness and readiness are two probes.** `GET /health` says the process
 answers. `GET /ready` says this node can take a hook: its store accepted a

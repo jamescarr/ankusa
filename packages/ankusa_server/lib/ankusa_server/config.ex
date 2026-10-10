@@ -43,6 +43,7 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_STORAGE_TYPE` | `storage.type` |
   | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
   | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
+  | `ANKUSA_BACKUP_ENABLED` | `backup.enabled` |
 
   Sources are deliberately **not** env-overridable: they carry behaviour
   (verifier, sinks), and behaviour in an env var is unreadable in review.
@@ -59,7 +60,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check sources source_store lifecycle)
+  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -73,6 +74,7 @@ defmodule AnkusaServer.Config do
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token)
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes ip store)
+  @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type)
   @lifecycle_keys ~w(sinks)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
@@ -268,7 +270,8 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
     {"ANKUSA_S3_REGION", ["storage", "s3", "region"]},
     {"ANKUSA_GCS_BUCKET", ["storage", "gcs", "bucket"]},
-    {"ANKUSA_STORAGE_KEY_PREFIX", ["storage", "key_prefix"]}
+    {"ANKUSA_STORAGE_KEY_PREFIX", ["storage", "key_prefix"]},
+    {"ANKUSA_BACKUP_ENABLED", ["backup", "enabled"]}
   ]
 
   defp apply_env_overrides(doc, env) do
@@ -324,6 +327,7 @@ defmodule AnkusaServer.Config do
         wal_section(doc) ++
         storage_section(doc) ++
         claim_check_section(doc) ++
+        backup_section(doc) ++
         source_store_section(doc) ++
         lifecycle_section(doc)
 
@@ -339,6 +343,7 @@ defmodule AnkusaServer.Config do
       Ankusa.Edge.Quarantine.validate_config!(config)
       Ankusa.Dispatch.Pipeline.validate_config!(config)
       Ankusa.Queue.validate_config!(config)
+      Ankusa.Store.Backup.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
       config
     rescue
@@ -567,6 +572,33 @@ defmodule AnkusaServer.Config do
         |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", ["claim_check"]))
         |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
         |> put_opt(:ip, string_opt(claim_check, "ip", ["claim_check"]))
+        |> put_opt(:blob_store, blob_store)
+    ]
+  end
+
+  # ── backup ──────────────────────────────────────────────────────────────────
+
+  # `store` takes the claim store's shape (`root` allowed for a local store); unset
+  # means the storage bucket, under `storage.key_prefix` either way.
+  defp backup_section(doc) do
+    backup = section!(doc, "backup", @backup_keys, [])
+
+    blob_store =
+      case backup["store"] do
+        nil ->
+          nil
+
+        _store ->
+          store = section!(backup, "store", @blob_store_keys, ["backup"])
+          blob_store!(store, ["backup", "store"], true)
+      end
+
+    [
+      backup:
+        []
+        |> put_opt(:enabled, bool_opt(backup, "enabled", ["backup"]))
+        |> put_opt(:interval_ms, int_opt(backup, "interval_ms", ["backup"]))
+        |> put_opt(:keep, int_opt(backup, "keep", ["backup"]))
         |> put_opt(:blob_store, blob_store)
     ]
   end

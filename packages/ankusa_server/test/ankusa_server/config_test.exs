@@ -233,6 +233,38 @@ defmodule AnkusaServer.ConfigTest do
     assert config.storage.blob_store == {Ankusa.BlobStore.LocalFS, []}
   end
 
+  test "the backup section lands in core's config, the env flag overrides it, unknown keys are named" do
+    path =
+      tmp_config("""
+      backup:
+        enabled: true
+        interval_ms: 30000
+        keep: 5
+        store: {type: s3, s3: {bucket: b, region: r}}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    backup = Config.load!(path: path, env: %{}).config.backup
+    assert %{enabled: true, interval_ms: 30_000, keep: 5} = backup
+    assert {Ankusa.BlobStore.S3, opts} = backup.blob_store
+    assert opts[:bucket] == "b"
+    assert opts[:region] == "r"
+
+    # Off by default, and the storage bucket unless a store is named.
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+    assert %{enabled: false, blob_store: nil} = Config.load!(path: path, env: %{}).config.backup
+
+    assert Config.load!(path: path, env: %{"ANKUSA_BACKUP_ENABLED" => "true"}).config.backup.enabled
+
+    path = tmp_config("backup: {enabled: true, foo: 1}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(backup: unknown key "foo")
+
+    path = tmp_config("backup: {keep: 0}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "backup.keep must be a positive integer, got 0"
+  end
+
   # ── env overrides ───────────────────────────────────────────────────────────
 
   test "ANKUSA_HTTP_PORT beats PORT beats the file" do

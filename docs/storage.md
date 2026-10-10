@@ -122,11 +122,65 @@ dependency beyond RocksDB itself. Every store-backed role (`edge`, `dispatch`,
 `storage`) reads that same database, and RocksDB is single-process, so they
 must all run in **one** BEAM node; splitting them across processes or hosts is
 not supported. It is durable to process crash and power loss **on that box**,
-not to losing the box. See "Scaling out" below.
+not to losing the box — unless [`backup`](#backup-and-restore) is on. See
+"Scaling out" below.
 
 ```elixir
 config :ankusa, wal: :disk   # the default
 ```
+
+### Backup and restore
+
+`backup.enabled` (off by default) turns on `Ankusa.Store.Backup`, which closes
+the gap above to `backup.interval_ms` (60 s): what a lost host takes with it
+is the hooks acked since the last backup.
+
+- **Backup.** Every interval the store writes a RocksDB checkpoint (memtables
+  flushed, files hard-linked under `<data_dir>/<instance>/store.checkpoint`,
+  in a process of its own so `/ready` keeps answering), and the uploader puts
+  it in the object store — `backup.blob_store`, else `storage.blob_store` —
+  under `storage.key_prefix`: `backup/sst/<name>` for every `.sst` and
+  `.blob` file (immutable, so each is uploaded once and shared by every
+  backup that lists it), `backup/<id>/<name>` for the manifest, options, WAL
+  and `CURRENT`, then `backup/<id>/manifest.json` (every file with its size
+  and sha256), then `backup/LATEST`. A backup exists only once `LATEST` names
+  it. After each one, backups beyond `backup.keep` (3) and every shared file
+  no kept backup lists are deleted; a purge that can't list the store or read
+  a kept manifest deletes nothing. A failed attempt is retried with the
+  compactor's backoff and never touches the store or the edge.
+- **Restore.** A store directory with no `CURRENT` file holds no database. With
+  `backup.enabled`, `Ankusa.Store` then restores `LATEST` before opening:
+  every file is checked against the manifest's size and sha256 and written
+  durably, `CURRENT` last, so a restore that fails part-way leaves no database
+  and the next boot starts it over. No `LATEST` at all starts an empty store.
+  A backup location that can't be read, a manifest that doesn't parse or a
+  file that fails its checksum refuses the boot
+  (`{:store_restore_failed, path, reason}`): an empty directory with a backup
+  configured is never taken as empty. Database files (`MANIFEST-*`, `.sst`,
+  `.blob`, `.log`) without a `CURRENT` that no interrupted restore left behind
+  are refused too (`{:unrecognized_store_files, names}`), never deleted: that
+  may be a damaged store worth recovering by hand.
+- **The archive.** A restored (or newly created) store may be behind the
+  segments in the bucket: hooks acked after the backup may already be
+  archived. Before the queue writer starts, `m:next_seq` moves past the
+  highest archived seq, so no new segment key overwrites one, and every
+  segment without a catalogue row is catalogued from its `.idx` object (with
+  the restored hooks' archive obligations it settles), so `Ankusa.Storage.fetch/2`
+  finds those hooks again. Their delivery state is gone with the host.
+- **Where to point it.** With `LocalFS` the backup lives on the same disk as the
+  store, and the node logs a warning saying so. Use a bucket: `storage.type:
+  s3|gcs`, or a `backup.store` of its own. Backups are per node, so nodes
+  sharing a bucket need distinct `storage.key_prefix`es, exactly as for
+  segments (two nodes on one prefix would purge each other's backups).
+  A replacement node takes over by starting with the same config on an empty
+  volume.
+- **Costs.** An upload reads one file into memory at a time; RocksDB files here
+  are bounded by the 64 MiB write buffers and its default blob file size
+  (256 MiB). Each backup uploads the files written since the previous one, plus
+  a few small per-backup files.
+- **Watching it.** `ankusa_backup_age_seconds` is the time since the last
+  successful backup — the data a lost host would take with it — and
+  `ankusa_backup_runs_total{result}` counts attempts.
 
 ## Scaling out
 

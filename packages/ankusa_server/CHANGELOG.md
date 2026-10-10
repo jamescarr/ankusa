@@ -15,6 +15,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   (a dedicated claim store, same shape as `storage` plus `root`),
   `storage.s3.session_token`, http sink `secret` and `max_response_bytes`,
   rabbitmq sink `max_inflight`, kafka sink `max_record_bytes`.
+- A `backup` section (`enabled`, `interval_ms`, `keep`, `store` — the
+  `claim_check.store` shape; env `ANKUSA_BACKUP_ENABLED`) for core's store
+  backup: with it on and segments (or `backup.store`) in a bucket, a container
+  started on an empty volume restores the latest backup before it serves, and
+  exits with `store_restore_failed` when the bucket can't be read.
+  `check-config` runs `Ankusa.Store.Backup.validate_config!/1`.
 - `docker-entrypoint remote` (an IEx shell in the running node) and
   `docker-entrypoint rpc EXPR`. Distribution stays on, bound to loopback with
   epmd (`rel/vm.args.eex`, `rel/env.sh.eex`); `RELEASE_DISTRIBUTION=none`

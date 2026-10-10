@@ -17,13 +17,14 @@ defmodule Ankusa.Instance do
       restarts with the store it writes to, and everything started after it
       restarts with the edge. A core that keeps crashing exhausts this
       supervisor's budget and the instance stops, for its parent to restart.
-    * **Every other domain** — dispatch, archive/storage, lifecycle events,
-      metrics, and the admin, route-admin and claim-check listeners — runs
-      under `Ankusa.Instance.Isolated`. It has its own restart budget, and when
-      that is exhausted it is restarted later with backoff instead of taking
-      the instance down. A broken sink, a port someone else took or a full
-      object store stops that domain, not the edge acking hooks; the hooks wait
-      in the store and are dispatched when the domain returns.
+    * **Every other domain** — dispatch, archive/storage, store backup,
+      lifecycle events, metrics, and the admin, route-admin and claim-check
+      listeners — runs under `Ankusa.Instance.Isolated`. It has its own
+      restart budget, and when that is exhausted it is restarted later with
+      backoff instead of taking the instance down. A broken sink, a port
+      someone else took or a full object store stops that domain, not the edge
+      acking hooks; the hooks wait in the store and are dispatched when the
+      domain returns.
     * **The registry** — a restart of `Ankusa.Registry` forgets every name an
       instance process registered. `Ankusa.Instance.RegistryWatch` notices and
       stops the instance, so whatever supervises it starts it again, every
@@ -62,12 +63,14 @@ defmodule Ankusa.Instance do
     Ankusa.Edge.RateLimiter.validate_config!(config)
     Ankusa.Edge.Quarantine.validate_config!(config)
     Ankusa.Dispatch.Pipeline.validate_config!(config)
+    Ankusa.Store.Backup.validate_config!(config)
     opts = [instance: config.instance, config: config]
 
     children =
       [{Ankusa.Instance.RegistryWatch, config.instance}] ++
         metrics_children(config, opts) ++
         store_children(config, opts) ++
+        backup_children(config, opts) ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
         edge_children(config, opts) ++
@@ -107,6 +110,15 @@ defmodule Ankusa.Instance do
   defp store_children(config, opts) do
     if store?(config), do: [{Ankusa.Store, opts}], else: []
   end
+
+  # The store's backup uploader, right behind the store: under `:rest_for_one`
+  # a store restart restarts it too. An unreachable object store fails
+  # backups, never the store or the edge.
+  defp backup_children(%Config{backup: %{enabled: true}} = config, opts) do
+    if store?(config), do: isolated(config, :backup, [{Ankusa.Store.Backup, opts}]), else: []
+  end
+
+  defp backup_children(_config, _opts), do: []
 
   @doc """
   Whether this instance runs the node-local store (`Ankusa.Store`): any of the

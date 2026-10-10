@@ -387,4 +387,29 @@ defmodule Ankusa.ConfigTest do
       end
     end
   end
+
+  describe "the backup section" do
+    test "a zero interval or keep fails at Config.new/1, naming the key" do
+      assert_raise ArgumentError, "backup.interval_ms must be a positive integer, got 0", fn ->
+        Config.new(backup: %{interval_ms: 0})
+      end
+
+      assert_raise ArgumentError, "backup.keep must be a positive integer, got 0", fn ->
+        Config.new(backup: %{keep: 0})
+      end
+    end
+
+    test "Ankusa.Store.Backup.validate_config!/1 checks the flag and the store's shape" do
+      assert :ok = Ankusa.Store.Backup.validate_config!(Config.new(backup: %{enabled: true}))
+
+      assert_raise ArgumentError, ~s(backup.enabled must be a boolean, got "yes"), fn ->
+        Ankusa.Store.Backup.validate_config!(Config.new(backup: %{enabled: "yes"}))
+      end
+
+      # The bad value is not echoed: it may carry credentials.
+      assert_raise ArgumentError, "backup.blob_store must be nil or {module, opts}", fn ->
+        Ankusa.Store.Backup.validate_config!(Config.new(backup: %{blob_store: "s3://secret"}))
+      end
+    end
+  end
 end

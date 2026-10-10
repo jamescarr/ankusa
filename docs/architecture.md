@@ -34,6 +34,15 @@ RocksDB database per instance at `<data_dir>/<instance>/store`, owned by the
 role together and scale out with independent nodes. See
 [Deployment topologies](#deployment-topologies).
 
+Losing the box is covered by [`backup`](configuration.md#backup), off by
+default: every `backup.interval_ms` (60 s) a checkpoint of the store goes to
+an object store, and a node that starts on an empty `data_dir` restores the
+latest one before it opens the store — or refuses to start when the backup
+location can't be read, never "starts empty". Hooks acked after the last
+backup are lost with the box (their archive copies, if the compactor wrote
+any, are catalogued again); the startup log names the interval. See
+[`storage.md`](storage.md#backup-and-restore).
+
 `wal.type: none` makes the node stateless instead: no queue, no batcher, no
 dispatch pipeline, no compactor, no DLQ, and the only role left is `:edge`. The
 store still runs for the quarantine pen and the API-managed sources and
@@ -457,7 +466,7 @@ asks for it), API-managed sources and rate-limit overrides. See
 ## Telemetry
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix:
-`ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `quarantine`,
+`ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `backup`, `quarantine`,
 `rate_limit`, `claim_check`, `replay`, `lifecycle`, `routes`, `instance` (a failure domain going down or coming
 back). Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
@@ -475,4 +484,6 @@ carries `ankusa_store_hooks`, `ankusa_queue_pending` / `_scheduled` /
 / `_claimed` / `_runnable` and `ankusa_dispatch_breakers_open` — enough to
 alert on a growing backlog, a filling disk or an open breaker before a
 provider sees a `503`. Per-delivery counters carry the sink module as a
-`sink` label.
+`sink` label. With `backup.enabled`, the uploader reports after every attempt:
+`ankusa_backup_age_seconds` (since the last successful backup — the data a
+lost host would take with it) and `ankusa_backup_runs_total{result}`.
