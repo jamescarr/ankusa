@@ -69,6 +69,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - `Ankusa.Sink.Reaper`: stops a sink adapter's connection after its
   `:idle_timeout_ms` without a delivery. The broker adapters (`ankusa_rabbitmq`,
   `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`) run one each.
+- **`Ankusa.Sink.GooglePubSub`**: publishes hooks to a Google Cloud Pub/Sub
+  topic with one `topics.publish` `POST` per delivery, the same
+  `Ankusa.Sink.Message` data as the other queue sinks and the same metadata
+  as message attributes. No new dependency (`req`). Auth is a caller-supplied
+  `:token_provider` MFA, as for `BlobStore.GCS`; one that answers `:error`
+  is `:no_credentials` (retried, no request sent). `:ok` only on a `200`
+  naming the message id. A message over `:max_message_bytes` (10 MB) and
+  `INVALID_ARGUMENT` are permanent; every other Pub/Sub error (a missing
+  topic included: the sink never creates one) is retried. Optional
+  `:ordering_key` (a string or a function of the envelope). `describe/2`
+  reports the AsyncAPI `googlepubsub` bindings. The admin config view shows
+  `project` and `ordering_key`.
+- `Ankusa.Sink.Message.attributes/2`: the `{name, value}` metadata pairs a
+  queue sink carries outside the body, now shared by `Sink.SQS` and
+  `Sink.GooglePubSub`.
 
 - **Store backup and restore** (`Ankusa.Store.Backup`, `backup.*`, off by
   default). Every `backup.interval_ms` (60 s) the store writes a RocksDB

@@ -168,17 +168,8 @@ defmodule Ankusa.Sink.SQS do
   end
 
   defp attributes(env, ctx) do
-    [
-      {"ankusa_id", env.id},
-      {"ankusa_source_id", env.source_id},
-      {"ankusa_tenant_id", env.tenant_id},
-      {"ankusa_message_version", "1"},
-      {"ankusa_idempotency_key", Envelope.idempotency_key(env)},
-      {"content_type", "application/json"},
-      {"ankusa_dedupe_key", env.dedupe_key},
-      {"ankusa_replay_id", ctx[:replay_id]}
-    ]
-    |> Enum.filter(fn {_name, value} -> is_binary(value) and value != "" end)
+    env
+    |> Message.attributes(ctx)
     |> Map.new(fn {name, value} -> {name, %{"DataType" => "String", "StringValue" => value}} end)
   end
 

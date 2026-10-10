@@ -37,13 +37,14 @@ defmodule AnkusaServer.ConfigTest do
     "REDIS_SINK_URL" => "redis://:fixture-redis-password@redis:6379",
     "SQS_QUEUE_URL" => "https://sqs.us-east-1.amazonaws.com/000000000000/fixture.fifo",
     "STANDARD_WEBHOOKS_SECRET" => "whsec_Zml4dHVyZQ==",
-    "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret"
+    "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret",
+    "GCP_TOKEN" => "fixture-gcp-token"
   }
 
   @fixture_secrets ~w(fixture-s3-secret
                       whsec_fixture-stripe-secret fixture-rabbit-password
                       fixture-kafka-password fixture-nats-password fixture-github-secret
-                      fixture-redis-password
+                      fixture-redis-password fixture-gcp-token
                       whsec_Zml4dHVyZQ== whsec_c2luay1maXh0dXJl)
 
   # ── the shipped configs ─────────────────────────────────────────────────────
@@ -84,7 +85,8 @@ defmodule AnkusaServer.ConfigTest do
              Ankusa.Sink.Kafka,
              Ankusa.Sink.NATS,
              Ankusa.Sink.Redis,
-             Ankusa.Sink.SQS
+             Ankusa.Sink.SQS,
+             Ankusa.Sink.GooglePubSub
            ]
 
     {Ankusa.Sink.Http, http_opts} = Enum.at(sinks, 1)
@@ -1071,10 +1073,10 @@ defmodule AnkusaServer.ConfigTest do
 
   test "storage.gcs.auth selects the token provider" do
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "metadata"})
-    assert opts[:token_provider] == {AnkusaServer.GcsToken, :metadata, []}
+    assert opts[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
 
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "token", token: "ya29.static"})
-    assert opts[:token_provider] == {AnkusaServer.GcsToken, :static, ["ya29.static"]}
+    assert opts[:token_provider] == {AnkusaServer.GcpToken, :static, ["ya29.static"]}
 
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "none"})
     refute Keyword.has_key?(opts, :token_provider)
@@ -1111,6 +1113,8 @@ defmodule AnkusaServer.ConfigTest do
                inline_max_bytes: 2048, publish_timeout_ms: 300, idle_timeout_ms: "60000"}
             - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h.fifo",
                region: us-east-1, message_group_id: g, max_message_bytes: 262144}
+            - {type: google_pubsub, project: p, topic: t, ordering_key: k,
+               max_message_bytes: 1000}
       """)
 
     env = %{"NATS_SERVERS" => "n1:4222,n2:4222"}
@@ -1138,7 +1142,8 @@ defmodule AnkusaServer.ConfigTest do
              {Ankusa.Sink.Kafka, kafka},
              {Ankusa.Sink.NATS, nats},
              {Ankusa.Sink.Redis, redis},
-             {Ankusa.Sink.SQS, sqs}
+             {Ankusa.Sink.SQS, sqs},
+             {Ankusa.Sink.GooglePubSub, pubsub}
            ] = source.sinks
 
     assert kafka[:brokers] == ["b:9092"]
@@ -1165,6 +1170,12 @@ defmodule AnkusaServer.ConfigTest do
     assert sqs[:region] == "us-east-1"
     assert sqs[:message_group_id] == "g"
     assert sqs[:max_message_bytes] == 262_144
+
+    assert pubsub[:project] == "p"
+    assert pubsub[:topic] == "t"
+    assert pubsub[:ordering_key] == "k"
+    assert pubsub[:max_message_bytes] == 1000
+    assert pubsub[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
   end
 
   test "an sqs sink requires queue_url and names an unknown key" do
@@ -1188,6 +1199,28 @@ defmodule AnkusaServer.ConfigTest do
 
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ ~s(unknown key "queue")
+  end
+
+  test "a google_pubsub sink requires project and topic, and auth: token requires a token" do
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: google_pubsub, project: p}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(sources.a.sinks[0]: missing required key "topic")
+
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: google_pubsub, project: p, topic: t, auth: token}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(sources.a.sinks[0]: missing required key "token")
   end
 
   test "a NATS auth block takes exactly one scheme, and only whole ones" do

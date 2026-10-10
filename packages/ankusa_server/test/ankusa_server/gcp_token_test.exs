@@ -1,12 +1,12 @@
-defmodule AnkusaServer.GcsTokenTest do
+defmodule AnkusaServer.GcpTokenTest do
   @moduledoc """
-  `AnkusaServer.GcsToken.metadata/0` against a `Req.Test` stand-in for the GCE
+  `AnkusaServer.GcpToken.metadata/0` against a `Req.Test` stand-in for the GCE
   metadata server: the cache, single-flight refresh, and no retries.
   """
 
   use ExUnit.Case, async: false
 
-  alias AnkusaServer.GcsToken
+  alias AnkusaServer.GcpToken
 
   @moduletag capture_log: true
 
@@ -15,17 +15,17 @@ defmodule AnkusaServer.GcsTokenTest do
 
     pid =
       start_supervised!(
-        {GcsToken, req_options: [plug: {Req.Test, GcsToken}], failure_backoff_ms: 300}
+        {GcpToken, req_options: [plug: {Req.Test, GcpToken}], failure_backoff_ms: 300}
       )
 
-    Req.Test.allow(GcsToken, test, pid)
+    Req.Test.allow(GcpToken, test, pid)
     %{server: pid}
   end
 
   defp stub(fun) do
     test = self()
 
-    Req.Test.stub(GcsToken, fn conn ->
+    Req.Test.stub(GcpToken, fn conn ->
       send(test, :metadata_request)
       fun.(conn)
     end)
@@ -48,23 +48,23 @@ defmodule AnkusaServer.GcsTokenTest do
 
     results =
       1..10
-      |> Enum.map(fn _ -> Task.async(&GcsToken.metadata/0) end)
+      |> Enum.map(fn _ -> Task.async(&GcpToken.metadata/0) end)
       |> Enum.map(&Task.await(&1, 5_000))
 
     assert results == List.duplicate({:ok, "tok"}, 10)
-    assert {:ok, "tok"} = GcsToken.metadata()
+    assert {:ok, "tok"} = GcpToken.metadata()
     assert requests() == 1
   end
 
   test "a failed fetch is :error after exactly one request, and a later call tries again" do
     stub(fn conn -> Plug.Conn.send_resp(conn, 500, "boom") end)
 
-    assert GcsToken.metadata() == :error
+    assert GcpToken.metadata() == :error
     assert requests() == 1
 
     stub(fn conn -> Req.Test.json(conn, %{"access_token" => "late", "expires_in" => "120"}) end)
     Process.sleep(300)
-    assert {:ok, "late"} = GcsToken.metadata()
+    assert {:ok, "late"} = GcpToken.metadata()
   end
 
   test "callers queued behind a failing fetch share its failure" do
@@ -75,7 +75,7 @@ defmodule AnkusaServer.GcsTokenTest do
 
     results =
       1..10
-      |> Enum.map(fn _ -> Task.async(&GcsToken.metadata/0) end)
+      |> Enum.map(fn _ -> Task.async(&GcpToken.metadata/0) end)
       |> Enum.map(&Task.await(&1, 5_000))
 
     assert results == List.duplicate(:error, 10)
@@ -85,8 +85,8 @@ defmodule AnkusaServer.GcsTokenTest do
   test "a token close to expiry is refreshed" do
     stub(fn conn -> Req.Test.json(conn, %{"access_token" => "short", "expires_in" => 30}) end)
 
-    assert {:ok, "short"} = GcsToken.metadata()
-    assert {:ok, "short"} = GcsToken.metadata()
+    assert {:ok, "short"} = GcpToken.metadata()
+    assert {:ok, "short"} = GcpToken.metadata()
     # 30 s of life is inside the 60 s margin: every call refetches.
     assert requests() == 2
   end

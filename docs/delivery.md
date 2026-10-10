@@ -191,7 +191,7 @@ publishes, for the AsyncAPI document (only messaging sinks implement it):
 @optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
 ```
 
-A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`) returns its
+A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`, `Sink.GooglePubSub`) returns its
 `inline_max_bytes` (default 64 KiB). Dispatch checks a body in **once**, before
 any sink runs, when it is larger than at least one of its source's sinks'
 thresholds, and hands the resulting claim reference to every sink and every
@@ -211,6 +211,7 @@ See [`claim-check.md`](claim-check.md).
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
 | `Sink.Redis` | `:redix`, separate `ankusa_redis` package | Publishes to a Redis pub/sub channel (`PUBLISH`) and reports zero subscribers as an error. Detailed below. |
 | `Sink.SQS` | none (core: `req` + `aws_signature`) | Sends to an SQS queue (`SendMessage`, SigV4), standard or FIFO, confirmed by SQS's `200`. Detailed below. |
+| `Sink.GooglePubSub` | none (core: `req`) | Publishes to a Google Cloud Pub/Sub topic (`topics.publish`, a bearer token from your `:token_provider`), confirmed by Pub/Sub's `200`. Detailed below. |
 
 ```elixir
 sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
@@ -644,6 +645,70 @@ the Kafka header set, at most 8 of SQS's 10 attributes. `ankusa_tenant_id` is
 left out when the hook has no tenant, because SQS refuses an empty attribute
 value. SQS counts attributes toward the size limit, so `max_message_bytes`
 checks body plus attributes.
+
+### `Sink.GooglePubSub`: Google Cloud Pub/Sub delivery
+
+The same `Ankusa.Sink.Message`, published to a Google Cloud Pub/Sub topic.
+Consumers on Pub/Sub (Cloud Run, Dataflow, a worker pulling a subscription)
+read it directly. Like `Sink.SQS`, the sink lives in `ankusa` core: one
+`topics.publish` REST `POST` per delivery through `Ankusa.HttpClient`, so it
+adds no dependency and starts no process. Auth is a `:token_provider` MFA, as
+for `BlobStore.GCS`; Ankusa bundles no OAuth client. (The `ankusa_server`
+image ships one for the metadata server, `auth: metadata`.)
+
+```elixir
+sinks: [
+  {Ankusa.Sink.GooglePubSub,
+   project: "my-project",
+   topic: "ankusa-hooks",                       # the topic id, not projects/.../topics/...
+   token_provider: {MyApp.Auth, :gcp_token, []},  # {:ok, token} | :error; omit for an emulator
+   ordering_key: "stripe",                      # default none; a string, or a 1-arity fun
+   inline_max_bytes: 65_536,                    # above this the message carries a claim reference
+   max_message_bytes: 10_000_000,               # data + attributes + key; larger is dead-lettered at once
+   timeout_ms: 5_000}
+   # endpoint: "https://us-east1-pubsub.googleapis.com"  # default: https://pubsub.googleapis.com
+]
+```
+
+**It never creates the topic or a subscription.** Retention, schema,
+encryption and who may subscribe are an operator's contract. A topic that does
+not exist is `{:error, {:pubsub, 404, "NOT_FOUND", message}}`, into the retry
+policy and then the DLQ. A topic with **no subscription** (and no topic
+message retention) answers `200` and discards the message: the sink cannot
+detect it.
+
+**`deliver/3` returns `:ok` only once Pub/Sub has the message.** That is a
+`200` whose reply names the one message id; Pub/Sub answers `200` after
+persisting the message, so the sink is durable for [direct mode](#direct-mode).
+The other outcomes:
+
+| Outcome | Result |
+| --- | --- |
+| data + attributes + ordering key over `max_message_bytes` (10 MB, Pub/Sub's limit) | permanent `{:message_too_large, size, max}`, before any request |
+| Pub/Sub refuses the message itself: `INVALID_ARGUMENT` | permanent `{:pubsub, status, "INVALID_ARGUMENT", message}`: dead-lettered at once |
+| any other Pub/Sub error: `NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED`, `UNAVAILABLE` | transient `{:pubsub, status, google_status, message}`: the retry policy |
+| a non-200 that is not a Google error document (a proxy) | transient `{:status, status, body}` |
+| a `200` that does not name one message id, a transport failure | transient |
+| the `:token_provider` answers `:error` | transient `:no_credentials`, no request sent |
+
+**There is no publish-side deduplication.** Delivery is at-least-once, so
+consumers dedupe on the `idempotency_key` (the `ankusa_idempotency_key`
+attribute).
+
+**The topic is the address, message attributes are the metadata.** Each message
+carries attributes `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
+`ankusa_message_version`, `ankusa_idempotency_key` and `content_type`, plus
+`ankusa_dedupe_key` and `ankusa_replay_id` when present: the same set
+`Sink.SQS` sends (`Ankusa.Sink.Message.attributes/2`). `ankusa_tenant_id` is
+left out when the hook has no tenant. Pub/Sub counts attributes and the
+ordering key toward the size limit, so `max_message_bytes` checks all three
+with the data.
+
+**Ordering is opt-in.** With `ordering_key` set, the message carries an
+`orderingKey`, which orders delivery only on a subscription with message
+ordering enabled, published through one regional endpoint, and caps that key's
+throughput at about 1 MB/s. Ankusa's own deliveries are unordered (see
+[`Ankusa.Sink`](#ankusasink)), so no key is sent by default.
 
 ## `Ankusa.RetryPolicy`
 

@@ -266,7 +266,7 @@ package's own `DynamicSupervisor` (started by its `Application`); brod's
 client id, an atom that `Sink.Kafka` scopes as
 `:"ankusa_kafka.<instance>.<client>"`; the AWS credential cache
 (`:ankusa_aws_credentials`), one ETS table keyed by credential source; and, in
-the image only, `AnkusaServer.GcsToken`. Each instance's route snapshot is
+the image only, `AnkusaServer.GcpToken`. Each instance's route snapshot is
 its own named ETS table. That's what makes two
 independent instances runnable in one VM (and what makes the test suite
 `async: true`-safe for anything that doesn't share on-disk state).
@@ -383,7 +383,8 @@ An ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
 `ankusa_rabbitmq` package), a Kafka topic (`Sink.Kafka`, separate
 `ankusa_kafka` package), a NATS JetStream subject (`Sink.NATS`, separate
 `ankusa_nats` package), a Redis pub/sub channel (`Sink.Redis`, separate
-`ankusa_redis` package), or an SQS queue (`Sink.SQS`, in core); either way fat
+`ankusa_redis` package), an SQS queue (`Sink.SQS`, in core), or a Google
+Cloud Pub/Sub topic (`Sink.GooglePubSub`, in core); either way fat
 payloads are checked in through
 `Ankusa.ClaimCheck` with only a claim reference on the queue, and the message
 itself is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its

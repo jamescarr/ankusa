@@ -1,8 +1,8 @@
 defmodule Ankusa.HttpClient do
   @moduledoc """
   The one place the outbound adapters issue HTTP requests: the object stores
-  (`Ankusa.BlobStore.S3`, `GCS`, `Azure`, `OCI`), `Ankusa.Sink.Http`, and
-  `Ankusa.Sink.SQS`.
+  (`Ankusa.BlobStore.S3`, `GCS`, `Azure`, `OCI`), `Ankusa.Sink.Http`,
+  `Ankusa.Sink.SQS`, and `Ankusa.Sink.GooglePubSub`.
 
   Those adapters share more than a client. Every request they send is a *function
   of its own bytes* — a signed S3 URL, a signed `SendMessage`, a forwarded hook

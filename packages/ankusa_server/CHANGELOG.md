@@ -33,13 +33,18 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `docker-entrypoint rpc EXPR`. Distribution stays on, bound to loopback with
   epmd (`rel/vm.args.eex`, `rel/env.sh.eex`); `RELEASE_DISTRIBUTION=none`
   turns it off.
-- GCS metadata tokens come from `AnkusaServer.GcsToken`, one cached token
-  fetched single-flight and refreshed before expiry.
+- GCP metadata tokens (GCS and Pub/Sub) come from `AnkusaServer.GcpToken`,
+  one cached token fetched single-flight and refreshed before expiry.
 - `type: sqs` sinks (`Ankusa.Sink.SQS`): `queue_url`, `region`, `endpoint`,
   `message_group_id`, `inline_max_bytes`, `max_message_bytes`, `timeout_ms`,
   and optional static `access_key_id` / `secret_access_key` /
   `session_token` (else the `AWS_*` env, IRSA, or the instance role).
   `reference.yml` documents it.
+- `type: google_pubsub` sinks (`Ankusa.Sink.GooglePubSub`): `project`,
+  `topic`, `endpoint`, `ordering_key`, `inline_max_bytes`,
+  `max_message_bytes`, `timeout_ms`, and `auth` (`metadata` | `token` |
+  `none`, default `metadata`; `token` is required when `auth: token`), the
+  same choice `storage.gcs.auth` offers. `reference.yml` documents it.
 
 ### Changed
 
@@ -49,7 +54,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - An unresolved `${…}` in the file is a load error naming the key (a
   substituted value that itself contains `${` is fine); a static source whose
   verifier secret is missing or undecodable fails `check-config` and boot.
-- `AnkusaServer.GcsToken` answers `:error` to every caller for a second after
+- `AnkusaServer.GcpToken` answers `:error` to every caller for a second after
   a failed metadata fetch, so a queue of callers behind a dead metadata server
   costs one request.
 - `:os_mon` runs (disk gauges); only `disksup` is configured. The image adds

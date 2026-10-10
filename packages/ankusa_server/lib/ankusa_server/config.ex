@@ -114,6 +114,7 @@ defmodule AnkusaServer.Config do
   @nats_auth_keys ~w(username password token nkey_seed jwt)
   @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms)
   @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token)
+  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token)
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -123,7 +124,7 @@ defmodule AnkusaServer.Config do
   @scheme_hashes ~w(sha256 sha512 sha1)
   @scheme_encodings ~w(hex base64)
   @scheme_secret_decodes ~w(raw whsec_base64)
-  @sink_types ~w(log http rabbitmq kafka nats redis sqs)
+  @sink_types ~w(log http rabbitmq kafka nats redis sqs google_pubsub)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
@@ -539,18 +540,24 @@ defmodule AnkusaServer.Config do
   defp gcs_opts!(gcs, path) do
     bucket = required_string!(gcs, "bucket", path)
 
-    opts = [bucket: bucket] |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))
+    ([bucket: bucket] |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))) ++
+      gcp_auth!(gcs, path)
+  end
 
-    case enum!(gcs["auth"] || "metadata", ~w(metadata token none), path ++ ["auth"]) do
+  # `auth: metadata | token | none` (default metadata) on any GCP section.
+  defp gcp_auth!(section, path) do
+    case enum!(section["auth"] || "metadata", ~w(metadata token none), path ++ ["auth"]) do
       "none" ->
-        opts
+        []
 
       "metadata" ->
-        opts ++ [token_provider: {AnkusaServer.GcsToken, :metadata, []}]
+        [token_provider: {AnkusaServer.GcpToken, :metadata, []}]
 
       "token" ->
-        token = required_string!(gcs, "token", path)
-        opts ++ [token_provider: {AnkusaServer.GcsToken, :static, [token]}]
+        [
+          token_provider:
+            {AnkusaServer.GcpToken, :static, [required_string!(section, "token", path)]}
+        ]
     end
   end
 
@@ -1283,6 +1290,20 @@ defmodule AnkusaServer.Config do
          |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
          |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
          |> put_opt(:session_token, string_opt(sink, "session_token", path))}
+
+      "google_pubsub" ->
+        check_keys!(sink, @google_pubsub_sink_keys, path)
+
+        {Ankusa.Sink.GooglePubSub,
+         ([
+            project: required_string!(sink, "project", path),
+            topic: required_string!(sink, "topic", path)
+          ]
+          |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+          |> put_opt(:ordering_key, string_opt(sink, "ordering_key", path))
+          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+          |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++ gcp_auth!(sink, path)}
     end
   end
 
