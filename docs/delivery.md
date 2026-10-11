@@ -208,7 +208,7 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature with `secret`. Status mapping below. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature with `secret`. Status mapping below. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -274,11 +274,20 @@ the message's `headers` object. Authentication and framing headers and every
 `x-ankusa-*` name are never forwarded. So a header-borne id such as
 `X-GitHub-Delivery` or `webhook-id` reaches the consumer as a forwarded header,
 and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
-`x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key` and (when set)
-`x-ankusa-tenant`, `x-ankusa-dedupe-key` and `x-ankusa-replay-id`; a message
-carries `id`, `source_id`, `tenant_id`, `received_at`, `content_type`, `size`,
-`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `headers` and the body
-(or claim).
+`x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,
+`x-ankusa-verification` and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`
+and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
+`received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
+`idempotency_key`, `verification`, `headers` and the body (or claim).
+
+**Verification.** Every delivery says how the hook was verified at ingest:
+`x-ankusa-verification` on `Sink.Http` and the message's `verification` object
+on a queue sink, `{"status": "ok" | "failed" | "skipped", "flagged": bool}`.
+`skipped` is a hook nothing verified (a source with no verifier, or a lifecycle
+event). `flagged` is `true` for a hook a source accepted despite a failed check
+(`on_verify_failure: accept_flag`): `Sink.Http` then also sends
+`x-ankusa-verification-flagged: true`. Treat a flagged hook, and the tenant it
+names, as unverified. The failure's reason is not on the wire.
 
 ### `Sink.RabbitMQ`: queue delivery
 
@@ -322,13 +331,14 @@ Message shape (`Ankusa.Sink.Message`, byte-identical for `Sink.Kafka`):
 // inline
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/json", "size": 245, "dedupe_key": "evt_1", "replay_id": null,
- "idempotency_key": "acme:stripe:evt_1",
+ "idempotency_key": "acme:stripe:evt_1", "verification": {"status": "ok", "flagged": false},
  "headers": {"x-github-event": "push"}, "sha256": "2cf24d...", "body_base64": "eyJpZCI6..."}
 
 // fat payload
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728, "dedupe_key": "evt_1",
- "replay_id": null, "idempotency_key": "acme:stripe:evt_1", "headers": {},
+ "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+ "verification": {"status": "ok", "flagged": false}, "headers": {},
  "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002", "sha256": "3bea8a..."}
 ```
 
@@ -337,8 +347,9 @@ consumers must ignore keys they don't know.
 
 Every message carries `sha256` (lowercase hex, inline bodies too), the
 provider event `dedupe_key` (or `null`), the `replay_id` of the replay job when
-this delivery is a replay (else `null`), the `idempotency_key` (below), and the
-forwarded provider request `headers` (lowercased; the source's
+this delivery is a replay (else `null`), the `idempotency_key` (below), the
+`verification` result (see [Idempotent receivers](#idempotent-receivers) above),
+and the forwarded provider request `headers` (lowercased; the source's
 `forward_headers` option decides which — see
 [`configuration.md`](configuration.md#sources)).
 

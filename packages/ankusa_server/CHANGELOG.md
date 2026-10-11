@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- Every delivery says how the hook was verified: `Sink.Http` sends
+  `x-ankusa-verification` (`ok`, `failed` or `skipped`) and, for a hook a
+  source accepted despite a failed check (`on_verify_failure: accept_flag`),
+  `x-ankusa-verification-flagged: true`; a queue sink's message carries
+  `verification: {status, flagged}`. The admin API's source routes show
+  `trust_url_tenant`.
 - `idle_timeout_ms` on `rabbitmq`, `kafka`, `nats` and `redis` sinks: close a
   broker connection after that long with no delivery (default 10 minutes, `0`
   never).

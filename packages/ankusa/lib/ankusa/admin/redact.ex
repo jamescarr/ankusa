@@ -8,7 +8,8 @@ defmodule Ankusa.Admin.Redact do
   blocklist. There are two modes.
 
   **Open** covers `%Ankusa.Config{}`'s own fields and a source entry's own
-  fields (`tenant`, `name`, `source_id`, `ingest_path`, `on_verify_failure`):
+  fields (`tenant`, `name`, `source_id`, `ingest_path`, `on_verify_failure`,
+  `trust_url_tenant`):
   none of them holds a secret, so values are converted as they are. Maps and
   keyword lists become string-keyed maps, atoms become strings (module atoms
   via `inspect/1`), numbers, booleans, `nil` and binaries stay, functions
@@ -81,6 +82,9 @@ defmodule Ankusa.Admin.Redact do
       "ingest_path" => "/webhooks/#{source_id}",
       "verify" => closed("verify", Map.get(spec, "verify") || %{"type" => "none"}),
       "on_verify_failure" => open(Map.get(spec, "on_verify_failure")),
+      # A boolean, shown as stored; anything else in a stored spec reads as the
+      # default, `false`, which the decoder would have refused anyway.
+      "trust_url_tenant" => Map.get(spec, "trust_url_tenant", false) == true,
       "sinks" => closed("sinks", Map.get(spec, "sinks", []))
     }
   end

@@ -158,11 +158,13 @@ The rule does not cover a shared source that has a verifier but
 `on_verify_failure: accept_flag`: a request that fails verification is still
 committed, flagged, under whatever tenant the URL names. It spends the
 source's quarantine bucket rather than that tenant's rate limit, but it lands
-in the tenant's storage scope. The flag is on the envelope
-(`verification.flagged`, which an Elixir sink sees); the HTTP and queue
-sinks' messages do not carry it, so their consumers cannot tell such a hook
-from a verified one. Under tenant routing, give a shared source `reject` or
-`quarantine` instead.
+in the tenant's storage scope. Every delivery says so: the message's
+`verification.flagged` is `true` and `Sink.Http` sends
+`x-ankusa-verification-flagged: true` (see
+[`delivery.md`](delivery.md#idempotent-receivers)), so a consumer can refuse
+or set aside a hook that was not verified, and the tenant it names with it.
+Under tenant routing, give a shared source `reject` or `quarantine` instead if
+nothing downstream checks the flag.
 
 ## Dynamic sources
 

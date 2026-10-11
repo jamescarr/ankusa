@@ -75,6 +75,7 @@ defmodule Ankusa.AsyncApiTest do
 
     assert %{"SinkMessageV1" => %{"required" => required}} = map["components"]["schemas"]
     assert "id" in required
+    assert "verification" in required
   end
 
   test "different addresses, brokers, and bindings are different channels and servers" do

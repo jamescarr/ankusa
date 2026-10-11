@@ -145,7 +145,7 @@ sources:
 
 - The raw body verbatim, with the provider's `content-type`.
 - `x-ankusa-id`, `x-ankusa-source`, and `x-ankusa-tenant` when set.
-- `x-ankusa-idempotency-key` always; `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when present.
+- `x-ankusa-idempotency-key` and `x-ankusa-verification` (`ok`, `failed` or `skipped`) always; `x-ankusa-verification-flagged: true` for a hook a source accepted despite a failed check (`on_verify_failure: accept_flag`); `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when present.
 - The provider's own request headers, per the source's `forward_headers` (by default every header except auth, framing, hop-by-hop and `x-ankusa-*`).
 - `2xx` means delivered. Anything else, a timeout, or a redirect is retried, then dead-lettered.
 - **Dedupe on `x-ankusa-idempotency-key`.** Delivery is at-least-once, so consumers are

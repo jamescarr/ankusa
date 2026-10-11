@@ -10,17 +10,23 @@ defmodule Ankusa.Sink.Message do
   lowercase hex sha256 the reader checks the redeemed bytes against (see
   `docs/claim-check.md`). Every message carries `sha256`, `dedupe_key`,
   `replay_id`, `idempotency_key` (the tenant-scoped key a consumer dedupes on:
-  `Ankusa.Envelope.idempotency_key/1`) and the forwarded provider `headers`:
+  `Ankusa.Envelope.idempotency_key/1`), `verification` (how the hook was
+  verified at ingest: `status` is `"ok"`, `"failed"` or `"skipped"`, and
+  `flagged` is `true` when a failed check was let through by the source's
+  `on_verify_failure: accept_flag`, so a consumer treats that hook as
+  unverified) and the forwarded provider `headers`:
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
        "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+       "verification": {"status": "ok", "flagged": false},
        "headers": {"x-github-event": "push"},
        "sha256": "2cf24dba...", "body_base64": "eyJpZCI6..."}
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 3145728,
        "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+       "verification": {"status": "ok", "flagged": false},
        "headers": {},
        "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
        "sha256": "3bea8a9a07c1e8dc..."}
@@ -76,6 +82,7 @@ defmodule Ankusa.Sink.Message do
       dedupe_key: env.dedupe_key,
       replay_id: Map.get(ctx, :replay_id),
       idempotency_key: Envelope.idempotency_key(env),
+      verification: verification(env.verification),
       headers: forwarded_headers(env, Map.get(ctx, :forward_headers, :default))
     }
 
@@ -190,4 +197,28 @@ defmodule Ankusa.Sink.Message do
 
   defp claim(%{claim: %{ref: %Ref{}} = claim}, _env), do: {:ok, claim}
   defp claim(ctx, env), do: check_in(ctx.instance, env)
+
+  @doc """
+  How the hook was verified, as every sink carries it: `status` is `:ok`,
+  `:failed` or `:skipped`, and `flagged` is `true` when a failed check was let
+  through by the source's `on_verify_failure: :accept_flag`.
+
+  `:skipped` is a hook nothing checked: a source whose verifier is
+  `Ankusa.Verifier.None` (which accepts everything, so its `:ok` says nothing
+  about authenticity), or an envelope that never went through ingest (a
+  lifecycle event, `verification: nil`). The reason and scheme stay off the
+  wire: a failed-but-accepted hook is the consumer's to distrust, not to
+  diagnose.
+  """
+  @spec verification(Ankusa.Verification.t() | nil) :: %{
+          status: Ankusa.Verification.status(),
+          flagged: boolean()
+        }
+  def verification(%Ankusa.Verification{provider: Ankusa.Verifier.None}),
+    do: %{status: :skipped, flagged: false}
+
+  def verification(%Ankusa.Verification{status: status, flagged: flagged}),
+    do: %{status: status, flagged: flagged}
+
+  def verification(nil), do: %{status: :skipped, flagged: false}
 end

@@ -24,9 +24,12 @@ defmodule Ankusa.Sink.Http do
   The original `env.body` is sent verbatim with the envelope's content-type
   (falling back to `application/octet-stream`). Identity headers `x-ankusa-id`,
   `x-ankusa-source`, `x-ankusa-idempotency-key` (the key a consumer dedupes on,
-  see `Ankusa.Envelope.idempotency_key/1`) and (when set) `x-ankusa-tenant` are
-  always added, plus `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the
-  hook carries them, and `webhook-id`/`webhook-timestamp`/`webhook-signature`
+  see `Ankusa.Envelope.idempotency_key/1`), `x-ankusa-verification` (`ok`,
+  `failed` or `skipped`: how the hook was verified at ingest) and (when set)
+  `x-ankusa-tenant` are always added, plus `x-ankusa-verification-flagged: true`
+  when a failed check was let through by `on_verify_failure: accept_flag` (treat
+  that hook as unverified), `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when
+  the hook carries them, and `webhook-id`/`webhook-timestamp`/`webhook-signature`
   with a `:secret`.
   Provider request headers are forwarded per the source's `forward_headers`
   option (see `Ankusa.Sink.Message.forwarded_headers/2`); a forwarded name that
@@ -93,6 +96,7 @@ defmodule Ankusa.Sink.Http do
         {"x-ankusa-source", env.source_id},
         {"content-type", env.content_type || "application/octet-stream"}
       ] ++
+        verification_headers(env.verification) ++
         tenant_header(env.tenant_id) ++
         dedupe_header(env.dedupe_key) ++
         replay_header(ctx[:replay_id]) ++
@@ -183,6 +187,15 @@ defmodule Ankusa.Sink.Http do
 
   defp dedupe_header(key) when is_binary(key), do: [{"x-ankusa-dedupe-key", key}]
   defp dedupe_header(_), do: []
+
+  # Always says how the hook was verified (`Message.verification/1`); the flagged
+  # header only when a failed check was let through.
+  defp verification_headers(verification) do
+    %{status: status, flagged: flagged} = Message.verification(verification)
+
+    [{"x-ankusa-verification", Atom.to_string(status)}] ++
+      if flagged, do: [{"x-ankusa-verification-flagged", "true"}], else: []
+  end
 
   defp replay_header(replay_id) when is_binary(replay_id), do: [{"x-ankusa-replay-id", replay_id}]
   defp replay_header(_), do: []

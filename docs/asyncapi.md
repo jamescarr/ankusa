@@ -28,8 +28,8 @@ SASL password, no header value.
 
 Every message's payload is [`SinkMessageV1`](delivery.md): the `Ankusa.Sink.Message`
 envelope (`id`, `source_id`, `tenant_id`, `received_at`, `content_type`, `size`,
-`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `headers`, and `body_base64`
-or `claim`), narrowed to the source. The provider's own body is opaque
+`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `verification`, `headers`,
+and `body_base64` or `claim`), narrowed to the source. The provider's own body is opaque
 bytes inside it; the document does not describe it.
 
 What a consumer learns per transport:
