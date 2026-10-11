@@ -61,6 +61,16 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- Every delivery says how the hook was verified at ingest. The v1 message
+  (`Ankusa.Sink.Message`, every queue sink) carries
+  `verification: {"status": "ok" | "failed" | "skipped", "flagged": bool}`,
+  and `Sink.Http` sends `x-ankusa-verification` always and
+  `x-ankusa-verification-flagged: true` for a hook its source accepted despite
+  a failed check (`on_verify_failure: :accept_flag`). `skipped` is a source
+  with no verifier (`Verifier.None`) or a lifecycle event. The reason stays
+  off the wire. `SinkMessageV1` requires the field; `v` stays `1`.
+  `Ankusa.Sink.Message.verification/1` is the one place that decides it.
+- `GET /v1/tenants/:tenant/sources[/:name]` shows `trust_url_tenant`.
 - `trust_url_tenant` on `%Ankusa.Source{}` (default `false`), and
   `Ankusa.Verifier.check_shared/2`, `validate_shared!/1` and
   `warn_stored_shared/2`: see the E5 entry under Changed.

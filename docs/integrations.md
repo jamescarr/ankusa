@@ -34,8 +34,12 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
 
 - The raw body, verbatim, exactly as the provider sent it.
 - Headers: `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,
-  `x-ankusa-tenant` (when the source has a tenant), and `content-type`;
-  `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the hook carries them.
+  `x-ankusa-verification` (`ok`, `failed` or `skipped`: how the hook was
+  verified at ingest), `x-ankusa-tenant` (when the source has a tenant), and
+  `content-type`; `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when the hook
+  carries them. `x-ankusa-verification-flagged: true` marks a hook its source
+  accepted despite a failed check (`on_verify_failure: accept_flag`): treat it
+  as unverified.
 - Respond `2xx` only after the job is durably enqueued: a `202` after an
   in-transaction insert commits, not before.
 - `408`, `429`, any other `4xx` not listed next, `5xx` and a timeout are

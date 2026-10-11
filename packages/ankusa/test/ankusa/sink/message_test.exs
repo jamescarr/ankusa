@@ -101,6 +101,7 @@ defmodule Ankusa.Sink.MessageTest do
     env =
       envelope("hello", %{
         dedupe_key: "evt_1",
+        verification: %Ankusa.Verification{status: :ok},
         headers: [{"x-github-event", "push"}, {"X-Custom", "v"}]
       })
 
@@ -120,6 +121,31 @@ defmodule Ankusa.Sink.MessageTest do
     assert decoded["idempotency_key"] == "t1:src:evt_1"
     assert decoded["replay_id"] == "rid"
     assert decoded["headers"] == %{"x-github-event" => "push", "x-custom" => "v"}
+    assert decoded["verification"] == %{"status" => "ok", "flagged" => false}
+  end
+
+  test "a hook accepted after a failed check says so, without the reason", %{ctx: ctx} do
+    env =
+      envelope("hello", %{
+        verification: %Ankusa.Verification{status: :failed, flagged: true, reason: :no_match}
+      })
+
+    assert {:ok, json} = Message.encode(env, ctx, 100)
+    assert JSON.decode!(json)["verification"] == %{"status" => "failed", "flagged" => true}
+    refute json =~ "reason"
+    refute json =~ "no_match"
+  end
+
+  test "a hook nothing checked encodes as skipped: no verifier, or no ingest", %{ctx: ctx} do
+    # `Verifier.None` accepts everything, so its `:ok` says nothing about the sender.
+    none = %Ankusa.Verification{status: :ok, provider: Ankusa.Verifier.None}
+
+    for verification <- [none, nil] do
+      assert {:ok, json} =
+               Message.encode(envelope("hello", %{verification: verification}), ctx, 100)
+
+      assert JSON.decode!(json)["verification"] == %{"status" => "skipped", "flagged" => false}
+    end
   end
 
   test "absent dedupe_key/replay_id encode as null and headers as {}", %{ctx: ctx} do

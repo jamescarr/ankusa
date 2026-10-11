@@ -873,6 +873,7 @@ defmodule Ankusa.Admin.RouterTest do
              }
 
       assert created["on_verify_failure"] == "reject"
+      assert created["trust_url_tenant"] == false
       assert created["sinks"] == [%{"type" => "log"}]
       refute conn.resp_body =~ "s3cr3t"
 
@@ -1138,6 +1139,55 @@ defmodule Ankusa.Admin.RouterTest do
     end
   end
 
+  describe "a shared source under a tenant-path resolver" do
+    setup do
+      config =
+        test_config(
+          roles: [:dispatch],
+          admin: %{enabled: true},
+          route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+          source_store: {Ankusa.SourceStore.Persistent, decoder: &decoder/2}
+        )
+
+      put_config(config)
+      start_supervised!({Ankusa.Store, instance: config.instance})
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      %{inst: config.instance}
+    end
+
+    test "trust_url_tenant is what lets an unverified one be written, and the view shows it", %{
+      inst: inst
+    } do
+      open = %{"name" => "open", "verify" => %{"type" => "none"}}
+
+      conn = call(inst, :post, "/v1/tenants/default/sources", JSON.encode!(spec(open)))
+      assert conn.status == 400
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_source"
+
+      conn =
+        call(
+          inst,
+          :post,
+          "/v1/tenants/default/sources",
+          JSON.encode!(spec(Map.put(open, "trust_url_tenant", true)))
+        )
+
+      assert conn.status == 201
+
+      assert %{"name" => "open", "trust_url_tenant" => true} =
+               created = JSON.decode!(conn.resp_body)
+
+      conn = call(inst, :get, "/v1/tenants/default/sources/open")
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body) == created
+
+      conn = call(inst, :get, "/v1/tenants/default/sources")
+      assert %{"entries" => [^created]} = JSON.decode!(conn.resp_body)
+    end
+  end
+
   describe "source delete with undelivered rows" do
     test "DELETE with queued rows is 409 source_has_deliveries and keeps the source" do
       config = start_backlog_instance([:edge, :dispatch])
@@ -1399,8 +1449,11 @@ defmodule Ankusa.Admin.RouterTest do
   # that the decoder returns source options or raises.
   defp decoder(_source_id, spec) do
     case Map.get(spec, "sinks") do
-      [_ | _] = sinks -> [sinks: Enum.map(sinks, &sink/1)]
-      _ -> raise ArgumentError, "sinks must be a non-empty list"
+      [_ | _] = sinks ->
+        [sinks: Enum.map(sinks, &sink/1), trust_url_tenant: spec["trust_url_tenant"] || false]
+
+      _ ->
+        raise ArgumentError, "sinks must be a non-empty list"
     end
   end
 

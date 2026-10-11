@@ -130,6 +130,23 @@ defmodule Ankusa.ReplayTest do
     end
   end
 
+  # Receives `{:replayed, id, replay_id}` until every id in `ids` has arrived at
+  # least once; a repeat is fine (dispatch is at-least-once), a stranger is not.
+  defp collect_replayed(seen, ids, replay_id) do
+    if MapSet.equal?(seen, ids) do
+      seen
+    else
+      receive do
+        {:replayed, id, rid} ->
+          assert rid == replay_id
+          assert MapSet.member?(ids, id)
+          collect_replayed(MapSet.put(seen, id), ids, replay_id)
+      after
+        5_000 -> flunk("#{MapSet.size(ids) - MapSet.size(seen)} ids were never delivered")
+      end
+    end
+  end
+
   test "pacing: a job moves dead rows at its rate and delivers each once with replay_id" do
     config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
     inst = config.instance
@@ -323,7 +340,7 @@ defmodule Ankusa.ReplayTest do
       end
     end)
 
-    # Everything still gets delivered exactly once and the job finishes.
+    # Every row is delivered and the job finishes.
     poll(
       fn ->
         case Replay.get(inst, job.id) do
@@ -336,15 +353,11 @@ defmodule Ankusa.ReplayTest do
 
     ids = MapSet.new(envs, & &1.id)
 
-    received =
-      for _ <- 1..300 do
-        assert_receive {:replayed, id, replay_id}, 2_000
-        assert MapSet.member?(ids, id)
-        assert replay_id == job.id
-        id
-      end
-
-    assert MapSet.new(received) == ids
+    # The replayer moves each dead row exactly once (its cursor is committed
+    # with the rows: `moved: 300` above). Dispatch redelivers a row whose
+    # delivery was in flight when the instance stopped, which at-least-once
+    # allows, so an id may arrive twice; every id must arrive at least once.
+    assert collect_replayed(MapSet.new(), ids, job.id) == ids
     assert {:ok, %{total: 0}} = Ankusa.Queue.dead(inst, limit: 10)
   end
 

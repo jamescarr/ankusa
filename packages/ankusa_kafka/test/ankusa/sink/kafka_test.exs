@@ -180,6 +180,26 @@ defmodule Ankusa.Sink.KafkaTest do
     assert length(fetch_all(topic)) == 2
   end
 
+  test "the supervisor's status never prints the brokers or credentials the client started with",
+       %{instance: inst, topic: topic} do
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), opts(topic))
+
+    # The client is a `:temporary` child, so its DynamicSupervisor keeps no start
+    # args for it: the brokers (and any `:sasl` credentials) live only in brod's
+    # own state. Find the child first, so the refute is not vacuous.
+    supervisor = Ankusa.Sink.Kafka.Supervisor
+    client = Process.whereis(:"ankusa_kafka.#{inst}.default")
+    assert is_pid(client)
+
+    assert Enum.any?(
+             DynamicSupervisor.which_children(supervisor),
+             &match?({_, ^client, _, _}, &1)
+           )
+
+    printed = inspect(:sys.get_status(supervisor), limit: :infinity, printable_limit: :infinity)
+    refute printed =~ inspect(hd(@hosts))
+  end
+
   defp high_watermark(topic) do
     {:ok, {hw, _messages}} = :brod.fetch(@hosts, topic, 0, 0)
     hw

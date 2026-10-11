@@ -50,7 +50,7 @@ defmodule Ankusa.Sink.HttpTest do
   test "forwards the body verbatim, with the identity headers and content type", %{
     capture: capture
   } do
-    env = envelope()
+    env = envelope(%{verification: %Ankusa.Verification{status: :ok}})
 
     assert :ok = Sink.Http.deliver(env, %{attempt: 1}, opts("/hooks"))
 
@@ -62,6 +62,42 @@ defmodule Ankusa.Sink.HttpTest do
     assert h["x-ankusa-source"] == "stripe"
     assert h["x-ankusa-tenant"] == "acme"
     assert h["content-type"] == "application/json"
+    assert h["x-ankusa-verification"] == "ok"
+    refute Map.has_key?(h, "x-ankusa-verification-flagged")
+  end
+
+  test "a hook accepted after a failed check is marked flagged, without the reason", %{
+    capture: capture
+  } do
+    env =
+      envelope(%{
+        verification: %Ankusa.Verification{status: :failed, flagged: true, reason: :no_match}
+      })
+
+    assert :ok = Sink.Http.deliver(env, %{attempt: 1}, opts("/hooks"))
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    h = Map.new(headers)
+    assert h["x-ankusa-verification"] == "failed"
+    assert h["x-ankusa-verification-flagged"] == "true"
+    refute Enum.any?(headers, fn {_name, value} -> value =~ "no_match" end)
+  end
+
+  test "an envelope nothing verified is skipped, and a provider cannot claim otherwise", %{
+    capture: capture
+  } do
+    env =
+      envelope(%{
+        verification: nil,
+        headers: [{"x-ankusa-verification", "ok"}, {"x-ankusa-verification-flagged", "true"}]
+      })
+
+    assert :ok = Sink.Http.deliver(env, %{attempt: 1, forward_headers: :default}, opts("/hooks"))
+
+    assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+    h = Map.new(headers)
+    assert h["x-ankusa-verification"] == "skipped"
+    refute Map.has_key?(h, "x-ankusa-verification-flagged")
   end
 
   test "falls back to application/octet-stream when the envelope has no content type", %{

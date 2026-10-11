@@ -1182,6 +1182,12 @@ the Redix connection and the registry's keys; each first asserts it found the
 child or key it inspects. What stays is the clients' own state: amqp_client,
 brod and gnat keep the credentials they were given.
 
+**Status (2026-10-11).** The Kafka adapter was the one with no test of that
+claim: its `:temporary` client child keeps no start args, which nothing pinned.
+`kafka_test.exs` now delivers, finds the client among the supervisor's
+children, and refutes the brokers in `:sys.get_status/1` of
+`Ankusa.Sink.Kafka.Supervisor`; making the child `:transient` fails it.
+
 <a id="e5"></a>
 ### E5 · Medium · Code — The URL tenant is not bound to the source, and `accept_flag` spends budget
 
@@ -1209,9 +1215,22 @@ before the rule keeps serving, and the node names it in a warning at boot
 Not covered: a shared source *with* a verifier and `on_verify_failure:
 accept_flag` still commits a forged hook, flagged, under whatever tenant the
 URL names (it spends the source's quarantine bucket, not that tenant's rate
-limit). The flag is on the envelope (`verification.flagged`, which an Elixir
-sink sees); the HTTP and queue sinks' messages do not carry it, so their
-consumers cannot tell. `multi-tenancy.md` documents the rule and this case.
+limit). `multi-tenancy.md` documents the rule and this case. (When this note
+was written the flag was on the envelope only, so the HTTP and queue sinks'
+consumers could not tell; see the 2026-10-11 note below.)
+
+**Status (2026-10-11).** The flag now reaches consumers. Every v1 message
+carries `verification: {status, flagged}` (`Sink.Message.verification/1`) and
+`Sink.Http` sends `x-ankusa-verification` always and
+`x-ankusa-verification-flagged: true` when the hook was accepted flagged, so a
+consumer can refuse or set aside a hook that failed verification, and the
+tenant it names with it. `status` is `skipped` for a source with no verifier
+(`Verifier.None`'s `:ok` says nothing about the sender) and for a lifecycle
+event; the failure's reason is not on the wire. The `SinkMessageV1` schema
+requires the field. The queue sinks' application headers are unchanged: the
+body carries it. A source with `trust_url_tenant: true` is now visible in the
+admin API's source view (`GET /v1/tenants/:t/sources[/:name]`), so an operator
+can audit which sources take the tenant from the URL unverified.
 
 <a id="e6"></a>
 ### E6 · Medium · Code — Ingest backpressure counts records, not bytes
