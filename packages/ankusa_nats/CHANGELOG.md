@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DynamicSupervisor` (and every other delivery) behind it. It reconnects on
   its own with a 2 s backoff; `deliver/3` returns `{:error, :not_connected}`
   meanwhile.
+- The connection supervisor's child spec holds the connection settings inside
+  a closure, so `:sys.get_status/1` of `Ankusa.Sink.NATS.Supervisor`, or a
+  supervisor report, never prints a password, token or nkey seed.
 
 ## [0.5.0] - 2026-10-08
 

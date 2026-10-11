@@ -10,7 +10,7 @@ Paths below are relative to `packages/ankusa/lib/ankusa/` unless they start with
 
 **Layout.** Findings are grouped by root cause, not by pipeline stage. [Root causes](#root-causes) maps the nine causes to their findings; each group's section states the cause, lists its findings as the review recorded them, and ends with a solution scope. [Where it breaks](#where-it-breaks) keeps the stage view.
 
-**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, E4 and E5 are closed, and so are D2's two open bullets and the B7, C2, S6 and O2 residuals; what remains (B5, which is inherent, and the sink adapters' connection credentials, a Low residual of O2) is listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
+**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, E4 and E5 are closed, and so are D2's two open bullets and the B7, C2, S6 and O2 residuals. An audit of every closed finding the same day found one new gap (a `wal: :none` node accepted an API-managed source with no durable sink; see [D2](#d2)), an untested D2 path and the sink adapters' O2 residual; all three are closed. What remains (B5, which is inherent, and credentials held in the broker client libraries' own process state) is listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
 
 ## Verdict
 
@@ -505,6 +505,22 @@ that fails and returns to pending, is dead-lettered as `source_gone` when it
 is next claimed — unless the name is re-created first, in which case it is
 delivered to the new source. The check is node-local, like the DLQ: with
 `SourceStore.Redis` a delete on one node does not see another node's queue.
+
+**Status (2026-10-10, audit).** Two follow-ups from re-checking the fixes
+above. The rebinding bullet had no test; `dispatch_test.exs` now enqueues on
+an edge-only node, restarts with the sinks reordered and re-optioned (the row
+delivers through its module's new index with the current options), then with
+the module removed (`{:sink_gone, 0, module}` in the DLQ, the surviving sink
+delivers). And the G3 invariant had a hole under `wal: :none`: boot refused a
+static source with no durable sink, but a source created or updated through
+the admin API was not checked, so a log-only source answered `201` with no
+durable copy anywhere. `Ankusa.SourceStore.Table.check_write/2`, which both
+writable stores (`SourceStore.Persistent`, `SourceStore.Redis`) call before
+a write, now applies `Ankusa.Queue.check_durable/2` — the same rule as boot —
+so the write is `400 invalid_source` and nothing is stored. A source that
+reaches the node without that check — stored before it existed, or written
+to a shared `SourceStore.Redis` by a `wal: :disk` node — is refused at the
+ack instead: `Edge.Publish` answers `503` for a source with no durable sink.
 
 <a id="b1"></a>
 ### B1 · Critical · Reproduced — RabbitMQ confirms unroutable publishes, and `durable?` says that is durable
@@ -1146,6 +1162,26 @@ sink adapters' connection supervisors (`Ankusa.Sink.{Kafka,NATS,RabbitMQ,Redis}.
 hold connection credentials in their children's start arguments, and brod,
 gnat and Redix keep them in their own process state.
 
+**Status (2026-10-10, audit).** The sink-adapter residual is closed, and was
+worse than recorded for Redis but narrower than recorded for Kafka. A
+`DynamicSupervisor` keeps no start arguments for a `:temporary` child (its
+state holds `{m, f, :undefined}`), and the Kafka and Redis connections are
+`:temporary`, so their supervisors never printed them. The RabbitMQ and NATS
+connections restart, so their supervisors did. And `Sink.Redis` registered its
+connection under `{:redis_sink, url}`, so the URL's password was in the
+instance registry's key, and Redix, given the URL, kept the password in its
+state. Now RabbitMQ passes the connection only the options it reads, with the
+URL inside a zero-arity closure (`Connection.init/1` resolves it); NATS starts
+`Gnat.ConnectionSupervisor` through `Sink.NATS.start_connection_supervisor/2`
+with the settings in a closure (`inspect` prints a closure without its
+captured values); Redis registers under a digest of the URL
+(`Sink.Redis.connection_key/1`) and starts Redix with the password as an MFA
+over a closure, like the Redis stores. Tests plant a canary credential and
+refute it in `:sys.get_status/1` of the RabbitMQ and NATS supervisors, and of
+the Redix connection and the registry's keys; each first asserts it found the
+child or key it inspects. What stays is the clients' own state: amqp_client,
+brod and gnat keep the credentials they were given.
+
 <a id="e5"></a>
 ### E5 · Medium · Code — The URL tenant is not bound to the source, and `accept_flag` spends budget
 
@@ -1500,11 +1536,11 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 ## Remaining work, re-assessed
 
-Re-rated against the code on 2026-10-09 with this review's own severity definitions; updated 2026-10-10, when the B7, C2, S6 and O2 residuals, D2's open bullets and the E5 deviation were closed. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
+Re-rated against the code on 2026-10-09 with this review's own severity definitions; updated 2026-10-10, when the B7, C2, S6 and O2 residuals, D2's open bullets and the E5 deviation were closed, and again after the same day's audit closed the sink adapters' O2 residual and the `wal: :none` runtime-source gap. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
 
 | Finding | Severity now | What still fails | Why it stays |
 |---|---|---|---|
-| O2 residual (sink adapters) | Low | `Ankusa.Sink.{Kafka,NATS,RabbitMQ,Redis}.Supervisor` hold connection credentials in their children's start arguments, so `:sys.get_status/1` on one, or a SASL supervisor report, prints them; brod, gnat and Redix keep them in their own process state. | The instance tree is closed; these connections are started per sink by each adapter, and the clients' own state is theirs. SASL reports are off by default. |
+| O2 residual (client-library state) | Low | amqp_client, brod and gnat keep the connection credentials they were given in their own process state, so `:sys.get_status/1` on one of their processes prints them. | Nothing Ankusa starts prints them: no child spec or registry key holds them, and `Sink.RabbitMQ.Connection`, which keeps the URL in its state to dial, redacts it in `format_status/1`. The clients' state is theirs. |
 | B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | Re-checked 2026-10-10: brod (4.7.0) has no cancel and no idempotent producer, and a per-hook transaction does not hide the record from `read_uncommitted` consumers; consumers dedupe on `idempotency_key`. |
 
 ## Decisions that choose between the options

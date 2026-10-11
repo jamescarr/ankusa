@@ -458,12 +458,12 @@ The trade is the retry: with no queue there is no retry policy, no dead-letter
 queue, and no replay — a `503` with `Retry-After` is the whole retry mechanism,
 so the provider must retry and consumers must dedupe on the idempotency key,
 which is the hook `id` unless the source sets
-[`dedupe`](configuration.md#sources). Every statically configured source needs at
-least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`); boot
-refuses the config otherwise, and a source created at runtime through the admin
-API is not checked. Every sink in the list still has to confirm, so a
-non-durable one that cannot — Redis pub/sub with no subscriber — is a `503`
-for every request, not a silently skipped hop. The local state this topology
+[`dedupe`](configuration.md#sources). Every source needs at least one sink
+whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`): boot refuses a config
+whose static source has none, and the admin API refuses to create or update a
+source into one (`400 invalid_source`). Every sink in the list still has to
+confirm, so a non-durable one that cannot — Redis pub/sub with no subscriber —
+is a `503` for every request, not a silently skipped hop. The local state this topology
 has is the quarantine pen (rows in the store, added only for a source that
 asks for it), API-managed sources and rate-limit overrides. See
 [`delivery.md#direct-mode`](delivery.md#direct-mode) and

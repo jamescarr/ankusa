@@ -378,5 +378,9 @@ defmodule Ankusa.Sink.RabbitMQTest do
 
     refute printed =~ "guest:guest"
     assert printed =~ @amqp_url |> URI.parse() |> Map.put(:userinfo, nil) |> URI.to_string()
+
+    # Nor does the supervisor's copy of the connection's child spec.
+    supervisor = :sys.get_status(Ankusa.Sink.RabbitMQ.Supervisor)
+    refute inspect(supervisor, limit: :infinity, printable_limit: :infinity) =~ "guest:guest"
   end
 end

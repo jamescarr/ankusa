@@ -183,7 +183,7 @@ defmodule Ankusa.Sink.RedisTest do
     assert :ok = deliver(envelope(), ctx(inst), opts)
     assert receive_message(ps, ref) == channel
 
-    old = Ankusa.whereis(inst, {:redis_sink, @url})
+    old = Ankusa.whereis(inst, Redis.connection_key(@url))
     mon = Process.monitor(old)
     reaper = Ankusa.Sink.Redis.Reaper
 
@@ -199,11 +199,35 @@ defmodule Ankusa.Sink.RedisTest do
     :sys.get_state(reaper)
 
     assert_receive {:DOWN, ^mon, :process, ^old, _reason}, 5_000
-    assert Ankusa.whereis(inst, {:redis_sink, @url}) == nil
+    assert Ankusa.whereis(inst, Redis.connection_key(@url)) == nil
 
     assert :ok = deliver(envelope(), ctx(inst), opts)
     assert receive_message(ps, ref) == channel
-    assert Ankusa.whereis(inst, {:redis_sink, @url}) not in [nil, old]
+    assert Ankusa.whereis(inst, Redis.connection_key(@url)) not in [nil, old]
+  end
+
+  test "the URL's password is in no registry key or connection state", %{
+    instance: inst
+  } do
+    canary = "s3cr3t-canary"
+    url = "redis://:#{canary}@127.0.0.1:1"
+    printed = &inspect(&1, limit: :infinity, printable_limit: :infinity)
+
+    assert {:error, _} = Redis.deliver(envelope(), ctx(inst), url: url, channel: "x")
+
+    pid = Ankusa.whereis(inst, Redis.connection_key(url))
+    assert is_pid(pid)
+
+    # The connection is `:temporary`, so its DynamicSupervisor keeps no start
+    # args; what can print the password is Redix's state and the registry key.
+    # Each check first finds what it looks at, so the refutes are not vacuous.
+    connection = printed.(:sys.get_status(pid))
+    assert connection =~ "connection_password"
+    refute connection =~ canary
+
+    keys = Registry.select(Ankusa.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    assert {inst, Redis.connection_key(url)} in keys
+    refute printed.(keys) =~ canary
   end
 
   defp receive_message(ps, ref) do

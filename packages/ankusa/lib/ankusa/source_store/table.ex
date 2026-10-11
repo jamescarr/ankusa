@@ -171,15 +171,21 @@ defmodule Ankusa.SourceStore.Table do
   end
 
   @doc """
-  Refuse a write of a source the instance's config would not run
-  (`Ankusa.Verifier.check_shared/2`). `build/4` and `load_spec/5` stay
-  permissive: refusing a stored source at load would `404` it, and dispatch
-  would dead-letter its pending hooks as `source_gone`.
+  Refuse a write of a source the instance's config would not run: a shared
+  source without a verifier (`Ankusa.Verifier.check_shared/2`), or, under
+  `wal: :none`, a source with no durable sink (`Ankusa.Queue.check_durable/2`).
+  `build/4` and `load_spec/5` stay permissive: refusing a stored source at load
+  would `404` it, and dispatch would dead-letter its pending hooks as
+  `source_gone`.
   """
   @spec check_write(atom(), Source.t()) :: :ok | {:error, :invalid, String.t()}
   def check_write(instance, %Source{} = source) do
-    case Ankusa.Verifier.check_shared(Ankusa.config(instance), source) do
-      :ok -> :ok
+    config = Ankusa.config(instance)
+
+    with :ok <- Ankusa.Verifier.check_shared(config, source),
+         :ok <- Ankusa.Queue.check_durable(config, source) do
+      :ok
+    else
       {:error, message} -> {:error, :invalid, message}
     end
   end

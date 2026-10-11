@@ -456,6 +456,27 @@ defmodule Ankusa.SourceStorePersistentTest do
     assert {:ok, %Source{trust_url_tenant: false}} = SourceStore.fetch(inst, "default.legacy")
   end
 
+  # ── durability under wal: :none ─────────────────────────────────────────────
+
+  test "under wal: :none, a source with no durable sink is refused when written" do
+    {config, _pid} = start_store(wal: :none)
+    inst = config.instance
+
+    assert {:error, :invalid, message} =
+             SourceStore.put(inst, "acme", "logonly", @log_spec, :create)
+
+    assert message =~ ~s(source "acme.logonly")
+    assert message =~ "none of its sinks is durable"
+    assert SourceStore.get(inst, "acme", "logonly") == :error
+
+    hooked = %{"sinks" => [%{"type" => "log"}, %{"type" => "http", "url" => "http://sink.test"}]}
+    assert {:ok, _} = SourceStore.put(inst, "acme", "hooked", hooked, :create)
+
+    # An update that drops the durable sink is refused too, and changes nothing.
+    assert {:error, :invalid, _} = SourceStore.put(inst, "acme", "hooked", @log_spec, :update)
+    assert {:ok, %{spec: ^hooked}} = SourceStore.get(inst, "acme", "hooked")
+  end
+
   # ── helpers ─────────────────────────────────────────────────────────────────
 
   defp start_store(overrides \\ []) do
@@ -524,5 +545,6 @@ defmodule Ankusa.SourceStorePersistentTest do
   defp drifted_decoder(source_id, spec), do: decoder(source_id, spec)
 
   defp sink(%{"type" => "log"}), do: {Ankusa.Sink.Log, []}
+  defp sink(%{"type" => "http", "url" => url}), do: {Ankusa.Sink.Http, [url: url]}
   defp sink(other), do: raise(ArgumentError, "unknown sink: #{inspect(other)}")
 end

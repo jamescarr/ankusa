@@ -13,6 +13,15 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Fixed
 
+- Under `wal: :none`, a source written at runtime (`Ankusa.SourceStore.put/5`,
+  the admin API's source routes) with no durable sink is refused with
+  `{:error, :invalid, message}` (`400 invalid_source`), as boot already
+  refused a static one: it would have answered `201` with no durable copy
+  anywhere. Every writable source store applies the new
+  `Ankusa.Queue.check_durable/2` before a write, and `Ankusa.Edge.Publish`
+  answers `503` for a source that reaches ingest without that check (stored
+  before it, or written to a shared source store by a `wal: :disk` node)
+  instead of acking it with no durable copy.
 - A store restored from backup (or created fresh with a backup configured)
   keeps its `RESTORE-IN-PROGRESS` marker until `reconcile_archive` has
   succeeded. A node that died, or whose reconcile failed, between the restore

@@ -45,6 +45,10 @@ follows [Semantic Versioning](https://semver.org/).
   so a store that crashes during a Redis outage does not hold the edge down. It
   loads once the subscription is confirmed and on every tick. A first boot
   still fails loudly.
+- `Ankusa.Sink.Redis` registers its connection under a digest of the URL
+  instead of the URL, and starts Redix with the URL's password as an
+  `{m, f, a}` over a closure: the password is in no registry key, child spec
+  or Redix state.
 
 ## [0.4.0] - 2026-10-02
 
