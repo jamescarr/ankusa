@@ -152,7 +152,8 @@ an existing struct), `use AsyncApiSpex.Channel` and `use AsyncApiSpex.Spec` to
 declare a publishing module's topic and broker and assemble the document from
 those modules, a validator, a Plug
 (`AsyncApiSpex.Plug.RenderSpec`) that serves a document as
-`application/asyncapi+json`, and `mix async_api_spex.gen` to write one to a file.
+`application/asyncapi+json`, another (`AsyncApiSpex.Plug.Viewer`) that renders
+it as a browsable HTML page, and `mix async_api_spex.gen` to write one to a file.
 Its README shows an app declaring its channels.
 
 `Ankusa.AsyncApi.document/1` returns the `%AsyncApiSpex.Document{}` for an

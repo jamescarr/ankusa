@@ -53,16 +53,20 @@ defmodule AsyncApiSpex.Schema.Fields do
     |> put_meta("required", if(required == [], do: nil, else: required))
   end
 
+  # Runs before the module is loaded under `mix compile`, so it reads the
+  # module's definitions and attributes instead of calling it.
   @doc false
   def __after_compile__(env, _bytecode) do
     module = env.module
 
-    unless function_exported?(module, :__struct__, 0) do
+    unless Module.defines?(module, {:__struct__, 0}) do
       raise ArgumentError,
             "use AsyncApiSpex.Schema with :fields requires defstruct in #{inspect(module)}"
     end
 
-    case Keyword.keys(module.__async_api_fields__()) -- struct_keys(module) do
+    keys = for %{field: key} <- Macro.struct_info!(module, env), do: key
+
+    case Keyword.keys(Module.get_attribute(module, :__async_api_fields__)) -- keys do
       [] ->
         :ok
 

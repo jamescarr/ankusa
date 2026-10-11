@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its operation on the module that publishes to it or consumes from it.
 - `use AsyncApiSpex.Spec` implements `spec/0` by assembling a document from
   channel modules, listed with `channels:` or discovered with `otp_app:`.
+- `AsyncApiSpex.Plug.Viewer` serves an HTML page that renders a document in
+  the browser with the AsyncAPI React component (pinned to 3.2.1 on unpkg;
+  `:bundle_url` and `:stylesheet_url` point it at a self-hosted copy). Mount it
+  next to `AsyncApiSpex.Plug.RenderSpec` with `path:` set to that mount.
+- CI scaffolds a fresh `mix new` app that depends on nothing but this library
+  and `plug`, decorates a producer and a consumer, and serves, validates, and
+  writes the document, so the library is proven outside the repository it
+  lives in.
 
 ### Changed
 

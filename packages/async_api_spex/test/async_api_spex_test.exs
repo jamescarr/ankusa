@@ -243,6 +243,44 @@ defmodule AsyncApiSpexTest do
     end
   end
 
+  describe "AsyncApiSpex.Plug.Viewer" do
+    test "serves an HTML page that renders the document at :path" do
+      conn =
+        Plug.Test.conn(:get, "/asyncapi")
+        |> AsyncApiSpex.Plug.Viewer.call(AsyncApiSpex.Plug.Viewer.init(path: "/asyncapi.json"))
+
+      assert conn.status == 200
+      assert conn.halted
+      assert [content_type] = Plug.Conn.get_resp_header(conn, "content-type")
+      assert String.starts_with?(content_type, "text/html")
+      assert conn.resp_body =~ ~s|"/asyncapi.json"|
+
+      assert conn.resp_body =~
+               "https://unpkg.com/@asyncapi/react-component@3.2.1/browser/standalone/index.js"
+
+      assert conn.resp_body =~ "AsyncApiStandalone.render"
+    end
+
+    test "a </script> inside :config cannot close the script block" do
+      html = AsyncApiSpex.Plug.Viewer.init(path: "/x", config: %{"a" => "</script><b>"})
+
+      assert html =~ "<\\/script>"
+      refute html =~ "</script><b>"
+    end
+
+    test "init/1 without :path raises" do
+      assert_raise ArgumentError, ~r/requires a :path option/, fn ->
+        AsyncApiSpex.Plug.Viewer.init([])
+      end
+    end
+
+    test "init/1 with an unknown option raises" do
+      assert_raise ArgumentError, ~r/unknown option\(s\) \[:spec\]/, fn ->
+        AsyncApiSpex.Plug.Viewer.init(path: "/asyncapi.json", spec: AsyncApiSpexTest.Spec)
+      end
+    end
+  end
+
   describe "mix async_api_spex.gen" do
     test "writes the encoded document to the output path" do
       output =

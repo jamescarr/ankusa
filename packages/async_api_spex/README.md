@@ -7,13 +7,15 @@ document, and serve or serialize it. The API mirrors
 macros, a Plug, and a mix task.
 
 The library has no dependency on any application's domain code — only `plug`
-(optional, for `AsyncApiSpex.Plug.RenderSpec`).
+(optional, for `AsyncApiSpex.Plug.RenderSpec` and `AsyncApiSpex.Plug.Viewer`)
+— and nothing from any application in this repository;
+`scripts/standalone.sh` proves it against a fresh `mix new` app in CI.
 
 ## Installation
 
 ```elixir
 def deps do
-  [{:async_api_spex, "~> 0.1"}]
+  [{:async_api_spex, "~> 0.2"}]
 end
 ```
 
@@ -104,11 +106,24 @@ same one.
 
 ### Serve or write it
 
-Serve it from a Plug router:
+Serve it from a router, next to a page that renders it:
 
 ```elixir
+# Plug.Router
+forward "/asyncapi.json", to: AsyncApiSpex.Plug.RenderSpec, init_opts: [spec: Shop.AsyncApi]
+forward "/asyncapi",      to: AsyncApiSpex.Plug.Viewer,     init_opts: [path: "/asyncapi.json"]
+
+# Phoenix router
 forward "/asyncapi.json", AsyncApiSpex.Plug.RenderSpec, spec: Shop.AsyncApi
+forward "/asyncapi",      AsyncApiSpex.Plug.Viewer,     path: "/asyncapi.json"
 ```
+
+`AsyncApiSpex.Plug.Viewer` serves an HTML page that fetches the document from
+its `path:` (the `RenderSpec` mount, as an absolute path); open `/asyncapi` to
+browse the channels, operations, and schemas. The page is the
+[AsyncAPI React component](https://github.com/asyncapi/asyncapi-react), loaded
+from unpkg; point `:bundle_url` and `:stylesheet_url` at a self-hosted copy if
+your Content Security Policy blocks it.
 
 Or write it to a file:
 

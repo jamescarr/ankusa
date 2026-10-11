@@ -140,8 +140,10 @@ defmodule AsyncApiSpex.Schema do
 
   defp fields_quoted(name, fields, meta) do
     quote do
+      @__async_api_fields__ unquote(Macro.escape(fields))
+
       @doc false
-      def __async_api_fields__, do: unquote(Macro.escape(fields))
+      def __async_api_fields__, do: @__async_api_fields__
 
       @after_compile {AsyncApiSpex.Schema.Fields, :__after_compile__}
 
