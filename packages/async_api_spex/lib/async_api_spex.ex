@@ -16,7 +16,8 @@ defmodule AsyncApiSpex do
     * `validate/1` checks the document and reports errors by JSON path.
 
   Serve a document from a Plug application with `AsyncApiSpex.Plug.RenderSpec`,
-  or write it to a file with `mix async_api_spex.gen`.
+  browse it as an HTML page with `AsyncApiSpex.Plug.Viewer`, or write it to a
+  file with `mix async_api_spex.gen`.
   """
 
   alias AsyncApiSpex.Document

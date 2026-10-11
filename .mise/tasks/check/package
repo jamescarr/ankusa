@@ -35,6 +35,9 @@ case "$kind" in
     mix format --check-formatted
     mix compile --warnings-as-errors
     mix test
+    # The one package-specific step: async_api_spex is for other projects, so
+    # its gate is a project that is not this repo.
+    if [ "$pkg" = async_api_spex ]; then scripts/standalone.sh; fi
     ;;
   npm)
     npm ci
