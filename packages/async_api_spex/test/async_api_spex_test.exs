@@ -268,6 +268,20 @@ defmodule AsyncApiSpexTest do
       refute html =~ "</script><b>"
     end
 
+    test "the title and asset URLs are HTML-escaped" do
+      html =
+        AsyncApiSpex.Plug.Viewer.init(
+          path: "/x",
+          title: "<b>Shop</b>",
+          bundle_url: ~s|https://cdn.example/a.js"><script>x()</script>|,
+          stylesheet_url: ~s|https://cdn.example/a.css" onload="x()|
+        )
+
+      assert html =~ "<title>&lt;b&gt;Shop&lt;/b&gt;</title>"
+      assert html =~ ~s|src="https://cdn.example/a.js&quot;&gt;&lt;script&gt;x()&lt;/script&gt;"|
+      assert html =~ ~s|href="https://cdn.example/a.css&quot; onload=&quot;x()"|
+    end
+
     test "init/1 without :path raises" do
       assert_raise ArgumentError, ~r/requires a :path option/, fn ->
         AsyncApiSpex.Plug.Viewer.init([])

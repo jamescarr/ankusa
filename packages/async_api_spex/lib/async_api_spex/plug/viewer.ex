@@ -30,9 +30,11 @@ if Code.ensure_loaded?(Plug) do
       * `:config` — a map passed to the component as its `config` prop;
         defaults to `%{"show" => %{"sidebar" => true}}`.
 
-    The bundle and stylesheet are loaded from unpkg. A Content Security Policy
-    that blocks unpkg needs `:bundle_url` and `:stylesheet_url` pointed at a
-    self-hosted copy.
+    The bundle and stylesheet are loaded from unpkg; point `:bundle_url` and
+    `:stylesheet_url` at a self-hosted copy to keep the page off a CDN. Under a
+    Content Security Policy the page also needs its one inline `<script>` (the
+    `render` call carrying `:path` and `:config`) allowed, with
+    `'unsafe-inline'` or that script's hash in `script-src`.
     """
 
     @behaviour Plug

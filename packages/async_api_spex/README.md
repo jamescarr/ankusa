@@ -122,8 +122,9 @@ forward "/asyncapi",      AsyncApiSpex.Plug.Viewer,     path: "/asyncapi.json"
 its `path:` (the `RenderSpec` mount, as an absolute path); open `/asyncapi` to
 browse the channels, operations, and schemas. The page is the
 [AsyncAPI React component](https://github.com/asyncapi/asyncapi-react), loaded
-from unpkg; point `:bundle_url` and `:stylesheet_url` at a self-hosted copy if
-your Content Security Policy blocks it.
+from unpkg; `:bundle_url` and `:stylesheet_url` point it at a self-hosted copy.
+Under a Content Security Policy, `script-src` must also allow the page's one
+inline `<script>` (`'unsafe-inline'` or its hash).
 
 Or write it to a file:
 

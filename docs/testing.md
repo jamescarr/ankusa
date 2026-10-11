@@ -226,7 +226,7 @@ the bucket/container bootstrap, runs `mix test --only integration` (the tagged t
 ## `async_api_spex`: `mix test`
 
 ```sh
-mise run check:package async_api_spex    # 61 tests + the standalone scaffold, no external infra needed
+mise run check:package async_api_spex    # 62 tests + the standalone scaffold, no external infra needed
 ```
 
 Covers: a document declared with `use AsyncApiSpex.Schema` / `Message` encoding
