@@ -53,7 +53,7 @@ Every top-level section, with its keys and defaults:
 | Section | Keys (default) |
 | --- | --- |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
-| `log` | `level` (`info`) |
+| `log` | `level` (`info`), `banner` (`true`; the ASCII-art banner on start) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
@@ -155,6 +155,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ROLES` | `node.roles`, comma-separated (`edge`, `dispatch`, `storage`, `claim_check`) |
 | `ANKUSA_DATA_DIR` | `node.data_dir` |
 | `ANKUSA_LOG_LEVEL` | `log.level` |
+| `ANKUSA_BANNER` | `log.banner` |
 | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
 | `ANKUSA_ADMIN_PORT` | `admin.port` |
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |

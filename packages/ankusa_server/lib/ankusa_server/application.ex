@@ -36,6 +36,8 @@ defmodule AnkusaServer.Application do
     Logger.configure(level: loaded.log_level)
     config = loaded.config
 
+    if loaded.banner, do: AnkusaServer.Banner.print()
+
     Logger.info(
       "[ankusa] ankusa_server #{version()} roles=#{inspect(config.roles)} http=#{config.port} " <>
         "admin=#{admin(config)} routes=#{routes(config)} wal=#{Ankusa.Queue.label(config.wal)} " <>
