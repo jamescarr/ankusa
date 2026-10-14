@@ -18,7 +18,8 @@ defmodule Ankusa.Instance do
       restarts with the edge. A core that keeps crashing exhausts this
       supervisor's budget and the instance stops, for its parent to restart.
     * **Every other domain** — dispatch, archive/storage, store backup,
-      lifecycle events, metrics, and the admin, route-admin and claim-check
+      lifecycle events, the SCIM directory, the token verifier, the audit
+      shipper, metrics, and the admin, route-admin and claim-check
       listeners — runs under `Ankusa.Instance.Isolated`. It has its own
       restart budget, and when that is exhausted it is restarted later with
       backoff instead of taking the instance down. A broken sink, a port
@@ -76,6 +77,8 @@ defmodule Ankusa.Instance do
     Ankusa.Routes.validate_config!(config)
     Ankusa.Queue.validate_config!(config)
     Ankusa.Lifecycle.validate_config!(config)
+    Ankusa.Auth.validate_config!(config)
+    Ankusa.Audit.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     Ankusa.Edge.Quarantine.validate_config!(config)
     Ankusa.Dispatch.Pipeline.validate_config!(config)
@@ -89,6 +92,9 @@ defmodule Ankusa.Instance do
         backup_children(config, opts) ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
+        directory_children(config, opts) ++
+        auth_children(config, opts) ++
+        audit_children(config, opts) ++
         edge_children(config, opts) ++
         routes_admin_children(config) ++
         dispatch_children(config, opts) ++
@@ -143,7 +149,10 @@ defmodule Ankusa.Instance do
   @spec store?(Config.t()) :: boolean()
   def store?(%Config{} = config) do
     Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
-      match?({Ankusa.SourceStore.Persistent, _}, config.source_store)
+      match?({Ankusa.SourceStore.Persistent, _}, config.source_store) or
+      config.audit.enabled or
+      (config.scim.enabled and
+         match?({Ankusa.Directory.Store.Persistent, _}, config.scim.directory))
   end
 
   # The one process that assigns seqs and commits hooks, in the edge subtree
@@ -173,6 +182,32 @@ defmodule Ankusa.Instance do
 
   defp lifecycle_children(config, opts),
     do: isolated(config, :lifecycle, [{Ankusa.Lifecycle.Publisher, opts}])
+
+  # The SCIM directory, when its store is a process (the persistent one is; the
+  # Redis one holds a connection). It starts before the listener that serves
+  # `/scim/v2` and before auth, which resolves tokens through it.
+  defp directory_children(%Config{scim: %{enabled: true, directory: {mod, _opts}}} = config, opts) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :start_link, 1),
+      do: isolated(config, :directory, [{mod, opts}]),
+      else: []
+  end
+
+  defp directory_children(_config, _opts), do: []
+
+  # The token verifier, when it is a process (the OIDC one caches its JWKS).
+  defp auth_children(%Config{auth: %{enabled: true, verifier: {mod, _opts}}} = config, opts) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :start_link, 1),
+      do: isolated(config, :auth, [{mod, opts}]),
+      else: []
+  end
+
+  defp auth_children(_config, _opts), do: []
+
+  # The audit log's shipper and pruner. It runs with no sinks too: it prunes.
+  defp audit_children(%Config{audit: %{enabled: true}} = config, opts),
+    do: isolated(config, :audit, [{Ankusa.Audit.Shipper, opts}])
+
+  defp audit_children(_config, _opts), do: []
 
   # Everything that stands between a request and the ack, in one subtree
   # (`:rest_for_one`, so each child restarts with what it depends on):
@@ -243,11 +278,13 @@ defmodule Ankusa.Instance do
   # up.
   defp routes_admin_children(config) do
     if routes?(config) do
-      Logger.warning(
-        "[ankusa] route management API on " <>
-          "#{listen_addr(config.routes.admin, "routes.admin.ip")} is unauthenticated; " <>
-          "do not expose it publicly, front it with your own proxy or network policy"
-      )
+      unless config.auth.enabled do
+        Logger.warning(
+          "[ankusa] route management API on " <>
+            "#{listen_addr(config.routes.admin, "routes.admin.ip")} is unauthenticated; " <>
+            "do not expose it publicly, front it with your own proxy or network policy"
+        )
+      end
 
       isolated(config, :routes_admin, [
         bandit_child(
@@ -334,11 +371,13 @@ defmodule Ankusa.Instance do
   # has started.
   defp admin_children(config) do
     if config.admin.enabled do
-      Logger.warning(
-        "[ankusa] admin API on #{listen_addr(config.admin, "admin.ip")} is unauthenticated; " <>
-          "do not expose it " <>
-          "publicly, front it with your own proxy or network policy"
-      )
+      unless config.auth.enabled do
+        Logger.warning(
+          "[ankusa] admin API on #{listen_addr(config.admin, "admin.ip")} is unauthenticated; " <>
+            "do not expose it " <>
+            "publicly, front it with your own proxy or network policy"
+        )
+      end
 
       isolated(config, :admin, [
         bandit_child(Ankusa.Admin.Router, config.instance, config.admin, "admin.ip")

@@ -41,7 +41,8 @@ admin:
   # defaults this on because it is the only way to operate a container without
   # an Elixir shell; core's default for embedded users is false.
   enabled: true
-  # [env ANKUSA_ADMIN_PORT] unauthenticated — do not publish it.
+  # [env ANKUSA_ADMIN_PORT] unauthenticated unless `auth.enabled` (below) — do
+  # not publish it.
   port: 4002
   # [env ANKUSA_ADMIN_IP] the address it binds. Loopback by default, so inside
   # a container `-p 4002:4002` does not reach it; set 0.0.0.0 to publish it.
@@ -109,9 +110,9 @@ routes:
     # - {action: allow, cidr: "203.0.113.0/24"}
 
   admin:
-    # Its own listener, unauthenticated by design (same stance as `admin:`
-    # above): front it with your own proxy or network policy before exposing
-    # it.
+    # Its own listener, unauthenticated unless `auth.enabled` (below), same
+    # stance as `admin:` above: front it with your own proxy or network policy
+    # before exposing it.
     port: 4003
     # The address it binds; 0.0.0.0 exposes it on every interface.
     ip: 127.0.0.1
@@ -317,6 +318,86 @@ lifecycle:
     - type: kafka
       brokers: ["${KAFKA_BROKERS}"]
       topic: ankusa.lifecycle
+
+# Enterprise single sign-on for the admin API (4002) and the route-management
+# API (4003): `Authorization: Bearer <JWT from your OIDC identity provider>`.
+# Off by default; off means both listeners answer everyone, as before. On,
+# every request except GET /health and GET /ready needs a token, `/metrics`
+# included. The claim-check API (4001) is not covered: workers redeem claims
+# there, not people. See docs/authentication.md.
+auth:
+  enabled: false
+  # Required once enabled. The signing keys are fetched from the issuer's
+  # .well-known/openid-configuration (or `jwks_uri`) and cached.
+  oidc:
+    # `iss` must equal this exactly.
+    issuer: https://login.example.com/
+    # `aud` must be this string, or a list containing it.
+    audience: ankusa
+    # RS256 RS384 RS512 ES256 ES384 PS256; never none or HS*. Default [RS256, ES256].
+    # algorithms: [RS256, ES256]
+    # Clock skew allowed on exp and nbf. Default 60.
+    # leeway_seconds: 60
+    # Skip discovery and fetch the keys from here.
+    # jwks_uri: https://login.example.com/keys
+  # The token claims that name the subject (subject bindings) and, without
+  # SCIM, the groups (group bindings). Defaults sub and groups.
+  subject_claim: sub
+  groups_claim: groups
+  # With `scim.enabled`: how a token finds its provisioned user. The claim's
+  # value is compared with the user's userName (case-insensitively) or
+  # externalId (exactly). A token matching no active user is refused.
+  user_match:
+    claim: preferred_username
+    attribute: userName   # userName | externalId
+  # Who may do what. roles: viewer < operator < admin (viewer reads, operator
+  # replays and purges quarantine, admin manages sources, routes, rate limits
+  # and reads the audit log). A binding names exactly one of `group` (a group
+  # claim, or with SCIM the displayName of a directory group) or `subject`
+  # (a token subject: a machine identity, which needs no SCIM user). `tenants`
+  # is `all` (the default) or the tenants the grant is limited to; platform-wide
+  # actions need a grant over `all`.
+  bindings:
+    - {group: Platform, role: admin}
+    - {group: Acme Ops, role: operator, tenants: [acme]}
+    - {subject: ci-deployer, role: viewer}
+
+# SCIM 2.0 provisioning of users and groups (Okta, Microsoft Entra ID), served
+# under /scim/v2 on the admin listener. Needs `auth.enabled`. The directory it
+# fills is what `auth.bindings` groups and `auth.user_match` read: deactivating
+# or deleting a user there stops their tokens being accepted.
+scim:
+  enabled: false
+  # The bearer token the identity provider's SCIM client sends; at least 32
+  # bytes. It opens /scim/v2 and nothing else.
+  token: "${ANKUSA_SCIM_TOKEN:-}"
+  # The URL SCIM clients reach this API at, for meta.location. Unset = taken
+  # from the request.
+  # base_url: https://admin.example.com
+  # persistent -> this node's store (node-local). redis -> Redis, shared by every
+  # node with the same namespace (ankusa_redis); a `url` with no `type` means redis.
+  store:
+    type: persistent
+    # The two keys below are only valid with `type: redis`.
+    # url: redis://cache:6379
+    # namespace: ankusa:directory:default
+
+# The durable audit log: every mutation and every denial on 4002, 4003 and
+# /scim/v2, written to this node's store before the response is sent (a
+# mutation whose record cannot be written is refused, 503 audit_unavailable).
+# Read it with GET /v1/audit. Off by default.
+audit:
+  enabled: false
+  # Entries older than this are deleted, but never ahead of a sink that has not
+  # received them. null keeps everything.
+  retention_days: 365
+  # Optional. Each entry is also delivered, at least once and in order, as a
+  # CloudEvent io.ankusa.audit.<action> (id = the entry id) to these sinks: the
+  # same types as a source's `sinks`. `ankusa:audit` is a reserved source id.
+  # sinks:
+  #   - type: kafka
+  #     brokers: ["${KAFKA_BROKERS}"]
+  #     topic: ankusa.audit
 
 # static     -> sources from `sources:` below only; the admin API cannot write.
 # persistent -> plus API-managed, tenant-scoped sources kept in this node's

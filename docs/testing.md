@@ -18,6 +18,33 @@ mise run test:integration             # +21 tests against the floci emulators (s
 
 The always-on tests cover:
 
+- **Access control** (`auth_test.exs`, `admin/guard_test.exs`,
+  `admin/actions_test.exs`): configuration the boot refuses by key name; the
+  role/scope arithmetic (a role includes the ones below it, a tenant-scoped
+  grant covers its tenants and never the platform); the guard in front of both
+  listeners with a table-of-tokens verifier (`401` vs `403` vs `503`, public
+  health, `/metrics` needs a viewer, tenant-scoped admins, a tenant's rate limit
+  being platform-wide, the routes listener); that a percent-encoded path
+  (`/v1/replay%73`) cannot dodge the role of the route the router reaches; users
+  resolved through the SCIM directory (not provisioned, deactivated, group
+  bindings, `userName` and `externalId` matching, subject bindings). The
+  classifier test walks `priv/openapi/admin.v1.yaml`: an operation the document
+  adds without a classification, or a write that classifies as a read, fails it.
+- **Audit log** (`audit_test.exs`): a mutation leaves exactly one finished
+  entry naming who did what to what, denials are recorded, reads and bodies are
+  not; an entry that cannot be written refuses the mutation (the source does not
+  exist afterwards); a crashing handler is an `error` entry; paging and
+  filters; the shipper delivering every entry, in order, none skipped, to a sink
+  that fails three times, and resuming from its cursor after a restart (it
+  waits for the cursor to be on disk: shipping is at-least-once); a `pending`
+  entry younger than a minute held back; pruning that never outruns a lagging
+  sink; `scim.token` redacted from `/v1/config`.
+- **SCIM** (`scim/*_test.exs`, `directory/store/persistent_test.exs`): the
+  Okta and Entra flows through the admin router with the SCIM token (probe by
+  `userName`, create, case-insensitive uniqueness, `PATCH active "False"`
+  taking a user's access away, 20 concurrent `PATCH add members` losing none,
+  every PATCH path form, discovery), the filter and patch grammars, and the
+  persistent directory's indexes, cascades, versions and unavailability.
 - **Ingest dedupe and metrics** (`dedupe_test.exs`, `metrics_test.exs`):
   `dedupe_test.exs` covers a provider retry collapsing to the original id with
   `duplicate: true`, a key past its TTL committing again, two entries sharing
@@ -360,6 +387,34 @@ channel with no subscriber being `{:error, :no_subscribers}`, `durable?` pinned
 failing fast (`:econnrefused`, not a hang). Every publish in the suite goes to
 a per-test unique channel and instance, so tests never see each other's
 messages.
+
+`test/ankusa/directory/store/redis_test.exs` (29 tests) covers
+`Ankusa.Directory.Store.Redis` against the same server, through the
+`Ankusa.Directory` facade: case-insensitive uniqueness (also under 10
+concurrent creators of one `userName`), renames moving the index, version
+conflicts, 20 concurrent `add_members` all retained, deleting a user or a group
+cascading both membership directions, unknown members refused atomically, two
+nodes on one namespace seeing each other's writes at once, and an unreachable
+Redis being `{:error, :unavailable}` on every call. Each test gets its own
+namespace.
+
+## `ankusa_oidc`: `mix test`
+
+```sh
+mise run check:package ankusa_oidc       # 31 tests, no external infra needed
+```
+
+The identity provider is a Bandit server on a port the OS picks, serving
+discovery and a JWKS from real RSA and EC keys; tokens are signed with
+`JOSE.JWT.sign/3`. Covered: a valid token; every claim (`iss`, `aud` as a
+string and a list, `exp` required and past only by the leeway, `nbf`); tokens
+that must never verify (`alg: none`, an HS256 token signed with the public key's
+own bytes, an algorithm the configuration does not allow, a forger reusing the
+provider's `kid`, a payload changed after signing, garbage that must not raise);
+key rotation (one refresh for a new `kid`, at most one per cooldown, a failing
+refresh keeping the keys it has); a provider that is down at boot being
+`:unavailable` until it is up; and the option validation, which refuses `none`
+and `HS*` at boot.
 
 ## SDK conformance: one harness across the SDKs
 

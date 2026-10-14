@@ -64,6 +64,7 @@ defmodule Ankusa.MixProject do
         "../../docs/claim-check.md",
         "../../docs/multi-tenancy.md",
         "../../docs/asyncapi.md",
+        "../../docs/authentication.md",
         "../../docs/packaging.md",
         "../../docs/testing.md",
         "../../docs/releasing.md",
@@ -81,7 +82,8 @@ defmodule Ankusa.MixProject do
           "../../docs/storage.md",
           "../../docs/claim-check.md",
           "../../docs/multi-tenancy.md",
-          "../../docs/asyncapi.md"
+          "../../docs/asyncapi.md",
+          "../../docs/authentication.md"
         ],
         Contributing: [
           "../../docs/packaging.md",

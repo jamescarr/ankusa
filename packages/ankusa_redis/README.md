@@ -2,13 +2,14 @@
 
 Redis adapters for the Ankusa webhook ingestion framework: the multi-node
 route store (`Ankusa.Routes.Store.Redis`), the multi-node source store
-(`Ankusa.SourceStore.Redis`), and the pub/sub sink (`Ankusa.Sink.Redis`).
+(`Ankusa.SourceStore.Redis`), the shared SCIM directory
+(`Ankusa.Directory.Store.Redis`), and the pub/sub sink (`Ankusa.Sink.Redis`).
 
 This package exists so `ankusa` core stays free of the `:redix` dependency. It
-is needed only by deployments that keep route definitions or API-managed
-sources in Redis so every edge node serves the same set (a single node can use
-core's in-memory route store and `SourceStore.Persistent`), or that deliver
-hooks to a Redis pub/sub channel.
+is needed only by deployments that keep route definitions, API-managed
+sources or SCIM-provisioned users in Redis so every node serves the same set (a
+single node can use core's in-memory route store, `SourceStore.Persistent` and
+`Directory.Store.Persistent`), or that deliver hooks to a Redis pub/sub channel.
 
 ## Installation
 
@@ -67,6 +68,35 @@ config =
 The `decoder` turns a stored JSON spec into `Ankusa.Source` options, as for
 `Ankusa.SourceStore.Persistent`. In the server image this is
 `source_store: {type: redis, url: ...}`.
+
+## SCIM directory
+
+`Ankusa.Directory.Store.Redis` implements `Ankusa.Directory.Store`: the users and
+groups an identity provider provisions over SCIM (`scim.enabled`), shared by
+every node configured with the same `namespace`, so a user deactivated through
+one node is refused by all of them. Nothing is cached (authenticating a request
+reads the directory), every mutation is one Lua script (uniqueness, version
+check, indexes and membership together), and a Redis error is
+`{:error, :unavailable}`, which the admin API answers `503`:
+
+```elixir
+config =
+  Ankusa.Config.new(
+    admin: %{enabled: true},
+    auth: %{enabled: true, verifier: {Ankusa.Auth.OIDC, issuer: "...", audience: "ankusa"}},
+    scim: %{
+      enabled: true,
+      token: System.fetch_env!("ANKUSA_SCIM_TOKEN"),
+      directory:
+        {Ankusa.Directory.Store.Redis,
+         url: "redis://localhost:6379", namespace: "ankusa:directory"}
+    }
+  )
+```
+
+On Redis Cluster put a hash tag in the namespace (`"{ankusa}:directory"`): the
+write scripts touch several keys derived from it, which must share a slot. See
+`Ankusa.Directory.Store.Redis` for the key layout.
 
 ## Pub/sub sink
 

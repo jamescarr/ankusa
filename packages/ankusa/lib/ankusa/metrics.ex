@@ -240,6 +240,18 @@ defmodule Ankusa.Metrics do
       counter(
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
+      ),
+      counter(
+        "ankusa.audit.write_failures.total",
+        scoped(own, event_name: [:ankusa, :audit, :write_failed], tags: [:instance])
+      ),
+      counter(
+        "ankusa.audit.ship_failures.total",
+        scoped(own, event_name: [:ankusa, :audit, :ship_failed], tags: [:instance, :sink])
+      ),
+      counter(
+        "ankusa.auth.denied.total",
+        scoped(own, event_name: [:ankusa, :auth, :denied], tags: [:instance, :reason])
       )
     ] ++ gauges(own)
   end

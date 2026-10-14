@@ -8,6 +8,18 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Single sign-on, SCIM and an audit log.** Three new sections, all off by
+  default (see `docs/authentication.md`): `auth` (OIDC bearer tokens for the
+  admin API on 4002 and the route-management API on 4003: `oidc.issuer`,
+  `oidc.audience`, `algorithms`, `leeway_seconds`, `jwks_uri`; `subject_claim`,
+  `groups_claim`, `user_match`, and `bindings` of a `group` or a `subject` to a
+  `viewer`, `operator` or `admin` role, global or scoped to `tenants`), `scim`
+  (`enabled`, `token`, `base_url`, `store.type` of `persistent` or `redis`: SCIM
+  2.0 provisioning under `/scim/v2`), and `audit` (`enabled`, `retention_days`,
+  `sinks`: a durable log of every mutation and denial, read at `GET /v1/audit`).
+  `auth.enabled` without `auth.oidc`, an unknown key, a malformed binding, a
+  SCIM token under 32 bytes, or `none`/`HS*` algorithms fail the boot and
+  `check-config`, naming the key. The image now includes `ankusa_oidc`.
 - Every delivery says how the hook was verified: `Sink.Http` sends
   `x-ankusa-verification` (`ok`, `failed` or `skipped`) and, for a hook a
   source accepted despite a failed check (`on_verify_failure: accept_flag`),

@@ -24,6 +24,7 @@ COPY packages/ankusa_rabbitmq/mix.exs packages/ankusa_rabbitmq/mix.lock ./packag
 COPY packages/ankusa_kafka/mix.exs packages/ankusa_kafka/mix.lock ./packages/ankusa_kafka/
 COPY packages/ankusa_nats/mix.exs packages/ankusa_nats/mix.lock ./packages/ankusa_nats/
 COPY packages/ankusa_redis/mix.exs packages/ankusa_redis/mix.lock ./packages/ankusa_redis/
+COPY packages/ankusa_oidc/mix.exs packages/ankusa_oidc/mix.lock ./packages/ankusa_oidc/
 COPY packages/ankusa_server/mix.exs packages/ankusa_server/mix.lock ./packages/ankusa_server/
 
 WORKDIR /repo/packages/ankusa_server
@@ -68,8 +69,9 @@ VOLUME /var/lib/ankusa
 
 # 4000 ingest, 4001 claim check (:claim_check role), 4002 admin/metrics, 4003
 # route management (`routes.enabled` on an `edge` node; it does not listen
-# otherwise). Publishing more than 4000 is a deliberate act: 4001, 4002 and
-# 4003 are unauthenticated (see README).
+# otherwise). Publishing more than 4000 is a deliberate act: 4001 never
+# authenticates, and 4002 and 4003 are unauthenticated unless `auth.enabled`
+# (OIDC bearer tokens; see README).
 EXPOSE 4000 4001 4002 4003
 
 # Readiness, not liveness: unhealthy while the store cannot take a synced write

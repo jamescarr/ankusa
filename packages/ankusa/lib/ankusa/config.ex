@@ -166,7 +166,39 @@ defmodule Ankusa.Config do
             # as CloudEvents) are delivered: `[{module, opts}]` implementing
             # Ankusa.Sink, run through the WAL and dispatch like a hook. `[]`
             # means lifecycle events are off. See `Ankusa.Lifecycle`.
-            lifecycle: %{sinks: []}
+            lifecycle: %{sinks: []},
+            # enterprise SSO: a verifier turns `Authorization: Bearer <token>`
+            # into claims, group/subject bindings turn claims into roles. Off by
+            # default, and off means the admin and route-management listeners
+            # stay open, as they always were. See `Ankusa.Auth`.
+            auth: %{
+              enabled: false,
+              # {module, opts} implementing Ankusa.Auth.Verifier; required when enabled
+              verifier: nil,
+              subject_claim: "sub",
+              groups_claim: "groups",
+              # how a token finds its SCIM user: the claim's value against the
+              # user's :user_name (case-insensitive) or :external_id (exact)
+              user_match: %{claim: "preferred_username", attribute: :user_name},
+              # [%{role: :viewer | :operator | :admin, group: String.t() | nil,
+              #    subject: String.t() | nil, tenants: :all | [String.t()]}]
+              bindings: []
+            },
+            # SCIM 2.0 provisioning of users and groups into a directory, served
+            # under /scim/v2 on the admin listener. See `Ankusa.Scim.Router`.
+            scim: %{
+              enabled: false,
+              # the bearer token SCIM clients (Okta, Entra) send; >= 32 bytes
+              token: nil,
+              # "https://admin.example.com", used for meta.location; nil = from the request
+              base_url: nil,
+              # {module, opts} implementing Ankusa.Directory.Store
+              directory: {Ankusa.Directory.Store.Persistent, []}
+            },
+            # the durable audit log of every mutation and denial on the admin,
+            # route-management and SCIM surfaces, shipped at least once to `sinks`
+            # (`[{module, opts}]` implementing Ankusa.Sink). See `Ankusa.Audit`.
+            audit: %{enabled: false, retention_days: 365, sinks: []}
 
   @type t :: %__MODULE__{}
 
@@ -207,7 +239,8 @@ defmodule Ankusa.Config do
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:backup`,
-  `:admin`, `:routes`, `:rate_limits`, `:quarantine`, `:lifecycle`) over the
+  `:admin`, `:routes`, `:rate_limits`, `:quarantine`, `:lifecycle`, `:auth`,
+  `:scim`, `:audit`) over the
   defaults.
 
   `:routes` is nested one level deeper than the rest (`:routes` has its own
@@ -245,9 +278,14 @@ defmodule Ankusa.Config do
           :admin,
           :rate_limits,
           :quarantine,
-          :lifecycle
+          :lifecycle,
+          :scim,
+          :audit
         ] ->
           put_section(acc, k, v)
+
+        k == :auth ->
+          put_auth(acc, v)
 
         Map.has_key?(base, k) ->
           Map.put(acc, k, v)
@@ -452,6 +490,28 @@ defmodule Ankusa.Config do
       end)
 
     %{acc | routes: merged}
+  end
+
+  # `auth.user_match` is a section of its own: `user_match: %{claim: "sub"}`
+  # keeps the default attribute instead of replacing the whole map.
+  defp put_auth(acc, v) do
+    auth = section_map(v, "auth")
+
+    merged =
+      Enum.reduce(auth, acc.auth, fn {k, value}, auth ->
+        cond do
+          k == :user_match ->
+            Map.put(auth, k, merge_known!(auth[k], value, "auth.user_match"))
+
+          Map.has_key?(auth, k) ->
+            Map.put(auth, k, value)
+
+          true ->
+            raise ArgumentError, "unknown Ankusa.Config key: auth.#{k}"
+        end
+      end)
+
+    %{acc | auth: merged}
   end
 
   defp section_map(value, key) do

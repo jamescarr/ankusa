@@ -19,7 +19,8 @@ flowchart LR
 | --- | --- |
 | `packages/ankusa` | Core Mix project: edge/store/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `cidr`, `req`, `aws_signature`, `rocksdb`, `telemetry_metrics`/`telemetry_metrics_prometheus_core`, `nebulex`/`nebulex_local`, `async_api_spex` only). |
 | `packages/ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats` | One sink adapter each (`Sink.RabbitMQ`/`Kafka`/`NATS`), path-depend on `ankusa` + one broker client (`amqp`/`brod`/`gnat`). Own `docker-compose.yml` for local broker infra. |
-| `packages/ankusa_redis` | Redis adapters: the route store (`Ankusa.Routes.Store.Redis` — definitions in Redis, shared by every edge node) and the pub/sub sink (`Ankusa.Sink.Redis`). Path-depends on `ankusa` + one client (`redix`). Own `docker-compose.yml` (Redis on `:6399`). |
+| `packages/ankusa_redis` | Redis adapters: the route store (`Ankusa.Routes.Store.Redis` — definitions in Redis, shared by every edge node), the source store, the SCIM directory (`Ankusa.Directory.Store.Redis`) and the pub/sub sink (`Ankusa.Sink.Redis`). Path-depends on `ankusa` + one client (`redix`). Own `docker-compose.yml` (Redis on `:6399`). |
+| `packages/ankusa_oidc` | `Ankusa.Auth.OIDC`, the OpenID Connect bearer-token verifier for the admin and route-management APIs (`Ankusa.Auth.Verifier`). Path-depends on `ankusa` + `jose` + `req`; not a sink. |
 | `packages/async_api_spex` | Generic AsyncAPI 3.0 library, no Ankusa code (structs, `use AsyncApiSpex.Schema`/`Message`/`Channel`/`Spec` — the last three decorate an app's existing structs and publishing modules into a document — validator, `AsyncApiSpex.Plug.RenderSpec`, `mix async_api_spex.gen`). Core depends on it for `Ankusa.AsyncApi`; every project that path-depends on core and builds in `:prod` (the adapters, `ankusa_server`, the examples) pins it by path with `override: true`. Publish it to Hex before core. |
 | `conformance/` | Language-neutral SDK vectors (`features.json`, `cases/*.json`) and the checker (`check.mjs`) every `packages/sdk-*` must pass; `mise run check:conformance`. |
 | `packages/ankusa_server` | The `jamescarr/ankusa` Docker image: core + every adapter, driven entirely by YAML (`config.ex` is the loader). Not published to Hex. |
@@ -43,6 +44,7 @@ Why the package split (and when a new adapter earns its own package):
 | Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,sweeper}.ex` |
 | Route management | `routes.ex`, `routes/{route,matcher,snapshot,cache,router,store}.ex`, `routes/store/ets.ex`, `net.ex`, `net/client_ip.ex` |
 | Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex` + `instance/{isolated,registry_watch}.ex` (failure domains, registry watch), `source.ex`, `source_store.ex` + `source_store/persistent.ex`, `lifecycle.ex` + `lifecycle/publisher.ex`, `async_api.ex` + `async_api/schemas.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex`, `aws/credentials.ex` (AWS credential chain for S3 and SQS), `ulid.ex`, `uuid_v7.ex` |
+| Access control (SSO, SCIM, audit) | `auth.ex` + `auth/{verifier,principal}.ex` (token → principal → grants), `admin/guard.ex` (authenticate, authorize, audit, in front of both admin routers) + `admin/actions.ex` (the action/role/scope table), `audit.ex` + `audit/shipper.ex` (durable log, shipping, pruning), `directory.ex` + `directory/store.ex` + `directory/store/persistent.ex` (SCIM users and groups), `scim/{router,resource,filter,patch,errors,discovery}.ex` |
 
 `packages/ankusa_server/lib/ankusa_server`: `application.ex`, `cli.ex`,
 `config.ex` (YAML → core config), `config_error.ex`, `gcp_token.ex`.
@@ -61,6 +63,7 @@ Why the package split (and when a new adapter earns its own package):
 | [`multi-tenancy.md`](docs/multi-tenancy.md) | catch URLs per customer |
 | [`integrations.md`](docs/integrations.md) | Oban, Celery, queues |
 | [`asyncapi.md`](docs/asyncapi.md) | the AsyncAPI document an instance serves, and lifecycle events (endpoint/route created, updated, deleted) |
+| [`authentication.md`](docs/authentication.md) | SSO for the admin APIs (OIDC), SCIM provisioning, roles and tenant scoping, the audit log |
 | [`elixir.md`](docs/elixir.md) | embed the library in your own app |
 | [`testing.md`](docs/testing.md) | running the suites, local infra, what each one covers |
 | [`packaging.md`](docs/packaging.md) | why adapters are separate packages, and how to add one |

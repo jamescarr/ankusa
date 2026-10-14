@@ -37,6 +37,11 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
   | `[:ankusa, :lifecycle, :delivered]` | — | `:instance`, `:type`, `:sink` |
   | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:not_running`, `:queue_full`, `:gave_up`) |
+  | `[:ankusa, :auth, :denied]` | — | `:instance`, `:reason` (`:unauthenticated`, `:invalid_token`, `:forbidden`, `:user_not_provisioned`, `:user_inactive`, `:auth_unavailable`, `:scim_token`) |
+  | `[:ankusa, :audit, :recorded]` | — | `:instance`, `:outcome` |
+  | `[:ankusa, :audit, :write_failed]` | — | `:instance` |
+  | `[:ankusa, :audit, :shipped]` | — | `:instance`, `:sink` |
+  | `[:ankusa, :audit, :ship_failed]` | — | `:instance`, `:sink`, `:reason` |
   | `[:ankusa, :instance, :subtree_down]` | `:delay_ms` | `:instance`, `:domain`, `:reason` |
   | `[:ankusa, :instance, :subtree_up]` | — | `:instance`, `:domain` |
   | `[:ankusa, :replay, :moved]` | `:count` | `:instance`, `:replay_id`, `:kind` |

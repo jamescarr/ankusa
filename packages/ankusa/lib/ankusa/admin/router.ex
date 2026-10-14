@@ -10,15 +10,29 @@ defmodule Ankusa.Admin.Router do
   `Ankusa.Edge.Quarantine.recent/2`, `:sys.get_state/1`-style poking); this is
   the same surface over HTTP.
 
-  ## No authentication, by design
+  ## Authentication
 
-  Ankusa does not manage users, tokens, or API keys. The only request
-  authentication in the framework is provider signature verification on ingest
-  (`Ankusa.Edge.Router`), which is webhook semantics, not access control — so
-  nothing here reads the `authorization` header. Operators front this port with
-  their own proxy, SSO, or network policy, the way Elasticsearch was operated
-  before it shipped security. `/v1/config` is still redacted because a proxy may
-  let many people read it.
+  Off by default. With `auth.enabled: false` (the default) nothing here reads the
+  `authorization` header: Ankusa does not manage users, so a deployment that
+  does not turn SSO on fronts this port with its own proxy, SSO, or network
+  policy, the way Elasticsearch was operated before it shipped security, and
+  `/v1/config` is still redacted because a proxy may let many people read it.
+
+  With `auth.enabled: true`, `Ankusa.Admin.Guard` runs before every handler:
+  every route except `GET /health` and `GET /ready` needs
+  `Authorization: Bearer <token>`, verified by `auth.verifier` and mapped to a
+  role (`viewer`, `operator`, `admin`, each global or scoped to tenants) by
+  `auth.bindings`. What each route needs is `Ankusa.Admin.Actions`; `/metrics`
+  needs `viewer`. A refusal is `401` (`unauthenticated`, `invalid_token`), `403`
+  (`forbidden`, `user_not_provisioned`, `user_inactive`) or `503`
+  (`auth_unavailable`). See `Ankusa.Auth`.
+
+  `/scim/v2` is the SCIM 2.0 endpoint an identity provider provisions users and
+  groups through (`Ankusa.Scim.Router`), under its own static `scim.token`.
+
+  With `audit.enabled: true`, every mutation and every denial on this listener
+  is written to the node's durable audit log before the response is sent, and
+  `GET /v1/audit` reads it (`Ankusa.Audit`).
 
   ## Node-local by design
 
@@ -56,6 +70,7 @@ defmodule Ankusa.Admin.Router do
   @identity_regex ~r/\A[A-Za-z0-9_-]{1,64}\z/
 
   plug(:match)
+  plug(Ankusa.Admin.Guard, listener: :admin)
   plug(:dispatch)
 
   get "/health" do
@@ -181,8 +196,31 @@ defmodule Ankusa.Admin.Router do
     require_role(conn, :edge, &rate_limit_delete(&1, tenant))
   end
 
+  get "/v1/audit" do
+    audit_index(conn, nil)
+  end
+
+  get "/v1/tenants/:tenant/audit" do
+    if valid_identity?(tenant), do: audit_index(conn, tenant), else: invalid_tenant(conn)
+  end
+
+  # The SCIM client authenticates with `scim.token`, not a user token; the
+  # guard has already checked it (and `scim.enabled`) for this prefix.
+  forward("/scim/v2", to: Ankusa.Scim.Router)
+
   match _ do
     send_json(conn, 404, %{error: "not_found"})
+  end
+
+  # `Plug.Router` wraps a crash in a `Plug.Conn.WrapperError` that carries the
+  # conn the router was *called* with, which has not been through the guard: no
+  # principal, no audit entry, no `before_send`. The crash is handled here,
+  # around `dispatch`, where the conn is the guard's, so a mutation that
+  # crashes is finished in the audit log as an `error`.
+  def dispatch(conn, opts) do
+    super(conn, opts)
+  catch
+    kind, reason -> Ankusa.Admin.Guard.crashed(conn, kind, reason, __STACKTRACE__)
   end
 
   # ── routes ──────────────────────────────────────────────────────────────────
@@ -442,12 +480,90 @@ defmodule Ankusa.Admin.Router do
 
   defp put_source(conn, ok_status, result) do
     case result do
-      {:ok, stored} -> send_json(conn, ok_status, Redact.source_entry(stored))
-      {:error, :invalid, message} -> invalid_source(conn, message)
-      {:error, :exists} -> send_json(conn, 409, %{error: "source_exists"})
-      {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
-      {:error, :store_unavailable} -> source_store_unavailable(conn)
-      {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
+      {:ok, stored} ->
+        conn
+        |> Ankusa.Audit.put_target("#{stored.tenant}.#{stored.name}")
+        |> send_json(ok_status, Redact.source_entry(stored))
+
+      {:error, :invalid, message} ->
+        invalid_source(conn, message)
+
+      {:error, :exists} ->
+        send_json(conn, 409, %{error: "source_exists"})
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "source_not_found"})
+
+      {:error, :store_unavailable} ->
+        source_store_unavailable(conn)
+
+      {:error, :read_only} ->
+        send_json(conn, 409, %{error: "source_store_read_only"})
+    end
+  end
+
+  # ── audit log ───────────────────────────────────────────────────────────────
+
+  @audit_outcomes ~w(pending success failure error denied)
+
+  # `tenant` forces the tenant of the entries (the tenant route); on the global
+  # route it is an optional filter. Node-local, like the DLQ and the pen.
+  defp audit_index(conn, tenant) do
+    if config(conn).audit.enabled do
+      params = Plug.Conn.fetch_query_params(conn).query_params
+
+      with {:ok, tenant} <- audit_tenant(params, tenant),
+           {:ok, action} <- string_param(params, "action"),
+           {:ok, actor} <- string_param(params, "actor"),
+           {:ok, outcome} <- audit_outcome(params),
+           {:ok, since} <- non_neg_param(params, "since"),
+           {:ok, until} <- non_neg_param(params, "until"),
+           :ok <- if(since && until && until < since, do: {:error, "until"}, else: :ok),
+           {:ok, limit} <- int_param(params, "limit", @default_limit),
+           {:ok, cursor} <- string_param(params, "cursor") do
+        filters = %{
+          tenant: tenant,
+          action: action,
+          actor: actor,
+          outcome: outcome,
+          since: since,
+          until: until,
+          limit: clamp_limit(limit),
+          cursor: cursor
+        }
+
+        case Ankusa.Audit.list(instance(conn), filters) do
+          {:ok, %{entries: entries, next_cursor: next}} ->
+            send_json(conn, 200, %{entries: entries, next_cursor: next})
+
+          {:error, :invalid_cursor} ->
+            invalid_filter(conn, "cursor")
+
+          {:error, :store_unavailable} ->
+            send_json(conn, 503, %{error: "store_unavailable"})
+        end
+      else
+        {:error, field} -> invalid_filter(conn, field)
+      end
+    else
+      send_json(conn, 409, %{error: "audit_disabled"})
+    end
+  end
+
+  defp audit_tenant(_params, tenant) when is_binary(tenant), do: {:ok, tenant}
+
+  defp audit_tenant(params, nil) do
+    case string_param(params, "tenant") do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, tenant} -> if valid_identity?(tenant), do: {:ok, tenant}, else: {:error, "tenant"}
+      {:error, field} -> {:error, field}
+    end
+  end
+
+  defp audit_outcome(params) do
+    case string_param(params, "outcome") do
+      {:ok, outcome} when outcome in [nil | @audit_outcomes] -> {:ok, outcome}
+      _ -> {:error, "outcome"}
     end
   end
 
@@ -569,10 +685,10 @@ defmodule Ankusa.Admin.Router do
       with {:ok, spec} <- replay_spec(map) do
         case Ankusa.Replay.start(instance(conn), spec) do
           {:ok, :created, job} ->
-            send_json(conn, 202, Ankusa.Replay.to_json(job))
+            conn |> Ankusa.Audit.put_target(job.id) |> send_json(202, Ankusa.Replay.to_json(job))
 
           {:ok, :existing, job} ->
-            send_json(conn, 200, Ankusa.Replay.to_json(job))
+            conn |> Ankusa.Audit.put_target(job.id) |> send_json(200, Ankusa.Replay.to_json(job))
 
           {:error, {:invalid, field}} ->
             invalid_filter(conn, field)

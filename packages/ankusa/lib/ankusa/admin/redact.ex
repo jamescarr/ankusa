@@ -54,15 +54,26 @@ defmodule Ankusa.Admin.Redact do
                  key_fingerprint exchange routing_key topic brokers servers subject channel
                  queue_url message_group_id client_name inbox_prefix username mechanism
                  type method exchange_type parse hash encoding secret_decode on_verify_failure
-                 project ordering_key)
+                 project ordering_key issuer audience)
 
-  @doc "A redacted, JSON-encodable view of the whole config."
+  @doc """
+  A redacted, JSON-encodable view of the whole config.
+
+  Open mode shows every `%Ankusa.Config{}` field as it is, which would expose
+  `scim.token` (a bare string): it is replaced here, whenever it is set.
+  """
   @spec config(Ankusa.Config.t()) :: map()
   def config(%Ankusa.Config{} = config) do
     config
     |> Map.from_struct()
     |> open_map()
+    |> redact_scim_token()
   end
+
+  defp redact_scim_token(%{"scim" => %{"token" => token} = scim} = view) when not is_nil(token),
+    do: %{view | "scim" => %{scim | "token" => @redacted}}
+
+  defp redact_scim_token(view), do: view
 
   @doc """
   A redacted, JSON-encodable view of one tenant-scoped source, built from the

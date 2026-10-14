@@ -8,13 +8,40 @@ info:
     `admin.enabled: true` (default port 4002). This document is the
     cross-language contract. The Elixir code conforms to it, not the reverse.
 
-    This API performs **no** authentication or authorization. Ankusa does not
-    manage users, API keys, or tokens; the only request authentication in the
-    framework is provider signature verification on ingest. Deployers secure
-    this port at their own boundary (network policy, a reverse proxy, SSO, a
-    service mesh) — the same way Elasticsearch was operated before it shipped
-    security. `GET /v1/config` is redacted anyway, because a proxy may let many
-    people read it.
+    **Authentication is off by default.** With `auth.enabled: false` this API
+    performs no authentication or authorization, and deployers secure the port
+    at their own boundary (network policy, a reverse proxy, SSO, a service
+    mesh) — the way Elasticsearch was operated before it shipped security.
+    `GET /v1/config` is redacted anyway, because a proxy may let many people
+    read it.
+
+    With `auth.enabled: true`, every operation except `GET /health` and
+    `GET /ready` needs `Authorization: Bearer <token>`: a JWT from the
+    configured OIDC identity provider (`bearerAuth`). The token's subject or
+    groups are mapped to a role by `auth.bindings`, each role global or scoped
+    to tenants:
+
+    | Role | May |
+    | --- | --- |
+    | `viewer` | every read (`/metrics` included), the route dry run |
+    | `operator` | `viewer`, plus replays and purging the quarantine pen |
+    | `admin` | `operator`, plus sources, route definitions, the global IP rules, per-tenant rate limits and the audit log |
+
+    A tenant-scoped grant covers that tenant's sources and audit trail only;
+    everything platform-wide needs a grant over all tenants. A request is refused
+    with `401` (no or invalid token), `403` (the roles do not cover it, or the
+    token's user is not provisioned or is deactivated) or `503` (the identity
+    provider's keys cannot be reached): see the `Unauthenticated`, `Forbidden`
+    and `AuthUnavailable` responses, which every operation can answer.
+
+    With `audit.enabled: true`, every mutation and every denial is written to a
+    durable audit log before the response is sent (the `audit` tag); a mutation
+    whose record cannot be written is refused with `503 audit_unavailable`
+    (`AuditUnavailable`) and does not happen.
+
+    The `scim` tag is a SCIM 2.0 endpoint (`/scim/v2`) an identity provider
+    provisions users and groups through, authenticated by its own static token
+    (`scimToken`).
 
     Responses are node-local by design: the DLQ is the dispatch node's disk and
     the quarantine pen is the edge node's. A route that needs a role
@@ -28,7 +55,7 @@ info:
     4002) **except** the `routes` tag, which is `Ankusa.Routes.Router` on its own
     listener (`routes.admin.port`, default 4003): managing routes is an operator
     action, and it should share neither the ingest port nor the operator API's
-    port. Both listeners are unauthenticated by design — see above.
+    port. Both listeners share the authentication described above.
 
     The `routes` endpoints edit the table the *edge* enforces, so they exist only
     on a node with `routes.enabled: true` and the `:edge` role.
@@ -47,7 +74,9 @@ servers:
     description: |
       Route-management listener (default `routes.admin.port`). Only the `routes`
       tag is served here, plus `GET /health`.
-security: []
+security:
+  - {}
+  - bearerAuth: []
 tags:
   - name: operations
     description: Health, metrics, and the effective configuration.
@@ -69,6 +98,15 @@ tags:
       a **capture gate**, not an identity: it decides whether a request is
       captured, while `Ankusa.RouteResolver` and the source store still decide
       which source and tenant it belongs to.
+  - name: audit
+    description: |
+      The durable audit log of every mutation and denial. Requires
+      `audit.enabled: true` and the `admin` role. Node-local.
+  - name: scim
+    description: |
+      SCIM 2.0 provisioning of users and groups (`/scim/v2`), authenticated with
+      `scim.token`. Requires `scim.enabled: true` (`404` otherwise). What it
+      provisions is what `auth.bindings` and `auth.user_match` read.
 paths:
   /health:
     servers:
@@ -79,6 +117,7 @@ paths:
           Route-management listener (default `routes.admin.port`), only with
           routes enabled.
     get:
+      security: []
       operationId: getHealth
       tags: [operations]
       summary: Liveness probe
@@ -110,6 +149,7 @@ paths:
       - url: http://localhost:4002
         description: Operator API listener (default `admin.port`).
     get:
+      security: []
       operationId: getReady
       tags: [operations]
       summary: Readiness probe
@@ -980,7 +1020,547 @@ paths:
           $ref: '#/components/responses/InvalidIpRules'
         '503':
           $ref: '#/components/responses/StoreUnavailable'
+  /v1/audit:
+    get:
+      operationId: listAudit
+      tags: [audit]
+      summary: The audit log
+      description: |
+        Newest first. Requires `audit.enabled: true` (`409 audit_disabled`
+        otherwise) and the `admin` role with a grant over all tenants. Reads are
+        node-local, like the DLQ: this node's store holds the entries of the
+        requests this node served.
+
+        Every mutation and every denial on the operator API, the
+        route-management API and SCIM is recorded; reads are not. A mutation is
+        recorded `pending` before its handler runs and rewritten with its
+        outcome when it answers, so a `pending` entry that stays `pending` is a
+        request whose outcome was lost (the node crashed). Request bodies are
+        never recorded.
+
+        A page ends at `limit` entries or after 100 000 examined entries, and
+        `next_cursor` is where to resume (`null` when the log was read to its
+        start).
+      parameters:
+        - name: tenant
+          in: query
+          required: false
+          description: Only entries about this tenant.
+          schema:
+            type: string
+        - $ref: '#/components/parameters/AuditAction'
+        - $ref: '#/components/parameters/AuditActor'
+        - $ref: '#/components/parameters/AuditOutcome'
+        - $ref: '#/components/parameters/AuditSince'
+        - $ref: '#/components/parameters/AuditUntil'
+        - $ref: '#/components/parameters/AuditLimit'
+        - $ref: '#/components/parameters/AuditCursor'
+      responses:
+        '200':
+          description: Matching entries, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/AuditDisabled'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+  /v1/tenants/{tenant}/audit:
+    parameters:
+      - name: tenant
+        in: path
+        required: true
+        description: The tenant id.
+        schema:
+          type: string
+    get:
+      operationId: listTenantAudit
+      tags: [audit]
+      summary: One tenant's audit entries
+      description: |
+        As `GET /v1/audit`, limited to entries about `tenant`. Needs the `admin`
+        role for that tenant: a grant scoped to `[tenant]` is enough.
+      parameters:
+        - $ref: '#/components/parameters/AuditAction'
+        - $ref: '#/components/parameters/AuditActor'
+        - $ref: '#/components/parameters/AuditOutcome'
+        - $ref: '#/components/parameters/AuditSince'
+        - $ref: '#/components/parameters/AuditUntil'
+        - $ref: '#/components/parameters/AuditLimit'
+        - $ref: '#/components/parameters/AuditCursor'
+      responses:
+        '200':
+          description: Matching entries, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/AuditDisabled'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+  /scim/v2/ServiceProviderConfig:
+    get:
+      operationId: scimServiceProviderConfig
+      tags: [scim]
+      summary: SCIM service provider configuration
+      description: What this SCIM endpoint supports (RFC 7643 section 5). Static.
+      security: [{scimToken: []}]
+      responses:
+        '200':
+          description: The configuration.
+          content:
+            application/scim+json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+  /scim/v2/ResourceTypes:
+    get:
+      operationId: scimListResourceTypes
+      tags: [scim]
+      summary: SCIM resource types
+      security: [{scimToken: []}]
+      responses:
+        '200':
+          description: The `User` and `Group` resource types.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimListResponse'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+  /scim/v2/ResourceTypes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [User, Group]
+    get:
+      operationId: scimGetResourceType
+      tags: [scim]
+      summary: One SCIM resource type
+      security: [{scimToken: []}]
+      responses:
+        '200':
+          description: The resource type.
+          content:
+            application/scim+json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+  /scim/v2/Schemas:
+    get:
+      operationId: scimListSchemas
+      tags: [scim]
+      summary: SCIM schemas
+      security: [{scimToken: []}]
+      responses:
+        '200':
+          description: The User, Group and enterprise user extension schemas.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimListResponse'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+  /scim/v2/Schemas/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The schema URN.
+        schema:
+          type: string
+    get:
+      operationId: scimGetSchema
+      tags: [scim]
+      summary: One SCIM schema
+      security: [{scimToken: []}]
+      responses:
+        '200':
+          description: The schema.
+          content:
+            application/scim+json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+  /scim/v2/Users:
+    get:
+      operationId: scimListUsers
+      tags: [scim]
+      summary: List or look up users
+      description: |
+        `filter` supports `userName eq "..."` (case-insensitive), `externalId eq
+        "..."` and `id eq "..."`; an identity provider uses it to look a user up
+        before creating one, so a miss is an empty list, not a `404`.
+      security: [{scimToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/ScimFilter'
+        - $ref: '#/components/parameters/ScimStartIndex'
+        - $ref: '#/components/parameters/ScimCount'
+      responses:
+        '200':
+          description: A ListResponse of users.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimListResponse'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    post:
+      operationId: scimCreateUser
+      tags: [scim]
+      summary: Provision a user
+      description: |
+        `userName` is required and unique case-insensitively (`409 uniqueness`).
+        Only the attributes in the `User` schema are kept; `id`, `meta`,
+        `groups` and `password` in the body are ignored.
+      security: [{scimToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+      responses:
+        '201':
+          description: Created. `Location` is the new user's URL.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '409':
+          $ref: '#/components/responses/ScimUniqueness'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+  /scim/v2/Users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: scimGetUser
+      tags: [scim]
+      summary: One user
+      security: [{scimToken: []}]
+      responses:
+        '200':
+          description: The user, with the groups they belong to.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    put:
+      operationId: scimReplaceUser
+      tags: [scim]
+      summary: Replace a user
+      security: [{scimToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+      responses:
+        '200':
+          description: The replaced user.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '409':
+          $ref: '#/components/responses/ScimUniqueness'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    patch:
+      operationId: scimPatchUser
+      tags: [scim]
+      summary: Patch a user
+      description: |
+        RFC 7644 section 3.5.2. `add`, `replace` and `remove`, with or without a
+        path (`active`, `name.givenName`, `emails[type eq "work"].value`, an
+        enterprise-extension attribute). `active` accepts `"False"`. Deactivating
+        a user (`active: false`) stops their tokens being accepted at once.
+      security: [{scimToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimPatchOp'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimPatchOp'
+      responses:
+        '200':
+          description: The patched user.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '409':
+          $ref: '#/components/responses/ScimUniqueness'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    delete:
+      operationId: scimDeleteUser
+      tags: [scim]
+      summary: Delete a user
+      description: Also removes the user from every group.
+      security: [{scimToken: []}]
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+  /scim/v2/Groups:
+    get:
+      operationId: scimListGroups
+      tags: [scim]
+      summary: List or look up groups
+      description: |
+        `filter` supports `displayName eq "..."` (case-insensitive), `externalId
+        eq "..."` and `id eq "..."`. `excludedAttributes=members` omits the
+        member lists.
+      security: [{scimToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/ScimFilter'
+        - $ref: '#/components/parameters/ScimStartIndex'
+        - $ref: '#/components/parameters/ScimCount'
+        - $ref: '#/components/parameters/ScimExcludedAttributes'
+      responses:
+        '200':
+          description: A ListResponse of groups.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimListResponse'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    post:
+      operationId: scimCreateGroup
+      tags: [scim]
+      summary: Provision a group
+      description: |
+        `displayName` is required and unique case-insensitively. Every member
+        must be an existing user id (`400 invalidValue` otherwise). The group's
+        `displayName` is what `auth.bindings[].group` names.
+      security: [{scimToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimGroup'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimGroup'
+      responses:
+        '201':
+          description: Created. `Location` is the new group's URL.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '409':
+          $ref: '#/components/responses/ScimUniqueness'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+  /scim/v2/Groups/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: scimGetGroup
+      tags: [scim]
+      summary: One group
+      security: [{scimToken: []}]
+      parameters:
+        - $ref: '#/components/parameters/ScimExcludedAttributes'
+      responses:
+        '200':
+          description: The group, with its members.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    put:
+      operationId: scimReplaceGroup
+      tags: [scim]
+      summary: Replace a group
+      description: A body without `members` leaves the membership alone; with `members`, even `[]`, it replaces it.
+      security: [{scimToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimGroup'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimGroup'
+      responses:
+        '200':
+          description: The replaced group.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '409':
+          $ref: '#/components/responses/ScimUniqueness'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    patch:
+      operationId: scimPatchGroup
+      tags: [scim]
+      summary: Patch a group
+      description: |
+        As for users, plus `members`: `add` appends, `replace` sets, `remove`
+        deletes (`members[value eq "<id>"]`, or a `value` list as Microsoft Entra
+        sends it). Membership changes are atomic per operation, so concurrent
+        provisioning runs cannot lose each other's members.
+      security: [{scimToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimPatchOp'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimPatchOp'
+      responses:
+        '200':
+          description: The patched group.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimGroup'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '409':
+          $ref: '#/components/responses/ScimUniqueness'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
+    delete:
+      operationId: scimDeleteGroup
+      tags: [scim]
+      summary: Delete a group
+      description: Members stay users; only the membership goes.
+      security: [{scimToken: []}]
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/ScimUnauthenticated'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+        '503':
+          $ref: '#/components/responses/ScimUnavailable'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A JWT issued by the configured OIDC identity provider
+        (`auth.oidc.issuer`), with the configured audience. Required on every
+        operation except `GET /health` and `GET /ready` when `auth.enabled` is
+        true; ignored when it is false.
+    scimToken:
+      type: http
+      scheme: bearer
+      description: |
+        The static `scim.token` the identity provider's SCIM client sends. It
+        opens `/scim/v2` and nothing else.
   schemas:
     Health:
       type: object
@@ -1557,6 +2137,16 @@ components:
             - rate_limit_not_found
             - store_unavailable
             - wal_disabled
+            - unauthenticated
+            - invalid_token
+            - forbidden
+            - user_not_provisioned
+            - user_inactive
+            - auth_unavailable
+            - audit_unavailable
+            - audit_disabled
+            - internal_error
+            - bad_request
         field:
           type: string
           description: |
@@ -1575,6 +2165,254 @@ components:
         max_routes:
           type: integer
           description: Present on `too_many_routes`; the configured cap.
+        required_role:
+          type: string
+          enum: [viewer, operator, admin]
+          description: Present on `forbidden`; the lowest role the operation needs.
+    AuditActor:
+      type: object
+      description: Who made the request.
+      required: [type, subject, username, user_id, ip]
+      properties:
+        type:
+          type: string
+          enum: [anonymous, user, service, scim]
+          description: |
+            `anonymous` when `auth.enabled` is false or the request carried no
+            valid credential; `user` for a provisioned user; `service` for a
+            token matching only a subject binding; `scim` for the SCIM client.
+        subject:
+          type: [string, 'null']
+          description: The token's subject claim.
+        username:
+          type: [string, 'null']
+        user_id:
+          type: [string, 'null']
+          description: The directory user's id, when SCIM is on.
+        ip:
+          type: [string, 'null']
+          description: The peer address. `X-Forwarded-For` is not trusted.
+    AuditEntry:
+      type: object
+      required: [id, at, time, instance, listener, action, outcome, status, method, path, tenant, target, actor, request_id]
+      properties:
+        id:
+          type: string
+          description: A UUIDv7; the CloudEvent `id` when the entry is shipped to `audit.sinks`.
+        at:
+          type: integer
+          description: When the request arrived, unix milliseconds.
+        time:
+          type: string
+          format: date-time
+        instance:
+          type: string
+        listener:
+          type: string
+          enum: [admin, routes]
+          description: SCIM requests are on the `admin` listener.
+        action:
+          type: string
+          description: The action name, e.g. `source.create`, `replay.update`, `route.delete`, `scim.user.update`, `audit.list`.
+        outcome:
+          type: string
+          enum: [pending, success, failure, error, denied]
+          description: |
+            `success` a `2xx`; `failure` the handler refused; `error` the handler
+            crashed (the change may or may not have happened); `denied` a
+            `401`/`403`; `pending` the outcome was never recorded.
+        status:
+          type: [integer, 'null']
+          description: The response status; `null` while `pending`.
+        method:
+          type: string
+        path:
+          type: string
+          description: The request path, without its query string.
+        tenant:
+          type: [string, 'null']
+        target:
+          type: [string, 'null']
+          description: The entity acted on (`<tenant>.<source>`, a route or replay id, a SCIM resource id).
+        actor:
+          $ref: '#/components/schemas/AuditActor'
+        request_id:
+          type: [string, 'null']
+          description: The request's `X-Request-Id`, when it carried one.
+    AuditPage:
+      type: object
+      required: [entries, next_cursor]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        next_cursor:
+          type: [string, 'null']
+          description: Pass as `cursor` for the next, older, page. `null` at the end of the log.
+    ScimListResponse:
+      type: object
+      required: [schemas, totalResults, startIndex, itemsPerPage, Resources]
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+        totalResults:
+          type: integer
+        startIndex:
+          type: integer
+        itemsPerPage:
+          type: integer
+        Resources:
+          type: array
+          items:
+            type: object
+    ScimMeta:
+      type: object
+      readOnly: true
+      properties:
+        resourceType:
+          type: string
+        created:
+          type: string
+          format: date-time
+        lastModified:
+          type: string
+          format: date-time
+        version:
+          type: string
+          description: A weak ETag, `W/"<n>"`.
+        location:
+          type: string
+    ScimUser:
+      type: object
+      description: |
+        An RFC 7643 User. Only the attributes listed here and the enterprise
+        extension are kept.
+      required: [userName]
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+          readOnly: true
+        externalId:
+          type: string
+        userName:
+          type: string
+          maxLength: 256
+          description: Unique, case-insensitively. What `auth.user_match` compares a token's claim with.
+        name:
+          type: object
+        displayName:
+          type: string
+        nickName:
+          type: string
+        title:
+          type: string
+        userType:
+          type: string
+        preferredLanguage:
+          type: string
+        locale:
+          type: string
+        timezone:
+          type: string
+        active:
+          type: boolean
+          default: true
+          description: 'A user with `active: false` is refused (`403 user_inactive`) whatever their token says.'
+        emails:
+          type: array
+          items:
+            type: object
+        phoneNumbers:
+          type: array
+          items:
+            type: object
+        groups:
+          type: array
+          readOnly: true
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+              display:
+                type: string
+        meta:
+          $ref: '#/components/schemas/ScimMeta'
+      additionalProperties: true
+    ScimGroup:
+      type: object
+      required: [displayName]
+      properties:
+        schemas:
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+          readOnly: true
+        externalId:
+          type: string
+        displayName:
+          type: string
+          maxLength: 256
+          description: Unique, case-insensitively. What `auth.bindings[].group` names.
+        members:
+          type: array
+          items:
+            type: object
+            required: [value]
+            properties:
+              value:
+                type: string
+                description: A user id.
+              display:
+                type: string
+                readOnly: true
+        meta:
+          $ref: '#/components/schemas/ScimMeta'
+    ScimPatchOp:
+      type: object
+      required: [schemas, Operations]
+      properties:
+        schemas:
+          type: array
+          items:
+            const: 'urn:ietf:params:scim:api:messages:2.0:PatchOp'
+        Operations:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [op]
+            properties:
+              op:
+                type: string
+                description: '`add`, `replace` or `remove`, case-insensitive.'
+              path:
+                type: string
+              value: {}
+    ScimError:
+      type: object
+      required: [schemas, status, detail]
+      properties:
+        schemas:
+          type: array
+          items:
+            const: 'urn:ietf:params:scim:api:messages:2.0:Error'
+        status:
+          type: string
+        scimType:
+          type: string
+          enum: [invalidFilter, invalidSyntax, invalidPath, invalidValue, noTarget, mutability, uniqueness]
+        detail:
+          type: string
   responses:
     InvalidFilter:
       description: '`400`. `invalid_filter`: a non-integer `since`, `until` or `limit`, a negative `since`/`until` or an `until` before `since` on a quarantine purge, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key.'
@@ -1753,3 +2591,187 @@ components:
           examples:
             storeDown:
               value: {error: store_unavailable}
+
+    Unauthenticated:
+      description: |
+        `401`. `unauthenticated` (no `Authorization: Bearer` header) or
+        `invalid_token` (the identity provider's token did not verify: bad
+        signature, wrong issuer or audience, expired). `WWW-Authenticate:
+        Bearer`. Only with `auth.enabled: true`.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missing:
+              value: {error: unauthenticated}
+            invalid:
+              value: {error: invalid_token}
+    Forbidden:
+      description: |
+        `403`. `forbidden` (the token's roles do not cover this operation;
+        `required_role` is the lowest that does), `user_not_provisioned` (the
+        token matches no SCIM user) or `user_inactive` (the SCIM user is
+        deactivated). Only with `auth.enabled: true`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            forbidden:
+              value: {error: forbidden, required_role: admin}
+            notProvisioned:
+              value: {error: user_not_provisioned}
+            inactive:
+              value: {error: user_inactive}
+    AuthUnavailable:
+      description: |
+        `503`. `auth_unavailable`: the identity provider's signing keys have
+        never been fetched, or the SCIM directory could not be read. The token is
+        not judged; retry (`Retry-After: 1`).
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: auth_unavailable}
+    AuditUnavailable:
+      description: |
+        `503`. `audit_unavailable`: with `audit.enabled: true` a mutation is
+        recorded before it runs, and this node's store could not take the record.
+        Nothing was changed; retry (`Retry-After: 1`). Any mutation on the
+        operator, route-management or SCIM API can answer it.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: audit_unavailable}
+    AuditDisabled:
+      description: '`409`. `audit_disabled`: `audit.enabled` is false.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: audit_disabled}
+    ScimUnauthenticated:
+      description: '`401`. The SCIM bearer token is missing or wrong.'
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimNotFound:
+      description: '`404`. No such resource.'
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimBadRequest:
+      description: '`400`. `invalidFilter`, `invalidSyntax`, `invalidPath`, `invalidValue`, `noTarget` or `mutability`; `detail` says why.'
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimUniqueness:
+      description: '`409`. `uniqueness`: `userName` or `displayName` is taken (compared case-insensitively). Also a plain `409` when a concurrent change won every retry.'
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimUnavailable:
+      description: '`503`. The directory store could not be reached; retry (`Retry-After: 1`).'
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+  parameters:
+    AuditAction:
+      name: action
+      in: query
+      required: false
+      description: Exact action name, e.g. `source.create`.
+      schema:
+        type: string
+    AuditActor:
+      name: actor
+      in: query
+      required: false
+      description: The actor's subject or username.
+      schema:
+        type: string
+    AuditOutcome:
+      name: outcome
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [pending, success, failure, error, denied]
+    AuditSince:
+      name: since
+      in: query
+      required: false
+      description: Inclusive lower bound on the entry time, unix milliseconds.
+      schema:
+        type: integer
+    AuditUntil:
+      name: until
+      in: query
+      required: false
+      description: Inclusive upper bound on the entry time, unix milliseconds.
+      schema:
+        type: integer
+    AuditLimit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum entries returned. Clamped to 1..1000.
+      schema:
+        type: integer
+        default: 100
+    AuditCursor:
+      name: cursor
+      in: query
+      required: false
+      description: A `next_cursor` from an earlier page.
+      schema:
+        type: string
+    ScimFilter:
+      name: filter
+      in: query
+      required: false
+      description: '`<attribute> eq "<value>"`. Nothing else is supported (`400 invalidFilter`).'
+      schema:
+        type: string
+    ScimStartIndex:
+      name: startIndex
+      in: query
+      required: false
+      description: 1-based index of the first result.
+      schema:
+        type: integer
+        default: 1
+    ScimCount:
+      name: count
+      in: query
+      required: false
+      description: Maximum results, clamped to 0..1000.
+      schema:
+        type: integer
+        default: 100
+    ScimExcludedAttributes:
+      name: excludedAttributes
+      in: query
+      required: false
+      description: '`members` omits a group''s member list.'
+      schema:
+        type: string

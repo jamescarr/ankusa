@@ -19,6 +19,7 @@ defmodule Ankusa.Store.Keys do
   def meta("ready_probe"), do: "m:ready_probe"
   def meta("store_id"), do: "m:store_id"
   def meta("imported:" <> artifact), do: "m:imported:" <> artifact
+  def meta("audit_cursor:" <> i), do: "m:audit_cursor:" <> i
 
   def source(tenant, name) when is_binary(tenant) and is_binary(name),
     do: <<"s:", tenant::binary, 0, name::binary>>
@@ -72,6 +73,33 @@ defmodule Ankusa.Store.Keys do
   # Replay jobs (`Ankusa.Dispatch.Replayer`); `id` is a UUIDv7 string.
   def replay_job(id) when is_binary(id), do: "j:" <> id
 
+  # ── audit log ─────────────────────────────────────────────────────────────
+
+  # `at` is the entry's time in ms; `seq` is a per-node monotonic sequence that
+  # orders entries made in the same millisecond (an id is random within one);
+  # `id` is a UUIDv7 string. The log scans in the order entries were made.
+  def audit(at, seq, id) when is_integer(at) and is_integer(seq) and is_binary(id),
+    do: <<"a:", at::64, seq::64, id::binary>>
+
+  # ── directory (users and groups provisioned over SCIM) ────────────────────
+  # Resources and index rows of `Ankusa.Directory.Store.Persistent`. The name
+  # indexes hold the case-folded `userName`/`displayName`.
+
+  def directory_user(id) when is_binary(id), do: "du:" <> id
+  def directory_user_name(downcased) when is_binary(downcased), do: "dU:" <> downcased
+  def directory_user_external(external_id) when is_binary(external_id), do: "dX:" <> external_id
+  def directory_group(id) when is_binary(id), do: "dg:" <> id
+  def directory_group_name(downcased) when is_binary(downcased), do: "dG:" <> downcased
+  def directory_group_external(external_id) when is_binary(external_id), do: "dY:" <> external_id
+
+  # Membership, both directions: the members of a group (`dm:`) and the groups
+  # of a user (`dn:`), kept in step by every write that changes either.
+  def group_member(group_id, user_id) when is_binary(group_id) and is_binary(user_id),
+    do: <<"dm:", group_id::binary, 0, user_id::binary>>
+
+  def user_group(user_id, group_id) when is_binary(user_id) and is_binary(group_id),
+    do: <<"dn:", user_id::binary, 0, group_id::binary>>
+
   # ── decoders ──────────────────────────────────────────────────────────────
 
   def decode_due(<<?d, at::64, seq::64, sink::16>>), do: {at, seq, sink}
@@ -122,7 +150,12 @@ defmodule Ankusa.Store.Keys do
     quarantine: %{cf: :quarantine, lo: <<?s>>, hi: <<?s, @ff8::binary>>},
     sources: %{cf: :default, lo: "s:", hi: <<"s:", 0xFF>>},
     rate_limits: %{cf: :default, lo: "r:", hi: <<"r:", 0xFF>>},
-    replays: %{cf: :default, lo: "j:", hi: <<"j:", 0xFF>>}
+    replays: %{cf: :default, lo: "j:", hi: <<"j:", 0xFF>>},
+    audit: %{cf: :default, lo: "a:", hi: <<"a:", @ff8::binary>>},
+    directory_users: %{cf: :default, lo: "du:", hi: <<"du:", 0xFF>>},
+    directory_groups: %{cf: :default, lo: "dg:", hi: <<"dg:", 0xFF>>},
+    group_members: %{cf: :default, lo: "dm:", hi: <<"dm:", 0xFF>>},
+    user_groups: %{cf: :default, lo: "dn:", hi: <<"dn:", 0xFF>>}
   }
 
   @doc "The column family, low and high sentinel of a scanned key family."

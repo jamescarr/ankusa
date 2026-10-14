@@ -61,7 +61,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle)
+  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle auth scim audit)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -78,6 +78,16 @@ defmodule AnkusaServer.Config do
   @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
+  @auth_keys ~w(enabled oidc subject_claim groups_claim user_match bindings)
+  @oidc_keys ~w(issuer audience algorithms leeway_seconds jwks_uri)
+  @user_match_keys ~w(claim attribute)
+  @user_match_attributes %{"userName" => :user_name, "externalId" => :external_id}
+  @binding_keys ~w(role group subject tenants)
+  @binding_roles ~w(viewer operator admin)
+  @scim_keys ~w(enabled token base_url store)
+  @scim_store_keys ~w(type url namespace)
+  @scim_store_types ~w(persistent redis)
+  @audit_keys ~w(enabled retention_days sinks)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms)
   # Keys a Redis store owns (`routes.store`, `source_store`); the other store
@@ -334,7 +344,10 @@ defmodule AnkusaServer.Config do
         claim_check_section(doc) ++
         backup_section(doc) ++
         source_store_section(doc) ++
-        lifecycle_section(doc)
+        lifecycle_section(doc) ++
+        auth_section(doc) ++
+        scim_section(doc) ++
+        audit_section(doc)
 
     try do
       config = Ankusa.Config.new(opts)
@@ -351,6 +364,8 @@ defmodule AnkusaServer.Config do
       Ankusa.Queue.validate_config!(config)
       Ankusa.Store.Backup.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
+      Ankusa.Auth.validate_config!(config)
+      Ankusa.Audit.validate_config!(config)
       config
     rescue
       error in ArgumentError -> raise ConfigError, message: error.message
@@ -889,6 +904,219 @@ defmodule AnkusaServer.Config do
       _ ->
         lifecycle = section!(doc, "lifecycle", @lifecycle_keys, [])
         [lifecycle: %{sinks: sinks!(lifecycle, ["lifecycle"])}]
+    end
+  end
+
+  # ── auth / scim / audit ─────────────────────────────────────────────────────
+
+  # The identity provider: `auth.oidc` is the one verifier the image ships.
+  # Roles come from `auth.bindings`, and, with `scim.enabled`, from the groups
+  # an identity provider provisions into the directory.
+  defp auth_section(doc) do
+    case doc["auth"] do
+      nil ->
+        []
+
+      _ ->
+        auth = section!(doc, "auth", @auth_keys, [])
+        enabled = bool!(Map.get(auth, "enabled", false), ["auth", "enabled"])
+
+        if enabled and auth["oidc"] == nil do
+          raise ConfigError, message: "auth.oidc is required when auth.enabled is true"
+        end
+
+        settings =
+          [enabled: enabled]
+          |> put_opt(:verifier, oidc_verifier(auth))
+          |> put_opt(:subject_claim, string_opt(auth, "subject_claim", ["auth"]))
+          |> put_opt(:groups_claim, string_opt(auth, "groups_claim", ["auth"]))
+          |> put_opt(:user_match, user_match(auth))
+          |> put_opt(:bindings, bindings(auth))
+
+        [auth: Map.new(settings)]
+    end
+  end
+
+  defp oidc_verifier(auth) do
+    case auth["oidc"] do
+      nil ->
+        nil
+
+      _ ->
+        oidc = section!(auth, "oidc", @oidc_keys, ["auth"])
+        path = ["auth", "oidc"]
+
+        opts =
+          [
+            issuer: required_string!(oidc, "issuer", path),
+            audience: required_string!(oidc, "audience", path)
+          ]
+          |> put_opt(
+            :algorithms,
+            oidc["algorithms"] && string_list!(oidc["algorithms"], path ++ ["algorithms"])
+          )
+          |> put_opt(:leeway_seconds, int_opt(oidc, "leeway_seconds", path))
+          |> put_opt(:jwks_uri, string_opt(oidc, "jwks_uri", path))
+
+        {Ankusa.Auth.OIDC, opts}
+    end
+  end
+
+  defp user_match(auth) do
+    case auth["user_match"] do
+      nil ->
+        nil
+
+      _ ->
+        match = section!(auth, "user_match", @user_match_keys, ["auth"])
+        path = ["auth", "user_match"]
+
+        attribute =
+          case match["attribute"] do
+            nil ->
+              nil
+
+            value ->
+              name = enum!(value, Map.keys(@user_match_attributes), path ++ ["attribute"])
+              Map.fetch!(@user_match_attributes, name)
+          end
+
+        %{}
+        |> then(
+          &if(claim = string_opt(match, "claim", path), do: Map.put(&1, :claim, claim), else: &1)
+        )
+        |> then(&if(attribute, do: Map.put(&1, :attribute, attribute), else: &1))
+    end
+  end
+
+  defp bindings(auth) do
+    case auth["bindings"] do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        list
+        |> Enum.with_index()
+        |> Enum.map(fn {binding, index} -> binding!(binding, ["auth", "bindings", index]) end)
+
+      other ->
+        raise ConfigError, message: type_error(["auth", "bindings"], "a list of bindings", other)
+    end
+  end
+
+  defp binding!(binding, path) do
+    binding = section!(binding, @binding_keys, path)
+
+    %{
+      role:
+        String.to_atom(
+          enum!(required_string!(binding, "role", path), @binding_roles, path ++ ["role"])
+        )
+    }
+    |> then(
+      &if(group = string_opt(binding, "group", path), do: Map.put(&1, :group, group), else: &1)
+    )
+    |> then(
+      &if(subject = string_opt(binding, "subject", path),
+        do: Map.put(&1, :subject, subject),
+        else: &1
+      )
+    )
+    |> then(&if(tenants = tenants(binding, path), do: Map.put(&1, :tenants, tenants), else: &1))
+  end
+
+  # `all`, or the tenants it is scoped to.
+  defp tenants(binding, path) do
+    case binding["tenants"] do
+      nil ->
+        nil
+
+      "all" ->
+        :all
+
+      list when is_list(list) ->
+        Enum.map(list, &expect_string(&1, path ++ ["tenants"]))
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["tenants"], ~s("all" or a list of tenant ids), other)
+    end
+  end
+
+  # SCIM 2.0 provisioning under `/scim/v2` on the admin listener. The token is a
+  # secret: `${ANKUSA_SCIM_TOKEN}`.
+  defp scim_section(doc) do
+    case doc["scim"] do
+      nil ->
+        []
+
+      _ ->
+        scim = section!(doc, "scim", @scim_keys, [])
+
+        settings =
+          [enabled: bool!(Map.get(scim, "enabled", false), ["scim", "enabled"])]
+          |> put_opt(:token, string_opt(scim, "token", ["scim"]))
+          |> put_opt(:base_url, string_opt(scim, "base_url", ["scim"]))
+          |> put_opt(:directory, scim_directory(scim))
+
+        [scim: Map.new(settings)]
+    end
+  end
+
+  # The same rule as `source_store`: a URL with no type is Redis, and Redis keys
+  # under `persistent` are an error, not a silent drop.
+  defp scim_directory(scim) do
+    store = section!(scim, "store", @scim_store_keys, ["scim"])
+    path = ["scim", "store"]
+
+    type =
+      enum!(
+        store["type"] || (store["url"] && "redis") || "persistent",
+        @scim_store_types,
+        path ++ ["type"]
+      )
+
+    case type do
+      "persistent" ->
+        reject_redis_only_keys!(store, path)
+        nil
+
+      "redis" ->
+        {Ankusa.Directory.Store.Redis,
+         [url: required_string!(store, "url", path)]
+         |> put_opt(:namespace, string_opt(store, "namespace", path))}
+    end
+  end
+
+  # The audit log is off unless asked for. `retention_days: null` keeps entries
+  # for ever; leaving the key out is the default, a year.
+  defp audit_section(doc) do
+    case doc["audit"] do
+      nil ->
+        []
+
+      _ ->
+        audit = section!(doc, "audit", @audit_keys, [])
+
+        settings =
+          [enabled: bool!(Map.get(audit, "enabled", false), ["audit", "enabled"])]
+          |> then(fn settings ->
+            if Map.has_key?(audit, "retention_days"),
+              do: settings ++ [retention_days: int_opt(audit, "retention_days", ["audit"])],
+              else: settings
+          end)
+          |> put_opt(:sinks, audit_sinks(audit))
+
+        [audit: Map.new(settings)]
+    end
+  end
+
+  # Optional, unlike a source's: an audit log with no sinks is the log itself.
+  defp audit_sinks(audit) do
+    case audit["sinks"] do
+      nil -> nil
+      [] -> nil
+      _ -> sinks!(audit, ["audit"])
     end
   end
 

@@ -68,6 +68,9 @@ Every top-level section, with its keys and defaults:
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
+| `auth` | `enabled` (`false`), `oidc.issuer` and `oidc.audience` (required once enabled), `oidc.algorithms` (`[RS256, ES256]`), `oidc.leeway_seconds` (60), `oidc.jwks_uri`, `subject_claim` (`sub`), `groups_claim` (`groups`), `user_match.claim` (`preferred_username`) and `user_match.attribute` (`userName` \| `externalId`), `bindings` (`[]`; each `role` = `viewer` \| `operator` \| `admin`, exactly one of `group` or `subject`, `tenants` = `all` or a list). OIDC bearer tokens for the admin and route-management APIs. See [`authentication.md`](authentication.md) |
+| `scim` | `enabled` (`false`; needs `auth.enabled`), `token` (≥ 32 bytes; use `${ANKUSA_SCIM_TOKEN}`), `base_url` (unset = from the request), `store.type` (`persistent` \| `redis`; `store.url`/`store.namespace` are Redis-only; a `url` with no `type` means `redis`). SCIM 2.0 provisioning under `/scim/v2` on the admin listener. See [`authentication.md#scim`](authentication.md#scim) |
+| `audit` | `enabled` (`false`), `retention_days` (365; `null` keeps everything), `sinks` (optional; same types as a source's). The durable audit log of every mutation and denial. See [`authentication.md#the-audit-log`](authentication.md#the-audit-log) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -207,7 +210,8 @@ Never `Application.get_env/2` scattered through call sites:
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
 `:dispatch`, `:storage`, `:claim_check`, `:backup`, `:admin`, `:rate_limits`,
-`:quarantine` and `:lifecycle` are maps and get **deep-merged** over the
+`:quarantine`, `:lifecycle`, `:scim` and `:audit` are maps, and `:auth` is a map
+with a nested `:user_match`; all get **deep-merged** over the
 defaults. Pass only the keys you want to change.
 
 The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
@@ -274,7 +278,22 @@ config :ankusa,
   },
   rate_limits: %{default: nil, tenants: %{}},
   quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824},
-  lifecycle: %{sinks: []}
+  lifecycle: %{sinks: []},
+  auth: %{
+    enabled: false,
+    verifier: nil,
+    subject_claim: "sub",
+    groups_claim: "groups",
+    user_match: %{claim: "preferred_username", attribute: :user_name},
+    bindings: []
+  },
+  scim: %{
+    enabled: false,
+    token: nil,
+    base_url: nil,
+    directory: {Ankusa.Directory.Store.Persistent, []}
+  },
+  audit: %{enabled: false, retention_days: 365, sinks: []}
 ```
 
 | Key | Default | Meaning |
@@ -386,9 +405,16 @@ role also gets
 which read and adjust this node's per-tenant ingest limits
 ([Rate limits](#rate-limits)); a store that cannot be read or written answers
 `503 store_unavailable`. Everything here
-is **unauthenticated by design**: put it behind your own
+is **unauthenticated unless `auth.enabled`**: until you turn that on (OIDC
+bearer tokens, role bindings, an audit log; see
+[`authentication.md`](authentication.md)), put it behind your own
 proxy, SSO, or network policy. The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
+
+With `audit.enabled: true` it also serves `GET /v1/audit` and
+`GET /v1/tenants/{tenant}/audit` (the audit log, newest first), and with
+`scim.enabled: true` the SCIM 2.0 endpoint under `/scim/v2`
+([`authentication.md`](authentication.md)).
 
 With `admin.enabled: true` it also serves `GET /asyncapi.json`, the AsyncAPI
 document of the channels this node publishes to ([AsyncAPI and lifecycle

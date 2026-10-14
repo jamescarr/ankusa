@@ -208,29 +208,33 @@ and
 ## Security
 
 Ankusa verifies provider signatures on ingest (`stripe`, `github`, `standard_webhooks`,
-`shopify`, `slack`, and `hmac` for any body-HMAC provider), and does no other
-authentication. It does not manage users, API keys,
-or tokens; that is your identity provider's job, and pretending otherwise would
-be worse.
+`shopify`, `slack`, and `hmac` for any body-HMAC provider). The admin API (4002)
+and the route-management API (4003) are **unauthenticated by default**; turn on
+`auth.enabled` and they take OIDC bearer tokens from your identity provider
+instead, with roles, tenant scoping, SCIM provisioning and an audit log (see
+[`docs/authentication.md`](https://github.com/jamescarr/ankusa/blob/main/docs/authentication.md)).
+Ankusa has no users or API keys of its own: the identity provider is the source
+of truth. The claim-check API (4001) never authenticates.
 
 So:
 
 - **Publish only port 4000.** Providers authenticate themselves by signing the
   body, and Ankusa verifies that signature against the source's secret.
-- **Put 4002 (admin/metrics) behind your own proxy, SSO, or network policy.** It
-  ships unauthenticated on purpose: it cannot know your identity provider, and a
-  half-authentication scheme is worse than none. `GET /v1/config` is redacted
-  anyway, because a proxy may let many people read it.
+- **Put 4002 (admin/metrics) behind `auth.enabled`, or your own proxy, SSO, or
+  network policy.** With `auth.enabled: false` (the default) anyone who reaches
+  it can read and change everything. `GET /v1/config` is redacted either way,
+  because a proxy may let many people read it.
 - **Put 4001 (claim check) behind your proxy, mesh, or network policy, the
   same as 4002.** The claim-check API performs no authentication of its own:
   it exists so non-BEAM consumers can fetch large payloads without holding
   storage credentials. Keep it internal and decide who may read what in the
   layer in front of it.
-- **Put 4003 (route management) behind your proxy or network policy, the same
-  as 4002.** It edits the route definitions the edge enforces and
-  authenticates nobody, by the same deliberate decision. It only listens when
+- **Put 4003 (route management) behind `auth.enabled` or your proxy or network
+  policy, the same as 4002.** It edits the route definitions the edge enforces
+  and is unauthenticated unless `auth.enabled`. It only listens when
   `routes.enabled` is set on an `edge` node, and publishing it is your call.
-- **Point Prometheus at 4002 through your proxy, with read-only credentials.**
+- **Point Prometheus at 4002 through your proxy, with read-only credentials**
+  (with `auth.enabled`, a `viewer` token: `/metrics` needs one).
 
 All three listeners bind `127.0.0.1` by default. A proxy or a Prometheus in
 another container, pod or host reaches them only after `admin.ip`,

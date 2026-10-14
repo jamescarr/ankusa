@@ -8,6 +8,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Ankusa.Directory.Store.Redis`: the SCIM directory (`scim.directory`) in
+  Redis, shared by every node configured with the same `namespace`. Users and
+  groups are JSON strings with case-folded name indexes and membership sets in
+  both directions; every mutation is one Lua script (uniqueness, version check,
+  indexes and membership together), so concurrent `add_members` calls lose
+  nobody. Nothing is cached: a deactivated user is refused on every node at once.
+  A Redis error or timeout is `{:error, :unavailable}`, which the admin API
+  answers `503` rather than `403`. Requires a core with `Ankusa.Directory.Store`.
 - `Ankusa.SourceStore.Redis`: API-managed, tenant-scoped sources kept in Redis
   and shared by every node configured with the same `namespace` (a hash of
   sources and a version counter; Lua-scripted writes; pub/sub invalidation with

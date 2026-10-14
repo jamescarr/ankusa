@@ -473,6 +473,321 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ ~s("ankusa:lifecycle" is reserved for lifecycle events)
   end
 
+  # ── auth, scim, audit ───────────────────────────────────────────────────────
+
+  @auth_yaml """
+  sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+  auth:
+    enabled: true
+    oidc:
+      issuer: https://login.example.com/
+      audience: ankusa
+      algorithms: [RS256, ES384]
+      leeway_seconds: 30
+      jwks_uri: https://login.example.com/keys
+    subject_claim: oid
+    groups_claim: roles
+    user_match: {claim: upn, attribute: externalId}
+    bindings:
+      - {group: Platform, role: admin}
+      - {group: Acme Ops, role: operator, tenants: [acme, globex]}
+      - {subject: ci-deployer, role: viewer, tenants: all}
+  scim:
+    enabled: true
+    token: "${ANKUSA_SCIM_TOKEN}"
+    base_url: https://admin.example.com
+    store: {type: redis, url: "redis://cache:6379", namespace: "ankusa:dir"}
+  audit:
+    enabled: true
+    retention_days: 30
+    sinks:
+      - {type: kafka, brokers: ["redpanda:9092"], topic: ankusa.audit}
+  """
+
+  @scim_token String.duplicate("s", 40)
+
+  test "the full auth, scim and audit sections translate to the core config" do
+    config =
+      Config.load!(path: tmp_config(@auth_yaml), env: %{"ANKUSA_SCIM_TOKEN" => @scim_token}).config
+
+    assert config.auth == %{
+             enabled: true,
+             verifier:
+               {Ankusa.Auth.OIDC,
+                [
+                  issuer: "https://login.example.com/",
+                  audience: "ankusa",
+                  algorithms: ["RS256", "ES384"],
+                  leeway_seconds: 30,
+                  jwks_uri: "https://login.example.com/keys"
+                ]},
+             subject_claim: "oid",
+             groups_claim: "roles",
+             user_match: %{claim: "upn", attribute: :external_id},
+             bindings: [
+               %{group: "Platform", role: :admin},
+               %{group: "Acme Ops", role: :operator, tenants: ["acme", "globex"]},
+               %{subject: "ci-deployer", role: :viewer, tenants: :all}
+             ]
+           }
+
+    assert config.scim == %{
+             enabled: true,
+             token: @scim_token,
+             base_url: "https://admin.example.com",
+             directory:
+               {Ankusa.Directory.Store.Redis,
+                [url: "redis://cache:6379", namespace: "ankusa:dir"]}
+           }
+
+    assert %{enabled: true, retention_days: 30, sinks: [{Ankusa.Sink.Kafka, kafka}]} =
+             config.audit
+
+    assert kafka[:topic] == "ankusa.audit"
+  end
+
+  test "without the sections everything is off, as before" do
+    config =
+      Config.load!(
+        path: tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}"),
+        env: %{}
+      ).config
+
+    assert config.auth.enabled == false
+    assert config.auth.verifier == nil
+    assert config.auth.bindings == []
+    assert config.scim.enabled == false
+    assert config.scim.directory == {Ankusa.Directory.Store.Persistent, []}
+    assert config.audit == %{enabled: false, retention_days: 365, sinks: []}
+  end
+
+  test "the reference config carries all three sections, switched off" do
+    config = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).config
+
+    assert %{enabled: false, verifier: {Ankusa.Auth.OIDC, oidc}, bindings: [_, _, _]} =
+             config.auth
+
+    assert oidc[:audience] == "ankusa"
+    assert config.auth.user_match == %{claim: "preferred_username", attribute: :user_name}
+
+    assert %{enabled: false, token: "", directory: {Ankusa.Directory.Store.Persistent, []}} =
+             config.scim
+
+    assert %{enabled: false, retention_days: 365, sinks: []} = config.audit
+  end
+
+  test "audit retention: an explicit null keeps everything, a missing key is a year" do
+    keep =
+      Config.load!(path: tmp_config("audit: {enabled: true, retention_days: null}"), env: %{}).config
+
+    assert keep.audit.retention_days == nil
+
+    default = Config.load!(path: tmp_config("audit: {enabled: true}"), env: %{}).config
+    assert default.audit.retention_days == 365
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("audit: {retention_days: 0}"), env: %{})
+      end
+
+    assert error.message =~ "audit.retention_days must be nil or an integer >= 1"
+  end
+
+  test "audit sinks are optional, and an empty list is no sinks" do
+    config = Config.load!(path: tmp_config("audit: {enabled: true, sinks: []}"), env: %{}).config
+    assert config.audit.sinks == []
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("audit: {sinks: [{type: carrier_pigeon}]}"), env: %{})
+      end
+
+    assert error.message =~ "audit.sinks[0].type"
+  end
+
+  test "a source named like the reserved audit source is rejected" do
+    path =
+      tmp_config("""
+      sources:
+        "ankusa:audit": {verify: {type: none}, sinks: [{type: log}]}
+      audit: {enabled: true}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s("ankusa:audit" is reserved for audit events)
+  end
+
+  test "auth.enabled without auth.oidc is refused, by name" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("auth: {enabled: true}"), env: %{})
+      end
+
+    assert error.message == "auth.oidc is required when auth.enabled is true"
+  end
+
+  test "unknown keys in auth, scim and audit name their path" do
+    for {yaml, message} <- [
+          {"auth: {bindings: [{group: A, role: admin, roles: [admin]}]}",
+           ~s(auth.bindings[0]: unknown key "roles")},
+          {"auth: {oidc: {issuer: i, audience: a, scope: x}}",
+           ~s(auth.oidc: unknown key "scope")},
+          {"auth: {user_match: {claims: x}}", ~s(auth.user_match: unknown key "claims")},
+          {"auth: {mode: oidc}", ~s(auth: unknown key "mode")},
+          {"scim: {store: {type: persistent, tick_ms: 5}}",
+           ~s(scim.store: unknown key "tick_ms")},
+          {"scim: {secret: x}", ~s(scim: unknown key "secret")},
+          {"audit: {sink: []}", ~s(audit: unknown key "sink")}
+        ] do
+      error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+      assert error.message =~ message, "#{yaml} => #{error.message}"
+    end
+  end
+
+  test "a binding is checked: one identity, a known role, valid tenants" do
+    base = "auth: {bindings: [%s]}"
+
+    for {binding, message} <- [
+          {"{role: admin}", "auth.bindings[0] must set exactly one of group or subject"},
+          {"{group: A, subject: s, role: admin}",
+           "auth.bindings[0] must set exactly one of group or subject"},
+          {"{group: A}", ~s(auth.bindings[0]: missing required key "role")},
+          {"{group: A, role: root}", ~s(auth.bindings[0].role: unknown value "root")},
+          {"{group: A, role: admin, tenants: acme}", "auth.bindings[0].tenants"},
+          {"{group: A, role: admin, tenants: []}",
+           "auth.bindings[0].tenants must be :all or a non-empty list"},
+          {~s({group: A, role: admin, tenants: ["bad.tenant"]}), "auth.bindings[0].tenants"}
+        ] do
+      error =
+        assert_raise ConfigError, fn ->
+          Config.load!(path: tmp_config(String.replace(base, "%s", binding)), env: %{})
+        end
+
+      assert error.message =~ message, "#{binding} => #{error.message}"
+    end
+  end
+
+  test "user_match.attribute is userName or externalId" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("auth: {user_match: {attribute: email}}"), env: %{})
+      end
+
+    assert error.message =~ "auth.user_match.attribute: unknown value \"email\"; expected one of"
+  end
+
+  test "oidc options are checked at load, not at the first login" do
+    yaml = "auth: {enabled: true, oidc: {issuer: i, audience: a, algorithms: [HS256]}}"
+    error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+    assert error.message =~ "auth.oidc.algorithms"
+    assert error.message =~ "never none, never HS*"
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("auth: {enabled: true, oidc: {audience: a}}"), env: %{})
+      end
+
+    assert error.message =~ ~s(auth.oidc: missing required key "issuer")
+  end
+
+  test "scim needs auth, the admin listener and a token of at least 32 bytes" do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("scim: {enabled: true, token: x}"), env: %{})
+      end
+
+    assert error.message == "scim.enabled requires auth.enabled"
+
+    auth = "auth: {enabled: true, oidc: {issuer: i, audience: a}}"
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path: tmp_config("#{auth}\nscim: {enabled: true, token: \"0123456789\"}"),
+          env: %{}
+        )
+      end
+
+    assert error.message =~ "scim.token must be a string of at least 32 bytes"
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("#{auth}\nscim: {enabled: true}"), env: %{})
+      end
+
+    assert error.message =~ "scim.token"
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path:
+            tmp_config(
+              "#{auth}\nadmin: {enabled: false}\nscim: {enabled: true, token: \"#{@scim_token}\"}"
+            ),
+          env: %{}
+        )
+      end
+
+    assert error.message == "scim.enabled requires admin.enabled"
+
+    assert %{enabled: true} =
+             Config.load!(
+               path: tmp_config("#{auth}\nscim: {enabled: true, token: \"#{@scim_token}\"}"),
+               env: %{}
+             ).config.scim
+  end
+
+  test "an unset ${ANKUSA_SCIM_TOKEN} fails by name rather than becoming an empty token" do
+    error =
+      assert_raise ConfigError, fn -> Config.load!(path: tmp_config(@auth_yaml), env: %{}) end
+
+    assert error.message =~ "ANKUSA_SCIM_TOKEN"
+  end
+
+  test "scim.store: a url with no type is redis, and redis keys under persistent are refused" do
+    auth = "auth: {enabled: true, oidc: {issuer: i, audience: a}}\n"
+    token = ~s(token: "#{@scim_token}")
+
+    config =
+      Config.load!(
+        path:
+          tmp_config("#{auth}scim: {enabled: true, #{token}, store: {url: \"redis://r:6379\"}}"),
+        env: %{}
+      ).config
+
+    assert {Ankusa.Directory.Store.Redis, [url: "redis://r:6379"]} = config.scim.directory
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(
+          path: tmp_config("scim: {store: {type: persistent, url: \"redis://r:6379\"}}"),
+          env: %{}
+        )
+      end
+
+    assert error.message =~ ~s(scim.store: "url" is only valid with type: redis)
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("scim: {store: {type: redis}}"), env: %{})
+      end
+
+    assert error.message =~ ~s(scim.store: missing required key "url")
+  end
+
+  test "the SCIM token never appears in the config the admin API prints" do
+    config =
+      Config.load!(path: tmp_config(@auth_yaml), env: %{"ANKUSA_SCIM_TOKEN" => @scim_token}).config
+
+    printed = config |> Ankusa.Admin.Redact.config() |> JSON.encode!()
+
+    refute printed =~ @scim_token
+    assert printed =~ "[REDACTED]"
+    # what the operator needs to see to know which identity provider it trusts
+    assert printed =~ "https://login.example.com/"
+    assert printed =~ "Platform"
+  end
+
   # ── validation errors ───────────────────────────────────────────────────────
 
   test "an unknown key names its path, including list indexes" do

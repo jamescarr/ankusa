@@ -61,6 +61,42 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Enterprise single sign-on for the admin and route-management APIs**
+  (`auth.enabled`, off by default). `Ankusa.Admin.Guard` runs before every
+  handler of `Ankusa.Admin.Router` and `Ankusa.Routes.Router`: every route but
+  `GET /health` and `GET /ready` needs `Authorization: Bearer <token>`, verified
+  by an `Ankusa.Auth.Verifier` (`auth.verifier`; `Ankusa.Auth.OIDC` in the new
+  `ankusa_oidc` package), and mapped to a role (`viewer < operator < admin`, each
+  global or scoped to tenants) by `auth.bindings`. `Ankusa.Admin.Actions` is the
+  table of what each route needs. `401` (`unauthenticated`, `invalid_token`),
+  `403` (`forbidden`, `user_not_provisioned`, `user_inactive`) and `503`
+  (`auth_unavailable`); `[:ankusa, :auth, :denied]` and
+  `ankusa.auth.denied.total`. `/metrics` needs `viewer` when auth is on. The
+  guard classifies the path the router matched (percent-decoded), so an encoded
+  path cannot reach a route under another route's role. See
+  `docs/authentication.md`.
+- **SCIM 2.0 provisioning** (`scim.enabled`, needs `auth.enabled`): `/scim/v2`
+  on the admin listener (`Ankusa.Scim.Router`: Users, Groups,
+  ServiceProviderConfig, ResourceTypes, Schemas; `eq` filters; PATCH with paths,
+  filters and the enterprise extension; Okta's and Entra's forms), authenticated
+  by the static `scim.token`. It fills a directory (`Ankusa.Directory`,
+  `scim.directory`: `Ankusa.Directory.Store.Persistent` in the node's store, or
+  `Ankusa.Directory.Store.Redis` in `ankusa_redis`) that group bindings and
+  `auth.user_match` read: a deactivated or deleted user is refused whatever
+  their token says. Group membership changes are atomic, so concurrent PATCHes
+  lose none.
+- **A durable audit log** (`audit.enabled`): every mutation and every denial on
+  the admin, route-management and SCIM surfaces is written to the node's store
+  before the response is sent, `pending` first and completed from the response;
+  a mutation whose record cannot be written is refused (`503
+  audit_unavailable`). `GET /v1/audit` and `GET /v1/tenants/:tenant/audit` read
+  it (newest first, filters, cursor paging). `audit.sinks` receive every entry
+  at least once and in order as CloudEvents (`io.ankusa.audit.<action>`)
+  (`Ankusa.Audit.Shipper`, a cursor per sink in the store); `audit.retention_days`
+  prunes, never ahead of the slowest sink. `ankusa:audit` is a reserved source
+  id.
+- `Ankusa.Admin.Redact` hides `scim.token` and shows `issuer` and `audience` of
+  an OIDC verifier.
 - Every delivery says how the hook was verified at ingest. The v1 message
   (`Ankusa.Sink.Message`, every queue sink) carries
   `verification: {"status": "ok" | "failed" | "skipped", "flagged": bool}`,

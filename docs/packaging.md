@@ -49,6 +49,10 @@ packages/
   ankusa_rabbitmq             path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
   ankusa_kafka                path-dep on ankusa + brod. Ankusa.Sink.Kafka.
   ankusa_nats                 path-dep on ankusa + gnat. Ankusa.Sink.NATS.
+  ankusa_oidc                 path-dep on ankusa + jose + req. Not a sink:
+                              Ankusa.Auth.OIDC, the OpenID Connect
+                              bearer-token verifier (Ankusa.Auth.Verifier)
+                              for the admin APIs' single sign-on.
   ankusa_redis                path-dep on ankusa + redix.
                               Ankusa.Routes.Store.Redis (route definitions in
                               Redis, shared across edge nodes) and
@@ -197,8 +201,11 @@ doesn't need": an HTTP-only deployment compiles `rocksdb` and not `crc32cer`.
 `gnat`, which pulls `jason`, `nkeys` (+ `ed25519`/`kcl`), `nimble_parsec`, and
 `connection`, pure Elixir, but four libraries nobody running an HTTP-,
 Kafka-, or RabbitMQ-only deployment has any use for, which is the same test
-with a lighter dependency. `ankusa_redis` carries `redix` for its two
-adapters — the shared route store and `Ankusa.Sink.Redis` — so only a
+with a lighter dependency. `ankusa_oidc` carries `jose` (JWT verification), which
+only a deployment that turns single sign-on on needs; core defines the
+`Ankusa.Auth.Verifier` behaviour and everything that uses it, and stays free of
+it. `ankusa_redis` carries `redix` for its adapters — the shared route
+store, the shared SCIM directory, the source store and `Ankusa.Sink.Redis` — so only a
 deployment that configures one of them compiles it. Those are genuine
 external dependencies the laptop/standalone user shouldn't pay to compile,
 so each got its own package the moment it was built, not before.

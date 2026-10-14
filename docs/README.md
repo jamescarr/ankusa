@@ -26,6 +26,7 @@ New here? Start with the [quickstart](quickstart.md).
 | --- | --- |
 | [`integrations.md`](integrations.md) | Oban, Celery, queues |
 | [`asyncapi.md`](asyncapi.md) | the AsyncAPI document of an instance's channels, and lifecycle events |
+| [`authentication.md`](authentication.md) | SSO for the admin APIs (OIDC), SCIM provisioning, roles and tenant scoping, the audit log |
 | [`elixir.md`](elixir.md) | embed the library |
 
 ## Contributing

@@ -8,15 +8,22 @@ defmodule Ankusa.Routes.Router do
   would put a second, easily-forgotten endpoint next to the one that accepts
   provider traffic.
 
-  ## No authentication, by design
+  ## Authentication
 
-  Same stance as `Ankusa.Admin.Router`: Ankusa does not manage users, tokens, or
-  API keys, and it does not know what auth scheme a deployment wants — mTLS, a
-  gateway's own bearer scheme, a network policy, an operator VPN. Baking in one
-  scheme (a shared token, say) would be the wrong one for most of them. Front
-  this port with whatever your deployment already uses; it carries the same
-  blast radius as `Ankusa.Admin.Router`'s `/v1/dlq/replay`, so it deserves the
-  same treatment.
+  Same stance as `Ankusa.Admin.Router`. Off by default (`auth.enabled: false`):
+  nothing here reads the `authorization` header, and a deployment fronts this
+  port with whatever it already uses — mTLS, a gateway's bearer scheme, a
+  network policy, an operator VPN. It carries the same blast radius as
+  `Ankusa.Admin.Router`'s `POST /v1/replays`, so it deserves the same treatment.
+
+  With `auth.enabled: true`, `Ankusa.Admin.Guard` runs before every handler:
+  everything except `GET /health` needs `Authorization: Bearer <token>`. Reading
+  routes and the IP rules (and the dry run, which changes nothing) needs the
+  `viewer` role; creating, replacing, updating or deleting a route, or putting
+  the IP rules, needs `admin` with a grant over all tenants, because routes
+  belong to no tenant. See `Ankusa.Auth` and `Ankusa.Admin.Actions`. With
+  `audit.enabled: true` every mutation and denial is recorded in the audit log
+  (`Ankusa.Audit`).
 
   ## Responding
 
@@ -71,6 +78,7 @@ defmodule Ankusa.Routes.Router do
   @max_body 65_536
 
   plug(:match)
+  plug(Ankusa.Admin.Guard, listener: :routes)
   plug(:dispatch)
 
   get "/health" do
@@ -182,10 +190,20 @@ defmodule Ankusa.Routes.Router do
     send_json(conn, 404, %{error: "not_found"})
   end
 
+  # See `Ankusa.Admin.Router.dispatch/2`.
+  def dispatch(conn, opts) do
+    super(conn, opts)
+  catch
+    kind, reason -> Ankusa.Admin.Guard.crashed(conn, kind, reason, __STACKTRACE__)
+  end
+
   # ── writes ──────────────────────────────────────────────────────────────────
 
-  defp write(conn, {:ok, %Route{} = route}, status),
-    do: send_json(conn, status, Route.to_json(route))
+  defp write(conn, {:ok, %Route{} = route}, status) do
+    conn
+    |> Ankusa.Audit.put_target(route.id)
+    |> send_json(status, Route.to_json(route))
+  end
 
   defp write(conn, {:error, {:invalid, field, message}}, _status),
     do: send_json(conn, 400, %{error: "invalid_route", field: field, message: message})
