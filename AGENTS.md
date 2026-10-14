@@ -91,6 +91,7 @@ one; CI runs the same tasks this table does.
 | `mise run new:adapter <name>` | scaffold `packages/ankusa_<name>/` |
 | `mise run status` | every package's version, last tag, published or not |
 | `mise run docker:smoke` | build `jamescarr/ankusa:dev`, run `packages/ankusa_server/scripts/smoke.sh` against it |
+| `mise run build [pkg]` | local only: build one Mix package from source (default `ankusa_server`); compiled Hex deps come from a cache in `~/.cache/ankusa/mix` shared by every worktree, their warnings go to `_build/<env>/deps-compile.log`, ours stay fatal |
 
 ## Run the checks before calling work done
 
