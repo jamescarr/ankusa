@@ -47,7 +47,7 @@ defmodule AnkusaRabbitmq.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :credentials_obfuscation],
       mod: {Ankusa.Sink.RabbitMQ.Application, []}
     ]
   end

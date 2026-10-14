@@ -200,6 +200,39 @@ defmodule Ankusa.Sink.KafkaTest do
     refute printed =~ inspect(hd(@hosts))
   end
 
+  test "a brod client's crash report never prints the SASL password", %{
+    instance: inst,
+    topic: topic
+  } do
+    canary = "s3cr3t-canary-#{System.unique_integer([:positive])}"
+    opts = [brokers: ["127.0.0.1:1"], topic: topic, sasl: {:plain, "ankusa", canary}]
+    name = :"ankusa_kafka.#{inst}.default"
+
+    # No broker answers, so the client exits during init and logs a crash report
+    # carrying its state.
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        try do
+          Kafka.deliver(envelope(), ctx(inst), opts)
+        catch
+          :exit, _ -> :exit
+        end
+
+        wait_until_gone(name, System.monotonic_time(:millisecond) + 5_000)
+        Process.sleep(200)
+      end)
+
+    assert log =~ "ankusa_kafka.#{inst}.default"
+    refute log =~ canary
+  end
+
+  defp wait_until_gone(name, deadline) do
+    if Process.whereis(name) != nil and System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(20)
+      wait_until_gone(name, deadline)
+    end
+  end
+
   defp high_watermark(topic) do
     {:ok, {hw, _messages}} = :brod.fetch(@hosts, topic, 0, 0)
     hw
