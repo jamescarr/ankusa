@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+#MISE description="Build one Mix package from source: deps from the shared cache, third-party warnings silenced, ours fatal"
+#USAGE arg "[pkg]" help="directory name under packages/ (default: ankusa_server)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+pkg="${usage_pkg:-ankusa_server}"
+dir=$(pkg_dir "$pkg")
+kind=$(pkg_kind "$pkg")
+case "$kind" in
+  hex | docker) ;;
+  *) fail "$pkg is not a Mix project (kind: $kind)" ;;
+esac
+cd "$dir"
+env="${MIX_ENV:-dev}"
+export MIX_ENV="$env"
+
+# One cache entry per package, env, platform, toolchain, lock, and config:
+# config feeds compile_env, which Mix checks against what a dep was built with.
+key=$(
+  {
+    printf '%s\n' "$pkg" "$env"
+    uname -sm
+    elixir -e 'IO.write([System.version(), "-otp", System.otp_release()])'
+    cat mix.lock
+    cat config/*.exs 2>/dev/null || true
+  } | shasum -a 256 | cut -c1-16
+)
+cache_root="${ANKUSA_MIX_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/ankusa/mix}/$pkg"
+cache="$cache_root/$key"
+
+tmp=""
+cleanup() { if [ -n "$tmp" ]; then rm -rf "$tmp"; fi; }
+trap cleanup EXIT
+
+# Copy-on-write where the filesystem has it (APFS clonefile, reflinks), so a
+# restore is near-instant and costs no disk until something is rewritten.
+os=$(uname -s)
+clone() {
+  if [ "$os" = Darwin ]; then
+    cp -cR "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -R "$1" "$2"; }
+  else
+    cp -R --reflink=auto "$1" "$2"
+  fi
+}
+
+# Restore. Mix trusts a dep in _build when its .app and .mix/compile.elixir_scm
+# (Elixir/OTP version, SCM, lock entry) match, none of which carry this
+# checkout's path, so cloned directories need no recompile. Existing entries are
+# never overwritten: a local build in progress wins.
+if [ -d "$cache" ]; then
+  mkdir -p deps "_build/$env/lib"
+  for src in "$cache"/deps/* "$cache"/lib/*; do
+    [ -e "$src" ] || continue
+    case "$src" in
+      "$cache"/deps/*) dst="deps/${src##*/}" ;;
+      *) dst="_build/$env/lib/${src##*/}" ;;
+    esac
+    [ -e "$dst" ] || [ -L "$dst" ] || clone "$src" "$dst"
+  done
+  touch "$cache"
+  echo "==> deps restored from $cache"
+fi
+
+mix deps.get
+
+# Hex deps only, output to a log: their warnings are upstream's (every one is
+# already on its latest release). ERL_COMPILER_OPTIONS sits below each dep's
+# own -compile attributes and silences the Erlang lints that would otherwise
+# fill the log. Scoped to this command; it must not reach our compile below.
+log="_build/$env/deps-compile.log"
+mkdir -p "_build/$env"
+if ! ERL_COMPILER_OPTIONS='[nowarn_deprecated_catch,nowarn_match_alias_pats]' \
+  MIX_OS_DEPS_COMPILE_PARTITION_COUNT="${MIX_OS_DEPS_COMPILE_PARTITION_COUNT:-4}" \
+  mix deps.compile --skip-local-deps >"$log" 2>&1; then
+  cat "$log" >&2
+  fail "mix deps.compile failed (full log above, also in $dir/$log)"
+fi
+echo "==> third-party deps compiled (log: $dir/$log)"
+
+# Save. Built in a temp dir and moved into place, so a concurrent build in
+# another worktree never sees half an entry; if that build wins the race, mv
+# nests ours inside its entry, and the second rm drops it.
+if [ ! -d "$cache" ]; then
+  tmp="$cache_root/.tmp.$$"
+  mkdir -p "$tmp/lib"
+  clone deps "$tmp/deps"
+  for d in deps/*; do
+    n="${d##*/}"
+    if [ -d "_build/$env/lib/$n" ]; then clone "_build/$env/lib/$n" "$tmp/lib/$n"; fi
+  done
+  if [ ! -e "$cache" ]; then mv "$tmp" "$cache"; else rm -rf "$tmp"; fi
+  rm -rf "$cache/.tmp.$$"
+  tmp=""
+  echo "==> deps cached in $cache"
+  # Keep the three most recently used entries (ls skips the .tmp.* dirs).
+  i=0
+  for e in $(ls -t "$cache_root"); do
+    i=$((i + 1))
+    if [ "$i" -gt 3 ]; then rm -rf "${cache_root:?}/$e"; fi
+  done
+fi
+
+# Ours: the path deps (core, async_api_spex, the adapters) and the package.
+# Mix builds path deps with --no-warnings-as-errors, so their warnings show
+# here rather than fail; check:package holds each one at zero.
+mix compile --warnings-as-errors
+
+echo "==> $pkg built ($env)"
