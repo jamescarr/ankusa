@@ -383,4 +383,38 @@ defmodule Ankusa.Sink.RabbitMQTest do
     supervisor = :sys.get_status(Ankusa.Sink.RabbitMQ.Supervisor)
     refute inspect(supervisor, limit: :infinity, printable_limit: :infinity) =~ "guest:guest"
   end
+
+  test "amqp_client's processes hold the connection password only encrypted", %{
+    instance: inst,
+    exchange: exch
+  } do
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
+
+    printed =
+      for pid <- Process.list(),
+          amqp_client_process?(pid),
+          status = sys_status(pid),
+          status != nil,
+          do: inspect(status, limit: :infinity, printable_limit: :infinity)
+
+    assert Enum.any?(printed, &(&1 =~ ":amqp_params_network"))
+    refute Enum.any?(printed, &(&1 =~ ~s({:plaintext, "guest"})))
+  end
+
+  defp amqp_client_process?(pid) do
+    with {:dictionary, dict} <- Process.info(pid, :dictionary),
+         {_, call} when is_tuple(call) <- List.keyfind(dict, :"$initial_call", 0) do
+      call
+      |> Tuple.to_list()
+      |> Enum.any?(&(is_atom(&1) and String.starts_with?(Atom.to_string(&1), "amqp_")))
+    else
+      _ -> false
+    end
+  end
+
+  defp sys_status(pid) do
+    :sys.get_status(pid, 1_000)
+  catch
+    :exit, _ -> nil
+  end
 end

@@ -11,8 +11,8 @@ need this package.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.5"},
-    {:ankusa_kafka, "~> 0.5"}
+    {:ankusa, "~> 0.6"},
+    {:ankusa_kafka, "~> 0.6"}
   ]
 end
 ```

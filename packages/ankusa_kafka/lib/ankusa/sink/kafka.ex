@@ -245,6 +245,11 @@ defmodule Ankusa.Sink.Kafka do
         default_producer_config: [required_acks: -1, ack_timeout: timeout]
       ] ++ Keyword.take(opts, [:ssl, :sasl])
 
+    # brod_sup hides a SASL password in a closure (brod_utils:init_sasl_opt/1) before
+    # starting a client; this starts brod_client directly, so it does the same, or the
+    # password sits in the client's state and every crash report of it.
+    config = :brod_utils.init_sasl_opt(config)
+
     # :temporary: brod's client exits during init when no broker answers.
     # Restarting it here would crash-loop past the supervisor's restart
     # intensity and take the application down; the next `deliver/3` starts

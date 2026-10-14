@@ -12,16 +12,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   verifies the Standard Webhooks signature an HTTP sink with a `secret` adds,
   comparing with `hash_equals`; failures throw
   `Webhook\InvalidSignatureError` (`$errorCode`, `$field`, never retryable).
-
-### Changed
-
-- `ClaimCheckClient::redeem()` throws `ClaimCheckUnavailableError`
-  (retryable) for a gateway `408` or `429` instead of `ClaimRejectedError`.
-
-## [0.4.0] - 2026-10-08
-
-### Added
-
 - `Message::$idempotencyKey` and `HookHeaders::$idempotencyKey`, the key Ankusa
   ships (the message's `idempotency_key`, the `x-ankusa-idempotency-key`
   header). `idempotencyKey()` on both returns it, and for a message or
@@ -37,6 +27,11 @@ this project follows [Semantic Versioning](https://semver.org/).
   `headers`).
 - `HookHeaders::$dedupeKey` and `$replayId`, from `x-ankusa-dedupe-key` and
   `x-ankusa-replay-id`.
+
+### Changed
+
+- `ClaimCheckClient::redeem()` throws `ClaimCheckUnavailableError`
+  (retryable) for a gateway `408` or `429` instead of `ClaimRejectedError`.
 
 ### Removed
 
@@ -80,5 +75,4 @@ this project follows [Semantic Versioning](https://semver.org/).
   caller-supplied `Content-Type` rather than duplicating it.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.4.0...HEAD
-[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.3.0...sdk-php-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-php-v0.3.0

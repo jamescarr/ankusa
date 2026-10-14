@@ -15,6 +15,13 @@ follows [Semantic Versioning](https://semver.org/).
   requires core's) and the next delivery opens a new one, so a deleted or
   re-pointed source no longer leaves its connection open for the life of the
   node.
+- Every publish carries the `ankusa_idempotency_key` AMQP header: the same
+  tenant-scoped key as the message's `idempotency_key`
+  (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
+  0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
+  which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+- AMQP `message_id` is the hook id; the `ankusa_dedupe_key` and
+  `ankusa_replay_id` AMQP headers are set when present.
 
 ### Changed
 
@@ -35,21 +42,6 @@ follows [Semantic Versioning](https://semver.org/).
   with the URL inside a closure, so `:sys.get_status/1` of
   `Ankusa.Sink.RabbitMQ.Supervisor`, or a supervisor report, never prints
   the password.
-
-## [0.5.0] - 2026-10-08
-
-### Added
-
-- Every publish carries the `ankusa_idempotency_key` AMQP header: the same
-  tenant-scoped key as the message's `idempotency_key`
-  (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
-  0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
-  which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
-- AMQP `message_id` is the hook id; the `ankusa_dedupe_key` and
-  `ankusa_replay_id` AMQP headers are set when present.
-
-### Changed
-
 - **Breaking: `Ankusa.Sink.RabbitMQ.Connection.publish/4`'s fourth argument is
   a keyword list of properties** (`message_id:`, `headers:`), not a header
   list.
@@ -61,6 +53,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- amqp_client's processes hold the connection password encrypted: the
+  application sets a random `credentials_obfuscation` secret at start unless
+  the host already set one, so `:sys.get_status/1` or a crash report of an
+  amqp_client process no longer prints `{:plaintext, password}`.
 - A channel the broker closes (a `404` publishing to a deleted exchange, a `406`)
   is reopened at once on the same connection, re-declaring the exchange. The
   publish it interrupted answers `{:error, {:channel_closed, reason}}`.
@@ -150,7 +146,6 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
   with `ankusa_kafka`, so both sinks publish byte-identical messages.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.4.0...ankusa_rabbitmq-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.3.0...ankusa_rabbitmq-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.1...ankusa_rabbitmq-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.0...ankusa_rabbitmq-v0.2.1

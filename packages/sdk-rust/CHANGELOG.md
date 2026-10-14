@@ -12,16 +12,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   Standard Webhooks signature an HTTP sink with a `secret` adds, comparing in
   constant time (`hmac`); failures are `InvalidSignatureError` (`code`,
   `field`, never retryable). New dependency: `hmac`.
-
-### Changed
-
-- `ClaimCheckClient::redeem` returns `ClaimCheckError::Unavailable`
-  (retryable) for a gateway `408` or `429` instead of `Rejected`.
-
-## [0.4.0] - 2026-10-08
-
-### Added
-
 - `decode_message` and `Message`, for consumers of Ankusa's queue: the inline
   (`body_base64`) and claim (`claim`) body forms, `sha256`/size/tenant
   validation, forwarded `headers`, the shipped `idempotency_key` field, and
@@ -34,6 +24,11 @@ this project follows [Semantic Versioning](https://semver.org/).
   `update_replay`, with the `Replay`, `ReplayList`, `ReplaySpec`, and
   `ReplayPatch` models. Kinds are `dlq`, `archive` and `quarantine`;
   `ReplaySpec`'s `id`/`since`/`until` apply to `quarantine` too.
+
+### Changed
+
+- `ClaimCheckClient::redeem` returns `ClaimCheckError::Unavailable`
+  (retryable) for a gateway `408` or `429` instead of `Rejected`.
 
 ### Removed
 
@@ -71,5 +66,4 @@ this project follows [Semantic Versioning](https://semver.org/).
   for shared base URL, headers, and timeout.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.4.0...HEAD
-[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.3.0...sdk-rust-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-rust-v0.3.0
