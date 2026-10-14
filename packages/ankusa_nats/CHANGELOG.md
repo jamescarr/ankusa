@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:publish_timeout_ms` plus 1 s): a connection with no delivery for that long
   is closed (`Ankusa.Sink.Reaper`, requires core's) and the next delivery
   opens a new one.
+- Every message carries the `ankusa_idempotency_key` header: the same
+  tenant-scoped key as the message's `idempotency_key`
+  (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
+  0.5 or newer**: the key comes from
+  `Ankusa.Envelope.idempotency_key/1`, which 0.4.x does not have, so the Hex
+  requirement is now `~> 0.5`.
+- `ankusa_dedupe_key` and `ankusa_replay_id` headers when present.
 
 ### Changed
 
@@ -26,21 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The connection supervisor's child spec holds the connection settings inside
   a closure, so `:sys.get_status/1` of `Ankusa.Sink.NATS.Supervisor`, or a
   supervisor report, never prints a password, token or nkey seed.
-
-## [0.5.0] - 2026-10-08
-
-### Added
-
-- Every message carries the `ankusa_idempotency_key` header: the same
-  tenant-scoped key as the message's `idempotency_key`
-  (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
-  0.5 or newer**: the key comes from
-  `Ankusa.Envelope.idempotency_key/1`, which 0.4.x does not have, so the Hex
-  requirement is now `~> 0.5`.
-- `ankusa_dedupe_key` and `ankusa_replay_id` headers when present.
-
-### Changed
-
 - **Breaking: every publish sets `Nats-Msg-Id`** to the hook `id`
   (`id:replay:<replay_id>` on a replay), so a stream's duplicate window drops
   a re-publish of the same delivery inside the window (0.4.0 set none).
@@ -109,7 +101,6 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
   nested ticket object, breaking for consumers; the message `v` stays `1`.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.4.0...ankusa_nats-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.3.0...ankusa_nats-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.2.1...ankusa_nats-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.2.0...ankusa_nats-v0.2.1

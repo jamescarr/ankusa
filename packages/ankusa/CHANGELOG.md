@@ -11,54 +11,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
-### Fixed
-
-- Under `wal: :none`, a source written at runtime (`Ankusa.SourceStore.put/5`,
-  the admin API's source routes) with no durable sink is refused with
-  `{:error, :invalid, message}` (`400 invalid_source`), as boot already
-  refused a static one: it would have answered `201` with no durable copy
-  anywhere. Every writable source store applies the new
-  `Ankusa.Queue.check_durable/2` before a write, and `Ankusa.Edge.Publish`
-  answers `503` for a source that reaches ingest without that check (stored
-  before it, or written to a shared source store by a `wal: :disk` node)
-  instead of acking it with no durable copy.
-- A store restored from backup (or created fresh with a backup configured)
-  keeps its `RESTORE-IN-PROGRESS` marker until `reconcile_archive` has
-  succeeded. A node that died, or whose reconcile failed, between the restore
-  and the reconcile now reconciles on its next boot instead of opening as an
-  existing store and reusing archived seqs.
-- A backup refuses to run when the prefix's latest backup belongs to another
-  store (`{:foreign_backup, theirs, ours}`, logged at error level): each store
-  gets an id (`m:store_id`) on its first backup, carried by its checkpoints
-  and recorded in every manifest. Two nodes on one prefix no longer purge each
-  other's backups. A node whose `LATEST` was moved by another writer of the
-  same store (an old host beside its replacement) refuses too
-  (`{:prefix_shared, latest}`).
-- Blob files of the hooks and quarantine column families are capped at 64 MiB
-  (`blob_file_size`; RocksDB's default is 256 MiB), bounding what one backup
-  upload or restore holds in memory.
-- `DELETE /v1/tenants/:tenant/sources/:name` no longer answers `204` while
-  this node's queue still holds undelivered rows for the source: it is
-  `409 source_has_deliveries` (`{"pending": n, "inflight": m}`) and nothing is
-  deleted. `?deliveries=dead_letter` dead-letters the pending rows first, as
-  `{:source_gone, source_id}` (needs the `:dispatch` role, `409
-  role_not_enabled` otherwise; `503 dispatch_unavailable` if the pipeline
-  cannot answer), then deletes; rows in flight settle on their own. A source
-  re-created under the same name no longer inherits the old backlog.
-- Delivery rows record their `source_id`, so one source's rows are found
-  without reading every hook. Rows written before keep working: they are
-  matched by their hook's source.
-- The claim gateway serves one `Range: bytes=` range as `206` with
-  `Content-Range` (`416` past the end), from one ranged store read, and every
-  claim response says `Accept-Ranges: bytes`. Several ranges, other units and
-  any `If-Range` get the whole claim. `HEAD` reads only the pack's index, not
-  the claim.
-- The S3, GCS, Azure and OCI blob stores retry a transport error or a `408`,
-  `429`, `500`, `502`, `503` or `504` (`:retries`, default 2 extra attempts,
-  200 ms then 1 s apart), re-signing each attempt; any other answer is
-  returned at once, mapped as before. `put` sends its iodata as is instead of
-  copying a segment into one binary first.
-
 ### Added
 
 - Every delivery says how the hook was verified at ingest. The v1 message
@@ -174,87 +126,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   queue included: the sink never creates one) is retried. `describe/2`
   reports the AsyncAPI `sqs` channel binding. The admin config view shows
   `queue_url` and `message_group_id`.
-
-### Changed
-
-- `Ankusa.BlobStore.S3.Credentials` is now `Ankusa.AWS.Credentials` (ETS table
-  `:ankusa_aws_credentials`), shared by `BlobStore.S3` and `Sink.SQS`. The
-  chain and its options are unchanged.
-- **Circuit breakers are on by default** (`dispatch.breaker_failures: 5`): a
-  sink that keeps failing has its rows parked, without spending attempts,
-  instead of each retrying on the policy's schedule, so they reach the DLQ
-  later than before. `breaker_failures: 0` keeps the old behaviour. A replay
-  job counts its rows parked behind an open breaker toward auto-pause.
-- `Sink.Http` maps `400`, `401`, `403`, `404`, `410`, `413`, `422` to
-  `{:permanent, {:status, s}}` (dead-letter now) and honours `Retry-After` on
-  `408`, `429` and `5xx`.
-- **Breaking:** `Ankusa.BlobStore` calls take a scope —
-  `put(instance, :segments | :claims, key, data)` and so on — and the
-  `list/3` callback returns `{:ok, keys} | {:error, reason}`, following every
-  adapter's pagination (S3, GCS, Azure, OCI) to the end.
-- **Breaking:** `c:Ankusa.SourceStore.fetch/2` may return
-  `{:error, :unavailable}`: ingest answers `503 store_unavailable` instead of
-  `404`, dispatch reschedules the row a second later with attempts unchanged
-  instead of dead-lettering it as `:source_gone`, and a replay job retries
-  its page.
-- **Breaking:** the route snapshot lives in a per-instance ETS table
-  published in generations (`Ankusa.Routes.Snapshot`), not
-  `:persistent_term`; the removed `Ankusa.Routes.snapshot` function is replaced by
-  `Ankusa.Routes.meta/1`.
-- A source with a `tenant_id` other than `"default"` answers only routes
-  naming that tenant (any other is `404`); `"default"` sources stay shared.
-- A hook accepted flagged (`accept_flag`) spends its source's quarantine
-  bucket.
-- Single-claim pack ids are the check-in time plus 64 random bits (no longer
-  derived from the hook id and its receive time); retention counts from
-  check-in.
-- Claim gateway: `cache-control: private, max-age=31536000, immutable`; `503`
-  bodies carry only the error code; a store `403` is
-  `503 store_forbidden` with `Retry-After: 60`.
-- **Breaking (E5):** under a resolver that takes the tenant from the request
-  (any but `Ankusa.RouteResolver.Path`), a source that is shared
-  (`tenant_id: "default"`), has `Ankusa.Verifier.None` and does not set
-  `trust_url_tenant: true` is refused: a configured one stops the instance
-  from starting (`ArgumentError` naming the source, on every node whatever
-  its roles), and a `SourceStore.Persistent` write of one is
-  `{:error, :invalid, message}` (the admin API's `400 invalid_source`). One
-  the store already held keeps serving, and is named in a warning at boot.
-  Set `trust_url_tenant: true` to keep a deliberately open shared endpoint.
-- **Breaking (O2):** no supervisor in the instance tree holds the
-  `%Ankusa.Config{}` any more. `Ankusa.Instance.child_spec/1` and
-  `start_link/1` store the config (`Ankusa.put_config/1`) and pass only the
-  instance name; every child is started with `[instance: instance]` and reads
-  `Ankusa.config(instance)`. A custom `Ankusa.SourceStore` or
-  `Ankusa.Routes.Store` that runs a process now gets `start_link([instance:
-  instance])` instead of `start_link(%Ankusa.Config{})` /
-  `opts[:config]`, and reads its options from `Ankusa.config(instance)`.
-  `SourceStore.Persistent.start_link/1` takes `[instance: instance]`.
-  `:sys.get_status/1` of the instance's parent, the instance and its
-  subtrees no longer prints sink options or verifier secrets.
-
-### Fixed
-
-- The claim sweeper no longer stops at a partition it cannot delete
-  (`File.rm_rf/1`, logged); `claim_check.retention_days` must be `nil` or
-  ≥ 1, and `sweep_interval_ms` positive.
-- The S3 and Azure managed-identity credential caches are created when the
-  `:ankusa` application starts; they used to belong to whichever request or task
-  filled them first and vanished with it, so temporary credentials were
-  fetched again on almost every call.
-- The route snapshot table is owned by `Ankusa.Routes.TableOwner` and lent to
-  the routes store, so a store crash no longer deletes it, and the restarted
-  store resumes from it (`Ankusa.Routes.Snapshot.adopt/1`): the ETS store keeps
-  API-created routes across a store crash instead of re-seeding from config.
-- A `{:permanent, _}` answer to a breaker's probe closes the breaker; it used
-  to leave the probe slot taken, parking the key forever.
-- `storage.key_prefix` is applied when a segment is named and the catalogue
-  keeps the full key, so changing the prefix no longer strands archived
-  segments.
-
-## [0.5.0] - 2026-10-08
-
-### Added
-
 - **Ingest dedupe.** `Ankusa.Dedupe` extracts a provider event key (a delivery
   header such as GitHub's `x-github-delivery`, or a JSON field such as
   Stripe's `"id"`) from every accepted hook, configured per source as
@@ -389,6 +260,60 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- `Ankusa.BlobStore.S3.Credentials` is now `Ankusa.AWS.Credentials` (ETS table
+  `:ankusa_aws_credentials`), shared by `BlobStore.S3` and `Sink.SQS`. The
+  chain and its options are unchanged.
+- **Circuit breakers are on by default** (`dispatch.breaker_failures: 5`): a
+  sink that keeps failing has its rows parked, without spending attempts,
+  instead of each retrying on the policy's schedule, so they reach the DLQ
+  later than before. `breaker_failures: 0` keeps the old behaviour. A replay
+  job counts its rows parked behind an open breaker toward auto-pause.
+- `Sink.Http` maps `400`, `401`, `403`, `404`, `410`, `413`, `422` to
+  `{:permanent, {:status, s}}` (dead-letter now) and honours `Retry-After` on
+  `408`, `429` and `5xx`.
+- **Breaking:** `Ankusa.BlobStore` calls take a scope —
+  `put(instance, :segments | :claims, key, data)` and so on — and the
+  `list/3` callback returns `{:ok, keys} | {:error, reason}`, following every
+  adapter's pagination (S3, GCS, Azure, OCI) to the end.
+- **Breaking:** `c:Ankusa.SourceStore.fetch/2` may return
+  `{:error, :unavailable}`: ingest answers `503 store_unavailable` instead of
+  `404`, dispatch reschedules the row a second later with attempts unchanged
+  instead of dead-lettering it as `:source_gone`, and a replay job retries
+  its page.
+- **Breaking:** the route snapshot lives in a per-instance ETS table
+  published in generations (`Ankusa.Routes.Snapshot`), not
+  `:persistent_term`; the removed `Ankusa.Routes.snapshot` function is replaced by
+  `Ankusa.Routes.meta/1`.
+- A source with a `tenant_id` other than `"default"` answers only routes
+  naming that tenant (any other is `404`); `"default"` sources stay shared.
+- A hook accepted flagged (`accept_flag`) spends its source's quarantine
+  bucket.
+- Single-claim pack ids are the check-in time plus 64 random bits (no longer
+  derived from the hook id and its receive time); retention counts from
+  check-in.
+- Claim gateway: `cache-control: private, max-age=31536000, immutable`; `503`
+  bodies carry only the error code; a store `403` is
+  `503 store_forbidden` with `Retry-After: 60`.
+- **Breaking (E5):** under a resolver that takes the tenant from the request
+  (any but `Ankusa.RouteResolver.Path`), a source that is shared
+  (`tenant_id: "default"`), has `Ankusa.Verifier.None` and does not set
+  `trust_url_tenant: true` is refused: a configured one stops the instance
+  from starting (`ArgumentError` naming the source, on every node whatever
+  its roles), and a `SourceStore.Persistent` write of one is
+  `{:error, :invalid, message}` (the admin API's `400 invalid_source`). One
+  the store already held keeps serving, and is named in a warning at boot.
+  Set `trust_url_tenant: true` to keep a deliberately open shared endpoint.
+- **Breaking (O2):** no supervisor in the instance tree holds the
+  `%Ankusa.Config{}` any more. `Ankusa.Instance.child_spec/1` and
+  `start_link/1` store the config (`Ankusa.put_config/1`) and pass only the
+  instance name; every child is started with `[instance: instance]` and reads
+  `Ankusa.config(instance)`. A custom `Ankusa.SourceStore` or
+  `Ankusa.Routes.Store` that runs a process now gets `start_link([instance:
+  instance])` instead of `start_link(%Ankusa.Config{})` /
+  `opts[:config]`, and reads its options from `Ankusa.config(instance)`.
+  `SourceStore.Persistent.start_link/1` takes `[instance: instance]`.
+  `:sys.get_status/1` of the instance's parent, the instance and its
+  subtrees no longer prints sink options or verifier secrets.
 - Delivery rows may carry `replay: replay_id`, the job a replayed delivery is
   attributed to.
 - `Ankusa.Queue.enqueue/3` takes an optional `deadline` (a
@@ -498,6 +423,67 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Fixed
 
+- Under `wal: :none`, a source written at runtime (`Ankusa.SourceStore.put/5`,
+  the admin API's source routes) with no durable sink is refused with
+  `{:error, :invalid, message}` (`400 invalid_source`), as boot already
+  refused a static one: it would have answered `201` with no durable copy
+  anywhere. Every writable source store applies the new
+  `Ankusa.Queue.check_durable/2` before a write, and `Ankusa.Edge.Publish`
+  answers `503` for a source that reaches ingest without that check (stored
+  before it, or written to a shared source store by a `wal: :disk` node)
+  instead of acking it with no durable copy.
+- A store restored from backup (or created fresh with a backup configured)
+  keeps its `RESTORE-IN-PROGRESS` marker until `reconcile_archive` has
+  succeeded. A node that died, or whose reconcile failed, between the restore
+  and the reconcile now reconciles on its next boot instead of opening as an
+  existing store and reusing archived seqs.
+- A backup refuses to run when the prefix's latest backup belongs to another
+  store (`{:foreign_backup, theirs, ours}`, logged at error level): each store
+  gets an id (`m:store_id`) on its first backup, carried by its checkpoints
+  and recorded in every manifest. Two nodes on one prefix no longer purge each
+  other's backups. A node whose `LATEST` was moved by another writer of the
+  same store (an old host beside its replacement) refuses too
+  (`{:prefix_shared, latest}`).
+- Blob files of the hooks and quarantine column families are capped at 64 MiB
+  (`blob_file_size`; RocksDB's default is 256 MiB), bounding what one backup
+  upload or restore holds in memory.
+- `DELETE /v1/tenants/:tenant/sources/:name` no longer answers `204` while
+  this node's queue still holds undelivered rows for the source: it is
+  `409 source_has_deliveries` (`{"pending": n, "inflight": m}`) and nothing is
+  deleted. `?deliveries=dead_letter` dead-letters the pending rows first, as
+  `{:source_gone, source_id}` (needs the `:dispatch` role, `409
+  role_not_enabled` otherwise; `503 dispatch_unavailable` if the pipeline
+  cannot answer), then deletes; rows in flight settle on their own. A source
+  re-created under the same name no longer inherits the old backlog.
+- Delivery rows record their `source_id`, so one source's rows are found
+  without reading every hook. Rows written before keep working: they are
+  matched by their hook's source.
+- The claim gateway serves one `Range: bytes=` range as `206` with
+  `Content-Range` (`416` past the end), from one ranged store read, and every
+  claim response says `Accept-Ranges: bytes`. Several ranges, other units and
+  any `If-Range` get the whole claim. `HEAD` reads only the pack's index, not
+  the claim.
+- The S3, GCS, Azure and OCI blob stores retry a transport error or a `408`,
+  `429`, `500`, `502`, `503` or `504` (`:retries`, default 2 extra attempts,
+  200 ms then 1 s apart), re-signing each attempt; any other answer is
+  returned at once, mapped as before. `put` sends its iodata as is instead of
+  copying a segment into one binary first.
+- The claim sweeper no longer stops at a partition it cannot delete
+  (`File.rm_rf/1`, logged); `claim_check.retention_days` must be `nil` or
+  ≥ 1, and `sweep_interval_ms` positive.
+- The S3 and Azure managed-identity credential caches are created when the
+  `:ankusa` application starts; they used to belong to whichever request or task
+  filled them first and vanished with it, so temporary credentials were
+  fetched again on almost every call.
+- The route snapshot table is owned by `Ankusa.Routes.TableOwner` and lent to
+  the routes store, so a store crash no longer deletes it, and the restarted
+  store resumes from it (`Ankusa.Routes.Snapshot.adopt/1`): the ETS store keeps
+  API-created routes across a store crash instead of re-seeding from config.
+- A `{:permanent, _}` answer to a breaker's probe closes the breaker; it used
+  to leave the probe slot taken, parking the key forever.
+- `storage.key_prefix` is applied when a segment is named and the catalogue
+  keeps the full key, so changing the prefix no longer strands archived
+  segments.
 - `Ankusa.Verifier.Hmac` fails closed on an empty key. A missing, `nil` or
   empty `:secret`, an empty list, or a list element that is empty or does not
   decode is `{:error, :bad_secret}` for every hook. It used to HMAC with the
@@ -1086,7 +1072,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   effect.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.4.0...ankusa-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.3.0...ankusa-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.4...ankusa-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.1...ankusa-v0.2.4

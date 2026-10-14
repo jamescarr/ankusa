@@ -12,16 +12,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   verifies the Standard Webhooks signature an HTTP sink with a `secret` adds,
   comparing with `OpenSSL.fixed_length_secure_compare`; failures raise
   `Ankusa::InvalidSignatureError` (`code`, `field`, never retryable).
-
-### Changed
-
-- `ClaimCheckClient#redeem` raises `ClaimCheckUnavailableError` (retryable)
-  for a gateway `408` or `429` instead of `ClaimRejectedError`.
-
-## [0.4.0] - 2026-10-08
-
-### Added
-
 - `Ankusa::Message` and `Ankusa.decode_message(data)`, plus
   `Ankusa::InvalidMessageError` (with `code`, `field` and `retryable?` false):
   decode and validate the v1 queue message every sink delivers — the inline
@@ -40,6 +30,11 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `AdminClient#create_replay`, `#get_replay`, `#list_replays` and
   `#update_replay` for the `POST/GET/PATCH /v1/replays` replay-job API (kinds
   `dlq`, `archive`, `quarantine`).
+
+### Changed
+
+- `ClaimCheckClient#redeem` raises `ClaimCheckUnavailableError` (retryable)
+  for a gateway `408` or `429` instead of `ClaimRejectedError`.
 
 ### Removed
 
@@ -78,5 +73,4 @@ this project follows [Semantic Versioning](https://semver.org/).
   exactly one bit to route a failure to dead-letter or retry.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.4.0...HEAD
-[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.3.0...sdk-ruby-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-ruby-v0.3.0

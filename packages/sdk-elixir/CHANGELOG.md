@@ -15,16 +15,6 @@ follows [Semantic Versioning](https://semver.org/).
   `:tolerance_seconds`, and answers `401`
   `{"error":"invalid_signature","code":...}` to a delivery that doesn't
   verify.
-
-### Changed
-
-- `Ankusa.SDK.ClaimCheck.redeem/3` returns `ClaimCheckUnavailableError`
-  (retryable) for a gateway `408` or `429` instead of `ClaimRejectedError`.
-
-## [0.4.0] - 2026-10-08
-
-### Added
-
 - `Ankusa.SDK.Message.decode/1` now carries `dedupe_key`, `replay_id`,
   `idempotency_key` and `headers`, verifies an inline body's length and sha256,
   checks a claim's tenant against `tenant_id`, and rejects a claim that isn't a
@@ -42,6 +32,11 @@ follows [Semantic Versioning](https://semver.org/).
 - `Ankusa.SDK.Admin.create_replay/2`, `get_replay/2`, `list_replays/1` and
   `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`;
   kinds `dlq`, `archive`, `quarantine`).
+
+### Changed
+
+- `Ankusa.SDK.ClaimCheck.redeem/3` returns `ClaimCheckUnavailableError`
+  (retryable) for a gateway `408` or `429` instead of `ClaimRejectedError`.
 
 ### Removed
 
@@ -90,5 +85,4 @@ follows [Semantic Versioning](https://semver.org/).
   (`test/conformance_test.exs`), passing every vector in `conformance/cases`.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.4.0...HEAD
-[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...sdk-elixir-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-elixir-v0.3.0

@@ -59,26 +59,6 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `max_message_bytes`, `timeout_ms`, and `auth` (`metadata` | `token` |
   `none`, default `metadata`; `token` is required when `auth: token`), the
   same choice `storage.gcs.auth` offers. `reference.yml` documents it.
-
-### Changed
-
-- The image's `HEALTHCHECK` asks `GET /ready` (`docker-entrypoint
-  healthcheck`, ingest port first, then admin), so a node whose store refuses
-  writes reports `unhealthy`.
-- An unresolved `${…}` in the file is a load error naming the key (a
-  substituted value that itself contains `${` is fine); a static source whose
-  verifier secret is missing or undecodable fails `check-config` and boot.
-- `AnkusaServer.GcpToken` answers `:error` to every caller for a second after
-  a failed metadata fetch, so a queue of callers behind a dead metadata server
-  costs one request.
-- `:os_mon` runs (disk gauges); only `disksup` is configured. The image adds
-  `coreutils`: `disksup` runs `df -lk -x squashfs`, which busybox's `df`
-  rejects.
-
-## [0.5.0] - 2026-10-08
-
-### Added
-
 - Every sink now sends the tenant-scoped idempotency key: the message gains
   `idempotency_key` (still `v: 1`), `Sink.Http` sends `x-ankusa-idempotency-key`,
   and RabbitMQ, Kafka and NATS send `ankusa_idempotency_key`. It is
@@ -116,6 +96,18 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Changed
 
+- The image's `HEALTHCHECK` asks `GET /ready` (`docker-entrypoint
+  healthcheck`, ingest port first, then admin), so a node whose store refuses
+  writes reports `unhealthy`.
+- An unresolved `${…}` in the file is a load error naming the key (a
+  substituted value that itself contains `${` is fine); a static source whose
+  verifier secret is missing or undecodable fails `check-config` and boot.
+- `AnkusaServer.GcpToken` answers `:error` to every caller for a second after
+  a failed metadata fetch, so a queue of callers behind a dead metadata server
+  costs one request.
+- `:os_mon` runs (disk gauges); only `disksup` is configured. The image adds
+  `coreutils`: `disksup` runs `df -lk -x squashfs`, which busybox's `df`
+  rejects.
 - `GET /asyncapi.json`: `SinkMessageV1` now requires `sha256`, `dedupe_key`,
   `replay_id`, `idempotency_key` and `headers`, and `SinkMessageHeadersV1`
   requires `ankusa_idempotency_key`. A consumer that validates messages
@@ -351,7 +343,6 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...ankusa_server-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...ankusa_server-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...ankusa_server-v0.2.4

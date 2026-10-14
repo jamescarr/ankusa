@@ -357,7 +357,7 @@ Elixir consumers: alongside the claim-check client sit `Ankusa.SDK.Receiver`
 clients.
 
 ```elixir
-# mix.exs: {:ankusa_sdk, "~> 0.4"}
+# mix.exs: {:ankusa_sdk, "~> 0.5"}
 claim_check = Ankusa.SDK.ClaimCheck.new(ENV.fetch("CLAIM_CHECK_URL", "http://localhost:4001"))
 
 case Ankusa.SDK.ClaimCheck.redeem(claim_check, claim, sha256) do

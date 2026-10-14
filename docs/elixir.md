@@ -10,10 +10,10 @@ rather run Ankusa as a container, or you don't write Elixir, start at the
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.5"},
+    {:ankusa, "~> 0.6"},
     # add these as you scale out:
-    {:ankusa_kafka, "~> 0.5"},     # deliver to Kafka
-    {:ankusa_rabbitmq, "~> 0.5"}   # deliver to RabbitMQ
+    {:ankusa_kafka, "~> 0.6"},     # deliver to Kafka
+    {:ankusa_rabbitmq, "~> 0.6"}   # deliver to RabbitMQ
   ]
 end
 ```

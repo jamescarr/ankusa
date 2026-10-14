@@ -15,8 +15,8 @@ hooks to a Redis pub/sub channel.
 ```elixir
 def deps do
   [
-    {:ankusa, "~> 0.5"},
-    {:ankusa_redis, "~> 0.4"}
+    {:ankusa, "~> 0.6"},
+    {:ankusa_redis, "~> 0.5"}
   ]
 end
 ```

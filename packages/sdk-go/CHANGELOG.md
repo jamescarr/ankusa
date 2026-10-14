@@ -13,16 +13,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   Standard Webhooks signature an HTTP sink with a `secret` adds, comparing
   with `hmac.Equal`; failures are `*InvalidSignatureError` (`Code`, `Field`,
   not retryable).
-
-### Changed
-
-- `Redeem` returns `*ClaimCheckUnavailableError` (retryable) for a gateway
-  `408` or `429` instead of `*ClaimRejectedError`.
-
-## [0.4.0] - 2026-10-08
-
-### Added
-
 - `DecodeMessage` and the `Message` type: decode a v1 queue message with the
   body-integrity checks (`size_mismatch`, `integrity`, `tenant_mismatch`) and
   the `dedupe_key`/`replay_id`/`idempotency_key`/`headers` fields, raising
@@ -42,6 +32,11 @@ this project follows [Semantic Versioning](https://semver.org/).
   with the `Replay`, `ReplayList`, `ReplaySpec`, and `ReplayPatch` types. Kinds
   are `dlq`, `archive` and `quarantine`; `ReplaySpec.ID`, `Since` and `Until`
   cover `quarantine` too.
+
+### Changed
+
+- `Redeem` returns `*ClaimCheckUnavailableError` (retryable) for a gateway
+  `408` or `429` instead of `*ClaimRejectedError`.
 
 ### Removed
 
@@ -77,5 +72,4 @@ this project follows [Semantic Versioning](https://semver.org/).
   `ReplaceRoute`, or `UpdateRoute`).
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.4.0...HEAD
-[0.4.0]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.3.0...sdk-go-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.3.0

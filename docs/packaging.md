@@ -277,7 +277,7 @@ services:
 
 **Depending on `ankusa` directly *and* transitively through an adapter
 package needs `override: true`.** Each adapter package's own
-`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.5` for rabbitmq/kafka/nats, `~> 0.4` for redis) whenever Mix
+`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.6` for every adapter) whenever Mix
 evaluates it as a nested dependency: Mix builds dependencies under `:prod`
 by default regardless of *your* project's `Mix.env()`, so the adapter
 package's dev/test-only path-dep branch never gets hit there. A wrapper app
