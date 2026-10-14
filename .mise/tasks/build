@@ -85,31 +85,38 @@ mkdir -p "_build/$env"
 # Mix.Dep is Mix's internal API (the calls deps.loadpaths makes), pinned by
 # the Elixir in .mise.toml; a rename fails here, loudly. stderr is only shown
 # on failure: mix run warns about our app until its first build.
-stale=$(mix run --no-start --no-compile --no-deps-check -e '
-  for dep <- Mix.Dep.load_and_cache(),
-      dep.scm.fetchable?(),
-      Mix.Dep.compilable?(Mix.Dep.check_lock(dep)),
-      do: IO.puts(dep.app)
-' 2>"$err") || {
-  cat "$err" >&2
-  fail "could not list the Hex deps to build (above)"
+stale_deps() {
+  mix run --no-start --no-compile --no-deps-check -e '
+    for dep <- Mix.Dep.load_and_cache(),
+        dep.scm.fetchable?(),
+        Mix.Dep.compilable?(Mix.Dep.check_lock(dep)),
+        do: IO.puts(dep.app)
+  ' 2>"$err" || {
+    cat "$err" >&2
+    fail "could not list the Hex deps to build (above)"
+  }
 }
+stale=$(stale_deps)
+
+# A stale dep that was already here may hold a build tree from another
+# checkout (cloned from the cache): rebuild it from a fresh fetch instead. The
+# fetch also marks every dep that depends on it stale, so list them again.
+refetch=""
+for n in $stale; do
+  case "$present" in *" $n "*)
+    rm -rf "deps/$n"
+    refetch=1
+    ;;
+  esac
+done
+if [ -n "$refetch" ]; then
+  mix deps.get
+  stale=$(stale_deps)
+fi
 
 if [ -z "$stale" ]; then
   echo "==> third-party deps up to date"
 else
-  # A stale dep that was already here may hold a build tree from another
-  # checkout (cloned from the cache): rebuild it from a fresh fetch instead.
-  refetch=""
-  for n in $stale; do
-    case "$present" in *" $n "*)
-      rm -rf "deps/$n"
-      refetch=1
-      ;;
-    esac
-  done
-  if [ -n "$refetch" ]; then mix deps.get; fi
-
   # Output to the log: their warnings are upstream's (every one is already on
   # its latest release). ERL_COMPILER_OPTIONS sits below each dep's own
   # -compile attributes and silences the Erlang lints that would otherwise
