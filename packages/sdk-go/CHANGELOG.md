@@ -7,6 +7,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
 - `VerifySignature(header, body, secrets, VerifyOptions)` verifies the
@@ -71,5 +73,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   encoded as JSON (an unencodable `Metadata` value in `CreateRoute`,
   `ReplaceRoute`, or `UpdateRoute`).
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.3.0
