@@ -106,7 +106,7 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - Kafka headers: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `content_type`
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.6.0...HEAD
-[0.6.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_kafka-v0.6.0
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.4.0...ankusa_kafka-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.3.0...ankusa_kafka-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.1...ankusa_kafka-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.0...ankusa_kafka-v0.2.1

@@ -75,5 +75,5 @@ this project follows [Semantic Versioning](https://semver.org/).
   exactly one bit to route a failure to dead-letter or retry.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-ruby-v0.5.0
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.3.0...sdk-ruby-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-ruby-v0.3.0

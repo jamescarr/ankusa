@@ -345,7 +345,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.6.0...HEAD
-[0.6.0]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_server-v0.6.0
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...ankusa_server-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...ankusa_server-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...ankusa_server-v0.2.4

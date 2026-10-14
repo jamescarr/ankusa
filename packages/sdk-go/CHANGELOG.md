@@ -74,5 +74,5 @@ this project follows [Semantic Versioning](https://semver.org/).
   `ReplaceRoute`, or `UpdateRoute`).
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.5.0
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-go-v0.3.0...sdk-go-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-go-v0.3.0

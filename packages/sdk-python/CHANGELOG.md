@@ -134,7 +134,7 @@ this project follows [Semantic Versioning](https://semver.org/).
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.5.0
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...sdk-python-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...sdk-python-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1

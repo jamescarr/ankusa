@@ -77,5 +77,5 @@ this project follows [Semantic Versioning](https://semver.org/).
   caller-supplied `Content-Type` rather than duplicating it.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-php-v0.5.0
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.3.0...sdk-php-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-php-v0.3.0

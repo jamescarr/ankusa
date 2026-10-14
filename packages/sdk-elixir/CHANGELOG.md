@@ -87,5 +87,5 @@ follows [Semantic Versioning](https://semver.org/).
   (`test/conformance_test.exs`), passing every vector in `conformance/cases`.
 
 [Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.5.0...HEAD
-[0.5.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-elixir-v0.5.0
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...sdk-elixir-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-elixir-v0.3.0
