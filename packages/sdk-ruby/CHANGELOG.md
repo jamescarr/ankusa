@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
 - `Ankusa.verify_signature(headers, body, secrets, tolerance_seconds: 300, now: nil)`
@@ -72,5 +74,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   family, which carries `.status` and `.body` instead), so a consumer needs
   exactly one bit to route a failure to dead-letter or retry.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-ruby-v0.3.0...sdk-ruby-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-ruby-v0.3.0

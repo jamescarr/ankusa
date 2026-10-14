@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
 - `verify_signature(headers, body, secrets, *, tolerance_seconds=300, now=None)`
@@ -131,7 +133,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `content-type` into a `HookHeaders` dataclass, raising
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...sdk-python-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...sdk-python-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1
