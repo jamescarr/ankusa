@@ -31,7 +31,11 @@ cache_root="${ANKUSA_MIX_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/ankusa/mix}/$pkg
 cache="$cache_root/$key"
 
 tmp=""
-cleanup() { if [ -n "$tmp" ]; then rm -rf "$tmp"; fi; }
+err=$(mktemp)
+cleanup() {
+  rm -f "$err"
+  if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
+}
 trap cleanup EXIT
 
 # Copy-on-write where the filesystem has it (APFS clonefile, reflinks), so a
@@ -63,21 +67,62 @@ if [ -d "$cache" ]; then
   echo "==> deps restored from $cache"
 fi
 
+# What is in deps/ before the fetch; anything deps.get fetches now is pristine.
+present=" "
+for d in deps/*; do
+  if [ -e "$d" ]; then present="$present${d##*/} "; fi
+done
+
 mix deps.get
 
-# Hex deps only, output to a log: their warnings are upstream's (every one is
-# already on its latest release). ERL_COMPILER_OPTIONS sits below each dep's
-# own -compile attributes and silences the Erlang lints that would otherwise
-# fill the log. Scoped to this command; it must not reach our compile below.
 log="_build/$env/deps-compile.log"
 mkdir -p "_build/$env"
-if ! ERL_COMPILER_OPTIONS='[nowarn_deprecated_catch,nowarn_match_alias_pats]' \
-  MIX_OS_DEPS_COMPILE_PARTITION_COUNT="${MIX_OS_DEPS_COMPILE_PARTITION_COUNT:-4}" \
-  mix deps.compile --skip-local-deps >"$log" 2>&1; then
-  cat "$log" >&2
-  fail "mix deps.compile failed (full log above, also in $dir/$log)"
+
+# The Hex deps Mix would build on its own: unbuilt, stale, or built by another
+# Elixir/OTP. Not a bare `mix deps.compile`, which reruns every dep's build:
+# that recompiles cloned Mix deps and breaks the CMake NIFs (rocksdb,
+# crc32cer), whose build trees record the absolute path they were built at.
+# Mix.Dep is Mix's internal API (the calls deps.loadpaths makes), pinned by
+# the Elixir in .mise.toml; a rename fails here, loudly. stderr is only shown
+# on failure: mix run warns about our app until its first build.
+stale=$(mix run --no-start --no-compile --no-deps-check -e '
+  for dep <- Mix.Dep.load_and_cache(),
+      dep.scm.fetchable?(),
+      Mix.Dep.compilable?(Mix.Dep.check_lock(dep)),
+      do: IO.puts(dep.app)
+' 2>"$err") || {
+  cat "$err" >&2
+  fail "could not list the Hex deps to build (above)"
+}
+
+if [ -z "$stale" ]; then
+  echo "==> third-party deps up to date"
+else
+  # A stale dep that was already here may hold a build tree from another
+  # checkout (cloned from the cache): rebuild it from a fresh fetch instead.
+  refetch=""
+  for n in $stale; do
+    case "$present" in *" $n "*)
+      rm -rf "deps/$n"
+      refetch=1
+      ;;
+    esac
+  done
+  if [ -n "$refetch" ]; then mix deps.get; fi
+
+  # Output to the log: their warnings are upstream's (every one is already on
+  # its latest release). ERL_COMPILER_OPTIONS sits below each dep's own
+  # -compile attributes and silences the Erlang lints that would otherwise
+  # fill the log. Scoped to this command; it must not reach our compile below.
+  # shellcheck disable=SC2086 # $stale is a list of app names
+  if ! ERL_COMPILER_OPTIONS='[nowarn_deprecated_catch,nowarn_match_alias_pats]' \
+    MIX_OS_DEPS_COMPILE_PARTITION_COUNT="${MIX_OS_DEPS_COMPILE_PARTITION_COUNT:-4}" \
+    mix deps.compile $stale >"$log" 2>&1; then
+    cat "$log" >&2
+    fail "mix deps.compile failed (full log above, also in $dir/$log)"
+  fi
+  echo "==> third-party deps compiled (log: $dir/$log)"
 fi
-echo "==> third-party deps compiled (log: $dir/$log)"
 
 # Save. Built in a temp dir and moved into place, so a concurrent build in
 # another worktree never sees half an entry; if that build wins the race, mv
