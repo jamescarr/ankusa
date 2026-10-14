@@ -269,6 +269,23 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message == "backup.keep must be a positive integer, got 0"
   end
 
+  test "log.banner is on by default, the file or ANKUSA_BANNER turns it off, a non-boolean is named" do
+    demo = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    banner = fn yaml, env -> Config.load!(path: tmp_config(yaml), env: env).banner end
+
+    assert banner.(demo, %{}) == true
+    assert banner.(demo, %{"ANKUSA_BANNER" => "false"}) == false
+    assert banner.("log: {banner: false}\n" <> demo, %{}) == false
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("log: {banner: maybe}\n"), env: %{})
+      end
+
+    assert error.message == ~s(log.banner: expected a boolean, got "maybe")
+  end
+
   # ── env overrides ───────────────────────────────────────────────────────────
 
   test "ANKUSA_HTTP_PORT beats PORT beats the file" do

@@ -25,6 +25,8 @@ node:
 log:
   # [env ANKUSA_LOG_LEVEL] debug | info | warning | error
   level: info
+  # [env ANKUSA_BANNER] the ASCII-art banner printed to stdout on start
+  banner: true
 
 http:
   # [env ANKUSA_HTTP_PORT, else PORT] the ingest listener.

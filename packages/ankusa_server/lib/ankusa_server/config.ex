@@ -32,6 +32,7 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_ROLES` | `node.roles` (comma-separated) |
   | `ANKUSA_DATA_DIR` | `node.data_dir` |
   | `ANKUSA_LOG_LEVEL` | `log.level` |
+  | `ANKUSA_BANNER` | `log.banner` |
   | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
   | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
@@ -63,7 +64,7 @@ defmodule AnkusaServer.Config do
 
   @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle)
   @node_keys ~w(roles data_dir)
-  @log_keys ~w(level)
+  @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix)
   @admin_keys ~w(enabled port ip gauge_interval_ms)
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue max_queue_bytes)
@@ -130,8 +131,8 @@ defmodule AnkusaServer.Config do
   @log_levels ~w(debug info warning error)
   @exchange_types ~w(topic direct fanout headers)
 
-  @typedoc "A loaded config plus the log level the file asked for."
-  @type loaded :: %{config: Ankusa.Config.t(), log_level: Logger.level()}
+  @typedoc "A loaded config plus the log level and banner switch the file asked for."
+  @type loaded :: %{config: Ankusa.Config.t(), log_level: Logger.level(), banner: boolean()}
 
   @var_re ~r/\$\{([A-Z0-9_]+)(:-([^}]*))?\}/
 
@@ -151,7 +152,7 @@ defmodule AnkusaServer.Config do
       |> interpolate(env, [])
       |> apply_env_overrides(env)
 
-    %{config: config!(doc), log_level: log_level!(doc)}
+    %{config: config!(doc), log_level: log_level!(doc), banner: banner?(doc)}
   end
 
   @doc """
@@ -263,6 +264,7 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ROLES", ["node", "roles"]},
     {"ANKUSA_DATA_DIR", ["node", "data_dir"]},
     {"ANKUSA_LOG_LEVEL", ["log", "level"]},
+    {"ANKUSA_BANNER", ["log", "banner"]},
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_ADMIN_IP", ["admin", "ip"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
@@ -315,6 +317,11 @@ defmodule AnkusaServer.Config do
     log = section!(doc, "log", @log_keys, [])
     level = enum!(log["level"] || "info", @log_levels, ["log", "level"])
     String.to_existing_atom(level)
+  end
+
+  defp banner?(doc) do
+    log = section!(doc, "log", @log_keys, [])
+    bool_opt(log, "banner", ["log"]) != false
   end
 
   defp config!(doc) do
