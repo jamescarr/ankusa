@@ -6,6 +6,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Fixed
+
+- The image's NATS client is `gnat 1.18.1`: no gnat process holds the NATS
+  password, token or nkey seed in the clear. See the `ankusa_nats` changelog.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

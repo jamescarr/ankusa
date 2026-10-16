@@ -10,7 +10,7 @@ Paths below are relative to `packages/ankusa/lib/ankusa/` unless they start with
 
 **Layout.** Findings are grouped by root cause, not by pipeline stage. [Root causes](#root-causes) maps the nine causes to their findings; each group's section states the cause, lists its findings as the review recorded them, and ends with a solution scope. [Where it breaks](#where-it-breaks) keeps the stage view.
 
-**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, E4 and E5 are closed, and so are D2's two open bullets and the B7, C2, S6 and O2 residuals. An audit of every closed finding the same day found one new gap (a `wal: :none` node accepted an API-managed source with no durable sink; see [D2](#d2)), an untested D2 path and the sink adapters' O2 residual; all three are closed. On 2026-10-14 the client-library part of O2 was closed for RabbitMQ (amqp_client's copy is encrypted) and Kafka (brod's copy is a closure). What remains — B5, which is inherent, and the credentials gnat keeps in its own state — is listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
+**Status.** The findings below are the review as recorded at `42b6f5a`. Fixes since then are recorded in dated **Status** notes under each finding, in the Status column of [Top findings](#top-findings), and in [Remaining work, re-assessed](#remaining-work-re-assessed). As of 2026-10-10, no Critical or High finding is still open, E4 and E5 are closed, and so are D2's two open bullets and the B7, C2, S6 and O2 residuals. An audit of every closed finding the same day found one new gap (a `wal: :none` node accepted an API-managed source with no durable sink; see [D2](#d2)), an untested D2 path and the sink adapters' O2 residual; all three are closed. On 2026-10-14 the client-library part of O2 was closed for RabbitMQ (amqp_client's copy is encrypted) and Kafka (brod's copy is a closure), and on 2026-10-15 for NATS (gnat 1.18 takes its credentials as closures). What remains is B5, which is inherent; it is listed in [Remaining work, re-assessed](#remaining-work-re-assessed).
 
 ## Verdict
 
@@ -1201,6 +1201,16 @@ refutes the password in the crash report of a client whose broker is
 unreachable. gnat 1.17 takes credentials only as binaries and keeps them in
 `Gnat`'s state with no `format_status/1`, so NATS stays.
 
+**Status (2026-10-15).** The NATS client's copy is closed. gnat 1.18.1 takes
+`:password`, `:token` and `:nkey_seed` as zero-arity functions, resolved at each
+handshake (`Gnat.Handshake.resolve_secret/1`), and defines `format_status/1` on
+`Gnat` and `Gnat.ConnectionSupervisor` that redacts them, `:jwt` and
+`:ssl_opts`. `Sink.NATS` hands each of the three to gnat as a closure
+(`hide_secret/1`), so neither gnat process holds the plaintext. `nats_test.exs`
+refutes the canary in `:sys.get_state/1` of both processes; that call skips
+`format_status/1`, so it proves the closures and not only gnat's redaction. No
+O2 residual remains.
+
 <a id="e5"></a>
 ### E5 · Medium · Code — The URL tenant is not bound to the source, and `accept_flag` spends budget
 
@@ -1316,6 +1326,17 @@ types: ports `0..65535`; sizes, counts and most intervals ≥ 1;
 
 **Status (2026-10-09).** CI fails on advisories: `mix hex.audit` runs in
 `.mise/tasks/check/{package,examples,tools}` after `deps.get --check-locked`.
+
+**Status (2026-10-15).** The gate fired. `mix hex.audit` flagged `bandit 1.12.5`,
+the edge listener's HTTP server, in every package and example that locks it:
+EEF-CVE-2026-105659 (High: an HTTP/2 send blocked on the flow-control window was
+reset by every `WINDOW_UPDATE`, so a trickle of them pinned a stream
+indefinitely) and EEF-CVE-2026-105660 (Medium: the authority of an HTTP/1
+request target let a client choose `conn.host` and `conn.port`). Both are fixed
+in `bandit 1.13.0`. Core requires `~> 1.13` (was `~> 1.12.5`, which held every
+app on 1.12.x), and the ten lockfiles that lock it now lock `1.13.1` (it reverts
+a stale-conn check that 1.13.0 added), moved with `mix deps.update bandit`; that
+pulls `thousand_island 1.6.0`, and `hpax 1.1.0` in `oban-consumer/consumer_app`.
 
 <a id="c4"></a>
 ### C4 · Low · Code — Refs are bearer capabilities with partly derivable ids
@@ -1568,11 +1589,10 @@ Each group's fix includes rewriting the claims below that it disproves.
 
 ## Remaining work, re-assessed
 
-Re-rated against the code on 2026-10-09 with this review's own severity definitions; updated 2026-10-10, when the B7, C2, S6 and O2 residuals, D2's open bullets and the E5 deviation were closed, and again after the same day's audit closed the sink adapters' O2 residual and the `wal: :none` runtime-source gap, and again on 2026-10-14, when the RabbitMQ and Kafka client-library credentials were closed. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
+Re-rated against the code on 2026-10-09 with this review's own severity definitions; updated 2026-10-10, when the B7, C2, S6 and O2 residuals, D2's open bullets and the E5 deviation were closed, and again after the same day's audit closed the sink adapters' O2 residual and the `wal: :none` runtime-source gap, again on 2026-10-14, when the RabbitMQ and Kafka client-library credentials were closed, and again on 2026-10-15, when the NATS client's was. No Critical or High remains. Ranks 1–8 of the 2026-10-07 table are done; what is left is below.
 
 | Finding | Severity now | What still fails | Why it stays |
 |---|---|---|---|
-| O2 residual (gnat state) | Low | gnat keeps the NATS password, token or nkey seed it was given in `Gnat`'s state, so `:sys.get_status/1` or a crash report of a gnat connection prints them. | gnat 1.17 accepts credentials only as binaries and defines no `format_status/1`; closing it takes an upstream change. amqp_client (encrypted since 2026-10-14) and brod (a closure since 2026-10-14) no longer hold them in the clear. Nothing Ankusa starts prints them. |
 | B5 residual | Low (inherent) | A Kafka produce that timed out can still land, and its retry duplicates it. | Re-checked 2026-10-10: brod (4.7.0) has no cancel and no idempotent producer, and a per-hook transaction does not hide the record from `read_uncommitted` consumers; consumers dedupe on `idempotency_key`. |
 
 ## Decisions that choose between the options

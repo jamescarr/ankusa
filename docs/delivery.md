@@ -507,7 +507,11 @@ acknowledgement, `{"stream":"ANKUSA","seq":42}`, awaited up to
 a permission violation, or no answering stream all come back as
 `{:error, reason}`. Note that an error ack carries `"seq": 0` *and* an
 `"error"` in the same body, so a sink that only checks for a stream name and a
-sequence would report a refused hook as delivered.
+sequence would report a refused hook as delivered. The one permanent error is
+`{:permanent, :max_payload_exceeded}`: a message over the server's
+`max_payload` (1 MiB by default) is refused by gnat before it is sent, and is
+dead-lettered at once rather than retried. It takes an `:inline_max_bytes`
+raised past that limit; at the default (64 KiB) a larger body is claim-checked.
 
 **The subject is the address, the headers are the metadata.** Each message
 carries the same headers the Kafka sink sets — always `ankusa_id`,

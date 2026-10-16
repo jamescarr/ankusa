@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `gnat ~> 1.18`. The sink hands `:password`, `:token` and
+  `:nkey_seed` to gnat as zero-arity functions, so neither the `Gnat`
+  connection nor its `Gnat.ConnectionSupervisor` holds them in the clear in
+  its state, `:sys.get_status/1` or a crash report.
+- A publish over the server's `max_payload` is
+  `{:error, {:permanent, :max_payload_exceeded}}` and is dead-lettered at once.
+  gnat 1.18 refuses it before sending; on 1.17 the server closed the
+  connection, cutting off every publish in flight on it.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

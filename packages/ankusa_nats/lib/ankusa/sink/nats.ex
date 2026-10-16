@@ -27,7 +27,9 @@ defmodule Ankusa.Sink.NATS do
   when the ack never arrives, `:no_stream` when no stream covers the subject,
   and `{:jetstream, %{"code" => 400, "description" => "message size exceeds
   maximum allowed"}}` for a publish the stream itself refuses (size, TTL,
-  permissions).
+  permissions). The one exception is `{:permanent, :max_payload_exceeded}`: a
+  publish larger than the server's `max_payload` is refused by gnat before it is
+  sent, and is dead-lettered at once.
 
   A publish whose ack is lost can still have been stored, so delivery is
   at-least-once. Every publish sets `Nats-Msg-Id` to the hook's `id` — or
@@ -87,8 +89,10 @@ defmodule Ankusa.Sink.NATS do
       `:inbox_prefix`        — passed to gnat's connection settings
     * credentials            — `:username` (needs `:password`), `:password`,
                                `:token`, or `:nkey_seed` (with `:jwt` for
-                               operator-mode accounts). gnat sends exactly one
-                               scheme, choosing in that order, so set one.
+                               operator-mode accounts); each secret is handed
+                               to gnat as a zero-arity function, so no gnat
+                               process holds it in the clear. gnat sends exactly
+                               one scheme, choosing in that order, so set one.
 
   `:no_responders` is always on. It costs nothing when the server answers, and
   it turns "no stream covers this subject and nothing else is listening" into
@@ -108,6 +112,10 @@ defmodule Ankusa.Sink.NATS do
   # gnat's connection_settings, minus the `:host`/`:port` this sink derives from
   # `:servers` and minus `:name`, which `:client_name` maps onto.
   @connection_settings ~w(tls ssl_opts tcp_opts connection_timeout ping_interval inbox_prefix username password token nkey_seed jwt)a
+
+  # The settings gnat (>= 1.18) resolves through a zero-arity function; see
+  # `hide_secret/1`. `:jwt` and `:username` are not secrets gnat resolves.
+  @secret_settings [:password, :token, :nkey_seed]
 
   @impl true
   def deliver(%Envelope{} = env, ctx, opts) do
@@ -166,6 +174,12 @@ defmodule Ankusa.Sink.NATS do
 
       {:error, :no_responders} ->
         {:error, :no_stream}
+
+      # gnat refuses a body over the server's `max_payload` before sending it
+      # (it used to be the server closing the connection, cutting off every
+      # publish in flight). Retrying cannot shrink the hook.
+      {:error, :max_payload_exceeded} ->
+        {:error, {:permanent, :max_payload_exceeded}}
 
       {:error, reason} ->
         {:error, reason}
@@ -267,7 +281,8 @@ defmodule Ankusa.Sink.NATS do
   # The settings carry credentials (password, token, nkey seed): the child spec
   # holds them only inside a closure, which `inspect` prints without its
   # captured values, so the DynamicSupervisor's status and reports never show
-  # them. Gnat's own processes still hold them in their state.
+  # them. Each secret is also a closure inside the settings (`hide_secret/1`),
+  # so gnat's processes hold no plaintext either.
   defp start_supervisor(instance, connection, opts) do
     settings = %{
       connection_settings: servers(opts),
@@ -299,7 +314,7 @@ defmodule Ankusa.Sink.NATS do
     overrides =
       opts
       |> Keyword.take(@connection_settings)
-      |> Map.new()
+      |> Map.new(&hide_secret/1)
       |> put_opt(:name, Keyword.get(opts, :client_name))
       |> Map.put(:no_responders, true)
 
@@ -308,6 +323,13 @@ defmodule Ankusa.Sink.NATS do
     |> server_list()
     |> Enum.map(fn server -> Map.merge(overrides, server_settings(server)) end)
   end
+
+  # gnat (>= 1.18) calls a zero-arity function for these at each handshake, so
+  # neither its connection nor its supervisor ever holds the plaintext.
+  defp hide_secret({key, value}) when key in @secret_settings and is_binary(value),
+    do: {key, fn -> value end}
+
+  defp hide_secret(pair), do: pair
 
   # `:servers` is a list of `"host:port"` strings or `{host, port}` tuples; a
   # YAML loader may also hand over one comma-separated string.
