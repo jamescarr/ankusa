@@ -216,6 +216,26 @@ defmodule Ankusa.Sink.NATSTest do
     assert info.state.messages == 0
   end
 
+  test "a hook over the server's max_payload is permanent and the connection survives", %{
+    instance: inst,
+    subject: subject
+  } do
+    # The base64 body in the message is ~1.33 MB, over the server's 1 MiB
+    # `max_payload`. gnat refuses it before sending; the server used to close
+    # the connection instead, cutting off every publish in flight.
+    body = :binary.copy("a", 1_000_000)
+    o = opts(subject, inline_max_bytes: 2_000_000)
+
+    assert :ok = deliver(envelope(), ctx(inst), o)
+    conn = Ankusa.whereis(inst, {:nats_conn, :default})
+
+    assert {:error, {:permanent, :max_payload_exceeded}} =
+             NATS.deliver(envelope(%{body: body, size: byte_size(body)}), ctx(inst), o)
+
+    assert Ankusa.whereis(inst, {:nats_conn, :default}) == conn
+    assert :ok = NATS.deliver(envelope(), ctx(inst), o)
+  end
+
   test "an unreachable server is :not_connected at once; the handshake never blocks the caller" do
     inst = :"nats_down_#{System.unique_integer([:positive])}"
     opts = [servers: ["127.0.0.1:1"], subject: "whatever", connection_timeout: 1_000]
@@ -244,6 +264,30 @@ defmodule Ankusa.Sink.NATSTest do
     # The child spec is in the status, so the refute below is not vacuous.
     assert printed =~ "start_connection_supervisor"
     refute printed =~ canary
+  end
+
+  test "gnat's processes hold the connection's secrets only as closures", %{
+    instance: inst,
+    subject: subject
+  } do
+    canary = "s3cr3t-canary"
+    o = opts(subject, password: canary, token: canary, nkey_seed: canary)
+
+    # The server requires no auth, so gnat never resolves the secrets; the
+    # connection comes up and both processes keep the settings in their state.
+    assert :ok = deliver(envelope(), ctx(inst), o)
+
+    for pid <- [
+          Ankusa.whereis(inst, {:nats_conn, :default}),
+          Ankusa.whereis(inst, {:nats_sup, :default})
+        ] do
+      # `:sys.get_state/1` skips `format_status/1`, so this is the state itself,
+      # not gnat's redaction of it.
+      printed = inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity)
+
+      assert printed =~ "password: #Function<"
+      refute printed =~ canary
+    end
   end
 
   test "the connection is registered in the instance's registry, not as a global atom", %{

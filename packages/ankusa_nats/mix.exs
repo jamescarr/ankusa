@@ -54,7 +54,7 @@ defmodule AnkusaNats.MixProject do
   defp deps do
     ankusa_deps() ++
       [
-        {:gnat, "~> 1.17"},
+        {:gnat, "~> 1.18"},
         {:ex_doc, "~> 0.40", only: :dev, runtime: false}
       ]
   end
