@@ -11,15 +11,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
-### Fixed
-
-- Requires `bandit ~> 1.13.1` (was `~> 1.12.5`). `1.12.5` has two published
-  advisories, EEF-CVE-2026-105659 (an HTTP/2 stream pinned indefinitely by a
-  trickle of `WINDOW_UPDATE` frames) and EEF-CVE-2026-105660 (an HTTP/1 request
-  target choosing `conn.host` and `conn.port`), both fixed in `1.13.0`. It also
-  pulls `thousand_island 1.6`. `1.13` answers an idle connection that sent no
-  bytes by closing it, not with a `408`.
-
 ## [0.6.0] - 2026-10-14
 
 ### Added
@@ -271,6 +262,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- Requires `bandit ~> 1.13` (was `~> 1.12.5`, which held every app on
+  1.12.x: 1.12.5 has two published advisories, EEF-CVE-2026-105659 and
+  EEF-CVE-2026-105660, fixed in 1.13.0).
 - `Ankusa.BlobStore.S3.Credentials` is now `Ankusa.AWS.Credentials` (ETS table
   `:ankusa_aws_credentials`), shared by `BlobStore.S3` and `Sink.SQS`. The
   chain and its options are unchanged.

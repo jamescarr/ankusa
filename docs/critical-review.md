@@ -1333,10 +1333,10 @@ EEF-CVE-2026-105659 (High: an HTTP/2 send blocked on the flow-control window was
 reset by every `WINDOW_UPDATE`, so a trickle of them pinned a stream
 indefinitely) and EEF-CVE-2026-105660 (Medium: the authority of an HTTP/1
 request target let a client choose `conn.host` and `conn.port`). Both are fixed
-in `bandit 1.13.0`. Core now requires `~> 1.13.1` (1.13.1 reverts a stale-conn
-check that 1.13.0 added), moved with `mix deps.update bandit` in the ten
-lockfiles that lock it; that pulls `thousand_island 1.6.0`, and `hpax 1.1.0` in
-`oban-consumer/consumer_app`.
+in `bandit 1.13.0`. Core requires `~> 1.13` (was `~> 1.12.5`, which held every
+app on 1.12.x), and the ten lockfiles that lock it now lock `1.13.1` (it reverts
+a stale-conn check that 1.13.0 added), moved with `mix deps.update bandit`; that
+pulls `thousand_island 1.6.0`, and `hpax 1.1.0` in `oban-consumer/consumer_app`.
 
 <a id="c4"></a>
 ### C4 · Low · Code — Refs are bearer capabilities with partly derivable ids
