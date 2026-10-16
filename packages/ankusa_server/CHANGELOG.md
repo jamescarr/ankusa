@@ -172,6 +172,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - The image's HTTP client stack is `mint 1.11.0` (was `1.10.1`, which has
   three published advisories: EEF-CVE-2026-91043, EEF-CVE-2026-94194 and
   EEF-CVE-2026-92103) and `hpax 1.1.0`.
+- The image's HTTP server is `bandit 1.13.1` (was `1.12.5`, which has two
+  published advisories: EEF-CVE-2026-105659 and EEF-CVE-2026-105660) on
+  `thousand_island 1.6.0`.
 - An unreachable object store is retried with backoff (up to 60 s) instead of
   every second, and any failed store write asks the store for a rate-limited
   reopen, not only ingest's: a fallback for a latched RocksDB write error after
