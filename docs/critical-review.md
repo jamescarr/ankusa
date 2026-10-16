@@ -1327,6 +1327,17 @@ types: ports `0..65535`; sizes, counts and most intervals ≥ 1;
 **Status (2026-10-09).** CI fails on advisories: `mix hex.audit` runs in
 `.mise/tasks/check/{package,examples,tools}` after `deps.get --check-locked`.
 
+**Status (2026-10-15).** The gate fired. `mix hex.audit` flagged `bandit 1.12.5`,
+the edge listener's HTTP server, in every package and example that locks it:
+EEF-CVE-2026-105659 (High: an HTTP/2 send blocked on the flow-control window was
+reset by every `WINDOW_UPDATE`, so a trickle of them pinned a stream
+indefinitely) and EEF-CVE-2026-105660 (Medium: the authority of an HTTP/1
+request target let a client choose `conn.host` and `conn.port`). Both are fixed
+in `bandit 1.13.0`. Core now requires `~> 1.13.1` (1.13.1 reverts a stale-conn
+check that 1.13.0 added), moved with `mix deps.update bandit` in the ten
+lockfiles that lock it; that pulls `thousand_island 1.6.0`, and `hpax 1.1.0` in
+`oban-consumer/consumer_app`.
+
 <a id="c4"></a>
 ### C4 · Low · Code — Refs are bearer capabilities with partly derivable ids
 
