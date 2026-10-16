@@ -262,6 +262,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- Requires `bandit ~> 1.13` (was `~> 1.12.5`, which held every app on
+  1.12.x: 1.12.5 has two published advisories, EEF-CVE-2026-105659 and
+  EEF-CVE-2026-105660, fixed in 1.13.0).
 - `Ankusa.BlobStore.S3.Credentials` is now `Ankusa.AWS.Credentials` (ETS table
   `:ankusa_aws_credentials`), shared by `BlobStore.S3` and `Sink.SQS`. The
   chain and its options are unchanged.
