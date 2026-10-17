@@ -193,7 +193,7 @@ claim_check:
   read_deadline_ms: 5000
   read_timeout_ms: 3000
   read_retries: 1
-  read_max_inflight: 64       # per store
+  read_max_inflight: 48       # per store; under the HTTP client's 50 connections
   read_queue_max: 256         # per store; 0 = never wait
   read_cache_bytes: 134217728 # 0 = no cache
   read_cache_max_entry_bytes: 1048576

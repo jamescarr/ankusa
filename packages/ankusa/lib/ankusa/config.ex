@@ -119,8 +119,9 @@ defmodule Ankusa.Config do
               read_retries: 1,
               # per store: the ceiling of the adaptive limit on concurrent store
               # reads from this node; it halves on a throttle or an unreachable
-              # answer and grows back by one per round of successes
-              read_max_inflight: 64,
+              # answer and grows back by one per round of successes. Under the
+              # HTTP client's 50 connections per host, so no read waits for one.
+              read_max_inflight: 48,
               # per store: reads waiting for a slot; past this a read is shed at
               # once (0 = never wait)
               read_queue_max: 256,

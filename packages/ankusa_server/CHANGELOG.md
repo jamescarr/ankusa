@@ -22,7 +22,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - `ankusa_blob_store_retries_total` and
   `ankusa_claim_check_store_breaker_transitions_total` on `/metrics`.
 - `claim_check.read_deadline_ms` (5000), `read_timeout_ms` (3000),
-  `read_retries` (1), `read_max_inflight` (64), `read_queue_max` (256),
+  `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256),
   `read_cache_bytes` (134217728) and `read_cache_max_entry_bytes` (1048576):
   the gateway caches pack indexes and claims, coalesces concurrent reads,
   backs off a throttling store with an adaptive per-store limit, and answers

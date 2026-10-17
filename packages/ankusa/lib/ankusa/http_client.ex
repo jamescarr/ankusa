@@ -101,6 +101,14 @@ defmodule Ankusa.HttpClient do
       {:error, reason} ->
         {:error, reason}
     end
+  rescue
+    # Finch raises when no pooled connection frees up within its checkout
+    # timeout (5 s by default): that is a transport failure like a refused
+    # connection, for the caller's retry and breaker to see, not a crash of
+    # whatever was reading.
+    error in RuntimeError -> {:error, error}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp body_option(nil), do: []

@@ -202,6 +202,16 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
     assert ranges() == []
   end
 
+  # Every `{source, result}` pair received, in order; nothing left behind.
+  defp read_events(acc \\ []) do
+    receive do
+      {:telemetry, [:ankusa, :claim_check, :read], _, %{source: s, result: r}} ->
+        read_events([{s, r} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   test "a queued read whose deadline passed is shed without a store request", %{inst: inst} do
     start_reader(inst, [range_delay_ms: 300], %{read_max_inflight: 1, read_deadline_ms: 100})
     attach(inst, [[:ankusa, :claim_check, :read]])
@@ -217,11 +227,26 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
     # the first fetch finishes, the queued one is found expired and dropped
     Process.sleep(400)
     assert ranges() == [0]
-
-    assert_received {:telemetry, _, %{duration: d}, %{source: :shed, result: :deadline}}
-                    when d > 0
-
     assert Reader.stats(inst)[0] == %{limit: 1, inflight: 0, queued: 0}
+
+    # each caller once at its deadline, and the one fetch that ran
+    assert Enum.sort(read_events()) == [{:shed, :deadline}, {:shed, :deadline}, {:store, :ok}]
+  end
+
+  test "a caller that joined a fetch and timed out is counted once, as shed", %{inst: inst} do
+    start_reader(inst, [range_delay_ms: 300], %{read_deadline_ms: 100})
+    attach(inst, [[:ankusa, :claim_check, :read]])
+    [id] = pack(inst, ["x"])
+
+    results =
+      1..2
+      |> Enum.map(fn _ -> Task.async(fn -> ClaimCheck.locate(inst, "acme", id) end) end)
+      |> Task.await_many()
+
+    assert results == List.duplicate({:error, {:unavailable, :deadline}}, 2)
+    Process.sleep(400)
+    assert ranges() == [0]
+    assert Enum.sort(read_events()) == [{:shed, :deadline}, {:shed, :deadline}, {:store, :ok}]
   end
 
   @tag :capture_log
@@ -229,14 +254,19 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
     inst: inst
   } do
     start_reader(inst)
+    attach(inst, [[:ankusa, :claim_check, :read]])
     key = {:bytes, "acme", Ref.new_pack_id(), 0}
     deadline = ClaimCheck.deadline(inst)
 
     assert {:error, {:unavailable, {:exit, _reason}}} =
              Reader.fetch(inst, key, 0, fn -> raise "boom" end, deadline)
 
+    # counted once, by the reader, as the store read it was
+    assert read_events() == [{:store, :unavailable}]
+
     assert {:ok, 1} = Reader.fetch(inst, key, 0, fn -> {:ok, 1} end, deadline)
     assert %{inflight: 0, queued: 0} = Reader.stats(inst)[0]
+    assert read_events() == [{:store, :ok}]
   end
 
   test "every read is counted by where it was answered from", %{inst: inst} do

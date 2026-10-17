@@ -311,8 +311,9 @@ claim_check:
   read_retries: 1
   # Per store: the ceiling of the gateway's adaptive limit on concurrent store
   # reads. It halves when the store throttles (429, 503 SlowDown) or does not
-  # answer, and grows back by one per round of successes.
-  read_max_inflight: 64
+  # answer, and grows back by one per round of successes. Under the HTTP
+  # client's 50 connections per host, so no read waits for one.
+  read_max_inflight: 48
   # Per store: reads waiting for a slot. Past this a read is shed at once
   # (503); 0 = never wait.
   read_queue_max: 256

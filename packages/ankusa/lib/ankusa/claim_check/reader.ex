@@ -32,7 +32,7 @@ defmodule Ankusa.ClaimCheck.Reader do
   else — a dispatch node calling `Ankusa.ClaimCheck.redeem/3` — goes straight
   to the store, bounded only by the store's read timeout.
 
-  Emits `[:ankusa, :claim_check, :read]` once per caller,
+  Emits `[:ankusa, :claim_check, :read]` once per caller (see `fetch/5`),
   `[:ankusa, :claim_check, :read_limit]` on every change of a store's limit,
   and `[:ankusa, :claim_check, :read_state]` every second per store it has
   read from (see `Ankusa.Telemetry`).
@@ -80,9 +80,15 @@ defmodule Ankusa.ClaimCheck.Reader do
   Run `fun` — one read of `key` from claim store `store` — under the store's
   limit, or join a fetch of `key` already running. `deadline` is an absolute
   `System.monotonic_time(:millisecond)`: past it the caller gets
-  `{:unavailable, :deadline}`, whatever the fetch is doing, and is counted as
-  a read shed at its deadline; the fetch it started or joined still runs to
-  the end, fills the cache, and is counted when it finishes.
+  `{:unavailable, :deadline}`, whatever the fetch is doing; the fetch it
+  started or joined still runs to the end and fills the cache.
+
+  Every caller is counted once on `[:ankusa, :claim_check, :read]`: the
+  reader counts the caller whose fetch went to the store (`:store`, when the
+  fetch finishes, whether or not that caller is still waiting); every other
+  caller counts itself, as `:coalesced` when it got the fetch's answer and
+  `:shed` when it got none (the queue was full, its deadline passed, or the
+  reader is down).
   """
   @spec fetch(atom(), key(), non_neg_integer(), (-> result), integer()) ::
           result | {:error, {:unavailable, :overloaded | :deadline | {:exit, term()}}}
@@ -91,30 +97,29 @@ defmodule Ankusa.ClaimCheck.Reader do
     started = System.monotonic_time()
     remaining = deadline - System.monotonic_time(:millisecond)
 
-    result =
+    {result, source} =
       if remaining <= 0 do
-        {:error, {:unavailable, :deadline}}
+        {{:error, {:unavailable, :deadline}}, :shed}
       else
         try do
-          GenServer.call(
-            Ankusa.via(instance, :claim_reader),
-            {:fetch, key, store, fun, deadline},
-            remaining
-          )
+          case GenServer.call(
+                 Ankusa.via(instance, :claim_reader),
+                 {:fetch, key, store, fun, deadline},
+                 remaining
+               ) do
+            {:fetched, result} -> {result, nil}
+            {:joined, result} -> {result, :coalesced}
+            {:shed, result} -> {result, :shed}
+          end
         catch
           # The reply, if it comes later, is dropped: the call's alias is gone.
-          :exit, {:timeout, _} -> {:error, {:unavailable, :deadline}}
-          :exit, reason -> {:error, {:unavailable, {:exit, reason}}}
+          :exit, {:timeout, _} -> {{:error, {:unavailable, :deadline}}, :shed}
+          :exit, reason -> {{:error, {:unavailable, {:exit, reason}}}, :shed}
         end
       end
 
-    # The reader counts the callers it answers; one it didn't is counted here.
-    case result do
-      {:error, {:unavailable, reason}} when reason == :deadline or elem(reason, 0) == :exit ->
-        emit_read(instance, elem(key, 0), :shed, result, store, System.monotonic_time() - started)
-
-      _answered ->
-        :ok
+    if source do
+      emit_read(instance, elem(key, 0), source, result, store, System.monotonic_time() - started)
     end
 
     result
@@ -207,9 +212,7 @@ defmodule Ankusa.ClaimCheck.Reader do
         {:noreply, put_store(state, store, %{s | queue: queue})}
 
       true ->
-        result = {:error, {:unavailable, :overloaded}}
-        emit_read(state.instance, elem(key, 0), :shed, result, store, 0)
-        {:reply, result, put_store(state, store, s)}
+        {:reply, {:shed, {:error, {:unavailable, :overloaded}}}, put_store(state, store, s)}
     end
   end
 
@@ -266,9 +269,9 @@ defmodule Ankusa.ClaimCheck.Reader do
   defp join(state, key, from, started),
     do: %{state | waiting: Map.update!(state.waiting, key, &[{from, started} | &1])}
 
-  # Every waiter gets the answer; the first one, which started the fetch, is
-  # counted as the store read, the rest as coalesced onto it. Events go out
-  # before the replies, so a caller that has its answer has seen them.
+  # Every waiter gets the answer. The first one started the fetch: it is the
+  # store read, counted here (its caller may be gone). The others count
+  # themselves as coalesced, if they are still there to.
   defp finish(state, ref, result) do
     {{key, store}, running} = Map.pop!(state.running, ref)
     {waiters, waiting} = Map.pop!(state.waiting, key)
@@ -277,14 +280,10 @@ defmodule Ankusa.ClaimCheck.Reader do
     s = store(state, store)
     s = verdict(state, store, %{s | inflight: s.inflight - 1}, result)
 
-    waiters
-    |> Enum.reverse()
-    |> Enum.with_index()
-    |> Enum.each(fn {{from, started}, n} ->
-      source = if n == 0, do: :store, else: :coalesced
-      emit_read(state.instance, elem(key, 0), source, result, store, now - started)
-      GenServer.reply(from, result)
-    end)
+    [{head, head_started} | joined] = Enum.reverse(waiters)
+    emit_read(state.instance, elem(key, 0), :store, result, store, now - head_started)
+    GenServer.reply(head, {:fetched, result})
+    for {from, _started} <- joined, do: GenServer.reply(from, {:joined, result})
 
     %{state | running: running, waiting: waiting}
     |> put_store(store, s)
@@ -303,11 +302,7 @@ defmodule Ankusa.ClaimCheck.Reader do
 
       cond do
         System.monotonic_time(:millisecond) >= deadline ->
-          result = {:error, {:unavailable, :deadline}}
-          duration = System.monotonic_time() - started
-          emit_read(state.instance, elem(key, 0), :shed, result, store, duration)
-          GenServer.reply(from, result)
-
+          GenServer.reply(from, {:shed, {:error, {:unavailable, :deadline}}})
           drain(state, store)
 
         Map.has_key?(state.waiting, key) ->

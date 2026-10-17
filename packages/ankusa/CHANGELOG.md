@@ -53,8 +53,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   cached), and reads the store through `Ankusa.ClaimCheck.Reader`: concurrent
   reads of one pack index or claim share one store request; per store, an
   adaptive limit on concurrent reads (ceiling `read_max_inflight`, default
-  64) halves on a throttle (`429`, `503`) or an unreachable store and grows
-  back by one per round of successes; reads past it queue up to
+  48, under the HTTP client's 50 connections per host) halves on a throttle
+  (`429`, `503`) or an unreachable store and grows back by one per round of
+  successes; reads past it queue up to
   `read_queue_max` (default 256) and the rest are shed at once; and every
   request is answered within `read_deadline_ms` (default 5 s) — a store read
   that outlives it still fills the cache. Claim reads use
@@ -90,6 +91,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   random 1–3 s instead of a fixed `1`, and logs throttles, sheds and missed
   deadlines at `:debug` (they are counted by
   `ankusa_claim_check_reads_total`).
+- `Ankusa.HttpClient` answers `{:error, %RuntimeError{}}` when the HTTP
+  client's connection pool cannot hand out a connection within its checkout
+  timeout, instead of letting that raise out of the adapter: the retry and
+  the breaker see it as the transport failure it is.
 
 ## [0.6.0] - 2026-10-14
 
