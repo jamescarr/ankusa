@@ -1,0 +1,85 @@
+# Grafana, provisioned from grafana-configmap.yaml with the Prometheus
+# datasource and the Ankusa dashboard (its home page). Anonymous admin: a demo
+# on localhost, no login.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    {{- include "demo.labels" "grafana" | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        {{- include "demo.labels" "grafana" | nindent 8 }}
+      annotations:
+        # Covers the dashboard JSON too: the rendered ConfigMap embeds it.
+        checksum/config: {{ include (print $.Template.BasePath "/grafana-configmap.yaml") . | sha256sum }}
+        # Reached by the gateway, and talks only to the sidecar-less Prometheus:
+        # nothing for a sidecar to do.
+        sidecar.istio.io/inject: "false"
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: grafana
+          image: {{ include "demo.image" .Values.images.grafana }}
+          imagePullPolicy: {{ .Values.images.grafana.pullPolicy }}
+          env:
+            - {name: GF_SERVER_ROOT_URL, value: "http://localhost:8080/grafana/"}
+            - {name: GF_SERVER_SERVE_FROM_SUB_PATH, value: "true"}
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Admin}
+            - {name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true"}
+            - {name: GF_AUTH_BASIC_ENABLED, value: "false"}
+            - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /etc/grafana/dashboards/ankusa.json}
+            - {name: GF_ANALYTICS_REPORTING_ENABLED, value: "false"}
+            - {name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false"}
+            - {name: GF_NEWS_NEWS_FEED_ENABLED, value: "false"}
+            - {name: GOMEMLIMIT, value: {{ .Values.monitoring.grafana.goMemLimit | quote }}}
+          ports:
+            - {name: http, containerPort: 3000}
+          readinessProbe:
+            httpGet: {path: /grafana/api/health, port: 3000}
+            periodSeconds: 5
+          # Every start runs Grafana's ~800 DB migrations on a fresh sqlite (the container
+          # layer); on a busy node that took over 45 s, and a liveness probe that fired
+          # first killed it into a loop that started from scratch each time. Liveness
+          # waits until Grafana has answered once, for up to 5 minutes.
+          startupProbe:
+            httpGet: {path: /grafana/api/health, port: 3000}
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /grafana/api/health, port: 3000}
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.monitoring.grafana.resources | nindent 12 }}
+          # No data volume: Grafana's sqlite lives in the container layer. Nothing in
+          # it is worth keeping; the datasource and dashboard are provisioned.
+          volumeMounts:
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources/prometheus.yaml, subPath: prometheus.yaml, readOnly: true}
+            - {name: providers, mountPath: /etc/grafana/provisioning/dashboards/ankusa.yaml, subPath: ankusa.yaml, readOnly: true}
+            - {name: dashboards, mountPath: /etc/grafana/dashboards, readOnly: true}
+      volumes:
+        - name: datasources
+          configMap: {name: grafana-datasources}
+        - name: providers
+          configMap: {name: grafana-dashboard-providers}
+        - name: dashboards
+          configMap: {name: grafana-dashboards}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels:
+    {{- include "demo.labels" "grafana" | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - {name: http, port: 3000, targetPort: http}

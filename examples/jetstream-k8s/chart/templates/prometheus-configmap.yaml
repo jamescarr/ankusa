@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  labels:
+    {{- include "demo.labels" "prometheus" | nindent 4 }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      # Must be <= scrape_interval or Prometheus refuses the config.
+      scrape_timeout: 4s
+    scrape_configs:
+      # Every pod of this chart with a container port named `admin`: the direct and
+      # durable ankusa pods and the claim-check gateway. One target per such port.
+      # honor_labels stays false: ankusa's own `instance="default"` label collides
+      # with the target's `instance` and is kept as `exported_instance`.
+      - job_name: ankusa
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {own_namespace: true}
+        relabel_configs:
+          - {source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_part_of], regex: ankusa-jetstream-demo, action: keep}
+          - {source_labels: [__meta_kubernetes_pod_container_port_name], regex: admin, action: keep}
+          - {source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], target_label: app}
+          - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}
