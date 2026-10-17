@@ -155,8 +155,9 @@ defmodule Ankusa.ClaimCheck.Reader do
      }}
   end
 
-  # A crash report prints the state: the queued fetches close over the
-  # config, which holds the stores' credentials. Report sizes.
+  # A crash report prints the state: hundreds of queued closures and their
+  # callers are noise, and a closure's captures are not for a log. Report
+  # sizes.
   @impl true
   def format_status(%{state: %{stores: stores} = state} = status) do
     stores = Map.new(stores, fn {index, s} -> {index, %{s | queue: :queue.len(s.queue)}} end)

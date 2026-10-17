@@ -45,6 +45,9 @@ defmodule Ankusa.Metrics do
 
   # 1 ms … 2.5 s, which covers a local WAL commit through a slow upstream sink.
   @seconds_buckets [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]
+  # The claim gateway answers at up to `claim_check.read_deadline_ms` (5 s by
+  # default): the tail this histogram exists for sits past 2.5 s.
+  @gateway_seconds_buckets @seconds_buckets ++ [5, 10]
 
   @doc """
   Child spec for this instance's metrics reporter.
@@ -244,7 +247,7 @@ defmodule Ankusa.Metrics do
           measurement: &duration_seconds/1,
           unit: :second,
           tags: [:instance, :method],
-          reporter_options: [buckets: @seconds_buckets]
+          reporter_options: [buckets: @gateway_seconds_buckets]
         )
       ),
       counter(

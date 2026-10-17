@@ -287,12 +287,15 @@ defmodule Ankusa.ClaimCheck do
   end
 
   # The cache is filled inside the fetch, so a read that outlives its
-  # caller's deadline still leaves the index for the retry.
+  # caller's deadline still leaves the index for the retry. The closure reads
+  # the config itself (a `persistent_term` read) rather than closing over it:
+  # it is copied into the reader and its task, and queued there, and the
+  # config carries every sink's and store's credentials.
   defp fetch_index(instance, config, tenant_id, pack_id, length, deadline) do
     keys = Ref.object_keys(tenant_id, pack_id, config.claim_check.key_layout)
 
     fun = fn ->
-      case Stores.read_range(instance, config, pack_id, keys, 0, length) do
+      case Stores.read_range(instance, Ankusa.config(instance), pack_id, keys, 0, length) do
         {:ok, prefix, store, key} ->
           pack = %{store: store, key: key, prefix: prefix, read: length}
           Cache.put_pack(instance, tenant_id, pack_id, pack)
@@ -365,13 +368,15 @@ defmodule Ankusa.ClaimCheck do
         do: {:bytes, tenant_id, pack_id, index},
         else: {:range, tenant_id, pack_id, index, first, length}
 
+    %{store: store, key: object_key, offset: offset} = location
+
     fun = fn ->
       case Stores.get_range(
              instance,
-             config,
-             location.store,
-             location.key,
-             location.offset + first,
+             Ankusa.config(instance),
+             store,
+             object_key,
+             offset + first,
              length
            ) do
         {:ok, bin} when byte_size(bin) == length ->

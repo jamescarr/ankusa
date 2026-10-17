@@ -139,6 +139,7 @@ defmodule Ankusa.ClaimCheck.Cache do
   @doc "Cache a located pack, or do nothing if the cache isn't running."
   @spec put_pack(atom(), String.t(), String.t(), pack()) :: :ok
   def put_pack(instance, tenant_id, pack_id, pack) do
+    pack = %{pack | prefix: own(pack.prefix)}
     weight = byte_size(pack.prefix) + byte_size(pack.key)
     put(instance, {:pack, tenant_id, pack_id}, pack, weight, @index_ttl)
   end
@@ -168,8 +169,27 @@ defmodule Ankusa.ClaimCheck.Cache do
   caller keeps them under `claim_check.read_cache_max_entry_bytes`.
   """
   @spec put_body(atom(), String.t(), String.t(), non_neg_integer(), binary()) :: :ok
-  def put_body(instance, tenant_id, pack_id, index, bin),
-    do: put(instance, {:body, tenant_id, pack_id, index}, bin, byte_size(bin), @body_ttl)
+  def put_body(instance, tenant_id, pack_id, index, bin) do
+    bin = own(bin)
+    put(instance, {:body, tenant_id, pack_id, index}, bin, byte_size(bin), @body_ttl)
+  end
+
+  @doc false
+  # Bytes held across both generations, as the budget counts them (each
+  # entry's bytes plus the overhead); 0 when the cache isn't running.
+  @spec bytes(atom()) :: non_neg_integer()
+  def bytes(instance) do
+    {{_newer, newer_bytes}, older, _half} = gens(instance)
+    :atomics.get(newer_bytes, 1) + if(older, do: :atomics.get(elem(older, 1), 1), else: 0)
+  rescue
+    ArgumentError -> 0
+  end
+
+  # A body from an HTTP adapter can be a slice of a larger buffer, and ETS
+  # would keep the whole buffer alive: store, and count, only the bytes.
+  defp own(bin) do
+    if :binary.referenced_byte_size(bin) > byte_size(bin), do: :binary.copy(bin), else: bin
+  end
 
   # ── tables ──────────────────────────────────────────────────────────────────
 
@@ -211,14 +231,15 @@ defmodule Ankusa.ClaimCheck.Cache do
   end
 
   # The bytes are reserved first: a generation that already holds half the
-  # budget takes nothing more, and only the insert that filled it asks for
+  # budget takes nothing more (and gives the reservation back, so the count
+  # is what the table holds), and only the insert that filled it asks for
   # the turnover, so one is asked for per generation.
   defp insert(instance, {table, bytes} = gen, {_key, _value, _expires, weight} = entry, half) do
     total = :atomics.add_get(bytes, 1, weight)
 
     cond do
       total - weight >= half ->
-        :ok
+        :atomics.sub(bytes, 1, weight)
 
       total >= half ->
         :ets.insert(table, entry)

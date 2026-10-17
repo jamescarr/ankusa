@@ -240,12 +240,19 @@ defmodule Ankusa.ClaimCheck.Stores do
   # A throttle is an answer. A 403 says nothing about whether the store is up.
   # Reads use `claim_check.read_timeout_ms`/`read_retries`: the store's own
   # `timeout_ms`/`retries` are sized for writes, not for a reader waiting on
-  # the answer.
+  # the answer. The same bound covers waiting for a pooled connection (the
+  # HTTP stores share one client pool per host with the sinks), unless the
+  # store's own `req_options` set `:pool_timeout`.
   defp read(instance, config, {index, mod, opts}, key, offset, length) do
+    timeout_ms = config.claim_check.read_timeout_ms
+
     opts =
-      Keyword.merge(opts,
-        timeout_ms: config.claim_check.read_timeout_ms,
-        retries: config.claim_check.read_retries
+      opts
+      |> Keyword.merge(timeout_ms: timeout_ms, retries: config.claim_check.read_retries)
+      |> Keyword.update(
+        :req_options,
+        [pool_timeout: timeout_ms],
+        &Keyword.put_new(&1, :pool_timeout, timeout_ms)
       )
 
     result = get(mod, instance, key, offset, length, opts)
