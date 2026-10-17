@@ -8,7 +8,8 @@ name: ankusa
 #   # start the emulators + bucket/container bootstrap
 #   docker compose -f docker-compose.integration.yml up -d
 #   mix test --include integration
-#   # tear down (drops emulator state)
+#   # tear down (drops emulator state: every emulator persists to a named
+#   # volume, which `-v` removes)
 #   docker compose -f docker-compose.integration.yml down -v
 #
 # Endpoints/buckets match the defaults the adapters expect in
@@ -16,13 +17,19 @@ name: ankusa
 
 services:
   # AWS emulator: serves S3 (the blob store) and SQS (`Sink.SQS`; its
-  # integration test creates its own queues) on one port.
+  # integration test creates its own queues) on one port. Every emulator here
+  # runs in `persistent` storage mode (each change written to disk) into its
+  # own named volume, instead of the images' in-memory default.
   floci:
     image: floci/floci:latest
     ports:
       - "4566:4566"
     environment:
       AWS_DEFAULT_REGION: us-east-1
+      FLOCI_STORAGE_MODE: persistent
+      FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - floci-data:/app/data
 
   # Creates the S3 bucket once floci is answering requests. Runs to
   # completion; re-run is idempotent (`mb` on an existing bucket is a no-op
@@ -48,6 +55,11 @@ services:
     image: floci/floci-gcp:latest
     ports:
       - "4588:4588"
+    environment:
+      FLOCI_GCP_STORAGE_MODE: persistent
+      FLOCI_GCP_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - floci-gcp-data:/app/data
 
   # Creates the GCS bucket once floci-gcp is answering requests.
   gcs-bootstrap:
@@ -70,6 +82,11 @@ services:
     image: floci/floci-az:latest
     ports:
       - "4577:4577"
+    environment:
+      FLOCI_AZ_STORAGE_MODE: persistent
+      FLOCI_AZ_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - floci-az-data:/app/data
 
   # Creates the Blob container once floci-az is answering requests.
   azure-bootstrap:
@@ -90,6 +107,11 @@ services:
     image: floci/floci-oci:latest
     ports:
       - "4599:4599"
+    environment:
+      FLOCI_OCI_STORAGE_MODE: persistent
+      FLOCI_OCI_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - floci-oci-data:/app/data
 
   # Creates the Object Storage bucket once floci-oci is answering requests.
   oci-bootstrap:
@@ -105,3 +127,9 @@ services:
           -H 'Content-Type: application/json' \
           -d "{\"name\":\"$$ANKUSA_OCI_BUCKET\",\"compartmentId\":\"ocid1.tenancy.oc1..flocilocaltenancy0000000000000000000000000000000000000000\"}" || true
         echo "oci bucket $$ANKUSA_OCI_BUCKET ready"
+
+volumes:
+  floci-data:
+  floci-gcp-data:
+  floci-az-data:
+  floci-oci-data:
