@@ -37,8 +37,12 @@ flowchart LR
   that refuses new publishes once 640 MiB are queued (`discard: new`), so a
   backlog the consumers cannot clear pushes back on the providers with `503`s
   instead of silently deleting hooks. The consumer dedupes on
-  `idempotencyKey`, `ack`s what it processed, `nak`s what a retry can fix, and
-  `term`s what it can't. KEDA reads the consumer's lag from NATS's monitoring
+  `idempotencyKey`, `ack`s what it processed, and `nak`s what a retry can fix
+  (retried without limit, backing off to 10 s). What can never succeed (a body
+  that is not a message, a claim that is gone) is copied, with the reason in a
+  header, to a dead-letter stream (`ANKUSA_DLQ`, subject `dlq.ankusa`) and then
+  `term`ed; the panel shows a *dead-lettered* count when it is not zero. KEDA
+  reads the consumer's lag from NATS's monitoring
   endpoint and scales the Deployment.
 - **Large bodies take the claim-check path.** A body over `inline_max_bytes`
   (64 KiB here) is checked in to an S3 bucket (floci, the repo's emulator) by
@@ -132,12 +136,15 @@ transit" rather than a transient surplus.
 
 **The panel is the consumers' ledger.** A consumer announces each hook it has
 processed with a NATS *request* to `demo.consumed` and acks the hook only when
-the panel replies. Applying or removing an `AuthorizationPolicy` on the NATS
-pods makes Envoy drain *every* connection to them, the panel's included, and a
-plain publish sent in that gap would vanish after the consumer had already
-marked the hook done. With the reply, a hook the ledger did not record is naked
-and processed again, so the zero-loss figure holds through the drills below.
-The price: with the panel down, consumers nak and retry instead of acking.
+the panel replies. A plain publish (or a `flush`, which only proves the local
+sidecar took the bytes) can vanish when a connection is cut underneath it:
+applying or removing an `AuthorizationPolicy` on the NATS pods makes Envoy
+close the connections it carries, and a drill that used a plain publish
+reported 147 hooks as lost although JetStream had every one acked. With the
+reply, a hook the ledger did not record is naked and processed again, so the
+zero-loss figure holds through the drills below. The price: with the panel down
+(a `run.sh` re-run restarts it), consumers nak and retry, backing off to 10 s,
+instead of acking; nothing is dropped, they just wait for it.
 
 The panel only runs in the cluster: it reads the pod's ServiceAccount token and
 CA, so there is no supported way to run it on the host.
@@ -154,11 +161,11 @@ drill below ends with the sender stopped and the badge at **0 lost**.
 |**Kill ankusa** (`✕` or *Kill a random pod*)|the box turns red then disappears and a replacement appears; the sender shows a retry or two and `failed` stays 0; `accepted` keeps rising.|
 |**Kill a consumer**|its in-flight hooks (`ack-pending`) are redelivered after `ack_wait` (30 s) to the surviving pods.|
 |**Kill a NATS node** (`✕` on the leader named in the JetStream box)|the R3 stream elects a new leader within a few seconds; the sender retries for a moment (a few dozen `retried`), `failed` stays 0. *Kill a random pod → NATS* usually hits a follower, which changes nothing visible.|
-|**Deny `consumer → NATS`**|consumed/s falls to 0 within ~10 s while `pending` climbs; KEDA scales the consumers up (the new replicas cannot reach NATS, so they restart until you allow it); *Allow* → the backlog drains.|
+|**Deny `consumer → NATS`**|consumed/s falls to 0 within ~10 s while `pending` climbs; KEDA scales the consumers up (the new replicas wait for NATS instead of restarting, `waitOnFirstConnect`); *Allow* → the backlog drains.|
 |**Deny `ankusa → NATS`**|direct mode has no local buffer: within ~10 s `accepted` stops, the sender's `retried` then `failed` climb, and in-flight sits at its cap of 256; *Allow* → recovers, and the held-back requests go out in a burst. Nothing the ingest answered `201` is lost.|
-|**Deny `consumer → claim-check`** (set *size min* ≥ 69, ~134 KiB, so every hook is claimed; ~20 req/s)|the consumer logs `claim-check gateway unreachable` and `nak`s, `redelivered` and `ack-pending` climb and the tail goes quiet; *Allow* → redelivery completes.|
+|**Deny `consumer → claim-check`** (set *size min* ≥ 69, ~134 KiB, so every hook is claimed; ~20 req/s)|the consumer logs `claim-check gateway unreachable` and `nak`s, `redelivered` and `ack-pending` climb and the tail goes quiet. A hook is retried for as long as it takes (the consumer's `max_deliver` is unlimited, the nak delay grows to 10 s), so *Allow* after any length of outage (2.5 minutes tried) → the backlog drains and the badge returns to 0 lost.|
 |**Gateway fault: abort 50%**|about half of the attempts get `503` from Envoy and are retried: `retried` is ~0.9 × `sent`, and ~6 % of hooks (0.5⁴) exhaust their three retries and count as `failed`; `accepted + failed = sent`.|
-|**Gateway fault: delay 2000 ms, 100%**|the *ingest latency* is ~2 s and the in-flight count grows.|
+|**Gateway fault: delay 2000 ms, 100%**|the *ingest latency* reads ~2 s and *in flight* climbs to rate × 2 s (100 at 50/s); nothing fails, and everything is consumed once the fault is cleared.|
 
 The deny levers take up to ~10 s: a new connection is refused at once, but an
 established one (a NATS connection is long-lived) is only cut when Envoy
@@ -169,12 +176,15 @@ Things you may notice, none of them a bug:
 
 - A new ankusa pod's first request or two can `503`: the NATS sink opens its
   connection on the first delivery. It is the same retry as any other `503`.
-- floci keeps every claimed body in memory, so it has a 3 GiB limit, its
-  `keeper` sidecar deletes claims older than 5 minutes, and the sender spends
-  at most 8 MiB/s on claimed bodies (the panel says when it is holding back).
-  A hook the consumers have not reached within 5 minutes can no longer redeem
-  its claim and is terminated. Sustained overload of floci restarts it empty;
-  the keeper re-creates the bucket.
+- floci keeps every claimed body on its JVM heap, so it has a 3 GiB limit (70 %
+  of it heap), its `keeper` sidecar deletes claims older than 5 minutes, and the
+  sender spends at most 2 MiB/s on claimed bodies (the panel says when it is
+  holding back). Ten minutes at that cap (rate 60, 130-180 KiB) held floci at
+  ~700 MiB with no restarts; at 8 MiB/s it ran out of heap and stopped
+  answering. A hook the consumers have not reached within 5 minutes can no
+  longer redeem its claim: it is dead-lettered (the panel shows the count).
+  If floci does restart, the keeper re-creates the bucket, and the claims it
+  held are gone.
 - Each consumer pod remembers the idempotency keys it has seen (20 000). Two
   pods can still process the same hook after a redelivery; the panel counts it
   once.
@@ -199,10 +209,13 @@ Things you may notice, none of them a bug:
 ## Autoscaling
 
 - **ankusa**: `autoscaling/v2` HPA on the container's CPU (the sidecar's does
-  not count), target 60 %, 2-6 pods. Small hooks barely load it. Rate 500 with
-  bodies of 30-60 KiB settles at three pods (~50 % CPU). Large claimed bodies
-  cost more CPU (sha256, packing, S3 signing), but the sender caps those at
-  8 MiB/s (see above), so claimed traffic alone cannot drive it to six.
+  not count), target 50 % of a 100m request, 2-6 pods. A pod serving 30-60 KiB
+  hooks costs about 0.6 millicores per hook a second, so two pods scale out at
+  roughly 160 hooks/s in total: at rate 300 the fleet goes from two pods to four
+  within about 40 s and settles near 48 % CPU; at 500 it reaches the cap of six
+  within a minute and sits at ~60 %. Large claimed bodies cost more CPU
+  (sha256, packing, S3 signing), but the sender caps those at 2 MiB/s (see
+  above).
 - **consumer**: a KEDA `ScaledObject` with the `nats-jetstream` trigger on the
   `worker` consumer's lag, 50 messages per replica, 1-8 pods. Each replica
   handles one hook at a time with a simulated 25 ms of work (`WORK_MS`), about

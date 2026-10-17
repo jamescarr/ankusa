@@ -243,10 +243,19 @@ defmodule ControlPanel.Stream do
         pending: consumer["num_pending"] || 0,
         ack_pending: consumer["num_ack_pending"] || 0,
         redelivered: consumer["num_redelivered"] || 0,
-        leader: get_in(stream, ["cluster", "leader"])
+        leader: get_in(stream, ["cluster", "leader"]),
+        dlq: dead_lettered(conn)
       }
     else
       _unavailable -> :unavailable
+    end
+  end
+
+  # Hooks the consumers gave up on and copied to the dead-letter stream.
+  defp dead_lettered(conn) do
+    case api(conn, "$JS.API.STREAM.INFO.ANKUSA_DLQ") do
+      {:ok, stream} -> get_in(stream, ["state", "messages"]) || 0
+      :error -> 0
     end
   end
 

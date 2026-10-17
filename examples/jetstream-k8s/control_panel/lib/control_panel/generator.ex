@@ -256,13 +256,22 @@ defmodule ControlPanel.Generator do
     started = System.monotonic_time(:millisecond)
 
     result =
-      Req.post(url,
-        body: body,
-        headers: [{"content-type", "application/json"}, {"x-demo-event-id", event_id}],
-        retry: false,
-        receive_timeout: 15_000,
-        decode_body: false
-      )
+      try do
+        Req.post(url,
+          body: body,
+          headers: [{"content-type", "application/json"}, {"x-demo-event-id", event_id}],
+          finch: ControlPanel.Finch,
+          retry: false,
+          receive_timeout: 15_000,
+          decode_body: false
+        )
+      rescue
+        # Anything the HTTP client raises (an exhausted pool, say) is a failed
+        # attempt like a refused connection, not a crashed request.
+        exception -> {:error, exception}
+      catch
+        :exit, reason -> {:error, reason}
+      end
 
     latency = System.monotonic_time(:millisecond) - started
 

@@ -24,8 +24,11 @@ nats: {host: nats, port: 4222, monitoringService: nats-headless}
 ankusa:
   minReplicas: 2
   maxReplicas: 6
-  cpuTargetUtilization: 60
-  resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {memory: 768Mi}}
+  # A pod serving ~1 hook/s costs ~0.6 millicores, so with a 100m request and a 50 %
+  # target, two pods scale out at about 160 hooks/s (a 30-60 KiB body) in total, and
+  # six are needed at 500.
+  cpuTargetUtilization: 50
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}
   # Bodies above this are checked in to the claim store; the NATS message
   # carries a claim ref instead.
   inlineMaxBytes: 65536
@@ -57,10 +60,11 @@ controlPanel:
   # crosses the same VirtualService (and its fault lever) as an outside caller.
   gatewayUrl: "http://istio-ingress.istio-ingress.svc.cluster.local"
   # The most claimed body bytes (over ankusa.inlineMaxBytes) the generator sends
-  # a second. floci holds them in memory (floci.resources.limits.memory); the
-  # keeper expires them after floci.claimRetentionMinutes. 8 MiB/s x 5 min is
-  # 2.4 GiB.
-  claimBytesPerSec: 8388608
+  # a second. floci holds every one on its JVM heap until the keeper expires it
+  # after floci.claimRetentionMinutes: 2 MiB/s x 5 min is ~600 MiB live against a
+  # ~2 GiB heap. At 8 MiB/s (2.4 GiB live) floci ran out of heap and stopped
+  # answering.
+  claimBytesPerSec: 2097152
   resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
 
 # The Istio ingress gateway run.sh installs (release `istio-ingress`).

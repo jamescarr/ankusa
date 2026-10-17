@@ -39,6 +39,9 @@ spec:
           imagePullPolicy: {{ .Values.images.floci.pullPolicy }}
           env:
             - {name: AWS_DEFAULT_REGION, value: {{ .Values.s3.region | quote }}}
+            # The JVM's default heap is a quarter of the container's memory limit.
+            # floci keeps every object on it, so give it most of the 3Gi.
+            - {name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=70"}
           ports:
             - {name: s3, containerPort: 4566}
           readinessProbe:

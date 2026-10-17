@@ -16,7 +16,7 @@ import { hostname } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { AckPolicy, DiscardPolicy, jetstream, jetstreamManager, RetentionPolicy, type JsMsg } from "@nats-io/jetstream";
-import { connect } from "@nats-io/transport-node";
+import { connect, headers } from "@nats-io/transport-node";
 import {
   ClaimCheckError,
   createClaimCheckClient,
@@ -45,22 +45,21 @@ const POD_NAME = process.env.POD_NAME ?? hostname();
 
 const DEDUPE_CAP = 20_000;
 const NANOS_PER_MS = 1_000_000;
+const DLQ_STREAM = process.env.DLQ_STREAM ?? "ANKUSA_DLQ";
+const DLQ_SUBJECT = process.env.DLQ_SUBJECT ?? "dlq.ankusa";
 
 // The gateway is open: no bearer token. Auth belongs in front of it.
 const claimCheck = createClaimCheckClient({ baseUrl: CLAIM_CHECK_URL });
 
-// Per-replica idempotency memory: a Set for lookups and a FIFO for eviction.
-// Two replicas can still process the same hook (an ack_wait expiry, a replay);
-// a real consumer keeps its idempotency keys in its database.
+// Per-replica idempotency memory, the oldest key evicted first (a Set iterates
+// in insertion order). Two replicas can still process the same hook (an
+// ack_wait expiry, a replay); a real consumer keeps its idempotency keys in
+// its database.
 const seen = new Set<string>();
-const seenOrder: string[] = [];
 
-function remember(key: string): boolean {
-  if (seen.has(key)) return true;
+function remember(key: string) {
   seen.add(key);
-  seenOrder.push(key);
-  if (seenOrder.length > DEDUPE_CAP) seen.delete(seenOrder.shift()!);
-  return false;
+  if (seen.size > DEDUPE_CAP) seen.delete(seen.values().next().value!);
 }
 
 async function resolveBody(msg: Message): Promise<"inline" | "claim"> {
@@ -89,7 +88,9 @@ function startHealthServer() {
 async function main() {
   const health = startHealthServer();
 
-  const nc = await connect({ servers: NATS_URL, maxReconnectAttempts: -1, name: POD_NAME });
+  // waitOnFirstConnect: a replica KEDA adds while NATS is unreachable keeps
+  // trying instead of crash-looping, so it is ready the moment the route is back.
+  const nc = await connect({ servers: NATS_URL, maxReconnectAttempts: -1, waitOnFirstConnect: true, name: POD_NAME });
   connected = true;
   void (async () => {
     for await (const status of nc.status()) {
@@ -120,6 +121,13 @@ async function main() {
     retention: RetentionPolicy.Workqueue,
     discard: DiscardPolicy.New,
   };
+  const dlqConfig = {
+    name: DLQ_STREAM,
+    subjects: [DLQ_SUBJECT],
+    num_replicas: STREAM_REPLICAS,
+    max_age: 24 * 60 * 60 * 1_000 * NANOS_PER_MS,
+    max_bytes: 64 * 1024 * 1024,
+  };
   try {
     await jsm.streams.add(streamConfig);
   } catch {
@@ -130,19 +138,34 @@ async function main() {
     }
   }
   try {
+    await jsm.streams.add(dlqConfig);
+  } catch (err) {
+    console.error(`[consumer] stream ${DLQ_STREAM}: ${(err as Error).message}`);
+  }
+  const consumerConfig = {
+    ack_wait: 30_000 * NANOS_PER_MS,
+    // A hook is retried until it succeeds or is dead-lettered: a bounded count
+    // would strand it in the work queue after a long outage.
+    max_deliver: -1,
+    max_ack_pending: 200,
+  };
+  try {
     await jsm.consumers.add(STREAM, {
+      ...consumerConfig,
       durable_name: CONSUMER,
       ack_policy: AckPolicy.Explicit,
-      ack_wait: 30_000 * NANOS_PER_MS,
-      max_deliver: 10,
-      max_ack_pending: 200,
       filter_subject: SUBJECT_FILTER,
     });
-  } catch (err) {
-    console.error(`[consumer] consumer ${STREAM}/${CONSUMER}: ${(err as Error).message}`);
+  } catch {
+    try {
+      await jsm.consumers.update(STREAM, CONSUMER, consumerConfig);
+    } catch (err) {
+      console.error(`[consumer] consumer ${STREAM}/${CONSUMER}: ${(err as Error).message}`);
+    }
   }
 
-  const consumer = await jetstream(nc).consumers.get(STREAM, CONSUMER);
+  const js = jetstream(nc);
+  const consumer = await js.consumers.get(STREAM, CONSUMER);
   const messages = await consumer.consume({ max_messages: 50 });
   console.log(`[consumer] ${POD_NAME} consuming ${STREAM}/${CONSUMER}, claims via ${CLAIM_CHECK_URL}`);
 
@@ -188,19 +211,45 @@ async function main() {
     );
   };
 
-  const handle = async (m: JsMsg) => {
-    let msg: Message;
-    try {
-      msg = decodeMessage(m.data);
-    } catch (err) {
-      console.error(`[consumer] undecodable message, terminating: ${(err as Error).message}`);
-      m.term();
-      return;
-    }
-    const key = idempotencyKey(msg);
+  // A hook this consumer can never process is copied, with the reason, to the
+  // dead-letter stream before it is terminated, so a permanent failure leaves a
+  // record instead of vanishing. If even that publish fails the hook is naked
+  // and tried again.
+  const deadLetter = async (m: JsMsg, reason: string) => {
+    const h = headers();
+    h.set("Dlq-Reason", reason.slice(0, 200));
+    h.set("Dlq-Consumer", POD_NAME);
+    h.set("Dlq-Stream-Seq", String(m.seq));
+    await js.publish(DLQ_SUBJECT, m.data, { headers: h });
+    m.term(reason);
+  };
 
+  const fail = async (m: JsMsg, err: unknown) => {
+    const reason = (err as Error).message;
+    const permanent =
+      err instanceof InvalidMessageError ||
+      err instanceof InvalidClaimRefError ||
+      (err instanceof ClaimCheckError && !err.retryable);
+    if (permanent) {
+      try {
+        await deadLetter(m, reason);
+        console.error(`[consumer] seq=${m.seq} permanent failure, dead-lettered: ${reason}`);
+        return;
+      } catch (dlqErr) {
+        console.error(`[consumer] seq=${m.seq} dead-letter publish failed: ${(dlqErr as Error).message}`);
+      }
+    }
+    // Retried for as long as it takes (max_deliver is unlimited), backing off to 10 s.
+    const delay = Math.min(10_000, 1_000 * m.info.deliveryCount);
+    console.error(`[consumer] seq=${m.seq} transient failure, nak in ${delay} ms: ${reason}`);
+    m.nak(delay);
+  };
+
+  const handle = async (m: JsMsg) => {
     try {
-      if (remember(key)) {
+      const msg = decodeMessage(m.data);
+      const key = idempotencyKey(msg);
+      if (seen.has(key)) {
         await announce(msg, key, msg.body !== null ? "inline" : "claim", true);
         m.ack();
         return;
@@ -208,22 +257,11 @@ async function main() {
       const via = await resolveBody(msg);
       await sleep(WORK_MS);
       await announce(msg, key, via, false);
+      remember(key);
       console.log(`[consumer] hook=${msg.id} via=${via} size=${msg.size} latency_ms=${Date.now() - msg.received_at}`);
       m.ack();
     } catch (err) {
-      // The claim never made it: let a retry redeem it again.
-      seen.delete(key);
-      const permanent =
-        err instanceof InvalidMessageError ||
-        err instanceof InvalidClaimRefError ||
-        (err instanceof ClaimCheckError && !err.retryable);
-      if (permanent) {
-        console.error(`[consumer] permanent failure for ${msg.id}, terminating: ${(err as Error).message}`);
-        m.term();
-      } else {
-        console.error(`[consumer] transient failure for ${msg.id}, nak: ${(err as Error).message}`);
-        m.nak(5_000);
-      }
+      await fail(m, err);
     }
   };
 

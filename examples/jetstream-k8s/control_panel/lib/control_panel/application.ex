@@ -23,6 +23,9 @@ defmodule ControlPanel.Application do
            }
          ]
        }},
+      # The load generator's own HTTP pool: sized to its in-flight cap, so a
+      # slow ingest (the delay fault) cannot starve it of connections.
+      {Finch, name: ControlPanel.Finch, pools: %{default: [size: 300]}},
       ControlPanel.Generator,
       ControlPanel.Cluster,
       ControlPanel.IngestMetrics,

@@ -28,8 +28,10 @@ podTemplate:
         traffic.sidecar.istio.io/excludeOutboundPorts: "6222"
 container:
   merge:
+    # A full stream (the consumers far behind) keeps its recent blocks in memory:
+    # ~450Mi at the 640 MiB cap, so 512Mi is no headroom.
     resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
+      requests: {cpu: 100m, memory: 512Mi}
+      limits: {cpu: 500m, memory: 1Gi}
 natsBox:
   enabled: false

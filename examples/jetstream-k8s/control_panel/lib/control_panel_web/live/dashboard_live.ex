@@ -191,6 +191,12 @@ defmodule ControlPanelWeb.DashboardLive do
           <.metric label="retried" value={Format.int(@sender.totals.retried)} />
           <.metric label="in flight" value={Format.int(@sender.inflight)} />
           <.metric label="ingest latency" value={"#{Format.int(@sender.mean_latency_ms)} ms"} />
+          <.metric
+            :if={is_map(@jetstream) and @jetstream.dlq > 0}
+            label="dead-lettered"
+            value={Format.int(@jetstream.dlq)}
+            tone="text-error"
+          />
           <.zero_loss sender={@sender} consumed={@consumed} jetstream={@jetstream} />
         </div>
         <button
