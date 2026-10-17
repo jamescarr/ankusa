@@ -179,10 +179,7 @@ defmodule ControlPanelWeb.DashboardLive do
           <.metric label="sent" value={Format.int(@sender.totals.sent)} />
           <.metric label="accepted" value={Format.int(@sender.totals.accepted)} />
           <.metric label="consumed (unique)" value={Format.int(@consumed.unique_total)} />
-          <.metric
-            label="duplicates (ingest / consumer)"
-            value={"#{Format.int(@sender.totals.duplicates)} / #{Format.int(@consumed.duplicate_total)}"}
-          />
+          <.metric label="duplicates" value={Format.int(@consumed.duplicate_total)} />
           <.metric
             label="failed"
             value={Format.int(@sender.totals.failed)}

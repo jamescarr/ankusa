@@ -110,7 +110,7 @@ kubectl -n ankusa-jetstream get pods,hpa,scaledobject -w
   many extra hooks *Fire burst* queues, whether or not the steady stream is
   running. Each request goes to the ingress gateway, and a `503`, `429` or
   transport error is retried up to three times a second apart with the *same*
-  event id (`x-demo-event-id`, which the ingest dedupes on): that is what a
+  event id (`x-demo-event-id`): that is what a
   webhook provider does. Requests the in-flight cap (256) holds back are
   deferred, not dropped.
 - **Flow.** sender → Envoy → ankusa pods → JetStream → consumer pods, with
@@ -119,12 +119,12 @@ kubectl -n ankusa-jetstream get pods,hpa,scaledobject -w
   red while terminating; `✕` kills that pod. The chips under the columns show
   the HPA's and KEDA's current/desired replicas and the CPU / lag they act on.
 - **Totals.** *sent*, *accepted* (answered `201`), *consumed (unique)*,
-  *duplicates*, *failed* (gave up after retries), *retried*, *in flight* and
-  the mean *ingest latency*. The **zero loss** badge is
-  `accepted − consumed (unique)`: it turns green when it is 0, the sender has
-  stopped and JetStream is empty. "Unique" counts a hook once by idempotency
-  key across all consumer pods, so a hook redelivered to another pod is a
-  duplicate, not a second hook.
+  *duplicates* (hooks a consumer saw a second time), *failed* (gave up after
+  retries), *retried*, *in flight* and the mean *ingest latency*. The **zero
+  loss** badge is `accepted − consumed (unique)`: it turns green when it is 0,
+  the sender has stopped and JetStream is empty. "Unique" counts a hook once by
+  idempotency key across all consumer pods, so a hook redelivered to another pod
+  is a duplicate, not a second hook.
 - **Consumed.** The last 30 hooks the consumers processed: time (UTC), hook id,
   pod, size, `inline` or `claim`, ingest-to-consumed latency, and `dup` when a
   pod had already seen it.
@@ -185,10 +185,17 @@ Things you may notice, none of them a bug:
   has a liveness probe on `/_floci/health`. A hook the consumers have not
   reached within 5 minutes can no longer redeem its claim: it is dead-lettered
   (the panel shows the count). If floci does restart, the keeper re-creates the
-  bucket, and the claims it held are gone.
-- Each consumer pod remembers the idempotency keys it has seen (20 000). Two
-  pods can still process the same hook after a redelivery; the panel counts it
-  once.
+  bucket, and the claims it held are gone. So a `201` for a claimed body is only
+  as durable as the claim store behind it: when floci ran out of heap at 8 MiB/s
+  and was replaced, 401 hooks the ingest had accepted lost their claims and were
+  dead-lettered (the 0-lost badge missed it because the panel restarted in the
+  same upgrade). floci is a demo store; use a real bucket.
+- Direct mode never collapses duplicates at ingest: every provider retry that
+  gets a `201` is a new JetStream message, so duplicate handling is entirely
+  the consumers' job, fleet-wide. Each consumer pod here remembers the last
+  20 000 idempotency keys it saw, which is a demo shortcut, not a guarantee: two
+  pods can process the same hook, and the panel counts it once. A real consumer
+  needs a store shared by all its replicas (a unique key in its database).
 
 ## Why the chart looks the way it does
 

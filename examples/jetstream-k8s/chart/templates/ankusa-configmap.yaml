@@ -25,6 +25,10 @@ data:
     sources:
       demo:
         verify: {type: none}
+        # Direct mode does no ingest dedupe (only the queue writer collapses
+        # duplicates, and `wal: none` has none): this only stamps `dedupe_key` and
+        # `idempotency_key` on the message. A provider retry is a second hook and
+        # collapsing it is the consumer's job, fleet-wide.
         dedupe: {header: x-demo-event-id}
         sinks:
           - type: nats
