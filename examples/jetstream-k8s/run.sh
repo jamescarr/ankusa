@@ -100,7 +100,7 @@ up() {
   helm upgrade --install nats nats/nats -n "$NS" \
     --version "$NATS_CHART_VERSION" -f "$DIR/infra/nats-values.yaml" --wait --timeout 5m
 
-  echo "==> demo chart: ankusa fleets (direct + durable), claim-check, floci, consumer, control panel, mesh routes"
+  echo "==> demo chart: ankusa fleets (direct + durable), claim-check, floci, consumer, control panel, Prometheus, Grafana, mesh routes"
   local existed=0
   if helm status demo -n "$NS" >/dev/null 2>&1; then existed=1; fi
   helm upgrade --install demo "$DIR/chart" -n "$NS" \
@@ -116,19 +116,20 @@ up() {
     kubectl -n "$NS" rollout status deployment/control-panel --timeout=300s
   fi
 
-  echo "==> waiting for http://localhost:8080 (both ingest routes through the gateway, panel behind it)"
-  local ingest=000 durable=000 panel=000
+  echo "==> waiting for http://localhost:8080 (both ingest routes through the gateway, panel and Grafana behind it)"
+  local ingest=000 durable=000 panel=000 grafana=000
   for _ in $(seq 1 60); do
     ingest=$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:8080/webhooks/demo \
       -H 'content-type: application/json' -d '{"id":"smoke"}' || true)
     durable=$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:8080/webhooks/durable \
       -H 'content-type: application/json' -d '{"id":"smoke"}' || true)
     panel=$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/health || true)
-    if [ "$ingest" = 201 ] && [ "$durable" = 201 ] && [ "$panel" = 200 ]; then break; fi
+    grafana=$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/grafana/api/health || true)
+    if [ "$ingest" = 201 ] && [ "$durable" = 201 ] && [ "$panel" = 200 ] && [ "$grafana" = 200 ]; then break; fi
     sleep 2
   done
-  if [ "$ingest" != 201 ] || [ "$durable" != 201 ] || [ "$panel" != 200 ]; then
-    echo "error: POST /webhooks/demo returned $ingest, POST /webhooks/durable returned $durable (want 201 each), GET /health returned $panel (want 200)" >&2
+  if [ "$ingest" != 201 ] || [ "$durable" != 201 ] || [ "$panel" != 200 ] || [ "$grafana" != 200 ]; then
+    echo "error: POST /webhooks/demo returned $ingest, POST /webhooks/durable returned $durable (want 201 each), GET /health returned $panel, GET /grafana/api/health returned $grafana (want 200 each)" >&2
     kubectl -n "$NS" get pods >&2
     exit 1
   fi
@@ -137,6 +138,8 @@ up() {
 
 ==> up
     control panel    http://localhost:8080/
+    grafana          http://localhost:8080/grafana/   (the Ankusa dashboard is the home page)
+    prometheus       http://localhost:8080/prometheus/targets
     ingest (direct)  curl -XPOST localhost:8080/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
     ingest (durable) curl -XPOST localhost:8080/webhooks/durable -H 'content-type: application/json' -d '{"id":"evt_1"}'
     watch            kubectl -n $NS get pods,pvc,hpa,scaledobject -w
