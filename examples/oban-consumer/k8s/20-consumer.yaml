@@ -18,6 +18,8 @@ spec:
         - name: consumer
           image: ankusa-oban-consumer:e2e
           imagePullPolicy: IfNotPresent
+          # Open-file cap for the BEAM on kind: see the ankusa StatefulSet.
+          command: ["/bin/sh", "-c", "ulimit -n 65536 && exec /app/bin/consumer start"]
           lifecycle:
             preStop:
               # Give kube-proxy time to remove this pod from the Service's
