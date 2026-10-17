@@ -64,9 +64,10 @@ defmodule ControlPanelWeb.DashboardLive.Format do
 
   @doc """
   `ankusa-7d9f8b6c5-x2k4j` -> `ankusa·x2k4j`: the Deployment's ReplicaSet hash
-  tells nobody anything. A StatefulSet pod (`nats-0`) keeps its full name.
+  tells nobody anything. A StatefulSet pod (`nats-0`, `ankusa-durable-0`)
+  keeps its full name.
   """
   @spec short_name(String.t(), String.t()) :: String.t()
-  def short_name(name, "nats"), do: name
+  def short_name(name, group) when group in ["nats", "ankusa-durable"], do: name
   def short_name(name, group), do: "#{group}·#{name |> String.split("-") |> List.last()}"
 end

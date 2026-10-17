@@ -33,6 +33,25 @@ ankusa:
   # carries a claim ref instead.
   inlineMaxBytes: 65536
 
+# Durable mode (wal.type: disk): a StatefulSet whose pods each commit a hook to
+# their own RocksDB store (a PVC) before answering 201, then dispatch it to the
+# same JetStream stream (subject ankusa.durable) with retries, a circuit
+# breaker and a DLQ. No HPA: a pod's store holds hooks, so it is not scaled
+# down freely.
+durable:
+  replicas: 3
+  storage: 1Gi
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}
+  # A short retry budget: 0.5, 1, 2, 4 s, then 5 s apart, 12 attempts (~25-48 s
+  # of failing). The breaker opens after `failures` consecutive failures and
+  # parks rows without spending attempts, then probes after openMs (doubling
+  # up to maxOpenMs). So a down or flapping sink builds a backlog, not a DLQ:
+  # a flap of 20 s down / 20 s up dead-lettered nothing even at 4 attempts.
+  # `breaker.failures: 0` turns the breaker off, and then every row that fails
+  # max_attempts times in a row is dead-lettered (the panel's Replay DLQ).
+  retry: {base_ms: 500, max_ms: 5000, max_attempts: 12}
+  breaker: {failures: 5, openMs: 5000, maxOpenMs: 30000}
+
 # KEDA owns the replica count: one replica per `lagThreshold` of JetStream lag.
 consumer:
   minReplicas: 1

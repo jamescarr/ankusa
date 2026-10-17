@@ -1,5 +1,6 @@
-# One VirtualService, so the control panel's fault lever has a stable JSON-patch
-# path: /spec/http/0/fault.
+# One VirtualService, so the control panel's fault lever has stable JSON-patch
+# paths: the two ingest routes are /spec/http/0 (direct) and /spec/http/1
+# (durable), and the panel patches both. Keep them first and in this order.
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -12,13 +13,22 @@ spec:
   http:
     - name: ankusa-ingest
       match:
-        - uri: {prefix: /webhooks/}
+        - uri: {exact: /webhooks/demo}
       route:
         - destination:
             host: ankusa
             port: {number: 4000}
       # Istio retries a 503 twice by default; that would hide exactly what the
       # fleet returned. The sender retries on its own and counts it.
+      retries: {attempts: 0}
+      timeout: 15s
+    - name: ankusa-durable
+      match:
+        - uri: {exact: /webhooks/durable}
+      route:
+        - destination:
+            host: ankusa-durable
+            port: {number: 4000}
       retries: {attempts: 0}
       timeout: 15s
     - name: control-panel

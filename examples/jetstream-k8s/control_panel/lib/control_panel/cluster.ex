@@ -19,7 +19,7 @@ defmodule ControlPanel.Cluster do
 
   @poll_ms 2_000
   @log_every_ms 60_000
-  @groups ~w(ankusa consumer claim-check nats floci)
+  @groups ~w(ankusa ankusa-durable consumer claim-check nats floci)
   @lever_prefix "chaos-deny-"
 
   defstruct pods: [],

@@ -1,9 +1,10 @@
 defmodule ControlPanelWeb.DashboardLive.Flow do
   @moduledoc """
-  The live flow diagram: sender -> Istio gateway -> ankusa pods -> JetStream ->
-  consumer pods, with the claim-check side path (floci, claim-check gateway)
-  underneath. Pure HEEx/SVG, no JavaScript: every number comes from the
-  snapshots the dashboard LiveView already holds.
+  The live flow diagram: sender -> Istio gateway -> ankusa pods (the direct
+  Deployment's, then the durable StatefulSet's) -> JetStream -> consumer pods,
+  with the claim-check side path (floci, claim-check gateway) underneath. Pure
+  HEEx/SVG, no JavaScript: every number comes from the snapshots the dashboard
+  LiveView already holds.
 
   Geometry is fixed (`viewBox` 1000x560, columns at x = 20 / 200 / 380 / 580 /
   780); a column of pods is centred on the flow's axis, at most eight boxes
@@ -27,6 +28,7 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
   @x_consumer 780
 
   @nats_pods ~w(nats-0 nats-1 nats-2)
+  @durable "ankusa-durable"
 
   attr :sender, :map, required: true
   attr :cluster, :map, required: true
@@ -35,7 +37,7 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
   attr :jetstream, :any, required: true
 
   def flow(assigns) do
-    ankusa = layout(pods(assigns.cluster, "ankusa"))
+    ankusa = layout(pods(assigns.cluster, "ankusa") ++ pods(assigns.cluster, @durable))
     consumers = layout(pods(assigns.cluster, "consumer"))
 
     ingest_rate =
@@ -74,7 +76,7 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
       <g class="fill-base-content/60 text-[11px] uppercase tracking-wide">
         <text x={x_sender()} y="34">sender</text>
         <text x={x_gateway()} y="34">istio gateway</text>
-        <text x={x_ankusa()} y="34">ankusa · direct</text>
+        <text x={x_ankusa()} y="34">ankusa · direct + durable</text>
         <text x={x_jetstream()} y="34">jetstream · R3</text>
         <text x={x_consumer()} y="34">consumers · keda</text>
       </g>
@@ -109,8 +111,8 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
           y1={y + pod_h() / 2}
           x2={x_jetstream()}
           y2={axis()}
-          rate={pod_rate(@ingest, pod.name)}
-          denied={"ankusa-nats" in @denies}
+          rate={out_rate(@ingest, pod)}
+          denied={out_lever(pod) in @denies}
         />
       <% end %>
       <%= for {pod, y} <- @consumers.pods do %>
@@ -143,6 +145,9 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
       <%!-- the denied levers, labelled once each --%>
       <g class="fill-error text-[10px] font-semibold" text-anchor="middle">
         <text :if={"ankusa-nats" in @denies} x={x_ankusa() + pod_w() + 20} y="50">⛔ denied</text>
+        <text :if={"durable-nats" in @denies} x={x_ankusa() + pod_w() + 20} y="64">
+          ⛔ durable denied
+        </text>
         <text :if={"consumer-nats" in @denies} x={x_jetstream() + pod_w() + 20} y="50">⛔ denied</text>
         <text :if={"consumer-claim-check" in @denies} x={x_consumer() + 10} y="512">⛔ denied</text>
       </g>
@@ -175,7 +180,9 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
           stroke-width="2"
         />
         <text x="10" y="20" class="fill-base-content text-[12px] font-semibold">Envoy ingress</text>
-        <text x="10" y="36" class="fill-base-content/70 text-[10px]">POST /webhooks/demo</text>
+        <text x="10" y="36" class="fill-base-content/70 text-[10px]">
+          POST /webhooks/{if @sender.target == "durable", do: "durable", else: "demo"}
+        </text>
         <text
           x="10"
           y="49"
@@ -192,6 +199,7 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
         x={x_ankusa()}
         y={y}
         sub={ankusa_sub(@ingest, pod)}
+        warn={breaker_open?(@ingest, pod)}
         killable
       />
       <text :if={@ankusa.more > 0} x={x_ankusa()} y="414" class="fill-base-content/60 text-[10px]">
@@ -304,6 +312,7 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
   attr :y, :any, required: true
   attr :sub, :string, required: true
   attr :killable, :boolean, default: false
+  attr :warn, :boolean, default: false
 
   defp pod_box(assigns) do
     ~H"""
@@ -313,7 +322,7 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
         width={pod_w()}
         height={pod_h()}
         rx="6"
-        class={["fill-base-200", pod_stroke(@pod)]}
+        class={["fill-base-200", pod_stroke(@pod, @warn)]}
         stroke-width="2"
         stroke-dasharray={@pod.terminating? && "4 3"}
       />
@@ -351,7 +360,7 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
       width="50"
       height="20"
       rx="5"
-      class={["fill-base-200", (@pod && pod_stroke(@pod)) || "stroke-base-content/30"]}
+      class={["fill-base-200", (@pod && pod_stroke(@pod, false)) || "stroke-base-content/30"]}
       stroke-width="2"
       stroke-dasharray={@pod && @pod.terminating? && "4 3"}
     />
@@ -424,6 +433,32 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
   defp pod_rate(ingest, name), do: get_in(ingest, [name, :rate]) || 0.0
   defp consumer_rate(consumed, name), do: get_in(consumed.per_consumer, [name, :rate]) || 0
 
+  # What leaves a pod for JetStream: a direct pod publishes inside the request,
+  # so it is the ingest rate; a durable pod delivers from its store.
+  defp out_rate(ingest, %{group: @durable, name: name}),
+    do: get_in(ingest, [name, :delivered_rate]) || 0.0
+
+  defp out_rate(ingest, pod), do: pod_rate(ingest, pod.name)
+
+  defp out_lever(%{group: @durable}), do: "durable-nats"
+  defp out_lever(_pod), do: "ankusa-nats"
+
+  defp breaker_open?(ingest, pod), do: (get_in(ingest, [pod.name, :breakers_open]) || 0) > 0
+
+  defp ankusa_sub(ingest, %{group: @durable} = pod) do
+    case ingest[pod.name] do
+      nil ->
+        "– /s"
+
+      m ->
+        queued = Format.int((m.pending || 0) + (m.scheduled || 0) + (m.inflight || 0))
+
+        if (m.breakers_open || 0) > 0,
+          do: "breaker open · q #{queued}",
+          else: "#{Format.rate(m.rate)}/s in · q #{queued}"
+    end
+  end
+
   defp ankusa_sub(ingest, pod) do
     case ingest[pod.name] do
       nil -> "– /s"
@@ -460,9 +495,10 @@ defmodule ControlPanelWeb.DashboardLive.Flow do
 
   ## Styling
 
-  defp pod_stroke(%{terminating?: true}), do: "stroke-error"
-  defp pod_stroke(%{ready?: true}), do: "stroke-success"
-  defp pod_stroke(_not_ready), do: "stroke-warning"
+  defp pod_stroke(%{terminating?: true}, _warn), do: "stroke-error"
+  defp pod_stroke(%{ready?: true}, true), do: "stroke-warning"
+  defp pod_stroke(%{ready?: true}, _warn), do: "stroke-success"
+  defp pod_stroke(_not_ready, _warn), do: "stroke-warning"
 
   defp edge_state(true, _rate), do: :denied
   defp edge_state(false, rate) when rate > 0, do: :flow

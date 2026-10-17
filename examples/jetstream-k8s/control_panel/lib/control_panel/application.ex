@@ -30,6 +30,7 @@ defmodule ControlPanel.Application do
       ControlPanel.Cluster,
       ControlPanel.IngestMetrics,
       ControlPanel.Stream,
+      ControlPanel.Flapper,
       ControlPanelWeb.Endpoint
     ]
 

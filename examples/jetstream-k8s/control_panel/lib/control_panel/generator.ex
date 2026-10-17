@@ -1,7 +1,9 @@
 defmodule ControlPanel.Generator do
   @moduledoc """
-  The synthetic webhook sender: `POST /webhooks/demo` on the ingress gateway at
-  a steady rate, plus on-demand bursts, with a random body size per request.
+  The synthetic webhook sender: `POST /webhooks/demo` (the direct fleet) or
+  `POST /webhooks/durable` (the durable fleet) on the ingress gateway, picked
+  by `set_target/1`, at a steady rate, plus on-demand bursts, with a random
+  body size per request.
 
   A tick every 100 ms starts `rate / 10` requests (the remainder is carried to
   the next tick) and drains the burst backlog. At most `@max_inflight` requests
@@ -35,6 +37,7 @@ defmodule ControlPanel.Generator do
   @pad String.duplicate("x", @max_size)
 
   defstruct running: false,
+            target: "direct",
             rate: 20,
             burst: 500,
             size_min: 512,
@@ -71,6 +74,11 @@ defmodule ControlPanel.Generator do
   @spec fire_burst() :: map()
   def fire_burst, do: GenServer.call(__MODULE__, :fire_burst)
 
+  @doc "Send new requests to the `\"direct\"` or the `\"durable\"` fleet. A request already retrying keeps its target."
+  @spec set_target(String.t()) :: map()
+  def set_target(target) when target in ~w(direct durable),
+    do: GenServer.call(__MODULE__, {:target, target})
+
   @spec snapshot() :: map()
   def snapshot, do: GenServer.call(__MODULE__, :snapshot)
 
@@ -105,6 +113,11 @@ defmodule ControlPanel.Generator do
 
   def handle_call(:fire_burst, _from, state) do
     state = %{state | burst_backlog: state.burst_backlog + state.burst}
+    {:reply, snapshot_of(state), state}
+  end
+
+  def handle_call({:target, target}, _from, state) do
+    state = %{state | target: target}
     {:reply, snapshot_of(state), state}
   end
 
@@ -235,7 +248,7 @@ defmodule ControlPanel.Generator do
 
   defp start_request(state, size) do
     seq = state.seq + 1
-    url = Application.fetch_env!(:control_panel, :gateway_url) <> "/webhooks/demo"
+    url = Application.fetch_env!(:control_panel, :gateway_url) <> path(state.target)
     generator = self()
 
     task =
@@ -245,6 +258,9 @@ defmodule ControlPanel.Generator do
 
     %{state | seq: seq, tasks: Map.put(state.tasks, task.ref, true)} |> bump(:sent)
   end
+
+  defp path("direct"), do: "/webhooks/demo"
+  defp path("durable"), do: "/webhooks/durable"
 
   ## One request (runs in a task)
 
@@ -375,6 +391,7 @@ defmodule ControlPanel.Generator do
 
     %{
       running: state.running,
+      target: state.target,
       rate: state.rate,
       burst: state.burst,
       size_min: state.size_min,

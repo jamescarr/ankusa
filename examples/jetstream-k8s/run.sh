@@ -100,7 +100,7 @@ up() {
   helm upgrade --install nats nats/nats -n "$NS" \
     --version "$NATS_CHART_VERSION" -f "$DIR/infra/nats-values.yaml" --wait --timeout 5m
 
-  echo "==> demo chart: ankusa fleet, claim-check, floci, consumer, control panel, mesh routes"
+  echo "==> demo chart: ankusa fleets (direct + durable), claim-check, floci, consumer, control panel, mesh routes"
   local existed=0
   if helm status demo -n "$NS" >/dev/null 2>&1; then existed=1; fi
   helm upgrade --install demo "$DIR/chart" -n "$NS" \
@@ -110,22 +110,25 @@ up() {
   if [ "$existed" = 1 ]; then
     # Rebuilt images keep the same :dev tag, so Helm sees nothing to change.
     kubectl -n "$NS" rollout restart deployment/ankusa deployment/claim-check \
-      deployment/consumer deployment/control-panel
+      deployment/consumer deployment/control-panel statefulset/ankusa-durable
     kubectl -n "$NS" rollout status deployment/ankusa --timeout=300s
+    kubectl -n "$NS" rollout status statefulset/ankusa-durable --timeout=300s
     kubectl -n "$NS" rollout status deployment/control-panel --timeout=300s
   fi
 
-  echo "==> waiting for http://localhost:8080 (ingest through the gateway, panel behind it)"
-  local ingest=000 panel=000
+  echo "==> waiting for http://localhost:8080 (both ingest routes through the gateway, panel behind it)"
+  local ingest=000 durable=000 panel=000
   for _ in $(seq 1 60); do
     ingest=$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:8080/webhooks/demo \
       -H 'content-type: application/json' -d '{"id":"smoke"}' || true)
+    durable=$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:8080/webhooks/durable \
+      -H 'content-type: application/json' -d '{"id":"smoke"}' || true)
     panel=$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/health || true)
-    if [ "$ingest" = 201 ] && [ "$panel" = 200 ]; then break; fi
+    if [ "$ingest" = 201 ] && [ "$durable" = 201 ] && [ "$panel" = 200 ]; then break; fi
     sleep 2
   done
-  if [ "$ingest" != 201 ] || [ "$panel" != 200 ]; then
-    echo "error: POST /webhooks/demo returned $ingest (want 201), GET /health returned $panel (want 200)" >&2
+  if [ "$ingest" != 201 ] || [ "$durable" != 201 ] || [ "$panel" != 200 ]; then
+    echo "error: POST /webhooks/demo returned $ingest, POST /webhooks/durable returned $durable (want 201 each), GET /health returned $panel (want 200)" >&2
     kubectl -n "$NS" get pods >&2
     exit 1
   fi
@@ -133,10 +136,11 @@ up() {
   cat <<EOF
 
 ==> up
-    control panel   http://localhost:8080/
-    ingest          curl -XPOST localhost:8080/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
-    watch           kubectl -n $NS get pods,hpa,scaledobject -w
-    tear down       $DIR/run.sh down
+    control panel    http://localhost:8080/
+    ingest (direct)  curl -XPOST localhost:8080/webhooks/demo -H 'content-type: application/json' -d '{"id":"evt_1"}'
+    ingest (durable) curl -XPOST localhost:8080/webhooks/durable -H 'content-type: application/json' -d '{"id":"evt_1"}'
+    watch            kubectl -n $NS get pods,pvc,hpa,scaledobject -w
+    tear down        $DIR/run.sh down
 EOF
 }
 

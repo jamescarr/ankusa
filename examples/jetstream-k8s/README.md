@@ -1,21 +1,27 @@
-# Example: an autoscaling ankusa fleet → NATS JetStream → an autoscaling consumer, on `kind` with Helm and Istio
+# Example: an autoscaling ankusa fleet and a durable one → NATS JetStream → an autoscaling consumer, on `kind` with Helm and Istio
 
 A local Kubernetes (`kind`) cluster, installed with Helm, that you can push
 around from a browser. An Istio ingress gateway (Envoy) load-balances
 `POST /webhooks/demo` across a fleet of stateless ankusa ingest pods that
-scales on CPU. They publish to a three-node NATS JetStream cluster (an R3
-stream), and a TypeScript consumer fleet that scales on JetStream lag pulls
-from it. A Phoenix LiveView control panel, running in the same cluster, fires
-synthetic webhooks at the gateway, draws the flow live, tails what the
-consumers processed, and breaks things on request.
+scales on CPU, and `POST /webhooks/durable` across a second, durable fleet
+of three pods that store every hook on their own disk before answering. Both
+publish to a three-node NATS JetStream cluster (an R3 stream), and a
+TypeScript consumer fleet that scales on JetStream lag pulls from it. A
+Phoenix LiveView control panel, running in the same cluster, fires synthetic
+webhooks at either fleet, draws the flow live, tails what the consumers
+processed, and breaks things on request, once or on a timer.
 
 ```mermaid
 flowchart LR
     S[control panel\nload generator] -->|POST /webhooks/demo| G[Istio ingress gateway\nEnvoy]
+    S -->|POST /webhooks/durable| G
     G --> A[ankusa ×2-6\ndirect mode, HPA on CPU]
+    G --> D[ankusa-durable ×3\nwal: disk, a PVC each]
     A -->|publish, 201 on ack| N[(NATS JetStream\n3 nodes, stream ANKUSA R3)]
+    D -->|201 on disk commit,\nthen dispatch with retries| N
     N --> C[consumer ×1-8\nTypeScript, KEDA on lag]
     A -.->|body over 64 KiB| F[(floci\nS3 emulator)]
+    D -.->|body over 64 KiB| F
     C -.->|claim ref| CC[claim-check gateway]
     CC -.-> F
     C -->|request demo.consumed| P[control panel\nflow + tail + ledger]
@@ -30,6 +36,17 @@ flowchart LR
   HPA on container CPU adds and removes them freely, and a pod killed
   mid-request costs the provider one retry, not a hook. See
   [`docs/architecture.md`](../../docs/architecture.md).
+- **Durable mode (`wal.type: disk`) turns a sink outage into a backlog.** The
+  `ankusa-durable` StatefulSet's pods each commit a hook to their own RocksDB
+  store (a 1 GiB PVC) and answer `201` once it is on disk; dispatch then
+  publishes it to JetStream (subject `ankusa.durable`, inside the same
+  stream) with retries, a circuit breaker per sink and a DLQ, replayable from
+  the admin API. NATS being down is not the provider's problem: ingest keeps
+  answering `201` and the store holds the hooks until NATS is back. A killed
+  pod comes back under the same name on the same volume, with its backlog.
+  Each pod has its own store, so dedupe on the event id is per pod, and the
+  fleet has no autoscaler: scaling a pod away would strand what it holds. See
+  [`docs/delivery.md`](../../docs/delivery.md).
 - **The consumer owns the topology.** The ankusa NATS sink never creates a
   stream: the consumer creates the `ANKUSA` stream (R3, subjects `ankusa.>`)
   and its durable pull consumer `worker` on boot, and every replica shares
@@ -77,7 +94,8 @@ serves the panel:
 |URL|What|
 |---|---|
 |<http://localhost:8080/>|the control panel|
-|`POST http://localhost:8080/webhooks/demo`|ingest, through Envoy, to the ankusa fleet|
+|`POST http://localhost:8080/webhooks/demo`|ingest, through Envoy, to the direct fleet|
+|`POST http://localhost:8080/webhooks/durable`|ingest, through Envoy, to the durable fleet|
 
 `up` never tears anything down, so re-running it rebuilds the images and rolls
 the deployments. `examples/jetstream-k8s/run.sh down` deletes the cluster.
@@ -98,12 +116,14 @@ the deployments. `examples/jetstream-k8s/run.sh down` deletes the cluster.
 Watch the autoscalers while you play:
 
 ```sh
-kubectl -n ankusa-jetstream get pods,hpa,scaledobject -w
+kubectl -n ankusa-jetstream get pods,pvc,hpa,scaledobject -w
 ```
 
 ## The control panel
 
-- **Sender.** Start/Stop runs a steady stream at *rate* req/s (0-500). *Size
+- **Sender.** *Direct* / *Durable* picks the fleet it posts to
+  (`/webhooks/demo` or `/webhooks/durable`); a request already retrying keeps
+  its target. Start/Stop runs a steady stream at *rate* req/s (0-500). *Size
   min* and *size max* set each body's size, drawn uniformly between them, on a
   log scale from 64 B to 4 MiB (the slider shows the bytes; 64 KiB is position
   62.5, so *size min* ≥ 63 sends only claimed bodies). *Burst volume* sets how
@@ -113,18 +133,38 @@ kubectl -n ankusa-jetstream get pods,hpa,scaledobject -w
   event id (`x-demo-event-id`): that is what a
   webhook provider does. Requests the in-flight cap (256) holds back are
   deferred, not dropped.
-- **Flow.** sender → Envoy → ankusa pods → JetStream → consumer pods, with
-  floci and the claim-check gateway as the side path. Edge thickness and dash
-  speed follow the rate; a pod's border is green when ready, amber when not,
-  red while terminating; `✕` kills that pod. The chips under the columns show
-  the HPA's and KEDA's current/desired replicas and the CPU / lag they act on.
+- **Flow.** sender → Envoy → ankusa pods (the direct ones, then
+  `ankusa-durable-0..2`) → JetStream → consumer pods, with floci and the
+  claim-check gateway as the side path. Edge thickness and dash speed follow
+  the rate; a pod's border is green when ready, amber when not, red while
+  terminating; `✕` kills that pod. A durable pod shows its ingest rate and
+  queue (`q`), its edge to JetStream follows what it *delivers*, and while its
+  NATS breaker is open it reads `breaker open` with an amber border. The chips
+  under the columns show the HPA's and KEDA's current/desired replicas and the
+  CPU / lag they act on.
 - **Totals.** *sent*, *accepted* (answered `201`), *consumed (unique)*,
-  *duplicates* (hooks a consumer saw a second time), *failed* (gave up after
-  retries), *retried*, *in flight* and the mean *ingest latency*. The **zero
-  loss** badge is `accepted − consumed (unique)`: it turns green when it is 0,
-  the sender has stopped and JetStream is empty. "Unique" counts a hook once by
+  *duplicates (ingest / consumer)* (retries a durable pod answered
+  `"duplicate": true`, which direct mode never does / hooks a consumer saw a
+  second time), *failed* (gave up after retries), *retried*, *in flight* and
+  the mean *ingest latency*. The **zero loss** badge is
+  `accepted − consumed (unique)`: it turns green when it is 0, the sender has
+  stopped, JetStream is empty and the durable pods have nothing queued. Rows in
+  the durable fleet's DLQ are accepted but not consumed, and the badge says so
+  (`N not consumed · N in ankusa DLQ (replay)`). "Unique" counts a hook once by
   idempotency key across all consumer pods, so a hook redelivered to another pod
   is a duplicate, not a second hook.
+- **Durable store.** One row per durable pod: hooks committed (*in/s*) and
+  delivered (*out/s*) a second, *pend* (due now or being delivered), *sched*
+  (due later: backing off, or parked while the breaker is open), *dead* (out of
+  attempts: the DLQ), *brk* (the NATS sink's breaker) and the store's size on
+  disk. *Replay DLQ* starts a DLQ replay on every pod
+  (`POST :4002/v1/replays {"kind":"dlq","source_id":"durable"}`; each pod
+  replays its own store); *Kill all durable pods* SIGKILLs the three at once.
+- **Chaos.** One-shot levers (kill a pod, cut a connection, a gateway fault,
+  which hits both ingest routes) and two timed ones: *Flap a connection* denies
+  a lever for *down* seconds, allows it for *up* seconds, and repeats until
+  *Stop*, which leaves it allowed; *Rolling kills* SIGKILLs a random pod of a
+  group now and then every *every* seconds.
 - **Consumed.** The last 30 hooks the consumers processed: time (UTC), hook id,
   pod, size, `inline` or `claim`, ingest-to-consumed latency, and `dup` when a
   pod had already seen it.
@@ -153,8 +193,9 @@ CA, so there is no supported way to run it on the host.
 
 Each lever acts through the Kubernetes API with the panel's own ServiceAccount (a
 namespaced `Role`, see [`chart/templates/control-panel.yaml`](chart/templates/control-panel.yaml)).
-Start the sender first (rate ~100) unless the drill says otherwise. Every
-drill below ends with the sender stopped and the badge at **0 lost**.
+Start the sender first (rate ~100, target *Direct* unless the lever is the
+durable fleet's) unless the drill says otherwise. Every drill below ends with
+the sender stopped and the badge at **0 lost**.
 
 |Lever|What to expect|
 |---|---|
@@ -166,6 +207,18 @@ drill below ends with the sender stopped and the badge at **0 lost**.
 |**Deny `consumer → claim-check`** (set *size min* ≥ 69, ~134 KiB, so every hook is claimed; ~20 req/s)|the consumer logs `claim-check gateway unreachable` and `nak`s, `redelivered` and `ack-pending` climb and the tail goes quiet. A hook is retried for as long as it takes (the consumer's `max_deliver` is unlimited, the nak delay grows to 10 s), so *Allow* after an outage shorter than the 5-minute claim retention (2.5 minutes tried) → the backlog drains and the badge returns to 0 lost. Hold it longer and the claims expire: those hooks are dead-lettered instead.|
 |**Gateway fault: abort 50%**|about half of the attempts get `503` from Envoy and are retried: `retried` is ~0.9 × `sent`, and ~6 % of hooks (0.5⁴) exhaust their three retries and count as `failed`; `accepted + failed = sent`.|
 |**Gateway fault: delay 2000 ms, 100%**|the *ingest latency* reads ~2 s and *in flight* climbs to rate × 2 s (100 at 50/s); nothing fails, and everything is consumed once the fault is cleared.|
+
+The durable fleet, target *Durable*, rate 100, bodies 512 B-4 KiB. The
+numbers are from one run each:
+
+|Lever|What to expect|
+|---|---|
+|**Deny `ankusa-durable → NATS`** (120 s)|ingest does not notice: `accepted` keeps rising at the full rate, `failed` and `retried` stay 0. Each pod's breaker opens within seconds (*brk* `open`, amber boxes) and the backlog sits in *sched*: ~12 000 rows after 120 s. *Allow* → the breakers close on their next probe and the backlog drains (84 s). Compare **Deny `ankusa → NATS`** for 40 s on the direct fleet: 639 `failed`, 2 517 `retried`.|
+|**Kill a durable pod** (`✕`) during a deny|it comes back in ~15 s under the same name, on the same volume, with its backlog: 808 queued before the kill, 895 at its first reading (it had taken 184 new hooks by then).|
+|**Kill all durable pods** during a deny|all three are back in ~7 s with their backlogs (5 116 queued before, each pod's count plus what it took since). The sender's requests in the gap are retried, and the ones that outlast three retries count as `failed` (~100 here); nothing accepted is lost.|
+|**Flap `ankusa-durable → NATS`** (down 20 s / up 20 s, 4 min)|`failed` stays 0; the breakers open and close with the flap, *out/s* is 0 while down and catches up while up. Nothing is dead-lettered: an open breaker parks rows without spending attempts, so even `durable.retry.max_attempts: 4` gave 0 dead. The same flap on `ankusa → NATS` with target *Direct* (2 min): 451 `failed`, 2 885 `retried`.|
+|**DLQ and Replay DLQ** (`helm upgrade … --set durable.breaker.failures=0 --set durable.retry.max_attempts=4`, then a 30 s deny)|with the breaker off, a row is dead-lettered after its 4th failed attempt (~3.5 s): 1 497 *dead*, and once the backlog has drained the badge reads `1,497 not consumed · 1,497 in ankusa DLQ (replay)`. *Replay DLQ* → *dead* back to 0 and the badge to 0 lost within 15 s. Re-run `run.sh` to restore the chart's values.|
+|**Rolling kills: `nats` every 30 s** (3 min)|7 NATS pods killed, the stream's leader moves several times; target *Durable*: 0 `retried`, 0 `failed`; target *Direct*: 54 `retried`, 0 `failed`.|
 
 The deny levers take up to ~10 s: a new connection is refused at once, but an
 established one (a NATS connection is long-lived) is only cut when Envoy
@@ -192,10 +245,14 @@ Things you may notice, none of them a bug:
   same upgrade). floci is a demo store; use a real bucket.
 - Direct mode never collapses duplicates at ingest: every provider retry that
   gets a `201` is a new JetStream message, so duplicate handling is entirely
-  the consumers' job, fleet-wide. Each consumer pod here remembers the last
-  20 000 idempotency keys it saw, which is a demo shortcut, not a guarantee: two
-  pods can process the same hook, and the panel counts it once. A real consumer
-  needs a store shared by all its replicas (a unique key in its database).
+  the consumers' job, fleet-wide. The durable fleet does collapse them, per
+  pod: a retry that reaches the pod that stored the hook is answered
+  `"duplicate": true` (ten posts of one event id gave three hooks, one per pod,
+  and seven duplicates); one that reaches another pod is stored again. Each
+  consumer pod here remembers the last 20 000 idempotency keys it saw, which is
+  a demo shortcut, not a guarantee: two pods can process the same hook, and the
+  panel counts it once. A real consumer needs a store shared by all its
+  replicas (a unique key in its database).
 
 ## Why the chart looks the way it does
 
@@ -204,7 +261,12 @@ Things you may notice, none of them a bug:
   `ClaimRejectedError` (the consumer would `term` the hook, losing it). On a
   TCP port the connection is reset, which is retryable.
 - `demo-routes` sets `retries: {attempts: 0}`. Istio's default retries a `503`
-  twice, which would hide what the ingest fleet actually returned.
+  twice, which would hide what the ingest fleet actually returned. Its two
+  ingest routes come first, direct then durable: the gateway fault lever
+  patches `/spec/http/0/fault` and `/spec/http/1/fault` by index.
+- The durable fleet is a StatefulSet with a `volumeClaimTemplate`, so a pod
+  that dies comes back with its own store, and has no HPA. Its pods all start
+  at once (`podManagementPolicy: Parallel`); they share nothing.
 - The Erlang containers (ankusa, claim-check, the panel) start through
   `ulimit -n 65536`. A kind node's containerd has `LimitNOFILE=infinity`, so a
   pod starts with a limit of about a billion open files, the VM sizes its
@@ -224,6 +286,9 @@ Things you may notice, none of them a bug:
   within a minute and sits at ~60 %. Large claimed bodies cost more CPU
   (sha256, packing, S3 signing), but the sender caps those at 2 MiB/s (see
   above).
+- **ankusa-durable**: fixed at three replicas (`durable.replicas`). A pod's
+  store holds hooks until they are delivered, so removing one is a decision,
+  not something an autoscaler should make on CPU.
 - **consumer**: a KEDA `ScaledObject` with the `nats-jetstream` trigger on the
   `worker` consumer's lag, 50 messages per replica, 1-8 pods. Each replica
   handles one hook at a time with a simulated 25 ms of work (`WORK_MS`), about
@@ -242,7 +307,7 @@ Things you may notice, none of them a bug:
 |---|---|
 |`run.sh`|`up` / `down`|
 |`infra/`|kind config and the Helm values for Istio, NATS|
-|`chart/`|this example's chart: ankusa, claim-check, floci, consumer, KEDA `ScaledObject`, control panel, Istio `Gateway`/`VirtualService`|
+|`chart/`|this example's chart: the direct ankusa Deployment, the durable `ankusa-durable` StatefulSet, claim-check, floci, consumer, KEDA `ScaledObject`, control panel, Istio `Gateway`/`VirtualService`|
 |`consumer/`|the TypeScript JetStream consumer, built on [`packages/sdk-typescript`](../../packages/sdk-typescript)|
 |`control_panel/`|the Phoenix LiveView control panel|
 
