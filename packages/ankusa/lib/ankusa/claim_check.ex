@@ -4,11 +4,12 @@ defmodule Ankusa.ClaimCheck do
   hand each one back by reference.
 
   Ankusa's dispatch pipeline is the only writer. It writes directly to the
-  instance's `Ankusa.BlobStore`, packing every claim a WAL read batch needs for
-  one tenant into one object (`Ankusa.ClaimCheck.Pack`), so one `PUT` covers
-  many claims. Each claim gets an `Ankusa.ClaimCheck.Ref` (a URN naming its
-  tenant and claim id) and the sha256 of its bytes, which travel together as
-  a `t:claim/0`.
+  instance's claim stores (`Ankusa.ClaimCheck.Stores`: one or more object
+  stores, with failover between them), packing every claim a WAL read batch
+  needs for one tenant into one object (`Ankusa.ClaimCheck.Pack`), so one
+  `PUT` covers many claims. Each claim gets an `Ankusa.ClaimCheck.Ref` (a URN
+  naming its tenant and claim id) and the sha256 of its bytes, which travel
+  together as a `t:claim/0`.
 
   Readers either call `redeem/3` in-process, fetch
   `GET /v1/claims/<tenant>/<claim_id>` from a `:claim_check`-role node
@@ -28,8 +29,8 @@ defmodule Ankusa.ClaimCheck do
 
   require Logger
 
-  alias Ankusa.ClaimCheck.{Pack, Ref}
-  alias Ankusa.{BlobStore, Config, Telemetry}
+  alias Ankusa.ClaimCheck.{Pack, Ref, Stores}
+  alias Ankusa.{Config, Telemetry}
 
   # ZIP without ZIP64 caps an archive at 65,535 entries (two are the index and
   # the manifest) and 4 GiB; a claim id's 16 position bits cap it at 65,536. Packs split well inside both regardless of pack_max_bytes.
@@ -67,7 +68,8 @@ defmodule Ankusa.ClaimCheck do
   @doc """
   Store `items` for one tenant as a single pack object, with one `PUT`.
 
-  Returns a `t:claim/0` per item id once the write is durable. opts:
+  Returns a `t:claim/0` per item id once the write is durable in one of the
+  claim stores (`Ankusa.ClaimCheck.Stores.write/5`). opts:
 
     * `:pack_id` — the pack's id (`Ankusa.ClaimCheck.Ref.pack_id/2`); default
       a freshly minted one (`Ref.new_pack_id/0`: now plus 64 random bits).
@@ -81,20 +83,18 @@ defmodule Ankusa.ClaimCheck do
     result =
       with :ok <- Ref.validate_tenant(tenant_id),
            :ok <- Ref.validate_pack_id(pack_id) do
+        config = Ankusa.config(instance)
+
         claims =
           items
           |> Enum.with_index()
           |> Enum.map(fn {item, index} -> claim(item, Ref.claim_id(pack_id, index)) end)
 
         {data, _placements} = Pack.build(claims)
-        key = Ref.object_key(tenant_id, pack_id)
+        key = Ref.object_key(tenant_id, pack_id, config.claim_check.key_layout)
 
-        case put(instance, key, data) do
-          :ok ->
-            {:ok, Map.new(claims, &{&1.id, checked_in(tenant_id, &1)})}
-
-          {:error, reason} ->
-            {:error, {:unavailable, reason}}
+        with {:ok, store} <- Stores.write(instance, config, pack_id, key, data) do
+          {:ok, Map.new(claims, &{&1.id, checked_in(tenant_id, &1)}), store}
         end
       end
 
@@ -109,11 +109,15 @@ defmodule Ankusa.ClaimCheck do
         instance: instance,
         tenant_id: tenant_id,
         pack_id: pack_id,
-        result: result_tag(result)
+        result: result_tag(result),
+        store: store(result)
       }
     )
 
-    result
+    case result do
+      {:ok, claims, _store} -> {:ok, claims}
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc """
@@ -184,8 +188,16 @@ defmodule Ankusa.ClaimCheck do
     result
   end
 
-  @typedoc "A claim's pack (object key), and the claim's offset and length in it."
-  @type location :: %{key: String.t(), offset: non_neg_integer(), length: non_neg_integer()}
+  @typedoc """
+  A claim's pack: the index of the claim store it was found in, its object
+  key there, and the claim's offset and length in it.
+  """
+  @type location :: %{
+          store: non_neg_integer(),
+          key: String.t(),
+          offset: non_neg_integer(),
+          length: non_neg_integer()
+        }
 
   @doc """
   Read a claim's bytes, with no digest check: `locate/3`, then `read_bytes/4`
@@ -201,18 +213,23 @@ defmodule Ankusa.ClaimCheck do
 
   @doc """
   Find a claim without reading it: one ranged read of its pack's index, up to
-  the claim's row. A claim id past the end of the index, or a missing pack, is
-  `:not_found`.
+  the claim's row, searching every claim store under both key layouts
+  (`Ankusa.ClaimCheck.Stores.read_range/6`). A claim id past the end of the
+  index, or a pack no store has, is `:not_found`; a pack not found while some
+  store could not answer is that store's error.
   """
   @spec locate(atom(), String.t(), String.t()) :: {:ok, location()} | {:error, reason()}
   def locate(instance, tenant_id, claim_id) do
     with :ok <- Ref.validate_tenant(tenant_id),
          {:ok, pack_id, index} <- Ref.locate(claim_id) do
-      key = Ref.object_key(tenant_id, pack_id)
+      config = Ankusa.config(instance)
+      keys = Ref.object_keys(tenant_id, pack_id, config.claim_check.key_layout)
+      prefix_bytes = Pack.index_prefix_bytes(index)
 
-      with {:ok, prefix} <- get_range(instance, key, 0, Pack.index_prefix_bytes(index)),
+      with {:ok, prefix, store, key} <-
+             Stores.read_range(instance, config, pack_id, keys, 0, prefix_bytes),
            {:ok, offset, length} <- pack_entry(prefix, index) do
-        {:ok, %{key: key, offset: offset, length: length}}
+        {:ok, %{store: store, key: key, offset: offset, length: length}}
       end
     end
   end
@@ -224,8 +241,10 @@ defmodule Ankusa.ClaimCheck do
   """
   @spec read_bytes(atom(), location(), non_neg_integer(), non_neg_integer()) ::
           {:ok, binary()} | {:error, reason()}
-  def read_bytes(instance, %{key: key, offset: offset}, first, length) do
-    case get_range(instance, key, offset + first, length) do
+  def read_bytes(_instance, _location, _first, 0), do: {:ok, <<>>}
+
+  def read_bytes(instance, %{store: store, key: key, offset: offset}, first, length) do
+    case Stores.get_range(instance, Ankusa.config(instance), store, key, offset + first, length) do
       {:ok, bin} when byte_size(bin) == length -> {:ok, bin}
       {:ok, _short} -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
@@ -239,11 +258,14 @@ defmodule Ankusa.ClaimCheck do
     * `claim_check.pack_max_bytes` must be a positive integer
     * `claim_check.retention_days` must be `nil` or an integer >= 1, and
       `claim_check.sweep_interval_ms` an integer >= 1
-    * `claim_check.retention_days` set with a non-`LocalFS` claim store (the
+    * `claim_check.blob_stores` must be `nil` or a non-empty list of
+      `{module, opts}`; `claim_check.placement` `:ordered` or `:hash`;
+      `claim_check.key_layout` `:flat` or `:sharded`
+    * `claim_check.retention_days` set with any non-`LocalFS` claim store (the
       sweeper only ever covers `LocalFS`; S3/GCS need a bucket lifecycle rule)
     * `max_body_bytes` of 4 GiB or more: a pack can't hold a body that large
 
-  A `:claim_check`-only node whose claim store is `LocalFS` boots with a
+  A `:claim_check`-only node with a `LocalFS` claim store boots with a
   warning: the gateway reads its own disk, and other nodes' claims are only
   there if that directory is shared with them.
   """
@@ -269,36 +291,51 @@ defmodule Ankusa.ClaimCheck do
             "max_body_bytes must be under 4 GiB: a claim pack can't hold a larger body"
     end
 
-    {store, _opts} = claim_store(config)
-
-    if cc.retention_days != nil and store != Ankusa.BlobStore.LocalFS do
+    unless cc.blob_stores == nil or valid_stores?(cc.blob_stores) do
       raise ArgumentError,
-            "claim_check.retention_days is set but the claim store is #{inspect(store)} — " <>
-              "the LocalFS sweeper doesn't cover it. Use a bucket lifecycle rule on the " <>
-              "claims/ prefix instead, and leave retention_days nil."
+            "claim_check.blob_stores must be nil or a non-empty list of {module, opts}, " <>
+              "got #{inspect(cc.blob_stores)}"
     end
 
-    if store == Ankusa.BlobStore.LocalFS and Config.role?(config, :claim_check) and
+    unless cc.placement in [:ordered, :hash] do
+      raise ArgumentError,
+            "claim_check.placement must be :ordered or :hash, got #{inspect(cc.placement)}"
+    end
+
+    unless cc.key_layout in [:flat, :sharded] do
+      raise ArgumentError,
+            "claim_check.key_layout must be :flat or :sharded, got #{inspect(cc.key_layout)}"
+    end
+
+    modules = for {_index, mod, _opts} <- Stores.list(config), do: mod
+
+    case Enum.find(modules, &(&1 != Ankusa.BlobStore.LocalFS)) do
+      store when store != nil and cc.retention_days != nil ->
+        raise ArgumentError,
+              "claim_check.retention_days is set but the claim store is #{inspect(store)} — " <>
+                "the LocalFS sweeper doesn't cover it. Use a bucket lifecycle rule on the " <>
+                "claims/ prefix instead, and leave retention_days nil."
+
+      _ ->
+        :ok
+    end
+
+    if Ankusa.BlobStore.LocalFS in modules and Config.role?(config, :claim_check) and
          not Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
       Logger.warning(
         "[ankusa] the claim gateway reads claims from local disk (LocalFS); other nodes' " <>
           "claims are not here unless this directory is shared with them. Point " <>
-          "claim_check.blob_store at the store the dispatch nodes write to."
+          "claim_check.blob_stores at the stores the dispatch nodes write to."
       )
     end
 
     :ok
   end
 
-  @doc """
-  The store claim packs live in: `claim_check.blob_store`, else
-  `storage.blob_store`. Claim keys are never prefixed.
-  """
-  @spec claim_store(Config.t()) :: {module(), keyword()}
-  def claim_store(%Config{} = config) do
-    {mod, opts, _prefix} = BlobStore.resolve_config(config, :claims)
-    {mod, opts}
-  end
+  defp valid_stores?([_ | _] = stores),
+    do: Enum.all?(stores, &match?({mod, opts} when is_atom(mod) and is_list(opts), &1))
+
+  defp valid_stores?(_), do: false
 
   # ── internals ─────────────────────────────────────────────────────────────
 
@@ -320,24 +357,6 @@ defmodule Ankusa.ClaimCheck do
     case Pack.locate(prefix, index) do
       {:ok, offset, length} -> {:ok, offset, length}
       :error -> {:error, :not_found}
-    end
-  end
-
-  # A read that starts past the end of an object comes back empty (LocalFS
-  # answers :eof; S3 and GCS answer 416), and one that runs past the end comes
-  # back short; the caller decides what a short read means. A 403 is the store
-  # refusing the gateway's credential (an S3 credential without
-  # `s3:ListBucket` answers 403 for a missing key, too).
-  defp get_range(_instance, _key, _offset, 0), do: {:ok, <<>>}
-
-  defp get_range(instance, key, offset, length) do
-    case BlobStore.get_range(instance, :claims, key, offset, length) do
-      {:ok, bin} -> {:ok, bin}
-      {:error, :not_found} -> {:error, :not_found}
-      {:error, :eof} -> {:ok, <<>>}
-      {:error, {:status, 416, _body}} -> {:ok, <<>>}
-      {:error, {:status, 403, _body}} -> {:error, :forbidden}
-      {:error, reason} -> {:error, {:unavailable, reason}}
     end
   end
 
@@ -368,28 +387,15 @@ defmodule Ankusa.ClaimCheck do
       byte_size(content_type)
   end
 
-  # A blob store is external code, and so is a `:token_provider` it calls (a
-  # `GenServer.call` into Goth or the like): a raise, exit, throw or a stray
-  # return in its write is an unavailable store, not a crashed caller. Under
-  # `wal: :none` the caller is the request.
-  defp put(instance, key, data) do
-    case BlobStore.put(instance, :claims, key, data) do
-      :ok -> :ok
-      {:error, _reason} = error -> error
-      other -> {:error, {:bad_return, other}}
-    end
-  rescue
-    error -> {:error, error}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
-    :throw, value -> {:error, {:throw, value}}
-  end
-
   defp item_result({:ok, refs}, id), do: {:ok, Map.fetch!(refs, id)}
   defp item_result({:error, reason}, _id), do: {:error, reason}
 
   defp sha256(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
 
-  defp result_tag({:ok, _}), do: :ok
+  defp result_tag({:ok, _bin}), do: :ok
+  defp result_tag({:ok, _claims, _store}), do: :ok
   defp result_tag({:error, reason}), do: reason
+
+  defp store({:ok, _claims, store}), do: store
+  defp store({:error, _reason}), do: nil
 end

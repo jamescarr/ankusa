@@ -230,14 +230,15 @@ whatever answers the sink) is the only shared state. See
 ```
 
 Callers go through the facade, which names a **scope** on every call —
-`Ankusa.BlobStore.put(instance, :segments | :claims, key, data)` and so on.
-`:segments` resolves `storage.blob_store`; `:claims` resolves
-`claim_check.blob_store`, else the segment store. `storage.key_prefix` is
-applied once, when the compactor names a new segment
+`Ankusa.BlobStore.put(instance, :segments | :backup, key, data)` and so on.
+`:segments` resolves `storage.blob_store`. `storage.key_prefix` is applied
+once, when the compactor names a new segment
 (`Ankusa.BlobStore.object_key/3`), and the archive catalogue records the full
 key, which every later read uses verbatim: changing the prefix moves new
 segments only and never strands archived ones. `list/3` lists this node's
-segments under its prefix and returns full keys. Claims are never prefixed.
+segments under its prefix and returns full keys. Claim packs bypass the
+facade: `Ankusa.ClaimCheck.Stores` writes and reads them across
+`claim_check.blob_stores` (failing over between stores), never prefixed.
 Adapters see full keys and stay prefix-unaware.
 
 `list/3` returns `{:ok, keys}` or `{:error, reason}` — a listing that failed
@@ -259,8 +260,10 @@ Two independent namespaces share one `BlobStore` by default and never
 collide: `seg/...` (each segment written by `Ankusa.Storage.Compactor`, plus
 its sibling `.idx` index object, under `storage.key_prefix`) and `claims/...`
 (`Ankusa.ClaimCheck`, packed per tenant per dispatch batch, one object holding
-many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`; or in their own
-store with `claim_check.blob_store`). Retention differs per namespace too. See
+many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
+`claims/tenant=<t>/shard=<c>/dt=<day>/<pack_id>` with
+`claim_check.key_layout: :sharded`; or in stores of their own with
+`claim_check.blob_stores`). Retention differs per namespace too. See
 [`claim-check.md#retention`](claim-check.md#retention).
 
 | Adapter | Deps | Notes |

@@ -82,13 +82,28 @@ defmodule Ankusa.ClaimCheck.RefTest do
     before_midnight = Ref.pack_id(last_ms_of_day, @entropy)
     after_midnight = Ref.pack_id(last_ms_of_day + 1, @entropy)
 
-    assert Ref.object_key("acme", before_midnight) ==
+    assert Ref.object_key("acme", before_midnight, :flat) ==
              "claims/tenant=acme/dt=2026-09-23/#{before_midnight}"
 
-    assert Ref.object_key("acme", after_midnight) ==
+    assert Ref.object_key("acme", after_midnight, :flat) ==
              "claims/tenant=acme/dt=2026-09-24/#{after_midnight}"
 
-    assert Ref.key(%Ref{tenant_id: "acme", claim_id: Ref.claim_id(after_midnight, 7)}) ==
-             Ref.object_key("acme", after_midnight)
+    assert Ref.key(%Ref{tenant_id: "acme", claim_id: Ref.claim_id(after_midnight, 7)}, :flat) ==
+             Ref.object_key("acme", after_midnight, :flat)
+  end
+
+  test "the sharded layout puts shard=<the id's eleventh character> between tenant and dt" do
+    sharded = "claims/tenant=acme/shard=A/dt=2026-09-24/#{@pack_id}"
+    flat = "claims/tenant=acme/dt=2026-09-24/#{@pack_id}"
+
+    assert Ref.shard(@pack_id) == "A"
+    assert Ref.object_key("acme", @pack_id, :sharded) == sharded
+    assert Ref.object_key("acme", @pack_id, :flat) == flat
+    assert Ref.object_keys("acme", @pack_id, :sharded) == [sharded, flat]
+    assert Ref.object_keys("acme", @pack_id, :flat) == [flat, sharded]
+
+    # every claim of the pack shares the pack's shard, so a ref alone finds it
+    assert Ref.shard(Ref.claim_id(@pack_id, 0xFFFF)) == "A"
+    assert Ref.key(%Ref{tenant_id: "acme", claim_id: @claim_id}, :sharded) == sharded
   end
 end

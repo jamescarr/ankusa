@@ -92,9 +92,21 @@ defmodule Ankusa.Config do
               # LocalFS retention only; nil disables the sweeper
               retention_days: nil,
               sweep_interval_ms: 3_600_000,
-              # {module, opts} for claim packs; nil = storage.blob_store. Claim
-              # keys are never prefixed, so one gateway reads every node's claims.
-              blob_store: nil
+              # [{module, opts}, ...] claim packs are written to; nil =
+              # [storage.blob_store]. Claim keys are never prefixed, so one
+              # gateway reads every node's claims.
+              blob_stores: nil,
+              # which store a new pack goes to: :ordered = the first, the others
+              # only while it is down; :hash = the pack id's random bits pick
+              # one, the rest take over when it fails
+              placement: :ordered,
+              # a store whose write failed is skipped for this long (ms) before
+              # it is tried again
+              store_cooldown_ms: 30_000,
+              # :flat = claims/tenant=<t>/dt=<d>/<pack>; :sharded adds
+              # shard=<c>/ under the tenant (32 prefixes per tenant) — see
+              # Ankusa.ClaimCheck.Ref
+              key_layout: :flat
             },
             # continuous backup of the store to an object store, and restore into
             # an empty data_dir at boot (see Ankusa.Store.Backup). Off by default.
@@ -311,6 +323,7 @@ defmodule Ankusa.Config do
     {[:dispatch, :max_inflight_bytes], "dispatch.max_inflight_bytes"},
     {[:storage, :roll_bytes], "storage.roll_bytes"},
     {[:claim_check, :sweep_interval_ms], "claim_check.sweep_interval_ms"},
+    {[:claim_check, :store_cooldown_ms], "claim_check.store_cooldown_ms"},
     {[:backup, :interval_ms], "backup.interval_ms"},
     {[:backup, :keep], "backup.keep"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},

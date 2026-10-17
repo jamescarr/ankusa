@@ -224,6 +224,20 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
+        "ankusa.claim_check.store_breaker.transitions.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :store_breaker],
+          tags: [:instance, :store, :state]
+        )
+      ),
+      counter(
+        "ankusa.blob_store.retries.total",
+        scoped(own,
+          event_name: [:ankusa, :blob_store, :retry],
+          tags: [:instance, :status]
+        )
+      ),
+      counter(
         "ankusa.lifecycle.delivered.total",
         scoped(own,
           event_name: [:ankusa, :lifecycle, :delivered],
@@ -303,6 +317,7 @@ defmodule Ankusa.Metrics do
   end
 
   defp normalize_value({tag, _rest}), do: tag
+  defp normalize_value(v) when is_integer(v), do: Integer.to_string(v)
   defp normalize_value(_other), do: :other
 
   defp oldest_due_age_seconds(%{oldest_due_age_ms: ms}), do: ms / 1000

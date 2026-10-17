@@ -85,6 +85,7 @@ defmodule Ankusa.Instance do
     children =
       [{Ankusa.Instance.RegistryWatch, config.instance}] ++
         metrics_children(config, opts) ++
+        claim_store_children(opts) ++
         store_children(config, opts) ++
         backup_children(config, opts) ++
         source_store_children(config, opts) ++
@@ -118,6 +119,11 @@ defmodule Ankusa.Instance do
       do: isolated(config, :metrics, [{Ankusa.Metrics, opts}, {Ankusa.Metrics.Gauges, opts}]),
       else: []
   end
+
+  # The claim stores' write breakers (`Ankusa.ClaimCheck.Stores`): an ETS
+  # table every claim writer shares — dispatch, the edge's direct-mode
+  # publish — so it starts before them. One small process, in every role.
+  defp claim_store_children(opts), do: [{Ankusa.ClaimCheck.Stores, opts}]
 
   # The node's local store. Roles that read or write hooks, deliveries or the
   # archive need it; a writable source store needs it too, because it is where

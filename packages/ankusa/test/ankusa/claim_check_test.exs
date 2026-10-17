@@ -2,7 +2,8 @@ defmodule Ankusa.ClaimCheckTest do
   use ExUnit.Case, async: false
 
   alias Ankusa.{ClaimCheck, Config, UUIDv7}
-  alias Ankusa.ClaimCheck.Ref
+  alias Ankusa.BlobStore.LocalFS
+  alias Ankusa.ClaimCheck.{Ref, Stores}
   alias Ankusa.Test.CountingBlobStore
 
   setup do
@@ -23,6 +24,46 @@ defmodule Ankusa.ClaimCheckTest do
     }
 
     Ankusa.put_config(config)
+  end
+
+  # One `CountingBlobStore` claim store per entry of `stores_opts`, each on a
+  # tmp root of its own unless the entry names one. Returns the roots.
+  defp use_stores(%{config: config}, stores_opts, claim_check \\ %{}) do
+    stores =
+      for opts <- stores_opts do
+        {root, opts} =
+          Keyword.pop_lazy(opts, :root, fn ->
+            root =
+              Path.join(System.tmp_dir!(), "ankusa_claims_#{System.unique_integer([:positive])}")
+
+            on_exit(fn -> File.rm_rf(root) end)
+            root
+          end)
+
+        {CountingBlobStore, [pid: self(), root: root] ++ opts}
+      end
+
+    cc = config.claim_check |> Map.merge(claim_check) |> Map.put(:blob_stores, stores)
+    Ankusa.put_config(%{config | claim_check: cc})
+    Enum.map(stores, fn {_mod, opts} -> opts[:root] end)
+  end
+
+  # Telemetry `events` of this test's instance, as `{:telemetry, event, meta}`.
+  defp attach(inst, events) do
+    handler = "claim-check-test-#{System.unique_integer([:positive])}"
+    test = self()
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        events,
+        fn event, _measurements, meta, _config ->
+          if meta.instance == inst, do: send(test, {:telemetry, event, meta})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
   end
 
   defp item(tenant, body), do: %{id: UUIDv7.generate(), tenant_id: tenant, body: body}
@@ -70,13 +111,16 @@ defmodule Ankusa.ClaimCheckTest do
     {:ok, claims} = ClaimCheck.check_in(inst, "acme", [a])
     %{ref: ref, sha256: sha256} = claims[a.id]
 
-    {:ok, packed} = Ankusa.BlobStore.get(inst, :claims, Ref.key(ref))
+    [{0, mod, opts}] = Stores.list(Ankusa.config(inst))
+    key = Ref.key(ref, :flat)
+
+    {:ok, packed} = mod.get(inst, key, opts)
     tampered = :binary.replace(packed, "original", "ORIGINAL")
-    :ok = Ankusa.BlobStore.put(inst, :claims, Ref.key(ref), tampered)
+    :ok = mod.put(inst, key, tampered, opts)
 
     assert {:error, :integrity_mismatch} = ClaimCheck.redeem(inst, ref, sha256)
 
-    :ok = Ankusa.BlobStore.put(inst, :claims, Ref.key(ref), packed)
+    :ok = mod.put(inst, key, packed, opts)
     assert {:error, :integrity_mismatch} = ClaimCheck.redeem(inst, ref, String.upcase(sha256))
   end
 
@@ -198,22 +242,55 @@ defmodule Ankusa.ClaimCheckTest do
                    end
     end
 
-    test "retention is judged against the claim store, not the segment store" do
+    test "retention is judged against the claim stores, not the segment store" do
       s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
 
       dedicated_local =
         Config.new(
           storage: %{blob_store: s3},
-          claim_check: %{retention_days: 7, blob_store: {Ankusa.BlobStore.LocalFS, root: "/x"}}
+          claim_check: %{retention_days: 7, blob_stores: [{LocalFS, root: "/x"}]}
         )
 
       assert :ok = ClaimCheck.validate_config!(dedicated_local)
 
-      dedicated_s3 = Config.new(claim_check: %{retention_days: 7, blob_store: s3})
+      dedicated_s3 = Config.new(claim_check: %{retention_days: 7, blob_stores: [s3]})
 
       assert_raise ArgumentError, ~r/bucket lifecycle rule/, fn ->
         ClaimCheck.validate_config!(dedicated_s3)
       end
+
+      # one non-LocalFS store among several is enough to refuse
+      mixed =
+        Config.new(claim_check: %{retention_days: 7, blob_stores: [s3, {LocalFS, root: "/x"}]})
+
+      assert_raise ArgumentError,
+                   ~r/claim store is Ankusa.BlobStore.S3 .* bucket lifecycle rule/,
+                   fn ->
+                     ClaimCheck.validate_config!(mixed)
+                   end
+    end
+
+    test "rejects a malformed blob_stores, placement or key_layout" do
+      for bad <- [[], {LocalFS, []}, [LocalFS], [{LocalFS, %{}}], [{"LocalFS", []}]] do
+        assert_raise ArgumentError,
+                     "claim_check.blob_stores must be nil or a non-empty list of {module, opts}, " <>
+                       "got #{inspect(bad)}",
+                     fn ->
+                       ClaimCheck.validate_config!(Config.new(claim_check: %{blob_stores: bad}))
+                     end
+      end
+
+      assert_raise ArgumentError,
+                   "claim_check.placement must be :ordered or :hash, got :random",
+                   fn ->
+                     ClaimCheck.validate_config!(Config.new(claim_check: %{placement: :random}))
+                   end
+
+      assert_raise ArgumentError,
+                   "claim_check.key_layout must be :flat or :sharded, got :hashed",
+                   fn ->
+                     ClaimCheck.validate_config!(Config.new(claim_check: %{key_layout: :hashed}))
+                   end
     end
   end
 
@@ -230,7 +307,7 @@ defmodule Ankusa.ClaimCheckTest do
         config
         | claim_check: %{
             config.claim_check
-            | blob_store: {Ankusa.BlobStore.LocalFS, root: claims_root}
+            | blob_stores: [{LocalFS, root: claims_root}]
           }
       })
 
@@ -238,14 +315,126 @@ defmodule Ankusa.ClaimCheckTest do
       {:ok, claims} = ClaimCheck.check_in(inst, "acme", [a])
       %{ref: ref} = claims[a.id]
 
-      assert File.exists?(Path.join(claims_root, Ref.key(ref)))
-      refute File.exists?(Path.join(Config.path(config, "segments"), Ref.key(ref)))
+      assert File.exists?(Path.join(claims_root, Ref.key(ref, :flat)))
+      refute File.exists?(Path.join(Config.path(config, "segments"), Ref.key(ref, :flat)))
       assert {:ok, "dedicated bytes"} = ClaimCheck.read(inst, "acme", ref.claim_id)
     end
   end
 
+  describe "stores" do
+    test ":ordered writes to the first store, and to the next while it fails", ctx do
+      attach(ctx.inst, [[:ankusa, :claim_check, :check_in]])
+      [root_0, root_1] = use_stores(ctx, [[fail_tenant: "acme"], []])
+      a = item("acme", "failed over")
+
+      assert {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [a])
+      key = Ref.key(claims[a.id].ref, :flat)
+
+      refute File.exists?(Path.join(root_0, key))
+      assert File.exists?(Path.join(root_1, key))
+      assert {:ok, "failed over"} = redeem(ctx.inst, claims[a.id])
+      assert_received {:telemetry, [:ankusa, :claim_check, :check_in], %{store: 1, result: :ok}}
+    end
+
+    test ":hash spreads packs by the pack id's random bits, and each redeems", ctx do
+      roots = use_stores(ctx, [[], []], %{placement: :hash})
+      ms = System.system_time(:millisecond)
+
+      for {entropy, home} <- [{<<0::64>>, 0}, {<<1::64>>, 1}] do
+        pack_id = Ref.pack_id(ms, entropy)
+        a = item("acme", "home #{home}")
+
+        {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [a], pack_id: pack_id)
+        key = Ref.object_key("acme", pack_id, :flat)
+
+        for {root, index} <- Enum.with_index(roots) do
+          assert File.exists?(Path.join(root, key)) == (index == home)
+        end
+
+        assert {:ok, a.body} == redeem(ctx.inst, claims[a.id])
+      end
+    end
+
+    @tag :capture_log
+    test "a failed store is skipped for store_cooldown_ms, then tried again", ctx do
+      start_supervised!({Stores, instance: ctx.inst})
+      attach(ctx.inst, [[:ankusa, :claim_check, :store_breaker]])
+      {:ok, failures} = Agent.start_link(fn -> 1 end)
+      # long enough to outlast store 1's durable (fsynced) write of the first pack
+      [root_0, root_1] = use_stores(ctx, [[failures: failures], []], %{store_cooldown_ms: 500})
+
+      # store 0 fails, store 1 takes the pack, store 0's breaker opens
+      assert {:ok, _claims} = ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "1")])
+      assert length(puts()) == 2
+      assert_received {:telemetry, _event, %{store: 0, state: :open}}
+
+      # inside the cooldown store 0 is not even tried
+      b = item("acme", "2")
+      assert {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [b])
+      assert length(puts()) == 1
+      assert File.exists?(Path.join(root_1, Ref.key(claims[b.id].ref, :flat)))
+
+      # after it, store 0 is tried again, takes the pack, and its breaker closes
+      Process.sleep(550)
+      c = item("acme", "3")
+      assert {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [c])
+      assert length(puts()) == 1
+      assert File.exists?(Path.join(root_0, Ref.key(claims[c.id].ref, :flat)))
+      assert_received {:telemetry, _event, %{store: 0, state: :closed}}
+      refute_received {:telemetry, _event, %{state: :open}}
+    end
+
+    test "every store failing is :unavailable with each store's reason, in attempt order", ctx do
+      use_stores(ctx, [[fail_tenant: "acme"], [fail_tenant: "acme"]])
+
+      assert {:error, {:unavailable, [{0, :injected_failure}, {1, :injected_failure}]}} =
+               ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "nowhere")])
+
+      assert length(puts()) == 2
+    end
+
+    test "a miss is :not_found only when every store answered", ctx do
+      ref = %Ref{tenant_id: "acme", claim_id: Ref.claim_id(Ref.new_pack_id(), 0)}
+      digest = String.duplicate("0", 64)
+
+      use_stores(ctx, [[range_error: :econnrefused], []])
+      assert {:error, {:unavailable, :econnrefused}} = ClaimCheck.redeem(ctx.inst, ref, digest)
+
+      use_stores(ctx, [[], []])
+      assert {:error, :not_found} = ClaimCheck.redeem(ctx.inst, ref, digest)
+    end
+
+    test "a read searches past a store that cannot answer to the one holding the pack", ctx do
+      [root_0, root_1] = use_stores(ctx, [[], []], %{placement: :hash})
+      pack_id = Ref.pack_id(System.system_time(:millisecond), <<1::64>>)
+      a = item("acme", "in store 1")
+      {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [a], pack_id: pack_id)
+
+      # the pack's home is now store 0, which errors on every read
+      use_stores(ctx, [[root: root_0, range_error: :econnrefused], [root: root_1]], %{
+        placement: :ordered
+      })
+
+      assert {:ok, "in store 1"} = redeem(ctx.inst, claims[a.id])
+    end
+
+    test "a pack written under one key layout is read under the other", ctx do
+      for {written, configured} <- [{:flat, :sharded}, {:sharded, :flat}] do
+        [root] = use_stores(ctx, [[]], %{key_layout: written})
+        a = item("acme", "written #{written}")
+        {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [a])
+
+        assert File.exists?(Path.join(root, Ref.key(claims[a.id].ref, written)))
+        refute File.exists?(Path.join(root, Ref.key(claims[a.id].ref, configured)))
+
+        use_stores(ctx, [[root: root]], %{key_layout: configured})
+        assert {:ok, a.body} == redeem(ctx.inst, claims[a.id])
+      end
+    end
+  end
+
   test "the removed claim_check keys fail at Config.new/1" do
-    for key <- [:api_tokens, :adapter, :max_bytes] do
+    for key <- [:api_tokens, :adapter, :max_bytes, :blob_store] do
       assert_raise ArgumentError, ~r/unknown Ankusa.Config key: claim_check.#{key}/, fn ->
         Config.new(claim_check: %{key => nil})
       end

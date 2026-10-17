@@ -11,6 +11,50 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **Several claim stores, with failover.** `claim_check.blob_stores` takes a
+  list of `{module, opts}` (buckets, regions, providers) and
+  `claim_check.placement` picks a new pack's store: `:ordered` (default) the
+  first, the others only while it is down; `:hash` spreads packs over every
+  store by the pack id's random bits. A failed pack write moves on to the
+  next store at once, and a store whose write failed is skipped for
+  `claim_check.store_cooldown_ms` (default 30 s). A read searches every store,
+  so a failed-over pack is still found; a miss while some store could not
+  answer is `{:unavailable, reason}`, never `:not_found`. Refs, the gateway
+  API and the SDKs are unchanged: the store is a function of the ref and the
+  config. New `Ankusa.ClaimCheck.Stores`; `Ankusa.ClaimCheck.location` gains
+  `:store`; `[:ankusa, :claim_check, :check_in]` gains `:store`, and
+  `[:ankusa, :claim_check, :store_breaker]` /
+  `ankusa_claim_check_store_breaker_transitions_total` count breaker opens and
+  closes.
+- **Sharded claim keys.** `claim_check.key_layout: :sharded` writes packs
+  under `claims/tenant=<t>/shard=<c>/dt=<d>/<pack>`, `c` being the pack id's
+  eleventh character: 32 prefixes per tenant, so one busy tenant's writes
+  spread over 32 object-store partitions instead of throttling (S3
+  `503 SlowDown`) on one. Opt-in (default `:flat`, the existing layout); reads
+  try both layouts whatever it says, and the LocalFS sweeper sweeps both.
+  `Ankusa.ClaimCheck.Ref.object_keys/3` and `shard/1`.
+- `[:ankusa, :blob_store, :retry]` on every HTTP blob-store retry, counted by
+  `ankusa_blob_store_retries_total{status}`.
+
+### Changed
+
+- **Breaking:** `claim_check.blob_store` is now `claim_check.blob_stores`, a
+  list (`blob_stores: [{mod, opts}]`); a config still naming `blob_store`
+  fails `Ankusa.Config.new/1` with `unknown Ankusa.Config key:
+  claim_check.blob_store`. `Ankusa.ClaimCheck`'s `claim_store/1` and the
+  `:claims` scope of `Ankusa.BlobStore` are gone: claim packs go through
+  `Ankusa.ClaimCheck.Stores`.
+- **Breaking:** `Ankusa.ClaimCheck.Ref`'s `object_key/2` and `key/1` take a
+  layout: `Ankusa.ClaimCheck.Ref.object_key/3`, `Ankusa.ClaimCheck.Ref.key/2`.
+  `Ankusa.BlobStore.Retry`'s `run/2` is `Ankusa.BlobStore.Retry.run/3`, the
+  instance first.
+- `Ankusa.BlobStore.Retry` jitters each delay to between half and all of
+  200 ms / 1 s / 5 s, so nodes throttled together don't retry in lockstep.
+- Metric labels with integer values (an HTTP status, a store index) are
+  reported as that number instead of `other`.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

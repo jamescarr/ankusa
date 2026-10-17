@@ -6,6 +6,21 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Added
+
+- `claim_check.stores`: a list of claim stores (each the `claim_check.store`
+  shape), exclusive with `store`. A pack whose store fails is written to the
+  next one, a failed store is skipped for `claim_check.store_cooldown_ms`
+  (default 30000), and the gateway searches every store.
+  `claim_check.placement: ordered | hash` (default `ordered`) picks a new
+  pack's store. See the `ankusa` changelog.
+- `claim_check.key_layout: flat | sharded` (default `flat`): `sharded` adds a
+  `shard=<c>/` folder under the tenant, 32 key prefixes per tenant, so a busy
+  tenant doesn't hit S3's per-prefix request limit. The gateway reads both
+  layouts.
+- `ankusa_blob_store_retries_total` and
+  `ankusa_claim_check_store_breaker_transitions_total` on `/metrics`.
+
 ### Fixed
 
 - The image's NATS client is `gnat 1.18.1`: no gnat process holds the NATS

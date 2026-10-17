@@ -75,7 +75,7 @@ defmodule AnkusaServer.Config do
   @blob_store_keys ~w(type root s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token)
   @gcs_keys ~w(bucket endpoint auth token)
-  @claim_check_keys ~w(port retention_days pack_max_bytes ip store)
+  @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms)
   @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
@@ -512,9 +512,9 @@ defmodule AnkusaServer.Config do
   end
 
   # `{module, opts}` from a `type: local|s3|gcs` section with its `s3:`/`gcs:`
-  # children: `storage` itself, and `claim_check.store`. `root?` allows a
-  # LocalFS `root` (only a dedicated claim store has one; segments live under
-  # `data_dir`).
+  # children: `storage` itself, `claim_check.store` and each entry of
+  # `claim_check.stores`. `root?` allows a LocalFS `root` (only a dedicated
+  # claim store has one; segments live under `data_dir`).
   defp blob_store!(section, path, root?) do
     s3 = section!(section, "s3", @s3_keys, path)
     gcs = section!(section, "gcs", @gcs_keys, path)
@@ -573,27 +573,60 @@ defmodule AnkusaServer.Config do
 
   defp claim_check_section(doc) do
     claim_check = section!(doc, "claim_check", @claim_check_keys, [])
-
-    blob_store =
-      case claim_check["store"] do
-        nil ->
-          nil
-
-        _store ->
-          store = section!(claim_check, "store", @blob_store_keys, ["claim_check"])
-          blob_store!(store, ["claim_check", "store"], true)
-      end
+    path = ["claim_check"]
 
     [
       claim_check:
         []
-        |> put_opt(:port, int_opt(claim_check, "port", ["claim_check"]))
-        |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", ["claim_check"]))
-        |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
-        |> put_opt(:ip, string_opt(claim_check, "ip", ["claim_check"]))
-        |> put_opt(:blob_store, blob_store)
+        |> put_opt(:port, int_opt(claim_check, "port", path))
+        |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", path))
+        |> put_opt(:retention_days, int_opt(claim_check, "retention_days", path))
+        |> put_opt(:ip, string_opt(claim_check, "ip", path))
+        |> put_opt(:blob_stores, claim_stores!(claim_check))
+        |> put_opt(:placement, atom_enum_opt(claim_check, "placement", ~w(ordered hash), path))
+        |> put_opt(:key_layout, atom_enum_opt(claim_check, "key_layout", ~w(flat sharded), path))
+        |> put_opt(:store_cooldown_ms, int_opt(claim_check, "store_cooldown_ms", path))
     ]
   end
+
+  # `store` (one mapping) and `stores` (a list of them, in failover order) both
+  # become `claim_check.blob_stores`; neither (or null) = nil, the storage
+  # bucket.
+  defp claim_stores!(claim_check) do
+    case {claim_check["store"], claim_check["stores"]} do
+      {nil, nil} ->
+        nil
+
+      {_store, nil} ->
+        store = section!(claim_check, "store", @blob_store_keys, ["claim_check"])
+        [blob_store!(store, ["claim_check", "store"], true)]
+
+      {nil, [_ | _] = stores} ->
+        stores
+        |> Enum.with_index()
+        |> Enum.map(fn {entry, index} ->
+          claim_store!(entry, ["claim_check", "stores", index])
+        end)
+
+      {nil, []} ->
+        raise ConfigError, message: "claim_check.stores: must not be empty"
+
+      {nil, other} ->
+        raise ConfigError,
+          message: type_error(["claim_check", "stores"], "a list of stores", other)
+
+      {_store, _stores} ->
+        raise ConfigError,
+          message: "claim_check: store and stores are exclusive; list every store under stores"
+    end
+  end
+
+  defp claim_store!(entry, path) when is_map(entry) do
+    entry |> section!(@blob_store_keys, path) |> blob_store!(path, true)
+  end
+
+  defp claim_store!(entry, path),
+    do: raise(ConfigError, message: type_error(path, "a mapping", entry))
 
   # ── backup ──────────────────────────────────────────────────────────────────
 

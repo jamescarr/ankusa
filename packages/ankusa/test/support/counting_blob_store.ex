@@ -11,6 +11,7 @@ defmodule Ankusa.Test.CountingBlobStore do
     * `:failures` — an `Agent` holding how many upcoming puts to fail
     * `:put_delay_ms` — sleep before each put, to hold a pack upload open
     * `:get_error` — every `get/3` answers `{:error, value}`, an unreachable store
+    * `:range_error` — every `get_range/5` answers `{:error, value}`
     * `:list_error` — every `list/3` answers `{:error, value}`
     * `:lost_acks` — an `Agent` holding how many upcoming `LATEST` puts land
       but answer `{:error, :timeout}`, as a put whose response was lost
@@ -76,8 +77,12 @@ defmodule Ankusa.Test.CountingBlobStore do
   end
 
   @impl true
-  def get_range(instance, key, offset, length, opts),
-    do: LocalFS.get_range(instance, key, offset, length, local(opts))
+  def get_range(instance, key, offset, length, opts) do
+    case Keyword.fetch(opts, :range_error) do
+      {:ok, reason} -> {:error, reason}
+      :error -> LocalFS.get_range(instance, key, offset, length, local(opts))
+    end
+  end
 
   @impl true
   def delete(instance, key, opts), do: LocalFS.delete(instance, key, local(opts))

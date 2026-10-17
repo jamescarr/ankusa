@@ -278,6 +278,28 @@ claim_check:
   # store:
   #   type: s3
   #   s3: {bucket: "${CLAIMS_BUCKET}", region: "${S3_REGION}"}
+  # Or several stores (buckets, regions, providers), exclusive with `store`:
+  # a pack whose store fails is written to the next one, and the gateway
+  # searches every store, so a failed-over pack is still found. Each entry has
+  # the `store` shape. Removing a store makes the packs in it unreadable:
+  # remove one only after its packs have aged out.
+  # stores:
+  #   - type: s3
+  #     s3: {bucket: "${CLAIMS_BUCKET}", region: us-east-1}
+  #   - type: s3
+  #     s3: {bucket: "${CLAIMS_BUCKET_WEST}", region: us-west-2}
+  # Which store a new pack goes to: ordered = the first, the others only while
+  # it is down; hash = spread packs evenly over every store, the rest taking
+  # over while one is down.
+  placement: ordered
+  # A store whose write failed is skipped for this long (ms), then tried again.
+  store_cooldown_ms: 30000
+  # flat = claims/tenant=<t>/dt=<d>/<pack>. sharded adds shard=<c>/ under the
+  # tenant: 32 key prefixes per tenant, so one busy tenant's writes spread
+  # over 32 object-store partitions instead of throttling (503 SlowDown) on
+  # one. The gateway reads both layouts whatever this says; tools that read
+  # the bucket directly (Spark partition discovery) see the extra folder.
+  key_layout: flat
   # The gateway performs no authentication. Keep 4001 internal and put your
   # proxy, mesh, or network policy in front of it, the same as 4002.
 
