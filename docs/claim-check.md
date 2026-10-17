@@ -144,9 +144,12 @@ store at once, and later writes skip the failed store for
 `store_cooldown_ms`, then try it again. Only when every store fails does the
 write fail, and the delivery is retried under the sink's retry policy, the
 same as with one store. The gateway searches every store, so a pack a failover
-put elsewhere is still served. A claim no store has is `404` only when every
-store answered: if one couldn't, the answer is `503 store_unavailable`,
-because the claim may be in it.
+put elsewhere is still served. A store that can't answer a read is searched
+last for `store_cooldown_ms` too, so on a gateway that never writes, a hung
+store costs one read its timeout and the next reads go to the healthy stores
+first. A claim no store has is `404` only when every store answered: if one
+couldn't, the answer is `503 store_unavailable`, because the claim may be in
+it.
 
 Set the same list, in the same order, on every node that writes claims and on
 the gateway. Adding a store is safe: with `hash` new packs spread onto it, and

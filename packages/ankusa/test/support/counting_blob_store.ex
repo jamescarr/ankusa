@@ -12,6 +12,8 @@ defmodule Ankusa.Test.CountingBlobStore do
     * `:put_delay_ms` — sleep before each put, to hold a pack upload open
     * `:get_error` — every `get/3` answers `{:error, value}`, an unreachable store
     * `:range_error` — every `get_range/5` answers `{:error, value}`
+    * `:notify_range` — `{pid, tag}`: `{:blob_range, tag}` to `pid` on every
+      `get_range/5`, so a test can tell which store a read went to
     * `:list_error` — every `list/3` answers `{:error, value}`
     * `:lost_acks` — an `Agent` holding how many upcoming `LATEST` puts land
       but answer `{:error, :timeout}`, as a put whose response was lost
@@ -78,6 +80,8 @@ defmodule Ankusa.Test.CountingBlobStore do
 
   @impl true
   def get_range(instance, key, offset, length, opts) do
+    with {pid, tag} <- Keyword.get(opts, :notify_range), do: send(pid, {:blob_range, tag})
+
     case Keyword.fetch(opts, :range_error) do
       {:ok, reason} -> {:error, reason}
       :error -> LocalFS.get_range(instance, key, offset, length, local(opts))

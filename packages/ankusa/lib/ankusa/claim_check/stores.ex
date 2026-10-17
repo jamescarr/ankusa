@@ -21,24 +21,28 @@ defmodule Ankusa.ClaimCheck.Stores do
 
   ## Breaker
 
-  A store whose write fails is skipped by later writes for
-  `claim_check.store_cooldown_ms`, then tried again; a success closes it. When
-  every store is down, every store is tried anyway — a write is never refused
-  untried. The cooldown is fixed: the stores back each other up, and the
-  dispatch retry policy backs the whole write. Each open and close emits
-  `[:ankusa, :claim_check, :store_breaker]`. Breakers live in an ETS table
-  this process owns; a restart closes them all.
+  A store whose write or read fails (could not answer: not a 403, not a
+  missing key) is skipped by later writes, and searched last by later reads,
+  for `claim_check.store_cooldown_ms`, then tried again; any answer from it
+  closes it. When every store is down, every store is tried anyway — a write
+  is never refused untried. The cooldown is fixed: the stores back each other
+  up, and the dispatch retry policy backs the whole write. Each open and close
+  emits `[:ankusa, :claim_check, :store_breaker]`. Breakers live in an ETS
+  table this process owns; a restart closes them all.
 
   ## Reads
 
   A read searches: every store, in the pack's write order, at the configured
   `claim_check.key_layout`, then every store again at the other layout — so a
   pack a failover put elsewhere, or one written before `key_layout` or
-  `placement` changed, is still found. Reads never consult the breaker. A miss
-  is reported as `:not_found` only when every store answered; if any store
-  could not, the read is `{:unavailable, reason}` (or `:forbidden`), the first
-  such error, so a claim is never declared gone while it may be in a store that
-  did not answer.
+  `placement` changed, is still found. Stores whose breaker is open are
+  searched last, never skipped: a read that cannot reach a store opens its
+  breaker too, so on a gateway that never writes, a hung store costs one
+  read its timeout and later reads go to the healthy stores first; an answer
+  from a store (found or not) closes it. A miss is reported as `:not_found`
+  only when every store answered; if any store could not, the read is
+  `{:unavailable, reason}` (or `:forbidden`), the first such error, so a claim
+  is never declared gone while it may be in a store that did not answer.
 
   Adding a store moves `:hash` homes (the search still finds older packs).
   Removing a store makes the packs in it unreadable: remove one only after
@@ -130,7 +134,7 @@ defmodule Ankusa.ClaimCheck.Stores do
           {:halt, {:ok, index}}
 
         {:error, reason} ->
-          mark_down(instance, config, index, reason)
+          mark_down(instance, config, index, :write, reason)
           {:cont, [{index, reason} | failures]}
       end
     end)
@@ -163,19 +167,22 @@ defmodule Ankusa.ClaimCheck.Stores do
   @doc """
   Find pack `pack_id` under the first of `keys` any store has, and read
   `length` bytes of it at `offset`: each key in turn, across every store in
-  the pack's write order (see Reads). Returns the bytes with the store index
-  and key they came from.
+  the pack's write order, healthy stores first (see Reads). Returns the bytes
+  with the store index and key they came from.
   """
   @spec read_range(atom(), Config.t(), String.t(), [String.t()], non_neg_integer(), pos_integer()) ::
           {:ok, binary(), non_neg_integer(), String.t()} | {:error, read_error()}
   def read_range(instance, %Config{} = config, pack_id, keys, offset, length) do
-    order = order(config, pack_id)
+    {up, down} =
+      config
+      |> order(pack_id)
+      |> Enum.split_with(fn {index, _mod, _opts} -> not down?(instance, index) end)
 
     # Layout-major: every store at the configured layout before any at the
     # other one.
-    for(key <- keys, {index, mod, opts} <- order, do: {key, index, mod, opts})
-    |> Enum.reduce_while(nil, fn {key, index, mod, opts}, error ->
-      case get(mod, instance, key, offset, length, opts) do
+    for(key <- keys, store <- up ++ down, do: {key, store})
+    |> Enum.reduce_while(nil, fn {key, {index, _mod, _opts} = store}, error ->
+      case read(instance, config, store, key, offset, length) do
         {:ok, bin} -> {:halt, {:found, bin, index, key}}
         {:error, :not_found} -> {:cont, error}
         {:error, reason} -> {:cont, error || reason}
@@ -204,9 +211,25 @@ defmodule Ankusa.ClaimCheck.Stores do
           {:ok, binary()} | {:error, read_error()}
   def get_range(instance, %Config{} = config, index, key, offset, length) do
     case Enum.at(list(config), index) do
-      {^index, mod, opts} -> get(mod, instance, key, offset, length, opts)
+      {^index, _mod, _opts} = store -> read(instance, config, store, key, offset, length)
       nil -> {:error, :not_found}
     end
+  end
+
+  # One ranged read, and its verdict on the store's breaker: an answer (the
+  # bytes, or no such key) closes it, a store that could not answer opens it.
+  # A 403 says nothing about whether the store is up.
+  defp read(instance, config, {index, mod, opts}, key, offset, length) do
+    result = get(mod, instance, key, offset, length, opts)
+
+    case result do
+      {:ok, _bin} -> mark_up(instance, index)
+      {:error, :not_found} -> mark_up(instance, index)
+      {:error, {:unavailable, reason}} -> mark_down(instance, config, index, :read, reason)
+      {:error, :forbidden} -> :ok
+    end
+
+    result
   end
 
   # A read that starts past the end of an object comes back empty (LocalFS
@@ -249,15 +272,15 @@ defmodule Ankusa.ClaimCheck.Stores do
   # `insert_new` decides the transition, so concurrent failures of one store
   # emit one `:open`; a store already open (or past its cooldown and failing
   # again) only has its cooldown pushed out.
-  defp mark_down(instance, config, index, reason) do
+  defp mark_down(instance, config, index, op, reason) do
     cooldown = config.claim_check.store_cooldown_ms
     entry = {index, now_ms() + cooldown}
 
     if :ets.insert_new(table(instance), entry) do
       Logger.warning(
-        "[ankusa] claim store #{index} failed a write " <>
+        "[ankusa] claim store #{index} failed a #{op} " <>
           "(#{inspect(reason, limit: 10, printable_limit: 256)}); " <>
-          "writes skip it for #{cooldown} ms"
+          "writes skip it and reads try it last for #{cooldown} ms"
       )
 
       breaker_event(instance, index, :open, reason)
@@ -270,12 +293,17 @@ defmodule Ankusa.ClaimCheck.Stores do
     ArgumentError -> :ok
   end
 
-  # `take` is atomic too: one close per open.
+  # Every read and write of a healthy store lands here, so the common case is
+  # a lookup, not a write to the table. `take` is atomic: one close per open.
   defp mark_up(instance, index) do
-    case :ets.take(table(instance), index) do
-      [] -> :ok
-      [_entry] -> breaker_event(instance, index, :closed, nil)
+    table = table(instance)
+
+    with [_entry] <- :ets.lookup(table, index),
+         [_entry] <- :ets.take(table, index) do
+      breaker_event(instance, index, :closed, nil)
     end
+
+    :ok
   rescue
     ArgumentError -> :ok
   end

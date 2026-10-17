@@ -18,7 +18,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `claim_check.placement` picks a new pack's store: `:ordered` (default) the
   first, the others only while it is down; `:hash` spreads packs over every
   store by the pack id's random bits. A failed pack write moves on to the
-  next store at once, and a store whose write failed is skipped for
+  next store at once, and a store whose write failed, or that could not
+  answer a read, is skipped by writes and searched last by reads for
   `claim_check.store_cooldown_ms` (default 30 s). A read searches every store,
   so a failed-over pack is still found; a miss while some store could not
   answer is `{:unavailable, reason}`, never `:not_found`. Refs, the gateway

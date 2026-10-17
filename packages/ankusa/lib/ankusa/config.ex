@@ -100,8 +100,9 @@ defmodule Ankusa.Config do
               # only while it is down; :hash = the pack id's random bits pick
               # one, the rest take over when it fails
               placement: :ordered,
-              # a store whose write failed is skipped for this long (ms) before
-              # it is tried again
+              # a store that failed a write or could not answer a read is
+              # skipped by writes, and searched last by reads, for this long
+              # (ms) before it is tried again
               store_cooldown_ms: 30_000,
               # :flat = claims/tenant=<t>/dt=<d>/<pack>; :sharded adds
               # shard=<c>/ under the tenant (32 prefixes per tenant) — see

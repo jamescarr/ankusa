@@ -10,8 +10,9 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 - `claim_check.stores`: a list of claim stores (each the `claim_check.store`
   shape), exclusive with `store`. A pack whose store fails is written to the
-  next one, a failed store is skipped for `claim_check.store_cooldown_ms`
-  (default 30000), and the gateway searches every store.
+  next one, a store that fails a write or a read is skipped by writes and
+  searched last by reads for `claim_check.store_cooldown_ms` (default 30000),
+  and the gateway searches every store.
   `claim_check.placement: ordered | hash` (default `ordered`) picks a new
   pack's store. See the `ankusa` changelog.
 - `claim_check.key_layout: flat | sharded` (default `flat`): `sharded` adds a

@@ -418,6 +418,51 @@ defmodule Ankusa.ClaimCheckTest do
       assert {:ok, "in store 1"} = redeem(ctx.inst, claims[a.id])
     end
 
+    @tag :capture_log
+    test "a store that cannot answer a read is searched last, but still searched", ctx do
+      start_supervised!({Stores, instance: ctx.inst})
+      attach(ctx.inst, [[:ankusa, :claim_check, :store_breaker]])
+      [root_0, root_1] = use_stores(ctx, [[], []], %{placement: :hash})
+      pack_id = Ref.pack_id(System.system_time(:millisecond), <<1::64>>)
+      a = item("acme", "in store 1")
+      {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [a], pack_id: pack_id)
+
+      # Store 0 is the pack's home now, and cannot answer a read.
+      use_stores(
+        ctx,
+        [
+          [root: root_0, range_error: :econnrefused, notify_range: {self(), 0}],
+          [root: root_1, notify_range: {self(), 1}]
+        ],
+        %{placement: :ordered}
+      )
+
+      ranges = fn ->
+        for _ <- 1..3,
+            do:
+              (receive do
+                 {:blob_range, s} -> s
+               after
+                 0 -> nil
+               end)
+      end
+
+      # The first read pays for store 0 and opens its breaker...
+      assert {:ok, "in store 1"} = redeem(ctx.inst, claims[a.id])
+      assert ranges.() == [0, 1, 1]
+      assert_received {:telemetry, _event, %{store: 0, state: :open, reason: :econnrefused}}
+
+      # ...so the next goes to store 1 first, and store 0 is never reached.
+      assert {:ok, "in store 1"} = redeem(ctx.inst, claims[a.id])
+      assert ranges.() == [1, 1, nil]
+
+      # A store that is down is still searched: a miss is not :not_found.
+      ref = %Ref{tenant_id: "acme", claim_id: Ref.claim_id(Ref.new_pack_id(), 0)}
+
+      assert {:error, {:unavailable, :econnrefused}} =
+               ClaimCheck.redeem(ctx.inst, ref, String.duplicate("0", 64))
+    end
+
     test "a pack written under one key layout is read under the other", ctx do
       for {written, configured} <- [{:flat, :sharded}, {:sharded, :flat}] do
         [root] = use_stores(ctx, [[]], %{key_layout: written})

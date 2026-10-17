@@ -292,7 +292,8 @@ claim_check:
   # it is down; hash = spread packs evenly over every store, the rest taking
   # over while one is down.
   placement: ordered
-  # A store whose write failed is skipped for this long (ms), then tried again.
+  # A store that failed a write, or could not answer a read, is skipped by
+  # writes and searched last by reads for this long (ms), then tried again.
   store_cooldown_ms: 30000
   # flat = claims/tenant=<t>/dt=<d>/<pack>. sharded adds shard=<c>/ under the
   # tenant: 32 key prefixes per tenant, so one busy tenant's writes spread
