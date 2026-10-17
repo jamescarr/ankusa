@@ -34,16 +34,17 @@ defmodule Ankusa.ClaimCheck.Stores do
 
   ## Reads
 
-  A read searches: every store, in the pack's write order, at the configured
-  `claim_check.key_layout`, then every store again at the other layout — so a
-  pack a failover put elsewhere, or one written before `key_layout` or
-  `placement` changed, is still found. Stores whose breaker is open are
-  searched last, never skipped: a read that cannot reach a store opens its
-  breaker too, so on a gateway that never writes, a hung store costs one
-  read its timeout and later reads go to the healthy stores first; an answer
-  from a store (found or not) closes it. A store that could not answer is not
-  asked again within the same read, at the other layout: that would cost a
-  hung store's timeout twice, and double the requests to one that throttles.
+  A read searches every store at the configured `claim_check.key_layout`,
+  then every store again at the other layout — so a pack a failover put
+  elsewhere, or one written before `key_layout` or `placement` changed, is
+  still found. Stores whose breaker is open are searched after every healthy
+  store has been asked at both layouts, never skipped: a read that cannot
+  reach a store opens its breaker too, so on a gateway that never writes, a
+  hung store costs one read its timeout and later reads go to the healthy
+  stores first; an answer from a store (found or not) closes it. A store that
+  could not answer is not asked again within the same read, at the other
+  layout: that would cost a hung store's timeout twice, and double the
+  requests to one that throttles.
   A `403` is asked again (a credential without `s3:ListBucket` answers 403
   for a missing key). A miss is reported as `:not_found` only when every
   store answered; if any store could not, the read is `{:unavailable,
@@ -184,9 +185,9 @@ defmodule Ankusa.ClaimCheck.Stores do
       |> order(pack_id)
       |> Enum.split_with(fn {index, _mod, _opts} -> not down?(instance, index) end)
 
-    # Layout-major: every store at the configured layout before any at the
-    # other one.
-    for(key <- keys, store <- up ++ down, do: {key, store})
+    # Healthy stores at both layouts before any store whose breaker is open;
+    # within a group, the configured layout first.
+    for(group <- [up, down], key <- keys, store <- group, do: {key, store})
     |> Enum.reduce_while({nil, []}, fn {key, {index, _mod, _opts} = store}, {error, failed} ->
       if index in failed do
         {:cont, {error, failed}}
@@ -240,19 +241,12 @@ defmodule Ankusa.ClaimCheck.Stores do
   # A throttle is an answer. A 403 says nothing about whether the store is up.
   # Reads use `claim_check.read_timeout_ms`/`read_retries`: the store's own
   # `timeout_ms`/`retries` are sized for writes, not for a reader waiting on
-  # the answer. The same bound covers waiting for a pooled connection (the
-  # HTTP stores share one client pool per host with the sinks), unless the
-  # store's own `req_options` set `:pool_timeout`.
+  # the answer.
   defp read(instance, config, {index, mod, opts}, key, offset, length) do
-    timeout_ms = config.claim_check.read_timeout_ms
-
     opts =
-      opts
-      |> Keyword.merge(timeout_ms: timeout_ms, retries: config.claim_check.read_retries)
-      |> Keyword.update(
-        :req_options,
-        [pool_timeout: timeout_ms],
-        &Keyword.put_new(&1, :pool_timeout, timeout_ms)
+      Keyword.merge(opts,
+        timeout_ms: config.claim_check.read_timeout_ms,
+        retries: config.claim_check.read_retries
       )
 
     result = get(mod, instance, key, offset, length, opts)
@@ -281,7 +275,9 @@ defmodule Ankusa.ClaimCheck.Stores do
   # answers :eof; S3 and GCS answer 416): the object is there. One that runs
   # past the end comes back short; the caller decides what a short read means.
   # A 403 is the store refusing this node's credential (an S3 credential
-  # without `s3:ListBucket` answers 403 for a missing key, too).
+  # without `s3:ListBucket` answers 403 for a missing key, too). As with
+  # `attempt/5`, a raise, exit, throw or stray return from the adapter (or a
+  # `:token_provider` it calls) is an unavailable store, not a crashed caller.
   defp get(mod, instance, key, offset, length, opts) do
     case mod.get_range(instance, key, offset, length, opts) do
       {:ok, bin} -> {:ok, bin}
@@ -290,7 +286,13 @@ defmodule Ankusa.ClaimCheck.Stores do
       {:error, {:status, 416, _body}} -> {:ok, <<>>}
       {:error, {:status, 403, _body}} -> {:error, :forbidden}
       {:error, reason} -> {:error, {:unavailable, reason}}
+      other -> {:error, {:unavailable, {:bad_return, other}}}
     end
+  rescue
+    error -> {:error, {:unavailable, error}}
+  catch
+    :exit, reason -> {:error, {:unavailable, {:exit, reason}}}
+    :throw, value -> {:error, {:unavailable, {:throw, value}}}
   end
 
   # ── breaker ─────────────────────────────────────────────────────────────────

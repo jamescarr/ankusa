@@ -168,7 +168,7 @@ The gateway keeps answering fast while an object store throttles or hangs:
 
 - **From memory.** Pack indexes and claims it has read are cached, up to
   `read_cache_bytes`; a claim over `read_cache_max_entry_bytes` is served and
-  never cached, and ranges never are. A pack's first read covers its first
+  never cached, and partial ranges never are. A pack's first read covers its first
   1 024 claims, so the rest of the pack is located without the store. Claims
   never change, so nothing cached is wrong while the claim exists; a claim
   swept by retention can still answer `HEAD` for up to 10 minutes, and `GET`
@@ -206,8 +206,9 @@ back together. On `/metrics`:
 `ankusa_claim_check_gateway_requests_total{method,status}` and
 `ankusa_claim_check_gateway_duration_seconds`;
 `ankusa_claim_check_reads_total{kind,source,result}`, where `source` is
-`cache`, `store`, `coalesced` or `shed` and `result` tells `throttled`,
-`unavailable`, `overloaded` (shed by the queue) and `deadline` apart; and
+`cache`, `store`, `coalesced`, `shed` or `direct` (a node reading without
+the gateway's reader) and `result` tells `throttled`, `unavailable`,
+`overloaded` (shed by the queue) and `deadline` (shed at the deadline) apart; and
 `ankusa_claim_check_read_limit`, `_read_inflight` and `_read_queued` per
 store.
 

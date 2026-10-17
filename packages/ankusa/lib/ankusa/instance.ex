@@ -11,8 +11,10 @@ defmodule Ankusa.Instance do
   The tree is `:rest_for_one`, and what the instance does when a part of it
   fails depends on which part:
 
-    * **The core** — the store, the source store and the edge subtree (routes,
-      queue writer, quarantine, rate limiter, batchers, ingress listener) — is
+    * **The core** — the claim stores' breaker table
+      (`Ankusa.ClaimCheck.Stores`), the store, the source store and the edge
+      subtree (routes, queue writer, quarantine, rate limiter, batchers,
+      ingress listener) — is
       what acks hooks. A crash there restarts whatever depends on it: the edge
       restarts with the store it writes to, and everything started after it
       restarts with the edge. A core that keeps crashing exhausts this

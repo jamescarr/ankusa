@@ -121,6 +121,7 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
 
   test "concurrent reads of one claim share one index read and one bytes read", %{inst: inst} do
     start_reader(inst, range_delay_ms: 150)
+    attach(inst, [[:ankusa, :claim_check, :read]])
     [id] = pack(inst, ["shared"])
 
     results =
@@ -130,6 +131,17 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
 
     assert results == List.duplicate({:ok, "shared"}, 8)
     assert ranges() == [0, 0]
+
+    # one caller per fetch went to the store, the other seven joined it; the
+    # rest of the sixteen are cache hits (a task that lost the index race)
+    sources =
+      for _ <- 1..16 do
+        assert_received {:telemetry, [:ankusa, :claim_check, :read], _, %{source: source}}
+        source
+      end
+
+    assert Enum.count(sources, &(&1 == :store)) == 2
+    assert Enum.count(sources, &(&1 == :coalesced)) + Enum.count(sources, &(&1 == :cache)) == 14
   end
 
   test "past the limit reads queue, and past the queue they are shed at once", %{inst: inst} do
@@ -174,16 +186,42 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
 
   test "a read slower than the deadline answers at it, and still fills the cache", %{inst: inst} do
     start_reader(inst, [range_delay_ms: 400], %{read_deadline_ms: 100})
+    attach(inst, [[:ankusa, :claim_check, :read]])
     [id] = pack(inst, ["late"])
 
     {result, ms} = timed(fn -> ClaimCheck.locate(inst, "acme", id) end)
     assert result == {:error, {:unavailable, :deadline}}
     assert ms < 250
+    assert_received {:telemetry, _, _, %{kind: :index, source: :shed, result: :deadline}}
 
     Process.sleep(500)
     assert ranges() == [0]
+    # the orphaned fetch finished and was counted as the store read it was
+    assert_received {:telemetry, _, _, %{kind: :index, source: :store, result: :ok}}
     assert {:ok, %{length: 4}} = ClaimCheck.locate(inst, "acme", id)
     assert ranges() == []
+  end
+
+  test "a queued read whose deadline passed is shed without a store request", %{inst: inst} do
+    start_reader(inst, [range_delay_ms: 300], %{read_max_inflight: 1, read_deadline_ms: 100})
+    attach(inst, [[:ankusa, :claim_check, :read]])
+    [a, b] = for _ <- 1..2, do: hd(pack(inst, ["x"]))
+
+    results =
+      [a, b]
+      |> Enum.map(fn id -> Task.async(fn -> ClaimCheck.locate(inst, "acme", id) end) end)
+      |> Task.await_many()
+
+    assert results == List.duplicate({:error, {:unavailable, :deadline}}, 2)
+
+    # the first fetch finishes, the queued one is found expired and dropped
+    Process.sleep(400)
+    assert ranges() == [0]
+
+    assert_received {:telemetry, _, %{duration: d}, %{source: :shed, result: :deadline}}
+                    when d > 0
+
+    assert Reader.stats(inst)[0] == %{limit: 1, inflight: 0, queued: 0}
   end
 
   @tag :capture_log
@@ -198,6 +236,7 @@ defmodule Ankusa.ClaimCheck.ReaderTest do
              Reader.fetch(inst, key, 0, fn -> raise "boom" end, deadline)
 
     assert {:ok, 1} = Reader.fetch(inst, key, 0, fn -> {:ok, 1} end, deadline)
+    assert %{inflight: 0, queued: 0} = Reader.stats(inst)[0]
   end
 
   test "every read is counted by where it was answered from", %{inst: inst} do

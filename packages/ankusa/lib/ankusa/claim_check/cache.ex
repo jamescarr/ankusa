@@ -27,14 +27,18 @@ defmodule Ankusa.ClaimCheck.Cache do
   each an ETS table: inserts go to the newer one, and when it holds half the
   budget it becomes the older one and the previous older one is dropped whole.
   A hit in the older generation is copied into the newer one (and counted
-  again), so what keeps being read keeps living. Every 10 minutes the
-  generations turn over regardless, so an idle cache empties within 20.
+  again), so an entry that keeps being read outlives the generation it was
+  written in, up to its own TTL. Every 10 minutes the generations turn over
+  regardless, so an idle cache empties within 20.
 
   An insert reserves its bytes before it lands, and one that finds the newer
   generation already full is dropped (the next read goes to the store), so a
   generation never holds more than half the budget plus the one entry that
-  filled it. That insert asks this process for the turnover; inserts dropped
-  until it is handled are what keeps the bound while it is pending.
+  filled it; an entry larger than half the budget on its own is never
+  inserted. The insert that fills a generation asks this process for the
+  turnover, and this process also checks every second, in case that insert's
+  caller died first; inserts dropped until the turnover is handled are what
+  keeps the bound while it is pending.
 
   `Ankusa.Routes.Cache` uses Nebulex; this cache can't. Nebulex bounds memory
   by `:ets.info(tab, :memory)`, which counts a binary longer than 64 bytes as
@@ -52,6 +56,7 @@ defmodule Ankusa.ClaimCheck.Cache do
 
   @index_ttl :timer.minutes(10)
   @body_ttl :timer.minutes(2)
+  @check_ms :timer.seconds(1)
   @turnover_ms :timer.minutes(10)
   # The ETS tuple, the key's strings, and the binary's own header, roughly.
   @entry_overhead 256
@@ -89,6 +94,7 @@ defmodule Ankusa.ClaimCheck.Cache do
     :ets.new(table(instance), [:named_table, :protected, :set, read_concurrency: true])
     :ets.insert(table(instance), {:gens, generation(), nil, half})
     Process.send_after(self(), :turnover, @turnover_ms)
+    Process.send_after(self(), :check, @check_ms)
     {:ok, %{instance: instance}}
   end
 
@@ -106,6 +112,18 @@ defmodule Ankusa.ClaimCheck.Cache do
   def handle_info(:turnover, state) do
     turn_over(state.instance)
     Process.send_after(self(), :turnover, @turnover_ms)
+    {:noreply, state}
+  end
+
+  # The insert that filled the newer generation asks for the turnover; if its
+  # process died before it could, this notices within a second.
+  def handle_info(:check, state) do
+    case gens(state.instance) do
+      {{_table, bytes}, _older, half} ->
+        if :atomics.get(bytes, 1) >= half, do: turn_over(state.instance)
+    end
+
+    Process.send_after(self(), :check, @check_ms)
     {:noreply, state}
   end
 
@@ -149,8 +167,10 @@ defmodule Ankusa.ClaimCheck.Cache do
   def forget_pack(instance, tenant_id, pack_id) do
     {{newer, _bytes}, older, _half} = gens(instance)
     key = {:pack, tenant_id, pack_id}
-    :ets.delete(newer, key)
+    # Older first: a read promoting the pack meanwhile re-checks the older
+    # copy after its insert, so this order leaves it nothing to resurrect.
     if older, do: :ets.delete(elem(older, 0), key)
+    :ets.delete(newer, key)
     :ok
   rescue
     # not running, or a generation dropped under us
@@ -207,10 +227,22 @@ defmodule Ankusa.ClaimCheck.Cache do
         :error
 
       [] when older != nil ->
-        case :ets.lookup(elem(older, 0), key) do
+        older_table = elem(older, 0)
+
+        case :ets.lookup(older_table, key) do
           [{^key, value, expires, _weight} = entry] when expires > now ->
             insert(instance, gen, entry, half)
-            {:ok, value}
+
+            # A `forget_pack/3` that ran meanwhile deleted the older copy:
+            # don't bring it back.
+            case :ets.lookup(older_table, key) do
+              [] ->
+                :ets.delete(newer, key)
+                :error
+
+              _still ->
+                {:ok, value}
+            end
 
           _miss ->
             :error
@@ -233,7 +265,10 @@ defmodule Ankusa.ClaimCheck.Cache do
   # The bytes are reserved first: a generation that already holds half the
   # budget takes nothing more (and gives the reservation back, so the count
   # is what the table holds), and only the insert that filled it asks for
-  # the turnover, so one is asked for per generation.
+  # the turnover, so one is asked for per generation. An entry no generation
+  # can hold is never reserved.
+  defp insert(_instance, _gen, {_key, _value, _expires, weight}, half) when weight > half, do: :ok
+
   defp insert(instance, {table, bytes} = gen, {_key, _value, _expires, weight} = entry, half) do
     total = :atomics.add_get(bytes, 1, weight)
 

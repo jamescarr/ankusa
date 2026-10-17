@@ -122,10 +122,16 @@ defmodule Ankusa.ClaimCheck.Sweeper do
 
   # Every `claims/tenant=*/dt=*` and `claims/tenant=*/shard=*/dt=*` directory
   # under each claim store's root, with its date. `validate_config!/1` makes
-  # every store LocalFS whenever this process runs.
+  # every store LocalFS whenever this process runs. Two stores on one root
+  # (or one on the default root spelled out) are one root here, so nothing is
+  # scanned or counted twice.
   defp partitions(config) do
-    for {_index, Ankusa.BlobStore.LocalFS, opts} <- Stores.list(config),
-        root = Keyword.get(opts, :root) || Config.path(config, "segments"),
+    roots =
+      for {_index, Ankusa.BlobStore.LocalFS, opts} <- Stores.list(config),
+          uniq: true,
+          do: Keyword.get(opts, :root) || Config.path(config, "segments")
+
+    for root <- roots,
         glob <- [
           [root, Ref.claims_prefix(), "tenant=*", "dt=*"],
           [root, Ref.claims_prefix(), "tenant=*", "shard=*", "dt=*"]

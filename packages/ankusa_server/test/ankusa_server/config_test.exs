@@ -109,7 +109,12 @@ defmodule AnkusaServer.ConfigTest do
              key_layout: :flat,
              store_cooldown_ms: 30_000,
              read_deadline_ms: 5_000,
-             read_cache_bytes: 134_217_728
+             read_timeout_ms: 3_000,
+             read_retries: 1,
+             read_max_inflight: 64,
+             read_queue_max: 256,
+             read_cache_bytes: 134_217_728,
+             read_cache_max_entry_bytes: 1_048_576
            } = config.claim_check
   end
 

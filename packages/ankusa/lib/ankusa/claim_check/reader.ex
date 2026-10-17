@@ -80,29 +80,44 @@ defmodule Ankusa.ClaimCheck.Reader do
   Run `fun` — one read of `key` from claim store `store` — under the store's
   limit, or join a fetch of `key` already running. `deadline` is an absolute
   `System.monotonic_time(:millisecond)`: past it the caller gets
-  `{:unavailable, :deadline}`, whatever the fetch is doing.
+  `{:unavailable, :deadline}`, whatever the fetch is doing, and is counted as
+  a read shed at its deadline; the fetch it started or joined still runs to
+  the end, fills the cache, and is counted when it finishes.
   """
   @spec fetch(atom(), key(), non_neg_integer(), (-> result), integer()) ::
           result | {:error, {:unavailable, :overloaded | :deadline | {:exit, term()}}}
         when result: {:ok, term()} | {:error, term()}
   def fetch(instance, key, store, fun, deadline) when is_function(fun, 0) do
+    started = System.monotonic_time()
     remaining = deadline - System.monotonic_time(:millisecond)
 
-    if remaining <= 0 do
-      {:error, {:unavailable, :deadline}}
-    else
-      try do
-        GenServer.call(
-          Ankusa.via(instance, :claim_reader),
-          {:fetch, key, store, fun, deadline},
-          remaining
-        )
-      catch
-        # The reply, if it comes later, is dropped: the call's alias is gone.
-        :exit, {:timeout, _} -> {:error, {:unavailable, :deadline}}
-        :exit, reason -> {:error, {:unavailable, {:exit, reason}}}
+    result =
+      if remaining <= 0 do
+        {:error, {:unavailable, :deadline}}
+      else
+        try do
+          GenServer.call(
+            Ankusa.via(instance, :claim_reader),
+            {:fetch, key, store, fun, deadline},
+            remaining
+          )
+        catch
+          # The reply, if it comes later, is dropped: the call's alias is gone.
+          :exit, {:timeout, _} -> {:error, {:unavailable, :deadline}}
+          :exit, reason -> {:error, {:unavailable, {:exit, reason}}}
+        end
       end
+
+    # The reader counts the callers it answers; one it didn't is counted here.
+    case result do
+      {:error, {:unavailable, reason}} when reason == :deadline or elem(reason, 0) == :exit ->
+        emit_read(instance, elem(key, 0), :shed, result, store, System.monotonic_time() - started)
+
+      _answered ->
+        :ok
     end
+
+    result
   end
 
   @doc "Each store's limit, store requests running, and reads queued."
@@ -112,7 +127,7 @@ defmodule Ankusa.ClaimCheck.Reader do
   @doc false
   # One `[:ankusa, :claim_check, :read]` event: `source` is `:cache`,
   # `:direct` (no reader running), `:store`, `:coalesced` or `:shed`.
-  @spec emit_read(atom(), atom(), atom(), term(), non_neg_integer() | nil, integer()) :: :ok
+  @spec emit_read(atom(), atom(), atom(), term(), non_neg_integer(), integer()) :: :ok
   def emit_read(instance, kind, source, result, store, duration) do
     Telemetry.emit(
       [:claim_check, :read],

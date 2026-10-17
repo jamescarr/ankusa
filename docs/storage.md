@@ -238,7 +238,7 @@ key, which every later read uses verbatim: changing the prefix moves new
 segments only and never strands archived ones. `list/3` lists this node's
 segments under its prefix and returns full keys. Claim packs bypass the
 facade: `Ankusa.ClaimCheck.Stores` writes and reads them across
-`claim_check.blob_stores` (failing over between stores), never prefixed.
+`claim_check.blob_stores` (`claim_check.stores` in YAML; failing over between stores), never prefixed.
 Adapters see full keys and stay prefix-unaware.
 
 `list/3` returns `{:ok, keys}` or `{:error, reason}` — a listing that failed

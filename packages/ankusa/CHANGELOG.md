@@ -20,12 +20,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   store by the pack id's random bits. A failed pack write moves on to the
   next store at once, and a store whose write failed, or that could not
   answer a read, is skipped by writes and searched last by reads for
-  `claim_check.store_cooldown_ms` (default 30 s). A read searches every store,
-  so a failed-over pack is still found; a miss while some store could not
-  answer is `{:unavailable, reason}`, never `:not_found`. Refs, the gateway
-  API and the SDKs are unchanged: the store is a function of the ref and the
-  config. New `Ankusa.ClaimCheck.Stores`; `Ankusa.ClaimCheck.location` gains
-  `:store`; `[:ankusa, :claim_check, :check_in]` gains `:store`, and
+  `claim_check.store_cooldown_ms` (default 30 s); a throttled answer (`429`,
+  `503`) never opens the breaker. A read searches every store under both key
+  layouts, healthy stores first, so a failed-over pack is still found, and a
+  store that could not answer is not asked again within the same read; a
+  miss while some store could not answer is `{:unavailable, reason}`, never
+  `:not_found`. A `check_in/4` that tried several stores fails with
+  `{:unavailable, [{store, reason}, ...]}` in attempt order (`{:unavailable,
+  reason}` after a single attempt, as before). Refs, the gateway API and the
+  SDKs are unchanged: the store is a function of the ref and the config.
+  `Ankusa.ClaimCheck.validate_config!/1` rejects a bad `blob_stores`,
+  `placement` or `key_layout`, and `retention_days` with any non-LocalFS
+  claim store. New `Ankusa.ClaimCheck.Stores`, supervised in every role;
+  `Ankusa.ClaimCheck.location` gains `:store`;
+  `[:ankusa, :claim_check, :check_in]` gains `:store`, and
   `[:ankusa, :claim_check, :store_breaker]` /
   `ankusa_claim_check_store_breaker_transitions_total` count breaker opens and
   closes.
@@ -58,8 +66,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `[:ankusa, :claim_check, :gateway]`, `:read`, `:read_limit` and
   `:read_state`; on `/metrics`,
   `ankusa_claim_check_gateway_requests_total{method,status}`,
-  `ankusa_claim_check_gateway_duration_seconds`,
-  `ankusa_claim_check_reads_total{kind,source,result}` and
+  `ankusa_claim_check_gateway_duration_seconds` (buckets up to 10 s, past
+  the deadline), `ankusa_claim_check_reads_total{kind,source,result}` and
   `ankusa_claim_check_read_limit`/`_read_inflight`/`_read_queued{store}`.
 
 ### Changed
@@ -82,10 +90,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   random 1–3 s instead of a fixed `1`, and logs throttles, sheds and missed
   deadlines at `:debug` (they are counted by
   `ankusa_claim_check_reads_total`).
-- A throttled claim-store read (`429`, `503`) no longer opens the store's
-  breaker: the store answered. A read no longer asks a store that could not
-  answer again at the other key layout, which cost a hung store's timeout
-  twice and doubled the requests to a throttling one.
 
 ## [0.6.0] - 2026-10-14
 

@@ -29,8 +29,9 @@ defmodule Ankusa.Metrics do
   reasons are terms (`{:unavailable, {:status, 503, body}}`) and some tags are
   modules. Both would be an unbounded or unusable label, so every tag value goes
   through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
-  modules become strings (`"Ankusa.Sink.Http"`), and anything else
-  becomes `:other`. `:outcome` on ingest is already one of a fixed set
+  modules become strings (`"Ankusa.Sink.Http"`), integers are rendered as
+  numbers (only ever a store index or an HTTP status, both bounded), and
+  anything else becomes `:other`. `:outcome` on ingest is already one of a fixed set
   (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
   `:quarantine_rate_limited`, `:quarantine_full`, `:overload` or
   `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.

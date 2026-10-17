@@ -12,12 +12,13 @@ defmodule Ankusa.BlobStore do
       Nodes that share one bucket give themselves distinct prefixes
       (`"node-a/"`), because a segment key (`seg/<first>-<last>`) is only
       unique per node.
-    * claim packs do not go through this facade: `Ankusa.ClaimCheck.Stores`
-      writes and reads them across `claim_check.blob_stores`, never prefixed.
     * `:backup` — store backups (`Ankusa.Store.Backup`): the
       `backup.blob_store` when set, else the segment store, **with**
       `storage.key_prefix`. A backup belongs to one node's store, like its
       segments.
+
+  Claim packs do not go through this facade: `Ankusa.ClaimCheck.Stores`
+  writes and reads them across `claim_check.blob_stores`, never prefixed.
 
   The prefix is applied once, when a new object is named (`object_key/3`);
   the full key is what the archive catalogue records, and `put`/`get`/

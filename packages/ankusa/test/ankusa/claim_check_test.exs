@@ -485,6 +485,71 @@ defmodule Ankusa.ClaimCheckTest do
       assert_received {:telemetry, _event, %{store: 0, state: :open}}
     end
 
+    @tag :capture_log
+    test "a throttled read is an answer: it closes an open breaker", ctx do
+      start_supervised!({Stores, instance: ctx.inst})
+      attach(ctx.inst, [[:ankusa, :claim_check, :store_breaker]])
+      {:ok, failures} = Agent.start_link(fn -> 1 end)
+      {:ok, throttles} = Agent.start_link(fn -> 1 end)
+      use_stores(ctx, [[failures: failures, range_failures: throttles], []])
+
+      assert {:ok, _claims} = ClaimCheck.check_in(ctx.inst, "acme", [item("acme", "1")])
+      assert_received {:telemetry, _event, %{store: 0, state: :open}}
+
+      ref = %Ref{tenant_id: "acme", claim_id: Ref.claim_id(Ref.new_pack_id(), 0)}
+
+      assert {:error, {:unavailable, {:status, 503, "SlowDown"}}} =
+               ClaimCheck.redeem(ctx.inst, ref, String.duplicate("0", 64))
+
+      assert_received {:telemetry, _event, %{store: 0, state: :closed}}
+    end
+
+    @tag :capture_log
+    test "a store that could not answer is not asked again at the other layout; a 403 is", ctx do
+      start_supervised!({Stores, instance: ctx.inst})
+      [root_0, root_1] = use_stores(ctx, [[], []], %{placement: :hash, key_layout: :sharded})
+      pack_id = Ref.pack_id(System.system_time(:millisecond), <<1::64>>)
+      a = item("acme", "in store 1, sharded")
+      {:ok, claims} = ClaimCheck.check_in(ctx.inst, "acme", [a], pack_id: pack_id)
+
+      ranges = fn ->
+        Stream.repeatedly(fn ->
+          receive do
+            {:blob_range, s} -> s
+          after
+            0 -> nil
+          end
+        end)
+        |> Enum.take_while(&(&1 != nil))
+      end
+
+      stores = fn store_0 ->
+        use_stores(
+          ctx,
+          [
+            [root: root_0, notify_range: {self(), 0}] ++ store_0,
+            [root: root_1, notify_range: {self(), 1}]
+          ],
+          %{placement: :ordered, key_layout: :flat}
+        )
+      end
+
+      # Store 0 is the home now and refuses the credential: it is asked at
+      # both layouts before the pack is found in store 1 at the other one.
+      stores.(range_error: {:status, 403, "denied"})
+      assert {:ok, "in store 1, sharded"} = redeem(ctx.inst, claims[a.id])
+      assert ranges.() == [0, 1, 0, 1, 1]
+
+      # Unreachable, it is asked once, and its breaker opens...
+      stores.(range_error: :econnrefused)
+      assert {:ok, "in store 1, sharded"} = redeem(ctx.inst, claims[a.id])
+      assert ranges.() == [0, 1, 1, 1]
+
+      # ...so the next read asks the healthy store at both layouts first.
+      assert {:ok, "in store 1, sharded"} = redeem(ctx.inst, claims[a.id])
+      assert ranges.() == [1, 1, 1]
+    end
+
     test "a pack written under one key layout is read under the other", ctx do
       for {written, configured} <- [{:flat, :sharded}, {:sharded, :flat}] do
         [root] = use_stores(ctx, [[]], %{key_layout: written})

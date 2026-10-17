@@ -290,8 +290,18 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
     on_exit(fn -> :telemetry.detach(handler) end)
 
-    call(inst, :get, Ref.path(check_in(inst, "found")))
+    path = Ref.path(check_in(inst, "found"))
+    call(inst, :get, path)
     assert_received {:gateway, %{duration: d}, %{method: "GET", status: 200}} when d > 0
+
+    call(inst, :head, path)
+    assert_received {:gateway, _measurements, %{method: "HEAD", status: 200}}
+
+    get_range(inst, path, "bytes=99-")
+    assert_received {:gateway, _measurements, %{method: "GET", status: 416}}
+
+    call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+    assert_received {:gateway, _measurements, %{method: "GET", status: 404}}
 
     Ankusa.put_config(%{
       config

@@ -83,9 +83,45 @@ defmodule Ankusa.ClaimCheck.CacheTest do
       assert Cache.bytes(ctx.inst) <= @budget
     end
 
-    :sys.get_state(ctx.pid)
+    # two more turnovers, waited for, so 1 is gone whatever the race above did
+    put(ctx.inst, ctx.pid, 201..208)
     assert Cache.bytes(ctx.inst) in 500..@budget
     refute held?(ctx.inst, 1)
+  end
+
+  test "an entry larger than half the budget is never cached", ctx do
+    :ok = Cache.put_body(ctx.inst, "t", "p", 0, :crypto.strong_rand_bytes(2_000))
+    assert Cache.bytes(ctx.inst) == 0
+    refute held?(ctx.inst, 0)
+  end
+
+  # The insert that fills a generation asks for the turnover; if its process
+  # died first, the owner's own check must notice. Stand in for that death by
+  # filling the counter without an insert.
+  test "a generation filled without a turnover request is turned over by the check", ctx do
+    [{:gens, {_table, bytes}, nil, 2_000}] = :ets.lookup(:"ankusa_claim_cache_#{ctx.inst}", :gens)
+    :atomics.put(bytes, 1, 2_000)
+
+    :ok = Cache.put_body(ctx.inst, "t", "p", 1, @body)
+    refute held?(ctx.inst, 1)
+
+    send(ctx.pid, :check)
+    :sys.get_state(ctx.pid)
+    :ok = Cache.put_body(ctx.inst, "t", "p", 2, @body)
+    assert held?(ctx.inst, 2)
+  end
+
+  test "a pack forgotten while a read was promoting it stays forgotten", ctx do
+    pack = %{store: 0, key: "k", prefix: "p", read: 8_231}
+    :ok = Cache.put_pack(ctx.inst, "t", "swept", pack)
+    put(ctx.inst, ctx.pid, 1..4)
+
+    # The forget lands between the reader's lookup in the older generation and
+    # its re-check: the reader's promoted copy must not survive. Interleave by
+    # hand: look the pack up (promoting it), forget, then look again.
+    assert {:ok, ^pack} = Cache.pack(ctx.inst, "t", "swept")
+    :ok = Cache.forget_pack(ctx.inst, "t", "swept")
+    assert Cache.pack(ctx.inst, "t", "swept") == :error
   end
 
   test "forget_pack removes a pack from either generation", ctx do

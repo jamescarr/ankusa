@@ -35,9 +35,9 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id`, `:result`, `:store` (index into `claim_check.blob_stores` the pack was written to, `nil` on failure) |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
-  | `[:ankusa, :claim_check, :store_breaker]` | — | `:instance`, `:store` (index into `claim_check.blob_stores`), `:state` (`:open`, `:closed`), `:reason` (on `:open`) |
+  | `[:ankusa, :claim_check, :store_breaker]` | — | `:instance`, `:store` (index into `claim_check.blob_stores`), `:state` (`:open`, `:closed`), `:reason` (`nil` on `:closed`) |
   | `[:ankusa, :claim_check, :gateway]` | `:duration` | `:instance`, `:method`, `:status` (one per claim request the gateway answered) |
-  | `[:ankusa, :claim_check, :read]` | `:duration` | `:instance`, `:kind` (`:index`, `:bytes`, `:range`), `:source` (`:cache`, `:store`, `:coalesced`, `:shed`, `:direct`), `:result` (`:ok`, `:not_found`, `:forbidden`, `:throttled`, `:unavailable`, `:overloaded`, `:deadline`), `:store` |
+  | `[:ankusa, :claim_check, :read]` | `:duration` | `:instance`, `:kind` (`:index`, `:bytes`, `:range`), `:source` (`:cache`, `:store`, `:coalesced`, `:shed`, `:direct`), `:result` (`:ok`, `:not_found`, `:forbidden`, `:throttled`, `:unavailable`, `:overloaded`, `:deadline`), `:store`. One per caller: `:store` is the caller whose fetch went to the store, `:coalesced` one that joined it, `:shed` one answered without a fetch's result (the queue was full, or its deadline passed — a fetch it started still finishes and is counted as `:store`) |
   | `[:ankusa, :claim_check, :read_limit]` | `:limit` | `:instance`, `:store` (every change of a store's adaptive read limit) |
   | `[:ankusa, :claim_check, :read_state]` | `:limit`, `:inflight`, `:queued` | `:instance`, `:store` (every second, per store the gateway's reader has read from) |
   | `[:ankusa, :blob_store, :retry]` | `:delay_ms` | `:instance`, `:attempt`, `:status` (an HTTP status or `:transport`) |
