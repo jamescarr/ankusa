@@ -1,0 +1,23 @@
+# The claim-check gateway: a node with only the claim_check role, reading the
+# same bucket the edge pods write to. Consumers redeem `claim` refs here, so
+# they hold no object-store credentials.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claim-check-config
+  labels:
+    {{- include "demo.labels" "claim-check" | nindent 4 }}
+data:
+  ankusa.yml: |
+    node:
+      roles: [claim_check]
+    log:
+      banner: false
+    admin:
+      enabled: true
+      ip: 0.0.0.0
+    claim_check:
+      port: 4001
+      ip: 0.0.0.0
+      store:
+        {{- include "demo.claimStore" . | nindent 8 }}

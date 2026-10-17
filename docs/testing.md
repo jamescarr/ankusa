@@ -428,6 +428,23 @@ docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
 ```
 
+[`examples/jetstream-k8s/`](https://github.com/jamescarr/ankusa/tree/main/examples/jetstream-k8s/)
+is a manual drill on a real `kind` cluster. CI only does what
+`mise run check:examples` does for it: builds and typechecks the consumer,
+compiles and format-checks the control panel, and runs `helm lint` /
+`helm template` on the
+chart. The cluster itself is brought up by hand, and the drills in that
+example's README (autoscaling, the claim path, killing pods, cutting
+connections with Istio `AuthorizationPolicy`, gateway faults) are the test:
+
+```sh
+examples/jetstream-k8s/run.sh
+curl -i -XPOST localhost:8080/webhooks/demo -H 'content-type: application/json' \
+  -H 'x-demo-event-id: v1' -d '{"id":"evt_1"}'     # 201 through the Envoy gateway
+open http://localhost:8080/                          # the control panel
+examples/jetstream-k8s/run.sh down
+```
+
 Follow `ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats`/`ankusa_redis`: a
 `docker-compose.yml` for the real
 dependency, and tests that

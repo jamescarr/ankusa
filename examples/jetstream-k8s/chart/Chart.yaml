@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ankusa-jetstream-demo
+description: Ankusa ingest fleet, claim-check gateway, JetStream consumer and control panel for the jetstream-k8s example
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

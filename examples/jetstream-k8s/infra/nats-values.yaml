@@ -1,0 +1,35 @@
+config:
+  cluster:
+    # noAdvertise stays at the chart's default (true): clients reconnect through
+    # the Service, so every NATS connection crosses a sidecar and carries a mesh
+    # principal for the AuthorizationPolicy levers.
+    enabled: true
+    replicas: 3
+  jetstream:
+    enabled: true
+    fileStore:
+      pvc:
+        size: 1Gi
+  monitor:
+    enabled: true
+# The chart already sets `appProtocol: tcp` on the client port. NATS is
+# server-first (the server speaks before the client), so without it Istio's
+# protocol sniffing would stall every connection on 4222.
+service:
+  ports:
+    monitor:
+      enabled: true
+podTemplate:
+  merge:
+    metadata:
+      annotations:
+        # Cluster routes (6222) bypass the sidecar.
+        traffic.sidecar.istio.io/excludeInboundPorts: "6222"
+        traffic.sidecar.istio.io/excludeOutboundPorts: "6222"
+container:
+  merge:
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 512Mi}
+natsBox:
+  enabled: false

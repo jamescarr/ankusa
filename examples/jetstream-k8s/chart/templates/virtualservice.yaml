@@ -1,0 +1,28 @@
+# One VirtualService, so the control panel's fault lever has a stable JSON-patch
+# path: /spec/http/0/fault.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: demo-routes
+  labels:
+    {{- include "demo.labels" "gateway" | nindent 4 }}
+spec:
+  hosts: ["*"]
+  gateways: [demo-gateway]
+  http:
+    - name: ankusa-ingest
+      match:
+        - uri: {prefix: /webhooks/}
+      route:
+        - destination:
+            host: ankusa
+            port: {number: 4000}
+      # Istio retries a 503 twice by default; that would hide exactly what the
+      # fleet returned. The sender retries on its own and counts it.
+      retries: {attempts: 0}
+      timeout: 15s
+    - name: control-panel
+      route:
+        - destination:
+            host: control-panel
+            port: {number: 4100}
