@@ -56,7 +56,7 @@ defmodule ControlPanel.MixProject do
        depth: 1},
       {:daisyui,
        github: "saadeghi/daisyui",
-       tag: "v5.5.20",
+       tag: "v5.7.50",
        sparse: "packages/bundle",
        app: false,
        compile: false,
@@ -64,7 +64,7 @@ defmodule ControlPanel.MixProject do
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
-      {:dns_cluster, "~> 0.2.0"},
+      {:dns_cluster, "~> 0.3"},
       {:bandit, "~> 1.5"},
       # The panel talks to NATS directly (the consumed-event tail, JetStream
       # state) and to the Kubernetes API / the ingress gateway over HTTP.
