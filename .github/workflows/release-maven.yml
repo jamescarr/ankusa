@@ -42,7 +42,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: resolve
         run: |
           source .mise/lib/pkg.sh
@@ -75,11 +75,11 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@v5
         with:
-          version: 2026.9.11
+          version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
           # Pinned to .mise/conf.d/sdk-java.toml's java and sbt, the toolchain
           # `mise run check:package sdk-java` built and tested with.

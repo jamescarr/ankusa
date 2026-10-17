@@ -3,4 +3,4 @@
 # sbt version pinned in packages/sdk-java/project/build.properties.
 [tools]
 java = "temurin-25.0.4+101.0.LTS"
-sbt = "2.0.9"
+sbt = "2.0.10"

@@ -6,6 +6,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ## [Unreleased]
 
+### Changed
+
+- The image's dependencies are relocked to their latest releases: `brod
+  4.7.0` (Kafka), `amqp 4.3.0` (RabbitMQ), `req 0.7.5` on `finch 0.24.0`, and
+  `ed25519`/`kcl 1.5.2` (NATS nkeys).
+
 ### Fixed
 
 - The image's NATS client is `gnat 1.18.1`: no gnat process holds the NATS

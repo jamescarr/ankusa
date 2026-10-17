@@ -11,6 +11,11 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `async_api_spex ~> 0.2` from Hex (was `~> 0.1`, which excluded
+  0.2.0, the release this package is built and tested against).
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

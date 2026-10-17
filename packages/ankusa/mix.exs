@@ -171,7 +171,7 @@ defmodule Ankusa.MixProject do
     if Mix.env() in [:dev, :test] do
       {:async_api_spex, path: "../async_api_spex"}
     else
-      {:async_api_spex, "~> 0.1"}
+      {:async_api_spex, "~> 0.2"}
     end
   end
 end

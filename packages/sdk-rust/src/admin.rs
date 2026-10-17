@@ -486,7 +486,7 @@ impl AdminError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminClient, AdminError, ListDeadLettersParams, ReplayPatch, ReplaySpec};
+    use super::{AdminClient, AdminError, ListDeadLettersParams, Replay, ReplayPatch, ReplaySpec};
     use crate::client::{ClientBuilder, test_support::Recording};
 
     fn client(transport: Recording) -> AdminClient<Recording> {
@@ -570,13 +570,9 @@ mod tests {
     #[tokio::test]
     async fn list_replays_returns_the_page() {
         let client = client(Recording::new(200, r#"{"replays":[]}"#));
-        assert!(
-            client
-                .list_replays()
-                .await
-                .expect("listed")
-                .replays
-                .is_empty()
+        assert_eq!(
+            client.list_replays().await.expect("listed").replays,
+            Vec::<Replay>::new()
         );
     }
 
