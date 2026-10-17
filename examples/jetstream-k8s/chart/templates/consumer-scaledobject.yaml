@@ -1,0 +1,28 @@
+# KEDA scales `consumer` on the durable consumer's lag, read from the NATS
+# monitoring endpoint. KEDA creates and owns the HPA `keda-hpa-consumer`.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: consumer
+  labels:
+    {{- include "demo.labels" "consumer" | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: consumer
+  minReplicaCount: {{ .Values.consumer.minReplicas }}
+  maxReplicaCount: {{ .Values.consumer.maxReplicas }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
+  triggers:
+    - type: nats-jetstream
+      metadata:
+        natsServerMonitoringEndpoint: "{{ .Values.nats.monitoringService }}.{{ .Release.Namespace }}.svc.cluster.local:8222"
+        account: "$G"
+        stream: ANKUSA
+        consumer: worker
+        lagThreshold: {{ .Values.consumer.lagThreshold | quote }}
+        activationLagThreshold: "0"
+        useHttps: "false"

@@ -1,0 +1,103 @@
+# The durable fleet; its config is in ankusa-durable-configmap.yaml. Each pod
+# owns a store on its own PVC, so it is a StatefulSet: a killed pod comes back
+# under the same name on the same volume, with every hook it had accepted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ankusa-durable
+  labels:
+    {{- include "demo.labels" "ankusa-durable" | nindent 4 }}
+---
+# The StatefulSet's governing Service (stable pod DNS names).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankusa-durable-headless
+  labels:
+    {{- include "demo.labels" "ankusa-durable" | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: ankusa-durable
+  ports:
+    - {name: http, port: 4000, targetPort: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankusa-durable
+  labels:
+    {{- include "demo.labels" "ankusa-durable" | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: ankusa-durable
+  ports:
+    - {name: http, port: 4000, targetPort: http}
+    - {name: admin, port: 4002, targetPort: admin}
+---
+# No HPA: scaling a pod away strands whatever its store still holds.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ankusa-durable
+  labels:
+    {{- include "demo.labels" "ankusa-durable" | nindent 4 }}
+spec:
+  replicas: {{ int .Values.durable.replicas }}
+  serviceName: ankusa-durable-headless
+  # The pods share nothing, so there is no reason to start them one by one.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ankusa-durable
+  template:
+    metadata:
+      labels:
+        {{- include "demo.labels" "ankusa-durable" | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/ankusa-durable-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: ankusa-durable
+      # A Service named `ankusa-durable` would otherwise inject
+      # ANKUSA_DURABLE_PORT=tcp://... next to the ANKUSA_* settings the image reads.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: ankusa
+          image: {{ include "demo.image" .Values.images.ankusa }}
+          # The image's own entrypoint, behind a cap on open files: see `nofile` in values.yaml.
+          command: ["/bin/sh", "-c", "ulimit -n {{ .Values.nofile }} && exec /sbin/tini -- /usr/local/bin/docker-entrypoint start"]
+          imagePullPolicy: {{ .Values.images.ankusa.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 4000}
+            - {name: admin, containerPort: 4002}
+          # /ready is 503 while the store cannot take a synced write.
+          readinessProbe:
+            httpGet: {path: /ready, port: 4000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 4000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            # Let the mesh stop sending new requests before the BEAM stops.
+            preStop:
+              exec: {command: ["sleep", "5"]}
+          resources:
+            {{- toYaml .Values.durable.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/ankusa/ankusa.yml, subPath: ankusa.yml, readOnly: true}
+            - {name: data, mountPath: /var/lib/ankusa}
+      volumes:
+        - name: config
+          configMap: {name: ankusa-durable-config}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "demo.labels" "ankusa-durable" | nindent 10 }}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ .Values.durable.storage }}

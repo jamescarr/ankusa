@@ -1,0 +1,92 @@
+# floci: an S3 emulator standing in for the real object store behind the claim
+# store. It keeps everything in memory, so it is the one piece of this demo that
+# forgets: the `keeper` sidecar re-creates the bucket when floci restarts and
+# expires old claims so the memory stays bounded (see files/floci-keeper.sh).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: floci-keeper
+  labels:
+    {{- include "demo.labels" "floci" | nindent 4 }}
+data:
+  keeper.sh: |
+    {{- .Files.Get "files/floci-keeper.sh" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: floci
+  labels:
+    {{- include "demo.labels" "floci" | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: floci
+  template:
+    metadata:
+      labels:
+        {{- include "demo.labels" "floci" | nindent 8 }}
+      annotations:
+        checksum/keeper: {{ .Files.Get "files/floci-keeper.sh" | sha256sum }}
+    spec:
+      # A Service named `floci` would otherwise inject FLOCI_PORT=tcp://..., which floci reads
+      # as its own port setting and refuses to start on.
+      enableServiceLinks: false
+      containers:
+        - name: floci
+          image: {{ include "demo.image" .Values.images.floci }}
+          imagePullPolicy: {{ .Values.images.floci.pullPolicy }}
+          env:
+            - {name: AWS_DEFAULT_REGION, value: {{ .Values.s3.region | quote }}}
+          ports:
+            - {name: s3, containerPort: 4566}
+          # Same tolerance as liveness below: a floci busy writing a large claim must not
+          # drop out of the Service endpoints on one slow answer (that would 503 the
+          # ingest check-ins and make the consumers nak their redeems).
+          readinessProbe:
+            httpGet: {path: /_floci/health, port: 4566}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 4
+          # floci is a native image whose heap is capped (about 80 % of the memory
+          # limit). Past that it does not crash: it stops answering with the process
+          # still up. A liveness probe turns that into a restart, and the keeper then
+          # re-creates the bucket. Generous, so a busy floci is not mistaken for a dead one.
+          livenessProbe:
+            httpGet: {path: /_floci/health, port: 4566}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.floci.resources | nindent 12 }}
+        - name: keeper
+          image: {{ include "demo.image" .Values.images.awsCli }}
+          command: ["/bin/sh", "/keeper/keeper.sh"]
+          env:
+            - {name: AWS_ACCESS_KEY_ID, value: {{ .Values.s3.accessKeyId | quote }}}
+            - {name: AWS_SECRET_ACCESS_KEY, value: {{ .Values.s3.secretAccessKey | quote }}}
+            - {name: AWS_DEFAULT_REGION, value: {{ .Values.s3.region | quote }}}
+            - {name: BUCKET, value: {{ .Values.s3.bucket | quote }}}
+            - {name: RETENTION_MINUTES, value: {{ .Values.floci.claimRetentionMinutes | quote }}}
+          volumeMounts:
+            - {name: keeper, mountPath: /keeper, readOnly: true}
+          resources:
+            requests: {cpu: 10m, memory: 64Mi}
+            limits: {memory: 256Mi}
+      volumes:
+        - name: keeper
+          configMap: {name: floci-keeper}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: floci
+  labels:
+    {{- include "demo.labels" "floci" | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: floci
+  ports:
+    - {name: http-s3, port: 4566, targetPort: s3}

@@ -1,0 +1,93 @@
+# Defaults for the jetstream-k8s demo. run.sh overrides images.ankusa.* to
+# whatever $ANKUSA_IMAGE names; everything else is meant to be edited here.
+
+images:
+  ankusa: {repository: jamescarr/ankusa, tag: dev, pullPolicy: IfNotPresent}
+  consumer: {repository: ankusa-jetstream-consumer, tag: dev, pullPolicy: IfNotPresent}
+  controlPanel: {repository: ankusa-jetstream-panel, tag: dev, pullPolicy: IfNotPresent}
+  floci: {repository: floci/floci, tag: latest, pullPolicy: IfNotPresent}
+  awsCli: {repository: amazon/aws-cli, tag: 2.17.62}
+
+# RLIMIT_NOFILE for the BEAM containers (ankusa, claim-check, control panel). A
+# kind node's containerd runs with LimitNOFILE=infinity, so a pod starts with a
+# limit of 1073741816 open files and the Erlang VM sizes its tables from it: it
+# is OOM-killed at boot, whatever its memory limit. The containers cap it first.
+nofile: 65536
+
+# The NATS cluster itself is the `nats/nats` chart that run.sh installs from
+# infra/nats-values.yaml. The KEDA ScaledObject reads JetStream's monitoring
+# endpoint (port 8222) from "<monitoringService>.<namespace>.svc.cluster.local".
+nats: {host: nats, port: 4222, monitoringService: nats-headless}
+
+# Direct mode (wal.type: none): stateless edge pods, 201 only on JetStream's
+# publish ack. The HPA owns the replica count.
+ankusa:
+  minReplicas: 2
+  maxReplicas: 6
+  # A pod serving ~1 hook/s costs ~0.6 millicores, so with a 100m request and a 50 %
+  # target, two pods scale out at about 160 hooks/s (a 30-60 KiB body) in total, and
+  # six are needed at 500.
+  cpuTargetUtilization: 50
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}
+  # Bodies above this are checked in to the claim store; the NATS message
+  # carries a claim ref instead.
+  inlineMaxBytes: 65536
+
+# Durable mode (wal.type: disk): a StatefulSet whose pods each commit a hook to
+# their own RocksDB store (a PVC) before answering 201, then dispatch it to the
+# same JetStream stream (subject ankusa.durable) with retries, a circuit
+# breaker and a DLQ. No HPA: a pod's store holds hooks, so it is not scaled
+# down freely.
+durable:
+  replicas: 3
+  storage: 1Gi
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 768Mi}}
+  # A short retry budget: 0.5, 1, 2, 4 s, then 5 s apart, 12 attempts (~25-48 s
+  # of failing). The breaker opens after `failures` consecutive failures and
+  # parks rows without spending attempts, then probes after openMs (doubling
+  # up to maxOpenMs). So a down or flapping sink builds a backlog, not a DLQ:
+  # a flap of 20 s down / 20 s up dead-lettered nothing even at 4 attempts.
+  # `breaker.failures: 0` turns the breaker off, and then every row that fails
+  # max_attempts times in a row is dead-lettered (the panel's Replay DLQ).
+  retry: {base_ms: 500, max_ms: 5000, max_attempts: 12}
+  breaker: {failures: 5, openMs: 5000, maxOpenMs: 30000}
+
+# KEDA owns the replica count: one replica per `lagThreshold` of JetStream lag.
+consumer:
+  minReplicas: 1
+  maxReplicas: 8
+  lagThreshold: 50
+  workMs: 25
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+
+claimCheck:
+  replicas: 1
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
+
+# floci, an S3 emulator, behind the claim store. It keeps every claimed body in
+# memory, hence the limit; its keeper sidecar deletes claims older than
+# claimRetentionMinutes. A hook the consumers have not reached by then can no
+# longer redeem its claim. That includes a durable pod's backlog: its claims
+# are checked in when dispatch first picks a hook up, so claimed hooks held
+# through a longer sink outage are dead-lettered by the consumer. Static demo
+# credentials.
+floci:
+  claimRetentionMinutes: 5
+  resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {memory: 3Gi}}
+s3: {bucket: ankusa-claims, region: us-east-1, accessKeyId: test, secretAccessKey: test}
+
+controlPanel:
+  secretKeyBase: "demo-only-not-a-secret-demo-only-not-a-secret-demo-only-not-a-secret-0000"
+  # The panel's load generator posts to the ingress gateway Service, so it
+  # crosses the same VirtualService (and its fault lever) as an outside caller.
+  gatewayUrl: "http://istio-ingress.istio-ingress.svc.cluster.local"
+  # The most claimed body bytes (over ankusa.inlineMaxBytes) the generator sends
+  # a second. floci holds every one on its heap until the keeper expires it
+  # after floci.claimRetentionMinutes: 2 MiB/s x 5 min is ~600 MiB live, where
+  # floci's heap tops out near 80 % of its 3Gi limit. At 8 MiB/s (2.4 GiB live)
+  # it ran out of heap and stopped answering.
+  claimBytesPerSec: 2097152
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
+
+# The Istio ingress gateway run.sh installs (release `istio-ingress`).
+gateway: {selector: {istio: ingress}, serviceHost: "istio-ingress.istio-ingress.svc.cluster.local"}

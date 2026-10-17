@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ankusa
+  labels:
+    {{- include "demo.labels" "ankusa" | nindent 4 }}
+---
+# `replicas` is left out on purpose: the HPA owns it, and a `helm upgrade`
+# must not reset a scaled-out fleet to the chart's value.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ankusa
+  labels:
+    {{- include "demo.labels" "ankusa" | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ankusa
+  template:
+    metadata:
+      labels:
+        {{- include "demo.labels" "ankusa" | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/ankusa-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: ankusa
+      # A Service named `ankusa` would otherwise inject ANKUSA_PORT=tcp://... next to the
+      # ANKUSA_* settings the image reads.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: ankusa
+          image: {{ include "demo.image" .Values.images.ankusa }}
+          # The image's own entrypoint, behind a cap on open files: see `nofile` in values.yaml.
+          command: ["/bin/sh", "-c", "ulimit -n {{ .Values.nofile }} && exec /sbin/tini -- /usr/local/bin/docker-entrypoint start"]
+          imagePullPolicy: {{ .Values.images.ankusa.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 4000}
+            - {name: admin, containerPort: 4002}
+          readinessProbe:
+            httpGet: {path: /ready, port: 4000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 4000}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            # Let the mesh stop sending new requests before the BEAM stops.
+            preStop:
+              exec: {command: ["sleep", "5"]}
+          resources:
+            {{- toYaml .Values.ankusa.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/ankusa/ankusa.yml, subPath: ankusa.yml, readOnly: true}
+            - {name: data, mountPath: /var/lib/ankusa}
+      volumes:
+        - name: config
+          configMap: {name: ankusa-config}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ankusa
+  labels:
+    {{- include "demo.labels" "ankusa" | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: ankusa
+  ports:
+    - {name: http, port: 4000, targetPort: http}
+    - {name: admin, port: 4002, targetPort: admin}

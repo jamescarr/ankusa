@@ -1,0 +1,38 @@
+# Direct mode: no hook store, no dispatch. Ingest publishes to JetStream inside
+# the request and answers 201 on the publish ack, 503 otherwise. Bodies above
+# inline_max_bytes are checked in to the claim store first.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ankusa-config
+  labels:
+    {{- include "demo.labels" "ankusa" | nindent 4 }}
+data:
+  ankusa.yml: |
+    node:
+      roles: [edge]
+    log:
+      banner: false
+    wal:
+      type: none
+      publish_timeout_ms: 6000
+    admin:
+      enabled: true
+      ip: 0.0.0.0
+    claim_check:
+      store:
+        {{- include "demo.claimStore" . | nindent 8 }}
+    sources:
+      demo:
+        verify: {type: none}
+        # Direct mode does no ingest dedupe (only the queue writer collapses
+        # duplicates, and `wal: none` has none): this only stamps `dedupe_key` and
+        # `idempotency_key` on the message. A provider retry is a second hook and
+        # collapsing it is the consumer's job, fleet-wide.
+        dedupe: {header: x-demo-event-id}
+        sinks:
+          - type: nats
+            servers: {{ printf "%s:%d" .Values.nats.host (int .Values.nats.port) | quote }}
+            subject: ankusa.demo
+            inline_max_bytes: {{ int .Values.ankusa.inlineMaxBytes }}
+            publish_timeout_ms: 4000

@@ -1,0 +1,29 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ankusa
+  labels:
+    {{- include "demo.labels" "ankusa" | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ankusa
+  minReplicas: {{ .Values.ankusa.minReplicas }}
+  maxReplicas: {{ .Values.ankusa.maxReplicas }}
+  metrics:
+    # The container's CPU, not the pod's: the Istio sidecar's CPU would
+    # otherwise count towards the target.
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: ankusa
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.ankusa.cpuTargetUtilization }}
+  behavior:
+    scaleUp:
+      policies:
+        - {type: Pods, value: 2, periodSeconds: 15}
+    scaleDown:
+      stabilizationWindowSeconds: 60

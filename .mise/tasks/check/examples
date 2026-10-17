@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, the Python worker's lockfile, and the Rust worker's fmt/clippy"
+#MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, the Python worker's lockfile, the Rust worker's fmt/clippy, and the Helm charts' lint/template"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -47,4 +47,11 @@ for f in examples/*/*/package.json; do
   d="${f%/package.json}"
   echo "==> $d"
   (cd "$d" && npm ci && npx tsc --noEmit)
+done
+
+for f in examples/*/chart/Chart.yaml; do
+  [ -f "$f" ] || continue
+  d="${f%/Chart.yaml}"
+  echo "==> $d"
+  (cd "$d" && helm lint . && helm template demo . >/dev/null)
 done

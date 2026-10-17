@@ -1,0 +1,75 @@
+# The claim-check gateway; its config is in claim-check-configmap.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claim-check
+  labels:
+    {{- include "demo.labels" "claim-check" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claim-check
+  labels:
+    {{- include "demo.labels" "claim-check" | nindent 4 }}
+spec:
+  replicas: {{ .Values.claimCheck.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: claim-check
+  template:
+    metadata:
+      labels:
+        {{- include "demo.labels" "claim-check" | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/claim-check-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: claim-check
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: claim-check
+          image: {{ include "demo.image" .Values.images.ankusa }}
+          command: ["/bin/sh", "-c", "ulimit -n {{ .Values.nofile }} && exec /sbin/tini -- /usr/local/bin/docker-entrypoint start"]
+          imagePullPolicy: {{ .Values.images.ankusa.pullPolicy }}
+          ports:
+            - {name: claim, containerPort: 4001}
+            - {name: admin, containerPort: 4002}
+          readinessProbe:
+            httpGet: {path: /health, port: 4001}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 4001}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec: {command: ["sleep", "5"]}
+          resources:
+            {{- toYaml .Values.claimCheck.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/ankusa/ankusa.yml, subPath: ankusa.yml, readOnly: true}
+            - {name: data, mountPath: /var/lib/ankusa}
+      volumes:
+        - name: config
+          configMap: {name: claim-check-config}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claim-check
+  labels:
+    {{- include "demo.labels" "claim-check" | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: claim-check
+  ports:
+    # `tcp-` makes Istio treat the port as plain TCP. That is deliberate: the
+    # panel's "consumer -> claim-check" lever is an AuthorizationPolicy DENY,
+    # and on an HTTP port Envoy answers it with a 403, which the SDK files as
+    # a non-retryable ClaimRejectedError (the consumer would `term` the hook).
+    # On a TCP port the connection is reset instead, which is retryable, so
+    # the consumer naks and the hook is redelivered once the lever is released.
+    - {name: tcp-http, port: 4001, targetPort: claim}

@@ -24,6 +24,7 @@ flowchart LR
 | [kafka-sqs-consumer](kafka-sqs-consumer/) | Kafka → SQS FIFO | TypeScript | docker | `docker compose up --build -d --wait` |
 | [nats-consumer](nats-consumer/) | NATS JetStream | Rust | docker | `docker compose up --build -d --wait` |
 | [oban-consumer](oban-consumer/) | HTTP → Oban | Elixir | docker, kind, kubectl | `./run.sh` |
+| [jetstream-k8s](jetstream-k8s/) | NATS JetStream, autoscaled (kind + Helm + Istio) | TypeScript | docker, kind, kubectl, helm | `./run.sh` |
 
 ## quickstart
 
@@ -119,6 +120,33 @@ flowchart LR
 
 [`oban-consumer/`](oban-consumer/)
 
+## jetstream-k8s
+
+A `kind` cluster installed with Helm, with an Istio ingress gateway (Envoy)
+load-balancing webhooks across an autoscaling fleet of stateless ankusa pods
+(direct mode, HPA on CPU), a three-node NATS JetStream cluster, and an
+autoscaling TypeScript consumer (KEDA on JetStream lag). A Phoenix LiveView
+control panel in the cluster fires synthetic webhooks (rate, burst, payload
+size), draws the flow live, tails the last 30 consumed hooks, and breaks things
+on request: kill pods, cut a connection with an Istio `AuthorizationPolicy`,
+inject `503`s or delay at the gateway. Bodies over the inline limit take the
+claim-check path through an S3 emulator.
+
+```mermaid
+flowchart LR
+    S[control panel\nload generator] --> G[Istio gateway]
+    G --> A[ankusa ×2-6\nHPA]
+    A --> N[(JetStream\n3 nodes, R3)]
+    N --> C[consumer ×1-8\nKEDA]
+    A -.-> F[(floci S3)]
+    C -.->|claim ref| CC[claim-check gateway]
+    CC -.-> F
+```
+
+[`jetstream-k8s/`](jetstream-k8s/)
+
 `rabbitmq-consumer`, `kafka-sqs-consumer`, and `oban-consumer` build their
 ingest app from this repo's Elixir source, so you can see the library in use;
 `quickstart` and `nats-consumer` run the published image instead.
+`jetstream-k8s` builds the server image from this repo (`mise run docker:build`)
+unless you point `ANKUSA_IMAGE` at a published one.
