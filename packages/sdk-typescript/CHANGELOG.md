@@ -6,6 +6,10 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Depends on `openapi-fetch ^0.17.0` (was `^0.13.0`).
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

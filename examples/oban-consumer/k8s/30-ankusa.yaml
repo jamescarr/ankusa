@@ -28,6 +28,10 @@ spec:
         - name: ankusa
           image: ankusa-oban-ingest:e2e
           imagePullPolicy: IfNotPresent
+          # A kind node's containerd runs with LimitNOFILE=infinity, and the
+          # BEAM sizes its tables from the open-file limit: uncapped, each pod
+          # takes ~2 GB at boot and gets OOM-killed. Cap it before the release starts.
+          command: ["/bin/sh", "-c", "ulimit -n 65536 && exec /app/bin/ingest start"]
           lifecycle:
             preStop:
               # Same k8s Service endpoint-removal race as the consumer

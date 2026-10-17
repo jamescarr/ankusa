@@ -3,7 +3,7 @@
 # an app against the path deps" in docs/packaging.md), so the build needs both
 # directories in one context, at the same relative paths.
 #   docker compose build worker   (context: ../.. in docker-compose.yml)
-FROM node:22-alpine
+FROM node:24-alpine
 
 # The link imports the SDK's build output, so build it first.
 WORKDIR /repo/packages/sdk-typescript

@@ -6,7 +6,7 @@ images:
   consumer: {repository: ankusa-jetstream-consumer, tag: dev, pullPolicy: IfNotPresent}
   controlPanel: {repository: ankusa-jetstream-panel, tag: dev, pullPolicy: IfNotPresent}
   floci: {repository: floci/floci, tag: latest, pullPolicy: IfNotPresent}
-  awsCli: {repository: amazon/aws-cli, tag: 2.17.62}
+  awsCli: {repository: amazon/aws-cli, tag: 2.38.1}
 
 # RLIMIT_NOFILE for the BEAM containers (ankusa, claim-check, control panel). A
 # kind node's containerd runs with LimitNOFILE=infinity, so a pod starts with a
