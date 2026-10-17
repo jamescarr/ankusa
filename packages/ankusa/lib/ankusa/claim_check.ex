@@ -29,7 +29,7 @@ defmodule Ankusa.ClaimCheck do
 
   require Logger
 
-  alias Ankusa.ClaimCheck.{Pack, Ref, Stores}
+  alias Ankusa.ClaimCheck.{Cache, Pack, Reader, Ref, Stores}
   alias Ankusa.{Config, Telemetry}
 
   # ZIP without ZIP64 caps an archive at 65,535 entries (two are the index and
@@ -64,6 +64,12 @@ defmodule Ankusa.ClaimCheck do
   # A manifest row per claim: its ids, digest, JSON keys, and numbers. The
   # content type is added on top. Only used to size packs against the cap.
   @manifest_row_bytes 200
+
+  # A pack's index is read this far on a miss, whatever the claim asked for:
+  # the first 1 024 claims' rows (8 231 bytes), which is every claim of every
+  # pack dispatch builds at `dispatch.batch` 128, so one read and one cache
+  # entry locate them all.
+  @index_read_bytes Pack.index_prefix_bytes(1023)
 
   @doc """
   Store `items` for one tenant as a single pack object, with one `PUT`.
@@ -189,10 +195,14 @@ defmodule Ankusa.ClaimCheck do
   end
 
   @typedoc """
-  A claim's pack: the index of the claim store it was found in, its object
-  key there, and the claim's offset and length in it.
+  A located claim: its tenant, pack and index in the pack, the index of the
+  claim store the pack was found in, its object key there, and the claim's
+  offset and length in it.
   """
   @type location :: %{
+          tenant_id: String.t(),
+          pack_id: String.t(),
+          index: non_neg_integer(),
           store: non_neg_integer(),
           key: String.t(),
           offset: non_neg_integer(),
@@ -200,54 +210,205 @@ defmodule Ankusa.ClaimCheck do
         }
 
   @doc """
-  Read a claim's bytes, with no digest check: `locate/3`, then `read_bytes/4`
-  over the whole claim. A claim id past the end of its pack's index, a missing
-  pack, or a pack that ends before the claim does is `:not_found`.
+  The `:deadline` of a read starting now: `claim_check.read_deadline_ms` from
+  now, as an absolute `System.monotonic_time(:millisecond)`.
   """
-  @spec read(atom(), String.t(), String.t()) :: {:ok, binary()} | {:error, reason()}
-  def read(instance, tenant_id, claim_id) do
-    with {:ok, location} <- locate(instance, tenant_id, claim_id) do
-      read_bytes(instance, location, 0, location.length)
+  @spec deadline(atom() | Config.t()) :: integer()
+  def deadline(%Config{claim_check: %{read_deadline_ms: ms}}),
+    do: System.monotonic_time(:millisecond) + ms
+
+  def deadline(instance), do: deadline(Ankusa.config(instance))
+
+  @doc """
+  Read a claim's bytes, with no digest check: `locate/4`, then `read_bytes/5`
+  over the whole claim, both under one `:deadline` (default `deadline/1`). A
+  claim id past the end of its pack's index, a missing pack, or a pack that
+  ends before the claim does is `:not_found`.
+  """
+  @spec read(atom(), String.t(), String.t(), keyword()) :: {:ok, binary()} | {:error, reason()}
+  def read(instance, tenant_id, claim_id, opts \\ []) do
+    opts = Keyword.put_new_lazy(opts, :deadline, fn -> deadline(instance) end)
+
+    with {:ok, location} <- locate(instance, tenant_id, claim_id, opts) do
+      read_bytes(instance, location, 0, location.length, opts)
     end
   end
 
   @doc """
-  Find a claim without reading it: one ranged read of its pack's index, up to
-  the claim's row, searching every claim store under both key layouts
+  Find a claim without reading it: its pack's index, from
+  `Ankusa.ClaimCheck.Cache`, else one ranged read of the index's first
+  8 231 bytes (the first 1 024 claims' rows), or up to the claim's row when
+  that is further, searching every claim store under both key layouts
   (`Ankusa.ClaimCheck.Stores.read_range/6`). A claim id past the end of the
   index, or a pack no store has, is `:not_found`; a pack not found while some
   store could not answer is that store's error.
+
+  On a `:claim_check` node the read goes through `Ankusa.ClaimCheck.Reader`,
+  and gives up with `{:unavailable, :deadline}` at `opts[:deadline]` (default
+  `deadline/1`); elsewhere it goes straight to the store.
   """
-  @spec locate(atom(), String.t(), String.t()) :: {:ok, location()} | {:error, reason()}
-  def locate(instance, tenant_id, claim_id) do
+  @spec locate(atom(), String.t(), String.t(), keyword()) ::
+          {:ok, location()} | {:error, reason()}
+  def locate(instance, tenant_id, claim_id, opts \\ []) do
     with :ok <- Ref.validate_tenant(tenant_id),
          {:ok, pack_id, index} <- Ref.locate(claim_id) do
       config = Ankusa.config(instance)
-      keys = Ref.object_keys(tenant_id, pack_id, config.claim_check.key_layout)
-      prefix_bytes = Pack.index_prefix_bytes(index)
+      deadline = Keyword.get_lazy(opts, :deadline, fn -> deadline(config) end)
+      locate_in(instance, config, tenant_id, pack_id, index, deadline)
+    end
+  end
 
-      with {:ok, prefix, store, key} <-
-             Stores.read_range(instance, config, pack_id, keys, 0, prefix_bytes),
-           {:ok, offset, length} <- pack_entry(prefix, index) do
-        {:ok, %{store: store, key: key, offset: offset, length: length}}
+  # `read` is how far the cached (or fetched) index was asked for: when that
+  # covers this claim's row, a shorter prefix means the pack ends before it.
+  # A fetch this caller joined may have asked for less than it needs (only
+  # for a claim past row 1 023): it fetches again.
+  defp locate_in(instance, config, tenant_id, pack_id, index, deadline) do
+    needed = Pack.index_prefix_bytes(index)
+
+    case Cache.pack(instance, tenant_id, pack_id) do
+      {:ok, %{read: read} = pack} when read >= needed ->
+        Reader.emit_read(instance, :index, :cache, {:ok, pack}, pack.store, 0)
+        located(pack, tenant_id, pack_id, index)
+
+      _miss_or_short ->
+        length = max(needed, @index_read_bytes)
+
+        case fetch_index(instance, config, tenant_id, pack_id, length, deadline) do
+          {:ok, %{read: read} = pack} when read >= needed ->
+            located(pack, tenant_id, pack_id, index)
+
+          {:ok, _shorter} ->
+            locate_in(instance, config, tenant_id, pack_id, index, deadline)
+
+          {:error, _reason} = error ->
+            error
+        end
+    end
+  end
+
+  # The cache is filled inside the fetch, so a read that outlives its
+  # caller's deadline still leaves the index for the retry.
+  defp fetch_index(instance, config, tenant_id, pack_id, length, deadline) do
+    keys = Ref.object_keys(tenant_id, pack_id, config.claim_check.key_layout)
+
+    fun = fn ->
+      case Stores.read_range(instance, config, pack_id, keys, 0, length) do
+        {:ok, prefix, store, key} ->
+          pack = %{store: store, key: key, prefix: prefix, read: length}
+          Cache.put_pack(instance, tenant_id, pack_id, pack)
+          {:ok, pack}
+
+        {:error, _reason} = error ->
+          error
       end
+    end
+
+    run(instance, {:index, tenant_id, pack_id}, Stores.home(config, pack_id), fun, deadline)
+  end
+
+  defp located(pack, tenant_id, pack_id, index) do
+    case Pack.locate(pack.prefix, index) do
+      {:ok, offset, length} ->
+        {:ok,
+         %{
+           tenant_id: tenant_id,
+           pack_id: pack_id,
+           index: index,
+           store: pack.store,
+           key: pack.key,
+           offset: offset,
+           length: length
+         }}
+
+      :error ->
+        {:error, :not_found}
     end
   end
 
   @doc """
-  `length` bytes of a located claim, starting `first` bytes into it: one
-  ranged read. The caller keeps the range inside the claim's `length`; a pack
-  that ends before the range does is `:not_found`.
+  `length` bytes of a located claim, starting `first` bytes into it: the
+  whole claim from `Ankusa.ClaimCheck.Cache` when it is there, else one ranged
+  read, through `Ankusa.ClaimCheck.Reader` on a `:claim_check` node (see
+  `locate/4` for `opts[:deadline]`). A whole claim of at most
+  `claim_check.read_cache_max_entry_bytes` is cached; a range never is. The
+  caller keeps the range inside the claim's `length`; a pack that ends before
+  the range does is `:not_found`, and forgets the cached pack (it was swept).
   """
-  @spec read_bytes(atom(), location(), non_neg_integer(), non_neg_integer()) ::
+  @spec read_bytes(atom(), location(), non_neg_integer(), non_neg_integer(), keyword()) ::
           {:ok, binary()} | {:error, reason()}
-  def read_bytes(_instance, _location, _first, 0), do: {:ok, <<>>}
+  def read_bytes(instance, location, first, length, opts \\ [])
 
-  def read_bytes(instance, %{store: store, key: key, offset: offset}, first, length) do
-    case Stores.get_range(instance, Ankusa.config(instance), store, key, offset + first, length) do
-      {:ok, bin} when byte_size(bin) == length -> {:ok, bin}
-      {:ok, _short} -> {:error, :not_found}
-      {:error, reason} -> {:error, reason}
+  def read_bytes(_instance, _location, _first, 0, _opts), do: {:ok, <<>>}
+
+  def read_bytes(instance, location, first, length, opts) do
+    %{tenant_id: tenant_id, pack_id: pack_id, index: index} = location
+    whole? = first == 0 and length == location.length
+
+    case if(whole?, do: Cache.body(instance, tenant_id, pack_id, index), else: :error) do
+      {:ok, bin} ->
+        Reader.emit_read(instance, :bytes, :cache, {:ok, bin}, location.store, 0)
+        {:ok, bin}
+
+      :error ->
+        fetch_bytes(instance, location, first, length, whole?, opts)
+    end
+  end
+
+  defp fetch_bytes(instance, location, first, length, whole?, opts) do
+    %{tenant_id: tenant_id, pack_id: pack_id, index: index} = location
+    config = Ankusa.config(instance)
+    deadline = Keyword.get_lazy(opts, :deadline, fn -> deadline(config) end)
+    cache? = whole? and length <= config.claim_check.read_cache_max_entry_bytes
+
+    key =
+      if whole?,
+        do: {:bytes, tenant_id, pack_id, index},
+        else: {:range, tenant_id, pack_id, index, first, length}
+
+    fun = fn ->
+      case Stores.get_range(
+             instance,
+             config,
+             location.store,
+             location.key,
+             location.offset + first,
+             length
+           ) do
+        {:ok, bin} when byte_size(bin) == length ->
+          if cache?, do: Cache.put_body(instance, tenant_id, pack_id, index, bin)
+          {:ok, bin}
+
+        {:ok, _short} ->
+          {:error, :not_found}
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+
+    case run(instance, key, location.store, fun, deadline) do
+      {:error, :not_found} = error ->
+        Cache.forget_pack(instance, tenant_id, pack_id)
+        error
+
+      result ->
+        result
+    end
+  end
+
+  # Through the reader when it runs (a `:claim_check` node), else straight to
+  # the store: no limit, no coalescing, no deadline but the store's timeout.
+  defp run(instance, key, store, fun, deadline) do
+    case Ankusa.whereis(instance, :claim_reader) do
+      nil ->
+        started = System.monotonic_time()
+        result = fun.()
+        duration = System.monotonic_time() - started
+        Reader.emit_read(instance, elem(key, 0), :direct, result, store, duration)
+        result
+
+      _pid ->
+        Reader.fetch(instance, key, store, fun, deadline)
     end
   end
 
@@ -352,13 +513,6 @@ defmodule Ankusa.ClaimCheck do
 
   defp checked_in(tenant_id, claim),
     do: %{ref: %Ref{tenant_id: tenant_id, claim_id: claim.claim_id}, sha256: claim.sha256}
-
-  defp pack_entry(prefix, index) do
-    case Pack.locate(prefix, index) do
-      {:ok, offset, length} -> {:ok, offset, length}
-      :error -> {:error, :not_found}
-    end
-  end
 
   # Greedy, order-preserving: start a new pack when the next item would push
   # this one past the cap (or past what a ZIP can hold). A single oversized

@@ -36,6 +36,10 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
   | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
   | `[:ankusa, :claim_check, :store_breaker]` | — | `:instance`, `:store` (index into `claim_check.blob_stores`), `:state` (`:open`, `:closed`), `:reason` (on `:open`) |
+  | `[:ankusa, :claim_check, :gateway]` | `:duration` | `:instance`, `:method`, `:status` (one per claim request the gateway answered) |
+  | `[:ankusa, :claim_check, :read]` | `:duration` | `:instance`, `:kind` (`:index`, `:bytes`, `:range`), `:source` (`:cache`, `:store`, `:coalesced`, `:shed`, `:direct`), `:result` (`:ok`, `:not_found`, `:forbidden`, `:throttled`, `:unavailable`, `:overloaded`, `:deadline`), `:store` |
+  | `[:ankusa, :claim_check, :read_limit]` | `:limit` | `:instance`, `:store` (every change of a store's adaptive read limit) |
+  | `[:ankusa, :claim_check, :read_state]` | `:limit`, `:inflight`, `:queued` | `:instance`, `:store` (every second, per store the gateway's reader has read from) |
   | `[:ankusa, :blob_store, :retry]` | `:delay_ms` | `:instance`, `:attempt`, `:status` (an HTTP status or `:transport`) |
   | `[:ankusa, :lifecycle, :delivered]` | — | `:instance`, `:type`, `:sink` |
   | `[:ankusa, :lifecycle, :dropped]` | — | `:instance`, `:type`, `:sink`, `:reason` (`:not_running`, `:queue_full`, `:gave_up`) |

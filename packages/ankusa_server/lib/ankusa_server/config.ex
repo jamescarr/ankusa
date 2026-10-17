@@ -75,7 +75,9 @@ defmodule AnkusaServer.Config do
   @blob_store_keys ~w(type root s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token)
   @gcs_keys ~w(bucket endpoint auth token)
-  @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms)
+  @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
+                       read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
+                       read_cache_bytes read_cache_max_entry_bytes)
   @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
@@ -586,6 +588,16 @@ defmodule AnkusaServer.Config do
         |> put_opt(:placement, atom_enum_opt(claim_check, "placement", ~w(ordered hash), path))
         |> put_opt(:key_layout, atom_enum_opt(claim_check, "key_layout", ~w(flat sharded), path))
         |> put_opt(:store_cooldown_ms, int_opt(claim_check, "store_cooldown_ms", path))
+        |> put_opt(:read_deadline_ms, int_opt(claim_check, "read_deadline_ms", path))
+        |> put_opt(:read_timeout_ms, int_opt(claim_check, "read_timeout_ms", path))
+        |> put_opt(:read_retries, int_opt(claim_check, "read_retries", path))
+        |> put_opt(:read_max_inflight, int_opt(claim_check, "read_max_inflight", path))
+        |> put_opt(:read_queue_max, int_opt(claim_check, "read_queue_max", path))
+        |> put_opt(:read_cache_bytes, int_opt(claim_check, "read_cache_bytes", path))
+        |> put_opt(
+          :read_cache_max_entry_bytes,
+          int_opt(claim_check, "read_cache_max_entry_bytes", path)
+        )
     ]
   end
 

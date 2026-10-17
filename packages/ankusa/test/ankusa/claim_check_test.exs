@@ -463,6 +463,28 @@ defmodule Ankusa.ClaimCheckTest do
                ClaimCheck.redeem(ctx.inst, ref, String.duplicate("0", 64))
     end
 
+    @tag :capture_log
+    test "a throttled read never opens the store's breaker; a 500 does", ctx do
+      start_supervised!({Stores, instance: ctx.inst})
+      attach(ctx.inst, [[:ankusa, :claim_check, :store_breaker]])
+      ref = %Ref{tenant_id: "acme", claim_id: Ref.claim_id(Ref.new_pack_id(), 0)}
+      digest = String.duplicate("0", 64)
+
+      use_stores(ctx, [[range_error: {:status, 503, "SlowDown"}]])
+
+      assert {:error, {:unavailable, {:status, 503, "SlowDown"}}} =
+               ClaimCheck.redeem(ctx.inst, ref, digest)
+
+      refute_received {:telemetry, [:ankusa, :claim_check, :store_breaker], _meta}
+
+      use_stores(ctx, [[range_error: {:status, 500, "boom"}]])
+
+      assert {:error, {:unavailable, {:status, 500, "boom"}}} =
+               ClaimCheck.redeem(ctx.inst, ref, digest)
+
+      assert_received {:telemetry, _event, %{store: 0, state: :open}}
+    end
+
     test "a pack written under one key layout is read under the other", ctx do
       for {written, configured} <- [{:flat, :sharded}, {:sharded, :flat}] do
         [root] = use_stores(ctx, [[]], %{key_layout: written})

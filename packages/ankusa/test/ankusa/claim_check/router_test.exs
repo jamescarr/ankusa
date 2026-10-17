@@ -9,7 +9,8 @@ defmodule Ankusa.ClaimCheck.RouterTest do
   use ExUnit.Case, async: false
 
   alias Ankusa.{ClaimCheck, Config, UUIDv7}
-  alias Ankusa.ClaimCheck.{Ref, Router}
+  alias Ankusa.ClaimCheck.{Cache, Reader, Ref, Router, Stores}
+  alias Ankusa.Test.CountingBlobStore
 
   setup do
     inst = :"ccr#{System.unique_integer([:positive])}"
@@ -35,6 +36,19 @@ defmodule Ankusa.ClaimCheck.RouterTest do
   end
 
   defp error(conn), do: JSON.decode!(conn.resp_body)["error"]
+
+  # What a `:claim_check` node runs beside the listener, under the test's
+  # config with `claim_check` merged in.
+  defp start_reader(inst, claim_check) do
+    config = Ankusa.config(inst)
+    Ankusa.put_config(%{config | claim_check: Map.merge(config.claim_check, claim_check)})
+    start_supervised!({Stores, instance: inst})
+
+    if Ankusa.config(inst).claim_check.read_cache_bytes > 0,
+      do: start_supervised!({Cache, instance: inst})
+
+    start_supervised!({Reader, instance: inst})
+  end
 
   test "GET /health", %{inst: inst} do
     conn = call(inst, :get, "/health")
@@ -243,7 +257,11 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     assert conn.status == 404
   end
 
-  test "a store that can't be reached is 503 with Retry-After", %{inst: inst, config: config} do
+  @tag :capture_log
+  test "a store that can't be reached is 503 with a jittered Retry-After", %{
+    inst: inst,
+    config: config
+  } do
     Ankusa.put_config(%{
       config
       | storage: %{config.storage | blob_store: {__MODULE__.DownStore, []}}
@@ -252,7 +270,56 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
 
     assert {conn.status, JSON.decode!(conn.resp_body)} == {503, %{"error" => "store_unavailable"}}
-    assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+    assert [retry_after] = Plug.Conn.get_resp_header(conn, "retry-after")
+    assert retry_after in ["1", "2", "3"]
+  end
+
+  @tag :capture_log
+  test "every claim request emits its method, status and duration", %{inst: inst, config: config} do
+    test = self()
+    handler = "router-test-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:ankusa, :claim_check, :gateway],
+      fn _event, measurements, meta, _ ->
+        if meta.instance == inst, do: send(test, {:gateway, measurements, meta})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    call(inst, :get, Ref.path(check_in(inst, "found")))
+    assert_received {:gateway, %{duration: d}, %{method: "GET", status: 200}} when d > 0
+
+    Ankusa.put_config(%{
+      config
+      | storage: %{config.storage | blob_store: {__MODULE__.DownStore, []}}
+    })
+
+    call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+    assert_received {:gateway, _measurements, %{method: "GET", status: 503}}
+  end
+
+  test "a store slower than read_deadline_ms is 503 at the deadline, not when it answers", %{
+    inst: inst
+  } do
+    root = Path.join(System.tmp_dir!(), "ankusa_claims_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    start_reader(inst, %{
+      read_deadline_ms: 100,
+      blob_stores: [{CountingBlobStore, root: root, range_delay_ms: 400}]
+    })
+
+    {elapsed_us, conn} =
+      :timer.tc(fn ->
+        call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+      end)
+
+    assert {conn.status, error(conn)} == {503, "store_unavailable"}
+    assert div(elapsed_us, 1000) < 250
   end
 
   defmodule DownStore do

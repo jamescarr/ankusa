@@ -94,7 +94,7 @@ defmodule Ankusa.Instance do
         routes_admin_children(config) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
-        claim_check_children(config) ++
+        claim_check_children(config, opts) ++
         admin_children(config)
 
     # `:any_significant`: the registry watcher is the only significant child.
@@ -289,7 +289,10 @@ defmodule Ankusa.Instance do
     ]
   end
 
-  defp claim_check_children(config) do
+  # The gateway's read cache and reader start before its listener, in the same
+  # subtree. `Isolated` restarts children one for one, so a reader crash
+  # leaves the listener up: until it is back, reads go straight to the store.
+  defp claim_check_children(config, opts) do
     if Config.role?(config, :claim_check) do
       Logger.warning(
         "[ankusa] claim-check API on #{listen_addr(config.claim_check, "claim_check.ip")} " <>
@@ -297,14 +300,25 @@ defmodule Ankusa.Instance do
           "front it with your own proxy, mesh, or network policy"
       )
 
-      isolated(config, :claim_check, [
-        bandit_child(
-          Ankusa.ClaimCheck.Router,
-          config.instance,
-          config.claim_check,
-          "claim_check.ip"
-        )
-      ])
+      cache =
+        if config.claim_check.read_cache_bytes > 0,
+          do: [{Ankusa.ClaimCheck.Cache, opts}],
+          else: []
+
+      isolated(
+        config,
+        :claim_check,
+        cache ++
+          [
+            {Ankusa.ClaimCheck.Reader, opts},
+            bandit_child(
+              Ankusa.ClaimCheck.Router,
+              config.instance,
+              config.claim_check,
+              "claim_check.ip"
+            )
+          ]
+      )
     else
       []
     end

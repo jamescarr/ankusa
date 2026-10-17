@@ -28,7 +28,9 @@ defmodule Ankusa.ClaimCheck.Stores do
   is never refused untried. The cooldown is fixed: the stores back each other
   up, and the dispatch retry policy backs the whole write. Each open and close
   emits `[:ankusa, :claim_check, :store_breaker]`. Breakers live in an ETS
-  table this process owns; a restart closes them all.
+  table this process owns; a restart closes them all. A throttled answer
+  (`429`, `503`) is a reachable store: it never opens the breaker;
+  `Ankusa.ClaimCheck.Reader`'s per-store limit is what backs off.
 
   ## Reads
 
@@ -39,10 +41,14 @@ defmodule Ankusa.ClaimCheck.Stores do
   searched last, never skipped: a read that cannot reach a store opens its
   breaker too, so on a gateway that never writes, a hung store costs one
   read its timeout and later reads go to the healthy stores first; an answer
-  from a store (found or not) closes it. A miss is reported as `:not_found`
-  only when every store answered; if any store could not, the read is
-  `{:unavailable, reason}` (or `:forbidden`), the first such error, so a claim
-  is never declared gone while it may be in a store that did not answer.
+  from a store (found or not) closes it. A store that could not answer is not
+  asked again within the same read, at the other layout: that would cost a
+  hung store's timeout twice, and double the requests to one that throttles.
+  A `403` is asked again (a credential without `s3:ListBucket` answers 403
+  for a missing key). A miss is reported as `:not_found` only when every
+  store answered; if any store could not, the read is `{:unavailable,
+  reason}` (or `:forbidden`), the first such error, so a claim is never
+  declared gone while it may be in a store that did not answer.
 
   Adding a store moves `:hash` homes (the search still finds older packs).
   Removing a store makes the packs in it unreadable: remove one only after
@@ -181,17 +187,22 @@ defmodule Ankusa.ClaimCheck.Stores do
     # Layout-major: every store at the configured layout before any at the
     # other one.
     for(key <- keys, store <- up ++ down, do: {key, store})
-    |> Enum.reduce_while(nil, fn {key, {index, _mod, _opts} = store}, error ->
-      case read(instance, config, store, key, offset, length) do
-        {:ok, bin} -> {:halt, {:found, bin, index, key}}
-        {:error, :not_found} -> {:cont, error}
-        {:error, reason} -> {:cont, error || reason}
+    |> Enum.reduce_while({nil, []}, fn {key, {index, _mod, _opts} = store}, {error, failed} ->
+      if index in failed do
+        {:cont, {error, failed}}
+      else
+        case read(instance, config, store, key, offset, length) do
+          {:ok, bin} -> {:halt, {:found, bin, index, key}}
+          {:error, :not_found} -> {:cont, {error, failed}}
+          {:error, {:unavailable, _} = reason} -> {:cont, {error || reason, [index | failed]}}
+          {:error, reason} -> {:cont, {error || reason, failed}}
+        end
       end
     end)
     |> case do
       {:found, bin, index, key} -> {:ok, bin, index, key}
-      nil -> {:error, :not_found}
-      error -> {:error, error}
+      {nil, _failed} -> {:error, :not_found}
+      {error, _failed} -> {:error, error}
     end
   end
 
@@ -216,17 +227,44 @@ defmodule Ankusa.ClaimCheck.Stores do
     end
   end
 
+  @doc """
+  Whether a read error is the store throttling this node (`429`, `503`): a
+  reachable store asking for less load, not one that is down.
+  """
+  @spec throttled?(term()) :: boolean()
+  def throttled?({:unavailable, {:status, status, _body}}) when status in [429, 503], do: true
+  def throttled?(_), do: false
+
   # One ranged read, and its verdict on the store's breaker: an answer (the
   # bytes, or no such key) closes it, a store that could not answer opens it.
-  # A 403 says nothing about whether the store is up.
+  # A throttle is an answer. A 403 says nothing about whether the store is up.
+  # Reads use `claim_check.read_timeout_ms`/`read_retries`: the store's own
+  # `timeout_ms`/`retries` are sized for writes, not for a reader waiting on
+  # the answer.
   defp read(instance, config, {index, mod, opts}, key, offset, length) do
+    opts =
+      Keyword.merge(opts,
+        timeout_ms: config.claim_check.read_timeout_ms,
+        retries: config.claim_check.read_retries
+      )
+
     result = get(mod, instance, key, offset, length, opts)
 
     case result do
-      {:ok, _bin} -> mark_up(instance, index)
-      {:error, :not_found} -> mark_up(instance, index)
-      {:error, {:unavailable, reason}} -> mark_down(instance, config, index, :read, reason)
-      {:error, :forbidden} -> :ok
+      {:ok, _bin} ->
+        mark_up(instance, index)
+
+      {:error, :not_found} ->
+        mark_up(instance, index)
+
+      {:error, {:unavailable, {:status, s, _body}}} when s in [429, 503] ->
+        mark_up(instance, index)
+
+      {:error, {:unavailable, reason}} ->
+        mark_down(instance, config, index, :read, reason)
+
+      {:error, :forbidden} ->
+        :ok
     end
 
     result

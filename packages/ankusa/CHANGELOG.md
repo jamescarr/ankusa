@@ -38,6 +38,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Ankusa.ClaimCheck.Ref.object_keys/3` and `shard/1`.
 - `[:ankusa, :blob_store, :retry]` on every HTTP blob-store retry, counted by
   `ankusa_blob_store_retries_total{status}`.
+- **The claim gateway stays fast while an object store throttles or hangs.**
+  A `:claim_check` node caches pack indexes and claims in memory
+  (`Ankusa.ClaimCheck.Cache`, `claim_check.read_cache_bytes`, default
+  128 MiB; a claim over `read_cache_max_entry_bytes`, default 1 MiB, is never
+  cached), and reads the store through `Ankusa.ClaimCheck.Reader`: concurrent
+  reads of one pack index or claim share one store request; per store, an
+  adaptive limit on concurrent reads (ceiling `read_max_inflight`, default
+  64) halves on a throttle (`429`, `503`) or an unreachable store and grows
+  back by one per round of successes; reads past it queue up to
+  `read_queue_max` (default 256) and the rest are shed at once; and every
+  request is answered within `read_deadline_ms` (default 5 s) — a store read
+  that outlives it still fills the cache. Claim reads use
+  `read_timeout_ms` (3 s) and `read_retries` (1) instead of the store's own
+  write timeouts. `Ankusa.ClaimCheck.locate/4`, `read/4` and `read_bytes/5`
+  take a `:deadline`; `Ankusa.ClaimCheck.location` gains `:tenant_id`,
+  `:pack_id` and `:index`; `Ankusa.ClaimCheck.deadline/1` and
+  `Ankusa.ClaimCheck.Stores.throttled?/1` are new. Telemetry:
+  `[:ankusa, :claim_check, :gateway]`, `:read`, `:read_limit` and
+  `:read_state`; on `/metrics`,
+  `ankusa_claim_check_gateway_requests_total{method,status}`,
+  `ankusa_claim_check_gateway_duration_seconds`,
+  `ankusa_claim_check_reads_total{kind,source,result}` and
+  `ankusa_claim_check_read_limit`/`_read_inflight`/`_read_queued{store}`.
 
 ### Changed
 
@@ -55,6 +78,14 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   200 ms / 1 s / 5 s, so nodes throttled together don't retry in lockstep.
 - Metric labels with integer values (an HTTP status, a store index) are
   reported as that number instead of `other`.
+- The claim gateway's `503 store_unavailable` carries `Retry-After` of a
+  random 1–3 s instead of a fixed `1`, and logs throttles, sheds and missed
+  deadlines at `:debug` (they are counted by
+  `ankusa_claim_check_reads_total`).
+- A throttled claim-store read (`429`, `503`) no longer opens the store's
+  breaker: the store answered. A read no longer asks a store that could not
+  answer again at the other key layout, which cost a hung store's timeout
+  twice and doubled the requests to a throttling one.
 
 ## [0.6.0] - 2026-10-14
 

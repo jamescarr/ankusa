@@ -103,8 +103,14 @@ defmodule AnkusaServer.ConfigTest do
     assert config.batcher.max_queue_bytes == 268_435_456
     assert config.storage.key_prefix == ""
 
-    assert %{blob_stores: nil, placement: :ordered, key_layout: :flat, store_cooldown_ms: 30_000} =
-             config.claim_check
+    assert %{
+             blob_stores: nil,
+             placement: :ordered,
+             key_layout: :flat,
+             store_cooldown_ms: 30_000,
+             read_deadline_ms: 5_000,
+             read_cache_bytes: 134_217_728
+           } = config.claim_check
   end
 
   test "the baked image config is the demo: admin on, one open source" do
@@ -273,6 +279,26 @@ defmodule AnkusaServer.ConfigTest do
       assert {cc.blob_stores, cc.placement, cc.key_layout, cc.store_cooldown_ms} ==
                {nil, :ordered, :flat, 30_000}
     end
+  end
+
+  test "claim_check read keys land in core's config, and core's ranges name a bad one" do
+    path =
+      tmp_config("""
+      claim_check: {read_deadline_ms: 2500, read_cache_bytes: 0, read_queue_max: 0}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    cc = Config.load!(path: path, env: %{}).config.claim_check
+    assert {cc.read_deadline_ms, cc.read_cache_bytes, cc.read_queue_max} == {2500, 0, 0}
+
+    path =
+      tmp_config("""
+      claim_check: {read_timeout_ms: 0}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "claim_check.read_timeout_ms must be a positive integer, got 0"
   end
 
   test "claim_check store/stores mistakes fail the load, naming the key" do

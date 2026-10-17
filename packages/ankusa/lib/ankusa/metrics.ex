@@ -231,6 +231,30 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
+        "ankusa.claim_check.gateway.requests.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          tags: [:instance, :method, :status]
+        )
+      ),
+      distribution(
+        "ankusa.claim_check.gateway.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance, :method],
+          reporter_options: [buckets: @seconds_buckets]
+        )
+      ),
+      counter(
+        "ankusa.claim_check.reads.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read],
+          tags: [:instance, :kind, :source, :result]
+        )
+      ),
+      counter(
         "ankusa.blob_store.retries.total",
         scoped(own,
           event_name: [:ankusa, :blob_store, :retry],
@@ -255,7 +279,7 @@ defmodule Ankusa.Metrics do
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
       )
-    ] ++ gauges(own)
+    ] ++ gauges(own) ++ read_gauges(own)
   end
 
   # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue
@@ -288,6 +312,22 @@ defmodule Ankusa.Metrics do
       last_value(
         name,
         scoped(own, event_name: event, measurement: measurement, unit: unit, tags: [:instance])
+      )
+    end
+  end
+
+  # The gateway reader's per-store state, every second. Tagged by store too,
+  # which `gauges/1` (tags `[:instance]` only) can't do.
+  defp read_gauges(own) do
+    for measurement <- [:limit, :inflight, :queued] do
+      last_value(
+        "ankusa.claim_check.read.#{measurement}",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read_state],
+          measurement: measurement,
+          unit: :unit,
+          tags: [:instance, :store]
+        )
       )
     end
   end

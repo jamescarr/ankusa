@@ -21,6 +21,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   layouts.
 - `ankusa_blob_store_retries_total` and
   `ankusa_claim_check_store_breaker_transitions_total` on `/metrics`.
+- `claim_check.read_deadline_ms` (5000), `read_timeout_ms` (3000),
+  `read_retries` (1), `read_max_inflight` (64), `read_queue_max` (256),
+  `read_cache_bytes` (134217728) and `read_cache_max_entry_bytes` (1048576):
+  the gateway caches pack indexes and claims, coalesces concurrent reads,
+  backs off a throttling store with an adaptive per-store limit, and answers
+  every request within the deadline. Its `503 store_unavailable` carries a
+  random `Retry-After` of 1–3 s. See the `ankusa` changelog.
+- `ankusa_claim_check_gateway_requests_total`,
+  `ankusa_claim_check_gateway_duration_seconds`,
+  `ankusa_claim_check_reads_total` and `ankusa_claim_check_read_limit`/
+  `_read_inflight`/`_read_queued` on `/metrics`.
 
 ### Fixed
 

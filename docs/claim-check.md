@@ -162,6 +162,55 @@ decided in front of it: a service mesh, Envoy, an API gateway, a cloud load
 balancer with OIDC. It logs a warning saying so at startup, the same as the
 admin API.
 
+### Under load
+
+The gateway keeps answering fast while an object store throttles or hangs:
+
+- **From memory.** Pack indexes and claims it has read are cached, up to
+  `read_cache_bytes`; a claim over `read_cache_max_entry_bytes` is served and
+  never cached, and ranges never are. A pack's first read covers its first
+  1 024 claims, so the rest of the pack is located without the store. Claims
+  never change, so nothing cached is wrong while the claim exists; a claim
+  swept by retention can still answer `HEAD` for up to 10 minutes, and `GET`
+  for up to 2.
+- **One store read per claim.** Concurrent requests for one claim, or one
+  pack's index, share one store read.
+- **An adaptive limit.** Per store, concurrent reads are capped at a limit
+  that starts at `read_max_inflight`, halves when the store throttles (`429`,
+  `503 SlowDown`) or doesn't answer, and grows back by one per round of
+  successes. Reads past it wait in a queue of `read_queue_max`; past that,
+  they get `503` at once.
+- **A deadline.** Every request is answered within `read_deadline_ms`, well
+  inside the SDKs' 10 s request timeout: past it, `503 store_unavailable`. A
+  store read that outlives the deadline still finishes and fills the cache,
+  so the client's retry is served from memory. Store requests use
+  `read_timeout_ms` and `read_retries`, not the store's write timeouts, and a
+  store that couldn't answer isn't asked again at the other key layout within
+  the same read.
+
+```yaml
+claim_check:
+  read_deadline_ms: 5000
+  read_timeout_ms: 3000
+  read_retries: 1
+  read_max_inflight: 64       # per store
+  read_queue_max: 256         # per store; 0 = never wait
+  read_cache_bytes: 134217728 # 0 = no cache
+  read_cache_max_entry_bytes: 1048576
+```
+
+A throttling store never opens its breaker: it answered, and the limit is what
+backs off. Every `503 store_unavailable` carries a `Retry-After` of 1 to 3
+seconds, picked at random, so the clients one throttle turned away don't come
+back together. On `/metrics`:
+`ankusa_claim_check_gateway_requests_total{method,status}` and
+`ankusa_claim_check_gateway_duration_seconds`;
+`ankusa_claim_check_reads_total{kind,source,result}`, where `source` is
+`cache`, `store`, `coalesced` or `shed` and `result` tells `throttled`,
+`unavailable`, `overloaded` (shed by the queue) and `deadline` apart; and
+`ankusa_claim_check_read_limit`, `_read_inflight` and `_read_queued` per
+store.
+
 ## Redeem a claim
 
 ```
@@ -206,7 +255,7 @@ Errors are JSON: `{"error": "not_found"}`.
 | `404` | `not_found` | no such claim: expired by retention, or never written | No, dead-letter |
 | `416` |  | the `Range` starts past the claim's end; `content-range: bytes */<length>` | No, fix the range |
 | `408`, `429` |  | a front layer (proxy, API gateway) timing out or throttling | Yes, retry |
-| `503` | `store_unavailable` | the object store is unreachable; `Retry-After: 1` | Yes |
+| `503` | `store_unavailable` | the object store is unreachable, throttling, or slower than the gateway's deadline, or the gateway is shedding load; `Retry-After` 1–3, random | Yes |
 | `503` | `store_forbidden` | the object store refused the gateway's credential; `Retry-After: 60` | Yes, after fixing the policy |
 |  |  | bytes don't match the message's sha256 (your check) | No, dead-letter |
 
@@ -565,7 +614,9 @@ local sweeper sweeps both.
 Each HTTP object store retries a throttled (`429`, `503`) or failed request
 twice, after about 200 ms and then 1 s, each delay jittered so nodes throttled
 together don't retry in step. Past that, the store's breaker and the failover
-above take over, then the delivery's retry policy. On `/metrics`,
+above take over, then the delivery's retry policy. The gateway's reads retry
+once (`read_retries`) and back off on their own: see
+[Under load](#under-load). On `/metrics`,
 `ankusa_blob_store_retries_total{status}` counts the retries and
 `ankusa_claim_check_store_breaker_transitions_total{store,state}` the
 breakers opening and closing.
