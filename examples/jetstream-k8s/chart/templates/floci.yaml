@@ -41,9 +41,14 @@ spec:
             - {name: AWS_DEFAULT_REGION, value: {{ .Values.s3.region | quote }}}
           ports:
             - {name: s3, containerPort: 4566}
+          # Same tolerance as liveness below: a floci busy writing a large claim must not
+          # drop out of the Service endpoints on one slow answer (that would 503 the
+          # ingest check-ins and make the consumers nak their redeems).
           readinessProbe:
             httpGet: {path: /_floci/health, port: 4566}
-            periodSeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 4
           # floci is a native image whose heap is capped (about 80 % of the memory
           # limit). Past that it does not crash: it stops answering with the process
           # still up. A liveness probe turns that into a restart, and the keeper then
