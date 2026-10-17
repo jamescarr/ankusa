@@ -8,10 +8,12 @@ defmodule Ankusa.ClaimCheck.Ref do
     * `tenant` — `[A-Za-z0-9_-]{1,64}`; the same string in the URN, the gateway
       path, and the storage key, with no encoding anywhere
     * `claim_id` — a canonical (uppercase) `Ankusa.ULID`. Its first 48 bits
-      are the pack's creation time and pick the pack's `dt=` folder; its last
-      16 bits are the claim's position in the pack. The pack's own id is the
-      claim id with those 16 bits zeroed, so the ref locates the pack
-      without an index lookup.
+      are the pack's creation time and pick the pack's `dt=` folder; its next
+      5 bits (the id's eleventh character) pick the pack's `shard=` folder
+      under the `:sharded` layout (`object_key/3`); its last 16 bits are the
+      claim's position in the pack. The pack's own id is the claim id with
+      those 16 bits zeroed, so the ref locates the pack without an index
+      lookup.
 
   The digest isn't part of the ref: a queue message carries it next to the
   ref, as `sha256`, and the reader checks it.
@@ -26,6 +28,13 @@ defmodule Ankusa.ClaimCheck.Ref do
   defstruct [:tenant_id, :claim_id]
 
   @type t :: %__MODULE__{tenant_id: String.t(), claim_id: String.t()}
+
+  @typedoc """
+  How a pack's storage key is laid out: `:flat` is
+  `claims/tenant=<t>/dt=<d>/<pack>`, `:sharded` adds `shard=<c>/` between the
+  tenant and the date — see `object_key/3`.
+  """
+  @type layout :: :flat | :sharded
 
   @prefix "urn:ankusa:claim:v1:"
   @claims_prefix "claims/"
@@ -59,11 +68,11 @@ defmodule Ankusa.ClaimCheck.Ref do
   def path(%__MODULE__{tenant_id: tenant_id, claim_id: claim_id}),
     do: "/v1/claims/#{tenant_id}/#{claim_id}"
 
-  @doc "The storage key of the pack this ref points into."
-  @spec key(t()) :: String.t()
-  def key(%__MODULE__{tenant_id: tenant_id, claim_id: claim_id}) do
+  @doc "The storage key, under `layout`, of the pack this ref points into."
+  @spec key(t(), layout()) :: String.t()
+  def key(%__MODULE__{tenant_id: tenant_id, claim_id: claim_id}, layout) do
     {:ok, pack_id, _index} = locate(claim_id)
-    object_key(tenant_id, pack_id)
+    object_key(tenant_id, pack_id, layout)
   end
 
   @doc "A fresh pack id, stamped with the current time."
@@ -110,19 +119,53 @@ defmodule Ankusa.ClaimCheck.Ref do
   BigQuery, and Athena discover `tenant` and `dt` as columns. `dt` is the UTC
   date of the pack id's timestamp, so the key is a pure function of the ref.
   Only call this with a validated tenant and pack id.
+
+    * `:flat` — `claims/tenant=<t>/dt=<yyyy-mm-dd>/<pack_id>`.
+    * `:sharded` — `claims/tenant=<t>/shard=<c>/dt=<yyyy-mm-dd>/<pack_id>`,
+      `c` being `shard/1` of the pack id: one of 32 prefixes per tenant, so a
+      busy tenant's writes spread over 32 object-store partitions instead of
+      landing on the tail of one. `shard=` sits above `dt=` so a partition
+      formed on a shard stays warm across days, and below `tenant=` so one
+      tenant is still one prefix to delete.
   """
-  @spec object_key(String.t(), String.t()) :: String.t()
-  def object_key(tenant_id, pack_id) do
+  @spec object_key(String.t(), String.t(), layout()) :: String.t()
+  def object_key(tenant_id, pack_id, :flat) do
+    "#{@claims_prefix}tenant=#{tenant_id}/dt=#{date(pack_id)}/#{pack_id}"
+  end
+
+  def object_key(tenant_id, pack_id, :sharded) do
+    "#{@claims_prefix}tenant=#{tenant_id}/shard=#{shard(pack_id)}/dt=#{date(pack_id)}/#{pack_id}"
+  end
+
+  @doc """
+  Both storage keys a pack may live under, `preferred`'s first: a reader tries
+  the configured layout, then the other one, so a pack written before the
+  layout changed is still found.
+  """
+  @spec object_keys(String.t(), String.t(), layout()) :: [String.t()]
+  def object_keys(tenant_id, pack_id, :sharded),
+    do: [object_key(tenant_id, pack_id, :sharded), object_key(tenant_id, pack_id, :flat)]
+
+  def object_keys(tenant_id, pack_id, :flat),
+    do: [object_key(tenant_id, pack_id, :flat), object_key(tenant_id, pack_id, :sharded)]
+
+  @doc """
+  The pack's shard under the `:sharded` layout: the id's eleventh character,
+  i.e. the first five of its 64 random bits (the first ten characters are the
+  48-bit timestamp), one of the 32 Crockford characters. Every claim id of a
+  pack shares it, so a reader computes the key from a claim id as is.
+  """
+  @spec shard(String.t()) :: String.t()
+  def shard(id), do: String.at(id, 10)
+
+  defp date(pack_id) do
     {:ok, bits} = ULID.decode(pack_id)
 
-    date =
-      bits
-      |> ULID.timestamp_ms()
-      |> DateTime.from_unix!(:millisecond)
-      |> DateTime.to_date()
-      |> Date.to_iso8601()
-
-    "#{@claims_prefix}tenant=#{tenant_id}/dt=#{date}/#{pack_id}"
+    bits
+    |> ULID.timestamp_ms()
+    |> DateTime.from_unix!(:millisecond)
+    |> DateTime.to_date()
+    |> Date.to_iso8601()
   end
 
   @doc "`:ok` if `tenant_id` is a valid tenant name."

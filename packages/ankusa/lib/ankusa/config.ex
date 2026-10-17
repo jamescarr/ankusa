@@ -92,9 +92,42 @@ defmodule Ankusa.Config do
               # LocalFS retention only; nil disables the sweeper
               retention_days: nil,
               sweep_interval_ms: 3_600_000,
-              # {module, opts} for claim packs; nil = storage.blob_store. Claim
-              # keys are never prefixed, so one gateway reads every node's claims.
-              blob_store: nil
+              # [{module, opts}, ...] claim packs are written to; nil =
+              # [storage.blob_store]. Claim keys are never prefixed, so one
+              # gateway reads every node's claims.
+              blob_stores: nil,
+              # which store a new pack goes to: :ordered = the first, the others
+              # only while it is down; :hash = the pack id's random bits pick
+              # one, the rest take over when it fails
+              placement: :ordered,
+              # a store that failed a write or could not answer a read is
+              # skipped by writes, and searched last by reads, for this long
+              # (ms) before it is tried again
+              store_cooldown_ms: 30_000,
+              # :flat = claims/tenant=<t>/dt=<d>/<pack>; :sharded adds
+              # shard=<c>/ under the tenant (32 prefixes per tenant) — see
+              # Ankusa.ClaimCheck.Ref
+              key_layout: :flat,
+              # ── reads: the gateway, and redeem/3 in-process on a :claim_check node ──
+              # one read (the pack index, then the bytes) must finish within this;
+              # past it the gateway answers 503 + Retry-After, and the store read
+              # that outlived it still completes and fills the cache
+              read_deadline_ms: 5_000,
+              # per store request while reading a claim (a store's own timeout_ms
+              # and retries are for writes)
+              read_timeout_ms: 3_000,
+              read_retries: 1,
+              # per store: the ceiling of the adaptive limit on concurrent store
+              # reads from this node; it halves on a throttle or an unreachable
+              # answer and grows back by one per round of successes
+              read_max_inflight: 64,
+              # per store: reads waiting for a slot; past this a read is shed at
+              # once (0 = never wait)
+              read_queue_max: 256,
+              # memory for cached pack indexes and claim bodies; 0 = no cache
+              read_cache_bytes: 128 * 1024 * 1024,
+              # a claim larger than this is served but never cached
+              read_cache_max_entry_bytes: 1024 * 1024
             },
             # continuous backup of the store to an object store, and restore into
             # an empty data_dir at boot (see Ankusa.Store.Backup). Off by default.
@@ -311,6 +344,11 @@ defmodule Ankusa.Config do
     {[:dispatch, :max_inflight_bytes], "dispatch.max_inflight_bytes"},
     {[:storage, :roll_bytes], "storage.roll_bytes"},
     {[:claim_check, :sweep_interval_ms], "claim_check.sweep_interval_ms"},
+    {[:claim_check, :store_cooldown_ms], "claim_check.store_cooldown_ms"},
+    {[:claim_check, :read_deadline_ms], "claim_check.read_deadline_ms"},
+    {[:claim_check, :read_timeout_ms], "claim_check.read_timeout_ms"},
+    {[:claim_check, :read_max_inflight], "claim_check.read_max_inflight"},
+    {[:claim_check, :read_cache_max_entry_bytes], "claim_check.read_cache_max_entry_bytes"},
     {[:backup, :interval_ms], "backup.interval_ms"},
     {[:backup, :keep], "backup.keep"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
@@ -318,11 +356,15 @@ defmodule Ankusa.Config do
   ]
 
   # `0` means something for these: no linger before a commit, roll at once,
-  # and a compactor that only runs when asked (`Compactor.tick/1`).
+  # a compactor that only runs when asked (`Compactor.tick/1`), a claim read
+  # with no retry, one that never waits for a slot, and no claim cache.
   @non_negative [
     {[:batcher, :max_delay_ms], "batcher.max_delay_ms"},
     {[:storage, :roll_ms], "storage.roll_ms"},
-    {[:storage, :interval_ms], "storage.interval_ms"}
+    {[:storage, :interval_ms], "storage.interval_ms"},
+    {[:claim_check, :read_retries], "claim_check.read_retries"},
+    {[:claim_check, :read_queue_max], "claim_check.read_queue_max"},
+    {[:claim_check, :read_cache_bytes], "claim_check.read_cache_bytes"}
   ]
 
   @key_prefix ~r"\A([A-Za-z0-9._-]+/)+\z"

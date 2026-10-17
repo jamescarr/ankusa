@@ -64,63 +64,64 @@ defmodule Ankusa.BlobStore.Azure do
   @api_version "2024-11-04"
 
   @impl true
-  def put(_instance, key, data, opts) do
+  def put(instance, key, data, opts) do
     headers = [
       {"x-ms-blob-type", "BlockBlob"},
       {"content-type", "application/octet-stream"}
     ]
 
-    case request(opts, :put, blob_url(opts, key), data, headers) do
+    case request(instance, opts, :put, blob_url(opts, key), data, headers) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl true
-  def get(_instance, key, opts), do: request(opts, :get, blob_url(opts, key), nil, [])
+  def get(instance, key, opts),
+    do: request(instance, opts, :get, blob_url(opts, key), nil, [])
 
   @impl true
-  def get_range(_instance, key, offset, length, opts) do
+  def get_range(instance, key, offset, length, opts) do
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, blob_url(opts, key), nil, [{"range", range}])
+    request(instance, opts, :get, blob_url(opts, key), nil, [{"range", range}])
   end
 
   @impl true
-  def delete(_instance, key, opts) do
-    _ = request(opts, :delete, blob_url(opts, key), nil, [])
+  def delete(instance, key, opts) do
+    _ = request(instance, opts, :delete, blob_url(opts, key), nil, [])
     :ok
   end
 
   # Every page (`NextMarker`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
+  def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
-  defp list_pages(opts, prefix, marker, acc) do
+  defp list_pages(instance, opts, prefix, marker, acc) do
     query =
       [{"restype", "container"}, {"comp", "list"}, {"prefix", prefix}] ++
         if(marker, do: [{"marker", marker}], else: [])
 
     url = endpoint(opts) <> "/" <> container(opts) <> query_suffix(query, opts)
 
-    with {:ok, body} <- request(opts, :get, url, nil, []),
+    with {:ok, body} <- request(instance, opts, :get, url, nil, []),
          {:ok, keys, next} <- parse_list_page(body) do
       acc = [keys | acc]
 
       case next do
         nil -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
-        marker -> list_pages(opts, prefix, marker, acc)
+        marker -> list_pages(instance, opts, prefix, marker, acc)
       end
     end
   end
 
   # ── requests ──────────────────────────────────────────────────────────────
 
-  defp request(opts, method, url, body, headers) do
+  defp request(instance, opts, method, url, body, headers) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
     req_options = Keyword.get(opts, :req_options, [])
 
     result =
-      Retry.run(opts, fn ->
+      Retry.run(instance, opts, fn ->
         all_headers = auth_headers(opts) ++ version_header(opts) ++ headers
         HttpClient.request(method, url, all_headers, body, timeout, req_options)
       end)

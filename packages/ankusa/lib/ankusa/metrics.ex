@@ -224,6 +224,44 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
+        "ankusa.claim_check.store_breaker.transitions.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :store_breaker],
+          tags: [:instance, :store, :state]
+        )
+      ),
+      counter(
+        "ankusa.claim_check.gateway.requests.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          tags: [:instance, :method, :status]
+        )
+      ),
+      distribution(
+        "ankusa.claim_check.gateway.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance, :method],
+          reporter_options: [buckets: @seconds_buckets]
+        )
+      ),
+      counter(
+        "ankusa.claim_check.reads.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read],
+          tags: [:instance, :kind, :source, :result]
+        )
+      ),
+      counter(
+        "ankusa.blob_store.retries.total",
+        scoped(own,
+          event_name: [:ankusa, :blob_store, :retry],
+          tags: [:instance, :status]
+        )
+      ),
+      counter(
         "ankusa.lifecycle.delivered.total",
         scoped(own,
           event_name: [:ankusa, :lifecycle, :delivered],
@@ -241,7 +279,7 @@ defmodule Ankusa.Metrics do
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
       )
-    ] ++ gauges(own)
+    ] ++ gauges(own) ++ read_gauges(own)
   end
 
   # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue
@@ -278,6 +316,22 @@ defmodule Ankusa.Metrics do
     end
   end
 
+  # The gateway reader's per-store state, every second. Tagged by store too,
+  # which `gauges/1` (tags `[:instance]` only) can't do.
+  defp read_gauges(own) do
+    for measurement <- [:limit, :inflight, :queued] do
+      last_value(
+        "ankusa.claim_check.read.#{measurement}",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read_state],
+          measurement: measurement,
+          unit: :unit,
+          tags: [:instance, :store]
+        )
+      )
+    end
+  end
+
   # What every definition shares: only this instance's events (ANDed with a
   # metric's own `:keep`), and bounded label values.
   defp scoped(own, opts) do
@@ -303,6 +357,7 @@ defmodule Ankusa.Metrics do
   end
 
   defp normalize_value({tag, _rest}), do: tag
+  defp normalize_value(v) when is_integer(v), do: Integer.to_string(v)
   defp normalize_value(_other), do: :other
 
   defp oldest_due_age_seconds(%{oldest_due_age_ms: ms}), do: ms / 1000

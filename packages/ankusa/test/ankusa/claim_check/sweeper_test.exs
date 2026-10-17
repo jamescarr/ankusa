@@ -45,6 +45,22 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
     assert {:ok, "fresh"} = redeem(inst, fresh)
   end
 
+  test "sweeps shard=<c>/dt= partitions of the sharded key layout too", %{inst: inst} do
+    config = Ankusa.config(inst)
+    Ankusa.put_config(%{config | claim_check: %{config.claim_check | key_layout: :sharded}})
+
+    old = claim_at(inst, days_ago(10), "old")
+    fresh = claim_at(inst, days_ago(1), "fresh")
+
+    root = Config.path(config, "segments")
+    assert [_, _] = Path.wildcard(Path.join(root, "claims/tenant=acme/shard=*/dt=*"))
+
+    assert {1, 2} = Sweeper.sweep(inst)
+
+    assert {:error, :not_found} = redeem(inst, old)
+    assert {:ok, "fresh"} = redeem(inst, fresh)
+  end
+
   test "keeps a claim for at least retention_days: the partition exactly on the cutoff day stays",
        %{inst: inst} do
     boundary = claim_at(inst, days_ago(7), "boundary")

@@ -76,7 +76,7 @@ defmodule Ankusa.BlobStore.OCI do
   @body_headers ["content-length", "content-type", "x-content-sha256"]
 
   @impl true
-  def put(_instance, key, data, opts) do
+  def put(instance, key, data, opts) do
     url = object_url(opts, key)
 
     extra = [
@@ -84,32 +84,33 @@ defmodule Ankusa.BlobStore.OCI do
       {"x-content-sha256", sha256_base64(data)}
     ]
 
-    case request(opts, :put, url, data, extra) do
+    case request(instance, opts, :put, url, data, extra) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl true
-  def get(_instance, key, opts), do: request(opts, :get, object_url(opts, key), nil, [])
+  def get(instance, key, opts),
+    do: request(instance, opts, :get, object_url(opts, key), nil, [])
 
   @impl true
-  def get_range(_instance, key, offset, length, opts) do
+  def get_range(instance, key, offset, length, opts) do
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, object_url(opts, key), nil, [{"range", range}])
+    request(instance, opts, :get, object_url(opts, key), nil, [{"range", range}])
   end
 
   @impl true
-  def delete(_instance, key, opts) do
-    _ = request(opts, :delete, object_url(opts, key), nil, [])
+  def delete(instance, key, opts) do
+    _ = request(instance, opts, :delete, object_url(opts, key), nil, [])
     :ok
   end
 
   # Every page (`nextStartWith` → `start`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
+  def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
-  defp list_pages(opts, prefix, start, acc) do
+  defp list_pages(instance, opts, prefix, start, acc) do
     query = [{"prefix", prefix}] ++ if(start, do: [{"start", start}], else: [])
 
     url =
@@ -121,13 +122,16 @@ defmodule Ankusa.BlobStore.OCI do
         "/o" <>
         "?" <> URI.encode_query(query, :rfc3986)
 
-    with {:ok, body} <- request(opts, :get, url, nil, []),
+    with {:ok, body} <- request(instance, opts, :get, url, nil, []),
          {:ok, page} when is_map(page) <- JSON.decode(body) do
       acc = [page |> Map.get("objects", []) |> Enum.map(& &1["name"]) | acc]
 
       case page["nextStartWith"] do
-        next when is_binary(next) and next != "" -> list_pages(opts, prefix, next, acc)
-        _ -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+        next when is_binary(next) and next != "" ->
+          list_pages(instance, opts, prefix, next, acc)
+
+        _ ->
+          {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
       end
     else
       {:error, reason} -> {:error, reason}
@@ -137,13 +141,13 @@ defmodule Ankusa.BlobStore.OCI do
 
   # ── requests ──────────────────────────────────────────────────────────────
 
-  defp request(opts, method, url, body, extra_headers) do
+  defp request(instance, opts, method, url, body, extra_headers) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
     req_options = Keyword.get(opts, :req_options, [])
 
     # Signed per attempt: the signature covers the `date` header.
     result =
-      Retry.run(opts, fn ->
+      Retry.run(instance, opts, fn ->
         headers = [{"date", rfc1123_date(:calendar.universal_time())} | extra_headers]
         authorization = sign(opts, method, url, headers, body)
 
