@@ -163,7 +163,7 @@ drill below ends with the sender stopped and the badge at **0 lost**.
 |**Kill a NATS node** (`✕` on the leader named in the JetStream box)|the R3 stream elects a new leader within a few seconds; the sender retries for a moment (a few dozen `retried`), `failed` stays 0. *Kill a random pod → NATS* usually hits a follower, which changes nothing visible.|
 |**Deny `consumer → NATS`**|consumed/s falls to 0 within ~10 s while `pending` climbs; KEDA scales the consumers up (the new replicas wait for NATS instead of restarting, `waitOnFirstConnect`); *Allow* → the backlog drains.|
 |**Deny `ankusa → NATS`**|direct mode has no local buffer: within ~10 s `accepted` stops, the sender's `retried` then `failed` climb, and in-flight sits at its cap of 256; *Allow* → recovers, and the held-back requests go out in a burst. Nothing the ingest answered `201` is lost.|
-|**Deny `consumer → claim-check`** (set *size min* ≥ 69, ~134 KiB, so every hook is claimed; ~20 req/s)|the consumer logs `claim-check gateway unreachable` and `nak`s, `redelivered` and `ack-pending` climb and the tail goes quiet. A hook is retried for as long as it takes (the consumer's `max_deliver` is unlimited, the nak delay grows to 10 s), so *Allow* after any length of outage (2.5 minutes tried) → the backlog drains and the badge returns to 0 lost.|
+|**Deny `consumer → claim-check`** (set *size min* ≥ 69, ~134 KiB, so every hook is claimed; ~20 req/s)|the consumer logs `claim-check gateway unreachable` and `nak`s, `redelivered` and `ack-pending` climb and the tail goes quiet. A hook is retried for as long as it takes (the consumer's `max_deliver` is unlimited, the nak delay grows to 10 s), so *Allow* after an outage shorter than the 5-minute claim retention (2.5 minutes tried) → the backlog drains and the badge returns to 0 lost. Hold it longer and the claims expire: those hooks are dead-lettered instead.|
 |**Gateway fault: abort 50%**|about half of the attempts get `503` from Envoy and are retried: `retried` is ~0.9 × `sent`, and ~6 % of hooks (0.5⁴) exhaust their three retries and count as `failed`; `accepted + failed = sent`.|
 |**Gateway fault: delay 2000 ms, 100%**|the *ingest latency* reads ~2 s and *in flight* climbs to rate × 2 s (100 at 50/s); nothing fails, and everything is consumed once the fault is cleared.|
 
@@ -176,15 +176,16 @@ Things you may notice, none of them a bug:
 
 - A new ankusa pod's first request or two can `503`: the NATS sink opens its
   connection on the first delivery. It is the same retry as any other `503`.
-- floci keeps every claimed body on its JVM heap, so it has a 3 GiB limit (70 %
-  of it heap), its `keeper` sidecar deletes claims older than 5 minutes, and the
-  sender spends at most 2 MiB/s on claimed bodies (the panel says when it is
-  holding back). Ten minutes at that cap (rate 60, 130-180 KiB) held floci at
-  ~700 MiB with no restarts; at 8 MiB/s it ran out of heap and stopped
-  answering. A hook the consumers have not reached within 5 minutes can no
-  longer redeem its claim: it is dead-lettered (the panel shows the count).
-  If floci does restart, the keeper re-creates the bucket, and the claims it
-  held are gone.
+- floci keeps every claimed body on its heap (it is a native image, whose heap
+  defaults to ~80 % of the container limit, here 3 GiB), its `keeper` sidecar
+  deletes claims older than 5 minutes, and the sender spends at most 2 MiB/s on
+  claimed bodies (the panel says when it is holding back). Ten minutes at that
+  cap (rate 60, 130-180 KiB) held floci at ~700 MiB with no restarts; at 8 MiB/s
+  it ran out of heap and stopped answering, process still up, which is why it
+  has a liveness probe on `/_floci/health`. A hook the consumers have not
+  reached within 5 minutes can no longer redeem its claim: it is dead-lettered
+  (the panel shows the count). If floci does restart, the keeper re-creates the
+  bucket, and the claims it held are gone.
 - Each consumer pod remembers the idempotency keys it has seen (20 000). Two
   pods can still process the same hook after a redelivery; the panel counts it
   once.

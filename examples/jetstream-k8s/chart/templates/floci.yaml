@@ -39,14 +39,21 @@ spec:
           imagePullPolicy: {{ .Values.images.floci.pullPolicy }}
           env:
             - {name: AWS_DEFAULT_REGION, value: {{ .Values.s3.region | quote }}}
-            # The JVM's default heap is a quarter of the container's memory limit.
-            # floci keeps every object on it, so give it most of the 3Gi.
-            - {name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=70"}
           ports:
             - {name: s3, containerPort: 4566}
           readinessProbe:
-            tcpSocket: {port: 4566}
+            httpGet: {path: /_floci/health, port: 4566}
             periodSeconds: 3
+          # floci is a native image whose heap is capped (about 80 % of the memory
+          # limit). Past that it does not crash: it stops answering with the process
+          # still up. A liveness probe turns that into a restart, and the keeper then
+          # re-creates the bucket. Generous, so a busy floci is not mistaken for a dead one.
+          livenessProbe:
+            httpGet: {path: /_floci/health, port: 4566}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.floci.resources | nindent 12 }}
         - name: keeper

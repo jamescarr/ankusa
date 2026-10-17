@@ -139,8 +139,12 @@ async function main() {
   }
   try {
     await jsm.streams.add(dlqConfig);
-  } catch (err) {
-    console.error(`[consumer] stream ${DLQ_STREAM}: ${(err as Error).message}`);
+  } catch {
+    try {
+      await jsm.streams.update(DLQ_STREAM, dlqConfig);
+    } catch (err) {
+      console.error(`[consumer] stream ${DLQ_STREAM}: ${(err as Error).message}`);
+    }
   }
   const consumerConfig = {
     ack_wait: 30_000 * NANOS_PER_MS,

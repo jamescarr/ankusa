@@ -60,10 +60,10 @@ controlPanel:
   # crosses the same VirtualService (and its fault lever) as an outside caller.
   gatewayUrl: "http://istio-ingress.istio-ingress.svc.cluster.local"
   # The most claimed body bytes (over ankusa.inlineMaxBytes) the generator sends
-  # a second. floci holds every one on its JVM heap until the keeper expires it
-  # after floci.claimRetentionMinutes: 2 MiB/s x 5 min is ~600 MiB live against a
-  # ~2 GiB heap. At 8 MiB/s (2.4 GiB live) floci ran out of heap and stopped
-  # answering.
+  # a second. floci holds every one on its heap until the keeper expires it
+  # after floci.claimRetentionMinutes: 2 MiB/s x 5 min is ~600 MiB live, where
+  # floci's heap tops out near 80 % of its 3Gi limit. At 8 MiB/s (2.4 GiB live)
+  # it ran out of heap and stopped answering.
   claimBytesPerSec: 2097152
   resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
 
