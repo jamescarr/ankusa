@@ -23,12 +23,18 @@ services:
       timeout: 5s
       retries: 30
 
+  # `persistent` storage into a named volume (the image defaults to memory):
+  # the bucket and claimed payloads survive a floci restart; `down -v` drops them.
   floci:
     image: floci/floci:latest
     ports:
       - "4566:4566"
     environment:
       AWS_DEFAULT_REGION: us-east-1
+      FLOCI_STORAGE_MODE: persistent
+      FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+    volumes:
+      - floci-data:/app/data
 
   s3-bootstrap:
     image: amazon/aws-cli:2.17.62
@@ -116,3 +122,6 @@ services:
       ROUTING_PATTERN: "ankusa.#"
       QUEUE_NAME: ankusa-example-worker
       CLAIM_CHECK_URL: http://claim-check:4001
+
+volumes:
+  floci-data:

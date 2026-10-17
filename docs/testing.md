@@ -223,6 +223,11 @@ the bucket/container bootstrap, runs `mix test --only integration` (the tagged t
 `packages/ankusa`, and tears the emulators down. CI runs it as the
 `core integration (floci)` job.
 
+Every floci emulator runs in `persistent` storage mode (the images default to
+in-memory) with its state on a named Docker volume, so it survives an emulator
+restart; the task's `down -v` removes those volumes, so each run starts empty.
+The example compose files that use floci do the same.
+
 ## `async_api_spex`: `mix test`
 
 ```sh
