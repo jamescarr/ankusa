@@ -53,11 +53,23 @@ defmodule ControlPanel.Chaos do
     |> ok_or_error()
   end
 
-  @spec kill_random(String.t()) :: :ok | {:error, term()}
-  def kill_random(group) when group in @kill_groups do
-    case running(group) do
-      [] -> {:error, :none}
-      names -> names |> Enum.random() |> kill_pod()
+  @doc """
+  Kill a random running pod of `group`. With `all_ready: true` it kills
+  nothing (`{:error, :not_ready}`) unless every pod of the group is ready, so
+  a rolling kill never takes a second NATS node down while the last one it
+  killed is still catching up.
+  """
+  @spec kill_random(String.t(), keyword()) :: :ok | {:error, term()}
+  def kill_random(group, opts \\ []) when group in @kill_groups do
+    pods = for pod <- Cluster.snapshot().pods, pod.group == group, do: pod
+
+    if opts[:all_ready] && not Enum.all?(pods, &(&1.ready? and not &1.terminating?)) do
+      {:error, :not_ready}
+    else
+      case running(group) do
+        [] -> {:error, :none}
+        names -> names |> Enum.random() |> kill_pod()
+      end
     end
   end
 
@@ -159,7 +171,9 @@ defmodule ControlPanel.Chaos do
 
   @doc """
   Start a replay of source `durable`'s dead rows on every ready durable pod.
-  A pod that already runs one answers `200` with it, which counts as started.
+  A pod that already has a job with this filter answers `200` with it: a
+  running one counts as started, a paused one (a job pauses itself when its
+  rows keep failing) is resumed first, or it would never move a row.
   """
   @spec replay_dlq() :: {:ok, pos_integer()} | {:error, term()}
   def replay_dlq do
@@ -171,7 +185,7 @@ defmodule ControlPanel.Chaos do
         failures =
           pods
           |> Task.async_stream(&start_replay/1,
-            timeout: 6_000,
+            timeout: 11_000,
             on_timeout: :kill_task,
             zip_input_on_exit: true
           )
@@ -186,15 +200,45 @@ defmodule ControlPanel.Chaos do
   end
 
   defp start_replay(%{name: name, ip: ip}) do
-    case Req.post("http://#{ip}:4002/v1/replays",
-           body: JSON.encode!(%{kind: "dlq", source_id: "durable"}),
+    replays = "http://#{ip}:4002/v1/replays"
+
+    with {:ok, job} <- admin(:post, replays, %{kind: "dlq", source_id: "durable"}, name) do
+      case job do
+        %{"state" => "paused", "id" => id} ->
+          with {:ok, _job} <- admin(:patch, "#{replays}/#{id}", %{state: "running"}, name),
+               do: :ok
+
+        _running_or_new ->
+          :ok
+      end
+    end
+  end
+
+  defp admin(method, url, body, name) do
+    case Req.request(
+           method: method,
+           url: url,
+           body: JSON.encode!(body),
            headers: [{"content-type", "application/json"}],
            retry: false,
-           receive_timeout: 5_000
+           receive_timeout: 5_000,
+           decode_body: false
          ) do
-      {:ok, %Req.Response{status: status}} when status in 200..299 -> :ok
-      {:ok, %Req.Response{status: status}} -> {:error, {name, status}}
-      {:error, exception} -> {:error, {name, exception}}
+      {:ok, %Req.Response{status: status, body: job}} when status in 200..299 ->
+        {:ok, decode(job)}
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {name, status}}
+
+      {:error, exception} ->
+        {:error, {name, exception}}
+    end
+  end
+
+  defp decode(body) do
+    case JSON.decode(body) do
+      {:ok, %{} = job} -> job
+      _other -> %{}
     end
   end
 

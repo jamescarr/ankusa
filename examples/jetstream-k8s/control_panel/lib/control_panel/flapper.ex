@@ -5,7 +5,10 @@ defmodule ControlPanel.Flapper do
   * A **flap** cycles one `ControlPanel.Chaos` lever: DENY for `down_s`, ALLOW
     for `up_s`, until stopped. Stopping it leaves the lever allowed.
   * A **rolling kill** SIGKILLs a random running pod of a group now and then
-    every `every_s`.
+    every `every_s`, but only when every pod of the group is ready: a tick
+    that finds one still starting (a NATS node catching up after the last
+    kill) is skipped, so the drill never takes down two of three NATS nodes
+    at once. `kills` counts the pods it killed, `skipped` the ticks it passed.
 
   Starting either one again while it runs replaces its timings; the phase it
   is in restarts with the new duration.
@@ -29,7 +32,7 @@ defmodule ControlPanel.Flapper do
   @kill_groups ~w(nats ankusa ankusa-durable consumer)
 
   # flaps: lever => %{down_s, up_s, phase, cycles, timer, token}
-  # kills: group => %{every_s, kills, timer, token}
+  # kills: group => %{every_s, kills, skipped, timer, token}
   # workers: lever/group => the pid of its last Kubernetes call
   defstruct flaps: %{}, kills: %{}, workers: %{}
 
@@ -42,7 +45,13 @@ defmodule ControlPanel.Flapper do
               cycles: pos_integer()
             }
           },
-          kills: %{String.t() => %{every_s: pos_integer(), kills: non_neg_integer()}}
+          kills: %{
+            String.t() => %{
+              every_s: pos_integer(),
+              kills: non_neg_integer(),
+              skipped: non_neg_integer()
+            }
+          }
         }
 
   ## API
@@ -132,10 +141,14 @@ defmodule ControlPanel.Flapper do
     state =
       case state.kills[group] do
         nil ->
-          kill = schedule_kill(%{every_s: every_s, kills: 1, timer: nil, token: nil}, group)
+          kill =
+            schedule_kill(
+              %{every_s: every_s, kills: 0, skipped: 0, timer: nil, token: nil},
+              group
+            )
 
           state
-          |> run(group, "kill a #{group} pod", fn -> Chaos.kill_random(group) end)
+          |> run_kill(group)
           |> put_in([Access.key(:kills), group], kill)
 
         kill ->
@@ -192,15 +205,36 @@ defmodule ControlPanel.Flapper do
   def handle_info({:kill, group, token}, state) do
     case state.kills[group] do
       %{token: ^token} = kill ->
-        kill = schedule_kill(%{kill | kills: kill.kills + 1}, group)
-
         state
-        |> run(group, "kill a #{group} pod", fn -> Chaos.kill_random(group) end)
-        |> put_in([Access.key(:kills), group], kill)
-        |> broadcast()
+        |> run_kill(group)
+        |> put_in([Access.key(:kills), group], schedule_kill(kill, group))
         |> noreply()
 
       _stale ->
+        {:noreply, state}
+    end
+  end
+
+  # The outcome of a rolling kill's call; the counts only move for a rolling
+  # kill that is still running.
+  def handle_info({:killed, group, result}, state) do
+    case {state.kills[group], result} do
+      {nil, _result} ->
+        {:noreply, state}
+
+      {kill, :ok} ->
+        {:noreply,
+         state
+         |> put_in([Access.key(:kills), group], %{kill | kills: kill.kills + 1})
+         |> broadcast()}
+
+      {kill, {:error, :not_ready}} ->
+        {:noreply,
+         state
+         |> put_in([Access.key(:kills), group], %{kill | skipped: kill.skipped + 1})
+         |> broadcast()}
+
+      {_kill, {:error, _reason}} ->
         {:noreply, state}
     end
   end
@@ -230,21 +264,36 @@ defmodule ControlPanel.Flapper do
   ## Kubernetes calls
 
   # Runs `fun` in a task that first waits for the previous call on the same
-  # key to finish.
-  defp run(state, key, label, fun) do
+  # key to finish. With `notify`, the task sends `{notify, key, result}` back.
+  defp run(state, key, label, fun, notify \\ nil) do
     previous = state.workers[key]
+    server = self()
 
     {:ok, pid} =
       Task.Supervisor.start_child(ControlPanel.TaskSupervisor, fn ->
         if previous, do: await_exit(previous)
+        result = fun.()
 
-        case fun.() do
+        case result do
           :ok -> :ok
+          {:error, :not_ready} -> Logger.info("flapper: #{label}: skipped, a pod is not ready")
           {:error, reason} -> Logger.warning("flapper: #{label}: #{describe(reason)}")
         end
+
+        if notify, do: send(server, {notify, key, result})
       end)
 
     put_in(state, [Access.key(:workers), key], pid)
+  end
+
+  defp run_kill(state, group) do
+    run(
+      state,
+      group,
+      "kill a #{group} pod",
+      fn -> Chaos.kill_random(group, all_ready: true) end,
+      :killed
+    )
   end
 
   defp await_exit(pid) do
@@ -272,7 +321,9 @@ defmodule ControlPanel.Flapper do
           {lever, Map.take(flap, [:down_s, :up_s, :phase, :cycles])}
         end),
       kills:
-        Map.new(state.kills, fn {group, kill} -> {group, Map.take(kill, [:every_s, :kills])} end)
+        Map.new(state.kills, fn {group, kill} ->
+          {group, Map.take(kill, [:every_s, :kills, :skipped])}
+        end)
     }
   end
 end

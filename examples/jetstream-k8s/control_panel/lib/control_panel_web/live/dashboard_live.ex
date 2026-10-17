@@ -530,7 +530,10 @@ defmodule ControlPanelWeb.DashboardLive do
                   id={"rolling-#{group}"}
                   class="flex items-center justify-between gap-2 text-sm"
                 >
-                  <span>{group} · every {kill.every_s} s · {kill.kills} killed</span>
+                  <span>
+                    {group} · every {kill.every_s} s · {kill.kills} killed{if kill.skipped > 0,
+                      do: " · #{kill.skipped} skipped (not ready)"}
+                  </span>
                   <button
                     id={"rolling-stop-#{group}"}
                     phx-click="rolling_stop"
@@ -610,7 +613,12 @@ defmodule ControlPanelWeb.DashboardLive do
                     </th>
                     <th class="text-right" title="out of attempts: the DLQ">dead</th>
                     <th title="the NATS sink's circuit breaker">brk</th>
-                    <th class="text-right" title="the store's size on disk">disk</th>
+                    <th
+                      class="text-right"
+                      title="SST and blob files only: the memtable and the WAL are not counted, so a fresh backlog can read near 0 until a flush or a restart"
+                    >
+                      sst
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -868,14 +876,19 @@ defmodule ControlPanelWeb.DashboardLive do
     for {_pod, %{group: @durable} = m} <- ingest, reduce: 0, do: (acc -> acc + sum(m, keys))
   end
 
-  # Queued rows over the whole durable fleet, or `nil` if a live durable pod
-  # has no metrics: its store may hold rows nobody can see.
+  # Queued rows over the whole durable fleet, or `nil` while any durable pod is
+  # not fully reporting (terminating, not ready, not scraped yet, or before its
+  # first queue gauge): its store may hold rows nobody can see.
   defp durable_backlog(cluster, ingest) do
-    if Enum.any?(durable_rows(cluster, ingest), fn {pod, m} ->
-         is_nil(m) and not pod.terminating?
-       end),
-       do: nil,
-       else: durable_sum(ingest, [:pending, :scheduled, :inflight])
+    rows = durable_rows(cluster, ingest)
+
+    unknown? =
+      rows == [] or
+        Enum.any?(rows, fn {pod, m} ->
+          pod.terminating? or not pod.ready? or is_nil(m) or is_nil(m.pending)
+        end)
+
+    if unknown?, do: nil, else: durable_sum(ingest, [:pending, :scheduled, :inflight])
   end
 
   defp sum(metrics, keys), do: keys |> Enum.map(&(metrics[&1] || 0)) |> Enum.sum()

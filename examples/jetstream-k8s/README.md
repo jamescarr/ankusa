@@ -45,7 +45,12 @@ flowchart LR
   answering `201` and the store holds the hooks until NATS is back. A killed
   pod comes back under the same name on the same volume, with its backlog.
   Each pod has its own store, so dedupe on the event id is per pod, and the
-  fleet has no autoscaler: scaling a pod away would strand what it holds. See
+  fleet has no autoscaler: scaling a pod away would strand what it holds. One
+  limit comes from this demo's claim store: a body over 64 KiB is checked in
+  to floci when dispatch first picks the hook up, and the keeper deletes
+  claims after 5 minutes, so a backlog of *claimed* hooks held longer than
+  that is delivered with refs to deleted objects and the consumer
+  dead-letters them (see the drills). See
   [`docs/delivery.md`](../../docs/delivery.md).
 - **The consumer owns the topology.** The ankusa NATS sink never creates a
   stream: the consumer creates the `ANKUSA` stream (R3, subjects `ankusa.>`)
@@ -156,15 +161,19 @@ kubectl -n ankusa-jetstream get pods,pvc,hpa,scaledobject -w
 - **Durable store.** One row per durable pod: hooks committed (*in/s*) and
   delivered (*out/s*) a second, *pend* (due now or being delivered), *sched*
   (due later: backing off, or parked while the breaker is open), *dead* (out of
-  attempts: the DLQ), *brk* (the NATS sink's breaker) and the store's size on
-  disk. *Replay DLQ* starts a DLQ replay on every pod
+  attempts: the DLQ), *brk* (the NATS sink's breaker) and *sst*, the store's
+  SST and blob files (the memtable and the WAL are not counted, so a fresh
+  backlog can read near 0). *Replay DLQ* starts a DLQ replay on every pod
   (`POST :4002/v1/replays {"kind":"dlq","source_id":"durable"}`; each pod
-  replays its own store); *Kill all durable pods* SIGKILLs the three at once.
+  replays its own store) and resumes a replay that paused itself (a replay
+  run while NATS is still down pauses once its rows are parked behind the
+  open breaker); *Kill all durable pods* SIGKILLs the three at once.
 - **Chaos.** One-shot levers (kill a pod, cut a connection, a gateway fault,
   which hits both ingest routes) and two timed ones: *Flap a connection* denies
   a lever for *down* seconds, allows it for *up* seconds, and repeats until
   *Stop*, which leaves it allowed; *Rolling kills* SIGKILLs a random pod of a
-  group now and then every *every* seconds.
+  group now and then every *every* seconds, skipping a tick while any pod of
+  the group is not ready (so it never has two of the three NATS nodes down).
 - **Consumed.** The last 30 hooks the consumers processed: time (UTC), hook id,
   pod, size, `inline` or `claim`, ingest-to-consumed latency, and `dup` when a
   pod had already seen it.
@@ -208,8 +217,10 @@ the sender stopped and the badge at **0 lost**.
 |**Gateway fault: abort 50%**|about half of the attempts get `503` from Envoy and are retried: `retried` is ~0.9 × `sent`, and ~6 % of hooks (0.5⁴) exhaust their three retries and count as `failed`; `accepted + failed = sent`.|
 |**Gateway fault: delay 2000 ms, 100%**|the *ingest latency* reads ~2 s and *in flight* climbs to rate × 2 s (100 at 50/s); nothing fails, and everything is consumed once the fault is cleared.|
 
-The durable fleet, target *Durable*, rate 100, bodies 512 B-4 KiB. The
-numbers are from one run each:
+The durable fleet, target *Durable*, rate 100, bodies 512 B-4 KiB unless the
+row says otherwise. The numbers are from one run each. Every one ended at 0
+lost except the long outage with claimed bodies, which shows the claim
+store's limit:
 
 |Lever|What to expect|
 |---|---|
@@ -218,7 +229,9 @@ numbers are from one run each:
 |**Kill all durable pods** during a deny|all three are back in ~7 s with their backlogs (5 116 queued before, each pod's count plus what it took since). The sender's requests in the gap are retried, and the ones that outlast three retries count as `failed` (~100 here); nothing accepted is lost.|
 |**Flap `ankusa-durable → NATS`** (down 20 s / up 20 s, 4 min)|`failed` stays 0; the breakers open and close with the flap, *out/s* is 0 while down and catches up while up. Nothing is dead-lettered: an open breaker parks rows without spending attempts, so even `durable.retry.max_attempts: 4` gave 0 dead. The same flap on `ankusa → NATS` with target *Direct* (2 min): 451 `failed`, 2 885 `retried`.|
 |**DLQ and Replay DLQ** (`helm upgrade … --set durable.breaker.failures=0 --set durable.retry.max_attempts=4`, then a 30 s deny)|with the breaker off, a row is dead-lettered after its 4th failed attempt (~3.5 s): 1 497 *dead*, and once the backlog has drained the badge reads `1,497 not consumed · 1,497 in ankusa DLQ (replay)`. *Replay DLQ* → *dead* back to 0 and the badge to 0 lost within 15 s. Re-run `run.sh` to restore the chart's values.|
-|**Rolling kills: `nats` every 30 s** (3 min)|7 NATS pods killed, the stream's leader moves several times; target *Durable*: 0 `retried`, 0 `failed`; target *Direct*: 54 `retried`, 0 `failed`.|
+|**Replay DLQ while NATS is down** (chart values, 6 789 dead rows on disk, deny on)|each pod's replay job moves a few hundred rows, finds them parked behind the open breaker and pauses itself (`auto-paused: … parked behind an open circuit breaker`); the rest stay dead. After *Allow*, *Replay DLQ* again resumes the paused jobs: all 6 789 delivered, *dead* 0 in about a minute.|
+|**Claimed bodies through a long outage** (*size* 140-160 KiB, rate 12, deny `ankusa-durable → NATS` for 7 min)|ingest answers `201` throughout (5 479 hooks). After *Allow*, 3 844 are consumed and 1 634 dead-lettered by the consumer, about the first two minutes of the outage: their claims were checked in when dispatch first picked them up and the keeper deleted them after 5 minutes. One more row reached 12 failed attempts during the outage and went to the ankusa DLQ. Keep a durable outage of claimed hooks under `floci.claimRetentionMinutes`, or raise it.|
+|**Rolling kills: `nats` every 30 s** (3 min)|7 NATS pods killed, the stream's leader moves several times; target *Durable*: 0 `retried`, 0 `failed`; target *Direct*: 54 `retried`, 0 `failed`. Every 10 s (target *Direct*): 3 kills and 6 ticks skipped while the last-killed node was not ready yet, 0 `failed`.|
 
 The deny levers take up to ~10 s: a new connection is refused at once, but an
 established one (a NATS connection is long-lived) is only cut when Envoy
@@ -270,7 +283,10 @@ Things you may notice, none of them a bug:
 - The Erlang containers (ankusa, claim-check, the panel) start through
   `ulimit -n 65536`. A kind node's containerd has `LimitNOFILE=infinity`, so a
   pod starts with a limit of about a billion open files, the VM sizes its
-  tables from it, and it is OOM-killed at boot whatever its memory limit.
+  tables from it, and it is OOM-killed at boot whatever its memory limit. The
+  same goes for a second VM started inside the pod: run
+  `kubectl exec … -- sh -c 'ulimit -n 65536 && exec /app/bin/control_panel rpc "…"'`,
+  or the `rpc` VM OOM-kills the panel container.
 - Every pod sets `enableServiceLinks: false`. A Service named `floci` injects
   `FLOCI_PORT=tcp://…`, which floci reads as its own port setting.
 - The NATS chart already marks the client port `appProtocol: tcp` (NATS is

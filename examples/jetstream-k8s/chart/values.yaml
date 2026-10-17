@@ -67,7 +67,10 @@ claimCheck:
 # floci, an S3 emulator, behind the claim store. It keeps every claimed body in
 # memory, hence the limit; its keeper sidecar deletes claims older than
 # claimRetentionMinutes. A hook the consumers have not reached by then can no
-# longer redeem its claim. Static demo credentials.
+# longer redeem its claim. That includes a durable pod's backlog: its claims
+# are checked in when dispatch first picks a hook up, so claimed hooks held
+# through a longer sink outage are dead-lettered by the consumer. Static demo
+# credentials.
 floci:
   claimRetentionMinutes: 5
   resources: {requests: {cpu: 100m, memory: 512Mi}, limits: {memory: 3Gi}}
