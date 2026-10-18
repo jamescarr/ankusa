@@ -35,6 +35,15 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `claim_check.redeem.signed` cases. A pre-SEC-11 node reads a v2 ref as
   invalid: roll the gateways and the SDK readers before setting keys on the
   writers.
+- **`Ankusa.SecretProvider` and `Ankusa.SourceStore.Static.publish/2` (SEC-9).**
+  The behaviour (`fetch(ref, opts)` returning `{:ok, binary} | {:error,
+  :not_found | :unavailable}`) a secret manager implements; the `ankusa_server`
+  image resolves `${sm:<provider>:<ref>}` through it. `publish/2` replaces the
+  sources a running instance with the static source store serves, after the
+  checks it boots under (durability under `wal: :none`, shared sources without a
+  verifier, verifier options, egress), and returns the ids that changed; a
+  refused spec applies nothing. Reads see the new spec on their next
+  `fetch/2`.
 - **Durable lifecycle outbox with revisions (SEC-2.b).** Lifecycle events are
   no longer queued in memory: the audit row of a source or route change is
   flagged `publish: true` and committed, with the redacted entity beside it

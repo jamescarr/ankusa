@@ -17,7 +17,9 @@ or point `ANKUSA_CONFIG` at another path.
 `${VAR}` and `${VAR:-default}` are interpolated from the environment. A
 `${VAR}` with no value and no default stops the container at startup and names
 the field, so an empty secret can never quietly accept everything an attacker
-signs. An invalid file exits `78` (`EX_CONFIG`), a message, not a crash dump.
+signs. `${file:/abs/path}` reads a file and `${sm:<provider>:<ref>}` asks a
+secret manager; see [Secret sources](#secret-sources). An invalid file exits
+`78` (`EX_CONFIG`), a message, not a crash dump.
 Check a file before you start the container:
 
 ```sh
@@ -76,7 +78,7 @@ Every top-level section, with its keys and defaults:
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
-| `secrets` | `kek` (a 32-byte key, base64, optionally `<id>:<base64>`; use `${VAR}`), `kek_previous` (a list, or one comma-separated string, of keys that may still decrypt). With a `kek`, the secrets of API-managed sources are encrypted before they are stored (`source_store.type: persistent` or `redis`); unset, they are stored as plain JSON. See [Encryption at rest](storage.md#encryption-at-rest) |
+| `secrets` | `kek` (a 32-byte key, base64, optionally `<id>:<base64>`; use `${VAR}`), `kek_previous` (a list, or one comma-separated string, of keys that may still decrypt). With a `kek`, the secrets of API-managed sources are encrypted before they are stored (`source_store.type: persistent` or `redis`); unset, they are stored as plain JSON. See [Encryption at rest](storage.md#encryption-at-rest). `providers.<name>` (`type: aws` or `vault`, and their settings) and `cache_ttl_ms` (`0`) name the secret managers `${sm:<name>:<ref>}` reads from; see [Secret sources](#secret-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones. Read with `GET /v1/audit` (scope `audit:read`). Per node |
@@ -96,7 +98,7 @@ One source per provider endpoint; the key is the catch-URL segment
 | Key | Meaning |
 | --- | --- |
 | `tenant` | The storage/retention scope. With `routing: tenant_path` the URL wins. Default `default`. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`: a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300, at most 3600: see [Custom HMAC schemes](#custom-hmac-schemes)). `hmac` takes the descriptor keys below. |
+| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret` (or `secret_file`): a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `secret_file` is `secret` read from a file, a path or a list of paths, exclusive with `secret` ([Secret sources](#secret-sources)). `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300, at most 3600: see [Custom HMAC schemes](#custom-hmac-schemes)). `hmac` takes the descriptor keys below. |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `trust_url_tenant` | `true` \| `false` (default `false`). With `routing: tenant_path`, a source with `tenant: default` and `verify: {type: none}` files hooks under whatever tenant the URL names, unverified: boot, `check-config` and an admin API write refuse it unless it sets `trust_url_tenant: true`. See [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
@@ -171,7 +173,7 @@ URL), cannot be described by this engine. They need a bespoke
 | `type` | Keys |
 | --- | --- |
 | `log` | none |
-| `http` | `url` (`https://` unless `egress.allow_insecure_http`), `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (**required** unless `allow_unsigned: true`: a `whsec_` secret, or a list while rotating, signs every delivery the Standard Webhooks way), `allow_unsigned` (`false`; `true` sends deliveries with no signature, so any host that can reach the URL can inject hooks. A `secret` still signs when both are set. A sink with neither does not load, and the admin API answers `400 invalid_source` for a source that has one), `max_response_bytes` (65536; only the status is used), `cacertfile` (a PEM CA bundle to verify the receiver's certificate against, for a private CA; the file must exist at load), `allow_insecure_tls` (`false`; `true` skips certificate verification for this sink). `/v1/config` shows `allow_unsigned` (a boolean) and hides `secret`. Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
+| `http` | `url` (`https://` unless `egress.allow_insecure_http`), `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (**required** unless `allow_unsigned: true`: a `whsec_` secret, or a list while rotating, signs every delivery the Standard Webhooks way; `secret_file` reads it from a file instead, see [Secret sources](#secret-sources)), `allow_unsigned` (`false`; `true` sends deliveries with no signature, so any host that can reach the URL can inject hooks. A `secret` still signs when both are set. A sink with neither does not load, and the admin API answers `400 invalid_source` for a source that has one), `max_response_bytes` (65536; only the status is used), `cacertfile` (a PEM CA bundle to verify the receiver's certificate against, for a private CA; the file must exist at load), `allow_insecure_tls` (`false`; `true` skips certificate verification for this sink). `/v1/config` shows `allow_unsigned` (a boolean) and hides `secret`. Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least 16000). |
 | `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a larger record is dead-lettered at once), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`), `idle_timeout_ms` (600000; the client closes after this long with no delivery, `0` never; at least the produce timeout plus 1000). |
 | `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
@@ -219,11 +221,89 @@ then the EC2 instance profile (IMDSv2), caching each until shortly before it
 expires.
 
 A `${VAR}` the loader cannot resolve (an unset variable without a `:-`
-default, or a `${` that is not a variable reference) is a load error naming the
-key, never a literal string.
+default, or a `${` that is not a variable, file or secret-manager reference) is
+a load error naming the key, never a literal string.
 
 Sources and sinks are not env-overridable: they carry behaviour, so they live in
-the file, with secrets injected through `${VAR}`.
+the file, with secrets injected through `${VAR}`, `${file:…}` or `${sm:…}`.
+
+### Secret sources
+
+A secret reaches the file three ways, all resolved when the file is loaded and
+again on a [reload](#rotating-without-a-redeploy):
+
+| Form | Reads |
+| --- | --- |
+| `${VAR}` | the environment |
+| `${file:/abs/path}` | the file, minus one trailing newline (what a Kubernetes secret volume or a Docker secret holds). Absolute path, at most 64 KiB. Anywhere a string goes |
+| `secret_file: /abs/path` (or a list) | the same, as `secret:` of a `verify` block or an `http` sink (a source's or `lifecycle`'s). Exclusive with `secret`; a list is a rotation window. The path may use `${VAR}`; `${file:${VAR}/key}` is not a reference |
+| `${sm:<provider>:<ref>}` | a secret manager, through the provider of that name under `secrets.providers` |
+
+```yaml
+secrets:
+  cache_ttl_ms: 0                       # how long a ${sm:} value is reused by the next load (0..86400000)
+  providers:
+    prod-vault:
+      type: vault
+      address: https://vault.internal:8200   # https, or http on a loopback address
+      token: "${file:/var/run/secrets/vault-token}"
+      mount: secret                      # KV v2 mount (default secret)
+      namespace: team-a                  # optional, Vault Enterprise
+      timeout_ms: 5000
+    aws:
+      type: aws                          # AWS Secrets Manager
+      region: us-east-1
+      # endpoint, access_key_id, secret_access_key, session_token: optional; without keys
+      # the usual chain is walked (environment, EKS web identity, EC2 instance profile)
+
+sources:
+  stripe:
+    verify:
+      type: stripe
+      secret:
+        - "${sm:prod-vault:ankusa/stripe#whsec}"   # field whsec of secret/ankusa/stripe
+        - "${sm:aws:prod/stripe-old}"               # a whole secret
+```
+
+`#<field>` picks one field of a JSON secret (Vault KV v2 data, or an AWS
+`SecretString` holding a JSON object). Vault with no `#` needs exactly one
+field. A provider's own credentials come from `${VAR}` or `${file:…}`, never
+from another `${sm:}`. Providers are `AnkusaServer.SecretProvider.Vault` and
+`AnkusaServer.SecretProvider.AwsSecretsManager`, behind the
+`Ankusa.SecretProvider` behaviour (`fetch(ref, opts)` returning
+`{:ok, binary} | {:error, :not_found | :unavailable}`).
+
+A reference that cannot be resolved at boot (a missing file, a manager that is
+down, a secret that is not there) is a load error naming the key and the
+reference, never a value. Secrets and tokens never appear in a message, and
+`providers` (a token among its keys) is not part of the running config, so
+`print-config` and `GET /v1/config` never show it. `secret_file` and `${file:}`
+are read from the file of this host only: a source
+an API client submits cannot use them.
+
+#### Rotating without a redeploy
+
+`AnkusaServer.Secrets.reload/2` (run from `remote`:
+`AnkusaServer.Secrets.reload(:default)`) re-reads the file, resolves every
+reference again and republishes the sources the file declares
+(`source_store.type: static`): a rotated secret takes effect without a restart.
+Nothing triggers it on a signal or over HTTP yet. Rotation is two reloads and a
+list: put the new secret first and keep the old one second (`secret: [new,
+old]`, or `secret_file: [/new, /old]`) until the provider has switched, reload,
+then drop the old one and reload again. A hook that verifies with either secret
+is accepted in between.
+
+A reference that fails *on a reload* does not take verification down: it keeps
+the value of the last good load, and the reload logs a warning naming the key
+and the reference and returns it under `:kept`. A reference that has no
+previous value (a path you just added) is an error and nothing is applied, as
+is a file that no longer parses or a source the instance would refuse to boot
+with. `cache_ttl_ms` above `0` makes a reload reuse a `${sm:}` value fetched
+within that many milliseconds (a manager with an API quota); `refresh: true`
+ignores it. With `source_store.type: persistent` or `redis` the file's sources
+are seeds, which a reload does not republish. A reload republishes `sources`
+only: a secret under `lifecycle`, `storage` or any other key is read at boot
+and changes with a restart.
 
 ### Starting points
 

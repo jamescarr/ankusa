@@ -12,6 +12,11 @@ defmodule AnkusaServer.Config do
        in: the file holds `${STRIPE_WHSEC}`, not the secret. An unset variable
        with no default is a startup failure naming the dotted key, not a
        silently empty secret; `${NAME:-}` is how a file asks for empty.
+       `${file:/abs/path}` and `${sm:<provider>:<ref>}` (a secret manager under
+       `secrets.providers`) are resolved by `AnkusaServer.Secrets` once the
+       environment overrides are in, and a source's `secret_file:` is
+       `secret:` read from a file; see that module for the outage rule and
+       `reload/2`.
     3. **Env overrides.** A fixed set of `ANKUSA_*` variables (below) override
        the file — env wins, because that is how containers get reconfigured
        without a new image.
@@ -93,7 +98,7 @@ defmodule AnkusaServer.Config do
   @gcs_keys ~w(bucket endpoint auth token sse)
   @sse_keys ~w(type key_id)
   @sse_types %{"aes256" => :aes256, "kms" => :kms}
-  @secrets_keys ~w(kek kek_previous)
+  @secrets_keys ~w(kek kek_previous providers cache_ttl_ms)
   @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
                        read_cache_bytes read_cache_max_entry_bytes max_concurrent_reads
@@ -155,28 +160,46 @@ defmodule AnkusaServer.Config do
   @log_levels ~w(debug info warning error)
   @exchange_types ~w(topic direct fanout headers)
 
-  @typedoc "A loaded config plus the log level and banner switch the file asked for."
-  @type loaded :: %{config: Ankusa.Config.t(), log_level: Logger.level(), banner: boolean()}
+  @typedoc """
+  A loaded config plus the log level and banner switch the file asked for, and
+  what its `${file:}` / `${sm:}` references resolved to (`AnkusaServer.Secrets`).
+  """
+  @type loaded :: %{
+          config: Ankusa.Config.t(),
+          log_level: Logger.level(),
+          banner: boolean(),
+          secrets: AnkusaServer.Secrets.t()
+        }
 
-  @var_re ~r/\$\{([A-Z0-9_]+)(:-([^}]*))?\}/
+  # `${NAME}`, `${NAME:-default}`, `${file:/path}`, `${sm:provider:ref}`. A file
+  # path or a reference holds no `$` or `}`: `${file:${DIR}/key}` is spelled
+  # `secret_file: ${DIR}/key`.
+  @var_re ~r/\$\{(?:file:([^}$]+)|sm:([a-z0-9_-]+):([^}$]+)|([A-Z0-9_]+)(?::-([^}]*))?)\}/
 
   @doc """
   Read, interpolate, validate, and translate the config file.
 
-  Options: `:env` (an environment map, default `System.get_env/0`) and `:path`
-  (overrides `ANKUSA_CONFIG`, used by tests and `--config`-style callers).
+  Options: `:env` (an environment map, default `System.get_env/0`), `:path`
+  (overrides `ANKUSA_CONFIG`, used by tests and `--config`-style callers),
+  `:secrets` (the `AnkusaServer.Secrets` of the load this one follows: a
+  reference that fails keeps its value from there, see `AnkusaServer.Secrets.reload/2`)
+  and `refresh: true` (ignore `secrets.cache_ttl_ms`).
   """
   @spec load!(keyword()) :: loaded()
   def load!(opts \\ []) do
     env = Keyword.get(opts, :env, System.get_env())
     raw = read!(Keyword.get(opts, :path), env)
 
-    doc =
+    {doc, secrets} =
       raw
       |> interpolate(env, [])
       |> apply_env_overrides(env)
+      |> AnkusaServer.Secrets.resolve(
+        Keyword.get(opts, :secrets),
+        Keyword.take(opts, [:refresh])
+      )
 
-    %{config: config!(doc), log_level: log_level!(doc), banner: banner?(doc)}
+    %{config: config!(doc), log_level: log_level!(doc), banner: banner?(doc), secrets: secrets}
   end
 
   @doc """
@@ -244,7 +267,8 @@ defmodule AnkusaServer.Config do
   # ── 2. interpolate ──────────────────────────────────────────────────────────
 
   defp interpolate(value, env, path) when is_map(value) do
-    Map.new(value, fn {k, v} -> {k, interpolate(v, env, path ++ [k])} end)
+    value = Map.new(value, fn {k, v} -> {k, interpolate(v, env, path ++ [k])} end)
+    if secret_file_site?(path), do: expand_secret_file(value, path), else: value
   end
 
   defp interpolate(value, env, path) when is_list(value) do
@@ -254,33 +278,111 @@ defmodule AnkusaServer.Config do
   end
 
   defp interpolate(value, env, path) when is_binary(value) do
-    # Whatever in the file still reads `${` once the variable references are
-    # taken out did not match the grammar (`${stripe_secret}`, `${A-B}`): left
-    # alone it would become a literal secret or URL, so it is an error. Only
-    # the template is checked: a substituted value may contain `${` itself.
+    # Whatever in the file still reads `${` once the references are taken out
+    # did not match the grammar (`${stripe_secret}`, `${A-B}`): left alone it
+    # would become a literal secret or URL, so it is an error. Only the template
+    # is checked: a substituted value may contain `${` itself.
     if value |> then(&Regex.replace(@var_re, &1, "")) |> String.contains?("${") do
       raise ConfigError,
         message:
-          "#{render_path(path)}: unresolved ${…} (variable names are [A-Z0-9_]+; " <>
+          "#{render_path(path)}: unresolved ${…} (use ${NAME}, ${NAME:-default}, " <>
+            "${file:/abs/path} or ${sm:<provider>:<ref>}; variable names are [A-Z0-9_]+; " <>
             "use ${NAME:-} for an empty default)"
     end
 
-    Regex.replace(@var_re, value, fn _match, name, marker, default ->
-      case Map.fetch(env, name) do
-        {:ok, replacement} ->
-          replacement
-
-        # The marker, not the default, decides: `${NAME:-}` has an empty one.
-        :error when marker != "" ->
-          default
-
-        :error ->
-          raise ConfigError, message: "#{render_path(path)}: ${#{name}} is not set"
-      end
-    end)
+    value
+    |> parts()
+    |> Enum.map(&substitute(&1, env, path))
+    |> AnkusaServer.Secrets.template(path)
   end
 
   defp interpolate(value, _env, _path), do: value
+
+  # The value as literal text and references, in order. A variable is
+  # substituted here; a file or secret manager reference stays for
+  # `AnkusaServer.Secrets`, so a file that cannot be read fails with the
+  # same dotted key as an unset variable.
+  defp parts(value) do
+    {parts, position} =
+      @var_re
+      |> Regex.scan(value, return: :index)
+      |> Enum.reduce({[], 0}, fn [{start, length} | groups], {parts, position} ->
+        literal = binary_part(value, position, start - position)
+        {[reference(value, groups) | [literal | parts]], start + length}
+      end)
+
+    tail = binary_part(value, position, byte_size(value) - position)
+    Enum.reverse([tail | parts])
+  end
+
+  defp reference(value, groups) do
+    case Enum.map(groups, &group(value, &1)) do
+      [file | _] when is_binary(file) -> {:file, file}
+      [_file, name, ref | _] when is_binary(name) -> {:sm, name, ref}
+      [_file, _name, _ref, var, default] -> {:var, var, default}
+      [_file, _name, _ref, var] -> {:var, var, nil}
+    end
+  end
+
+  # An optional group that did not take part is `{-1, 0}` (or is cut off the end).
+  defp group(_value, {-1, _length}), do: nil
+  defp group(value, {start, length}), do: binary_part(value, start, length)
+
+  defp substitute({:var, name, default}, env, path) do
+    case Map.fetch(env, name) do
+      {:ok, replacement} ->
+        replacement
+
+      # An empty default is still a default: `${NAME:-}` is how a file asks for empty.
+      :error when is_binary(default) ->
+        default
+
+      :error ->
+        raise ConfigError, message: "#{render_path(path)}: ${#{name}} is not set"
+    end
+  end
+
+  defp substitute(part, _env, _path), do: part
+
+  # `secret_file:` is `secret:` read from a file (one path, or a list for a
+  # rotation window). It means something only where a `secret` does: a verifier,
+  # and an HTTP sink of a source or of `lifecycle`. A spec an API client
+  # submits never goes through here, so it cannot name a file of this host.
+  defp secret_file_site?(["sources", _id, "verify"]), do: true
+  defp secret_file_site?(["sources", _id, "sinks", index]) when is_integer(index), do: true
+  defp secret_file_site?(["lifecycle", "sinks", index]) when is_integer(index), do: true
+  defp secret_file_site?(_path), do: false
+
+  defp expand_secret_file(%{"secret_file" => files} = map, path) do
+    if Map.has_key?(map, "secret") do
+      raise ConfigError,
+        message: "#{render_path(path)}: secret and secret_file are mutually exclusive"
+    end
+
+    key_path = path ++ ["secret_file"]
+
+    secret =
+      case files do
+        [_ | _] ->
+          files
+          |> Enum.with_index()
+          |> Enum.map(fn {file, i} -> file_ref!(file, key_path ++ [i]) end)
+
+        file ->
+          file_ref!(file, key_path)
+      end
+
+    map |> Map.delete("secret_file") |> Map.put("secret", secret)
+  end
+
+  defp expand_secret_file(map, _path), do: map
+
+  defp file_ref!(file, path) when is_binary(file) and file != "",
+    do: AnkusaServer.Secrets.file_template(file, path)
+
+  defp file_ref!(other, path),
+    do:
+      raise(ConfigError, message: type_error(path, "a file path or a list of file paths", other))
 
   # ── 3. env overrides ────────────────────────────────────────────────────────
 
@@ -2149,9 +2251,11 @@ defmodule AnkusaServer.Config do
     "#{render_path(path)}: expected #{expected}, got #{inspect(value)}"
   end
 
-  defp render_path([]), do: "config"
+  @doc false
+  @spec render_path([term()]) :: String.t()
+  def render_path([]), do: "config"
 
-  defp render_path(segments) do
+  def render_path(segments) do
     Enum.reduce(segments, "", fn
       index, "" when is_integer(index) -> "[#{index}]"
       index, acc when is_integer(index) -> acc <> "[#{index}]"
