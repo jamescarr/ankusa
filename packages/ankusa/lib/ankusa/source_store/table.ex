@@ -20,6 +20,8 @@ defmodule Ankusa.SourceStore.Table do
   alias Ankusa.{Source, SourceStore}
 
   @spec table(atom()) :: atom()
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   def table(instance), do: :"ankusa_source_store_#{instance}"
 
   @doc "Create the instance's table, owned by the caller."

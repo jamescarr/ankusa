@@ -80,7 +80,7 @@ one; CI runs the same tasks this table does.
 | Task | What |
 | --- | --- |
 | `mise run check` | everything CI checks, every package/example/tool |
-| `mise run check:package <pkg>` | one package: format, warnings-as-errors, tests, docs; starts/stops that package's own `docker-compose.yml` |
+| `mise run check:package <pkg>` | one package: format, warnings-as-errors, `credo --strict`, dialyzer, sobelow (core, `ankusa_server`), tests with a coverage floor (core 85 %, others 80 %), docs; starts/stops that package's own `docker-compose.yml` |
 | `mise run check:examples` | `examples/*` |
 | `mise run check:tools` | `tools/*` |
 | `mise run check:conformance` | validate `conformance/` and run every `packages/sdk-*` against its vectors |

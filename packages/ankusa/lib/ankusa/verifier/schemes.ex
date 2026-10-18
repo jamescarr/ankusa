@@ -65,11 +65,11 @@ defmodule Ankusa.Verifier.Schemes do
   @secret_decodes [:raw, :whsec_base64]
 
   @doc "Every named preset, keyed by scheme name."
-  @spec all() :: %{atom() => %Scheme{}}
+  @spec all() :: %{atom() => Scheme.t()}
   def all, do: @presets
 
   @doc "Look up a named preset."
-  @spec fetch(atom()) :: {:ok, %Scheme{}} | :error
+  @spec fetch(atom()) :: {:ok, Scheme.t()} | :error
   def fetch(name) when is_atom(name) do
     Map.fetch(@presets, name)
   end
@@ -80,7 +80,7 @@ defmodule Ankusa.Verifier.Schemes do
   Validate a scheme descriptor, raising `ArgumentError` naming the offending
   field on the first violation.
   """
-  @spec validate!(%Scheme{}) :: %Scheme{}
+  @spec validate!(Scheme.t()) :: Scheme.t()
   def validate!(%Scheme{} = scheme) do
     unless is_binary(scheme.signature_header) and scheme.signature_header != "" do
       raise ArgumentError, "scheme.signature_header must be a non-empty string"

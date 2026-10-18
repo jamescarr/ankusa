@@ -13,11 +13,22 @@ cd "$dir"
 
 tmp=""
 infra=""
+testlog=""
 cleanup() {
   if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
+  if [ -n "$testlog" ]; then rm -f "$testlog"; fi
   if [ -n "$infra" ]; then docker compose down -v; fi
 }
 trap cleanup EXIT
+
+# The seed ExUnit randomized this run with, on the CI run's summary page, so a
+# flaky ordering failure can be replayed with `mix test --seed <n>`.
+record_seed() {
+  [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
+  local seed
+  seed=$(sed -n -E 's/^(Running ExUnit with seed: |Randomized with seed )([0-9]+).*/\2/p' "$testlog" | head -1)
+  printf -- '- `%s`: ExUnit seed `%s`\n' "$pkg" "${seed:-unknown}" >> "$GITHUB_STEP_SUMMARY"
+}
 
 if [ -f docker-compose.yml ]; then
   echo "==> $pkg: docker compose up"
@@ -34,7 +45,21 @@ case "$kind" in
     mix hex.audit
     mix format --check-formatted
     mix compile --warnings-as-errors
-    mix test
+    # Static analysis. The credo config is the repo's .credo.exs; dialyzer's PLTs
+    # live under _build (see each mix.exs), which CI caches.
+    mix credo --strict
+    mix dialyzer
+    # Plug applications only: the packages that serve HTTP.
+    case "$pkg" in
+      ankusa | ankusa_server) mix sobelow --exit --skip ;;
+    esac
+    # `--cover` enforces the package's `test_coverage: [summary: [threshold: n]]`
+    # floor (core 85, every other package 80).
+    testlog=$(mktemp)
+    status=0
+    mix test --cover 2>&1 | tee "$testlog" || status=$?
+    record_seed
+    [ "$status" -eq 0 ] || exit "$status"
     # The one package-specific step: async_api_spex is for other projects, so
     # its gate is a project that is not this repo.
     if [ "$pkg" = async_api_spex ]; then scripts/standalone.sh; fi

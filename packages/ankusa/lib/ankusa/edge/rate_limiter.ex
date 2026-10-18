@@ -438,7 +438,11 @@ defmodule Ankusa.Edge.RateLimiter do
 
   # ── ETS ─────────────────────────────────────────────────────────────────────
 
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   defp overrides_table(instance), do: :"ankusa_rate_limits_#{instance}"
 
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   defp buckets_table(instance), do: :"ankusa_rate_buckets_#{instance}"
 end

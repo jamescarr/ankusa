@@ -119,7 +119,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/test/ankusa/loss_test.exs`, `packages/ankusa/lib/ankusa/queue/writer.ex:500-511`, `packages/ankusa/lib/ankusa/store.ex:345-350,593-594`.
   *Evidence:* —
 
-- [ ] **F3 — Static analysis and coverage gates** · P1 · Deps: —
+- [x] **F3 — Static analysis and coverage gates** · P1 · Deps: —
   *Why:* `.mise/tasks/check/package:33-37` runs format, warnings-as-errors, tests, `hex.audit` only; no dialyzer, credo, sobelow or coverage floor.
   *Change:* add `dialyxir` (PLT cached on `mix.lock` + OTP in CI), `credo --strict`, `sobelow --exit` (core and `ankusa_server`), and `mix test --cover` with `coveralls.json`/`test_coverage: [threshold: 85]` for core (adapters 80) to `.mise/tasks/check/package`; record the ExUnit seed in `$GITHUB_STEP_SUMMARY`.
   *Done when:* an injected wrong `@spec` fails CI; coverage below the floor fails CI; the suite passes clean.

@@ -70,6 +70,8 @@ defmodule Ankusa.Metrics do
 
   @doc "Registered name of this instance's reporter."
   @spec reporter_name(atom()) :: atom()
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   def reporter_name(instance), do: :"ankusa_metrics_#{instance}"
 
   @doc "Render the current metrics in Prometheus text exposition format."

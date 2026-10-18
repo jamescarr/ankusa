@@ -28,6 +28,8 @@ defmodule Ankusa.BlobStore.LocalFS do
   end
 
   @impl true
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   def get(instance, key, opts) do
     case File.read(Path.join(root(instance, opts), key)) do
       {:ok, bin} -> {:ok, bin}
@@ -58,6 +60,8 @@ defmodule Ankusa.BlobStore.LocalFS do
   end
 
   @impl true
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   def delete(instance, key, opts) do
     _ = File.rm(Path.join(root(instance, opts), key))
     :ok

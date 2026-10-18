@@ -34,8 +34,8 @@ defmodule Ankusa.AsyncApi do
   credentials (`Ankusa.Sink.Description`).
   """
 
-  alias Ankusa.{Lifecycle, Sink, SourceStore}
   alias Ankusa.AsyncApi.{LifecycleEvent, SinkMessage, SinkMessageHeaders}
+  alias Ankusa.{Lifecycle, Sink, SourceStore}
   alias AsyncApiSpex.{Channel, Document, Info, Message, Operation, Reference, Server}
 
   @doc "Build the document for `instance` from its current configuration."

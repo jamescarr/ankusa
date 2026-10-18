@@ -874,7 +874,7 @@ defmodule AnkusaServer.ConfigTest do
              max_size: 100,
              ttl_ms: 1000,
              negative_ttl_ms: 500,
-             gc_interval_ms: 10000
+             gc_interval_ms: 10_000
            }
 
     assert routes.ip_rules == %{

@@ -330,17 +330,15 @@ defmodule Ankusa.BlobStore.S3SigningTest do
            conn.req_headers, body}
         )
 
-        cond do
-          conn.host == "sts.test" ->
-            Plug.Conn.send_resp(conn, 200, """
-            <AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials>
-            <AccessKeyId>ASIAWEB</AccessKeyId><SecretAccessKey>websecret</SecretAccessKey>
-            <SessionToken>webtoken</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>
-            </Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>
-            """)
-
-          true ->
-            Plug.Conn.send_resp(conn, 200, "ok")
+        if conn.host == "sts.test" do
+          Plug.Conn.send_resp(conn, 200, """
+          <AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials>
+          <AccessKeyId>ASIAWEB</AccessKeyId><SecretAccessKey>websecret</SecretAccessKey>
+          <SessionToken>webtoken</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>
+          </Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>
+          """)
+        else
+          Plug.Conn.send_resp(conn, 200, "ok")
         end
       end)
 

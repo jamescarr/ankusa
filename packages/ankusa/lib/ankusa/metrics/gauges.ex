@@ -125,6 +125,9 @@ defmodule Ankusa.Metrics.Gauges do
     end
   end
 
+  # `:disksup` is os_mon's, which core does not start or depend on (the server
+  # image does); this reads it only when its process exists.
+  @dialyzer {:no_unknown, disk: 2}
   defp disk(instance, config) do
     if is_pid(Process.whereis(:disksup)) do
       case :disksup.get_disk_info(String.to_charlist(Path.expand(config.data_dir))) do

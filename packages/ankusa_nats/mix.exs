@@ -18,7 +18,11 @@ defmodule AnkusaNats.MixProject do
       package: package(),
       source_url: @source_url,
       homepage_url: @source_url,
-      docs: docs()
+      docs: docs(),
+      test_coverage: [summary: [threshold: 80]],
+      # Every PLT lives under _build, which CI caches (keyed on the toolchain pins
+      # and mix.lock), so a run rebuilds a PLT only when one of them changed.
+      dialyzer: [plt_core_path: "_build/plts", plt_local_path: "_build/plts"]
     ]
   end
 
@@ -55,7 +59,9 @@ defmodule AnkusaNats.MixProject do
     ankusa_deps() ++
       [
         {:gnat, "~> 1.18"},
-        {:ex_doc, "~> 0.40", only: :dev, runtime: false}
+        {:ex_doc, "~> 0.40", only: :dev, runtime: false},
+        {:credo, "~> 1.7", only: :dev, runtime: false},
+        {:dialyxir, "~> 1.4", only: :dev, runtime: false}
       ]
   end
 

@@ -4,10 +4,28 @@ Every package's test suite runs from its own directory under `packages/`;
 there's no single test runner spanning them, because each has a genuinely
 different infrastructure dependency (none, RabbitMQ, Redpanda, NATS, Redis).
 `mise run check:package <pkg>` runs one package's full CI check (format,
-warnings-as-errors, tests, docs), starting and stopping that package's own
-`docker-compose.yml` around the suite; `mise run check` runs all of them. The
+warnings-as-errors, credo, dialyzer, sobelow, tests with a coverage floor,
+docs), starting and stopping that package's own `docker-compose.yml` around the
+suite; `mise run check` runs all of them. The
 eight client SDKs are also checked against one shared, language-neutral vector
 suite — `mise run check:conformance`, below.
+
+## Static analysis and coverage gates
+
+`check:package` runs these on every Mix package (sobelow only on the two Plug
+applications) between `mix compile --warnings-as-errors` and the tests:
+
+| Gate | What fails it | Config |
+| --- | --- | --- |
+| `mix credo --strict` | any issue | [`.credo.exs`](../.credo.exs): the default checks, except `Design.AliasUsage` is off and the nesting and cyclomatic-complexity ceilings sit at the worst function that exists today (5 and 20) |
+| `mix dialyzer` | any warning (a wrong `@spec`, an unreachable clause, a call that can never succeed) | PLTs live in `_build/plts`; CI caches `_build` keyed on the toolchain pins and `mix.lock`, so a PLT rebuilds only when one changes |
+| `mix sobelow --exit --skip` | any finding in `ankusa` core or `ankusa_server` | a deliberate finding is marked in the code with `# sobelow_skip ["<Check>"]` and a line saying why it is safe; `--skip` is what makes sobelow read those marks |
+| `mix test --cover` | line coverage under the package's `test_coverage` threshold | `85` for `ankusa` core (shared test helpers excluded), `80` for every other package, in each `mix.exs` |
+
+The test run prints its ExUnit seed; in CI `check:package` also appends it to the
+job's summary (`$GITHUB_STEP_SUMMARY`), so an order-dependent failure replays with
+`mix test --seed <n>`. A new adapter scaffolded by `mise run new:adapter` ships
+the same dependencies, PLT paths and coverage floor.
 
 ## `ankusa` core: `mix test`
 

@@ -1,8 +1,8 @@
 defmodule Ankusa.ClaimCheckTest do
   use ExUnit.Case, async: false
 
-  alias Ankusa.{ClaimCheck, Config, UUIDv7}
   alias Ankusa.BlobStore.LocalFS
+  alias Ankusa.{ClaimCheck, Config, UUIDv7}
   alias Ankusa.ClaimCheck.{Ref, Stores}
   alias Ankusa.Test.CountingBlobStore
 
