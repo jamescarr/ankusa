@@ -16,6 +16,16 @@ defmodule Ankusa.Verifier.Hmac do
   empty secret, an empty list, or an element that is empty or does not decode
   fails every hook with `:bad_secret`.
 
+  `:tolerance` is the replay window in seconds, 0 to
+  `Ankusa.Verifier.max_tolerance_seconds/0` (3600; default 300). A window wider
+  than an hour is not a window, so anything else fails every hook with
+  `:bad_tolerance` and refuses the boot of a source declared in config.
+
+  `hash: :sha1` on an inline scheme is allowed, for providers that still sign
+  with it, but it is no longer collision resistant: `weak_hash?/1` reports it,
+  boot logs a warning, and every such verification counts toward
+  `ankusa_verifier_weak_hash_total`.
+
   Providers that are not body-HMAC — Twilio (SHA1 over the full request URL plus
   sorted form params) and PayPal (RSA over a certificate fetched from a provider
   URL) — are not expressible here and stay bespoke `Ankusa.Verifier` modules.
@@ -74,6 +84,7 @@ defmodule Ankusa.Verifier.Hmac do
   @spec verify(Envelope.t(), keyword()) :: :ok | {:error, term()}
   def verify(%Envelope{} = env, opts) do
     with {:ok, scheme} <- resolve_scheme(opts),
+         :ok <- check_tolerance(opts),
          {:ok, candidates, sig_ts} <- candidates(env, scheme),
          {:ok, ts} <- timestamp(env, scheme, sig_ts, opts),
          {:ok, signed} <- signed_bytes(env, scheme, ts),
@@ -107,15 +118,41 @@ defmodule Ankusa.Verifier.Hmac do
 
   @doc """
   Check `opts` the way `verify/2` would use them, without a request: the
-  scheme resolves and every secret decodes to a non-empty key. `:ok`, or the
-  error `verify/2` would return for every hook. Used at boot for sources
-  declared in config (`Ankusa.Verifier.validate_config!/1`).
+  scheme resolves, `:tolerance` (when set) is an integer from 0 to
+  `Ankusa.Verifier.max_tolerance_seconds/0`, and every secret decodes to a
+  non-empty key. `:ok`, or the error `verify/2` would return for every hook.
+  Used at boot for sources declared in config
+  (`Ankusa.Verifier.validate_config!/1`).
   """
-  @spec validate_opts(keyword()) :: :ok | {:error, :bad_secret | :bad_scheme}
+  @spec validate_opts(keyword()) :: :ok | {:error, :bad_secret | :bad_scheme | :bad_tolerance}
   def validate_opts(opts) do
     with {:ok, scheme} <- resolve_scheme(opts),
+         :ok <- check_tolerance(opts),
          {:ok, _keys} <- secret_keys(opts, scheme) do
       :ok
+    end
+  end
+
+  @doc """
+  Whether `opts` verify with SHA-1, a hash that is no longer collision
+  resistant. No named preset uses it (`verifier_test.exs` asserts that), so
+  only an inline `%Scheme{hash: :sha1}` is weak. It works, because some
+  providers still sign that way; `Ankusa.Verifier.validate_config!/1` logs a
+  warning at boot and every verification increments
+  `ankusa_verifier_weak_hash_total`.
+  """
+  @spec weak_hash?(keyword()) :: boolean()
+  def weak_hash?(opts), do: match?(%Scheme{hash: :sha1}, opts[:scheme])
+
+  # A replay window is seconds, from "exact" to an hour: past that it is not a
+  # window, it is the absence of one. `nil` is the default window.
+  defp check_tolerance(opts) do
+    max = Verifier.max_tolerance_seconds()
+
+    case opts[:tolerance] do
+      nil -> :ok
+      t when is_integer(t) and t >= 0 and t <= max -> :ok
+      _ -> {:error, :bad_tolerance}
     end
   end
 

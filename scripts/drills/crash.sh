@@ -17,9 +17,11 @@ set -euo pipefail
 mode=${1:?usage: crash.sh tmpfs|dm}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
-image=$(sed -n 's/^FROM \(elixir:[^ ]*-alpine\) AS build$/\1/p' "$root/packages/ankusa_server/Dockerfile")
+# The `FROM` line carries the tag and, since SEC-8, the digest the image is
+# pinned to (`elixir:1.20.4-alpine@sha256:…`); `docker run` takes it whole.
+image=$(sed -n 's/^FROM \(elixir:[^ @]*-alpine\(@sha256:[0-9a-f]\{64\}\)\{0,1\}\) AS build$/\1/p' "$root/packages/ankusa_server/Dockerfile")
 [ -n "$image" ] || {
-  echo "FAIL: no 'FROM elixir:…-alpine AS build' line in packages/ankusa_server/Dockerfile" >&2
+  echo "FAIL: no 'FROM elixir:…-alpine[@sha256:…] AS build' line in packages/ankusa_server/Dockerfile" >&2
   exit 1
 }
 

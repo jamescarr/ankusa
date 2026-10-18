@@ -20,6 +20,8 @@ defmodule Ankusa.Verifier do
     * `:timestamp_out_of_tolerance` — outside the replay window
     * `:bad_secret` — the configured secret can't be used as a key
     * `:bad_scheme` — an unknown or missing scheme name (`Verifier.Hmac`)
+    * `:bad_tolerance` — `:tolerance` is not an integer from 0 to
+      `max_tolerance_seconds/0` (`Verifier.Hmac`)
   """
 
   require Logger
@@ -27,6 +29,7 @@ defmodule Ankusa.Verifier do
   alias Ankusa.Envelope
 
   @default_tolerance_seconds 300
+  @max_tolerance_seconds 3600
 
   @doc """
   Verify an envelope. Return `:ok` to accept, or `{:error, reason}` to trigger
@@ -42,6 +45,21 @@ defmodule Ankusa.Verifier do
   @callback scheme_name(opts :: keyword()) :: String.t() | nil
 
   @optional_callbacks scheme_name: 1
+
+  @doc """
+  The widest replay window, in seconds, a verifier accepts: an hour. Beyond that
+  a signed hook stays replayable long enough that the window protects nothing.
+  """
+  @spec max_tolerance_seconds() :: pos_integer()
+  def max_tolerance_seconds, do: @max_tolerance_seconds
+
+  @doc """
+  Whether the verifier `{mod, opts}` checks signatures with a weak hash (SHA-1).
+  Only `Ankusa.Verifier.Hmac` can; see `Ankusa.Verifier.Hmac.weak_hash?/1`.
+  """
+  @spec weak_hash?(module(), keyword()) :: boolean()
+  def weak_hash?(Ankusa.Verifier.Hmac, opts), do: Ankusa.Verifier.Hmac.weak_hash?(opts)
+  def weak_hash?(_mod, _opts), do: false
 
   @doc "Constant-time compare of two binaries of equal length."
   @spec secure_compare(binary(), binary()) :: boolean()
@@ -65,11 +83,12 @@ defmodule Ankusa.Verifier do
 
   @doc """
   Refuse to boot with a source declared in config whose `Ankusa.Verifier.Hmac`
-  secret is missing, empty or undecodable (or whose scheme is unknown): such a
-  source would fail every hook with `:bad_secret`, which `on_verify_failure`
-  then quarantines, flags or rejects — silently, at runtime. Sources a
-  writable store holds are checked when they are written. Raises
-  `ArgumentError` naming the source.
+  secret is missing, empty or undecodable, whose scheme is unknown, or whose
+  `:tolerance` is outside `0..max_tolerance_seconds/0`: such a source would fail
+  every hook, which `on_verify_failure` then quarantines, flags or rejects —
+  silently, at runtime. Sources a writable store holds are checked when they are
+  written. Raises `ArgumentError` naming the source. A source that verifies
+  with SHA-1 (`Ankusa.Verifier.Hmac.weak_hash?/1`) boots, with one warning.
   """
   @spec validate_config!(Ankusa.Config.t()) :: :ok
   def validate_config!(%Ankusa.Config{} = config) do
@@ -79,18 +98,35 @@ defmodule Ankusa.Verifier do
       {id, %Ankusa.Source{verifier: {Ankusa.Verifier.Hmac, opts}}} ->
         case Ankusa.Verifier.Hmac.validate_opts(opts) do
           :ok ->
-            :ok
+            warn_weak_hash(id, opts)
 
           {:error, :bad_scheme} ->
             raise ArgumentError, "source #{id}: verifier scheme is missing or unknown"
 
           {:error, :bad_secret} ->
             raise ArgumentError, "source #{id}: verifier secret is missing or undecodable"
+
+          {:error, :bad_tolerance} ->
+            raise ArgumentError,
+                  "source #{id}: verifier tolerance must be an integer from 0 to " <>
+                    "#{@max_tolerance_seconds} seconds, got: #{inspect(opts[:tolerance])}"
         end
 
       _other ->
         :ok
     end)
+  end
+
+  defp warn_weak_hash(id, opts) do
+    if Ankusa.Verifier.Hmac.weak_hash?(opts) do
+      Logger.warning(
+        "[ankusa] source #{id} verifies with SHA-1, which is no longer collision " <>
+          "resistant: use sha256 or sha512 if the provider can sign with it. Every " <>
+          "verification counts toward ankusa_verifier_weak_hash_total."
+      )
+    end
+
+    :ok
   end
 
   @doc """
