@@ -21,7 +21,7 @@ defmodule AnkusaServer.ConfigTest do
     "AWS_SECRET_ACCESS_KEY" => "fixture-s3-secret",
     "GCS_BUCKET" => "fixture-gcs-bucket",
     "STRIPE_WHSEC" => "whsec_fixture-stripe-secret",
-    "SINK_URL" => "http://sink.fixture.invalid/hooks",
+    "SINK_URL" => "https://sink.fixture.invalid/hooks",
     "SINK_WHSEC" => "whsec_c2luay1maXh0dXJl",
     "RABBITMQ_URL" => "amqp://ankusa:fixture-rabbit-password@rabbitmq:5672",
     "RABBITMQ_EXCHANGE" => "ankusa.hooks",
@@ -612,7 +612,7 @@ defmodule AnkusaServer.ConfigTest do
       sources:
         demo:
           verify: {type: none}
-          sinks: [{type: http, url: "http://sink.invalid/hooks"}]
+          sinks: [{type: http, url: "https://sink.invalid/hooks"}]
       """)
 
     config = Config.load!(path: path, env: %{"ANKUSA_WAL_TYPE" => "none"}).config
@@ -1352,7 +1352,7 @@ defmodule AnkusaServer.ConfigTest do
           on_verify_failure: accept_flag
           verify: {type: standard_webhooks, secret: "whsec_YWJj", tolerance_seconds: 60}
           sinks:
-            - {type: http, url: "http://sink.invalid/h", method: put, timeout_ms: 250,
+            - {type: http, url: "https://sink.invalid/h", method: put, timeout_ms: 250,
                headers: {x-one: "1"}}
             - {type: rabbitmq, exchange: ankusa.full, idle_timeout_ms: 0}
             - {type: kafka, brokers: ["b:9092"], topic: t, ssl: true,
@@ -1385,7 +1385,7 @@ defmodule AnkusaServer.ConfigTest do
     assert [
              {Ankusa.Sink.Http,
               [
-                url: "http://sink.invalid/h",
+                url: "https://sink.invalid/h",
                 method: :put,
                 headers: [{"x-one", "1"}],
                 timeout_ms: 250
@@ -1781,10 +1781,202 @@ defmodule AnkusaServer.ConfigTest do
         a:
           verify: {type: none}
           sinks:
-            - {type: http, url: "http://sink.invalid", headers: {authorization: "Bearer leak"}}
+            - {type: http, url: "https://sink.invalid", headers: {authorization: "Bearer leak"}}
       """)
 
     refute print_config(path) =~ "Bearer leak"
+  end
+
+  # ── egress ──────────────────────────────────────────────────────────────────
+
+  describe "egress" do
+    test "defaults: https only, every private range denied" do
+      config = Config.load!(path: tmp_config("sources: {}\n"), env: %{}).config
+
+      assert config.egress == Ankusa.HttpClient.Egress.default_policy()
+      assert config.egress.allow_insecure_http == false
+      assert "169.254.0.0/16" in config.egress.deny_cidrs
+      assert config.egress.deny_hosts == ["metadata.google.internal"]
+    end
+
+    test "the section is read key by key over the defaults" do
+      path =
+        tmp_config("""
+        egress:
+          allow_insecure_http: true
+          allow_cidrs: ["10.20.0.0/16", "fd00:1::/32"]
+          allow_hosts: worker, jobs.internal
+          deny_hosts: []
+        """)
+
+      egress = Config.load!(path: path, env: %{}).config.egress
+
+      assert egress.allow_insecure_http
+      assert egress.allow_cidrs == ["10.20.0.0/16", "fd00:1::/32"]
+      assert egress.allow_hosts == ["worker", "jobs.internal"]
+      assert egress.deny_hosts == []
+      assert egress.deny_cidrs == Ankusa.HttpClient.Egress.default_policy().deny_cidrs
+    end
+
+    test "a bad value names its key" do
+      assert_raise ConfigError, ~r/egress.allow_cidrs: invalid CIDR "10.0.0.0\/99"/, fn ->
+        Config.load!(path: tmp_config("egress: {allow_cidrs: [\"10.0.0.0/99\"]}\n"), env: %{})
+      end
+
+      assert_raise ConfigError, ~r/egress.allow_insecure_http/, fn ->
+        Config.load!(path: tmp_config("egress: {allow_insecure_http: \"yes\"}\n"), env: %{})
+      end
+
+      assert_raise ConfigError, ~r/egress.*allow_everything/, fn ->
+        Config.load!(path: tmp_config("egress: {allow_everything: true}\n"), env: %{})
+      end
+    end
+
+    test "an http sink must be https, unless egress.allow_insecure_http" do
+      yaml = """
+      sources:
+        a:
+          verify: {type: none}
+          sinks: [{type: http, url: "http://hooks.example/h?token=sekrit"}]
+      """
+
+      error =
+        assert_raise ConfigError, ~r/sources.a.sinks\[0\].url: must be an https:\/\/ URL/, fn ->
+          Config.load!(path: tmp_config(yaml), env: %{})
+        end
+
+      refute error.message =~ "sekrit", "the URL may hold credentials"
+
+      allowed = tmp_config("egress: {allow_insecure_http: true}\n" <> yaml)
+      assert %Ankusa.Config{} = Config.load!(path: allowed, env: %{}).config
+    end
+
+    test "a lifecycle http sink is held to the same rule" do
+      yaml = """
+      lifecycle:
+        sinks: [{type: http, url: "http://events.example/"}]
+      """
+
+      assert_raise ConfigError, ~r/lifecycle.sinks\[0\].url: must be an https:\/\/ URL/, fn ->
+        Config.load!(path: tmp_config(yaml), env: %{})
+      end
+
+      assert %Ankusa.Config{} =
+               Config.load!(
+                 path: tmp_config("egress: {allow_insecure_http: true}\n" <> yaml),
+                 env: %{}
+               ).config
+    end
+
+    test "a sink URL that is not an absolute http(s) URL is refused" do
+      for url <- ["ftp://hooks.example/", "hooks.example/path", "/just/a/path"] do
+        yaml = "sources: {a: {verify: {type: none}, sinks: [{type: http, url: \"#{url}\"}]}}\n"
+
+        assert_raise ConfigError,
+                     ~r/sources.a.sinks\[0\].url: must be an? (absolute )?http\(s\) URL/,
+                     fn ->
+                       Config.load!(path: tmp_config(yaml), env: %{})
+                     end
+      end
+    end
+
+    test "API-submitted sources are held to the configured policy when written" do
+      spec = %{
+        "verify" => %{"type" => "none"},
+        "sinks" => [%{"type" => "http", "url" => "http://hooks.example/h"}]
+      }
+
+      assert_raise ConfigError,
+                   ~r/sources.acme.new.sinks\[0\].url: must be an https:\/\/ URL/,
+                   fn ->
+                     Config.source_from_map!("acme.new", spec)
+                   end
+
+      strict = "source_store: {type: persistent}\n"
+      loose = strict <> "egress: {allow_insecure_http: true}\n"
+
+      {Ankusa.SourceStore.Persistent, opts} =
+        Config.load!(path: tmp_config(strict), env: %{}).config.source_store
+
+      assert_raise ConfigError, ~r/must be an https:\/\/ URL/, fn ->
+        opts[:decoder].("acme.new", spec)
+      end
+
+      {Ankusa.SourceStore.Persistent, opts} =
+        Config.load!(path: tmp_config(loose), env: %{}).config.source_store
+
+      assert [sinks: [{Ankusa.Sink.Http, [url: "http://hooks.example/h"]}]] =
+               Keyword.take(opts[:decoder].("acme.new", spec), [:sinks])
+    end
+
+    test "per-sink TLS keys reach the sink; verification is on unless the sink says otherwise" do
+      ca = tmp_config("not a real bundle, but a file\n")
+
+      path =
+        tmp_config("""
+        sources:
+          a:
+            verify: {type: none}
+            sinks:
+              - {type: http, url: "https://private-ca.example/h", cacertfile: "#{ca}"}
+              - {type: http, url: "https://self-signed.example/h", allow_insecure_tls: true}
+              - {type: http, url: "https://default.example/h"}
+        """)
+
+      source = source_from(Config.load!(path: path, env: %{}).config, "a")
+
+      assert [
+               {Ankusa.Sink.Http, private},
+               {Ankusa.Sink.Http, insecure},
+               {Ankusa.Sink.Http, default}
+             ] = source.sinks
+
+      assert private[:cacertfile] == ca
+      assert insecure[:allow_insecure_tls] == true
+      refute Keyword.has_key?(default, :allow_insecure_tls)
+      refute Keyword.has_key?(default, :cacertfile)
+    end
+
+    test "a cacertfile that is not a file, or a non-boolean allow_insecure_tls, fails the load" do
+      sink = fn extra ->
+        tmp_config("""
+        sources:
+          a:
+            verify: {type: none}
+            sinks: [{type: http, url: "https://h.example/", #{extra}}]
+        """)
+      end
+
+      assert_raise ConfigError,
+                   ~r/sources.a.sinks\[0\]: Sink.Http cacertfile "\/nope\/ca.pem" is not a readable file/,
+                   fn ->
+                     Config.load!(path: sink.("cacertfile: /nope/ca.pem"), env: %{})
+                   end
+
+      assert_raise ConfigError, ~r/sources.a.sinks\[0\].allow_insecure_tls/, fn ->
+        Config.load!(path: sink.("allow_insecure_tls: \"yes\""), env: %{})
+      end
+    end
+
+    test "the printed config shows the policy, and a sink's TLS opt-out but not its CA path" do
+      ca = tmp_config("a file\n")
+
+      path =
+        tmp_config("""
+        egress: {allow_cidrs: ["10.20.0.0/16"]}
+        sources:
+          a:
+            verify: {type: none}
+            sinks: [{type: http, url: "https://h.example/", cacertfile: "#{ca}", allow_insecure_tls: true}]
+        """)
+
+      printed = print_config(path)
+
+      assert printed =~ "10.20.0.0/16"
+      assert printed =~ "metadata.google.internal"
+      assert printed =~ ~s("allow_insecure_tls":true)
+      refute printed =~ ca
+    end
   end
 
   # ── helpers ─────────────────────────────────────────────────────────────────

@@ -144,6 +144,10 @@ defmodule Ankusa.MixProject do
       # Sink.Http and Sink.SQS. Replaces hand-rolled :httpc plumbing (and starts its own
       # Finch pool, so embedders configure nothing).
       {:req, "~> 0.7"},
+      # The CA bundle Mint falls back to when OTP cannot load the OS trust store
+      # (`Ankusa.HttpClient` always verifies peers), so a minimal container
+      # never fails every TLS request closed for want of a bundle.
+      {:castore, "~> 1.0"},
       # AWS Signature V4 — the signing implementation behind the official
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
       # string-to-sign / HMAC-chain code; signs Ankusa.BlobStore.S3 and Ankusa.Sink.SQS.

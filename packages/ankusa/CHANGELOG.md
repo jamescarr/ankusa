@@ -106,9 +106,39 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `ankusa_claim_check_gateway_duration_seconds` (buckets up to 10 s, past
   the deadline), `ankusa_claim_check_reads_total{kind,source,result}` and
   `ankusa_claim_check_read_limit`/`_read_inflight`/`_read_queued{store}`.
+- **Egress policy: `Sink.Http` can no longer be pointed at loopback, the cloud
+  metadata service or the private network** (CWE-918). `Config` gains
+  `egress: %{allow_insecure_http, deny_cidrs, allow_cidrs, allow_hosts,
+  deny_hosts}`; every `Sink.Http` attempt (a source's and a lifecycle sink's)
+  goes through `Ankusa.HttpClient.Egress`: the name is resolved for both
+  families and the delivery is refused, as `{:permanent, {:egress_denied,
+  reason}}`, when any address is denied (loopback, RFC 1918, carrier-grade NAT,
+  link-local, unique-local IPv6, the unspecified addresses; IPv4-mapped IPv6 and
+  odd literals such as `2130706433` match as the address they are) and not
+  excepted by `allow_cidrs`/`allow_hosts`, or the host is in `deny_hosts`
+  (`metadata.google.internal`). `http` URLs are refused unless
+  `allow_insecure_http`; an `http` delivery connects to the address that was
+  checked, with the name as its `host` header. A name that does not resolve is
+  retried. Reasons name the host and address, never the URL.
+  [`configuration.md#egress`](../../docs/configuration.md#egress).
+- **TLS verification is explicit everywhere.** Every outbound `https` request
+  (`Ankusa.HttpClient`: object stores, SQS, Pub/Sub, HTTP sinks) verifies the
+  peer's chain and hostname and negotiates TLS 1.2 or 1.3 only. `Sink.Http` takes
+  `:cacertfile` (a private CA bundle) and `:allow_insecure_tls` (the one way to
+  skip verification, per sink); a `verify: :verify_none` in `:req_options` raises
+  from `HttpClient.validate!/2`, and fails the config load for a static or
+  lifecycle HTTP sink (`Egress.validate_config!/1`, `Sink.Http.validate_opts!/1`).
+  `castore ~> 1.0` is now a locked dependency (Mint's fallback bundle).
+- `Ankusa.fetch_config/1`, `Ankusa.HttpClient.validate!/2` (public).
 
 ### Changed
 
+- **Breaking:** `Sink.Http` refuses, at delivery, a URL that is not `https`
+  or that resolves to a denied address, with the default policy. A deployment
+  that delivers to a plain-http or private-network receiver sets `egress`
+  (`allow_insecure_http: true`, and `allow_cidrs` or `allow_hosts` naming the
+  receiver). A static or lifecycle sink with an unsupported `:req_options` key
+  now fails at boot instead of at its first delivery.
 - **Hooks and delivery rows have a versioned encoding.** `Ankusa.Envelope`
   gains `to_binary/2` (`version: 0 | 1`; v1 is `"AE"`, `1`, then the term) and
   a delivery row gets the same scheme (`"AD"`, `1`). Both are read in the old

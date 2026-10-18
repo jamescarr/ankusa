@@ -63,7 +63,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle egress)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -87,6 +87,7 @@ defmodule AnkusaServer.Config do
   @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
+  @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms)
   # Keys a Redis store owns (`routes.store`, `source_store`); the other store
@@ -115,7 +116,7 @@ defmodule AnkusaServer.Config do
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms secret max_response_bytes)
+  @http_sink_keys ~w(type url method headers timeout_ms secret max_response_bytes cacertfile allow_insecure_tls)
   @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms)
   @sasl_keys ~w(mechanism username password)
@@ -338,6 +339,8 @@ defmodule AnkusaServer.Config do
   defp config!(doc) do
     check_keys!(doc, @root_keys, [])
 
+    egress = egress_policy!(doc)
+
     opts =
       node_section(doc) ++
         http_section(doc) ++
@@ -353,8 +356,9 @@ defmodule AnkusaServer.Config do
         storage_section(doc) ++
         claim_check_section(doc) ++
         backup_section(doc) ++
-        source_store_section(doc) ++
-        lifecycle_section(doc)
+        egress_section(doc) ++
+        source_store_section(doc, egress) ++
+        lifecycle_section(doc, egress)
 
     try do
       config = Ankusa.Config.new(opts)
@@ -371,6 +375,7 @@ defmodule AnkusaServer.Config do
       Ankusa.Queue.validate_config!(config)
       Ankusa.Store.Backup.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
+      Ankusa.HttpClient.Egress.validate_config!(config)
       config
     rescue
       error in ArgumentError ->
@@ -987,15 +992,94 @@ defmodule AnkusaServer.Config do
     ]
   end
 
+  # ── egress ──────────────────────────────────────────────────────────────────
+
+  # The keys the file sets; `Ankusa.Config.new/1` merges them over the defaults.
+  defp egress_given(doc) do
+    egress = section!(doc, "egress", @egress_keys, [])
+    path = ["egress"]
+
+    []
+    |> put_opt(:allow_insecure_http, bool_opt(egress, "allow_insecure_http", path))
+    |> put_opt(:deny_cidrs, egress_list(egress, "deny_cidrs", path))
+    |> put_opt(:allow_cidrs, egress_list(egress, "allow_cidrs", path))
+    |> put_opt(:allow_hosts, egress_list(egress, "allow_hosts", path))
+    |> put_opt(:deny_hosts, egress_list(egress, "deny_hosts", path))
+  end
+
+  # Unlike `string_list!/2`, an empty list is meaningful here (`allow_cidrs: []`,
+  # or `deny_cidrs: []` to take the deny list away).
+  defp egress_list(egress, key, path) do
+    case egress[key] do
+      nil -> nil
+      [] -> []
+      value -> string_list!(value, path ++ [key])
+    end
+  end
+
+  defp egress_section(doc), do: [egress: Map.new(egress_given(doc))]
+
+  defp egress_policy!(doc) do
+    Map.merge(Ankusa.HttpClient.Egress.default_policy(), Map.new(egress_given(doc)))
+  end
+
+  # `https` only, unless `egress.allow_insecure_http`. Judged on the URL's shape,
+  # not its address: a name resolves at delivery, where the egress policy decides.
+  # The message never echoes the URL, which may carry credentials.
+  defp check_sink_schemes!(sinks, egress, path) do
+    sinks
+    |> Enum.with_index()
+    |> Enum.each(fn
+      {{Ankusa.Sink.Http, opts}, index} ->
+        check_sink_scheme!(opts[:url], egress, path ++ ["sinks", index, "url"])
+
+      {_other, _index} ->
+        :ok
+    end)
+  end
+
+  defp check_sink_scheme!(url, egress, path) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host}
+      when is_binary(scheme) and is_binary(host) and host != "" ->
+        case String.downcase(scheme) do
+          "https" ->
+            :ok
+
+          "http" when egress.allow_insecure_http ->
+            :ok
+
+          "http" ->
+            raise ConfigError,
+              message:
+                "#{render_path(path)}: must be an https:// URL " <>
+                  "(plain http needs egress.allow_insecure_http: true)"
+
+          _other ->
+            raise ConfigError, message: "#{render_path(path)}: must be an http(s) URL"
+        end
+
+      _no_host ->
+        raise ConfigError, message: "#{render_path(path)}: must be an absolute http(s) URL"
+    end
+  end
+
+  defp validate_http_sink!(opts, path) do
+    Ankusa.Sink.Http.validate_opts!(opts)
+  rescue
+    error in ArgumentError ->
+      reraise ConfigError, [message: "#{render_path(path)}: #{error.message}"], __STACKTRACE__
+  end
+
   # ── sources ─────────────────────────────────────────────────────────────────
 
   # A URL with no `type` means Redis, as for `routes.store`: a file that sets
   # one has said it wants sources shared, and the other types have no URL.
-  defp source_store_section(doc) do
-    sources = sources!(doc)
+  defp source_store_section(doc, egress) do
+    sources = sources!(doc, egress)
     store = section!(doc, "source_store", @source_store_keys, [])
     path = ["source_store"]
-    decoder = &AnkusaServer.Config.source_from_map!/2
+    decoder = &AnkusaServer.Config.source_from_map!(&1, &2, egress)
 
     type =
       enum!(
@@ -1026,18 +1110,20 @@ defmodule AnkusaServer.Config do
   # Lifecycle events are delivered to the same kind of sinks a source's hooks
   # are, so the sink walker is shared: every sink type, its key check, and its
   # error message carry over to `lifecycle.sinks` unchanged.
-  defp lifecycle_section(doc) do
+  defp lifecycle_section(doc, egress) do
     case doc["lifecycle"] do
       nil ->
         []
 
       _ ->
         lifecycle = section!(doc, "lifecycle", @lifecycle_keys, [])
-        [lifecycle: %{sinks: sinks!(lifecycle, ["lifecycle"])}]
+        sinks = sinks!(lifecycle, ["lifecycle"])
+        check_sink_schemes!(sinks, egress, ["lifecycle"])
+        [lifecycle: %{sinks: sinks}]
     end
   end
 
-  defp sources!(doc) do
+  defp sources!(doc, egress) do
     case doc["sources"] do
       nil ->
         warn_no_sources()
@@ -1047,7 +1133,7 @@ defmodule AnkusaServer.Config do
         if sources == %{}, do: warn_no_sources()
 
         Map.new(sources, fn {source_id, source} ->
-          {source_id, source_opts!(source, ["sources", source_id])}
+          {source_id, source_opts!(source, ["sources", source_id], egress)}
         end)
 
       other ->
@@ -1068,21 +1154,33 @@ defmodule AnkusaServer.Config do
   with the same dotted-path message the YAML walker produces.
   """
   @spec source_from_map!(String.t(), map()) :: keyword()
-  def source_from_map!(source_id, spec) do
-    source_opts!(spec, ["sources", source_id])
+  def source_from_map!(source_id, spec),
+    do: source_from_map!(source_id, spec, Ankusa.HttpClient.Egress.default_policy())
+
+  @doc false
+  # The decoder the image gives the source stores: `source_from_map!/2` under the
+  # configured egress policy, so an API-submitted `http://` sink is refused when
+  # it is written, with the same message the file gets.
+  @spec source_from_map!(String.t(), map(), Ankusa.HttpClient.Egress.policy()) :: keyword()
+  def source_from_map!(source_id, spec, egress) do
+    source_opts!(spec, ["sources", source_id], egress)
   end
 
-  defp source_opts!(source, path) do
+  defp source_opts!(source, path, egress) do
     source = section!(source, @source_keys, path)
 
-    []
-    |> put_opt(:tenant_id, string_opt(source, "tenant", path))
-    |> put_opt(:on_verify_failure, atom_enum_opt(source, "on_verify_failure", @policies, path))
-    |> put_opt(:verifier, verifier(source, path))
-    |> Keyword.put(:sinks, sinks!(source, path))
-    |> put_opt(:dedupe, dedupe(source, path))
-    |> put_opt(:forward_headers, forward_headers(source, path))
-    |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
+    opts =
+      []
+      |> put_opt(:tenant_id, string_opt(source, "tenant", path))
+      |> put_opt(:on_verify_failure, atom_enum_opt(source, "on_verify_failure", @policies, path))
+      |> put_opt(:verifier, verifier(source, path))
+      |> Keyword.put(:sinks, sinks!(source, path))
+      |> put_opt(:dedupe, dedupe(source, path))
+      |> put_opt(:forward_headers, forward_headers(source, path))
+      |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
+
+    check_sink_schemes!(opts[:sinks], egress, path)
+    opts
   end
 
   # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
@@ -1363,13 +1461,18 @@ defmodule AnkusaServer.Config do
               secrets
           end
 
-        {Ankusa.Sink.Http,
-         [url: required_string!(sink, "url", path)]
-         |> put_opt(:method, atom_enum_opt(sink, "method", ~w(post put patch), path))
-         |> put_opt(:headers, headers(sink["headers"], path ++ ["headers"]))
-         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
-         |> put_opt(:secret, secret)
-         |> put_opt(:max_response_bytes, int_opt(sink, "max_response_bytes", path))}
+        opts =
+          [url: required_string!(sink, "url", path)]
+          |> put_opt(:method, atom_enum_opt(sink, "method", ~w(post put patch), path))
+          |> put_opt(:headers, headers(sink["headers"], path ++ ["headers"]))
+          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+          |> put_opt(:secret, secret)
+          |> put_opt(:max_response_bytes, int_opt(sink, "max_response_bytes", path))
+          |> put_opt(:cacertfile, string_opt(sink, "cacertfile", path))
+          |> put_opt(:allow_insecure_tls, bool_opt(sink, "allow_insecure_tls", path))
+
+        validate_http_sink!(opts, path)
+        {Ankusa.Sink.Http, opts}
 
       "rabbitmq" ->
         check_keys!(sink, @rabbitmq_sink_keys, path)

@@ -403,6 +403,37 @@ backup:
   #   type: s3
   #   s3: {bucket: "${BACKUP_BUCKET}", region: "${S3_REGION}"}
 
+# Where outbound HTTP may go: every `type: http` sink (a source's, or the
+# lifecycle's) is checked on every attempt, so a sink URL cannot reach this
+# node's own listeners, the cloud metadata service or the private network
+# unless you say so. A denied target is dead-lettered like a 401; fix the
+# policy or the URL, then replay. A `type: http` sink must be https:// to load
+# unless allow_insecure_http is true.
+egress:
+  allow_insecure_http: false
+  # An address in any of these is refused. This is the default list; setting
+  # it replaces the whole list ([] turns the address check off).
+  deny_cidrs:
+    - 0.0.0.0/8
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+    - "::/128"
+    - "::1/128"
+    - fc00::/7
+    - fe80::/10
+  # The way in to a private network your sinks live on: an address inside one
+  # of these passes even though a deny_cidrs entry holds it, and a hostname in
+  # allow_hosts (a service name such as `worker`) is exempt from the address
+  # check. Both are still resolved on every attempt.
+  allow_cidrs: []
+  allow_hosts: []
+  # Names refused before any lookup; wins over allow_hosts.
+  deny_hosts: [metadata.google.internal]
+
 lifecycle:
   # Where a lifecycle event goes when a source or route is created, updated, or
   # deleted (through the admin API or the route-management API): a CloudEvents
@@ -473,6 +504,11 @@ sources:
         secret: "${SINK_WHSEC}"
         # Only the status is used; at most this much of the response is read.
         max_response_bytes: 65536
+        # Verify the receiver's certificate against this PEM bundle (a private
+        # CA) instead of the system's trust store. Verification is never off
+        # unless allow_insecure_tls is true, which skips it for this one sink.
+        # cacertfile: /etc/ankusa/ca.pem
+        # allow_insecure_tls: false
       - type: rabbitmq
         url: "${RABBITMQ_URL}"
         exchange: "${RABBITMQ_EXCHANGE}"

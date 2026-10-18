@@ -239,7 +239,34 @@ defmodule Ankusa.Config do
             # as CloudEvents) are delivered: `[{module, opts}]` implementing
             # Ankusa.Sink, run through the WAL and dispatch like a hook. `[]`
             # means lifecycle events are off. See `Ankusa.Lifecycle`.
-            lifecycle: %{sinks: []}
+            lifecycle: %{sinks: []},
+            # where outbound HTTP may go (`Ankusa.HttpClient.Egress`): every
+            # `Ankusa.Sink.Http` delivery — a source's or a lifecycle sink's — is
+            # checked against it on every attempt, and a denied target is a
+            # permanent failure. `https` only unless `allow_insecure_http`; an
+            # address in `deny_cidrs` is refused unless `allow_cidrs` or
+            # `allow_hosts` exempts it; `deny_hosts` names are refused before any
+            # lookup. `allow_cidrs` is how a deployment opts in to the private
+            # network its sinks live on; `deny_cidrs` replaces the default list.
+            egress: %{
+              allow_insecure_http: false,
+              deny_cidrs: [
+                "0.0.0.0/8",
+                "127.0.0.0/8",
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "100.64.0.0/10",
+                "169.254.0.0/16",
+                "::/128",
+                "::1/128",
+                "fc00::/7",
+                "fe80::/10"
+              ],
+              allow_cidrs: [],
+              allow_hosts: [],
+              deny_hosts: ["metadata.google.internal"]
+            }
 
   # `lifecycle.sinks` is spelled out because the struct's default (`[]`) is all
   # a bare `%__MODULE__{}` tells dialyzer about the field.
@@ -283,7 +310,7 @@ defmodule Ankusa.Config do
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
   `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:quarantine`,
-  `:lifecycle`) over the defaults. Every `tls` block (`listener.tls`,
+  `:lifecycle`, `:egress`) over the defaults. Every `tls` block (`listener.tls`,
   `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
   validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
   `listener.num_acceptors: nil` becomes two per scheduler.
@@ -325,7 +352,8 @@ defmodule Ankusa.Config do
           :metrics,
           :rate_limits,
           :quarantine,
-          :lifecycle
+          :lifecycle,
+          :egress
         ] ->
           put_section(acc, k, v)
 
@@ -338,6 +366,7 @@ defmodule Ankusa.Config do
     end)
     |> normalize_wal()
     |> validate_listen_ips!()
+    |> validate_egress!()
     |> normalize_listeners!()
     |> validate_ranges!()
   end
@@ -366,6 +395,13 @@ defmodule Ankusa.Config do
     listen_ip!(config.claim_check.ip, "claim_check.ip")
     listen_ip!(config.routes.admin.ip, "routes.admin.ip")
     listen_ip!(config.metrics.ip, "metrics.ip")
+    config
+  end
+
+  # The policy's own shape. The sinks it governs are checked where sources are
+  # built (`Ankusa.HttpClient.Egress.validate_config!/1`, at boot).
+  defp validate_egress!(config) do
+    Ankusa.HttpClient.Egress.validate_policy!(config.egress)
     config
   end
 

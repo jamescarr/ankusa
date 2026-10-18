@@ -32,9 +32,21 @@ defmodule Ankusa.HttpClient do
   would alter a URL that has already been signed, or replace the headers carrying
   a credential. Silently ignoring them would be a worse failure than refusing
   them: the caller would believe a proxy or a pool was in use.
+
+  ## TLS is verified, always
+
+  An `https` request verifies the peer's certificate chain and hostname
+  (`verify: :verify_peer`) and negotiates TLS 1.2 or 1.3 only. The trust store is
+  the operating system's, with `castore`'s bundle behind it where OTP cannot
+  load that; `:cacertfile` in `opts` names a PEM bundle instead (a private CA).
+  Turning verification off is not a `:req_options` setting: a `transport_opts:
+  [verify: :verify_none]` raises `ArgumentError` from `validate!/2`, and the one
+  way past it is `allow_insecure_tls: true` in `opts`, which `Ankusa.Sink.Http`
+  exposes per sink for a receiver that cannot present a certificate.
   """
 
   @transport_options [:finch, :connect_options, :pool_timeout, :plug]
+  @tls_versions [:"tlsv1.3", :"tlsv1.2"]
 
   @doc """
   Issue one request, returning the status and raw body.
@@ -48,6 +60,9 @@ defmodule Ankusa.HttpClient do
   that many bytes: the body is then `{:truncated, bytes_read}` and the
   connection is closed rather than drained. Without it the whole body is read,
   which the blob stores need.
+
+  `:cacertfile` and `:allow_insecure_tls` in `opts` are likewise taken out
+  before the request is built; see "TLS is verified, always".
   """
   @spec request(
           atom(),
@@ -78,7 +93,9 @@ defmodule Ankusa.HttpClient do
         ) :: {:ok, non_neg_integer(), %{String.t() => [String.t()]}, term()} | {:error, term()}
   def request_with_headers(method, url, headers, body, timeout_ms, opts \\ []) do
     {max_bytes, opts} = Keyword.pop(opts, :max_response_bytes)
-    validate!(opts)
+    {cacertfile, opts} = Keyword.pop(opts, :cacertfile)
+    {insecure_tls?, opts} = Keyword.pop(opts, :allow_insecure_tls, false)
+    validate!(opts, insecure_tls?)
 
     request =
       [
@@ -91,7 +108,10 @@ defmodule Ankusa.HttpClient do
         redirect: false,
         receive_timeout: timeout_ms,
         connect_options:
-          Keyword.merge([timeout: timeout_ms], Keyword.get(opts, :connect_options, []))
+          connect_options(url, timeout_ms, Keyword.get(opts, :connect_options, []), %{
+            cacertfile: cacertfile,
+            insecure?: insecure_tls?
+          })
       ] ++ Keyword.drop(opts, [:connect_options]) ++ body_option(body) ++ cap_option(max_bytes)
 
     case Req.request(request) do
@@ -132,8 +152,47 @@ defmodule Ankusa.HttpClient do
     ]
   end
 
-  defp validate!(opts) do
-    case Keyword.keys(opts) -- @transport_options do
+  # The connect timeout, then the TLS options for an `https` URL, then the
+  # caller's own `:connect_options` over both. `transport_opts` are Mint's
+  # `:gen_tcp` options for `http`, so the TLS ones must not reach an `http` URL.
+  defp connect_options(url, timeout_ms, connect_options, tls) do
+    base = Keyword.merge([timeout: timeout_ms], Keyword.delete(connect_options, :transport_opts))
+    caller = Keyword.get(connect_options, :transport_opts, [])
+
+    if https?(url) do
+      Keyword.put(base, :transport_opts, Keyword.merge(tls_options(tls), caller))
+    else
+      if caller == [], do: base, else: Keyword.put(base, :transport_opts, caller)
+    end
+  end
+
+  defp tls_options(%{insecure?: true}), do: [verify: :verify_none]
+
+  defp tls_options(%{cacertfile: cacertfile}) do
+    [verify: :verify_peer, versions: @tls_versions] ++
+      if(cacertfile, do: [cacertfile: cacertfile], else: [])
+  end
+
+  defp https?(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme} when is_binary(scheme) -> String.downcase(scheme) == "https"
+      _other -> false
+    end
+  end
+
+  @doc """
+  Raise `ArgumentError` unless `req_options` holds only transport keys
+  (`:finch`, `:connect_options`, `:pool_timeout`, `:plug`) and does not turn off
+  TLS verification (`connect_options: [transport_opts: [verify: :verify_none]]`)
+  without `allow_insecure_tls?`.
+
+  `request/6` calls it on every request, and `Ankusa.Sink.Http.validate_opts!/1`
+  calls it when a config is validated, so a bad `:req_options` on an HTTP sink
+  fails at boot, not at its first delivery.
+  """
+  @spec validate!(keyword(), boolean()) :: :ok
+  def validate!(req_options, allow_insecure_tls? \\ false) do
+    case Keyword.keys(req_options) -- @transport_options do
       [] ->
         :ok
 
@@ -145,5 +204,18 @@ defmodule Ankusa.HttpClient do
                 "would alter a URL that has already been signed or replace the " <>
                 "headers carrying a credential."
     end
+
+    transport_opts =
+      req_options |> Keyword.get(:connect_options, []) |> Keyword.get(:transport_opts, [])
+
+    if Keyword.get(transport_opts, :verify) == :verify_none and not allow_insecure_tls? do
+      raise ArgumentError,
+            ":req_options connect_options: [transport_opts: [verify: :verify_none]] " <>
+              "turns off TLS peer verification, which is refused. Name a private CA " <>
+              "with :cacertfile instead, or set allow_insecure_tls: true on the one " <>
+              "sink that must talk to an unverifiable receiver."
+    end
+
+    :ok
   end
 end
