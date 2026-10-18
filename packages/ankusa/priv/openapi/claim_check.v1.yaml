@@ -7,21 +7,26 @@ info:
     HTTP surface of the `:claim_check` role. This document is the
     cross-language contract. The Elixir code conforms to it, not the reverse.
 
-    A claim-check ref is one string:
+    A claim-check ref is one string, in one of two forms:
 
         urn:ankusa:claim:v1:<tenant>:<claim_id>
+        urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>
 
-    A reader turns it into a request by dropping the `urn:ankusa:claim:v1:`
-    prefix and joining the two segments with `/` under `/v1/claims/`. The
-    gateway returns the bytes; the reader checks them against the `sha256`
-    the queue message carries next to the ref, which is never sent to the
-    gateway.
+    A reader turns it into a request by dropping the `urn:ankusa:claim:v<n>:`
+    prefix and joining the tenant and claim id with `/` under `/v1/claims/`;
+    a v2 ref's expiry and signature go on the same request as the `exp` and
+    `sig` query parameters, which the gateway checks before it reads anything
+    (a v2 ref is only as good as its expiry; a v1 ref never expires, and is
+    refused once the gateway is told to accept signed refs only). The gateway
+    returns the bytes; the reader checks them against the `sha256` the queue
+    message carries next to the ref, which is never sent to the gateway.
 
     Every operation except `GET /health` needs a credential
     (`claim_check.auth`): a static bearer token (`mode: token`), an OIDC
     access token (`mode: jwt`) or a client certificate (`mode: mtls`).
     Reading a claim needs the `claims:read` scope **and** the tenant of the
-    path, as `tenant:<tenant_id>` or `tenant:*`: `401` without an accepted
+    path, as `tenant:<tenant_id>` or `tenant:*` (or whatever the gateway's
+    `claim_check.authorize` hook decides): `401` without an accepted
     credential, `403` without the scope. `mode: none` is accepted on a
     loopback address only, or with `allow_insecure: true` when a mesh or
     proxy in front of the port authenticates every caller. A shared cache
@@ -72,6 +77,25 @@ paths:
               value: bytes=0-1023
             suffix:
               value: bytes=-1024
+        - name: exp
+          in: query
+          required: false
+          description: |
+            A v2 ref's expiry (Unix seconds). Send with `sig`, both or neither.
+          schema:
+            $ref: '#/components/schemas/Exp'
+        - name: sig
+          in: query
+          required: false
+          description: |
+            A v2 ref's signature. Send with `exp`, both or neither: one of
+            the two, a value out of grammar, or a signature no configured key
+            produced for this tenant, claim and `exp` is `400 bad_signature`;
+            a good one whose `exp` has passed is `410 ref_expired`. With
+            neither (a v1 ref) the gateway answers `400 unsigned_ref` when it
+            refuses unsigned refs (`claim_check.accept_unsigned_refs`).
+          schema:
+            $ref: '#/components/schemas/Sig'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -110,6 +134,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
         '416':
           description: |
             The range starts at or past the claim's end (or is `bytes=-0`, or
@@ -195,11 +221,30 @@ components:
       type: string
       description: |
         A claim-check ref, as carried in a queue message's `claim` field.
-        Segments: tenant and claim id. The digest to check the bytes against
-        is the message's `sha256` field (lowercase hex), not part of the ref.
-      pattern: '^urn:ankusa:claim:v1:[A-Za-z0-9_-]{1,64}:[0-7][0-9A-HJKMNP-TV-Z]{25}$'
+        v1 has two segments, tenant and claim id; v2 adds the Unix second the
+        ref expires and a 43-character unpadded base64url HMAC-SHA256 of
+        `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>` under one of the
+        gateway's `claim_check.ref_signing_keys`. The digest to check the
+        bytes against is the message's `sha256` field (lowercase hex), not
+        part of the ref.
+      pattern: '^urn:ankusa:claim:(v1:[A-Za-z0-9_-]{1,64}:[0-7][0-9A-HJKMNP-TV-Z]{25}|v2:[A-Za-z0-9_-]{1,64}:[0-7][0-9A-HJKMNP-TV-Z]{25}:[1-9][0-9]{0,11}:[A-Za-z0-9_-]{43})$'
       examples:
         - urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
+        - urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac
+    Exp:
+      type: string
+      description: |
+        A v2 ref's expiry, in Unix seconds: decimal, 1 to 12 digits, no
+        leading zero.
+      pattern: '^[1-9][0-9]{0,11}$'
+      examples: ['1790345000']
+    Sig:
+      type: string
+      description: |
+        A v2 ref's signature: 43 unpadded base64url characters, the
+        HMAC-SHA256 of `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>`.
+      pattern: '^[A-Za-z0-9_-]{43}$'
+      examples: ['MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac']
     Error:
       type: object
       required: [error]
@@ -209,15 +254,21 @@ components:
           enum:
             - invalid_tenant
             - invalid_id
+            - bad_signature
+            - unsigned_ref
+            - ref_expired
             - not_found
             - store_unavailable
+            - store_forbidden
+            - overloaded
             - unauthenticated
             - forbidden
         scope:
           type: string
           description: |
-            Present on `forbidden`; the scope the principal lacks
-            (`claims:read`, or `tenant:<tenant_id>`).
+            Present on `forbidden` from the built-in check; the scope the
+            principal lacks (`claims:read`, or `tenant:<tenant_id>`). A
+            `claim_check.authorize` hook's refusal names none.
     Health:
       type: object
       required: [status]
@@ -226,7 +277,12 @@ components:
           const: ok
   responses:
     BadRequest:
-      description: '`invalid_tenant` or `invalid_id` (not a canonical ULID). Permanent.'
+      description: |
+        `invalid_tenant` or `invalid_id` (not a canonical ULID); `bad_signature`
+        (a v2 ref's `exp` or `sig` is missing one, out of grammar, or not what
+        any `claim_check.ref_signing_keys` entry signed for this tenant, claim
+        and expiry); `unsigned_ref` (a v1 path while the gateway refuses
+        unsigned refs). Permanent.
       content:
         application/json:
           schema:
@@ -237,8 +293,20 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    Gone:
+      description: |
+        `ref_expired`: the ref's signature is good and its `exp` has passed.
+        Permanent for this ref: dead-letter, do not requeue. Redeliver the
+        hook to get a fresh one.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     StoreUnavailable:
-      description: '`store_unavailable`. Transient. Retry.'
+      description: |
+        `store_unavailable` (the object store is unreachable, throttling, or
+        slower than the gateway's deadline) or `overloaded` (the node is at
+        `claim_check.max_concurrent_reads`). Transient. Retry.
       headers:
         Retry-After:
           description: Seconds to wait before retrying.

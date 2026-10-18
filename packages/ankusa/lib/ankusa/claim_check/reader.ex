@@ -20,6 +20,11 @@ defmodule Ankusa.ClaimCheck.Reader do
       passes; a queued read whose deadline passed is dropped without a store
       request. A store request that outlives its callers still runs to the
       end and fills `Ankusa.ClaimCheck.Cache`, so the client's retry finds it.
+    * **A node-wide request gate** — `admit/2` and `release/1` bound how many
+      gateway requests the node serves at once (`claim_check.max_concurrent_reads`),
+      cache hits included, so a flood of cheap reads can't starve the node.
+      The gateway answers `503` + `Retry-After` past it, before it locates
+      anything.
 
   The limit is per store, not per key prefix. S3 throttles per prefix, and
   `claim_check.key_layout: :sharded` is what spreads a tenant's packs over
@@ -125,6 +130,57 @@ defmodule Ankusa.ClaimCheck.Reader do
     result
   end
 
+  @doc """
+  Count the calling process as one of the gateway's requests in flight, unless
+  `max` already are (`:shed`; the caller answers `503` and does not `release/1`).
+  `max` is `claim_check.max_concurrent_reads`; `0` admits everything, and so
+  does a node whose reader is not running, which has no gate to count at.
+
+  The gate is a set of request processes, not a counter, so a request process
+  that is killed before it releases is dropped by the reader's next tick
+  instead of leaking a slot for good.
+  """
+  @spec admit(atom(), non_neg_integer()) :: :ok | :shed
+  def admit(_instance, 0), do: :ok
+
+  def admit(instance, max) when is_integer(max) and max > 0 do
+    table = gate(instance)
+    true = :ets.insert(table, {self()})
+
+    if :ets.info(table, :size) > max do
+      :ets.delete(table, self())
+      :shed
+    else
+      :ok
+    end
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Give back the slot `admit/2` counted for the calling process."
+  @spec release(atom()) :: :ok
+  def release(instance) do
+    :ets.delete(gate(instance), self())
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
+  defp gate(instance), do: :"ankusa_claim_gate_#{instance}"
+
+  # A request process killed mid-request never released: forget the dead ones.
+  defp sweep_gate(instance) do
+    table = gate(instance)
+
+    for {pid} <- :ets.tab2list(table), not Process.alive?(pid) do
+      :ets.delete(table, pid)
+    end
+
+    :ok
+  end
+
   @doc "Each store's limit, store requests running, and reads queued."
   @spec stats(atom()) :: stats()
   def stats(instance), do: GenServer.call(Ankusa.via(instance, :claim_reader), :stats)
@@ -158,6 +214,7 @@ defmodule Ankusa.ClaimCheck.Reader do
 
     # Linked on purpose: its tasks must not outlive the reader.
     {:ok, task_sup} = Task.Supervisor.start_link()
+    :ets.new(gate(instance), [:named_table, :public, :set, write_concurrency: true])
     Process.send_after(self(), :tick, @tick_ms)
 
     {:ok,
@@ -246,6 +303,7 @@ defmodule Ankusa.ClaimCheck.Reader do
       )
     end
 
+    sweep_gate(state.instance)
     Process.send_after(self(), :tick, @tick_ms)
     {:noreply, state}
   end

@@ -8,11 +8,15 @@ defmodule Ankusa.ClaimCheck.Router do
   Every request but `GET /health` is authenticated (`claim_check.auth`, see
   `Ankusa.Admin.Auth`) and authorized: `401` without a credential, `403`
   unless the caller holds `claims:read` and `tenant:<tenant_id>` (or
-  `tenant:*`) for the tenant in the path. The default `mode: :none` is
-  accepted on loopback only; anywhere else configure `:jwt`, `:mtls` or
-  `:token`, or say with `allow_insecure: true` that a mesh or proxy in front of
-  the port authenticates every caller. A shared cache must sit behind that
-  layer, never in front of it.
+  `tenant:*`) for the tenant in the path — or, with `claim_check.authorize`
+  set to `{module, fun, args}`, unless `apply(module, fun, [context | args])`
+  returns `:ok`, `context` being `%{principal, tenant_id, claim_id, conn}`
+  (the path's two segments as given, not yet validated). The hook replaces
+  the built-in check and runs before anything is read. The default
+  `mode: :none` is accepted on loopback only; anywhere else configure `:jwt`,
+  `:mtls` or `:token`, or say with `allow_insecure: true` that a mesh or proxy
+  in front of the port authenticates every caller. A shared cache must sit
+  behind that layer, never in front of it.
 
   ## API
 
@@ -39,6 +43,19 @@ defmodule Ankusa.ClaimCheck.Router do
       index, never the claim. `Range` is ignored.
     * `GET /health` — liveness.
 
+  ## Signed refs
+
+  A v2 ref (`Ankusa.ClaimCheck.Ref`) is redeemed at the same path with
+  `?exp=<exp_unix>&sig=<signature>`. After authorization and before any read
+  the gateway holds it to `Ankusa.ClaimCheck.verify_ref/2`: `400 bad_signature`
+  when no `claim_check.ref_signing_keys` entry signed this tenant, claim and
+  expiry (or `exp`/`sig` are missing one, or out of grammar), `410
+  ref_expired` when it did and the expiry has passed, `400 unsigned_ref` for a
+  path with neither while `claim_check.accept_unsigned_refs` is false. All
+  three are permanent. Past `claim_check.max_concurrent_reads` requests in
+  flight on this node a request is `503 overloaded` + `Retry-After` (random
+  1–3 seconds) before anything is read.
+
   No integrity check happens here: the path carries no digest. The reader
   checks the bytes against the sha256 its queue message carried
   (`Ankusa.ClaimCheck.redeem/3` does this in-process). The whole response is
@@ -60,7 +77,7 @@ defmodule Ankusa.ClaimCheck.Router do
 
   alias Ankusa.Admin.Auth
   alias Ankusa.{ClaimCheck, Http, Telemetry}
-  alias Ankusa.ClaimCheck.Stores
+  alias Ankusa.ClaimCheck.{Reader, Ref, Stores}
 
   @cache_control "private, max-age=31536000, immutable"
   # One range-spec of the `bytes` unit: `first-last`, `first-`, or `-suffix`.
@@ -83,13 +100,35 @@ defmodule Ankusa.ClaimCheck.Router do
   end
 
   defp claim(conn, tenant_id, claim_id) do
-    Auth.authorize_tenant(conn, "claims:read", tenant_id, &serve_claim(&1, tenant_id, claim_id))
+    config = Ankusa.config(instance(conn))
+    authorize(conn, config, tenant_id, claim_id, &serve_claim(&1, config, tenant_id, claim_id))
   end
 
-  defp serve_claim(conn, tenant_id, claim_id) do
+  # The built-in rule — `claims:read` and `tenant:<tenant_id>` (or `tenant:*`) —
+  # unless `claim_check.authorize` replaces it. The hook is told who is asking
+  # and what for, and nothing is read before it says `:ok`; anything else it
+  # returns is a refusal, and a raise is a `500`: either way nothing is read.
+  defp authorize(conn, %{claim_check: %{authorize: nil}}, tenant_id, _claim_id, fun),
+    do: Auth.authorize_tenant(conn, "claims:read", tenant_id, fun)
+
+  defp authorize(conn, %{claim_check: %{authorize: {mod, hook, args}}}, tenant_id, claim_id, fun) do
+    context = %{
+      principal: conn.assigns.principal,
+      tenant_id: tenant_id,
+      claim_id: claim_id,
+      conn: conn
+    }
+
+    case apply(mod, hook, [context | args]) do
+      :ok -> fun.(conn)
+      _refused -> conn |> Http.send_json(403, %{error: "forbidden"}) |> Plug.Conn.halt()
+    end
+  end
+
+  defp serve_claim(conn, config, tenant_id, claim_id) do
     instance = instance(conn)
     started = System.monotonic_time()
-    conn = serve(conn, instance, tenant_id, claim_id, ClaimCheck.deadline(instance))
+    conn = proven_and_admitted(conn, config, instance, tenant_id, claim_id)
 
     Telemetry.emit(
       [:claim_check, :gateway],
@@ -98,6 +137,46 @@ defmodule Ankusa.ClaimCheck.Router do
     )
 
     conn
+  end
+
+  # The ref's proof first (cheap, and a forged ref must not take a slot), then
+  # a slot among `claim_check.max_concurrent_reads`, held until the response
+  # is sent.
+  defp proven_and_admitted(conn, config, instance, tenant_id, claim_id) do
+    with :ok <- check_ref(conn, config, tenant_id, claim_id),
+         :ok <- admit(instance, config) do
+      try do
+        serve(conn, instance, tenant_id, claim_id, ClaimCheck.deadline(config))
+      after
+        Reader.release(instance)
+      end
+    else
+      {:error, reason} -> error_response(conn, reason, tenant_id, claim_id)
+    end
+  end
+
+  defp admit(instance, config) do
+    case Reader.admit(instance, config.claim_check.max_concurrent_reads) do
+      :ok -> :ok
+      :shed -> {:error, :overloaded}
+    end
+  end
+
+  # A v2 ref's `exp` and `sig` ride the query string, `?exp=<unix>&sig=<mac>`
+  # (`Ankusa.ClaimCheck.Ref.path/1`); with neither, the path is a v1 ref. Only
+  # one of the two, or a value out of the grammar, is `:bad_signature`.
+  defp check_ref(conn, config, tenant_id, claim_id) do
+    %{query_params: params} = Plug.Conn.fetch_query_params(conn)
+    check_ref(config, tenant_id, claim_id, params["exp"], params["sig"])
+  end
+
+  defp check_ref(config, tenant_id, claim_id, nil, nil),
+    do: ClaimCheck.verify_ref(config, %Ref{tenant_id: tenant_id, claim_id: claim_id})
+
+  defp check_ref(config, tenant_id, claim_id, exp, sig) do
+    with {:ok, ref} <- Ref.signed(tenant_id, claim_id, exp, sig) do
+      ClaimCheck.verify_ref(config, ref)
+    end
   end
 
   # A HEAD response carries the claim's length and no body: the server keeps a
@@ -214,6 +293,25 @@ defmodule Ankusa.ClaimCheck.Router do
 
   defp error_response(conn, :not_found, _tenant_id, _claim_id),
     do: Http.send_json(conn, 404, %{error: "not_found"})
+
+  # A forged or mangled proof and a refused v1 ref are the caller's bug, and a
+  # ref past its expiry is gone for good: none is worth a retry.
+  defp error_response(conn, :bad_signature, _tenant_id, _claim_id),
+    do: Http.send_json(conn, 400, %{error: "bad_signature"})
+
+  defp error_response(conn, :unsigned_ref, _tenant_id, _claim_id),
+    do: Http.send_json(conn, 400, %{error: "unsigned_ref"})
+
+  defp error_response(conn, :ref_expired, _tenant_id, _claim_id),
+    do: Http.send_json(conn, 410, %{error: "ref_expired"})
+
+  # This node is at `claim_check.max_concurrent_reads`: expected under load,
+  # counted on `[:ankusa, :claim_check, :gateway]` by its status.
+  defp error_response(conn, :overloaded, _tenant_id, _claim_id) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", Integer.to_string(Enum.random(1..3)))
+    |> Http.send_json(503, %{error: "overloaded"})
+  end
 
   # Kept retryable on purpose: a gateway with the wrong credential is a
   # configuration fault, and answering it permanently would make every worker

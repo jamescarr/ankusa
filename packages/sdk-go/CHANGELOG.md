@@ -9,6 +9,11 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `ParseClaimRef` and `ClaimCheckClient.Redeem` accept signed, expiring v2
+  refs (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`):
+  `ParsedClaimRef.Path` ends in `?exp=&sig=` and `Redeem` requests it as is.
+  The gateway's `400 bad_signature` and `410 ref_expired` are a
+  `*ClaimRejectedError`. The SDK never checks the signature or the expiry.
 - `ReceiveDelivery(header, body, ReceiveOptions{Secrets, AllowUnsigned,
   ToleranceSeconds, Now})`, the receiver-side decision on one HTTP-sink
   delivery. The sink signs every delivery unless configured
