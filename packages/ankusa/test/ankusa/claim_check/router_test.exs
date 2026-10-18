@@ -526,10 +526,11 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     } do
       ref = resign(acme, @key, System.system_time(:second) - 1)
 
-      for method <- [:get, :head] do
-        conn = signed_call(inst, method, Ref.path(ref))
-        assert {conn.status, JSON.decode!(conn.resp_body)} == {410, %{"error" => "ref_expired"}}
-      end
+      conn = signed_call(inst, :get, Ref.path(ref))
+      assert {conn.status, JSON.decode!(conn.resp_body)} == {410, %{"error" => "ref_expired"}}
+
+      # a HEAD answer has the status and no body
+      assert signed_call(inst, :head, Ref.path(ref)).status == 410
     end
 
     test "a tampered signature, a swapped claim or expiry, or a foreign key is 400", %{

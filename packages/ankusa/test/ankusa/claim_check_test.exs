@@ -390,7 +390,9 @@ defmodule Ankusa.ClaimCheckTest do
 
     test "ref_signing_keys: a list of strings of at least 16 bytes; the error never echoes one" do
       good = String.duplicate("k", 16)
-      assert :ok = ClaimCheck.validate_config!(Config.new(claim_check: %{ref_signing_keys: [good]}))
+
+      assert :ok =
+               ClaimCheck.validate_config!(Config.new(claim_check: %{ref_signing_keys: [good]}))
 
       for bad <- [["short"], [good, 42], "not-a-list", [nil]] do
         error =
