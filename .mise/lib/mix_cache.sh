@@ -66,30 +66,22 @@ mix_cache_warm() {
   # recompile. Existing entries are never overwritten: a local build in
   # progress wins.
   #
-  # A Hex dep's compiled beams are restored only when its deps/ directory came
-  # from this same entry. A dep directory that was already here (an earlier
-  # `mix deps.get`) is source only — it has no compiled priv/, RocksDB's NIF
-  # included — and restored beams would make Mix skip rebuilding it, so the
-  # app would fail to load.
-  restored_deps=" "
+  # A NIF dep's compiled artifacts live in deps/<app>/priv (RocksDB's .so,
+  # crc32cer's). If the dep directory here is source only — an earlier
+  # `mix deps.get` with no compile — its beams are not restored: Mix would
+  # trust them and skip the rebuild, and the app would fail to load.
   if [ -d "$cache" ]; then
     mkdir -p deps "_build/$env/lib"
     for src in "$cache"/deps/*; do
       [ -e "$src" ] || continue
       n="deps/${src##*/}"
-      if [ ! -e "$n" ] && [ ! -L "$n" ]; then
-        _mix_cache_clone "$src" "$n"
-        restored_deps="$restored_deps${src##*/} "
-      fi
+      [ -e "$n" ] || [ -L "$n" ] || _mix_cache_clone "$src" "$n"
     done
     for src in "$cache"/lib/*; do
       [ -e "$src" ] || continue
       app=${src##*/}
-      if [ -e "deps/$app" ]; then
-        case "$restored_deps" in
-          *" $app "*) ;;
-          *) continue ;;
-        esac
+      if [ -e "deps/$app" ] && [ -d "$cache/deps/$app/priv" ] && [ ! -d "deps/$app/priv" ]; then
+        continue
       fi
       n="_build/$env/lib/$app"
       [ -e "$n" ] || [ -L "$n" ] || _mix_cache_clone "$src" "$n"
