@@ -469,6 +469,58 @@
           "field": null
         }
       }
+    },
+    {
+      "id": "signature.ok.asymmetric_alongside",
+      "feature": "webhook.verify_signature.asymmetric",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W",
+          "webhook-timestamp": "1674087231",
+          "webhook-signature": "v1a,pbpYBMlty2hExn4zt0UTGb6BaP2Vq5AfyzjB9GGV3x/wCJKd8UjOCf8Qhaji6TKY9C5eNMnlF0GG4udaO6B7Ag== v1,ARw42xaAApl/nxRo+iPGYwSaMQaOwMo2eyH5JBRA+bQ="
+        },
+        "body": {
+          "text": "{\"type\":\"contact.created\",\"timestamp\":\"2022-11-03T20:26:10.344522Z\",\"data\":{\"id\":\"1f81eb52-5198-4599-803e-771906343485\"}}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1674087231
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W",
+          "timestamp": 1674087231
+        }
+      }
+    },
+    {
+      "id": "signature.error.asymmetric_only",
+      "feature": "webhook.verify_signature.asymmetric",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_2KWPBgLlAfxdpx2AI54pPJ85f4W",
+          "webhook-timestamp": "1674087231",
+          "webhook-signature": "v1a,pbpYBMlty2hExn4zt0UTGb6BaP2Vq5AfyzjB9GGV3x/wCJKd8UjOCf8Qhaji6TKY9C5eNMnlF0GG4udaO6B7Ag=="
+        },
+        "body": {
+          "text": "{\"type\":\"contact.created\",\"timestamp\":\"2022-11-03T20:26:10.344522Z\",\"data\":{\"id\":\"1f81eb52-5198-4599-803e-771906343485\"}}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1674087231
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "no_matching_signature",
+          "field": "webhook-signature"
+        }
+      }
     }
   ]
 }

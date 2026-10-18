@@ -257,7 +257,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/claim_check/router.ex`, `claim_check/ref.ex:30-130`, `claim_check.ex:200-240`, `conformance/cases/redeem.json`.
   *Evidence:* —
 
-- [ ] **SEC-12 — Verifier breadth: asymmetric, token/basic, client-certificate** · P0 · Deps: SEC-6
+- [x] **SEC-12 — Verifier breadth: asymmetric, token/basic, client-certificate** · P0 · Deps: SEC-6
   *Why:* only `Verifier.Hmac` and `Verifier.None` exist (`verifier/schemes.ex:8-11`); providers using Ed25519/RSA (Standard Webhooks `v1a,`), static bearer/basic auth, or mTLS client certs force `None` + `accept_flag`, i.e. unverified data.
   *Change:* extract `Ankusa.Verifier.Template` (`candidates/2`, `timestamp/4`, `signed_bytes/3`) from `Hmac`; add `Verifier.Asymmetric` (`:crypto.verify/5` with `:eddsa`/`:rsa` + sha256, keys as PEM/base64, key list for rotation, preset `standard_webhooks_asym`), `Verifier.Token` (header/basic/query token compared with `secure_compare/2`), `Verifier.ClientCert` (peer cert from SEC-6: SAN or fingerprint allowlist via `raw_request.peer_cert`). YAML schemes in `ankusa_server/config.ex`; conformance case for the asymmetric vector.
   *Done when:* the Standard Webhooks asymmetric reference vector verifies; a wrong key, stale timestamp and tampered body fail; a client-cert source rejects a request without the pinned cert.

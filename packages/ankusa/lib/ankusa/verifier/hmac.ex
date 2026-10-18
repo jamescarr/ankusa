@@ -36,6 +36,7 @@ defmodule Ankusa.Verifier.Hmac do
   alias Ankusa.Envelope
   alias Ankusa.Verifier
   alias Ankusa.Verifier.Hmac.Scheme
+  alias Ankusa.Verifier.Template
 
   defmodule Scheme do
     @moduledoc """
@@ -84,10 +85,10 @@ defmodule Ankusa.Verifier.Hmac do
   @spec verify(Envelope.t(), keyword()) :: :ok | {:error, term()}
   def verify(%Envelope{} = env, opts) do
     with {:ok, scheme} <- resolve_scheme(opts),
-         :ok <- check_tolerance(opts),
-         {:ok, candidates, sig_ts} <- candidates(env, scheme),
-         {:ok, ts} <- timestamp(env, scheme, sig_ts, opts),
-         {:ok, signed} <- signed_bytes(env, scheme, ts),
+         :ok <- Verifier.check_tolerance(opts),
+         {:ok, candidates, sig_ts} <- Template.candidates(env, scheme),
+         {:ok, ts} <- Template.timestamp(env, scheme, sig_ts, opts),
+         {:ok, signed} <- Template.signed_bytes(env, scheme, ts),
          {:ok, keys} <- secret_keys(opts, scheme) do
       matched? =
         Enum.any?(keys, fn key ->
@@ -124,10 +125,11 @@ defmodule Ankusa.Verifier.Hmac do
   Used at boot for sources declared in config
   (`Ankusa.Verifier.validate_config!/1`).
   """
+  @impl true
   @spec validate_opts(keyword()) :: :ok | {:error, :bad_secret | :bad_scheme | :bad_tolerance}
   def validate_opts(opts) do
     with {:ok, scheme} <- resolve_scheme(opts),
-         :ok <- check_tolerance(opts),
+         :ok <- Verifier.check_tolerance(opts),
          {:ok, _keys} <- secret_keys(opts, scheme) do
       :ok
     end
@@ -143,18 +145,6 @@ defmodule Ankusa.Verifier.Hmac do
   """
   @spec weak_hash?(keyword()) :: boolean()
   def weak_hash?(opts), do: match?(%Scheme{hash: :sha1}, opts[:scheme])
-
-  # A replay window is seconds, from "exact" to an hour: past that it is not a
-  # window, it is the absence of one. `nil` is the default window.
-  defp check_tolerance(opts) do
-    max = Verifier.max_tolerance_seconds()
-
-    case opts[:tolerance] do
-      nil -> :ok
-      t when is_integer(t) and t >= 0 and t <= max -> :ok
-      _ -> {:error, :bad_tolerance}
-    end
-  end
 
   defp resolve_scheme(opts) do
     case opts[:scheme] do
@@ -176,139 +166,6 @@ defmodule Ankusa.Verifier.Hmac do
 
       _ ->
         {:error, :bad_scheme}
-    end
-  end
-
-  defp candidates(env, %Scheme{} = scheme) do
-    case Envelope.header(env, scheme.signature_header) do
-      nil ->
-        {:error, :missing_signature}
-
-      header ->
-        case scheme.parse do
-          :whole -> whole(header, scheme.sig_prefix)
-          :csv_pairs -> csv_pairs(header, scheme)
-          :space_versions -> space_versions(header, scheme)
-        end
-    end
-  end
-
-  defp whole(header, nil), do: {:ok, [header], nil}
-
-  defp whole(header, prefix) do
-    if String.starts_with?(header, prefix) do
-      {:ok, [String.replace_prefix(header, prefix, "")], nil}
-    else
-      {:error, :malformed_signature}
-    end
-  end
-
-  defp csv_pairs(header, %Scheme{sig_key: sig_key, timestamp: timestamp}) do
-    parts =
-      header
-      |> String.split(",", trim: true)
-      |> Enum.map(&String.split(&1, "=", parts: 2))
-
-    sigs = for [^sig_key, v] <- parts, do: v
-
-    sig_ts =
-      case timestamp do
-        {:sig, field} ->
-          Enum.find_value(parts, fn
-            [^field, v] -> v
-            _ -> nil
-          end)
-
-        _ ->
-          nil
-      end
-
-    if sigs != [] do
-      {:ok, sigs, sig_ts}
-    else
-      {:error, :malformed_signature}
-    end
-  end
-
-  defp space_versions(header, %Scheme{version: version}) do
-    sigs =
-      header
-      |> String.split(" ", trim: true)
-      |> Enum.flat_map(fn token ->
-        case version do
-          nil ->
-            [token]
-
-          v ->
-            if String.starts_with?(token, v) do
-              [String.replace_prefix(token, v, "")]
-            else
-              []
-            end
-        end
-      end)
-
-    if sigs != [] do
-      {:ok, sigs, nil}
-    else
-      {:error, :malformed_signature}
-    end
-  end
-
-  defp timestamp(_env, %Scheme{timestamp: nil}, _sig_ts, _opts), do: {:ok, nil}
-
-  defp timestamp(env, %Scheme{timestamp: {:header, name}}, _sig_ts, opts) do
-    case Envelope.header(env, name) do
-      nil -> {:error, :missing_signature}
-      "" -> {:error, :missing_signature}
-      ts -> check_timestamp(ts, opts)
-    end
-  end
-
-  defp timestamp(_env, %Scheme{timestamp: {:sig, _field}}, sig_ts, opts) do
-    case sig_ts do
-      nil -> {:error, :missing_signature}
-      ts -> check_timestamp(ts, opts)
-    end
-  end
-
-  defp check_timestamp(ts, opts) do
-    case Verifier.check_timestamp(ts, opts) do
-      :ok -> {:ok, ts}
-      {:error, _} = err -> err
-    end
-  end
-
-  defp signed_bytes(env, %Scheme{signed: template}, ts) do
-    with :ok <- header_values?(env, template),
-         :ok <- ts_value?(template, ts) do
-      {:ok,
-       Regex.replace(~r/\{(body|ts|header:[^}]*)\}/, template, fn _, token ->
-         case token do
-           "body" -> env.body
-           "ts" -> ts
-           "header:" <> name -> Envelope.header(env, name)
-         end
-       end)}
-    end
-  end
-
-  defp header_values?(env, template) do
-    ~r/\{header:([^}]*)\}/
-    |> Regex.scan(template, capture: :all_but_first)
-    |> Enum.reduce_while(:ok, fn [name], :ok ->
-      case Envelope.header(env, name) do
-        nil -> {:halt, {:error, :missing_signature}}
-        _ -> {:cont, :ok}
-      end
-    end)
-  end
-
-  defp ts_value?(template, ts) do
-    if is_nil(ts) and String.contains?(template, "{ts}") do
-      {:error, :missing_signature}
-    else
-      :ok
     end
   end
 

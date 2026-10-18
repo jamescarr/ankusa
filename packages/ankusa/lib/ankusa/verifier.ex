@@ -7,6 +7,21 @@ defmodule Ankusa.Verifier do
   `opts` carry the per-source secret and any tolerance window
   (`Ankusa.Verifier.check_timestamp/2`).
 
+  The verifiers in core:
+
+    * `Ankusa.Verifier.None` — accepts everything;
+    * `Ankusa.Verifier.Hmac` — a shared-secret signature over the request;
+    * `Ankusa.Verifier.Asymmetric` — a public-key (Ed25519, RSA) signature over
+      the request; the node holds no secret;
+    * `Ankusa.Verifier.Token` — a static bearer, basic, header or query
+      credential;
+    * `Ankusa.Verifier.ClientCert` — the client certificate of the edge
+      listener's mutual-TLS handshake.
+
+  The edge puts request context some verifiers need into `opts`, for those
+  verifiers only: `:peer_cert` (the DER client certificate, or `nil`) for
+  `ClientCert` and `:query` (the raw query string) for a `Token` in the query.
+
   ## Failure vocabulary
 
   Adapters return `{:error, reason}`, which the source's `on_verify_failure`
@@ -14,14 +29,20 @@ defmodule Ankusa.Verifier do
   deliberately shared so telemetry and dashboards can count them without
   knowing which provider produced them:
 
-    * `:missing_signature` — a required header is absent
+    * `:missing_signature` — a required header, credential or certificate is
+      absent
     * `:malformed_signature` — present, but not parseable
-    * `:no_match` — nothing matched the expected digest
+    * `:no_match` — nothing matched the expected digest, key, token or pin
     * `:timestamp_out_of_tolerance` — outside the replay window
     * `:bad_secret` — the configured secret can't be used as a key
-    * `:bad_scheme` — an unknown or missing scheme name (`Verifier.Hmac`)
+      (`Verifier.Hmac`, `Verifier.Token`)
+    * `:bad_key` — a configured public key can't be used (`Verifier.Asymmetric`)
+    * `:bad_pin` — a certificate source pins nothing usable
+      (`Verifier.ClientCert`)
+    * `:bad_scheme` — an unknown or missing scheme name (`Verifier.Hmac`,
+      `Verifier.Asymmetric`), or an unknown `:location` (`Verifier.Token`)
     * `:bad_tolerance` — `:tolerance` is not an integer from 0 to
-      `max_tolerance_seconds/0` (`Verifier.Hmac`)
+      `max_tolerance_seconds/0` (`Verifier.Hmac`, `Verifier.Asymmetric`)
   """
 
   require Logger
@@ -38,13 +59,21 @@ defmodule Ankusa.Verifier do
   @callback verify(Envelope.t(), opts :: keyword()) :: :ok | {:error, term()}
 
   @doc """
+  Check `opts` without a request: `:ok`, or the `{:error, reason}` `verify/2`
+  would return for every hook. Optional — `validate_config!/1` runs it, at boot,
+  for every source declared in config whose verifier implements it, and the
+  image's loader runs it for every source an admin API write submits.
+  """
+  @callback validate_opts(opts :: keyword()) :: :ok | {:error, atom()}
+
+  @doc """
   Human name of the scheme for telemetry; `nil` when the verifier has no named
   scheme. Optional — verifiers that only implement `verify/2` are attributed by
   their module name instead.
   """
   @callback scheme_name(opts :: keyword()) :: String.t() | nil
 
-  @optional_callbacks scheme_name: 1
+  @optional_callbacks scheme_name: 1, validate_opts: 1
 
   @doc """
   The widest replay window, in seconds, a verifier accepts: an hour. Beyond that
@@ -82,43 +111,90 @@ defmodule Ankusa.Verifier do
   end
 
   @doc """
-  Refuse to boot with a source declared in config whose `Ankusa.Verifier.Hmac`
-  secret is missing, empty or undecodable, whose scheme is unknown, or whose
-  `:tolerance` is outside `0..max_tolerance_seconds/0`: such a source would fail
+  Whether `opts[:tolerance]` is a usable replay window: absent (the default
+  window), or an integer from 0 to `max_tolerance_seconds/0`. A window wider
+  than an hour is not a window, it is the absence of one. Shared by every
+  verifier that checks a timestamp.
+  """
+  @spec check_tolerance(keyword()) :: :ok | {:error, :bad_tolerance}
+  def check_tolerance(opts) do
+    case opts[:tolerance] do
+      nil -> :ok
+      t when is_integer(t) and t >= 0 and t <= @max_tolerance_seconds -> :ok
+      _ -> {:error, :bad_tolerance}
+    end
+  end
+
+  @doc """
+  Refuse to boot with a source declared in config whose verifier would fail
   every hook, which `on_verify_failure` then quarantines, flags or rejects —
-  silently, at runtime. Sources a writable store holds are checked when they are
-  written. Raises `ArgumentError` naming the source. A source that verifies
-  with SHA-1 (`Ankusa.Verifier.Hmac.weak_hash?/1`) boots, with one warning.
+  silently, at runtime. Every verifier that implements `validate_opts/1` is
+  asked: an `Ankusa.Verifier.Hmac` or `Ankusa.Verifier.Token` secret that is
+  missing, empty or undecodable, an `Ankusa.Verifier.Asymmetric` public key that
+  is not a key, an `Ankusa.Verifier.ClientCert` that pins nothing, an unknown
+  scheme, or a `:tolerance` outside `0..max_tolerance_seconds/0`. A
+  `ClientCert` source also needs `listener.tls` with `verify: :verify_peer`:
+  no other listener ever receives a client certificate. Sources a writable store
+  holds are checked when they are written. Raises `ArgumentError` naming the
+  source. A source that verifies with SHA-1
+  (`Ankusa.Verifier.Hmac.weak_hash?/1`) boots, with one warning.
   """
   @spec validate_config!(Ankusa.Config.t()) :: :ok
   def validate_config!(%Ankusa.Config{} = config) do
     config
     |> Ankusa.Queue.static_sources()
     |> Enum.each(fn
-      {id, %Ankusa.Source{verifier: {Ankusa.Verifier.Hmac, opts}}} ->
-        case Ankusa.Verifier.Hmac.validate_opts(opts) do
-          :ok ->
-            warn_weak_hash(id, opts)
-
-          {:error, :bad_scheme} ->
-            raise ArgumentError, "source #{id}: verifier scheme is missing or unknown"
-
-          {:error, :bad_secret} ->
-            raise ArgumentError, "source #{id}: verifier secret is missing or undecodable"
-
-          {:error, :bad_tolerance} ->
-            raise ArgumentError,
-                  "source #{id}: verifier tolerance must be an integer from 0 to " <>
-                    "#{@max_tolerance_seconds} seconds, got: #{inspect(opts[:tolerance])}"
-        end
-
-      _other ->
-        :ok
+      {id, %Ankusa.Source{verifier: {mod, opts}}} -> validate_source!(config, id, mod, opts)
+      _other -> :ok
     end)
   end
 
-  defp warn_weak_hash(id, opts) do
-    if Ankusa.Verifier.Hmac.weak_hash?(opts) do
+  defp validate_source!(config, id, mod, opts) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :validate_opts, 1) do
+      case mod.validate_opts(opts) do
+        :ok ->
+          warn_weak_hash(id, mod, opts)
+          check_listener!(config, id, mod)
+
+        {:error, reason} ->
+          raise ArgumentError, "source #{id}: " <> invalid_message(reason, opts)
+      end
+    end
+
+    :ok
+  end
+
+  defp invalid_message(:bad_scheme, _opts), do: "verifier scheme is missing or unknown"
+  defp invalid_message(:bad_secret, _opts), do: "verifier secret is missing or undecodable"
+
+  defp invalid_message(:bad_key, _opts),
+    do: "verifier public_key is missing or is not a key of the scheme's algorithm"
+
+  defp invalid_message(:bad_pin, _opts),
+    do:
+      "verifier pins no certificate: set fingerprints (SHA-256, 64 hex characters) " <>
+        "or subjects (dns:, email:, uri:, ip: or cn: identities)"
+
+  defp invalid_message(:bad_tolerance, opts) do
+    "verifier tolerance must be an integer from 0 to " <>
+      "#{@max_tolerance_seconds} seconds, got: #{inspect(opts[:tolerance])}"
+  end
+
+  defp invalid_message(reason, _opts), do: "verifier options are invalid: #{inspect(reason)}"
+
+  defp check_listener!(config, id, Ankusa.Verifier.ClientCert) do
+    unless match?(%{verify: :verify_peer}, config.listener.tls) do
+      raise ArgumentError,
+            "source #{id}: client_cert verification needs listener.tls with verify: " <>
+              "verify_peer, and cacertfile: no client certificate reaches a listener that " <>
+              "does not ask for one"
+    end
+  end
+
+  defp check_listener!(_config, _id, _mod), do: :ok
+
+  defp warn_weak_hash(id, mod, opts) do
+    if weak_hash?(mod, opts) do
       Logger.warning(
         "[ankusa] source #{id} verifies with SHA-1, which is no longer collision " <>
           "resistant: use sha256 or sha512 if the provider can sign with it. Every " <>

@@ -131,6 +131,9 @@ defmodule Ankusa.TestHelpers do
   @doc """
   Send a `request/3` map through `Ankusa.Edge.Router` for `config`'s instance
   and return the `Plug.Conn`. No socket: the router runs on a `Plug.Test` conn.
+  A `:peer_cert` key on `req` (a DER certificate) is the client certificate the
+  connection presents, as Bandit would report it for a mutual-TLS listener; a
+  query string in `req.path` is the request's query string.
   """
   def route_through_edge(config, req) do
     conn =
@@ -139,6 +142,15 @@ defmodule Ankusa.TestHelpers do
         Plug.Test.conn(:post, req.path, req.body),
         fn {k, v}, conn -> Plug.Conn.put_req_header(conn, k, v) end
       )
+
+    conn =
+      case Map.get(req, :peer_cert) do
+        nil ->
+          conn
+
+        der ->
+          Plug.Test.put_peer_data(conn, %{address: {127, 0, 0, 1}, port: 1, ssl_cert: der})
+      end
 
     Ankusa.Edge.Router.call(conn, Ankusa.Edge.Router.init(instance: config.instance))
   end

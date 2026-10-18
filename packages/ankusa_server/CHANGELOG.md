@@ -8,6 +8,19 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`verify.type`: `standard_webhooks_asym`, `asymmetric`, `token`, `client_cert`
+  (SEC-12).** A source can be verified by the provider's public key (Standard
+  Webhooks `v1a` Ed25519 by preset, or any Ed25519/RSA scheme described inline:
+  `public_key` one or a rotation list, `algorithm`, `signature_header`, `signed`,
+  `timestamp_header`, ...), by a static credential (`secret` plus `location:
+  bearer | basic | header | query`, with `header` or `param`), or by a pinned
+  mutual-TLS client certificate (`fingerprints`, `subjects`; boot and
+  `check-config` refuse it unless `listener.tls` has `verify: verify_peer`). A
+  key, secret or pin core cannot use is a load error naming
+  `sources.<id>.verify.<key>`; the admin API's source writes go through the same
+  loader. `/v1/config` shows `location`, `fingerprints` and `subjects` and hides
+  `secret` and `public_key`. See `docs/configuration.md`.
+
 - **Signed, attested image (SEC-8).** Every published image now carries an
   SPDX SBOM and a SLSA provenance attestation (`mode=max`) for `linux/amd64`
   and `linux/arm64`, and its index digest is signed keylessly with cosign by

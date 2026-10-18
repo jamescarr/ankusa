@@ -129,6 +129,10 @@ defmodule AnkusaServer.Config do
   }
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
+  @verify_asym_preset_keys ~w(type public_key tolerance_seconds)
+  @verify_asym_keys ~w(type public_key tolerance_seconds signature_header parse sig_prefix sig_key version signed algorithm encoding timestamp_header)
+  @verify_token_keys ~w(type secret location header param)
+  @verify_client_cert_keys ~w(type fingerprints subjects)
   @log_sink_keys ~w(type)
   @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls)
   @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
@@ -143,7 +147,9 @@ defmodule AnkusaServer.Config do
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
   @ip_rule_actions ~w(allow deny)
-  @verify_types ~w(none stripe github standard_webhooks shopify slack hmac)
+  @verify_types ~w(none stripe github standard_webhooks shopify slack hmac standard_webhooks_asym asymmetric token client_cert)
+  @token_locations ~w(bearer basic header query)
+  @scheme_algorithms ~w(ed25519 rsa_sha256)
   @scheme_parses ~w(whole csv_pairs space_versions)
   @scheme_hashes ~w(sha256 sha512 sha1)
   @scheme_encodings ~w(hex base64)
@@ -1589,12 +1595,7 @@ defmodule AnkusaServer.Config do
         # only `secret`/`tolerance_seconds`; `hmac` takes the descriptor keys).
         check_keys!(verify, verify_keys(type), path)
 
-        opts =
-          []
-          |> put_opt(:secret, secret_opt(verify, path))
-          |> put_opt(:tolerance, tolerance_opt(verify, path))
-
-        {verify_module(type), verify_opts(type, verify, path, opts)}
+        verifier_for(type, verify, path)
     end
   end
 
@@ -1618,7 +1619,218 @@ defmodule AnkusaServer.Config do
     end
   end
 
+  defp verifier_for("standard_webhooks_asym", verify, path),
+    do: asymmetric_verifier(:standard_webhooks_asym, verify, path)
+
+  defp verifier_for("asymmetric", verify, path),
+    do: asymmetric_verifier(asymmetric_scheme(verify, path), verify, path)
+
+  defp verifier_for("token", verify, path), do: token_verifier(verify, path)
+  defp verifier_for("client_cert", verify, path), do: client_cert_verifier(verify, path)
+
+  defp verifier_for(type, verify, path) do
+    opts =
+      []
+      |> put_opt(:secret, secret_opt(verify, path))
+      |> put_opt(:tolerance, tolerance_opt(verify, path))
+
+    {verify_module(type), verify_opts(type, verify, path, opts)}
+  end
+
+  # The provider's public key, or keys newest first. Each is checked against the
+  # scheme's algorithm here, so a bad one names its YAML key. `/v1/config` shows
+  # it as `[REDACTED]` like any adapter option not on the allowlist: a private
+  # key pasted by mistake must not be echoed back.
+  defp asymmetric_verifier(scheme, verify, path) do
+    value = verify["public_key"]
+
+    if is_nil(value),
+      do: raise(ConfigError, message: "#{render_path(path)}: missing required key \"public_key\"")
+
+    keys = secret!(value, path ++ ["public_key"])
+    non_empty_secret!(keys, path ++ ["public_key"])
+
+    keys
+    |> List.wrap()
+    |> Enum.with_index()
+    |> Enum.each(fn {key, index} ->
+      case Ankusa.Verifier.Asymmetric.validate_opts(scheme: scheme, public_key: key) do
+        :ok ->
+          :ok
+
+        {:error, _reason} ->
+          segments = if is_list(keys), do: ["public_key", index], else: ["public_key"]
+
+          raise ConfigError,
+            message:
+              "#{render_path(path ++ segments)}: not a public key for the scheme's " <>
+                "algorithm (whpk_<base64> or the base64 of 32 bytes for ed25519; a PEM " <>
+                "PUBLIC KEY, or an RSA PUBLIC KEY of at least 2048 bits, for rsa_sha256)"
+      end
+    end)
+
+    opts = put_opt([scheme: scheme, public_key: keys], :tolerance, tolerance_opt(verify, path))
+    {Ankusa.Verifier.Asymmetric, opts}
+  end
+
+  # The string is checked against a closed list first (`enum!/3`), so the atoms are a fixed set.
+  # sobelow_skip ["DOS.StringToAtom"]
+  defp asymmetric_scheme(verify, path) do
+    timestamp_header = string_opt(verify, "timestamp_header", path)
+
+    scheme = %Ankusa.Verifier.Asymmetric.Scheme{
+      signature_header: required_string!(verify, "signature_header", path),
+      parse:
+        String.to_atom(
+          enum!(string_opt(verify, "parse", path) || "whole", @scheme_parses, path ++ ["parse"])
+        ),
+      sig_prefix: string_opt(verify, "sig_prefix", path),
+      sig_key: string_opt(verify, "sig_key", path),
+      version: string_opt(verify, "version", path),
+      signed: string_opt(verify, "signed", path) || "{body}",
+      algorithm:
+        String.to_atom(
+          enum!(
+            string_opt(verify, "algorithm", path) || "ed25519",
+            @scheme_algorithms,
+            path ++ ["algorithm"]
+          )
+        ),
+      encoding:
+        String.to_atom(
+          enum!(
+            string_opt(verify, "encoding", path) || "base64",
+            @scheme_encodings,
+            path ++ ["encoding"]
+          )
+        ),
+      timestamp: (timestamp_header && {:header, timestamp_header}) || nil
+    }
+
+    Ankusa.Verifier.Schemes.validate!(scheme)
+  end
+
+  defp token_verifier(verify, path) do
+    required_secret!(verify, path)
+    opts = [secret: secret_opt(verify, path), location: token_location(verify, path)]
+
+    case Ankusa.Verifier.Token.validate_opts(opts) do
+      :ok ->
+        {Ankusa.Verifier.Token, opts}
+
+      {:error, _reason} ->
+        raise ConfigError,
+          message: "#{render_path(path ++ ["secret"])}: a basic secret must be user:password"
+    end
+  end
+
+  # `header` names the header of `location: header`, `param` the query parameter
+  # of `location: query`; each is required there and refused anywhere else.
+  defp token_location(verify, path) do
+    location =
+      enum!(
+        string_opt(verify, "location", path) || "bearer",
+        @token_locations,
+        path ++ ["location"]
+      )
+
+    case location do
+      "bearer" -> token_name!(verify, nil, path, :bearer)
+      "basic" -> token_name!(verify, nil, path, :basic)
+      "header" -> token_name!(verify, "header", path, :header)
+      "query" -> token_name!(verify, "param", path, :query)
+    end
+  end
+
+  defp token_name!(verify, key, path, location) do
+    for extra <- ~w(header param), extra != key, Map.has_key?(verify, extra) do
+      raise ConfigError,
+        message:
+          "#{render_path(path)}: unknown key \"#{extra}\" for location #{inspect(to_string(location))}"
+    end
+
+    case key do
+      nil ->
+        location
+
+      key ->
+        case required_string!(verify, key, path) do
+          "" -> raise ConfigError, message: "#{render_path(path ++ [key])}: must not be empty"
+          name -> {location, name}
+        end
+    end
+  end
+
+  defp client_cert_verifier(verify, path) do
+    opts =
+      []
+      |> put_opt(:fingerprints, fingerprints(verify, path))
+      |> put_opt(:subjects, subjects(verify, path))
+
+    if opts == [] do
+      raise ConfigError,
+        message: "#{render_path(path)}: client_cert needs \"fingerprints\" or \"subjects\""
+    end
+
+    {Ankusa.Verifier.ClientCert, opts}
+  end
+
+  # Normalised (lowercase hex, no `:`), so `/v1/config` and the verifier agree.
+  defp fingerprints(verify, path) do
+    case verify["fingerprints"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["fingerprints"]
+
+        value
+        |> string_list!(path)
+        |> Enum.with_index()
+        |> Enum.map(fn {fingerprint, index} ->
+          case Ankusa.Verifier.ClientCert.normalize_fingerprint(fingerprint) do
+            {:ok, hex} ->
+              hex
+
+            :error ->
+              raise ConfigError,
+                message:
+                  "#{render_path(path ++ [index])}: expected a SHA-256 fingerprint " <>
+                    "(64 hex characters, optional : separators), got #{inspect(fingerprint)}"
+          end
+        end)
+    end
+  end
+
+  defp subjects(verify, path) do
+    case verify["subjects"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["subjects"]
+        subjects = string_list!(value, path)
+
+        subjects
+        |> Enum.with_index()
+        |> Enum.each(fn {subject, index} ->
+          if Ankusa.Verifier.ClientCert.validate_opts(subjects: [subject]) != :ok do
+            raise ConfigError,
+              message:
+                "#{render_path(path ++ [index])}: expected dns:<name>, email:<address>, " <>
+                  "uri:<uri>, ip:<address> or cn:<common name>, got #{inspect(subject)}"
+          end
+        end)
+
+        subjects
+    end
+  end
+
   defp verify_keys("hmac"), do: @verify_hmac_keys
+  defp verify_keys("standard_webhooks_asym"), do: @verify_asym_preset_keys
+  defp verify_keys("asymmetric"), do: @verify_asym_keys
+  defp verify_keys("token"), do: @verify_token_keys
+  defp verify_keys("client_cert"), do: @verify_client_cert_keys
   defp verify_keys(_), do: @verify_keys
 
   defp verify_module("none"), do: Ankusa.Verifier.None

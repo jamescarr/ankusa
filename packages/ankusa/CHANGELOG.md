@@ -13,6 +13,34 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Verifier breadth: public-key, token and client-certificate (SEC-12).** A
+  provider that signs with Ed25519 or RSA, sends a static credential, or
+  authenticates by mutual TLS no longer has to be a `Verifier.None` source with
+  `accept_flag`. `Ankusa.Verifier.Asymmetric` verifies an Ed25519 (RFC 8032) or
+  RSASSA-PKCS1-v1_5/SHA-256 signature against the provider's public key (`whpk_`
+  base64, bare base64, or a PEM `PUBLIC KEY`/`RSA PUBLIC KEY`; a list for
+  rotation), over the same wire templates as `Hmac`, with the preset
+  `:standard_webhooks_asym` (`v1a,` entries) and a replay window; it holds no
+  secret, and a signature of the wrong length is dropped before any public-key
+  operation, at most 8 being tried per request. `Ankusa.Verifier.Token` accepts
+  a bearer, basic, header or query credential (rotation list, comparison over
+  SHA-256 digests with `secure_compare/2`) and keeps it out of everything
+  stored: its header is added to the source's `store_headers` drop list.
+  `Ankusa.Verifier.ClientCert` accepts a request whose mutual-TLS client
+  certificate matches a pinned SHA-256 fingerprint or a SAN/CN identity; the
+  edge fetches the certificate from the socket only for such a source and
+  passes it, and the query string, through the verifier's `opts` (the envelope
+  and the stored format are unchanged). The shared half of `Hmac` moved to
+  `Ankusa.Verifier.Template` (`candidates/2`, `timestamp/4`, `signed_bytes/3`),
+  and `Ankusa.Verifier.Schemes` validates `%Asymmetric.Scheme{}` too. A new
+  optional `Ankusa.Verifier` callback, `validate_opts/1`, is run at boot by
+  `validate_config!/1` for every verifier that has one, which now refuses a
+  token secret, public key or pin it cannot use, and a `ClientCert` source on a
+  listener without `tls.verify: :verify_peer`, naming the source. New failure
+  reasons `:bad_key` and `:bad_pin`. `Redact` shows `location`, `fingerprints`,
+  `subjects`, `param` and `algorithm`, never a secret or a public key. See
+  [`docs/configuration.md`](../../docs/configuration.md#public-key-token-and-client-certificate-verifiers).
+
 - **Durable lifecycle outbox with revisions (SEC-2.b).** Lifecycle events are
   no longer queued in memory: the audit row of a source or route change is
   flagged `publish: true` and committed, with the redacted entity beside it
