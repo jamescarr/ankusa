@@ -13,6 +13,15 @@ defmodule Ankusa.Replay do
   second, and only while the Pipeline's oldest-due lag is at most `max_lag_ms`
   and its in-flight window is not full.
 
+  A fourth kind, `kind: :lifecycle`, re-emits lifecycle events
+  (`Ankusa.Lifecycle`) from the audit trail over a `since`/`until` window of
+  the change's time, optionally for some `tenants` (route events belong to
+  `"default"`). It re-delivers to the node's lifecycle sinks through the
+  lifecycle publisher, not through dispatch: each event keeps the `id` it was
+  first emitted with (the id is derived from the audit row) and carries the
+  job's id as `replayid`, so a consumer that dedupes on `id` drops what it
+  already has. `rate` is rows per second; `max_lag_ms` is not used.
+
   Jobs are durable and resumable: every job is a store record, its cursor is
   committed in the same batch as the rows it moved, and a restart resumes from
   the last committed page. A job that keeps dead-lettering its deliveries
@@ -35,6 +44,10 @@ defmodule Ankusa.Replay do
        at or before its own creation. Fix the source's secret first (or add the
        new one: `secret: [new, old]`), then start the job; an entry that still
        fails verification stays in the pen and counts as `skipped`.
+    7. A `kind: :lifecycle` job covers the events the trail held when it was
+       created, in `since`/`until`. It is the way back for a lifecycle sink
+       that was down for longer than `dispatch.retry` waits, or that lost
+       events: start it at the time the outage began.
   """
 
   alias Ankusa.Audit.Context
@@ -48,6 +61,7 @@ defmodule Ankusa.Replay do
 
   @dlq_keys [:kind, :source_id, :id, :since, :until, :tenants, :rate, :max_lag_ms]
   @archive_keys [:kind, :from, :to, :source_id, :tenants, :sinks, :rate, :max_lag_ms]
+  @lifecycle_keys [:kind, :since, :until, :tenants, :rate, :max_lag_ms]
   @patch_keys [:state, :rate, :max_lag_ms]
   @max_tenants 1_000
 
@@ -55,17 +69,19 @@ defmodule Ankusa.Replay do
   Create a replay job. `spec` (map or keyword) takes the admin API's keys as
   atoms: for `kind: :dlq` and `kind: :quarantine` the optional `:source_id`,
   `:id`, `:since`, `:until`; for `kind: :archive` the required `:from`, `:to`,
-  and the optional `:source_id` and `:sinks`; plus `:rate` and `:max_lag_ms`.
+  and the optional `:source_id` and `:sinks`; for `kind: :lifecycle` the
+  optional `:since` and `:until`; plus `:rate` and `:max_lag_ms`.
   Every kind also takes `:tenants`, a non-empty list of tenant ids: the job
-  only touches hooks owned by those tenants (the admin API sets it from the
-  caller's `tenant:` scopes).
+  only touches hooks (a lifecycle job, events) owned by those tenants (the
+  admin API sets it from the caller's `tenant:` scopes).
 
   Returns `{:ok, :created, job}`, or `{:ok, :existing, job}` when a `running`
   or `paused` job with the same kind and filter already exists (a proxy retry
   is idempotent). `{:error, {:invalid, field}}` names a bad field,
   `{:error, :too_many_replays}` the 16-job cap, and
   `{:error, {:role_not_enabled, :edge}}` an archive or quarantine job on a
-  node without a queue writer.
+  node without a queue writer (`{:role_not_enabled, :lifecycle}`: a lifecycle
+  job on a node with no lifecycle sinks).
   """
   @spec start(atom(), map() | keyword(), keyword()) ::
           {:ok, :created | :existing, map()}
@@ -175,7 +191,7 @@ defmodule Ankusa.Replay do
       # Keys are validated per kind: a `from`/`to` on a dlq spec (or a
       # `since`/`until` on an archive spec) is a typo, not a silently dropped
       # bound — the former would otherwise replay the whole DLQ.
-      keys = if kind == :archive, do: @archive_keys, else: @dlq_keys
+      keys = keys_for(kind)
 
       with :ok <- reject_unknown(spec, keys) do
         case kind do
@@ -208,10 +224,28 @@ defmodule Ankusa.Replay do
                  max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
                }}
             end
+
+          :lifecycle ->
+            with :ok <- tenants_ok(Map.get(spec, :tenants)),
+                 :ok <- optional_field(spec, :since, :integer),
+                 :ok <- optional_field(spec, :until, :integer),
+                 :ok <- until_ok(spec) do
+              {:ok,
+               %{
+                 kind: :lifecycle,
+                 filter: Map.take(spec, [:since, :until, :tenants]),
+                 rate: Map.get(spec, :rate, @default_rate),
+                 max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
+               }}
+            end
         end
       end
     end
   end
+
+  defp keys_for(:archive), do: @archive_keys
+  defp keys_for(:lifecycle), do: @lifecycle_keys
+  defp keys_for(_kind), do: @dlq_keys
 
   defp validate_patch(patch) do
     patch = Map.new(patch)
@@ -235,6 +269,7 @@ defmodule Ankusa.Replay do
   defp kind_ok(:dlq), do: :ok
   defp kind_ok(:quarantine), do: :ok
   defp kind_ok(:archive), do: :ok
+  defp kind_ok(:lifecycle), do: :ok
   defp kind_ok(_), do: {:error, {:invalid, "kind"}}
 
   defp state_ok(nil), do: :ok
