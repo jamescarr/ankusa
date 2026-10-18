@@ -61,7 +61,7 @@ Every top-level section, with its keys and defaults:
 | --- | --- |
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
 | `log` | `level` (`info`), `banner` (`true`; the ASCII-art banner on start) |
-| `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
+| `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`), `store_headers` (`drop`: `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`; `hash`: none). See [Stored headers](#stored-headers) |
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
@@ -101,6 +101,28 @@ One source per provider endpoint; the key is the catch-URL segment
 | `sinks` | At least one; every sink is tried on every delivered hook. |
 | `dedupe` | Collapse provider retries at ingest. A preset name (`github`, `standard_webhooks`, `svix`, `shopify`, `stripe`), or a mapping with exactly one of `preset` (same names), `header` (the event-id header, e.g. `X-GitHub-Delivery`) or `json` (a dot path into the body, e.g. `data.id`), plus an optional `ttl_seconds` (default 259 200 = 72 h). Hooks that share a key within the TTL get the same `201` and the original id, with `"duplicate": true` on the later ones. Keys are scoped to the tenant and the source, so two tenants behind one `tenant_path` source never collapse each other's events. The key travels into every delivery as `dedupe_key`. |
 | `forward_headers` | Which provider request headers travel into sink messages (and `Sink.Http` requests): a list of names (lowercased; still minus the never-forwarded set below), or absent for the default set: every header except `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `host`, `content-length`, `content-type`, `connection`, `keep-alive`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `expect`, and every `x-ankusa-*` header. (`:default` is the Elixir value only; YAML takes a list or nothing.) |
+| `store_headers` | `drop` / `hash` lists of header names that override `http.store_headers` for this source, key by key (an absent list inherits). See [Stored headers](#stored-headers). |
+
+#### Stored headers
+
+A hook is stored with the request's headers, and the store, the archive
+segments, the quarantine pen and every sink message all carry what was stored.
+`store_headers` decides which headers survive, after the signature is verified
+(the verifier and the source's `dedupe` read the complete list):
+
+- `drop`: removed from the hook. Default: `authorization`, `proxy-authorization`,
+  `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`.
+- `hash`: kept under the same name with the value replaced by `sha256:<hex>`,
+  so a consumer can tell two requests carried the same value without being able
+  to read it. Default: none.
+
+Names are case-insensitive; a name in both lists is dropped. The count of
+removed headers is `dropped_headers` on the `[:ankusa, :ingest]` telemetry
+span. A source's `store_headers` overrides the `http` lists key by key, so a
+source that sets only `hash` keeps the instance's `drop`. Do not drop a header a
+source's verifier needs: a quarantine replay verifies the stored hook again.
+Changing the policy affects hooks accepted afterwards; stored hooks are not
+rewritten.
 
 ### Custom HMAC schemes
 
@@ -237,6 +259,7 @@ config :ankusa,
   data_dir: "./data",
   roles: [:edge, :dispatch, :storage],
   max_body_bytes: 8_000_000,
+  store_headers: %{drop: ~w(authorization proxy-authorization cookie set-cookie x-api-key x-auth-token), hash: []},
   route_resolver: {Ankusa.RouteResolver.Path, []},
   source_store: {Ankusa.SourceStore.Static, sources: %{}},
   wal: :disk,
@@ -328,6 +351,7 @@ config :ankusa,
 | `listener.http2` | `false` | Serve HTTP/2 (off: HTTP/1.1 only). |
 | `listener.tls` | `nil` | The ingest listener's TLS block (`certfile`, `keyfile`, `cacertfile`, `verify`, `versions`, `ciphers`). The `listener` limits apply to every listener; this key is the ingest port's alone. See [Listeners](#listeners-limits-tls-and-mtls). |
 | `max_body_bytes` | `8_000_000` | Hard cap on a request body. A `Content-Length` over it is `413` before any of the body is read; a body without one (chunked) is cut off at the cap while streaming. |
+| `store_headers` | `%{drop: [...the six credential headers above], hash: []}` | Which request headers a hook is stored with (`Ankusa.Edge.StoredHeaders`), applied after verification. `drop` removes a header from the stored hook, `hash` keeps it with the value replaced by `"sha256:<hex>"`; names are case-insensitive and a name in both lists is dropped. An absent `drop` or `hash` keeps the default's list. See [Stored headers](#stored-headers). |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); `Ankusa.SourceStore.Redis` (`ankusa_redis`, the image's `source_store.type: redis`) keeps them in Redis, shared across nodes; the rest is read-only. |
 | `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
@@ -859,6 +883,7 @@ config :ankusa,
 | `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink, each retried independently. |
 | `dedupe` | `nil` | Collapse provider retries at ingest: `:github \| :standard_webhooks \| :svix \| :shopify \| :stripe`, or `%{header: "X-Event-Id"}` / `%{json: "data.id"}`, each with an optional `ttl_ms` (default `259_200_000`). |
 | `forward_headers` | `:default` | `:default` (every header except the never-forwarded set; see [Sources](#sources)) or a list of header names. |
+| `store_headers` | `nil` | `nil` (the instance's `store_headers`) or `%{drop: [..], hash: [..]}` overriding it per key; an absent `drop`/`hash` inherits the instance's list. |
 
 A source cannot override the dispatch-wide retry policy: there is no per-source
 retry policy. `Sink.Http`/`Sink.RabbitMQ`/`Sink.Kafka`/`Sink.NATS`/`Sink.Redis`

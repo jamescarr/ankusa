@@ -38,6 +38,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   true}` behind your own proxy. The shipped fanout configs take
   `CLAIM_CHECK_TOKEN`. See the `ankusa` changelog and `docs/configuration.md`.
 
+- `http.store_headers` (`drop`, `hash`; default drops `authorization`,
+  `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`, `x-auth-token`)
+  and a per-source `store_headers` override: which request headers a hook is
+  stored with, applied after the signature is verified. A dropped header is in
+  no stored hook, archive segment, quarantine entry or sink message; a hashed
+  one is kept as `sha256:<hex>`. **Behaviour change:** those credential headers
+  are no longer stored by default; `drop: []` restores the old behaviour. See
+  the `ankusa` changelog and `docs/configuration.md#stored-headers`.
+
 - `listener` (`max_connections`, `num_acceptors`, `read_timeout_ms`,
   `body_read_timeout_ms`, `request_deadline_ms`, `max_requests_per_connection`,
   `max_header_count`, `max_header_length`, `http2`, `tls`), `metrics`

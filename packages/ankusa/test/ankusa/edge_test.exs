@@ -3,7 +3,8 @@ defmodule Ankusa.EdgeTest do
 
   import Ankusa.TestHelpers
   alias Ankusa.Edge.{Batcher, Ingest}
-  alias Ankusa.Envelope
+  alias Ankusa.{Envelope, Store}
+  alias Ankusa.Store.Keys
 
   @secret "whsec_" <> Base.encode64("supersecret-key")
 
@@ -110,6 +111,168 @@ defmodule Ankusa.EdgeTest do
     assert stored_ids(config.instance) == []
     assert {:ok, [entry]} = Ankusa.Edge.Quarantine.recent(config.instance, 10)
     assert entry.source_id == "q"
+  end
+
+  describe "stored-header policy" do
+    @credentials [
+      {"authorization", "Bearer sk_live_topsecret"},
+      {"cookie", "sid=topsecret-session"},
+      {"x-keep", "visible"}
+    ]
+
+    defp signed_source(extra \\ []) do
+      %{
+        "swh" =>
+          [verifier: {Ankusa.Verifier.Hmac, scheme: :standard_webhooks, secret: @secret}] ++
+            extra
+      }
+    end
+
+    defp raw_hook_row(inst, %Envelope{seq: seq}) do
+      assert {:ok, row} = Store.get(inst, :hooks, Keys.hook(seq))
+      row
+    end
+
+    test "drops stored headers: a signed POST with authorization and cookie verifies, and neither is stored" do
+      config = start_edge(signed_source())
+      body = ~s({"event":"ok"})
+      headers = standard_webhooks_headers("msg_1", body, @secret) ++ @credentials
+
+      conn = route_through_edge(config, request("swh", body, headers))
+      assert conn.status == 201
+
+      assert {:ok, [env]} = Ankusa.Queue.hooks(config.instance, 0, 10)
+      names = Enum.map(env.headers, &elem(&1, 0))
+      refute "authorization" in names
+      refute "cookie" in names
+      assert Envelope.header(env, "x-keep") == "visible"
+      assert Envelope.header(env, "webhook-id") == "msg_1"
+      assert env.verification.status == :ok
+
+      # not in the store's bytes either, names or values
+      row = raw_hook_row(config.instance, env)
+      refute row =~ "topsecret"
+      refute row =~ "authorization"
+      refute row =~ "cookie"
+
+      # and never in a message to a sink, whatever `forward_headers` says
+      ctx = %{instance: config.instance, attempt: 1, forward_headers: :default}
+      assert {:ok, json} = Ankusa.Sink.Message.encode(env, ctx, 1_000)
+      refute json =~ "topsecret"
+      refute json =~ "authorization"
+      assert JSON.decode!(json)["headers"]["x-keep"] == "visible"
+    end
+
+    test "the header is matched in any case, and the ingest span reports how many were dropped" do
+      config = start_edge(signed_source())
+      body = ~s({"event":"ok"})
+
+      headers =
+        standard_webhooks_headers("msg_1", body, @secret) ++
+          [{"Authorization", "Bearer topsecret"}, {"X-API-Key", "topsecret"}, {"x-keep", "1"}]
+
+      ref = make_ref()
+      me = self()
+
+      :telemetry.attach(
+        "dropped-#{inspect(ref)}",
+        [:ankusa, :ingest, :stop],
+        fn _event, _measurements, meta, _ -> send(me, {:ingest, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("dropped-#{inspect(ref)}") end)
+
+      assert {:ok, env} = Ingest.ingest(config.instance, request("swh", body, headers))
+      assert_receive {:ingest, %{outcome: :committed, dropped_headers: 2}}
+
+      assert Enum.map(env.headers, &elem(&1, 0)) |> Enum.sort() ==
+               ["webhook-id", "webhook-signature", "webhook-timestamp", "x-keep"]
+    end
+
+    test "a hook that stores nothing drops nothing" do
+      config = start_edge(signed_source())
+      body = ~s({"event":"ok"})
+
+      ref = make_ref()
+      me = self()
+
+      :telemetry.attach(
+        "none-#{inspect(ref)}",
+        [:ankusa, :ingest, :stop],
+        fn _event, _measurements, meta, _ -> send(me, {:ingest, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("none-#{inspect(ref)}") end)
+
+      bad = [{"webhook-id", "m"}, {"webhook-timestamp", "1"}, {"webhook-signature", "v1,no"}]
+
+      assert {:rejected, _} =
+               Ingest.ingest(config.instance, request("swh", body, bad ++ @credentials))
+
+      assert_receive {:ingest, %{outcome: :rejected, dropped_headers: 0}}
+    end
+
+    test "a source override hashes a header, and the instance policy can be replaced" do
+      sources =
+        signed_source(store_headers: %{hash: ["Authorization"]}) |> Map.put("plain", [])
+
+      config = start_edge(sources, store_headers: %{drop: ["x-keep"]})
+      body = ~s({"event":"ok"})
+      signed = standard_webhooks_headers("msg_1", body, @secret)
+
+      # `swh` inherits the instance's `drop: ["x-keep"]` and hashes authorization
+      assert {:ok, env} =
+               Ingest.ingest(config.instance, request("swh", body, signed ++ @credentials))
+
+      digest =
+        "sha256:" <>
+          Base.encode16(:crypto.hash(:sha256, "Bearer sk_live_topsecret"), case: :lower)
+
+      assert Envelope.header(env, "authorization") == digest
+      assert Envelope.header(env, "cookie") == "sid=topsecret-session"
+      assert Envelope.header(env, "x-keep") == nil
+
+      assert {:ok, [stored]} = Ankusa.Queue.hooks(config.instance, 0, 10)
+      assert Envelope.header(stored, "authorization") == digest
+      refute raw_hook_row(config.instance, stored) =~ "sk_live_topsecret"
+
+      # a source with no override runs the instance policy as configured
+      assert {:ok, plain} = Ingest.ingest(config.instance, request("plain", "x", @credentials))
+      assert Envelope.header(plain, "authorization") == "Bearer sk_live_topsecret"
+      assert Envelope.header(plain, "x-keep") == nil
+    end
+
+    test "the dedupe key is read before the header is dropped" do
+      source = [dedupe: %{header: "x-api-key"}, verifier: {Ankusa.Verifier.None, []}]
+      config = start_edge(%{"d" => source})
+
+      req = request("d", "{}", [{"x-api-key", "evt-1"}])
+      assert {:ok, first} = Ingest.ingest(config.instance, req)
+      assert first.dedupe_key == "evt-1"
+      assert Envelope.header(first, "x-api-key") == nil
+      assert {:duplicate, %Envelope{id: id}} = Ingest.ingest(config.instance, req)
+      assert id == first.id
+    end
+
+    test "a quarantined hook is held without the dropped headers" do
+      config = start_edge(quarantining(["q"]))
+
+      assert {:quarantined, _} =
+               Ingest.ingest(config.instance, request("q", "forged", @credentials))
+
+      # the held entry's body is the stored envelope
+      assert {:ok, [%{id: id, received_at: received_at}]} =
+               Ankusa.Edge.Quarantine.recent(config.instance, 10)
+
+      assert {:ok, held} =
+               Store.get(config.instance, :quarantine, Keys.quarantine_body(received_at, id))
+
+      assert held =~ "x-keep"
+      refute held =~ "topsecret"
+      refute held =~ "authorization"
+    end
   end
 
   defp quarantining(ids) do

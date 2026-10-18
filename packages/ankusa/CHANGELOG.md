@@ -90,6 +90,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   authenticates every caller. `/v1/config` shows each token's `id` and scopes
   but never its hash.
 
+- **Stored-header policy (SEC-5).** A hook used to be stored, archived and
+  forwarded with every provider header, `Authorization`, `Cookie` and
+  `x-api-key` included. The new `store_headers` config key
+  (`%{drop: [...], hash: [...]}`, `Ankusa.Edge.StoredHeaders`) and the
+  per-source `store_headers` override are applied in `Ankusa.Edge.Ingest`
+  **after** verification (the verifier and the dedupe key still read every
+  header): `drop` removes a header from the hook, `hash` keeps it with the
+  value replaced by `sha256:<hex>`. The default drops `authorization`,
+  `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key` and
+  `x-auth-token`, so those are no longer in the stored hook, the archive
+  segment, the quarantine pen or any sink message; set `drop: []` to keep the
+  old behaviour. The `[:ankusa, :ingest]` span's stop metadata gains
+  `:dropped_headers`. Hooks stored before the upgrade are not rewritten.
+  See `docs/configuration.md#stored-headers`.
+
 - **Hardened listeners, TLS/mTLS on every listener, a separate metrics
   listener (SEC-6).** The new `listener` config section sets what Bandit's
   defaults left open, on every HTTP listener the instance runs:
