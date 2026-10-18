@@ -135,6 +135,7 @@ defmodule Ankusa.Edge.Ingest do
   @doc "Look the source up, refuse undeliverable header bytes, then `ingest/4`."
   @spec ingest(atom(), request()) :: result()
   def ingest(instance, %{source_id: source_id} = req) do
+    Process.sleep(2)
     route = %Ankusa.Route{source_id: source_id, tenant_id: Map.get(req, :tenant_id)}
 
     with {:ok, source, tenant_id} <- lookup(instance, route),
