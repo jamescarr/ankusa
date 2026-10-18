@@ -80,7 +80,9 @@ defmodule Ankusa.Verifier.Hmac do
          {:ok, keys} <- secret_keys(opts, scheme) do
       matched? =
         Enum.any?(keys, fn key ->
-          expected = encode(:crypto.mac(:hmac, scheme.hash, key, signed), scheme.encoding)
+          expected =
+            encode(:crypto.mac(:hmac, crypto_hash(scheme.hash), key, signed), scheme.encoding)
+
           Enum.any?(candidates, &Verifier.secure_compare(&1, expected))
         end)
 
@@ -115,8 +117,6 @@ defmodule Ankusa.Verifier.Hmac do
          {:ok, _keys} <- secret_keys(opts, scheme) do
       :ok
     end
-  rescue
-    ArgumentError -> {:error, :bad_scheme}
   end
 
   defp resolve_scheme(opts) do
@@ -131,7 +131,11 @@ defmodule Ankusa.Verifier.Hmac do
         end
 
       %Scheme{} = scheme ->
-        {:ok, Ankusa.Verifier.Schemes.validate!(scheme)}
+        try do
+          {:ok, Ankusa.Verifier.Schemes.validate!(scheme)}
+        rescue
+          ArgumentError -> {:error, :bad_scheme}
+        end
 
       _ ->
         {:error, :bad_scheme}
@@ -303,6 +307,11 @@ defmodule Ankusa.Verifier.Hmac do
 
   def raw_key(secret, :whsec_base64),
     do: secret |> String.replace_prefix("whsec_", "") |> Base.decode64()
+
+  # The scheme says `:sha1` (the name providers and `docs/configuration.md` use);
+  # `:crypto.mac/4` knows SHA-1 as `:sha` and raises `:badarg` on `:sha1`.
+  defp crypto_hash(:sha1), do: :sha
+  defp crypto_hash(hash), do: hash
 
   defp encode(mac, :hex), do: Base.encode16(mac, case: :lower)
   defp encode(mac, :base64), do: Base.encode64(mac)
