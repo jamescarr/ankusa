@@ -125,7 +125,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Done when:* an injected wrong `@spec` fails CI; coverage below the floor fails CI; the suite passes clean.
   *Proof:* `mise run check:package ankusa` → dialyzer `0 errors`, credo `0 issues`, sobelow `No findings`, coverage ≥ 85 %.
   *Anchors:* `.mise/tasks/check/package`, `packages/ankusa/mix.exs`.
-  *Evidence:* —
+  *Evidence:* 2026-10-17 · PR #98 · `mise run check:package` for ankusa, ankusa_kafka, ankusa_nats, ankusa_rabbitmq, ankusa_redis, ankusa_server, async_api_spex, sdk-elixir (all exit 0); `mise run check:examples`, `check:tools`, `check:links`, `lint:workflows`, `check:conformance` (all exit 0); `@spec min_for(...) :: atom()` injected into `Ankusa.UUIDv7`, `mix dialyzer`, reverted · core: `found no issues` (credo), `Total errors: 0 … done (passed successfully)` (dialyzer), `SCAN COMPLETE` with no finding (sobelow `--exit --skip`), `87.51% Total` against the 85 floor · wrong spec: `The @spec for the function does not match the success typing … (non_neg_integer()) :: binary() / … :: atom()`, dialyzer exit 2 · floor: `ankusa_rabbitmq` first failed its 80 floor at 76.79 % (`Coverage test failed, threshold not met`, task exit 3) until broker-free callback tests lifted it; core at the default 90 floor failed at 87.70 %. The injected-spec and coverage failures were run locally; no red CI run was made.
 
 - [ ] **F4 — Property tests for parsers and codecs** · P1 · Deps: —
   *Why:* no `StreamData`/fuzz anywhere; `Ref.parse/1`, `Pack.build/read`, `Envelope` round-trip, header validation, CIDR parsing and the 0.3 frame scanner are example-tested only.
