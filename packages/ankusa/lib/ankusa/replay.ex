@@ -46,15 +46,19 @@ defmodule Ankusa.Replay do
   @min_max_lag_ms 100
   @max_max_lag_ms 600_000
 
-  @dlq_keys [:kind, :source_id, :id, :since, :until, :rate, :max_lag_ms]
-  @archive_keys [:kind, :from, :to, :source_id, :sinks, :rate, :max_lag_ms]
+  @dlq_keys [:kind, :source_id, :id, :since, :until, :tenants, :rate, :max_lag_ms]
+  @archive_keys [:kind, :from, :to, :source_id, :tenants, :sinks, :rate, :max_lag_ms]
   @patch_keys [:state, :rate, :max_lag_ms]
+  @max_tenants 1_000
 
   @doc """
   Create a replay job. `spec` (map or keyword) takes the admin API's keys as
   atoms: for `kind: :dlq` and `kind: :quarantine` the optional `:source_id`,
   `:id`, `:since`, `:until`; for `kind: :archive` the required `:from`, `:to`,
   and the optional `:source_id` and `:sinks`; plus `:rate` and `:max_lag_ms`.
+  Every kind also takes `:tenants`, a non-empty list of tenant ids: the job
+  only touches hooks owned by those tenants (the admin API sets it from the
+  caller's `tenant:` scopes).
 
   Returns `{:ok, :created, job}`, or `{:ok, :existing, job}` when a `running`
   or `paused` job with the same kind and filter already exists (a proxy retry
@@ -76,25 +80,57 @@ defmodule Ankusa.Replay do
     end
   end
 
-  @doc "Every job, newest first."
-  @spec list(atom()) :: {:ok, [map()]} | {:error, :store_unavailable}
-  def list(instance), do: call(instance, :list)
+  @doc """
+  Every job, newest first. `tenants` limits the list to the jobs scoped to
+  tenants inside that list (`nil` is every job, including unscoped ones).
+  """
+  @spec list(atom(), [String.t()] | nil) :: {:ok, [map()]} | {:error, :store_unavailable}
+  def list(instance, tenants \\ nil) do
+    with {:ok, jobs} <- call(instance, :list) do
+      {:ok, Enum.filter(jobs, &visible?(&1, tenants))}
+    end
+  end
 
-  @doc "One job by id."
-  @spec get(atom(), String.t()) :: {:ok, map()} | {:error, :not_found | :store_unavailable}
-  def get(instance, id), do: call(instance, {:get, id})
+  @doc "One job by id; a job outside `tenants` (see `list/2`) is `:not_found`."
+  @spec get(atom(), String.t(), [String.t()] | nil) ::
+          {:ok, map()} | {:error, :not_found | :store_unavailable}
+  def get(instance, id, tenants \\ nil) do
+    with {:ok, job} <- call(instance, {:get, id}) do
+      if visible?(job, tenants), do: {:ok, job}, else: {:error, :not_found}
+    end
+  end
 
   @doc """
   Patch a job: `:state` (`:running | :paused | :cancelled`), `:rate` and/or
   `:max_lag_ms`. `{:error, :finished}` for a `done`, `cancelled` or `failed`
-  job. Resuming clears `error` and resets the auto-pause window.
+  job; a job outside the `tenants:` option (see `list/2`) is `:not_found`. Resuming clears
+  `error` and resets the auto-pause window.
   """
   @spec update(atom(), String.t(), map() | keyword(), keyword()) ::
           {:ok, map()}
           | {:error, :not_found | :finished | {:invalid, String.t()} | :store_unavailable}
   def update(instance, id, patch, opts \\ []) do
-    with {:ok, patch} <- validate_patch(patch) do
+    with {:ok, patch} <- validate_patch(patch),
+         :ok <- check_visible(instance, id, Keyword.get(opts, :tenants)) do
       call(instance, {:update, id, patch, Context.from_opts(opts)})
+    end
+  end
+
+  defp check_visible(_instance, _id, nil), do: :ok
+
+  defp check_visible(instance, id, tenants) do
+    with {:ok, _job} <- get(instance, id, tenants), do: :ok
+  end
+
+  # A job scoped to tenants (its filter's `:tenants`) is visible to a caller
+  # limited to `tenants` only when every tenant it touches is one of theirs. An
+  # unscoped job touches every tenant, so only an unlimited caller sees it.
+  defp visible?(_job, nil), do: true
+
+  defp visible?(%{filter: filter}, tenants) do
+    case Map.get(filter, :tenants) do
+      [_ | _] = scoped -> Enum.all?(scoped, &(&1 in tenants))
+      _ -> false
     end
   end
 
@@ -148,11 +184,12 @@ defmodule Ankusa.Replay do
                  :ok <- optional_field(spec, :id, :string),
                  :ok <- optional_field(spec, :since, :integer),
                  :ok <- optional_field(spec, :until, :integer),
+                 :ok <- tenants_ok(Map.get(spec, :tenants)),
                  :ok <- until_ok(spec) do
               {:ok,
                %{
                  kind: kind,
-                 filter: Map.take(spec, [:source_id, :id, :since, :until]),
+                 filter: Map.take(spec, [:source_id, :id, :since, :until, :tenants]),
                  rate: Map.get(spec, :rate, @default_rate),
                  max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
                }}
@@ -161,11 +198,12 @@ defmodule Ankusa.Replay do
           :archive ->
             with :ok <- from_to_ok(instance, spec),
                  :ok <- optional_field(spec, :source_id, :string),
+                 :ok <- tenants_ok(Map.get(spec, :tenants)),
                  :ok <- sinks_ok(Map.get(spec, :sinks)) do
               {:ok,
                %{
                  kind: :archive,
-                 filter: Map.take(spec, [:from, :to, :source_id, :sinks]),
+                 filter: Map.take(spec, [:from, :to, :source_id, :tenants, :sinks]),
                  rate: Map.get(spec, :rate, @default_rate),
                  max_lag_ms: Map.get(spec, :max_lag_ms, @default_max_lag_ms)
                }}
@@ -279,6 +317,17 @@ defmodule Ankusa.Replay do
       :ok
     else
       {:error, {:invalid, "sinks"}}
+    end
+  end
+
+  defp tenants_ok(nil), do: :ok
+
+  defp tenants_ok(tenants) do
+    if is_list(tenants) and tenants != [] and length(tenants) <= @max_tenants and
+         Enum.all?(tenants, &is_binary/1) do
+      :ok
+    else
+      {:error, {:invalid, "tenants"}}
     end
   end
 end

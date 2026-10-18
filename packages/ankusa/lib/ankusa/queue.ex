@@ -182,7 +182,10 @@ defmodule Ankusa.Queue do
   failure as text. A dead key whose row or hook is gone (corruption) is logged
   and not listed; one beyond the returned page is still counted, so `total` is
   exact unless corruption hides past the page. Options: `:source_id`, `:since`
-  (a unix-ms lower bound on the dead-letter time), `:limit`.
+  (a unix-ms lower bound on the dead-letter time), `:tenants` (a list of tenant
+  ids: only dead letters of those tenants' hooks, found by reading each
+  candidate's hook until the tenant is in the index; `nil`, the default, is
+  every tenant), `:limit`.
   """
   @spec dead(atom(), keyword()) ::
           {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}

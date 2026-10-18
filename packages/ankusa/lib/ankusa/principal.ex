@@ -28,10 +28,12 @@ defmodule Ankusa.Principal do
   | `audit:read` | reserved for the audit log; no route yet |
   | `tenant:<id>`, `tenant:*` | the tenants the other scopes apply to |
 
-  A resource that is node-global rather than tenant-keyed (the DLQ, the
-  quarantine pen, replay jobs, the rate-limit listing, route definitions)
-  needs `tenant:*` as well as its scope: a principal limited to some tenants
-  must not read or change every tenant's rows.
+  A resource that spans tenants is filtered by tenant, not refused. The DLQ,
+  the quarantine pen, replay jobs and the rate-limit listing take an optional
+  `tenant` filter: a principal limited to some tenants gets rows for those
+  tenants only (forced server-side) and `403` for a `tenant` it does not hold;
+  `tenant:*` is required to read or change them unfiltered. Route definitions
+  and IP rules belong to no tenant and still need `tenant:*`.
   """
 
   @enforce_keys [:id]
