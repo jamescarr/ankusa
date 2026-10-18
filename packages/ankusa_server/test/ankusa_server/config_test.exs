@@ -202,7 +202,8 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
 
     assert error.message ==
-             "sources.stripe.verify.secret: unresolved ${…} (variable names are [A-Z0-9_]+; " <>
+             "sources.stripe.verify.secret: unresolved ${…} (use ${NAME}, ${NAME:-default}, " <>
+               "${file:/abs/path} or ${sm:<provider>:<ref>}; variable names are [A-Z0-9_]+; " <>
                "use ${NAME:-} for an empty default)"
   end
 
