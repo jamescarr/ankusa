@@ -224,7 +224,10 @@ mod tests {
             v2("acme", "1", SIG).replace(":v2:", ":v3:"),
         ];
         for claim_ref in bad {
-            assert!(parse_claim_ref(&claim_ref).is_err(), "accepted {claim_ref:?}");
+            assert!(
+                parse_claim_ref(&claim_ref).is_err(),
+                "accepted {claim_ref:?}"
+            );
         }
     }
 }

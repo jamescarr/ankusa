@@ -337,7 +337,9 @@ defmodule AnkusaServer.ConfigTest do
     cc = Config.load!(path: path, env: %{}).config.claim_check
 
     assert cc.ref_signing_keys == [String.duplicate("a", 16), String.duplicate("b", 16)]
-    assert {cc.ref_ttl_ms, cc.accept_unsigned_refs, cc.max_concurrent_reads} == {3_600_000, true, 0}
+
+    assert {cc.ref_ttl_ms, cc.accept_unsigned_refs, cc.max_concurrent_reads} ==
+             {3_600_000, true, 0}
 
     # one comma-separated string, the form `${VAR}` carries
     path =
