@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Soak the image: loadgen for DURATION (3600) s, sample /metrics + RSS, fail on missing > 0 or RSS growth > 5 % (starts a container on 4000/4002)"
+#MISE depends=["docker:build"]
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+# DURATION, RATE, CONCURRENCY, BODY_BYTES, SAMPLE_INTERVAL, DRAIN_TIMEOUT,
+# MAX_RSS_GROWTH and SOAK_OUT are documented at the top of the script.
+exec packages/ankusa_server/scripts/soak.sh "$DOCKER_IMAGE:dev"

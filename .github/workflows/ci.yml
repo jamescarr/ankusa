@@ -153,6 +153,104 @@ jobs:
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:tools
 
+  # The perf regression gate (ground rule 10 of ANKUSA_HARDENING_PLAN.md,
+  # docs/testing.md "Perf gate"): on every push to main, and on a PR only when
+  # its diff touches a hot-path file. The job itself always runs (so a
+  # branch-protection rule can require it); the steps that cost minutes are
+  # skipped on a PR that does not touch the hot path. Hosted runners of one
+  # class differ by a factor of two in speed from job to job, so the gate
+  # compares against the base commit measured on this very runner (see the
+  # "measure the base commit" step); the checked-in
+  # packages/ankusa/bench/baseline.json (github-linux-x64) is the fallback when
+  # there is no base commit to measure.
+  bench:
+    name: perf gate
+    runs-on: ubuntu-latest
+    env:
+      # Ground rule 10's hot-path files, plus the gate's own files.
+      HOT_PATHS: >-
+        ^packages/ankusa/lib/ankusa/(
+        (edge|queue|store|dispatch|verifier|routes)/.*|
+        (store|queue|dedupe|envelope|http|route_resolver)\.ex|
+        sink/(message|http)\.ex
+        )$|^packages/ankusa/bench/|^\.mise/tasks/bench/|^\.github/workflows/ci\.yml$
+    steps:
+      - uses: actions/checkout@v7
+      - id: scope
+        name: does the diff touch the hot path?
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "not a pull request: gate runs"
+            exit 0
+          fi
+          pattern=$(echo "$HOT_PATHS" | tr -d ' ')
+          touched=$(gh api "repos/$REPO/pulls/$PR/files" --paginate -q '.[].filename' | grep -E "$pattern" || true)
+          if [ -n "$touched" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "hot-path files touched:"
+            echo "$touched"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "no hot-path file touched: gate skipped"
+          fi
+      - if: steps.scope.outputs.run == 'true'
+        uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - if: steps.scope.outputs.run == 'true'
+        name: cache mix deps
+        uses: actions/cache@v6
+        with:
+          path: |
+            packages/ankusa/deps
+            packages/ankusa/_build
+          key: mix-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock') }}
+      - if: steps.scope.outputs.run == 'true'
+        name: rocksdb system deps
+        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
+      - if: steps.scope.outputs.run == 'true'
+        run: mix local.hex --force && mix local.rebar --force
+      - if: steps.scope.outputs.run == 'true'
+        name: measure the base commit on this runner
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          src="packages/ankusa/lib packages/ankusa/priv packages/ankusa/config"
+          if [ -z "$BASE_SHA" ] || [ -z "${BASE_SHA//0/}" ] || ! git fetch --depth=1 --quiet origin "$BASE_SHA"; then
+            echo "::notice::no base commit to measure: comparing with the checked-in baseline"
+            exit 0
+          fi
+          if ! git diff --quiet "$BASE_SHA" HEAD -- packages/ankusa/mix.exs packages/ankusa/mix.lock; then
+            echo "::notice::mix.exs or mix.lock changed: comparing with the checked-in baseline"
+            exit 0
+          fi
+          # The base's sources under this change's bench scripts.
+          # shellcheck disable=SC2086
+          rm -rf $src && git checkout "$BASE_SHA" -- $src
+          BENCH_REBASELINE=1 BENCH_BASELINE="$RUNNER_TEMP/base-baseline.json" mise run bench:gate
+          # shellcheck disable=SC2086
+          rm -rf $src && git checkout HEAD -- $src
+          echo "BENCH_BASELINE=$RUNNER_TEMP/base-baseline.json" >> "$GITHUB_ENV"
+      - if: steps.scope.outputs.run == 'true'
+        run: mise run bench:gate
+      - if: always() && steps.scope.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-last
+          path: |
+            packages/ankusa/bench/last.json
+            ${{ runner.temp }}/base-baseline.json
+          if-no-files-found: ignore
+
   # The crash-consistency drill (scripts/drills/crash_drill.sh): ENOSPC on a
   # 96 MiB tmpfs, then kill -9 under load; every acked hook must read back.
   crash:
