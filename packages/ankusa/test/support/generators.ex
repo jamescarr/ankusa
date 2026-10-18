@@ -12,8 +12,8 @@ defmodule Ankusa.Generators do
 
   use ExUnitProperties
 
-  alias Ankusa.{Envelope, Verification}
   alias Ankusa.ClaimCheck.Ref
+  alias Ankusa.{Envelope, Verification}
   alias Ankusa.Verifier.Hmac.Scheme
 
   # The largest timestamp `Ankusa.ULID` decodes (9999-12-31T23:59:59.999Z).
