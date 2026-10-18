@@ -101,13 +101,19 @@ mix_cache_warm() {
           dep.scm.fetchable?(),
           Mix.Dep.compilable?(Mix.Dep.check_lock(dep)),
           do: IO.puts(dep.app)
-    ' 2>"$err" || {
-      cat "$err" >&2
-      rm -f "$err"
-      fail "could not list the Hex deps to build (above)"
-    }
+    ' 2>"$err"
   }
-  stale=$(_mix_cache_stale_deps)
+  if stale=$(_mix_cache_stale_deps); then
+    :
+  else
+    # A project whose config/runtime.exs needs an env var at this point (a
+    # Phoenix example wants SECRET_KEY_BASE) cannot be probed: `mix run`
+    # evaluates runtime config. Nothing is skipped — the caller's own compile
+    # builds every dep, just without the cache's help.
+    sed -n '1p' "$err" >&2 || true
+    echo "==> could not list the Hex deps to build; leaving them to this project's own compile"
+    stale=""
+  fi
 
   # A stale dep that was already here may hold a build tree from another
   # checkout (cloned from the cache): rebuild it from a fresh fetch instead.
@@ -123,7 +129,7 @@ mix_cache_warm() {
   done
   if [ -n "$refetch" ]; then
     mix deps.get
-    stale=$(_mix_cache_stale_deps)
+    stale=$(_mix_cache_stale_deps) || stale=""
   fi
 
   if [ -z "$stale" ]; then
@@ -135,7 +141,7 @@ mix_cache_warm() {
     # fill the log. Scoped to this command; it must not reach our compile.
     # shellcheck disable=SC2086 # $stale is a list of app names
     if ! ERL_COMPILER_OPTIONS='[nowarn_deprecated_catch,nowarn_match_alias_pats]' \
-      MIX_OS_DEPS_COMPILE_PARTITION_COUNT="${MIX_OS_DEPS_COMPILE_PARTITION_COUNT:-4}" \
+      MIX_OS_DEPS_COMPILE_PARTITION_COUNT="${MIX_OS_DEPS_COMPILE_PARTITION_COUNT:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}" \
       mix deps.compile $stale >"$log" 2>&1; then
       cat "$log" >&2
       rm -f "$err"

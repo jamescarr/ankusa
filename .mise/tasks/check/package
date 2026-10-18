@@ -141,9 +141,6 @@ esac
 
 if [ "$kind" = hex ]; then
   mix docs --warnings-as-errors
-  # The :prod deps come from the same shared cache; hex.build below compiles
-  # the project itself, as before.
-  (MIX_ENV=prod mix_cache_warm "$dir" "$pkg" prod)
   # Build the package the way release.yml publishes it, under :prod: Hex
   # rejects path deps, so `ankusa` resolves `async_api_spex` and the adapters
   # resolve `ankusa` from Hex rather than the path dep.
