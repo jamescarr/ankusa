@@ -1,0 +1,5 @@
+# Parallel PRs each append an entry under `## [Unreleased]`, so merging two
+# branches that touched the same changelog line keeps both sides instead of
+# conflicting. GitHub's mergeability check ignores merge drivers: a PR can
+# still read CONFLICTING until its branch merges main locally and pushes.
+packages/*/CHANGELOG.md merge=union
