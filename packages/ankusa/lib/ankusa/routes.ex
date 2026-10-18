@@ -34,6 +34,7 @@ defmodule Ankusa.Routes do
 
   alias Ankusa.Audit
   alias Ankusa.Audit.Context
+  alias Ankusa.Lifecycle
   alias Ankusa.Net
   alias Ankusa.Routes.{Cache, Matcher, Route, Snapshot, Store}
 
@@ -191,8 +192,7 @@ defmodule Ankusa.Routes do
           | {:error, :too_many_routes | :store_unavailable}
   def create(instance, attrs, opts \\ []) do
     with {:ok, route} <- Route.from_attrs(attrs) do
-      instance
-      |> audited(opts, fn ->
+      audited(instance, opts, fn ->
         with {:ok, meta} <- writable_meta(instance),
              :ok <- unique_id(instance, meta, route),
              :ok <- no_conflict(instance, meta, route) do
@@ -202,7 +202,6 @@ defmodule Ankusa.Routes do
            end)}
         end
       end)
-      |> announce(instance, :created)
     end
   end
 
@@ -219,45 +218,33 @@ defmodule Ankusa.Routes do
           | {:error, :too_many_routes | :store_unavailable}
   def replace(instance, id, attrs, opts \\ []) do
     with {:ok, route} <- Route.from_attrs(attrs, id: id) do
-      result =
-        audited(instance, opts, fn ->
-          with {:ok, meta} <- writable_meta(instance),
-               :ok <- no_conflict(instance, meta, route) do
-            case Snapshot.fetch(instance, meta, id) do
-              {:ok, existing} ->
-                # The stored route is what gets returned: `inserted_at` is the one the
-                # route already had, and the caller has to be told that, not the
-                # timestamp this call happened to mint.
-                stored = %{
-                  route
-                  | inserted_at: existing.inserted_at,
-                    revision: existing.revision + 1
-                }
+      audited(instance, opts, fn ->
+        with {:ok, meta} <- writable_meta(instance),
+             :ok <- no_conflict(instance, meta, route) do
+          case Snapshot.fetch(instance, meta, id) do
+            {:ok, existing} ->
+              # The stored route is what gets returned: `inserted_at` is the one the
+              # route already had, and the caller has to be told that, not the
+              # timestamp this call happened to mint.
+              stored = %{
+                route
+                | inserted_at: existing.inserted_at,
+                  revision: existing.revision + 1
+              }
 
-                change =
-                  plan(instance, "route.update", existing, stored, {stored, :updated}, fn ->
-                    Store.replace(instance, stored, meta.version)
-                  end)
+              {:ok,
+               plan(instance, "route.update", existing, stored, stored, fn ->
+                 Store.replace(instance, stored, meta.version)
+               end)}
 
-                {:ok, change}
-
-              :error ->
-                change =
-                  plan(instance, "route.create", nil, route, {route, :created}, fn ->
-                    Store.insert(instance, route, meta.version)
-                  end)
-
-                {:ok, change}
-            end
+            :error ->
+              {:ok,
+               plan(instance, "route.create", nil, route, route, fn ->
+                 Store.insert(instance, route, meta.version)
+               end)}
           end
-        end)
-
-      # Only the attempt that committed reaches here: `audited/3` has already
-      # retried the ones that lost a race.
-      case result do
-        {:ok, {stored, action}} -> announce({:ok, stored}, instance, action)
-        other -> other
-      end
+        end
+      end)
     end
   end
 
@@ -277,8 +264,7 @@ defmodule Ankusa.Routes do
     # The route being patched and the conflict check are both validated against
     # ONE version: a concurrent writer that slips between the reads moves the
     # version, the store refuses this write as stale, and it is re-read.
-    instance
-    |> audited(opts, fn ->
+    audited(instance, opts, fn ->
       with {:ok, meta} <- writable_meta(instance),
            {:ok, existing} <- fetch(instance, meta, id),
            {:ok, patch} <- patch_attrs(patch),
@@ -292,7 +278,6 @@ defmodule Ankusa.Routes do
          end)}
       end
     end)
-    |> announce(instance, :updated)
   end
 
   @doc "Delete a route definition. Audited like `create/3`."
@@ -306,22 +291,29 @@ defmodule Ankusa.Routes do
         {:error, :not_found} -> nil
       end
 
+    # The event of a deletion reports the route as it was: nothing is left to read.
+    entity =
+      Lifecycle.outbox(instance, fn ->
+        if before, do: Route.to_json(before), else: %{"id" => id}
+      end)
+
     result =
       audited(instance, opts, fn ->
-        attrs = %{
-          action: "route.delete",
-          resource: id,
-          before_hash: before && definition_hash(instance, before),
-          revision: before && before.revision + 1
-        }
+        attrs =
+          Map.merge(
+            %{
+              action: "route.delete",
+              resource: id,
+              before_hash: before && definition_hash(instance, before),
+              revision: before && before.revision + 1
+            },
+            entity
+          )
 
         {:ok, %{attrs: attrs, apply: fn -> Store.delete(instance, id) end, reply: :ok}}
       end)
 
-    with {:ok, :ok} <- result do
-      Ankusa.Lifecycle.route_changed(instance, :deleted, id)
-      :ok
-    end
+    with {:ok, :ok} <- result, do: :ok
   end
 
   @doc """
@@ -592,32 +584,30 @@ defmodule Ankusa.Routes do
 
   # ── CRUD internals ──────────────────────────────────────────────────────────
 
-  # The change has committed; recording it is the lifecycle module's business and
-  # never changes the caller's result. Called after `audited/3` returns, never
-  # inside its closure, which may run again on a lost race.
-  defp announce({:ok, route} = result, instance, action) do
-    Ankusa.Lifecycle.route_changed(instance, action, route)
-    result
-  end
-
-  defp announce(other, _instance, _action), do: other
-
   # What `audited/3` takes from a validated change: the audit row's attrs, the
   # store call that makes it (`apply`), and what the caller gets back.
   defp plan(instance, action, before, %Route{} = route, reply, apply) do
-    attrs = %{
-      action: action,
-      resource: route.id,
-      before_hash: before && definition_hash(instance, before),
-      after_hash: definition_hash(instance, route),
-      revision: route.revision
-    }
+    attrs =
+      Map.merge(
+        %{
+          action: action,
+          resource: route.id,
+          before_hash: before && definition_hash(instance, before),
+          after_hash: definition_hash(instance, route),
+          revision: route.revision
+        },
+        Lifecycle.outbox(instance, fn -> Route.to_json(route) end)
+      )
 
     %{attrs: attrs, apply: apply, reply: reply}
   end
 
   # A definition's hash covers what the route *is*, not when it was stored.
-  defp definition_hash(instance, %Route{} = route) do
+  # Public for `Ankusa.Lifecycle.reconcile/2`, which hashes the stored route the
+  # same way to see whether a change that nobody saw finish was applied.
+  @doc false
+  @spec definition_hash(atom(), Route.t()) :: String.t() | nil
+  def definition_hash(instance, %Route{} = route) do
     json = route |> Route.to_json() |> Map.drop(["inserted_at", "updated_at", "revision"])
     Audit.digest(instance, json)
   end
@@ -642,7 +632,7 @@ defmodule Ankusa.Routes do
         with {:ok, pending} <- pending_row(instance, context, attrs, pending) do
           case run(instance, pending, apply) do
             :ok ->
-              settle(instance, pending, Map.put(outcome(attrs), :result, "ok"))
+              settle(instance, pending, ok_update(attrs))
               {:ok, reply}
 
             {:error, :stale} when attempt < @max_attempts ->
@@ -686,7 +676,12 @@ defmodule Ankusa.Routes do
   end
 
   defp outcome(attrs),
-    do: Map.take(attrs, [:resource, :before_hash, :after_hash, :revision, :detail])
+    do: Map.take(attrs, [:resource, :before_hash, :after_hash, :revision, :detail, :entity])
+
+  # A change that took effect: its row goes to the lifecycle outbox when the
+  # change carries an entity (lifecycle events are on).
+  defp ok_update(attrs),
+    do: attrs |> outcome() |> Map.merge(%{result: "ok", publish: Map.has_key?(attrs, :entity)})
 
   defp settle(instance, pending, update) do
     with {:error, reason} <- Audit.finish(instance, pending, update) do

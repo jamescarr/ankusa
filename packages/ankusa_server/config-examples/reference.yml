@@ -507,8 +507,10 @@ egress:
 lifecycle:
   # Where a lifecycle event goes when a source or route is created, updated, or
   # deleted (through the admin API or the route-management API): a CloudEvents
-  # 1.0 message, io.ankusa.source.created and friends, published from memory
-  # with the dispatch retry policy; not persisted. The same sink types as a source's
+  # 1.0 message, io.ankusa.source.created and friends, read from the audit trail
+  # (durable, in commit order, at least once, each with the subject's revision),
+  # retried with the dispatch retry policy and replayable (POST /v1/replays
+  # {"kind": "lifecycle"}). The same sink types as a source's
   # `sinks`, at least one. Omit the whole section to turn lifecycle events off.
   # `ankusa:lifecycle` is a reserved source id. The AsyncAPI document on
   # GET /asyncapi.json describes this channel too. See docs/asyncapi.md.
