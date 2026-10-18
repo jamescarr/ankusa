@@ -43,8 +43,11 @@ else
 fi
 
 echo "==> building images"
-docker build --platform linux/arm64 -t ankusa-oban-ingest:e2e -f examples/oban-consumer/ingest_app/Dockerfile .
-docker build --platform linux/arm64 -t ankusa-oban-consumer:e2e examples/oban-consumer/consumer_app
+# The images must match the kind node's architecture, which is the Docker
+# host's: arm64 on Apple silicon, amd64 on a CI runner. PLATFORM overrides.
+PLATFORM="${PLATFORM:-linux/$(docker version -f '{{.Server.Arch}}')}"
+docker build --platform "$PLATFORM" -t ankusa-oban-ingest:e2e -f examples/oban-consumer/ingest_app/Dockerfile .
+docker build --platform "$PLATFORM" -t ankusa-oban-consumer:e2e examples/oban-consumer/consumer_app
 
 echo "==> loading images into kind"
 kind load docker-image ankusa-oban-ingest:e2e --name "$CLUSTER"

@@ -1,8 +1,9 @@
 # loadgen
 
 Unpublished internal Mix project. Two tasks, used together by
-`examples/oban-consumer/run.sh` to prove Ankusa delivers every webhook it
-accepts to the Oban consumer fleet with zero loss under concurrent load.
+`examples/oban-consumer/run.sh` and `examples/fleet-e2e/run.sh` to prove
+Ankusa delivers every webhook it accepts to the consumer fleet with zero loss
+under concurrent load.
 
 Not part of the Ankusa package set; never referenced from `mix.exs` of any
 published package.

@@ -1,0 +1,97 @@
+name: E2E
+
+# The end-to-end proofs that need a whole deployment, not a package: they run
+# nightly, on demand, and on every release tag, never on an ordinary push.
+#
+#   fleet : examples/fleet-e2e/run.sh. Load balancer -> two edge nodes ->
+#           shared bucket and claim-check gateway -> consumer, with a node
+#           killed mid-run and a provider retry sent to the other node. It also
+#           runs on a pull request that touches the example, so a change to it
+#           is proven before it merges.
+#   kind  : `mise run e2e`. The Oban consumer on a kind cluster, pods killed.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    tags: ["*-v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/e2e.yml"
+      - "examples/fleet-e2e/**"
+      - "tools/loadgen/**"
+      - "packages/ankusa_server/Dockerfile"
+
+jobs:
+  fleet:
+    name: fleet end to end (compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      ANKUSA_IMAGE: ankusa-fleet-e2e:local
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      # The server image is the slow part (RocksDB compiles); run.sh is told to
+      # skip its own `docker build` and use this one.
+      - name: Build the server image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: packages/ankusa_server/Dockerfile
+          load: true
+          tags: ${{ env.ANKUSA_IMAGE }}
+          cache-from: type=gha,scope=fleet-e2e
+          cache-to: type=gha,mode=max,scope=fleet-e2e
+      - run: mix local.hex --force && mix local.rebar --force
+      - name: examples/fleet-e2e/run.sh
+        run: BUILD_ANKUSA=0 examples/fleet-e2e/run.sh
+      - name: Keep the load generator's reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fleet-e2e-reports
+          path: examples/fleet-e2e/.e2e-out/
+          if-no-files-found: ignore
+
+  kind:
+    name: kind + Oban end to end
+    # Heavy, and untouched by a change to the fleet example.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mise run e2e
+      - name: Keep the load generator's reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-e2e-reports
+          path: examples/oban-consumer/.e2e-out/
+          if-no-files-found: ignore

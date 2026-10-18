@@ -1,0 +1,78 @@
+# One config for every Ankusa container in the fleet example. Per-node values
+# (roles, the segment key prefix, credentials) come from the environment, so
+# `ankusa-a`, `ankusa-b` and `claim-check` run the same file.
+#
+#   - ankusa-a / ankusa-b : roles edge, dispatch, storage (the default), each
+#                           with its own RocksDB store and its own
+#                           `storage.key_prefix`, sharing one S3 bucket
+#   - claim-check         : ANKUSA_ROLES=claim_check, the only reader of the
+#                           shared bucket the consumer talks to
+#
+# Route definitions and API-managed sources live in Redis, so every edge node
+# enforces the same ones. See ../README.md.
+
+node:
+  data_dir: /var/lib/ankusa
+
+log:
+  banner: false
+
+admin:
+  enabled: true
+  port: 4002
+  ip: 0.0.0.0
+
+wal:
+  type: disk
+
+# Segments and claims share one bucket. Segment keys carry the node's prefix
+# (`node-a/`, `node-b/`), claim keys never do, so the gateway finds the claims
+# of both nodes.
+storage:
+  type: s3
+  key_prefix: "${ANKUSA_STORAGE_KEY_PREFIX:-}"
+  s3:
+    bucket: "${S3_BUCKET}"
+    region: us-east-1
+    endpoint: "${S3_ENDPOINT}"
+    access_key_id: "${S3_ACCESS_KEY_ID}"
+    secret_access_key: "${S3_SECRET_ACCESS_KEY}"
+
+claim_check:
+  port: 4001
+  ip: 0.0.0.0
+
+# Deny-by-default routing, shared by every edge node through Redis. The Redis
+# store seeds a namespace once, on its first boot.
+routes:
+  enabled: true
+  store:
+    type: redis
+    url: "${REDIS_URL}"
+    namespace: ankusa:routes:fleet
+  seed:
+    - id: demo
+      path: /webhooks/demo
+      methods: [POST]
+
+source_store:
+  type: redis
+  url: "${REDIS_URL}"
+  namespace: ankusa:sources:fleet
+
+sources:
+  demo:
+    verify: {type: none}
+    on_verify_failure: accept_flag
+    # The loadgen bodies carry a unique `id`; a provider retry repeats it. The
+    # dedupe index is per node, so the same event sent to the other node is a
+    # second hook, and the consumer's idempotency key collapses the two.
+    dedupe: {json: id}
+    sinks:
+      - type: rabbitmq
+        url: "${RABBITMQ_URL}"
+        exchange: ankusa.events
+        exchange_type: topic
+        routing_key: ankusa.demo
+        # Low so the fat hook the run sends takes the claim path.
+        inline_max_bytes: 8192

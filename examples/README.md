@@ -25,6 +25,7 @@ flowchart LR
 | [nats-consumer](nats-consumer/) | NATS JetStream | Rust | docker | `docker compose up --build -d --wait` |
 | [oban-consumer](oban-consumer/) | HTTP → Oban | Elixir | docker, kind, kubectl | `./run.sh` |
 | [jetstream-k8s](jetstream-k8s/) | NATS JetStream, autoscaled (kind + Helm + Istio) | TypeScript | docker, kind, kubectl, helm | `./run.sh` |
+| [fleet-e2e](fleet-e2e/) | RabbitMQ, two edge nodes behind nginx | TypeScript (Postgres) | docker | `./run.sh` |
 
 ## quickstart
 
@@ -119,6 +120,31 @@ flowchart LR
 ```
 
 [`oban-consumer/`](oban-consumer/)
+
+## fleet-e2e
+
+The multi-node proof in plain Compose, run nightly in CI: nginx round-robins
+over two Ankusa edge nodes that keep their own stores and share route and
+source definitions (Redis) and a bucket (MinIO). A claim-check gateway serves
+fat bodies to a TypeScript consumer that records every hook in Postgres, and
+`run.sh` drives `tools/loadgen` through steady, chaos (a node killed, a provider
+retry sent to the other node, the consumer killed) and burst phases, then
+verifies that every acknowledged hook was processed.
+
+```mermaid
+flowchart LR
+    L[load generator] --> LB[nginx]
+    LB --> A[ankusa-a, own store]
+    LB --> B[ankusa-b, own store]
+    A & B -->|publish| X((RabbitMQ))
+    X --> C[consumer]
+    C --> DB[(processed_webhooks)]
+    A & B -.->|fat body| S[(MinIO)]
+    C -.->|claim ref| CC[claim-check]
+    CC -.-> S
+```
+
+[`fleet-e2e/`](fleet-e2e/)
 
 ## jetstream-k8s
 

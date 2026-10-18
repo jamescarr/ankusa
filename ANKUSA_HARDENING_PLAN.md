@@ -135,7 +135,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/claim_check/{ref,pack}.ex`, `envelope.ex:78-87`, `edge/ingest.ex:155-164`, `net.ex`, `store/migrate.ex`.
   *Evidence:* —
 
-- [ ] **F5 — Fleet end-to-end in CI (nightly)** · P0 · Deps: —
+- [x] **F5 — Fleet end-to-end in CI (nightly)** · P0 · Deps: —
   *Why:* the only multi-node zero-loss proof is the manual kind+Oban drill (`docs/testing.md:483-537`); nothing exercises LB → N nodes → shared claim bucket → gateway → consumer automatically.
   *Change:* `examples/fleet-e2e/`: compose with 2 `ankusa_server` nodes (Redis route+source store from `ankusa_redis`, MinIO claims bucket, distinct `storage.key_prefix`), 1 `claim_check`-role node, nginx round-robin, a consumer (copy the `examples/rabbitmq-consumer` worker, extended to upsert into a Postgres `processed_webhooks` table so `mix loadgen.verify` works unchanged), and a `run.sh` driving `tools/loadgen` steady/chaos (`docker kill` one node mid-run)/burst phases then `loadgen.verify`. Workflow `.github/workflows/e2e.yml`: nightly + `workflow_dispatch` + on tags, running `examples/fleet-e2e/run.sh` and `mise run e2e`. Chaos must also include a provider retry sent to the *other* node (same dedupe key) and record `extra_deliveries`.
   *Done when:* nightly is green with `missing: 0`, `sha_mismatches: 0`; a fat hook from node A is redeemed through the gateway; `extra_deliveries` is reported (allowed > 0 until TEN-6, then must be 0).
