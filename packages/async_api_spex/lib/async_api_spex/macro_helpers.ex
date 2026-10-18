@@ -44,9 +44,6 @@ defmodule AsyncApiSpex.MacroHelpers do
 
       other ->
         case Macro.expand(other, caller) do
-          value when is_map(value) ->
-            :ok
-
           value when is_binary(value) or is_list(value) or is_number(value) or is_atom(value) ->
             raise ArgumentError, "#{context} :schema must be a map, got: #{inspect(value)}"
 

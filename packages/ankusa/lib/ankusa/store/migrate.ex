@@ -239,6 +239,8 @@ defmodule Ankusa.Store.Migrate do
   # permission or I/O error says nothing about its contents, so it refuses to
   # start like any other legacy read failure, instead of booting without the
   # sources or overrides it holds.
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp read_json(path) do
     case File.read(path) do
       {:ok, body} -> JSON.decode(body)
@@ -451,12 +453,16 @@ defmodule Ankusa.Store.Migrate do
     with :ok <- flush(acc.ctx, acc.batch), do: {:ok, acc.count, acc.max_seq}
   end
 
+  # Trusted: the operator's own legacy data directory, never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp decode(bin, :unsafe) do
     {:ok, :erlang.binary_to_term(bin)}
   rescue
     ArgumentError -> :error
   end
 
+  # Trusted: the operator's own legacy data directory, never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp decode(bin, :safe) do
     {:ok, :erlang.binary_to_term(bin, [:safe])}
   rescue
@@ -501,6 +507,9 @@ defmodule Ankusa.Store.Migrate do
     end
   end
 
+  # Trusted: the operator's own legacy data directory, never request input.
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Misc.BinToTerm", "Traversal.FileModule"]
   defp read_sidecar(path, dir, default) do
     case File.read(path) do
       {:error, :enoent} ->

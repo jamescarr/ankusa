@@ -35,8 +35,8 @@ defmodule Ankusa.SDK.Sources do
   """
 
   alias Ankusa.SDK.{HTTP, SourceConflictError, SourceInvalidError, SourceNotFoundError}
-  alias Ankusa.SDK.{SourceStoreReadOnlyError, SourcesUnavailableError, VersionMismatchError}
   alias Ankusa.SDK.Sources.{Source, Spec}
+  alias Ankusa.SDK.{SourceStoreReadOnlyError, SourcesUnavailableError, VersionMismatchError}
 
   # The same rule `Ankusa.ClaimCheck.Ref` uses for its tenant. Anything outside
   # it is rejected before a path is built: an unvalidated ".." or "a/b" would

@@ -43,10 +43,8 @@ defmodule Ankusa.UUIDv7 do
           e::binary-12>>
       )
       when v in ~c"89ab" do
-    with {:ok, <<ms::48, _rest::binary>>} <-
-           Base.decode16(a <> b <> "7" <> c <> <<v>> <> d <> e, case: :lower) do
-      {:ok, ms}
-    else
+    case Base.decode16(a <> b <> "7" <> c <> <<v>> <> d <> e, case: :lower) do
+      {:ok, <<ms::48, _rest::binary>>} -> {:ok, ms}
       _ -> :error
     end
   end

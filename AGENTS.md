@@ -25,7 +25,7 @@ flowchart LR
 | `packages/ankusa_server` | The `jamescarr/ankusa` Docker image: core + every adapter, driven entirely by YAML (`config.ex` is the loader). Not published to Hex. |
 | `packages/sdk-typescript`, `sdk-python`, `sdk-rust`, `sdk-ruby`, `sdk-go`, `sdk-php`, `sdk-elixir`, `sdk-java`, `sdk-clojure` | Published client SDKs (npm `ankusa`, PyPI `ankusa`, crates.io `ankusa`, RubyGems `ankusa-sdk`, Go module `github.com/jamescarr/ankusa/packages/sdk-go`, Packagist `jamescarr/ankusa`, Hex `ankusa_sdk`, Maven Central `io.github.jamescarr:ankusa-sdk`, Clojars `io.github.jamescarr/ankusa-clj`) for writing worker consumers. |
 | `examples/*` | Runnable Docker-composed demos, one per delivery transport; see [`examples/README.md`](examples/README.md). |
-| `tools/loadgen` | Load generator used by the `oban-consumer` example. |
+| `tools/loadgen` | Load generator used by the `oban-consumer` and `fleet-e2e` examples. |
 | `docs/*` | Prose docs, see table below. Index: [`docs/README.md`](docs/README.md). |
 | `.mise/tasks/*` | Every CI/dev task, one file each (see Commands below). |
 
@@ -80,13 +80,13 @@ one; CI runs the same tasks this table does.
 | Task | What |
 | --- | --- |
 | `mise run check` | everything CI checks, every package/example/tool |
-| `mise run check:package <pkg>` | one package: format, warnings-as-errors, tests, docs; starts/stops that package's own `docker-compose.yml` |
+| `mise run check:package <pkg>` | one package: format, warnings-as-errors, `credo --strict`, dialyzer, sobelow (core, `ankusa_server`), tests with a coverage floor (core 85 %, others 80 %), docs; starts/stops that package's own `docker-compose.yml` |
 | `mise run check:examples` | `examples/*` |
 | `mise run check:tools` | `tools/*` |
 | `mise run check:conformance` | validate `conformance/` and run every `packages/sdk-*` against its vectors |
 | `mise run test:integration` | `ankusa` core's object-store adapters vs. the floci emulators |
 | `mise run test:crash` | crash-consistency drill (needs `docker`): ENOSPC on a 96 MiB tmpfs, then `kill -9` under load; every acked hook must read back. `scripts/drills/flakey.sh` is the power-loss variant on device-mapper (privileged Docker) |
-| `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`) |
+| `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`). The multi-node compose drill is `examples/fleet-e2e/run.sh` (needs `docker`, `mix`, `jq`); `.github/workflows/e2e.yml` runs both nightly, on tags, and the fleet one on PRs that touch it |
 | `mise run format` | `mix format`, `gofmt`, google-java-format, and cljfmt across every package — run before pushing, not after CI complains |
 | `mise run deps` | refresh every `mix.lock` after adding/removing a core dependency |
 | `mise run new:adapter <name>` | scaffold `packages/ankusa_<name>/` |
@@ -109,6 +109,7 @@ until they pass too.
 | an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |
 | the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) | `mise run test:crash`, and `scripts/drills/flakey.sh` where Docker can run `--privileged` |
+| the claim check, route or source stores, or anything a second node shares | `examples/fleet-e2e/run.sh` (`mise run e2e` before a release) |
 | anything, before tagging a release | `mise run e2e` |
 | everything | `mise run check` |
 

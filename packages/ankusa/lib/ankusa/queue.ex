@@ -201,16 +201,18 @@ defmodule Ankusa.Queue do
     cfs = [:default, :hooks, :deliveries, :index, :archive, :quarantine]
 
     Enum.reduce_while(cfs, {:ok, 0}, fn cf, {:ok, acc} ->
-      with {:ok, sst} <- Store.property(instance, cf, "rocksdb.total-sst-files-size") do
-        blob =
-          case Store.property(instance, cf, "rocksdb.total-blob-file-size") do
-            {:ok, n} -> n
-            {:error, _} -> 0
-          end
+      case Store.property(instance, cf, "rocksdb.total-sst-files-size") do
+        {:ok, sst} ->
+          blob =
+            case Store.property(instance, cf, "rocksdb.total-blob-file-size") do
+              {:ok, n} -> n
+              {:error, _} -> 0
+            end
 
-        {:cont, {:ok, acc + sst + blob}}
-      else
-        {:error, reason} -> {:halt, {:error, reason}}
+          {:cont, {:ok, acc + sst + blob}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end

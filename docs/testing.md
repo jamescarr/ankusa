@@ -4,10 +4,28 @@ Every package's test suite runs from its own directory under `packages/`;
 there's no single test runner spanning them, because each has a genuinely
 different infrastructure dependency (none, RabbitMQ, Redpanda, NATS, Redis).
 `mise run check:package <pkg>` runs one package's full CI check (format,
-warnings-as-errors, tests, docs), starting and stopping that package's own
-`docker-compose.yml` around the suite; `mise run check` runs all of them. The
+warnings-as-errors, credo, dialyzer, sobelow, tests with a coverage floor,
+docs), starting and stopping that package's own `docker-compose.yml` around the
+suite; `mise run check` runs all of them. The
 eight client SDKs are also checked against one shared, language-neutral vector
 suite — `mise run check:conformance`, below.
+
+## Static analysis and coverage gates
+
+`check:package` runs these on every Mix package (sobelow only on the two Plug
+applications) between `mix compile --warnings-as-errors` and the tests:
+
+| Gate | What fails it | Config |
+| --- | --- | --- |
+| `mix credo --strict` | any issue | [`.credo.exs`](../.credo.exs): the default checks, except `Design.AliasUsage` is off and the nesting and cyclomatic-complexity ceilings sit at the worst function that exists today (5 and 20) |
+| `mix dialyzer` | any warning (a wrong `@spec`, an unreachable clause, a call that can never succeed) | PLTs live in `_build/plts`; CI caches `_build` keyed on the toolchain pins and `mix.lock`, so a PLT rebuilds only when one changes |
+| `mix sobelow --exit --skip` | any finding in `ankusa` core or `ankusa_server` | a deliberate finding is marked in the code with `# sobelow_skip ["<Check>"]` and a line saying why it is safe; `--skip` is what makes sobelow read those marks |
+| `mix test --cover` | line coverage under the package's `test_coverage` threshold | `85` for `ankusa` core (shared test helpers excluded), `80` for every other package, in each `mix.exs` |
+
+The test run prints its ExUnit seed; in CI `check:package` also appends it to the
+job's summary (`$GITHUB_STEP_SUMMARY`), so an order-dependent failure replays with
+`mix test --seed <n>`. A new adapter scaffolded by `mise run new:adapter` ships
+the same dependencies, PLT paths and coverage floor.
 
 ## `ankusa` core: `mix test`
 
@@ -557,6 +575,54 @@ The bench reports `ingest_per_s`, `end_to_end_per_s`, `drain_s` and `missing`,
 and exits non-zero if anything acked never arrived. The numbers are
 machine-dependent and move with the pipeline, so run it on your own hardware
 rather than reading a figure here.
+
+## Fleet end to end (compose, nightly)
+
+[`examples/fleet-e2e/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/fleet-e2e/run.sh)
+is the automated multi-node proof: the whole path a provider's hook takes, with
+more than one Ankusa node, in plain Docker Compose (no `kind`):
+
+```text
+loadgen -> nginx (round robin) -> ankusa-a / ankusa-b -> RabbitMQ -> consumer -> Postgres
+                                   |  (own store, own segment prefix)             |
+                                   +-- Redis: routes, API-managed sources         |
+                                   +-- MinIO bucket <- claim-check gateway <------+ (fat hooks)
+```
+
+Both nodes read their route definitions and sources from Redis (a path nobody
+defined is a `404` on either), write segments under their own
+`storage.key_prefix` of one bucket, and check fat bodies in to it. The
+`claim-check`-role node is the only reader of that bucket; the consumer holds no
+storage credentials. It records every hook in `processed_webhooks`, keyed by the
+message's `idempotency_key`, which is the table `mix loadgen.verify` reads, so
+the verifier is the one the kind drill uses.
+
+```sh
+examples/fleet-e2e/run.sh
+# verify: missing=0 sha_mismatches=0 extra_deliveries=<n> claim_redeemed_cross_node=true
+```
+
+Phases: **steady** (paced, through the load balancer); **fat hooks** (a 20 KB
+body POSTed to each node directly must reach the consumer through a claim, with
+its sha256 intact: `claim_redeemed_cross_node`); **chaos** (the same load, with
+`ankusa-a` killed at +10 s and started at +20 s, one event delivered to node b
+and then *retried on node a*, and the consumer killed at +30 s); **burst**
+(closed loop). Each phase is verified; the run fails on any `missing` or
+`sha_mismatches`.
+
+`extra_deliveries` counts consumer receipts beyond the first per idempotency
+key: the provider retry (the dedupe index is per node, so the retry is a
+second hook that collapses into the same row) plus whatever RabbitMQ redelivers
+after the consumer kill. It is reported, not asserted to be zero; it must be
+zero once fleet-scoped dedupe lands (`TEN-6` in
+[`ANKUSA_HARDENING_PLAN.md`](https://github.com/jamescarr/ankusa/blob/main/ANKUSA_HARDENING_PLAN.md)).
+
+CI: [`.github/workflows/e2e.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/e2e.yml)
+runs it nightly, on `workflow_dispatch`, on every release tag, and on a pull
+request that touches the example, beside `mise run e2e` (the kind drill below).
+The load generator's reports are uploaded as the `fleet-e2e-reports` artifact.
+`RATE`, `DURATION` (at least 40), `BURST_SECONDS`, `CONCURRENCY`, `KEEP=1` and
+`BUILD_ANKUSA=0` (use the image named by `ANKUSA_IMAGE`) tune a run.
 
 ## Load and end-to-end (kind + Oban)
 

@@ -2,8 +2,8 @@ defmodule Ankusa.DedupeTest do
   use ExUnit.Case, async: false
 
   import Ankusa.TestHelpers
-  alias Ankusa.{Envelope, Store}
   alias Ankusa.Edge.{Ingest, Router}
+  alias Ankusa.{Envelope, Store}
   alias Ankusa.Store.Keys
 
   @secret "whsec_" <> Base.encode64("supersecret-key")

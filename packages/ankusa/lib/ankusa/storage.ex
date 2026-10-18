@@ -40,6 +40,8 @@ defmodule Ankusa.Storage do
     end
   end
 
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp locate_in(instance, %{key: key, idx_key: idx_key}, event_id) do
     with {:ok, bin} <- Ankusa.BlobStore.get(instance, :segments, idx_key),
          {:ok, {offset, length, seq}} <- Map.fetch(:erlang.binary_to_term(bin), event_id) do

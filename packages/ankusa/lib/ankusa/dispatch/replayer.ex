@@ -169,58 +169,55 @@ defmodule Ankusa.Dispatch.Replayer do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
+  def handle_call({:start, _spec}, _from, %{loaded?: false} = state),
+    do: {:reply, {:error, :store_unavailable}, state}
+
   def handle_call({:start, spec}, _from, state) do
+    active = active_jobs(state.jobs)
+
+    existing = Enum.find(active, &(&1.kind == spec.kind and &1.filter == spec.filter))
+
     cond do
-      not state.loaded? ->
-        {:reply, {:error, :store_unavailable}, state}
+      existing != nil ->
+        {:reply, {:ok, :existing, existing}, state}
+
+      length(active) >= @max_active ->
+        {:reply, {:error, :too_many_replays}, state}
+
+      spec.kind in [:archive, :quarantine] and
+          Ankusa.whereis(state.instance, :queue_writer) == nil ->
+        {:reply, {:error, {:role_not_enabled, :edge}}, state}
 
       true ->
-        active = active_jobs(state.jobs)
+        now = System.system_time(:millisecond)
 
-        existing = Enum.find(active, &(&1.kind == spec.kind and &1.filter == spec.filter))
+        job = %{
+          id: UUIDv7.generate(),
+          kind: spec.kind,
+          filter: spec.filter,
+          rate: spec.rate,
+          max_lag_ms: spec.max_lag_ms,
+          state: :running,
+          created_at: now,
+          updated_at: now,
+          finished_at: nil,
+          cursor: nil,
+          upto: upto(spec, now),
+          moved: 0,
+          scanned: 0,
+          skipped: 0,
+          delivered: 0,
+          dead: 0,
+          error: nil
+        }
 
-        cond do
-          existing != nil ->
-            {:reply, {:ok, :existing, existing}, state}
+        case Store.write(state.instance, [job_put(job)], sync: true) do
+          :ok ->
+            emit_state(state.instance, job)
+            {:reply, {:ok, :created, job}, arm(put_job(state, job))}
 
-          length(active) >= @max_active ->
-            {:reply, {:error, :too_many_replays}, state}
-
-          spec.kind in [:archive, :quarantine] and
-              Ankusa.whereis(state.instance, :queue_writer) == nil ->
-            {:reply, {:error, {:role_not_enabled, :edge}}, state}
-
-          true ->
-            now = System.system_time(:millisecond)
-
-            job = %{
-              id: UUIDv7.generate(),
-              kind: spec.kind,
-              filter: spec.filter,
-              rate: spec.rate,
-              max_lag_ms: spec.max_lag_ms,
-              state: :running,
-              created_at: now,
-              updated_at: now,
-              finished_at: nil,
-              cursor: nil,
-              upto: upto(spec, now),
-              moved: 0,
-              scanned: 0,
-              skipped: 0,
-              delivered: 0,
-              dead: 0,
-              error: nil
-            }
-
-            case Store.write(state.instance, [job_put(job)], sync: true) do
-              :ok ->
-                emit_state(state.instance, job)
-                {:reply, {:ok, :created, job}, arm(put_job(state, job))}
-
-              {:error, _reason} ->
-                {:reply, {:error, :store_unavailable}, state}
-            end
+          {:error, _reason} ->
+            {:reply, {:error, :store_unavailable}, state}
         end
     end
   end
@@ -252,52 +249,51 @@ defmodule Ankusa.Dispatch.Replayer do
     end
   end
 
+  def handle_call({:update, _id, _patch}, _from, %{loaded?: false} = state),
+    do: {:reply, {:error, :store_unavailable}, state}
+
   def handle_call({:update, id, patch}, _from, state) do
-    if not state.loaded? do
-      {:reply, {:error, :store_unavailable}, state}
-    else
-      case Map.fetch(state.jobs, id) do
-        :error ->
-          {:reply, {:error, :not_found}, state}
+    case Map.fetch(state.jobs, id) do
+      :error ->
+        {:reply, {:error, :not_found}, state}
 
-        {:ok, %{state: job_state}} when job_state in @finished_states ->
-          {:reply, {:error, :finished}, state}
+      {:ok, %{state: job_state}} when job_state in @finished_states ->
+        {:reply, {:error, :finished}, state}
 
-        {:ok, job} ->
-          now = System.system_time(:millisecond)
+      {:ok, job} ->
+        now = System.system_time(:millisecond)
 
-          job =
-            Enum.reduce(patch, job, fn
-              {:state, :running}, job ->
-                %{job | state: :running, error: nil, updated_at: now}
+        job =
+          Enum.reduce(patch, job, fn
+            {:state, :running}, job ->
+              %{job | state: :running, error: nil, updated_at: now}
 
-              {:state, state}, job ->
-                %{job | state: state, updated_at: now}
+            {:state, state}, job ->
+              %{job | state: state, updated_at: now}
 
-              {:rate, rate}, job ->
-                %{job | rate: rate, updated_at: now}
+            {:rate, rate}, job ->
+              %{job | rate: rate, updated_at: now}
 
-              {:max_lag_ms, lag}, job ->
-                %{job | max_lag_ms: lag, updated_at: now}
-            end)
+            {:max_lag_ms, lag}, job ->
+              %{job | max_lag_ms: lag, updated_at: now}
+          end)
 
-          # Resuming resets the auto-pause window, so a job the operator has
-          # fixed the sink behind gets a fresh look.
-          state =
-            if patch[:state] == :running,
-              do: %{state | windows: Map.delete(state.windows, id)},
-              else: state
+        # Resuming resets the auto-pause window, so a job the operator has
+        # fixed the sink behind gets a fresh look.
+        state =
+          if patch[:state] == :running,
+            do: %{state | windows: Map.delete(state.windows, id)},
+            else: state
 
-          case Store.write(state.instance, [job_put(job)], sync: true) do
-            :ok ->
-              emit_state(state.instance, job)
-              state = state |> put_job(job) |> prune_finished()
-              {:reply, {:ok, job}, arm(state)}
+        case Store.write(state.instance, [job_put(job)], sync: true) do
+          :ok ->
+            emit_state(state.instance, job)
+            state = state |> put_job(job) |> prune_finished()
+            {:reply, {:ok, job}, arm(state)}
 
-            {:error, _reason} ->
-              {:reply, {:error, :store_unavailable}, state}
-          end
-      end
+          {:error, _reason} ->
+            {:reply, {:error, :store_unavailable}, state}
+        end
     end
   end
 
@@ -320,50 +316,48 @@ defmodule Ankusa.Dispatch.Replayer do
 
       bucket = %{tokens: tokens, at: mono_now}
 
-      cond do
-        in_backoff?(state, job.id, mono_now) ->
-          %{state | buckets: Map.put(state.buckets, job.id, bucket)}
+      if in_backoff?(state, job.id, mono_now) do
+        %{state | buckets: Map.put(state.buckets, job.id, bucket)}
+      else
+        case throttle_reason(pressure, job) do
+          nil ->
+            n = min(trunc(tokens), @max_items_per_tick)
 
-        true ->
-          case throttle_reason(pressure, job) do
-            nil ->
-              n = min(trunc(tokens), @max_items_per_tick)
+            if n >= 1 do
+              case step(state, job, n) do
+                {:ok, state, job, moved, _finished?} ->
+                  # The step wrote the job's cursor/counters to the store; the
+                  # in-memory copy follows it, so the next tick resumes from
+                  # the committed cursor instead of re-running the page.
+                  state = put_job(state, job)
 
-              if n >= 1 do
-                case step(state, job, n) do
-                  {:ok, state, job, moved, _finished?} ->
-                    # The step wrote the job's cursor/counters to the store; the
-                    # in-memory copy follows it, so the next tick resumes from
-                    # the committed cursor instead of re-running the page.
-                    state = put_job(state, job)
+                  %{
+                    state
+                    | buckets:
+                        Map.put(state.buckets, job.id, %{
+                          tokens: max(tokens - moved, 0),
+                          at: mono_now
+                        })
+                  }
 
-                    %{
-                      state
-                      | buckets:
-                          Map.put(state.buckets, job.id, %{
-                            tokens: max(tokens - moved, 0),
-                            at: mono_now
-                          })
-                    }
+                {:error, state, job, reason} ->
+                  Logger.warning(
+                    "[ankusa] replay job #{job.id} step failed, retrying: #{inspect(reason)}"
+                  )
 
-                  {:error, state, job, reason} ->
-                    Logger.warning(
-                      "[ankusa] replay job #{job.id} step failed, retrying: #{inspect(reason)}"
-                    )
-
-                    %{
-                      state
-                      | backoff: Map.put(state.backoff, job.id, mono_now + @error_backoff_ms)
-                    }
-                end
-              else
-                %{state | buckets: Map.put(state.buckets, job.id, bucket)}
+                  %{
+                    state
+                    | backoff: Map.put(state.backoff, job.id, mono_now + @error_backoff_ms)
+                  }
               end
-
-            reason ->
-              emit_throttled(state.instance, job, reason)
+            else
               %{state | buckets: Map.put(state.buckets, job.id, bucket)}
-          end
+            end
+
+          reason ->
+            emit_throttled(state.instance, job, reason)
+            %{state | buckets: Map.put(state.buckets, job.id, bucket)}
+        end
       end
     end)
   end
@@ -568,6 +562,8 @@ defmodule Ankusa.Dispatch.Replayer do
 
   # An index that does not decode is a corrupt object: skip the segment rather
   # than crash the Replayer forever on it.
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp decode_index(bin) do
     {:ok, :erlang.binary_to_term(bin)}
   rescue
@@ -676,7 +672,7 @@ defmodule Ankusa.Dispatch.Replayer do
     # step before anything moves: the cursor stays, the next tick retries it.
     case resolve_archive_entries(state.instance, job, kept, skipped) do
       {:ok, entries, skipped} ->
-        commit_archive(state, job, entries, skipped, scanned, row, done_all?, last_offset, :go)
+        write_archive(state, job, entries, skipped, scanned, row, done_all?, last_offset)
 
       :unavailable ->
         {:error, state, job, :source_store_unavailable}
@@ -715,7 +711,7 @@ defmodule Ankusa.Dispatch.Replayer do
     end)
   end
 
-  defp commit_archive(state, job, entries, skipped, scanned, row, done_all?, last_offset, :go) do
+  defp write_archive(state, job, entries, skipped, scanned, row, done_all?, last_offset) do
     instance = state.instance
     now = System.system_time(:millisecond)
     moved = length(entries)
@@ -852,33 +848,37 @@ defmodule Ankusa.Dispatch.Replayer do
   # `Ankusa.Verifier.check_timestamp/2`): the release is late, the hook was
   # not. A verifier that raises fails the check like any other.
   defp reverify(instance, env) do
-    with {:ok, source} <- SourceStore.fetch(instance, env.source_id) do
-      env = %{env | tenant_id: env.tenant_id || source.tenant_id}
-      {mod, opts} = source.verifier
+    case SourceStore.fetch(instance, env.source_id) do
+      {:ok, source} ->
+        env = %{env | tenant_id: env.tenant_id || source.tenant_id}
+        {mod, opts} = source.verifier
 
-      case safe_verify(mod, env, opts) do
-        :ok ->
-          verification = %Verification{
-            status: :ok,
-            provider: mod,
-            scheme: Verifier.scheme_name(mod, opts)
-          }
+        case safe_verify(mod, env, opts) do
+          :ok ->
+            verification = %Verification{
+              status: :ok,
+              provider: mod,
+              scheme: Verifier.scheme_name(mod, opts)
+            }
 
-          env = %{env | verification: verification, seq: nil}
+            env = %{env | verification: verification, seq: nil}
 
-          {:ok,
-           %{
-             envelope: %{env | dedupe_key: Dedupe.key(source.dedupe, env)},
-             sinks: source.sinks,
-             dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
-           }}
+            {:ok,
+             %{
+               envelope: %{env | dedupe_key: Dedupe.key(source.dedupe, env)},
+               sinks: source.sinks,
+               dedupe_ttl_ms: source.dedupe && source.dedupe.ttl_ms
+             }}
 
-        _failed ->
-          :failed
-      end
-    else
-      :error -> :failed
-      {:error, :unavailable} -> :unavailable
+          _failed ->
+            :failed
+        end
+
+      :error ->
+        :failed
+
+      {:error, :unavailable} ->
+        :unavailable
     end
   end
 
@@ -1050,6 +1050,8 @@ defmodule Ankusa.Dispatch.Replayer do
 
   # ── load ──────────────────────────────────────────────────────────────────
 
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp load_jobs(instance) do
     %{lo: lo, hi: hi} = Keys.family(:replays)
 

@@ -13,7 +13,11 @@ defmodule AnkusaServer.MixProject do
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      releases: releases()
+      releases: releases(),
+      test_coverage: [summary: [threshold: 80]],
+      # Every PLT lives under _build, which CI caches (keyed on the toolchain pins
+      # and mix.lock), so a run rebuilds a PLT only when one of them changed.
+      dialyzer: [plt_core_path: "_build/plts", plt_local_path: "_build/plts"]
     ]
   end
 
@@ -38,7 +42,11 @@ defmodule AnkusaServer.MixProject do
       {:ankusa_kafka, path: "../ankusa_kafka"},
       {:ankusa_nats, path: "../ankusa_nats"},
       {:ankusa_redis, path: "../ankusa_redis"},
-      {:yaml_elixir, "~> 2.12"}
+      {:yaml_elixir, "~> 2.12"},
+      # Static analysis gates run by `mise run check:package` (dev only).
+      {:credo, "~> 1.7", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
+      {:sobelow, "~> 0.14", only: :dev, runtime: false}
     ]
   end
 

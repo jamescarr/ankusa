@@ -46,6 +46,8 @@ defmodule Ankusa.Fsync do
   concurrent caller still waits for the fsyncs that make it durable, and a
   parent fsync that failed once is retried by the next call.
   """
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   def mkdir_p(dir, root) do
     with :ok <- File.mkdir_p(dir) do
       fsync_parents(chain(Path.expand(dir), Path.expand(root)))
@@ -76,6 +78,8 @@ defmodule Ankusa.Fsync do
   then renamed over `path`, then the directory is fsynced. The temp file is
   removed on any error.
   """
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   def write_file(path, data) do
     tmp = path <> ".tmp." <> Integer.to_string(System.unique_integer([:positive]))
 
