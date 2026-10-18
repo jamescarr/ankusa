@@ -569,21 +569,27 @@ neither gated number; the 256-worker cells catch CPU cost per hook as lost
 `ingest_per_s`. At 32 workers latency is the service time, so the same delay
 shows up in `p99_ms`.
 
-A p99 over 20 000 samples is noisy on a shared machine. A cell that is over a
-limit after its three runs is therefore run three more times, and the verdict
-is the median of all six; a real regression fails both rounds, noise rarely
-does. `last.json` and the table show the second-round numbers. A shared
-runner can still be a bad machine for the whole job (one such run showed p99
-three to five times the baseline in every cell with throughput and p50
-unchanged): when the gate goes red on a change that touches no hot-path code,
-re-run the job once on a fresh runner; a real regression fails again.
+A p99 over 20 000 samples is noisy on a shared machine, and noise only adds
+latency and takes throughput away. A cell that is over a limit after its
+three runs is therefore run three more times and judged on its best run of the
+six (lowest `p99_ms`, highest `ingest_per_s`): a real regression raises every
+run, noise rarely does. `last.json` and the table show those best-run numbers
+for such a cell.
 
-Numbers only compare on the machine class that recorded them: `runner` is
-`github-linux-x64` for the CI baseline, and a run on another class prints a
-`WARN` (a laptop is usually faster than the CI runner, so it passes; a slower
-one can fail without a regression). `BENCH_RUNS`, `BENCH_CONFIRM`,
-`BENCH_RUNNER`, `BENCH_BASELINE` and `BENCH_REBASELINE` are documented in the
-script's header.
+Numbers only compare on the machine that recorded them. Hosted CI runners of
+one class differ by a factor of two in speed from job to job (the same code
+ran at 23 000 and at 50 000 hooks/s on two `ubuntu-latest` runners), so the CI
+job does not compare with `baseline.json`: it measures the pull request's base
+commit on its own runner first (`BENCH_REBASELINE=1 BENCH_BASELINE=<temp
+file>` over the base's `lib/`, `priv/` and `config/` with this change's bench
+scripts), then gates the change against that. It falls back to the checked-in
+`baseline.json` only when there is no base commit to measure or `mix.exs` /
+`mix.lock` changed. `baseline.json` (`runner: github-linux-x64`) is the
+reference for local runs on a comparable machine; a run on another runner
+class prints a `WARN` (a laptop is usually faster than the CI runner, so it
+passes; a slower one can fail without a regression). `BENCH_RUNS`,
+`BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and `BENCH_REBASELINE` are
+documented in the script's header.
 
 CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on
 a pull request whose diff touches a hot-path file: anything under
@@ -592,14 +598,16 @@ a pull request whose diff touches a hot-path file: anything under
 `route_resolver.ex`, `sink/message.ex`, `sink/http.ex`, or the gate's own files
 (`packages/ankusa/bench/`, `.mise/tasks/bench/`, `ci.yml`). The job always
 reports a status (it can be a required check); on a PR that touches none of
-those paths its steps are skipped. The run's `last.json` is attached as the
-`bench-last` artifact.
+those paths its steps are skipped. The run's `last.json` and the base
+commit's numbers are attached as the `bench-last` artifact. If the gate goes
+red on a change that touches no hot-path code, re-run the job once; a real
+regression fails again.
 
-A hot-path PR states before/after numbers in its description. The baseline
-changes only in a pull request titled `perf: rebaseline <reason>` that carries
-the before/after table: run the gate in CI (or on a `github-linux-x64`
-machine) with `BENCH_REBASELINE=1`, or copy the `bench-last` artifact's cells
-and `runner` into `baseline.json`.
+A hot-path PR states before/after numbers in its description. The checked-in
+baseline changes only in a pull request titled `perf: rebaseline <reason>`
+that carries the before/after table: copy the `bench-last` artifact's cells
+and `runner` into `baseline.json`, or run `BENCH_REBASELINE=1 mise run
+bench:gate` on a `github-linux-x64` machine.
 
 ### Soak: `mise run bench:soak`
 
