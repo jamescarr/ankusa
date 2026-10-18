@@ -6,6 +6,17 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.receive_delivery(headers, body, secrets: [], allow_unsigned: false,
+  tolerance_seconds: 300, now: nil)`, the receiver-side decision on one
+  HTTP-sink delivery. The sink signs every delivery unless configured
+  `allow_unsigned: true`, so a receiver is closed by default: with `secrets`
+  the delivery must verify (as `verify_signature`); with none and no
+  `allow_unsigned: true` it raises `InvalidSignatureError` (`invalid_secret`).
+  The signature is judged before the hook id. Returns a `ReceivedDelivery`
+  (`headers`, `verified`).
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

@@ -919,7 +919,7 @@ defmodule AnkusaServer.ConfigTest do
       sources:
         demo:
           verify: {type: none}
-          sinks: [{type: http, url: "https://sink.invalid/hooks"}]
+          sinks: [{type: http, url: "https://sink.invalid/hooks", allow_unsigned: true}]
       """)
 
     config = Config.load!(path: path, env: %{"ANKUSA_WAL_TYPE" => "none"}).config
@@ -1723,7 +1723,7 @@ defmodule AnkusaServer.ConfigTest do
           verify: {type: standard_webhooks, secret: "whsec_YWJj", tolerance_seconds: 60}
           sinks:
             - {type: http, url: "https://sink.invalid/h", method: put, timeout_ms: 250,
-               headers: {x-one: "1"}}
+               allow_unsigned: true, headers: {x-one: "1"}}
             - {type: rabbitmq, exchange: ankusa.full, idle_timeout_ms: 0}
             - {type: kafka, brokers: ["b:9092"], topic: t, ssl: true,
                sasl: {mechanism: scram_sha_512, username: u, password: p},
@@ -1758,7 +1758,8 @@ defmodule AnkusaServer.ConfigTest do
                 url: "https://sink.invalid/h",
                 method: :put,
                 headers: [{"x-one", "1"}],
-                timeout_ms: 250
+                timeout_ms: 250,
+                allow_unsigned: true
               ]},
              {Ankusa.Sink.RabbitMQ, [exchange: "ankusa.full", idle_timeout_ms: 0]},
              {Ankusa.Sink.Kafka, kafka},
@@ -2195,7 +2196,7 @@ defmodule AnkusaServer.ConfigTest do
         a:
           verify: {type: none}
           sinks:
-            - {type: http, url: "https://sink.invalid", headers: {authorization: "Bearer leak"}}
+            - {type: http, url: "https://sink.invalid", allow_unsigned: true, headers: {authorization: "Bearer leak"}}
       """)
 
     refute print_config(path) =~ "Bearer leak"
@@ -2251,7 +2252,7 @@ defmodule AnkusaServer.ConfigTest do
       sources:
         a:
           verify: {type: none}
-          sinks: [{type: http, url: "http://hooks.example/h?token=sekrit"}]
+          sinks: [{type: http, url: "http://hooks.example/h?token=sekrit", allow_unsigned: true}]
       """
 
       error =
@@ -2268,7 +2269,7 @@ defmodule AnkusaServer.ConfigTest do
     test "a lifecycle http sink is held to the same rule" do
       yaml = """
       lifecycle:
-        sinks: [{type: http, url: "http://events.example/"}]
+        sinks: [{type: http, url: "http://events.example/", allow_unsigned: true}]
       """
 
       assert_raise ConfigError, ~r/lifecycle.sinks\[0\].url: must be an https:\/\/ URL/, fn ->
@@ -2284,7 +2285,8 @@ defmodule AnkusaServer.ConfigTest do
 
     test "a sink URL that is not an absolute http(s) URL is refused" do
       for url <- ["ftp://hooks.example/", "hooks.example/path", "/just/a/path"] do
-        yaml = "sources: {a: {verify: {type: none}, sinks: [{type: http, url: \"#{url}\"}]}}\n"
+        yaml =
+          "sources: {a: {verify: {type: none}, sinks: [{type: http, allow_unsigned: true, url: \"#{url}\"}]}}\n"
 
         assert_raise ConfigError,
                      ~r/sources.a.sinks\[0\].url: must be an? (absolute )?http\(s\) URL/,
@@ -2297,7 +2299,9 @@ defmodule AnkusaServer.ConfigTest do
     test "API-submitted sources are held to the configured policy when written" do
       spec = %{
         "verify" => %{"type" => "none"},
-        "sinks" => [%{"type" => "http", "url" => "http://hooks.example/h"}]
+        "sinks" => [
+          %{"type" => "http", "url" => "http://hooks.example/h", "allow_unsigned" => true}
+        ]
       }
 
       assert_raise ConfigError,
@@ -2319,8 +2323,52 @@ defmodule AnkusaServer.ConfigTest do
       {Ankusa.SourceStore.Persistent, opts} =
         Config.load!(path: tmp_config(loose), env: %{}).config.source_store
 
-      assert [sinks: [{Ankusa.Sink.Http, [url: "http://hooks.example/h"]}]] =
+      assert [sinks: [{Ankusa.Sink.Http, [url: "http://hooks.example/h", allow_unsigned: true]}]] =
                Keyword.take(opts[:decoder].("acme.new", spec), [:sinks])
+    end
+
+    test "an HTTP sink is signed by default: no secret and no allow_unsigned fails the load" do
+      yaml = fn sink ->
+        "sources: {a: {verify: {type: none}, sinks: [{type: http, url: \"https://h.example/\"#{sink}}]}}\n"
+      end
+
+      assert_raise ConfigError,
+                   ~r/sources.a.sinks\[0\]: Sink.Http requires secret.*allow_unsigned: true/,
+                   fn -> Config.load!(path: tmp_config(yaml.("")), env: %{}) end
+
+      assert_raise ConfigError, ~r/sources.a.sinks\[0\]: Sink.Http requires secret/, fn ->
+        Config.load!(path: tmp_config(yaml.(", allow_unsigned: false")), env: %{})
+      end
+
+      assert_raise ConfigError, ~r/sources.a.sinks\[0\].allow_unsigned/, fn ->
+        Config.load!(path: tmp_config(yaml.(", allow_unsigned: \"maybe\"")), env: %{})
+      end
+
+      for ok <- [", secret: whsec_YWJj", ", allow_unsigned: true"] do
+        assert %Ankusa.Config{} = Config.load!(path: tmp_config(yaml.(ok)), env: %{}).config
+      end
+
+      lifecycle = "lifecycle: {sinks: [{type: http, url: \"https://events.example/\"}]}\n"
+
+      assert_raise ConfigError, ~r/lifecycle.sinks\[0\]: Sink.Http requires secret/, fn ->
+        Config.load!(path: tmp_config(lifecycle), env: %{})
+      end
+    end
+
+    test "an API-submitted source with an unsigned HTTP sink is refused when written" do
+      spec = %{
+        "verify" => %{"type" => "none"},
+        "sinks" => [%{"type" => "http", "url" => "https://hooks.example/h"}]
+      }
+
+      assert_raise ConfigError, ~r/sources.acme.new.sinks\[0\]: Sink.Http requires secret/, fn ->
+        Config.source_from_map!("acme.new", spec)
+      end
+
+      signed = put_in(spec, ["sinks", Access.at(0), "secret"], "whsec_YWJj")
+
+      assert [sinks: [{Ankusa.Sink.Http, [url: _, secret: "whsec_YWJj"]}]] =
+               Keyword.take(Config.source_from_map!("acme.new", signed), [:sinks])
     end
 
     test "per-sink TLS keys reach the sink; verification is on unless the sink says otherwise" do
@@ -2332,9 +2380,9 @@ defmodule AnkusaServer.ConfigTest do
           a:
             verify: {type: none}
             sinks:
-              - {type: http, url: "https://private-ca.example/h", cacertfile: "#{ca}"}
-              - {type: http, url: "https://self-signed.example/h", allow_insecure_tls: true}
-              - {type: http, url: "https://default.example/h"}
+              - {type: http, url: "https://private-ca.example/h", cacertfile: "#{ca}", allow_unsigned: true}
+              - {type: http, url: "https://self-signed.example/h", allow_insecure_tls: true, allow_unsigned: true}
+              - {type: http, url: "https://default.example/h", allow_unsigned: true}
         """)
 
       source = source_from(Config.load!(path: path, env: %{}).config, "a")
@@ -2357,7 +2405,7 @@ defmodule AnkusaServer.ConfigTest do
         sources:
           a:
             verify: {type: none}
-            sinks: [{type: http, url: "https://h.example/", #{extra}}]
+            sinks: [{type: http, url: "https://h.example/", allow_unsigned: true, #{extra}}]
         """)
       end
 
@@ -2381,7 +2429,7 @@ defmodule AnkusaServer.ConfigTest do
         sources:
           a:
             verify: {type: none}
-            sinks: [{type: http, url: "https://h.example/", cacertfile: "#{ca}", allow_insecure_tls: true}]
+            sinks: [{type: http, url: "https://h.example/", cacertfile: "#{ca}", allow_insecure_tls: true, allow_unsigned: true}]
         """)
 
       printed = print_config(path)

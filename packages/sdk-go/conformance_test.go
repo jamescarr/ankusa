@@ -193,6 +193,29 @@ func dispatch(t *testing.T, c conformanceCase, recorder *recorder) (any, error) 
 			opts,
 		)
 
+	case "receive_delivery":
+		var receiver struct {
+			Secrets          []string `json:"secrets"`
+			AllowUnsigned    bool     `json:"allow_unsigned"`
+			ToleranceSeconds *int64   `json:"tolerance_seconds"`
+		}
+		if raw, ok := c.Input["receiver"]; ok {
+			if err := json.Unmarshal(raw, &receiver); err != nil {
+				t.Fatalf("decode receiver: %v", err)
+			}
+		}
+		now := decode[int64](t, c.Input["now"])
+		return ankusa.ReceiveDelivery(
+			headerInput(t, c.Input["headers"]),
+			bodyBytes(t, decode[*bodySpec](t, c.Input["body"])),
+			ankusa.ReceiveOptions{
+				Secrets:          receiver.Secrets,
+				AllowUnsigned:    receiver.AllowUnsigned,
+				ToleranceSeconds: receiver.ToleranceSeconds,
+				Now:              &now,
+			},
+		)
+
 	case "decode_message":
 		return ankusa.DecodeMessage([]byte(decode[string](t, c.Input["message"])))
 

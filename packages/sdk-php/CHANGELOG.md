@@ -6,6 +6,17 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa\Webhook\Receiver::receive($headers, $body, $secrets, $allowUnsigned,
+  $toleranceSeconds, $now)`, the receiver-side decision on one HTTP-sink
+  delivery. The sink signs every delivery unless configured
+  `allow_unsigned: true`, so a receiver is closed by default: with `$secrets`
+  the delivery must verify (as `Signature::verify`); with none and no
+  `$allowUnsigned` it throws `InvalidSignatureError` (`invalid_secret`). The
+  signature is judged before the hook id. Returns a `ReceivedDelivery`
+  (`headers`, `verified`).
+
 ### Changed
 
 - Accepts `guzzlehttp/guzzle ^8.2` and `guzzlehttp/psr7 ^3.1` as well as

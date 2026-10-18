@@ -106,7 +106,9 @@ defmodule Ankusa.AsyncApiTest do
         source_store:
           static(%{
             "quiet" => [sinks: [{Ankusa.Sink.Log, []}]],
-            "relay" => [sinks: [{Ankusa.Sink.Http, url: "https://sink.invalid/hook"}]]
+            "relay" => [
+              sinks: [{Ankusa.Sink.Http, url: "https://sink.invalid/hook", allow_unsigned: true}]
+            ]
           })
       )
 

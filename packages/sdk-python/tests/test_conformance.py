@@ -219,6 +219,19 @@ def _run_verify_signature(case: dict[str, Any], requests: list[RecordedRequest])
     return {"id": verified.id, "timestamp": verified.timestamp}
 
 
+def _run_receive_delivery(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
+    inp = case["input"]
+    receiver = inp["receiver"]
+    kwargs: dict[str, Any] = {
+        "now": inp["now"],
+        "secrets": receiver.get("secrets", []),
+        "allow_unsigned": receiver.get("allow_unsigned", False),
+    }
+    if "tolerance_seconds" in receiver:
+        kwargs["tolerance_seconds"] = receiver["tolerance_seconds"]
+    received = ankusa.receive_delivery(inp["headers"], _body_bytes(inp["body"]), **kwargs)
+    return {"verified": received.verified, **dataclasses.asdict(received.headers)}
+
 
 def _run_decode_message(case: dict[str, Any], requests: list[RecordedRequest]) -> Any:
     return dataclasses.asdict(ankusa.decode_message(case["input"]["message"]))
@@ -366,6 +379,7 @@ RUNNERS: dict[str, Runner] = {
     "parse_claim_ref": _run_parse_claim_ref,
     "parse_headers": _run_parse_headers,
     "verify_signature": _run_verify_signature,
+    "receive_delivery": _run_receive_delivery,
     "decode_message": _run_decode_message,
     "idempotency_key": _run_idempotency_key,
     "redeem": _run_redeem,

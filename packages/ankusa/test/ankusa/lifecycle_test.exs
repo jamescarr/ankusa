@@ -447,7 +447,9 @@ defmodule Ankusa.LifecycleTest do
         {Bandit, plug: {RecordPlug, test: self()}, scheme: :http, ip: {127, 0, 0, 1}, port: port}
       )
 
-      sink = {Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events", timeout_ms: 500}
+      sink =
+        {Ankusa.Sink.Http,
+         url: "http://127.0.0.1:#{port}/events", allow_unsigned: true, timeout_ms: 500}
 
       # Plain http is allowed here; the loopback address still is not.
       config =
@@ -475,7 +477,11 @@ defmodule Ankusa.LifecycleTest do
         start_instance(
           dispatch: [retry: @fast_retry],
           egress: %{allow_insecure_http: true, allow_cidrs: ["127.0.0.0/8"]},
-          lifecycle: %{sinks: [{Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events"}]}
+          lifecycle: %{
+            sinks: [
+              {Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events", allow_unsigned: true}
+            ]
+          }
         )
 
       {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)

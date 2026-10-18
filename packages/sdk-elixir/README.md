@@ -116,7 +116,9 @@ Standalone (Bandit):
 ```elixir
 # mix.exs: {:bandit, "~> 1.12"}
 children = [
-  {Bandit, plug: {Ankusa.SDK.Receiver, handler: MyApp.Hooks}, port: 4200}
+  {Bandit,
+   plug: {Ankusa.SDK.Receiver, handler: MyApp.Hooks, secret: System.fetch_env!("ANKUSA_WHSEC")},
+   port: 4200}
 ]
 ```
 
@@ -126,24 +128,32 @@ In a Phoenix endpoint, mount the receiver **above** the body parsers:
 defmodule MyAppWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :my_app
 
-  plug Ankusa.SDK.Receiver, path: "/deliveries", handler: MyApp.Hooks
+  plug Ankusa.SDK.Receiver,
+    path: "/deliveries",
+    handler: MyApp.Hooks,
+    secret: System.fetch_env!("ANKUSA_WHSEC")
+
   plug Plug.Parsers, parsers: [:json], json_decoder: JSON
 
   # … the rest of the endpoint
 end
 ```
 
-Options: `:handler` (a module, or `{module, arg}`), `:path` (only that path is
-handled; everything else passes through untouched), `:max_body_bytes`
-(default `8_000_000`, the same cap core's ingest applies to a raw body), and
-`:secret` / `:tolerance_seconds` for a signed sink (below).
+Options: `:handler` (a module, or `{module, arg}`), `:secret` (required unless
+`allow_unsigned: true`, see below), `:path` (only that path is handled;
+everything else passes through untouched), `:max_body_bytes` (default
+`8_000_000`, the same cap core's ingest applies to a raw body),
+`:allow_unsigned` and `:tolerance_seconds`.
 
-### Signed deliveries
+### Signed deliveries (required by default)
 
-An HTTP sink with a `secret` signs every delivery the
-[Standard Webhooks](https://www.standardwebhooks.com/) way. Give the receiver
-the same secret and it verifies each delivery before your handler sees it,
-answering `401` `{"error":"invalid_signature","code":...}` otherwise:
+`Ankusa.Sink.Http` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way unless the sink is
+configured `allow_unsigned: true`, so the receiver is closed by default: give
+it the sink's `:secret` and it verifies each delivery before your handler sees
+it, answering `401` `{"error":"invalid_signature","code":...}` otherwise.
+Without `:secret` it **refuses to start** (`ArgumentError` at `init/1`), so an
+unconfigured receiver is never open to any host that can reach its URL:
 
 ```elixir
 plug Ankusa.SDK.Receiver,
@@ -152,11 +162,17 @@ plug Ankusa.SDK.Receiver,
   tolerance_seconds: 300
 ```
 
+`allow_unsigned: true` (matching a sink configured the same way) accepts
+deliveries with no `:secret`, unverified; a configured `:secret` is never
+weakened by it. The signature is judged before `x-ankusa-id`, so a request
+that is not a signed delivery is a `401` whatever else it lacks.
+
 Secrets are `whsec_` + base64, or any other string used as its own bytes;
 pass a list during a rotation. The check on its own is
 `Ankusa.SDK.Signature.verify/4`, returning `{:error,
 %Ankusa.SDK.InvalidSignatureError{code: ..., field: ...}}` (never retryable);
-the comparison is `:crypto.hash_equals/2`.
+`Ankusa.SDK.Webhook.receive_delivery/3` is the whole decision (signature, then
+headers) without Plug. The comparison is `:crypto.hash_equals/2`.
 
 The handler sees one value whichever transport delivered the hook:
 
