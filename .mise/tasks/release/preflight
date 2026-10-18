@@ -63,3 +63,24 @@ for p in "${pkgs[@]}"; do
 
   printf '  %-18s %s -> %s\n' "$p" "$v" "$tag"
 done
+
+# A core tag ships the ack path. The device-mapper drill is the one check that
+# catches a hook acked before its fsync, and CI's tmpfs drill cannot. It needs
+# a privileged Docker host: where there is none (exit 2, or no docker at all)
+# it stays the manual pre-release step docs/testing.md describes.
+for p in "${pkgs[@]}"; do
+  if [ "$p" = ankusa ]; then
+    echo "  crash drill on device-mapper (scripts/drills/flakey.sh)"
+    rc=0
+    if command -v docker >/dev/null 2>&1; then
+      scripts/drills/flakey.sh || rc=$?
+    else
+      rc=2
+    fi
+    case $rc in
+      0) ;;
+      2) echo "  SKIPPED: no privileged Docker host here; run scripts/drills/flakey.sh on one before tagging ankusa" >&2 ;;
+      *) fail "the crash drill on device-mapper failed (exit $rc): an acked hook is not safe" ;;
+    esac
+  fi
+done
