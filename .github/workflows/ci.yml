@@ -60,7 +60,9 @@ jobs:
       # calls a function core newly gained fails dialyzer against a stale PLT:
       # bump the `v` below when that happens (SEC-4: `Ankusa.Crypto.Envelope`;
       # SEC-8: `Ankusa.Verifier.max_tolerance_seconds/0`; SEC-9:
-      # `Ankusa.SecretProvider`, `Ankusa.SourceStore.Static.publish/2`).
+      # `Ankusa.SecretProvider`, `Ankusa.SourceStore.Static.publish/2`; SEC-12:
+      # `Ankusa.Verifier.Asymmetric`/`Token`/`ClientCert`, called by the image's
+      # loader).
       # The `v` is in the restore prefix too, so bumping it still misses.
       # A mix.lock change alone matches the prefix: the entry built from the
       # previous lockfile is restored, `mix deps.get --check-locked` fetches
@@ -73,9 +75,9 @@ jobs:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
-            mix-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -121,9 +123,9 @@ jobs:
           path: |
             packages/ankusa/deps
             packages/ankusa/_build
-          key: mix-v4-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
           restore-keys: |
-            mix-v4-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml') }}-
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -163,9 +165,9 @@ jobs:
           path: |
             examples/*/*/deps
             examples/*/*/_build
-          key: mix-v4-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-${{ hashFiles('examples/*/*/mix.lock') }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-${{ hashFiles('examples/*/*/mix.lock') }}
           restore-keys: |
-            mix-v4-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -242,9 +244,9 @@ jobs:
           path: |
             packages/ankusa/deps
             packages/ankusa/_build
-          key: mix-v4-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
           restore-keys: |
-            mix-v4-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-
       - if: steps.scope.outputs.run == 'true'
         name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
