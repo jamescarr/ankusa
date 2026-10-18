@@ -120,6 +120,26 @@ The always-on tests cover:
   address over a socket) and TLS verification against a real `https` listener
   with a private CA (untrusted, `cacertfile`, hostname mismatch,
   `allow_insecure_tls`, `verify_none` refused).
+- **Secrets at rest** (`crypto_test.exs`, `source_store_persistent_test.exs`,
+  `secrets_rewrap_task_test.exs`, `blob_store_sse_test.exs`): the
+  `Ankusa.Crypto.Envelope` value layout (a flipped bit in the IV, tag or
+  ciphertext, or a key id relabelled to another key's, is `:tampered`; every
+  encryption has its own IV), key parsing and rotation (`kek_previous` decrypts
+  and never encrypts; a failing or raising provider is an error value that does
+  not echo what it raised), and which fields of a source spec are encrypted
+  (exactly the ones `Ankusa.Admin.Redact` hides, a rotation list element by
+  element, identity and structure left readable). `no plaintext at rest`: the
+  stored row read raw, and every file under the data dir including the WAL,
+  hold none of a spec's secrets, and a restart decrypts; the same scan finds
+  them in a store with no KEK, so it is not vacuous. A row no key opens (no
+  KEK, a key it was not given, an altered ciphertext, a KEK provider that
+  fails) refuses the boot and names the source. `rewrap`: a rotation, a dry
+  run that writes nothing, 700 rows over three batches, then the old key
+  dropped and no longer opening the rows; `mix ankusa.secrets.rewrap` runs the
+  same runbook against a stopped node's data dir. `sse` on S3, GCS, Azure and
+  OCI is the header the adapter puts on the wire (`Req.Test` captures it; S3's
+  is in `SignedHeaders`), only on a `PUT`; a bad option is a boot error and
+  `put/4` raises rather than writing an unencrypted object.
 - **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with
   `503` once the batcher's queue fills while a commit is in flight, pluggable
   route resolvers (`Path` and `TenantPath`), and that the same body posted
@@ -305,7 +325,9 @@ The 24 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,
 `:not_found`, `list`+`delete`. `store/backup_s3_integration_test.exs` runs a
-store backup and restore through floci S3. `sink/sqs_integration_test.exs`
+store backup and restore through floci S3, and `sse header on put`: a segment,
+a backup and a claim `PUT`, recorded on their way to the emulator, all carry
+`x-amz-server-side-encryption`. `sink/sqs_integration_test.exs`
 delivers through `Sink.SQS` to floci's SQS and reads the queue back: the
 `Ankusa.Sink.Message` body, the message attributes and FIFO group, one stored
 message for a retried FIFO delivery and a second for a replay, a missing queue
@@ -458,6 +480,16 @@ Redis that is not there (or against a corrupted definition) fails instead of
 starting a node that would deny everything. The suite deletes only the keys under
 its own namespace (`ankusa:routes:test`) between tests — never `FLUSHDB`, which
 would wipe a Redis you happen to share with it.
+
+The Redis *source* store has its own suite
+(`test/ankusa/source_store/redis_test.exs`). Its secrets-at-rest cases: with
+`secrets.kek` the hash entry holds no plaintext secret while every node with
+the key reads it (and an update that omits the secret merges the decrypted
+copy); a node with no key for an entry refuses its first boot and the log names
+the entry; a `kek_provider` that fails refuses it too; `rewrap/1` moves
+plaintext and previous-key entries to the current key, writes nothing and moves
+no version when there is nothing to move, and a node with only the new key then
+reads everything.
 
 `test/ankusa/sink/redis_test.exs` (6 tests) covers `Ankusa.Sink.Redis` against
 the same server, subscribing with `Redix.PubSub` in the test process: an inline

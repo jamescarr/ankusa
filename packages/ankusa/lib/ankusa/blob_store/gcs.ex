@@ -26,6 +26,11 @@ defmodule Ankusa.BlobStore.GCS do
     * `:retries`        — default `2`: extra attempts after a transport error
                            or a `408`/`429`/`5xx`, each with a fresh token from
                            `:token_provider`. See `Ankusa.BlobStore.Retry`
+    * `:sse`            — `%{type: :kms, key_id: key_resource_name}`: every upload
+                           names the Cloud KMS key that encrypts the object
+                           (`x-goog-encryption-kms-key-name` and `kmsKeyName`).
+                           GCS encrypts everything at rest anyway; this picks
+                           the key. See `Ankusa.BlobStore.SSE`
 
   ## Local dev
 
@@ -41,14 +46,27 @@ defmodule Ankusa.BlobStore.GCS do
 
   @behaviour Ankusa.BlobStore
 
-  alias Ankusa.BlobStore.Retry
+  alias Ankusa.BlobStore.{Retry, SSE}
   alias Ankusa.HttpClient
 
   @impl true
   def put(instance, key, data, opts) do
-    url = media_url(opts, "o", [{"uploadType", "media"}, {"name", key}])
+    url =
+      media_url(
+        opts,
+        "o",
+        [{"uploadType", "media"}, {"name", key}] ++ SSE.query(opts, :gcs)
+      )
 
-    case request(instance, opts, :post, url, data, [], "application/octet-stream") do
+    case request(
+           instance,
+           opts,
+           :post,
+           url,
+           data,
+           SSE.headers(opts, :gcs),
+           "application/octet-stream"
+         ) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end

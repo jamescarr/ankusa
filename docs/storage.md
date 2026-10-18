@@ -236,6 +236,76 @@ is the hooks acked since the last backup.
   successful backup — the data a lost host would take with it — and
   `ankusa_backup_runs_total{result}` counts attempts.
 
+## Encryption at rest
+
+What rests where, and who encrypts it:
+
+| Data | Where | Encrypted by |
+| --- | --- | --- |
+| Hook bodies, delivery rows, the archive catalogue | this node's RocksDB files | **the volume** (EBS, LUKS, a CSI class with encryption): Ankusa does not encrypt bodies |
+| Stored source specs: verify secrets, sink credentials, header values | the `s:` rows of that store, in every backup of it; or Redis (`source_store.type: redis`) | **Ankusa**, with `secrets.kek` (below) |
+| Segments, backups, claim packs | the object store | **the object store**, asked to by `sse:` on every `put/4` (below) |
+
+The startup log states it in one line, so an operator reads what a node
+promises without reading config: `store files rely on volume encryption;
+secrets envelope-encrypted with key <id>` (or `secrets are stored in plaintext
+(no secrets.kek is configured)`; with `secrets.kek_provider` it names the
+provider, since the key is resolved when the source store starts). Body-level
+encryption is deliberately not offered: add it only if a compliance review
+demands it.
+
+**Secrets.** With a key-encryption key (`secrets.kek`, or a `kek_provider`) the
+secret-bearing fields of a source spec are encrypted with AES-256-GCM before
+`Ankusa.SourceStore.Persistent` writes the row (or `Ankusa.SourceStore.Redis`
+the hash entry), and decrypted as the row is loaded. Which fields is not a
+second list to maintain: it is the inverse of what the admin API hides
+(`Ankusa.Admin.Redact`) — header values, anything under a key that is not on
+its shown-key allowlist, a URL carrying credentials — so the type, topic,
+region and signature header of a stored source stay readable and diffable
+while `verify.secret` and a sink's password do not. A value is
+`<<"AENC", 1, key_id_len, key_id, iv::96, tag::128, ciphertext>>` (base64 in
+the JSON, behind `AENC:`), its key id authenticated with it
+([`Ankusa.Crypto.Envelope`](https://hexdocs.pm/ankusa/Ankusa.Crypto.Envelope.html)).
+
+- **A row no key opens refuses the boot** (`{:source_store_load_failed,
+  {:secrets, source_id, reason}}`, and the log names the source). It is never
+  skipped: a node that booted without it would `404` every hook for that
+  source. A Redis node has the same rule at first boot; on a later reload it
+  keeps its mirror and logs the entry.
+- **Rows written before there was a KEK** load as they are, and
+  `rewrap/1` encrypts them.
+- **Rotation.** Put the new key in `secrets.kek` and the old one in
+  `secrets.kek_previous` (keys that decrypt, never encrypt), roll the nodes,
+  move every row (`Ankusa.SourceStore.Persistent.rewrap/1` or
+  `Ankusa.SourceStore.Redis.rewrap/1` on a running node, or `mix
+  ankusa.secrets.rewrap` on a stopped node's data dir with `ANKUSA_KEK` and
+  `ANKUSA_KEK_PREVIOUS`), then drop the old key. A rewrap is synced in
+  batches: an interrupted one leaves every row readable under one key or the
+  other.
+- **Backups.** Backed-up stores carry the same ciphertext, so restoring needs
+  the same keys; keep them where the backup is not (a secrets manager, the
+  provider's KMS), not on the volume.
+- **Not covered.** Sources in the configuration file (`sources:`) are not
+  stored and are not touched; they hold `${VAR}` references. A KEK is in
+  memory in the node, as any key is.
+
+**Object stores.** `sse:` in the options of an object-store adapter is sent on
+every `PUT` it makes: `S3` as `x-amz-server-side-encryption: AES256 | aws:kms`
+(+ `…-aws-kms-key-id`; signed with the request), `GCS` as
+`x-goog-encryption-kms-key-name` (and the `kmsKeyName` upload parameter),
+`Azure` as `x-ms-encryption-scope`, `OCI` as `opc-sse-kms-key-id`. Because
+segments, backups and claim packs all reach the object store through that
+adapter's `put/4` with the options of the store they are configured on, one
+`sse:` per configured store covers them; a deployment that gives backups or
+claims their own store (`backup.store`, `claim_check.stores`) sets it on each.
+On GCS, Azure and OCI every object is encrypted at rest regardless, so
+`type: aes256` sends nothing and only `kms` (a customer-managed key) changes
+anything. A misspelled option, or `kms` without the `key_id` the provider
+needs, is a boot error, never an unencrypted object. The test is
+`sse header on put` in
+`test/ankusa/store/backup_s3_integration_test.exs`: a segment, a backup and a
+claim PUT recorded on their way to the emulator all carry the header.
+
 ## Scaling out
 
 One node is one local store. To scale, run **N independent all-role
@@ -321,6 +391,10 @@ safe to repeat. A worst-case call is three timeouts plus the waits. `put`
 hands the adapter's iodata to the HTTP client as is: a segment is not copied
 into one binary first. `LocalFS` does neither: a POSIX error is not
 transient.
+
+**The HTTP adapters take `sse:`** — server-side encryption on every `put/4`
+(`%{type: :aes256}`, or `%{type: :kms, key_id: key}`): see
+[Encryption at rest](#encryption-at-rest) for what each provider receives.
 
 ```elixir
 # S3 / MinIO / R2

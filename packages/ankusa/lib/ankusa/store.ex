@@ -212,6 +212,10 @@ defmodule Ankusa.Store do
 
       Logger.info("[ankusa] store at #{path}. #{durability(config)}")
 
+      Logger.info(
+        "[ankusa] store files rely on volume encryption; #{Ankusa.Crypto.Envelope.describe(config)}"
+      )
+
       # Handles are published, so the import and the archive reconciliation
       # can use `write/3` and `get/3`.
       case after_open(config, boot, path) do

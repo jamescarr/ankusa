@@ -52,8 +52,8 @@ defmodule Ankusa.SourceStore.RedisTest do
     |> build_config()
   end
 
-  defp start_node(opts \\ []) do
-    config = node_config(opts)
+  defp start_node(opts \\ [], config_opts \\ []) do
+    config = node_config(opts, config_opts)
     start_supervised!({Ankusa.Instance, config}, id: config.instance)
     config.instance
   end
@@ -320,6 +320,135 @@ defmodule Ankusa.SourceStore.RedisTest do
     assert {:ok, _} = SourceStore.put(a, "acme", "after", @log_spec, :create)
     eventually(fn -> match?({:ok, _}, SourceStore.fetch(b, "acme.after")) end)
   end
+
+  # ── secrets at rest ─────────────────────────────────────────────────────────
+
+  describe "secrets at rest" do
+    @kek_a Base.encode64(:binary.copy(<<1>>, 32))
+    @kek_b Base.encode64(:binary.copy(<<2>>, 32))
+
+    defp stored_entry(conn, source_id) do
+      assert {:ok, entry} = Redix.command(conn, ["HGET", @namespace <> ":sources", source_id])
+      entry
+    end
+
+    @tag :capture_log
+    test "Redis holds no plaintext secret, and every node with the key reads it", %{conn: conn} do
+      a = start_node([], secrets: [kek: "k1:" <> @kek_a])
+      b = start_node([], secrets: [kek: "k1:" <> @kek_a])
+
+      assert {:ok, stored} = SourceStore.put(a, "acme", "billing", @spec_map, :create)
+      assert stored.spec == @spec_map
+
+      entry = stored_entry(conn, "acme.billing")
+      refute entry =~ "s3cr3t"
+      assert entry =~ "AENC:"
+      # identity and structure stay readable
+      assert entry =~ "X-Sig"
+      assert entry =~ ~s("tenant":"acme")
+
+      eventually(fn -> match?({:ok, _}, SourceStore.get(b, "acme", "billing")) end)
+      assert {:ok, %{spec: @spec_map}} = SourceStore.get(b, "acme", "billing")
+
+      # An update that omits the secret merges Redis's decrypted copy, and the
+      # stored result is encrypted again.
+      edit = put_in(@spec_map, ["verify"], %{"type" => "hmac", "signature_header" => "X-New"})
+      assert {:ok, updated} = SourceStore.put(b, "acme", "billing", edit, :update)
+      assert updated.spec["verify"]["secret"] == "s3cr3t"
+      refute stored_entry(conn, "acme.billing") =~ "s3cr3t"
+
+      eventually(fn ->
+        match?(
+          {:ok, %{spec: %{"verify" => %{"signature_header" => "X-New"}}}},
+          SourceStore.get(a, "acme", "billing")
+        )
+      end)
+
+      assert {:ok, %{spec: %{"verify" => %{"secret" => "s3cr3t"}}}} =
+               SourceStore.get(a, "acme", "billing")
+    end
+
+    @tag :capture_log
+    test "a node that has no key for an entry refuses its first boot, naming it" do
+      a = start_node([], secrets: [kek: "k1:" <> @kek_a])
+      assert {:ok, _} = SourceStore.put(a, "acme", "billing", @spec_map, :create)
+
+      Process.flag(:trap_exit, true)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, _reason} = Ankusa.Instance.start_link(node_config([]))
+
+          assert {:error, _reason} =
+                   Ankusa.Instance.start_link(node_config([], secrets: [kek: "k2:" <> @kek_b]))
+        end)
+
+      assert log =~ "source acme.billing cannot be decrypted"
+      assert log =~ ~s({:unknown_key, "k1"})
+      refute log =~ "s3cr3t"
+    end
+
+    @tag :capture_log
+    test "a KEK that cannot be resolved refuses the boot" do
+      Process.flag(:trap_exit, true)
+
+      config = node_config([], secrets: [kek_provider: {__MODULE__, :failing_provider, []}])
+      assert {:error, _reason} = Ankusa.Instance.start_link(config)
+    end
+
+    @tag :capture_log
+    test "rewrap moves plaintext and previous-key entries to the current key", %{conn: conn} do
+      plain = start_node()
+      assert {:ok, _} = SourceStore.put(plain, "acme", "billing", @spec_map, :create)
+      assert {:ok, _} = SourceStore.put(plain, "acme", "open", @log_spec, :create)
+      assert stored_entry(conn, "acme.billing") =~ "s3cr3t"
+
+      # Without a KEK there is nothing to move rows to, and nothing is written.
+      assert {:error, {:secrets, _source_id, :no_kek}} = Redis.rewrap(plain)
+      assert stored_entry(conn, "acme.billing") =~ "s3cr3t"
+
+      # k1 arrives: the plaintext rows load, and rewrap encrypts the ones with
+      # something to hide.
+      k1 = start_node([], secrets: [kek: "k1:" <> @kek_a])
+      eventually(fn -> match?({:ok, _}, SourceStore.get(k1, "acme", "billing")) end)
+      assert Redis.rewrap(k1) == {:ok, %{rewrapped: 1, current: 1}}
+      refute stored_entry(conn, "acme.billing") =~ "s3cr3t"
+      assert Redis.rewrap(k1) == {:ok, %{rewrapped: 0, current: 2}}
+
+      # Rotation: k2 current with k1 previous reads k1's rows, and rewrap moves them.
+      k2 = start_node([], secrets: [kek: "k2:" <> @kek_b, kek_previous: ["k1:" <> @kek_a]])
+      eventually(fn -> match?({:ok, _}, SourceStore.get(k2, "acme", "billing")) end)
+      assert {:ok, %{spec: @spec_map}} = SourceStore.get(k2, "acme", "billing")
+      assert Redis.rewrap(k2) == {:ok, %{rewrapped: 1, current: 1}}
+      assert Redis.rewrap(k2) == {:ok, %{rewrapped: 0, current: 2}}
+
+      # k1 can be dropped: a node that has only k2 boots and reads everything.
+      k2_only = start_node([], secrets: [kek: "k2:" <> @kek_b])
+      assert {:ok, %{spec: @spec_map}} = SourceStore.get(k2_only, "acme", "billing")
+      assert {:ok, %{spec: @log_spec}} = SourceStore.get(k2_only, "acme", "open")
+    end
+
+    @tag :capture_log
+    test "a rewrap tells the other nodes the version moved", %{conn: conn} do
+      plain = start_node()
+      assert {:ok, _} = SourceStore.put(plain, "acme", "billing", @spec_map, :create)
+      {:ok, before} = Redix.command(conn, ["GET", @namespace <> ":version"])
+
+      keyed = start_node([], secrets: [kek: "k1:" <> @kek_a])
+      eventually(fn -> match?({:ok, _}, SourceStore.get(keyed, "acme", "billing")) end)
+      assert {:ok, %{rewrapped: 1}} = Redis.rewrap(keyed)
+
+      assert {:ok, after_rewrap} = Redix.command(conn, ["GET", @namespace <> ":version"])
+      assert String.to_integer(after_rewrap) > String.to_integer(before)
+
+      # a rewrap that wrote nothing leaves the version alone
+      assert {:ok, %{rewrapped: 0}} = Redis.rewrap(keyed)
+      assert {:ok, ^after_rewrap} = Redix.command(conn, ["GET", @namespace <> ":version"])
+    end
+  end
+
+  # Called through `secrets.kek_provider`.
+  def failing_provider, do: {:error, :kms_down}
 
   # A TCP forwarder in front of the compose Redis, as in the route store's
   # suite: killing it makes Redis unreachable for the one node pointed at it,

@@ -480,6 +480,286 @@ defmodule Ankusa.SourceStorePersistentTest do
     assert {:ok, %{spec: ^hooked}} = SourceStore.get(inst, "acme", "hooked")
   end
 
+  # ── secrets at rest ─────────────────────────────────────────────────────────
+
+  describe "secrets at rest" do
+    @kek_a Base.encode64(:binary.copy(<<1>>, 32))
+    @kek_b Base.encode64(:binary.copy(<<2>>, 32))
+
+    @secret_spec %{
+      "verify" => %{"type" => "hmac", "secret" => "whsec-canary", "signature_header" => "X-Sig"},
+      "sinks" => [
+        %{
+          "type" => "http",
+          "url" => "https://relay:url-pass-canary@sink.example/hook",
+          "headers" => %{"authorization" => "Bearer header-canary"}
+        }
+      ]
+    }
+
+    @canaries ~w(whsec-canary url-pass-canary header-canary)
+
+    test "no plaintext at rest" do
+      {config, pid} = start_store(secrets: [kek: "k1:" <> @kek_a])
+      instance = config.instance
+
+      assert {:ok, stored} = SourceStore.put(instance, "acme", "billing", @secret_spec, :create)
+
+      # the row itself, read raw through the store
+      raw = raw_row(instance, "acme", "billing")
+      for canary <- @canaries, do: refute(raw =~ canary, "#{canary} is in the stored row")
+
+      # identity and structure stay readable
+      assert raw =~ ~s("type":"hmac")
+      assert raw =~ "X-Sig"
+
+      # the callers still see the plain spec: ETS, the facade, the admin API's merge
+      assert stored.spec == @secret_spec
+      assert {:ok, %{spec: @secret_spec}} = SourceStore.get(instance, "acme", "billing")
+
+      # and no file the node wrote holds one either (the WAL has the synced write)
+      for canary <- @canaries,
+          do: refute(files_contain?(config.data_dir, canary), "#{canary} is in a store file")
+
+      # a restart decrypts
+      restart_store(config, pid)
+      assert {:ok, %{spec: @secret_spec}} = SourceStore.get(instance, "acme", "billing")
+      assert {:ok, %Source{id: "acme.billing"}} = SourceStore.fetch(instance, "acme.billing")
+    end
+
+    test "without a KEK the row is plain JSON, as it always was (and the scan can tell)" do
+      {config, _pid} = start_store()
+      assert {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @secret_spec, :create)
+
+      assert raw_row(config.instance, "acme", "billing") =~ "whsec-canary"
+      assert files_contain?(config.data_dir, "whsec-canary")
+    end
+
+    test "an update that omits the verify secret keeps the stored one, across a restart" do
+      {config, pid} = start_store(secrets: [kek: @kek_a])
+      instance = config.instance
+      assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @secret_spec, :create)
+
+      edit = %{
+        "verify" => %{"type" => "hmac", "signature_header" => "X-New"},
+        "sinks" => @secret_spec["sinks"]
+      }
+
+      assert {:ok, updated} = SourceStore.put(instance, "acme", "billing", edit, :update)
+      assert updated.spec["verify"]["secret"] == "whsec-canary"
+
+      refute raw_row(instance, "acme", "billing") =~ "whsec-canary"
+
+      restart_store(config, pid)
+
+      assert {:ok,
+              %{spec: %{"verify" => %{"secret" => "whsec-canary", "signature_header" => "X-New"}}}} =
+               SourceStore.get(instance, "acme", "billing")
+    end
+
+    test "rows written before a KEK existed load, and rewrap encrypts them" do
+      {plain, pid} = start_store()
+      instance = plain.instance
+      assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @secret_spec, :create)
+      assert {:ok, _} = SourceStore.put(instance, "acme", "plain", @log_spec, :create)
+
+      keyed = config_like(plain, kek: "k1:" <> @kek_a)
+      restart_store(keyed, pid)
+      assert {:ok, %{spec: @secret_spec}} = SourceStore.get(instance, "acme", "billing")
+      assert raw_row(instance, "acme", "billing") =~ "whsec-canary"
+
+      assert Persistent.rewrap(instance) == {:ok, %{rewrapped: 1, current: 1}}
+      refute raw_row(instance, "acme", "billing") =~ "whsec-canary"
+      assert {:ok, %{spec: @secret_spec}} = SourceStore.get(instance, "acme", "billing")
+
+      # nothing left to do, and the row with nothing to hide was never touched
+      assert Persistent.rewrap(instance) == {:ok, %{rewrapped: 0, current: 2}}
+      assert raw_row(instance, "acme", "plain") == JSON.encode!(@log_spec)
+    end
+
+    @tag :capture_log
+    test "boot refuses an encrypted row when no KEK is configured" do
+      {config, pid} = start_store(secrets: [kek: "k1:" <> @kek_a])
+      assert {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @secret_spec, :create)
+      assert {:ok, _} = SourceStore.put(config.instance, "acme", "plain", @log_spec, :create)
+
+      assert {:error, {:source_store_load_failed, {:secrets, "acme.billing", :no_kek}}} =
+               boot_refused(config_like(config, []), pid)
+    end
+
+    @tag :capture_log
+    test "boot refuses a row encrypted under a key it was not given" do
+      {config, pid} = start_store(secrets: [kek: "k1:" <> @kek_a])
+      assert {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @secret_spec, :create)
+
+      assert {:error,
+              {:source_store_load_failed, {:secrets, "acme.billing", {:unknown_key, "k1"}}}} =
+               boot_refused(config_like(config, kek: "k2:" <> @kek_b), pid)
+    end
+
+    @tag :capture_log
+    test "boot refuses a row whose ciphertext was altered" do
+      {config, pid} = start_store(secrets: [kek: "k1:" <> @kek_a])
+      instance = config.instance
+      assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @secret_spec, :create)
+
+      altered =
+        instance
+        |> raw_row("acme", "billing")
+        |> JSON.decode!()
+        |> update_in(["verify", "secret"], fn "AENC:" <> encoded ->
+          bytes = Base.decode64!(encoded)
+          size = byte_size(bytes) - 1
+          <<head::binary-size(^size), last>> = bytes
+          "AENC:" <> Base.encode64(<<head::binary, Bitwise.bxor(last, 1)>>)
+        end)
+
+      :ok =
+        Store.write(
+          instance,
+          [{:put, :default, Keys.source("acme", "billing"), JSON.encode!(altered)}],
+          sync: true
+        )
+
+      assert {:error, {:source_store_load_failed, {:secrets, "acme.billing", :tampered}}} =
+               boot_refused(config, pid)
+    end
+
+    @tag :capture_log
+    test "a KEK provider that fails refuses the boot instead of storing plaintext" do
+      config =
+        test_config(
+          source_store: {Persistent, [decoder: &decoder/2]},
+          secrets: [kek_provider: {__MODULE__, :provider, []}]
+        )
+
+      put_config(config)
+      start_supervised!({Store, instance: config.instance})
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {:source_store_load_failed, {:secrets, {:kek_provider, :kms_down}}}} =
+               Persistent.start_link(instance: config.instance)
+    end
+
+    test "rewrap moves rows to the current key, and the old key can then be dropped" do
+      {config, pid} = start_store(secrets: [kek: "k1:" <> @kek_a])
+      instance = config.instance
+      assert {:ok, _} = SourceStore.put(instance, "acme", "billing", @secret_spec, :create)
+      assert {:ok, _} = SourceStore.put(instance, "acme", "plain", @log_spec, :create)
+
+      # roll out k2 with k1 still readable: every row loads
+      rotated = config_like(config, kek: "k2:" <> @kek_b, kek_previous: ["k1:" <> @kek_a])
+      pid = restart_store(rotated, pid)
+      assert {:ok, %{spec: @secret_spec}} = SourceStore.get(instance, "acme", "billing")
+      assert raw_row(instance, "acme", "billing") =~ "AENC:"
+
+      # a dry run counts and writes nothing
+      before = raw_row(instance, "acme", "billing")
+      {:ok, ring} = Ankusa.Crypto.Envelope.keyring(rotated.secrets)
+
+      assert Persistent.rewrap_rows(instance, ring, dry_run: true) ==
+               {:ok, %{rewrapped: 1, current: 1}}
+
+      assert raw_row(instance, "acme", "billing") == before
+
+      assert Persistent.rewrap(instance) == {:ok, %{rewrapped: 1, current: 1}}
+      refute raw_row(instance, "acme", "billing") == before
+
+      # k1 can go: the same rows load under k2 alone
+      pid = restart_store(config_like(config, kek: "k2:" <> @kek_b), pid)
+      assert {:ok, %{spec: @secret_spec}} = SourceStore.get(instance, "acme", "billing")
+
+      # and k1 alone no longer opens them
+      assert {:error,
+              {:source_store_load_failed, {:secrets, "acme.billing", {:unknown_key, "k2"}}}} =
+               boot_refused(config_like(config, kek: "k1:" <> @kek_a), pid)
+    end
+
+    test "rewrap_rows works in batches, over any number of rows" do
+      config = test_config()
+      put_config(config)
+      instance = config.instance
+      start_supervised!({Store, instance: instance})
+
+      count = 700
+
+      ops =
+        for n <- 1..count do
+          spec = %{
+            "verify" => %{"type" => "hmac", "secret" => "bulk-canary-#{n}"},
+            "sinks" => [%{"type" => "log"}]
+          }
+
+          {:put, :default, Keys.source("bulk", "s#{n}"), JSON.encode!(spec)}
+        end
+
+      :ok = Store.write(instance, ops, sync: true)
+
+      {:ok, ring} =
+        Ankusa.Crypto.Envelope.keyring(%{kek: @kek_a, kek_previous: [], kek_provider: nil})
+
+      assert Persistent.rewrap_rows(instance, ring) == {:ok, %{rewrapped: count, current: 0}}
+      assert Persistent.rewrap_rows(instance, ring) == {:ok, %{rewrapped: 0, current: count}}
+
+      for n <- [1, 256, 257, 512, 700] do
+        refute raw_row(instance, "bulk", "s#{n}") =~ "bulk-canary"
+      end
+    end
+
+    test "rewrap_rows refuses without a KEK, and on a row it cannot read, writing nothing" do
+      config = test_config()
+      put_config(config)
+      instance = config.instance
+      start_supervised!({Store, instance: instance})
+
+      :ok =
+        Store.write(
+          instance,
+          [{:put, :default, Keys.source("acme", "billing"), JSON.encode!(@secret_spec)}],
+          sync: true
+        )
+
+      {:ok, keyless} =
+        Ankusa.Crypto.Envelope.keyring(%{kek: nil, kek_previous: [], kek_provider: nil})
+
+      assert Persistent.rewrap_rows(instance, keyless) ==
+               {:error, {:secrets, "acme.billing", :no_kek}}
+
+      assert raw_row(instance, "acme", "billing") =~ "whsec-canary"
+    end
+
+    test "the startup log says how secrets rest" do
+      config =
+        test_config(
+          source_store: {Persistent, [decoder: &decoder/2]},
+          secrets: [kek: "k1:" <> @kek_a]
+        )
+
+      put_config(config)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_supervised!({Store, instance: config.instance})
+        end)
+
+      assert log =~
+               "store files rely on volume encryption; secrets envelope-encrypted with key k1"
+
+      plain = test_config(source_store: {Persistent, [decoder: &decoder/2]})
+      put_config(plain)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_supervised!({Store, instance: plain.instance}, id: :plain)
+        end)
+
+      assert log =~ "store files rely on volume encryption; secrets are stored in plaintext"
+    end
+  end
+
+  # Called through `secrets.kek_provider`.
+  def provider, do: {:error, :kms_down}
+
   # ── helpers ─────────────────────────────────────────────────────────────────
 
   defp start_store(overrides \\ []) do
@@ -498,6 +778,43 @@ defmodule Ankusa.SourceStorePersistentTest do
     {:ok, pid} = Persistent.start_link(instance: config.instance)
     on_exit(fn -> stop(pid) end)
     {config, pid}
+  end
+
+  defp raw_row(instance, tenant, name) do
+    assert {:ok, raw} = Store.get(instance, :default, Keys.source(tenant, name))
+    raw
+  end
+
+  # Every file under `dir` (the RocksDB files and their WAL included), not only
+  # what a `get` returns.
+  defp files_contain?(dir, needle) do
+    dir
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.any?(&String.contains?(File.read!(&1), needle))
+  end
+
+  # The same node (instance, data dir, decoder) with other `secrets`.
+  defp config_like(config, secrets) do
+    Ankusa.Config.new(
+      instance: config.instance,
+      data_dir: config.data_dir,
+      port: 0,
+      source_store: {Persistent, [decoder: &decoder/2]},
+      secrets: secrets
+    )
+  end
+
+  # Stop the node's source store and store, start the store again under
+  # `config`, and return what starting the source store answers.
+  defp boot_refused(config, pid) do
+    stop(pid)
+    stop_supervised!({Store, config.instance})
+    put_config(config)
+    start_supervised!({Store, instance: config.instance})
+    Process.flag(:trap_exit, true)
+    Persistent.start_link(instance: config.instance)
   end
 
   # A full node restart as far as sources go: the source store and the RocksDB

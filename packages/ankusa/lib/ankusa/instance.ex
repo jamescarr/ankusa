@@ -83,6 +83,7 @@ defmodule Ankusa.Instance do
     Ankusa.Edge.Quarantine.validate_config!(config)
     Ankusa.Dispatch.Pipeline.validate_config!(config)
     Ankusa.Store.Backup.validate_config!(config)
+    Ankusa.BlobStore.validate_config!(config)
     Ankusa.HttpClient.Egress.validate_config!(config)
     opts = [instance: config.instance]
 

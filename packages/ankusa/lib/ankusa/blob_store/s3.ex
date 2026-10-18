@@ -32,6 +32,10 @@ defmodule Ankusa.BlobStore.S3 do
     * `:retries`           — default `2`: extra attempts after a transport
                               error or a `408`/`429`/`5xx`, each re-signed.
                               See `Ankusa.BlobStore.Retry`
+    * `:sse`               — `%{type: :aes256}` or `%{type: :kms, key_id: arn}`:
+                              server-side encryption, sent (and signed) as
+                              `x-amz-server-side-encryption` on every `put/4`.
+                              See `Ankusa.BlobStore.SSE`
 
   Addressing is always path-style (`{endpoint}/{bucket}/{key}`) — the one
   scheme every target (AWS, MinIO, R2, floci) accepts unambiguously.
@@ -62,12 +66,12 @@ defmodule Ankusa.BlobStore.S3 do
   # OTP stdlib apps that aren't themselves Mix dependencies.
   @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
 
-  alias Ankusa.BlobStore.Retry
+  alias Ankusa.BlobStore.{Retry, SSE}
   alias Ankusa.HttpClient
 
   @impl true
   def put(instance, key, data, opts) do
-    case request(instance, opts, :put, key, data, []) do
+    case request(instance, opts, :put, key, data, SSE.headers(opts, :s3)) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end

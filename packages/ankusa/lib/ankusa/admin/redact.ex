@@ -59,10 +59,17 @@ defmodule Ankusa.Admin.Redact do
   @doc "A redacted, JSON-encodable view of the whole config."
   @spec config(Ankusa.Config.t()) :: map()
   def config(%Ankusa.Config{} = config) do
-    config
-    |> Map.from_struct()
-    |> redact_auth()
+    fields =
+      config
+      |> Map.from_struct()
+      |> redact_auth()
+
+    # `secrets` holds the key-encryption keys: closed mode shows `kek` and
+    # `kek_previous` as `[REDACTED]` and a provider callback as `Mod.fun/arity`.
+    fields
+    |> Map.delete(:secrets)
     |> open_map()
+    |> Map.put("secrets", closed("secrets", fields.secrets))
   end
 
   # The control planes' `auth` blocks (`Ankusa.Admin.Auth`): a token entry keeps
@@ -119,6 +126,71 @@ defmodule Ankusa.Admin.Redact do
       _ -> entry
     end
   end
+
+  @doc """
+  Walk a stored source spec (string keys, plain JSON values) and hand every
+  string the closed-mode rules would hide to `fun`, threading an accumulator.
+  Everything else comes back as it was.
+
+  This is the inverse of the allowlist above, and it is what decides which
+  fields of a spec are encrypted at rest (`Ankusa.Crypto.Envelope.seal/2`):
+  header values, every string under a key that is not on the shown-key
+  allowlist (`secret` included, in a list too), and a `url`/`endpoint`/
+  `resource` that carries credentials. A new adapter option is hidden, and so
+  encrypted, until its key is added to `@shown_keys`.
+  """
+  @spec reduce_hidden(map(), acc, (String.t(), acc -> {String.t(), acc})) :: {map(), acc}
+        when acc: term()
+  def reduce_hidden(spec, acc, fun) when is_map(spec) and is_function(fun, 2),
+    do: hide_map(spec, acc, fun)
+
+  @doc "`reduce_hidden/3` without an accumulator: replace every hidden string by `fun.(string)`."
+  @spec map_hidden(map(), (String.t() -> String.t())) :: map()
+  def map_hidden(spec, fun) when is_map(spec) and is_function(fun, 1) do
+    {mapped, :ok} = reduce_hidden(spec, :ok, fn string, :ok -> {fun.(string), :ok} end)
+    mapped
+  end
+
+  defp hide_map(map, acc, fun) do
+    {pairs, acc} =
+      Enum.map_reduce(map, acc, fn {key, value}, acc ->
+        {value, acc} = hide_entry(key_string(key), value, acc, fun)
+        {{key, value}, acc}
+      end)
+
+    {Map.new(pairs), acc}
+  end
+
+  # Header names stay, so a spec still says which headers a sink sends.
+  defp hide_entry("headers", headers, acc, fun) when is_map(headers) do
+    {pairs, acc} =
+      Enum.map_reduce(headers, acc, fn
+        {name, value}, acc when is_binary(value) ->
+          {value, acc} = fun.(value, acc)
+          {{name, value}, acc}
+
+        pair, acc ->
+          {pair, acc}
+      end)
+
+    {Map.new(pairs), acc}
+  end
+
+  defp hide_entry(key, value, acc, fun) when is_binary(value) do
+    cond do
+      key in @url_keys -> if redact_url(value) == value, do: {value, acc}, else: fun.(value, acc)
+      key in @shown_keys -> {value, acc}
+      true -> fun.(value, acc)
+    end
+  end
+
+  defp hide_entry(_key, value, acc, fun) when is_map(value), do: hide_map(value, acc, fun)
+
+  defp hide_entry(key, list, acc, fun) when is_list(list) do
+    Enum.map_reduce(list, acc, fn item, acc -> hide_entry(key, item, acc, fun) end)
+  end
+
+  defp hide_entry(_key, value, acc, _fun), do: {value, acc}
 
   defp key_string(key) when is_binary(key) or is_atom(key), do: to_string(key)
   defp key_string(key), do: inspect(key)

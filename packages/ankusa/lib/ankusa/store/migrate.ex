@@ -468,8 +468,12 @@ defmodule Ankusa.Store.Migrate do
   defp import_sources(ctx, path) do
     case read_json(path) do
       {:ok, %{"version" => 1, "sources" => entries}} when is_list(entries) ->
-        ops = Enum.flat_map(entries, &source_ops/1)
-        with :ok <- write(ctx, ops, :sync), do: {:ok, length(ops), []}
+        # Imported specs rest like any other: encrypted when a KEK is configured.
+        with {:ok, keyring} <- source_keyring(ctx),
+             ops = Enum.flat_map(entries, &source_ops(&1, keyring)),
+             :ok <- write(ctx, ops, :sync) do
+          {:ok, length(ops), []}
+        end
 
       {:error, {:legacy_read_failed, _, _}} = error ->
         error
@@ -502,12 +506,20 @@ defmodule Ankusa.Store.Migrate do
     end
   end
 
-  defp source_ops(%{"tenant" => tenant, "name" => name, "spec" => spec})
-       when is_binary(tenant) and is_binary(name) and is_map(spec) do
-    [{:put, :default, Keys.source(tenant, name), JSON.encode!(spec)}]
+  defp source_keyring(ctx) do
+    case Ankusa.Crypto.Envelope.keyring(ctx.config.secrets) do
+      {:ok, keyring} -> {:ok, keyring}
+      {:error, reason} -> {:error, {:import_write_failed, {:secrets, reason}}}
+    end
   end
 
-  defp source_ops(entry) do
+  defp source_ops(%{"tenant" => tenant, "name" => name, "spec" => spec}, keyring)
+       when is_binary(tenant) and is_binary(name) and is_map(spec) do
+    sealed = Ankusa.Crypto.Envelope.seal(keyring, spec)
+    [{:put, :default, Keys.source(tenant, name), JSON.encode!(sealed)}]
+  end
+
+  defp source_ops(entry, _keyring) do
     Logger.warning("[ankusa] skipping malformed 0.3 source entry: #{inspect(entry)}")
     []
   end
