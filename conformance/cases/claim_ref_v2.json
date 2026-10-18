@@ -1,0 +1,433 @@
+{
+  "cases": [
+    {
+      "id": "claim_ref.v2.ok",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "ok": {
+          "tenant_id": "acme",
+          "claim_id": "01M39VMD8RA3C5HR4RBV67Y002",
+          "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002?exp=1790345000&sig=MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.ok.tenant_charset_and_url_alphabet",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:Acme_co-1:01M39VMD8RA3C5HR4RBV67Y002:1:jmB3wXSGX1X3yt-Jd3glZkze5Sdf4rgLRiK-Zi65LFI"
+      },
+      "expect": {
+        "ok": {
+          "tenant_id": "Acme_co-1",
+          "claim_id": "01M39VMD8RA3C5HR4RBV67Y002",
+          "path": "/v1/claims/Acme_co-1/01M39VMD8RA3C5HR4RBV67Y002?exp=1&sig=jmB3wXSGX1X3yt-Jd3glZkze5Sdf4rgLRiK-Zi65LFI"
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.ok.exp_12_digits",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:999999999999:VAZL4BgO-UzTGIqZU5-Xja93lpmSWO0j3RppRDa1vMY"
+      },
+      "expect": {
+        "ok": {
+          "tenant_id": "acme",
+          "claim_id": "01M39VMD8RA3C5HR4RBV67Y002",
+          "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002?exp=999999999999&sig=VAZL4BgO-UzTGIqZU5-Xja93lpmSWO0j3RppRDa1vMY"
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.no_exp_no_sig",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.no_sig",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.extra_segment",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac:extra"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.sig_42",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1A"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.sig_44",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1AcA"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.sig_padded",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac="
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.sig_standard_base64",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1:jmB3wXSGX1X3yt+Jd3glZkze5Sdf4rgLRiK+Zi65LFI"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.exp_zero",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:0:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.exp_leading_zero",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:01790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.exp_13_digits",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1000000000000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.exp_negative",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:-1:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.exp_not_digits",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:soon:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.lowercase_ulid",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01m39vmd8ra3c5hr4rbv67y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.tenant_dot",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:bad.tenant:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.trailing_newline",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac\n"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "claim_ref.v2.reject.v3",
+      "feature": "claim_ref.v2",
+      "operation": "parse_claim_ref",
+      "input": {
+        "ref": "urn:ankusa:claim:v3:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidClaimRefError",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "id": "redeem.v2.ok",
+      "feature": "claim_check.redeem.signed",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 200,
+          "headers": {
+            "content-type": "application/octet-stream"
+          },
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "ok": {
+          "body": {
+            "text": "hello claim check"
+          }
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002?exp=1790345000&sig=MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+          }
+        ]
+      }
+    },
+    {
+      "id": "redeem.v2.error.expired",
+      "feature": "claim_check.redeem.signed",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 410,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "error": "ref_expired"
+            }
+          }
+        },
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimRejectedError",
+          "retryable": false,
+          "status": 410,
+          "body": {
+            "error": "ref_expired"
+          }
+        }
+      }
+    },
+    {
+      "id": "redeem.v2.error.bad_signature",
+      "feature": "claim_check.redeem.signed",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 400,
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "json": {
+              "error": "bad_signature"
+            }
+          }
+        },
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimRejectedError",
+          "retryable": false,
+          "status": 400,
+          "body": {
+            "error": "bad_signature"
+          }
+        }
+      }
+    },
+    {
+      "id": "redeem.v2.error.overloaded",
+      "feature": "claim_check.redeem.signed",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 503,
+          "headers": {
+            "content-type": "application/json",
+            "retry-after": "2"
+          },
+          "body": {
+            "json": {
+              "error": "overloaded"
+            }
+          }
+        },
+        "ref": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "id": "message.decode.claim_v2",
+      "feature": "claim_ref.v2",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"acme\",\"received_at\":1720000000000,\"content_type\":\"application/json\",\"size\":3145728,\"dedupe_key\":null,\"replay_id\":null,\"headers\":{},\"claim\":\"urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac\",\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}"
+      },
+      "expect": {
+        "ok": {
+          "v": 1,
+          "id": "01a0",
+          "source_id": "demo",
+          "tenant_id": "acme",
+          "received_at": 1720000000000,
+          "content_type": "application/json",
+          "size": 3145728,
+          "body_base64": null,
+          "claim": "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac",
+          "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null,
+          "headers": {}
+        }
+      }
+    },
+    {
+      "id": "message.reject.claim_v2_tenant_mismatch",
+      "feature": "claim_ref.v2",
+      "operation": "decode_message",
+      "input": {
+        "message": "{\"v\":1,\"id\":\"01a0\",\"source_id\":\"demo\",\"tenant_id\":\"globex\",\"received_at\":1720000000000,\"size\":3145728,\"claim\":\"urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac\",\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}"
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidMessageError",
+          "retryable": false,
+          "code": "tenant_mismatch",
+          "field": null
+        }
+      }
+    }
+  ]
+}

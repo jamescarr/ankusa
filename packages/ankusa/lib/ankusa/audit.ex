@@ -49,21 +49,37 @@ defmodule Ankusa.Audit do
       a *pending* row (`<<?p, seq::64>>`, synced) that says what is about to
       happen; the change is applied; `finish/3` then moves it into the trail
       with the outcome, in one batch. A crash in between leaves the pending row,
-      and the next boot (or the caller dying, while this node runs) moves it
-      into the trail with `result: "interrupted"`: *the change may or may not
-      have been applied*; `after_hash` is the hash of what was about to be
-      written, so an operator can compare it to the subject's present state.
-      The trail never loses a change that was applied; it can show one that was
-      not (`"interrupted"`).
+      and the next boot (or the caller dying, while this node runs) settles it
+      as `result: "interrupted"`: *the change may or may not have been
+      applied*; `after_hash` is the hash of what was about to be written. For a
+      source or route, `Ankusa.Lifecycle.reconcile/2` does better than that: it
+      reads the subject's present state and compares its hash to the row's
+      `after_hash` (the change was applied: `"ok"`) and `before_hash` (it was
+      not: `"failed"`); a state that is neither (someone else changed it
+      meanwhile) stays `"interrupted"` and is flagged for a state-refresh
+      event. A boot has to wait for the subject's store to load, so such rows
+      are settled by a tick (every second, for a minute, then as
+      `"interrupted"`). The trail never loses a change that was applied; it can
+      show one that was not only as `"interrupted"`.
 
   A change whose audit row cannot be written is not made: the caller gets
   `{:error, :store_unavailable}`.
 
+  ## The lifecycle outbox
+
+  When lifecycle events are on (`Ankusa.Lifecycle`), the row of a source or
+  route change that took effect is flagged `publish: true`, and the redacted
+  entity its event carries is written beside it at `<<?o, seq::64>>` in the
+  same batch. The entity is not in the row: a row never holds a spec, and even
+  redacted an entity is one. `Ankusa.Lifecycle.Publisher` reads the flagged
+  rows in `seq` order with `page/3` and keeps its place in `m:lifecycle_cursor`.
+
   ## Retention
 
-  `audit.retention_days` (default 365). An hourly sweep deletes rows older than
-  that, oldest first, in bounded batches, and emits `[:ankusa, :audit, :pruned]`.
-  Every committed row emits `[:ankusa, :audit]`.
+  `audit.retention_days` (default 365). An hourly sweep deletes rows (and the
+  lifecycle entities beside them) older than that, oldest first, in bounded
+  batches, and emits `[:ankusa, :audit, :pruned]`. Every committed row emits
+  `[:ankusa, :audit]`.
   """
 
   use GenServer
@@ -71,6 +87,8 @@ defmodule Ankusa.Audit do
   require Logger
 
   alias Ankusa.Audit.Context
+  alias Ankusa.Lifecycle
+  alias Ankusa.Lifecycle.Publisher
   alias Ankusa.Store
   alias Ankusa.Store.Keys
   alias Ankusa.Telemetry
@@ -92,7 +110,23 @@ defmodule Ankusa.Audit do
   @default_limit 100
   @max_limit 1_000
 
-  @updatable [:result, :before_hash, :after_hash, :revision, :detail, :tenant, :resource]
+  @updatable [
+    :result,
+    :before_hash,
+    :after_hash,
+    :revision,
+    :detail,
+    :tenant,
+    :resource,
+    :entity,
+    :publish,
+    :event
+  ]
+
+  # How often, and for how long after boot, a pending row of a source or route
+  # is reconciled against the subject's store, which starts after this process.
+  @reconcile_tick_ms 1_000
+  @reconcile_ms 60_000
 
   @typedoc "What a caller says about its change. `action` is required."
   @type attrs :: %{
@@ -103,7 +137,8 @@ defmodule Ankusa.Audit do
           optional(:after_hash) => String.t() | nil,
           optional(:revision) => pos_integer() | nil,
           optional(:detail) => map() | nil,
-          optional(:result) => String.t()
+          optional(:result) => String.t(),
+          optional(:entity) => map() | nil
         }
 
   @type row :: %{required(atom()) => term()}
@@ -280,6 +315,60 @@ defmodule Ankusa.Audit do
     end
   end
 
+  @doc """
+  Rows after `after_seq`, oldest first: at most `max_rows` of them, as
+  `{seq, {:ok, row} | {:error, reason}}` (a row that cannot be decoded is
+  reported, not skipped, so the reader decides). The lifecycle outbox
+  (`Ankusa.Lifecycle.Publisher`) and its replay read the trail this way: `seq`
+  is commit order, so a reader that keeps the last one it handled cannot miss
+  a row.
+  """
+  @spec page(atom(), non_neg_integer(), pos_integer()) ::
+          {:ok, [{pos_integer(), {:ok, row()} | {:error, term()}}]} | {:error, term()}
+  def page(instance, after_seq, max_rows) when is_integer(after_seq) and after_seq >= 0 do
+    %{hi: hi} = Keys.family(:audit)
+
+    result =
+      Store.fold(
+        instance,
+        :audit,
+        {<<?a, after_seq + 1::64>>, hi},
+        {[], 0},
+        fn key, value, {rows, count} ->
+          {seq, _at} = Keys.decode_audit(key)
+          acc = {[{seq, decode_row(value)} | rows], count + 1}
+          if count + 1 >= max_rows, do: {:halt, acc}, else: {:cont, acc}
+        end
+      )
+
+    with {:ok, {rows, _count}} <- result, do: {:ok, Enum.reverse(rows)}
+  end
+
+  @doc "The last `seq` the trail handed out (`0` for an empty trail)."
+  @spec last_seq(atom()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def last_seq(instance), do: load_seq(instance)
+
+  @doc """
+  The redacted entity of the row `seq` (a row flagged `publish: true`), or
+  `:not_found` when it was pruned.
+  """
+  @spec entity(atom(), pos_integer()) :: {:ok, map()} | :not_found | {:error, term()}
+  def entity(instance, seq) when is_integer(seq) do
+    case Store.get(instance, :audit, Keys.lifecycle_entity(seq)) do
+      {:ok, json} ->
+        case JSON.decode(json) do
+          {:ok, %{} = entity} -> {:ok, entity}
+          _other -> {:error, :undecodable}
+        end
+
+      :not_found ->
+        :not_found
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp scan_row(key, value, acc, filters) do
     {seq, _at} = Keys.decode_audit(key)
     acc = %{acc | examined: acc.examined + 1}
@@ -399,16 +488,24 @@ defmodule Ankusa.Audit do
       :ets.new(table(instance), [:named_table, :protected, read_concurrency: true])
       true = :ets.insert(table(instance), {:key, key})
 
+      # A source or a route is settled once its store has loaded (see
+      # `handle_info(:reconcile, _)`); everything else is settled now.
+      {deferred, now} =
+        Enum.split_with(leftovers, fn {_seq, row} -> Lifecycle.reconcilable?(row) end)
+
       state = %{
         instance: instance,
         next_seq: last_seq + 1,
         pending: %{},
-        prune_interval: prune_interval
+        prune_interval: prune_interval,
+        leftovers: deferred,
+        reconcile_until: System.monotonic_time(:millisecond) + @reconcile_ms
       }
 
-      case resolve_leftovers(state, leftovers) do
+      case resolve_leftovers(state, now) do
         {:ok, state} ->
           Process.send_after(self(), :prune, prune_interval)
+          if deferred != [], do: Process.send_after(self(), :reconcile, @reconcile_tick_ms)
           {:ok, state}
 
         {:error, reason} ->
@@ -435,12 +532,15 @@ defmodule Ankusa.Audit do
   @impl true
   def handle_call({:commit, context, attrs, ops}, _from, state) do
     seq = state.next_seq
-    row = row(context, attrs, seq)
-    batch = ops ++ [{:put, :audit, Keys.audit(seq, row.at), encode(row)}, seq_op(seq)]
+    row = context |> row(attrs, seq) |> then(&%{&1 | publish: is_map(&1.entity)})
+    {stored, entity_ops} = split_entity(row)
+
+    batch =
+      ops ++ [{:put, :audit, Keys.audit(seq, row.at), encode(stored)}, seq_op(seq) | entity_ops]
 
     case Store.write(state.instance, batch, sync: true) do
       :ok ->
-        emit(state.instance, row)
+        emit(state.instance, stored)
         {:reply, :ok, %{state | next_seq: seq + 1}}
 
       {:error, reason} ->
@@ -474,6 +574,13 @@ defmodule Ankusa.Audit do
       {%{ref: ref} = entry, rest} ->
         Process.demonitor(ref, [:flush])
         state = %{state | pending: rest}
+
+        # A caller that says "interrupted" does not know what its change did:
+        # the subject's state does.
+        update =
+          if Map.get(update, :result) == "interrupted",
+            do: settle_interrupted(state.instance, entry.row, update),
+            else: update
 
         # A failed write leaves the row pending on disk; the next boot finishes it.
         case finalize(state, seq, entry.row, update) do
@@ -510,7 +617,9 @@ defmodule Ankusa.Audit do
       {seq, entry} ->
         state = %{state | pending: Map.delete(state.pending, seq)}
 
-        case finalize(state, seq, entry.row, %{result: "interrupted"}) do
+        update = settle_interrupted(state.instance, entry.row, %{result: "interrupted"})
+
+        case finalize(state, seq, entry.row, update) do
           {:ok, state} ->
             {:noreply, state}
 
@@ -524,6 +633,30 @@ defmodule Ankusa.Audit do
   def handle_info(:prune, state) do
     _ = do_prune(state.instance)
     Process.send_after(self(), :prune, state.prune_interval)
+    {:noreply, state}
+  end
+
+  # The boot's pending rows of sources and routes: settle each as soon as its
+  # store has loaded, or as "interrupted" once the minute is up.
+  def handle_info(:reconcile, state) do
+    expired? = System.monotonic_time(:millisecond) >= state.reconcile_until
+
+    {left, state} =
+      Enum.reduce(state.leftovers, {[], state}, fn {seq, row} = leftover, {left, state} ->
+        case reconcile_update(state.instance, row, expired?) do
+          nil ->
+            {[leftover | left], state}
+
+          update ->
+            case finalize(state, seq, row, update) do
+              {:ok, state} -> {left, state}
+              {:error, _reason} -> {[leftover | left], state}
+            end
+        end
+      end)
+
+    state = %{state | leftovers: Enum.reverse(left)}
+    if state.leftovers != [], do: Process.send_after(self(), :reconcile, @reconcile_tick_ms)
     {:noreply, state}
   end
 
@@ -541,13 +674,15 @@ defmodule Ankusa.Audit do
   defp finalize(state, pending_seq, row, update) do
     seq = state.next_seq
     at = System.system_time(:millisecond)
-    final = row |> Map.merge(Map.take(update, @updatable)) |> Map.merge(%{seq: seq, at: at})
+    merged = row |> Map.merge(Map.take(update, @updatable)) |> Map.merge(%{seq: seq, at: at})
+    {final, entity_ops} = split_entity(merged)
 
-    batch = [
-      {:delete, :audit, Keys.audit_pending(pending_seq)},
-      {:put, :audit, Keys.audit(seq, at), encode(final)},
-      seq_op(seq)
-    ]
+    batch =
+      [
+        {:delete, :audit, Keys.audit_pending(pending_seq)},
+        {:put, :audit, Keys.audit(seq, at), encode(final)},
+        seq_op(seq)
+      ] ++ entity_ops
 
     case Store.write(state.instance, batch, sync: true) do
       :ok ->
@@ -557,6 +692,56 @@ defmodule Ankusa.Audit do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # The row as it is stored, and the op that stores its lifecycle entity beside
+  # it: only a row that is flagged for publication has one.
+  defp split_entity(row) do
+    {entity, row} = Map.pop(row, :entity)
+    publish? = Map.get(row, :publish, false) == true and is_map(entity)
+
+    ops =
+      if publish?,
+        do: [{:put, :audit, Keys.lifecycle_entity(row.seq), JSON.encode!(entity)}],
+        else: []
+
+    {Map.put(row, :publish, publish?), ops}
+  end
+
+  # What a pending row of a source or route turned out to be, from the
+  # subject's present state; `update` when that cannot be read.
+  defp settle_interrupted(instance, row, update) do
+    case reconcile(instance, row) do
+      {:ok, settled} -> settled
+      _unknown -> update
+    end
+  end
+
+  defp reconcile_update(instance, row, expired?) do
+    case reconcile(instance, row) do
+      {:ok, update} ->
+        update
+
+      :not_ready when expired? ->
+        Logger.error(
+          "[ankusa] the store of #{row.action} #{row.resource} did not load in time; " <>
+            "recording the change as interrupted, with no lifecycle event"
+        )
+
+        %{result: "interrupted"}
+
+      _not_ready ->
+        nil
+    end
+  end
+
+  # Reading a subject must never take the trail down with it.
+  defp reconcile(instance, row) do
+    Lifecycle.reconcile(instance, row)
+  rescue
+    _error -> :not_ready
+  catch
+    :exit, _reason -> :not_ready
   end
 
   defp row(context, attrs, seq) do
@@ -573,7 +758,9 @@ defmodule Ankusa.Audit do
       after_hash: Map.get(attrs, :after_hash),
       result: Map.get(attrs, :result, "ok"),
       revision: Map.get(attrs, :revision),
-      detail: Map.get(attrs, :detail)
+      detail: Map.get(attrs, :detail),
+      publish: false,
+      entity: Map.get(attrs, :entity)
     }
   end
 
@@ -589,6 +776,8 @@ defmodule Ankusa.Audit do
       resource: row.resource,
       result: row.result
     })
+
+    if row.publish, do: Publisher.wake(instance)
   end
 
   defp load_key(instance) do
@@ -676,11 +865,17 @@ defmodule Ankusa.Audit do
       end)
 
     with {:ok, {n, keys}} <- scan,
-         :ok <- Store.write(instance, Enum.map(keys, &{:delete, :audit, &1}), sync: false) do
+         :ok <- Store.write(instance, Enum.flat_map(keys, &prune_ops/1), sync: false) do
       if n < @prune_batch,
         do: {:ok, total + n},
         else: prune_batches(instance, cutoff, left - 1, total + n)
     end
+  end
+
+  # A row and the lifecycle entity beside it (a delete of an absent key is a no-op).
+  defp prune_ops(key) do
+    {seq, _at} = Keys.decode_audit(key)
+    [{:delete, :audit, key}, {:delete, :audit, Keys.lifecycle_entity(seq)}]
   end
 
   # The instance name is operator config: one atom per instance, never request input.

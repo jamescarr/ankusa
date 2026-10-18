@@ -27,7 +27,7 @@ The most common shape, and the one every worked example on this page uses:
 point `Sink.Http` at your service's own endpoint.
 
 ```elixir
-sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 5_000}]
+sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", secret: System.fetch_env!("DELIVERIES_WHSEC"), timeout_ms: 5_000}]
 ```
 
 **The contract:**
@@ -71,12 +71,14 @@ sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 
 
 ### Signed deliveries
 
-Give the sink a `secret` and every delivery carries a
-[Standard Webhooks](https://www.standardwebhooks.com/) signature:
-`webhook-id` (the hook id), `webhook-timestamp` (unix seconds at send time)
-and `webhook-signature` (`v1,<base64 HMAC-SHA256>` over
+Every delivery is signed. `Sink.Http` needs a `secret` (or an explicit
+`allow_unsigned: true`: a sink with neither does not load), and every
+delivery carries a [Standard Webhooks](https://www.standardwebhooks.com/)
+signature: `webhook-id` (the hook id), `webhook-timestamp` (unix seconds at
+send time) and `webhook-signature` (`v1,<base64 HMAC-SHA256>` over
 `<webhook-id>.<webhook-timestamp>.<raw body>`; one entry per secret while you
-rotate).
+rotate). Without it, any host that can reach your consumer's URL could inject
+hooks for any tenant.
 
 ```yaml
 sinks:
@@ -107,6 +109,30 @@ dead-letters at once, and a fixed secret plus a DLQ replay redelivers.
 Verify the raw bytes, before any JSON parser touches them. The shared vectors
 are `conformance/cases/signature.json`.
 
+Each SDK also has the receiver-side decision in one call, closed by default
+the same way the sink is: with the sink's secrets it verifies as above; with
+none and no explicit opt-out it refuses every delivery (`invalid_secret`), so
+an unconfigured receiver is never open. The signature is judged before the hook
+id, so a request that is not a signed delivery is a `401` whatever else it
+lacks (`400` only for a signed delivery with no `x-ankusa-id`).
+
+| SDK | Receive (signed by default) |
+| --- | --- |
+| TypeScript (`ankusa`) | `receiveDelivery({ headers, body, secrets })`; `allowUnsigned: true` to opt out |
+| Python (`ankusa`) | `receive_delivery(headers, body, secrets=[...])`; `allow_unsigned=True` to opt out |
+| Go | `ankusa.ReceiveDelivery(headers, body, ankusa.ReceiveOptions{Secrets: ...})`; `AllowUnsigned: true` to opt out |
+| Rust | `receive_delivery(&headers, body, &ReceiveOptions { secrets, ..Default::default() })`; `allow_unsigned: true` to opt out |
+| Ruby (`ankusa-sdk`) | `Ankusa.receive_delivery(headers, body, secrets: [...])`; `allow_unsigned: true` to opt out |
+| PHP | `Ankusa\Webhook\Receiver::receive($headers, $body, $secrets)`; `allowUnsigned: true` to opt out |
+| Java | `Receiver.receive(headers, body, Receiver.Options.signed(secrets))`; `Options.unsigned()` to opt out |
+| Elixir (`ankusa_sdk`) | the `Ankusa.SDK.Receiver` plug: `secret:` is required (it refuses to start without), `allow_unsigned: true` to opt out; `Ankusa.SDK.Webhook.receive_delivery/3` without Plug |
+| Clojure (`ankusa-clj`) | `(ankusa.sdk.webhook/receive-delivery headers body {:secrets [...]})`; `:allow-unsigned true` to opt out |
+
+An opt-out on the sink (`allow_unsigned: true`) and on the receiver go
+together: a receiver that opts out accepts anything, so keep it off any
+address you do not control. The shared vectors are the
+`webhook.require_signature` cases in `conformance/cases/receive.json`.
+
 Elixir consumers get this contract as a `Plug`: `Ankusa.SDK.Receiver` (Hex
 package
 [`ankusa_sdk`](https://github.com/jamescarr/ankusa/tree/main/packages/sdk-elixir))
@@ -117,7 +143,11 @@ returns anything else; Ankusa retries both, exactly the retry signal above.
 Mount it above `Plug.Parsers`:
 
 ```elixir
-plug Ankusa.SDK.Receiver, path: "/deliveries", handler: MyApp.Hooks
+plug Ankusa.SDK.Receiver,
+  path: "/deliveries",
+  handler: MyApp.Hooks,
+  secret: System.fetch_env!("DELIVERIES_WHSEC")
+
 plug Plug.Parsers, parsers: [:json], json_decoder: JSON
 ```
 
@@ -322,7 +352,7 @@ def deliveries():
 ```
 
 ```elixir
-sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", timeout_ms: 5_000}]
+sinks: [{Ankusa.Sink.Http, url: "https://jobs.internal/deliveries", secret: System.fetch_env!("DELIVERIES_WHSEC"), timeout_ms: 5_000}]
 ```
 
 `apply_async` raising (broker unreachable) surfaces as a 5xx, which Ankusa

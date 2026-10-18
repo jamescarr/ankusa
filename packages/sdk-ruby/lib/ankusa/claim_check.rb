@@ -58,24 +58,31 @@ module Ankusa
   # Mirrors `#/components/schemas/Ref` in priv/openapi/claim_check.v1.yaml --
   # keep the two in sync. A ref is one string:
   #   urn:ankusa:claim:v1:<tenant>:<claim_id>
+  #   urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>
+  # <exp_unix> is a decimal of 1-12 digits with no leading zero and <signature>
+  # 43 unpadded base64url characters. The gateway checks the signature; the
+  # SDK only carries it.
   #
   # \A...\z, never ^...$: Ruby's ^ and $ are line anchors, so a ref ending in a
   # newline would otherwise parse.
   CLAIM_REF_PATTERN = /\Aurn:ankusa:claim:v1:([A-Za-z0-9_-]{1,64}):([0-7][0-9A-HJKMNP-TV-Z]{25})\z/
+  CLAIM_REF_V2_PATTERN =
+    /\Aurn:ankusa:claim:v2:([A-Za-z0-9_-]{1,64}):([0-7][0-9A-HJKMNP-TV-Z]{25}):([1-9][0-9]{0,11}):([A-Za-z0-9_-]{43})\z/
 
   SHA256_PATTERN = /\A[0-9a-f]{64}\z/
 
   # Parses a claim-check ref (the `claim` field of a queue message) into the
-  # tenant id, claim id, and GET /v1/claims/{tenant_id}/{claim_id} path. Raises
-  # `InvalidClaimRefError` -- never worth retrying -- if `ref` isn't a
-  # well-formed ref.
+  # tenant id, claim id, and GET /v1/claims/{tenant_id}/{claim_id} path (with
+  # ?exp=&sig= for a v2 ref). Raises `InvalidClaimRefError` -- never worth
+  # retrying -- if `ref` isn't a well-formed ref.
   def self.parse_claim_ref(ref)
-    match = ref.is_a?(String) ? CLAIM_REF_PATTERN.match(ref) : nil
+    match = ref.is_a?(String) ? (CLAIM_REF_V2_PATTERN.match(ref) || CLAIM_REF_PATTERN.match(ref)) : nil
     raise InvalidClaimRefError, "invalid claim-check ref: #{ref}" if match.nil?
 
-    tenant_id = match[1]
-    claim_id = match[2]
-    ParsedClaimRef.new(tenant_id: tenant_id, claim_id: claim_id, path: "/v1/claims/#{tenant_id}/#{claim_id}")
+    tenant_id, claim_id, exp, sig = match.captures
+    path = "/v1/claims/#{tenant_id}/#{claim_id}"
+    path += "?exp=#{exp}&sig=#{sig}" if sig
+    ParsedClaimRef.new(tenant_id: tenant_id, claim_id: claim_id, path: path)
   end
 
   # Redeem claim-check refs against a deployment's claim-check gateway.

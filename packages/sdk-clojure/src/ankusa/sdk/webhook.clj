@@ -17,7 +17,8 @@
   The result also carries every request header under `:headers`, lowercased, so
   a receiver can read the provider's own headers the sink forwarded."
   (:require [ankusa.sdk.impl.error :as error]
-            [ankusa.sdk.impl.headers :refer [normalize]]))
+            [ankusa.sdk.impl.headers :refer [normalize]]
+            [ankusa.sdk.signature :as signature]))
 
 (set! *warn-on-reflection* true)
 
@@ -49,3 +50,39 @@
      :replay-id (non-empty h "x-ankusa-replay-id")
      :idempotency-key (non-empty h "x-ankusa-idempotency-key")
      :headers h}))
+
+(defn receive-delivery
+  "Judge one HTTP-sink delivery: is it signed, and what is its identity.
+
+  Ankusa's HTTP sink signs every delivery unless it is configured
+  `allow_unsigned: true`, so a receiver is closed by default: without the
+  sink's `:secrets` (or an explicit `:allow-unsigned true`) it refuses every
+  delivery, because any host that can reach the receiver's URL could otherwise
+  inject hooks.
+
+  `headers` as for `parse-headers`; `body` the raw bytes received. Options:
+  `:secrets` (a secret or a seq of them; with any, the delivery MUST verify as
+  in `ankusa.sdk.signature/verify`, and `:allow-unsigned` does not weaken
+  that), `:allow-unsigned` (accept a delivery when no secret is configured,
+  unverified), `:tolerance-seconds` and `:now` (as for `verify`).
+
+  Returns what `parse-headers` returns plus `:verified` (`false` only for an
+  unsigned delivery `:allow-unsigned` let through). Throws
+  `:ankusa.sdk/InvalidSignatureError` (answer `401`) when there is no valid
+  signature, `\"invalid_secret\"` when no secret is configured and
+  `:allow-unsigned` is not set, and `:ankusa.sdk/MissingHookIdError` (`400`)
+  when `x-ankusa-id` is absent. The signature is judged first."
+  [headers body {:keys [secrets allow-unsigned tolerance-seconds now]}]
+  (let [secrets (if (string? secrets) [secrets] (seq secrets))
+        verified? (cond
+                    secrets (do (signature/verify headers body secrets
+                                                  (cond-> {}
+                                                    tolerance-seconds (assoc :tolerance-seconds tolerance-seconds)
+                                                    now (assoc :now now)))
+                                true)
+                    allow-unsigned false
+                    :else (throw (error/error "InvalidSignatureError"
+                                              (str "no secret configured: deliveries are signed, so the "
+                                                   "receiver needs the sink's secret (or :allow-unsigned true)")
+                                              {:code "invalid_secret" :field nil})))]
+    (assoc (parse-headers headers) :verified verified?)))

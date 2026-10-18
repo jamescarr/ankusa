@@ -40,18 +40,18 @@ fi
 echo "==> $pkg ($kind)"
 case "$kind" in
   hex | docker)
-    mix deps.get --check-locked
     # Deps come from the shared cache `mise run build` keeps (see
     # .mise/lib/mix_cache.sh), restored per env instead of compiled here: a
     # fresh worktree used to compile every dep from source for each env the
     # steps below use — RocksDB's C++ NIF in dev for credo/dialyzer/docs,
-    # again in test for the suite, again in prod for hex.build — which is what
-    # held the repo-wide check's lock for those minutes. The subshells keep
-    # MIX_ENV local: the steps below still compile/test/build themselves,
-    # unchanged.
+    # again in test for the suite — which is what held the repo-wide check's
+    # lock for those minutes. The subshells keep MIX_ENV local. Restore comes
+    # before `deps.get`: the cache pairs sources with their compiled priv/,
+    # while deps.get alone leaves source-only directories.
     for env in dev test; do
-      (MIX_ENV="$env" mix_cache_warm "$dir" "$pkg" "$env")
+      (MIX_ENV="$env" mix_cache_warm "$dir" "$pkg" "$env" --check-locked)
     done
+    mix deps.get --check-locked
     mix deps.unlock --check-unused
     # Retired packages and published security advisories fail the build. CI sets
     # HEX_AUDIT_LOG so the report is uploaded as the `hex-audit-<pkg>` artifact.
@@ -141,9 +141,6 @@ esac
 
 if [ "$kind" = hex ]; then
   mix docs --warnings-as-errors
-  # The :prod deps come from the same shared cache; hex.build below compiles
-  # the project itself, as before.
-  (MIX_ENV=prod mix_cache_warm "$dir" "$pkg" prod)
   # Build the package the way release.yml publishes it, under :prod: Hex
   # rejects path deps, so `ankusa` resolves `async_api_spex` and the adapters
   # resolve `ankusa` from Hex rather than the path dep.

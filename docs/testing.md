@@ -130,7 +130,10 @@ The always-on tests cover:
   the `BlobStore.Azure` request plumbing (Put Blob headers, SAS appending vs.
   bearer `:token_provider`, `get_range` windows, `list` XML, `:not_found`); the
   `Ankusa.BlobStore.Azure.ManagedIdentity` token provider (IMDS fetch shape,
-  caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
+  caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, the
+  signed-by-default rule (a sink with neither `secret` nor `allow_unsigned: true`
+  fails `validate_opts!/1` with "requires secret", and a delivery for one that
+  skipped it is dead-lettered unsent), and the
   rule that a redirect is reported rather than followed; the shared
   `Ankusa.HttpClient` allowlist; the egress policy (`Ankusa.HttpClient.Egress`:
   loopback, metadata, private ranges, mapped IPv6 and odd IPv4 spellings,
@@ -203,6 +206,19 @@ The always-on tests cover:
   and `/ready` and answers `404` to the operator API's routes. The image
   smoke drill (`mise run docker:smoke`) repeats the mutual-TLS check with
   `openssl s_client` and `curl` against the built image.
+- **Secret sources** (`source_store_static_test.exs` in core;
+  `ankusa_server/test/ankusa_server/secrets_test.exs`): `SourceStore.Static.publish/2`
+  swaps a running instance's sources, names the ids that changed, and applies
+  nothing when one spec is refused; `${file:}` and `secret_file:` read a file
+  (one trailing newline removed) and a missing, oversized, relative or
+  doubly-given file fails the load by dotted key, never with a value; `${sm:}`
+  resolves through a loopback stub of Vault KV v2 and AWS `GetSecretValue`
+  (SigV4 header, token header, a JSON field, a binary secret) and a missing or
+  unreachable secret fails the boot naming the reference; a signed POST
+  verifies with the new secret after a file swap and a reload while the old one
+  stays valid until it leaves the list; a manager outage or a deleted file at
+  reload keeps the last value and logs a warning; a reload that cannot be
+  applied changes nothing; an API-submitted spec cannot name a file.
 - **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
   exactly once; a failing sink is retried until it succeeds; a failing sink's
   retries do not hold the slots a healthy source needs (D1); one dead row per
@@ -318,18 +334,39 @@ The always-on tests cover:
   `edge_direct_test.exs`, which asserts the response really does wait for the
   sink's confirm — and is a `503` when that confirm never comes. A full disk,
   a failing disk and a power cut are the crash drill's, below.
-- **Lifecycle events** (`lifecycle_test.exs`): through a real instance, a
-  source's create/update/delete and a route's create/replace/patch/delete each
-  deliver one CloudEvent to the configured sink, the source's secret arrives
-  redacted, a refused change emits nothing, and the store assigns no seq to an
-  event (they bypass it). A refusing sink is retried until it confirms; when
-  the retries run out the event is dropped and counted but the change stands; a
-  broken sink (one that raises, or returns neither `:ok` nor an error) never
-  holds back another or crashes the publisher; a full queue and a publisher that isn't
-  running each drop and count the event; with no lifecycle sinks there is no
+- **Lifecycle events** (`lifecycle_test.exs`, `replay_test.exs`): through a real
+  instance, a source's create/update/delete and a route's
+  create/replace/patch/delete each deliver one CloudEvent to the configured
+  sink, the source's secret arrives redacted, a refused change emits nothing,
+  and the store assigns no seq to an event (it is not a hook). The outbox:
+  `survives kill` runs `test/support/lifecycle_harness.exs` in a child BEAM
+  whose only sink never confirms, creates a source, and is `kill -9`ed the
+  moment `SourceStore.put/6` returns; the reopened store delivers
+  `source.created`. `ordered by revision` puts three rapid updates through a
+  sink that is slower the lower the revision and sees them in order;
+  publishing the same row twice gives the same event `id`, body and
+  idempotency key (a replay adds `replayid` and nothing else); a publisher
+  killed before its cursor moved delivers again with the same `id`; the row
+  holds no entity (it sits beside it, redacted); what changed while lifecycle
+  was off is not announced. A pending row of a change nobody saw finish is
+  settled from the subject's state: applied is announced, not applied is not,
+  neither is announced as a state refresh, a deletion that was applied carries
+  the entity the row recorded, and a row left across a restart is settled at
+  the next boot. `lifecycle replay` re-emits a window (`since`/`until`/
+  `tenant`) under the job's id with the original event ids, an empty window
+  finishes, a node with no lifecycle sink refuses the job. A refusing sink is
+  retried until it confirms; when the retries run out the event is dropped
+  and counted but the change stands; a broken sink (one that raises, or
+  returns neither `:ok` nor an error) never keeps another from receiving the
+  event or crashes the publisher; with no lifecycle sinks there is no
   publisher. `ankusa:lifecycle` is a `404` at ingest, an event over a sink's
   inline threshold is claim-checked under a valid tenant and redeems to the
-  event, and each invalid lifecycle config is refused at boot.
+  event, and each invalid lifecycle config is refused at boot. The Redis
+  route and source stores (`ankusa_redis`, `redis_lifecycle_test.exs`, needs
+  the package's compose Redis): a child BEAM leaves a pending row for each
+  place a `kill -9` can land (change applied, not applied, state changed
+  elsewhere) and the reopened node announces the applied ones and the current
+  state, and nothing for the one that never happened.
 - **The AsyncAPI document** (`async_api_test.exs`, plus `GET /asyncapi.json` in
   `admin/router_test.exs`): sources on one address share a channel, sinks
   without a channel are absent, a computed address is a channel of its own, the
@@ -559,6 +596,13 @@ runner also runs inside its own `mise run check:package <pkg>`. Adding a
 feature to `features.json` makes every SDK fail until it implements the
 feature; the vector format and runner contract are in
 `conformance/README.md`.
+
+`webhook.require_signature` (`cases/receive.json`) is the receiver half of
+signed-by-default: every SDK's `receive_delivery` refuses an unsigned delivery
+unless told `allow_unsigned`, verifies a signed one, and judges the signature
+before the hook id. The Elixir `Ankusa.SDK.Receiver` plug is tested on top of it
+(`receiver_test.exs`: it refuses to start without a secret, answers `401` to an
+unsigned POST).
 
 ## Verifying the worked example
 

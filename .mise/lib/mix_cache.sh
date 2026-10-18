@@ -20,7 +20,7 @@
 # stale, save": `.mise/tasks/build` and the checks must agree on the cache key
 # or each would miss the other's entries.
 mix_cache_warm() {
-  local dir=$1 label=$2 env=$3
+  local dir=$1 label=$2 env=$3 lock=${4:-}
   local cache_name cache_root cache key tmp err present log stale n refetch i e os
   export MIX_ENV="$env"
 
@@ -48,12 +48,15 @@ mix_cache_warm() {
 
   # Copy-on-write where the filesystem has it (APFS clonefile, reflinks), so a
   # restore is near-instant and costs no disk until something is rewritten.
+  # `-p`: Mix marks a dep stale when a source file is newer than the manifest
+  # that compiled it, so restored files must keep the timestamps they were
+  # built with (a plain `cp` would date them now and recompile every dep).
   os=$(uname -s)
   _mix_cache_clone() {
     if [ "$os" = Darwin ]; then
-      cp -cR "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -R "$1" "$2"; }
+      cp -cRp "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -Rp "$1" "$2"; }
     else
-      cp -R --reflink=auto "$1" "$2"
+      cp -Rp --reflink=auto "$1" "$2"
     fi
   }
 
@@ -62,14 +65,25 @@ mix_cache_warm() {
   # of which carry this checkout's path, so cloned directories need no
   # recompile. Existing entries are never overwritten: a local build in
   # progress wins.
+  #
+  # A NIF dep's compiled artifacts live in deps/<app>/priv (RocksDB's .so,
+  # crc32cer's). If the dep directory here is source only — an earlier
+  # `mix deps.get` with no compile — its beams are not restored: Mix would
+  # trust them and skip the rebuild, and the app would fail to load.
   if [ -d "$cache" ]; then
     mkdir -p deps "_build/$env/lib"
-    for src in "$cache"/deps/* "$cache"/lib/*; do
+    for src in "$cache"/deps/*; do
       [ -e "$src" ] || continue
-      case "$src" in
-        "$cache"/deps/*) n="deps/${src##*/}" ;;
-        *) n="_build/$env/lib/${src##*/}" ;;
-      esac
+      n="deps/${src##*/}"
+      [ -e "$n" ] || [ -L "$n" ] || _mix_cache_clone "$src" "$n"
+    done
+    for src in "$cache"/lib/*; do
+      [ -e "$src" ] || continue
+      app=${src##*/}
+      if [ -e "deps/$app" ] && [ -d "$cache/deps/$app/priv" ] && [ ! -d "deps/$app/priv" ]; then
+        continue
+      fi
+      n="_build/$env/lib/$app"
       [ -e "$n" ] || [ -L "$n" ] || _mix_cache_clone "$src" "$n"
     done
     touch "$cache"
@@ -83,7 +97,8 @@ mix_cache_warm() {
     if [ -e "$n" ]; then present="$present${n##*/} "; fi
   done
 
-  mix deps.get
+  # shellcheck disable=SC2086 # $lock is empty or --check-locked
+  mix deps.get $lock
 
   log="_build/$env/deps-compile.log"
   mkdir -p "_build/$env"
@@ -101,13 +116,19 @@ mix_cache_warm() {
           dep.scm.fetchable?(),
           Mix.Dep.compilable?(Mix.Dep.check_lock(dep)),
           do: IO.puts(dep.app)
-    ' 2>"$err" || {
-      cat "$err" >&2
-      rm -f "$err"
-      fail "could not list the Hex deps to build (above)"
-    }
+    ' 2>"$err"
   }
-  stale=$(_mix_cache_stale_deps)
+  if stale=$(_mix_cache_stale_deps); then
+    :
+  else
+    # A project whose config/runtime.exs needs an env var at this point (a
+    # Phoenix example wants SECRET_KEY_BASE) cannot be probed: `mix run`
+    # evaluates runtime config. Nothing is skipped — the caller's own compile
+    # builds every dep, just without the cache's help.
+    sed -n '1p' "$err" >&2 || true
+    echo "==> could not list the Hex deps to build; leaving them to this project's own compile"
+    stale=""
+  fi
 
   # A stale dep that was already here may hold a build tree from another
   # checkout (cloned from the cache): rebuild it from a fresh fetch instead.
@@ -122,8 +143,9 @@ mix_cache_warm() {
     esac
   done
   if [ -n "$refetch" ]; then
-    mix deps.get
-    stale=$(_mix_cache_stale_deps)
+    # shellcheck disable=SC2086 # $lock is empty or --check-locked
+    mix deps.get $lock
+    stale=$(_mix_cache_stale_deps) || stale=""
   fi
 
   if [ -z "$stale" ]; then
@@ -135,7 +157,7 @@ mix_cache_warm() {
     # fill the log. Scoped to this command; it must not reach our compile.
     # shellcheck disable=SC2086 # $stale is a list of app names
     if ! ERL_COMPILER_OPTIONS='[nowarn_deprecated_catch,nowarn_match_alias_pats]' \
-      MIX_OS_DEPS_COMPILE_PARTITION_COUNT="${MIX_OS_DEPS_COMPILE_PARTITION_COUNT:-4}" \
+      MIX_OS_DEPS_COMPILE_PARTITION_COUNT="${MIX_OS_DEPS_COMPILE_PARTITION_COUNT:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}" \
       mix deps.compile $stale >"$log" 2>&1; then
       cat "$log" >&2
       rm -f "$err"

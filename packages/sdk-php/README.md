@@ -136,6 +136,37 @@ pass several during a rotation. `$toleranceSeconds` (default 300) bounds the
 `webhook-timestamp` window. Signatures are compared with `hash_equals`;
 failures carry `$errorCode` and `$field`, never retryable.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default.
+`Receiver::receive()` is the one call that decides: with the sink's `$secrets`
+it verifies as above; with none, and no `$allowUnsigned`, it refuses every
+delivery (`InvalidSignatureError`, `$errorCode` `invalid_secret`) — otherwise
+any host that can reach your URL could inject hooks. A configured secret is
+never weakened by `$allowUnsigned`. The signature is judged before the hook
+id, so a delivery that fails it is a `401` even when it also lacks
+`x-ankusa-id` (`MissingHookIdError`, `400`).
+
+```php
+use Ankusa\Webhook\InvalidSignatureError;
+use Ankusa\Webhook\MissingHookIdError;
+use Ankusa\Webhook\Receiver;
+
+try {
+    $received = Receiver::receive(getallheaders(), file_get_contents('php://input'), [getenv('ANKUSA_WHSEC')]);
+    // $received->headers is the HookHeaders; $received->verified is false only
+    // for an unsigned delivery `allowUnsigned: true` let through.
+} catch (InvalidSignatureError $e) {
+    http_response_code(401);
+    echo json_encode(['error' => 'invalid_signature', 'code' => $e->errorCode]);
+    exit;
+} catch (MissingHookIdError) {
+    http_response_code(400);
+    exit;
+}
+```
+
 ## Consuming queue messages
 
 A queue consumer (Redis or a broker; the HTTP sink sends the original body

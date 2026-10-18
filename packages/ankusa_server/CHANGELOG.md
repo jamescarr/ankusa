@@ -8,6 +8,32 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Signed, expiring claim refs (SEC-11).** `claim_check` takes
+  `ref_signing_keys` (a list, or a comma-separated string for `${VAR}`; each
+  at least 16 bytes, `[current, previous...]`), `ref_ttl_ms`,
+  `accept_unsigned_refs` and `max_concurrent_reads` (1024). With keys, refs
+  are v2 (`urn:ankusa:claim:v2:...`), the gateway refuses a forged one (`400
+  bad_signature`) or an expired one (`410 ref_expired`) and, unless told
+  otherwise, a v1 one (`400 unsigned_ref`). `claim_check.authorize` is
+  Elixir config only. See `config-examples/reference.yml`.
+- **Secret sources and rotation without a redeploy (SEC-9).** A secret no
+  longer has to come from the environment. `${file:/abs/path}` reads a file
+  (one trailing newline removed: a Kubernetes secret volume, a Docker secret);
+  `secret_file: /abs/path` (or a list) is `secret:` read from a file, on a
+  source's `verify` and `http` sinks and on `lifecycle` sinks;
+  `${sm:<provider>:<ref>}` asks a secret manager named under the new
+  `secrets.providers` (`type: vault` for HashiCorp Vault KV v2, `type: aws` for
+  AWS Secrets Manager; `#<field>` picks a field of a JSON secret) with
+  `secrets.cache_ttl_ms` (default 0). A reference that cannot be resolved at
+  boot is a load error naming the key and the reference, never a value.
+  `AnkusaServer.Secrets.reload/2` re-reads the file, resolves every reference
+  again and republishes a static source store's sources, so a rotated secret
+  verifies without a restart (`secret: [new, old]` stays the rotation window);
+  a reference that fails on a reload keeps its last value and logs a warning.
+  Nothing triggers a reload on a signal or over HTTP yet. The image now lists
+  `aws_signature` as a direct dependency (the lock is unchanged). A spec an API
+  client submits cannot use `secret_file` or `${file:}`. See
+  `docs/configuration.md#secret-sources`.
 - **Signed, attested image (SEC-8).** Every published image now carries an
   SPDX SBOM and a SLSA provenance attestation (`mode=max`) for `linux/amd64`
   and `linux/arm64`, and its index digest is signed keylessly with cosign by
@@ -102,6 +128,16 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `ankusa` changelog and [`configuration.md#egress`](../../docs/configuration.md#egress).
 
 ### Changed
+
+- **Breaking (SEC-10):** a `type: http` sink needs a `secret` (a `whsec_`
+  secret, or a list while rotating) to load, or `allow_unsigned: true` to send
+  deliveries with no signature. The same check runs when the admin API writes a
+  source (`400 invalid_source`); a source already stored by
+  `source_store.type: persistent` or `redis` with an unsigned HTTP sink is
+  skipped at boot with a warning until it is rewritten with a `secret` (or
+  `allow_unsigned: true`). Every shipped example config sets
+  `secret: "${SINK_WHSEC}"`; the quickstart demo sets `allow_unsigned: true`
+  because its worker does not verify.
 
 - **Breaking:** a `type: http` sink URL must be `https://` to load (a plain
   `http://` one needs `egress.allow_insecure_http: true`), and at delivery its

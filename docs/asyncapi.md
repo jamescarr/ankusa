@@ -80,9 +80,20 @@ route-management API, or `Ankusa.SourceStore.put/5`, `delete/3` and
 
 The body is a [CloudEvents 1.0](https://cloudevents.io) structured-mode event:
 `specversion`, `id`, `source` (`urn:ankusa:instance:<instance>`), `type`,
-`subject`, `time`, `datacontenttype`, and `data`: the entity exactly as the
-admin API returns it, secrets redacted (`"secret": "[REDACTED]"`). For a
-deletion, `data` is the last view of a source, or `{"id": ...}` for a route.
+`subject`, `time` (when the change committed), `datacontenttype`, and `data`:
+the entity exactly as the admin API returns it, secrets redacted
+(`"secret": "[REDACTED]"`), as the change left it. For a deletion, `data` is
+the whole entity as it was the moment before (a source's last view, the
+route's definition). These attributes say which change an event is:
+
+| attribute | |
+| --- | --- |
+| `id` | derived from the change, never minted: the same event has the same `id` however often it is sent |
+| `revision` | the subject's change counter, `1` at creation; absent for a store that keeps none (the Redis source store) |
+| `actor` | the principal id that made the change (`system` for code) |
+| `instance` | the instance name |
+| `sequence` | the instance's audit sequence number, a decimal string: events of one instance are totally ordered by it |
+| `replayid` | only on an event a replay job re-sent |
 
 The event travels as the `body_base64` of an ordinary `SinkMessageV1` (so the
 `content_type` is `application/cloudevents+json`, and the document names the
@@ -93,23 +104,52 @@ rpk topic consume ankusa.lifecycle -n 1 -f '%v\n' | jq -r .body_base64 | base64 
 # "io.ankusa.source.created"
 ```
 
-Lifecycle events bypass the store. They are not hooks: nothing is written to the
-store, and they do not go through dispatch. A supervised in-memory publisher,
-running on every node that has a lifecycle sink, hands each event to every
-lifecycle sink independently, so a broker that is down never holds back another.
-It is best effort:
+Lifecycle events are durable and ordered. They are not hooks and do not go
+through dispatch; each one is the change's audit row
+([`Ankusa.Audit`](architecture.md)), flagged for publication and committed in
+the same synced batch as the change, with the redacted entity beside it. A
+supervised publisher, on every node that has the store, reads those rows in
+commit order, keeps the last one that every lifecycle sink has dealt with in the
+store (`m:lifecycle_cursor`, synced on every advance), and hands each row to
+every lifecycle sink independently:
 
-- The change has already happened, and the call that made it returns without
-  waiting on a broker. A failed delivery is retried with the `dispatch.retry`
-  policy, exponential by default. When the retries run out, when the publisher's
-  queue is full (10,000 pending sink deliveries), or when the publisher is not
-  running, the event is dropped for that sink, logged, and counted as
-  `ankusa_lifecycle_dropped_total` (label `reason`: `gave_up`, `queue_full`,
-  `not_running`). `ankusa_lifecycle_delivered_total` counts the rest. The caller
+- A `kill -9` right after the change returns loses neither: the event is
+  delivered after the restart. Delivery is **at least once**: a node killed
+  after a sink confirmed an event and before the cursor moved sends it again,
+  and so does a replay. Every send of one event carries the same `id`, so
+  dedupe on it.
+- Events arrive in the order the changes committed, and each carries the
+  subject's `revision`: three rapid updates of one source arrive as revisions
+  *n*, *n*+1, *n*+2. A consumer that keeps the highest `revision` it has seen
+  per `subject` and ignores a lower one is never moved backwards by a late
+  duplicate.
+- A failed delivery is retried with the `dispatch.retry` policy, exponential by
+  default. The cursor moves only once every sink confirmed the event or gave up
+  on it, so one failing sink holds back the events behind it, for every sink,
+  until it confirms or its retries run out. Then the event is dropped *for that
+  sink*, logged, and counted as `ankusa_lifecycle_dropped_total` (label
+  `reason`: `gave_up`, or `unreadable` for an audit row or entity that could not
+  be read). `ankusa_lifecycle_delivered_total` counts the rest. The caller
   always gets the success of its change.
-- Pending events are lost when the node stops, and there is no ordering:
-  deliveries run concurrently and retries reorder them. A consumer that needs a
-  complete picture reads the admin API's source and route lists.
+- `POST /v1/replays` with `{"kind": "lifecycle", "since": <ms>, "until": <ms>,
+  "tenant": "<tenant>"}` (every key optional; route events belong to tenant
+  `default`) re-emits the events the trail held when the job started, over the
+  window of the changes' own time. It is how a sink that was down longer than
+  the retries wait, or lost events, catches up. A replayed event keeps its `id`
+  and adds `replayid`. The job runs on a node with the `dispatch` role and a
+  lifecycle sink, at `rate` events per second, and tries a sink three times
+  before it counts the delivery as `dead`.
+- Turning lifecycle events on starts at the end of the trail: what changed
+  while they were off is not announced. The trail, and the entity of each
+  event, are kept for `audit.retention_days`; a sink that is offline for longer
+  than that loses the older events.
+- A source in the Redis store and a route are a dual write (the change lives
+  outside the node's store). A node killed halfway leaves a pending audit row,
+  and the next boot settles it from the subject's present state, not by guess:
+  if the state is the one the change was heading to, it is announced; if it is
+  the one it started from, it is not; if it is neither (someone changed it
+  meanwhile) a state-refresh event, an `updated` (or `deleted`) one carrying
+  what is there now, is announced.
 - The edge never resolves `ankusa:lifecycle`: `POST /webhooks/ankusa:lifecycle`
   is a `404`, and a configured source of that id is a boot error.
 - The event is not listed by `GET /v1/tenants/{tenant}/sources`, never passes
@@ -120,7 +160,7 @@ It is best effort:
   `inline_max_bytes` goes through the claim check inside the sink, like a hook.
 
 Only the node that served the change emits, so a route written on one node of a
-Redis-backed fleet is announced once.
+Redis-backed fleet is announced once, from that node's trail.
 
 ## Describing your own sink
 
