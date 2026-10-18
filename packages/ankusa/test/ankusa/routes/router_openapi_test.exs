@@ -4,7 +4,7 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
   `priv/openapi/admin.v1.yaml`: the document and `Ankusa.Routes.Router` cannot
   drift apart without failing here.
 
-  Four things are checked, and each one catches a different kind of drift:
+  Five things are checked, and each one catches a different kind of drift:
 
     1. **Every documented operation is executed.** The request is built from the
        operation's *own* `example`s — the path parameter's, the query
@@ -31,6 +31,11 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     4. **Every example is an example of its own schema.** The document is
        validated against itself, so prose-level examples cannot silently rot into
        values the schemas forbid.
+    5. **The security scheme is declared and executed.** Both documents (this
+       one and `claim_check.v1.yaml`) declare bearer and mutual-TLS auth, every
+       operation but the health probes inherits it and documents `401` and
+       `403`, and the `401`/`403` probes of point 3 run against an instance with
+       token authentication, so a route added without a scope check fails there.
 
   Responses are read through `deref_response/3`: most error responses are `$ref`s
   into `components/responses`, and reading `content` off a `$ref` finds nothing —
@@ -108,8 +113,10 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
 
   # Every documented error response, with the request that produces it. The
   # status is the one the probe must get; `:query` replaces the documented query
-  # string, `:path` addresses a concrete path (a missing id, say), and `:body` is
-  # the request body. Each probe runs against a fresh instance seeded with
+  # string, `:path` addresses a concrete path (a missing id, say), `:body` is
+  # the request body, and `:token` is the bearer token sent (the `401`/`403`
+  # probes run against an instance with token authentication, see
+  # `@probe_tokens`). Each probe runs against a fresh instance seeded with
   # `@probe_seed`, so a `404` probe addresses an id that really is missing and a
   # `409` probe really collides.
   #
@@ -141,7 +148,42 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     {:replaceRoute, 503, [body: %{"path" => "/webhooks/stripe"}]},
     {:updateRoute, 503, [body: %{"enabled" => false}]},
     {:deleteRoute, 503, []},
-    {:putIpRules, 503, [body: %{"default" => "allow", "rules" => []}]}
+    {:putIpRules, 503, [body: %{"default" => "allow", "rules" => []}]},
+    {:listRoutes, 401, []},
+    {:createRoute, 401, [body: %{"path" => "/hooks/any"}]},
+    {:getRoute, 401, []},
+    {:replaceRoute, 401, [body: %{"path" => "/webhooks/stripe"}]},
+    {:updateRoute, 401, [body: %{"enabled" => false}]},
+    {:deleteRoute, 401, []},
+    {:testRoute, 401, [body: %{"method" => "POST", "path" => "/webhooks/stripe"}]},
+    {:getIpRules, 401, []},
+    {:putIpRules, 401, [body: %{"default" => "allow", "rules" => []}]},
+    # A token that reads cannot write, and one that writes cannot read.
+    {:listRoutes, 403, [token: "writer"]},
+    {:createRoute, 403, [token: "reader", body: %{"path" => "/hooks/any"}]},
+    {:getRoute, 403, [token: "writer"]},
+    {:replaceRoute, 403, [token: "reader", body: %{"path" => "/webhooks/stripe"}]},
+    {:updateRoute, 403, [token: "reader", body: %{"enabled" => false}]},
+    {:deleteRoute, 403, [token: "reader"]},
+    {:testRoute, 403,
+     [token: "writer", body: %{"method" => "POST", "path" => "/webhooks/stripe"}]},
+    {:getIpRules, 403, [token: "writer"]},
+    {:putIpRules, 403, [token: "reader", body: %{"default" => "allow", "rules" => []}]}
+  ]
+
+  # The tokens the `401`/`403` probes authenticate with: one that may only read
+  # route definitions, one that may only write them.
+  @probe_tokens [
+    %{
+      id: "reader",
+      sha256: Ankusa.Admin.Auth.Token.hash("reader"),
+      scopes: ["routes:read", "tenant:*"]
+    },
+    %{
+      id: "writer",
+      sha256: Ankusa.Admin.Auth.Token.hash("writer"),
+      scopes: ["routes:write", "tenant:*"]
+    }
   ]
 
   setup_all do
@@ -306,6 +348,48 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
            Add them to @error_probes with a request that produces them, or stop
            documenting them.
            """
+  end
+
+  # ── the security scheme ─────────────────────────────────────────────────────
+
+  @claim_spec_path Path.expand("../../../priv/openapi/claim_check.v1.yaml", __DIR__)
+
+  test "the admin document declares bearer and mutual-TLS auth, on every operation but the probes",
+       %{document: document} do
+    assert_secured(document, ["/health", "/ready"])
+  end
+
+  test "the claim gateway document declares the same schemes and secures readClaim" do
+    {:ok, claim_document} = YamlElixir.read_from_file(@claim_spec_path)
+    assert_secured(claim_document, ["/health"])
+  end
+
+  defp assert_secured(document, exempt) do
+    assert document["security"] == [%{"bearerAuth" => []}, %{"mutualTLS" => []}]
+
+    assert %{
+             "bearerAuth" => %{"type" => "http", "scheme" => "bearer"},
+             "mutualTLS" => %{"type" => "mutualTLS"}
+           } = document["components"]["securitySchemes"]
+
+    for {path, item} <- document["paths"],
+        {method, operation} <- item,
+        method in http_methods(),
+        is_map(operation) do
+      where = "#{String.upcase(method)} #{path}"
+
+      if path in exempt do
+        assert operation["security"] == [], "#{where} is a probe and must opt out of security"
+      else
+        refute Map.has_key?(operation, "security"),
+               "#{where} must inherit the document's security"
+
+        for status <- ["401", "403"] do
+          assert Map.has_key?(operation["responses"], status),
+                 "#{where} does not document #{status}"
+        end
+      end
+    end
   end
 
   # ── the documented claims the sequence cannot drive ─────────────────────────
@@ -810,6 +894,11 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
   # addresses exists (or, for a `404` probe, certainly does not). A `503` needs
   # a store whose writes fail; every other documented error needs a working one.
   defp probe_config(503), do: start(seed: @probe_seed, store: {UnavailableStore, []})
+
+  defp probe_config(status) when status in [401, 403] do
+    start(seed: @probe_seed, admin: [auth: %{mode: :token, tokens: @probe_tokens}])
+  end
+
   defp probe_config(_status), do: start(seed: @probe_seed)
 
   # The probe's request: the documented method and path, with the probe's own
@@ -823,14 +912,20 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
         concrete -> concrete
       end
 
-    call(config, method, path, request[:body])
+    call(config, method, path, request[:body], request[:token])
   end
 
   defp query_suffix(nil), do: ""
   defp query_suffix(query), do: "?" <> query
 
-  defp call(config, method, path, body) do
+  defp call(config, method, path, body, token \\ nil) do
     conn = Plug.Test.conn(method, path, body && JSON.encode!(body))
+
+    conn =
+      if token,
+        do: Plug.Conn.put_req_header(conn, "authorization", "Bearer " <> token),
+        else: conn
+
     Router.call(conn, Router.init(instance: config.instance))
   end
 

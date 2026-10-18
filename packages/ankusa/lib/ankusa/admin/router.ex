@@ -10,15 +10,31 @@ defmodule Ankusa.Admin.Router do
   `Ankusa.Edge.Quarantine.recent/2`, `:sys.get_state/1`-style poking); this is
   the same surface over HTTP.
 
-  ## No authentication, by design
+  ## Authentication and scopes
 
-  Ankusa does not manage users, tokens, or API keys. The only request
-  authentication in the framework is provider signature verification on ingest
-  (`Ankusa.Edge.Router`), which is webhook semantics, not access control — so
-  nothing here reads the `authorization` header. Operators front this port with
-  their own proxy, SSO, or network policy, the way Elasticsearch was operated
-  before it shipped security. `/v1/config` is still redacted because a proxy may
-  let many people read it.
+  Every route but `GET /health` and `GET /ready` needs a credential
+  (`admin.auth`, see `Ankusa.Admin.Auth`): `401` without one, `403` when the
+  caller's scopes (`Ankusa.Principal`) do not cover the route. Scopes are
+  checked before anything else, so a caller without them learns nothing about
+  this node's roles or data.
+
+  | Route | Scope |
+  | --- | --- |
+  | `GET /metrics`, `GET /v1/wal` | `metrics:read` |
+  | `GET /v1/config`, `GET /asyncapi.json` | `config:read` |
+  | `GET /v1/dlq` | `dlq:read` + `tenant:*` |
+  | `POST /v1/replays` | `replays:write` + `tenant:*`, and `dlq:write` / `quarantine:write` for those kinds |
+  | `GET /v1/replays[/:id]` | `replays:read` + `tenant:*` |
+  | `PATCH /v1/replays/:id` | `replays:write` + `tenant:*` |
+  | `GET /v1/quarantine`, `DELETE /v1/quarantine` | `quarantine:read` / `quarantine:write` + `tenant:*` |
+  | `GET /v1/tenants/:tenant/sources[/:name]` | `sources:read` + `tenant:<tenant>` |
+  | `POST/PUT/DELETE /v1/tenants/:tenant/sources[/:name]` | `sources:write` + `tenant:<tenant>` |
+  | `GET /v1/rate-limits` | `rate_limits:read` + `tenant:*` |
+  | `GET/PUT/DELETE /v1/tenants/:tenant/rate-limit` | `rate_limits:read` / `rate_limits:write` + `tenant:<tenant>` |
+
+  The DLQ, the quarantine pen and replay jobs are node-global rows, not
+  tenant-keyed, so they need `tenant:*` until they are filtered by tenant.
+  `/v1/config` is still redacted, because many people may hold `config:read`.
 
   ## Node-local by design
 
@@ -33,6 +49,7 @@ defmodule Ankusa.Admin.Router do
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
 
+  alias Ankusa.Admin.Auth
   alias Ankusa.Admin.Redact
   alias Ankusa.Config
   alias Ankusa.Edge.RateLimiter
@@ -55,6 +72,9 @@ defmodule Ankusa.Admin.Router do
   # from the `invalid_source` a bad name or spec gets.
   @identity_regex ~r/\A[A-Za-z0-9_-]{1,64}\z/
 
+  # Before `:match`, so an unknown path is `401` to a caller with no credential
+  # rather than a `404` that confirms it is not there.
+  plug(Auth, section: :admin)
   plug(:match)
   plug(:dispatch)
 
@@ -70,10 +90,101 @@ defmodule Ankusa.Admin.Router do
 
   # Also served, alone, by the metrics listener (`Ankusa.Metrics.Router`).
   get "/metrics" do
-    Ankusa.Metrics.Router.metrics(conn)
+    Auth.authorize(conn, "metrics:read", &Ankusa.Metrics.Router.metrics/1)
   end
 
   get "/v1/wal" do
+    Auth.authorize(conn, "metrics:read", &wal/1)
+  end
+
+  get "/v1/config" do
+    Auth.authorize(conn, "config:read", fn conn ->
+      send_json(conn, 200, Redact.config(config(conn)))
+    end)
+  end
+
+  # No role gate, like `/v1/config`: it is built from config, and the document
+  # carries no credentials (`Ankusa.AsyncApi`).
+  get "/asyncapi.json" do
+    Auth.authorize(conn, "config:read", fn conn ->
+      AsyncApiSpex.Plug.RenderSpec.send_spec(conn, Ankusa.AsyncApi.document(instance(conn)))
+    end)
+  end
+
+  get "/v1/dlq" do
+    global_role(conn, "dlq:read", :dispatch, &dlq_index/1)
+  end
+
+  post "/v1/replays" do
+    global_role(conn, "replays:write", :dispatch, &replay_create/1)
+  end
+
+  get "/v1/replays" do
+    global_role(conn, "replays:read", :dispatch, &replay_list/1)
+  end
+
+  get "/v1/replays/:id" do
+    global_role(conn, "replays:read", :dispatch, &replay_get(&1, id))
+  end
+
+  patch "/v1/replays/:id" do
+    global_role(conn, "replays:write", :dispatch, &replay_update(&1, id))
+  end
+
+  get "/v1/quarantine" do
+    global_role(conn, "quarantine:read", :edge, &quarantine_index/1)
+  end
+
+  delete "/v1/quarantine" do
+    global_role(conn, "quarantine:write", :edge, &quarantine_purge/1)
+  end
+
+  get "/v1/tenants/:tenant/sources" do
+    Auth.authorize_tenant(conn, "sources:read", tenant, &sources_index(&1, tenant))
+  end
+
+  post "/v1/tenants/:tenant/sources" do
+    Auth.authorize_tenant(conn, "sources:write", tenant, &source_create(&1, tenant))
+  end
+
+  get "/v1/tenants/:tenant/sources/:name" do
+    Auth.authorize_tenant(conn, "sources:read", tenant, &source_get(&1, tenant, name))
+  end
+
+  put "/v1/tenants/:tenant/sources/:name" do
+    Auth.authorize_tenant(conn, "sources:write", tenant, &source_update(&1, tenant, name))
+  end
+
+  delete "/v1/tenants/:tenant/sources/:name" do
+    Auth.authorize_tenant(conn, "sources:write", tenant, &source_delete(&1, tenant, name))
+  end
+
+  # The limiter is the edge node's own state (`Ankusa.Edge.RateLimiter`), so
+  # these are role-gated like the quarantine list, not node-agnostic like
+  # source management.
+  get "/v1/rate-limits" do
+    global_role(conn, "rate_limits:read", :edge, &rate_limits_index/1)
+  end
+
+  get "/v1/tenants/:tenant/rate-limit" do
+    tenant_role(conn, "rate_limits:read", tenant, :edge, &rate_limit_get(&1, tenant))
+  end
+
+  put "/v1/tenants/:tenant/rate-limit" do
+    tenant_role(conn, "rate_limits:write", tenant, :edge, &rate_limit_put(&1, tenant))
+  end
+
+  delete "/v1/tenants/:tenant/rate-limit" do
+    tenant_role(conn, "rate_limits:write", tenant, :edge, &rate_limit_delete(&1, tenant))
+  end
+
+  match _ do
+    send_json(conn, 404, %{error: "not_found"})
+  end
+
+  # ── routes ──────────────────────────────────────────────────────────────────
+
+  defp wal(conn) do
     config = config(conn)
 
     case config.wal do
@@ -87,89 +198,6 @@ defmodule Ankusa.Admin.Router do
         })
     end
   end
-
-  get "/v1/config" do
-    send_json(conn, 200, Redact.config(config(conn)))
-  end
-
-  # No role gate, like `/v1/config`: it is built from config, and the document
-  # carries no credentials (`Ankusa.AsyncApi`).
-  get "/asyncapi.json" do
-    AsyncApiSpex.Plug.RenderSpec.send_spec(conn, Ankusa.AsyncApi.document(instance(conn)))
-  end
-
-  get "/v1/dlq" do
-    require_role(conn, :dispatch, &dlq_index/1)
-  end
-
-  post "/v1/replays" do
-    require_role(conn, :dispatch, &replay_create/1)
-  end
-
-  get "/v1/replays" do
-    require_role(conn, :dispatch, &replay_list/1)
-  end
-
-  get "/v1/replays/:id" do
-    require_role(conn, :dispatch, &replay_get(&1, id))
-  end
-
-  patch "/v1/replays/:id" do
-    require_role(conn, :dispatch, &replay_update(&1, id))
-  end
-
-  get "/v1/quarantine" do
-    require_role(conn, :edge, &quarantine_index/1)
-  end
-
-  delete "/v1/quarantine" do
-    require_role(conn, :edge, &quarantine_purge/1)
-  end
-
-  get "/v1/tenants/:tenant/sources" do
-    sources_index(conn, tenant)
-  end
-
-  post "/v1/tenants/:tenant/sources" do
-    source_create(conn, tenant)
-  end
-
-  get "/v1/tenants/:tenant/sources/:name" do
-    source_get(conn, tenant, name)
-  end
-
-  put "/v1/tenants/:tenant/sources/:name" do
-    source_update(conn, tenant, name)
-  end
-
-  delete "/v1/tenants/:tenant/sources/:name" do
-    source_delete(conn, tenant, name)
-  end
-
-  # The limiter is the edge node's own state (`Ankusa.Edge.RateLimiter`), so
-  # these are role-gated like the quarantine list, not node-agnostic like
-  # source management.
-  get "/v1/rate-limits" do
-    require_role(conn, :edge, &rate_limits_index/1)
-  end
-
-  get "/v1/tenants/:tenant/rate-limit" do
-    require_role(conn, :edge, &rate_limit_get(&1, tenant))
-  end
-
-  put "/v1/tenants/:tenant/rate-limit" do
-    require_role(conn, :edge, &rate_limit_put(&1, tenant))
-  end
-
-  delete "/v1/tenants/:tenant/rate-limit" do
-    require_role(conn, :edge, &rate_limit_delete(&1, tenant))
-  end
-
-  match _ do
-    send_json(conn, 404, %{error: "not_found"})
-  end
-
-  # ── routes ──────────────────────────────────────────────────────────────────
 
   defp dlq_index(conn) do
     params = Plug.Conn.fetch_query_params(conn).query_params
@@ -553,31 +581,41 @@ defmodule Ankusa.Admin.Router do
   defp replay_create(conn) do
     with_replay_body(conn, fn map, conn ->
       case replay_spec(map) do
+        # The route needed `replays:write`; replaying a DLQ or the quarantine
+        # pen is also a write to that store, so those kinds need its scope too.
         {:ok, spec} ->
-          case Ankusa.Replay.start(instance(conn), spec) do
-            {:ok, :created, job} ->
-              send_json(conn, 202, Ankusa.Replay.to_json(job))
-
-            {:ok, :existing, job} ->
-              send_json(conn, 200, Ankusa.Replay.to_json(job))
-
-            {:error, {:invalid, field}} ->
-              invalid_filter(conn, field)
-
-            {:error, :too_many_replays} ->
-              send_json(conn, 409, %{error: "too_many_replays"})
-
-            {:error, {:role_not_enabled, role}} ->
-              send_json(conn, 409, %{error: "role_not_enabled", role: to_string(role)})
-
-            {:error, :store_unavailable} ->
-              send_json(conn, 503, %{error: "store_unavailable"})
-          end
+          Auth.authorize(conn, replay_kind_scopes(spec.kind), &start_replay(&1, spec))
 
         {:error, field} ->
           invalid_filter(conn, field)
       end
     end)
+  end
+
+  defp replay_kind_scopes(:dlq), do: "dlq:write"
+  defp replay_kind_scopes(:quarantine), do: "quarantine:write"
+  defp replay_kind_scopes(:archive), do: []
+
+  defp start_replay(conn, spec) do
+    case Ankusa.Replay.start(instance(conn), spec) do
+      {:ok, :created, job} ->
+        send_json(conn, 202, Ankusa.Replay.to_json(job))
+
+      {:ok, :existing, job} ->
+        send_json(conn, 200, Ankusa.Replay.to_json(job))
+
+      {:error, {:invalid, field}} ->
+        invalid_filter(conn, field)
+
+      {:error, :too_many_replays} ->
+        send_json(conn, 409, %{error: "too_many_replays"})
+
+      {:error, {:role_not_enabled, role}} ->
+        send_json(conn, 409, %{error: "role_not_enabled", role: to_string(role)})
+
+      {:error, :store_unavailable} ->
+        send_json(conn, 503, %{error: "store_unavailable"})
+    end
   end
 
   defp replay_list(conn) do
@@ -779,6 +817,14 @@ defmodule Ankusa.Admin.Router do
       send_json(conn, 409, %{error: "role_not_enabled", role: to_string(role)})
     end
   end
+
+  # Scope first, role second: a caller without the scope learns nothing about
+  # which roles this node runs.
+  defp global_role(conn, scope, role, fun),
+    do: Auth.authorize_global(conn, scope, &require_role(&1, role, fun))
+
+  defp tenant_role(conn, scope, tenant, role, fun),
+    do: Auth.authorize_tenant(conn, scope, tenant, &require_role(&1, role, fun))
 
   # Absent → `default`. Present but not an integer (a query string always
   # arrives as a binary; a JSON body may carry either) → `{:error, key}`.

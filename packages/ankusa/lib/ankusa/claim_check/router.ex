@@ -5,10 +5,14 @@ defmodule Ankusa.ClaimCheck.Router do
   separate from `Ankusa.Edge.Router`: the edge is internet-facing, this is
   internal-network-only.
 
-  It performs **no authentication or authorization**. Whatever fronts the port
-  (a mesh, Envoy, an API gateway) decides who may read what; the tenant is a
-  path segment so that layer can check it without reading a body. A shared
-  cache must sit behind that layer, never in front of it.
+  Every request but `GET /health` is authenticated (`claim_check.auth`, see
+  `Ankusa.Admin.Auth`) and authorized: `401` without a credential, `403`
+  unless the caller holds `claims:read` and `tenant:<tenant_id>` (or
+  `tenant:*`) for the tenant in the path. The default `mode: :none` is
+  accepted on loopback only; anywhere else configure `:jwt`, `:mtls` or
+  `:token`, or say with `allow_insecure: true` that a mesh or proxy in front of
+  the port authenticates every caller. A shared cache must sit behind that
+  layer, never in front of it.
 
   ## API
 
@@ -45,15 +49,16 @@ defmodule Ankusa.ClaimCheck.Router do
   Every claim request answers within `claim_check.read_deadline_ms`. Its
   reads go through `Ankusa.ClaimCheck.Cache` (pack indexes and claims already
   read) and `Ankusa.ClaimCheck.Reader` (coalescing, a per-store adaptive
-  limit on store requests, a bounded queue, and the deadline). Each request
-  emits `[:ankusa, :claim_check, :gateway]` with its method, status and
-  duration.
+  limit on store requests, a bounded queue, and the deadline). Each authorized
+  request emits `[:ankusa, :claim_check, :gateway]` with its method, status and
+  duration; a `401` or `403` is refused before any of it and emits nothing.
   """
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
 
   require Logger
 
+  alias Ankusa.Admin.Auth
   alias Ankusa.{ClaimCheck, Http, Telemetry}
   alias Ankusa.ClaimCheck.Stores
 
@@ -61,6 +66,7 @@ defmodule Ankusa.ClaimCheck.Router do
   # One range-spec of the `bytes` unit: `first-last`, `first-`, or `-suffix`.
   @range_spec ~r/\A(\d*)-(\d*)\z/
 
+  plug(Auth, section: :claim_check)
   plug(:match)
   plug(:dispatch)
 
@@ -77,6 +83,10 @@ defmodule Ankusa.ClaimCheck.Router do
   end
 
   defp claim(conn, tenant_id, claim_id) do
+    Auth.authorize_tenant(conn, "claims:read", tenant_id, &serve_claim(&1, tenant_id, claim_id))
+  end
+
+  defp serve_claim(conn, tenant_id, claim_id) do
     instance = instance(conn)
     started = System.monotonic_time()
     conn = serve(conn, instance, tenant_id, claim_id, ClaimCheck.deadline(instance))

@@ -251,8 +251,9 @@ The always-on tests cover:
   reporting, telemetry, and CRUD. `edge_route_guard_test.exs` drives the guard
   with real requests and asserts its store effects (a rejected request writes
   **nothing**); `routes/router_test.exs` drives the management API over both
-  `Plug.Test.conn` and a real socket, unauthenticated by design like
-  `Ankusa.Admin.Router`. `routes/router_openapi_test.exs` is the
+  `Plug.Test.conn` and a real socket, plus its 401/403 cases (`admin/router_auth_test.exs`
+  does the same for every `Ankusa.Admin.Router` route; `admin/auth_test.exs` covers
+  tokens, JWTs against a stub JWKS endpoint, and client certificates). `routes/router_openapi_test.exs` is the
   contract test for that API: it drives every documented operation from the
   examples in `priv/openapi/admin.v1.yaml` — path parameters, query parameters,
   and request bodies included — and drives every documented error response with

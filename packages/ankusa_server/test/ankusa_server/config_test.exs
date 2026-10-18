@@ -38,13 +38,14 @@ defmodule AnkusaServer.ConfigTest do
     "SQS_QUEUE_URL" => "https://sqs.us-east-1.amazonaws.com/000000000000/fixture.fifo",
     "STANDARD_WEBHOOKS_SECRET" => "whsec_Zml4dHVyZQ==",
     "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret",
-    "GCP_TOKEN" => "fixture-gcp-token"
+    "GCP_TOKEN" => "fixture-gcp-token",
+    "CLAIM_CHECK_TOKEN" => "fixture-claim-check-token"
   }
 
   @fixture_secrets ~w(fixture-s3-secret
                       whsec_fixture-stripe-secret fixture-rabbit-password
                       fixture-kafka-password fixture-nats-password fixture-github-secret
-                      fixture-redis-password fixture-gcp-token
+                      fixture-redis-password fixture-gcp-token fixture-claim-check-token
                       whsec_Zml4dHVyZQ== whsec_c2luay1maXh0dXJl)
 
   # ── the shipped configs ─────────────────────────────────────────────────────
@@ -59,13 +60,18 @@ defmodule AnkusaServer.ConfigTest do
   test "the reference config spells out the whole schema" do
     config = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).config
 
-    assert config.admin == %{
+    assert Map.delete(config.admin, :auth) == %{
              enabled: true,
              port: 4002,
              ip: "127.0.0.1",
              gauge_interval_ms: 15_000,
              tls: nil
            }
+
+    # The reference spells the auth blocks out at their defaults.
+    for auth <- [config.admin.auth, config.routes.admin.auth, config.claim_check.auth] do
+      assert %{mode: :none, allow_insecure: false, tokens: [], mtls: %{subject_map: %{}}} = auth
+    end
 
     assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
 
@@ -124,13 +130,15 @@ defmodule AnkusaServer.ConfigTest do
   test "the baked image config is the demo: admin on, one open source" do
     config = Config.load!(path: "rel/ankusa.yml", env: %{}).config
 
-    assert config.admin == %{
+    assert Map.delete(config.admin, :auth) == %{
              enabled: true,
              port: 4002,
              ip: "127.0.0.1",
              gauge_interval_ms: 15_000,
              tls: nil
            }
+
+    assert config.admin.auth.mode == :none
 
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) == ["demo"]
@@ -429,14 +437,40 @@ defmodule AnkusaServer.ConfigTest do
 
     assert Config.load!(path: path, env: %{}).config.admin.ip == "127.0.0.1"
 
+    # Off loopback the admin API must authenticate, so the address comes with a token.
     config =
       Config.load!(
         path: path,
-        env: %{"ANKUSA_ADMIN_IP" => "0.0.0.0", "ANKUSA_CLAIM_CHECK_IP" => "::"}
+        env: %{
+          "ANKUSA_ADMIN_IP" => "0.0.0.0",
+          "ANKUSA_ADMIN_TOKEN" => "operator-token",
+          "ANKUSA_CLAIM_CHECK_IP" => "::"
+        }
       ).config
 
     assert config.admin.ip == "0.0.0.0"
     assert config.claim_check.ip == "::"
+  end
+
+  test "ANKUSA_ADMIN_IP off loopback without authentication fails the load, naming admin.auth" do
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: path, env: %{"ANKUSA_ADMIN_IP" => "0.0.0.0"})
+      end
+
+    assert error.message =~
+             "admin.auth.mode is :none but admin.ip (0.0.0.0) is not a loopback address"
+
+    # The explicit opt-out for a deployment authenticated in front of the port.
+    open =
+      tmp_config("""
+      admin: {auth: {mode: none, allow_insecure: true}}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    assert Config.load!(path: open, env: %{"ANKUSA_ADMIN_IP" => "0.0.0.0"}).config.admin.auth.allow_insecure
   end
 
   test "a listener ip that is not an address fails load! naming the key" do
@@ -587,6 +621,165 @@ defmodule AnkusaServer.ConfigTest do
         error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
         assert error.message =~ message, "#{yaml}: #{error.message}"
       end
+    end
+  end
+
+  describe "control-plane auth" do
+    @tls_dir Path.expand("../../../ankusa/test/fixtures/tls", __DIR__)
+    @sources "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+    @every_scope Ankusa.Principal.scopes()
+
+    defp load_auth(yaml, env \\ %{}),
+      do: Config.load!(path: tmp_config(yaml <> "\n" <> @sources), env: env).config
+
+    defp load_error(yaml, env \\ %{}) do
+      error = assert_raise ConfigError, fn -> load_auth(yaml, env) end
+      error.message
+    end
+
+    test "tokens are hashed at load: the plaintext never reaches core's config" do
+      config =
+        load_auth("""
+        admin:
+          auth:
+            mode: token
+            tokens:
+              - {id: ci, token: "ci-secret-token", scopes: [dlq:read, "tenant:acme"]}
+              - id: pre-hashed
+                sha256: #{Ankusa.Admin.Auth.Token.hash("other-secret")}
+                scopes: "config:read, metrics:read"
+        """)
+
+      assert [
+               %{id: "ci", sha256: hash, scopes: ["dlq:read", "tenant:acme"]},
+               %{id: "pre-hashed", scopes: ["config:read", "metrics:read"]}
+             ] = config.admin.auth.tokens
+
+      assert hash == Ankusa.Admin.Auth.Token.hash("ci-secret-token")
+      refute inspect(config) =~ "ci-secret-token"
+    end
+
+    test "token mistakes are named" do
+      for {entry, message} <- [
+            {"{id: ci, scopes: [dlq:read]}", "admin.auth.tokens[0]: needs token or sha256"},
+            {"{id: ci, token: x, sha256: abc, scopes: [dlq:read]}",
+             "admin.auth.tokens[0]: token and sha256 are alternatives"},
+            {"{id: ci, token: \"\", scopes: [dlq:read]}",
+             "admin.auth.tokens[0].token: must not be empty"},
+            {"{token: x, scopes: [dlq:read]}",
+             ~s(admin.auth.tokens[0]: missing required key "id")},
+            {"{id: ci, token: x}", ~s(admin.auth.tokens[0]: missing required key "scopes")},
+            {"{id: ci, token: x, scopes: [dlq:read], extra: 1}",
+             ~s(admin.auth.tokens[0]: unknown key "extra")},
+            {"{id: ci, token: x, scopes: [dlq:read, admin:all]}",
+             ~s(has unknown scopes ["admin:all"])}
+          ] do
+        assert load_error("admin: {auth: {mode: token, tokens: [#{entry}]}}") =~ message
+      end
+    end
+
+    test "jwt and mtls blocks land in core's config" do
+      config =
+        load_auth("""
+        admin:
+          tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem, cacertfile: #{@tls_dir}/ca.pem, verify: verify_peer}
+          auth:
+            mode: mtls
+            mtls:
+              subject_map:
+                "cn:ops-laptop": [dlq:read, "tenant:*"]
+                "uri:spiffe://prod/ops": metrics:read
+        claim_check:
+          auth:
+            mode: jwt
+            jwt:
+              issuer: https://login.example.com/
+              audience: [ankusa-claims, ankusa]
+              jwks_url: https://login.example.com/jwks.json
+              refresh_ms: 60000
+              leeway_s: 5
+              scope_claim: scp
+        """)
+
+      assert config.admin.auth.mtls.subject_map == %{
+               "cn:ops-laptop" => ["dlq:read", "tenant:*"],
+               "uri:spiffe://prod/ops" => ["metrics:read"]
+             }
+
+      assert %{
+               mode: :jwt,
+               jwt: %{
+                 issuer: "https://login.example.com/",
+                 audience: ["ankusa-claims", "ankusa"],
+                 jwks_url: "https://login.example.com/jwks.json",
+                 refresh_ms: 60_000,
+                 min_refresh_ms: 10_000,
+                 leeway_s: 5,
+                 scope_claim: "scp"
+               }
+             } = config.claim_check.auth
+    end
+
+    test "core's rules run at load: mtls needs verify_peer, jwt needs a key source" do
+      assert load_error(
+               "admin: {auth: {mode: mtls, mtls: {subject_map: {\"cn:a\": [dlq:read]}}}}"
+             ) =~
+               "admin.auth.mode: :mtls needs admin.tls with verify: :verify_peer"
+
+      assert load_error("admin: {auth: {mode: jwt, jwt: {issuer: i, audience: a}}}") =~
+               "needs admin.auth.jwt.jwks_url or admin.auth.jwt.keys"
+
+      assert load_error("admin: {auth: {mode: basic}}") =~
+               ~s(admin.auth.mode: unknown value "basic")
+
+      assert load_error("admin: {auth: {tokns: []}}") =~ ~s(admin.auth: unknown key "tokns")
+
+      assert load_error("claim_check: {auth: {jwt: {secret: x}}}") =~
+               ~s(claim_check.auth.jwt: unknown key "secret")
+    end
+
+    test "ANKUSA_ADMIN_TOKEN gives the admin API one token holding every scope and every tenant" do
+      config = load_auth("", %{"ANKUSA_ADMIN_TOKEN" => "env-operator-token"})
+
+      assert %{mode: :token, tokens: [%{id: "ANKUSA_ADMIN_TOKEN", sha256: hash, scopes: scopes}]} =
+               config.admin.auth
+
+      assert hash == Ankusa.Admin.Auth.Token.hash("env-operator-token")
+      assert scopes == @every_scope ++ ["tenant:*"]
+      refute inspect(config) =~ "env-operator-token"
+    end
+
+    test "the env tokens replace the file's auth block, one per control plane" do
+      config =
+        load_auth(
+          """
+          admin:
+            auth: {mode: none}
+          """,
+          %{
+            "ANKUSA_ADMIN_TOKEN" => "a",
+            "ANKUSA_ROUTES_ADMIN_TOKEN" => "r",
+            "ANKUSA_CLAIM_CHECK_TOKEN" => "c"
+          }
+        )
+
+      assert [%{id: "ANKUSA_ADMIN_TOKEN"}] = config.admin.auth.tokens
+
+      assert [
+               %{
+                 id: "ANKUSA_ROUTES_ADMIN_TOKEN",
+                 scopes: ["routes:read", "routes:write", "tenant:*"]
+               }
+             ] =
+               config.routes.admin.auth.tokens
+
+      assert [%{id: "ANKUSA_CLAIM_CHECK_TOKEN", scopes: ["claims:read", "tenant:*"]}] =
+               config.claim_check.auth.tokens
+    end
+
+    test "an empty token variable is an error, not a way to switch authentication off" do
+      assert load_error("", %{"ANKUSA_ADMIN_TOKEN" => ""}) =~
+               "ANKUSA_ADMIN_TOKEN is set but empty"
     end
   end
 
@@ -1045,7 +1238,7 @@ defmodule AnkusaServer.ConfigTest do
   test "routes are off unless the file says otherwise" do
     path = tmp_config("http: {port: 4000}\n")
 
-    assert Config.load!(path: path, env: %{}).config.routes == %Ankusa.Config{}.routes
+    assert Config.load!(path: path, env: %{}).config.routes == Ankusa.Config.new().routes
   end
 
   test "a routes section maps to core's routes config" do
@@ -1089,7 +1282,7 @@ defmodule AnkusaServer.ConfigTest do
              rules: [%{action: :allow, cidr: "203.0.113.0/24"}]
            }
 
-    assert routes.admin == %{port: 4100, ip: "127.0.0.1", tls: nil}
+    assert Map.delete(routes.admin, :auth) == %{port: 4100, ip: "127.0.0.1", tls: nil}
 
     assert [%{"id" => "seed", "path" => "/hooks/seed", "metadata" => %{"owner" => "acme"}}] =
              routes.seed
@@ -1236,7 +1429,7 @@ defmodule AnkusaServer.ConfigTest do
     assert routes.enabled
     assert routes.max_routes == 10_000
     assert routes.store == {Ankusa.Routes.Store.ETS, []}
-    assert routes.admin == %{port: 4003, ip: "127.0.0.1", tls: nil}
+    assert Map.delete(routes.admin, :auth) == %{port: 4003, ip: "127.0.0.1", tls: nil}
     assert routes.ip_denied_status == 403
     assert routes.log_sample == 100
     assert routes.trusted_proxies == []

@@ -86,7 +86,7 @@ admin:
   # defaults this on because it is the only way to operate a container without
   # an Elixir shell; core's default for embedded users is false.
   enabled: true
-  # [env ANKUSA_ADMIN_PORT] unauthenticated — do not publish it.
+  # [env ANKUSA_ADMIN_PORT] see `auth` below before publishing it.
   port: 4002
   # [env ANKUSA_ADMIN_IP] the address it binds. Loopback by default, so inside
   # a container `-p 4002:4002` does not reach it; set 0.0.0.0 to publish it.
@@ -99,6 +99,41 @@ admin:
   # A TLS block for the admin listener, shaped like `listener.tls` above.
   # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem,
   #       cacertfile: /etc/ankusa/tls/ops-ca.pem, verify: verify_peer}
+  # Who may call it (`Ankusa.Admin.Auth`). With a mode other than none every
+  # route but /health and /ready needs a credential, and each route needs a
+  # scope: metrics:read, config:read, sources:read|write, dlq:read|write,
+  # replays:read|write, quarantine:read|write, rate_limits:read|write — plus
+  # tenant:<id>, or tenant:* for anything that spans tenants (the DLQ, replays,
+  # the quarantine pen). 401 without a credential, 403 without the scope.
+  #   none  — no authentication; accepted on a loopback address only, or with
+  #           allow_insecure: true when a proxy or mesh in front of the port
+  #           authenticates every caller (anything else fails at boot)
+  #   token — static bearer tokens, for development, CI and scripts
+  #   jwt   — OIDC access tokens, verified against your provider's JWKS
+  #   mtls  — client certificates; needs `tls` above with verify: verify_peer
+  # [env ANKUSA_ADMIN_TOKEN] replaces this whole block with one `token` entry
+  # holding every scope and tenant:*.
+  auth:
+    mode: none
+    allow_insecure: false
+    # tokens:
+    #   - id: ci
+    #     token: "${CI_TOKEN}"       # hashed at load; or `sha256:` with the hex hash
+    #     scopes: [dlq:read, replays:write, "tenant:*"]
+    # jwt:
+    #   issuer: https://login.example.com/
+    #   audience: ankusa-admin      # or a list: any one of them is accepted
+    #   jwks_url: https://login.example.com/.well-known/jwks.json   # https, or http on loopback
+    #   keys: []                    # public JWKs ({kty: EC, ...}) or PEM strings, besides the JWKS
+    #   refresh_ms: 300000          # refetch the JWKS this often
+    #   min_refresh_ms: 10000       # an unknown `kid` refetches at most this often
+    #   leeway_s: 30                # clock skew allowed on exp and nbf
+    #   scope_claim: scope          # a space-delimited string, or a list
+    #   tenants_claim: ankusa_tenants   # ["acme"], or ["*"] for every tenant
+    # mtls:
+    #   # A certificate's identities: its SANs (dns:, email:, uri:, ip:), then cn:
+    #   subject_map:
+    #     "cn:ops-laptop": [dlq:read, replays:write, "tenant:*"]
 
 metrics:
   # A listener that serves only /metrics, /health and /ready (404 for
@@ -170,14 +205,20 @@ routes:
     # - {action: allow, cidr: "203.0.113.0/24"}
 
   admin:
-    # Its own listener, unauthenticated by design (same stance as `admin:`
-    # above): front it with your own proxy or network policy before exposing
-    # it.
+    # Its own listener, authenticated like `admin:` above (see its `auth`
+    # comment). Route definitions belong to no tenant, so `routes:read` and
+    # `routes:write` only count together with tenant:*.
+    # [env ANKUSA_ROUTES_ADMIN_TOKEN] replaces the `auth` block below with one
+    # token holding both.
     port: 4003
     # The address it binds; 0.0.0.0 exposes it on every interface.
     ip: 127.0.0.1
     # A TLS block for this listener, shaped like `listener.tls` above.
     # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
+    auth:
+      mode: none
+      allow_insecure: false
+      # tokens, jwt and mtls take the same shapes as under `admin.auth`.
 
   # Routes an operator cannot wait for the API to create: a standalone node
   # (no Redis) loses API-created routes on restart, but not these. Applied on
@@ -327,6 +368,14 @@ claim_check:
   ip: 127.0.0.1
   # A TLS block for the gateway, shaped like `listener.tls` above.
   # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
+  # Who may read claims: the `claims:read` scope plus tenant:<tenant> for the
+  # claim's tenant (or tenant:*). Same shapes as under `admin.auth`;
+  # [env ANKUSA_CLAIM_CHECK_TOKEN] replaces this block with one token holding
+  # both. Consumers (the SDKs' claim-check clients) send the token as
+  # `Authorization: Bearer`, e.g. the TypeScript client's `headers` option.
+  auth:
+    mode: none
+    allow_insecure: false
   # Target size of one pack object; a body larger than this still gets a pack
   # of its own. Core defaults this to 16 MiB.
   pack_max_bytes: 16777216

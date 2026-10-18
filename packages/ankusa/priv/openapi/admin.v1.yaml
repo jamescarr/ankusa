@@ -8,13 +8,21 @@ info:
     `admin.enabled: true` (default port 4002). This document is the
     cross-language contract. The Elixir code conforms to it, not the reverse.
 
-    This API performs **no** authentication or authorization. Ankusa does not
-    manage users, API keys, or tokens; the only request authentication in the
-    framework is provider signature verification on ingest. Deployers secure
-    this port at their own boundary (network policy, a reverse proxy, SSO, a
-    service mesh) — the same way Elasticsearch was operated before it shipped
-    security. `GET /v1/config` is redacted anyway, because a proxy may let many
-    people read it.
+    Every operation except `GET /health` and `GET /ready` needs a credential,
+    and each needs a **scope** (`Ankusa.Principal`): `401` when the credential
+    is missing or not accepted, `403` when its principal lacks the scope the
+    operation needs (named in the body). Each listener has its own `auth`
+    block (`admin.auth`, `routes.admin.auth`): a static bearer token
+    (`mode: token`), an OIDC access token verified against the identity
+    provider's JWKS (`mode: jwt`), or a client certificate mapped to scopes
+    (`mode: mtls`). `mode: none` — no authentication — is accepted only on a
+    loopback address. The scopes are `metrics:read`, `config:read`,
+    `sources:read|write`, `dlq:read|write`, `replays:read|write`,
+    `quarantine:read|write`, `rate_limits:read|write`, `routes:read|write`,
+    `claims:read`, plus `tenant:<id>` or `tenant:*` for the tenants they apply
+    to; a resource that spans tenants needs `tenant:*`. Each operation below
+    says which it needs. `GET /v1/config` is redacted anyway, because many
+    people may hold `config:read`.
 
     Responses are node-local by design: the DLQ is the dispatch node's disk and
     the quarantine pen is the edge node's. A route that needs a role
@@ -28,7 +36,7 @@ info:
     4002) **except** the `routes` tag, which is `Ankusa.Routes.Router` on its own
     listener (`routes.admin.port`, default 4003): managing routes is an operator
     action, and it should share neither the ingest port nor the operator API's
-    port. Both listeners are unauthenticated by design — see above.
+    port. Both listeners authenticate their callers the same way — see above.
 
     The `routes` endpoints edit the table the *edge* enforces, so they exist only
     on a node with `routes.enabled: true` and the `:edge` role.
@@ -47,7 +55,9 @@ servers:
     description: |
       Route-management listener (default `routes.admin.port`). Only the `routes`
       tag is served here, plus `GET /health`.
-security: []
+security:
+  - bearerAuth: []
+  - mutualTLS: []
 tags:
   - name: operations
     description: Health, metrics, and the effective configuration.
@@ -80,6 +90,7 @@ paths:
           routes enabled.
     get:
       operationId: getHealth
+      security: []
       tags: [operations]
       summary: Liveness probe
       description: |
@@ -111,6 +122,7 @@ paths:
         description: Operator API listener (default `admin.port`).
     get:
       operationId: getReady
+      security: []
       tags: [operations]
       summary: Readiness probe
       description: |
@@ -151,6 +163,10 @@ paths:
         series. Only the events this node emits appear — an edge node has no
         dispatch series, a storage node has no ingest series.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Prometheus text exposition format, version 0.0.4.
           content:
@@ -171,6 +187,10 @@ paths:
         and by shape (a URI password becomes `user:[REDACTED]`), so this
         is safe to hand to anyone who can reach the port.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: |
             A JSON object mirroring the config's nesting. `{module, opts}`
@@ -196,6 +216,10 @@ paths:
 
         The body is JSON, which AsyncAPI tooling reads as YAML 1.2.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The AsyncAPI document.
           content:
@@ -222,6 +246,10 @@ paths:
         is unreachable. Node-local, like the DLQ and the quarantine list: ask
         every node. A node running `wal.type: none` has no queue to report.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: This node's queue statistics.
           content:
@@ -259,6 +287,10 @@ paths:
             type: integer
             default: 100
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Matching entries, newest first. `total` counts all matches, before `limit`.
           content:
@@ -308,6 +340,10 @@ paths:
             schema:
               $ref: '#/components/schemas/ReplaySpec'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '202':
           description: The new job, running.
           content:
@@ -339,6 +375,10 @@ paths:
       summary: List replay jobs
       description: Every replay job, newest first.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: All jobs, newest first.
           content:
@@ -361,6 +401,10 @@ paths:
           schema:
             type: string
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The job.
           content:
@@ -395,6 +439,10 @@ paths:
             schema:
               $ref: '#/components/schemas/ReplayPatch'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The updated job.
           content:
@@ -432,6 +480,10 @@ paths:
             type: integer
             default: 100
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Recent quarantined entries, newest first.
           content:
@@ -489,6 +541,10 @@ paths:
             type: integer
             default: 1000
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: What was deleted.
           content:
@@ -512,6 +568,10 @@ paths:
         `default` is `null` when the config sets none, which with no tenant
         entry means unlimited.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The default, if any, and every tenant with a limit — configured or overridden.
           content:
@@ -537,6 +597,10 @@ paths:
         `rate_limits.default` — with `source` saying which. `source: none` means
         unlimited; `rate` and `burst` are `null` then.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The effective limit and where it came from.
           content:
@@ -564,6 +628,10 @@ paths:
             schema:
               $ref: '#/components/schemas/RateLimit'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The stored override.
           content:
@@ -585,6 +653,10 @@ paths:
         the bucket is reset. Immediate, like the source store's own deletes —
         and, like them, this node's alone.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '204':
           description: Deleted. No body.
         '400':
@@ -624,6 +696,10 @@ paths:
               $ref: '#/components/schemas/DryRunRequest'
             example: {method: POST, path: /webhooks/stripe, ip: 203.0.113.7}
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: 'The decision, and what produced it: `decision: deny` with the `reason` that denied it.'
           content:
@@ -700,6 +776,10 @@ paths:
             type: string
           example: checkout
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: One page of route definitions.
           content:
@@ -753,6 +833,10 @@ paths:
               ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
               metadata: {owner: payments}
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '201':
           description: The stored route, timestamps included.
           content:
@@ -793,6 +877,10 @@ paths:
       tags: [routes]
       summary: Fetch one route definition
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The route.
           content:
@@ -834,6 +922,10 @@ paths:
               ip_rules: []
               metadata: {owner: payments, staging: true}
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The stored route, with the `inserted_at` it already had.
           content:
@@ -875,6 +967,10 @@ paths:
               $ref: '#/components/schemas/RoutePatch'
             example: {enabled: true}
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The patched route.
           content:
@@ -914,6 +1010,10 @@ paths:
         as well — while the Redis store seeds once per namespace and keeps the
         deletion.
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '204':
           description: Deleted. No body.
         '404':
@@ -929,6 +1029,10 @@ paths:
       tags: [routes]
       summary: The global IP rules
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The ordered global rules, and the `default` when none match.
           content:
@@ -965,6 +1069,10 @@ paths:
               default: deny
               rules: [{action: allow, cidr: '203.0.113.0/24'}]
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The stored rules, as parsed.
           content:
@@ -981,6 +1089,19 @@ paths:
         '503':
           $ref: '#/components/responses/StoreUnavailable'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        `Authorization: Bearer <token>`: an OIDC/OAuth2 access token (`mode: jwt`)
+        or a static token (`mode: token`).
+    mutualTLS:
+      type: mutualTLS
+      description: |
+        A client certificate presented to a listener with `tls.verify:
+        verify_peer` (`mode: mtls`), mapped to scopes by `auth.mtls.subject_map`.
   schemas:
     Health:
       type: object
@@ -1557,6 +1678,8 @@ components:
             - rate_limit_not_found
             - store_unavailable
             - wal_disabled
+            - unauthenticated
+            - forbidden
         field:
           type: string
           description: |
@@ -1575,6 +1698,11 @@ components:
         max_routes:
           type: integer
           description: Present on `too_many_routes`; the configured cap.
+        scope:
+          type: string
+          description: |
+            Present on `forbidden`; the scope the principal lacks (`dlq:read`,
+            `tenant:acme`, `tenant:*`, …).
   responses:
     InvalidFilter:
       description: '`400`. `invalid_filter`: a non-integer `since`, `until` or `limit`, a negative `since`/`until` or an `until` before `since` on a quarantine purge, a non-string `source_id` or `id`, a replay spec with an unknown key or a bad field (`kind`, `since`/`until`, `from`/`to`, `sinks`, `rate`, `max_lag_ms`, `state`), or a replay body that is not a JSON object or is over 64 KiB. `field` names the offending parameter or key.'
@@ -1753,3 +1881,31 @@ components:
           examples:
             storeDown:
               value: {error: store_unavailable}
+    Unauthorized:
+      description: '`401`. `unauthenticated`: no credential, or one that is wrong, expired or unknown. The body is the same whatever the cause. Every operation except `GET /health` and `GET /ready` needs a credential.'
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: Always `Bearer realm="ankusa"`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: unauthenticated}
+    Forbidden:
+      description: '`403`. `forbidden`: the credential is good, but its principal lacks `scope`, which the operation needs. Scopes are checked before anything else, so a caller without them learns nothing about this node.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missingRead:
+              value: {error: forbidden, scope: 'routes:read'}
+            missingWrite:
+              value: {error: forbidden, scope: 'routes:write'}
+            missingDlq:
+              value: {error: forbidden, scope: 'dlq:read'}
+            missingTenant:
+              summary: A resource that spans tenants needs `tenant:*`
+              value: {error: forbidden, scope: 'tenant:*'}

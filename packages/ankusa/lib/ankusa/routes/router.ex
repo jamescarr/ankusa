@@ -8,15 +8,15 @@ defmodule Ankusa.Routes.Router do
   would put a second, easily-forgotten endpoint next to the one that accepts
   provider traffic.
 
-  ## No authentication, by design
+  ## Authentication and scopes
 
-  Same stance as `Ankusa.Admin.Router`: Ankusa does not manage users, tokens, or
-  API keys, and it does not know what auth scheme a deployment wants — mTLS, a
-  gateway's own bearer scheme, a network policy, an operator VPN. Baking in one
-  scheme (a shared token, say) would be the wrong one for most of them. Front
-  this port with whatever your deployment already uses; it carries the same
-  blast radius as `Ankusa.Admin.Router`'s `/v1/dlq/replay`, so it deserves the
-  same treatment.
+  Every route but `GET /health` needs a credential (`routes.admin.auth`, see
+  `Ankusa.Admin.Auth`): `401` without one, `403` without the scope. Reading
+  (`GET`, and the dry run `POST /admin/routes/test`) needs `routes:read`; every
+  other write needs `routes:write`. Route definitions and IP rules belong to
+  no tenant, so both scopes only count together with `tenant:*`: a principal
+  limited to some tenants must not edit what every tenant's ingest is checked
+  against.
 
   ## Responding
 
@@ -63,6 +63,7 @@ defmodule Ankusa.Routes.Router do
 
   require Logger
 
+  alias Ankusa.Admin.Auth
   alias Ankusa.Routes
   alias Ankusa.Routes.Route
 
@@ -70,8 +71,24 @@ defmodule Ankusa.Routes.Router do
   # magnitude more than the largest legitimate one.
   @max_body 65_536
 
+  plug(Auth, section: :routes_admin)
   plug(:match)
+  plug(:authorize_scope)
   plug(:dispatch)
+
+  # One rule for the whole surface: reading is `routes:read`, writing is
+  # `routes:write`. The dry run is a `POST` that changes nothing.
+  defp authorize_scope(%Plug.Conn{path_info: ["health"]} = conn, _opts), do: conn
+
+  defp authorize_scope(%Plug.Conn{} = conn, _opts) do
+    scope =
+      if conn.method in ["GET", "HEAD"] or
+           (conn.method == "POST" and conn.path_info == ["admin", "routes", "test"]),
+         do: "routes:read",
+         else: "routes:write"
+
+    Auth.authorize_global(conn, scope, & &1)
+  end
 
   get "/health" do
     instance = instance(conn)
