@@ -2157,6 +2157,262 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message =~ ~s(sources.custom.verify.parse: unknown value "bogus")
   end
 
+  # ── asymmetric, token and client-certificate verifiers ─────────────────────
+
+  @asym_pub "whpk_11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
+  @asym_other_pub "whpk_PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw="
+
+  defp verify_yaml(verify, extra) do
+    tmp_config("""
+    #{extra}
+    sources:
+      x:
+        verify: #{verify}
+        sinks: [{type: log}]
+    """)
+  end
+
+  defp verifier_of(verify, env \\ %{}, extra \\ "") do
+    config = Config.load!(path: verify_yaml(verify, extra), env: env).config
+    source_from(config, "x").verifier
+  end
+
+  defp verify_error(verify, env \\ %{}, extra \\ "") do
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: verify_yaml(verify, extra), env: env)
+      end
+
+    error.message
+  end
+
+  test "type standard_webhooks_asym takes a public key or a rotation list, and names a bad one" do
+    assert verifier_of(
+             ~s({type: standard_webhooks_asym, public_key: "#{@asym_pub}", tolerance_seconds: 60})
+           ) ==
+             {Ankusa.Verifier.Asymmetric,
+              [scheme: :standard_webhooks_asym, public_key: @asym_pub, tolerance: 60]}
+
+    assert verifier_of(
+             ~s({type: standard_webhooks_asym, public_key: ["#{@asym_pub}", "#{@asym_other_pub}"]})
+           ) ==
+             {Ankusa.Verifier.Asymmetric,
+              [scheme: :standard_webhooks_asym, public_key: [@asym_pub, @asym_other_pub]]}
+
+    assert verifier_of(~s({type: standard_webhooks_asym, public_key: "${PUB}"}), %{
+             "PUB" => @asym_pub
+           }) ==
+             {Ankusa.Verifier.Asymmetric,
+              [scheme: :standard_webhooks_asym, public_key: @asym_pub]}
+
+    assert verify_error("{type: standard_webhooks_asym}") ==
+             ~s(sources.x.verify: missing required key "public_key")
+
+    assert verify_error(~s({type: standard_webhooks_asym, public_key: ""})) ==
+             "sources.x.verify.public_key: must not be empty"
+
+    assert verify_error("{type: standard_webhooks_asym, public_key: nope}") =~
+             "sources.x.verify.public_key: not a public key for the scheme's algorithm"
+
+    assert verify_error(~s({type: standard_webhooks_asym, public_key: ["#{@asym_pub}", nope]})) =~
+             "sources.x.verify.public_key[1]: not a public key for the scheme's algorithm"
+
+    assert verify_error(~s({type: standard_webhooks_asym, public_key: "#{@asym_pub}", secret: k})) ==
+             ~s(sources.x.verify: unknown key "secret")
+
+    assert verify_error(
+             ~s({type: standard_webhooks_asym, public_key: "#{@asym_pub}", tolerance_seconds: 3601})
+           ) ==
+             "sources.x.verify.tolerance_seconds: must be between 0 and 3600 seconds, got 3601"
+  end
+
+  test "type asymmetric builds an inline scheme, and checks each key against its algorithm" do
+    assert {Ankusa.Verifier.Asymmetric, opts} =
+             verifier_of(
+               ~s({type: asymmetric, public_key: "#{@asym_pub}", signature_header: "X-Sig", ) <>
+                 ~s(sig_prefix: "ed25519=", encoding: hex, timestamp_header: "X-Ts", ) <>
+                 ~s(signed: "{ts}.{body}", tolerance_seconds: 120})
+             )
+
+    assert opts[:public_key] == @asym_pub
+    assert opts[:tolerance] == 120
+
+    assert opts[:scheme] == %Ankusa.Verifier.Asymmetric.Scheme{
+             signature_header: "X-Sig",
+             parse: :whole,
+             sig_prefix: "ed25519=",
+             signed: "{ts}.{body}",
+             algorithm: :ed25519,
+             encoding: :hex,
+             timestamp: {:header, "X-Ts"}
+           }
+
+    rsa = :public_key.generate_key({:rsa, 2048, 65_537})
+    {:RSAPrivateKey, _, n, e, _, _, _, _, _, _, _} = rsa
+
+    pem =
+      [:public_key.pem_entry_encode(:SubjectPublicKeyInfo, {:RSAPublicKey, n, e})]
+      |> :public_key.pem_encode()
+      |> JSON.encode!()
+
+    assert {Ankusa.Verifier.Asymmetric, rsa_opts} =
+             verifier_of(
+               "{type: asymmetric, algorithm: rsa_sha256, signature_header: X-Sig, public_key: #{pem}}"
+             )
+
+    assert rsa_opts[:scheme].algorithm == :rsa_sha256
+    assert rsa_opts[:scheme].encoding == :base64
+
+    # The default algorithm is ed25519: an RSA key under it is named, not loaded.
+    assert verify_error("{type: asymmetric, signature_header: X-Sig, public_key: #{pem}}") =~
+             "sources.x.verify.public_key: not a public key for the scheme's algorithm"
+
+    assert verify_error(
+             ~s({type: asymmetric, signature_header: X-Sig, public_key: "#{@asym_pub}", algorithm: dsa})
+           ) =~
+             ~s(sources.x.verify.algorithm: unknown value "dsa")
+
+    assert verify_error(~s({type: asymmetric, public_key: "#{@asym_pub}"})) ==
+             ~s(sources.x.verify: missing required key "signature_header")
+  end
+
+  test "type token: bearer by default, basic, a header or a query parameter, each secret named when wrong" do
+    assert verifier_of("{type: token, secret: tok}") ==
+             {Ankusa.Verifier.Token, [secret: "tok", location: :bearer]}
+
+    assert verifier_of(~s({type: token, secret: "${TOKEN}"}), %{"TOKEN" => "from-env"}) ==
+             {Ankusa.Verifier.Token, [secret: "from-env", location: :bearer]}
+
+    assert verifier_of("{type: token, secret: [new, old]}") ==
+             {Ankusa.Verifier.Token, [secret: ["new", "old"], location: :bearer]}
+
+    assert verifier_of("{type: token, secret: \"svc:pw\", location: basic}") ==
+             {Ankusa.Verifier.Token, [secret: "svc:pw", location: :basic]}
+
+    assert verifier_of("{type: token, secret: tok, location: header, header: X-Hook}") ==
+             {Ankusa.Verifier.Token, [secret: "tok", location: {:header, "X-Hook"}]}
+
+    assert verifier_of("{type: token, secret: tok, location: query, param: token}") ==
+             {Ankusa.Verifier.Token, [secret: "tok", location: {:query, "token"}]}
+
+    assert verify_error("{type: token}") == ~s(sources.x.verify: missing required key "secret")
+
+    assert verify_error(~s({type: token, secret: ""})) ==
+             "sources.x.verify.secret: must not be empty"
+
+    assert verify_error("{type: token, secret: [ok, \"\"]}") ==
+             "sources.x.verify.secret[1]: must not be empty"
+
+    assert verify_error("{type: token, secret: nocolon, location: basic}") ==
+             "sources.x.verify.secret: a basic secret must be user:password"
+
+    assert verify_error("{type: token, secret: tok, location: header}") ==
+             ~s(sources.x.verify: missing required key "header")
+
+    assert verify_error("{type: token, secret: tok, location: query}") ==
+             ~s(sources.x.verify: missing required key "param")
+
+    assert verify_error(~s({type: token, secret: tok, location: header, header: ""})) ==
+             "sources.x.verify.header: must not be empty"
+
+    assert verify_error("{type: token, secret: tok, header: X-Hook}") ==
+             ~s(sources.x.verify: unknown key "header" for location "bearer")
+
+    assert verify_error("{type: token, secret: tok, location: header, header: X, param: p}") ==
+             ~s(sources.x.verify: unknown key "param" for location "header")
+
+    assert verify_error("{type: token, secret: tok, location: cookie}") ==
+             ~s(sources.x.verify.location: unknown value "cookie"; expected one of bearer, basic, header, query)
+
+    assert verify_error("{type: token, secret: tok, tolerance_seconds: 5}") ==
+             ~s(sources.x.verify: unknown key "tolerance_seconds")
+  end
+
+  describe "type client_cert" do
+    @mtls "listener: {tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem, cacertfile: #{@tls_dir}/ca.pem, verify: verify_peer}}"
+
+    test "pins fingerprints (normalised) and subjects, on a listener that asks for a certificate" do
+      colons = String.duplicate("AB:", 31) <> "AB"
+      normal = String.duplicate("ab", 32)
+
+      assert verifier_of("{type: client_cert, fingerprints: [\"#{colons}\"]}", %{}, @mtls) ==
+               {Ankusa.Verifier.ClientCert, [fingerprints: [normal]]}
+
+      assert verifier_of("{type: client_cert, subjects: \"dns:a.example, cn:b\"}", %{}, @mtls) ==
+               {Ankusa.Verifier.ClientCert, [subjects: ["dns:a.example", "cn:b"]]}
+
+      assert verifier_of(
+               "{type: client_cert, fingerprints: [#{normal}], subjects: [\"cn:b\"]}",
+               %{},
+               @mtls
+             ) ==
+               {Ankusa.Verifier.ClientCert, [fingerprints: [normal], subjects: ["cn:b"]]}
+    end
+
+    test "names a missing or malformed pin" do
+      assert verify_error("{type: client_cert}", %{}, @mtls) ==
+               ~s(sources.x.verify: client_cert needs "fingerprints" or "subjects")
+
+      assert verify_error("{type: client_cert, fingerprints: [abc]}", %{}, @mtls) =~
+               "sources.x.verify.fingerprints[0]: expected a SHA-256 fingerprint"
+
+      assert verify_error("{type: client_cert, subjects: [\"cn:a\", bob]}", %{}, @mtls) =~
+               "sources.x.verify.subjects[1]: expected dns:<name>, email:<address>"
+
+      assert verify_error("{type: client_cert, subjects: [\"cn:a\"], secret: k}", %{}, @mtls) ==
+               ~s(sources.x.verify: unknown key "secret")
+    end
+
+    test "refuses to load on a listener that never asks for a client certificate" do
+      plain = verify_error("{type: client_cert, subjects: [\"cn:a\"]}")
+
+      assert plain =~
+               "source x: client_cert verification needs listener.tls with verify: verify_peer"
+
+      tls =
+        "listener: {tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}}"
+
+      assert verify_error("{type: client_cert, subjects: [\"cn:a\"]}", %{}, tls) =~
+               "client_cert verification needs listener.tls with verify: verify_peer"
+    end
+  end
+
+  test "/v1/config shows where a credential travels and which keys are pinned, never the credential or a public key" do
+    mtls =
+      "listener: {tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem, cacertfile: #{@tls_dir}/ca.pem, verify: verify_peer}}"
+
+    path =
+      tmp_config("""
+      #{mtls}
+      sources:
+        bearer: {verify: {type: token, secret: "tok-canary-1"}, sinks: [{type: log}]}
+        header: {verify: {type: token, secret: "tok-canary-2", location: header, header: X-Hook}, sinks: [{type: log}]}
+        query: {verify: {type: token, secret: "tok-canary-3", location: query, param: token}, sinks: [{type: log}]}
+        asym: {verify: {type: standard_webhooks_asym, public_key: "#{@asym_pub}"}, sinks: [{type: log}]}
+        cert: {verify: {type: client_cert, fingerprints: ["#{String.duplicate("ab", 32)}"], subjects: ["cn:ops"]}, sinks: [{type: log}]}
+      """)
+
+    printed = print_config(path)
+
+    for canary <- ["tok-canary-1", "tok-canary-2", "tok-canary-3", @asym_pub] do
+      refute printed =~ canary
+    end
+
+    sources = JSON.decode!(printed)["source_store"]["opts"]["sources"]
+    opts = fn id -> sources[id]["verifier"]["opts"] end
+
+    assert opts.("bearer") == %{"secret" => "[REDACTED]", "location" => "bearer"}
+    assert opts.("header")["location"] == ~s({:header, "X-Hook"})
+    assert opts.("header")["secret"] == "[REDACTED]"
+    assert opts.("query")["location"] == ~s({:query, "token"})
+    assert opts.("asym")["public_key"] == "[REDACTED]"
+
+    assert opts.("cert") == %{
+             "fingerprints" => [String.duplicate("ab", 32)],
+             "subjects" => ["cn:ops"]
+           }
+  end
+
   test "routing tenant_path uses the tenant resolver" do
     path =
       tmp_config("""

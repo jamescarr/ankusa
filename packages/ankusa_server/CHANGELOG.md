@@ -19,6 +19,19 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `503`, and past `max_body_bytes` `413`. See the `ankusa` changelog,
   [`configuration.md#rate-limits`](../../docs/configuration.md#rate-limits) and
   `config-examples/reference.yml`.
+- **`verify.type`: `standard_webhooks_asym`, `asymmetric`, `token`, `client_cert`
+  (SEC-12).** A source can be verified by the provider's public key (Standard
+  Webhooks `v1a` Ed25519 by preset, or any Ed25519/RSA scheme described inline:
+  `public_key` one or a rotation list, `algorithm`, `signature_header`, `signed`,
+  `timestamp_header`, ...), by a static credential (`secret` plus `location:
+  bearer | basic | header | query`, with `header` or `param`), or by a pinned
+  mutual-TLS client certificate (`fingerprints`, `subjects`; boot and
+  `check-config` refuse it unless `listener.tls` has `verify: verify_peer`). A
+  key, secret or pin core cannot use is a load error naming
+  `sources.<id>.verify.<key>`; the admin API's source writes go through the same
+  loader. `/v1/config` shows `location`, `fingerprints` and `subjects` and hides
+  `secret` and `public_key`. See `docs/configuration.md`.
+
 - **Signed, expiring claim refs (SEC-11).** `claim_check` takes
   `ref_signing_keys` (a list, or a comma-separated string for `${VAR}`; each
   at least 16 bytes, `[current, previous...]`), `ref_ttl_ms`,

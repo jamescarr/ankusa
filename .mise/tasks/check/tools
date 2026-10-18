@@ -2,6 +2,7 @@
 #MISE description="Every tools/* Mix project: locked deps, format, compile"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+source "$MISE_PROJECT_ROOT/.mise/lib/mix_cache.sh"
 cd "$ROOT"
 
 for f in tools/*/mix.exs; do
@@ -10,6 +11,7 @@ for f in tools/*/mix.exs; do
   echo "==> $d"
   (
     cd "$d"
+    (mix_cache_warm "$d" "$d" dev --check-locked)
     mix deps.get --check-locked
     mix deps.unlock --check-unused
     mix hex.audit

@@ -140,6 +140,19 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
      whether or not the signature matched, and the replay window
      (`tolerance_seconds`) is capped at an hour; both are tested in
      `verifier_test.exs` and `metrics_test.exs`.
+   - Five verifiers ship in core: none, an HMAC signature, an Ed25519 or RSA
+     public-key signature (`Verifier.Asymmetric`, which holds no secret), a
+     static bearer/basic/header/query credential (`Verifier.Token`) and the
+     pinned mutual-TLS client certificate (`Verifier.ClientCert`). The edge
+     hands a verifier only the request context it reads, through its `opts`:
+     the peer certificate (a live TLS-socket call, made for `ClientCert`
+     sources alone) and the query string (`Token`), so the envelope and the
+     stored format are unchanged. A token's header is dropped from what is
+     stored, whatever the `store_headers` policy. Tested in `verifier_test.exs`
+     (the Standard Webhooks `v1a` reference vector, wrong key, stale
+     timestamp, tampered body, each token location, each certificate pin),
+     `edge_test.exs` (through the router) and `instance_test.exs` (a real
+     mutual-TLS handshake).
    - An accepted hook is charged against its tenant's ingest quota
      (`rate_limits`: hooks and bytes per second) before anything is written.
      Over the limit is `429` with `Retry-After`, nothing stored — and because

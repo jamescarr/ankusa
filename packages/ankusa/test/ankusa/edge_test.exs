@@ -962,4 +962,158 @@ defmodule Ankusa.EdgeTest do
       assert route_through_edge(config, request("flag", body, headers)).status == 201
     end
   end
+
+  describe "verifier breadth" do
+    @tls_dir Path.expand("../fixtures/tls", __DIR__)
+
+    defp cert_der(name) do
+      [{:Certificate, der, _}] =
+        @tls_dir |> Path.join(name) |> File.read!() |> :public_key.pem_decode()
+
+      der
+    end
+
+    defp fingerprint(der), do: Base.encode16(:crypto.hash(:sha256, der), case: :lower)
+
+    defp post(config, source_id, headers \\ [], path_suffix \\ "", extra \\ %{}) do
+      req = %{
+        request(source_id, ~s({"a":1}), headers)
+        | path: "/webhooks/#{source_id}#{path_suffix}"
+      }
+
+      route_through_edge(config, Map.merge(req, extra))
+    end
+
+    defp stored_headers(config) do
+      {:ok, hooks} = Ankusa.Queue.hooks(config.instance, 0, 10)
+      Enum.flat_map(hooks, & &1.headers)
+    end
+
+    test "a token source: the right token is stored, a wrong or missing one is a 401, and the token is never stored" do
+      config =
+        start_edge(
+          %{
+            "bearer" => [verifier: {Ankusa.Verifier.Token, secret: "s3cret"}],
+            "header" => [
+              verifier:
+                {Ankusa.Verifier.Token, secret: "s3cret", location: {:header, "x-hook-token"}}
+            ],
+            "query" => [
+              verifier: {Ankusa.Verifier.Token, secret: "s3cret", location: {:query, "token"}}
+            ]
+          },
+          # An instance policy that drops nothing: the token header is dropped anyway.
+          store_headers: %{drop: []}
+        )
+
+      assert post(config, "bearer", [{"authorization", "Bearer s3cret"}, {"x-keep", "1"}]).status ==
+               201
+
+      assert post(config, "header", [{"x-hook-token", "s3cret"}, {"x-keep", "2"}]).status == 201
+      assert post(config, "query", [{"x-keep", "3"}], "?token=s3cret").status == 201
+
+      for {source, headers, suffix} <- [
+            {"bearer", [{"authorization", "Bearer nope"}], ""},
+            {"bearer", [], ""},
+            {"header", [{"x-hook-token", "nope"}], ""},
+            {"header", [{"authorization", "Bearer s3cret"}], ""},
+            {"query", [], "?token=nope"},
+            {"query", [{"x-hook-token", "s3cret"}], ""}
+          ] do
+        conn = post(config, source, headers, suffix)
+        assert conn.status == 401, "#{source} #{inspect(headers)} #{suffix}"
+        assert %{"error" => "verification_failed"} = JSON.decode!(conn.resp_body)
+      end
+
+      assert length(stored_ids(config.instance)) == 3
+
+      stored = stored_headers(config)
+      assert {"x-keep", "1"} in stored and {"x-keep", "2"} in stored and {"x-keep", "3"} in stored
+      refute Enum.any?(stored, fn {name, _} -> name in ["authorization", "x-hook-token"] end)
+      refute Enum.any?(stored, fn {_name, value} -> value =~ "s3cret" end)
+    end
+
+    test "an asymmetric source: a genuine Ed25519 signature is accepted; a wrong key, a stale timestamp and a tampered body are not" do
+      {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+      {other_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+
+      config =
+        start_edge(%{
+          "asym" => [
+            verifier:
+              {Ankusa.Verifier.Asymmetric,
+               scheme: :standard_webhooks_asym, public_key: "whpk_" <> Base.encode64(pub)}
+          ],
+          "other" => [
+            verifier:
+              {Ankusa.Verifier.Asymmetric,
+               scheme: :standard_webhooks_asym, public_key: "whpk_" <> Base.encode64(other_pub)}
+          ]
+        })
+
+      body = ~s({"a":1})
+
+      signed = fn ts, signed_body ->
+        sig = :crypto.sign(:eddsa, :none, "msg_1.#{ts}.#{signed_body}", [priv, :ed25519])
+
+        [
+          {"webhook-id", "msg_1"},
+          {"webhook-timestamp", to_string(ts)},
+          {"webhook-signature", "v1a," <> Base.encode64(sig)}
+        ]
+      end
+
+      now = System.system_time(:second)
+
+      assert post(config, "asym", signed.(now, body)).status == 201
+      assert post(config, "other", signed.(now, body)).status == 401
+      assert post(config, "asym", signed.(now - 301, body)).status == 401
+      assert post(config, "asym", signed.(now, ~s({"a":2}))).status == 401
+      assert length(stored_ids(config.instance)) == 1
+    end
+
+    test "a client-certificate source rejects a request without the pinned certificate" do
+      client = cert_der("client.pem")
+      stranger = cert_der("stranger.pem")
+
+      tls = [
+        certfile: Path.join(@tls_dir, "server.pem"),
+        keyfile: Path.join(@tls_dir, "server-key.pem"),
+        cacertfile: Path.join(@tls_dir, "ca.pem"),
+        verify: :verify_peer
+      ]
+
+      config =
+        start_edge(
+          %{
+            "pinned" => [
+              verifier: {Ankusa.Verifier.ClientCert, fingerprints: [fingerprint(client)]}
+            ],
+            "subject" => [
+              verifier: {Ankusa.Verifier.ClientCert, subjects: ["cn:ankusa-test-client"]}
+            ],
+            "elsewhere" => [
+              verifier: {Ankusa.Verifier.ClientCert, fingerprints: [String.duplicate("0", 64)]}
+            ]
+          },
+          listener: %{tls: tls}
+        )
+
+      assert post(config, "pinned", [], "", %{peer_cert: client}).status == 201
+      assert post(config, "subject", [], "", %{peer_cert: client}).status == 201
+
+      # No certificate, another certificate, and a certificate pinned for a
+      # different source: each a 401, nothing stored.
+      assert post(config, "pinned").status == 401
+      assert post(config, "pinned", [], "", %{peer_cert: stranger}).status == 401
+      assert post(config, "subject", [], "", %{peer_cert: stranger}).status == 401
+      assert post(config, "elsewhere", [], "", %{peer_cert: client}).status == 401
+
+      # A header cannot stand in for the handshake.
+      forged = [{"x-ssl-client-cert", Base.encode64(client)}, {"x-forwarded-client-cert", "x"}]
+      assert post(config, "pinned", forged).status == 401
+
+      assert length(stored_ids(config.instance)) == 2
+    end
+  end
 end

@@ -351,7 +351,19 @@ defmodule Ankusa.InstanceTest do
     # presenting `client` (`{certfile, keyfile}`) when given. A refused client
     # certificate shows up either as a failed handshake or, under TLS 1.3, as an
     # error on the first read, so both are `{:error, _}`.
-    defp tls_get(port, path, client) do
+    defp tls_get(port, path, client),
+      do: tls_request(port, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n", client)
+
+    defp tls_post(port, path, body, client) do
+      tls_request(
+        port,
+        "POST #{path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: #{byte_size(body)}\r\n" <>
+          "Connection: close\r\n\r\n" <> body,
+        client
+      )
+    end
+
+    defp tls_request(port, request, client) do
       opts =
         [
           :binary,
@@ -368,7 +380,7 @@ defmodule Ankusa.InstanceTest do
       case :ssl.connect(~c"127.0.0.1", port, opts, 5_000) do
         {:ok, sock} ->
           result =
-            with :ok <- :ssl.send(sock, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            with :ok <- :ssl.send(sock, request),
                  do: :ssl.recv(sock, 0, 5_000)
 
           :ssl.close(sock)
@@ -428,6 +440,85 @@ defmodule Ankusa.InstanceTest do
 
       # And the listener is TLS only: a plain-HTTP client gets no answer.
       assert {:error, _} = Req.get("http://127.0.0.1:#{port}/health", retry: false)
+    end
+
+    @tag :capture_log
+    test "a client-certificate source takes a hook from the pinned certificate over real mutual TLS, and from no other" do
+      port = free_port()
+      [{:Certificate, client_der, _}] = :public_key.pem_decode(File.read!(fixture("client.pem")))
+      pin = Base.encode16(:crypto.hash(:sha256, client_der), case: :lower)
+
+      config =
+        test_config(
+          roles: [:edge],
+          port: port,
+          listener: %{
+            tls: [
+              certfile: fixture("server.pem"),
+              keyfile: fixture("server-key.pem"),
+              cacertfile: fixture("ca.pem"),
+              verify: :verify_peer
+            ]
+          },
+          source_store:
+            {Ankusa.SourceStore.Static,
+             sources: %{
+               "pinned" => [
+                 verifier: {Ankusa.Verifier.ClientCert, fingerprints: [pin]},
+                 sinks: [{Ankusa.Sink.Log, []}]
+               ],
+               "other" => [
+                 verifier:
+                   {Ankusa.Verifier.ClientCert, fingerprints: [String.duplicate("0", 64)]},
+                 sinks: [{Ankusa.Sink.Log, []}]
+               ]
+             }}
+        )
+
+      start_supervised!({Ankusa.Instance, config})
+      eventually(fn -> listening?(port) end)
+
+      client = {fixture("client.pem"), fixture("client-key.pem")}
+
+      # The certificate the handshake accepted, pinned for this source: stored.
+      assert {:ok, "HTTP/1.1 201" <> _} = tls_post(port, "/webhooks/pinned", ~s({"a":1}), client)
+      assert length(stored_ids(config.instance)) == 1
+
+      # Accepted by the handshake, pinned for another source: 401, nothing stored.
+      assert {:ok, "HTTP/1.1 401" <> _} = tls_post(port, "/webhooks/other", ~s({"a":1}), client)
+
+      # No certificate, or a certificate the listener's CA did not sign: no
+      # request ever reaches the source.
+      assert {:error, _} = tls_post(port, "/webhooks/pinned", ~s({"a":1}), nil)
+
+      assert {:error, _} =
+               tls_post(
+                 port,
+                 "/webhooks/pinned",
+                 ~s({"a":1}),
+                 {fixture("stranger.pem"), fixture("stranger-key.pem")}
+               )
+
+      assert length(stored_ids(config.instance)) == 1
+    end
+
+    @tag :capture_log
+    test "a client-certificate source refuses to boot on a listener that never asks for a certificate" do
+      config =
+        test_config(
+          roles: [:edge],
+          source_store:
+            {Ankusa.SourceStore.Static,
+             sources: %{"pinned" => [verifier: {Ankusa.Verifier.ClientCert, subjects: ["cn:x"]}]}}
+        )
+
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Ankusa.Instance.start_link(config)
+
+      assert message =~
+               "source pinned: client_cert verification needs listener.tls with verify: verify_peer"
     end
 
     @tag :capture_log

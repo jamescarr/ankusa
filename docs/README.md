@@ -36,6 +36,7 @@ New here? Start with the [quickstart](quickstart.md).
 | [`packaging.md`](packaging.md) | why adapters are separate packages, and how to add one |
 | [`critical-review.md`](critical-review.md) | the 2026-10 end-to-end review: findings by root cause, and which are fixed |
 | [`releasing.md`](releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, Packagist, Maven Central, or Clojars |
+| [`adr/`](adr/README.md) | the design records ground rule 14 requires before a change to the ack path, the store key layout, a wire format, the isolation model or the durability mode |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | before opening a PR |
 
 Exact callback signatures and options: the module docs on
