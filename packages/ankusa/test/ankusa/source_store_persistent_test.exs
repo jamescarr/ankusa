@@ -64,6 +64,7 @@ defmodule Ankusa.SourceStorePersistentTest do
              tenant: "acme",
              name: "billing",
              source_id: "acme.billing",
+             revision: 1,
              spec: @spec_map
            }
 
@@ -280,6 +281,7 @@ defmodule Ankusa.SourceStorePersistentTest do
     put_config(config)
     instance = config.instance
     start_supervised!({Store, instance: instance})
+    start_supervised!({Ankusa.Audit, instance: instance})
 
     :ok =
       Store.write(
@@ -322,6 +324,7 @@ defmodule Ankusa.SourceStorePersistentTest do
     instance = config.instance
 
     start_supervised!({Store, instance: instance})
+    start_supervised!({Ankusa.Audit, instance: instance})
 
     :ok =
       Store.write(
@@ -491,6 +494,7 @@ defmodule Ankusa.SourceStorePersistentTest do
     put_config(config)
     # The sources live in the node's store, which must be up first.
     start_supervised!({Store, instance: config.instance})
+    start_supervised!({Ankusa.Audit, instance: config.instance})
     {:ok, pid} = Persistent.start_link(instance: config.instance)
     on_exit(fn -> stop(pid) end)
     {config, pid}
@@ -501,9 +505,11 @@ defmodule Ankusa.SourceStorePersistentTest do
   # carry a different decoder, to simulate a config change across the restart.
   defp restart_store(config, pid) do
     stop(pid)
+    stop_supervised!({Ankusa.Audit, config.instance})
     stop_supervised!({Store, config.instance})
     put_config(config)
     start_supervised!({Store, instance: config.instance})
+    start_supervised!({Ankusa.Audit, instance: config.instance})
     {:ok, pid2} = Persistent.start_link(instance: config.instance)
     on_exit(fn -> stop(pid2) end)
     pid2

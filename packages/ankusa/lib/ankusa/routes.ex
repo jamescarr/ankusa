@@ -32,6 +32,8 @@ defmodule Ankusa.Routes do
 
   require Logger
 
+  alias Ankusa.Audit
+  alias Ankusa.Audit.Context
   alias Ankusa.Net
   alias Ankusa.Routes.{Cache, Matcher, Route, Snapshot, Store}
 
@@ -176,20 +178,28 @@ defmodule Ankusa.Routes do
   enabled route serving one of the same methods — the two would both match, and
   "which one wins" would be an implementation detail. Disabled routes are free to
   collide: they capture nothing.
+
+  Every write here is audited (`Ankusa.Audit`): the route store is pluggable (ETS,
+  or Redis shared by a fleet), so the audit row cannot share a batch with the
+  change. It is written first, pending, and finished with the outcome. Options:
+  `audit:`, the `Ankusa.Audit.Context` of the change.
   """
-  @spec create(atom(), term()) ::
+  @spec create(atom(), term(), keyword()) ::
           {:ok, Route.t()}
           | {:error, {:invalid, String.t(), String.t()}}
           | {:error, {:conflict, String.t()}}
           | {:error, :too_many_routes | :store_unavailable}
-  def create(instance, attrs) do
+  def create(instance, attrs, opts \\ []) do
     with {:ok, route} <- Route.from_attrs(attrs) do
       instance
-      |> write(fn ->
+      |> audited(opts, fn ->
         with {:ok, meta} <- writable_meta(instance),
              :ok <- unique_id(instance, meta, route),
              :ok <- no_conflict(instance, meta, route) do
-          put(route, Store.insert(instance, route, meta.version))
+          {:ok,
+           plan(instance, "route.create", nil, route, route, fn ->
+             Store.insert(instance, route, meta.version)
+           end)}
         end
       end)
       |> announce(instance, :created)
@@ -200,17 +210,17 @@ defmodule Ankusa.Routes do
   Replace a route wholesale, addressed by `id` (`PUT` semantics, idempotent).
 
   A `PUT` for an id that does not exist yet creates it, so the cap applies; one
-  for an existing id keeps its `inserted_at`.
+  for an existing id keeps its `inserted_at`. Audited like `create/3`.
   """
-  @spec replace(atom(), String.t(), term()) ::
+  @spec replace(atom(), String.t(), term(), keyword()) ::
           {:ok, Route.t()}
           | {:error, {:invalid, String.t(), String.t()}}
           | {:error, {:conflict, String.t()}}
           | {:error, :too_many_routes | :store_unavailable}
-  def replace(instance, id, attrs) do
+  def replace(instance, id, attrs, opts \\ []) do
     with {:ok, route} <- Route.from_attrs(attrs, id: id) do
       result =
-        write(instance, fn ->
+        audited(instance, opts, fn ->
           with {:ok, meta} <- writable_meta(instance),
                :ok <- no_conflict(instance, meta, route) do
             case Snapshot.fetch(instance, meta, id) do
@@ -218,19 +228,34 @@ defmodule Ankusa.Routes do
                 # The stored route is what gets returned: `inserted_at` is the one the
                 # route already had, and the caller has to be told that, not the
                 # timestamp this call happened to mint.
-                stored = %{route | inserted_at: existing.inserted_at}
-                stored |> put(Store.replace(instance, stored, meta.version)) |> tag(:updated)
+                stored = %{
+                  route
+                  | inserted_at: existing.inserted_at,
+                    revision: existing.revision + 1
+                }
+
+                change =
+                  plan(instance, "route.update", existing, stored, {stored, :updated}, fn ->
+                    Store.replace(instance, stored, meta.version)
+                  end)
+
+                {:ok, change}
 
               :error ->
-                route |> put(Store.insert(instance, route, meta.version)) |> tag(:created)
+                change =
+                  plan(instance, "route.create", nil, route, {route, :created}, fn ->
+                    Store.insert(instance, route, meta.version)
+                  end)
+
+                {:ok, change}
             end
           end
         end)
 
-      # Only the attempt that committed reaches here: `write/2` has already
+      # Only the attempt that committed reaches here: `audited/3` has already
       # retried the ones that lost a race.
       case result do
-        {:ok, stored, action} -> announce({:ok, stored}, instance, action)
+        {:ok, {stored, action}} -> announce({:ok, stored}, instance, action)
         other -> other
       end
     end
@@ -241,35 +266,59 @@ defmodule Ankusa.Routes do
 
   `path` and `id` are immutable here — moving a route changes which requests it
   captures, which is a `PUT` (a full, reviewable definition), not a patch.
+  Audited like `create/3`.
   """
-  @spec update(atom(), String.t(), term()) ::
+  @spec update(atom(), String.t(), term(), keyword()) ::
           {:ok, Route.t()}
           | {:error, {:invalid, String.t(), String.t()}}
           | {:error, {:conflict, String.t()}}
           | {:error, :not_found | :too_many_routes | :store_unavailable}
-  def update(instance, id, patch) do
+  def update(instance, id, patch, opts \\ []) do
     # The route being patched and the conflict check are both validated against
     # ONE version: a concurrent writer that slips between the reads moves the
     # version, the store refuses this write as stale, and it is re-read.
     instance
-    |> write(fn ->
+    |> audited(opts, fn ->
       with {:ok, meta} <- writable_meta(instance),
            {:ok, existing} <- fetch(instance, meta, id),
            {:ok, patch} <- patch_attrs(patch),
            attrs = Map.merge(attrs_of(existing), patch),
            {:ok, route} <- Route.from_attrs(attrs, id: id),
-           route = %{route | inserted_at: existing.inserted_at},
+           route = %{route | inserted_at: existing.inserted_at, revision: existing.revision + 1},
            :ok <- no_conflict(instance, meta, route) do
-        put(route, Store.replace(instance, route, meta.version))
+        {:ok,
+         plan(instance, "route.update", existing, route, route, fn ->
+           Store.replace(instance, route, meta.version)
+         end)}
       end
     end)
     |> announce(instance, :updated)
   end
 
-  @doc "Delete a route definition."
-  @spec delete(atom(), String.t()) :: :ok | {:error, :not_found | :store_unavailable}
-  def delete(instance, id) do
-    with :ok <- Store.delete(instance, id) do
+  @doc "Delete a route definition. Audited like `create/3`."
+  @spec delete(atom(), String.t(), keyword()) :: :ok | {:error, :not_found | :store_unavailable}
+  def delete(instance, id, opts \\ []) do
+    # What the audit row says was deleted comes from this node's snapshot; the
+    # store itself (Redis, shared by a fleet) decides whether there was a route.
+    before =
+      case get(instance, id) do
+        {:ok, route} -> route
+        {:error, :not_found} -> nil
+      end
+
+    result =
+      audited(instance, opts, fn ->
+        attrs = %{
+          action: "route.delete",
+          resource: id,
+          before_hash: before && definition_hash(instance, before),
+          revision: before && before.revision + 1
+        }
+
+        {:ok, %{attrs: attrs, apply: fn -> Store.delete(instance, id) end, reply: :ok}}
+      end)
+
+    with {:ok, :ok} <- result do
       Ankusa.Lifecycle.route_changed(instance, :deleted, id)
       :ok
     end
@@ -304,18 +353,34 @@ defmodule Ankusa.Routes do
 
   The list is ordered, first match wins, and `default` decides the case where
   nothing matched — the "obvious" `default: :allow` is only safe when the
-  surrounding network is already trusted.
+  surrounding network is already trusted. Audited like `create/3`.
   """
-  @spec put_ip_rules(atom(), term()) ::
+  @spec put_ip_rules(atom(), term(), keyword()) ::
           {:ok, %{default: :allow | :deny, rules: [Route.ip_rule()]}}
           | {:error, {:invalid, String.t(), String.t()}}
           | {:error, :store_unavailable}
-  def put_ip_rules(instance, attrs) do
+  def put_ip_rules(instance, attrs, opts \\ []) do
     with {:ok, ip_rules} <- Route.parse_ip_rules(attrs) do
-      case Store.put_ip_rules(instance, ip_rules) do
-        :ok -> {:ok, ip_rules}
-        {:error, reason} -> {:error, reason}
-      end
+      current = ip_rules(instance)
+
+      audited(instance, opts, fn ->
+        change = %{
+          attrs: %{
+            action: "ip_rules.put",
+            resource: "ip_rules",
+            before_hash: Ankusa.Audit.digest(instance, Route.rules_json(current)),
+            after_hash: Ankusa.Audit.digest(instance, Route.rules_json(ip_rules)),
+            detail: %{
+              "default" => to_string(ip_rules.default),
+              "rules" => length(ip_rules.rules)
+            }
+          },
+          apply: fn -> Store.put_ip_rules(instance, ip_rules) end,
+          reply: ip_rules
+        }
+
+        {:ok, change}
+      end)
     end
   end
 
@@ -527,16 +592,8 @@ defmodule Ankusa.Routes do
 
   # ── CRUD internals ──────────────────────────────────────────────────────────
 
-  # A route is only ever reported as persisted once the store said so; on a store
-  # error the caller gets the error tuple, not a definition that isn't there.
-  defp put(route, :ok), do: {:ok, route}
-  defp put(_route, {:error, reason}), do: {:error, reason}
-
-  defp tag({:ok, route}, action), do: {:ok, route, action}
-  defp tag(other, _action), do: other
-
   # The change has committed; recording it is the lifecycle module's business and
-  # never changes the caller's result. Called after `write/2` returns, never
+  # never changes the caller's result. Called after `audited/3` returns, never
   # inside its closure, which may run again on a lost race.
   defp announce({:ok, route} = result, instance, action) do
     Ankusa.Lifecycle.route_changed(instance, action, route)
@@ -545,26 +602,103 @@ defmodule Ankusa.Routes do
 
   defp announce(other, _instance, _action), do: other
 
-  # Run one validate-then-write attempt, and run it again if the store says the
-  # table moved under it (`:stale`): the store has already published the newer
-  # snapshot by then, so the next attempt validates against what is really there.
-  defp write(instance, attempt \\ 1, fun) do
+  # What `audited/3` takes from a validated change: the audit row's attrs, the
+  # store call that makes it (`apply`), and what the caller gets back.
+  defp plan(instance, action, before, %Route{} = route, reply, apply) do
+    attrs = %{
+      action: action,
+      resource: route.id,
+      before_hash: before && definition_hash(instance, before),
+      after_hash: definition_hash(instance, route),
+      revision: route.revision
+    }
+
+    %{attrs: attrs, apply: apply, reply: reply}
+  end
+
+  # A definition's hash covers what the route *is*, not when it was stored.
+  defp definition_hash(instance, %Route{} = route) do
+    json = route |> Route.to_json() |> Map.drop(["inserted_at", "updated_at", "revision"])
+    Audit.digest(instance, json)
+  end
+
+  # One audited write. `fun` validates against the current snapshot and answers
+  # `{:ok, plan}` (see `plan/6`) or a rejection, which changes nothing and
+  # leaves no audit row. The route store is not the node's `Ankusa.Store`, so
+  # the row goes in first, pending, and is finished with the outcome (a
+  # `kill -9` in between leaves it for the next boot to record as
+  # "interrupted": see `Ankusa.Audit`).
+  #
+  # The store applies a write only if the table is still at the snapshot's
+  # version, and answers `:stale` when it is not: it has already published the
+  # newer snapshot, so the next attempt validates against what is really
+  # there. One pending row serves every attempt of one request.
+  defp audited(instance, opts, fun),
+    do: attempt(instance, Context.from_opts(opts), fun, 1, nil)
+
+  defp attempt(instance, context, fun, attempt, pending) do
     case fun.() do
-      {:error, :stale} when attempt < @max_attempts ->
-        write(instance, attempt + 1, fun)
+      {:ok, %{attrs: attrs, apply: apply, reply: reply}} ->
+        with {:ok, pending} <- pending_row(instance, context, attrs, pending) do
+          case run(instance, pending, apply) do
+            :ok ->
+              settle(instance, pending, Map.put(outcome(attrs), :result, "ok"))
+              {:ok, reply}
 
-      {:error, :stale} ->
-        Logger.warning(
-          "[ankusa] a route write lost #{@max_attempts} races in a row; answering " <>
-            "store_unavailable so the caller retries"
-        )
+            {:error, :stale} when attempt < @max_attempts ->
+              attempt(instance, context, fun, attempt + 1, pending)
 
-        {:error, :store_unavailable}
+            {:error, :stale} ->
+              Logger.warning(
+                "[ankusa] a route write lost #{@max_attempts} races in a row; answering " <>
+                  "store_unavailable so the caller retries"
+              )
 
-      result ->
-        result
+              settle(instance, pending, Map.put(outcome(attrs), :result, "failed"))
+              {:error, :store_unavailable}
+
+            # The store refused it as a request, not as an outage: nothing changed.
+            {:error, reason} = error when reason in [:not_found, :too_many_routes] ->
+              abandon(instance, pending)
+              error
+
+            {:error, _reason} = error ->
+              settle(instance, pending, Map.put(outcome(attrs), :result, "failed"))
+              error
+          end
+        end
+
+      {:error, _reason} = rejected ->
+        abandon(instance, pending)
+        rejected
     end
   end
+
+  defp pending_row(instance, context, attrs, nil), do: Audit.begin(instance, context, attrs)
+  defp pending_row(_instance, _context, _attrs, pending), do: {:ok, pending}
+
+  defp run(instance, pending, apply) do
+    apply.()
+  catch
+    kind, reason ->
+      _ = Audit.finish(instance, pending, %{result: "interrupted"})
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
+  defp outcome(attrs),
+    do: Map.take(attrs, [:resource, :before_hash, :after_hash, :revision, :detail])
+
+  defp settle(instance, pending, update) do
+    with {:error, reason} <- Audit.finish(instance, pending, update) do
+      Logger.error(
+        "[ankusa] an audit row could not be finished: #{inspect(reason)}; " <>
+          "it stays pending and is recorded as interrupted"
+      )
+    end
+  end
+
+  defp abandon(_instance, nil), do: :ok
+  defp abandon(instance, pending), do: Audit.discard(instance, pending)
 
   # A store that has not published a table cannot be written through: there is no
   # version to validate against, and nothing to check a conflict against. That is
@@ -614,7 +748,7 @@ defmodule Ankusa.Routes do
   end
 
   defp attrs_of(%Route{} = route),
-    do: Map.drop(Route.to_json(route), ["inserted_at", "updated_at"])
+    do: Map.drop(Route.to_json(route), ["inserted_at", "updated_at", "revision"])
 
   defp patch_attrs(patch) do
     with {:ok, patch} <- Route.stringify(patch, "route") do

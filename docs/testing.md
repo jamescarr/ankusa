@@ -88,6 +88,21 @@ The always-on tests cover:
   `mix ankusa.store.migrate` and its `--dry-run`); a migration killed after four
   of ten batches resumes at the fifth, never repeating a committed batch; a
   registry with a gap refuses rather than skip a format.
+- **Audit trail** (`test/ankusa/admin/audit_test.exs`): every mutating route of
+  the admin and route-management APIs leaves exactly one row (actor, client
+  address, request id, keyed hashes, revision), and a request that changes
+  nothing leaves none; `audit row survives kill` runs
+  `test/support/audit_harness.exs` in a child BEAM that makes every kind of
+  change and is `kill -9`ed on the response to the last one, then reopens the
+  store alone; `no secret in audit` scans every stored and served row for the
+  secrets the changes carried; `filters` covers `since`/`until`/`actor`/
+  `action`/`tenant`/`cursor`/`limit`, tenant visibility and the 401/403 cases;
+  the audit process's own tests cover commit order under concurrency, the
+  pending row a crash leaves (recorded `interrupted` at the next boot), a
+  caller that dies mid-change, retention pruning, and row versions. The format
+  2 fixture (`store-v2.tar.zst`) carries audit rows, which
+  `store_upgrade_test.exs` reads back; the format 1 fixture, upgraded, gives
+  every source revision 1.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing

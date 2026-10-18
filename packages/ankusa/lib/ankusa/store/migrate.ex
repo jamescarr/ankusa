@@ -64,7 +64,7 @@ defmodule Ankusa.Store.Migrate do
   # `mix ankusa.store.fixture` output for the new format
   # (`test/fixtures/store-v<to>.tar.zst`). Applied in order, so `from` of each
   # entry is the `to` of the one before it; `{1, 2, module}` is the first.
-  @migrations []
+  @migrations [{1, 2, Ankusa.Store.Migrations.AuditTrail}]
 
   @type migration :: {pos_integer(), pos_integer(), module()}
 

@@ -14,14 +14,16 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
   The seeded instance holds hooks still waiting on a sink (with their ingest
   dedupe keys), dead-lettered hooks, hooks that were delivered and archived (so
   only the archive catalogue and its segment know them), quarantined hooks and
-  API-managed sources. The archive holds `store/` (the RocksDB database),
-  `segments/` (the compacted objects) and `manifest.json`, the ids and counts
-  the upgrade test asserts after the boot. Compressed with zstd.
+  API-managed sources (one of them changed since, so it is at revision 2), a
+  tenant's rate-limit override and the audit trail those changes wrote. The
+  archive holds `store/` (the RocksDB database), `segments/` (the compacted
+  objects) and `manifest.json`, the ids, revisions, audit rows and counts the
+  upgrade test asserts after the boot. Compressed with zstd.
   """
 
   use Mix.Task
 
-  alias Ankusa.{Config, Envelope, Queue, SourceStore, Store}
+  alias Ankusa.{Audit, Config, Envelope, Queue, SourceStore, Store}
   alias Ankusa.Dispatch.Pipeline
   alias Ankusa.Edge.{Ingest, Quarantine}
   alias Ankusa.Storage.Compactor
@@ -147,6 +149,14 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
       quarantined = for n <- 1..2, do: quarantine!(inst, "q-#{n}")
       for name <- ["billing", "crm"], do: put_source!(inst, "acme", name)
 
+      {:ok, _updated} =
+        SourceStore.put(inst, "acme", "crm", %{"sinks" => [%{"type" => "log"}]}, :update)
+
+      {:ok, _limit} =
+        Ankusa.Edge.RateLimiter.put_override(inst, "acme", %{"rate" => 5, "burst" => 10})
+
+      {:ok, %{entries: trail}} = Audit.list(inst, limit: 1000)
+
       {:ok, version} = Store.get(inst, :default, Keys.format_version())
       {:ok, hooks} = Queue.hooks(inst, 0, 100_000)
       stored = Enum.map(hooks, & &1.id)
@@ -160,6 +170,8 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
         "archived_ids" => demo ++ doomed ++ archived,
         "quarantine_ids" => quarantined,
         "sources" => [["acme", "billing"], ["acme", "crm"]],
+        "revisions" => %{"acme.billing" => 1, "acme.crm" => 2},
+        "audit" => trail |> Enum.reverse() |> Enum.map(&[&1.action, &1.resource]),
         "dedupe" => for({id, n} <- Enum.with_index(demo, 1), do: ["demo", "evt-#{n}", id]),
         "segments" => segments
       }

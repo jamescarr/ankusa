@@ -37,6 +37,8 @@ defmodule Ankusa.Replay do
        fails verification stays in the pen and counts as `skipped`.
   """
 
+  alias Ankusa.Audit.Context
+
   @default_rate 1_000
   @default_max_lag_ms 2_000
   @min_rate 1
@@ -61,16 +63,16 @@ defmodule Ankusa.Replay do
   `{:error, {:role_not_enabled, :edge}}` an archive or quarantine job on a
   node without a queue writer.
   """
-  @spec start(atom(), map() | keyword()) ::
+  @spec start(atom(), map() | keyword(), keyword()) ::
           {:ok, :created | :existing, map()}
           | {:error,
              {:invalid, String.t()}
              | :too_many_replays
              | {:role_not_enabled, atom()}
              | :store_unavailable}
-  def start(instance, spec) do
+  def start(instance, spec, opts \\ []) do
     with {:ok, spec} <- validate_spec(instance, spec) do
-      call(instance, {:start, spec})
+      call(instance, {:start, spec, Context.from_opts(opts)})
     end
   end
 
@@ -87,12 +89,12 @@ defmodule Ankusa.Replay do
   `:max_lag_ms`. `{:error, :finished}` for a `done`, `cancelled` or `failed`
   job. Resuming clears `error` and resets the auto-pause window.
   """
-  @spec update(atom(), String.t(), map() | keyword()) ::
+  @spec update(atom(), String.t(), map() | keyword(), keyword()) ::
           {:ok, map()}
           | {:error, :not_found | :finished | {:invalid, String.t()} | :store_unavailable}
-  def update(instance, id, patch) do
+  def update(instance, id, patch, opts \\ []) do
     with {:ok, patch} <- validate_patch(patch) do
-      call(instance, {:update, id, patch})
+      call(instance, {:update, id, patch, Context.from_opts(opts)})
     end
   end
 

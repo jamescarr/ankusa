@@ -25,7 +25,18 @@ defmodule Ankusa.Dispatch.Replayer do
 
   require Logger
 
-  alias Ankusa.{BlobStore, Dedupe, SourceStore, Store, Telemetry, UUIDv7, Verification, Verifier}
+  alias Ankusa.{
+    Audit,
+    BlobStore,
+    Dedupe,
+    SourceStore,
+    Store,
+    Telemetry,
+    UUIDv7,
+    Verification,
+    Verifier
+  }
+
   alias Ankusa.Edge.Quarantine
   alias Ankusa.Queue
   alias Ankusa.Queue.{Archive, Deliveries}
@@ -169,10 +180,10 @@ defmodule Ankusa.Dispatch.Replayer do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def handle_call({:start, _spec}, _from, %{loaded?: false} = state),
+  def handle_call({:start, _spec, _context}, _from, %{loaded?: false} = state),
     do: {:reply, {:error, :store_unavailable}, state}
 
-  def handle_call({:start, spec}, _from, state) do
+  def handle_call({:start, spec, context}, _from, state) do
     active = active_jobs(state.jobs)
 
     existing = Enum.find(active, &(&1.kind == spec.kind and &1.filter == spec.filter))
@@ -211,7 +222,9 @@ defmodule Ankusa.Dispatch.Replayer do
           error: nil
         }
 
-        case Store.write(state.instance, [job_put(job)], sync: true) do
+        case Audit.commit(state.instance, context, job_attrs("replay.create", job, nil), [
+               job_put(job)
+             ]) do
           :ok ->
             emit_state(state.instance, job)
             {:reply, {:ok, :created, job}, arm(put_job(state, job))}
@@ -249,10 +262,10 @@ defmodule Ankusa.Dispatch.Replayer do
     end
   end
 
-  def handle_call({:update, _id, _patch}, _from, %{loaded?: false} = state),
+  def handle_call({:update, _id, _patch, _context}, _from, %{loaded?: false} = state),
     do: {:reply, {:error, :store_unavailable}, state}
 
-  def handle_call({:update, id, patch}, _from, state) do
+  def handle_call({:update, id, patch, context}, _from, state) do
     case Map.fetch(state.jobs, id) do
       :error ->
         {:reply, {:error, :not_found}, state}
@@ -285,7 +298,9 @@ defmodule Ankusa.Dispatch.Replayer do
             do: %{state | windows: Map.delete(state.windows, id)},
             else: state
 
-        case Store.write(state.instance, [job_put(job)], sync: true) do
+        action = if patch[:state] == :cancelled, do: "replay.cancel", else: "replay.update"
+
+        case Audit.commit(state.instance, context, job_attrs(action, job, patch), [job_put(job)]) do
           :ok ->
             emit_state(state.instance, job)
             state = state |> put_job(job) |> prune_finished()
@@ -296,6 +311,30 @@ defmodule Ankusa.Dispatch.Replayer do
         end
     end
   end
+
+  # What an audit row says about an operator's change to a job: the kind, the
+  # filter and the patch, which are JSON values, never a delivery's body.
+  defp job_attrs(action, job, patch) do
+    detail = %{
+      "kind" => to_string(job.kind),
+      "filter" => Map.new(job.filter, fn {key, value} -> {to_string(key), value} end)
+    }
+
+    detail =
+      if patch do
+        patch = Map.new(patch, fn {key, value} -> {to_string(key), json_value(value)} end)
+        Map.put(detail, "patch", patch)
+      else
+        detail
+      end
+
+    %{action: action, resource: job.id, detail: detail}
+  end
+
+  defp json_value(value) when is_atom(value) and not is_nil(value) and not is_boolean(value),
+    do: to_string(value)
+
+  defp json_value(value), do: value
 
   # ── the tick ──────────────────────────────────────────────────────────────
 

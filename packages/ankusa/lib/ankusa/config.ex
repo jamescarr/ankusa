@@ -244,6 +244,9 @@ defmodule Ankusa.Config do
             # Ankusa.Sink, run through the WAL and dispatch like a hook. `[]`
             # means lifecycle events are off. See `Ankusa.Lifecycle`.
             lifecycle: %{sinks: []},
+            # the audit trail (`Ankusa.Audit`): rows older than this many days are
+            # deleted by an hourly sweep
+            audit: %{retention_days: 365},
             # where outbound HTTP may go (`Ankusa.HttpClient.Egress`): every
             # `Ankusa.Sink.Http` delivery — a source's or a lifecycle sink's — is
             # checked against it on every attempt, and a denied target is a
@@ -357,6 +360,7 @@ defmodule Ankusa.Config do
           :rate_limits,
           :quarantine,
           :lifecycle,
+          :audit,
           :egress
         ] ->
           put_section(acc, k, v)
@@ -531,6 +535,14 @@ defmodule Ankusa.Config do
       "claim_check.retention_days",
       "nil or an integer >= 1",
       &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    check!(
+      config,
+      [:audit, :retention_days],
+      "audit.retention_days",
+      "an integer >= 1",
+      &(is_integer(&1) and &1 >= 1)
     )
 
     check!(

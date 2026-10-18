@@ -36,6 +36,8 @@ defmodule Ankusa.Edge.RateLimiter do
 
   require Logger
 
+  alias Ankusa.Audit
+  alias Ankusa.Audit.Context
   alias Ankusa.Config
   alias Ankusa.Store
   alias Ankusa.Store.Keys
@@ -322,15 +324,18 @@ defmodule Ankusa.Edge.RateLimiter do
   @doc """
   Set `tenant_id`'s runtime override, resetting its bucket on success: without
   the reset a raised limit would stay blocked until the old limit's accumulated
-  debt drained.
+  debt drained. Options: `audit:`, the `Ankusa.Audit.Context` of the change.
   """
-  @spec put_override(atom(), term(), term()) ::
+  @spec put_override(atom(), term(), term(), keyword()) ::
           {:ok, limit()} | {:error, :invalid, String.t()} | {:error, :store_unavailable}
-  def put_override(instance, tenant_id, attrs) do
+  def put_override(instance, tenant_id, attrs, opts \\ []) do
     if Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
       case parse_limit(attrs) do
         {:ok, limit} ->
-          GenServer.call(Ankusa.via(instance, :rate_limiter), {:put, tenant_id, limit})
+          GenServer.call(
+            Ankusa.via(instance, :rate_limiter),
+            {:put, tenant_id, limit, Context.from_opts(opts)}
+          )
 
         {:error, :invalid, message} ->
           {:error, :invalid, message}
@@ -342,19 +347,28 @@ defmodule Ankusa.Edge.RateLimiter do
 
   @doc """
   Remove `tenant_id`'s runtime override, so the config's limit applies again.
-  Resets the bucket too, for the same reason a `put` does.
+  Resets the bucket too, for the same reason a `put` does. Options: `audit:`.
   """
-  @spec delete_override(atom(), term()) ::
+  @spec delete_override(atom(), term(), keyword()) ::
           :ok | {:error, :not_found} | {:error, :store_unavailable}
-  def delete_override(instance, tenant_id) do
-    GenServer.call(Ankusa.via(instance, :rate_limiter), {:delete, tenant_id})
+  def delete_override(instance, tenant_id, opts \\ []) do
+    GenServer.call(
+      Ankusa.via(instance, :rate_limiter),
+      {:delete, tenant_id, Context.from_opts(opts)}
+    )
   end
 
   @impl true
-  def handle_call({:put, tenant_id, limit}, _from, state) do
+  def handle_call({:put, tenant_id, limit, context}, _from, state) do
     table = overrides_table(state.instance)
 
-    case persist_put(state.instance, tenant_id, limit) do
+    before =
+      case :ets.lookup(table, tenant_id) do
+        [{^tenant_id, current}] -> current
+        [] -> nil
+      end
+
+    case persist_put(state.instance, context, tenant_id, before, limit) do
       :ok ->
         :ets.insert(table, {tenant_id, limit})
         :ets.delete(buckets_table(state.instance), tenant_id)
@@ -366,17 +380,25 @@ defmodule Ankusa.Edge.RateLimiter do
     end
   end
 
-  def handle_call({:delete, tenant_id}, _from, state) do
+  def handle_call({:delete, tenant_id, context}, _from, state) do
     table = overrides_table(state.instance)
 
     case :ets.lookup(table, tenant_id) do
       [] ->
         {:reply, {:error, :not_found}, state}
 
-      [{^tenant_id, _limit}] ->
+      [{^tenant_id, current}] ->
         ops = [{:delete, :default, Keys.rate_limit(tenant_id)}]
 
-        case Store.write(state.instance, ops, sync: true) do
+        attrs = %{
+          action: "rate_limit.delete",
+          tenant: tenant_id,
+          resource: tenant_id,
+          before_hash: Audit.digest(state.instance, current),
+          detail: limit_detail(current)
+        }
+
+        case Audit.commit(state.instance, context, attrs, ops) do
           :ok ->
             :ets.delete(table, tenant_id)
             :ets.delete(buckets_table(state.instance), tenant_id)
@@ -391,11 +413,24 @@ defmodule Ankusa.Edge.RateLimiter do
 
   # ── persistence ─────────────────────────────────────────────────────────────
 
-  # One key per override (`r:<tenant>`), synced: a `PUT` answers "stored".
-  defp persist_put(instance, tenant_id, %{rate: rate, burst: burst}) do
+  # One key per override (`r:<tenant>`), in the same synced batch as its audit
+  # row: a `PUT` answers "stored".
+  defp persist_put(instance, context, tenant_id, before, %{rate: rate, burst: burst} = limit) do
     value = JSON.encode!(%{"rate" => rate, "burst" => burst})
-    Store.write(instance, [{:put, :default, Keys.rate_limit(tenant_id), value}], sync: true)
+
+    attrs = %{
+      action: "rate_limit.put",
+      tenant: tenant_id,
+      resource: tenant_id,
+      before_hash: Audit.digest(instance, before),
+      after_hash: Audit.digest(instance, limit),
+      detail: limit_detail(limit)
+    }
+
+    Audit.commit(instance, context, attrs, [{:put, :default, Keys.rate_limit(tenant_id), value}])
   end
+
+  defp limit_detail(%{rate: rate, burst: burst}), do: %{"rate" => rate, "burst" => burst}
 
   # A store this node cannot read must not boot with silently empty overrides:
   # a tenant's raised or lowered limit would quietly revert to the config's.

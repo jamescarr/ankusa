@@ -8,6 +8,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- `audit.retention_days` (365): how long the audit trail (`GET /v1/audit`, scope
+  `audit:read`) keeps its rows. The store format is now 2: an image that has
+  booted it cannot roll back to a format 1 image without restoring a backup.
+  See the `ankusa` changelog and `docs/architecture.md`.
+
 - `admin.auth`, `routes.admin.auth` and `claim_check.auth` (`mode`
   `none`/`token`/`jwt`/`mtls`, `allow_insecure`, `tokens` with `token:` (hashed
   at load) or `sha256:` and `scopes`, `jwt`, `mtls.subject_map`), and the env

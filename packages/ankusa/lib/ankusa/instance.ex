@@ -150,7 +150,7 @@ defmodule Ankusa.Instance do
   # the sources live. It must start before every child that reads from it: the
   # source store, the edge, dispatch and storage.
   defp store_children(config, opts) do
-    if store?(config), do: [{Ankusa.Store, opts}], else: []
+    if store?(config), do: [{Ankusa.Store, opts}, {Ankusa.Audit, opts}], else: []
   end
 
   # The store's backup uploader, right behind the store: under `:rest_for_one`
@@ -163,13 +163,20 @@ defmodule Ankusa.Instance do
   defp backup_children(_config, _opts), do: []
 
   @doc """
-  Whether this instance runs the node-local store (`Ankusa.Store`): any of the
-  `:edge`, `:dispatch` or `:storage` roles, or a persistent source store.
+  Whether this instance runs the node-local store (`Ankusa.Store`) and the audit
+  trail written into it (`Ankusa.Audit`): any of the `:edge`, `:dispatch` or
+  `:storage` roles, the admin API (every change it makes is audited), or a
+  source store that accepts writes.
   """
   @spec store?(Config.t()) :: boolean()
   def store?(%Config{} = config) do
-    Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
-      match?({Ankusa.SourceStore.Persistent, _}, config.source_store)
+    Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or config.admin.enabled or
+      writable_source_store?(config)
+  end
+
+  defp writable_source_store?(%Config{source_store: {mod, _opts}}) do
+    Code.ensure_loaded?(mod) and
+      (function_exported?(mod, :put, 6) or function_exported?(mod, :put, 5))
   end
 
   # The one process that assigns seqs and commits hooks, in the edge subtree

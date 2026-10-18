@@ -8,6 +8,10 @@ ExUnit.start(exclude: [:integration])
 # container drills in `scripts/drills/` share.
 Code.require_file("support/crash_harness.exs", __DIR__)
 
+# `Ankusa.AuditHarness`: the child-BEAM harness behind `audit_test.exs`'s
+# "audit row survives kill".
+Code.require_file("support/audit_harness.exs", __DIR__)
+
 # Runs per property in `test/ankusa/property/` (StreamData reads this key when
 # a `check all` starts). 5 000 is the floor the hardening plan asks of CI;
 # `PROPERTY_RUNS=50000 mix test test/ankusa/property` is the long soak.
