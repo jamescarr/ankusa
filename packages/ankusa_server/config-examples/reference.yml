@@ -611,8 +611,10 @@ sources:
     # trust_url_tenant: false   # with routing: tenant_path, a tenant: default source with verify type none must set this to true
     # reject | quarantine | accept_flag (what happens when verification fails)
     on_verify_failure: reject
-    # none | stripe | github | standard_webhooks | shopify | slack | hmac.
-    # Every type except none requires secret; stripe, standard_webhooks, and
+    # none | stripe | github | standard_webhooks | shopify | slack | hmac, or the
+    # public-key, token and client-certificate types shown further down
+    # (standard_webhooks_asym | asymmetric | token | client_cert).
+    # Every HMAC type requires secret; stripe, standard_webhooks, and
     # slack also take tolerance_seconds (default 300). hmac takes the
     # descriptor keys shown on the `custom` source below.
     verify:
@@ -793,4 +795,44 @@ sources:
   #     tolerance_seconds: 300
   #     parse: whole            # whole | csv_pairs (with sig_key: v1) | space_versions (with version: "v1,")
   #     secret_decode: raw      # raw | whsec_base64
+  #   sinks: [{type: log}]
+
+  # A provider that signs with a private key: Ankusa holds only its PUBLIC key,
+  # so a leaked config forges nothing. `standard_webhooks_asym` is the Standard
+  # Webhooks `v1a` Ed25519 preset; `asymmetric` describes any Ed25519 or RSA
+  # (rsa_sha256) provider with the descriptor keys of `hmac` above, `algorithm`
+  # in place of `hash`, and `encoding` hex | base64. public_key is `whpk_<base64>`,
+  # the bare base64 of 32 bytes, or a PEM; a list rotates, newest first.
+  # partner:
+  #   verify: {type: standard_webhooks_asym, public_key: "${PARTNER_WHPK}"}
+  #   on_verify_failure: reject
+  #   sinks: [{type: log}]
+  # signer:
+  #   verify:
+  #     type: asymmetric
+  #     algorithm: rsa_sha256       # ed25519 (default) | rsa_sha256
+  #     public_key: ["${SIGNER_KEY_NEW}", "${SIGNER_KEY_OLD}"]
+  #     signature_header: "X-Signature"
+  #     encoding: hex
+  #   sinks: [{type: log}]
+
+  # A provider that can only send a static credential: bearer (default), basic
+  # (secret is user:password), a header, or a query parameter. The credential is
+  # never stored. Use on_verify_failure: reject (a quarantined hook cannot be
+  # re-verified without it).
+  # internal:
+  #   verify: {type: token, secret: "${INTERNAL_TOKEN}"}
+  #   on_verify_failure: reject
+  #   sinks: [{type: log}]
+  # hooked:
+  #   verify: {type: token, secret: "${HOOK_TOKEN}", location: header, header: X-Hook-Token}
+  #   on_verify_failure: reject
+  #   sinks: [{type: log}]
+
+  # A client that authenticates by certificate: pin its SHA-256 fingerprint
+  # and/or a SAN or CN identity. Needs `listener.tls` with verify: verify_peer
+  # (boot refuses it otherwise).
+  # mesh:
+  #   verify: {type: client_cert, fingerprints: ["${MESH_CERT_SHA256}"], subjects: ["dns:ingest.mesh.internal"]}
+  #   on_verify_failure: reject
   #   sinks: [{type: log}]

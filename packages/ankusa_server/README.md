@@ -221,10 +221,12 @@ and
 ## Security
 
 Ankusa verifies provider signatures on ingest (`stripe`, `github`, `standard_webhooks`,
-`shopify`, `slack`, and `hmac` for any body-HMAC provider), and does no other
-authentication. It does not manage users, API keys,
-or tokens; that is your identity provider's job, and pretending otherwise would
-be worse.
+`shopify`, `slack`, and `hmac` for any body-HMAC provider; `standard_webhooks_asym`
+and `asymmetric` for an Ed25519 or RSA provider, from its public key), and can
+authenticate a sender that cannot sign by a static credential (`token`) or a
+pinned mutual-TLS client certificate (`client_cert`). It does not manage users,
+API keys, or tokens of its own; that is your identity provider's job, and
+pretending otherwise would be worse.
 
 So:
 
