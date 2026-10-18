@@ -1,0 +1,156 @@
+name: ankusa-fleet-e2e
+
+# The fleet end to end: a load balancer, two Ankusa edge nodes with their own
+# stores, a shared route/source store (Redis), a shared bucket (MinIO), a
+# claim-check gateway, RabbitMQ, and a consumer that records every hook in
+# Postgres.
+#
+#   examples/fleet-e2e/run.sh            # builds, starts, drives load, verifies
+#   KEEP=1 examples/fleet-e2e/run.sh     # leave the stack up afterwards
+#
+# Only 18080 (the load balancer), 14001/14002 (the nodes, so the run can send a
+# retry to one of them directly) and 15433 (Postgres, for loadgen.verify) are
+# published. Everything else is on the compose network.
+
+x-ankusa: &ankusa
+  image: ${ANKUSA_IMAGE:-ankusa-fleet-e2e:local}
+  volumes:
+    - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
+  environment: &ankusa-env
+    ANKUSA_CONFIG: /etc/ankusa/ankusa.yml
+    REDIS_URL: redis://redis:6379
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    S3_BUCKET: ankusa-fleet
+    S3_ENDPOINT: http://minio:9000
+    S3_ACCESS_KEY_ID: minioadmin
+    S3_SECRET_ACCESS_KEY: minioadmin
+  restart: "no"
+
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+
+  minio-bootstrap:
+    image: amazon/aws-cli:2.38.1
+    depends_on: [minio]
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until aws s3 ls >/dev/null 2>&1; do echo "waiting for minio..."; sleep 1; done
+        aws s3 mb s3://ankusa-fleet || true
+        echo "bucket ankusa-fleet ready"
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    # `ping` is green before the AMQP listener is up; the port check is what
+    # says a client can connect.
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ankusa
+      POSTGRES_PASSWORD: ankusa
+      POSTGRES_DB: consumer
+    ports:
+      - "127.0.0.1:15433:5432"
+    volumes:
+      - ./consumer/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ankusa -d consumer"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Two edge nodes: every role, a store of their own, one segment prefix each.
+  ankusa-a:
+    <<: *ankusa
+    environment:
+      <<: *ankusa-env
+      ANKUSA_STORAGE_KEY_PREFIX: node-a/
+    volumes:
+      - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
+      - ankusa-a-data:/var/lib/ankusa
+    ports:
+      - "127.0.0.1:14001:4000"
+    depends_on:
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      minio-bootstrap: {condition: service_completed_successfully}
+
+  ankusa-b:
+    <<: *ankusa
+    environment:
+      <<: *ankusa-env
+      ANKUSA_STORAGE_KEY_PREFIX: node-b/
+    volumes:
+      - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
+      - ankusa-b-data:/var/lib/ankusa
+    ports:
+      - "127.0.0.1:14002:4000"
+    depends_on:
+      redis: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      minio-bootstrap: {condition: service_completed_successfully}
+
+  # The gateway: same image, same config, one role. It holds the bucket
+  # credentials; the consumer holds none.
+  claim-check:
+    <<: *ankusa
+    environment:
+      <<: *ankusa-env
+      ANKUSA_ROLES: claim_check
+    depends_on:
+      minio-bootstrap: {condition: service_completed_successfully}
+
+  nginx:
+    image: nginx:1.29-alpine
+    ports:
+      - "127.0.0.1:18080:4000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - ankusa-a
+      - ankusa-b
+
+  consumer:
+    build:
+      context: ../..
+      dockerfile: examples/fleet-e2e/consumer/Dockerfile
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      claim-check: {condition: service_started}
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_EXCHANGE: ankusa.events
+      ROUTING_PATTERN: "ankusa.#"
+      QUEUE_NAME: ankusa-fleet-consumer
+      CLAIM_CHECK_URL: http://claim-check:4001
+      DATABASE_URL: postgres://ankusa:ankusa@postgres:5432/consumer
+    restart: "no"
+
+volumes:
+  ankusa-a-data:
+  ankusa-b-data:
