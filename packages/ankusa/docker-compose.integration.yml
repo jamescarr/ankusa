@@ -35,7 +35,7 @@ services:
   # completion; re-run is idempotent (`mb` on an existing bucket is a no-op
   # error we swallow).
   s3-bootstrap:
-    image: amazon/aws-cli:2.17.62
+    image: amazon/aws-cli:2.38.1
     depends_on: [floci]
     environment:
       AWS_ACCESS_KEY_ID: test
@@ -63,7 +63,7 @@ services:
 
   # Creates the GCS bucket once floci-gcp is answering requests.
   gcs-bootstrap:
-    image: curlimages/curl:8.10.1
+    image: curlimages/curl:8.23.0
     depends_on: [floci-gcp]
     environment:
       ANKUSA_GCS_BUCKET: ankusa-segments-dev
@@ -90,7 +90,7 @@ services:
 
   # Creates the Blob container once floci-az is answering requests.
   azure-bootstrap:
-    image: curlimages/curl:8.10.1
+    image: curlimages/curl:8.23.0
     depends_on: [floci-az]
     environment:
       ANKUSA_AZURE_CONTAINER: ankusa-segments-dev
@@ -115,7 +115,7 @@ services:
 
   # Creates the Object Storage bucket once floci-oci is answering requests.
   oci-bootstrap:
-    image: curlimages/curl:8.10.1
+    image: curlimages/curl:8.23.0
     depends_on: [floci-oci]
     environment:
       ANKUSA_OCI_BUCKET: ankusa-segments-dev

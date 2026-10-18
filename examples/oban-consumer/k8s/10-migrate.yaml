@@ -12,7 +12,8 @@ spec:
         - name: consumer-migrate
           image: ankusa-oban-consumer:e2e
           imagePullPolicy: IfNotPresent
-          command: ["/app/bin/consumer", "eval", "AnkusaExample.Consumer.Release.migrate()"]
+          # Open-file cap for the BEAM on kind: see the ankusa StatefulSet.
+          command: ["/bin/sh", "-c", "ulimit -n 65536 && exec /app/bin/consumer eval 'AnkusaExample.Consumer.Release.migrate()'"]
           env:
             - name: DATABASE_URL
               value: "ecto://ankusa:ankusa@postgres:5432/consumer"

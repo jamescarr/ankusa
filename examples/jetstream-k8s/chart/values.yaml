@@ -6,7 +6,7 @@ images:
   consumer: {repository: ankusa-jetstream-consumer, tag: dev, pullPolicy: IfNotPresent}
   controlPanel: {repository: ankusa-jetstream-panel, tag: dev, pullPolicy: IfNotPresent}
   floci: {repository: floci/floci, tag: latest, pullPolicy: IfNotPresent}
-  awsCli: {repository: amazon/aws-cli, tag: 2.17.62}
+  awsCli: {repository: amazon/aws-cli, tag: 2.38.1}
   prometheus: {repository: prom/prometheus, tag: v3.15.0, pullPolicy: IfNotPresent}
   grafana: {repository: grafana/grafana, tag: 13.2.4, pullPolicy: IfNotPresent}
 

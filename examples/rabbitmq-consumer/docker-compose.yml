@@ -37,7 +37,7 @@ services:
       - floci-data:/app/data
 
   s3-bootstrap:
-    image: amazon/aws-cli:2.17.62
+    image: amazon/aws-cli:2.38.1
     depends_on: [floci]
     environment:
       AWS_ACCESS_KEY_ID: test

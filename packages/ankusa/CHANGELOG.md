@@ -73,6 +73,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- Requires `async_api_spex ~> 0.2` from Hex (was `~> 0.1`, which excluded
+  0.2.0, the release this package is built and tested against).
 - **Breaking:** `claim_check.blob_store` is now `claim_check.blob_stores`, a
   list (`blob_stores: [{mod, opts}]`); a config still naming `blob_store`
   fails `Ankusa.Config.new/1` with `unknown Ankusa.Config key:

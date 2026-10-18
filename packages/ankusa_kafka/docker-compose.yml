@@ -9,7 +9,7 @@ name: ankusa_kafka
 
 services:
   redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.5
     command:
       - redpanda
       - start

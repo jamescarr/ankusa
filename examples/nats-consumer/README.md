@@ -23,7 +23,7 @@ flowchart LR
 | --- | --- |
 | `docker-compose.yml` | NATS with JetStream, the worker, and Ankusa on 4000 (ingest) and 127.0.0.1:4002 (admin); the claim-check gateway (4001) stays on the compose network |
 | `ankusa.yml` | One open `demo` source whose NATS sink publishes to `ankusa.demo`, with `inline_max_bytes: 8192` so a ~20 KB hook takes the claim-check path |
-| `Cargo.toml` / `Cargo.lock` | The worker's crate: `async-nats`, `serde_json`, `base64`, and `ankusa` (published 0.3.0, `default-features = false`, since the gateway is plain HTTP) |
+| `Cargo.toml` / `Cargo.lock` | The worker's crate: `async-nats`, `serde_json`, `base64`, and `ankusa` (published 0.5.0, `default-features = false`, since the gateway is plain HTTP) |
 | `Dockerfile` | Builds the worker with `cargo build --release --locked`; the build context is this directory alone, because the SDK comes from crates.io |
 | `src/main.rs` | Creates the `ANKUSA` stream and a durable pull consumer, decodes each message, redeems claims via `ankusa::ClaimCheckClient`, dedupes on `id`, then acks, `nak`s, or `term`s the message |
 

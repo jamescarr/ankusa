@@ -34,7 +34,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: resolve
         run: |
           source .mise/lib/pkg.sh
@@ -59,7 +59,7 @@ jobs:
     env:
       MIRROR: git@github.com:jamescarr/ankusa-php.git
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Push to the split mirror
         env:
