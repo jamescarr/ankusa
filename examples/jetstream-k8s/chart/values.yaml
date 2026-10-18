@@ -7,6 +7,8 @@ images:
   controlPanel: {repository: ankusa-jetstream-panel, tag: dev, pullPolicy: IfNotPresent}
   floci: {repository: floci/floci, tag: latest, pullPolicy: IfNotPresent}
   awsCli: {repository: amazon/aws-cli, tag: 2.17.62}
+  prometheus: {repository: prom/prometheus, tag: v3.15.0, pullPolicy: IfNotPresent}
+  grafana: {repository: grafana/grafana, tag: 13.2.4, pullPolicy: IfNotPresent}
 
 # RLIMIT_NOFILE for the BEAM containers (ankusa, claim-check, control panel). A
 # kind node's containerd runs with LimitNOFILE=infinity, so a pod starts with a
@@ -88,6 +90,23 @@ controlPanel:
   # it ran out of heap and stopped answering.
   claimBytesPerSec: 2097152
   resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 512Mi}}
+
+# Prometheus scrapes every ankusa-image pod's admin port (:4002/metrics) every
+# 5 s; Grafana serves a provisioned dashboard of what it collects. Both run
+# outside the mesh (no sidecar) and are reached through the ingress gateway
+# at /prometheus/ and /grafana/. Prometheus keeps its data in an emptyDir and
+# Grafana in its container layer: a demo, not a store.
+monitoring:
+  # ~140 MiB peak with six targets.
+  prometheus: {resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}}
+  # Grafana 13 keeps a ~400 MiB live Go heap, and Go's default GC lets the heap grow
+  # to twice that before it collects: under a 512Mi limit it was OOM-killed as soon
+  # as a browser loaded the dashboard. goMemLimit (GOMEMLIMIT) makes the GC collect
+  # sooner; with the dashboard open and the sender at 100/s the container still
+  # peaked at ~1 GiB (the bundled plugin processes add ~110 MiB), hence the limit.
+  grafana:
+    goMemLimit: 768MiB
+    resources: {requests: {cpu: 50m, memory: 512Mi}, limits: {memory: 1536Mi}}
 
 # The Istio ingress gateway run.sh installs (release `istio-ingress`).
 gateway: {selector: {istio: ingress}, serviceHost: "istio-ingress.istio-ingress.svc.cluster.local"}
