@@ -48,12 +48,15 @@ mix_cache_warm() {
 
   # Copy-on-write where the filesystem has it (APFS clonefile, reflinks), so a
   # restore is near-instant and costs no disk until something is rewritten.
+  # `-p`: Mix marks a dep stale when a source file is newer than the manifest
+  # that compiled it, so restored files must keep the timestamps they were
+  # built with (a plain `cp` would date them now and recompile every dep).
   os=$(uname -s)
   _mix_cache_clone() {
     if [ "$os" = Darwin ]; then
-      cp -cR "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -R "$1" "$2"; }
+      cp -cRp "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -Rp "$1" "$2"; }
     else
-      cp -R --reflink=auto "$1" "$2"
+      cp -Rp --reflink=auto "$1" "$2"
     fi
   }
 
