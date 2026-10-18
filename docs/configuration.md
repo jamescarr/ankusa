@@ -596,11 +596,17 @@ rate-limit override, quarantine purge or replay job, newest first, with
 filters. The trail spans tenants, so a reader without `tenant:*` sees only its
 own tenants' rows (none of the rows that belong to no tenant), and naming
 another tenant is a `403`. Tenants are scopes too: `tenant:<id>` for one, `tenant:*` for all.
-A tenant's resources (its sources and rate limit, its claims) need that tenant;
-resources that span tenants (the DLQ, replay jobs, the quarantine pen, the
-rate-limit listing, route definitions and IP rules) need `tenant:*` until they
-are filtered by tenant, so a tenant-limited token cannot read another tenant's
-rows.
+A tenant's resources (its sources and rate limit, its claims) need that tenant.
+The DLQ, replay jobs, the quarantine pen and the rate-limit listing hold every
+tenant's rows, so they are filtered by tenant instead: a token limited to some
+`tenant:<id>` scopes gets only those tenants' rows (the filter is forced on the
+server), `?tenant=<id>` narrows a read to one tenant (the `tenant` key of a
+`POST /v1/replays` body), and naming a tenant the token does not hold is `403`.
+`tenant:*` is what reads, purges or replays across tenants. A quarantine purge
+or a replay started by a limited token touches only its tenants' rows, and a
+replay job is visible to (and steerable by) a limited token only when it is
+scoped to tenants that token holds. Route definitions and IP rules belong to no
+tenant and still need `tenant:*`.
 
 ```yaml
 admin:

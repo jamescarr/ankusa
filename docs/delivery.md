@@ -812,6 +812,18 @@ creation, so rows that die again during the replay are never picked up twice.
 `kind: :archive` re-sends archived hooks over a `received_at` window instead,
 and `kind: :quarantine` releases held hooks that now verify (see
 [Quarantine](#quarantine)).
+
+`GET /v1/dlq`, `GET /v1/replays[/:id]`, `PATCH /v1/replays/:id` and
+`POST /v1/replays` are limited by tenant the same way
+([scopes](configuration.md#control-plane-authentication)): `?tenant=<id>` (the
+`tenant` key of a replay body) names one tenant, a token limited to some
+`tenant:<id>` scopes gets only those tenants' dead letters and starts only jobs
+whose `tenants` filter is those tenants (a job another tenant's token started is
+`404` to it), and naming a tenant the token does not hold is `403`.
+`Ankusa.Queue.dead/2` and `Ankusa.Replay.start/2` take the same filter as
+`:tenants`. The dead index does not carry the tenant yet, so a tenant-filtered
+read looks at the hook of every dead row that passes the other filters.
+
 Delivery is at-least-once, so a replayed hook is a redelivery.
 
 ## Quarantine
@@ -857,6 +869,12 @@ spends no token. A restart neither empties the pen nor forgets its size.
 
 **Inspect** with `GET /v1/quarantine` on the admin port (newest first, no
 bodies) or `Ankusa.Edge.Quarantine.recent/2`.
+
+With [admin authentication](configuration.md#control-plane-authentication) the
+list, a purge and a quarantine replay are limited to the caller's tenants:
+`?tenant=<id>` names one, a token limited to some `tenant:<id>` scopes sees and
+deletes only those tenants' entries, and `tenant:*` is required for the whole
+pen. An entry written before the pen kept the tenant belongs to `default`.
 
 **Release** with a `quarantine` replay job, after fixing the source's secret:
 

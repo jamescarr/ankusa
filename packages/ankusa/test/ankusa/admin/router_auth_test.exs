@@ -15,27 +15,28 @@ defmodule Ankusa.Admin.RouterAuthTest do
   alias Ankusa.Principal
 
   # {method, path, scope, tenancy}: `:open` routes are not about a tenant,
-  # `:global` ones span tenants (they need `tenant:*`), `{:tenant, t}` ones
-  # belong to tenant `t`.
+  # `:filtered` ones hold every tenant's rows and are limited to the caller's
+  # tenants (`tenant:*` for all of them), `{:tenant, t}` ones belong to tenant
+  # `t`.
   @routes [
     {:get, "/metrics", "metrics:read", :open},
     {:get, "/v1/wal", "metrics:read", :open},
     {:get, "/v1/config", "config:read", :open},
     {:get, "/asyncapi.json", "config:read", :open},
-    {:get, "/v1/dlq", "dlq:read", :global},
-    {:post, "/v1/replays", "replays:write", :global},
-    {:get, "/v1/replays", "replays:read", :global},
-    {:get, "/v1/replays/nope", "replays:read", :global},
-    {:patch, "/v1/replays/nope", "replays:write", :global},
-    {:get, "/v1/quarantine", "quarantine:read", :global},
-    {:delete, "/v1/quarantine", "quarantine:write", :global},
+    {:get, "/v1/dlq", "dlq:read", :filtered},
+    {:post, "/v1/replays", "replays:write", :filtered},
+    {:get, "/v1/replays", "replays:read", :filtered},
+    {:get, "/v1/replays/nope", "replays:read", :filtered},
+    {:patch, "/v1/replays/nope", "replays:write", :filtered},
+    {:get, "/v1/quarantine", "quarantine:read", :filtered},
+    {:delete, "/v1/quarantine", "quarantine:write", :filtered},
     {:get, "/v1/audit", "audit:read", :open},
     {:get, "/v1/tenants/acme/sources", "sources:read", {:tenant, "acme"}},
     {:post, "/v1/tenants/acme/sources", "sources:write", {:tenant, "acme"}},
     {:get, "/v1/tenants/acme/sources/billing", "sources:read", {:tenant, "acme"}},
     {:put, "/v1/tenants/acme/sources/billing", "sources:write", {:tenant, "acme"}},
     {:delete, "/v1/tenants/acme/sources/billing", "sources:write", {:tenant, "acme"}},
-    {:get, "/v1/rate-limits", "rate_limits:read", :global},
+    {:get, "/v1/rate-limits", "rate_limits:read", :filtered},
     {:get, "/v1/tenants/acme/rate-limit", "rate_limits:read", {:tenant, "acme"}},
     {:put, "/v1/tenants/acme/rate-limit", "rate_limits:write", {:tenant, "acme"}},
     {:delete, "/v1/tenants/acme/rate-limit", "rate_limits:write", {:tenant, "acme"}}
@@ -60,6 +61,7 @@ defmodule Ankusa.Admin.RouterAuthTest do
         token("operator", "operator", @every_scope ++ ["tenant:*"]),
         token("acme", "acme", @every_scope ++ ["tenant:acme"]),
         token("globex", "globex", @every_scope ++ ["tenant:globex"]),
+        token("tenantless", "tenantless", @every_scope),
         token("scopeless", "scopeless", ["tenant:*", "claims:read"]),
         token("replayer", "replayer", ["replays:write", "tenant:*"])
       ] ++ missing_one
@@ -87,6 +89,19 @@ defmodule Ankusa.Admin.RouterAuthTest do
   end
 
   defp call(inst, method, path, token), do: call(inst, {method, path, nil, nil}, token)
+
+  # A request naming `tenant`: a query parameter, or the body key of a replay
+  # start (`POST /v1/replays` reads its tenant from the body).
+  defp call_naming(inst, {:post, "/v1/replays", _s, _t}, tenant, token) do
+    conn =
+      Plug.Test.conn(:post, "/v1/replays", JSON.encode!(%{kind: "dlq", tenant: tenant}))
+      |> Plug.Conn.put_req_header("authorization", "Bearer " <> token)
+
+    Router.call(conn, Router.init(instance: inst))
+  end
+
+  defp call_naming(inst, {method, path, scope, tenancy}, tenant, token),
+    do: call(inst, {method, path <> "?tenant=" <> tenant, scope, tenancy}, token)
 
   describe "401" do
     test "every route but /health and /ready refuses a request with no credential", %{inst: inst} do
@@ -128,11 +143,23 @@ defmodule Ankusa.Admin.RouterAuthTest do
       end
     end
 
-    test "a route that spans tenants needs tenant:*, not one tenant", %{inst: inst} do
-      for {method, path, _scope, :global} = route <- @routes do
-        conn = call(inst, route, "acme")
+    test "a filtered route needs some tenant, and a tenant-limited token cannot name another",
+         %{inst: inst} do
+      for {method, path, _scope, :filtered} = route <- @routes do
+        conn = call(inst, route, "tenantless")
         assert conn.status == 403, "#{method} #{path} answered #{conn.status}"
         assert %{"scope" => "tenant:*"} = JSON.decode!(conn.resp_body)
+
+        # Its own tenant gets through to the handler (which may still refuse
+        # the empty body), another tenant's is 403, naming the tenant.
+        refute call(inst, route, "acme").status in [401, 403], "acme on #{method} #{path}"
+
+        conn = call_naming(inst, route, "globex", "acme")
+        assert conn.status == 403, "#{method} #{path} answered #{conn.status}"
+        assert %{"scope" => "tenant:globex"} = JSON.decode!(conn.resp_body)
+
+        refute call_naming(inst, route, "acme", "acme").status in [401, 403]
+        refute call_naming(inst, route, "globex", "operator").status in [401, 403]
       end
     end
   end

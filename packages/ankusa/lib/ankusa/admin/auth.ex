@@ -194,6 +194,50 @@ defmodule Ankusa.Admin.Auth do
     end
   end
 
+  @doc """
+  `authorize/3` for a resource that spans tenants but is filtered by tenant
+  (the DLQ, the quarantine pen, replay jobs, the rate-limit listing).
+
+  `requested` is the tenant the request names (`nil` for none). `fun` receives
+  the conn and the tenants the rows must be limited to, forced server-side:
+
+    * `requested` set: the principal must hold `tenant:<requested>` (or
+      `tenant:*`), else `403`; `fun` gets `[requested]`.
+    * `requested` unset and the principal holds `tenant:*`: `fun` gets `nil`,
+      meaning unfiltered.
+    * `requested` unset and the principal holds some `tenant:<id>` scopes:
+      `fun` gets exactly those ids.
+    * a principal with no tenant at all is `403` naming `tenant:*`.
+  """
+  @spec authorize_tenants(
+          Plug.Conn.t(),
+          String.t() | [String.t()],
+          String.t() | nil,
+          (Plug.Conn.t(), [String.t()] | nil -> Plug.Conn.t())
+        ) :: Plug.Conn.t()
+  def authorize_tenants(conn, scope, requested, fun) when is_function(fun, 2) do
+    principal = conn.assigns.principal
+
+    cond do
+      missing = missing_scope(principal, List.wrap(scope)) ->
+        forbidden(conn, missing)
+
+      is_binary(requested) ->
+        if Principal.tenant?(principal, requested),
+          do: fun.(conn, [requested]),
+          else: forbidden(conn, "tenant:#{requested}")
+
+      Principal.all_tenants?(principal) ->
+        fun.(conn, nil)
+
+      principal.tenants == [] ->
+        forbidden(conn, "tenant:*")
+
+      true ->
+        fun.(conn, principal.tenants)
+    end
+  end
+
   defp missing_scope(principal, scopes),
     do: Enum.find(scopes, &(not Principal.scope?(principal, &1)))
 
