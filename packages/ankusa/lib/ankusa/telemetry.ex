@@ -51,6 +51,8 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :routes, :match]` | — | `:instance`, `:route_id`, `:cached`, `:cacheable` |
   | `[:ankusa, :routes, :reject]` | — | `:instance`, `:reason`, `:method`, `:path` |
   | `[:ankusa, :routes, :changed]` | — | `:instance`, `:action`, `:route_id`, `:version` |
+  | `[:ankusa, :audit]` | `:count` (1) | `:instance`, `:seq`, `:action`, `:actor`, `:tenant`, `:resource`, `:result` (`"ok"`, `"failed"`, `"interrupted"`). One per row committed to the audit trail |
+  | `[:ankusa, :audit, :pruned]` | `:count` | `:instance`. Rows the retention sweep (`audit.retention_days`) deleted |
 
   `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
   `:rejected`, `:rate_limited`, `:quarantine_rate_limited`, `:quarantine_full`,

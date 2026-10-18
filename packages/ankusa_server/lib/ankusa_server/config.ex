@@ -66,7 +66,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress audit)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
@@ -114,6 +114,7 @@ defmodule AnkusaServer.Config do
   @rate_limits_keys ~w(default tenants)
   @rate_limit_keys ~w(rate burst)
   @quarantine_keys ~w(burst rate max_bytes)
+  @audit_keys ~w(retention_days)
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
@@ -392,6 +393,7 @@ defmodule AnkusaServer.Config do
         routes_section(doc) ++
         rate_limits_section(doc) ++
         quarantine_section(doc) ++
+        audit_section(doc) ++
         batcher_section(doc) ++
         dispatch_section(doc) ++
         wal_section(doc) ++
@@ -1248,6 +1250,17 @@ defmodule AnkusaServer.Config do
         |> put_opt(:rate, number_opt(quarantine, "rate", path))
         |> put_opt(:max_bytes, int_opt(quarantine, "max_bytes", path))
     ]
+  end
+
+  # ── audit ───────────────────────────────────────────────────────────────────
+
+  # Types only; the range is core's (`Ankusa.Config`), so `check-config` and an
+  # embedded boot fail with the same message.
+  defp audit_section(doc) do
+    path = ["audit"]
+    audit = section!(doc, "audit", @audit_keys, [])
+
+    [audit: [] |> put_opt(:retention_days, int_opt(audit, "retention_days", path))]
   end
 
   # ── egress ──────────────────────────────────────────────────────────────────

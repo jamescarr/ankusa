@@ -44,9 +44,11 @@ defmodule Ankusa.SecretsRewrapTaskTest do
     config = node_config(base, kek: "k1:" <> @kek_a)
     put_config(config)
     start_supervised!({Store, instance: config.instance}, id: :first_boot)
+    start_supervised!({Ankusa.Audit, instance: config.instance}, id: :first_boot_audit)
     {:ok, pid} = Persistent.start_link(instance: config.instance)
     assert {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
     GenServer.stop(pid)
+    stop_supervised!(:first_boot_audit)
     stop_supervised!(:first_boot)
 
     %{

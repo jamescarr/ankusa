@@ -21,6 +21,10 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   config error naming `sources.<id>.verify.tolerance_seconds`. A `hash: sha1`
   source boots with a warning and counts on `ankusa_verifier_weak_hash_total`.
   See the `ankusa` changelog.
+- `audit.retention_days` (365): how long the audit trail (`GET /v1/audit`, scope
+  `audit:read`) keeps its rows. The store format is now 2: an image that has
+  booted it cannot roll back to a format 1 image without restoring a backup.
+  See the `ankusa` changelog and `docs/architecture.md`.
 
 - `secrets: {kek, kek_previous}` (use `${VAR}`): the key-encryption key that
   source specs' secrets are encrypted under before an API-managed source is

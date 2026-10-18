@@ -210,10 +210,18 @@ defmodule Ankusa.SourceStore.Table do
   Load one persisted spec into the table. A spec that collides with a seed, or
   that the decoder no longer accepts, is skipped with a warning (and left where
   it is persisted, so rolling a config change back brings it straight back).
-  Returns whether it was loaded.
+  `revision` is the source's stored revision, `nil` when it has none. Returns
+  whether it was loaded.
   """
-  @spec load_spec(:ets.table(), function() | nil, String.t(), String.t(), map()) :: boolean()
-  def load_spec(table, decoder, tenant, name, spec) do
+  @spec load_spec(
+          :ets.table(),
+          function() | nil,
+          String.t(),
+          String.t(),
+          map(),
+          pos_integer() | nil
+        ) :: boolean()
+  def load_spec(table, decoder, tenant, name, spec, revision \\ nil) do
     source_id = source_id(tenant, name)
 
     if seed?(table, source_id) do
@@ -225,6 +233,7 @@ defmodule Ankusa.SourceStore.Table do
     else
       case build(decoder, tenant, name, spec) do
         {:ok, stored, source} ->
+          stored = if revision, do: Map.put(stored, :revision, revision), else: stored
           put_rows(table, stored, source)
           true
 

@@ -64,6 +64,7 @@ defmodule Ankusa.Routes.Router do
   require Logger
 
   alias Ankusa.Admin.Auth
+  alias Ankusa.Audit.Context
   alias Ankusa.Routes
   alias Ankusa.Routes.Route
 
@@ -72,6 +73,7 @@ defmodule Ankusa.Routes.Router do
   @max_body 65_536
 
   plug(Auth, section: :routes_admin)
+  plug(Context)
   plug(:match)
   plug(:authorize_scope)
   plug(:dispatch)
@@ -129,8 +131,11 @@ defmodule Ankusa.Routes.Router do
     instance = instance(conn)
 
     case read_json(conn) do
-      {:ok, body, conn} -> conn |> write(Routes.create(instance, body), 201)
-      {:error, :body, conn} -> invalid_body(conn)
+      {:ok, body, conn} ->
+        conn |> write(Routes.create(instance, body, audit: Context.from_conn(conn)), 201)
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
     end
   end
 
@@ -147,8 +152,11 @@ defmodule Ankusa.Routes.Router do
     instance = instance(conn)
 
     case read_json(conn) do
-      {:ok, body, conn} -> conn |> write(Routes.replace(instance, id, body), 200)
-      {:error, :body, conn} -> invalid_body(conn)
+      {:ok, body, conn} ->
+        conn |> write(Routes.replace(instance, id, body, audit: Context.from_conn(conn)), 200)
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
     end
   end
 
@@ -156,15 +164,18 @@ defmodule Ankusa.Routes.Router do
     instance = instance(conn)
 
     case read_json(conn) do
-      {:ok, body, conn} -> conn |> write(Routes.update(instance, id, body), 200)
-      {:error, :body, conn} -> invalid_body(conn)
+      {:ok, body, conn} ->
+        conn |> write(Routes.update(instance, id, body, audit: Context.from_conn(conn)), 200)
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
     end
   end
 
   delete "/admin/routes/:id" do
     instance = instance(conn)
 
-    case Routes.delete(instance, id) do
+    case Routes.delete(instance, id, audit: Context.from_conn(conn)) do
       :ok -> Plug.Conn.send_resp(conn, 204, "")
       {:error, :not_found} -> not_found(conn)
       {:error, reason} -> store_error(conn, reason)
@@ -180,7 +191,7 @@ defmodule Ankusa.Routes.Router do
 
     case read_json(conn) do
       {:ok, body, conn} ->
-        case Routes.put_ip_rules(instance, body) do
+        case Routes.put_ip_rules(instance, body, audit: Context.from_conn(conn)) do
           {:ok, ip_rules} ->
             send_json(conn, 200, ip_rules_json(ip_rules))
 
