@@ -1,7 +1,11 @@
 # Releasing
 
 Every releasable artifact is a directory under `packages/`, versioned on its
-own with its own `CHANGELOG.md`. The directory name is the git tag prefix, and
+own with its own `CHANGELOG.md`. Those changelogs are marked `merge=union` in
+`.gitattributes`, so PRs that both append under `## [Unreleased]` merge
+without a textual conflict (GitHub's mergeability check does not run merge
+drivers, so a PR may still read CONFLICTING until its branch merges `main`
+locally and pushes). The directory name is the git tag prefix, and
 the files in it decide where it publishes:
 
 | Package | Kind | Tag | Published by |
@@ -113,6 +117,38 @@ version publishes its exact tag only, so nobody can pull `latest` and get an rc.
 The same job pushes `packages/ankusa_server/README.md` as the Docker Hub
 repository description. `release:verify ankusa_server` also checks `latest`
 (for a non-prerelease) and that the tag carries both architectures.
+
+### Supply chain: pins, SBOM, provenance, signature
+
+Nothing the image or its pipeline pulls is a moving name. `mise run lint:pins`
+(in `mise run check` and the CI `lint` job) fails any GitHub action not pinned
+to a 40-character commit SHA, the BuildKit and SBOM-scanner images `docker.yml`
+builds with, and any `FROM` or `# syntax=` in
+[`packages/ankusa_server/Dockerfile`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/Dockerfile)
+not pinned by digest. The tag or version each pin came from is the trailing
+comment; bump the SHA and the comment together (the header of
+`.mise/tasks/lint/pins` has the commands).
+
+A push to `main` or a server tag then does, in `docker.yml`:
+
+1. **`build`** pushes each architecture by digest with `provenance: mode=max`
+   (SLSA provenance) and an SPDX SBOM from the digest-pinned BuildKit Syft
+   scanner, both stored as attestation manifests next to the image.
+2. **`merge`** creates the tags, then refuses the index unless
+   `docker buildx imagetools inspect … --format '{{json .SBOM}}'` and `.Provenance`
+   each have `linux/amd64` and `linux/arm64`; signs the index digest with
+   `cosign sign --yes` (keyless: the job's OIDC token, `id-token: write`, is the
+   identity); and runs `smoke.sh` against `jamescarr/ankusa@sha256:<index>`,
+   whose first step is `cosign verify` with the identity of this workflow on
+   `main` or a server tag. A failure leaves the job red and no GitHub release.
+
+`mise run docker:smoke` builds locally and prints `cosign verify: skipped` (a
+local build is unsigned); `SMOKE_COSIGN_IMAGE=jamescarr/ankusa:X.Y.Z mise run
+docker:smoke`, or `smoke.sh jamescarr/ankusa@sha256:…`, verifies a published one
+(needs `cosign`). How a consumer verifies is in the image's
+[README](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/README.md#verify-an-image).
+Each CI package job also uploads `mix hex.audit`'s report as the
+`hex-audit-<package>` artifact.
 
 ## Secrets
 

@@ -1901,6 +1901,50 @@ defmodule AnkusaServer.ConfigTest do
              {Ankusa.Verifier.Hmac, [scheme: :slack, secret: "slack-secret", tolerance: 30]}
   end
 
+  test "tolerance range: 0..3600 loads, 3601 and negatives are a config error naming the key" do
+    load = fn type, seconds ->
+      path =
+        tmp_config("""
+        sources:
+          signed:
+            verify: {type: #{type}, secret: "whsec_YWJj", tolerance_seconds: #{seconds}}
+            sinks: [{type: log}]
+        """)
+
+      Config.load!(path: path, env: %{})
+    end
+
+    for seconds <- [0, 300, 3600] do
+      config = load.("stripe", seconds).config
+      assert {Ankusa.Verifier.Hmac, opts} = source_from(config, "signed").verifier
+      assert opts[:tolerance] == seconds
+    end
+
+    for type <- ~w(stripe standard_webhooks slack), seconds <- [3601, 86_400, -1] do
+      error = assert_raise ConfigError, fn -> load.(type, seconds) end
+
+      assert error.message ==
+               "sources.signed.verify.tolerance_seconds: must be between 0 and 3600 seconds, " <>
+                 "got #{seconds}"
+    end
+
+    # The same bound for an inline `hmac` scheme, and a string that parses past it.
+    path =
+      tmp_config("""
+      sources:
+        signed:
+          verify:
+            type: hmac
+            secret: "k"
+            signature_header: "X-Sig"
+            tolerance_seconds: "3601"
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.signed.verify.tolerance_seconds: must be between 0 and 3600"
+  end
+
   test "type hmac builds an inline scheme from the descriptor keys" do
     path =
       tmp_config("""
