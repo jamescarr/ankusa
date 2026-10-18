@@ -152,6 +152,16 @@ then runs every registered SDK's native runner.
      are ignored; no `v1,` entry equal (constant-time) to the base64
      HMAC-SHA256 of any secret → `no_matching_signature`
      (`field: "webhook-signature"`).
+
+  The `v1a,` (Ed25519) entries of the Standard Webhooks specification are
+  among the ignored ones: `verify_signature` is the HMAC receiver, so a
+  delivery with a valid `v1,` entry beside a `v1a,` one verifies, and one with
+  only `v1a,` entries is `no_matching_signature`
+  (`webhook.verify_signature.asymmetric`). The `v1a,` signature in those cases
+  is the specification's reference message signed with the RFC 8032 test key 1
+  (public key `whpk_11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=`); core's
+  `Ankusa.Verifier.Asymmetric` verifies the same bytes
+  (`packages/ankusa/test/ankusa/verifier_test.exs` reads these cases).
 - `receive_delivery`: `{"headers": {string: string}, "body": Body,
   "receiver": {"secrets"?: [string], "allow_unsigned"?: bool,
   "tolerance_seconds"?: int}, "now": int}` → `ok` is the `parse_headers`
