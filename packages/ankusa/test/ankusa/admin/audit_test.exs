@@ -684,7 +684,15 @@ defmodule Ankusa.Admin.AuditTest do
         end
 
       :ok =
-        Store.write(inst, seeded ++ [{:put, :default, Keys.audit_seq(), <<5::64>>}], sync: true)
+        Store.write(
+          inst,
+          seeded ++
+            [
+              {:put, :audit, Keys.lifecycle_entity(1), JSON.encode!(%{"old" => true})},
+              {:put, :default, Keys.audit_seq(), <<5::64>>}
+            ],
+          sync: true
+        )
 
       start_audit(inst)
       assert :ok = Audit.commit(inst, Context.system(), @attrs, [])
@@ -705,6 +713,25 @@ defmodule Ankusa.Admin.AuditTest do
       assert_receive {:pruned, 5}
       assert [%{action: "test.change", seq: 6}] = trail(inst)
       assert {:ok, 0} = Audit.prune(inst)
+      # The lifecycle entity beside a pruned row goes with it.
+      assert Audit.entity(inst, 1) == :not_found
+    end
+
+    test "a change with an entity is flagged for publication and keeps it beside the row", %{
+      audit: inst
+    } do
+      start_audit(inst)
+
+      assert :ok =
+               Audit.commit(inst, Context.system(), Map.put(@attrs, :entity, %{"k" => "v"}), [])
+
+      assert [%{publish: true} = row] = trail(inst)
+      refute Map.has_key?(row, :entity)
+      assert Audit.entity(inst, row.seq) == {:ok, %{"k" => "v"}}
+
+      assert :ok = Audit.commit(inst, Context.system(), @attrs, [])
+      assert [%{publish: false, seq: 2}, _first] = trail(inst)
+      assert Audit.entity(inst, 2) == :not_found
     end
 
     test "every committed row is a [:ankusa, :audit] event", %{audit: inst} do

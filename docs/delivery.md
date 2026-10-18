@@ -810,8 +810,12 @@ again). It needs the `:dispatch` role on this node. Filters (`:source_id`,
 AND; a `dlq` job touches only rows dead-lettered at or before its own
 creation, so rows that die again during the replay are never picked up twice.
 `kind: :archive` re-sends archived hooks over a `received_at` window instead,
-and `kind: :quarantine` releases held hooks that now verify (see
-[Quarantine](#quarantine)).
+`kind: :quarantine` releases held hooks that now verify (see
+[Quarantine](#quarantine)), and `kind: :lifecycle` re-emits lifecycle events from
+the audit trail over a `since`/`until` window to the node's lifecycle sinks (see
+[Lifecycle events](asyncapi.md#lifecycle-events)); that job takes `tenant`
+instead of `source_id`, keeps each event's `id`, and moves its cursor only once
+the publisher reports the page delivered.
 Delivery is at-least-once, so a replayed hook is a redelivery.
 
 ## Quarantine

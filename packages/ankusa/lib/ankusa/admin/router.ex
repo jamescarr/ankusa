@@ -651,9 +651,15 @@ defmodule Ankusa.Admin.Router do
 
   # ── replay jobs ────────────────────────────────────────────────────────────
 
-  @kind_map %{"dlq" => :dlq, "archive" => :archive, "quarantine" => :quarantine}
+  @kind_map %{
+    "dlq" => :dlq,
+    "archive" => :archive,
+    "quarantine" => :quarantine,
+    "lifecycle" => :lifecycle
+  }
+
   @state_map %{"running" => :running, "paused" => :paused, "cancelled" => :cancelled}
-  @replay_spec_keys ~w(kind source_id id since until from to sinks rate max_lag_ms)
+  @replay_spec_keys ~w(kind source_id id since until from to sinks tenant rate max_lag_ms)
   @replay_patch_keys ~w(state rate max_lag_ms)
 
   defp replay_create(conn) do
@@ -673,6 +679,7 @@ defmodule Ankusa.Admin.Router do
   defp replay_kind_scopes(:dlq), do: "dlq:write"
   defp replay_kind_scopes(:quarantine), do: "quarantine:write"
   defp replay_kind_scopes(:archive), do: []
+  defp replay_kind_scopes(:lifecycle), do: []
 
   defp start_replay(conn, spec) do
     case Ankusa.Replay.start(instance(conn), spec, audit: Context.from_conn(conn)) do
@@ -753,6 +760,7 @@ defmodule Ankusa.Admin.Router do
         with {:ok, kind} <- enum_param(map, "kind", @kind_map),
              {:ok, source_id} <- string_param(map, "source_id"),
              {:ok, id} <- string_param(map, "id"),
+             {:ok, tenant} <- string_param(map, "tenant"),
              {:ok, since} <- int_param(map, "since", nil),
              {:ok, until} <- int_param(map, "until", nil),
              {:ok, from} <- int_param(map, "from", nil),
@@ -764,6 +772,7 @@ defmodule Ankusa.Admin.Router do
             %{kind: kind}
             |> put_present(:source_id, source_id)
             |> put_present(:id, id)
+            |> put_present(:tenant, tenant)
             |> put_present(:since, since)
             |> put_present(:until, until)
             |> put_present(:from, from)

@@ -171,8 +171,10 @@ defmodule Ankusa.AsyncApi.LifecycleEvent do
       "type" => "object",
       "description" =>
         "A webhook endpoint (source) or route was created, updated, or deleted. " <>
-          "`data` is the entity as the admin API shows it, secrets redacted; for a deletion " <>
-          "it is the last view of a source, or `{\"id\": ...}` for a route.",
+          "`data` is the entity as the admin API shows it, secrets redacted, as the change " <>
+          "left it; for a deletion, as it was the moment before. Delivery is at least once and " <>
+          "in commit order: `id` is derived from the change, so the same event always has " <>
+          "the same id, and `revision` lets a consumer ignore a stale update.",
       "required" => [
         "specversion",
         "id",
@@ -203,7 +205,27 @@ defmodule Ankusa.AsyncApi.LifecycleEvent do
         },
         "time" => %{"type" => "string", "format" => "date-time"},
         "datacontenttype" => %{"const" => "application/json"},
-        "data" => %{"type" => "object"}
+        "data" => %{"type" => "object"},
+        "revision" => %{
+          "type" => "integer",
+          "minimum" => 1,
+          "description" =>
+            "The subject's change counter, 1 at creation. Absent for a store that keeps none."
+        },
+        "actor" => %{
+          "type" => "string",
+          "description" => "The id of the principal that made the change (`system` for code)."
+        },
+        "instance" => %{"type" => "string", "description" => "The instance's name."},
+        "sequence" => %{
+          "type" => "string",
+          "pattern" => "^[0-9]+$",
+          "description" => "The instance's audit sequence number: events are ordered by it."
+        },
+        "replayid" => %{
+          "type" => "string",
+          "description" => "Present only on an event a replay job re-sent: the job's id."
+        }
       }
     }
 end

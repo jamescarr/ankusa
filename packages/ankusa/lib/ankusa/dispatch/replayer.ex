@@ -4,7 +4,10 @@ defmodule Ankusa.Dispatch.Replayer do
 
   A job (`Ankusa.Replay`) re-sends either dead rows (`kind: :dlq`) or archived
   hooks (`kind: :archive`), or releases hooks held in the quarantine pen that
-  now pass verification (`kind: :quarantine`). It never bulk-flips rows: once
+  now pass verification (`kind: :quarantine`), or re-emits lifecycle events from
+  the audit trail (`kind: :lifecycle`; those go to the lifecycle sinks through
+  `Ankusa.Lifecycle.Publisher`, and the job moves its cursor when the publisher
+  reports a page delivered). It never bulk-flips rows: once
   a tick it drips up to `rate` rows into the existing due index, and only while
   the Pipeline's oldest-due lag is at most the job's `max_lag_ms` and its
   in-flight window is not full — so a replay only uses dispatch capacity live
@@ -29,6 +32,7 @@ defmodule Ankusa.Dispatch.Replayer do
     Audit,
     BlobStore,
     Dedupe,
+    Lifecycle,
     SourceStore,
     Store,
     Telemetry,
@@ -38,6 +42,7 @@ defmodule Ankusa.Dispatch.Replayer do
   }
 
   alias Ankusa.Edge.Quarantine
+  alias Ankusa.Lifecycle.Publisher
   alias Ankusa.Queue
   alias Ankusa.Queue.{Archive, Deliveries}
   alias Ankusa.Store.Keys
@@ -45,6 +50,8 @@ defmodule Ankusa.Dispatch.Replayer do
   @tick_ms 200
   @max_items_per_tick 2_000
   @max_scan_per_tick 20_000
+  # Audit rows one page of a lifecycle replay looks at.
+  @lifecycle_scan 500
   @max_active 16
   @keep_finished 100
   @auto_pause_min_dead 100
@@ -86,6 +93,9 @@ defmodule Ankusa.Dispatch.Replayer do
        windows: %{},
        segments: %{},
        backoff: %{},
+       # lifecycle replay pages handed to the publisher and not yet reported:
+       # `job id => %{last, scanned, skipped, moved, exhausted?, monitor}`
+       lifecycle: %{},
        timer: nil
      }}
   end
@@ -177,6 +187,32 @@ defmodule Ankusa.Dispatch.Replayer do
     {:noreply, arm(state)}
   end
 
+  # The lifecycle publisher reports a page it was handed: count its deliveries
+  # like any replay's outcomes, then move the job's cursor past the page.
+  def handle_info({:lifecycle_replayed, id, counts}, state) do
+    case Map.pop(state.lifecycle, id) do
+      {nil, _lifecycle} ->
+        {:noreply, state}
+
+      {page, lifecycle} ->
+        Process.demonitor(page.monitor, [:flush])
+
+        {:noreply, state} =
+          handle_info({:replay_outcomes, %{id => counts}}, %{state | lifecycle: lifecycle})
+
+        {:noreply, arm(lifecycle_settled(state, id, page))}
+    end
+  end
+
+  # The publisher died holding a page: the cursor has not moved, so the page is
+  # handed over again (the events keep their ids).
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    lifecycle =
+      state.lifecycle |> Enum.reject(fn {_id, page} -> page.monitor == ref end) |> Map.new()
+
+    {:noreply, %{state | lifecycle: lifecycle}}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
@@ -199,39 +235,11 @@ defmodule Ankusa.Dispatch.Replayer do
           Ankusa.whereis(state.instance, :queue_writer) == nil ->
         {:reply, {:error, {:role_not_enabled, :edge}}, state}
 
+      spec.kind == :lifecycle and Ankusa.whereis(state.instance, :lifecycle) == nil ->
+        {:reply, {:error, {:role_not_enabled, :lifecycle}}, state}
+
       true ->
-        now = System.system_time(:millisecond)
-
-        job = %{
-          id: UUIDv7.generate(),
-          kind: spec.kind,
-          filter: spec.filter,
-          rate: spec.rate,
-          max_lag_ms: spec.max_lag_ms,
-          state: :running,
-          created_at: now,
-          updated_at: now,
-          finished_at: nil,
-          cursor: nil,
-          upto: upto(spec, now),
-          moved: 0,
-          scanned: 0,
-          skipped: 0,
-          delivered: 0,
-          dead: 0,
-          error: nil
-        }
-
-        case Audit.commit(state.instance, context, job_attrs("replay.create", job, nil), [
-               job_put(job)
-             ]) do
-          :ok ->
-            emit_state(state.instance, job)
-            {:reply, {:ok, :created, job}, arm(put_job(state, job))}
-
-          {:error, _reason} ->
-            {:reply, {:error, :store_unavailable}, state}
-        end
+        start_job(state, spec, context)
     end
   end
 
@@ -549,6 +557,19 @@ defmodule Ankusa.Dispatch.Replayer do
       end
     else
       {:error, reason} -> {:error, state, job, reason}
+    end
+  end
+
+  # ── lifecycle steps ───────────────────────────────────────────────────────
+
+  # Re-emit the lifecycle events of a window of the audit trail. A page is
+  # handed to the lifecycle publisher and the job waits for its report before
+  # it moves the cursor: a crash in between sends the page again, never skips it.
+  defp step(state, %{kind: :lifecycle} = job, n) do
+    if Map.has_key?(state.lifecycle, job.id) do
+      {:ok, state, job, 0, false}
+    else
+      lifecycle_page(state, job, n)
     end
   end
 
@@ -996,6 +1017,182 @@ defmodule Ankusa.Dispatch.Replayer do
   end
 
   defp upto(_spec, _now), do: nil
+
+  # A new job. A lifecycle job covers the trail as it is now (`ceiling`), so
+  # events the replay itself provokes are never picked up.
+  defp start_job(state, spec, context) do
+    now = System.system_time(:millisecond)
+
+    with {:ok, ceiling} <- ceiling(state.instance, spec),
+         job = %{
+           id: UUIDv7.generate(),
+           kind: spec.kind,
+           filter: spec.filter,
+           rate: spec.rate,
+           max_lag_ms: spec.max_lag_ms,
+           state: :running,
+           created_at: now,
+           updated_at: now,
+           finished_at: nil,
+           cursor: nil,
+           upto: upto(spec, now),
+           ceiling: ceiling,
+           moved: 0,
+           scanned: 0,
+           skipped: 0,
+           delivered: 0,
+           dead: 0,
+           error: nil
+         },
+         :ok <-
+           Audit.commit(state.instance, context, job_attrs("replay.create", job, nil), [
+             job_put(job)
+           ]) do
+      emit_state(state.instance, job)
+      {:reply, {:ok, :created, job}, arm(put_job(state, job))}
+    else
+      {:error, _reason} -> {:reply, {:error, :store_unavailable}, state}
+    end
+  end
+
+  defp ceiling(instance, %{kind: :lifecycle}), do: Audit.last_seq(instance)
+  defp ceiling(_instance, _spec), do: {:ok, nil}
+
+  # The next page of the window: up to `n` flagged rows in the filter, with
+  # their entities, within @lifecycle_scan rows of the trail.
+  defp lifecycle_page(state, job, n) do
+    cursor = job.cursor || 0
+
+    with {:ok, entries} <- Audit.page(state.instance, cursor, @lifecycle_scan),
+         taken = Enum.take_while(entries, fn {seq, _row} -> seq <= job.ceiling end),
+         {:ok, page} <- lifecycle_collect(state.instance, taken, job, n) do
+      page = %{
+        page
+        | exhausted?:
+            length(taken) < length(entries) or
+              (page.all? and length(entries) < @lifecycle_scan) or page.last >= job.ceiling
+      }
+
+      lifecycle_hand_over(state, job, page)
+    else
+      {:error, reason} -> {:error, state, job, reason}
+    end
+  end
+
+  defp lifecycle_collect(instance, entries, job, n) do
+    acc = %{
+      rows: [],
+      last: job.cursor || 0,
+      scanned: 0,
+      skipped: 0,
+      moved: 0,
+      all?: true,
+      exhausted?: false
+    }
+
+    result =
+      Enum.reduce_while(entries, acc, fn
+        _entry, %{moved: moved} = acc when moved >= n ->
+          {:halt, %{acc | all?: false}}
+
+        {seq, decoded}, acc ->
+          acc = %{acc | last: seq, scanned: acc.scanned + 1}
+
+          case lifecycle_entry(instance, decoded, job) do
+            :skip -> {:cont, acc}
+            :gone -> {:cont, %{acc | skipped: acc.skipped + 1}}
+            {:ok, pair} -> {:cont, %{acc | rows: [pair | acc.rows], moved: acc.moved + 1}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+      end)
+
+    case result do
+      {:error, reason} -> {:error, reason}
+      page -> {:ok, %{page | rows: Enum.reverse(page.rows)}}
+    end
+  end
+
+  defp lifecycle_entry(instance, {:ok, %{publish: true} = row}, job) do
+    if Lifecycle.in_window?(row, job.filter) do
+      case Audit.entity(instance, row.seq) do
+        {:ok, entity} -> {:ok, {row, entity}}
+        :not_found -> :gone
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :skip
+    end
+  end
+
+  # A row that cannot be read is a row that cannot be replayed.
+  defp lifecycle_entry(_instance, {:error, _reason}, _job), do: :gone
+  defp lifecycle_entry(_instance, {:ok, _row}, _job), do: :skip
+
+  # Nothing to send in this page: the cursor moves on its own.
+  defp lifecycle_hand_over(state, job, %{rows: []} = page) do
+    case lifecycle_advance(state, job, page) do
+      {:ok, job} -> {:ok, prune_finished(state), job, 0, job.state == :done}
+      {:error, reason} -> {:error, state, job, reason}
+    end
+  end
+
+  defp lifecycle_hand_over(state, job, page) do
+    with pid when is_pid(pid) <- Ankusa.whereis(state.instance, :lifecycle),
+         :ok <- Publisher.replay(state.instance, job.id, page.rows, self()) do
+      page = %{page | rows: []} |> Map.put(:monitor, Process.monitor(pid))
+      {:ok, %{state | lifecycle: Map.put(state.lifecycle, job.id, page)}, job, page.moved, false}
+    else
+      # The replay backlog is full: ask again next tick, spending nothing.
+      {:error, :busy} -> {:ok, state, job, 0, false}
+      nil -> {:error, state, job, :not_running}
+      {:error, reason} -> {:error, state, job, reason}
+    end
+  end
+
+  # The job's cursor moves past a page, with its counters, and is written with
+  # the job record; the job is done when the page was the last one.
+  defp lifecycle_advance(state, job, page) do
+    now = System.system_time(:millisecond)
+
+    job = %{
+      job
+      | cursor: page.last,
+        moved: job.moved + page.moved,
+        scanned: job.scanned + page.scanned,
+        skipped: job.skipped + page.skipped,
+        updated_at: now
+    }
+
+    finished? = page.exhausted? and job.state == :running
+    job = if finished?, do: %{job | state: :done, finished_at: now}, else: job
+
+    case Store.write(state.instance, [job_put(job)], sync: finished?) do
+      :ok ->
+        if finished?, do: emit_state(state.instance, job)
+        {:ok, job}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp lifecycle_settled(state, id, page) do
+    with {:ok, job} <- Map.fetch(state.jobs, id),
+         {:ok, job} <- lifecycle_advance(state, job, page) do
+      state |> put_job(job) |> prune_finished()
+    else
+      :error ->
+        state
+
+      {:error, reason} ->
+        Logger.warning(
+          "[ankusa] replay job #{id} could not move past a lifecycle page, " <>
+            "sending it again: #{inspect(reason)}"
+        )
+
+        state
+    end
+  end
 
   defp job_put(job) do
     {:put, :default, Keys.replay_job(job.id), :erlang.term_to_binary(job)}

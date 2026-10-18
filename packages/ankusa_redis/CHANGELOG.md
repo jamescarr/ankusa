@@ -8,6 +8,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Ankusa.SourceStore.Redis.ready?/1` (core's optional `ready?/1` source-store
+  callback): whether the mirror has loaded from Redis, which core's lifecycle
+  outbox waits for before it settles a source change a killed node left
+  pending. Requires the `ankusa` release with the lifecycle outbox.
 - `Ankusa.SourceStore.Redis` encrypts the secret-bearing fields of each stored
   source spec with core's `secrets.kek` (`Ankusa.Crypto.Envelope`), so Redis,
   its persistence files and its backups hold no verify secret or sink

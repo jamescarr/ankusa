@@ -735,4 +735,127 @@ defmodule Ankusa.ReplayTest do
     assert {:error, {:role_not_enabled, :edge}} =
              Replay.start(config.instance, kind: :quarantine)
   end
+
+  defmodule LifecycleSink do
+    @moduledoc "Reports every lifecycle delivery as `{:lifecycle_seen, id, replay_id, event}`."
+
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, ctx, opts) do
+      send(
+        Keyword.fetch!(opts, :pid),
+        {:lifecycle_seen, env.id, ctx[:replay_id], JSON.decode!(env.body)}
+      )
+
+      :ok
+    end
+  end
+
+  @doc false
+  def lifecycle_decoder(_source_id, _spec), do: [sinks: [{Ankusa.Sink.Log, []}]]
+
+  defp start_lifecycle(sinks) do
+    start(%{},
+      source_store: {Ankusa.SourceStore.Persistent, decoder: &__MODULE__.lifecycle_decoder/2},
+      lifecycle: %{sinks: sinks}
+    )
+  end
+
+  defp put_source(inst, tenant, name) do
+    {:ok, _stored} =
+      Ankusa.SourceStore.put(inst, tenant, name, %{"sinks" => [%{"type" => "log"}]}, :create)
+  end
+
+  defp live_events(count) do
+    for _ <- 1..count do
+      assert_receive {:lifecycle_seen, id, nil, event}, 5_000
+      {id, event}
+    end
+  end
+
+  describe "lifecycle replay" do
+    test "lifecycle replay re-emits a window of the trail under the job's id, keeping each event id" do
+      config = start_lifecycle([{LifecycleSink, pid: self()}])
+      inst = config.instance
+
+      put_source(inst, "acme", "a")
+      put_source(inst, "acme", "b")
+      put_source(inst, "globex", "c")
+      live = Map.new(live_events(3))
+      assert map_size(live) == 3
+
+      assert {:ok, :created, job} = Replay.start(inst, kind: :lifecycle, tenant: "acme")
+      job = poll_job_state(inst, job.id, &(&1.state == :done))
+      job_id = job.id
+
+      # Only acme's two events, each with the id it was first emitted with.
+      seen =
+        for _ <- 1..2 do
+          assert_receive {:lifecycle_seen, id, ^job_id, event}, 5_000
+          {id, event}
+        end
+
+      refute_receive {:lifecycle_seen, _, _, _}, 200
+
+      for {id, event} <- seen do
+        assert event["replayid"] == job_id
+        assert event["data"]["tenant"] == "acme"
+        assert live[id]["subject"] == event["subject"]
+        assert live[id]["sequence"] == event["sequence"]
+      end
+
+      assert {job.moved, job.delivered, job.dead} == {2, 2, 0}
+    end
+
+    test "lifecycle replay honours since and until on the change's own time" do
+      config = start_lifecycle([{LifecycleSink, pid: self()}])
+      inst = config.instance
+
+      put_source(inst, "acme", "early")
+      Process.sleep(20)
+      middle = System.system_time(:millisecond)
+      Process.sleep(20)
+      put_source(inst, "acme", "late")
+      live_events(2)
+
+      assert {:ok, :created, job} = Replay.start(inst, kind: :lifecycle, since: middle)
+      poll_job_state(inst, job.id, &(&1.state == :done))
+      assert_receive {:lifecycle_seen, _, _, %{"subject" => "acme.late"}}, 5_000
+      refute_receive {:lifecycle_seen, _, _, _}, 200
+
+      assert {:ok, :created, job} = Replay.start(inst, kind: :lifecycle, until: middle)
+      poll_job_state(inst, job.id, &(&1.state == :done))
+      assert_receive {:lifecycle_seen, _, _, %{"subject" => "acme.early"}}, 5_000
+      refute_receive {:lifecycle_seen, _, _, _}, 200
+    end
+
+    test "lifecycle replay of an empty window finishes with nothing moved" do
+      config = start_lifecycle([{LifecycleSink, pid: self()}])
+
+      assert {:ok, :created, job} = Replay.start(config.instance, kind: :lifecycle)
+      job = poll_job_state(config.instance, job.id, &(&1.state == :done))
+      assert {job.moved, job.delivered} == {0, 0}
+    end
+
+    test "lifecycle replay needs a lifecycle sink on the node" do
+      config = start_lifecycle([])
+
+      assert {:error, {:role_not_enabled, :lifecycle}} =
+               Replay.start(config.instance, kind: :lifecycle)
+    end
+
+    test "lifecycle replay takes since, until and tenant and nothing else" do
+      config = start_lifecycle([{LifecycleSink, pid: self()}])
+
+      assert {:error, {:invalid, "source_id"}} =
+               Replay.start(config.instance, kind: :lifecycle, source_id: "x")
+
+      assert {:error, {:invalid, "tenant"}} =
+               Replay.start(config.instance, kind: :lifecycle, tenant: 7)
+
+      assert {:error, {:invalid, "until"}} =
+               Replay.start(config.instance, kind: :lifecycle, since: 10, until: 5)
+    end
+  end
 end

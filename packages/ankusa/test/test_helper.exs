@@ -12,6 +12,10 @@ Code.require_file("support/crash_harness.exs", __DIR__)
 # "audit row survives kill".
 Code.require_file("support/audit_harness.exs", __DIR__)
 
+# `Ankusa.LifecycleHarness`: the child-BEAM harness behind `lifecycle_test.exs`'s
+# "survives kill".
+Code.require_file("support/lifecycle_harness.exs", __DIR__)
+
 # Runs per property in `test/ankusa/property/` (StreamData reads this key when
 # a `check all` starts). 5 000 is the floor the hardening plan asks of CI;
 # `PROPERTY_RUNS=50000 mix test test/ankusa/property` is the long soak.
