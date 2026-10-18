@@ -163,9 +163,41 @@ The always-on tests cover:
   retry writes one object); `validate_config!/1` boot-time rejections; the
   `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
   deleting whole `dt=` day partitions.
+- **Property tests** (`test/ankusa/property/`, [StreamData](https://hexdocs.pm/stream_data),
+  5 000 runs per property by default; `PROPERTY_RUNS=50000 mix test
+  test/ankusa/property` for a long soak; generators in
+  `test/support/generators.ex`). Each one states what a parser or codec must
+  hold for *any* input, not for the examples someone thought of: a claim ref
+  parses back to itself, and whatever `Ref.parse/1` accepts is the canonical
+  spelling; a pack built from 1–600 claims of 0–1 MiB reads back byte for byte
+  by `Pack.locate/2` and by a standard ZIP reader (and the 65 532-claim
+  ceiling builds, one more is refused); `Envelope.from_binary/1` inverts
+  `to_binary/1` field for field; `Ingest.check_headers/1` never raises and
+  agrees with the byte-class definition on raw bytes; `Net.parse_cidr/1` is an
+  error or the exact range its prefix names, with the IPv4-mapped refusal;
+  the 0.3 import's frame scanner forgives a torn tail (every whole frame
+  imports), refuses the boot with a named error when an acked frame sits past
+  damage (bit flips in the payload, CRC, length, magic or version, zeroed
+  headers), and never raises on arbitrary bytes as a WAL, term log or
+  cursor/floor sidecar (a CRC-valid frame around a payload that is not an
+  envelope still raises, by design: `Store` turns that into a refused boot);
+  `Verifier.Hmac` never raises for any scheme, template, header list or
+  secret, verifies a request signed per its scheme under every key of a
+  rotation list, and refuses a tampered body, a wrong key and a stale
+  timestamp; `Dedupe.key/2` never raises, clamps to 200 bytes, and follows a
+  JSON path to exactly the string or integer at its end. The corpus under
+  `test/fixtures/corrupt_frames/` (see its `README.md`) is torn, bit-flipped and
+  zeroed 0.3 frames and unreadable sidecars, each of which has to make the
+  import return `{:error, _}`. A counterexample is fixed in the same change and
+  its shrunk case kept as an example test. The first runs found four:
+  `hash: sha1` raising in `:crypto.mac/4` and an invalid inline scheme raising
+  out of `verify/2` (both pinned in `verifier_test.exs`), a pack of 65 535
+  entries that `:zip` cannot open (the ceiling test above), and a torn WAL
+  header zero-extended into a "frame" of length 0 (`store_migrate_test.exs`).
 - **Route management** (`test/ankusa/net_test.exs`, `net/client_ip_test.exs`,
   `routes/matcher_test.exs`, `routes_test.exs`, `edge_route_guard_test.exs`,
-  `routes/router_test.exs`): example-based, no property tests. `cidr` (the
+  `routes/router_test.exs`): example-based (CIDR parsing is also covered by the
+  property tests above). `cidr` (the
   dependency) does the prefix bit math, so `net_test.exs` pins the small surface
   Ankusa keeps on top of `:inet` — address parsing, canonical rendering, the
   IPv4-mapped-to-IPv4 normalization, and `parse_cidr/1`, where junk is an
@@ -550,10 +582,96 @@ acked envelope. One JSON line plus a table; exit code is non-zero if anything
 acked never arrived. It runs under `MIX_ENV=test` because core's
 `config/config.exs` autostarts the default instance on :4000 outside `:test`.
 
-The bench reports `ingest_per_s`, `end_to_end_per_s`, `drain_s` and `missing`,
-and exits non-zero if anything acked never arrived. The numbers are
-machine-dependent and move with the pipeline, so run it on your own hardware
-rather than reading a figure here.
+The bench reports `ingest_per_s`, `p50_ms`, `p99_ms` (ingest latency),
+`end_to_end_per_s`, `drain_s` and `missing`, and exits non-zero if anything
+acked never arrived. The numbers are machine-dependent and move with the
+pipeline, so run it on your own hardware rather than reading a figure here.
+
+### Perf gate: `mise run bench:gate`
+
+A hot-path change must not make ingest slower unnoticed, so
+[`bench/gate.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gate.exs)
+runs the bench for `BODY_BYTES` 512 and 10240 (`N=20000`, `CONCURRENCY=256`,
+`SINK_LATENCY_MS=5`) and for 512 bytes at `CONCURRENCY=32`, three runs each,
+takes the median of every metric per cell (`512B`, `10240B`, `512B-c32`),
+writes `packages/ankusa/bench/last.json`, and compares it with the checked-in
+[`bench/baseline.json`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/baseline.json)
+(`{"512B": {"ingest_per_s", "p50_ms", "p99_ms", "end_to_end_per_s"}, "10240B":
+{...}, "512B-c32": {...}, "runner": "<class>"}`). It prints a table with the
+delta per metric and fails when a cell's `p99_ms` is above 1.2× the baseline or
+its `ingest_per_s` below 0.8× it:
+
+```text
+FAIL p99_ms 512B-c32: 45.10 > 1.2×21.60 (limit 25.92)
+```
+
+The `-c32` cell exists because of Little's law. At 256 workers the pipeline is
+throughput-bound and latency is simply 256 ÷ throughput, so a fixed delay in
+the request path (say a `Process.sleep(2)` in `Ingest.ingest/2`) changes
+neither gated number; the 256-worker cells catch CPU cost per hook as lost
+`ingest_per_s`. At 32 workers latency is the service time, so the same delay
+shows up in `p99_ms`.
+
+A p99 over 20 000 samples is noisy on a shared machine, and noise only adds
+latency and takes throughput away. A cell that is over a limit after its
+three runs is therefore run three more times and judged on its best run of the
+six (lowest `p99_ms`, highest `ingest_per_s`): a real regression raises every
+run, noise rarely does. `last.json` and the table show those best-run numbers
+for such a cell.
+
+Numbers only compare on the machine that recorded them. Hosted CI runners of
+one class differ by a factor of two in speed from job to job (the same code
+ran at 23 000 and at 50 000 hooks/s on two `ubuntu-latest` runners), so the CI
+job does not compare with `baseline.json`: it measures the pull request's base
+commit on its own runner first (`BENCH_REBASELINE=1 BENCH_BASELINE=<temp
+file>` over the base's `lib/`, `priv/` and `config/` with this change's bench
+scripts), then gates the change against that. It falls back to the checked-in
+`baseline.json` only when there is no base commit to measure or `mix.exs` /
+`mix.lock` changed. `baseline.json` (`runner: github-linux-x64`) is the
+reference for local runs on a comparable machine; a run on another runner
+class prints a `WARN` (a laptop is usually faster than the CI runner, so it
+passes; a slower one can fail without a regression). `BENCH_RUNS`,
+`BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and `BENCH_REBASELINE` are
+documented in the script's header.
+
+CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on
+a pull request whose diff touches a hot-path file: anything under
+`packages/ankusa/lib/ankusa/{edge,queue,store,dispatch,verifier,routes}/`,
+`store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`,
+`route_resolver.ex`, `sink/message.ex`, `sink/http.ex`, or the gate's own files
+(`packages/ankusa/bench/`, `.mise/tasks/bench/`, `ci.yml`). The job always
+reports a status (it can be a required check); on a PR that touches none of
+those paths its steps are skipped. The run's `last.json` and the base
+commit's numbers are attached as the `bench-last` artifact. If the gate goes
+red on a change that touches no hot-path code, re-run the job once; a real
+regression fails again.
+
+A hot-path PR states before/after numbers in its description. The checked-in
+baseline changes only in a pull request titled `perf: rebaseline <reason>`
+that carries the before/after table: copy the `bench-last` artifact's cells
+and `runner` into `baseline.json`, or run `BENCH_REBASELINE=1 mise run
+bench:gate` on a `github-linux-x64` machine.
+
+### Soak: `mise run bench:soak`
+
+[`scripts/soak.sh`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/scripts/soak.sh)
+runs the built image (the baked demo source, a `log` sink) under
+[`tools/loadgen`](https://github.com/jamescarr/ankusa/blob/main/tools/loadgen)
+at `RATE` (200) req/s for `DURATION` (3600) seconds. Every `SAMPLE_INTERVAL`
+(60) seconds it saves `/metrics` and the container's total RSS, then waits for
+the queue to drain and fails when `missing > 0` (accepted hooks minus
+`ankusa_dispatch_deliveries_total{result="ok"}`) or when RSS grew by more than
+5 %: the lowest sample in the last sixth of the run against the lowest in the
+second sixth (the container's RSS is a sawtooth that climbs about 10 % and
+drops back every few minutes; the floor is the live set a leak would raise).
+A run shorter than about ten minutes is still in warm-up and fails this check;
+`MAX_RSS_GROWTH=1` turns it off for a quick smoke of the script. Samples,
+scrapes, the loadgen report and `soak.json` land in
+`soak-out/`. The nightly
+[`soak.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/soak.yml)
+runs it (and `workflow_dispatch` takes a shorter `duration`); locally,
+`DURATION=600 mise run bench:soak` is a ten-minute check, and
+`DURATION=120 MAX_RSS_GROWTH=1 mise run bench:soak` a smoke of the script.
 
 ## Fleet end to end (compose, nightly)
 

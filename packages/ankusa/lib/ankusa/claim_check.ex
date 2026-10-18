@@ -32,7 +32,7 @@ defmodule Ankusa.ClaimCheck do
   alias Ankusa.ClaimCheck.{Cache, Pack, Reader, Ref, Stores}
   alias Ankusa.{Config, Telemetry}
 
-  # ZIP without ZIP64 caps an archive at 65,535 entries (two are the index and
+  # ZIP without ZIP64 caps an archive at 65,534 entries (two are the index and
   # the manifest) and 4 GiB; a claim id's 16 position bits cap it at 65,536.
   # Packs split well inside both regardless of pack_max_bytes.
   @max_pack_claims 65_000

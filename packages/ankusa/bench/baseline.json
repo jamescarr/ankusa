@@ -1,0 +1,21 @@
+{
+  "512B": {
+    "ingest_per_s": 23356.930,
+    "p50_ms": 4.145,
+    "p99_ms": 20.192,
+    "end_to_end_per_s": 2889.910
+  },
+  "10240B": {
+    "ingest_per_s": 9938.035,
+    "p50_ms": 13.541,
+    "p99_ms": 33.398,
+    "end_to_end_per_s": 2650.085
+  },
+  "512B-c32": {
+    "ingest_per_s": 11748.240,
+    "p50_ms": 1.949,
+    "p99_ms": 5.935,
+    "end_to_end_per_s": 2678.460
+  },
+  "runner": "github-linux-x64"
+}

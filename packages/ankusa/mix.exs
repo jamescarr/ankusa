@@ -172,6 +172,9 @@ defmodule Ankusa.MixProject do
       # listeners from the examples in it, so the document and the code cannot
       # drift apart.
       {:yaml_elixir, "~> 2.12", only: :test},
+      # Property tests (`test/ankusa/property/`): generators and `check all` for
+      # the parsers and codecs that take attacker-reachable bytes.
+      {:stream_data, "~> 1.1", only: :test},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       # Static analysis gates run by `mise run check:package` (dev only, so they
       # never reach a consumer's dependency tree).

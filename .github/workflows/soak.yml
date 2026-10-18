@@ -1,0 +1,54 @@
+name: Soak
+
+# Nightly: the built image under a steady load for an hour, /metrics and the
+# container's RSS sampled every 60 s. Fails on `missing > 0` (an accepted hook
+# no sink delivered) or an RSS growth above 5 % between the early and late
+# part of the run. `mise run bench:soak` runs the same thing locally; see
+# packages/ankusa_server/scripts/soak.sh for the knobs.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Seconds of load (the nightly run uses 3600)"
+        default: "3600"
+
+concurrency:
+  group: soak
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: soak (${{ inputs.duration || '3600' }} s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      DURATION: ${{ inputs.duration || '3600' }}
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.12
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      - run: mix local.hex --force && mix local.rebar --force
+      # The image build pulls its base images from Docker Hub.
+      - name: Log in to Docker Hub
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: mise run bench:soak
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-out
+          path: soak-out/
+          if-no-files-found: ignore
+          retention-days: 14
