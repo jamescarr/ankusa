@@ -497,8 +497,9 @@ mise run test:crash
   `acked=9344 recovered=5600 missing=3744` and exit status 1. It needs `docker run
   --privileged` with loop and device-mapper support in the Docker host's
   kernel and exits `2` where it has neither. `release:preflight` runs it
-  before a core tag; CI runs it as the informational job `crash-powerloss`.
-  Where neither can (no privileged runner), it is a manual pre-release step.
+  before a core tag; CI runs it as the job `crash-powerloss` (GitHub's
+  `ubuntu-latest` allows it; on a runner that does not, the job reports a
+  skip). Where no privileged Docker host exists, it is a manual pre-release step.
   The windows use device-mapper's `error` target rather than `dm-flakey`, a
   module some kernels lack; the fault is the same, I/O errors for 2 s.
 
