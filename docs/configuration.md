@@ -33,9 +33,16 @@ docker run --rm -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
 
 `version` prints the server and core versions.
 
-A minimal file, one open source and one HTTP sink:
+A minimal file, one open source and one HTTP sink. The worker here is plain
+`http://` on a private network, which sinks may not reach unless the `egress`
+block says so; a production sink is an `https://` URL on a public name and needs
+no `egress` block (see [Egress](#egress)):
 
 ```yaml
+egress:
+  allow_insecure_http: true
+  allow_hosts: [worker]
+
 sources:
   demo:
     verify: {type: none}
@@ -72,6 +79,7 @@ Every top-level section, with its keys and defaults:
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
+| `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`). Where `type: http` sinks may connect, checked on every attempt. See [Egress](#egress) |
 
 `storage.s3`/`storage.gcs` are read only when the matching
 `type` is set. See
@@ -138,7 +146,7 @@ URL), cannot be described by this engine. They need a bespoke
 | `type` | Keys |
 | --- | --- |
 | `log` | none |
-| `http` | `url`, `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (a `whsec_` secret, or a list while rotating: signs every delivery the Standard Webhooks way), `max_response_bytes` (65536; only the status is used). Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
+| `http` | `url` (`https://` unless `egress.allow_insecure_http`), `method` (`post` \| `put` \| `patch`), `headers`, `timeout_ms` (5000), `secret` (a `whsec_` secret, or a list while rotating: signs every delivery the Standard Webhooks way), `max_response_bytes` (65536; only the status is used), `cacertfile` (a PEM CA bundle to verify the receiver's certificate against, for a private CA; the file must exist at load), `allow_insecure_tls` (`false`; `true` skips certificate verification for this sink). Deliveries are not ordered; a consumer that needs order has to rebuild it from data it receives and tolerate redelivery. The receiver contract is in [`integrations.md#http-handoff-any-language`](integrations.md#http-handoff-any-language). |
 | `rabbitmq` | `url`, `exchange`, `exchange_type` (`topic` \| `direct` \| `fanout` \| `headers`), `routing_key`, `inline_max_bytes` (65536), `max_inflight` (256 unconfirmed publishes per connection; past it a publish fails fast and is retried), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least 16000). |
 | `kafka` | `brokers` (a list, or one comma-separated string), `topic`, `key` (a static string), `inline_max_bytes` (65536), `max_record_bytes` (1000000; a larger record is dead-lettered at once), `ssl`, `sasl` (`mechanism` = `plain` \| `scram_sha_256` \| `scram_sha_512`, `username`, `password`), `idle_timeout_ms` (600000; the client closes after this long with no delivery, `0` never; at least the produce timeout plus 1000). |
 | `nats` | `servers` (a list, or one comma-separated string; failover, one server at a time, picked at random per connect), `subject`, `inline_max_bytes` (65536), `publish_timeout_ms` (5000), `tls`, `auth` (one scheme: `username` + `password`, `token`, or `nkey_seed` + `jwt`), `idle_timeout_ms` (600000; the connection closes after this long with no delivery, `0` never; at least `publish_timeout_ms` plus 1000). The stream must already exist. See [`delivery.md`](delivery.md#sinknats-subject-delivery). |
@@ -213,7 +221,7 @@ Never `Application.get_env/2` scattered through call sites:
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
 `:dispatch`, `:storage`, `:claim_check`, `:backup`, `:admin`, `:rate_limits`,
-`:quarantine` and `:lifecycle` are maps and get **deep-merged** over the
+`:quarantine`, `:lifecycle` and `:egress` are maps and get **deep-merged** over the
 defaults. Pass only the keys you want to change.
 
 The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
@@ -290,7 +298,15 @@ config :ankusa,
   },
   rate_limits: %{default: nil, tenants: %{}},
   quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824},
-  lifecycle: %{sinks: []}
+  lifecycle: %{sinks: []},
+  egress: %{
+    allow_insecure_http: false,
+    deny_cidrs: ~w(0.0.0.0/8 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+                   100.64.0.0/10 169.254.0.0/16 ::/128 ::1/128 fc00::/7 fe80::/10),
+    allow_cidrs: [],
+    allow_hosts: [],
+    deny_hosts: ["metadata.google.internal"]
+  }
 ```
 
 | Key | Default | Meaning |
@@ -661,6 +677,64 @@ durable limits in the config. `PUT` and `DELETE`
 reset that tenant's bucket, so a raised limit is not held back by the old
 limit's accumulated debt. There is no "unlimited" value: to exempt a tenant
 from a `default`, give it a high limit of its own.
+
+#### Egress
+
+An HTTP sink forwards the webhook body to a URL that an operator, or a tenant
+through the admin API, chose. Left alone that URL could be Ankusa's own admin
+listener (`http://127.0.0.1:4003/...`), the cloud metadata service
+(`http://169.254.169.254/...`, which hands out the node's credentials) or any
+service on the private network. The `egress` section decides where
+`Sink.Http` may connect (`Ankusa.HttpClient.Egress`; source sinks and
+`lifecycle.sinks` alike):
+
+```yaml
+egress:
+  allow_insecure_http: false      # true also allows http:// sink URLs
+  deny_cidrs: [...]               # the default list above; setting it replaces it
+  allow_cidrs: ["10.20.0.0/16"]   # an internal range sinks may reach despite deny_cidrs
+  allow_hosts: [jobs.internal]    # names exempt from the address check
+  deny_hosts: [metadata.google.internal]   # names refused before any lookup
+```
+
+- **At load**, a `type: http` sink whose URL is not `https://` (or is not an
+  absolute http(s) URL) fails the config load, naming the key, unless
+  `allow_insecure_http` is on. The same rule applies when the admin API writes a
+  source (`400`), because the image's source decoder runs the same check.
+- **On every attempt**, the name is resolved for both address families
+  (the OTP resolver, `:inet.getaddrs`) and the delivery is refused when *any* address is in
+  `deny_cidrs` and not in `allow_cidrs`, or when the name is in `deny_hosts`
+  (`allow_hosts` exempts a name from the address check, `deny_hosts` wins). A name
+  with one public and one private record is refused as a rebinding setup.
+  IPv4-mapped IPv6 (`::ffff:127.0.0.1`) is matched as the IPv4 address. A literal
+  address, in any spelling inet parses (`http://2130706433/`), is checked as the
+  address it is.
+- **A denial is a dead letter**, not a retry: `{:permanent, {:egress_denied,
+  reason}}`, like a `401`. Fix the policy or the URL, then replay. A name that
+  does not resolve is retried. The reason names the host and the address, never
+  the URL, which may carry credentials.
+- **Pinning.** An `http` delivery connects to the address that was checked (the
+  URL is rewritten to it, with the name in the `host` header), so nothing is left
+  to rebind. An `https` delivery keeps the name and the client resolves it again
+  when it connects, so a name rebound to an internal address in that gap still has
+  to present a certificate valid for the name, which the service behind it does
+  not hold: peer verification is what closes the window. A sink with
+  `allow_insecure_tls: true` has no such check, so its connection is pinned too
+  (pinning every `https` URL would cost Req a connection pool per hostname, which
+  tenant-supplied URLs make unbounded).
+
+TLS verification is on for every outbound `https` connection (object stores, SQS,
+Pub/Sub, HTTP sinks): the peer's chain and hostname, TLS 1.2 or 1.3, against the
+system trust store with `castore`'s bundle behind it. A sink's `cacertfile` names a
+private CA instead; `allow_insecure_tls: true` on one sink is the only way to turn
+verification off, and a `verify: :verify_none` in `:req_options` fails the config
+load without it. `/v1/config` shows the policy and whether a sink skips
+verification, and hides a sink's `cacertfile` path like any other adapter option.
+
+The policy covers `Sink.Http`. The queue sinks (`rabbitmq`, `kafka`, `nats`,
+`redis`, `sqs`, `google_pubsub`) connect to the broker endpoints in their own
+config, and the object stores, SQS credentials and the cloud metadata clients to
+their configured endpoints; none of those URLs comes from a tenant.
 
 ### Configuring a source
 

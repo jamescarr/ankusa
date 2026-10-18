@@ -98,7 +98,13 @@ The always-on tests cover:
   `Ankusa.BlobStore.Azure.ManagedIdentity` token provider (IMDS fetch shape,
   caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
   rule that a redirect is reported rather than followed; the shared
-  `Ankusa.HttpClient` allowlist.
+  `Ankusa.HttpClient` allowlist; the egress policy (`Ankusa.HttpClient.Egress`:
+  loopback, metadata, private ranges, mapped IPv6 and odd IPv4 spellings,
+  DNS rebinding including an answer that moves between attempts, `allow_cidrs`
+  and `allow_hosts`, and that an `http` delivery really connects to the checked
+  address over a socket) and TLS verification against a real `https` listener
+  with a private CA (untrusted, `cacertfile`, hostname mismatch,
+  `allow_insecure_tls`, `verify_none` refused).
 - **Secrets at rest** (`crypto_test.exs`, `source_store_persistent_test.exs`,
   `secrets_rewrap_task_test.exs`, `blob_store_sse_test.exs`): the
   `Ankusa.Crypto.Envelope` value layout (a flipped bit in the IV, tag or

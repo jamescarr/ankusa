@@ -22,7 +22,7 @@ defmodule AnkusaExample.Ingest.Application do
 
     Logger.info(
       "[ankusa-example] starting: roles=#{inspect(config.roles)} port=#{config.port} " <>
-        "consumer_url=#{env("CONSUMER_URL", "http://localhost:4200/deliveries")}"
+        "consumer_url=#{consumer_url()}"
     )
 
     Supervisor.start_link([{Ankusa.Instance, config}], strategy: :one_for_one, name: __MODULE__)
@@ -34,9 +34,16 @@ defmodule AnkusaExample.Ingest.Application do
       port: env_int("PORT", 4000),
       data_dir: env("DATA_DIR", "./data"),
       roles: Ankusa.Config.parse_roles!(env("ANKUSA_ROLES", "edge,dispatch,storage")),
-      source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}}
+      source_store: {Ankusa.SourceStore.Static, sources: %{"demo" => source()}},
+      # The consumer is a plain-http Service on the cluster network, at a private
+      # address, which sinks may not reach by default (`Ankusa.HttpClient.Egress`):
+      # name that one host. A production sink is https on a public name.
+      egress: %{allow_insecure_http: true, allow_hosts: [consumer_host()]}
     )
   end
+
+  defp consumer_host, do: URI.parse(consumer_url()).host
+  defp consumer_url, do: env("CONSUMER_URL", "http://localhost:4200/deliveries")
 
   # A single zero-config `demo` source, matching the root project's own
   # quickstart — this example is about the pipeline, not verification, so
@@ -47,8 +54,7 @@ defmodule AnkusaExample.Ingest.Application do
       verifier: {Ankusa.Verifier.None, []},
       on_verify_failure: :accept_flag,
       sinks: [
-        {Ankusa.Sink.Http,
-         url: env("CONSUMER_URL", "http://localhost:4200/deliveries"), timeout_ms: 5_000}
+        {Ankusa.Sink.Http, url: consumer_url(), timeout_ms: 5_000}
       ]
     ]
   end
