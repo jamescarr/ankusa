@@ -13,6 +13,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Verifier hardening (SEC-8).** `Ankusa.Verifier.Hmac` caps `:tolerance` at
+  `Ankusa.Verifier.max_tolerance_seconds/0` (3600 s): `validate_opts/1` returns
+  `{:error, :bad_tolerance}` for anything but an integer from 0 to 3600,
+  `Ankusa.Verifier.validate_config!/1` refuses to boot a source declared in
+  config with one (naming it), and `verify/2` fails every hook closed with
+  `:bad_tolerance` for a stored source written before the cap. An inline scheme
+  with `hash: :sha1` still verifies (some providers only sign that way) but now
+  logs one boot warning naming the source, and every verification of it
+  increments the new `ankusa_verifier_weak_hash_total{instance,source_id,scheme}`
+  counter (`:weak_hash` on the `[:ankusa, :verify]` span metadata);
+  `Ankusa.Verifier.Hmac.weak_hash?/1` is the predicate. No named scheme uses
+  SHA-1.
+
 - **Secrets encrypted at rest, server-side encryption on every object-store
   write (SEC-4).** `Ankusa.Crypto.Envelope` encrypts the secret-bearing fields
   of an API-managed source's spec (the ones `Ankusa.Admin.Redact` hides:

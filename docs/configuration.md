@@ -94,7 +94,7 @@ One source per provider endpoint; the key is the catch-URL segment
 | Key | Meaning |
 | --- | --- |
 | `tenant` | The storage/retention scope. With `routing: tenant_path` the URL wins. Default `default`. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`: a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300). `hmac` takes the descriptor keys below. |
+| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret`: a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300, at most 3600: see [Custom HMAC schemes](#custom-hmac-schemes)). `hmac` takes the descriptor keys below. |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `trust_url_tenant` | `true` \| `false` (default `false`). With `routing: tenant_path`, a source with `tenant: default` and `verify: {type: none}` files hooks under whatever tenant the URL names, unverified: boot, `check-config` and an admin API write refuse it unless it sets `trust_url_tenant: true`. See [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
@@ -153,10 +153,11 @@ sources:
 | `sig_prefix` | none | Literal prefix stripped from a `whole` header value, e.g. `sha256=`. |
 | `sig_key` | none | With `parse: csv_pairs`, the key whose value is a signature, e.g. `v1`. |
 | `version` | none | With `parse: space_versions`, the token prefix, e.g. `v1,`. |
-| `hash` | `sha256` | `sha256` \| `sha512` \| `sha1`. |
+| `hash` | `sha256` | `sha256` \| `sha512` \| `sha1`. `sha1` is no longer collision resistant: it works for a provider that still signs with it, but boot logs one warning naming the source and every verification counts toward `ankusa_verifier_weak_hash_total{instance,source_id,scheme}`. No named scheme uses it. |
 | `encoding` | `hex` | `hex` (lowercase) \| `base64`. |
 | `secret_decode` | `raw` | `raw` (use `secret` as the key) \| `whsec_base64` (strip `whsec_` then Base64-decode). |
 | `timestamp_header` | none | Header carrying the Unix-seconds timestamp, both signed as `{ts}` and checked against `tolerance_seconds`. |
+| `tolerance_seconds` | `300` | The replay window in seconds for `timestamp_header` (and for `stripe`, `standard_webhooks` and `slack`): a hook whose timestamp is further than this from the node's clock fails verification. `0` to `3600`; `3601` or a negative value is a load error naming `sources.<id>.verify.tolerance_seconds`, and the same bound is enforced when an embedded instance boots. A window longer than an hour leaves a captured signature replayable for just as long. |
 
 Providers that are not body-HMAC, Twilio (SHA1 over the full request URL plus
 sorted form params) and PayPal (RSA over a certificate fetched from a provider

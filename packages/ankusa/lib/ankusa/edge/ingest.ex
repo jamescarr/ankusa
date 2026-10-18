@@ -274,11 +274,14 @@ defmodule Ankusa.Edge.Ingest do
 
   defp verify(instance, %Source{verifier: {mod, opts}} = source, env) do
     scheme = Ankusa.Verifier.scheme_name(mod, opts)
+    weak_hash = Ankusa.Verifier.weak_hash?(mod, opts)
 
     outcome =
       Ankusa.Telemetry.span([:verify], %{instance: instance, source_id: source.id}, fn ->
         result = mod.verify(env, opts)
-        {result, %{provider: mod, scheme: scheme, status: verify_status(result)}}
+
+        {result,
+         %{provider: mod, scheme: scheme, status: verify_status(result), weak_hash: weak_hash}}
       end)
 
     case outcome do

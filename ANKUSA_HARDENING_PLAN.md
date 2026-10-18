@@ -225,7 +225,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/admin/router.ex:117-135,165-253`, `queue/deliveries.ex:509-575`, `edge/quarantine.ex:38-44`, `replay.ex:40-49,129-170`.
   *Evidence:* —
 
-- [ ] **SEC-8 — Supply chain: digest pins, SBOM, provenance, signing; small verifier hardening** · P1 · Deps: —
+- [x] **SEC-8 — Supply chain: digest pins, SBOM, provenance, signing; small verifier hardening** · P1 · Deps: —
   *Why:* base images pinned by tag (`packages/ankusa_server/Dockerfile:10,48`), actions by major tag (`ci.yml:22-31`), no SBOM/provenance/signature in `docker.yml`; `tolerance_seconds` has no range check (`ankusa_server/config.ex:1061`); custom `hmac` permits `sha1` silently (`verifier/schemes.ex:54`).
   *Change:* `FROM …@sha256:` for both stages; pin every GitHub action to a commit SHA; `docker/build-push-action` with `sbom: true`, `provenance: mode=max`; `cosign sign --yes` keyless and `cosign verify` in `scripts/smoke.sh`; `mix hex.audit` output uploaded as a CI artifact; `tolerance ≤ 3600` in `Hmac.validate_opts/1` and the YAML loader; `sha1` logs a boot warning and increments `ankusa_verifier_weak_hash_total`.
   *Done when:* a tag build publishes SBOM + attestation and `cosign verify` passes in smoke; `tolerance: 3601` is a config error.

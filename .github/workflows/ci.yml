@@ -19,7 +19,7 @@ jobs:
     outputs:
       packages: ${{ steps.discover.outputs.packages }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: discover
         run: source .mise/lib/pkg.sh && echo "packages=$(pkg_json)" >> "$GITHUB_OUTPUT"
 
@@ -27,12 +27,13 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - run: mise run lint:workflows
+      - run: mise run lint:pins
       - run: mise run check:links
 
   package:
@@ -47,8 +48,8 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.discover.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
@@ -59,7 +60,7 @@ jobs:
       # calls a function core newly gained fails dialyzer against a stale PLT:
       # bump the `v` below when that happens (SEC-4: `Ankusa.Crypto.Envelope`).
       - name: cache mix deps
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/${{ matrix.package }}/deps
@@ -72,11 +73,23 @@ jobs:
       # Hub; anonymous pulls from shared runner IPs hit Hub's rate limit.
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: mise run check:package ${{ matrix.package }}
+        env:
+          # `mix hex.audit`'s report (retired packages, advisories), kept below.
+          HEX_AUDIT_LOG: ${{ runner.temp }}/hex-audit-${{ matrix.package }}.txt
+      # Even when the audit failed the job: the report says which dependency.
+      - name: Upload the hex audit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hex-audit-${{ matrix.package }}
+          path: ${{ runner.temp }}/hex-audit-${{ matrix.package }}.txt
+          if-no-files-found: ignore
+          retention-days: 30
 
   # Core's object-store adapters (and the S3 backup round trip) against the
   # floci emulators: `mix test --only integration` (the rest of core's suite
@@ -87,13 +100,13 @@ jobs:
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - name: cache mix deps
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/ankusa/deps
@@ -104,7 +117,7 @@ jobs:
       - run: mix local.hex --force && mix local.rebar --force
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -114,8 +127,8 @@ jobs:
     name: sdk conformance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
@@ -127,13 +140,13 @@ jobs:
     name: examples
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - name: cache mix deps
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             examples/*/*/deps
@@ -148,8 +161,8 @@ jobs:
     name: tools
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
@@ -178,7 +191,7 @@ jobs:
         sink/(message|http)\.ex
         )$|^packages/ankusa/bench/|^\.mise/tasks/bench/|^\.github/workflows/ci\.yml$
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: scope
         name: does the diff touch the hot path?
         env:
@@ -204,13 +217,13 @@ jobs:
             echo "no hot-path file touched: gate skipped"
           fi
       - if: steps.scope.outputs.run == 'true'
-        uses: jdx/mise-action@v5
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - if: steps.scope.outputs.run == 'true'
         name: cache mix deps
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/ankusa/deps
@@ -246,7 +259,7 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         run: mise run bench:gate
       - if: always() && steps.scope.outputs.run == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-last
           path: |
@@ -262,19 +275,19 @@ jobs:
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
       - name: cache compiled deps
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/crash
           key: crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock', 'packages/ankusa_server/Dockerfile') }}
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -292,15 +305,15 @@ jobs:
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: cache compiled deps
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/crash
           key: crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock', 'packages/ankusa_server/Dockerfile') }}
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
