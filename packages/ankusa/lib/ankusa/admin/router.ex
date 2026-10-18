@@ -56,10 +56,15 @@ defmodule Ankusa.Admin.Router do
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
 
+  require Logger
+
   alias Ankusa.Admin.Auth
   alias Ankusa.Admin.Redact
+  alias Ankusa.Audit
+  alias Ankusa.Audit.Context
   alias Ankusa.Config
   alias Ankusa.Edge.RateLimiter
+  alias Ankusa.Principal
 
   # A replay body is a filter, not a payload: three optional scalar keys. 64 KiB
   # is already an order of magnitude more than it can legitimately need.
@@ -82,6 +87,7 @@ defmodule Ankusa.Admin.Router do
   # Before `:match`, so an unknown path is `401` to a caller with no credential
   # rather than a `404` that confirms it is not there.
   plug(Auth, section: :admin)
+  plug(Context)
   plug(:match)
   plug(:dispatch)
 
@@ -148,6 +154,10 @@ defmodule Ankusa.Admin.Router do
 
   delete "/v1/quarantine" do
     scoped_role(conn, "quarantine:write", :edge, &quarantine_purge/2)
+  end
+
+  get "/v1/audit" do
+    Auth.authorize(conn, "audit:read", &audit_index/1)
   end
 
   get "/v1/tenants/:tenant/sources" do
@@ -274,7 +284,9 @@ defmodule Ankusa.Admin.Router do
 
       limit = limit |> max(1) |> min(@max_purge_limit)
 
-      case Ankusa.Edge.Quarantine.purge(instance(conn), filter, limit) do
+      case Ankusa.Edge.Quarantine.purge(instance(conn), filter, limit,
+             audit: Context.from_conn(conn)
+           ) do
         {:ok, %{deleted: deleted, bytes: bytes}} ->
           send_json(conn, 200, %{deleted: deleted, bytes: bytes})
 
@@ -292,6 +304,61 @@ defmodule Ankusa.Admin.Router do
   defp non_neg_param(params, key) do
     case int_param(params, key, nil) do
       {:ok, value} when is_integer(value) and value < 0 -> {:error, key}
+      other -> other
+    end
+  end
+
+  # ── the audit trail ─────────────────────────────────────────────────────────
+
+  # Newest first. The trail spans tenants: a reader without `tenant:*` sees the
+  # rows of its own tenants and none of the rows that belong to no tenant
+  # (routes, replays, the quarantine pen), and asking for another tenant's rows
+  # by name is a `403`, like any other tenant resource.
+  defp audit_index(conn) do
+    params = Plug.Conn.fetch_query_params(conn).query_params
+    principal = conn.assigns.principal
+
+    with {:ok, since} <- non_neg_param(params, "since"),
+         {:ok, until} <- non_neg_param(params, "until"),
+         {:ok, actor} <- string_param(params, "actor"),
+         {:ok, action} <- string_param(params, "action"),
+         {:ok, tenant} <- string_param(params, "tenant"),
+         {:ok, cursor} <- cursor_param(params),
+         {:ok, limit} <- int_param(params, "limit", @default_limit) do
+      if tenant && not Principal.tenant?(principal, tenant) do
+        send_json(conn, 403, %{error: "forbidden", scope: "tenant:#{tenant}"})
+      else
+        opts = [
+          since: since,
+          until: until,
+          actor: actor,
+          action: action,
+          tenant: tenant,
+          cursor: cursor,
+          limit: limit |> max(1) |> min(@max_limit),
+          tenants: if(Principal.all_tenants?(principal), do: :all, else: principal.tenants)
+        ]
+
+        case Audit.list(instance(conn), opts) do
+          {:ok, %{entries: entries, next_cursor: next}} ->
+            send_json(conn, 200, %{
+              entries: Enum.map(entries, &Audit.to_json/1),
+              next_cursor: next
+            })
+
+          {:error, reason} ->
+            Logger.error("[ankusa] could not read the audit trail: #{inspect(reason)}")
+            source_store_unavailable(conn)
+        end
+      end
+    else
+      {:error, field} -> invalid_filter(conn, field)
+    end
+  end
+
+  defp cursor_param(params) do
+    case int_param(params, "cursor", nil) do
+      {:ok, cursor} when is_integer(cursor) and cursor < 1 -> {:error, "cursor"}
       other -> other
     end
   end
@@ -336,7 +403,14 @@ defmodule Ankusa.Admin.Router do
       with_source_body(conn, fn body, conn ->
         name = Map.get(body, "name")
         spec = Map.delete(body, "name")
-        put_source(conn, 201, Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :create))
+
+        put_source(
+          conn,
+          201,
+          Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :create,
+            audit: Context.from_conn(conn)
+          )
+        )
       end)
     else
       invalid_tenant(conn)
@@ -360,7 +434,9 @@ defmodule Ankusa.Admin.Router do
           put_source(
             conn,
             200,
-            Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :update)
+            Ankusa.SourceStore.put(instance(conn), tenant, name, spec, :update,
+              audit: Context.from_conn(conn)
+            )
           )
         end)
     end
@@ -448,7 +524,7 @@ defmodule Ankusa.Admin.Router do
   end
 
   defp delete_and_reply(conn, tenant, name) do
-    case Ankusa.SourceStore.delete(instance(conn), tenant, name) do
+    case Ankusa.SourceStore.delete(instance(conn), tenant, name, audit: Context.from_conn(conn)) do
       # 204 carries no body: there is nothing left to describe.
       :ok -> Plug.Conn.send_resp(conn, 204, "")
       {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
@@ -520,7 +596,9 @@ defmodule Ankusa.Admin.Router do
   defp rate_limit_put(conn, tenant) do
     if valid_identity?(tenant) do
       with_rate_limit_body(conn, fn attrs, conn ->
-        case RateLimiter.put_override(instance(conn), tenant, attrs) do
+        case RateLimiter.put_override(instance(conn), tenant, attrs,
+               audit: Context.from_conn(conn)
+             ) do
           {:ok, limit} -> send_json(conn, 200, rate_limit_entry(tenant, {limit, :override}))
           {:error, :invalid, message} -> invalid_rate_limit(conn, message)
           {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
@@ -533,7 +611,7 @@ defmodule Ankusa.Admin.Router do
 
   defp rate_limit_delete(conn, tenant) do
     if valid_identity?(tenant) do
-      case RateLimiter.delete_override(instance(conn), tenant) do
+      case RateLimiter.delete_override(instance(conn), tenant, audit: Context.from_conn(conn)) do
         # 204 carries no body: there is nothing left to describe.
         :ok -> Plug.Conn.send_resp(conn, 204, "")
         {:error, :not_found} -> send_json(conn, 404, %{error: "rate_limit_not_found"})
@@ -634,7 +712,7 @@ defmodule Ankusa.Admin.Router do
   defp replay_kind_scopes(:archive), do: []
 
   defp start_replay(conn, spec) do
-    case Ankusa.Replay.start(instance(conn), spec) do
+    case Ankusa.Replay.start(instance(conn), spec, audit: Context.from_conn(conn)) do
       {:ok, :created, job} ->
         send_json(conn, 202, Ankusa.Replay.to_json(job))
 
@@ -674,7 +752,10 @@ defmodule Ankusa.Admin.Router do
     with_replay_body(conn, fn map, conn ->
       case replay_patch(map) do
         {:ok, patch} ->
-          case Ankusa.Replay.update(instance(conn), id, patch, tenants) do
+          case Ankusa.Replay.update(instance(conn), id, patch,
+                 tenants: tenants,
+                 audit: Context.from_conn(conn)
+               ) do
             {:ok, job} -> send_json(conn, 200, Ankusa.Replay.to_json(job))
             {:error, :not_found} -> send_json(conn, 404, %{error: "replay_not_found"})
             {:error, :finished} -> send_json(conn, 409, %{error: "replay_finished"})

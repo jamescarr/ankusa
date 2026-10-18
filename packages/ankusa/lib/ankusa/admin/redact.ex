@@ -106,8 +106,8 @@ defmodule Ankusa.Admin.Redact do
   doc.
   """
   @spec source_entry(Ankusa.SourceStore.stored()) :: map()
-  def source_entry(%{tenant: tenant, name: name, source_id: source_id, spec: spec}) do
-    %{
+  def source_entry(%{tenant: tenant, name: name, source_id: source_id, spec: spec} = stored) do
+    entry = %{
       "tenant" => open(tenant),
       "name" => open(name),
       "source_id" => open(source_id),
@@ -119,6 +119,12 @@ defmodule Ankusa.Admin.Redact do
       "trust_url_tenant" => Map.get(spec, "trust_url_tenant", false) == true,
       "sinks" => closed("sinks", Map.get(spec, "sinks", []))
     }
+
+    # The source's change counter, for a store that keeps one.
+    case Map.get(stored, :revision) do
+      revision when is_integer(revision) -> Map.put(entry, "revision", revision)
+      _ -> entry
+    end
   end
 
   @doc """

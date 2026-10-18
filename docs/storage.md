@@ -22,12 +22,13 @@ Column families, all in that one database:
 
 | Family | Holds |
 | --- | --- |
-| `default` | the next-seq marker, the store format version (`m:format_version`, see [Upgrading between releases](deployment.md#upgrading-between-releases)), migration markers, API-managed sources, rate-limit overrides, replay jobs (`j:<id>`) |
+| `default` | the next-seq marker, the store format version (`m:format_version`, see [Upgrading between releases](deployment.md#upgrading-between-releases)), migration markers, API-managed sources (`s:`) and their revisions (`v:`, kept after a source is deleted so a re-created one continues the count), rate-limit overrides, replay jobs (`j:<id>`), the audit sequence (`m:audit_seq`) and the key audit hashes are made with (`m:audit_key`) |
 | `hooks` | each committed hook, keyed by its `seq` |
 | `deliveries` | one delivery row per hook and sink |
 | `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs, ingest dedupe keys (`?u`) and their expiry index (`?e`) |
 | `archive` | the segment catalogue, and locations imported from a 0.3 node's index |
 | `quarantine` | the quarantine pen: one summary and one body key per held envelope |
+| `audit` | the audit trail, `<<?a, seq::64, at::64>>` → a versioned row (`<<"AA", 1, term>>`), in commit order; and the rows of changes still in flight, `<<?p, seq::64>>` (see [Architecture](architecture.md#guarantees-by-component)). Pruned by `audit.retention_days` |
 
 `Ankusa.Store` owns the DB handle; every other process calls
 `Ankusa.Store.write/3`, `get/3`, `multi_get/3`, `fold/6` and `property/3`

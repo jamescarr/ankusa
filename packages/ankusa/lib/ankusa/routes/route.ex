@@ -42,11 +42,26 @@ defmodule Ankusa.Routes.Route do
           enabled: boolean(),
           ip_rules: [ip_rule()],
           metadata: map(),
+          revision: pos_integer(),
           inserted_at: DateTime.t(),
           updated_at: DateTime.t()
         }
 
-  defstruct [:id, :path, :methods, :enabled, :ip_rules, :metadata, :inserted_at, :updated_at]
+  # `revision` counts the definition's changes, from 1 at creation: the store
+  # that persists a route persists it too, and every audited write of the route
+  # carries the one it produced (`Ankusa.Audit`). Re-creating a deleted route
+  # starts again at 1.
+  defstruct [
+    :id,
+    :path,
+    :methods,
+    :enabled,
+    :ip_rules,
+    :metadata,
+    :inserted_at,
+    :updated_at,
+    revision: 1
+  ]
 
   @fields ~w(id path methods enabled ip_rules metadata)
   @id_re ~r/\A[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?\z/
@@ -101,6 +116,7 @@ defmodule Ankusa.Routes.Route do
       "enabled" => route.enabled,
       "ip_rules" => Enum.map(route.ip_rules, &rule_json/1),
       "metadata" => route.metadata,
+      "revision" => route.revision,
       "inserted_at" => DateTime.to_iso8601(route.inserted_at),
       "updated_at" => DateTime.to_iso8601(route.updated_at)
     }
@@ -112,8 +128,10 @@ defmodule Ankusa.Routes.Route do
     with {:ok, inserted_at} <- timestamp(json["inserted_at"], "inserted_at"),
          {:ok, updated_at} <- timestamp(json["updated_at"], "updated_at"),
          {:ok, _id} <- stored_id(json),
-         {:ok, route} <- from_attrs(Map.drop(json, ["inserted_at", "updated_at"])) do
-      {:ok, %{route | inserted_at: inserted_at, updated_at: updated_at}}
+         {:ok, revision} <- stored_revision(json),
+         {:ok, route} <-
+           from_attrs(Map.drop(json, ["inserted_at", "updated_at", "revision"])) do
+      {:ok, %{route | inserted_at: inserted_at, updated_at: updated_at, revision: revision}}
     end
   end
 
@@ -123,6 +141,15 @@ defmodule Ankusa.Routes.Route do
   # minting a fresh id on every load would hand each node a different one.
   defp stored_id(%{"id" => id}) when is_binary(id), do: {:ok, id}
   defp stored_id(_json), do: {:error, {:invalid, "id", "is required"}}
+
+  # A definition written before routes carried a revision is revision 1.
+  defp stored_revision(%{"revision" => revision}) when is_integer(revision) and revision >= 1,
+    do: {:ok, revision}
+
+  defp stored_revision(%{"revision" => _other}),
+    do: {:error, {:invalid, "revision", "must be a positive integer"}}
+
+  defp stored_revision(_json), do: {:ok, 1}
 
   @doc """
   Parse an ordered rule list into `t:ip_rule/0`s, naming the index of the first

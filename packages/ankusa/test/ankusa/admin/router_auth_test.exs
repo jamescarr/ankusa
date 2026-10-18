@@ -30,6 +30,7 @@ defmodule Ankusa.Admin.RouterAuthTest do
     {:patch, "/v1/replays/nope", "replays:write", :filtered},
     {:get, "/v1/quarantine", "quarantine:read", :filtered},
     {:delete, "/v1/quarantine", "quarantine:write", :filtered},
+    {:get, "/v1/audit", "audit:read", :open},
     {:get, "/v1/tenants/acme/sources", "sources:read", {:tenant, "acme"}},
     {:post, "/v1/tenants/acme/sources", "sources:write", {:tenant, "acme"}},
     {:get, "/v1/tenants/acme/sources/billing", "sources:read", {:tenant, "acme"}},
