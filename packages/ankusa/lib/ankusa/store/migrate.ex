@@ -1,7 +1,19 @@
 defmodule Ankusa.Store.Migrate do
   @moduledoc false
 
-  # Imports a 0.3 data dir into the store, once, on first boot.
+  # Two jobs, both run at boot after the store opens and before anything serves.
+  #
+  # 1. The store format: `m:format_version` says which layout the RocksDB keys
+  #    are in. A store without the key is format 1 (every store written before
+  #    the marker existed) and is stamped on its first open. A store newer than
+  #    this release refuses to open, `{:store_format_newer, found, supported}`:
+  #    an older image would otherwise ignore the newer image's keys, and rolling
+  #    back past a format bump loses data. A store older than this release is
+  #    walked up the `@migrations` registry, in order, one bounded synced batch
+  #    at a time, with its place in `m:migrating:<to>`, so a migration killed
+  #    anywhere resumes at the next boot. Migrations are forward-only.
+  #
+  # 2. Imports a 0.3 data dir into the store, once, on first boot.
   #
   # 0.3 kept six artifacts under `<data_dir>/<instance>/`:
   #
@@ -43,14 +55,279 @@ defmodule Ankusa.Store.Migrate do
   # A frame header that claims more than this is not a frame.
   @max_frame 256 * 1024 * 1024
 
-  @doc "Run the import. `:ok`, or `{:error, reason}` and the store must not start."
-  @spec run(Config.t()) :: :ok | {:error, term()}
-  def run(%Config{} = config) do
+  # The format of a store that carries no `m:format_version`: every store
+  # written before the marker existed.
+  @base_format 1
+
+  # `{from, to, module}`, `module` an `Ankusa.Store.Migration`. A release that
+  # changes the key layout appends one entry here, in the same PR as its
+  # `mix ankusa.store.fixture` output for the new format
+  # (`test/fixtures/store-v<to>.tar.zst`). Applied in order, so `from` of each
+  # entry is the `to` of the one before it; `{1, 2, module}` is the first.
+  @migrations []
+
+  @type migration :: {pos_integer(), pos_integer(), module()}
+
+  @typedoc "What `mix ankusa.store.migrate --dry-run` reports about a store at rest."
+  @type plan :: %{
+          found: pos_integer() | nil,
+          current: pos_integer(),
+          pending: [migration()],
+          resume: %{to: pos_integer(), cursor: binary()} | nil
+        }
+
+  @doc "The registry of format migrations."
+  @spec migrations() :: [migration()]
+  def migrations, do: @migrations
+
+  @doc "The store format a release with `migrations` writes: the last `to`, or the base."
+  @spec current_format([migration()]) :: pos_integer()
+  def current_format(migrations \\ @migrations),
+    do:
+      migrations
+      |> Enum.map(fn {_from, to, _module} -> to end)
+      |> Enum.max(fn -> @base_format end)
+
+  @doc """
+  Boot work on an open store: refuse a store newer than this release, import
+  whatever 0.3 left, then stamp and migrate the store format. `:ok`, or
+  `{:error, reason}` and the store must not start.
+  """
+  @spec run(Config.t(), [migration()]) :: :ok | {:error, term()}
+  def run(%Config{} = config, migrations \\ @migrations) do
     ctx = %{config: config, instance: config.instance, stamp: System.system_time(:second)}
 
+    # Newer first: nothing is imported into, or written to, a store this
+    # release does not understand.
+    with {:ok, found} <- read_format(ctx.instance),
+         :ok <- refuse_newer(found, current_format(migrations)),
+         :ok <- import_legacy(ctx) do
+      upgrade_format(ctx.instance, migrations)
+    end
+  end
+
+  defp import_legacy(ctx) do
     with {:ok, done?} <- migration_done?(ctx) do
       if done?, do: tidy(ctx), else: import_all(ctx)
     end
+  end
+
+  # ── store format ─────────────────────────────────────────────────────────
+
+  @doc """
+  Stamp an unversioned store as format 1, then walk the registry from the
+  store's format up to `current_format(migrations)`. A store already past it is
+  `{:error, {:store_format_newer, found, supported}}`; a registry with no entry
+  leaving the store's format is `{:error, {:missing_migration, found, target}}`.
+  """
+  @spec upgrade_format(atom(), [migration()]) :: :ok | {:error, term()}
+  def upgrade_format(instance, migrations \\ @migrations) do
+    target = current_format(migrations)
+
+    with {:ok, found} <- read_format(instance),
+         {:ok, found} <- stamp(instance, found),
+         :ok <- refuse_newer(found, target) do
+      apply_migrations(instance, found, target, migrations)
+    end
+  end
+
+  defp read_format(instance) do
+    case Store.get(instance, :default, Keys.format_version()) do
+      :not_found -> {:ok, nil}
+      {:ok, bin} -> parse_format(bin)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_format(bin) do
+    case Integer.parse(bin) do
+      {version, ""} when version > 0 ->
+        {:ok, version}
+
+      _ ->
+        Logger.error(
+          "[ankusa] the store's format version #{inspect(bin)} is not a version number"
+        )
+
+        {:error, {:bad_format_version, bin}}
+    end
+  end
+
+  defp refuse_newer(found, supported) when is_integer(found) and found > supported do
+    Logger.error(
+      "[ankusa] store format #{found} is newer than this release supports (#{supported}). " <>
+        "Refusing to start: an older release would ignore what the newer one wrote. " <>
+        "Run the newer release, or restore the backup taken before it was first started."
+    )
+
+    {:error, {:store_format_newer, found, supported}}
+  end
+
+  defp refuse_newer(_found, _supported), do: :ok
+
+  defp stamp(instance, nil) do
+    with :ok <-
+           Store.write(
+             instance,
+             [{:put, :default, Keys.format_version(), Integer.to_string(@base_format)}],
+             sync: true
+           ) do
+      {:ok, @base_format}
+    end
+  end
+
+  defp stamp(_instance, found), do: {:ok, found}
+
+  defp apply_migrations(_instance, target, target, _migrations), do: :ok
+
+  defp apply_migrations(instance, found, target, migrations) do
+    case Enum.find(migrations, fn {from, _to, _module} -> from == found end) do
+      nil ->
+        Logger.error(
+          "[ankusa] store format #{found} cannot reach #{target}: no migration leaves #{found}"
+        )
+
+        {:error, {:missing_migration, found, target}}
+
+      {_from, to, module} when to > found ->
+        Logger.info("[ankusa] migrating the store format #{found} -> #{to}: #{module.describe()}")
+
+        with {:ok, cursor} <- read_cursor(instance, to),
+             :ok <- step_until_done(instance, to, module, cursor) do
+          Logger.info("[ankusa] store format is now #{to}")
+          apply_migrations(instance, to, target, migrations)
+        end
+
+      {from, to, _module} ->
+        {:error, {:bad_migration, from, to}}
+    end
+  end
+
+  defp read_cursor(instance, to) do
+    case Store.get(instance, :default, Keys.migrating(to)) do
+      {:ok, cursor} -> {:ok, cursor}
+      :not_found -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # One bounded batch per call. The batch and the cursor that says where the
+  # next one starts commit together, synced; the last batch also stamps the new
+  # format and drops the cursor, so a store is never at the new format with its
+  # migration half done.
+  defp step_until_done(instance, to, module, cursor) do
+    case safe_step(module, instance, cursor) do
+      {:ok, ops, :done} ->
+        done = [
+          {:delete, :default, Keys.migrating(to)},
+          {:put, :default, Keys.format_version(), Integer.to_string(to)}
+        ]
+
+        Store.write(instance, ops ++ done, sync: true)
+
+      {:ok, ops, {:more, next}} when is_binary(next) ->
+        with :ok <-
+               Store.write(instance, ops ++ [{:put, :default, Keys.migrating(to), next}],
+                 sync: true
+               ) do
+          step_until_done(instance, to, module, next)
+        end
+
+      {:error, reason} ->
+        {:error, {:store_migration_failed, to, reason}}
+
+      other ->
+        {:error, {:store_migration_failed, to, {:bad_step_result, other}}}
+    end
+  end
+
+  defp safe_step(module, instance, cursor) do
+    module.step(instance, cursor)
+  rescue
+    exception ->
+      Logger.error(
+        "[ankusa] a store format migration step raised: " <>
+          Exception.format(:error, exception, __STACKTRACE__)
+      )
+
+      {:error, Exception.message(exception)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  @doc """
+  What booting `store_path` would do, read from the files at rest (read-only,
+  so it is safe beside a running node): the store's format, the migrations
+  still to run and a migration that was interrupted.
+  `{:error, :no_store}` when there is no database there yet.
+  """
+  @spec plan(Path.t(), [migration()]) :: {:ok, plan()} | {:error, term()}
+  def plan(store_path, migrations \\ @migrations) do
+    path = String.to_charlist(store_path)
+
+    if File.exists?(Path.join(store_path, "CURRENT")) do
+      with_default_cf(path, fn db, cf -> plan_from(db, cf, migrations) end)
+    else
+      {:error, :no_store}
+    end
+  end
+
+  # RocksDB opens every column family or none: list them, then keep the handle
+  # of `default`, the only family the format keys live in.
+  defp with_default_cf(path, fun) do
+    with {:ok, names} <- :rocksdb.list_column_families(path, []),
+         {:ok, db, handles} <-
+           :rocksdb.open_readonly(path, [], Enum.map(names, &{&1, []})) do
+      try do
+        {~c"default", cf} = Enum.find(Enum.zip(names, handles), &(elem(&1, 0) == ~c"default"))
+        fun.(db, cf)
+      after
+        # The handles stay referenced across the close (see `Ankusa.Store`).
+        {_, _} = {:rocksdb.close(db), handles}
+      end
+    end
+  end
+
+  defp plan_from(db, cf, migrations) do
+    current = current_format(migrations)
+
+    with {:ok, found} <- plan_format(db, cf) do
+      chain = pending_chain(found || @base_format, current, migrations)
+
+      with {:ok, resume} <- plan_resume(db, cf, chain) do
+        {:ok, %{found: found, current: current, pending: chain, resume: resume}}
+      end
+    end
+  end
+
+  defp plan_format(db, cf) do
+    case :rocksdb.get(db, cf, Keys.format_version(), []) do
+      :not_found -> {:ok, nil}
+      {:ok, bin} -> parse_format(bin)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp pending_chain(found, target, migrations) when found < target do
+    case Enum.find(migrations, fn {from, _to, _module} -> from == found end) do
+      {_from, to, _module} = migration when to > found ->
+        [migration | pending_chain(to, target, migrations)]
+
+      _ ->
+        []
+    end
+  end
+
+  defp pending_chain(_found, _target, _migrations), do: []
+
+  defp plan_resume(db, cf, chain) do
+    Enum.reduce_while(chain, {:ok, nil}, fn {_from, to, _module}, {:ok, nil} ->
+      case :rocksdb.get(db, cf, Keys.migrating(to), []) do
+        {:ok, cursor} -> {:halt, {:ok, %{to: to, cursor: cursor}}}
+        :not_found -> {:cont, {:ok, nil}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   # ── orchestration ────────────────────────────────────────────────────────

@@ -25,7 +25,12 @@ defmodule Ankusa.MixProject do
       ],
       # Every PLT lives under _build, which CI caches (keyed on the toolchain pins
       # and mix.lock), so a run rebuilds a PLT only when one of them changes.
-      dialyzer: [plt_core_path: "_build/plts", plt_local_path: "_build/plts"]
+      # `:mix` is in the PLT for the `mix ankusa.store.*` tasks.
+      dialyzer: [
+        plt_core_path: "_build/plts",
+        plt_local_path: "_build/plts",
+        plt_add_apps: [:mix]
+      ]
     ]
   end
 
