@@ -200,34 +200,41 @@ defmodule Ankusa.SourceStore.Persistent do
   defp apply_delete(state, tenant, name, source_id, context) do
     current = Table.lookup_stored(state.table, tenant, name)
 
-    with {:ok, revision} <- next_revision(state.instance, tenant, name) do
-      ops = [
-        {:delete, :default, Keys.source(tenant, name)},
-        {:put, :default, Keys.source_revision(tenant, name), Integer.to_string(revision)}
-      ]
-
-      attrs = %{
-        action: "source.delete",
-        tenant: tenant,
-        resource: source_id,
-        before_hash: Audit.digest(state.instance, current.spec),
-        revision: revision
-      }
-
-      case Audit.commit(state.instance, context, attrs, ops) do
-        :ok ->
-          Table.delete_rows(state.table, tenant, name)
-          :ok
+    result =
+      case next_revision(state.instance, tenant, name) do
+        {:ok, revision} ->
+          commit_delete(state, tenant, name, source_id, current, revision, context)
 
         {:error, reason} ->
-          Logger.error("[ankusa] could not persist source #{source_id}: #{inspect(reason)}")
-          {:error, :store_unavailable}
+          {:error, reason}
       end
-    else
+
+    case result do
+      :ok ->
+        Table.delete_rows(state.table, tenant, name)
+        :ok
+
       {:error, reason} ->
         Logger.error("[ankusa] could not persist source #{source_id}: #{inspect(reason)}")
         {:error, :store_unavailable}
     end
+  end
+
+  defp commit_delete(state, tenant, name, source_id, current, revision, context) do
+    ops = [
+      {:delete, :default, Keys.source(tenant, name)},
+      {:put, :default, Keys.source_revision(tenant, name), Integer.to_string(revision)}
+    ]
+
+    attrs = %{
+      action: "source.delete",
+      tenant: tenant,
+      resource: source_id,
+      before_hash: Audit.digest(state.instance, current.spec),
+      revision: revision
+    }
+
+    Audit.commit(state.instance, context, attrs, ops)
   end
 
   defp apply_put(state, tenant, name, source_id, spec, mode, context) do
