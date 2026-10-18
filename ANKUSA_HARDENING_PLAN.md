@@ -103,7 +103,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 0 — Gates (make every later task provable)
 
-- [ ] **F1 — Perf regression gate** · P0 · Deps: —
+- [x] **F1 — Perf regression gate** · P0 · Deps: —
   *Why:* `bench/core_bench.exs` exists but has no baseline and no CI gate; `tools/loadgen` is manual; nothing stops a hot-path regression (`docs/testing.md:463-481`, `.mise/tasks/bench`, `.github/workflows/ci.yml`).
   *Change:* `.mise/tasks/bench/gate`: runs `core_bench.exs` for the matrix `BODY_BYTES ∈ {512, 10240}` × `N=20000` × `CONCURRENCY=256`, three runs each, median per cell, writes `packages/ankusa/bench/last.json`; compares to `packages/ankusa/bench/baseline.json` (`{cell: {ingest_per_s, p50_ms, p99_ms, end_to_end_per_s}, runner: "<class>"}`); fails if any cell's `p99_ms > 1.2 × baseline` or `ingest_per_s < 0.8 × baseline`. Extend `core_bench.exs` to print `p50_ms`/`p99_ms` in its JSON line if absent. CI job `bench` in `ci.yml` runs on PRs whose diff touches a ground-rule-10 hot-path file (`paths:` filter) and on `main`. Nightly workflow `.github/workflows/soak.yml`: `DURATION=3600` loadgen run against the `docker:smoke` image sampling `/metrics` every 60 s, failing on `missing > 0` or RSS growth > 5 %.
   *Done when:* a PR adding `Process.sleep(2)` to `Ankusa.Edge.Ingest.ingest/2` fails the `bench` job; reverting it passes; `baseline.json` is checked in with the runner class recorded.

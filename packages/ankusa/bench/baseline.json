@@ -1,0 +1,21 @@
+{
+  "512B": {
+    "ingest_per_s": 18437.070,
+    "p50_ms": 13.268,
+    "p99_ms": 20.129,
+    "end_to_end_per_s": 3672.980
+  },
+  "10240B": {
+    "ingest_per_s": 16723.390,
+    "p50_ms": 13.748,
+    "p99_ms": 28.102,
+    "end_to_end_per_s": 3566.010
+  },
+  "512B-c32": {
+    "ingest_per_s": 2406.110,
+    "p50_ms": 12.911,
+    "p99_ms": 20.949,
+    "end_to_end_per_s": 1743.780
+  },
+  "runner": "local-darwin-aarch64"
+}

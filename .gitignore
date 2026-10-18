@@ -78,3 +78,7 @@ examples/oban-consumer/.e2e-out/
 # Expert (Elixir language server) workspace dirs: a log at the repo root, plus
 # build/index caches inside each Mix project it opens (see .omp/lsp.yaml).
 **/.expert/
+
+# Perf gate and soak outputs (`mise run bench:gate`, `mise run bench:soak`).
+packages/ankusa/bench/last.json
+/soak-out/

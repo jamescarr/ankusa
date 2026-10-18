@@ -9,7 +9,10 @@
 #
 # Env knobs: N (20000), CONCURRENCY (256), SINK_LATENCY_MS (5), BODY_BYTES (512).
 #
-# Exits 1 if any acked hook never reached the sink, or if draining times out.
+# Prints one JSON line (`ingest_per_s`, `p50_ms`, `p99_ms`, `end_to_end_per_s`,
+# ... — `p50_ms`/`p99_ms` are the ingest latency percentiles; `mise run
+# bench:gate` reads them) and a table. Exits 1 if any acked hook never reached
+# the sink, or if draining times out.
 
 defmodule Bench.Sink do
   @behaviour Ankusa.Sink
@@ -144,6 +147,8 @@ missing = Enum.count(acked_ids, fn id -> not :ets.member(:bench_delivered, id) e
 report = %{
   acked: acked,
   ingest_per_s: if(ingest_s > 0, do: Float.round(acked / ingest_s, 2), else: 0.0),
+  p50_ms: percentile.(0.50),
+  p99_ms: percentile.(0.99),
   ingest_p50_ms: percentile.(0.50),
   ingest_p95_ms: percentile.(0.95),
   ingest_p99_ms: percentile.(0.99),

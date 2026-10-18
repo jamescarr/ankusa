@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Perf regression gate: core_bench matrix vs packages/ankusa/bench/baseline.json (p99 > 1.2x or ingest/s < 0.8x fails)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT/packages/ankusa"
+
+# Tunables (BENCH_RUNS, BENCH_RUNNER, BENCH_BASELINE, BENCH_REBASELINE) are
+# documented at the top of bench/gate.exs. The bench runs under MIX_ENV=test
+# (set by the script), so fetch and compile that environment first: compile
+# time must not land in the first measured run.
+export MIX_ENV=test
+mix deps.get --check-locked
+mix compile
+unset MIX_ENV
+
+exec elixir bench/gate.exs
