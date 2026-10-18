@@ -572,7 +572,11 @@ shows up in `p99_ms`.
 A p99 over 20 000 samples is noisy on a shared machine. A cell that is over a
 limit after its three runs is therefore run three more times, and the verdict
 is the median of all six; a real regression fails both rounds, noise rarely
-does. `last.json` and the table show the second-round numbers.
+does. `last.json` and the table show the second-round numbers. A shared
+runner can still be a bad machine for the whole job (one such run showed p99
+three to five times the baseline in every cell with throughput and p50
+unchanged): when the gate goes red on a change that touches no hot-path code,
+re-run the job once on a fresh runner; a real regression fails again.
 
 Numbers only compare on the machine class that recorded them: `runner` is
 `github-linux-x64` for the CI baseline, and a run on another class prints a
