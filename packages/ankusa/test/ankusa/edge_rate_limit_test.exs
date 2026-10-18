@@ -217,7 +217,11 @@ defmodule Ankusa.Edge.RateLimitTest do
   end
 
   defp start_store!(config) do
-    start_supervised!({Ankusa.Store, instance: config.instance})
+    # a restart of the store restarts the audit process with it
+    _ = stop_supervised({Ankusa.Audit, config.instance})
+    store = start_supervised!({Ankusa.Store, instance: config.instance})
+    start_supervised!({Ankusa.Audit, instance: config.instance})
+    store
   end
 
   defp start_limiter(config) do

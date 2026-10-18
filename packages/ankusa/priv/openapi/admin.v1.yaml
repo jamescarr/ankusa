@@ -19,7 +19,7 @@ info:
     loopback address. The scopes are `metrics:read`, `config:read`,
     `sources:read|write`, `dlq:read|write`, `replays:read|write`,
     `quarantine:read|write`, `rate_limits:read|write`, `routes:read|write`,
-    `claims:read`, plus `tenant:<id>` or `tenant:*` for the tenants they apply
+    `claims:read`, `audit:read`, plus `tenant:<id>` or `tenant:*` for the tenants they apply
     to; a resource that spans tenants needs `tenant:*`. Each operation below
     says which it needs. `GET /v1/config` is redacted anyway, because many
     people may hold `config:read`.
@@ -67,6 +67,12 @@ tags:
     description: |
       The quarantine pen: list and purge held hooks. `:edge` role only;
       node-local. Release them with a `quarantine` replay job (`replays` tag).
+  - name: audit
+    description: |
+      The audit trail: one row per change to a source, route, IP rule,
+      rate-limit override, quarantine purge or replay job, written in the same
+      synced batch as the change (or, for the route store and the Redis source
+      store, bracketing it). Node-local, newest first.
   - name: rate_limits
     description: |
       Per-tenant ingest rate limits: config values plus this node's runtime
@@ -557,6 +563,82 @@ paths:
           $ref: '#/components/responses/RoleNotEnabled'
         '503':
           $ref: '#/components/responses/NodeStoreUnavailable'
+  /v1/audit:
+    get:
+      operationId: listAudit
+      tags: [audit]
+      summary: The audit trail, newest first
+      description: |
+        Needs `audit:read`. The trail spans tenants: a caller without
+        `tenant:*` sees only the rows of its own tenants (none of the rows that
+        belong to no tenant: routes, IP rules, replay jobs, the quarantine
+        pen), and naming another tenant in `tenant` is a `403`. Rows are in
+        commit order; `cursor` is the `next_cursor` of the previous page. A
+        page can be shorter than `limit` while `next_cursor` is set: the scan
+        of one call is bounded, keep going. No row holds a secret: `before_hash`
+        and `after_hash` are keyed hashes that show a change without revealing
+        the value.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Inclusive lower bound on `at`, unix milliseconds.
+          schema:
+            type: integer
+            minimum: 0
+        - name: until
+          in: query
+          required: false
+          description: Inclusive upper bound on `at`, unix milliseconds.
+          schema:
+            type: integer
+            minimum: 0
+        - name: actor
+          in: query
+          required: false
+          description: The principal id that made the change (`system` for a change made from code).
+          schema:
+            type: string
+        - name: action
+          in: query
+          required: false
+          description: One action, such as `source.update` or `route.delete`.
+          schema:
+            type: string
+        - name: tenant
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          description: The `next_cursor` of the previous page.
+          schema:
+            type: integer
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          description: Maximum rows in the page. Values outside 1..1000 are clamped to that range.
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: A page of rows, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+        '400':
+          $ref: '#/components/responses/InvalidFilter'
+        '503':
+          $ref: '#/components/responses/NodeStoreUnavailable'
   /v1/rate-limits:
     get:
       operationId: listRateLimits
@@ -797,6 +879,7 @@ paths:
                         enabled: true
                         ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
                         metadata: {owner: payments}
+                        revision: 1
                         inserted_at: '2026-09-28T14:16:26Z'
                         updated_at: '2026-09-28T14:16:26Z'
                     next_cursor: null
@@ -852,6 +935,7 @@ paths:
                     enabled: true
                     ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
                     metadata: {owner: payments}
+                    revision: 1
                     inserted_at: '2026-09-28T14:16:26Z'
                     updated_at: '2026-09-28T14:16:26Z'
         '400':
@@ -896,6 +980,7 @@ paths:
                     enabled: true
                     ip_rules: [{action: allow, cidr: '203.0.113.0/24'}]
                     metadata: {owner: payments}
+                    revision: 1
                     inserted_at: '2026-09-28T14:16:26Z'
                     updated_at: '2026-09-28T14:16:26Z'
         '404':
@@ -941,6 +1026,7 @@ paths:
                     enabled: false
                     ip_rules: []
                     metadata: {owner: payments, staging: true}
+                    revision: 2
                     inserted_at: '2026-09-28T14:16:26Z'
                     updated_at: '2026-09-28T14:16:31Z'
         '400':
@@ -986,6 +1072,7 @@ paths:
                     enabled: true
                     ip_rules: []
                     metadata: {owner: payments, staging: true}
+                    revision: 3
                     inserted_at: '2026-09-28T14:16:26Z'
                     updated_at: '2026-09-28T14:16:33Z'
         '400':
@@ -1231,6 +1318,69 @@ components:
         bytes:
           type: integer
           description: The bytes they held against `quarantine.max_bytes`.
+    AuditPage:
+      type: object
+      required: [entries, next_cursor]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        next_cursor:
+          type: [string, 'null']
+          description: Pass as `cursor` for the next page; `null` on the last.
+    AuditEntry:
+      type: object
+      required: [seq, at, actor, remote_ip, action, tenant, resource, before_hash, after_hash, request_id, result, revision, detail]
+      properties:
+        seq:
+          type: integer
+          description: The row's place in commit order. Strictly increasing; the key of the row.
+        at:
+          type: string
+          format: date-time
+        actor:
+          type: string
+          description: The principal id (`Ankusa.Principal`); `system` for a change made from code.
+        remote_ip:
+          type: [string, 'null']
+          description: The client address, behind `routes.trusted_proxies` the one `X-Forwarded-For` names.
+        action:
+          type: string
+          description: |
+            `source.create|update|delete`, `rate_limit.put|delete`,
+            `quarantine.purge`, `replay.create|update|cancel`,
+            `route.create|update|delete`, `ip_rules.put`.
+        tenant:
+          type: [string, 'null']
+        resource:
+          type: [string, 'null']
+          description: The subject's id (`<tenant>.<name>` for a source, the route id, the replay job id).
+        before_hash:
+          type: [string, 'null']
+          description: HMAC-SHA256 (hex) of the subject before the change; `null` when there was none.
+        after_hash:
+          type: [string, 'null']
+          description: HMAC-SHA256 (hex) of the subject after the change; `null` for a delete.
+        request_id:
+          type: [string, 'null']
+          description: The request's `X-Request-Id`, or the id the node made up (answered in the same response header).
+        result:
+          type: string
+          enum: [ok, failed, interrupted]
+          description: |
+            `ok`: the change was made. `failed`: the store refused it. `interrupted`:
+            the node died between writing the row and finishing it (a change in
+            the route store or the Redis source store): the change may or may not
+            have been applied, and `after_hash` is the hash of what was about to
+            be written.
+        revision:
+          type: [integer, 'null']
+          description: The subject's revision after the change, for a subject that has one (sources in the node's store, routes).
+        detail:
+          type: [object, 'null']
+          additionalProperties: true
+          description: "Non-secret particulars: a purge's filter and count, a replay's kind, a rate limit's numbers."
     ReplaySpec:
       type: object
       required: [kind]
@@ -1475,7 +1625,7 @@ components:
       description: |
         A route definition: the capture gate. It decides whether a request is
         captured, not which source it belongs to.
-      required: [id, path, methods, enabled, ip_rules, metadata, inserted_at, updated_at]
+      required: [id, path, methods, enabled, ip_rules, metadata, revision, inserted_at, updated_at]
       properties:
         id:
           type: string
@@ -1519,6 +1669,11 @@ components:
           additionalProperties: true
           description: Free-form JSON for the operator — an owner, a sender name.
           example: {owner: payments}
+        revision:
+          type: integer
+          minimum: 1
+          description: Counts the definition's changes, from 1 at creation. Re-creating a deleted route starts again at 1.
+          example: 1
         inserted_at:
           type: string
           format: date-time

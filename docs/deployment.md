@@ -219,7 +219,7 @@ Measured numbers from a full ingest → dispatch → consumer run are recorded i
 ## Upgrading between releases
 
 The store carries a **format version** (`m:format_version` in its `default`
-column family; this release writes format 1). A store without the key is
+column family; this release writes format 2). A store without the key is
 format 1 — every store written before the marker existed — and is stamped on
 its first open. A release that changes the key layout adds a migration to the
 store's migration registry; on boot, before the node serves, the
@@ -228,6 +228,16 @@ bounded synced batches. A migration records its place in `m:migrating:<to>`
 with every batch, so a node killed mid-migration resumes at the next boot
 instead of starting over, and the new format is stamped only in the batch that
 finishes it. Migrations are forward-only.
+
+**Format 2 (the audit trail).** The store gains the `audit` column family and
+every API-managed source a revision (`v:<tenant>\0<name>`; sources a format 1
+store held become revision 1, in bounded synced batches). A format 1 release
+cannot open a format 2 store: it refuses at the format guard, and RocksDB
+itself refuses a database holding a column family the release does not list.
+That is the rollback boundary: **once a node has booted format 2, going back
+means restoring the pre-upgrade backup**, losing what was acked since and
+every audit row. A node's audit rows are its own; a fleet reads each node's
+trail with `GET /v1/audit` (scope `audit:read`) per node.
 
 Preview what a boot would do, without opening the store (read-only, safe
 beside a running node):

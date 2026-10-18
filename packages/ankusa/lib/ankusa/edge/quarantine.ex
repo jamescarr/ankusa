@@ -27,7 +27,8 @@ defmodule Ankusa.Edge.Quarantine do
 
   require Logger
 
-  alias Ankusa.{Config, Envelope, Store}
+  alias Ankusa.{Audit, Config, Envelope, Store}
+  alias Ankusa.Audit.Context
   alias Ankusa.Store.Keys
 
   # Idle buckets are dropped this often (a missing bucket is a full one).
@@ -117,14 +118,22 @@ defmodule Ankusa.Edge.Quarantine do
 
   @doc """
   Delete up to `limit` entries matching `filter`, oldest first, in one synced
-  batch. Returns how many went and the bytes they held. A pen that is not
-  running (its domain restarting) is `{:error, :store_unavailable}`.
+  batch together with the purge's audit row (`quarantine.purge`, with the
+  filter, the count and the bytes as its `detail`). Returns how many went and
+  the bytes they held. A pen that is not running (its domain restarting) is
+  `{:error, :store_unavailable}`. Options: `audit:`, the
+  `Ankusa.Audit.Context` of the change.
   """
-  @spec purge(atom(), filter(), pos_integer()) ::
+  @spec purge(atom(), filter(), pos_integer(), keyword()) ::
           {:ok, %{deleted: non_neg_integer(), bytes: non_neg_integer()}}
           | {:error, :store_unavailable}
-  def purge(instance, filter, limit) when is_map(filter) and is_integer(limit) and limit > 0 do
-    GenServer.call(Ankusa.via(instance, :quarantine), {:purge, filter, limit}, @purge_timeout_ms)
+  def purge(instance, filter, limit, opts \\ [])
+      when is_map(filter) and is_integer(limit) and limit > 0 do
+    GenServer.call(
+      Ankusa.via(instance, :quarantine),
+      {:purge, filter, limit, Context.from_opts(opts)},
+      @purge_timeout_ms
+    )
   catch
     :exit, _reason -> {:error, :store_unavailable}
   end
@@ -380,14 +389,14 @@ defmodule Ankusa.Edge.Quarantine do
 
   def handle_call(:held, _from, state), do: {:reply, state.bytes, state}
 
-  def handle_call({:purge, filter, limit}, _from, state) do
+  def handle_call({:purge, filter, limit, context}, _from, state) do
     {since, until} = {Map.get(filter, :since), Map.get(filter, :until)}
 
     with {:ok, hits} <- purge_hits(state.instance, range(since, until), filter, limit),
          ops = Enum.flat_map(hits, fn {key, _size} -> delete_ops(key) end),
-         :ok <- Store.write(state.instance, ops, sync: true) do
-      bytes = hits |> Enum.map(&elem(&1, 1)) |> Enum.sum()
-
+         bytes = hits |> Enum.map(&elem(&1, 1)) |> Enum.sum(),
+         :ok <-
+           Audit.commit(state.instance, context, purge_attrs(filter, limit, hits, bytes), ops) do
       {:reply, {:ok, %{deleted: length(hits), bytes: bytes}},
        %{state | bytes: max(state.bytes - bytes, 0)}}
     else
@@ -395,6 +404,23 @@ defmodule Ankusa.Edge.Quarantine do
         Logger.error("[ankusa] quarantine purge failed: #{inspect(error)}")
         {:reply, {:error, :store_unavailable}, state}
     end
+  end
+
+  # What a purge says about itself: the filter and what it took, never a body.
+  defp purge_attrs(filter, limit, hits, bytes) do
+    filter_detail =
+      for {key, value} when not is_nil(value) <- filter, into: %{}, do: {to_string(key), value}
+
+    %{
+      action: "quarantine.purge",
+      resource: "quarantine",
+      detail: %{
+        "filter" => filter_detail,
+        "limit" => limit,
+        "deleted" => length(hits),
+        "bytes" => bytes
+      }
+    }
   end
 
   @impl true

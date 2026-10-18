@@ -11,7 +11,7 @@ defmodule Ankusa.StoreUpgradeTest do
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.{Config, Envelope, Queue, SourceStore, Storage, Store}
+  alias Ankusa.{Audit, Config, Envelope, Queue, SourceStore, Storage, Store}
   alias Ankusa.Edge.{Ingest, Quarantine}
   alias Ankusa.Store.{Keys, Migrate}
   alias Mix.Tasks.Ankusa.Store.Fixture
@@ -119,7 +119,7 @@ defmodule Ankusa.StoreUpgradeTest do
   end
 
   describe "the format version" do
-    test "an unversioned store is stamped format 1 on open" do
+    test "an unversioned store is stamped format 1 on open, then migrated up" do
       inst = open_store()
       assert Store.get(inst, :default, Keys.format_version()) == {:ok, "1"}
 
@@ -128,23 +128,46 @@ defmodule Ankusa.StoreUpgradeTest do
       assert Store.get(inst, :default, Keys.format_version()) == :not_found
       stop_supervised!({Store, inst})
 
-      start_supervised!({Store, instance: inst})
+      start_supervised!({Store, instance: inst, migrations: []})
       assert Store.get(inst, :default, Keys.format_version()) == {:ok, "1"}
+      stop_supervised!({Store, inst})
+
+      # This release's registry takes it to format 2.
+      start_supervised!({Store, instance: inst})
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "2"}
+    end
+
+    test "format 1 sources become revision 1, and a replayed step keeps a revision it set" do
+      inst = open_store()
+      sources = for name <- ["a", "b", "c"], do: Keys.source("acme", name)
+      ops = for key <- sources, do: {:put, :default, key, ~s({"sinks":[]})}
+
+      :ok =
+        Store.write(inst, ops ++ [{:put, :default, Keys.source_revision("acme", "b"), "7"}],
+          sync: true
+        )
+
+      stop_supervised!({Store, inst})
+
+      start_supervised!({Store, instance: inst})
+      assert Store.get(inst, :default, Keys.source_revision("acme", "a")) == {:ok, "1"}
+      assert Store.get(inst, :default, Keys.source_revision("acme", "b")) == {:ok, "7"}
+      assert Store.get(inst, :default, Keys.source_revision("acme", "c")) == {:ok, "1"}
     end
 
     test "refuses newer format, naming both versions" do
       inst = open_store()
       config = Ankusa.config(inst)
-      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "2"}], sync: true)
+      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "3"}], sync: true)
       stop_supervised!({Store, inst})
 
       assert {:error, error} = start_supervised({Store, instance: inst})
-      assert {:store_format_newer, 2, 1} = find(error, &match?({:store_format_newer, _, _}, &1))
+      assert {:store_format_newer, 3, 2} = find(error, &match?({:store_format_newer, _, _}, &1))
 
       # The same refusal from the tasks an operator runs.
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
 
-      assert_raise Mix.Error, ~r/format 2 is newer than 1/, fn ->
+      assert_raise Mix.Error, ~r/format 3 is newer than 2/, fn ->
         MigrateTask.run(["--dry-run" | args])
       end
 
@@ -152,9 +175,9 @@ defmodule Ankusa.StoreUpgradeTest do
         MigrateTask.run(args)
       end
 
-      # A release whose registry reaches format 2 opens it as it is.
-      start_supervised!({Store, instance: inst, migrations: [{1, 2, Rewrite}]})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "2"}
+      # A release whose registry reaches format 3 opens it as it is.
+      start_supervised!({Store, instance: inst, migrations: [{1, 2, Rewrite}, {2, 3, Rewrite}]})
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "3"}
     end
 
     test "a format version that is not a number refuses to open" do
@@ -225,17 +248,23 @@ defmodule Ankusa.StoreUpgradeTest do
       stop_supervised!({Store, inst})
 
       assert Migrate.plan(Config.path(config, "store")) ==
-               {:ok, %{found: 1, current: 1, pending: [], resume: nil}}
+               {:ok,
+                %{
+                  found: 1,
+                  current: 2,
+                  pending: [{1, 2, Ankusa.Store.Migrations.AuditTrail}],
+                  resume: nil
+                }}
 
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
       MigrateTask.run(["--dry-run" | args])
       assert_received {:mix_shell, :info, ["store: " <> _]}
-      assert_received {:mix_shell, :info, ["format: 1 (this release: 1)"]}
-      assert_received {:mix_shell, :info, ["nothing to do"]}
+      assert_received {:mix_shell, :info, ["format: 1 (this release: 2)"]}
+      assert_received {:mix_shell, :info, ["  1 -> 2: " <> _]}
 
       MigrateTask.run(args)
       assert_received {:mix_shell, :info, [line]}
-      assert line =~ "is at format 1"
+      assert line =~ "is at format 2"
 
       empty = Path.join(config.data_dir, "nowhere")
       assert Migrate.plan(empty) == {:error, :no_store}
@@ -247,7 +276,7 @@ defmodule Ankusa.StoreUpgradeTest do
   defp open_store do
     config = test_config(roles: [:edge])
     put_config(config)
-    start_supervised!({Store, instance: config.instance})
+    start_supervised!({Store, instance: config.instance, migrations: []})
     config.instance
   end
 
@@ -278,8 +307,17 @@ defmodule Ankusa.StoreUpgradeTest do
     assert {:ok, held} = Quarantine.recent(inst, 10)
     assert held |> Enum.map(& &1.id) |> Enum.sort() == Enum.sort(manifest["quarantine_ids"])
 
+    # Every source has a revision: a format 1 store's were given revision 1 by
+    # the migration, a format 2 store's are as the audited writes left them.
     for [tenant, name] <- manifest["sources"] do
-      assert {:ok, _source} = SourceStore.get(inst, tenant, name)
+      assert {:ok, %{revision: revision}} = SourceStore.get(inst, tenant, name)
+      assert revision == Map.get(manifest["revisions"] || %{}, "#{tenant}.#{name}", 1)
+    end
+
+    # The audit trail the fixture's release wrote is read back whole, in order.
+    if manifest["audit"] do
+      assert {:ok, %{entries: entries}} = Audit.list(inst, limit: 1000)
+      assert entries |> Enum.reverse() |> Enum.map(&[&1.action, &1.resource]) == manifest["audit"]
     end
 
     # The archive: every hook the fixture archived is read back by id, whether

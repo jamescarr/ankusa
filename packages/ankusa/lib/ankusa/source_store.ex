@@ -8,11 +8,20 @@ defmodule Ankusa.SourceStore do
   ## Reads and writes
 
   `fetch/2` and `list/1` are the ingest-facing, read-only callbacks every store
-  implements. The optional admin callbacks (`put/5`, `get/3`, `list_tenant/2`,
-  `delete/3`) back the admin API's tenant-scoped source management; a store that
-  only reads (like `Ankusa.SourceStore.Static`) leaves them out and the facade
-  answers `{:error, :read_only}` / `:error` / `[]`. See
-  `Ankusa.SourceStore.Persistent` for the writable implementation.
+  implements. The optional admin callbacks (`put/5` or `put/6`, `get/3`,
+  `list_tenant/2`, `delete/3` or `delete/4`) back the admin API's tenant-scoped
+  source management; a store that only reads (like `Ankusa.SourceStore.Static`)
+  leaves them out and the facade answers `{:error, :read_only}` / `:error` /
+  `[]`. See `Ankusa.SourceStore.Persistent` for the writable implementation.
+
+  ## Audit
+
+  Every change to a source is audited (`Ankusa.Audit`). A store that keeps its
+  sources in this node's `Ankusa.Store` exports `put/6` and `delete/4`, which
+  take `audit: %Ankusa.Audit.Context{}` and commit the audit row in the same
+  synced batch as the change. A store that keeps them elsewhere exports
+  `put/5` and `delete/3`; the facade then brackets the call with a pending
+  audit row (a dual write: see `Ankusa.Audit`).
 
   ## Three answers to `fetch/2`
 
@@ -25,8 +34,8 @@ defmodule Ankusa.SourceStore do
   stops at that entry and retries it on its next tick. Never answer `:error`
   for "I could not look": that turns an outage into lost hooks.
 
-  Writes follow the same rule: a store that could not persist a `put/5` or
-  `delete/3` answers `{:error, :store_unavailable}` (the admin API's
+  Writes follow the same rule: a store that could not persist a `put` or
+  `delete` answers `{:error, :store_unavailable}` (the admin API's
   `503 store_unavailable`), never `{:error, :invalid, _}`, which tells the
   caller its request is wrong.
 
@@ -36,7 +45,8 @@ defmodule Ankusa.SourceStore do
   spec: a supervisor prints its children's start arguments.
   """
 
-  alias Ankusa.{Config, Source}
+  alias Ankusa.{Audit, Config, Source}
+  alias Ankusa.Audit.Context
 
   @typedoc """
   One tenant-scoped source as the store keeps it. `spec` is the submitted JSON
@@ -44,10 +54,11 @@ defmodule Ankusa.SourceStore do
   admin router), never the store's.
   """
   @type stored :: %{
-          tenant: String.t(),
-          name: String.t(),
-          source_id: String.t(),
-          spec: map()
+          required(:tenant) => String.t(),
+          required(:name) => String.t(),
+          required(:source_id) => String.t(),
+          required(:spec) => map(),
+          optional(:revision) => pos_integer()
         }
 
   @callback fetch(instance :: atom(), source_id :: String.t()) ::
@@ -76,7 +87,32 @@ defmodule Ankusa.SourceStore do
               | {:error, :invalid, String.t()}
               | {:error, :store_unavailable}
 
-  @optional_callbacks put: 5, get: 3, list_tenant: 2, delete: 3
+  @callback put(
+              instance :: atom(),
+              tenant :: String.t(),
+              name :: String.t(),
+              spec :: map(),
+              mode :: :create | :update,
+              opts :: keyword()
+            ) ::
+              {:ok, stored()}
+              | {:error, :invalid, String.t()}
+              | {:error, :exists}
+              | {:error, :not_found}
+              | {:error, :store_unavailable}
+
+  @callback delete(
+              instance :: atom(),
+              tenant :: String.t(),
+              name :: String.t(),
+              opts :: keyword()
+            ) ::
+              :ok
+              | {:error, :not_found}
+              | {:error, :invalid, String.t()}
+              | {:error, :store_unavailable}
+
+  @optional_callbacks put: 5, put: 6, get: 3, list_tenant: 2, delete: 3, delete: 4
 
   # Same rule as `Ankusa.ClaimCheck.Ref.valid_tenant?/1`: an identity that names
   # a storage partition and a URL path segment must not need encoding.
@@ -99,31 +135,80 @@ defmodule Ankusa.SourceStore do
 
   `tenant` and `name` are validated here, before the store sees them, so a bad
   identity is `{:error, :invalid, message}` no matter which store is configured.
-  A store that does not export `put/5` is read-only: `{:error, :read_only}`.
+  A store that exports neither `put/6` nor `put/5` is read-only:
+  `{:error, :read_only}`.
+
+  Options: `audit:` the `Ankusa.Audit.Context` of the change (default
+  `Ankusa.Audit.Context.system/0`).
   """
-  @spec put(atom(), String.t(), String.t(), map(), :create | :update) ::
+  @spec put(atom(), String.t(), String.t(), map(), :create | :update, keyword()) ::
           {:ok, stored()}
           | {:error, :invalid, String.t()}
           | {:error, :exists}
           | {:error, :not_found}
           | {:error, :store_unavailable}
           | {:error, :read_only}
-  def put(instance, tenant, name, spec, mode) do
+  def put(instance, tenant, name, spec, mode, opts \\ []) do
     with :ok <- validate_identity(tenant, "tenant"),
          :ok <- validate_identity(name, "name") do
       %Config{source_store: {mod, _}} = Ankusa.config(instance)
+      context = Context.from_opts(opts)
 
-      if exports?(mod, :put, 5) do
-        result = mod.put(instance, tenant, name, spec, mode)
+      result =
+        cond do
+          exports?(mod, :put, 6) ->
+            mod.put(instance, tenant, name, spec, mode, audit: context)
 
-        with {:ok, stored} <- result do
-          action = if mode == :create, do: :created, else: :updated
-          Ankusa.Lifecycle.source_changed(instance, action, stored)
+          exports?(mod, :put, 5) ->
+            audited_put(mod, instance, context, {tenant, name}, spec, mode)
+
+          true ->
+            {:error, :read_only}
         end
 
-        result
-      else
-        {:error, :read_only}
+      with {:ok, stored} <- result do
+        action = if mode == :create, do: :created, else: :updated
+        Ankusa.Lifecycle.source_changed(instance, action, stored)
+      end
+
+      result
+    end
+  end
+
+  # A store whose sources live elsewhere (Redis): the change cannot share a
+  # batch with its audit row, so the row is written first, pending, and
+  # finished with the outcome. A request the store rejects (it exists, it
+  # does not, the spec is invalid) changed nothing and leaves no row.
+  defp audited_put(mod, instance, context, {tenant, name}, spec, mode) do
+    attrs = %{
+      action: if(mode == :create, do: "source.create", else: "source.update"),
+      tenant: tenant,
+      resource: "#{tenant}.#{name}",
+      before_hash: prior_hash(mod, instance, tenant, name),
+      after_hash: Audit.digest(instance, spec)
+    }
+
+    Audit.record(instance, context, attrs, fn ->
+      result = mod.put(instance, tenant, name, spec, mode)
+      {result, put_outcome(instance, result)}
+    end)
+  end
+
+  defp put_outcome(instance, {:ok, stored}),
+    do: %{
+      result: "ok",
+      after_hash: Audit.digest(instance, stored.spec),
+      revision: Map.get(stored, :revision)
+    }
+
+  defp put_outcome(_instance, {:error, :store_unavailable}), do: %{result: "failed"}
+  defp put_outcome(_instance, _rejected), do: :discard
+
+  defp prior_hash(mod, instance, tenant, name) do
+    if exports?(mod, :get, 3) do
+      case mod.get(instance, tenant, name) do
+        {:ok, stored} -> Audit.digest(instance, stored.spec)
+        :error -> nil
       end
     end
   end
@@ -149,38 +234,82 @@ defmodule Ankusa.SourceStore do
 
   `tenant` and `name` are validated here, before the store sees them, so a bad
   identity is `{:error, :invalid, message}` no matter which store is configured.
-  A store that does not export `delete/3` is read-only: `{:error, :read_only}`.
+  A store that exports neither `delete/4` nor `delete/3` is read-only:
+  `{:error, :read_only}`. Options: `audit:`, as for `put/6`.
   """
-  @spec delete(atom(), String.t(), String.t()) ::
+  @spec delete(atom(), String.t(), String.t(), keyword()) ::
           :ok
           | {:error, :not_found}
           | {:error, :invalid, String.t()}
           | {:error, :store_unavailable}
           | {:error, :read_only}
-  def delete(instance, tenant, name) do
+  def delete(instance, tenant, name, opts \\ []) do
     with :ok <- validate_identity(tenant, "tenant"),
          :ok <- validate_identity(name, "name") do
       %Config{source_store: {mod, _}} = Ankusa.config(instance)
+      context = Context.from_opts(opts)
 
-      if exports?(mod, :delete, 3) do
-        # Read before the delete: the event's `data` is the last view of the
-        # source, and there is nothing left to read afterwards.
-        prior = if exports?(mod, :get, 3), do: mod.get(instance, tenant, name), else: :error
+      cond do
+        exports?(mod, :delete, 4) ->
+          prior = prior(mod, instance, tenant, name)
 
-        with :ok <- mod.delete(instance, tenant, name) do
-          entry =
-            case prior do
-              {:ok, stored} -> stored
-              :error -> %{tenant: tenant, name: name}
-            end
+          announce_delete(
+            instance,
+            mod.delete(instance, tenant, name, audit: context),
+            prior,
+            tenant,
+            name
+          )
 
-          Ankusa.Lifecycle.source_changed(instance, :deleted, entry)
-          :ok
-        end
-      else
-        {:error, :read_only}
+        exports?(mod, :delete, 3) ->
+          prior = prior(mod, instance, tenant, name)
+          result = audited_delete(mod, instance, context, tenant, name, prior)
+          announce_delete(instance, result, prior, tenant, name)
+
+        true ->
+          {:error, :read_only}
       end
     end
+  end
+
+  # Read before the delete: the event's `data` is the last view of the source,
+  # and there is nothing left to read afterwards.
+  defp prior(mod, instance, tenant, name),
+    do: if(exports?(mod, :get, 3), do: mod.get(instance, tenant, name), else: :error)
+
+  defp announce_delete(instance, :ok, prior, tenant, name) do
+    entry =
+      case prior do
+        {:ok, stored} -> stored
+        :error -> %{tenant: tenant, name: name}
+      end
+
+    Ankusa.Lifecycle.source_changed(instance, :deleted, entry)
+    :ok
+  end
+
+  defp announce_delete(_instance, other, _prior, _tenant, _name), do: other
+
+  defp audited_delete(mod, instance, context, tenant, name, prior) do
+    attrs = %{
+      action: "source.delete",
+      tenant: tenant,
+      resource: "#{tenant}.#{name}",
+      before_hash: with({:ok, stored} <- prior, do: Audit.digest(instance, stored.spec))
+    }
+
+    Audit.record(instance, context, attrs, fn ->
+      result = mod.delete(instance, tenant, name)
+
+      outcome =
+        case result do
+          :ok -> %{result: "ok"}
+          {:error, :store_unavailable} -> %{result: "failed"}
+          _rejected -> :discard
+        end
+
+      {result, outcome}
+    end)
   end
 
   defp validate_identity(value, label) when is_binary(value) do

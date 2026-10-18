@@ -13,6 +13,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Audit trail (SEC-2.a).** Every change to an API-managed source, a route, the
+  global IP rules, a rate-limit override, the quarantine pen (`DELETE
+  /v1/quarantine`) or a replay job writes one row to the new `audit` column
+  family: actor (`Ankusa.Principal`), client address, request id
+  (`X-Request-Id`, echoed in the response), `action`, `tenant`, `resource`,
+  keyed `before_hash`/`after_hash` (never a secret or a spec), `result` and the
+  subject's `revision`. Rows are in commit order (`<<?a, seq, at>>`:
+  `Ankusa.Audit` allocates `seq` and commits the batch). Changes in this node's
+  store (sources, rate limits, quarantine, replays) are committed in the same
+  synced batch as their row; route definitions and the Redis source store are a
+  dual write (a pending row, then the outcome), and a node killed in between
+  records `result: "interrupted"` at the next boot. `GET /v1/audit` (scope
+  `audit:read`, newest first, `since`/`until`/`actor`/`action`/`tenant`/`cursor`/
+  `limit`; a tenant-scoped reader sees only its tenants' rows),
+  `audit.retention_days` (365), telemetry `[:ankusa, :audit]` and
+  `[:ankusa, :audit, :pruned]`. Sources and routes carry a `revision` (also in
+  their API objects). `SourceStore.put/6`, `delete/4`, `Routes.*`,
+  `RateLimiter.*_override`, `Quarantine.purge/4` and `Replay.start/3`/`update/4`
+  take `audit: %Ankusa.Audit.Context{}`; code that passes none is `system`.
+  **The store format is now 2** (`store-v2` fixture): a node that has booted it
+  cannot roll back to a format 1 release without restoring a backup, and a node
+  with `admin.enabled` or a writable source store now opens the store.
+
 - **Secrets encrypted at rest, server-side encryption on every object-store
   write (SEC-4).** `Ankusa.Crypto.Envelope` encrypts the secret-bearing fields
   of an API-managed source's spec (the ones `Ankusa.Admin.Redact` hides:

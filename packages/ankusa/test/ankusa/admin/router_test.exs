@@ -848,6 +848,7 @@ defmodule Ankusa.Admin.RouterTest do
 
       put_config(config)
       start_supervised!({Ankusa.Store, instance: config.instance})
+      start_supervised!({Ankusa.Audit, instance: config.instance})
       {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
@@ -1076,6 +1077,7 @@ defmodule Ankusa.Admin.RouterTest do
 
       put_config(config)
       start_supervised!({Ankusa.Store, instance: config.instance})
+      start_supervised!({Ankusa.Audit, instance: config.instance})
       {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
@@ -1151,6 +1153,7 @@ defmodule Ankusa.Admin.RouterTest do
 
       put_config(config)
       start_supervised!({Ankusa.Store, instance: config.instance})
+      start_supervised!({Ankusa.Audit, instance: config.instance})
       {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 

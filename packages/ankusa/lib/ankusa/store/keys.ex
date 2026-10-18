@@ -30,6 +30,16 @@ defmodule Ankusa.Store.Keys do
 
   def rate_limit(tenant) when is_binary(tenant), do: <<"r:", tenant::binary>>
 
+  # A source's revision: a per-subject counter (decimal) that outlives the
+  # source's deletion, so a re-created source continues the count.
+  def source_revision(tenant, name) when is_binary(tenant) and is_binary(name),
+    do: <<"v:", tenant::binary, 0, name::binary>>
+
+  # The last sequence number the audit trail handed out, written in every audit
+  # batch, and the HMAC key audit hashes are made with (`Ankusa.Audit`).
+  def audit_seq, do: "m:audit_seq"
+  def audit_key, do: "m:audit_key"
+
   # ── hooks ─────────────────────────────────────────────────────────────────
 
   def hook(seq), do: <<seq::64>>
@@ -77,6 +87,16 @@ defmodule Ankusa.Store.Keys do
   # Replay jobs (`Ankusa.Dispatch.Replayer`); `id` is a UUIDv7 string.
   def replay_job(id) when is_binary(id), do: "j:" <> id
 
+  # ── audit ─────────────────────────────────────────────────────────────────
+
+  # The trail, in commit order: `seq` comes first because one process
+  # (`Ankusa.Audit`) allocates it and commits the batch, so key order is
+  # commit order whatever the wall clock does. A mutation whose store is not
+  # this one is recorded as a `?p` row first (`audit_pending/1`) and moves into
+  # the trail when it finishes.
+  def audit(seq, at) when is_integer(seq) and is_integer(at), do: <<?a, seq::64, at::64>>
+  def audit_pending(seq) when is_integer(seq), do: <<?p, seq::64>>
+
   # ── decoders ──────────────────────────────────────────────────────────────
 
   def decode_due(<<?d, at::64, seq::64, sink::16>>), do: {at, seq, sink}
@@ -84,6 +104,9 @@ defmodule Ankusa.Store.Keys do
   def decode_dead(<<?x, at::64, seq::64, sink::16>>), do: {at, seq, sink}
   def decode_cleared(<<?c, seq::64, kind::8, sink::16>>), do: {seq, kind, sink}
   def decode_delivery(<<seq::64, sink::16>>), do: {seq, sink}
+  def decode_audit(<<?a, seq::64, at::64>>), do: {seq, at}
+  def decode_audit_pending(<<?p, seq::64>>), do: seq
+  def decode_source_revision(<<"v:", rest::binary>>), do: decode_source(<<"s:", rest::binary>>)
 
   def decode_dedupe_expiry(<<?e, at::64, rest::binary>>) do
     case :binary.split(rest, <<0>>) do
@@ -113,6 +136,7 @@ defmodule Ankusa.Store.Keys do
   @ff10 <<@ff8::binary, 0xFF, 0xFF>>
   @ff11 <<@ff10::binary, 0xFF>>
   @ff18 <<@ff10::binary, @ff8::binary>>
+  @ff16 <<@ff8::binary, @ff8::binary>>
 
   @families %{
     hooks: %{cf: :hooks, lo: <<0::64>>, hi: @ff8},
@@ -127,7 +151,10 @@ defmodule Ankusa.Store.Keys do
     quarantine: %{cf: :quarantine, lo: <<?s>>, hi: <<?s, @ff8::binary>>},
     sources: %{cf: :default, lo: "s:", hi: <<"s:", 0xFF>>},
     rate_limits: %{cf: :default, lo: "r:", hi: <<"r:", 0xFF>>},
-    replays: %{cf: :default, lo: "j:", hi: <<"j:", 0xFF>>}
+    replays: %{cf: :default, lo: "j:", hi: <<"j:", 0xFF>>},
+    source_revisions: %{cf: :default, lo: "v:", hi: <<"v:", 0xFF>>},
+    audit: %{cf: :audit, lo: <<?a>>, hi: <<?a, @ff16::binary>>},
+    audit_pending: %{cf: :audit, lo: <<?p>>, hi: <<?p, @ff8::binary>>}
   }
 
   @doc "The column family, low and high sentinel of a scanned key family."

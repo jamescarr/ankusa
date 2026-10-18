@@ -78,6 +78,7 @@ Every top-level section, with its keys and defaults:
 | `secrets` | `kek` (a 32-byte key, base64, optionally `<id>:<base64>`; use `${VAR}`), `kek_previous` (a list, or one comma-separated string, of keys that may still decrypt). With a `kek`, the secrets of API-managed sources are encrypted before they are stored (`source_store.type: persistent` or `redis`); unset, they are stored as plain JSON. See [Encryption at rest](storage.md#encryption-at-rest) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
+| `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones. Read with `GET /v1/audit` (scope `audit:read`). Per node |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
 | `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`). Where `type: http` sinks may connect, checked on every attempt. See [Egress](#egress) |
 
@@ -246,7 +247,7 @@ Never `Application.get_env/2` scattered through call sites:
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
 `:dispatch`, `:storage`, `:claim_check`, `:backup`, `:admin`, `:rate_limits`,
-`:quarantine`, `:lifecycle` and `:egress` are maps and get **deep-merged** over the
+`:quarantine`, `:audit`, `:lifecycle` and `:egress` are maps and get **deep-merged** over the
 defaults. Pass only the keys you want to change.
 
 The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
@@ -324,6 +325,7 @@ config :ankusa,
   },
   rate_limits: %{default: nil, tenants: %{}},
   quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824},
+  audit: %{retention_days: 365},
   lifecycle: %{sinks: []},
   egress: %{
     allow_insecure_http: false,
@@ -420,6 +422,7 @@ config :ankusa,
 | `routes.seed` | `[]` | Route definitions loaded at boot (see below). With the ETS store they are loaded on **every** boot. |
 | `rate_limits.default`, `rate_limits.tenants` | `nil`, `%{}` | Per-tenant ingest limits, `%{rate: hooks_per_second, burst: hooks}`; fractions are allowed (`0.5` is one every two seconds) and both keys are required. Precedence is a runtime override, then the tenant's own entry, then `default`; no limit means unlimited. See [Rate limits](#rate-limits). |
 | `quarantine.burst`, `quarantine.rate`, `quarantine.max_bytes` | `100`, `20`, `1_073_741_824` | The quarantine pen: one token bucket per source (`burst` hooks back to back, refilled `rate` per second; over it, `429 quarantine_rate_limited`) and a cap on the pen's total bytes (a hook that would cross it is `503 quarantine_full`; the pen never evicts). See [`delivery.md#quarantine`](delivery.md#quarantine). |
+| `audit.retention_days` | `365` | Days the audit trail keeps a row. An hourly sweep deletes older rows, oldest first, in bounded batches (`[:ankusa, :audit, :pruned]`). A positive integer. Every committed row emits `[:ankusa, :audit]`. See [Architecture](architecture.md#guarantees-by-component). |
 
 Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 <constraint>, got <value>"`: every port is `0..65535`; `max_body_bytes`,
@@ -441,7 +444,7 @@ with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
 `claim_check.read_cache_bytes` may be `0` (no linger, roll at once, a
 compactor that runs only when asked, no read retry, no waiting for a slot, no
 claim cache);
-`claim_check.retention_days` is `nil` or ≥ 1; `storage.key_prefix` is `""` or
+`claim_check.retention_days` is `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `storage.key_prefix` is `""` or
 `name/` parts; `dispatch.sink_concurrency` is `nil` or `1..concurrency`,
 `dispatch.breaker_failures` ≥ 0, `breaker_open_ms` positive and
 `breaker_max_open_ms` ≥ `breaker_open_ms`. An embedded source whose verifier secret is missing or
@@ -585,8 +588,13 @@ Scopes (`Ankusa.Principal`): `metrics:read` (`/metrics`, `/v1/wal`),
 `quarantine:read` and `quarantine:write`, `rate_limits:read` and
 `rate_limits:write`, `routes:read` and `routes:write`, `claims:read`, and
 `dlq:write`, which starting a `dlq` replay also needs (`quarantine:write` for a
-`quarantine` replay). `config:write` and `audit:read` are reserved: no route
-uses them yet. Tenants are scopes too: `tenant:<id>` for one, `tenant:*` for all.
+`quarantine` replay). `config:write` is reserved: no route uses it yet.
+`audit:read` reads `GET /v1/audit`: every change to a source, route, IP rule,
+rate-limit override, quarantine purge or replay job, newest first, with
+`since`, `until` (ms), `actor`, `action`, `tenant`, `limit` and `cursor`
+filters. The trail spans tenants, so a reader without `tenant:*` sees only its
+own tenants' rows (none of the rows that belong to no tenant), and naming
+another tenant is a `403`. Tenants are scopes too: `tenant:<id>` for one, `tenant:*` for all.
 A tenant's resources (its sources and rate limit, its claims) need that tenant;
 resources that span tenants (the DLQ, replay jobs, the quarantine pen, the
 rate-limit listing, route definitions and IP rules) need `tenant:*` until they

@@ -8,13 +8,16 @@ defmodule Ankusa.Store do
   archive catalogue. Column families:
 
     * `default` — sequence, the store format version (`m:format_version`),
-      migration markers, sources, rate limits
+      migration markers, sources and their revisions, rate limits, replay jobs,
+      the audit sequence and key
     * `hooks` — `<<seq::64>>` → envelope
     * `deliveries` — `<<seq::64, sink::16>>` → delivery row
     * `index` — due/inflight/dead rows, archive obligations, cleared markers,
       claim-check refs
     * `archive` — segment catalogue and imported legacy locations
     * `quarantine` — quarantined envelopes
+    * `audit` — the audit trail (`<<?a, seq::64, at::64>>`) and the rows of
+      mutations still in flight (`<<?p, seq::64>>`), see `Ankusa.Audit`
 
   `Ankusa.Store` is the one process that owns the database handle; every other
   caller reads or writes through the functions here, which run the RocksDB
@@ -41,7 +44,7 @@ defmodule Ankusa.Store do
   alias Ankusa.Store.Keys
   alias Ankusa.Store.Migrate
 
-  @cf_names ~w(default hooks deliveries index archive quarantine)a
+  @cf_names ~w(default hooks deliveries index archive quarantine audit)a
 
   @cache_bytes 64 * 1024 * 1024
 
