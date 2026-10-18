@@ -267,13 +267,13 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 2 — Tenant isolation at 10⁶ tenants
 
-- [ ] **TEN-1.a — ADR: tenant in the store key layout** · P0 · Deps: F6 `[design-gate]`
+- [x] **TEN-1.a — ADR: tenant in the store key layout** · P0 · Deps: F6 `[design-gate]`
   *Why:* hooks/deliveries/due/inflight/dead/archive keys carry no tenant (`store/keys.ex:30-43,48-78`); counting, bounding or purging one tenant's rows is a full scan; gauges fold whole index families every 15 s (`metrics/gauges.ex:105-124`).
   *Change:* ADR deciding: dense tenant ordinal (`tenants` CF: `ord → tenant_id`, `tenant_id → ord`, assigned by the single writer at first sight), due key `<<?d, ord::32, at::64, seq::64, sink::16>>`, inflight/dead likewise, a `counters` row per tenant (`pending, scheduled, inflight, dead, bytes, archive_pending`) maintained in every transition batch, per-tenant scan cursors for TEN-3, migration v2→v3 rewriting index rows in bounded resumable batches, and the rollback boundary.
   *Done when:* `docs/adr/0001-tenant-key-layout.md` merged with Proof section naming TEN-1.b's tests.
   *Proof:* PR merged; `mise run check:links` passes.
   *Anchors:* `packages/ankusa/lib/ankusa/store/keys.ex`, `queue/deliveries.ex:66-93,180-250,342-352`, `metrics/gauges.ex:7-21,105-124`.
-  *Evidence:* —
+  *Evidence:* 2026-10-18 · PR #119 · `mise run check:links` (twice: on the branch, then after merging main for SEC-11), `grep` of `docs/adr/*.md` for `packages|examples|tools|.github` links (no hits), the PR merged · `no relative links escaping README.md/docs/` (exit 0); ADR 0001 has Context, Decision, Consequences and Proof, and the Proof names TEN-1.b's cases in `store_upgrade_test`, `queue_test`, `dispatch_test`, `metrics_test`, `admin/router_test`, `loss_test` plus self-asserting `bench/gauges_bench.exs` and `bench/dispatch_tick_bench.exs` (flat from 10³ to 10⁶ rows and from 10 to 10⁵ tenants with 8 active) and `bench:gate` · *Change* amended in the ADR (TEN-1.b implements the ADR): (1) due/inflight use new prefixes `?D`/`?F` and a by-tenant `?X` index sits beside the unchanged global `?x`, so the v2→v3 migration never reads its own output and the unfiltered `GET /v1/dlq` keeps its global newest-first order; (2) counters are blind `erlang_merge_operator` `int_add` operands (`counter_merge_operator` is a 32-bit `stoi`), because transitions come from the Writer, Pipeline, Replayer and archive compactor, not one writer; (3) an active-tenant index `?A` with delete-then-verify cleanup makes a dispatch tick O(tenants with work due); (4) `pending`/`scheduled` are redefined as first-attempt vs. retry rows, their sum unchanged; (5) `docs/adr/` is added to `docs/README.md`, `AGENTS.md` and the `check:links` glob.
 
 - [ ] **TEN-1.b — Implement the tenant key layout and counters** · P0 · Deps: TEN-1.a
   *Change:* as decided in the ADR; `Queue.pending_for_tenant/2`, `dead_for_tenant/2`, `purge_tenant/3`; `Gauges` read counters instead of folding; migration registered in F6 with fixture `store-v3`; `metrics` gain `ankusa_tenant_pending{tenant}` for the top-100 tenants by pending.
