@@ -613,12 +613,14 @@ values are hidden unless on an allowlist of non-secret keys such as `region`,
 `deliveries` and `disk_bytes` estimates; `{}` when the store cannot be read,
 `409 wal_disabled` under `wal.type: none`), `GET /v1/dlq`, the replay jobs API
 — `POST /v1/replays`, `GET /v1/replays`, `GET|PATCH /v1/replays/{id}`; `kind`
-is `dlq`, `archive` or `quarantine` — and `GET|DELETE /v1/quarantine` (`:edge`
+is `dlq`, `archive`, `quarantine` or `lifecycle` — and `GET|DELETE /v1/quarantine` (`:edge`
 role: list the pen, or purge entries by `source_id`, `id`, `since`/`until`,
 `limit`) on `admin.port`, independent of the node's roles. Replay jobs are per
 node, so a fleet replay is one `POST /v1/replays` per dispatch node; a
 `quarantine` job also needs the `:edge` role, since it releases this node's
-pen into this node's queue. Source management is
+pen into this node's queue, and a `lifecycle` job (`since`, `until`, `tenant`)
+needs a [lifecycle sink](asyncapi.md#lifecycle-events) on this node: it
+re-emits the node's own lifecycle events. Source management is
 node-agnostic: `GET|POST /v1/tenants/{tenant}/sources` and
 `GET|PUT|DELETE /v1/tenants/{tenant}/sources/{name}`, on a writable source
 store (`409 source_store_read_only` otherwise; a write the store could not

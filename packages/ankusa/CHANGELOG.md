@@ -22,6 +22,37 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   verifier, verifier options, egress), and returns the ids that changed; a
   refused spec applies nothing. Reads see the new spec on their next
   `fetch/2`.
+- **Durable lifecycle outbox with revisions (SEC-2.b).** Lifecycle events are
+  no longer queued in memory: the audit row of a source or route change is
+  flagged `publish: true` and committed, with the redacted entity beside it
+  (`<<?o, seq>>`; an audit row still never holds a spec), in the same synced
+  batch as the change. `Ankusa.Lifecycle.Publisher` is a cursor reader over
+  those rows (`m:lifecycle_cursor`, synced on every advance; a first boot
+  starts at the end of the trail), so a `kill -9` right after
+  `SourceStore.put/5` returns still delivers `source.created` after the
+  restart, and events arrive in commit order. Events carry `revision`, `actor`,
+  `instance`, `sequence` and the full redacted entity on delete; the event `id`
+  is derived from the row (a keyed hash laid out as a UUID, version 8) and
+  `time` is the commit time, so a redelivery after a crash, or a replay, is the
+  same event and a consumer dedupes on `id`. `Ankusa.Replay` has a fourth kind,
+  `:lifecycle` (`since`/`until`, and the SEC-7 `tenants` filter; `POST /v1/replays
+  {"kind": "lifecycle"}`) that re-emits a window of the trail, adding `replayid`. A
+  pending audit row of a route or Redis-store source (a node killed mid-change)
+  is settled by comparing the subject's present state with the row's
+  `before_hash`/`after_hash`: applied (`ok`, announced), not applied (`failed`,
+  not announced) or neither (stays `interrupted`, announces a state-refresh
+  `updated`/`deleted` event with the current entity and revision).
+  `Ankusa.SourceStore` gains the optional `ready?/1` callback for it. The
+  `LifecycleEventV1` schema in the AsyncAPI document names the new attributes.
+  **Breaking:** the in-memory queue and its `:queue_full` / `:not_running`
+  drop reasons are gone (`ankusa_lifecycle_dropped_total` has `gave_up` and
+  `unreadable`), `Lifecycle.source_changed/3` and `route_changed/3` and
+  `Publisher.publish/4` are removed, a route deletion's `data` is the whole
+  route (it was `{"id": ...}`), and a node with lifecycle sinks but no store
+  runs no publisher. The store gains the `m:lifecycle_cursor` key and the `?o`
+  key family in the `audit` column family: additive, no format bump; a release
+  that predates them ignores both (and leaves orphaned `?o` rows when it prunes).
+
 - **Verifier hardening (SEC-8).** `Ankusa.Verifier.Hmac` caps `:tolerance` at
   `Ankusa.Verifier.max_tolerance_seconds/0` (3600 s): `validate_opts/1` returns
   `{:error, :bad_tolerance}` for anything but an integer from 0 to 3600,

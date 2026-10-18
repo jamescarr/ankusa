@@ -677,7 +677,13 @@ defmodule Ankusa.Admin.Router do
 
   # ── replay jobs ────────────────────────────────────────────────────────────
 
-  @kind_map %{"dlq" => :dlq, "archive" => :archive, "quarantine" => :quarantine}
+  @kind_map %{
+    "dlq" => :dlq,
+    "archive" => :archive,
+    "quarantine" => :quarantine,
+    "lifecycle" => :lifecycle
+  }
+
   @state_map %{"running" => :running, "paused" => :paused, "cancelled" => :cancelled}
   @replay_spec_keys ~w(kind source_id id tenant since until from to sinks rate max_lag_ms)
   @replay_patch_keys ~w(state rate max_lag_ms)
@@ -710,6 +716,7 @@ defmodule Ankusa.Admin.Router do
   defp replay_kind_scopes(:dlq), do: "dlq:write"
   defp replay_kind_scopes(:quarantine), do: "quarantine:write"
   defp replay_kind_scopes(:archive), do: []
+  defp replay_kind_scopes(:lifecycle), do: []
 
   defp start_replay(conn, spec) do
     case Ankusa.Replay.start(instance(conn), spec, audit: Context.from_conn(conn)) do

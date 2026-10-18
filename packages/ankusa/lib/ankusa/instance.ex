@@ -200,13 +200,18 @@ defmodule Ankusa.Instance do
     end
   end
 
-  # Lifecycle events are published from memory (`Ankusa.Lifecycle.Publisher`),
-  # on every node whatever its roles: the admin API that makes the changes runs
-  # on any node. It starts before every listener that can make one.
+  # Lifecycle events are read from the audit trail (`Ankusa.Lifecycle.Publisher`
+  # is the cursor reader over it), on every node that has the store the trail is
+  # in: the admin API that makes the changes runs on any node, and a node with no
+  # store audits, and so announces, nothing. It starts behind the store and the
+  # source store, whose state it settles pending rows against.
   defp lifecycle_children(%Config{lifecycle: %{sinks: []}}, _opts), do: []
 
-  defp lifecycle_children(config, opts),
-    do: isolated(config, :lifecycle, [{Ankusa.Lifecycle.Publisher, opts}])
+  defp lifecycle_children(config, opts) do
+    if store?(config),
+      do: isolated(config, :lifecycle, [{Ankusa.Lifecycle.Publisher, opts}]),
+      else: []
+  end
 
   # Everything that stands between a request and the ack, in one subtree
   # (`:rest_for_one`, so each child restarts with what it depends on):
