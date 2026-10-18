@@ -433,6 +433,89 @@ defmodule Ankusa.VerifierTest do
     end
   end
 
+  describe "tolerance range and weak hashes" do
+    test "tolerance range: 0..3600 is valid, anything else is :bad_tolerance" do
+      for ok <- [0, 1, 300, 3600] do
+        assert Hmac.validate_opts(scheme: :stripe, secret: "k", tolerance: ok) == :ok
+      end
+
+      assert Hmac.validate_opts(scheme: :stripe, secret: "k") == :ok
+
+      for bad <- [3601, 86_400, -1, 300.0, "300", :infinity] do
+        assert Hmac.validate_opts(scheme: :stripe, secret: "k", tolerance: bad) ==
+                 {:error, :bad_tolerance}
+      end
+    end
+
+    test "verify/2 fails every hook closed on an out-of-range tolerance" do
+      ts = Integer.to_string(System.system_time(:second))
+      sig = Base.encode16(:crypto.mac(:hmac, :sha256, "k", "#{ts}.{}"), case: :lower)
+      request = env([{"Stripe-Signature", "t=#{ts},v1=#{sig}"}], "{}")
+
+      assert Hmac.verify(request, scheme: :stripe, secret: "k", tolerance: 3600) == :ok
+
+      assert Hmac.verify(request, scheme: :stripe, secret: "k", tolerance: 3601) ==
+               {:error, :bad_tolerance}
+    end
+
+    test "validate_config!/1 refuses a source with tolerance 3601 and names it" do
+      config = hmac_config(scheme: :stripe, secret: "k", tolerance: 3601)
+
+      assert_raise ArgumentError,
+                   ~r/^source weak-probe: verifier tolerance must be an integer/,
+                   fn ->
+                     Ankusa.Verifier.validate_config!(config)
+                   end
+
+      assert :ok =
+               Ankusa.Verifier.validate_config!(
+                 hmac_config(scheme: :stripe, secret: "k", tolerance: 3600)
+               )
+    end
+
+    test "no preset verifies with SHA-1, so only an inline scheme is weak" do
+      for {name, scheme} <- Ankusa.Verifier.Schemes.all() do
+        refute scheme.hash == :sha1, "preset #{name} uses SHA-1"
+        refute Hmac.weak_hash?(scheme: name)
+      end
+
+      assert Hmac.weak_hash?(scheme: %Scheme{signature_header: "X-Sig", hash: :sha1})
+      refute Hmac.weak_hash?(scheme: %Scheme{signature_header: "X-Sig", hash: :sha256})
+      assert Ankusa.Verifier.weak_hash?(Hmac, scheme: %Scheme{signature_header: "X", hash: :sha1})
+      refute Ankusa.Verifier.weak_hash?(Ankusa.Verifier.None, [])
+    end
+
+    test "a sha1 source boots with one warning naming it; sha256 boots silently" do
+      weak = %Scheme{signature_header: "X-Sig", hash: :sha1}
+      strong = %Scheme{signature_header: "X-Sig", hash: :sha256}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = Ankusa.Verifier.validate_config!(hmac_config(scheme: weak, secret: "k"))
+        end)
+
+      assert log =~ "source weak-probe verifies with SHA-1"
+      assert log =~ "ankusa_verifier_weak_hash_total"
+
+      quiet =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = Ankusa.Verifier.validate_config!(hmac_config(scheme: strong, secret: "k"))
+        end)
+
+      refute quiet =~ "SHA-1"
+    end
+
+    defp hmac_config(opts) do
+      Ankusa.Config.new(
+        instance: :"verifier_weak_#{System.unique_integer([:positive])}",
+        data_dir: System.tmp_dir!(),
+        roles: [:edge],
+        source_store:
+          {Ankusa.SourceStore.Static, sources: %{"weak-probe" => [verifier: {Hmac, opts}]}}
+      )
+    end
+  end
+
   describe "validate_shared!/1" do
     defp shared_config(resolver, source_opts, roles \\ [:edge]) do
       Ankusa.Config.new(

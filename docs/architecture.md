@@ -135,6 +135,11 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
      when either refuses — until a `quarantine` replay job re-verifies and
      releases it. See [`delivery.md`](delivery.md#quarantine)), or
      `:accept_flag` (commits anyway, envelope marked `flagged: true`).
+     A source that verifies with SHA-1 (an inline `hmac` scheme only) is
+     counted on `ankusa_verifier_weak_hash_total{instance,source_id,scheme}`
+     whether or not the signature matched, and the replay window
+     (`tolerance_seconds`) is capped at an hour; both are tested in
+     `verifier_test.exs` and `metrics_test.exs`.
    - An accepted hook is charged against its tenant's ingest rate limit
      (`rate_limits`) before anything is written. Over the limit is `429` with
      `Retry-After`, nothing stored — and because the charge comes after

@@ -118,6 +118,14 @@ defmodule Ankusa.Metrics do
           tags: [:instance, :source_id, :provider, :scheme]
         )
       ),
+      counter(
+        "ankusa.verifier.weak_hash.total",
+        scoped(own,
+          event_name: [:ankusa, :verify, :stop],
+          keep: &(&1[:weak_hash] == true),
+          tags: [:instance, :source_id, :scheme]
+        )
+      ),
       distribution(
         "ankusa.wal.commit.duration.seconds",
         scoped(own,

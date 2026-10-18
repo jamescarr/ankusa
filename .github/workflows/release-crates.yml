@@ -35,7 +35,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: resolve
         run: |
           source .mise/lib/pkg.sh
@@ -63,12 +63,12 @@ jobs:
       # create` below gets a 403.
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned to .mise/conf.d/sdk-rust.toml's rust, the toolchain `mise run
       # check:package sdk-rust` built and tested with:
       # dtolnay/rust-toolchain's default floats, which would let the release be
       # built by a compiler nothing here ever validated.
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: "1.99.1"
 

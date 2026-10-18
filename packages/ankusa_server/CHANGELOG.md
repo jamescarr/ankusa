@@ -8,6 +8,19 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Signed, attested image (SEC-8).** Every published image now carries an
+  SPDX SBOM and a SLSA provenance attestation (`mode=max`) for `linux/amd64`
+  and `linux/arm64`, and its index digest is signed keylessly with cosign by
+  `docker.yml`; the workflow refuses to finish without the attestations and
+  verifies the signature (`cosign verify`, in `scripts/smoke.sh`) against the
+  digest it just published. Verify one yourself with the command in the image
+  README ("Verify an image"). Both base images and the Dockerfile syntax
+  frontend are pinned by digest, and every GitHub action by commit SHA
+  (`mise run lint:pins` fails a bare tag).
+- `verify.tolerance_seconds` accepts 0 to 3600; `3601` or a negative value is a
+  config error naming `sources.<id>.verify.tolerance_seconds`. A `hash: sha1`
+  source boots with a warning and counts on `ankusa_verifier_weak_hash_total`.
+  See the `ankusa` changelog.
 - `audit.retention_days` (365): how long the audit trail (`GET /v1/audit`, scope
   `audit:read`) keeps its rows. The store format is now 2: an image that has
   booted it cannot roll back to a format 1 image without restoring a backup.
