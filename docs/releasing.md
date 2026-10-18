@@ -1,7 +1,11 @@
 # Releasing
 
 Every releasable artifact is a directory under `packages/`, versioned on its
-own with its own `CHANGELOG.md`. The directory name is the git tag prefix, and
+own with its own `CHANGELOG.md`. Those changelogs are marked `merge=union` in
+`.gitattributes`, so PRs that both append under `## [Unreleased]` merge
+without a textual conflict (GitHub's mergeability check does not run merge
+drivers, so a PR may still read CONFLICTING until its branch merges `main`
+locally and pushes). The directory name is the git tag prefix, and
 the files in it decide where it publishes:
 
 | Package | Kind | Tag | Published by |

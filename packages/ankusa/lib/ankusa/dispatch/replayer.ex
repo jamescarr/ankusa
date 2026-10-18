@@ -709,6 +709,7 @@ defmodule Ankusa.Dispatch.Replayer do
             cond do
               env.received_at < from or env.received_at > to -> :skip
               not matches_source?(filter, env.source_id) -> :skip
+              not matches_tenant?(filter, env.tenant_id) -> :skip
               true -> {:keep, %{bin: payload, size: byte_size(payload), env: env}}
             end
 
@@ -727,6 +728,15 @@ defmodule Ankusa.Dispatch.Replayer do
     case Map.get(filter, :source_id) do
       nil -> true
       expected -> expected == source_id
+    end
+  end
+
+  # An envelope without a tenant belongs to `"default"`, as in
+  # `Ankusa.Envelope.idempotency_key/1`.
+  defp matches_tenant?(filter, tenant_id) do
+    case Map.get(filter, :tenants) do
+      nil -> true
+      tenants -> (tenant_id || "default") in tenants
     end
   end
 

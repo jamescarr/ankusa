@@ -785,7 +785,7 @@ defmodule Ankusa.ReplayTest do
       live = Map.new(live_events(3))
       assert map_size(live) == 3
 
-      assert {:ok, :created, job} = Replay.start(inst, kind: :lifecycle, tenant: "acme")
+      assert {:ok, :created, job} = Replay.start(inst, kind: :lifecycle, tenants: ["acme"])
       job = poll_job_state(inst, job.id, &(&1.state == :done))
       job_id = job.id
 
@@ -845,14 +845,14 @@ defmodule Ankusa.ReplayTest do
                Replay.start(config.instance, kind: :lifecycle)
     end
 
-    test "lifecycle replay takes since, until and tenant and nothing else" do
+    test "lifecycle replay takes since, until and tenants and nothing else" do
       config = start_lifecycle([{LifecycleSink, pid: self()}])
 
       assert {:error, {:invalid, "source_id"}} =
                Replay.start(config.instance, kind: :lifecycle, source_id: "x")
 
-      assert {:error, {:invalid, "tenant"}} =
-               Replay.start(config.instance, kind: :lifecycle, tenant: 7)
+      assert {:error, {:invalid, "tenants"}} =
+               Replay.start(config.instance, kind: :lifecycle, tenants: [7])
 
       assert {:error, {:invalid, "until"}} =
                Replay.start(config.instance, kind: :lifecycle, since: 10, until: 5)

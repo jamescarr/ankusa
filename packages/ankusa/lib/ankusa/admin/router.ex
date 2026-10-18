@@ -22,18 +22,25 @@ defmodule Ankusa.Admin.Router do
   | --- | --- |
   | `GET /metrics`, `GET /v1/wal` | `metrics:read` |
   | `GET /v1/config`, `GET /asyncapi.json` | `config:read` |
-  | `GET /v1/dlq` | `dlq:read` + `tenant:*` |
-  | `POST /v1/replays` | `replays:write` + `tenant:*`, and `dlq:write` / `quarantine:write` for those kinds |
-  | `GET /v1/replays[/:id]` | `replays:read` + `tenant:*` |
-  | `PATCH /v1/replays/:id` | `replays:write` + `tenant:*` |
-  | `GET /v1/quarantine`, `DELETE /v1/quarantine` | `quarantine:read` / `quarantine:write` + `tenant:*` |
+  | `GET /v1/dlq` | `dlq:read` + a `tenant` (filtered) |
+  | `POST /v1/replays` | `replays:write` + a `tenant` (filtered), and `dlq:write` / `quarantine:write` for those kinds |
+  | `GET /v1/replays[/:id]` | `replays:read` + a `tenant` (filtered) |
+  | `PATCH /v1/replays/:id` | `replays:write` + a `tenant` (filtered) |
+  | `GET /v1/quarantine`, `DELETE /v1/quarantine` | `quarantine:read` / `quarantine:write` + a `tenant` (filtered) |
   | `GET /v1/tenants/:tenant/sources[/:name]` | `sources:read` + `tenant:<tenant>` |
   | `POST/PUT/DELETE /v1/tenants/:tenant/sources[/:name]` | `sources:write` + `tenant:<tenant>` |
-  | `GET /v1/rate-limits` | `rate_limits:read` + `tenant:*` |
+  | `GET /v1/rate-limits` | `rate_limits:read` + a `tenant` (filtered) |
   | `GET/PUT/DELETE /v1/tenants/:tenant/rate-limit` | `rate_limits:read` / `rate_limits:write` + `tenant:<tenant>` |
 
-  The DLQ, the quarantine pen and replay jobs are node-global rows, not
-  tenant-keyed, so they need `tenant:*` until they are filtered by tenant.
+  The DLQ, the quarantine pen, replay jobs and the rate-limit listing hold every
+  tenant's rows, so they are filtered by tenant (`Auth.authorize_tenants/4`).
+  A caller limited to some `tenant:<id>` scopes gets only those tenants' rows,
+  whatever it asks: the filter is forced server-side. `?tenant=<id>` (the body
+  key `tenant` of `POST /v1/replays`) narrows the answer to one tenant, and
+  naming a tenant the caller does not hold is `403`. Only `tenant:*` reads or
+  changes them unfiltered. A quarantine purge deletes, and a replay touches,
+  only the caller's tenants' rows; a replay job is visible to (and steerable
+  by) a limited caller only when it is scoped to tenants that caller holds.
   `/v1/config` is still redacted, because many people may hold `config:read`.
 
   ## Node-local by design
@@ -118,31 +125,35 @@ defmodule Ankusa.Admin.Router do
   end
 
   get "/v1/dlq" do
-    global_role(conn, "dlq:read", :dispatch, &dlq_index/1)
+    scoped_role(conn, "dlq:read", :dispatch, &dlq_index/2)
   end
 
+  # The tenant the job is limited to is in the body, so only the scope and
+  # "holds some tenant" are checked here; `replay_create/1` checks the rest.
   post "/v1/replays" do
-    global_role(conn, "replays:write", :dispatch, &replay_create/1)
+    Auth.authorize_tenants(conn, "replays:write", nil, fn conn, _tenants ->
+      require_role(conn, :dispatch, &replay_create/1)
+    end)
   end
 
   get "/v1/replays" do
-    global_role(conn, "replays:read", :dispatch, &replay_list/1)
+    scoped_role(conn, "replays:read", :dispatch, &replay_list/2)
   end
 
   get "/v1/replays/:id" do
-    global_role(conn, "replays:read", :dispatch, &replay_get(&1, id))
+    scoped_role(conn, "replays:read", :dispatch, &replay_get(&1, id, &2))
   end
 
   patch "/v1/replays/:id" do
-    global_role(conn, "replays:write", :dispatch, &replay_update(&1, id))
+    scoped_role(conn, "replays:write", :dispatch, &replay_update(&1, id, &2))
   end
 
   get "/v1/quarantine" do
-    global_role(conn, "quarantine:read", :edge, &quarantine_index/1)
+    scoped_role(conn, "quarantine:read", :edge, &quarantine_index/2)
   end
 
   delete "/v1/quarantine" do
-    global_role(conn, "quarantine:write", :edge, &quarantine_purge/1)
+    scoped_role(conn, "quarantine:write", :edge, &quarantine_purge/2)
   end
 
   get "/v1/audit" do
@@ -173,7 +184,7 @@ defmodule Ankusa.Admin.Router do
   # these are role-gated like the quarantine list, not node-agnostic like
   # source management.
   get "/v1/rate-limits" do
-    global_role(conn, "rate_limits:read", :edge, &rate_limits_index/1)
+    scoped_role(conn, "rate_limits:read", :edge, &rate_limits_index/2)
   end
 
   get "/v1/tenants/:tenant/rate-limit" do
@@ -209,7 +220,7 @@ defmodule Ankusa.Admin.Router do
     end
   end
 
-  defp dlq_index(conn) do
+  defp dlq_index(conn, tenants) do
     params = Plug.Conn.fetch_query_params(conn).query_params
 
     with {:ok, source_id} <- string_param(params, "source_id"),
@@ -218,6 +229,7 @@ defmodule Ankusa.Admin.Router do
       case Ankusa.Queue.dead(instance(conn),
              source_id: source_id,
              since: since,
+             tenants: tenants,
              limit: clamp_limit(limit)
            ) do
         {:ok, %{total: total, entries: entries}} ->
@@ -231,12 +243,16 @@ defmodule Ankusa.Admin.Router do
     end
   end
 
-  defp quarantine_index(conn) do
+  defp quarantine_index(conn, tenants) do
     params = Plug.Conn.fetch_query_params(conn).query_params
 
     case int_param(params, "limit", @default_limit) do
       {:ok, limit} ->
-        case Ankusa.Edge.Quarantine.recent(instance(conn), clamp_limit(limit)) do
+        case Ankusa.Edge.Quarantine.recent(
+               instance(conn),
+               clamp_limit(limit),
+               tenant_filter(tenants)
+             ) do
           {:ok, entries} ->
             send_json(conn, 200, %{entries: Enum.map(entries, &quarantine_entry/1)})
 
@@ -250,8 +266,8 @@ defmodule Ankusa.Admin.Router do
   end
 
   # `since`/`until` are inclusive bounds on `received_at` (ms). No filter at
-  # all purges the oldest `limit` entries.
-  defp quarantine_purge(conn) do
+  # all purges the oldest `limit` entries, of the caller's tenants only.
+  defp quarantine_purge(conn, tenants) do
     params = Plug.Conn.fetch_query_params(conn).query_params
 
     with {:ok, source_id} <- string_param(params, "source_id"),
@@ -260,7 +276,12 @@ defmodule Ankusa.Admin.Router do
          {:ok, until} <- non_neg_param(params, "until"),
          :ok <- if(since && until && until < since, do: {:error, "until"}, else: :ok),
          {:ok, limit} <- int_param(params, "limit", @default_purge_limit) do
-      filter = %{source_id: source_id, id: id, since: since, until: until}
+      filter =
+        Map.merge(
+          %{source_id: source_id, id: id, since: since, until: until},
+          tenant_filter(tenants)
+        )
+
       limit = limit |> max(1) |> min(@max_purge_limit)
 
       case Ankusa.Edge.Quarantine.purge(instance(conn), filter, limit,
@@ -276,6 +297,9 @@ defmodule Ankusa.Admin.Router do
       {:error, field} -> invalid_filter(conn, field)
     end
   end
+
+  defp tenant_filter(nil), do: %{}
+  defp tenant_filter(tenants), do: %{tenants: tenants}
 
   defp non_neg_param(params, key) do
     case int_param(params, key, nil) do
@@ -543,15 +567,17 @@ defmodule Ankusa.Admin.Router do
 
   # ── per-tenant rate limits ──────────────────────────────────────────────────
 
-  defp rate_limits_index(conn) do
-    %{default: default, tenants: tenants} = RateLimiter.list(instance(conn))
+  # The node default applies to every tenant and names none; the overrides are
+  # per tenant, so a tenant-limited caller sees only its own.
+  defp rate_limits_index(conn, tenants) do
+    %{default: default, tenants: overrides} = RateLimiter.list(instance(conn))
 
     send_json(conn, 200, %{
       default: limit(default),
       tenants:
-        Enum.map(tenants, fn {tenant, limit, source} ->
+        for {tenant, limit, source} <- overrides, tenants == nil or tenant in tenants do
           rate_limit_entry(tenant, {limit, source})
-        end)
+        end
     })
   end
 
@@ -659,16 +685,27 @@ defmodule Ankusa.Admin.Router do
   }
 
   @state_map %{"running" => :running, "paused" => :paused, "cancelled" => :cancelled}
-  @replay_spec_keys ~w(kind source_id id since until from to sinks tenant rate max_lag_ms)
+  @replay_spec_keys ~w(kind source_id id tenant since until from to sinks rate max_lag_ms)
   @replay_patch_keys ~w(state rate max_lag_ms)
 
+  # The route needed `replays:write` and a tenant the caller holds; the body
+  # names the kind and, optionally, one `tenant`. Replaying a DLQ or the
+  # quarantine pen is also a write to that store, so those kinds need its
+  # scope too. A caller limited to some tenants replays only their rows: the
+  # job's `tenants` filter is forced to the tenants it holds (`tenant:*` leaves
+  # it unset unless the body names one).
   defp replay_create(conn) do
     with_replay_body(conn, fn map, conn ->
       case replay_spec(map) do
-        # The route needed `replays:write`; replaying a DLQ or the quarantine
-        # pen is also a write to that store, so those kinds need its scope too.
         {:ok, spec} ->
-          Auth.authorize(conn, replay_kind_scopes(spec.kind), &start_replay(&1, spec))
+          {requested, spec} = Map.pop(spec, :tenant)
+
+          Auth.authorize_tenants(conn, replay_kind_scopes(spec.kind), requested, fn conn,
+                                                                                    tenants ->
+            if Enum.all?(tenants || [], &valid_identity?/1),
+              do: start_replay(conn, put_present(spec, :tenants, tenants && Enum.sort(tenants))),
+              else: invalid_filter(conn, "tenant")
+          end)
 
         {:error, field} ->
           invalid_filter(conn, field)
@@ -703,26 +740,29 @@ defmodule Ankusa.Admin.Router do
     end
   end
 
-  defp replay_list(conn) do
-    case Ankusa.Replay.list(instance(conn)) do
+  defp replay_list(conn, tenants) do
+    case Ankusa.Replay.list(instance(conn), tenants) do
       {:ok, jobs} -> send_json(conn, 200, %{replays: Enum.map(jobs, &Ankusa.Replay.to_json/1)})
       {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
     end
   end
 
-  defp replay_get(conn, id) do
-    case Ankusa.Replay.get(instance(conn), id) do
+  defp replay_get(conn, id, tenants) do
+    case Ankusa.Replay.get(instance(conn), id, tenants) do
       {:ok, job} -> send_json(conn, 200, Ankusa.Replay.to_json(job))
       {:error, :not_found} -> send_json(conn, 404, %{error: "replay_not_found"})
       {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
     end
   end
 
-  defp replay_update(conn, id) do
+  defp replay_update(conn, id, tenants) do
     with_replay_body(conn, fn map, conn ->
       case replay_patch(map) do
         {:ok, patch} ->
-          case Ankusa.Replay.update(instance(conn), id, patch, audit: Context.from_conn(conn)) do
+          case Ankusa.Replay.update(instance(conn), id, patch,
+                 tenants: tenants,
+                 audit: Context.from_conn(conn)
+               ) do
             {:ok, job} -> send_json(conn, 200, Ankusa.Replay.to_json(job))
             {:error, :not_found} -> send_json(conn, 404, %{error: "replay_not_found"})
             {:error, :finished} -> send_json(conn, 409, %{error: "replay_finished"})
@@ -905,10 +945,33 @@ defmodule Ankusa.Admin.Router do
     end
   end
 
-  # Scope first, role second: a caller without the scope learns nothing about
-  # which roles this node runs.
-  defp global_role(conn, scope, role, fun),
-    do: Auth.authorize_global(conn, scope, &require_role(&1, role, fun))
+  # For a resource that spans tenants (`Auth.authorize_tenants/4`): the
+  # `tenant` query parameter narrows it, and a caller limited to some tenants
+  # is held to them whatever it asks. Scope first, tenant second, role third,
+  # so a caller without the scope learns nothing about which roles this node
+  # runs. `fun` gets the tenants the rows must be limited to: `nil` is every
+  # tenant.
+  defp scoped_role(conn, scope, role, fun) do
+    Auth.authorize_tenants(conn, scope, tenant_param(conn), fn conn, tenants ->
+      run_scoped(conn, tenants, role, fun)
+    end)
+  end
+
+  defp run_scoped(conn, tenants, role, fun) do
+    if Enum.all?(tenants || [], &valid_identity?/1),
+      do: require_role(conn, role, &fun.(&1, tenants)),
+      else: invalid_filter(conn, "tenant")
+  end
+
+  # Absent is `nil`. Present but not a plain string (`tenant[]=x`) is `""`: no
+  # principal holds it, and it is not a tenant name.
+  defp tenant_param(conn) do
+    case Plug.Conn.fetch_query_params(conn).query_params do
+      %{"tenant" => tenant} when is_binary(tenant) -> tenant
+      %{"tenant" => _other} -> ""
+      _ -> nil
+    end
+  end
 
   defp tenant_role(conn, scope, tenant, role, fun),
     do: Auth.authorize_tenant(conn, scope, tenant, &require_role(&1, role, fun))

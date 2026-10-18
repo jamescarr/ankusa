@@ -225,16 +225,16 @@ defmodule Ankusa.Lifecycle do
 
   @doc """
   Whether a row's event falls in a replay job's filter (`:since` and `:until`
-  bound the row's time, `:tenant` its tenant).
+  bound the row's time, `:tenants` is the list of tenants it may belong to).
   """
   @spec in_window?(Audit.row(), map()) :: boolean()
   def in_window?(row, filter) do
     since = Map.get(filter, :since)
     until = Map.get(filter, :until)
-    tenant = Map.get(filter, :tenant)
+    tenants = Map.get(filter, :tenants)
 
     (is_nil(since) or row.at >= since) and (is_nil(until) or row.at <= until) and
-      (is_nil(tenant) or tenant(row) == tenant)
+      (is_nil(tenants) or tenant(row) in tenants)
   end
 
   # A UUID (version 8, the custom-layout one) from a keyed hash of the instance

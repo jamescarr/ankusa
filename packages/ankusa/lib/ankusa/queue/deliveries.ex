@@ -523,10 +523,38 @@ defmodule Ankusa.Queue.Deliveries do
         # The fold ends by halt (limit/max_scan reached) or by running off the
         # range; only the latter means every dead row in range was examined.
         exhausted? = hit_n < limit and scanned < max_scan
-        {:ok, Enum.reverse(hits), last, exhausted?, scanned}
+
+        # A tenant-filtered page may come back short of `limit` without being
+        # exhausted: the cursor still moves past the rows it left out.
+        with {:ok, hits} <- tenant_hits(instance, Enum.reverse(hits), filter) do
+          {:ok, hits, last, exhausted?, scanned}
+        end
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Until the dead index carries the tenant (TEN-1), a tenant filter reads the
+  # hooks of the page's hits.
+  defp tenant_hits(instance, hits, %{tenants: tenants}) when is_list(tenants) do
+    keys = Enum.map(hits, fn {_key, seq, _sink} -> Keys.hook(seq) end)
+
+    with {:ok, bins} <- Store.multi_get(instance, :hooks, keys) do
+      kept = for {hit, {:ok, bin}} <- Enum.zip(hits, bins), hook_tenant_in?(bin, tenants), do: hit
+      {:ok, kept}
+    end
+  end
+
+  defp tenant_hits(_instance, hits, _filter), do: {:ok, hits}
+
+  # The hook's tenant; an envelope without one belongs to `"default"`, as in
+  # `Envelope.idempotency_key/1`. A hook this node cannot decode names no
+  # tenant, so it matches none.
+  defp hook_tenant_in?(bin, tenants) do
+    case Envelope.from_binary(bin) do
+      {:ok, env} -> (env.tenant_id || "default") in tenants
+      {:error, _reason} -> false
     end
   end
 
@@ -598,40 +626,21 @@ defmodule Ankusa.Queue.Deliveries do
 
   @doc """
   The dead rows, newest first: `total` counts every match, `entries` holds the
-  first `:limit`. `opts`: `:source_id`, `:since`, `:limit`.
+  first `:limit`. `opts`: `:source_id`, `:since`, `:tenants` (only rows of
+  hooks owned by one of these tenants; `nil` is every tenant), `:limit`.
   """
   @spec dead(atom(), keyword()) ::
           {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}
-  # Trusted, internally written data (this node's own store rows); never request input.
-  # sobelow_skip ["Misc.BinToTerm"]
   def dead(instance, opts) do
     %{lo: lo, hi: hi} = Keys.family(:dead)
     limit = Keyword.fetch!(opts, :limit)
     filter = opts |> Keyword.take([:source_id, :since]) |> Map.new()
+    tenants = Keyword.get(opts, :tenants)
 
     scan =
-      Store.fold(
-        instance,
-        :dead,
-        {lo, hi},
-        {0, 0, []},
-        fn key, value, {total, kept_n, kept} = acc ->
-          {at, seq, sink} = Keys.decode_dead(key)
-          {source_id, id} = :erlang.binary_to_term(value)
-
-          cond do
-            not matches?(filter, source_id, id, at) ->
-              {:cont, acc}
-
-            kept_n < limit ->
-              {:cont, {total + 1, kept_n + 1, [{at, seq, sink, {source_id, id}} | kept]}}
-
-            true ->
-              {:cont, {total + 1, kept_n, kept}}
-          end
-        end,
-        reverse: true
-      )
+      if is_list(tenants),
+        do: dead_scan_tenants(instance, {lo, hi}, filter, tenants, limit),
+        else: dead_scan(instance, {lo, hi}, filter, limit)
 
     with {:ok, {total, _kept_n, kept}} <- scan,
          kept = Enum.reverse(kept),
@@ -675,6 +684,108 @@ defmodule Ankusa.Queue.Deliveries do
       end
 
       {:ok, %{total: total - length(orphans), entries: Enum.reverse(entries)}}
+    end
+  end
+
+  # `{total, kept_n, kept}` of the dead keys matching `filter`, newest first:
+  # every match is counted, the first `limit` are kept (as a reversed list).
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp dead_scan(instance, range, filter, limit) do
+    Store.fold(
+      instance,
+      :dead,
+      range,
+      {0, 0, []},
+      fn key, value, {total, kept_n, kept} = acc ->
+        {at, seq, sink} = Keys.decode_dead(key)
+        {source_id, id} = :erlang.binary_to_term(value)
+
+        cond do
+          not matches?(filter, source_id, id, at) ->
+            {:cont, acc}
+
+          kept_n < limit ->
+            {:cont, {total + 1, kept_n + 1, [{at, seq, sink, {source_id, id}} | kept]}}
+
+          true ->
+            {:cont, {total + 1, kept_n, kept}}
+        end
+      end,
+      reverse: true
+    )
+  end
+
+  # `dead_scan/4` limited to hooks owned by one of `tenants`. The dead index
+  # does not carry the tenant (TEN-1 will), so the keys that pass `filter` are
+  # checked against their hooks 1 000 at a time: the scan holds one
+  # chunk of keys, never the whole DLQ.
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp dead_scan_tenants(instance, range, filter, tenants, limit) do
+    scan =
+      Store.fold(
+        instance,
+        :dead,
+        range,
+        {{0, 0, []}, [], 0},
+        fn key, value, {acc, chunk, n} ->
+          {at, seq, sink} = Keys.decode_dead(key)
+          {source_id, id} = :erlang.binary_to_term(value)
+
+          if matches?(filter, source_id, id, at) do
+            chunk = [{at, seq, sink, {source_id, id}} | chunk]
+
+            if n + 1 < @source_chunk do
+              {:cont, {acc, chunk, n + 1}}
+            else
+              case tenant_step(instance, chunk, tenants, limit, acc) do
+                {:ok, acc} -> {:cont, {acc, [], 0}}
+                {:error, reason} -> {:halt, {:error, reason}}
+              end
+            end
+          else
+            {:cont, {acc, chunk, n}}
+          end
+        end,
+        reverse: true
+      )
+
+    case scan do
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:ok, {acc, chunk, _n}} -> tenant_step(instance, chunk, tenants, limit, acc)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Fold one chunk of dead keys (oldest first, as the reverse scan built it)
+  # into the `dead_scan/4` accumulator, keeping those whose hook belongs to
+  # `tenants`. A key whose hook is gone names no tenant and is left out.
+  defp tenant_step(_instance, [], _tenants, _limit, acc), do: {:ok, acc}
+
+  defp tenant_step(instance, chunk, tenants, limit, acc) do
+    entries = Enum.reverse(chunk)
+
+    with {:ok, bins} <-
+           Store.multi_get(
+             instance,
+             :hooks,
+             Enum.map(entries, fn {_, seq, _, _} -> Keys.hook(seq) end)
+           ) do
+      {:ok,
+       entries
+       |> Enum.zip(bins)
+       |> Enum.reduce(acc, fn
+         {entry, {:ok, bin}}, {total, kept_n, kept} = acc ->
+           cond do
+             not hook_tenant_in?(bin, tenants) -> acc
+             kept_n < limit -> {total + 1, kept_n + 1, [entry | kept]}
+             true -> {total + 1, kept_n, kept}
+           end
+
+         {_entry, :not_found}, acc ->
+           acc
+       end)}
     end
   end
 
