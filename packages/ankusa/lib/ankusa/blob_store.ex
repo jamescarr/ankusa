@@ -24,6 +24,13 @@ defmodule Ankusa.BlobStore do
   the full key is what the archive catalogue records, and `put`/`get`/
   `get_range`/`delete` take full keys verbatim. Changing `storage.key_prefix`
   therefore moves only new segments, never strands written ones.
+
+  ## Encryption at rest
+
+  The object-store adapters take an `:sse` option (`Ankusa.BlobStore.SSE`) that
+  asks the provider to encrypt every object a `put/4` writes, with a KMS key or
+  the provider's own. It is per store, so it covers the segment store, the
+  backup store and every claim store as each is configured.
   """
 
   alias Ankusa.Config
@@ -116,5 +123,24 @@ defmodule Ankusa.BlobStore do
   def resolve_config(%Config{backup: backup, storage: storage}, :backup) do
     {mod, opts} = Map.get(backup, :blob_store) || storage.blob_store
     {mod, opts, Map.get(storage, :key_prefix, "")}
+  end
+
+  @doc """
+  Check the `:sse` option of every blob store the config names
+  (`storage.blob_store`, `backup.blob_store`, `claim_check.blob_stores`).
+  """
+  @spec validate_config!(Config.t()) :: :ok
+  def validate_config!(%Config{storage: storage, backup: backup, claim_check: claim_check}) do
+    claim_stores =
+      claim_check.blob_stores
+      |> List.wrap()
+      |> Enum.with_index(fn store, index -> {"claim_check.blob_stores[#{index}]", store} end)
+
+    [{"storage.blob_store", storage.blob_store}, {"backup.blob_store", backup.blob_store}]
+    |> Kernel.++(claim_stores)
+    |> Enum.each(fn
+      {where, {mod, opts}} when is_atom(mod) -> Ankusa.BlobStore.SSE.validate!(mod, opts, where)
+      _unset_or_unknown -> :ok
+    end)
   end
 end

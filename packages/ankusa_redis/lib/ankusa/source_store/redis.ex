@@ -60,6 +60,18 @@ defmodule Ankusa.SourceStore.Redis do
   Redis. A Redis error on a write answers `{:error, :store_unavailable}`
   (the admin API's `503`), and nothing is written; reads keep serving the
   mirror.
+
+  ## Secrets at rest
+
+  With `secrets.kek` (or `secrets.kek_provider`) configured, the secret-bearing
+  fields of the `spec` in each hash entry are encrypted before the write
+  (`Ankusa.Crypto.Envelope`), so Redis, its persistence files and its backups
+  never hold a verify secret or a sink credential in the clear. Nodes decrypt
+  as they load; the mirror, and the admin API's merge-the-stored-secret
+  update, see plaintext. Every node of a namespace needs the same keys. An
+  entry a node holds no key for stops that node's *first* boot, and on a
+  later reload keeps its mirror and logs the entry on every tick.
+  `rewrap/1` moves every entry to the current key.
   """
 
   use Supervisor
@@ -113,6 +125,16 @@ defmodule Ankusa.SourceStore.Redis do
 
   @impl Ankusa.SourceStore
   defdelegate delete(instance, tenant, name), to: State
+
+  @doc """
+  Rewrite every entry under the current KEK (plaintext ones, and ones under a
+  `secrets.kek_previous` key). Returns `{:ok, %{rewrapped: n, current: m}}`.
+  """
+  @spec rewrap(atom()) ::
+          {:ok, %{rewrapped: non_neg_integer(), current: non_neg_integer()}}
+          | {:error, :store_unavailable}
+          | {:error, {:secrets, String.t(), term()}}
+  defdelegate rewrap(instance), to: State
 end
 
 defmodule Ankusa.SourceStore.Redis.TableOwner do
@@ -226,6 +248,7 @@ defmodule Ankusa.SourceStore.Redis.State do
 
   require Logger
 
+  alias Ankusa.Crypto.Envelope
   alias Ankusa.SourceStore.Redis.TableOwner
   alias Ankusa.SourceStore.Table
 
@@ -253,6 +276,25 @@ defmodule Ankusa.SourceStore.Redis.State do
   return {'ok', version}
   """
 
+  # Moves entries to the current key. KEYS: sources hash, version. ARGV, in
+  # threes: source id, the entry JSON that was read, the entry JSON to write.
+  # An entry another node changed since it was read is left for the next run.
+  @rewrap_sources """
+  local written = 0
+  for i = 1, #ARGV, 3 do
+    if redis.call('HGET', KEYS[1], ARGV[i]) == ARGV[i + 1] then
+      redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 2])
+      written = written + 1
+    end
+  end
+  if written == 0 then return {0, 0} end
+  local version = tonumber(redis.call('GET', KEYS[2]) or '0') + 1
+  redis.call('SET', KEYS[2], version)
+  return {written, version}
+  """
+
+  @rewrap_batch 100
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: server(Keyword.fetch!(opts, :instance)))
@@ -275,13 +317,42 @@ defmodule Ankusa.SourceStore.Redis.State do
   def delete(instance, tenant, name),
     do: GenServer.call(server(instance), {:delete, tenant, name}, @call_timeout)
 
+  @doc """
+  Rewrite every entry in Redis under the current KEK: entries still in
+  plaintext, and entries encrypted under a `secrets.kek_previous` key. Safe
+  beside other nodes (an entry that changed meanwhile is left for the next
+  run). Returns how many entries were rewritten and how many were already
+  current.
+  """
+  @spec rewrap(atom()) ::
+          {:ok, %{rewrapped: non_neg_integer(), current: non_neg_integer()}}
+          | {:error, :store_unavailable}
+          | {:error, {:secrets, String.t(), term()}}
+  def rewrap(instance), do: GenServer.call(server(instance), :rewrap, :infinity)
+
   # ── GenServer ───────────────────────────────────────────────────────────────
 
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    namespace = Keyword.fetch!(opts, :namespace)
     config = Ankusa.config(instance)
+
+    case Envelope.keyring(config.secrets) do
+      {:ok, keyring} ->
+        boot(opts, config, keyring)
+
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa_redis] source store could not resolve its secrets key: #{inspect(reason)}"
+        )
+
+        {:stop, {:secrets, reason}}
+    end
+  end
+
+  defp boot(opts, config, keyring) do
+    instance = Keyword.fetch!(opts, :instance)
+    namespace = Keyword.fetch!(opts, :namespace)
     {_mod, store_opts} = config.source_store
 
     case take_table(instance) do
@@ -291,6 +362,7 @@ defmodule Ankusa.SourceStore.Redis.State do
           namespace: namespace,
           table: table,
           decoder: Keyword.get(store_opts, :decoder),
+          keyring: keyring,
           conn: Ankusa.via(instance, :source_redis),
           pubsub: Ankusa.via(instance, :source_redis_pubsub),
           tick_ms: Keyword.fetch!(opts, :tick_ms),
@@ -387,6 +459,18 @@ defmodule Ankusa.SourceStore.Redis.State do
     end
   end
 
+  def handle_call(:rewrap, _from, state) do
+    with {:ok, flat} <- command(state, ["HGETALL", sources_key(state)]),
+         {:ok, plan, current} <- plan_rewrap(state, flat),
+         {:ok, written, version} <- write_rewrap(state, plan) do
+      state = resync_after_rewrap(state, written, version)
+      {:reply, {:ok, %{rewrapped: written, current: current + length(plan) - written}}, state}
+    else
+      {:error, {:secrets, _source_id, _reason}} = error -> {:reply, error, state}
+      {:error, reason} -> {:reply, {:error, :store_unavailable}, warn_unavailable(reason, state)}
+    end
+  end
+
   @impl true
   def handle_info(:tick, state) do
     state = sync(state)
@@ -464,13 +548,8 @@ defmodule Ankusa.SourceStore.Redis.State do
 
     with {:ok, [raw_version, flat]} <- transaction(state, commands),
          :ok <- not_emptied(state, raw_version, flat),
-         {:ok, version} <- parse_version(raw_version || "0") do
-      loaded =
-        flat
-        |> Enum.chunk_every(2)
-        |> Enum.flat_map(&load_entry(state, &1))
-        |> MapSet.new()
-
+         {:ok, version} <- parse_version(raw_version || "0"),
+         {:ok, loaded} <- load_entries(state, flat) do
       for {tenant, name} = key <- Table.stored_keys(state.table),
           not MapSet.member?(loaded, key),
           do: Table.delete_rows(state.table, tenant, name)
@@ -480,21 +559,109 @@ defmodule Ankusa.SourceStore.Redis.State do
     end
   end
 
+  defp load_entries(state, flat) do
+    flat
+    |> Enum.chunk_every(2)
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn pair, {:ok, loaded} ->
+      case load_entry(state, pair) do
+        {:ok, keys} -> {:cont, {:ok, Enum.into(keys, loaded)}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # An entry no key opens is not skipped like one that no longer decodes: at a
+  # first boot it stops the store, and on a later load it keeps the mirror (and
+  # the version) as they were, so every tick says so again.
   defp load_entry(state, [source_id, json]) do
     with {:ok, %{"tenant" => tenant, "name" => name, "spec" => spec}}
          when is_binary(tenant) and is_binary(name) and is_map(spec) <- JSON.decode(json),
-         true <- Table.load_spec(state.table, state.decoder, tenant, name, spec) do
-      [{tenant, name}]
+         {:ok, spec} <- unseal(state, source_id, spec) do
+      if Table.load_spec(state.table, state.decoder, tenant, name, spec),
+        do: {:ok, [{tenant, name}]},
+        else: {:ok, []}
     else
-      false ->
-        []
+      {:error, {:secrets, ^source_id, _reason}} = error ->
+        error
 
       _not_an_entry ->
         Logger.warning(
           "[ankusa_redis] skipping source #{source_id}: stored entry is not an object"
         )
 
-        []
+        {:ok, []}
+    end
+  end
+
+  defp unseal(state, source_id, spec) do
+    case Envelope.unseal(state.keyring, spec) do
+      {:ok, spec} ->
+        {:ok, spec}
+
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa_redis] source #{source_id} cannot be decrypted (#{inspect(reason)}); " <>
+            "configure secrets.kek, or secrets.kek_previous for the key it was written under"
+        )
+
+        {:error, {:secrets, source_id, reason}}
+    end
+  end
+
+  # ── rewrap ──────────────────────────────────────────────────────────────────
+
+  # `{:ok, [{source_id, read, to_write}], already_current}`. An entry that is not
+  # an object is left as it is, as a load leaves it.
+  defp plan_rewrap(state, flat) do
+    flat
+    |> Enum.chunk_every(2)
+    |> Enum.reduce_while({:ok, [], 0}, fn [source_id, json], {:ok, plan, current} ->
+      case rewrap_entry(state, source_id, json) do
+        {:ok, rewritten} -> {:cont, {:ok, [{source_id, json, rewritten} | plan], current}}
+        :current -> {:cont, {:ok, plan, current + 1}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp rewrap_entry(state, source_id, json) do
+    case JSON.decode(json) do
+      {:ok, %{"spec" => spec} = entry} when is_map(spec) ->
+        case Envelope.rewrap_spec(state.keyring, spec) do
+          {:ok, sealed} -> {:ok, JSON.encode!(%{entry | "spec" => sealed})}
+          :current -> :current
+          {:error, reason} -> {:error, {:secrets, source_id, reason}}
+        end
+
+      _not_an_entry ->
+        :current
+    end
+  end
+
+  defp write_rewrap(state, plan) do
+    plan
+    |> Enum.chunk_every(@rewrap_batch)
+    |> Enum.reduce_while({:ok, 0, 0}, fn chunk, {:ok, written, version} ->
+      args = Enum.flat_map(chunk, &Tuple.to_list/1)
+
+      case eval(state, @rewrap_sources, args) do
+        {:ok, [0, _version]} -> {:cont, {:ok, written, version}}
+        {:ok, [count, new_version]} -> {:cont, {:ok, written + count, new_version}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # The version moved, possibly more than once: tell the other nodes and
+  # re-read, rather than guess what this node's mirror should now say.
+  defp resync_after_rewrap(state, 0, _version), do: state
+
+  defp resync_after_rewrap(state, _written, version) do
+    broadcast(state, version)
+
+    case load(state) do
+      {:ok, state} -> state
+      {:error, reason} -> warn_unavailable(reason, state)
     end
   end
 
@@ -532,7 +699,7 @@ defmodule Ankusa.SourceStore.Redis.State do
 
       {:ok, json} ->
         case JSON.decode(json) do
-          {:ok, %{"spec" => spec}} when is_map(spec) -> {:ok, %{spec: spec}}
+          {:ok, %{"spec" => spec}} when is_map(spec) -> unseal_current(state, spec)
           _not_an_entry -> {:ok, nil}
         end
 
@@ -541,9 +708,23 @@ defmodule Ankusa.SourceStore.Redis.State do
     end
   end
 
+  # The merge reads the plain spec, as `Table.normalize/2` expects; an entry no
+  # key opens is a failed write (`store_unavailable`), never a merge against
+  # ciphertext.
+  defp unseal_current(state, spec) do
+    case Envelope.unseal(state.keyring, spec) do
+      {:ok, plain} -> {:ok, %{spec: plain}}
+      {:error, reason} -> {:error, {:secrets, reason}}
+    end
+  end
+
   defp write(state, stored, source, mode) do
     entry =
-      JSON.encode!(%{"tenant" => stored.tenant, "name" => stored.name, "spec" => stored.spec})
+      JSON.encode!(%{
+        "tenant" => stored.tenant,
+        "name" => stored.name,
+        "spec" => Envelope.seal(state.keyring, stored.spec)
+      })
 
     case eval(state, @put_source, [stored.source_id, entry, mode]) do
       {:ok, ["ok", version]} ->

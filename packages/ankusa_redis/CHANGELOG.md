@@ -6,6 +6,18 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.SourceStore.Redis` encrypts the secret-bearing fields of each stored
+  source spec with core's `secrets.kek` (`Ankusa.Crypto.Envelope`), so Redis,
+  its persistence files and its backups hold no verify secret or sink
+  credential in the clear. Nodes decrypt as they load; an update that omits the
+  secret merges Redis's decrypted copy. An entry no configured key opens stops
+  a node's first boot (the log names it) and, on a later reload, keeps the
+  mirror. `Ankusa.SourceStore.Redis.rewrap/1` moves plaintext and
+  previous-key entries to the current key, compare-and-set in batches, safe
+  beside other nodes. Requires the `ankusa` release with `secrets`.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

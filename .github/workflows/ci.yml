@@ -55,13 +55,16 @@ jobs:
       # `_build` also holds dialyzer's PLTs (`_build/plts`, see each mix.exs), so
       # this key — the OTP/Elixir pins in .mise.toml plus mix.lock — is the PLT
       # cache key: a run rebuilds a PLT only when the toolchain or a dep changed.
+      # The PLT also covers the path-dependency `ankusa`, so an adapter that
+      # calls a function core newly gained fails dialyzer against a stale PLT:
+      # bump the `v` below when that happens (SEC-4: `Ankusa.Crypto.Envelope`).
       - name: cache mix deps
         uses: actions/cache@v6
         with:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force

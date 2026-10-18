@@ -66,7 +66,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle egress)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix)
@@ -87,8 +87,11 @@ defmodule AnkusaServer.Config do
   @wal_keys ~w(type publish_timeout_ms)
   @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs)
   @blob_store_keys ~w(type root s3 gcs)
-  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token)
-  @gcs_keys ~w(bucket endpoint auth token)
+  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token sse)
+  @gcs_keys ~w(bucket endpoint auth token sse)
+  @sse_keys ~w(type key_id)
+  @sse_types %{"aes256" => :aes256, "kms" => :kms}
+  @secrets_keys ~w(kek kek_previous)
   @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
                        read_cache_bytes read_cache_max_entry_bytes tls auth)
@@ -395,6 +398,7 @@ defmodule AnkusaServer.Config do
         backup_section(doc) ++
         egress_section(doc) ++
         source_store_section(doc, egress) ++
+        secrets_section(doc) ++
         lifecycle_section(doc, egress)
 
     try do
@@ -411,6 +415,7 @@ defmodule AnkusaServer.Config do
       Ankusa.Dispatch.Pipeline.validate_config!(config)
       Ankusa.Queue.validate_config!(config)
       Ankusa.Store.Backup.validate_config!(config)
+      Ankusa.BlobStore.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
       Ankusa.HttpClient.Egress.validate_config!(config)
       config
@@ -844,13 +849,56 @@ defmodule AnkusaServer.Config do
     |> put_opt(:access_key_id, string_opt(s3, "access_key_id", path))
     |> put_opt(:secret_access_key, string_opt(s3, "secret_access_key", path))
     |> put_opt(:session_token, string_opt(s3, "session_token", path))
+    |> put_opt(:sse, sse_opt(s3, path))
   end
 
   defp gcs_opts!(gcs, path) do
     bucket = required_string!(gcs, "bucket", path)
 
-    ([bucket: bucket] |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))) ++
+    ([bucket: bucket]
+     |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))
+     |> put_opt(:sse, sse_opt(gcs, path))) ++
       gcp_auth!(gcs, path)
+  end
+
+  # `sse: {type: aes256 | kms, key_id: …}` on an `s3` or `gcs` section: the
+  # object store encrypts every object this store writes
+  # (`Ankusa.BlobStore.SSE` says what each provider does with it).
+  defp sse_opt(section, path) do
+    if section["sse"] == nil do
+      nil
+    else
+      sse_path = path ++ ["sse"]
+      sse = section!(section, "sse", @sse_keys, path)
+      type = required_string!(sse, "type", sse_path)
+      type = enum!(type, Map.keys(@sse_types), sse_path ++ ["type"])
+
+      [type: Map.fetch!(@sse_types, type)]
+      |> put_opt(:key_id, string_opt(sse, "key_id", sse_path))
+      |> Map.new()
+    end
+  end
+
+  # The key-encryption keys for secrets at rest (`Ankusa.Crypto.Envelope`).
+  # Both are operator-supplied through `${VAR}`: the file holds the reference,
+  # never the key. `kek_previous` is a list, or one comma-separated string, and
+  # may be empty (`${PREVIOUS_KEKS:-}`).
+  defp secrets_section(doc) do
+    path = ["secrets"]
+    secrets = section!(doc, "secrets", @secrets_keys, [])
+
+    previous =
+      case secrets["kek_previous"] do
+        empty when empty in [nil, [], ""] -> nil
+        keys -> string_list!(keys, path ++ ["kek_previous"])
+      end
+
+    [
+      secrets:
+        []
+        |> put_opt(:kek, string_opt(secrets, "kek", path))
+        |> put_opt(:kek_previous, previous)
+    ]
   end
 
   # `auth: metadata | token | none` (default metadata) on any GCP section.
