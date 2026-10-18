@@ -123,7 +123,12 @@ defmodule AnkusaServer.ConfigTest do
              read_max_inflight: 48,
              read_queue_max: 256,
              read_cache_bytes: 134_217_728,
-             read_cache_max_entry_bytes: 1_048_576
+             read_cache_max_entry_bytes: 1_048_576,
+             max_concurrent_reads: 1024,
+             ref_signing_keys: [],
+             ref_ttl_ms: nil,
+             accept_unsigned_refs: nil,
+             authorize: nil
            } = config.claim_check
   end
 
@@ -317,6 +322,66 @@ defmodule AnkusaServer.ConfigTest do
 
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message == "claim_check.read_timeout_ms must be a positive integer, got 0"
+  end
+
+  test "claim_check signing keys, ttl, unsigned policy and request cap land in core's config" do
+    path =
+      tmp_config("""
+      claim_check:
+        ref_signing_keys: ["#{String.duplicate("a", 16)}", "#{String.duplicate("b", 16)}"]
+        ref_ttl_ms: 3600000
+        accept_unsigned_refs: true
+        max_concurrent_reads: 0
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    cc = Config.load!(path: path, env: %{}).config.claim_check
+
+    assert cc.ref_signing_keys == [String.duplicate("a", 16), String.duplicate("b", 16)]
+
+    assert {cc.ref_ttl_ms, cc.accept_unsigned_refs, cc.max_concurrent_reads} ==
+             {3_600_000, true, 0}
+
+    # one comma-separated string, the form `${VAR}` carries
+    path =
+      tmp_config("""
+      claim_check: {ref_signing_keys: "#{String.duplicate("a", 16)}, #{String.duplicate("b", 16)}"}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    cc = Config.load!(path: path, env: %{}).config.claim_check
+    assert cc.ref_signing_keys == [String.duplicate("a", 16), String.duplicate("b", 16)]
+
+    # empty or null is "no signing"
+    for empty <- ["[]", "null", ~s("")] do
+      path =
+        tmp_config("""
+        claim_check: {ref_signing_keys: #{empty}, accept_unsigned_refs: null, ref_ttl_ms: null}
+        sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+        """)
+
+      cc = Config.load!(path: path, env: %{}).config.claim_check
+      assert {cc.ref_signing_keys, cc.accept_unsigned_refs, cc.ref_ttl_ms} == {[], nil, nil}
+    end
+  end
+
+  test "claim_check ref keys: core's ranges name a bad one" do
+    for {yaml, message} <- [
+          {"{ref_ttl_ms: 0}", "claim_check.ref_ttl_ms must be nil or a positive integer, got 0"},
+          {"{max_concurrent_reads: -1}",
+           "claim_check.max_concurrent_reads must be a non-negative integer, got -1"},
+          {"{accept_unsigned_refs: maybe}",
+           ~s(claim_check.accept_unsigned_refs: expected a boolean, got "maybe")}
+        ] do
+      path =
+        tmp_config("""
+        claim_check: #{yaml}
+        sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+        """)
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message, yaml
+    end
   end
 
   test "claim_check store/stores mistakes fail the load, naming the key" do

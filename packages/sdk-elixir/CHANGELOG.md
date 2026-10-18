@@ -8,6 +8,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Ankusa.SDK.ClaimRef.parse/1` and `Ankusa.SDK.ClaimCheck.redeem/3` accept
+  signed, expiring v2 refs
+  (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
+  parsed `path` carries `?exp=&sig=` and `redeem/3` requests it as is. The
+  gateway's `400 bad_signature` and `410 ref_expired` are an
+  `Ankusa.SDK.ClaimRejectedError`. The SDK never checks the signature or the
+  expiry.
 - `Ankusa.SDK.Webhook.receive_delivery/3`, the receiver-side decision on one
   HTTP-sink delivery (signature, then headers) without Plug. Options
   `:secrets`, `:allow_unsigned`, `:tolerance_seconds`, `:now`.

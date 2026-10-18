@@ -50,7 +50,13 @@ then runs every registered SDK's native runner.
 ### Inputs by operation
 
 - `parse_claim_ref`: `{"ref": string}` → `ok` is
-  `{"tenant_id", "claim_id", "path"}`.
+  `{"tenant_id", "claim_id", "path"}`. A v1 ref
+  (`urn:ankusa:claim:v1:<tenant>:<claim_id>`) gives the bare gateway path; a
+  v2 ref (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`,
+  `exp_unix` 1–12 decimal digits with no leading zero, `signature` exactly 43
+  characters of `[A-Za-z0-9_-]`) gives the same path followed by
+  `?exp=<exp_unix>&sig=<signature>`. No SDK checks the signature or the
+  expiry: the gateway does, and `redeem` sends the path as parsed.
 - `parse_headers`: `{"headers": {string: string}}` → `ok` is
   `{"id", "source", "tenant": string|null, "content_type": string|null,
   "dedupe_key": string|null, "replay_id": string|null,

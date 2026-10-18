@@ -141,6 +141,101 @@ defmodule Ankusa.ClaimCheckTest do
     assert {:error, :invalid_tenant} = ClaimCheck.check_in(inst, "../etc", [item("x", "b")])
   end
 
+  describe "signed refs" do
+    @key "claim-check-test-signing-key-0123"
+    @previous "claim-check-test-previous-key-4567"
+
+    defp sign_with(%{config: config}, keys, claim_check \\ %{}) do
+      cc = config.claim_check |> Map.merge(claim_check) |> Map.put(:ref_signing_keys, keys)
+      Ankusa.put_config(%{config | claim_check: cc})
+    end
+
+    test "without keys, check_in/4 mints v1 refs, and redeem/3 serves them", %{inst: inst} do
+      a = item("acme", "plain")
+      assert {:ok, [claim]} = checked_in(inst, [a])
+
+      assert %Ref{signature: nil, expires_at: nil} = claim.ref
+      assert Ref.to_string(claim.ref) =~ ":v1:"
+      assert {:ok, "plain"} = redeem(inst, claim)
+    end
+
+    test "with keys, check_in/4 mints v2 refs that expire ref_ttl_ms from now", ctx do
+      sign_with(ctx, [@key, @previous], %{ref_ttl_ms: 90_000})
+      before = System.system_time(:second)
+      assert {:ok, [claim]} = checked_in(ctx.inst, [item("acme", "signed")])
+
+      assert %Ref{signature: signature, expires_at: exp} = claim.ref
+      assert byte_size(signature) == 43
+      assert exp in (before + 90)..(System.system_time(:second) + 91)
+      assert Ref.to_string(claim.ref) =~ ":v2:acme:"
+      assert Ref.verify(claim.ref, [@key], before) == :ok
+      assert Ref.verify(claim.ref, [@previous], before) == {:error, :bad_signature}
+      assert {:ok, "signed"} = redeem(ctx.inst, claim)
+    end
+
+    test "the TTL is the retention when ref_ttl_ms is nil, else 30 days", ctx do
+      sign_with(ctx, [@key], %{retention_days: 2})
+      {:ok, [two_days]} = checked_in(ctx.inst, [item("acme", "a")])
+      assert_in_delta two_days.ref.expires_at, System.system_time(:second) + 2 * 86_400, 2
+
+      sign_with(ctx, [@key], %{retention_days: nil})
+      {:ok, [default]} = checked_in(ctx.inst, [item("acme", "b")])
+      assert_in_delta default.ref.expires_at, System.system_time(:second) + 30 * 86_400, 2
+    end
+
+    test "redeem/3 refuses an expired, forged or foreign-signed ref before reading", ctx do
+      sign_with(ctx, [@key])
+      {:ok, [claim]} = checked_in(ctx.inst, [item("acme", "guarded")])
+      bare = %Ref{tenant_id: "acme", claim_id: claim.ref.claim_id}
+      now = System.system_time(:second)
+
+      expired = Ref.sign(bare, @key, now - 1)
+      foreign = Ref.sign(bare, "a-key-nobody-configured-0000", now + 60)
+      forged = %{claim.ref | expires_at: claim.ref.expires_at + 1}
+
+      assert {:error, :ref_expired} = ClaimCheck.redeem(ctx.inst, expired, claim.sha256)
+      assert {:error, :bad_signature} = ClaimCheck.redeem(ctx.inst, foreign, claim.sha256)
+      assert {:error, :bad_signature} = ClaimCheck.redeem(ctx.inst, forged, claim.sha256)
+
+      # the URN a queue message carries goes through the same check
+      urn = Ref.to_string(expired)
+      assert {:error, :ref_expired} = ClaimCheck.redeem(ctx.inst, urn, claim.sha256)
+    end
+
+    test "a v1 ref is refused once keys are set, unless accept_unsigned_refs says so", ctx do
+      {:ok, [claim]} = checked_in(ctx.inst, [item("acme", "old ref")])
+      assert {:ok, "old ref"} = redeem(ctx.inst, claim)
+
+      sign_with(ctx, [@key])
+      assert {:error, :unsigned_ref} = redeem(ctx.inst, claim)
+
+      sign_with(ctx, [@key], %{accept_unsigned_refs: true})
+      assert {:ok, "old ref"} = redeem(ctx.inst, claim)
+
+      # explicit false refuses v1 even without keys' default saying so
+      sign_with(ctx, [@key], %{accept_unsigned_refs: false})
+      assert {:error, :unsigned_ref} = redeem(ctx.inst, claim)
+    end
+
+    test "a previous key still verifies after the rotation", ctx do
+      sign_with(ctx, [@previous])
+      {:ok, [claim]} = checked_in(ctx.inst, [item("acme", "rotated")])
+
+      sign_with(ctx, [@key, @previous])
+      assert {:ok, "rotated"} = redeem(ctx.inst, claim)
+
+      sign_with(ctx, [@key])
+      assert {:error, :bad_signature} = redeem(ctx.inst, claim)
+    end
+
+    defp checked_in(inst, items) do
+      results = ClaimCheck.check_in_batch(inst, items)
+      {:ok, for(item <- items, do: ok!(results[item.id]))}
+    end
+
+    defp ok!({:ok, claim}), do: claim
+  end
+
   describe "check_in_batch/2" do
     test "writes one object per tenant, and every ref redeems to its own body", ctx do
       use_store(ctx, [])
@@ -292,6 +387,63 @@ defmodule Ankusa.ClaimCheckTest do
                      ClaimCheck.validate_config!(Config.new(claim_check: %{key_layout: :hashed}))
                    end
     end
+
+    test "ref_signing_keys: a list of strings of at least 16 bytes; the error never echoes one" do
+      good = String.duplicate("k", 16)
+
+      assert :ok =
+               ClaimCheck.validate_config!(Config.new(claim_check: %{ref_signing_keys: [good]}))
+
+      for bad <- [["short"], [good, 42], "not-a-list", [nil]] do
+        error =
+          assert_raise ArgumentError, ~r/ref_signing_keys must be a list of strings/, fn ->
+            ClaimCheck.validate_config!(Config.new(claim_check: %{ref_signing_keys: bad}))
+          end
+
+        refute error.message =~ "short"
+      end
+    end
+
+    test "accept_unsigned_refs: false needs a key, or no ref could be minted or accepted" do
+      key = String.duplicate("k", 16)
+
+      assert_raise ArgumentError, ~r/accept_unsigned_refs is false but .* is empty/, fn ->
+        ClaimCheck.validate_config!(Config.new(claim_check: %{accept_unsigned_refs: false}))
+      end
+
+      assert :ok =
+               ClaimCheck.validate_config!(
+                 Config.new(claim_check: %{accept_unsigned_refs: false, ref_signing_keys: [key]})
+               )
+    end
+
+    test "authorize: nil or an exported {module, fun, args}" do
+      assert :ok = ClaimCheck.validate_config!(Config.new(claim_check: %{authorize: nil}))
+
+      assert :ok =
+               ClaimCheck.validate_config!(
+                 Config.new(claim_check: %{authorize: {__MODULE__, :allow_all, [:extra]}})
+               )
+
+      for bad <- [
+            {__MODULE__, :missing, []},
+            # arity counts the context argument
+            {__MODULE__, :allow_all, []},
+            {NoSuchModule, :allow, []}
+          ] do
+        assert_raise ArgumentError, ~r/claim_check.authorize .* is not defined/, fn ->
+          ClaimCheck.validate_config!(Config.new(claim_check: %{authorize: bad}))
+        end
+      end
+
+      for bad <- [:yes, {__MODULE__, :allow_all}, {"m", :f, []}, {__MODULE__, :allow_all, :x}] do
+        assert_raise ArgumentError, ~r/claim_check.authorize must be nil or/, fn ->
+          ClaimCheck.validate_config!(Config.new(claim_check: %{authorize: bad}))
+        end
+      end
+    end
+
+    def allow_all(_context, _extra), do: :ok
   end
 
   describe "a dedicated claim store" do

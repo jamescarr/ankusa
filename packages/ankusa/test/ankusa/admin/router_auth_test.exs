@@ -43,6 +43,8 @@ defmodule Ankusa.Admin.RouterAuthTest do
   ]
 
   @every_scope Principal.scopes()
+  @current_ref_key "current-ref-signing-key-aaaa1111"
+  @previous_ref_key "previous-ref-signing-key-bbbb2222"
 
   defp token(id, plain, scopes), do: %{id: id, sha256: Token.hash(plain), scopes: scopes}
 
@@ -69,7 +71,8 @@ defmodule Ankusa.Admin.RouterAuthTest do
     config =
       test_config(
         roles: [:edge, :dispatch],
-        admin: %{enabled: true, port: 0, auth: %{mode: :token, tokens: tokens}}
+        admin: %{enabled: true, port: 0, auth: %{mode: :token, tokens: tokens}},
+        claim_check: %{ref_signing_keys: [@current_ref_key, @previous_ref_key]}
       )
 
     put_config(config)
@@ -233,5 +236,14 @@ defmodule Ankusa.Admin.RouterAuthTest do
 
     assert "tenant:*" in scopes
     refute conn.resp_body =~ Token.hash("operator")
+  end
+
+  test "/v1/config hides every claim ref signing key and keeps their count", %{inst: inst} do
+    conn = call(inst, :get, "/v1/config", "operator")
+    assert %{"claim_check" => claim_check} = JSON.decode!(conn.resp_body)
+
+    assert claim_check["ref_signing_keys"] == ["[REDACTED]", "[REDACTED]"]
+    refute conn.resp_body =~ @current_ref_key
+    refute conn.resp_body =~ @previous_ref_key
   end
 end

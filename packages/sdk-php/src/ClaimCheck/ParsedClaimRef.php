@@ -16,11 +16,18 @@ final readonly class ParsedClaimRef
      */
     private const string PATTERN = '~\Aurn:ankusa:claim:v1:(?<tenant_id>[A-Za-z0-9_-]{1,64}):(?<claim_id>[0-7][0-9A-HJKMNP-TV-Z]{25})\z~';
 
+    /**
+     * The signed form: `<exp_unix>` is a decimal of 1-12 digits with no
+     * leading zero, `<signature>` 43 unpadded base64url characters. The
+     * gateway checks the signature; the SDK only carries it.
+     */
+    private const string PATTERN_V2 = '~\Aurn:ankusa:claim:v2:(?<tenant_id>[A-Za-z0-9_-]{1,64}):(?<claim_id>[0-7][0-9A-HJKMNP-TV-Z]{25}):(?<exp>[1-9][0-9]{0,11}):(?<sig>[A-Za-z0-9_-]{43})\z~';
+
     public function __construct(
         public string $tenantId,
         /** Canonical (uppercase) ULID. */
         public string $claimId,
-        /** `/v1/claims/{tenant_id}/{claim_id}`. */
+        /** `/v1/claims/{tenant_id}/{claim_id}`, then `?exp={exp_unix}&sig={signature}` for a v2 ref. */
         public string $path,
     ) {}
 
@@ -30,6 +37,13 @@ final readonly class ParsedClaimRef
      */
     public static function parse(string $ref): self
     {
+        if (preg_match(self::PATTERN_V2, $ref, $matches) === 1) {
+            $tenantId = (string) $matches['tenant_id'];
+            $claimId = (string) $matches['claim_id'];
+
+            return new self($tenantId, $claimId, "/v1/claims/{$tenantId}/{$claimId}?exp={$matches['exp']}&sig={$matches['sig']}");
+        }
+
         if (preg_match(self::PATTERN, $ref, $matches) !== 1) {
             throw new InvalidClaimRefError("invalid claim-check ref: {$ref}");
         }
