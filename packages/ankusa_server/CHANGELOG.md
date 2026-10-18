@@ -8,6 +8,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Signed, expiring claim refs (SEC-11).** `claim_check` takes
+  `ref_signing_keys` (a list, or a comma-separated string for `${VAR}`; each
+  at least 16 bytes, `[current, previous...]`), `ref_ttl_ms`,
+  `accept_unsigned_refs` and `max_concurrent_reads` (1024). With keys, refs
+  are v2 (`urn:ankusa:claim:v2:...`), the gateway refuses a forged one (`400
+  bad_signature`) or an expired one (`410 ref_expired`) and, unless told
+  otherwise, a v1 one (`400 unsigned_ref`). `claim_check.authorize` is
+  Elixir config only. See `config-examples/reference.yml`.
 - **Signed, attested image (SEC-8).** Every published image now carries an
   SPDX SBOM and a SLSA provenance attestation (`mode=max`) for `linux/amd64`
   and `linux/arm64`, and its index digest is signed keylessly with cosign by

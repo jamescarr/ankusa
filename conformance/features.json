@@ -29,6 +29,8 @@
   ],
   "features": [
     {"id": "claim_ref.parse", "description": "Parse urn:ankusa:claim:v1:<tenant>:<claim_id> into tenant_id, claim_id, and the /v1/claims/{tenant_id}/{claim_id} path; anything else raises InvalidClaimRefError."},
+    {"id": "claim_ref.v2", "description": "Parse urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature> (exp_unix: decimal, 1-12 digits, no leading zero; signature: 43 unpadded base64url characters) into the same tenant_id and claim_id, with the path /v1/claims/{tenant_id}/{claim_id}?exp={exp_unix}&sig={signature}. The SDK never verifies the signature: the gateway does. Any other segment count, exp or signature shape, or version raises InvalidClaimRefError; a message's claim in either form passes the same parse."},
+    {"id": "claim_check.redeem.signed", "description": "Redeeming a v2 ref requests the path with its ?exp=&sig= query exactly as parse_claim_ref returns it; the gateway's 400 bad_signature and 410 ref_expired are ClaimRejectedError(status, body), and 503 overloaded is ClaimCheckUnavailableError (retryable)."},
     {"id": "claim_check.redeem", "description": "GET /v1/claims/{tenant_id}/{claim_id} and return the body bytes verbatim (text, binary, empty)."},
     {"id": "claim_check.redeem.input_validation", "description": "A malformed ref, or a sha256 that isn't 64 lowercase hex chars, raises InvalidClaimRefError before any request is made."},
     {"id": "claim_check.redeem.integrity", "description": "Returned bytes are verified against the expected sha256; a mismatch raises ClaimIntegrityError."},

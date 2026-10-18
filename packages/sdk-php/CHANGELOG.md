@@ -6,6 +6,15 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ParsedClaimRef::parse()` and `ClaimCheckClient::redeem()` accept signed,
+  expiring v2 refs
+  (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
+  parsed `path` carries `?exp=&sig=` and `redeem()` requests it as is. The
+  gateway's `400 bad_signature` and `410 ref_expired` are a
+  `ClaimRejectedError`. The SDK never checks the signature or the expiry.
+
 ### Changed
 
 - Accepts `guzzlehttp/guzzle ^8.2` and `guzzlehttp/psr7 ^3.1` as well as

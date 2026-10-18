@@ -96,7 +96,8 @@ defmodule AnkusaServer.Config do
   @secrets_keys ~w(kek kek_previous)
   @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
-                       read_cache_bytes read_cache_max_entry_bytes tls auth)
+                       read_cache_bytes read_cache_max_entry_bytes max_concurrent_reads
+                       ref_signing_keys ref_ttl_ms accept_unsigned_refs tls auth)
   @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
@@ -950,9 +951,29 @@ defmodule AnkusaServer.Config do
           :read_cache_max_entry_bytes,
           int_opt(claim_check, "read_cache_max_entry_bytes", path)
         )
+        |> put_opt(:max_concurrent_reads, int_opt(claim_check, "max_concurrent_reads", path))
+        |> put_opt(:ref_signing_keys, ref_signing_keys(claim_check, path))
+        |> put_opt(:ref_ttl_ms, int_opt(claim_check, "ref_ttl_ms", path))
+        |> put_opt(
+          :accept_unsigned_refs,
+          nullable_bool_opt(claim_check, "accept_unsigned_refs", path)
+        )
         |> put_opt(:tls, tls_opt(claim_check, path))
         |> put_opt(:auth, auth_opt(claim_check, path))
     ]
+  end
+
+  # `[current, previous...]`: a list, or one comma-separated string (`${VAR}`).
+  # Empty or null leaves the key unset, which means no signing.
+  defp ref_signing_keys(claim_check, path) do
+    case claim_check["ref_signing_keys"] do
+      empty when empty in [nil, [], ""] -> nil
+      keys -> string_list!(keys, path ++ ["ref_signing_keys"])
+    end
+  end
+
+  defp nullable_bool_opt(map, key, path) do
+    if map[key] == nil, do: nil, else: bool_opt(map, key, path)
   end
 
   # `store` (one mapping) and `stores` (a list of them, in failover order) both

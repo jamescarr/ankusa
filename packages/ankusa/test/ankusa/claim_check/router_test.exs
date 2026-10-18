@@ -457,4 +457,320 @@ defmodule Ankusa.ClaimCheck.RouterTest do
       assert authed_call(inst, :get, path, "guess").status == 401
     end
   end
+
+  describe "signed refs" do
+    @key "router-test-signing-key-0123456789"
+    @previous "router-test-previous-key-9876543210"
+
+    defp signed_call(inst, method, path, bearer \\ "acme-reader") do
+      conn =
+        method
+        |> Plug.Test.conn(path, "")
+        |> Plug.Conn.put_req_header("authorization", "Bearer " <> bearer)
+
+      Router.call(conn, Router.init(instance: inst))
+    end
+
+    setup do
+      inst = :"ccrs#{System.unique_integer([:positive])}"
+      dir = Ankusa.TestHelpers.unique_data_dir(inst)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      tokens = [
+        token("acme-reader", ["claims:read", "tenant:acme"]),
+        token("any-reader", ["claims:read", "tenant:*"])
+      ]
+
+      config =
+        Config.new(
+          instance: inst,
+          data_dir: dir,
+          roles: [:claim_check],
+          claim_check: %{
+            ref_signing_keys: [@key, @previous],
+            auth: %{mode: :token, tokens: tokens}
+          }
+        )
+
+      Ankusa.put_config(config)
+
+      {:ok, acme} = ClaimCheck.check_in(inst, "acme", [%{id: "a", body: "acme bytes"}])
+      {:ok, globex} = ClaimCheck.check_in(inst, "globex", [%{id: "g", body: "globex bytes"}])
+
+      %{inst: inst, config: config, acme: acme["a"].ref, globex: globex["g"].ref}
+    end
+
+    defp resign(ref, key, expires_at),
+      do: Ref.sign(%Ref{tenant_id: ref.tenant_id, claim_id: ref.claim_id}, key, expires_at)
+
+    test "a gateway with keys mints v2 refs, and their path redeems", %{inst: inst, acme: acme} do
+      assert %Ref{signature: signature, expires_at: exp} = acme
+      assert is_binary(signature) and exp > System.system_time(:second)
+      assert Ref.path(acme) =~ "?exp=#{exp}&sig=#{signature}"
+
+      for method <- [:get, :head] do
+        assert signed_call(inst, method, Ref.path(acme)).status == 200
+      end
+
+      assert signed_call(inst, :get, Ref.path(acme)).resp_body == "acme bytes"
+    end
+
+    test "a ref signed with the previous key is still served", %{inst: inst, acme: acme} do
+      ref = resign(acme, @previous, System.system_time(:second) + 60)
+      assert signed_call(inst, :get, Ref.path(ref)).status == 200
+    end
+
+    test "an expired signed ref is 410, for GET and HEAD, and reads nothing", %{
+      inst: inst,
+      acme: acme
+    } do
+      ref = resign(acme, @key, System.system_time(:second) - 1)
+
+      for method <- [:get, :head] do
+        conn = signed_call(inst, method, Ref.path(ref))
+        assert {conn.status, JSON.decode!(conn.resp_body)} == {410, %{"error" => "ref_expired"}}
+      end
+    end
+
+    test "a tampered signature, a swapped claim or expiry, or a foreign key is 400", %{
+      inst: inst,
+      acme: acme
+    } do
+      exp = System.system_time(:second) + 60
+      good = resign(acme, @key, exp)
+      <<first::binary-size(1), rest::binary>> = good.signature
+      flipped = if(first == "A", do: "B", else: "A") <> rest
+      other_claim = Ref.claim_id(elem(Ref.locate(acme.claim_id), 1), 7)
+
+      for path <- [
+            "/v1/claims/acme/#{acme.claim_id}?exp=#{exp}&sig=#{flipped}",
+            # the signature is for another claim, and for another expiry
+            "/v1/claims/acme/#{other_claim}?exp=#{exp}&sig=#{good.signature}",
+            "/v1/claims/acme/#{acme.claim_id}?exp=#{exp + 1}&sig=#{good.signature}",
+            Ref.path(resign(acme, "some-other-signing-key-0123456789", exp))
+          ] do
+        conn = signed_call(inst, :get, path)
+        assert {conn.status, error(conn)} == {400, "bad_signature"}, path
+      end
+    end
+
+    test "an expired ref with a forged signature is 400, not 410", %{inst: inst, acme: acme} do
+      forged = resign(acme, "some-other-signing-key-0123456789", System.system_time(:second) - 5)
+      conn = signed_call(inst, :get, Ref.path(forged))
+      assert {conn.status, error(conn)} == {400, "bad_signature"}
+    end
+
+    test "exp without sig, sig without exp, and values out of grammar are 400", %{
+      inst: inst,
+      acme: acme
+    } do
+      base = "/v1/claims/acme/#{acme.claim_id}"
+
+      for query <- [
+            "?exp=#{acme.expires_at}",
+            "?sig=#{acme.signature}",
+            "?exp=abc&sig=#{acme.signature}",
+            "?exp=#{acme.expires_at}&sig=short",
+            "?exp[]=1&sig=#{acme.signature}"
+          ] do
+        conn = signed_call(inst, :get, base <> query)
+        assert {conn.status, error(conn)} == {400, "bad_signature"}, query
+      end
+    end
+
+    test "an unsigned v1 path is 400 unless accept_unsigned_refs is on", %{
+      inst: inst,
+      config: config,
+      acme: acme
+    } do
+      path = "/v1/claims/acme/#{acme.claim_id}"
+      conn = signed_call(inst, :get, path)
+      assert {conn.status, error(conn)} == {400, "unsigned_ref"}
+
+      Ankusa.put_config(%{
+        config
+        | claim_check: %{config.claim_check | accept_unsigned_refs: true}
+      })
+
+      assert signed_call(inst, :get, path).status == 200
+    end
+
+    test "authorization comes first: another tenant's credential is 403, whatever the ref", %{
+      inst: inst,
+      globex: globex
+    } do
+      assert signed_call(inst, :get, Ref.path(globex)).status == 403
+
+      expired = resign(globex, @key, System.system_time(:second) - 1)
+      conn = signed_call(inst, :get, Ref.path(expired))
+      assert {conn.status, error(conn)} == {403, "forbidden"}
+
+      conn = signed_call(inst, :get, Ref.path(globex), "any-reader")
+      assert {conn.status, conn.resp_body} == {200, "globex bytes"}
+    end
+
+    test "every refusal after authorization is on the gateway event", %{inst: inst, acme: acme} do
+      test = self()
+      handler = "router-signed-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :claim_check, :gateway],
+        fn _event, _measurements, meta, _ ->
+          if meta.instance == inst, do: send(test, {:gateway, meta.status})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      signed_call(inst, :get, Ref.path(resign(acme, @key, System.system_time(:second) - 1)))
+      assert_received {:gateway, 410}
+      signed_call(inst, :get, "/v1/claims/acme/#{acme.claim_id}")
+      assert_received {:gateway, 400}
+    end
+  end
+
+  describe "claim_check.authorize" do
+    defmodule Gate do
+      def allow(%{principal: principal, tenant_id: tenant, claim_id: claim_id, conn: conn}, only) do
+        send(self(), {:asked, principal.id, tenant, claim_id, conn.method})
+        if tenant == only, do: :ok, else: {:error, :forbidden}
+      end
+    end
+
+    setup %{config: config, inst: inst} do
+      {:ok, acme} = ClaimCheck.check_in(inst, "acme", [%{id: "a", body: "acme bytes"}])
+      {:ok, globex} = ClaimCheck.check_in(inst, "globex", [%{id: "g", body: "globex bytes"}])
+
+      Ankusa.put_config(%{
+        config
+        | claim_check: %{config.claim_check | authorize: {Gate, :allow, ["acme"]}}
+      })
+
+      %{acme: Ref.path(acme["a"].ref), globex: Ref.path(globex["g"].ref)}
+    end
+
+    test "is asked before anything is read, with the principal, tenant, claim and conn", %{
+      inst: inst,
+      acme: acme
+    } do
+      conn = call(inst, :get, acme)
+      assert {conn.status, conn.resp_body} == {200, "acme bytes"}
+      assert_received {:asked, "anonymous", "acme", claim_id, "GET"}
+      assert acme == "/v1/claims/acme/#{claim_id}"
+    end
+
+    test "a refusal is a 403 that names no scope, and the claim stays unread", %{
+      inst: inst,
+      globex: globex
+    } do
+      for method <- [:get, :head] do
+        conn = call(inst, method, globex)
+        assert conn.status == 403
+        refute conn.resp_body =~ "globex bytes"
+      end
+
+      assert JSON.decode!(call(inst, :get, globex).resp_body) == %{"error" => "forbidden"}
+    end
+
+    test "replaces the built-in scope check: a token without claims:read is up to the hook", %{
+      config: config,
+      inst: inst,
+      acme: acme
+    } do
+      tokens = [
+        %{id: "writer", sha256: Ankusa.Admin.Auth.Token.hash("writer"), scopes: ["sources:write"]}
+      ]
+
+      Ankusa.put_config(%{
+        config
+        | claim_check: %{
+            config.claim_check
+            | authorize: {Gate, :allow, ["acme"]},
+              auth: %{config.claim_check.auth | mode: :token, tokens: tokens}
+          }
+      })
+
+      conn =
+        :get
+        |> Plug.Test.conn(acme, "")
+        |> Plug.Conn.put_req_header("authorization", "Bearer writer")
+        |> Router.call(Router.init(instance: inst))
+
+      assert conn.status == 200
+      assert_received {:asked, "writer", "acme", _claim_id, "GET"}
+    end
+  end
+
+  describe "claim_check.max_concurrent_reads" do
+    setup %{inst: inst} do
+      start_reader(inst, %{max_concurrent_reads: 1})
+      %{path: Ref.path(check_in(inst, "found"))}
+    end
+
+    defp hold_slot(inst) do
+      parent = self()
+
+      pid =
+        spawn(fn ->
+          :ok = Reader.admit(inst, 1)
+          send(parent, :admitted)
+          Process.sleep(:infinity)
+        end)
+
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      assert_receive :admitted
+      pid
+    end
+
+    test "a request past the limit is 503 overloaded with a jittered Retry-After", %{
+      inst: inst,
+      path: path
+    } do
+      assert call(inst, :get, path).status == 200
+      hold_slot(inst)
+
+      for method <- [:get, :head] do
+        conn = call(inst, method, path)
+        assert conn.status == 503
+        assert Plug.Conn.get_resp_header(conn, "retry-after") in [["1"], ["2"], ["3"]]
+      end
+
+      assert JSON.decode!(call(inst, :get, path).resp_body) == %{"error" => "overloaded"}
+    end
+
+    test "a finished request gives its slot back", %{inst: inst, path: path} do
+      for _ <- 1..5, do: assert(call(inst, :get, path).status == 200)
+      assert :ets.info(:"ankusa_claim_gate_#{inst}", :size) == 0
+    end
+
+    test "a request process killed mid-request leaks no slot: the reader's tick drops it", %{
+      inst: inst,
+      path: path
+    } do
+      holder = hold_slot(inst)
+      assert call(inst, :get, path).status == 503
+
+      Process.exit(holder, :kill)
+      reader = Ankusa.whereis(inst, :claim_reader)
+      send(reader, :tick)
+      :sys.get_state(reader)
+
+      assert call(inst, :get, path).status == 200
+    end
+
+    test "the gate refuses a bad ref before it takes a slot", %{inst: inst, path: path} do
+      conn = call(inst, :get, path <> "?exp=1")
+      assert conn.status == 400
+      assert :ets.info(:"ankusa_claim_gate_#{inst}", :size) == 0
+    end
+
+    test "0 means no limit", %{inst: inst, path: path} do
+      config = Ankusa.config(inst)
+      Ankusa.put_config(%{config | claim_check: %{config.claim_check | max_concurrent_reads: 0}})
+      hold_slot(inst)
+      assert call(inst, :get, path).status == 200
+    end
+  end
 end

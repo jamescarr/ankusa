@@ -1,7 +1,11 @@
-//! The claim-check ref: `urn:ankusa:claim:v1:<tenant>:<claim_id>`.
+//! The claim-check ref: `urn:ankusa:claim:v1:<tenant>:<claim_id>`, or the
+//! signed, expiring `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`.
 
-/// The ref's prefix: everything before the tenant.
+/// The v1 ref's prefix: everything before the tenant.
 const PREFIX: &str = "urn:ankusa:claim:v1:";
+
+/// The v2 ref's prefix: everything before the tenant.
+const PREFIX_V2: &str = "urn:ankusa:claim:v2:";
 
 /// A claim-check ref, split into the parts the gateway path is built from.
 ///
@@ -10,6 +14,9 @@ const PREFIX: &str = "urn:ankusa:claim:v1:";
 pub struct ParsedClaimRef<'a> {
     tenant_id: &'a str,
     claim_id: &'a str,
+    /// A v2 ref's expiry (Unix seconds) and signature. The gateway checks
+    /// both; the SDK only carries them.
+    proof: Option<(&'a str, &'a str)>,
 }
 
 impl<'a> ParsedClaimRef<'a> {
@@ -26,20 +33,30 @@ impl<'a> ParsedClaimRef<'a> {
     }
 
     /// The gateway path that returns the claim's bytes:
-    /// `/v1/claims/{tenant_id}/{claim_id}`.
+    /// `/v1/claims/{tenant_id}/{claim_id}`, followed by
+    /// `?exp={exp_unix}&sig={signature}` for a v2 ref.
     #[must_use]
     pub fn path(&self) -> String {
-        format!("/v1/claims/{}/{}", self.tenant_id, self.claim_id)
+        match self.proof {
+            None => format!("/v1/claims/{}/{}", self.tenant_id, self.claim_id),
+            Some((exp, sig)) => format!(
+                "/v1/claims/{}/{}?exp={exp}&sig={sig}",
+                self.tenant_id, self.claim_id
+            ),
+        }
     }
 }
 
-/// Parses `urn:ankusa:claim:v1:<tenant>:<claim_id>`.
+/// Parses `urn:ankusa:claim:v1:<tenant>:<claim_id>` and
+/// `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`.
 ///
 /// The tenant is 1–64 characters of `A-Za-z0-9_-`, and the claim id is a
 /// canonical 26-character Crockford base32 ULID (`0-7` first, uppercase, and
-/// with `I`, `L`, `O`, and `U` never used). Anything else — an extra `:`
-/// segment, a lowercase or 25-character ULID, a trailing newline — is
-/// refused.
+/// with `I`, `L`, `O`, and `U` never used). A v2 ref's `exp_unix` is a decimal
+/// of 1–12 digits with no leading zero, and its signature is 43 unpadded
+/// base64url characters; neither is checked here, the gateway does. Anything
+/// else — an extra `:` segment, a lowercase or 25-character ULID, a trailing
+/// newline — is refused.
 ///
 /// # Errors
 ///
@@ -49,10 +66,24 @@ pub fn parse_claim_ref(claim_ref: &str) -> Result<ParsedClaimRef<'_>, InvalidCla
     let invalid = || InvalidClaimRefError {
         input: claim_ref.to_owned(),
     };
-    let rest = claim_ref.strip_prefix(PREFIX).ok_or_else(invalid)?;
-    // No second `:` may follow: the claim id's charset has no `:`, so an extra
-    // segment fails below rather than being silently truncated here.
-    let (tenant_id, claim_id) = rest.split_once(':').ok_or_else(invalid)?;
+    let (rest, signed) = match claim_ref.strip_prefix(PREFIX_V2) {
+        Some(rest) => (rest, true),
+        None => (claim_ref.strip_prefix(PREFIX).ok_or_else(invalid)?, false),
+    };
+    // No second `:` may follow the claim id of a v1 ref, nor a third the
+    // signature of a v2 one: neither charset has a `:`, so an extra segment
+    // fails below rather than being silently truncated here.
+    let (tenant_id, rest) = rest.split_once(':').ok_or_else(invalid)?;
+    let (claim_id, proof) = if signed {
+        let (claim_id, rest) = rest.split_once(':').ok_or_else(invalid)?;
+        let (exp, sig) = rest.split_once(':').ok_or_else(invalid)?;
+        if !is_exp(exp) || !is_signature(sig) {
+            return Err(invalid());
+        }
+        (claim_id, Some((exp, sig)))
+    } else {
+        (rest, None)
+    };
 
     let tenant_ok = !tenant_id.is_empty()
         && tenant_id.len() <= 64
@@ -65,7 +96,24 @@ pub fn parse_claim_ref(claim_ref: &str) -> Result<ParsedClaimRef<'_>, InvalidCla
     Ok(ParsedClaimRef {
         tenant_id,
         claim_id,
+        proof,
     })
+}
+
+/// A v2 ref's expiry: 1–12 decimal digits, the first not `0`.
+fn is_exp(exp: &str) -> bool {
+    !exp.is_empty()
+        && exp.len() <= 12
+        && !exp.starts_with('0')
+        && exp.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// A v2 ref's signature: 43 base64url characters, unpadded.
+fn is_signature(sig: &str) -> bool {
+    sig.len() == 43
+        && sig
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// A canonical Crockford base32 ULID: 26 characters, first one `0`–`7`,
@@ -136,5 +184,47 @@ mod tests {
         let claim_ref = format!("urn:ankusa:claim:v1:{tenant}:01M39VMD8RA3C5HR4RBV67Y002");
         let parsed = parse_claim_ref(&claim_ref).expect("valid ref");
         assert_eq!(parsed.tenant_id().len(), 64);
+    }
+
+    const SIG: &str = "MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac";
+
+    fn v2(tenant: &str, exp: &str, sig: &str) -> String {
+        format!("urn:ankusa:claim:v2:{tenant}:01M39VMD8RA3C5HR4RBV67Y002:{exp}:{sig}")
+    }
+
+    #[test]
+    fn parses_a_signed_ref_and_carries_the_proof_in_the_path() {
+        let claim_ref = v2("acme", "1790345000", SIG);
+        let parsed = parse_claim_ref(&claim_ref).expect("valid v2 ref");
+        assert_eq!(parsed.tenant_id(), "acme");
+        assert_eq!(parsed.claim_id(), "01M39VMD8RA3C5HR4RBV67Y002");
+        assert_eq!(
+            parsed.path(),
+            format!("/v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002?exp=1790345000&sig={SIG}")
+        );
+    }
+
+    #[test]
+    fn rejects_a_signed_ref_outside_the_grammar() {
+        let bad = [
+            "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002".to_owned(),
+            "urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000".to_owned(),
+            format!("{}:extra", v2("acme", "1790345000", SIG)),
+            v2("acme", "0", SIG),
+            v2("acme", "01790345000", SIG),
+            v2("acme", "1000000000000", SIG),
+            v2("acme", "-1", SIG),
+            v2("acme", "soon", SIG),
+            v2("acme", "1", &SIG[..42]),
+            v2("acme", "1", &format!("{SIG}A")),
+            v2("acme", "1", &format!("{SIG}=")),
+            v2("acme", "1", &SIG.replace('A', "+")),
+            v2("bad.tenant", "1", SIG),
+            format!("{}\n", v2("acme", "1", SIG)),
+            v2("acme", "1", SIG).replace(":v2:", ":v3:"),
+        ];
+        for claim_ref in bad {
+            assert!(parse_claim_ref(&claim_ref).is_err(), "accepted {claim_ref:?}");
+        }
     }
 }

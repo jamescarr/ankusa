@@ -249,7 +249,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/sink/http.ex`, `packages/sdk-elixir/lib/ankusa/sdk/receiver.ex`, `conformance/features.json`, `conformance/cases/`.
   *Evidence:* —
 
-- [ ] **SEC-11 — Claim gateway authorization and signed, expiring refs** · P0 · Deps: SEC-1
+- [x] **SEC-11 — Claim gateway authorization and signed, expiring refs** · P0 · Deps: SEC-1
   *Why:* the gateway has no auth/TLS/rate limit and refs are unexpiring bearer strings with 64 random bits whose tenant is only a path segment (`claim_check/router.ex:1-45`, `claim_check/ref.ex:71-88`); a leaked queue message grants reads until retention.
   *Change:* `claim_check.authorize: {mod, fun, args}` called before `locate` with `%{principal, tenant_id, claim_id, conn}`; default (when `claim_check.auth.mode != :none`) requires `claims:read` and `tenant:<t>`/`tenant:*`. Ref v2: `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<base64url hmac-sha256>` signed with `claim_check.ref_signing_keys: [current, previous]`, TTL `claim_check.ref_ttl_ms` (default = retention); `Ref.parse/1` accepts v1 only with `claim_check.accept_unsigned_refs: true`; expired → `410`; `claim_check.max_concurrent_reads` shedding with `503` + `Retry-After`. SDKs parse v2 (conformance `ref.v2` cases).
   *Done when:* tenant-A credential on a tenant-B path is 403; an expired signed ref is 410; a tampered signature is 400; all nine SDKs parse v2.

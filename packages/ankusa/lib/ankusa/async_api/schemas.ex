@@ -93,7 +93,7 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         },
         "claim" => %{
           "type" => "string",
-          "pattern" => "^urn:ankusa:claim:v1:[A-Za-z0-9_-]{1,64}:.+$",
+          "pattern" => "^urn:ankusa:claim:v[12]:[A-Za-z0-9_-]{1,64}:.+$",
           "description" => "Claim-check reference to the body, redeemable at the claim-check API."
         },
         "sha256" => %{

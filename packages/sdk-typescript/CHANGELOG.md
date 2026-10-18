@@ -6,6 +6,16 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `parseClaimRef` and `redeem` accept signed, expiring v2 refs
+  (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
+  parsed `path` carries `?exp=&sig=`, `redeem` sends them as the query, and
+  `ParsedClaimRef.proof` has the two values. The gateway's `400 bad_signature`
+  and `410 ref_expired` are a `ClaimRejectedError`; its `503 overloaded` is a
+  `ClaimCheckUnavailableError`. The SDK never checks the signature or the
+  expiry.
+
 ### Changed
 
 - Depends on `openapi-fetch ^0.17.0` (was `^0.13.0`).

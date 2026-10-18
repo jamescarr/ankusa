@@ -7,6 +7,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ParseClaimRef` and `ClaimCheckClient.Redeem` accept signed, expiring v2
+  refs (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`):
+  `ParsedClaimRef.Path` ends in `?exp=&sig=` and `Redeem` requests it as is.
+  The gateway's `400 bad_signature` and `410 ref_expired` are a
+  `*ClaimRejectedError`. The SDK never checks the signature or the expiry.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

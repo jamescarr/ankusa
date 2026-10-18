@@ -70,7 +70,7 @@ Every top-level section, with its keys and defaults:
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `storage.s3.sse`, `storage.gcs.sse` | `type` (`aes256` \| `kms`), `key_id` (the KMS key; required for `kms` on GCS, optional on S3). Server-side encryption sent on every object this store writes; the same `sse:` key is accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. See [Encryption at rest](storage.md#encryption-at-rest) |
-| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) and [Under load](claim-check.md#under-load) |
+| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), `max_concurrent_reads` (1024; 0 = no cap), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). `claim_check.authorize` is Elixir config only. See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
@@ -308,7 +308,12 @@ config :ankusa,
     read_max_inflight: 48,
     read_queue_max: 256,
     read_cache_bytes: 128 * 1024 * 1024,
-    read_cache_max_entry_bytes: 1024 * 1024
+    read_cache_max_entry_bytes: 1024 * 1024,
+    max_concurrent_reads: 1_024,
+    ref_signing_keys: [],
+    ref_ttl_ms: nil,
+    accept_unsigned_refs: nil,
+    authorize: nil
   },
   backup: %{enabled: false, interval_ms: 60_000, keep: 3, blob_store: nil},
   admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
@@ -396,6 +401,11 @@ config :ankusa,
 | `claim_check.read_queue_max` | `256` | Per store, reads waiting for a free slot; past it a read is answered `503` at once. `0` never waits. |
 | `claim_check.read_cache_bytes` | `134_217_728` | Memory for the gateway's cached pack indexes and claims; `0` turns the cache off. |
 | `claim_check.read_cache_max_entry_bytes` | `1_048_576` | A claim larger than this is served but never cached. |
+| `claim_check.max_concurrent_reads` | `1_024` | Gateway requests this node serves at once, cache hits included. A request past it is `503 overloaded` with `Retry-After` 1–3 before anything is read; `0` is no limit. The count is a set of request processes the reader sweeps every second, so a request process that dies never keeps a slot. |
+| `claim_check.ref_signing_keys` | `[]` | `[current \| previous]`: strings of at least 16 bytes. With a key, every claim a node checks in gets a **v2 ref**, `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`, an HMAC-SHA256 under the first key over the tenant, claim and expiry, and the gateway holds each request to it before it reads anything (`400 bad_signature`; `410 ref_expired`). A ref signed with any listed key is served, so a rotation is: put the new key first, drop the old one once every ref it signed has expired. Set the same keys on every claim-writing node, the gateway, and any node calling `redeem/3`. `/v1/config` shows each as `[REDACTED]`. `[]` mints v1 refs. See [`claim-check.md`](claim-check.md#the-reference). |
+| `claim_check.ref_ttl_ms` | `nil` | How long a v2 ref is good for, from the moment it is minted; positive. `nil` is the retention (`claim_check.retention_days`), else 30 days. |
+| `claim_check.accept_unsigned_refs` | `nil` | Whether the gateway (and `redeem/3`) still serves a v1 ref, which carries no expiry. `nil` means only while `ref_signing_keys` is empty, so setting keys refuses every v1 ref (`400 unsigned_ref`); `true` keeps the refs already in queues working while keys roll out. `false` with no keys is a boot error. |
+| `claim_check.authorize` | `nil` | `{module, fun, args}`, Elixir config only: called after authentication and before any read, as `apply(module, fun, [%{principal, tenant_id, claim_id, conn} \| args])`. `:ok` lets the request through; anything else is `403 forbidden`. It replaces the built-in check (`claims:read` plus `tenant:<tenant_id>` or `tenant:*`). The module must export `fun/(length(args) + 1)` at boot. |
 | `backup.enabled` | `false` | Back the store up to an object store while it runs, and restore the latest backup at boot when the store directory holds no database. A backup location that can't be read then refuses the boot (`{:store_restore_failed, path, reason}`) instead of starting empty. See [`storage.md`](storage.md#backup-and-restore). |
 | `backup.interval_ms` | `60_000` | How often a checkpoint is uploaded: the most a lost host loses. Only files the last backup doesn't already have are uploaded. |
 | `backup.keep` | `3` | Backups kept; older ones, and the files only they used, are deleted after each successful backup. |
@@ -441,10 +451,13 @@ are booleans, `metrics.ip` an IP address, and a `tls` block names existing
 with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
 `ciphers`;
 `batcher.max_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
-`claim_check.read_retries`, `claim_check.read_queue_max` and
-`claim_check.read_cache_bytes` may be `0` (no linger, roll at once, a
-compactor that runs only when asked, no read retry, no waiting for a slot, no
-claim cache);
+`claim_check.read_retries`, `claim_check.read_queue_max`,
+`claim_check.read_cache_bytes` and `claim_check.max_concurrent_reads` may be
+`0` (no linger, roll at once, a compactor that runs only when asked, no read
+retry, no waiting for a slot, no claim cache, no request cap);
+`claim_check.ref_ttl_ms` is `nil` or ≥ 1, `claim_check.accept_unsigned_refs` is
+`nil`, `true` or `false`, and every `claim_check.ref_signing_keys` entry is at
+least 16 bytes;
 `claim_check.retention_days` is `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `storage.key_prefix` is `""` or
 `name/` parts; `dispatch.sink_concurrency` is `nil` or `1..concurrency`,
 `dispatch.breaker_failures` ≥ 0, `breaker_open_ms` positive and

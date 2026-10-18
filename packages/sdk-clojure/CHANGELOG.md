@@ -9,6 +9,13 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `ankusa.sdk.claim-ref/parse` and `ankusa.sdk.claim-check/redeem` accept
+  signed, expiring v2 refs
+  (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
+  parsed `:path` ends in `?exp=&sig=` and `redeem` requests it as is. The
+  gateway's `400 bad_signature` and `410 ref_expired` are a
+  `:ankusa.sdk/ClaimRejectedError`. The SDK never checks the signature or the
+  expiry.
 - `ankusa.sdk.claim-check`: `redeem` fetches a claim's bytes from the
   claim-check gateway and verifies them against the expected digest before
   returning them, and `health` is a liveness probe. `ankusa.sdk.claim-ref/parse`
