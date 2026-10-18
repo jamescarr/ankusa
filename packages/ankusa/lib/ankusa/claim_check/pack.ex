@@ -48,7 +48,10 @@ defmodule Ankusa.ClaimCheck.Pack do
   @local_header 30
   @central_header 46
   @end_record 22
-  @max_entries 65_535
+  # 0xFFFF in the end record's entry count is ZIP64's "look elsewhere" marker, and
+  # standard readers (Erlang's `:zip` answers `:bad_eocd`) refuse a pack that
+  # writes it: one entry fewer than the 16-bit field holds.
+  @max_entries 65_534
   @max_bytes 0xFFFFFFFF
   # A claim id is a ULID: always 26 bytes.
   @claim_name 26

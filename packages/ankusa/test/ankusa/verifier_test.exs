@@ -381,6 +381,23 @@ defmodule Ankusa.VerifierTest do
                  secret: secret
                )
     end
+
+    # Found by `property/hmac_property_test.exs`: `:sha1` is the scheme's name for
+    # the hash (docs/configuration.md), but `:crypto.mac/4` calls it `:sha`, so
+    # every hook for a `hash: sha1` source raised.
+    test "a :sha1 scheme verifies a SHA-1 signature", %{secret: secret, scheme: scheme} do
+      scheme = %{scheme | hash: :sha1, sig_prefix: nil}
+      header = Base.encode16(:crypto.mac(:hmac, :sha, secret, "hello"), case: :lower)
+
+      assert Hmac.verify(env([{"X-Custom-Sig", header}], "hello"), scheme: scheme, secret: secret) ==
+               :ok
+
+      assert {:error, :no_match} =
+               Hmac.verify(env([{"X-Custom-Sig", header}], "hellp"),
+                 scheme: scheme,
+                 secret: secret
+               )
+    end
   end
 
   describe "scheme_name/1 and unknown schemes" do
@@ -397,6 +414,22 @@ defmodule Ankusa.VerifierTest do
     test "an unknown or missing scheme is :bad_scheme" do
       assert Hmac.verify(env([], "body"), secret: "x") == {:error, :bad_scheme}
       assert Hmac.verify(env([], "body"), scheme: :twilio, secret: "x") == {:error, :bad_scheme}
+    end
+
+    # Found by `property/hmac_property_test.exs`: `validate!/1`'s ArgumentError
+    # escaped `verify/2`, so a stored source with a bad inline scheme raised in
+    # the request path instead of failing its hooks like any other bad config.
+    test "an inline scheme that fails validation is :bad_scheme, not a raise" do
+      for scheme <- [
+            %Scheme{signature_header: "X-Sig", signed: "{nope}"},
+            %Scheme{signature_header: "", signed: "{body}"},
+            %Scheme{signature_header: "!", timestamp: {:sig, "!"}}
+          ] do
+        request = env([{"X-Sig", "abc"}], "body")
+
+        assert Hmac.verify(request, scheme: scheme, secret: "x") == {:error, :bad_scheme}
+        assert Hmac.validate_opts(scheme: scheme, secret: "x") == {:error, :bad_scheme}
+      end
     end
   end
 

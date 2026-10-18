@@ -101,6 +101,27 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   timeout, instead of letting that raise out of the adapter: the retry and
   the breaker see it as the transport failure it is.
 
+### Fixed
+
+- `Ankusa.Verifier.Hmac`: a scheme with `hash: sha1` (documented in
+  `configuration.md`) raised `:badarg` on every hook, because `:crypto.mac/4`
+  names SHA-1 `:sha`, not `:sha1`; it now verifies.
+- `Ankusa.Verifier.Hmac` answers `{:error, :bad_scheme}` for an inline
+  `%Scheme{}` that fails validation (an unknown `{token}` in `signed`, a
+  `{:sig, _}` timestamp without `parse: :csv_pairs`, ...), as `validate_opts/1`
+  already said it would, instead of raising `ArgumentError` out of the request
+  path.
+- The 0.3 import treats a WAL frame header with length 0 as not a frame. A
+  header whose payload never landed, followed by the zeros a file is extended
+  with after a crash (length 0, CRC 0, the CRC of nothing), was "valid", was
+  decoded as an envelope, and refused the boot with `legacy_import_failed`;
+  it is now the torn tail it is, and every complete frame before it imports.
+- `Ankusa.ClaimCheck.Pack.build/1` refuses a pack of more than 65,532 claims
+  (was 65,533). A full 65,535-entry pack wrote ZIP64's `0xFFFF` marker in its
+  end record, which standard readers (Erlang's `:zip`: `{:error, :bad_eocd}`)
+  refuse to open. `Ankusa.ClaimCheck` already split packs at 65,000 claims, so
+  only a direct caller of `Pack.build/1` could reach it.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added

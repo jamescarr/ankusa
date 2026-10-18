@@ -281,6 +281,25 @@ defmodule Ankusa.StoreMigrateTest do
       assert Enum.map(hooks, & &1.id) == Enum.map(envs, & &1.id)
     end
 
+    # Found by `property/migrate_property_test.exs`: a header whose payload never
+    # landed, then the zeros a file is extended with after a crash, reads as a
+    # frame of length 0 and CRC 0 (the CRC of nothing). That "frame" was decoded
+    # as an envelope, `binary_to_term("")` raised, and the boot was refused
+    # instead of forgiving the torn tail.
+    test "a torn header extended with zeros is a torn tail: every complete frame imports" do
+      config = config(roles: [:edge])
+      envs = for seq <- 1..3, do: envelope(seq)
+      path = Legacy.wal!(config, envs)
+
+      torn = <<0x484B::16, 1::8, 0::8, 4::64, 0::32, 0::32>>
+      File.write!(path, torn <> :binary.copy(<<0>>, 4096), [:append])
+
+      inst = boot(config)
+
+      assert {:ok, hooks} = Queue.hooks(inst, 0, 100)
+      assert Enum.map(hooks, & &1.id) == Enum.map(envs, & &1.id)
+    end
+
     test "a cursor file that is not what 0.3 wrote refuses to start rather than guess" do
       config = config(roles: [:edge])
       Legacy.wal!(config, [envelope(1)])
