@@ -54,6 +54,7 @@ defmodule Ankusa.Admin.Redact do
                  key_fingerprint exchange routing_key topic brokers servers subject channel
                  queue_url message_group_id client_name inbox_prefix username mechanism
                  type method exchange_type parse hash encoding secret_decode on_verify_failure
+                 algorithm location param fingerprints subjects
                  project ordering_key)
 
   @doc "A redacted, JSON-encodable view of the whole config."

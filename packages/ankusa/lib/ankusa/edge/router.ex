@@ -66,12 +66,7 @@ defmodule Ankusa.Edge.Router do
          {:ok, body, conn} <- read_body(conn, instance, config) do
       respond(
         conn,
-        Ingest.ingest(instance, source, tenant_id, %{
-          method: conn.method,
-          path: conn.request_path,
-          headers: conn.req_headers,
-          body: body
-        })
+        Ingest.ingest(instance, source, tenant_id, raw_request(conn, source, body))
       )
     else
       {:refused, %Plug.Conn{} = conn} -> conn
@@ -86,6 +81,33 @@ defmodule Ankusa.Edge.Router do
       :error ->
         {:refused, refuse(conn, instance, :unknown_source, 404, %{error: "unknown_source"})}
     end
+  end
+
+  # The request the ingest path reads. `peer_cert` is a live call into the TLS
+  # socket, so it is made for a source verified by `Ankusa.Verifier.ClientCert`
+  # and nobody else; no certificate (plain HTTP, a transport that cannot answer)
+  # is `nil`, which that verifier fails closed on.
+  defp raw_request(conn, %Ankusa.Source{verifier: {verifier, _opts}}, body) do
+    request = %{
+      method: conn.method,
+      path: conn.request_path,
+      headers: conn.req_headers,
+      query: conn.query_string,
+      body: body
+    }
+
+    if verifier == Ankusa.Verifier.ClientCert,
+      do: Map.put(request, :peer_cert, peer_cert(conn)),
+      else: request
+  end
+
+  defp peer_cert(conn) do
+    case Plug.Conn.get_peer_data(conn) do
+      %{ssl_cert: der} when is_binary(der) -> der
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # A declared length over the limit is refused on the header alone, so the

@@ -98,7 +98,7 @@ One source per provider endpoint; the key is the catch-URL segment
 | Key | Meaning |
 | --- | --- |
 | `tenant` | The storage/retention scope. With `routing: tenant_path` the URL wins. Default `default`. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac`. Every type except `none` requires `secret` (or `secret_file`): a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `secret_file` is `secret` read from a file, a path or a list of paths, exclusive with `secret` ([Secret sources](#secret-sources)). `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300, at most 3600: see [Custom HMAC schemes](#custom-hmac-schemes)). `hmac` takes the descriptor keys below. |
+| `verify.type` | `none` \| `stripe` \| `github` \| `standard_webhooks` \| `shopify` \| `slack` \| `hmac` \| `standard_webhooks_asym` \| `asymmetric` \| `token` \| `client_cert`. The HMAC types (`stripe` through `hmac`) and `token` require `secret` (or `secret_file`): a non-empty string or a list of non-empty strings (at most 8), newest first — every key is tried, so a rotation is `secret: ["${NEW}", "${OLD}"]`. An empty key would verify whatever anyone signs with it, so an empty value (an unset `${VAR:-}` included) is a load error. `secret_file` is `secret` read from a file, a path or a list of paths, exclusive with `secret` ([Secret sources](#secret-sources)). `stripe`, `standard_webhooks`, and `slack` also take `tolerance_seconds` (default 300, at most 3600: see [Custom HMAC schemes](#custom-hmac-schemes)). `hmac` takes the descriptor keys below. `standard_webhooks_asym` and `asymmetric` (provider public key), `token` (static credential) and `client_cert` (mTLS certificate pin) have their own keys: see [Public-key, token and client-certificate verifiers](#public-key-token-and-client-certificate-verifiers). |
 | `on_verify_failure` | `reject` \| `quarantine` \| `accept_flag`: what happens when verification fails. |
 | `trust_url_tenant` | `true` \| `false` (default `false`). With `routing: tenant_path`, a source with `tenant: default` and `verify: {type: none}` files hooks under whatever tenant the URL names, unverified: boot, `check-config` and an admin API write refuse it unless it sets `trust_url_tenant: true`. See [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
 | `sinks` | At least one; every sink is tried on every delivered hook. |
@@ -167,6 +167,109 @@ Providers that are not body-HMAC, Twilio (SHA1 over the full request URL plus
 sorted form params) and PayPal (RSA over a certificate fetched from a provider
 URL), cannot be described by this engine. They need a bespoke
 `Ankusa.Verifier` module.
+
+### Public-key, token and client-certificate verifiers
+
+A shared secret is the wrong tool when the provider can sign with a private key,
+and the only tool when it can only send a static credential or present a
+certificate. These four types cover those; each fails closed at load on a key,
+token or pin it cannot use, naming the YAML key.
+
+```yaml
+listener:
+  tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem,
+        cacertfile: /etc/ankusa/tls/providers-ca.pem, verify: verify_peer}  # for client_cert
+sources:
+  partner:                                  # Standard Webhooks v1a: Ed25519
+    verify: {type: standard_webhooks_asym, public_key: "whpk_11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="}
+    on_verify_failure: reject
+    sinks: [{type: log}]
+  signer:                                   # any Ed25519 or RSA provider, described inline
+    verify:
+      type: asymmetric
+      algorithm: rsa_sha256                 # ed25519 (default) | rsa_sha256
+      public_key: ["${SIGNER_KEY_NEW}", "${SIGNER_KEY_OLD}"]   # PEM, newest first
+      signature_header: "X-Signature"
+      encoding: hex                         # hex | base64 (default)
+      timestamp_header: "X-Timestamp"       # optional: signed as {ts}, replay window
+      signed: "{ts}.{body}"
+    sinks: [{type: log}]
+  internal:                                 # a static credential
+    verify: {type: token, secret: "${INTERNAL_TOKEN}"}     # Authorization: Bearer <secret>
+    on_verify_failure: reject
+    sinks: [{type: log}]
+  mesh:                                     # the client certificate of the mTLS handshake
+    verify: {type: client_cert, fingerprints: ["${MESH_CERT_SHA256}"]}
+    on_verify_failure: reject
+    sinks: [{type: log}]
+```
+
+**`standard_webhooks_asym`** and **`asymmetric`** hold the provider's *public*
+key, so a leaked config forges nothing. `public_key` is required: one key or a
+list of at most 8, newest first, every one tried, so a rotation is
+`public_key: ["${NEW}", "${OLD}"]`. A key is `whpk_<base64>` (the Standard
+Webhooks form) or the bare base64 of the 32 raw bytes for Ed25519, a PEM
+`PUBLIC KEY` block, or, for RSA, a PEM `RSA PUBLIC KEY` block or the bare base64
+of either DER form; a key that is not a key of the scheme's algorithm is a load
+error naming `sources.<id>.verify.public_key[<n>]`. `standard_webhooks_asym`
+takes `public_key` and `tolerance_seconds` only (header `webhook-signature`,
+entries `v1a,<base64>`, signed `<webhook-id>.<webhook-timestamp>.<body>`;
+entries that are not `v1a,` are ignored, so a provider that signs both ways can
+feed an HMAC and a public-key source). `asymmetric` takes the descriptor keys of
+[Custom HMAC schemes](#custom-hmac-schemes) (`signature_header`, `parse`,
+`sig_prefix`, `sig_key`, `version`, `signed`, `timestamp_header`,
+`tolerance_seconds`, `encoding`) with `algorithm` in place of `hash` and
+`secret_decode`.
+
+| `algorithm` | Signature |
+| --- | --- |
+| `ed25519` | RFC 8032, 64 bytes. |
+| `rsa_sha256` | RSASSA-PKCS1-v1_5 over SHA-256. A modulus under 2048 bits or an exponent under 65537 is refused. |
+
+A forged flood is bounded: a signature whose decoded length no configured key
+signs with is dropped before any public-key operation, and at most 8 are tried
+per request.
+
+**`token`** is for a provider that can only send a credential. It proves the
+sender knows the secret, not what the body is, and a captured request replays:
+prefer a signature whenever the provider has one. `secret` (or `secret_file`) is
+required, as for HMAC (one, or a list of at most 8 for rotation; empty is a load error).
+`location` is where it travels:
+
+| `location` | The credential is | Extra key |
+| --- | --- | --- |
+| `bearer` (default) | `Authorization: Bearer <secret>` | none |
+| `basic` | `Authorization: Basic base64(<secret>)`; the secret is `user:password` | none |
+| `header` | the value of a header | `header: <name>` (required) |
+| `query` | the value of a query parameter | `param: <name>` (required); URLs are logged by every proxy on the path, so this is the weakest form |
+
+The comparison hashes both sides, so neither the secret nor its length shows in
+timing. The credential is never stored: the header it travels in is added to the
+source's `store_headers.drop` whatever the instance policy says, so it is in no
+stored hook, archive segment, claim pack or sink message. A quarantined hook is
+stored without it, so a quarantine replay cannot re-verify a token hook (it
+stays in the pen): use `on_verify_failure: reject` here.
+
+**`client_cert`** accepts a request whose mutual-TLS client certificate is
+pinned: `fingerprints` (SHA-256 of the DER, 64 hex characters, any case,
+optional `:` separators, as `openssl x509 -fingerprint -sha256` prints it)
+and/or `subjects` (`dns:<name>`, `email:<address>`, `uri:<uri>`, `ip:<address>`
+from the subject alternative names, or `cn:<common name>`); a list, or one
+comma-separated string, and a certificate matching either is accepted. At least
+one is required. A fingerprint pin holds whatever the CA bundle says; a subject
+pin trusts `listener.tls.cacertfile` to have issued that identity only to the
+party meant, so scope that bundle to a CA that does. The certificate is the one
+the TLS handshake accepted, so the source only works on a listener with
+`tls.verify: verify_peer`: boot and `check-config` refuse a `client_cert` source
+otherwise, and a request with no certificate is `401`. Like a token source, use
+`on_verify_failure: reject`: a quarantined hook keeps no certificate to re-verify.
+
+The Elixir forms are `{Ankusa.Verifier.Asymmetric, scheme: :standard_webhooks_asym,
+public_key: "whpk_…"}` (or `scheme: %Ankusa.Verifier.Asymmetric.Scheme{…}`),
+`{Ankusa.Verifier.Token, secret: "…", location: :bearer | :basic | {:header, name} |
+{:query, param}}` and `{Ankusa.Verifier.ClientCert, fingerprints: [...], subjects: [...]}`.
+`/v1/config` shows `location`, `fingerprints` and `subjects`, and hides `secret`
+and `public_key`.
 
 ### Sinks
 
@@ -980,7 +1083,7 @@ config :ankusa,
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `tenant_id` | `"default"` | The storage/retention scope. See [`multi-tenancy.md`](multi-tenancy.md). |
-| `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. `Ankusa.Verifier.Hmac`'s `:secret` is a binary or a list of binaries, newest first — every key is tried, so a rotation is `secret: [new, old]`. |
+| `verifier` | `{Ankusa.Verifier.None, []}` | `{module, opts}` implementing `Ankusa.Verifier`. `Ankusa.Verifier.Hmac`'s `:secret` is a binary or a list of binaries, newest first — every key is tried, so a rotation is `secret: [new, old]`. `Ankusa.Verifier.Asymmetric` takes `:public_key` (one or a list) and `:scheme` (`:standard_webhooks_asym` or a `%Ankusa.Verifier.Asymmetric.Scheme{}`), `Ankusa.Verifier.Token` a `:secret` and a `:location`, `Ankusa.Verifier.ClientCert` `:fingerprints` and/or `:subjects`: see [Public-key, token and client-certificate verifiers](#public-key-token-and-client-certificate-verifiers). Every one of them that cannot work (no usable key, secret or pin) refuses the instance's boot, naming the source. |
 | `on_verify_failure` | `:reject` | `:reject` (`401`, nothing stored) / `:quarantine` (`202`, durable pen; see [`delivery.md#quarantine`](delivery.md#quarantine)) / `:accept_flag` (commits, envelope flagged). |
 | `trust_url_tenant` | `false` | Under a `route_resolver` other than `Ankusa.RouteResolver.Path`, a source with `tenant_id: "default"` and `Ankusa.Verifier.None` must set it to `true` (`Ankusa.Verifier.validate_shared!/1`); see [`multi-tenancy.md`](multi-tenancy.md#tenant-scoping-what-tenant_id-actually-does). |
 | `sinks` | `[{Ankusa.Sink.Log, []}]` | `[{module, opts}]` implementing `Ankusa.Sink`: one delivery per sink, each retried independently. |
@@ -1003,7 +1106,7 @@ the map.
 | --- | --- | --- | --- |
 | `Ankusa.RouteResolver` | Catch-URL scheme → `%Route{tenant_id, source_id}` | `RouteResolver.Path` (`/webhooks/:source_id`) | `RouteResolver.TenantPath` (`/webhooks/:tenant/:source`) |
 | `Ankusa.Queue` | Durable ack and seq assignment over this node's store | `wal: :disk` (one synced commit per batch) | none (`wal: :none` drops the queue entirely: ingest acks on the sinks' confirm, see [`delivery.md`](delivery.md#direct-mode)) |
-| `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack) |
+| `Ankusa.Verifier` | Signature/timestamp checks | `Verifier.None` | `Verifier.Hmac` (configurable HMAC engine; named schemes Stripe, GitHub, Standard Webhooks, Shopify, Slack), `Verifier.Asymmetric` (Ed25519 or RSA over the same wire templates; named scheme `standard_webhooks_asym`), `Verifier.Token` (bearer, basic, header or query credential), `Verifier.ClientCert` (mTLS client certificate pin) |
 | `Ankusa.SourceStore` | Source config, secrets, policy | `SourceStore.Static` | `SourceStore.Persistent` (API-managed sources in this node's store) |
 | `Ankusa.Sink` | What happens to a delivered hook | `Sink.Log` | `Sink.Http` (Req forward), `Sink.SQS` (`SendMessage`, in core), `Sink.RabbitMQ` (exchange publish, `ankusa_rabbitmq` package), `Sink.Kafka` (topic produce, `ankusa_kafka` package), `Sink.NATS` (JetStream subject publish, `ankusa_nats` package), `Sink.Redis` (pub/sub channel publish, `ankusa_redis` package) |
 | `Ankusa.RetryPolicy` | Backoff / give-up | `RetryPolicy.Exponential` (jitter) | none |

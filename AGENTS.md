@@ -36,7 +36,7 @@ Why the package split (and when a new adapter earns its own package):
 
 | Stage | Modules |
 | --- | --- |
-| Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/publish.ex`, `edge/quarantine.ex`, `edge/rate_limiter.ex`, `edge/route_guard.ex`, `dedupe.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,none,schemes}.ex` |
+| Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/publish.ex`, `edge/quarantine.ex`, `edge/rate_limiter.ex`, `edge/route_guard.ex`, `dedupe.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,asymmetric,token,client_cert,none,schemes,template}.ex` (`template.ex`: the header/timestamp/signed-bytes half `hmac` and `asymmetric` share) |
 | Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `store.ex`, `store/{keys,migrate,migration}.ex` (the store format version and its migration registry), `store/backup.ex` (checkpoint upload + boot restore), `fsync.ex` |
 | Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex`, `blob_store/azure/managed_identity.ex` |
 | Dispatch (sinks, retries, DLQ) | `dispatch/pipeline.ex`, `dispatch/replayer.ex`, `replay.ex`, `sink.ex`, `sink/{log,http,message,description,sqs,google_pubsub}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
@@ -66,6 +66,7 @@ Why the package split (and when a new adapter earns its own package):
 | [`packaging.md`](docs/packaging.md) | why adapters are separate packages, and how to add one |
 | [`critical-review.md`](docs/critical-review.md) | the 2026-10 end-to-end review: findings by root cause, and which are fixed |
 | [`releasing.md`](docs/releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, Packagist, Maven Central, or Clojars |
+| [`adr/`](docs/adr/README.md) | the design records ground rule 14 requires before a change to the ack path, the store key layout, a wire format, the isolation model or the durability mode |
 
 Exact callback signatures and options: module docs on [HexDocs](https://hexdocs.pm/ankusa).
 
