@@ -140,15 +140,25 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
      whether or not the signature matched, and the replay window
      (`tolerance_seconds`) is capped at an hour; both are tested in
      `verifier_test.exs` and `metrics_test.exs`.
-   - An accepted hook is charged against its tenant's ingest rate limit
-     (`rate_limits`) before anything is written. Over the limit is `429` with
-     `Retry-After`, nothing stored — and because the charge comes after
-     verification, a flood of forged requests spends no budget and can never
-     lock a tenant out. A forged hook is not free either: one accepted
-     *flagged* (`accept_flag`) or quarantined spends its source's quarantine
-     bucket (`429 quarantine_rate_limited` past it), and a flagged hook gets
-     no dedupe key, so it cannot suppress the real event. See
-     [`configuration.md#rate-limits`](configuration.md#rate-limits).
+   - An accepted hook is charged against its tenant's ingest quota
+     (`rate_limits`: hooks and bytes per second) before anything is written.
+     Over the limit is `429` with `Retry-After`, nothing stored — and because
+     the charge comes after verification, a flood of forged requests spends no
+     budget and can never lock a tenant out. A forged hook is not free either:
+     one accepted *flagged* (`accept_flag`) or quarantined spends its source's
+     quarantine bucket (`429 quarantine_rate_limited` past it), and a flagged
+     hook gets no dedupe key, so it cannot suppress the real event. What a
+     forged request *does* spend is the pre-read admission, which runs after
+     the source lookup and before the body is read: a limit per client address
+     (`429 ip_rate_limited`), per node (`429 node_rate_limited`) and per source
+     in body bytes per second (`429 source_rate_limited`), plus the tenant's
+     `max_body_bytes` (`413`) — CPU protection that a flood meets before it
+     costs a read or an HMAC. A tenant can also be given a share of the batchers
+     (`max_queue`, `max_queue_bytes`): past it the tenant gets
+     `429 tenant_overload`, and the other tenants never see a `503 overload`
+     it caused. See [`configuration.md#rate-limits`](configuration.md#rate-limits);
+     tested in `edge_rate_limit_test.exs` (`per ip pre-read`, `tenant overload
+     isolates`, `tenant body cap`).
 3. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default two)
    receives the envelope and **blocks the caller** until the batch it lands
    in commits. The flush to the store runs in a `Task`, so the batcher keeps
@@ -159,7 +169,10 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    what makes the ack honest. The queue is bounded twice — `max_queue`
    (default 10,000) records and `max_queue_bytes` (default 256 MiB) of body,
    both counting buffered *and* in-flight records: full means `503` with
-   `Retry-After`, never a promise the store can't back.
+   `Retry-After`, never a promise the store can't back. Those bounds are the
+   partition's, shared by every tenant; a tenant's `max_queue` and
+   `max_queue_bytes` count its own records across partitions, so it hits
+   `429 tenant_overload` before it can fill them.
 4. **`Ankusa.Queue`** commits the batch to the store durably and returns
    `{:committed, envelope}` (with `seq` assigned) or `{:duplicate, envelope}`
    (the original's `id`; nothing stored) per record, in the original

@@ -249,17 +249,38 @@ defmodule Ankusa.Config do
               # route attrs (maps or keyword lists) loaded at boot
               seed: []
             },
-            # per-tenant ingest rate limits, enforced in this node's memory
-            # (see `Ankusa.Edge.RateLimiter`). Precedence: a runtime override
-            # (admin API) beats `tenants[tenant]`, which beats `default`.
-            # `default: nil` and no tenant entry means unlimited.
+            # ingest admission, enforced in this node's memory (see
+            # `Ankusa.Edge.RateLimiter`). Per-tenant precedence: a runtime
+            # override (admin API) beats `tenants[tenant]`, which beats `default`.
+            # `default: nil` and no tenant entry means unlimited; with a
+            # tenant-carrying URL scheme (`RouteResolver.TenantPath`) a `default`
+            # is required.
             #
-            #   %{default: nil | %{rate: number, burst: pos_integer},
-            #     tenants: %{tenant_id => %{rate: number, burst: pos_integer}}}
+            #   %{default: nil | limit, tenants: %{tenant_id => limit},
+            #     per_ip: nil | %{rate: number, burst: pos_integer},
+            #     node: nil | %{rate: number, burst: pos_integer},
+            #     sources: %{default: nil | %{bytes_per_second: number,
+            #                                 burst_bytes: pos_integer}}}
             #
-            # `rate` is hooks per second (fractions allowed), `burst` the most
-            # hooks admitted back to back.
-            rate_limits: %{default: nil, tenants: %{}},
+            # A tenant `limit` is `%{rate: number, burst: pos_integer}` (`rate` is
+            # hooks per second, `burst` the most admitted back to back) plus,
+            # optionally: `bytes_per_second` and `burst_bytes` (body bytes),
+            # `max_body_bytes` (at most the instance `max_body_bytes`), and
+            # `max_queue` / `max_queue_bytes` (what this tenant may hold in this
+            # node's batchers at once).
+            #
+            # `per_ip`, `node` and `sources` are charged before the body is read,
+            # so they are CPU protection, not quota: `per_ip` by client address
+            # (`routes.trusted_proxies` decides whose `X-Forwarded-For` counts),
+            # `node` for every request, `sources.default.bytes_per_second` for
+            # each source's declared body bytes (100 MB/s unless changed).
+            rate_limits: %{
+              default: nil,
+              tenants: %{},
+              per_ip: nil,
+              node: nil,
+              sources: %{default: %{bytes_per_second: 100_000_000}}
+            },
             # the quarantine pen (`Ankusa.Edge.Quarantine`): one token bucket per
             # source (`burst` tokens, `rate` refilled per second) and a cap on the
             # pen's total bytes. A full pen refuses with 503, it never evicts.

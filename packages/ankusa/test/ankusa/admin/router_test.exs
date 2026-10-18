@@ -1180,6 +1180,7 @@ defmodule Ankusa.Admin.RouterTest do
           roles: [:dispatch],
           admin: %{enabled: true},
           route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+          rate_limits: %{default: %{rate: 1_000, burst: 1_000}},
           source_store: {Ankusa.SourceStore.Persistent, decoder: &decoder/2}
         )
 
@@ -1416,6 +1417,9 @@ defmodule Ankusa.Admin.RouterTest do
             {~s({"rate":1}), "burst is required"},
             {~s({"rate":1,"burst":1.5}), "burst must be an integer of at least 1, got 1.5"},
             {~s({"rate":1,"burst":1,"per":"s"}), ~s(unknown field "per")},
+            {~s({"rate":1,"burst":1,"max_queue":0}),
+             "max_queue must be an integer of at least 1, got 0"},
+            {~s({"rate":1,"burst":1,"burst_bytes":5}), "burst_bytes needs bytes_per_second"},
             {"[1]", "body must be a JSON object"},
             {"not json", "body must be a JSON object"}
           ] do
@@ -1426,6 +1430,39 @@ defmodule Ankusa.Admin.RouterTest do
         assert %{"error" => "invalid_rate_limit", "message" => ^message} =
                  JSON.decode!(conn.resp_body)
       end
+    end
+
+    test "PUT takes the optional admission keys, and GET and the listing return them", %{
+      inst: inst
+    } do
+      body =
+        ~s({"rate":2,"burst":4,"bytes_per_second":1000,"burst_bytes":2000,) <>
+          ~s("max_body_bytes":512,"max_queue":3,"max_queue_bytes":4096})
+
+      put = call(inst, :put, "/v1/tenants/acme/rate-limit", body)
+      assert put.status == 200
+
+      expected = %{
+        "tenant" => "acme",
+        "rate" => 2,
+        "burst" => 4,
+        "bytes_per_second" => 1000,
+        "burst_bytes" => 2000,
+        "max_body_bytes" => 512,
+        "max_queue" => 3,
+        "max_queue_bytes" => 4096,
+        "source" => "override"
+      }
+
+      assert JSON.decode!(put.resp_body) == expected
+      assert JSON.decode!(call(inst, :get, "/v1/tenants/acme/rate-limit").resp_body) == expected
+
+      assert %{"tenants" => [^expected]} =
+               JSON.decode!(call(inst, :get, "/v1/rate-limits").resp_body)
+
+      # A limit that sets none of them reads exactly as it always did.
+      assert JSON.decode!(call(inst, :get, "/v1/tenants/globex/rate-limit").resp_body) ==
+               %{"tenant" => "globex", "rate" => 5, "burst" => 10, "source" => "default"}
     end
 
     test "a bad tenant is 400 invalid_tenant on every route", %{inst: inst} do

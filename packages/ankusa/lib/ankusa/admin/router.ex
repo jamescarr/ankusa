@@ -622,6 +622,9 @@ defmodule Ankusa.Admin.Router do
     end
   end
 
+  # `rate` and `burst` always; the optional keys (`bytes_per_second`,
+  # `burst_bytes`, `max_body_bytes`, `max_queue`, `max_queue_bytes`) only when
+  # the limit sets them, so a limit that never used them reads as it always did.
   defp rate_limit_entry(tenant, {limit, source}) do
     %{
       tenant: tenant,
@@ -629,10 +632,11 @@ defmodule Ankusa.Admin.Router do
       burst: limit && limit.burst,
       source: Atom.to_string(source)
     }
+    |> Map.merge(Map.drop(limit || %{}, [:rate, :burst]))
   end
 
   defp limit(nil), do: nil
-  defp limit(%{rate: rate, burst: burst}), do: %{rate: rate, burst: burst}
+  defp limit(limit), do: limit
 
   # The body is a limit, not a spec: two required keys. A body that is empty,
   # oversized, unparseable, or not an object is the same `invalid_rate_limit`,
