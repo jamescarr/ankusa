@@ -72,6 +72,12 @@ wait_for() {
 
 node_ready() { curl -sf --max-time 2 "$1/ready"; }
 
+# The consumer owns its queue: until it has declared it and is consuming,
+# the exchange has nothing to route to and every publish is unroutable.
+consumer_consuming() {
+  compose exec -T rabbitmq rabbitmqctl -q list_queues name consumers | grep -Eq '^ankusa-fleet-consumer[[:space:]]+[1-9]'
+}
+
 # wait_row SECONDS DESCRIPTION SQL -- polls until SQL (a count) returns 1.
 wait_row() {
   local secs=$1 desc=$2 sql=$3
@@ -124,6 +130,7 @@ compose up -d --build
 echo "==> waiting for both nodes and the load balancer"
 wait_for 180 "ankusa-a /ready" node_ready "$NODE_A"
 wait_for 180 "ankusa-b /ready" node_ready "$NODE_B"
+wait_for 180 "the consumer to be consuming" consumer_consuming
 wait_for 60 "a hook through the load balancer" \
   curl -sf --max-time 5 -o /dev/null -XPOST "$LB/webhooks/demo" -d '{"id":"warmup"}'
 
@@ -153,6 +160,10 @@ verify_phase() {
 echo "==> phase 1/4: steady ($RATE/s for ${DURATION}s through the load balancer)"
 run_loadgen steady --rate "$RATE" --duration "$DURATION" --concurrency 64
 verify_phase steady 300
+if [ "$FAILED" != "0" ]; then
+  echo "error: the steady phase already lost or corrupted hooks; not driving chaos against a broken fleet" >&2
+  exit 1
+fi
 
 echo "==> phase 2/4: fat hooks from each node, redeemed through the gateway"
 CLAIM_OK=true

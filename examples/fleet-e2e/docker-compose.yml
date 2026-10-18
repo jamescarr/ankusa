@@ -59,8 +59,10 @@ services:
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
+    # `ping` is green before the AMQP listener is up; the port check is what
+    # says a client can connect.
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping && rabbitmq-diagnostics -q check_port_connectivity"]
       interval: 2s
       timeout: 5s
       retries: 60

@@ -11,6 +11,7 @@
 import amqp from "amqplib";
 import { ClaimCheckError, createClaimCheckClient, InvalidClaimRefError, parseClaimRef } from "ankusa";
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import pg from "pg";
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://guest:guest@localhost:5672";
@@ -66,8 +67,24 @@ async function record(msg: HookMessage, body: Buffer, via: string): Promise<void
   );
 }
 
+// RabbitMQ can report healthy before its AMQP listener accepts connections, so
+// a consumer started beside it retries instead of exiting: a consumer that never
+// declared its queue leaves the exchange with nothing to route to, and the
+// nodes' publishes fail as unroutable.
+async function connect(): Promise<amqp.ChannelModel> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await amqp.connect(RABBITMQ_URL);
+    } catch (err) {
+      if (attempt >= 60) throw err;
+      console.error(`[consumer] rabbitmq not ready (attempt ${attempt}), retrying: ${String(err)}`);
+      await sleep(2000);
+    }
+  }
+}
+
 async function main() {
-  const conn = await amqp.connect(RABBITMQ_URL);
+  const conn = await connect();
   const chan = await conn.createChannel();
 
   await chan.assertExchange(EXCHANGE, "topic", { durable: true });
