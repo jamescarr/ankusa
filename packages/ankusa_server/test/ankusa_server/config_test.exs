@@ -364,6 +364,118 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message == "backup.keep must be a positive integer, got 0"
   end
 
+  @kek Base.encode64(:binary.copy(<<7>>, 32))
+  @kek_old Base.encode64(:binary.copy(<<8>>, 32))
+
+  test "secrets.kek and kek_previous reach core's config through ${VAR}, and are never printed" do
+    path =
+      tmp_config("""
+      secrets:
+        kek: ${SECRETS_KEK}
+        kek_previous: ${SECRETS_PREVIOUS:-}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    env = %{"SECRETS_KEK" => "prod-1:" <> @kek}
+    config = Config.load!(path: path, env: env).config
+    assert config.secrets == %{kek: "prod-1:" <> @kek, kek_previous: [], kek_provider: nil}
+
+    env = Map.put(env, "SECRETS_PREVIOUS", "old-1:#{@kek_old}, #{@kek_old}x")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: env) end
+    assert error.message =~ "secrets.kek_previous must be a base64-encoded 32-byte key"
+    refute error.message =~ @kek_old
+
+    env = Map.put(env, "SECRETS_PREVIOUS", "old-1:" <> @kek_old)
+    config = Config.load!(path: path, env: env).config
+    assert config.secrets.kek_previous == ["old-1:" <> @kek_old]
+
+    printed = print_config(path, env)
+    refute printed =~ @kek
+    refute printed =~ @kek_old
+    assert printed =~ ~s("secrets")
+  end
+
+  test "without a secrets section nothing is encrypted, as before" do
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+    assert Config.load!(path: path, env: %{}).config.secrets == %{
+             kek: nil,
+             kek_previous: [],
+             kek_provider: nil
+           }
+  end
+
+  test "secrets mistakes fail the load, naming the key and never the value" do
+    demo = "\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    for {yaml, message} <- [
+          {"secrets: {kek: not-base64!}", "secrets.kek must be a base64-encoded 32-byte key"},
+          {~s(secrets: {kek: ""}), "secrets.kek must be a base64-encoded 32-byte key"},
+          {"secrets: {kek: #{@kek}, extra: 1}", ~s(secrets: unknown key "extra")},
+          {"secrets: {kek: [a]}", "secrets.kek: expected a string"},
+          {"secrets: {kek_previous: [#{@kek_old}]}",
+           "secrets.kek_previous needs secrets.kek or secrets.kek_provider"}
+        ] do
+      path = tmp_config(yaml <> demo)
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ message
+      refute error.message =~ @kek
+    end
+  end
+
+  test "sse on s3 and gcs stores lands in core's config for storage, backup and claim stores" do
+    path =
+      tmp_config("""
+      storage:
+        type: s3
+        s3: {bucket: segs, region: us-east-1, sse: {type: kms, key_id: "arn:aws:kms:us-east-1:1:key/a"}}
+      backup:
+        enabled: true
+        store: {type: gcs, gcs: {bucket: bk, auth: none, sse: {type: kms, key_id: "projects/p/k"}}}
+      claim_check:
+        stores:
+          - {type: s3, s3: {bucket: c1, region: us-east-1, sse: {type: aes256}}}
+          - {type: local}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert {Ankusa.BlobStore.S3, s3} = config.storage.blob_store
+    assert s3[:sse] == %{type: :kms, key_id: "arn:aws:kms:us-east-1:1:key/a"}
+
+    assert {Ankusa.BlobStore.GCS, gcs} = config.backup.blob_store
+    assert gcs[:sse] == %{type: :kms, key_id: "projects/p/k"}
+
+    assert [{Ankusa.BlobStore.S3, claims}, {Ankusa.BlobStore.LocalFS, []}] =
+             config.claim_check.blob_stores
+
+    assert claims[:sse] == %{type: :aes256}
+  end
+
+  test "sse mistakes fail the load, naming the key" do
+    demo = "\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    for {yaml, message} <- [
+          {"storage: {type: s3, s3: {bucket: b, region: r, sse: {type: rot13}}}",
+           ~s(storage.s3.sse.type: unknown value "rot13"; expected one of)},
+          {"storage: {type: s3, s3: {bucket: b, region: r, sse: {key_id: k}}}",
+           ~s(storage.s3.sse: missing required key "type")},
+          {"storage: {type: s3, s3: {bucket: b, region: r, sse: {type: kms, kms: k}}}",
+           ~s(storage.s3.sse: unknown key "kms")},
+          {"storage: {type: gcs, gcs: {bucket: b, auth: none, sse: {type: kms}}}",
+           "storage.blob_store: sse type :kms needs a key_id on gcs"},
+          {"storage: {type: s3, s3: {bucket: b, region: r, sse: {type: aes256, key_id: k}}}",
+           "storage.blob_store: sse key_id is only for type :kms"},
+          {"backup: {enabled: true, store: {type: gcs, gcs: {bucket: b, auth: none, sse: {type: kms}}}}",
+           "backup.blob_store: sse type :kms needs a key_id on gcs"}
+        ] do
+      path = tmp_config(yaml <> demo)
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ message
+    end
+  end
+
   test "log.banner is on by default, the file or ANKUSA_BANNER turns it off, a non-boolean is named" do
     demo = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
 

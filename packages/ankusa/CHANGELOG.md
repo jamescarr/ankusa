@@ -13,6 +13,36 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Secrets encrypted at rest, server-side encryption on every object-store
+  write (SEC-4).** `Ankusa.Crypto.Envelope` encrypts the secret-bearing fields
+  of an API-managed source's spec (the ones `Ankusa.Admin.Redact` hides:
+  `verify.secret`, sink credentials, header values, URLs with credentials)
+  with AES-256-GCM (`<<"AENC", 1, key_id_len, key_id, iv::96, tag::128,
+  ciphertext>>`, base64 behind `AENC:` in the JSON) before
+  `Ankusa.SourceStore.Persistent` writes the row, so neither the node's store
+  files nor any backup of them hold a secret in the clear. The key comes from
+  the new `secrets` config section: `kek` (32 bytes, base64, optionally
+  `<id>:<base64>`) or `kek_provider: {module, fun, args}`, and `kek_previous`
+  for rotation (keys that decrypt and never encrypt). A stored row no key
+  opens refuses the boot instead of being skipped; rows written before a KEK
+  existed still load. `Ankusa.SourceStore.Persistent.rewrap/1` and
+  `mix ankusa.secrets.rewrap` (a stopped node's data dir; keys from
+  `ANKUSA_KEK` and `ANKUSA_KEK_PREVIOUS`, `--dry-run`) move every row to the
+  current key, in synced batches. `Ankusa.Admin.Redact.config/1` shows the
+  keys as `[REDACTED]`. The 0.3 import encrypts the sources it imports. The
+  startup log now says how secrets rest: `store files rely on volume
+  encryption; secrets envelope-encrypted with key <id>` (or that they are
+  stored in plaintext).
+- `sse:` on `Ankusa.BlobStore.S3`, `GCS`, `Azure` and `OCI` (`%{type: :aes256}`
+  or `%{type: :kms, key_id: key}`): server-side encryption sent on every
+  `put/4` of that store, so on segments, backups and claim packs alike
+  (`x-amz-server-side-encryption` and `…-aws-kms-key-id`, signed;
+  `x-goog-encryption-kms-key-name` and `kmsKeyName`; `x-ms-encryption-scope`;
+  `opc-sse-kms-key-id`). `Ankusa.BlobStore.validate_config!/1` checks it at
+  boot for `storage.blob_store`, `backup.blob_store` and every
+  `claim_check.blob_stores` entry; a misspelled option, `:kms` without the
+  `key_id` the provider needs, or `sse` on `LocalFS` is a boot error, never an
+  unencrypted object. See `docs/storage.md#encryption-at-rest`.
 - **Hardened listeners, TLS/mTLS on every listener, a separate metrics
   listener (SEC-6).** The new `listener` config section sets what Bandit's
   defaults left open, on every HTTP listener the instance runs:

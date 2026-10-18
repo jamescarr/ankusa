@@ -299,6 +299,13 @@ storage:
     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
     # Temporary credentials only, beside the two keys above.
     # session_token: "${AWS_SESSION_TOKEN}"
+    # Server-side encryption, sent on every PUT this store makes (segments,
+    # and backups or claims when they use this store). `aes256` = S3-managed
+    # keys (x-amz-server-side-encryption: AES256); `kms` = aws:kms, with
+    # `key_id` naming the KMS key (omitted: the bucket's default KMS key).
+    # The same `sse:` key is accepted by `claim_check.store(s)` and
+    # `backup.store` entries. Unset: the bucket's own default encryption.
+    # sse: {type: kms, key_id: "${S3_KMS_KEY_ARN}"}
   # Used only when type: gcs.
   gcs:
     bucket: "${GCS_BUCKET}"
@@ -308,6 +315,10 @@ storage:
     # none     — send no credentials (an emulator).
     auth: metadata
     # token: "${GCS_TOKEN}"   # required iff auth: token
+    # Cloud KMS key for every object this store writes (`key_id` is the key's
+    # resource name and is required with `kms`). GCS encrypts everything at
+    # rest anyway; `aes256` is accepted and sends nothing.
+    # sse: {type: kms, key_id: "projects/p/locations/l/keyRings/r/cryptoKeys/k"}
 
 claim_check:
   # [env ANKUSA_CLAIM_CHECK_PORT] the gateway listener (:claim_check role).
@@ -433,6 +444,25 @@ source_store:
   # How often a node re-reads the version in case it missed a broadcast: the
   # worst-case staleness after a disconnect.
   # tick_ms: 30000
+
+# Secrets at rest. With a key-encryption key (KEK: 32 random bytes, base64,
+# `openssl rand -base64 32`, optionally `<id>:<base64>`), the secret-bearing
+# fields of API-managed sources (verify secrets, sink credentials, header
+# values: the fields `GET /v1/sources` shows as [REDACTED]) are AES-256-GCM
+# encrypted before they are stored, in this node's store and its backups
+# (`source_store.type: persistent`) or in Redis (`type: redis`). Every node of
+# a Redis namespace needs the same keys. A stored source that no given key
+# opens refuses the boot. Startup logs which key encrypts new rows.
+# To rotate: set `kek` to the new key and list the old one in `kek_previous`,
+# roll the nodes, then move every row to the new key from a `remote` shell:
+# `Ankusa.SourceStore.Persistent.rewrap(:default)` (`type: redis`:
+# `Ankusa.SourceStore.Redis.rewrap(:default)`). A stopped node's data dir can
+# be rewrapped with `mix ankusa.secrets.rewrap`. Then drop the old key. Seeds
+# in this file are not stored, so this does not touch them.
+# Unset: specs are stored as plain JSON (rely on volume encryption).
+# secrets:
+#   kek: "${ANKUSA_KEK}"
+#   kek_previous: "${ANKUSA_KEK_PREVIOUS:-}"   # list, or comma-separated
 
 sources:
   # One source per provider endpoint. The id is the catch-URL segment:

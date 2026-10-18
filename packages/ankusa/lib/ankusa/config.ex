@@ -239,7 +239,15 @@ defmodule Ankusa.Config do
             # as CloudEvents) are delivered: `[{module, opts}]` implementing
             # Ankusa.Sink, run through the WAL and dispatch like a hook. `[]`
             # means lifecycle events are off. See `Ankusa.Lifecycle`.
-            lifecycle: %{sinks: []}
+            lifecycle: %{sinks: []},
+            # secrets at rest (`Ankusa.Crypto.Envelope`): the key-encryption key
+            # that source specs' secrets (verify secrets, sink credentials) are
+            # encrypted under before they are stored. `kek` is 32 bytes, base64
+            # (optionally `"<id>:<base64>"`); `kek_provider` is a
+            # `{module, fun, args}` returning `{:ok, [kek | previous]}` instead;
+            # `kek_previous` keys decrypt but never encrypt, for rotation. With
+            # none, specs are stored as plain JSON, as they always were.
+            secrets: %{kek: nil, kek_previous: [], kek_provider: nil}
 
   # `lifecycle.sinks` is spelled out because the struct's default (`[]`) is all
   # a bare `%__MODULE__{}` tells dialyzer about the field.
@@ -283,7 +291,7 @@ defmodule Ankusa.Config do
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
   `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:quarantine`,
-  `:lifecycle`) over the defaults. Every `tls` block (`listener.tls`,
+  `:lifecycle`, `:secrets`) over the defaults. Every `tls` block (`listener.tls`,
   `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
   validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
   `listener.num_acceptors: nil` becomes two per scheduler.
@@ -325,7 +333,8 @@ defmodule Ankusa.Config do
           :metrics,
           :rate_limits,
           :quarantine,
-          :lifecycle
+          :lifecycle,
+          :secrets
         ] ->
           put_section(acc, k, v)
 
@@ -340,6 +349,12 @@ defmodule Ankusa.Config do
     |> validate_listen_ips!()
     |> normalize_listeners!()
     |> validate_ranges!()
+    |> validate_secrets!()
+  end
+
+  defp validate_secrets!(config) do
+    :ok = Ankusa.Crypto.Envelope.validate_config!(config)
+    config
   end
 
   @doc "The address a listener binds: a strict IPv4/IPv6 literal string, or an `:inet` address tuple."

@@ -204,6 +204,17 @@ that cannot reach Redis on its first boot refuses to start rather than run
 with no sources; once running, an outage leaves the mirror serving hooks, and
 source writes fail until Redis is back.
 
+**A stored source's secrets rest encrypted** when `secrets.kek` is set (either
+store): its `verify.secret` and its sinks' credentials are AES-256-GCM
+encrypted before the row or the Redis entry is written, so a backup of the
+store or a dump of Redis holds none of them in the clear, while the
+source's type, topics and the like stay readable. The admin API and the
+in-memory mirror still see the plain spec, and an update that omits the
+secret keeps the stored one as before. A source no configured key opens
+refuses the node's boot rather than `404`ing its hooks; rotate with
+`secrets.kek_previous` and `rewrap`. See
+[`storage.md#encryption-at-rest`](storage.md#encryption-at-rest).
+
 One consequence for `wal.type: none`: every source needs at least one sink
 whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`). Boot enforces it for
 sources in the config (`Ankusa.Queue.validate_config!/1`), and a source

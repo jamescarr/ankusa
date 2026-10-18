@@ -8,6 +8,20 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- `secrets: {kek, kek_previous}` (use `${VAR}`): the key-encryption key that
+  source specs' secrets are encrypted under before an API-managed source is
+  stored (`source_store.type: persistent` or `redis`), and the keys that may
+  still decrypt during a rotation. A stored source no key opens refuses the
+  boot; startup logs which key encrypts new rows; `print-config` and
+  `GET /v1/config` show the keys as `[REDACTED]`. Rotate by listing the old
+  key in `kek_previous`, then `Ankusa.SourceStore.Persistent.rewrap(:default)`
+  (Redis: `Ankusa.SourceStore.Redis.rewrap(:default)`) from `remote`.
+- `sse: {type: aes256 | kms, key_id}` on every `s3` and `gcs` block
+  (`storage`, `claim_check.store(s)`, `backup.store`): server-side encryption
+  sent on every object that store writes, `x-amz-server-side-encryption(-aws-kms-key-id)`
+  for S3 and `x-goog-encryption-kms-key-name` for GCS. A misspelled option, or
+  `kms` without the `key_id` GCS needs, fails the load naming the key. See the
+  `ankusa` changelog and `docs/storage.md#encryption-at-rest`.
 - `listener` (`max_connections`, `num_acceptors`, `read_timeout_ms`,
   `body_read_timeout_ms`, `request_deadline_ms`, `max_requests_per_connection`,
   `max_header_count`, `max_header_length`, `http2`, `tls`), `metrics`

@@ -36,6 +36,11 @@ defmodule Ankusa.BlobStore.Azure do
                            tests. See `Ankusa.HttpClient` for the accepted keys
     * `:retries`        — default `2`: extra attempts after a transport error
                            or a `408`/`429`/`5xx`. See `Ankusa.BlobStore.Retry`
+    * `:sse`            — `%{type: :kms, key_id: encryption_scope}`: every blob is
+                           written under that encryption scope
+                           (`x-ms-encryption-scope`). Blob Storage encrypts
+                           everything at rest anyway; this picks the key. See
+                           `Ankusa.BlobStore.SSE`
 
   ## Local dev
 
@@ -58,17 +63,19 @@ defmodule Ankusa.BlobStore.Azure do
   # See Ankusa.BlobStore.S3 for why this false-positive suppression exists.
   @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
 
-  alias Ankusa.BlobStore.Retry
+  alias Ankusa.BlobStore.{Retry, SSE}
   alias Ankusa.HttpClient
 
   @api_version "2024-11-04"
 
   @impl true
   def put(instance, key, data, opts) do
-    headers = [
-      {"x-ms-blob-type", "BlockBlob"},
-      {"content-type", "application/octet-stream"}
-    ]
+    headers =
+      SSE.headers(opts, :azure) ++
+        [
+          {"x-ms-blob-type", "BlockBlob"},
+          {"content-type", "application/octet-stream"}
+        ]
 
     case request(instance, opts, :put, blob_url(opts, key), data, headers) do
       {:ok, _body} -> :ok

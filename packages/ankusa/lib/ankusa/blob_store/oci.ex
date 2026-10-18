@@ -32,6 +32,10 @@ defmodule Ankusa.BlobStore.OCI do
     * `:retries`         — default `2`: extra attempts after a transport error
                            or a `408`/`429`/`5xx`, each re-signed with a fresh
                            `date`. See `Ankusa.BlobStore.Retry`
+    * `:sse`             — `%{type: :kms, key_id: vault_key_ocid}`: every object is
+                           encrypted with that Vault key (`opc-sse-kms-key-id`).
+                           Object Storage encrypts everything at rest anyway;
+                           this picks the key. See `Ankusa.BlobStore.SSE`
 
   ## Identity
 
@@ -69,7 +73,7 @@ defmodule Ankusa.BlobStore.OCI do
 
   @behaviour Ankusa.BlobStore
 
-  alias Ankusa.BlobStore.Retry
+  alias Ankusa.BlobStore.{Retry, SSE}
   alias Ankusa.HttpClient
 
   @generic_headers ["date", "(request-target)", "host"]
@@ -79,10 +83,12 @@ defmodule Ankusa.BlobStore.OCI do
   def put(instance, key, data, opts) do
     url = object_url(opts, key)
 
-    extra = [
-      {"content-type", "application/octet-stream"},
-      {"x-content-sha256", sha256_base64(data)}
-    ]
+    extra =
+      SSE.headers(opts, :oci) ++
+        [
+          {"content-type", "application/octet-stream"},
+          {"x-content-sha256", sha256_base64(data)}
+        ]
 
     case request(instance, opts, :put, url, data, extra) do
       {:ok, _body} -> :ok
