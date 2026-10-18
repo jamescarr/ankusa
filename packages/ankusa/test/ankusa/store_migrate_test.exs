@@ -327,7 +327,9 @@ defmodule Ankusa.StoreMigrateTest do
       put_config(config)
       assert {:error, error} = start_supervised({Ankusa.Instance, config})
 
-      assert {:legacy_import_failed, _} = find(error, &match?({:legacy_import_failed, _}, &1))
+      assert {:corrupt_legacy_wal_record, ^path, 2, :undecodable} =
+               find(error, &match?({:corrupt_legacy_wal_record, _, _, _}, &1))
+
       assert File.exists?(wal_dir(config))
     end
 

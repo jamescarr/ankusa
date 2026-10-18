@@ -230,10 +230,9 @@ defmodule Ankusa.Storage.Compactor do
   defp decode_ids(present) do
     {entries, undecodable} =
       Enum.reduce(present, {[], []}, fn {seq, bin}, {ok, bad} ->
-        try do
-          {[{seq, Envelope.from_binary(bin).id, bin} | ok], bad}
-        rescue
-          _ -> {ok, [seq | bad]}
+        case Envelope.from_binary(bin) do
+          {:ok, env} -> {[{seq, env.id, bin} | ok], bad}
+          {:error, _reason} -> {ok, [seq | bad]}
         end
       end)
 

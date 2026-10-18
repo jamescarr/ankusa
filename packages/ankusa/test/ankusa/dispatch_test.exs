@@ -667,6 +667,85 @@ defmodule Ankusa.DispatchTest do
     assert stored_ids(inst) == []
   end
 
+  # ── encodings this node cannot read (F7) ───────────────────────────────────
+
+  defp pending_row(at, size) do
+    %{
+      module: TagSink,
+      state: :pending,
+      attempts: 0,
+      at: at,
+      error: nil,
+      size: size,
+      source_id: "src1"
+    }
+  end
+
+  # A hook and its pending row as given: the bytes are the test's.
+  defp write_raw!(inst, seq, hook_bin, row_bin, at) do
+    :ok =
+      Store.write(
+        inst,
+        [
+          {:put, :hooks, Keys.hook(seq), hook_bin},
+          {:put, :deliveries, Keys.delivery(seq, 0), row_bin},
+          {:put, :index, Keys.due(at, seq, 0), <<byte_size(hook_bin)::32>>}
+        ],
+        sync: true
+      )
+  end
+
+  test "F7: a delivery row in a version this node does not know is dead-lettered, hook intact" do
+    inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
+    at = System.system_time(:millisecond) - 1_000
+    env = build_env("src1")
+
+    hook = Envelope.to_binary(env, version: 1)
+
+    <<"AD", 1, term::binary>> =
+      Deliveries.encode_row(pending_row(at, byte_size(hook)), version: 1)
+
+    write_raw!(inst, 7, hook, <<"AD", 9, term::binary>>, at)
+
+    assert {:ok, _} = Pipeline.tick(inst)
+    refute_receive {:delivered, :a, _}
+
+    assert {:ok, %{state: :dead, error: ":unsupported_delivery_row_version"}} =
+             Deliveries.row(inst, 7, 0)
+
+    assert {:ok, %{total: 1, entries: [entry]}} = Ankusa.Queue.dead(inst, limit: 10)
+    assert entry.reason == ":unsupported_delivery_row_version"
+    assert entry.envelope.id == env.id
+    assert entry.envelope.source_id == "src1"
+  end
+
+  test "F7: a hook and a row written by a newer node (v1, added fields) are delivered" do
+    inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
+    at = System.system_time(:millisecond) - 1_000
+    env = build_env("src1")
+
+    {_field, hook} = envelope_from_the_future(env, 1)
+    row = pending_row(at, byte_size(hook)) |> Map.put(:first_attempt_at, at)
+    write_raw!(inst, 7, hook, Deliveries.encode_row(row, version: 1), at)
+
+    assert {:ok, _} = Pipeline.tick(inst)
+    id = env.id
+    assert_receive {:delivered, :a, ^id}
+  end
+
+  test "F7: v0 rows, as every release up to 0.6 wrote them, are delivered" do
+    inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
+    at = System.system_time(:millisecond) - 1_000
+    env = build_env("src1")
+
+    hook = :erlang.term_to_binary(Map.from_struct(env), [:deterministic])
+    write_raw!(inst, 7, hook, :erlang.term_to_binary(pending_row(at, byte_size(hook))), at)
+
+    assert {:ok, _} = Pipeline.tick(inst)
+    id = env.id
+    assert_receive {:delivered, :a, ^id}
+  end
+
   # ── config helpers ─────────────────────────────────────────────────────────
 
   defp persistent_config(inst, dir, roles) do

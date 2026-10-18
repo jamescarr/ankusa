@@ -644,12 +644,16 @@ defmodule Ankusa.Dispatch.Replayer do
   defp decode_entry(codec, bin, offset, length, from, to, filter) do
     case codec.decode_record(binary_part(bin, offset, length)) do
       {:ok, payload} ->
-        env = Ankusa.Envelope.from_binary(payload)
+        case Ankusa.Envelope.from_binary(payload) do
+          {:ok, env} ->
+            cond do
+              env.received_at < from or env.received_at > to -> :skip
+              not matches_source?(filter, env.source_id) -> :skip
+              true -> {:keep, %{bin: payload, size: byte_size(payload), env: env}}
+            end
 
-        cond do
-          env.received_at < from or env.received_at > to -> :skip
-          not matches_source?(filter, env.source_id) -> :skip
-          true -> {:keep, %{bin: payload, size: byte_size(payload), env: env}}
+          {:error, _reason} ->
+            :unusable
         end
 
       {:error, _reason} ->
@@ -830,7 +834,12 @@ defmodule Ankusa.Dispatch.Replayer do
                 {:halt, {:error, :source_store_unavailable}}
             end
 
-          held when held in [:not_found, {:error, :undecodable}] ->
+          held
+          when held in [
+                 :not_found,
+                 {:error, :undecodable},
+                 {:error, :unsupported_envelope_version}
+               ] ->
             {:cont, {entries, ops, bytes, failed + 1}}
 
           {:error, reason} ->

@@ -15,6 +15,7 @@ defmodule Ankusa.Queue.Writer do
   require Logger
 
   alias Ankusa.Config
+  alias Ankusa.Queue.Deliveries
   alias Ankusa.Store
   alias Ankusa.Store.Keys
 
@@ -126,7 +127,7 @@ defmodule Ankusa.Queue.Writer do
         row_ops =
           Enum.flat_map(sinks, fn {index, mod} ->
             row =
-              :erlang.term_to_binary(%{
+              Deliveries.encode_row(%{
                 module: mod,
                 state: :pending,
                 attempts: 0,
@@ -464,7 +465,7 @@ defmodule Ankusa.Queue.Writer do
         mods
         |> Enum.with_index()
         |> Enum.flat_map(fn {mod, i} ->
-          row = :erlang.term_to_binary(%{base | module: mod})
+          row = Deliveries.encode_row(%{base | module: mod})
 
           [
             {:put, :deliveries, Keys.delivery(seq, i), row},

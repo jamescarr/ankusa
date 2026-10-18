@@ -109,6 +109,24 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **Hooks and delivery rows have a versioned encoding.** `Ankusa.Envelope`
+  gains `to_binary/2` (`version: 0 | 1`; v1 is `"AE"`, `1`, then the term) and
+  a delivery row gets the same scheme (`"AD"`, `1`). Both are read in the old
+  bare form (v0) and in v1; this release still *writes* v0, so a rollback to
+  0.6 keeps reading every row, and the release after it writes v1 (see
+  `docs/deployment.md`, "Rolling back a minor"). A field a newer node added is
+  ignored on an envelope and kept on a row, whether or not this VM has seen
+  its atom (decoding does not use `binary_to_term/2`'s `:safe`, which would
+  reject it). **Breaking for callers of the internals:**
+  `Ankusa.Envelope.from_binary/1`
+  now returns `{:ok, envelope} | {:error, :unsupported_envelope_version |
+  :undecodable}` instead of the struct or a raise. Every reader handles the
+  error: dispatch dead-letters the delivery (reason
+  `:unsupported_envelope_version`, `:unsupported_delivery_row_version` or
+  `:undecodable`) and lists it in the DLQ, `Ankusa.Queue.hooks/3` returns
+  `{:error, {:corrupt_value, :hooks, _}}`, a replay skips the hook, the
+  compactor logs it, and the 0.3 import refuses to boot with
+  `{:corrupt_legacy_wal_record, path, seq, reason}`.
 - Requires `async_api_spex ~> 0.2` from Hex (was `~> 0.1`, which excluded
   0.2.0, the release this package is built and tested against).
 - **Breaking:** `claim_check.blob_store` is now `claim_check.blob_stores`, a

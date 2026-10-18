@@ -21,8 +21,9 @@ defmodule Ankusa.Storage do
     with {:ok, {segment_key, offset, length, seq}} <- locate(instance, event_id),
          {:ok, frame} <-
            Ankusa.BlobStore.get_range(instance, :segments, segment_key, offset, length),
-         {:ok, payload} <- codec.decode_record(frame) do
-      {:ok, %{Envelope.from_binary(payload) | seq: seq}}
+         {:ok, payload} <- codec.decode_record(frame),
+         {:ok, env} <- Envelope.from_binary(payload) do
+      {:ok, %{env | seq: seq}}
     else
       _ -> :error
     end
