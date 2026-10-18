@@ -292,6 +292,28 @@ curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entri
 
 `linux/amd64` and `linux/arm64`.
 
+## Verify an image
+
+Every image Docker Hub serves for this repo is built by
+[`docker.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/docker.yml)
+on GitHub Actions, carries an SPDX SBOM and a SLSA provenance attestation for
+both platforms, and has its index digest signed keylessly with
+[cosign](https://github.com/sigstore/cosign) (the certificate names the workflow
+run; the signature is in the public Rekor log):
+
+```sh
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/jamescarr/ankusa/\.github/workflows/docker\.yml@refs/(heads/main|tags/ankusa_server-v.+)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  jamescarr/ankusa:X.Y.Z
+
+docker buildx imagetools inspect jamescarr/ankusa:X.Y.Z --format '{{json .SBOM}}'
+docker buildx imagetools inspect jamescarr/ankusa:X.Y.Z --format '{{json .Provenance}}'
+```
+
+A tag can move; to deploy exactly what you verified, pin the digest
+(`jamescarr/ankusa@sha256:…`, from `docker buildx imagetools inspect`).
+
 ## Where to read more
 
 The image is the framework; the documentation covers what it does and how it

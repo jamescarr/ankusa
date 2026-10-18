@@ -1592,9 +1592,29 @@ defmodule AnkusaServer.Config do
         opts =
           []
           |> put_opt(:secret, secret_opt(verify, path))
-          |> put_opt(:tolerance, int_opt(verify, "tolerance_seconds", path))
+          |> put_opt(:tolerance, tolerance_opt(verify, path))
 
         {verify_module(type), verify_opts(type, verify, path, opts)}
+    end
+  end
+
+  # The replay window, in seconds, from 0 to `Ankusa.Verifier.max_tolerance_seconds/0`
+  # (an hour). Core refuses the same range at boot; checking here names the YAML key.
+  defp tolerance_opt(verify, path) do
+    max = Ankusa.Verifier.max_tolerance_seconds()
+
+    case int_opt(verify, "tolerance_seconds", path) do
+      nil ->
+        nil
+
+      seconds when seconds >= 0 and seconds <= max ->
+        seconds
+
+      seconds ->
+        raise ConfigError,
+          message:
+            "#{render_path(path ++ ["tolerance_seconds"])}: must be between 0 and " <>
+              "#{max} seconds, got #{seconds}"
     end
   end
 

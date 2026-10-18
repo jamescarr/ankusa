@@ -50,6 +50,16 @@ The always-on tests cover:
   `duplicate: true`, a key past its TTL committing again, two entries sharing
   a key in one batch, per-tenant keys and the writer's expiry sweep;
   `metrics_test.exs` covers the scrape's bounded labels and series.
+- **Verifier hardening** (`verifier_test.exs` "tolerance range and weak hashes",
+  `metrics_test.exs`, `ankusa_server` `config_test.exs` "tolerance range"):
+  `tolerance` 0–3600 validates and 3601, a negative or a non-integer is
+  `:bad_tolerance` from `validate_opts/1` and every `verify/2`; a source
+  declared with 3601 refuses to boot and names itself; the YAML loader names
+  `sources.<id>.verify.tolerance_seconds`; no preset uses SHA-1; a `sha1`
+  inline scheme boots with one warning and a SHA-1 source (and no other)
+  appears on `ankusa_verifier_weak_hash_total`. `mise run lint:pins` is the
+  gate for action SHAs and image digests (what runs where:
+  [`releasing.md`](releasing.md#supply-chain-pins-sbom-provenance-signature)).
 - **Store and queue** (`store_test.exs`, `queue_test.exs`): the RocksDB store
   applies one batch across column families (puts, deletes, range deletes) and
   refuses an unreadable or missing store with `:store_unavailable` rather than

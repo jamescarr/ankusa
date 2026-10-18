@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
 # Ankusa as a server: the whole framework — core plus the RabbitMQ, NATS, and
 # Kafka adapters — in one image, configured by a mounted YAML file.
@@ -7,7 +7,13 @@
 # reason as examples/oban-consumer/ingest_app: the path deps (`../ankusa`,
 # `../ankusa_rabbitmq`, …) have to resolve to this checkout, or `mix release`
 # would pull the published Hex packages instead of the code being built.
-FROM elixir:1.20.4-alpine AS build
+#
+# Every image reference here is pinned by the digest of its multi-arch index
+# (`mise run lint:pins` fails a bare tag). The tag stays in front of the digest
+# for the reader; Docker resolves only the digest. To bump one, change tag and
+# digest together, in a PR:
+#   docker buildx imagetools inspect elixir:1.20.4-alpine --format '{{json .Manifest.Digest}}'
+FROM elixir:1.20.4-alpine@sha256:f1a8c06b332cacc7239381a25331a807fb63962f8221dff545ea4d8f78b0f50c AS build
 
 # build-base/cmake/git are for the C++ NIFs: `crc32cer` (via brod, the Kafka
 # client) compiles on install in :prod and has no prebuilt artifact. rocksdb
@@ -44,7 +50,7 @@ RUN mix deps.get --only prod && mix release ankusa
 # alarming stderr warning without it on every `eval` and `start`. coreutils is
 # for `:disksup` (the disk gauges): it runs `/bin/df -lk -x squashfs`, which
 # busybox's `df` rejects, so without GNU `df` every disk reading is zero.
-FROM alpine:3.24
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 RUN apk add --no-cache libstdc++ libgcc zstd-libs ncurses-libs openssl ca-certificates tini curl liblksctp coreutils \
  && addgroup -S ankusa && adduser -S -G ankusa -h /var/lib/ankusa ankusa \

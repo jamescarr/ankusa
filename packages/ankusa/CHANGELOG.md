@@ -13,6 +13,18 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Verifier hardening (SEC-8).** `Ankusa.Verifier.Hmac` caps `:tolerance` at
+  `Ankusa.Verifier.max_tolerance_seconds/0` (3600 s): `validate_opts/1` returns
+  `{:error, :bad_tolerance}` for anything but an integer from 0 to 3600,
+  `Ankusa.Verifier.validate_config!/1` refuses to boot a source declared in
+  config with one (naming it), and `verify/2` fails every hook closed with
+  `:bad_tolerance` for a stored source written before the cap. An inline scheme
+  with `hash: :sha1` still verifies (some providers only sign that way) but now
+  logs one boot warning naming the source, and every verification of it
+  increments the new `ankusa_verifier_weak_hash_total{instance,source_id,scheme}`
+  counter (`:weak_hash` on the `[:ankusa, :verify]` span metadata);
+  `Ankusa.Verifier.Hmac.weak_hash?/1` is the predicate. No named scheme uses
+  SHA-1.
 - **Tenant-scoped admin reads and writes (SEC-7).** The DLQ, replay jobs, the
   quarantine pen and the rate-limit listing are filtered by tenant instead of
   needing `tenant:*`: `GET /v1/dlq`, `GET|DELETE /v1/quarantine`,
