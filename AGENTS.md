@@ -85,6 +85,7 @@ one; CI runs the same tasks this table does.
 | `mise run check:tools` | `tools/*` |
 | `mise run check:conformance` | validate `conformance/` and run every `packages/sdk-*` against its vectors |
 | `mise run test:integration` | `ankusa` core's object-store adapters vs. the floci emulators |
+| `mise run test:crash` | crash-consistency drill (needs `docker`): ENOSPC on a 96 MiB tmpfs, then `kill -9` under load; every acked hook must read back. `scripts/drills/flakey.sh` is the power-loss variant on device-mapper (privileged Docker) |
 | `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`) |
 | `mise run format` | `mix format`, `gofmt`, google-java-format, and cljfmt across every package — run before pushing, not after CI complains |
 | `mise run deps` | refresh every `mix.lock` after adding/removing a core dependency |
@@ -107,6 +108,7 @@ until they pass too.
 | `tools/*` | `mise run check:tools` |
 | an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |
+| the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) | `mise run test:crash`, and `scripts/drills/flakey.sh` where Docker can run `--privileged` |
 | anything, before tagging a release | `mise run e2e` |
 | everything | `mise run check` |
 
