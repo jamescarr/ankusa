@@ -4,7 +4,7 @@ defmodule Ankusa.BlobStore.LocalFS do
 
   Objects live under `opts[:root]` (an absolute path), by default
   `Config.path(config, "segments")`. A dedicated claim store
-  (`claim_check.blob_store: {LocalFS, root: "/shared/claims"}`) points it
+  (`claim_check.blob_stores: [{LocalFS, root: "/shared/claims"}]`) points it
   elsewhere — at a directory every node and the gateway mount, say.
 
   Writes are atomic (temp file + rename) and durable (file and directory

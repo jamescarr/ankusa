@@ -45,6 +45,61 @@ defmodule Ankusa.ClaimCheck.SweeperTest do
     assert {:ok, "fresh"} = redeem(inst, fresh)
   end
 
+  test "sweeps shard=<c>/dt= partitions of the sharded key layout too", %{inst: inst} do
+    config = Ankusa.config(inst)
+    Ankusa.put_config(%{config | claim_check: %{config.claim_check | key_layout: :sharded}})
+
+    old = claim_at(inst, days_ago(10), "old")
+    fresh = claim_at(inst, days_ago(1), "fresh")
+
+    root = Config.path(config, "segments")
+    assert [_, _] = Path.wildcard(Path.join(root, "claims/tenant=acme/shard=*/dt=*"))
+
+    assert {1, 2} = Sweeper.sweep(inst)
+
+    assert {:error, :not_found} = redeem(inst, old)
+    assert {:ok, "fresh"} = redeem(inst, fresh)
+  end
+
+  test "sweeps every LocalFS claim store's root, and a root two stores share once", %{inst: inst} do
+    config = Ankusa.config(inst)
+    default_root = Config.path(config, "segments")
+
+    other_root =
+      Path.join(System.tmp_dir!(), "ankusa_claims_#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf(other_root) end)
+    stores = fn list -> %{config | claim_check: %{config.claim_check | blob_stores: list}} end
+
+    # :ordered writes to the first store: one old and one fresh pack per root
+    Ankusa.put_config(stores.([{Ankusa.BlobStore.LocalFS, []}]))
+    old_default = claim_at(inst, days_ago(10), "old default")
+    fresh_default = claim_at(inst, days_ago(1), "fresh default")
+    Ankusa.put_config(stores.([{Ankusa.BlobStore.LocalFS, root: other_root}]))
+    old_other = claim_at(inst, days_ago(10), "old other")
+    fresh_other = claim_at(inst, days_ago(1), "fresh other")
+
+    # three stores, two roots: the default root is named once and left
+    # implicit once. The sweeper reads its config when it starts.
+    Ankusa.put_config(
+      stores.([
+        {Ankusa.BlobStore.LocalFS, []},
+        {Ankusa.BlobStore.LocalFS, root: other_root},
+        {Ankusa.BlobStore.LocalFS, root: default_root}
+      ])
+    )
+
+    :ok = stop_supervised!({Sweeper, inst})
+    start_supervised!({Sweeper, instance: inst})
+
+    assert {2, 4} = Sweeper.sweep(inst)
+
+    assert {:error, :not_found} = redeem(inst, old_default)
+    assert {:error, :not_found} = redeem(inst, old_other)
+    assert {:ok, "fresh default"} = redeem(inst, fresh_default)
+    assert {:ok, "fresh other"} = redeem(inst, fresh_other)
+  end
+
   test "keeps a claim for at least retention_days: the partition exactly on the cutoff day stays",
        %{inst: inst} do
     boundary = claim_at(inst, days_ago(7), "boundary")

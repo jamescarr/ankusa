@@ -45,49 +45,53 @@ defmodule Ankusa.BlobStore.GCS do
   alias Ankusa.HttpClient
 
   @impl true
-  def put(_instance, key, data, opts) do
+  def put(instance, key, data, opts) do
     url = media_url(opts, "o", [{"uploadType", "media"}, {"name", key}])
 
-    case request(opts, :post, url, data, [], "application/octet-stream") do
+    case request(instance, opts, :post, url, data, [], "application/octet-stream") do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl true
-  def get(_instance, key, opts) do
+  def get(instance, key, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [{"alt", "media"}])
-    request(opts, :get, url, "", [], nil)
+    request(instance, opts, :get, url, "", [], nil)
   end
 
   @impl true
-  def get_range(_instance, key, offset, length, opts) do
+  def get_range(instance, key, offset, length, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [{"alt", "media"}])
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, url, nil, [{"range", range}], nil)
+    request(instance, opts, :get, url, nil, [{"range", range}], nil)
   end
 
   @impl true
-  def delete(_instance, key, opts) do
+  def delete(instance, key, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [])
-    _ = request(opts, :delete, url, nil, [], nil)
+    _ = request(instance, opts, :delete, url, nil, [], nil)
     :ok
   end
 
   # Every page (`nextPageToken`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
+  def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
-  defp list_pages(opts, prefix, token, acc) do
+  defp list_pages(instance, opts, prefix, token, acc) do
     query = [{"prefix", prefix}] ++ if(token, do: [{"pageToken", token}], else: [])
 
-    with {:ok, body} <- request(opts, :get, media_url(opts, "o", query), nil, [], nil),
+    with {:ok, body} <-
+           request(instance, opts, :get, media_url(opts, "o", query), nil, [], nil),
          {:ok, page} when is_map(page) <- JSON.decode(body) do
       acc = [page |> Map.get("items", []) |> Enum.map(& &1["name"]) | acc]
 
       case page["nextPageToken"] do
-        next when is_binary(next) and next != "" -> list_pages(opts, prefix, next, acc)
-        _ -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+        next when is_binary(next) and next != "" ->
+          list_pages(instance, opts, prefix, next, acc)
+
+        _ ->
+          {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
       end
     else
       {:error, reason} -> {:error, reason}
@@ -116,12 +120,12 @@ defmodule Ankusa.BlobStore.GCS do
   defp query_suffix([]), do: ""
   defp query_suffix(query), do: "?" <> URI.encode_query(query)
 
-  defp request(opts, method, url, body, headers, content_type) do
+  defp request(instance, opts, method, url, body, headers, content_type) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
     req_options = Keyword.get(opts, :req_options, [])
 
     result =
-      Retry.run(opts, fn ->
+      Retry.run(instance, opts, fn ->
         all_headers = auth_headers(opts) ++ headers ++ content_type_header(content_type)
         HttpClient.request(method, url, all_headers, body, timeout, req_options)
       end)

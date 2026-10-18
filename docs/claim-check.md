@@ -117,10 +117,100 @@ gateway serves claims written by every node of a fleet. A gateway-only node
 whose claim store is `local` logs a warning at boot: it reads its own disk, and
 other nodes' claims are only there if that directory is shared.
 
+### Several stores, and failover
+
+`claim_check.stores` lists claim stores in order, each in the `store` shape
+(the two keys are exclusive). Buckets, regions and providers can mix:
+
+```yaml
+claim_check:
+  stores:
+    - type: s3
+      s3: {bucket: "${CLAIMS_BUCKET}", region: us-east-1}
+    - type: s3
+      s3: {bucket: "${CLAIMS_BUCKET_WEST}", region: us-west-2}
+  placement: ordered        # or hash
+  store_cooldown_ms: 30000
+```
+
+- `placement: ordered` (default): every pack goes to the first store; the
+  next ones take packs only while it fails.
+- `placement: hash`: the pack id's random bits pick a store, so packs, and
+  their request rate, spread evenly over all of them; the next stores take
+  over while a pack's store fails.
+
+A pack write that still fails after the store's own retries moves to the next
+store at once, and later writes skip the failed store for
+`store_cooldown_ms`, then try it again. Only when every store fails does the
+write fail, and the delivery is retried under the sink's retry policy, the
+same as with one store. The gateway searches every store, so a pack a failover
+put elsewhere is still served. A store that can't answer a read is searched
+last for `store_cooldown_ms` too, so on a gateway that never writes, a hung
+store costs one read its timeout and the next reads go to the healthy stores
+first. A claim no store has is `404` only when every store answered: if one
+couldn't, the answer is `503 store_unavailable`, because the claim may be in
+it.
+
+Set the same list, in the same order, on every node that writes claims and on
+the gateway. Adding a store is safe: with `hash` new packs spread onto it, and
+older ones are still found. **Removing a store makes the claims in it
+unreadable**; remove one only once its packs are past retention. Each store
+needs its own lifecycle rule (see [Retention](#retention)).
+
 **The gateway does no authentication or authorization.** Who may read what is
 decided in front of it: a service mesh, Envoy, an API gateway, a cloud load
 balancer with OIDC. It logs a warning saying so at startup, the same as the
 admin API.
+
+### Under load
+
+The gateway keeps answering fast while an object store throttles or hangs:
+
+- **From memory.** Pack indexes and claims it has read are cached, up to
+  `read_cache_bytes`; a claim over `read_cache_max_entry_bytes` is served and
+  never cached, and partial ranges never are. A pack's first read covers its first
+  1 024 claims, so the rest of the pack is located without the store. Claims
+  never change, so nothing cached is wrong while the claim exists; a claim
+  swept by retention can still answer `HEAD` for up to 10 minutes, and `GET`
+  for up to 2.
+- **One store read per claim.** Concurrent requests for one claim, or one
+  pack's index, share one store read.
+- **An adaptive limit.** Per store, concurrent reads are capped at a limit
+  that starts at `read_max_inflight`, halves when the store throttles (`429`,
+  `503 SlowDown`) or doesn't answer, and grows back by one per round of
+  successes. Reads past it wait in a queue of `read_queue_max`; past that,
+  they get `503` at once.
+- **A deadline.** Every request is answered within `read_deadline_ms`, well
+  inside the SDKs' 10 s request timeout: past it, `503 store_unavailable`. A
+  store read that outlives the deadline still finishes and fills the cache,
+  so the client's retry is served from memory. Store requests use
+  `read_timeout_ms` and `read_retries`, not the store's write timeouts, and a
+  store that couldn't answer isn't asked again at the other key layout within
+  the same read.
+
+```yaml
+claim_check:
+  read_deadline_ms: 5000
+  read_timeout_ms: 3000
+  read_retries: 1
+  read_max_inflight: 48       # per store; under the HTTP client's 50 connections
+  read_queue_max: 256         # per store; 0 = never wait
+  read_cache_bytes: 134217728 # 0 = no cache
+  read_cache_max_entry_bytes: 1048576
+```
+
+A throttling store never opens its breaker: it answered, and the limit is what
+backs off. Every `503 store_unavailable` carries a `Retry-After` of 1 to 3
+seconds, picked at random, so the clients one throttle turned away don't come
+back together. On `/metrics`:
+`ankusa_claim_check_gateway_requests_total{method,status}` and
+`ankusa_claim_check_gateway_duration_seconds`;
+`ankusa_claim_check_reads_total{kind,source,result}`, where `source` is
+`cache`, `store`, `coalesced`, `shed` or `direct` (a node reading without
+the gateway's reader) and `result` tells `throttled`, `unavailable`,
+`overloaded` (shed by the queue) and `deadline` (shed at the deadline) apart; and
+`ankusa_claim_check_read_limit`, `_read_inflight` and `_read_queued` per
+store.
 
 ## Redeem a claim
 
@@ -166,7 +256,7 @@ Errors are JSON: `{"error": "not_found"}`.
 | `404` | `not_found` | no such claim: expired by retention, or never written | No, dead-letter |
 | `416` |  | the `Range` starts past the claim's end; `content-range: bytes */<length>` | No, fix the range |
 | `408`, `429` |  | a front layer (proxy, API gateway) timing out or throttling | Yes, retry |
-| `503` | `store_unavailable` | the object store is unreachable; `Retry-After: 1` | Yes |
+| `503` | `store_unavailable` | the object store is unreachable, throttling, or slower than the gateway's deadline, or the gateway is shedding load; `Retry-After` 1–3, random | Yes |
 | `503` | `store_forbidden` | the object store refused the gateway's credential; `Retry-After: 60` | Yes, after fixing the policy |
 |  |  | bytes don't match the message's sha256 (your check) | No, dead-letter |
 
@@ -486,16 +576,51 @@ Claims live at
 claims/tenant=acme/dt=2026-09-24/01M39VMD8RA3C5HR4RBV67Y000
 ```
 
-in the claim store (the storage bucket unless `claim_check.store` is set),
-beside the `seg/` segments and never under `storage.key_prefix`. The last
-segment is the pack id: any of its claim ids with the position bits (the last
-three characters, plus the lowest bit of the fourth-from-last) zeroed. A pack
-id is the check-in time plus 64 random bits, for a batch pack and a
-single-claim pack alike, so an id can't be derived from a hook id. `dt` is the
-UTC date of the id's timestamp — the check-in date, not the hook's receive
-date — so the key is computable from the reference. Hive-style `key=value`
-folders are what Spark and Databricks partition discovery, BigQuery, and
-Athena read without configuration.
+in the claim store (the storage bucket unless `claim_check.store` or
+`claim_check.stores` is set), beside the `seg/` segments and never under
+`storage.key_prefix`. The last segment is the pack id: any of its claim ids
+with the position bits (the last three characters, plus the lowest bit of the
+fourth-from-last) zeroed. A pack id is the check-in time plus 64 random bits,
+for a batch pack and a single-claim pack alike, so an id can't be derived from
+a hook id. `dt` is the UTC date of the id's timestamp — the check-in date, not
+the hook's receive date — so the key is computable from the reference.
+Hive-style `key=value` folders are what Spark and Databricks partition
+discovery, BigQuery, and Athena read without configuration.
+
+### Sharded keys
+
+With `claim_check.key_layout: sharded`, packs go one folder deeper:
+
+```
+claims/tenant=acme/shard=A/dt=2026-09-24/01M39VMD8RA3C5HR4RBV67Y000
+```
+
+`shard` is the pack id's eleventh character, the first 5 of its random bits:
+one of 32 values, and computable from the reference like the rest of the key.
+S3 takes about 3,500 writes and 5,500 reads per second per key prefix and
+answers `503 SlowDown` past that until it splits the prefix, which can take
+minutes. Under the default `flat` layout one tenant's packs all land on the
+tail of one prefix; `sharded` spreads them over 32. `shard=` sits under
+`tenant=`, so one tenant is still one prefix to delete, and above `dt=`, so a
+prefix S3 has split for a shard stays split across days.
+
+It is opt-in because readers of the bucket see the extra folder: Spark's
+partition discovery calls a tenant with both flat and sharded folders a
+conflict until the flat ones age out. The gateway reads both layouts whatever
+`key_layout` says, so switching either way never strands a claim, and the
+local sweeper sweeps both.
+
+### Throttling
+
+Each HTTP object store retries a throttled (`429`, `503`) or failed request
+twice, after about 200 ms and then 1 s, each delay jittered so nodes throttled
+together don't retry in step. Past that, the store's breaker and the failover
+above take over, then the delivery's retry policy. The gateway's reads retry
+once (`read_retries`) and back off on their own: see
+[Under load](#under-load). On `/metrics`,
+`ankusa_blob_store_retries_total{status}` counts the retries and
+`ankusa_claim_check_store_breaker_transitions_total{store,state}` the
+breakers opening and closing.
 
 ## Retention
 
@@ -506,8 +631,8 @@ wait before replaying a dead letter. Retention counts from **check-in**, the
 `dt=` date: a hook that sat in a backlog for a week before its first delivery
 gets the full retention window from that delivery, not from its arrival.
 
-- **S3 or GCS:** add a lifecycle rule on the `claims/` prefix. Ankusa doesn't
-  expire these for you.
+- **S3 or GCS:** add a lifecycle rule on the `claims/` prefix, in every claim
+  store. Ankusa doesn't expire these for you.
 
   ```sh
   aws s3api put-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
@@ -516,10 +641,11 @@ gets the full retention window from that delivery, not from its arrival.
   ```
 
 - **Local storage:** set `claim_check.retention_days` (≥ 1) on the node running
-  the `storage` role. It deletes whole `dt=` day directories once everything in
-  them is past retention, every hour; a directory it can't delete is logged and
-  the sweep moves on. Setting `retention_days` with a non-local claim store is a
-  boot error: the sweeper never touches a bucket.
+  the `storage` role. It deletes whole `dt=` day directories, under both key
+  layouts and in every local claim store, once everything in them is past
+  retention, every hour; a directory it can't delete is logged and the sweep
+  moves on. Setting `retention_days` with any non-local claim store is a boot
+  error: the sweeper never touches a bucket.
 
 ## Reading claims from a data platform
 

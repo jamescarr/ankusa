@@ -60,7 +60,7 @@ Every top-level section, with its keys and defaults:
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) |
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
-| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) |
+| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) and [Under load](claim-check.md#under-load) |
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
@@ -257,7 +257,17 @@ config :ankusa,
     pack_max_bytes: 16_777_216,
     retention_days: nil,
     sweep_interval_ms: 3_600_000,
-    blob_store: nil
+    blob_stores: nil,
+    placement: :ordered,
+    store_cooldown_ms: 30_000,
+    key_layout: :flat,
+    read_deadline_ms: 5_000,
+    read_timeout_ms: 3_000,
+    read_retries: 1,
+    read_max_inflight: 48,
+    read_queue_max: 256,
+    read_cache_bytes: 128 * 1024 * 1024,
+    read_cache_max_entry_bytes: 1024 * 1024
   },
   backup: %{enabled: false, interval_ms: 60_000, keep: 3, blob_store: nil},
   admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
@@ -314,7 +324,16 @@ config :ankusa,
 | `claim_check.pack_max_bytes` | `16_777_216` | Target size of one claim pack; a body larger than this still gets a pack of its own. Must be a positive integer. |
 | `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
 | `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
-| `claim_check.blob_store` | `nil` | `{module, opts}` for claim packs; `nil` uses `storage.blob_store`. A `LocalFS` claim store takes `root:` (an absolute path). |
+| `claim_check.blob_stores` | `nil` | `[{module, opts}, ...]`, the stores claim packs are written to and read from; `nil` uses `[storage.blob_store]`. A `LocalFS` claim store takes `root:` (an absolute path). A failed write moves to the next store; a read searches every one. Removing a store makes its claims unreadable. See [`claim-check.md`](claim-check.md#several-stores-and-failover). |
+| `claim_check.placement` | `:ordered` | Which store a new pack goes to: `:ordered` the first, the others only while it fails; `:hash` the pack id's random bits pick one, spreading packs over every store. |
+| `claim_check.store_cooldown_ms` | `30_000` | A store that failed a write, or could not answer a read, is skipped by later writes and searched last by later reads for this long, then tried again. Positive integer. |
+| `claim_check.key_layout` | `:flat` | `:flat` = `claims/tenant=<t>/dt=<d>/<pack>`; `:sharded` adds `shard=<c>/` under the tenant (32 prefixes per tenant, against per-prefix request limits like S3's `503 SlowDown`). Reads try both layouts. See [`claim-check.md`](claim-check.md#sharded-keys). |
+| `claim_check.read_deadline_ms` | `5_000` | The gateway answers every claim request within this: past it, `503 store_unavailable`. A store read that outlives it still finishes and fills the cache. Also bounds `redeem/3` on a `:claim_check` node. See [`claim-check.md`](claim-check.md#under-load). |
+| `claim_check.read_timeout_ms`, `claim_check.read_retries` | `3_000`, `1` | Per store request while reading a claim, and the retries after a failed one. A claim store's own `timeout_ms`/`retries` options are for writes. |
+| `claim_check.read_max_inflight` | `48` | Per store, the ceiling of the gateway's adaptive limit on concurrent store reads: it halves when the store throttles (`429`, `503`) or does not answer, and grows back by one per round of successes. The HTTP stores read through a client connection pool of 50 per host (claim reads get a pool of their own, keyed by `read_timeout_ms`), which is why the default sits under 50: a ceiling above it only queues reads inside the client, and one that waits past the client's 5 s checkout timeout fails as a transport error. Two claim stores on one host share that pool. |
+| `claim_check.read_queue_max` | `256` | Per store, reads waiting for a free slot; past it a read is answered `503` at once. `0` never waits. |
+| `claim_check.read_cache_bytes` | `134_217_728` | Memory for the gateway's cached pack indexes and claims; `0` turns the cache off. |
+| `claim_check.read_cache_max_entry_bytes` | `1_048_576` | A claim larger than this is served but never cached. |
 | `backup.enabled` | `false` | Back the store up to an object store while it runs, and restore the latest backup at boot when the store directory holds no database. A backup location that can't be read then refuses the boot (`{:store_restore_failed, path, reason}`) instead of starting empty. See [`storage.md`](storage.md#backup-and-restore). |
 | `backup.interval_ms` | `60_000` | How often a checkpoint is uploaded: the most a lost host loses. Only files the last backup doesn't already have are uploaded. |
 | `backup.keep` | `3` | Backups kept; older ones, and the files only they used, are deleted after each successful backup. |
@@ -340,10 +359,16 @@ config :ankusa,
 Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 <constraint>, got <value>"`: every port is `0..65535`; `max_body_bytes`,
 `direct_publish_timeout_ms`, the `batcher` and `dispatch` sizes and counts,
-`storage.roll_bytes`, `claim_check.sweep_interval_ms`, `backup.interval_ms`,
+`storage.roll_bytes`, `claim_check.sweep_interval_ms`,
+`claim_check.store_cooldown_ms`, `claim_check.read_deadline_ms`,
+`claim_check.read_timeout_ms`, `claim_check.read_max_inflight`,
+`claim_check.read_cache_max_entry_bytes`, `backup.interval_ms`,
 `backup.keep`, `admin.gauge_interval_ms` and `routes.max_routes` must be positive;
-`batcher.max_delay_ms`, `storage.roll_ms` and `storage.interval_ms` may be `0`
-(no linger, roll at once, a compactor that runs only when asked);
+`batcher.max_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
+`claim_check.read_retries`, `claim_check.read_queue_max` and
+`claim_check.read_cache_bytes` may be `0` (no linger, roll at once, a
+compactor that runs only when asked, no read retry, no waiting for a slot, no
+claim cache);
 `claim_check.retention_days` is `nil` or ≥ 1; `storage.key_prefix` is `""` or
 `name/` parts; `dispatch.sink_concurrency` is `nil` or `1..concurrency`,
 `dispatch.breaker_failures` ≥ 0, `breaker_open_ms` positive and
