@@ -4,8 +4,8 @@
 # packages do the same thing), so the build needs both directories in one
 # context.
 #   docker compose build worker   (context: ../.. in docker-compose.yml)
-FROM python:3.13-alpine
-COPY --from=ghcr.io/astral-sh/uv:0.5.29 /uv /uvx /usr/local/bin/
+FROM python:3.15-alpine
+COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /uvx /usr/local/bin/
 
 WORKDIR /repo
 COPY packages/sdk-python ./packages/sdk-python

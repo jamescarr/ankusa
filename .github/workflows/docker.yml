@@ -47,7 +47,7 @@ jobs:
       tags: ${{ steps.resolve.outputs.tags }}
       push: ${{ steps.resolve.outputs.push }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: resolve
         run: |
@@ -124,21 +124,21 @@ jobs:
             runner: ubuntu-24.04-arm
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Before buildx: setup-buildx pulls moby/buildkit and the build pulls
       # the base images, all from Docker Hub. Also the push credentials below.
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build (loaded locally so it can be smoke-tested)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: packages/ankusa_server/Dockerfile
@@ -160,7 +160,7 @@ jobs:
       - name: Push by digest
         id: push
         if: ${{ needs.resolve.outputs.push == 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: packages/ankusa_server/Dockerfile
@@ -174,7 +174,7 @@ jobs:
           set -euo pipefail
           echo "${{ steps.push.outputs.digest }}" > "$RUNNER_TEMP/digest-${{ matrix.arch }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ needs.resolve.outputs.push == 'true' }}
         with:
           name: digest-${{ matrix.arch }}
@@ -190,15 +190,15 @@ jobs:
     if: ${{ always() && needs.build.result == 'success' && needs.resolve.outputs.push == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -237,11 +237,11 @@ jobs:
     if: ${{ github.ref_type == 'tag' && needs.resolve.outputs.push == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The repo description on Docker Hub is the README operators land on when
       # they search for the image.
-      - uses: peter-evans/dockerhub-description@v4
+      - uses: peter-evans/dockerhub-description@v5
         # Cosmetic (the Docker Hub repo page's README), and known to 403 with
         # a token that has push-only scope: must not block the GitHub release
         # below, which carries the actual release notes.

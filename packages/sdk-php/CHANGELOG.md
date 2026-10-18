@@ -6,6 +6,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Accepts `guzzlehttp/guzzle ^8.2` and `guzzlehttp/psr7 ^3.1` as well as
+  `^7.9` and `^2.13`: an app resolves one Guzzle for everything, so the SDK
+  installs next to either major. The test suite and PHPStan pass on both.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

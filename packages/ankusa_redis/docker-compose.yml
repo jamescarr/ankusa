@@ -12,7 +12,7 @@ name: ankusa_redis
 
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     ports:
       - "6399:6379"
     healthcheck:

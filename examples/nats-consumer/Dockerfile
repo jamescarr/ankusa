@@ -1,6 +1,6 @@
 # Builds the worker against the published `ankusa` crate, so the build
 # context is just this directory.
-FROM rust:1.98.1-alpine3.24 AS build
+FROM rust:1.99.1-alpine3.24 AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
