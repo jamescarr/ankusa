@@ -588,7 +588,22 @@ defmodule Ankusa.Store.Migrate do
   end
 
   defp wal_record(seq, payload, acc) do
-    env = Envelope.from_binary(payload)
+    case Envelope.from_binary(payload) do
+      {:ok, env} ->
+        wal_commit(seq, env, acc)
+
+      {:error, reason} ->
+        Logger.error(
+          "[ankusa] #{acc.file}: frame #{seq} passes its checksum but is no envelope " <>
+            "(#{reason}). Refusing to start: an acked hook would be lost. " <>
+            "Move #{Path.dirname(acc.file)} aside to start without it."
+        )
+
+        {:error, {:corrupt_legacy_wal_record, acc.file, seq, reason}}
+    end
+  end
+
+  defp wal_commit(seq, env, acc) do
     bin = Envelope.to_binary(%{env | seq: nil})
     size = byte_size(bin)
     plan = acc.plan

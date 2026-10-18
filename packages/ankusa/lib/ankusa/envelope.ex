@@ -9,8 +9,8 @@ defmodule Ankusa.Envelope do
   Keep it as a refcounted binary and pass it by reference.
   """
 
-  @enforce_keys [:id, :source_id, :received_at, :method, :path, :headers, :body]
-  defstruct [
+  # The single list of fields: `defstruct` and the decoder's allow-list.
+  @fields [
     :id,
     :source_id,
     :tenant_id,
@@ -29,6 +29,18 @@ defmodule Ankusa.Envelope do
     :dedupe_key,
     size: 0
   ]
+
+  @known_keys Enum.map(@fields, fn
+                {key, _default} -> key
+                key -> key
+              end)
+
+  # The encoding `to_binary/1` writes. 0 = the bare term (readable by 0.6 and
+  # earlier); 1 = `"AE", 1, term`. Flips to 1 one minor after readers know v1.
+  @write_version 0
+
+  @enforce_keys [:id, :source_id, :received_at, :method, :path, :headers, :body]
+  defstruct @fields
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -68,22 +80,51 @@ defmodule Ankusa.Envelope do
 
   `body` is kept verbatim; the term is `:erlang.term_to_binary/2` with
   `:deterministic` so re-encoding a replayed record is byte-stable.
+
+  ## Versions
+
+  * `0` (default): the bare term, as every release up to 0.6 wrote it.
+  * `1` (`version: 1`): `<<"AE", 1, term::binary>>`. Nothing writes it by
+    default yet: this release reads both, the next one flips the default, so a
+    rollback from this release to the previous one still reads every row it
+    wrote (see `docs/deployment.md`, "Rolling back a minor").
   """
-  @spec to_binary(t()) :: binary()
-  def to_binary(%__MODULE__{} = env) do
-    :erlang.term_to_binary(Map.from_struct(env), [:deterministic])
+  @spec to_binary(t(), keyword()) :: binary()
+  def to_binary(%__MODULE__{} = env, opts \\ []) do
+    term = :erlang.term_to_binary(Map.from_struct(env), [:deterministic])
+
+    case Keyword.get(opts, :version, @write_version) do
+      0 -> term
+      1 -> <<"AE", 1, term::binary>>
+    end
   end
 
-  @doc "Inverse of `to_binary/1`."
-  @spec from_binary(binary()) :: t()
+  @doc """
+  Inverse of `to_binary/1,2`: reads the unprefixed legacy form (v0) and v1.
+
+  Keys the struct does not know (a field added by a newer node) are ignored,
+  so a row written by N+1 decodes on N. A version this node does not know is
+  `{:error, :unsupported_envelope_version}`; bytes that are no envelope at all
+  are `{:error, :undecodable}`. Never raises: callers dead-letter or log.
+  """
+  @spec from_binary(binary()) ::
+          {:ok, t()} | {:error, :unsupported_envelope_version | :undecodable}
+  def from_binary(<<"AE", 1, term::binary>>), do: decode(term)
+  def from_binary(<<"AE", _version, _term::binary>>), do: {:error, :unsupported_envelope_version}
+  def from_binary(bin) when is_binary(bin), do: decode(bin)
+
   # Trusted, internally written data (this node's own store rows); never request input.
+  # Not `:safe` on purpose: envelopes carry module atoms (`verification.provider`)
+  # and a newer node's added keys, atoms this VM may not have interned yet;
+  # `:safe` would reject the whole row instead of ignoring the unknown field.
   # sobelow_skip ["Misc.BinToTerm"]
-  def from_binary(bin) do
-    # Trusted, internally-written data. NOT `:safe`: envelopes legitimately carry
-    # module atoms (e.g. `verification.provider`) that a fresh decoding node may
-    # not have interned yet — `:safe` would reject them and crash replay/fetch.
-    map = :erlang.binary_to_term(bin)
-    struct(__MODULE__, map)
+  defp decode(term) do
+    case :erlang.binary_to_term(term) do
+      %{} = map -> {:ok, struct(__MODULE__, Map.take(map, @known_keys))}
+      _ -> {:error, :undecodable}
+    end
+  rescue
+    ArgumentError -> {:error, :undecodable}
   end
 end
 

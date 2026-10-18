@@ -244,6 +244,28 @@ due row) and an HTTP sink's `ordered` (deliveries are not ordered). In core,
 `wal: {Ankusa.WAL.DiskLog, _}` raises `ArgumentError` with a hint to use
 `wal: :disk`; any other value but `:disk` or `:none` raises too.
 
+## Rolling back a minor
+
+Hooks and delivery rows are stored in a versioned encoding (v0 = the bare Erlang
+term, v1 = a two-byte tag and a version byte in front of it; see
+[`storage.md`](storage.md#encoding-and-versions)). A release reads the
+versions it knows, and a release only starts *writing* a version once the
+release before it can read it. That makes a rollback of one minor safe, and
+puts the boundary here:
+
+| Running | Reads | Writes | Roll back to |
+| --- | --- | --- | --- |
+| 0.6 and earlier | v0 | v0 | n/a |
+| the first release with versioned encodings | v0, v1 | v0 | 0.6: safe, every row it wrote is v0 |
+| the release after it | v0, v1 | v1 | the first release with versioned encodings: safe; 0.6: **not supported** |
+
+0.6 reads a v1 row with a bare `binary_to_term` and raises, so once a node has
+run the release that writes v1, do not roll back past the release that reads
+it. Upgrade 0.6 to the release that writes v1 *through* the release that
+reads it, never directly. If a node must go below the boundary anyway, restore
+the data directory from a backup taken before the first v1 write; the hooks
+acked after it are lost with it.
+
 ## When a node refuses to start
 
 The store never treats a database it cannot read as empty. Two refusals name
@@ -257,6 +279,9 @@ the file and what to do:
   a 0.3 WAL with valid frames after the damage, or an unreadable `.cursors` or
   `.truncated` sidecar. Acked hooks after the damage would be lost, so the
   node will not guess. Move the 0.3 directory aside to start without it.
+- **`{:corrupt_legacy_wal_record, path, seq, reason}`** — a 0.3 WAL frame that
+  passes its checksum but is no envelope. The node will not guess; move the
+  0.3 directory aside to start without it.
 
 ## Worked examples
 

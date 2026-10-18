@@ -599,6 +599,41 @@ defmodule Ankusa.Dispatch.Pipeline do
     {state, drop ++ ops, pairs, jobs, sources}
   end
 
+  # A row this node cannot read (a version it does not know, or damage) is
+  # dead-lettered, never raised on: it is rebuilt from what the claim knows, so
+  # it lists in the DLQ with the decode error as its reason.
+  defp resolve_one(%{row: {:error, reason}} = item, acc, now) do
+    Logger.error(
+      "[ankusa] delivery row #{item.seq}/#{item.sink} does not decode (#{reason}); dead-lettering it"
+    )
+
+    {source_id, _id} = Deliveries.owner(item.env, %{})
+
+    row = %{
+      module: nil,
+      state: :pending,
+      attempts: 0,
+      at: now,
+      error: nil,
+      size: item.size,
+      source_id: source_id
+    }
+
+    dead(%{item | row: row}, reason, acc, now)
+  end
+
+  # The same for a hook this node cannot decode, e.g. an envelope version newer
+  # than it knows (`:unsupported_envelope_version`): its delivery dead-letters
+  # with that reason and the hook stays in the store for a node that can read it.
+  defp resolve_one(%{env: {:error, reason}} = item, acc, now) do
+    Logger.error(
+      "[ankusa] hook #{item.seq} does not decode (#{reason}); " <>
+        "dead-lettering its delivery row #{item.sink}"
+    )
+
+    dead(item, reason, acc, now)
+  end
+
   defp resolve_one(item, {state, ops, pairs, jobs, sources}, now) do
     {source, sources} = fetch_source(state.instance, item.env.source_id, sources)
 
@@ -692,7 +727,11 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     state =
       state
-      |> settle_dead(item.env, item.row.module, item.row.attempts)
+      |> settle_dead(
+        elem(Deliveries.owner(item.env, item.row), 0),
+        item.row.module,
+        item.row.attempts
+      )
       |> bump_replay(item.row, :dead)
 
     {state, dead_ops ++ ops, pairs, jobs, sources}
@@ -710,8 +749,14 @@ defmodule Ankusa.Dispatch.Pipeline do
         seqs
         |> Enum.zip(hooks)
         |> Map.new(fn
-          {seq, {:ok, bin}} -> {seq, %{Envelope.from_binary(bin) | seq: seq}}
-          {seq, :not_found} -> {seq, nil}
+          {seq, {:ok, bin}} ->
+            case Envelope.from_binary(bin) do
+              {:ok, env} -> {seq, %{env | seq: seq}}
+              {:error, _reason} = undecoded -> {seq, undecoded}
+            end
+
+          {seq, :not_found} ->
+            {seq, nil}
         end)
 
       {ops, dead} =
@@ -733,7 +778,7 @@ defmodule Ankusa.Dispatch.Pipeline do
         state =
           Enum.reduce(dead, state, fn {env, row}, state ->
             state
-            |> settle_dead(env, row.module, row.attempts)
+            |> settle_dead(elem(Deliveries.owner(env, row), 0), row.module, row.attempts)
             |> bump_replay(row, :dead)
           end)
 
@@ -742,18 +787,18 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp settle_dead(state, env, module, attempts) do
+  defp settle_dead(state, source_id, module, attempts) do
     Telemetry.emit([:dispatch, :stop], %{}, %{
       instance: state.instance,
       result: :dlq,
       attempts: attempts,
       sink: module,
-      source_id: env.source_id
+      source_id: source_id
     })
 
     Telemetry.emit([:dispatch, :dlq], %{}, %{
       instance: state.instance,
-      source_id: env.source_id,
+      source_id: source_id,
       sink: module
     })
 
@@ -1326,7 +1371,7 @@ defmodule Ankusa.Dispatch.Pipeline do
       :give_up ->
         {mod, _opts} = job.spec
         error = inspect({:sink, mod, reason}, limit: 50, printable_limit: 4096)
-        state = state |> settle_dead(job.env, mod, attempts) |> bump_replay(row, :dead)
+        state = state |> settle_dead(job.env.source_id, mod, attempts) |> bump_replay(row, :dead)
         {state, Deliveries.dead_ops(job.seq, job.sink, row, now, error, job.env), []}
     end
   end
