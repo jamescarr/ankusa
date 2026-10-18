@@ -233,7 +233,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa_server/Dockerfile`, `.github/workflows/docker.yml`, `.github/workflows/ci.yml`, `packages/ankusa/lib/ankusa/verifier/hmac.ex:276-294`, `verifier/schemes.ex:54`.
   *Evidence:* —
 
-- [ ] **SEC-9 — Secret sources and rotation without redeploy** · P1 · Deps: —
+- [x] **SEC-9 — Secret sources and rotation without redeploy** · P1 · Deps: —
   *Why:* secrets enter only via `${VAR}` (`ankusa_server/config.ex:10-14,222-257`); no file or secret-manager source; static-source rotation needs a redeploy.
   *Change:* `${file:/path}` interpolation and `secret_file:` siblings for `secret:`; behaviour `Ankusa.SecretProvider` with `c:fetch(ref) :: {:ok, binary} | {:error, :unavailable | :not_found}`; `${sm:<provider>:<ref>}` resolved by providers registered in `ankusa_server` (`AWS Secrets Manager`, `Vault` KV v2; both via `Req`, with cache TTL); re-resolution on reload (OPS-6); `SourceStore.Static` re-publishes updated specs; secret lists (`secret: [new, old]`) remain the rotation window.
   *Done when:* a secret file swap + reload verifies with the new secret while the old stays valid until removed; a provider outage at boot is a clear `ConfigError`, at reload a warning that keeps the old secret.

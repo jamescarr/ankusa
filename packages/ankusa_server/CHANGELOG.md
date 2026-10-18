@@ -8,6 +8,24 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Secret sources and rotation without a redeploy (SEC-9).** A secret no
+  longer has to come from the environment. `${file:/abs/path}` reads a file
+  (one trailing newline removed: a Kubernetes secret volume, a Docker secret);
+  `secret_file: /abs/path` (or a list) is `secret:` read from a file, on a
+  source's `verify` and `http` sinks and on `lifecycle` sinks;
+  `${sm:<provider>:<ref>}` asks a secret manager named under the new
+  `secrets.providers` (`type: vault` for HashiCorp Vault KV v2, `type: aws` for
+  AWS Secrets Manager; `#<field>` picks a field of a JSON secret) with
+  `secrets.cache_ttl_ms` (default 0). A reference that cannot be resolved at
+  boot is a load error naming the key and the reference, never a value.
+  `AnkusaServer.Secrets.reload/2` re-reads the file, resolves every reference
+  again and republishes a static source store's sources, so a rotated secret
+  verifies without a restart (`secret: [new, old]` stays the rotation window);
+  a reference that fails on a reload keeps its last value and logs a warning.
+  Nothing triggers a reload on a signal or over HTTP yet. The image now lists
+  `aws_signature` as a direct dependency (the lock is unchanged). A spec an API
+  client submits cannot use `secret_file` or `${file:}`. See
+  `docs/configuration.md#secret-sources`.
 - `audit.retention_days` (365): how long the audit trail (`GET /v1/audit`, scope
   `audit:read`) keeps its rows. The store format is now 2: an image that has
   booted it cannot roll back to a format 1 image without restoring a backup.

@@ -13,6 +13,15 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **`Ankusa.SecretProvider` and `Ankusa.SourceStore.Static.publish/2` (SEC-9).**
+  The behaviour (`fetch(ref, opts)` returning `{:ok, binary} | {:error,
+  :not_found | :unavailable}`) a secret manager implements; the `ankusa_server`
+  image resolves `${sm:<provider>:<ref>}` through it. `publish/2` replaces the
+  sources a running instance with the static source store serves, after the
+  checks it boots under (durability under `wal: :none`, shared sources without a
+  verifier, verifier options, egress), and returns the ids that changed; a
+  refused spec applies nothing. Reads see the new spec on their next
+  `fetch/2`.
 - **Tenant-scoped admin reads and writes (SEC-7).** The DLQ, replay jobs, the
   quarantine pen and the rate-limit listing are filtered by tenant instead of
   needing `tenant:*`: `GET /v1/dlq`, `GET|DELETE /v1/quarantine`,

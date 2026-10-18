@@ -362,4 +362,56 @@ defmodule Ankusa.SourceStore.Static do
     %Config{source_store: {_mod, opts}} = Ankusa.config(instance)
     Keyword.get(opts, :sources, %{})
   end
+
+  @doc """
+  Replace the sources a running instance serves with `sources` (the same
+  `source_id => keyword/map` shape as the `:sources` option), without a restart.
+
+  This is how a config reload rotates a secret: the caller re-reads its config,
+  resolves its secrets again and publishes the result. Every source is built
+  and checked with the rules the instance boots under (`wal: :none` durability,
+  a shared source with no verifier, the verifier's own options, egress), so a
+  spec that would refuse to boot is refused here and the instance keeps serving
+  the sources it has. Nothing is applied unless all of them pass.
+
+  Reads see the new config on their next `fetch/2`, so a hook already being
+  verified finishes against the secret it started with. Returns the ids that
+  were added, removed, or changed, sorted. Raises `ArgumentError` naming the
+  source when a spec is refused, and `ArgumentError` when the instance does
+  not run `Ankusa.SourceStore.Static`: a writable store keeps its sources
+  elsewhere.
+  """
+  @spec publish(atom(), %{String.t() => keyword() | map() | Source.t()}) :: {:ok, [String.t()]}
+  def publish(instance, sources) when is_map(sources) do
+    %Config{source_store: {__MODULE__, opts}} =
+      config =
+      case Ankusa.config(instance) do
+        %Config{source_store: {__MODULE__, _}} = config ->
+          config
+
+        %Config{source_store: {mod, _}} ->
+          raise ArgumentError,
+                "#{inspect(__MODULE__)}.publish/2 needs the static source store, " <>
+                  "instance #{inspect(instance)} runs #{inspect(mod)}"
+      end
+
+    old = config |> Ankusa.Queue.static_sources() |> Map.new()
+    updated = %Config{config | source_store: {__MODULE__, Keyword.put(opts, :sources, sources)}}
+
+    Ankusa.Queue.validate_config!(updated)
+    Ankusa.Verifier.validate_config!(updated)
+    Ankusa.Verifier.validate_shared!(updated)
+    Ankusa.HttpClient.Egress.validate_config!(updated)
+
+    new = updated |> Ankusa.Queue.static_sources() |> Map.new()
+    :ok = Ankusa.put_config(updated)
+
+    changed =
+      (Map.keys(old) ++ Map.keys(new))
+      |> Enum.uniq()
+      |> Enum.filter(&(Map.get(old, &1) != Map.get(new, &1)))
+      |> Enum.sort()
+
+    {:ok, changed}
+  end
 end

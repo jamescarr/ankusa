@@ -43,6 +43,9 @@ defmodule AnkusaServer.MixProject do
       {:ankusa_nats, path: "../ankusa_nats"},
       {:ankusa_redis, path: "../ankusa_redis"},
       {:yaml_elixir, "~> 2.12"},
+      # Signs the secret manager's requests (`AnkusaServer.SecretProvider.AwsSecretsManager`);
+      # the requirement core holds, so the lock does not change.
+      {:aws_signature, "~> 0.4"},
       # Static analysis gates run by `mise run check:package` (dev only).
       {:credo, "~> 1.7", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false},
