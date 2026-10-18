@@ -44,13 +44,62 @@ urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
 | `claim id` | A [ULID](https://github.com/ulid/spec) in canonical form: 26 uppercase Crockford base32 characters. The first 48 bits are the time the claim's pack was written; the last 16 are the claim's position in that pack. Several claims share one pack (see [Write cost](#write-cost)). |
 | `sha256` | A message field next to `claim`, not part of the reference: the lowercase hex digest of the claim's bytes. The reader checks it. |
 
-A reference grants nothing and names no bucket or URL. You turn it into a
-request by dropping the prefix:
+A reference names no bucket or URL, and the gateway wants a credential on top
+of it ([Run the gateway](#run-the-gateway)). A v1 reference never expires, and
+no secret binds it: a leaked message is good for every read its reader's
+credential allows until the claim is swept. You turn it into a request by
+dropping the prefix:
 
 ```
 urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
                     → GET /v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002
 ```
+
+### Signed, expiring references (v2)
+
+Set `claim_check.ref_signing_keys` and every claim written is handed back as a
+**v2** reference, which expires and cannot be forged or retargeted at another
+tenant:
+
+```
+urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac
+                    └┬─┘ └─────────┬──────────────┘ └───┬────┘ └────────────────────┬────────────────────┘
+                   tenant       claim id          exp_unix            signature
+```
+
+| Field | Meaning |
+| --- | --- |
+| `exp_unix` | The Unix second the reference stops working: decimal, 1 to 12 digits, no leading zero. `claim_check.ref_ttl_ms` after the claim was written; unset, the retention window (`claim_check.retention_days`), else 30 days. |
+| `signature` | 43 unpadded base64url characters: the HMAC-SHA256, under the first of `ref_signing_keys`, of `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>`. Changing the tenant, the claim id or the expiry breaks it. |
+
+The signed proof rides the request as two query parameters, in this order:
+
+```
+urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac
+   → GET /v1/claims/acme/01M39VMD8RA3C5HR4RBV67Y002?exp=1790345000&sig=MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac
+```
+
+Every SDK's `parse_claim_ref` does that for you and hands `redeem` the path
+with its query. SDKs never check the signature or the clock: only the
+gateway (and `redeem/3` on a node that has the keys) holds the key. The
+gateway answers, after it has authenticated and authorized the caller and
+before it reads anything, `400 bad_signature` for a signature no listed key
+produced (or an `exp` or `sig` missing one, or out of grammar) and `410
+ref_expired` for a good signature past its `exp`. A tampered `exp` is
+`bad_signature`, never `ref_expired`.
+
+**Rotating a key.** `ref_signing_keys` is `[current, previous...]`: new
+references are signed with the first, and one signed with any listed key is
+served. Put the new key in front on every claim-writing node and on the
+gateway, and drop the old key once every reference it signed has expired
+(`ref_ttl_ms` after the last deploy of the old key). The same keys must be
+configured on every claim-writing node and on every gateway.
+
+**Turning signing on.** The gateway then refuses a v1 reference with `400
+unsigned_ref`, because a v1 reference cannot be told from a forgery.
+References already sitting in queues are v1: set
+`claim_check.accept_unsigned_refs: true` while they drain, then remove it.
+With no keys, nothing changes: references stay v1 and are served.
 
 ## Run the gateway
 
@@ -193,6 +242,10 @@ The gateway keeps answering fast while an object store throttles or hangs:
   `read_timeout_ms` and `read_retries`, not the store's write timeouts, and a
   store that couldn't answer isn't asked again at the other key layout within
   the same read.
+- **A cap on the node.** Past `max_concurrent_reads` (1024) requests in flight
+  on one gateway, the next is `503 overloaded` with the same `Retry-After`, before
+  it locates anything: cache hits count, so a flood of cheap reads can't
+  starve the node. `0` is no cap.
 
 ```yaml
 claim_check:
@@ -259,10 +312,16 @@ Errors are JSON: `{"error": "not_found"}`.
 | `200` |  | the bytes, cacheable forever by the client |  |
 | `206` |  | the requested `Range` of the bytes |  |
 | `400` | `invalid_tenant`, `invalid_id` | tenant outside `[A-Za-z0-9_-]{1,64}`; claim id not a canonical ULID | No, a bug |
+| `400` | `bad_signature` | a [v2 reference](#signed-expiring-references-v2) whose `exp`/`sig` is missing one, out of grammar, or not what any `ref_signing_keys` entry signed for this tenant, claim and expiry | No, dead-letter |
+| `400` | `unsigned_ref` | a v1 reference (no `exp`/`sig`) while the gateway refuses unsigned references | No: re-deliver the hook for a v2 one |
+| `401` | `unauthenticated` | no credential, or one that is wrong or expired | After fixing the reader's credential |
+| `403` | `forbidden` | the credential lacks `claims:read` or the path's tenant (`scope` names it), or `claim_check.authorize` refused | After fixing the reader's credential |
 | `404` | `not_found` | no such claim: expired by retention, or never written | No, dead-letter |
+| `410` | `ref_expired` | a v2 reference with a good signature, past its `exp` | No, dead-letter: re-deliver the hook for a fresh one |
 | `416` |  | the `Range` starts past the claim's end; `content-range: bytes */<length>` | No, fix the range |
 | `408`, `429` |  | a front layer (proxy, API gateway) timing out or throttling | Yes, retry |
 | `503` | `store_unavailable` | the object store is unreachable, throttling, or slower than the gateway's deadline, or the gateway is shedding load; `Retry-After` 1–3, random | Yes |
+| `503` | `overloaded` | this node already serves `claim_check.max_concurrent_reads` requests; `Retry-After` 1–3, random | Yes |
 | `503` | `store_forbidden` | the object store refused the gateway's credential; `Retry-After: 60` | Yes, after fixing the policy |
 |  |  | bytes don't match the message's sha256 (your check) | No, dead-letter |
 
@@ -273,12 +332,28 @@ Redeeming doesn't delete. Several consumers can redeem one claim, every queue
 bound to a fanout exchange, say, and claims go away only through
 [retention](#retention).
 
+### Who may redeem
+
+Reading a claim needs a credential (`claim_check.auth`, see
+[Control-plane authentication](configuration.md#control-plane-authentication))
+holding `claims:read` **and** the tenant of the path as `tenant:<tenant_id>`
+(or `tenant:*`): a tenant-A credential on a tenant-B path is `403`, before
+anything is read. To decide differently (an ownership table, a policy
+service), set `claim_check.authorize` to a `{module, fun, args}`: the gateway
+calls `apply(module, fun, [context | args])` after authenticating the caller
+and before it locates the claim, with
+`context = %{principal: %Ankusa.Principal{}, tenant_id: ..., claim_id: ..., conn: %Plug.Conn{}}`
+(the two path segments as sent, not yet validated). Return `:ok` to serve it;
+anything else is `403 forbidden`. The hook replaces the built-in check, so it
+must also decide what a missing scope means. It runs in the request process
+and on every request: keep it fast and free of side effects.
+
 ### What a front layer needs
 
 The whole integration surface for auth is one method and one path shape:
 
 ```
-^/v1/claims/[A-Za-z0-9_-]{1,64}/[0-7][0-9A-HJKMNP-TV-Z]{25}$
+^/v1/claims/[A-Za-z0-9_-]{1,64}/[0-7][0-9A-HJKMNP-TV-Z]{25}(\?exp=[1-9][0-9]{0,11}&sig=[A-Za-z0-9_-]{43})?$
 ```
 
 Anything else can be refused at the edge. The tenant is a path segment, so an

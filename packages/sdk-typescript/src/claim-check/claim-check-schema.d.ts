@@ -69,14 +69,37 @@ export interface components {
         ClaimId: string;
         /**
          * @description A claim-check ref, as carried in a queue message's `claim` field.
-         *     Segments: tenant and claim id. The digest to check the bytes against
-         *     is the message's `sha256` field (lowercase hex), not part of the ref.
+         *     v1 has two segments, tenant and claim id; v2 adds the Unix second the
+         *     ref expires and a 43-character unpadded base64url HMAC-SHA256 of
+         *     `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>` under one of the
+         *     gateway's `claim_check.ref_signing_keys`. The digest to check the
+         *     bytes against is the message's `sha256` field (lowercase hex), not
+         *     part of the ref.
          * @example urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002
+         * @example urn:ankusa:claim:v2:acme:01M39VMD8RA3C5HR4RBV67Y002:1790345000:MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac
          */
         Ref: string;
+        /**
+         * @description A v2 ref's expiry, in Unix seconds: decimal, 1 to 12 digits, no
+         *     leading zero.
+         * @example 1790345000
+         */
+        Exp: string;
+        /**
+         * @description A v2 ref's signature: 43 unpadded base64url characters, the
+         *     HMAC-SHA256 of `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>`.
+         * @example MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac
+         */
+        Sig: string;
         Error: {
             /** @enum {string} */
-            error: "invalid_tenant" | "invalid_id" | "not_found" | "store_unavailable";
+            error: "invalid_tenant" | "invalid_id" | "bad_signature" | "unsigned_ref" | "ref_expired" | "not_found" | "store_unavailable" | "store_forbidden" | "overloaded" | "unauthenticated" | "forbidden";
+            /**
+             * @description Present on `forbidden` from the built-in check; the scope the
+             *     principal lacks (`claims:read`, or `tenant:<tenant_id>`). A
+             *     `claim_check.authorize` hook's refusal names none.
+             */
+            scope?: string;
         };
         Health: {
             /** @constant */
@@ -84,7 +107,13 @@ export interface components {
         };
     };
     responses: {
-        /** @description `invalid_tenant` or `invalid_id` (not a canonical ULID). Permanent. */
+        /**
+         * @description `invalid_tenant` or `invalid_id` (not a canonical ULID); `bad_signature`
+         *     (a v2 ref's `exp` or `sig` is missing one, out of grammar, or not what
+         *     any `claim_check.ref_signing_keys` entry signed for this tenant, claim
+         *     and expiry); `unsigned_ref` (a v1 path while the gateway refuses
+         *     unsigned refs). Permanent.
+         */
         BadRequest: {
             headers: {
                 [name: string]: unknown;
@@ -102,11 +131,61 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `store_unavailable`. Transient. Retry. */
+        /**
+         * @description `ref_expired`: the ref's signature is good and its `exp` has passed.
+         *     Permanent for this ref: dead-letter, do not requeue. Redeliver the
+         *     hook to get a fresh one.
+         */
+        Gone: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description `store_unavailable` (the object store is unreachable, throttling, or
+         *     slower than the gateway's deadline) or `overloaded` (the node is at
+         *     `claim_check.max_concurrent_reads`). Transient. Retry.
+         */
         StoreUnavailable: {
             headers: {
                 /** @description Seconds to wait before retrying. */
                 "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description `401`. `unauthenticated`: no credential, or one that is wrong, expired
+         *     or unknown. A fault in the reader's configuration, not in the claim:
+         *     fix the credential and retry; do not dead-letter the message.
+         */
+        Unauthorized: {
+            headers: {
+                /** @description Always `Bearer realm="ankusa"`. */
+                "WWW-Authenticate"?: string;
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "error": "unauthenticated"
+                 *     }
+                 */
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description `403`. `forbidden`: the credential is good, but its principal lacks
+         *     `claims:read` or the path's tenant (`scope` names it). Like `401`, a
+         *     reader configuration fault: do not dead-letter the message.
+         */
+        Forbidden: {
+            headers: {
                 [name: string]: unknown;
             };
             content: {
@@ -136,7 +215,19 @@ export type $defs = Record<string, never>;
 export interface operations {
     readClaim: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description A v2 ref's expiry (Unix seconds). Send with `sig`, both or neither. */
+                exp?: components["schemas"]["Exp"];
+                /**
+                 * @description A v2 ref's signature. Send with `exp`, both or neither: one of
+                 *     the two, a value out of grammar, or a signature no configured key
+                 *     produced for this tenant, claim and `exp` is `400 bad_signature`;
+                 *     a good one whose `exp` has passed is `410 ref_expired`. With
+                 *     neither (a v1 ref) the gateway answers `400 unsigned_ref` when it
+                 *     refuses unsigned refs (`claim_check.accept_unsigned_refs`).
+                 */
+                sig?: components["schemas"]["Sig"];
+            };
             header?: {
                 /**
                  * @description One byte range: `bytes=first-last`, `bytes=first-` or
@@ -180,7 +271,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            410: components["responses"]["Gone"];
             /**
              * @description The range starts at or past the claim's end (or is `bytes=-0`, or
              *     the claim is empty). Empty body.

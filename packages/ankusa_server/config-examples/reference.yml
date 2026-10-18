@@ -444,6 +444,27 @@ claim_check:
   read_cache_bytes: 134217728
   # A claim larger than this (bytes) is served but never cached.
   read_cache_max_entry_bytes: 1048576
+  # Claim requests this node serves at once, cache hits included; past it a
+  # request is 503 overloaded with Retry-After 1-3. 0 = no limit.
+  max_concurrent_reads: 1024
+  # Signed, expiring refs. With keys, the claims a dispatch node checks in get
+  # `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>` refs: an
+  # HMAC-SHA256 over the tenant, claim and expiry, which the gateway verifies
+  # before it reads anything (400 bad_signature; 410 ref_expired once past the
+  # expiry). A list, `[current, previous...]`, or one comma-separated string
+  # (`"${CLAIM_REF_KEYS}"`), each key at least 16 bytes: new refs are signed
+  # with the first, a ref signed with any of them is served, so a rotation is
+  # "add the new key in front, drop the old one after every ref it signed has
+  # expired". Set the same keys on every claim-writing node and on the
+  # gateway. [] = refs are unsigned v1 refs, which never expire.
+  ref_signing_keys: []
+  # How long a v2 ref is good for (ms), from the moment it is minted; null =
+  # the retention window (`retention_days`), else 30 days.
+  ref_ttl_ms: null
+  # Whether the gateway still serves v1 refs: null = only while
+  # ref_signing_keys is empty, so setting keys refuses every unsigned ref;
+  # true keeps serving refs already in queues while you roll keys out.
+  accept_unsigned_refs: null
   # The gateway performs no authentication. Keep 4001 internal and put your
   # proxy, mesh, or network policy in front of it, the same as 4002.
 
@@ -555,6 +576,31 @@ source_store:
 # secrets:
 #   kek: "${ANKUSA_KEK}"
 #   kek_previous: "${ANKUSA_KEK_PREVIOUS:-}"   # list, or comma-separated
+#
+# Secret sources. Besides ${VAR}, any string may be `${file:/abs/path}` (the
+# file's contents, one trailing newline removed: a Kubernetes secret volume, a
+# Docker secret) or `${sm:<provider>:<ref>}` (a secret manager named under
+# `providers`; `#<field>` picks one field of a JSON secret). A source's
+# `secret_file: /abs/path` (or a list) is `secret:` read from a file. A
+# provider's own credentials come from ${VAR} or ${file:}, never another ${sm:}.
+# Unresolvable at boot is a load error naming the key; on a reload
+# (`AnkusaServer.Secrets.reload(:default)` from a `remote` shell) a reference
+# that fails keeps its last value and logs a warning, so a rotated secret
+# takes effect without a restart. See docs/configuration.md#secret-sources.
+#   cache_ttl_ms: 0         # reuse a ${sm:} value fetched within this many ms (0..86400000)
+#   providers:
+#     prod-vault:
+#       type: vault                              # HashiCorp Vault KV v2
+#       address: https://vault.internal:8200     # https, or http on a loopback address
+#       token: "${file:/var/run/secrets/vault-token}"
+#       # mount: secret      # the KV v2 mount
+#       # namespace: team-a  # Vault Enterprise
+#       # timeout_ms: 5000
+#     aws:
+#       type: aws                                # AWS Secrets Manager
+#       region: us-east-1
+#       # endpoint / access_key_id / secret_access_key / session_token / timeout_ms;
+#       # without keys: AWS_* env, EKS web identity, EC2 instance profile
 
 sources:
   # One source per provider endpoint. The id is the catch-URL segment:
@@ -576,6 +622,10 @@ sources:
       # hooks signed with either verify while the provider switches over.
       # Every entry must be non-empty: an unset ${OLD:-} is a load error.
       # secret: ["${STRIPE_WHSEC_NEW}", "${STRIPE_WHSEC}"]
+      # Or read them from files (a list is the same rotation window):
+      # secret_file: [/run/secrets/stripe_new, /run/secrets/stripe_old]
+      # Or from a secret manager (see `secrets.providers` above):
+      # secret: ["${sm:prod-vault:ankusa/stripe#whsec}", "${sm:aws:prod/stripe-old}"]
       tolerance_seconds: 300
     # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
     # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*

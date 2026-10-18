@@ -36,6 +36,9 @@ defmodule AnkusaServer.Application do
     Logger.configure(level: loaded.log_level)
     config = loaded.config
 
+    # What the references resolved to, for `AnkusaServer.Secrets.reload/2`.
+    AnkusaServer.Secrets.remember(config.instance, loaded.secrets)
+
     if loaded.banner, do: AnkusaServer.Banner.print()
 
     Logger.info(

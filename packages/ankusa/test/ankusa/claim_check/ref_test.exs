@@ -77,6 +77,102 @@ defmodule Ankusa.ClaimCheck.RefTest do
     end
   end
 
+  # HMAC-SHA256 under @key of "urn:ankusa:claim:v2:acme:<claim>:<exp>", computed
+  # independently of this code (Python's hmac/hashlib), base64url, unpadded.
+  @key "0123456789abcdef0123456789abcdef"
+  @exp 1_790_345_000
+  @sig "MAmydaNzNwA3sV38ggZG15ElUTajA8QtBkKevsaq1Ac"
+  @v2 "urn:ankusa:claim:v2:acme:#{@claim_id}:#{@exp}:#{@sig}"
+
+  describe "v2 (signed, expiring) refs" do
+    test "sign/3 matches an independently computed HMAC, and parse/1 and to_string/1 round-trip" do
+      ref = Ref.sign(%Ref{tenant_id: "acme", claim_id: @claim_id}, @key, @exp)
+
+      assert ref.signature == @sig
+      assert Ref.to_string(ref) == @v2
+      assert {:ok, ^ref} = Ref.parse(@v2)
+      assert Ref.path(ref) == "/v1/claims/acme/#{@claim_id}?exp=#{@exp}&sig=#{@sig}"
+    end
+
+    test "verify/3 accepts the current key and the previous key, refuses any other" do
+      {:ok, ref} = Ref.parse(@v2)
+      now = @exp - 10
+
+      assert Ref.verify(ref, [@key], now) == :ok
+      assert Ref.verify(ref, ["another-key-of-sixteen-bytes", @key], now) == :ok
+      assert Ref.verify(ref, ["another-key-of-sixteen-bytes"], now) == {:error, :bad_signature}
+      assert Ref.verify(ref, [], now) == {:error, :bad_signature}
+    end
+
+    test "verify/3: the expiry second itself is valid, the next one is not" do
+      {:ok, ref} = Ref.parse(@v2)
+
+      assert Ref.verify(ref, [@key], @exp) == :ok
+      assert Ref.verify(ref, [@key], @exp + 1) == {:error, :ref_expired}
+    end
+
+    test "verify/3: a changed tenant, claim or expiry fails the signature, not the clock" do
+      {:ok, ref} = Ref.parse(@v2)
+
+      for tampered <- [
+            %{ref | tenant_id: "globex"},
+            %{ref | claim_id: Ref.claim_id(@pack_id, 3)},
+            %{ref | expires_at: @exp + 1},
+            %{ref | signature: String.replace(@sig, "MA", "MB")}
+          ] do
+        assert Ref.verify(tampered, [@key], @exp + 1_000_000) == {:error, :bad_signature}
+      end
+    end
+
+    test "verify/3: a v1 ref carries nothing to check" do
+      {:ok, ref} = Ref.parse(urn("acme", @claim_id))
+      assert Ref.verify(ref, [@key], 1) == {:error, :unsigned_ref}
+      assert Ref.path(ref) == "/v1/claims/acme/#{@claim_id}"
+    end
+
+    test "signed/4 builds a ref from path and query strings, or says what is wrong" do
+      assert {:ok, %Ref{expires_at: @exp, signature: @sig}} =
+               Ref.signed("acme", @claim_id, Integer.to_string(@exp), @sig)
+
+      assert Ref.signed("ac me", @claim_id, "1", @sig) == {:error, :invalid_tenant}
+      assert Ref.signed("acme", "nope", "1", @sig) == {:error, :invalid_id}
+
+      for {exp, sig} <- [
+            {"01", @sig},
+            {"0", @sig},
+            {"-1", @sig},
+            {"1x", @sig},
+            {"1234567890123", @sig},
+            {"1", String.slice(@sig, 0, 42)},
+            {"1", @sig <> "A"},
+            {"1", @sig <> "="},
+            {"1", "+" <> String.slice(@sig, 1, 42)},
+            {nil, @sig},
+            {"1", nil}
+          ] do
+        assert Ref.signed("acme", @claim_id, exp, sig) == {:error, :bad_signature},
+               "accepted #{inspect({exp, sig})}"
+      end
+    end
+
+    test "parse/1 rejects a v2 outside its grammar" do
+      for bad <- [
+            "urn:ankusa:claim:v2:acme:#{@claim_id}",
+            "urn:ankusa:claim:v2:acme:#{@claim_id}:#{@exp}",
+            @v2 <> ":x",
+            @v2 <> "\n",
+            "urn:ankusa:claim:v2:acme:#{@claim_id}:0#{@exp}:#{@sig}",
+            "urn:ankusa:claim:v2:acme:#{@claim_id}:#{@exp}:#{String.slice(@sig, 0, 42)}",
+            "urn:ankusa:claim:v2:acme:#{@claim_id}:#{@exp}:#{@sig}=",
+            "urn:ankusa:claim:v2:acme:#{String.downcase(@claim_id)}:#{@exp}:#{@sig}",
+            "urn:ankusa:claim:v2:ac:me:#{@claim_id}:#{@exp}:#{@sig}",
+            "urn:ankusa:claim:v3:acme:#{@claim_id}:#{@exp}:#{@sig}"
+          ] do
+        assert Ref.parse(bad) == {:error, :invalid_ref}, "accepted #{inspect(bad)}"
+      end
+    end
+  end
+
   test "the key's dt partition is the UTC date of the pack id's timestamp" do
     last_ms_of_day = DateTime.to_unix(~U[2026-09-23 23:59:59.999Z], :millisecond)
     before_midnight = Ref.pack_id(last_ms_of_day, @entropy)

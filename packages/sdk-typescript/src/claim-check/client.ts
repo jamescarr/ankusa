@@ -72,13 +72,14 @@ export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimC
   }
 
   async function fetchBytes(parsed: ParsedClaimRef): Promise<Buffer> {
-    const { tenantId: tenant_id, claimId: claim_id } = parsed;
+    const { tenantId: tenant_id, claimId: claim_id, proof } = parsed;
     let data: ArrayBuffer | undefined;
     let status: number;
     let errorBody: unknown;
     try {
       const result = await http.GET("/v1/claims/{tenant_id}/{claim_id}", {
-        params: { path: { tenant_id, claim_id } },
+        // A v2 ref's expiry and signature ride the query, exp first.
+        params: { path: { tenant_id, claim_id }, ...(proof ? { query: { exp: proof.exp, sig: proof.sig } } : {}) },
         parseAs: "arrayBuffer",
         signal: AbortSignal.timeout(timeoutMs),
       });

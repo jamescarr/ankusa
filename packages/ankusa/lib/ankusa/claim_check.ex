@@ -8,23 +8,27 @@ defmodule Ankusa.ClaimCheck do
   stores, with failover between them), packing every claim a WAL read batch
   needs for one tenant into one object (`Ankusa.ClaimCheck.Pack`), so one
   `PUT` covers many claims. Each claim gets an `Ankusa.ClaimCheck.Ref` (a URN
-  naming its tenant and claim id) and the sha256 of its bytes, which travel
+  naming its tenant and claim id — and, with `claim_check.ref_signing_keys`,
+  an expiry and an HMAC over both) and the sha256 of its bytes, which travel
   together as a `t:claim/0`.
 
   Readers either call `redeem/3` in-process, fetch
   `GET /v1/claims/<tenant>/<claim_id>` from a `:claim_check`-role node
   (`Ankusa.ClaimCheck.Router`), or read the objects straight from the bucket.
-  This module does no authentication or authorization; whatever fronts the
-  gateway decides who may read what.
+  The gateway authenticates and authorizes every request (`claim_check.auth`,
+  `claim_check.authorize`) and holds the ref to `verify_ref/2`; `read/4`,
+  `locate/4` and `read_bytes/5` below do neither, so code calling them has
+  already decided who may read what.
 
   Objects are written once under a freshly minted id and never rewritten, so
   every read is safe to cache forever.
 
   Permanent errors (`:not_found`, `:integrity_mismatch`, `:invalid_ref`,
-  `:invalid_tenant`, `:invalid_id`) mean retrying won't help —
-  callers should dead-letter. `{:unavailable, reason}` is transient, and so is
-  `:forbidden` (the object store refused this node's credential: a
-  configuration fault to fix, not a reason to drop the claim).
+  `:invalid_tenant`, `:invalid_id`, `:unsigned_ref`, `:bad_signature`,
+  `:ref_expired`) mean retrying won't help — callers should dead-letter.
+  `{:unavailable, reason}` is transient, and so is `:forbidden` (the object
+  store refused this node's credential: a configuration fault to fix, not a
+  reason to drop the claim).
   """
 
   require Logger
@@ -37,6 +41,10 @@ defmodule Ankusa.ClaimCheck do
   # Packs split well inside both regardless of pack_max_bytes.
   @max_pack_claims 65_000
   @max_pack_bytes 0xFFFFFFFF - 16 * 1024 * 1024
+
+  # How long a signed ref is good for when neither `claim_check.ref_ttl_ms` nor
+  # a retention window says.
+  @default_ref_ttl_ms 30 * 24 * 3_600_000
 
   @type item :: %{
           required(:id) => String.t(),
@@ -52,6 +60,9 @@ defmodule Ankusa.ClaimCheck do
           | :invalid_id
           | :not_found
           | :integrity_mismatch
+          | :unsigned_ref
+          | :bad_signature
+          | :ref_expired
           | :forbidden
           | {:unavailable, term()}
 
@@ -91,6 +102,7 @@ defmodule Ankusa.ClaimCheck do
       with :ok <- Ref.validate_tenant(tenant_id),
            :ok <- Ref.validate_pack_id(pack_id) do
         config = Ankusa.config(instance)
+        expires_at = ref_expires_at(config)
 
         claims =
           items
@@ -101,7 +113,7 @@ defmodule Ankusa.ClaimCheck do
         key = Ref.object_key(tenant_id, pack_id, config.claim_check.key_layout)
 
         with {:ok, store} <- Stores.write(instance, config, pack_id, key, data) do
-          {:ok, Map.new(claims, &{&1.id, checked_in(tenant_id, &1)}), store}
+          {:ok, Map.new(claims, &{&1.id, checked_in(config, expires_at, tenant_id, &1)}), store}
         end
       end
 
@@ -158,9 +170,35 @@ defmodule Ankusa.ClaimCheck do
   end
 
   @doc """
+  Check a ref against this node's policy, as the gateway does before it reads
+  anything:
+
+    * a v2 ref must carry a signature some `claim_check.ref_signing_keys` entry
+      produced (`{:error, :bad_signature}` otherwise) and must not be past its
+      expiry (`{:error, :ref_expired}`)
+    * a v1 ref is `{:error, :unsigned_ref}` unless `claim_check.accept_unsigned_refs`
+      is true (the default only while `ref_signing_keys` is empty)
+  """
+  @spec verify_ref(atom() | Config.t(), Ref.t()) ::
+          :ok | {:error, :unsigned_ref | :bad_signature | :ref_expired}
+  def verify_ref(%Config{claim_check: cc}, %Ref{signature: nil}) do
+    if accept_unsigned?(cc), do: :ok, else: {:error, :unsigned_ref}
+  end
+
+  def verify_ref(%Config{claim_check: cc}, %Ref{} = ref),
+    do: Ref.verify(ref, cc.ref_signing_keys, System.system_time(:second))
+
+  def verify_ref(instance, %Ref{} = ref), do: verify_ref(Ankusa.config(instance), ref)
+
+  defp accept_unsigned?(%{accept_unsigned_refs: nil, ref_signing_keys: keys}), do: keys == []
+  defp accept_unsigned?(%{accept_unsigned_refs: accept}), do: accept
+
+  @doc """
   Redeem a ref (a `%Ref{}` or its URN) for its bytes and check them against
   `sha256`, the lowercase hex digest the queue message carried with the ref.
-  Integrity is never trusted from the store.
+  Integrity is never trusted from the store. The ref is held to the node's
+  policy first (`verify_ref/2`): a forged, expired or (when refused) unsigned
+  ref reads nothing.
   """
   @spec redeem(atom(), Ref.t() | String.t(), String.t()) :: {:ok, binary()} | {:error, reason()}
   def redeem(instance, urn, sha256) when is_binary(urn) do
@@ -171,7 +209,8 @@ defmodule Ankusa.ClaimCheck do
     started = System.monotonic_time()
 
     result =
-      with {:ok, bin} <- read(instance, ref.tenant_id, ref.claim_id) do
+      with :ok <- verify_ref(instance, ref),
+           {:ok, bin} <- read(instance, ref.tenant_id, ref.claim_id) do
         if sha256(bin) == sha256, do: {:ok, bin}, else: {:error, :integrity_mismatch}
       end
 
@@ -431,6 +470,10 @@ defmodule Ankusa.ClaimCheck do
     * `claim_check.retention_days` set with any non-`LocalFS` claim store (the
       sweeper only ever covers `LocalFS`; S3/GCS need a bucket lifecycle rule)
     * `max_body_bytes` of 4 GiB or more: a pack can't hold a body that large
+    * `claim_check.ref_signing_keys` must be a list of strings of at least 16
+      bytes, and not empty while `claim_check.accept_unsigned_refs` is `false`
+    * `claim_check.authorize` must be `nil` or a `{module, fun, args}` the
+      module exports with arity `length(args) + 1`
 
   A `:claim_check`-only node with a `LocalFS` claim store boots with a
   warning: the gateway reads its own disk, and other nodes' claims are only
@@ -496,13 +539,56 @@ defmodule Ankusa.ClaimCheck do
       )
     end
 
-    :ok
+    :ok = validate_refs!(cc)
+    validate_authorize!(cc)
   end
 
   defp valid_stores?([_ | _] = stores),
     do: Enum.all?(stores, &match?({mod, opts} when is_atom(mod) and is_list(opts), &1))
 
   defp valid_stores?(_), do: false
+
+  @min_signing_key_bytes 16
+
+  defp validate_refs!(cc) do
+    keys = cc.ref_signing_keys
+
+    unless is_list(keys) and
+             Enum.all?(keys, &(is_binary(&1) and byte_size(&1) >= @min_signing_key_bytes)) do
+      raise ArgumentError,
+            "claim_check.ref_signing_keys must be a list of strings of at least " <>
+              "#{@min_signing_key_bytes} bytes, [current | previous], got " <>
+              inspect(Enum.map(List.wrap(keys), &redacted_key/1))
+    end
+
+    if cc.accept_unsigned_refs == false and keys == [] do
+      raise ArgumentError,
+            "claim_check.accept_unsigned_refs is false but claim_check.ref_signing_keys is " <>
+              "empty: no ref could be minted or accepted"
+    end
+
+    :ok
+  end
+
+  defp redacted_key(key) when is_binary(key), do: "<#{byte_size(key)} bytes>"
+  defp redacted_key(_other), do: "<not a string>"
+
+  defp validate_authorize!(%{authorize: nil}), do: :ok
+
+  defp validate_authorize!(%{authorize: {mod, fun, args}})
+       when is_atom(mod) and is_atom(fun) and is_list(args) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, fun, length(args) + 1) do
+      :ok
+    else
+      raise ArgumentError,
+            "claim_check.authorize #{inspect(mod)}.#{fun}/#{length(args) + 1} is not defined"
+    end
+  end
+
+  defp validate_authorize!(%{authorize: other}) do
+    raise ArgumentError,
+          "claim_check.authorize must be nil or {module, fun, args}, got #{inspect(other)}"
+  end
 
   # ── internals ─────────────────────────────────────────────────────────────
 
@@ -517,8 +603,27 @@ defmodule Ankusa.ClaimCheck do
     }
   end
 
-  defp checked_in(tenant_id, claim),
-    do: %{ref: %Ref{tenant_id: tenant_id, claim_id: claim.claim_id}, sha256: claim.sha256}
+  # A v2 ref when `claim_check.ref_signing_keys` has a key (signed with the
+  # first, expiring at `expires_at`), else a v1 ref.
+  defp checked_in(config, expires_at, tenant_id, claim) do
+    ref = %Ref{tenant_id: tenant_id, claim_id: claim.claim_id}
+
+    case config.claim_check.ref_signing_keys do
+      [] -> %{ref: ref, sha256: claim.sha256}
+      [key | _previous] -> %{ref: Ref.sign(ref, key, expires_at), sha256: claim.sha256}
+    end
+  end
+
+  # The Unix second a ref minted now stops being served: `ref_ttl_ms` from now,
+  # or the retention window, or 30 days when claims are never swept. Rounded up
+  # to the second, so a ref never expires before its TTL.
+  defp ref_expires_at(%Config{claim_check: cc}) do
+    ttl_ms =
+      cc.ref_ttl_ms ||
+        if(cc.retention_days, do: cc.retention_days * 86_400_000, else: @default_ref_ttl_ms)
+
+    div(System.system_time(:millisecond) + ttl_ms + 999, 1000)
+  end
 
   # Greedy, order-preserving: start a new pack when the next item would push
   # this one past the cap (or past what a ZIP can hold). A single oversized

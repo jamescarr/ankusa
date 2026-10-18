@@ -376,10 +376,25 @@ defmodule Ankusa.ConfigTest do
                      Config.new(batcher: %{max_delay_ms: -1})
                    end
 
-      for key <- [:read_retries, :read_queue_max, :read_cache_bytes] do
+      for key <- [:read_retries, :read_queue_max, :read_cache_bytes, :max_concurrent_reads] do
         assert_raise ArgumentError,
                      "claim_check.#{key} must be a non-negative integer, got -1",
                      fn -> Config.new(claim_check: %{key => -1}) end
+      end
+
+      for bad <- [0, -1, 1.5, "1000"] do
+        assert_raise ArgumentError,
+                     "claim_check.ref_ttl_ms must be nil or a positive integer, got #{inspect(bad)}",
+                     fn -> Config.new(claim_check: %{ref_ttl_ms: bad}) end
+      end
+
+      assert %Config{} = Config.new(claim_check: %{ref_ttl_ms: 1})
+      assert %Config{} = Config.new(claim_check: %{max_concurrent_reads: 0})
+
+      for bad <- [0, "true", :yes] do
+        assert_raise ArgumentError,
+                     "claim_check.accept_unsigned_refs must be nil, true or false, got #{inspect(bad)}",
+                     fn -> Config.new(claim_check: %{accept_unsigned_refs: bad}) end
       end
 
       for key <- [

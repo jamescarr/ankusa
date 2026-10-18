@@ -225,6 +225,19 @@ The always-on tests cover:
   and `/ready` and answers `404` to the operator API's routes. The image
   smoke drill (`mise run docker:smoke`) repeats the mutual-TLS check with
   `openssl s_client` and `curl` against the built image.
+- **Secret sources** (`source_store_static_test.exs` in core;
+  `ankusa_server/test/ankusa_server/secrets_test.exs`): `SourceStore.Static.publish/2`
+  swaps a running instance's sources, names the ids that changed, and applies
+  nothing when one spec is refused; `${file:}` and `secret_file:` read a file
+  (one trailing newline removed) and a missing, oversized, relative or
+  doubly-given file fails the load by dotted key, never with a value; `${sm:}`
+  resolves through a loopback stub of Vault KV v2 and AWS `GetSecretValue`
+  (SigV4 header, token header, a JSON field, a binary secret) and a missing or
+  unreachable secret fails the boot naming the reference; a signed POST
+  verifies with the new secret after a file swap and a reload while the old one
+  stays valid until it leaves the list; a manager outage or a deleted file at
+  reload keeps the last value and logs a warning; a reload that cannot be
+  applied changes nothing; an API-submitted spec cannot name a file.
 - **Dispatch** (`dispatch_test.exs`): a hook reaches every sink of its source
   exactly once; a failing sink is retried until it succeeds; a failing sink's
   retries do not hold the slots a healthy source needs (D1); one dead row per
