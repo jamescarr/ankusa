@@ -134,9 +134,41 @@ The always-on tests cover:
   retry writes one object); `validate_config!/1` boot-time rejections; the
   `:claim_check` role's read-only HTTP API; and the `LocalFS` retention sweeper
   deleting whole `dt=` day partitions.
+- **Property tests** (`test/ankusa/property/`, [StreamData](https://hexdocs.pm/stream_data),
+  5 000 runs per property by default; `PROPERTY_RUNS=50000 mix test
+  test/ankusa/property` for a long soak; generators in
+  `test/support/generators.ex`). Each one states what a parser or codec must
+  hold for *any* input, not for the examples someone thought of: a claim ref
+  parses back to itself, and whatever `Ref.parse/1` accepts is the canonical
+  spelling; a pack built from 1–600 claims of 0–1 MiB reads back byte for byte
+  by `Pack.locate/2` and by a standard ZIP reader (and the 65 532-claim
+  ceiling builds, one more is refused); `Envelope.from_binary/1` inverts
+  `to_binary/1` field for field; `Ingest.check_headers/1` never raises and
+  agrees with the byte-class definition on raw bytes; `Net.parse_cidr/1` is an
+  error or the exact range its prefix names, with the IPv4-mapped refusal;
+  the 0.3 import's frame scanner forgives a torn tail (every whole frame
+  imports), refuses the boot with a named error when an acked frame sits past
+  damage (bit flips in the payload, CRC, length, magic or version, zeroed
+  headers), and never raises on arbitrary bytes as a WAL, term log or
+  cursor/floor sidecar (a CRC-valid frame around a payload that is not an
+  envelope still raises, by design: `Store` turns that into a refused boot);
+  `Verifier.Hmac` never raises for any scheme, template, header list or
+  secret, verifies a request signed per its scheme under every key of a
+  rotation list, and refuses a tampered body, a wrong key and a stale
+  timestamp; `Dedupe.key/2` never raises, clamps to 200 bytes, and follows a
+  JSON path to exactly the string or integer at its end. The corpus under
+  `test/fixtures/corrupt_frames/` (see its `README.md`) is torn, bit-flipped and
+  zeroed 0.3 frames and unreadable sidecars, each of which has to make the
+  import return `{:error, _}`. A counterexample is fixed in the same change and
+  its shrunk case kept as an example test. The first runs found four:
+  `hash: sha1` raising in `:crypto.mac/4` and an invalid inline scheme raising
+  out of `verify/2` (both pinned in `verifier_test.exs`), a pack of 65 535
+  entries that `:zip` cannot open (the ceiling test above), and a torn WAL
+  header zero-extended into a "frame" of length 0 (`store_migrate_test.exs`).
 - **Route management** (`test/ankusa/net_test.exs`, `net/client_ip_test.exs`,
   `routes/matcher_test.exs`, `routes_test.exs`, `edge_route_guard_test.exs`,
-  `routes/router_test.exs`): example-based, no property tests. `cidr` (the
+  `routes/router_test.exs`): example-based (CIDR parsing is also covered by the
+  property tests above). `cidr` (the
   dependency) does the prefix bit math, so `net_test.exs` pins the small surface
   Ankusa keeps on top of `:inet` — address parsing, canonical rendering, the
   IPv4-mapped-to-IPv4 normalization, and `parse_cidr/1`, where junk is an

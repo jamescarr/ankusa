@@ -542,13 +542,17 @@ defmodule Ankusa.Store.Migrate do
     end
   end
 
+  # A frame's payload is an envelope, never empty. `len == 0` with `crc == 0` (the
+  # CRC of nothing) is what a header looks like when the file was extended with
+  # zeros after a torn write, so it is not a frame: it is judged torn tail or
+  # damage like any other bytes that do not parse, never decoded.
   defp wal_frames(reader, pos, acc) do
     case read_at(reader, pos, @wal_header) do
       {:eof, _} ->
         finish_wal(acc)
 
       {<<@wal_magic::16, @wal_version::8, _flags::8, seq::64, crc::32, len::32>>, reader}
-      when len <= @max_frame ->
+      when len in 1..@max_frame//1 ->
         cond do
           pos + @wal_header + len > reader.size ->
             torn_or_damaged(reader, pos, acc)
@@ -676,7 +680,7 @@ defmodule Ankusa.Store.Migrate do
   defp valid_frame_at?(reader, at) do
     case read_at(reader, at, @wal_header) do
       {<<@wal_magic::16, @wal_version::8, _flags::8, _seq::64, crc::32, len::32>>, reader}
-      when len <= @max_frame ->
+      when len in 1..@max_frame//1 ->
         if at + @wal_header + len <= reader.size do
           {payload, _} = read_at(reader, at + @wal_header, len)
           :erlang.crc32(payload) == crc

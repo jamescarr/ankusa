@@ -127,7 +127,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `.mise/tasks/check/package`, `packages/ankusa/mix.exs`.
   *Evidence:* —
 
-- [ ] **F4 — Property tests for parsers and codecs** · P1 · Deps: —
+- [x] **F4 — Property tests for parsers and codecs** · P1 · Deps: —
   *Why:* no `StreamData`/fuzz anywhere; `Ref.parse/1`, `Pack.build/read`, `Envelope` round-trip, header validation, CIDR parsing and the 0.3 frame scanner are example-tested only.
   *Change:* `{:stream_data, "~> 1.1", only: :test}` in core; `test/ankusa/property/` with properties (≥ 5 000 runs each in CI): `Ref.parse(Ref.to_string(r)) == r`; `Pack.read(Pack.build(items)) == items` for 1–65 000 items of 0–1 MiB; `Envelope.from_binary(Envelope.to_binary(e)) == {:ok, e}`; `Ingest.check_headers/1` never raises on arbitrary header lists; `Net.parse_cidr/1` returns `:error` or a valid range for arbitrary strings; `Store.Migrate` frame scanner never raises on arbitrary bytes; `Verifier.Hmac` template engine never raises on arbitrary templates/headers; `Dedupe.key/2` never raises on arbitrary bodies. A checked-in corpus `test/fixtures/corrupt_frames/` of torn/bit-flipped frames that all return `{:error, _}`.
   *Done when:* properties run in `mix test`; any property that finds a counterexample is fixed in the same PR with the shrunk case added as a regression test.
