@@ -217,7 +217,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/edge/ingest.ex:179-220,312-331`, `envelope.ex:11-29`, `sink/message.ex:50-53,145-161`.
   *Evidence:* —
 
-- [ ] **SEC-7 — Tenant-scoped admin reads and writes** · P0 · Deps: SEC-1
+- [x] **SEC-7 — Tenant-scoped admin reads and writes** · P0 · Deps: SEC-1
   *Why:* DLQ, quarantine, replays and rate-limit routes are node-global with only a `source_id` filter (`admin/router.ex:117-135,188-253`); any reader sees every tenant. CWE-284.
   *Change:* `tenant` filter on `Queue.dead/2`, `Quarantine.recent/purge`, `Replay` filters and rate-limit overrides; a principal with `tenant:<id>` scopes gets rows only for those tenants (filter forced server-side, `403` if the request names another tenant); `tenant:*` required for unfiltered reads. Until TEN-1 lands, tenant filtering scans rows' `tenant_id`; TEN-1 replaces the scan with the index.
   *Done when:* a tenant-A principal listing `/v1/dlq` sees only tenant-A rows; naming tenant B is 403; an operator sees all.

@@ -35,12 +35,17 @@ defmodule Ankusa.Edge.Quarantine do
   @max_ms 0xFFFF_FFFF_FFFF_FFFF
   @purge_timeout_ms 60_000
 
-  @typedoc "`:source_id`/`:id` match the summary; `:since`/`:until` (ms, inclusive) bound `received_at`."
+  @typedoc """
+  `:source_id`/`:id` match the summary; `:since`/`:until` (ms, inclusive) bound
+  `received_at`; `:tenants`, a list of tenant ids (`nil`: every tenant), keeps
+  the entries of those tenants.
+  """
   @type filter :: %{
           optional(:source_id) => String.t() | nil,
           optional(:id) => String.t() | nil,
           optional(:since) => non_neg_integer() | nil,
-          optional(:until) => non_neg_integer() | nil
+          optional(:until) => non_neg_integer() | nil,
+          optional(:tenants) => [String.t()] | nil
         }
 
   def start_link(opts) do
@@ -151,15 +156,16 @@ defmodule Ankusa.Edge.Quarantine do
   end
 
   @doc """
-  The most recent quarantined entries, newest first, at most `limit`. Reads the
-  store directly, so it never queues behind a write.
+  The most recent quarantined entries matching `filter` (`:source_id`, `:id`,
+  `:tenants`), newest first, at most `limit`. Reads the store directly, so it
+  never queues behind a write.
   """
-  @spec recent(atom(), non_neg_integer()) :: {:ok, [map()]} | {:error, term()}
-  def recent(_instance, 0), do: {:ok, []}
+  @spec recent(atom(), non_neg_integer(), filter()) :: {:ok, [map()]} | {:error, term()}
+  def recent(instance, limit, filter \\ %{})
 
-  # Trusted, internally written data (this node's own store rows); never request input.
-  # sobelow_skip ["Misc.BinToTerm"]
-  def recent(instance, limit) when is_integer(limit) and limit > 0 do
+  def recent(_instance, 0, _filter), do: {:ok, []}
+
+  def recent(instance, limit, filter) when is_integer(limit) and limit > 0 do
     %{lo: lo, hi: hi} = Keys.family(:quarantine)
 
     result =
@@ -168,10 +174,15 @@ defmodule Ankusa.Edge.Quarantine do
         :quarantine,
         {lo, hi},
         {0, []},
-        fn _key, value, {n, acc} ->
-          # Trusted, internally written data; the reason may be any term.
-          acc = [:erlang.binary_to_term(value) | acc]
-          if n + 1 >= limit, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+        fn _key, value, {n, acc} = state ->
+          # A summary that does not decode is not listed, as in `page/5`.
+          with {:ok, summary} <- decode_summary(value),
+               true <- matches?(filter, summary) do
+            acc = [summary | acc]
+            if n + 1 >= limit, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+          else
+            _ -> {:cont, state}
+          end
         end,
         reverse: true
       )
@@ -449,7 +460,7 @@ defmodule Ankusa.Edge.Quarantine do
         hit? =
           case decoded do
             {:ok, summary} -> matches?(filter, summary)
-            :error -> Map.get(filter, :source_id) == nil and Map.get(filter, :id) == nil
+            :error -> unfiltered?(filter)
           end
 
         cond do
@@ -467,8 +478,21 @@ defmodule Ankusa.Edge.Quarantine do
 
   defp matches?(filter, summary) do
     keep?(filter, :source_id, Map.get(summary, :source_id)) and
-      keep?(filter, :id, Map.get(summary, :id))
+      keep?(filter, :id, Map.get(summary, :id)) and tenant_ok?(filter, summary)
   end
+
+  # An entry written before the pen kept the tenant (0.4), or imported from a
+  # 0.3 data dir, has none: it belongs to `"default"`, as in
+  # `Envelope.idempotency_key/1`.
+  defp tenant_ok?(%{tenants: tenants}, summary) when is_list(tenants),
+    do: (Map.get(summary, :tenant_id) || "default") in tenants
+
+  defp tenant_ok?(_filter, _summary), do: true
+
+  defp unfiltered?(filter),
+    do:
+      Map.get(filter, :source_id) == nil and Map.get(filter, :id) == nil and
+        Map.get(filter, :tenants) == nil
 
   defp keep?(filter, key, value) do
     case Map.get(filter, key) do

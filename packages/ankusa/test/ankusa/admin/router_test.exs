@@ -1461,4 +1461,273 @@ defmodule Ankusa.Admin.RouterTest do
   defp sink(%{"type" => "fail"}), do: {AlwaysFailSink, []}
   defp sink(%{"type" => "http"} = spec), do: {Ankusa.Sink.Http, [url: spec["url"] || "http://x"]}
   defp sink(other), do: raise(ArgumentError, "unknown sink: #{inspect(other)}")
+
+  # ── tenant-scoped reads and writes ─────────────────────────────────────────
+
+  describe "tenant scoped admin routes" do
+    alias Ankusa.Admin.Auth.Token
+
+    @every_scope Ankusa.Principal.scopes()
+
+    defp token(id, scopes), do: %{id: id, sha256: Token.hash(id), scopes: scopes}
+
+    # `acme` and `globex` each hold every operation scope for their own tenant;
+    # `operator` holds `tenant:*`; `nobody` holds a scope and no tenant.
+    defp start_tenant_instance(sources) do
+      tokens = [
+        token("operator", @every_scope ++ ["tenant:*"]),
+        token("acme", @every_scope ++ ["tenant:acme"]),
+        token("globex", @every_scope ++ ["tenant:globex"]),
+        token("both", @every_scope ++ ["tenant:acme", "tenant:globex"]),
+        token("nobody", ["dlq:read", "quarantine:write", "replays:write"])
+      ]
+
+      config =
+        test_config(
+          roles: [:edge, :dispatch],
+          admin: %{enabled: true, port: 0, auth: %{mode: :token, tokens: tokens}},
+          source_store: {Ankusa.SourceStore.Static, sources: sources},
+          rate_limits: %{
+            default: %{rate: 5, burst: 10},
+            tenants: %{"acme" => %{rate: 1, burst: 2}, "globex" => %{rate: 3, burst: 4}}
+          },
+          dispatch: %{
+            retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
+            breaker_failures: 0
+          }
+        )
+
+      put_config(config)
+      start_supervised!({Ankusa.Instance, config})
+      config
+    end
+
+    defp tcall(inst, method, path, token, body \\ "") do
+      Plug.Test.conn(method, path, body)
+      |> Plug.Conn.put_req_header("authorization", "Bearer " <> token)
+      |> then(&Router.call(&1, Router.init(instance: inst)))
+    end
+
+    defp json(conn), do: JSON.decode!(conn.resp_body)
+
+    defp failing_sources do
+      %{
+        "acme.hooks" => [tenant_id: "acme", sinks: [{AlwaysFailSink, []}]],
+        "globex.hooks" => [tenant_id: "globex", sinks: [{AlwaysFailSink, []}]]
+      }
+    end
+
+    defp quarantining_sources do
+      for tenant <- ["acme", "globex"], into: %{} do
+        {"#{tenant}.strict",
+         [
+           tenant_id: tenant,
+           verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
+           on_verify_failure: :quarantine
+         ]}
+      end
+    end
+
+    test "tenant scoped dlq" do
+      config = start_tenant_instance(failing_sources())
+      inst = config.instance
+
+      acme_old = ingest!(config, "acme.hooks", ~s({"n":1}))
+      acme_new = ingest!(config, "acme.hooks", ~s({"n":2}))
+      globex = ingest!(config, "globex.hooks", ~s({"n":3}))
+      assert {:ok, _settled} = Pipeline.tick(inst)
+
+      # A tenant-limited principal sees its own rows and nothing else, newest
+      # first; `total` counts only its rows too.
+      conn = tcall(inst, :get, "/v1/dlq", "acme")
+      assert conn.status == 200
+      assert %{"total" => 2, "entries" => [first, second]} = json(conn)
+      assert {first["id"], second["id"]} == {acme_new.id, acme_old.id}
+      assert first["tenant_id"] == "acme" and second["tenant_id"] == "acme"
+
+      assert %{"total" => 2, "entries" => [only]} =
+               json(tcall(inst, :get, "/v1/dlq?limit=1", "acme"))
+
+      assert only["id"] == acme_new.id
+
+      assert %{"total" => 1, "entries" => [entry]} = json(tcall(inst, :get, "/v1/dlq", "globex"))
+      assert entry["id"] == globex.id
+
+      # Naming its own tenant is fine; naming another is 403, never an empty 200.
+      assert %{"total" => 2} = json(tcall(inst, :get, "/v1/dlq?tenant=acme", "acme"))
+      conn = tcall(inst, :get, "/v1/dlq?tenant=globex", "acme")
+      assert conn.status == 403
+      assert %{"error" => "forbidden", "scope" => "tenant:globex"} = json(conn)
+
+      # The filter cannot be dodged by smuggling a source of another tenant in.
+      assert %{"total" => 0, "entries" => []} =
+               json(tcall(inst, :get, "/v1/dlq?source_id=globex.hooks", "acme"))
+
+      # An operator sees every tenant, and may narrow to one.
+      assert %{"total" => 3} = json(tcall(inst, :get, "/v1/dlq", "operator"))
+
+      assert %{"total" => 1, "entries" => [only]} =
+               json(tcall(inst, :get, "/v1/dlq?tenant=globex", "operator"))
+
+      assert only["id"] == globex.id
+
+      # A principal holding two tenants sees both, or either.
+      assert %{"total" => 3} = json(tcall(inst, :get, "/v1/dlq", "both"))
+      assert %{"total" => 2} = json(tcall(inst, :get, "/v1/dlq?tenant=acme", "both"))
+
+      # No tenant at all is 403 naming `tenant:*`; a malformed tenant is 403 to
+      # a limited principal and 400 to one that may name anything.
+      assert %{"scope" => "tenant:*"} = json(tcall(inst, :get, "/v1/dlq", "nobody"))
+      assert tcall(inst, :get, "/v1/dlq?tenant=not%20valid", "acme").status == 403
+
+      conn = tcall(inst, :get, "/v1/dlq?tenant=not%20valid", "operator")
+      assert conn.status == 400
+      assert %{"error" => "invalid_filter", "field" => "tenant"} = json(conn)
+      assert tcall(inst, :get, "/v1/dlq?tenant[]=acme", "operator").status == 400
+    end
+
+    test "tenant scoped quarantine purge" do
+      config = start_tenant_instance(quarantining_sources())
+      inst = config.instance
+
+      for source <- ["acme.strict", "acme.strict", "globex.strict"] do
+        assert {:quarantined, _reason} =
+                 Ankusa.Edge.Ingest.ingest(inst, request(source, ~s({"id":"q"})))
+      end
+
+      assert %{"entries" => entries} = json(tcall(inst, :get, "/v1/quarantine", "acme"))
+      assert length(entries) == 2
+      assert Enum.all?(entries, &(&1["tenant_id"] == "acme"))
+
+      assert %{"entries" => [globex_entry]} = json(tcall(inst, :get, "/v1/quarantine", "globex"))
+      assert globex_entry["source_id"] == "globex.strict"
+
+      assert %{"entries" => all} = json(tcall(inst, :get, "/v1/quarantine", "operator"))
+      assert length(all) == 3
+
+      conn = tcall(inst, :get, "/v1/quarantine?tenant=globex", "acme")
+      assert conn.status == 403
+      assert %{"scope" => "tenant:globex"} = json(conn)
+
+      # Naming another tenant is refused before anything is deleted, and a
+      # source filter cannot reach across tenants.
+      conn = tcall(inst, :delete, "/v1/quarantine?tenant=globex", "acme")
+      assert conn.status == 403
+      assert %{"scope" => "tenant:globex"} = json(conn)
+
+      assert %{"deleted" => 0, "bytes" => 0} =
+               json(tcall(inst, :delete, "/v1/quarantine?source_id=acme.strict", "globex"))
+
+      assert %{"entries" => all} = json(tcall(inst, :get, "/v1/quarantine", "operator"))
+      assert length(all) == 3
+
+      # An unfiltered purge by a tenant-limited principal deletes only its own.
+      assert %{"deleted" => 2, "bytes" => bytes} =
+               json(tcall(inst, :delete, "/v1/quarantine", "acme"))
+
+      assert bytes > 0
+
+      assert %{"entries" => [left]} = json(tcall(inst, :get, "/v1/quarantine", "operator"))
+      assert left["tenant_id"] == "globex"
+
+      assert %{"scope" => "tenant:*"} = json(tcall(inst, :delete, "/v1/quarantine", "nobody"))
+
+      # An operator's unfiltered purge takes everything; `tenant` narrows it.
+      assert %{"deleted" => 0} =
+               json(tcall(inst, :delete, "/v1/quarantine?tenant=acme", "operator"))
+
+      assert %{"deleted" => 1} = json(tcall(inst, :delete, "/v1/quarantine", "operator"))
+    end
+
+    test "tenant scoped replay" do
+      {:ok, agent} = Agent.start_link(fn -> false end)
+      sink = {GatedSink, agent: agent, pid: self()}
+
+      config =
+        start_tenant_instance(%{
+          "acme.hooks" => [tenant_id: "acme", sinks: [sink]],
+          "globex.hooks" => [tenant_id: "globex", sinks: [sink]]
+        })
+
+      inst = config.instance
+      wait_loaded(inst)
+
+      acme = ingest!(config, "acme.hooks", ~s({"n":1}))
+      globex = ingest!(config, "globex.hooks", ~s({"n":2}))
+      assert {:ok, _settled} = Pipeline.tick(inst)
+      Agent.update(agent, fn _ -> true end)
+
+      # Naming another tenant is 403, and nothing is started.
+      conn = tcall(inst, :post, "/v1/replays", "acme", ~s({"kind":"dlq","tenant":"globex"}))
+      assert conn.status == 403
+      assert %{"scope" => "tenant:globex"} = json(conn)
+      assert %{"replays" => []} = json(tcall(inst, :get, "/v1/replays", "operator"))
+
+      assert %{"scope" => "tenant:*"} =
+               json(tcall(inst, :post, "/v1/replays", "nobody", ~s({"kind":"dlq"})))
+
+      # The job a tenant-limited principal starts is limited to its tenant,
+      # whatever the body says: the other tenant's dead row is left alone.
+      conn = tcall(inst, :post, "/v1/replays", "acme", ~s({"kind":"dlq"}))
+      assert conn.status == 202
+      job = json(conn)
+      assert job["filter"] == %{"tenants" => ["acme"]}
+
+      acme_id = acme.id
+      assert_receive {:delivered, ^acme_id, _body}, 5_000
+      globex_id = globex.id
+      refute_receive {:delivered, ^globex_id, _body}, 300
+
+      poll_job(inst, job["id"], &(&1.state == :done), System.monotonic_time(:millisecond) + 5_000)
+
+      assert %{"total" => 1, "entries" => [left]} = json(tcall(inst, :get, "/v1/dlq", "operator"))
+      assert left["id"] == globex.id
+
+      # Jobs are visible to the tenants they are scoped to, and to an operator.
+      assert %{"replays" => [%{"id" => id}]} = json(tcall(inst, :get, "/v1/replays", "acme"))
+      assert id == job["id"]
+      assert %{"replays" => [_]} = json(tcall(inst, :get, "/v1/replays", "operator"))
+      assert tcall(inst, :get, "/v1/replays/#{job["id"]}", "acme").status == 200
+
+      assert %{"replays" => []} = json(tcall(inst, :get, "/v1/replays", "globex"))
+      assert %{"replays" => []} = json(tcall(inst, :get, "/v1/replays?tenant=globex", "operator"))
+      assert tcall(inst, :get, "/v1/replays/#{job["id"]}", "globex").status == 404
+
+      conn = tcall(inst, :patch, "/v1/replays/#{job["id"]}", "globex", ~s({"state":"cancelled"}))
+      assert conn.status == 404
+      assert %{"error" => "replay_not_found"} = json(conn)
+
+      assert tcall(inst, :get, "/v1/replays?tenant=globex", "acme").status == 403
+
+      # An operator's unscoped job is invisible to every tenant-limited principal.
+      conn = tcall(inst, :post, "/v1/replays", "operator", ~s({"kind":"dlq","rate":10}))
+      assert conn.status == 202
+      unscoped = json(conn)
+      assert unscoped["filter"] == %{}
+
+      assert_receive {:delivered, ^globex_id, _body}, 5_000
+
+      assert tcall(inst, :get, "/v1/replays/#{unscoped["id"]}", "acme").status == 404
+      assert %{"replays" => [%{"id" => ^id}]} = json(tcall(inst, :get, "/v1/replays", "acme"))
+    end
+
+    test "tenant scoped rate-limit listing" do
+      config = start_tenant_instance(failing_sources())
+      inst = config.instance
+
+      assert %{"default" => %{"rate" => 5}, "tenants" => [%{"tenant" => "acme"}]} =
+               json(tcall(inst, :get, "/v1/rate-limits", "acme"))
+
+      assert %{"tenants" => [%{"tenant" => "globex"}]} =
+               json(tcall(inst, :get, "/v1/rate-limits", "globex"))
+
+      assert %{"tenants" => both} = json(tcall(inst, :get, "/v1/rate-limits", "operator"))
+      assert Enum.sort(for %{"tenant" => tenant} <- both, do: tenant) == ["acme", "globex"]
+
+      assert %{"tenants" => [%{"tenant" => "globex"}]} =
+               json(tcall(inst, :get, "/v1/rate-limits?tenant=globex", "operator"))
+
+      assert tcall(inst, :get, "/v1/rate-limits?tenant=globex", "acme").status == 403
+    end
+  end
 end
