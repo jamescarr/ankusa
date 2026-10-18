@@ -13,7 +13,7 @@ defmodule Ankusa.Telemetry do
 
   | Event | Measurements | Metadata |
   | --- | --- | --- |
-  | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome` |
+  | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:size`, `:outcome`, `:dropped_headers` (request headers the stored-header policy removed from the hook; `0` when it was not stored) |
   | `[:ankusa, :ingest, :refused]` | — | `:instance`, `:reason` (`:unknown_source`, `:payload_too_large`, `:body_read_failed`, `:invalid_header`, `:store_unavailable`) |
   | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status` |
   | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |

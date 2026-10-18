@@ -13,6 +13,15 @@ defmodule Ankusa.Edge.Ingest do
   durable accepts returns, or after a durable quarantine write. Everything
   else is a non-2xx.
 
+  ## Stored headers
+
+  Verification and the dedupe key read the request's complete header list.
+  Only then does the stored-header policy (`Ankusa.Edge.StoredHeaders`: the
+  instance's `store_headers`, overridden by the source's) remove or hash
+  credential-bearing headers, so the hook that is committed, archived,
+  claim-checked and published to sinks never carries them. The number removed
+  is `:dropped_headers` on the `[:ankusa, :ingest]` span's stop metadata.
+
   ## Lookup precedes the body
 
   The source is looked up (`lookup/2`) before the request body is read, and
@@ -23,7 +32,7 @@ defmodule Ankusa.Edge.Ingest do
   transport-less entry point (tests, benches, embedding): lookup, then ingest.
   """
 
-  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine, RateLimiter}
+  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine, RateLimiter, StoredHeaders}
   alias Ankusa.{Envelope, Source, Verification}
 
   @type result ::
@@ -184,18 +193,27 @@ defmodule Ankusa.Edge.Ingest do
   @spec ingest(atom(), Source.t(), String.t(), raw_request()) :: result()
   def ingest(instance, %Source{} = source, tenant_id, req) do
     Ankusa.Telemetry.span([:ingest], %{instance: instance, source_id: source.id}, fn ->
-      result = accept(instance, source, tenant_id, req)
-      {result, %{size: byte_size(req.body), outcome: tag(result)}}
+      {result, dropped} = accept(instance, source, tenant_id, req)
+
+      {result, %{size: byte_size(req.body), outcome: tag(result), dropped_headers: dropped}}
     end)
   end
 
+  # Returns the result and how many request headers the stored-header policy
+  # removed from the hook (0 for a hook that was not stored).
   defp accept(instance, source, tenant_id, req) do
     env = build_envelope(source, tenant_id, req)
 
     case verify(instance, source, env) do
-      {:accept, env} -> admit(instance, source, env)
-      {:quarantine, env, reason} -> quarantine(instance, env, reason)
-      {:reject, reason} -> {:rejected, reason}
+      {:accept, env} ->
+        admit(instance, source, env)
+
+      {:quarantine, env, reason} ->
+        {env, dropped} = store_headers(instance, source, env)
+        {quarantine(instance, env, reason), dropped}
+
+      {:reject, reason} ->
+        {{:rejected, reason}, 0}
     end
   end
 
@@ -209,16 +227,18 @@ defmodule Ankusa.Edge.Ingest do
       # A forged, flag-accepted request must not claim a provider event key and
       # suppress the real event, so no key is extracted when the hook was flagged.
       case Quarantine.hit(instance, env.source_id) do
-        :ok -> commit(instance, source, env)
-        {:rate_limited, ms} -> {:error, {:quarantine_rate_limited, ms}}
-        {:error, :store_unavailable} -> {:error, :store_unavailable}
+        :ok -> commit_stored(instance, source, env)
+        {:rate_limited, ms} -> {{:error, {:quarantine_rate_limited, ms}}, 0}
+        {:error, :store_unavailable} -> {{:error, :store_unavailable}, 0}
       end
     else
+      # The dedupe key is read from the complete header list: a source may
+      # dedupe on a header the stored-header policy then removes.
       env = %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
 
       case RateLimiter.hit(instance, env.tenant_id) do
         :ok ->
-          commit(instance, source, env)
+          commit_stored(instance, source, env)
 
         {:error, {:rate_limited, _}} = limited ->
           Ankusa.Telemetry.emit([:rate_limit, :rejected], %{}, %{
@@ -227,9 +247,27 @@ defmodule Ankusa.Edge.Ingest do
             source_id: env.source_id
           })
 
-          limited
+          {limited, 0}
       end
     end
+  end
+
+  # ── stored-header policy ──────────────────────────────────────────────────
+
+  # Verification has read the complete header list; what is stored, archived,
+  # claim-checked and forwarded from here on is the list the policy leaves.
+  # `Ankusa.config/1` is a `:persistent_term` read, and a header list the policy
+  # does not touch is the same list, not a copy.
+  defp store_headers(instance, %Source{store_headers: override}, env) do
+    policy = StoredHeaders.resolve(override, Ankusa.config(instance).store_headers)
+
+    {headers, dropped} = StoredHeaders.strip(env.headers, policy)
+    {%{env | headers: headers}, dropped}
+  end
+
+  defp commit_stored(instance, source, env) do
+    {env, dropped} = store_headers(instance, source, env)
+    {commit(instance, source, env), dropped}
   end
 
   # ── verification + policy ─────────────────────────────────────────────────
