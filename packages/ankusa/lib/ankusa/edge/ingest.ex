@@ -23,8 +23,8 @@ defmodule Ankusa.Edge.Ingest do
   transport-less entry point (tests, benches, embedding): lookup, then ingest.
   """
 
-  alias Ankusa.{Envelope, Source, Verification}
   alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine, RateLimiter}
+  alias Ankusa.{Envelope, Source, Verification}
 
   @type result ::
           {:ok, Envelope.t()}
@@ -51,11 +51,14 @@ defmodule Ankusa.Edge.Ingest do
           | :invalid_header
           | :store_unavailable
 
+  # Extra keys (`:source_id`, `:tenant_id` from a `request`) ride along: a closed
+  # map type here would make every `ingest/2` call "break the contract".
   @type raw_request :: %{
           required(:method) => String.t(),
           required(:path) => String.t(),
           required(:headers) => [{String.t(), String.t()}],
-          required(:body) => binary()
+          required(:body) => binary(),
+          optional(atom()) => term()
         }
 
   @type request :: %{

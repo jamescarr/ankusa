@@ -202,7 +202,9 @@ defmodule Ankusa.Config do
             # means lifecycle events are off. See `Ankusa.Lifecycle`.
             lifecycle: %{sinks: []}
 
-  @type t :: %__MODULE__{}
+  # `lifecycle.sinks` is spelled out because the struct's default (`[]`) is all
+  # a bare `%__MODULE__{}` tells dialyzer about the field.
+  @type t :: %__MODULE__{lifecycle: %{sinks: [{module(), keyword()}]}}
 
   @roles [:edge, :dispatch, :storage, :claim_check]
 

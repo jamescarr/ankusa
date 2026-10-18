@@ -392,16 +392,14 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # message arrives, and Redix guarantees delivery from that point on. Without the
   # wait, the load (which runs on another connection) could reach Redis first.
   defp subscribe(state) do
-    case Redix.PubSub.subscribe(state.pubsub, state.namespace, self()) do
-      {:ok, ref} ->
-        receive do
-          {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
-        after
-          @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
-        end
+    # `subscribe/3` answers `{:ok, ref}` only (its spec): a pub/sub connection
+    # that is down exits the call instead, which this process's supervisor sees.
+    {:ok, ref} = Redix.PubSub.subscribe(state.pubsub, state.namespace, self())
 
-      {:error, reason} ->
-        {:error, {:pubsub_subscribe_failed, reason}}
+    receive do
+      {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
+    after
+      @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
     end
   end
 
@@ -414,19 +412,15 @@ defmodule Ankusa.Routes.Store.Redis.State do
   # subscribe-before-load order still holds. Nothing here blocks on Redis, so
   # a restart during an outage does not hold the edge down for a timeout.
   defp resume(state, %{routes: routes, ip_rules: ip_rules, version: version}) do
-    case Redix.PubSub.subscribe(state.pubsub, state.namespace, self()) do
-      {:ok, _ref} ->
-        Logger.info(
-          "[ankusa_redis] restarted with a published route table (#{map_size(routes)} " <>
-            "routes); serving it and loading from Redis once the subscription is confirmed"
-        )
+    {:ok, _ref} = Redix.PubSub.subscribe(state.pubsub, state.namespace, self())
 
-        Process.send_after(self(), :tick, state.tick_ms)
-        {:ok, %{state | routes: routes, ip_rules: ip_rules, version: version}}
+    Logger.info(
+      "[ankusa_redis] restarted with a published route table (#{map_size(routes)} " <>
+        "routes); serving it and loading from Redis once the subscription is confirmed"
+    )
 
-      {:error, reason} ->
-        {:stop, {:pubsub_subscribe_failed, reason}}
-    end
+    Process.send_after(self(), :tick, state.tick_ms)
+    {:ok, %{state | routes: routes, ip_rules: ip_rules, version: version}}
   end
 
   # First boot of a namespace: write the config seed, atomically. Later boots

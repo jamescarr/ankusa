@@ -14,8 +14,8 @@ defmodule Ankusa.Store.BackupTest do
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.{Envelope, Storage, Store}
   alias Ankusa.BlobStore.LocalFS
+  alias Ankusa.{Envelope, Storage, Store}
   alias Ankusa.Storage.Compactor
   alias Ankusa.Store.Backup
   alias Ankusa.Test.CountingBlobStore

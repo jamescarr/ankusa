@@ -28,6 +28,9 @@ defmodule Ankusa.Net do
   @typedoc "A normalized IP address: an `:inet.ip_address()` tuple."
   @type ip :: :inet.ip_address()
 
+  @typedoc "A parsed CIDR range (`CIDR.parse/1`), the rule shape every IP list carries."
+  @type cidr :: %CIDR{}
+
   import Bitwise
 
   @doc """
@@ -92,7 +95,7 @@ defmodule Ankusa.Net do
   leave its ordinary "not a CIDR" message alone. A host whose bits fall outside
   its mask (`"10.0.0.5/8"`) is masked off, as `CIDR.parse/1` already does.
   """
-  @spec parse_cidr(binary()) :: {:ok, %CIDR{}} | {:error, :mapped_range | String.t()}
+  @spec parse_cidr(binary()) :: {:ok, cidr()} | {:error, :mapped_range | String.t()}
   def parse_cidr(cidr) when is_binary(cidr) do
     case parse_cidr_string(cidr) do
       %CIDR{} = parsed -> reject_mapped(parsed)

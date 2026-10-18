@@ -10,8 +10,8 @@ defmodule Ankusa.Admin.RouterTest do
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.Config
   alias Ankusa.Admin.Router
+  alias Ankusa.Config
   alias Ankusa.Dispatch.Pipeline
   alias Ankusa.Queue.Deliveries
   alias Ankusa.Store

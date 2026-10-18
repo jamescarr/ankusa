@@ -272,7 +272,7 @@ defmodule Ankusa.Replay do
   defp sinks_ok(nil), do: :ok
 
   defp sinks_ok(sinks) do
-    if is_list(sinks) and length(sinks) >= 1 and length(sinks) <= 64 and
+    if is_list(sinks) and sinks != [] and length(sinks) <= 64 and
          Enum.all?(sinks, &(is_integer(&1) and &1 >= 0)) do
       :ok
     else

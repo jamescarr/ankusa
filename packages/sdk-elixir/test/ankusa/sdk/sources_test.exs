@@ -6,8 +6,8 @@ defmodule Ankusa.SDK.SourcesTest do
     SourceConflictError,
     SourceInvalidError,
     SourceNotFoundError,
-    SourceStoreReadOnlyError,
     Sources,
+    SourceStoreReadOnlyError,
     SourcesUnavailableError,
     VersionMismatchError
   }

@@ -61,8 +61,8 @@ defmodule Ankusa.StorageTest do
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.{Envelope, Store}
   alias Ankusa.Dispatch.Pipeline
+  alias Ankusa.{Envelope, Store}
   alias Ankusa.Storage
   alias Ankusa.Storage.Compactor
   alias Ankusa.Store.Keys

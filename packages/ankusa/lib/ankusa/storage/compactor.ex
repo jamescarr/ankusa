@@ -250,12 +250,12 @@ defmodule Ankusa.Storage.Compactor do
 
   # A blob store is user code (S3, GCS, a custom adapter): an error return, a
   # raise, an exit and a throw are the same failure — this tick is retried,
-  # nothing crashes.
+  # nothing crashes. A return outside `:ok | {:error, _}` raises here and lands
+  # in the `rescue`.
   defp put(instance, key, data) do
     case Ankusa.BlobStore.put(instance, :segments, key, data) do
       :ok -> :ok
       {:error, _reason} = error -> error
-      other -> {:error, {:bad_return, other}}
     end
   rescue
     error -> {:error, {:raised, error}}

@@ -60,5 +60,6 @@ defmodule AnkusaServer.CLI do
   # `eval` nothing else has started it.
   defp ensure_yaml, do: Application.ensure_all_started(:yaml_elixir)
 
+  @spec halt(non_neg_integer()) :: no_return()
   defp halt(status), do: System.halt(status)
 end

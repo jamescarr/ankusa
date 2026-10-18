@@ -40,6 +40,8 @@ defmodule Ankusa.Queue.Deliveries do
   # Plain `binary_to_term`: rows hold module atoms, the same reason
   # `Envelope.from_binary/1` is not `:safe`.
   def encode_row(row), do: :erlang.term_to_binary(row)
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def decode_row(bin), do: :erlang.binary_to_term(bin)
 
   @type due :: %{
@@ -144,6 +146,8 @@ defmodule Ankusa.Queue.Deliveries do
   defp decode_hook(seq, {:ok, bin}), do: %{Envelope.from_binary(bin) | seq: seq}
   defp decode_hook(_seq, :not_found), do: nil
 
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp decode_claim({:ok, bin}), do: :erlang.binary_to_term(bin)
   defp decode_claim(:not_found), do: nil
 
@@ -405,6 +409,8 @@ defmodule Ankusa.Queue.Deliveries do
           {:ok, [{binary(), pos_integer(), non_neg_integer()}], binary() | nil, boolean(),
            non_neg_integer()}
           | {:error, term()}
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def dead_page(instance, {lower, upper}, filter, limit, max_scan) do
     result =
       Store.fold(instance, :dead, {lower, upper}, {0, 0, [], nil}, fn key,
@@ -506,6 +512,8 @@ defmodule Ankusa.Queue.Deliveries do
   """
   @spec dead(atom(), keyword()) ::
           {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def dead(instance, opts) do
     %{lo: lo, hi: hi} = Keys.family(:dead)
     limit = Keyword.fetch!(opts, :limit)

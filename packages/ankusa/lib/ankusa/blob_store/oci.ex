@@ -187,8 +187,8 @@ defmodule Ankusa.BlobStore.OCI do
       |> then(&:public_key.sign(signing_string, :sha256, &1))
       |> Base.encode64()
 
-    "Signature version=\"1\",keyId=\"#{key_id(opts)}\",algorithm=\"rsa-sha256\"," <>
-      "headers=\"#{Enum.join(signing_headers, " ")}\",signature=\"#{signature}\""
+    ~s(Signature version="1",keyId="#{key_id(opts)}",algorithm="rsa-sha256",) <>
+      ~s(headers="#{Enum.join(signing_headers, " ")}",signature="#{signature}")
   end
 
   defp header_value("(request-target)", method, url, _headers, _body) do

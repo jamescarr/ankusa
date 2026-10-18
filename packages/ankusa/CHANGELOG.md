@@ -13,6 +13,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- `t:Ankusa.Net.cidr/0`, the type of a parsed CIDR range, now in the specs of
+  `Ankusa.Net.parse_cidr/1` and `Ankusa.Net.ClientIP.resolve/2` in place of
+  `%CIDR{}`.
 - **Several claim stores, with failover.** `claim_check.blob_stores` takes a
   list of `{module, opts}` (buckets, regions, providers) and
   `claim_check.placement` picks a new pack's store: `:ordered` (default) the

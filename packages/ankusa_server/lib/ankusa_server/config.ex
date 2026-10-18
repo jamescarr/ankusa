@@ -362,7 +362,8 @@ defmodule AnkusaServer.Config do
       Ankusa.Lifecycle.validate_config!(config)
       config
     rescue
-      error in ArgumentError -> raise ConfigError, message: error.message
+      error in ArgumentError ->
+        reraise ConfigError, [message: error.message], __STACKTRACE__
     end
   end
 
@@ -381,6 +382,8 @@ defmodule AnkusaServer.Config do
 
   # `to_atom` after `enum!`, not `to_existing_atom`: under `bin/ankusa eval`
   # (check-config) modules load on demand, so `:edge` may not exist yet.
+  # The string is checked against a closed list first (`enum!/3`), so the atoms are a fixed set.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp roles!(value, path) do
     value
     |> string_list!(path)
@@ -795,6 +798,8 @@ defmodule AnkusaServer.Config do
     end
   end
 
+  # The string is checked against a closed list first (`enum!/3`), so the atoms are a fixed set.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp rule!(rule, path) do
     rule = section!(rule, @routes_rule_keys, path)
 
@@ -1117,6 +1122,8 @@ defmodule AnkusaServer.Config do
 
   defp verify_opts("none", _verify, _path, opts), do: opts
 
+  # The string is checked against a closed list first (`enum!/3`), so the atoms are a fixed set.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp verify_opts(type, verify, path, opts) do
     # The signature verifiers are useless without a secret, and a silently-empty
     # HMAC key would accept everything an attacker signs.
@@ -1181,6 +1188,8 @@ defmodule AnkusaServer.Config do
   defp secret!(value, path),
     do: raise(ConfigError, message: type_error(path, "a string or a list of strings", value))
 
+  # The string is checked against a closed list first (`enum!/3`), so the atoms are a fixed set.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp hmac_scheme(verify, path) do
     timestamp_header = string_opt(verify, "timestamp_header", path)
 
@@ -1576,6 +1585,8 @@ defmodule AnkusaServer.Config do
     end
   end
 
+  # The string is checked against a closed list first (`enum!/3`), so the atoms are a fixed set.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp atom_enum_opt(map, key, allowed, path) do
     case map[key] do
       nil -> nil

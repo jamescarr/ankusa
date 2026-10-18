@@ -160,6 +160,8 @@ defmodule Ankusa.ClaimCheck.Router do
   defp read_range(instance, location, {first, last}, deadline),
     do: ClaimCheck.read_bytes(instance, location, first, last - first + 1, deadline: deadline)
 
+  # The body is served as application/octet-stream (claim_headers/1), never HTML.
+  # sobelow_skip ["XSS.SendResp"]
   defp send_range(conn, :all, bin, _length),
     do: conn |> claim_headers() |> Plug.Conn.send_resp(200, bin)
 
@@ -170,6 +172,8 @@ defmodule Ankusa.ClaimCheck.Router do
     |> Plug.Conn.send_resp(416, "")
   end
 
+  # The body is served as application/octet-stream (claim_headers/1), never HTML.
+  # sobelow_skip ["XSS.SendResp"]
   defp send_range(conn, {first, last}, bin, length) do
     conn
     |> claim_headers()

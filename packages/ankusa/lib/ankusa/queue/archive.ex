@@ -86,6 +86,8 @@ defmodule Ankusa.Queue.Archive do
   @doc "Where an event archived by a 0.3 node lives, if it did."
   @spec legacy_location(atom(), String.t()) ::
           {:ok, {String.t(), non_neg_integer(), pos_integer(), pos_integer()}} | :error
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def legacy_location(instance, id) do
     case Store.get(instance, :archive, Keys.legacy_location(id)) do
       {:ok, bin} -> {:ok, :erlang.binary_to_term(bin)}
@@ -100,6 +102,8 @@ defmodule Ankusa.Queue.Archive do
   """
   @spec next_segment(atom(), non_neg_integer(), String.t(), String.t()) ::
           {:ok, map() | nil} | {:error, term()}
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def next_segment(instance, after_first_seq, min_id, max_id) do
     %{hi: hi} = Keys.family(:segments)
     range = {Keys.segment(after_first_seq + 1), hi}
@@ -115,6 +119,8 @@ defmodule Ankusa.Queue.Archive do
 
   @doc "Catalogue rows whose id range could hold `id`, oldest first."
   @spec segments_containing(atom(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def segments_containing(instance, id) do
     %{lo: lo, hi: hi} = Keys.family(:segments)
 

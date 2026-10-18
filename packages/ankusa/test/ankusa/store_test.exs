@@ -53,6 +53,7 @@ defmodule Ankusa.StoreTest do
         Store.write(inst, [{:put, :hooks, ["iolist"], "v"}], [])
       end
 
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
       assert_raise FunctionClauseError, fn -> apply(Store, :get, [inst, :hooks, ["iolist"]]) end
       assert_raise ArgumentError, fn -> Store.multi_get(inst, :hooks, [["iolist"]]) end
     end

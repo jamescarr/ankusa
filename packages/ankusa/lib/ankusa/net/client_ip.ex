@@ -50,7 +50,7 @@ defmodule Ankusa.Net.ClientIP do
   read. Callers treat both as an IP rejection: there is no address to match
   against rules, and neither case may quietly become the proxy's own address.
   """
-  @spec resolve(Plug.Conn.t(), [%CIDR{}]) :: {:ok, :inet.ip_address()} | :error
+  @spec resolve(Plug.Conn.t(), [Net.cidr()]) :: {:ok, :inet.ip_address()} | :error
   def resolve(%Plug.Conn{remote_ip: nil}, _trusted_proxies), do: :error
 
   def resolve(%Plug.Conn{remote_ip: remote_ip} = conn, trusted_proxies) do
