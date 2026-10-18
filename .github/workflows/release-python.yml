@@ -37,7 +37,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: resolve
         run: |
           source .mise/lib/pkg.sh
@@ -67,12 +67,12 @@ jobs:
       contents: write
       id-token: write # PyPI Trusted Publishing
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned to .mise/conf.d/sdk-python.toml's uv, the one `mise run
       # check:package sdk-python` built and tested with: setup-uv's default
       # floats, which would let the release be built by a toolchain nothing
       # here ever validated.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.13.1"
 
@@ -81,7 +81,7 @@ jobs:
         run: uv build
 
       - name: Publish package
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: packages/sdk-python/dist
 

@@ -120,6 +120,46 @@ defmodule Ankusa.MetricsTest do
     refute scrape =~ ~s(provider="Ankusa.Verifier.None")
   end
 
+  test "a SHA-1 source counts every verification, ok or failed, and nothing else does" do
+    scheme = %Ankusa.Verifier.Hmac.Scheme{signature_header: "x-sig", hash: :sha1}
+
+    config =
+      start_instance(
+        source_store:
+          {Static,
+           sources: %{
+             "legacy" => [
+               verifier: {Ankusa.Verifier.Hmac, scheme: scheme, secret: "k"},
+               on_verify_failure: :accept_flag,
+               sinks: [{Ankusa.Sink.Log, []}]
+             ],
+             "modern" => [
+               verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
+               on_verify_failure: :accept_flag,
+               sinks: [{Ankusa.Sink.Log, []}]
+             ]
+           }}
+      )
+
+    good = Base.encode16(:crypto.mac(:hmac, :sha, "k", "{}"), case: :lower)
+
+    assert {:ok, _} =
+             Ankusa.Edge.Ingest.ingest(
+               config.instance,
+               request("legacy", "{}", [{"x-sig", good}])
+             )
+
+    assert {:ok, _} = Ankusa.Edge.Ingest.ingest(config.instance, request("legacy", "{}"))
+    assert {:ok, _} = Ankusa.Edge.Ingest.ingest(config.instance, request("modern", "{}"))
+
+    scrape = Ankusa.Metrics.scrape(config.instance)
+
+    assert scrape =~
+             ~r/^ankusa_verifier_weak_hash_total\{(?=[^}]*scheme="custom")(?=[^}]*source_id="legacy")[^}]*\} 2$/m
+
+    refute scrape =~ ~r/^ankusa_verifier_weak_hash_total\{[^}]*source_id="modern"/m
+  end
+
   test "a denied hook is counted once, with its tenant, and tagged rate_limited" do
     config = start_instance(rate_limits: %{tenants: %{"acme" => %{rate: 0.001, burst: 1}}})
 

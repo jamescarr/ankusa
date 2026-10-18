@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#MISE description="Fail on a GitHub action not pinned to a commit SHA, or a release-image input not pinned by digest"
+#
+# SEC-8: a tag (`actions/checkout@v7`, `elixir:1.20.4-alpine`) is a name the
+# publisher can move; a commit SHA or an image digest is the bytes. Pins carry
+# the tag they came from as a trailing comment so a human can read them:
+#
+#   uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+#   FROM alpine:3.24@sha256:294b683c…
+#
+# To bump an action: `gh api repos/<owner>/<repo>/git/ref/tags/<tag> -q .object`
+# (dereference an annotated tag with `git/tags/<sha>`), then change the SHA and
+# its comment together. To bump an image:
+# `docker buildx imagetools inspect <image:tag> --format '{{json .Manifest.Digest}}'`.
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+problems=()
+
+# Every `uses:` in every workflow, except a reusable workflow in this repo.
+while IFS= read -r line; do
+  problems+=("action not pinned to a 40-character commit SHA: $line")
+done < <(
+  grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]' .github/workflows/*.yml |
+    grep -vE 'uses:[[:space:]]+\./' |
+    grep -vE 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$)' || true
+)
+
+# The BuildKit image and the SBOM scanner image docker.yml runs the build with.
+while IFS= read -r line; do
+  problems+=("build tool image not pinned by digest: $line")
+done < <(
+  grep -nE 'image=moby/buildkit|generator=' .github/workflows/*.yml |
+    grep -vE '(image=moby/buildkit|generator=)[^[:space:]]*@sha256:[0-9a-f]{64}' || true
+)
+
+# The release image: the syntax frontend and both stages' base images.
+dockerfile=packages/ankusa_server/Dockerfile
+stages=" $(sed -n -E 's/^FROM .* [Aa][Ss] ([A-Za-z0-9_.-]+)[[:space:]]*$/\1/p' "$dockerfile" | tr '\n' ' ') "
+while IFS= read -r line; do
+  image=$(echo "${line#*FROM }" | awk '{print $1}')
+  case "$image" in
+    scratch) continue ;;
+    *@sha256:????????????????????????????????????????????????????????????????) continue ;;
+  esac
+  case "$stages" in *" $image "*) continue ;; esac
+  problems+=("$dockerfile: base image not pinned by digest: $line")
+done < <(grep -E '^FROM ' "$dockerfile")
+
+grep -qE '^# syntax=[^[:space:]]+@sha256:[0-9a-f]{64}$' "$dockerfile" ||
+  problems+=("$dockerfile: the '# syntax=' frontend is not pinned by digest")
+
+if [ "${#problems[@]}" -gt 0 ]; then
+  printf '%s\n' "${problems[@]}" >&2
+  fail "${#problems[@]} unpinned supply-chain input(s) (see the header of .mise/tasks/lint/pins)"
+fi
+
+echo "pins OK: every action is a commit SHA, every release-image input a digest"

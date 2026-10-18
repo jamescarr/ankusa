@@ -2,12 +2,15 @@
 #
 # The image gate: start the built image and check what an operator checks in the
 # first minute — the demo hook is accepted, metrics and config answer, and a
-# broken config exits 78 instead of crash-looping.
+# broken config exits 78 instead of crash-looping. A published image (a
+# `repo@sha256:…` reference, or any image named by SMOKE_COSIGN_IMAGE) is first
+# checked for the keyless cosign signature .github/workflows/docker.yml makes.
 #
 #   packages/ankusa_server/scripts/smoke.sh jamescarr/ankusa:dev
+#   packages/ankusa_server/scripts/smoke.sh jamescarr/ankusa@sha256:…   # + cosign verify
 #
 # Used by both `mise run docker:smoke` and .github/workflows/docker.yml, so it
-# depends on nothing but docker, curl, and bash.
+# depends on nothing but docker, curl, and bash (and cosign, to verify one).
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke.sh IMAGE}"
@@ -23,6 +26,10 @@ ADMIN_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 # The mutual-TLS container's ingest and metrics ports.
 MTLS_PORT="${SMOKE_MTLS_PORT:-4010}"
 METRICS_PORT="${SMOKE_METRICS_PORT:-4014}"
+# Who may have signed a published image: this repo's docker.yml, on main or on a
+# server tag, with GitHub's OIDC issuer. Override for a fork.
+COSIGN_IDENTITY="${SMOKE_COSIGN_IDENTITY:-^https://github\.com/jamescarr/ankusa/\.github/workflows/docker\.yml@refs/(heads/main|tags/ankusa_server-v.+)$}"
+COSIGN_ISSUER="${SMOKE_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}"
 
 WORK="$(mktemp -d)"
 
@@ -47,6 +54,21 @@ http_code() {
   shift
   curl -s -o "$out" -w '%{http_code}' "$@"
 }
+
+# The signature first: nothing below should run an image nobody signed.
+cosign_target="${SMOKE_COSIGN_IMAGE:-}"
+case "$IMAGE" in
+  *@sha256:*) cosign_target="${cosign_target:-$IMAGE}" ;;
+esac
+if [ -n "$cosign_target" ]; then
+  command -v cosign >/dev/null || fail "cosign is not installed, so $cosign_target cannot be verified"
+  cosign verify --certificate-identity-regexp "$COSIGN_IDENTITY" \
+    --certificate-oidc-issuer "$COSIGN_ISSUER" "$cosign_target" >"$WORK/cosign" 2>&1 ||
+    fail "cosign verify failed for $cosign_target: $(cat "$WORK/cosign")"
+  echo "cosign verify: OK ($cosign_target)"
+else
+  echo "cosign verify: skipped (a locally built image is unsigned; pass a repo@sha256: reference or SMOKE_COSIGN_IMAGE)"
+fi
 
 # A leftover container from an interrupted run would make every check below lie.
 docker rm -f "$NAME" >/dev/null 2>&1 || true
