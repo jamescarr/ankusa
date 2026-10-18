@@ -117,7 +117,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Done when:* `crash` job is green on `main`; the drill fails if `Queue.Writer` is patched to skip `sync: true` (prove once, revert).
   *Proof:* `mise run test:crash` → `acked=<n> recovered=<n> missing=0 enospc_503=<k> resumed=true`; with the `sync: false` patch → `missing>0`.
   *Anchors:* `packages/ankusa/test/ankusa/loss_test.exs`, `packages/ankusa/lib/ankusa/queue/writer.ex:500-511`, `packages/ankusa/lib/ankusa/store.ex:345-350,593-594`.
-  *Evidence:* —
+  *Evidence:* 2026-10-17 · PR #96 · `mise run test:crash`, `scripts/drills/flakey.sh`, both again with `sync: false` in `queue/writer.ex` (reverted), `mise run check:package ankusa`, `mise run lint:workflows`, `mise run check:links` · `test:crash` → `acked=14940 recovered=14940 missing=0 enospc_503=1 resumed=true`; `flakey.sh` (ext4 on device-mapper: two 2 s I/O-error windows, then a power-loss cut) → `acked=6562 recovered=6562 missing=0 eio_503=17 resumed=true`; `flakey.sh` with `sync: false` → `acked=9344 recovered=5600 missing=3744`, exit 1. The tmpfs drill with the same patch still gives `missing=0` (`kill -9` loses nothing the kernel holds), so the `sync: false` proof is the device-mapper drill: CI job `crash` runs the tmpfs drill, informational job `crash-powerloss` runs `flakey.sh` where the runner allows privileged loop/device-mapper (exit 2 = skipped), `release:preflight` runs it for a core tag; the windows use the device-mapper `error` target (no `dm-flakey` module on the test kernel).
 
 - [ ] **F3 — Static analysis and coverage gates** · P1 · Deps: —
   *Why:* `.mise/tasks/check/package:33-37` runs format, warnings-as-errors, tests, `hex.audit` only; no dialyzer, credo, sobelow or coverage floor.
