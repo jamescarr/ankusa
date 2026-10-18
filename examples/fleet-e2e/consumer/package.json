@@ -1,0 +1,20 @@
+{
+  "name": "ankusa-fleet-e2e-consumer",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "tsx src/worker.ts"
+  },
+  "dependencies": {
+    "amqplib": "^2.2.0",
+    "ankusa": "file:../../../packages/sdk-typescript",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.1",
+    "typescript": "^7.0.2"
+  }
+}
