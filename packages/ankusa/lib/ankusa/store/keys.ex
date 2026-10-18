@@ -20,6 +20,11 @@ defmodule Ankusa.Store.Keys do
   def meta("store_id"), do: "m:store_id"
   def meta("imported:" <> artifact), do: "m:imported:" <> artifact
 
+  # The store's layout version (an integer in decimal), and the resumable marker
+  # of the format migration that is moving it to `to` (`Ankusa.Store.Migrate`).
+  def format_version, do: "m:format_version"
+  def migrating(to) when is_integer(to) and to > 0, do: "m:migrating:" <> Integer.to_string(to)
+
   def source(tenant, name) when is_binary(tenant) and is_binary(name),
     do: <<"s:", tenant::binary, 0, name::binary>>
 
