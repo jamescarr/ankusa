@@ -102,6 +102,20 @@ defmodule AnkusaServer.ConfigTest do
 
     assert config.batcher.max_queue_bytes == 268_435_456
     assert config.storage.key_prefix == ""
+
+    assert %{
+             blob_stores: nil,
+             placement: :ordered,
+             key_layout: :flat,
+             store_cooldown_ms: 30_000,
+             read_deadline_ms: 5_000,
+             read_timeout_ms: 3_000,
+             read_retries: 1,
+             read_max_inflight: 48,
+             read_queue_max: 256,
+             read_cache_bytes: 134_217_728,
+             read_cache_max_entry_bytes: 1_048_576
+           } = config.claim_check
   end
 
   test "the baked image config is the demo: admin on, one open source" do
@@ -231,10 +245,89 @@ defmodule AnkusaServer.ConfigTest do
     config = Config.load!(path: path, env: %{}).config
     assert config.storage.key_prefix == "node-a/"
 
-    assert {Ankusa.BlobStore.S3, opts} = config.claim_check.blob_store
+    assert [{Ankusa.BlobStore.S3, opts}] = config.claim_check.blob_stores
     assert opts[:bucket] == "claims"
     assert opts[:session_token] == "tok"
     assert config.storage.blob_store == {Ankusa.BlobStore.LocalFS, []}
+  end
+
+  test "claim_check.stores lands as blob_stores in list order, with placement, layout and cooldown" do
+    path =
+      tmp_config("""
+      claim_check:
+        stores:
+          - type: s3
+            s3: {bucket: claims-east, region: us-east-1}
+          - type: gcs
+            gcs: {bucket: claims-gcs, auth: none}
+        placement: hash
+        key_layout: sharded
+        store_cooldown_ms: 5000
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    cc = Config.load!(path: path, env: %{}).config.claim_check
+
+    assert [{Ankusa.BlobStore.S3, s3}, {Ankusa.BlobStore.GCS, gcs}] = cc.blob_stores
+    assert {s3[:bucket], s3[:region]} == {"claims-east", "us-east-1"}
+    assert gcs[:bucket] == "claims-gcs"
+    assert {cc.placement, cc.key_layout, cc.store_cooldown_ms} == {:hash, :sharded, 5000}
+  end
+
+  test "unset or null, claim_check keeps core's store, placement, layout and cooldown defaults" do
+    for section <- ["", "claim_check: {store: null, stores: null}\n"] do
+      path =
+        tmp_config(section <> "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+      cc = Config.load!(path: path, env: %{}).config.claim_check
+
+      assert {cc.blob_stores, cc.placement, cc.key_layout, cc.store_cooldown_ms} ==
+               {nil, :ordered, :flat, 30_000}
+    end
+  end
+
+  test "claim_check read keys land in core's config, and core's ranges name a bad one" do
+    path =
+      tmp_config("""
+      claim_check: {read_deadline_ms: 2500, read_cache_bytes: 0, read_queue_max: 0}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    cc = Config.load!(path: path, env: %{}).config.claim_check
+    assert {cc.read_deadline_ms, cc.read_cache_bytes, cc.read_queue_max} == {2500, 0, 0}
+
+    path =
+      tmp_config("""
+      claim_check: {read_timeout_ms: 0}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "claim_check.read_timeout_ms must be a positive integer, got 0"
+  end
+
+  test "claim_check store/stores mistakes fail the load, naming the key" do
+    for {yaml, message} <- [
+          {"claim_check: {store: {type: local}, stores: [{type: local}]}",
+           "claim_check: store and stores are exclusive; list every store under stores"},
+          {"claim_check: {stores: []}", "claim_check.stores: must not be empty"},
+          {"claim_check: {stores: {type: local}}",
+           ~s(claim_check.stores: expected a list of stores, got %{"type" => "local"})},
+          {"claim_check: {stores: [local]}",
+           ~s(claim_check.stores[0]: expected a mapping, got "local")},
+          {"claim_check: {stores: [{type: local, bucket: x}]}",
+           ~s(claim_check.stores[0]: unknown key "bucket")},
+          {"claim_check: {placement: nope}",
+           ~s(claim_check.placement: unknown value "nope"; expected one of ordered, hash)},
+          {"claim_check: {key_layout: hashed}",
+           ~s(claim_check.key_layout: unknown value "hashed"; expected one of flat, sharded)}
+        ] do
+      path =
+        tmp_config(yaml <> "\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
   end
 
   test "the backup section lands in core's config, the env flag overrides it, unknown keys are named" do

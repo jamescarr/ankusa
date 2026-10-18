@@ -11,10 +11,92 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ## [Unreleased]
 
+### Added
+
+- **Several claim stores, with failover.** `claim_check.blob_stores` takes a
+  list of `{module, opts}` (buckets, regions, providers) and
+  `claim_check.placement` picks a new pack's store: `:ordered` (default) the
+  first, the others only while it is down; `:hash` spreads packs over every
+  store by the pack id's random bits. A failed pack write moves on to the
+  next store at once, and a store whose write failed, or that could not
+  answer a read, is skipped by writes and searched last by reads for
+  `claim_check.store_cooldown_ms` (default 30 s); a throttled answer (`429`,
+  `503`) never opens the breaker. A read searches every store under both key
+  layouts, healthy stores first, so a failed-over pack is still found, and a
+  store that could not answer is not asked again within the same read; a
+  miss while some store could not answer is `{:unavailable, reason}`, never
+  `:not_found`. A `check_in/4` that tried several stores fails with
+  `{:unavailable, [{store, reason}, ...]}` in attempt order (`{:unavailable,
+  reason}` after a single attempt, as before). Refs, the gateway API and the
+  SDKs are unchanged: the store is a function of the ref and the config.
+  `Ankusa.ClaimCheck.validate_config!/1` rejects a bad `blob_stores`,
+  `placement` or `key_layout`, and `retention_days` with any non-LocalFS
+  claim store. New `Ankusa.ClaimCheck.Stores`, supervised in every role;
+  `Ankusa.ClaimCheck.location` gains `:store`;
+  `[:ankusa, :claim_check, :check_in]` gains `:store`, and
+  `[:ankusa, :claim_check, :store_breaker]` /
+  `ankusa_claim_check_store_breaker_transitions_total` count breaker opens and
+  closes.
+- **Sharded claim keys.** `claim_check.key_layout: :sharded` writes packs
+  under `claims/tenant=<t>/shard=<c>/dt=<d>/<pack>`, `c` being the pack id's
+  eleventh character: 32 prefixes per tenant, so one busy tenant's writes
+  spread over 32 object-store partitions instead of throttling (S3
+  `503 SlowDown`) on one. Opt-in (default `:flat`, the existing layout); reads
+  try both layouts whatever it says, and the LocalFS sweeper sweeps both.
+  `Ankusa.ClaimCheck.Ref.object_keys/3` and `shard/1`.
+- `[:ankusa, :blob_store, :retry]` on every HTTP blob-store retry, counted by
+  `ankusa_blob_store_retries_total{status}`.
+- **The claim gateway stays fast while an object store throttles or hangs.**
+  A `:claim_check` node caches pack indexes and claims in memory
+  (`Ankusa.ClaimCheck.Cache`, `claim_check.read_cache_bytes`, default
+  128 MiB; a claim over `read_cache_max_entry_bytes`, default 1 MiB, is never
+  cached), and reads the store through `Ankusa.ClaimCheck.Reader`: concurrent
+  reads of one pack index or claim share one store request; per store, an
+  adaptive limit on concurrent reads (ceiling `read_max_inflight`, default
+  48, under the HTTP client's 50 connections per host) halves on a throttle
+  (`429`, `503`) or an unreachable store and grows back by one per round of
+  successes; reads past it queue up to
+  `read_queue_max` (default 256) and the rest are shed at once; and every
+  request is answered within `read_deadline_ms` (default 5 s) — a store read
+  that outlives it still fills the cache. Claim reads use
+  `read_timeout_ms` (3 s) and `read_retries` (1) instead of the store's own
+  write timeouts. `Ankusa.ClaimCheck.locate/4`, `read/4` and `read_bytes/5`
+  take a `:deadline`; `Ankusa.ClaimCheck.location` gains `:tenant_id`,
+  `:pack_id` and `:index`; `Ankusa.ClaimCheck.deadline/1` and
+  `Ankusa.ClaimCheck.Stores.throttled?/1` are new. Telemetry:
+  `[:ankusa, :claim_check, :gateway]`, `:read`, `:read_limit` and
+  `:read_state`; on `/metrics`,
+  `ankusa_claim_check_gateway_requests_total{method,status}`,
+  `ankusa_claim_check_gateway_duration_seconds` (buckets up to 10 s, past
+  the deadline), `ankusa_claim_check_reads_total{kind,source,result}` and
+  `ankusa_claim_check_read_limit`/`_read_inflight`/`_read_queued{store}`.
+
 ### Changed
 
 - Requires `async_api_spex ~> 0.2` from Hex (was `~> 0.1`, which excluded
   0.2.0, the release this package is built and tested against).
+- **Breaking:** `claim_check.blob_store` is now `claim_check.blob_stores`, a
+  list (`blob_stores: [{mod, opts}]`); a config still naming `blob_store`
+  fails `Ankusa.Config.new/1` with `unknown Ankusa.Config key:
+  claim_check.blob_store`. `Ankusa.ClaimCheck`'s `claim_store/1` and the
+  `:claims` scope of `Ankusa.BlobStore` are gone: claim packs go through
+  `Ankusa.ClaimCheck.Stores`.
+- **Breaking:** `Ankusa.ClaimCheck.Ref`'s `object_key/2` and `key/1` take a
+  layout: `Ankusa.ClaimCheck.Ref.object_key/3`, `Ankusa.ClaimCheck.Ref.key/2`.
+  `Ankusa.BlobStore.Retry`'s `run/2` is `Ankusa.BlobStore.Retry.run/3`, the
+  instance first.
+- `Ankusa.BlobStore.Retry` jitters each delay to between half and all of
+  200 ms / 1 s / 5 s, so nodes throttled together don't retry in lockstep.
+- Metric labels with integer values (an HTTP status, a store index) are
+  reported as that number instead of `other`.
+- The claim gateway's `503 store_unavailable` carries `Retry-After` of a
+  random 1–3 s instead of a fixed `1`, and logs throttles, sheds and missed
+  deadlines at `:debug` (they are counted by
+  `ankusa_claim_check_reads_total`).
+- `Ankusa.HttpClient` answers `{:error, %RuntimeError{}}` when the HTTP
+  client's connection pool cannot hand out a connection within its checkout
+  timeout, instead of letting that raise out of the adapter: the retry and
+  the breaker see it as the transport failure it is.
 
 ## [0.6.0] - 2026-10-14
 

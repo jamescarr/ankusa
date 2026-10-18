@@ -66,24 +66,26 @@ defmodule Ankusa.BlobStore.S3 do
   alias Ankusa.HttpClient
 
   @impl true
-  def put(_instance, key, data, opts) do
-    case request(opts, :put, key, data, []) do
+  def put(instance, key, data, opts) do
+    case request(instance, opts, :put, key, data, []) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl true
-  def get(_instance, key, opts), do: request(opts, :get, key, nil, [])
+  def get(instance, key, opts), do: request(instance, opts, :get, key, nil, [])
 
   @impl true
-  def get_range(_instance, key, offset, length, opts) do
-    request(opts, :get, key, nil, [{"range", "bytes=#{offset}-#{offset + length - 1}"}])
+  def get_range(instance, key, offset, length, opts) do
+    request(instance, opts, :get, key, nil, [
+      {"range", "bytes=#{offset}-#{offset + length - 1}"}
+    ])
   end
 
   @impl true
-  def delete(_instance, key, opts) do
-    _ = request(opts, :delete, key, nil, [])
+  def delete(instance, key, opts) do
+    _ = request(instance, opts, :delete, key, nil, [])
     :ok
   end
 
@@ -91,46 +93,46 @@ defmodule Ankusa.BlobStore.S3 do
   # to the end. A failed page fails the listing — a short list would read as
   # "these are all the keys".
   @impl true
-  def list(_instance, prefix, opts), do: list_pages(opts, prefix, nil, [])
+  def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
-  defp list_pages(opts, prefix, token, acc) do
+  defp list_pages(instance, opts, prefix, token, acc) do
     query =
       [{"list-type", "2"}, {"prefix", prefix}] ++
         if(token, do: [{"continuation-token", token}], else: [])
 
     url = endpoint(opts) <> "/" <> bucket(opts) <> "?" <> URI.encode_query(query, :rfc3986)
 
-    with {:ok, body} <- signed_request(opts, :get, url, nil, []),
+    with {:ok, body} <- signed_request(instance, opts, :get, url, nil, []),
          {:ok, keys, next} <- parse_list_page(body) do
       acc = [keys | acc]
 
       case next do
         nil -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
-        token -> list_pages(opts, prefix, token, acc)
+        token -> list_pages(instance, opts, prefix, token, acc)
       end
     end
   end
 
   # ── requests ──────────────────────────────────────────────────────────────
 
-  defp request(opts, method, key, body, extra_headers) do
+  defp request(instance, opts, method, key, body, extra_headers) do
     url = endpoint(opts) <> "/" <> bucket(opts) <> "/" <> encode_path(key)
-    signed_request(opts, method, url, body, extra_headers)
+    signed_request(instance, opts, method, url, body, extra_headers)
   end
 
-  defp signed_request(opts, method, url, body, extra_headers) do
+  defp signed_request(instance, opts, method, url, body, extra_headers) do
     with {:ok, creds} <- Ankusa.AWS.Credentials.get(opts) do
-      send_signed(opts, creds, method, url, body, extra_headers)
+      send_signed(instance, opts, creds, method, url, body, extra_headers)
     end
   end
 
-  defp send_signed(opts, creds, method, url, body, extra_headers) do
+  defp send_signed(instance, opts, creds, method, url, body, extra_headers) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
     req_options = Keyword.get(opts, :req_options, [])
 
     # Signed per attempt: the signature carries the time it was made.
     result =
-      Retry.run(opts, fn ->
+      Retry.run(instance, opts, fn ->
         headers = sign(opts, creds, method, url, body, extra_headers)
         HttpClient.request(method, url, headers, body, timeout, req_options)
       end)

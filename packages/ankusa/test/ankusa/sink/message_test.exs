@@ -31,6 +31,11 @@ defmodule Ankusa.Sink.MessageTest do
     )
   end
 
+  defp list_claims(instance) do
+    [{0, mod, opts}] = ClaimCheck.Stores.list(Ankusa.config(instance))
+    mod.list(instance, "claims/", opts)
+  end
+
   test "a body of exactly inline_max_bytes rides inline", %{ctx: ctx} do
     env = envelope(:binary.copy("a", 100))
 
@@ -71,7 +76,7 @@ defmodule Ankusa.Sink.MessageTest do
     assert first.ref != second.ref
 
     today = Date.utc_today() |> Date.to_iso8601()
-    assert {:ok, [_, _] = keys} = Ankusa.BlobStore.list(ctx.instance, :claims, "claims/")
+    assert {:ok, [_, _] = keys} = list_claims(ctx.instance)
     assert Enum.all?(keys, &String.contains?(&1, "/dt=#{today}/"))
   end
 
@@ -86,7 +91,7 @@ defmodule Ankusa.Sink.MessageTest do
     assert {:ok, json} = Message.encode(env, Map.put(ctx, :claim, claim), 100)
     decoded = JSON.decode!(json)
     assert {decoded["claim"], decoded["sha256"]} == {Ref.to_string(claim.ref), claim.sha256}
-    assert Ankusa.BlobStore.list(ctx.instance, :claims, "claims/") == {:ok, []}
+    assert list_claims(ctx.instance) == {:ok, []}
   end
 
   test "a failed check-in is tagged :claim_check", %{ctx: ctx} do

@@ -278,6 +278,49 @@ claim_check:
   # store:
   #   type: s3
   #   s3: {bucket: "${CLAIMS_BUCKET}", region: "${S3_REGION}"}
+  # Or several stores (buckets, regions, providers), exclusive with `store`:
+  # a pack whose store fails is written to the next one, and the gateway
+  # searches every store, so a failed-over pack is still found. Each entry has
+  # the `store` shape. Removing a store makes the packs in it unreadable:
+  # remove one only after its packs have aged out.
+  # stores:
+  #   - type: s3
+  #     s3: {bucket: "${CLAIMS_BUCKET}", region: us-east-1}
+  #   - type: s3
+  #     s3: {bucket: "${CLAIMS_BUCKET_WEST}", region: us-west-2}
+  # Which store a new pack goes to: ordered = the first, the others only while
+  # it is down; hash = spread packs evenly over every store, the rest taking
+  # over while one is down.
+  placement: ordered
+  # A store that failed a write, or could not answer a read, is skipped by
+  # writes and searched last by reads for this long (ms), then tried again.
+  store_cooldown_ms: 30000
+  # flat = claims/tenant=<t>/dt=<d>/<pack>. sharded adds shard=<c>/ under the
+  # tenant: 32 key prefixes per tenant, so one busy tenant's writes spread
+  # over 32 object-store partitions instead of throttling (503 SlowDown) on
+  # one. The gateway reads both layouts whatever this says; tools that read
+  # the bucket directly (Spark partition discovery) see the extra folder.
+  key_layout: flat
+  # Reads (the gateway): one request's reads, the pack index and then the
+  # bytes, finish within this (ms); past it the gateway answers 503 with
+  # Retry-After 1-3, and the store read that outlived it still fills the cache.
+  read_deadline_ms: 5000
+  # Per store request while reading a claim (ms), and the retries after a
+  # failed one. A store's own timeout_ms/retries are for writes.
+  read_timeout_ms: 3000
+  read_retries: 1
+  # Per store: the ceiling of the gateway's adaptive limit on concurrent store
+  # reads. It halves when the store throttles (429, 503 SlowDown) or does not
+  # answer, and grows back by one per round of successes. Under the HTTP
+  # client's 50 connections per host, so no read waits for one.
+  read_max_inflight: 48
+  # Per store: reads waiting for a slot. Past this a read is shed at once
+  # (503); 0 = never wait.
+  read_queue_max: 256
+  # Memory for cached pack indexes and claims (bytes); 0 = no cache.
+  read_cache_bytes: 134217728
+  # A claim larger than this (bytes) is served but never cached.
+  read_cache_max_entry_bytes: 1048576
   # The gateway performs no authentication. Keep 4001 internal and put your
   # proxy, mesh, or network policy in front of it, the same as 4002.
 

@@ -94,11 +94,13 @@ It creates the kind cluster, builds and loads the three images, installs
 metrics-server, Istio (base, istiod, the ingress gateway), KEDA and NATS with
 Helm, then installs this example's own chart
 ([`chart/`](chart/)). It ends when the gateway answers a webhook with `201` and
-serves the panel:
+serves the panel and Grafana:
 
 |URL|What|
 |---|---|
 |<http://localhost:8080/>|the control panel|
+|<http://localhost:8080/grafana/>|Grafana, the *Ankusa* dashboard (anonymous admin)|
+|<http://localhost:8080/prometheus/>|Prometheus (targets, raw queries)|
 |`POST http://localhost:8080/webhooks/demo`|ingest, through Envoy, to the direct fleet|
 |`POST http://localhost:8080/webhooks/durable`|ingest, through Envoy, to the durable fleet|
 
@@ -198,6 +200,60 @@ instead of acking; nothing is dropped, they just wait for it.
 The panel only runs in the cluster: it reads the pod's ServiceAccount token and
 CA, so there is no supported way to run it on the host.
 
+## Metrics: Prometheus and Grafana
+
+Prometheus ([`chart/templates/prometheus*.yaml`](chart/templates/)) discovers
+every pod of this chart with a container port named `admin` (the direct pods,
+the three durable pods and the claim-check gateway) and scrapes
+`:4002/metrics` every 5 s, as job `ankusa`, adding the labels `app` (the pod's
+`app.kubernetes.io/name`) and `pod`. Ankusa labels every series
+`instance="default"` itself; Prometheus owns `instance` (the target address),
+so ankusa's label is kept as `exported_instance`.
+
+Grafana ([`chart/templates/grafana*.yaml`](chart/templates/)) is provisioned
+with that Prometheus as its datasource and one dashboard, *Ankusa*
+([`chart/files/grafana/ankusa.json`](chart/files/grafana/ankusa.json)), which
+is its home page. Rows: Fleet, Ingest, Store (durable fleet), Dispatch and
+sinks, Claim check, Lifecycle and backup. The `fleet` variable filters every
+panel by `app`. Change the JSON and re-run `run.sh`: the `checksum/config`
+annotation rolls the Grafana pod.
+
+Which pods export what (observed on this cluster):
+
+|Pods|Exports|
+|---|---|
+|direct (`ankusa`)|the ingest counters and latency histogram; `ankusa_dispatch_deliveries_total` for the in-request publish (a failed publish counts `result="error"` and is answered `503 store_unavailable`); `ankusa_claim_check_operations_total` for its check-ins; the quarantine, queue and store gauges (the last two always 0, `wal: none`); the disk gauges|
+|durable (`ankusa-durable`)|all of the direct pods' families, plus WAL commits, compaction, the dispatch scheduler gauges, breakers, DLQ and replay|
+|claim-check gateway|the disk gauges, nothing else|
+
+Four things to know when reading it:
+
+- A metric family is exported only after its first event; before that the
+  reporter has nothing to render. A counter such as
+  `ankusa_dispatch_dead_lettered_total` is "No data" in Grafana until the
+  first DLQ row, and so, in a fresh cluster, are the refused, backpressure,
+  replay, lifecycle and backup panels. A series also starts at its first
+  scraped value, not 0, so `rate()` and `increase()` miss whatever it counted
+  before Prometheus first saw it.
+- The claim-check gateway's HTTP reads (`GET /v1/claims/…`, which the
+  consumers make) emit no telemetry. `ankusa_claim_check_redeems_total`
+  counts in-process `Ankusa.ClaimCheck.redeem/3` calls only, so the *Redeems*
+  panel stays empty here; the consumers' own logs (`via=claim`) are the record
+  of redeems.
+- `ankusa_wal_commit_batch_size` is a counter (each WAL commit's batch size, summed)
+  without the `_total` suffix, so Prometheus attaches an info annotation to
+  its `rate()` ("metric might not be a counter"), which Grafana shows as a
+  notice icon on the *Hooks committed/s* header. The numbers are right.
+- Every `# HELP` string is empty. What each family counts is in
+  [`packages/ankusa/lib/ankusa/metrics.ex`](../../packages/ankusa/lib/ankusa/metrics.ex).
+
+Both Deployments run without a sidecar (see
+[Why the chart looks the way it does](#why-the-chart-looks-the-way-it-does)).
+Prometheus keeps 6 h in an `emptyDir` and Grafana's sqlite lives in its
+container layer, so a restart starts both empty; the datasource and dashboard
+are provisioned again. Grafana 13 peaks at ~1 GiB with the dashboard open; its
+sizing is in `values.yaml` (`monitoring.grafana`).
+
 ## Drills
 
 Each lever acts through the Kubernetes API with the panel's own ServiceAccount (a
@@ -291,6 +347,13 @@ Things you may notice, none of them a bug:
   `FLOCI_PORT=tcp://…`, which floci reads as its own port setting.
 - The NATS chart already marks the client port `appProtocol: tcp` (NATS is
   server-first, so Istio's protocol sniffing would stall it).
+- Prometheus and Grafana run without sidecars
+  (`sidecar.istio.io/inject: "false"`). mTLS is PERMISSIVE (there is no
+  `PeerAuthentication`), so each ankusa pod's sidecar accepts Prometheus's
+  plaintext scrape of `:4002`; a chaos `AuthorizationPolicy` matches the
+  caller's mTLS principal, which a plaintext scrape does not have, so it never
+  catches the scraper; and the gateway reaches Grafana and Prometheus in
+  plaintext.
 
 ## Autoscaling
 
@@ -323,7 +386,7 @@ Things you may notice, none of them a bug:
 |---|---|
 |`run.sh`|`up` / `down`|
 |`infra/`|kind config and the Helm values for Istio, NATS|
-|`chart/`|this example's chart: the direct ankusa Deployment, the durable `ankusa-durable` StatefulSet, claim-check, floci, consumer, KEDA `ScaledObject`, control panel, Istio `Gateway`/`VirtualService`|
+|`chart/`|this example's chart: the direct ankusa Deployment, the durable `ankusa-durable` StatefulSet, claim-check, floci, consumer, KEDA `ScaledObject`, control panel, Istio `Gateway`/`VirtualService`, Prometheus, Grafana (dashboard JSON in `chart/files/grafana/ankusa.json`)|
 |`consumer/`|the TypeScript JetStream consumer, built on [`packages/sdk-typescript`](../../packages/sdk-typescript)|
 |`control_panel/`|the Phoenix LiveView control panel|
 

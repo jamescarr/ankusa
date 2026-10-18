@@ -529,7 +529,7 @@ defmodule Ankusa.StorageTest do
         start(
           roles: [:edge, :storage],
           storage: %{key_prefix: prefix, blob_store: {Ankusa.BlobStore.LocalFS, root: shared}},
-          claim_check: %{blob_store: {Ankusa.BlobStore.LocalFS, root: shared}}
+          claim_check: %{blob_stores: [{Ankusa.BlobStore.LocalFS, root: shared}]}
         )
       end
 

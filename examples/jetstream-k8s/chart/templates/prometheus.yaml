@@ -1,0 +1,101 @@
+# Prometheus scrapes the admin port of every ankusa-image pod (see
+# prometheus-configmap.yaml). It discovers them through the Kubernetes API, so
+# it needs to list pods: a Role in this namespace, nothing cluster-wide.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  labels:
+    {{- include "demo.labels" "prometheus" | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus
+  labels:
+    {{- include "demo.labels" "prometheus" | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus
+  labels:
+    {{- include "demo.labels" "prometheus" | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels:
+    {{- include "demo.labels" "prometheus" | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  template:
+    metadata:
+      labels:
+        {{- include "demo.labels" "prometheus" | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/prometheus-configmap.yaml") . | sha256sum }}
+        # The scraper stays outside the mesh. mTLS is PERMISSIVE (there is no
+        # PeerAuthentication), so each pod's sidecar accepts its plaintext scrape of
+        # :4002, and the panel's chaos AuthorizationPolicies can never catch it.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: prometheus
+      enableServiceLinks: false
+      containers:
+        - name: prometheus
+          image: {{ include "demo.image" .Values.images.prometheus }}
+          imagePullPolicy: {{ .Values.images.prometheus.pullPolicy }}
+          # --web.external-url serves the UI and API under /prometheus, which the
+          # gateway route forwards unchanged.
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=6h
+            - --web.external-url=http://localhost:8080/prometheus/
+          ports:
+            - {name: http, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /prometheus/-/ready, port: 9090}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /prometheus/-/healthy, port: 9090}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.monitoring.prometheus.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml, readOnly: true}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus-config}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    {{- include "demo.labels" "prometheus" | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: prometheus
+  ports:
+    - {name: http, port: 9090, targetPort: http}

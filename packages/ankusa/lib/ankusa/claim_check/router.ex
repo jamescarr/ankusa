@@ -17,10 +17,12 @@ defmodule Ankusa.ClaimCheck.Router do
       immutable` (claims are written once and never rewritten; `private`
       because the path is a capability, and a shared cache would serve it to
       whoever asks), `Accept-Ranges: bytes`. `400` malformed, `404` no such
-      claim, `503 store_unavailable` + `Retry-After: 1` when the store is
-      unavailable, `503 store_forbidden` + `Retry-After: 60` when the store
-      refused this node's credential. A 503 body never carries the store's
-      error; it is logged.
+      claim, `503 store_unavailable` + `Retry-After` (a random 1–3 seconds, so
+      clients a throttled store turned away don't all come back at once) when
+      the store is unavailable, throttling, or slower than the deadline, or
+      this node is shedding load, `503 store_forbidden` + `Retry-After: 60`
+      when the store refused this node's credential. A 503 body never carries
+      the store's error; it is logged.
     * The same `GET` with one `Range: bytes=a-b`, `bytes=a-` or `bytes=-n` —
       `206` with those bytes and `Content-Range: bytes a-b/length` (`b`
       clamped to the claim's end), read from the store as one ranged read; a
@@ -37,13 +39,23 @@ defmodule Ankusa.ClaimCheck.Router do
   checks the bytes against the sha256 its queue message carried
   (`Ankusa.ClaimCheck.redeem/3` does this in-process). The whole response is
   one binary, not a stream: a claim is at most `max_body_bytes`.
+
+  ## Under load
+
+  Every claim request answers within `claim_check.read_deadline_ms`. Its
+  reads go through `Ankusa.ClaimCheck.Cache` (pack indexes and claims already
+  read) and `Ankusa.ClaimCheck.Reader` (coalescing, a per-store adaptive
+  limit on store requests, a bounded queue, and the deadline). Each request
+  emits `[:ankusa, :claim_check, :gateway]` with its method, status and
+  duration.
   """
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
 
   require Logger
 
-  alias Ankusa.{ClaimCheck, Http}
+  alias Ankusa.{ClaimCheck, Http, Telemetry}
+  alias Ankusa.ClaimCheck.Stores
 
   @cache_control "private, max-age=31536000, immutable"
   # One range-spec of the `bytes` unit: `first-last`, `first-`, or `-suffix`.
@@ -64,10 +76,24 @@ defmodule Ankusa.ClaimCheck.Router do
     claim(conn, tenant_id, claim_id)
   end
 
+  defp claim(conn, tenant_id, claim_id) do
+    instance = instance(conn)
+    started = System.monotonic_time()
+    conn = serve(conn, instance, tenant_id, claim_id, ClaimCheck.deadline(instance))
+
+    Telemetry.emit(
+      [:claim_check, :gateway],
+      %{duration: System.monotonic_time() - started},
+      %{instance: instance, method: conn.method, status: conn.status}
+    )
+
+    conn
+  end
+
   # A HEAD response carries the claim's length and no body: the server keeps a
   # `content-length` the plug set when the body it is handed is empty.
-  defp claim(%Plug.Conn{method: "HEAD"} = conn, tenant_id, claim_id) do
-    case ClaimCheck.locate(instance(conn), tenant_id, claim_id) do
+  defp serve(%Plug.Conn{method: "HEAD"} = conn, instance, tenant_id, claim_id, deadline) do
+    case ClaimCheck.locate(instance, tenant_id, claim_id, deadline: deadline) do
       {:ok, location} ->
         conn
         |> claim_headers()
@@ -79,12 +105,10 @@ defmodule Ankusa.ClaimCheck.Router do
     end
   end
 
-  defp claim(conn, tenant_id, claim_id) do
-    instance = instance(conn)
-
-    with {:ok, location} <- ClaimCheck.locate(instance, tenant_id, claim_id),
+  defp serve(conn, instance, tenant_id, claim_id, deadline) do
+    with {:ok, location} <- ClaimCheck.locate(instance, tenant_id, claim_id, deadline: deadline),
          range = range(conn, location.length),
-         {:ok, bin} <- read_range(instance, location, range) do
+         {:ok, bin} <- read_range(instance, location, range, deadline) do
       send_range(conn, range, bin, location.length)
     else
       {:error, reason} -> error_response(conn, reason, tenant_id, claim_id)
@@ -128,13 +152,13 @@ defmodule Ankusa.ClaimCheck.Router do
 
   defp resolve_range(_spec, _length), do: :unsatisfiable
 
-  defp read_range(instance, location, :all),
-    do: ClaimCheck.read_bytes(instance, location, 0, location.length)
+  defp read_range(instance, location, :all, deadline),
+    do: ClaimCheck.read_bytes(instance, location, 0, location.length, deadline: deadline)
 
-  defp read_range(_instance, _location, :unsatisfiable), do: {:ok, <<>>}
+  defp read_range(_instance, _location, :unsatisfiable, _deadline), do: {:ok, <<>>}
 
-  defp read_range(instance, location, {first, last}),
-    do: ClaimCheck.read_bytes(instance, location, first, last - first + 1)
+  defp read_range(instance, location, {first, last}, deadline),
+    do: ClaimCheck.read_bytes(instance, location, first, last - first + 1, deadline: deadline)
 
   defp send_range(conn, :all, bin, _length),
     do: conn |> claim_headers() |> Plug.Conn.send_resp(200, bin)
@@ -191,14 +215,21 @@ defmodule Ankusa.ClaimCheck.Router do
     |> Http.send_json(503, %{error: "store_forbidden"})
   end
 
+  # Shedding, the deadline and a throttling store are expected under load and
+  # counted by `[:ankusa, :claim_check, :read]`: logged at debug. A store that
+  # could not answer at all is a warning.
   defp error_response(conn, {:unavailable, reason}, tenant_id, claim_id) do
-    Logger.warning(
+    message = fn ->
       "[ankusa] claim gateway: store unavailable reading #{tenant_id}/#{claim_id}: " <>
         inspect(reason, limit: 20, printable_limit: 512)
-    )
+    end
+
+    if reason in [:overloaded, :deadline] or Stores.throttled?({:unavailable, reason}),
+      do: Logger.debug(message),
+      else: Logger.warning(message)
 
     conn
-    |> Plug.Conn.put_resp_header("retry-after", "1")
+    |> Plug.Conn.put_resp_header("retry-after", Integer.to_string(Enum.random(1..3)))
     |> Http.send_json(503, %{error: "store_unavailable"})
   end
 end

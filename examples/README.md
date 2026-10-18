@@ -130,7 +130,9 @@ control panel in the cluster fires synthetic webhooks (rate, burst, payload
 size), draws the flow live, tails the last 30 consumed hooks, and breaks things
 on request: kill pods, cut a connection with an Istio `AuthorizationPolicy`,
 inject `503`s or delay at the gateway. Bodies over the inline limit take the
-claim-check path through an S3 emulator.
+claim-check path through an S3 emulator. Prometheus scrapes every ankusa pod
+and a provisioned Grafana dashboard shows ingest, store, dispatch, claim-check
+and lifecycle metrics at `/grafana/`.
 
 ```mermaid
 flowchart LR

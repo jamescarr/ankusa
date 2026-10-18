@@ -29,8 +29,9 @@ defmodule Ankusa.Metrics do
   reasons are terms (`{:unavailable, {:status, 503, body}}`) and some tags are
   modules. Both would be an unbounded or unusable label, so every tag value goes
   through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
-  modules become strings (`"Ankusa.Sink.Http"`), and anything else
-  becomes `:other`. `:outcome` on ingest is already one of a fixed set
+  modules become strings (`"Ankusa.Sink.Http"`), integers are rendered as
+  numbers (only ever a store index or an HTTP status, both bounded), and
+  anything else becomes `:other`. `:outcome` on ingest is already one of a fixed set
   (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
   `:quarantine_rate_limited`, `:quarantine_full`, `:overload` or
   `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
@@ -45,6 +46,9 @@ defmodule Ankusa.Metrics do
 
   # 1 ms … 2.5 s, which covers a local WAL commit through a slow upstream sink.
   @seconds_buckets [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]
+  # The claim gateway answers at up to `claim_check.read_deadline_ms` (5 s by
+  # default): the tail this histogram exists for sits past 2.5 s.
+  @gateway_seconds_buckets @seconds_buckets ++ [5, 10]
 
   @doc """
   Child spec for this instance's metrics reporter.
@@ -224,6 +228,44 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
+        "ankusa.claim_check.store_breaker.transitions.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :store_breaker],
+          tags: [:instance, :store, :state]
+        )
+      ),
+      counter(
+        "ankusa.claim_check.gateway.requests.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          tags: [:instance, :method, :status]
+        )
+      ),
+      distribution(
+        "ankusa.claim_check.gateway.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance, :method],
+          reporter_options: [buckets: @gateway_seconds_buckets]
+        )
+      ),
+      counter(
+        "ankusa.claim_check.reads.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read],
+          tags: [:instance, :kind, :source, :result]
+        )
+      ),
+      counter(
+        "ankusa.blob_store.retries.total",
+        scoped(own,
+          event_name: [:ankusa, :blob_store, :retry],
+          tags: [:instance, :status]
+        )
+      ),
+      counter(
         "ankusa.lifecycle.delivered.total",
         scoped(own,
           event_name: [:ankusa, :lifecycle, :delivered],
@@ -241,7 +283,7 @@ defmodule Ankusa.Metrics do
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
       )
-    ] ++ gauges(own)
+    ] ++ gauges(own) ++ read_gauges(own)
   end
 
   # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue
@@ -278,6 +320,22 @@ defmodule Ankusa.Metrics do
     end
   end
 
+  # The gateway reader's per-store state, every second. Tagged by store too,
+  # which `gauges/1` (tags `[:instance]` only) can't do.
+  defp read_gauges(own) do
+    for measurement <- [:limit, :inflight, :queued] do
+      last_value(
+        "ankusa.claim_check.read.#{measurement}",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read_state],
+          measurement: measurement,
+          unit: :unit,
+          tags: [:instance, :store]
+        )
+      )
+    end
+  end
+
   # What every definition shares: only this instance's events (ANDed with a
   # metric's own `:keep`), and bounded label values.
   defp scoped(own, opts) do
@@ -303,6 +361,7 @@ defmodule Ankusa.Metrics do
   end
 
   defp normalize_value({tag, _rest}), do: tag
+  defp normalize_value(v) when is_integer(v), do: Integer.to_string(v)
   defp normalize_value(_other), do: :other
 
   defp oldest_due_age_seconds(%{oldest_due_age_ms: ms}), do: ms / 1000

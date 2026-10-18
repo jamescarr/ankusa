@@ -11,8 +11,10 @@ defmodule Ankusa.Instance do
   The tree is `:rest_for_one`, and what the instance does when a part of it
   fails depends on which part:
 
-    * **The core** — the store, the source store and the edge subtree (routes,
-      queue writer, quarantine, rate limiter, batchers, ingress listener) — is
+    * **The core** — the claim stores' breaker table
+      (`Ankusa.ClaimCheck.Stores`), the store, the source store and the edge
+      subtree (routes, queue writer, quarantine, rate limiter, batchers,
+      ingress listener) — is
       what acks hooks. A crash there restarts whatever depends on it: the edge
       restarts with the store it writes to, and everything started after it
       restarts with the edge. A core that keeps crashing exhausts this
@@ -85,6 +87,7 @@ defmodule Ankusa.Instance do
     children =
       [{Ankusa.Instance.RegistryWatch, config.instance}] ++
         metrics_children(config, opts) ++
+        claim_store_children(opts) ++
         store_children(config, opts) ++
         backup_children(config, opts) ++
         source_store_children(config, opts) ++
@@ -93,7 +96,7 @@ defmodule Ankusa.Instance do
         routes_admin_children(config) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
-        claim_check_children(config) ++
+        claim_check_children(config, opts) ++
         admin_children(config)
 
     # `:any_significant`: the registry watcher is the only significant child.
@@ -118,6 +121,11 @@ defmodule Ankusa.Instance do
       do: isolated(config, :metrics, [{Ankusa.Metrics, opts}, {Ankusa.Metrics.Gauges, opts}]),
       else: []
   end
+
+  # The claim stores' write breakers (`Ankusa.ClaimCheck.Stores`): an ETS
+  # table every claim writer shares — dispatch, the edge's direct-mode
+  # publish — so it starts before them. One small process, in every role.
+  defp claim_store_children(opts), do: [{Ankusa.ClaimCheck.Stores, opts}]
 
   # The node's local store. Roles that read or write hooks, deliveries or the
   # archive need it; a writable source store needs it too, because it is where
@@ -283,7 +291,10 @@ defmodule Ankusa.Instance do
     ]
   end
 
-  defp claim_check_children(config) do
+  # The gateway's read cache and reader start before its listener, in the same
+  # subtree. `Isolated` restarts children one for one, so a reader crash
+  # leaves the listener up: until it is back, reads go straight to the store.
+  defp claim_check_children(config, opts) do
     if Config.role?(config, :claim_check) do
       Logger.warning(
         "[ankusa] claim-check API on #{listen_addr(config.claim_check, "claim_check.ip")} " <>
@@ -291,14 +302,25 @@ defmodule Ankusa.Instance do
           "front it with your own proxy, mesh, or network policy"
       )
 
-      isolated(config, :claim_check, [
-        bandit_child(
-          Ankusa.ClaimCheck.Router,
-          config.instance,
-          config.claim_check,
-          "claim_check.ip"
-        )
-      ])
+      cache =
+        if config.claim_check.read_cache_bytes > 0,
+          do: [{Ankusa.ClaimCheck.Cache, opts}],
+          else: []
+
+      isolated(
+        config,
+        :claim_check,
+        cache ++
+          [
+            {Ankusa.ClaimCheck.Reader, opts},
+            bandit_child(
+              Ankusa.ClaimCheck.Router,
+              config.instance,
+              config.claim_check,
+              "claim_check.ip"
+            )
+          ]
+      )
     else
       []
     end

@@ -129,6 +129,32 @@ defmodule Ankusa.BlobStore.RetryTest do
     assert length(seen(agent)) == 3
   end
 
+  test "each retry emits [:ankusa, :blob_store, :retry] with a jittered delay" do
+    handler = "blob-store-retry-#{System.unique_integer([:positive])}"
+    test = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ankusa, :blob_store, :retry],
+        fn _event, measurements, meta, pid -> send(pid, {:retry, measurements, meta}) end,
+        test
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    stub([503, 200])
+    {mod, opts} = opts(S3)
+
+    assert :ok = mod.put(:retry_telemetry, "seg/a.seg", "abc", opts)
+
+    assert_receive {:retry, %{delay_ms: delay},
+                    %{instance: :retry_telemetry, attempt: 1, status: 503}}
+
+    assert delay in 100..200
+    refute_received {:retry, _, %{instance: :retry_telemetry}}
+  end
+
   test "a :retries that is not a non-negative integer raises" do
     stub([200])
     {mod, opts} = opts(GCS, retries: -1)

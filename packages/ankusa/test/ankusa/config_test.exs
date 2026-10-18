@@ -375,6 +375,24 @@ defmodule Ankusa.ConfigTest do
                    fn ->
                      Config.new(batcher: %{max_delay_ms: -1})
                    end
+
+      for key <- [:read_retries, :read_queue_max, :read_cache_bytes] do
+        assert_raise ArgumentError,
+                     "claim_check.#{key} must be a non-negative integer, got -1",
+                     fn -> Config.new(claim_check: %{key => -1}) end
+      end
+
+      for key <- [
+            :store_cooldown_ms,
+            :read_deadline_ms,
+            :read_timeout_ms,
+            :read_max_inflight,
+            :read_cache_max_entry_bytes
+          ] do
+        assert_raise ArgumentError,
+                     "claim_check.#{key} must be a positive integer, got 0",
+                     fn -> Config.new(claim_check: %{key => 0}) end
+      end
     end
 
     test "a key prefix is empty or slash-terminated segments" do

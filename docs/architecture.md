@@ -404,8 +404,9 @@ traffic, and — if you like — one bucket. Segment keys are
 `seg/<first_seq>-<last_seq>.seg`, so nodes sharing a bucket each set their
 own `storage.key_prefix` (`node-a/`, …) or they overwrite each other's
 segments. Claim keys are never prefixed — claim ids are unique across nodes —
-so the claim store (the bucket, or a dedicated `claim_check.store`) is shared
-by every node and one gateway serves them all.
+so the claim store (the bucket, or a dedicated `claim_check.store`, or a list
+of them with failover, `claim_check.stores`) is shared by every node and one
+gateway serves them all.
 
 ```mermaid
 flowchart LR
