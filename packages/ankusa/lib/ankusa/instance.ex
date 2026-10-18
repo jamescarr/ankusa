@@ -20,8 +20,8 @@ defmodule Ankusa.Instance do
       restarts with the edge. A core that keeps crashing exhausts this
       supervisor's budget and the instance stops, for its parent to restart.
     * **Every other domain** — dispatch, archive/storage, store backup,
-      lifecycle events, metrics, and the admin, route-admin and claim-check
-      listeners — runs under `Ankusa.Instance.Isolated`. It has its own
+      lifecycle events, metrics, and the admin, route-admin, claim-check and
+      metrics listeners — runs under `Ankusa.Instance.Isolated`. It has its own
       restart budget, and when that is exhausted it is restarted later with
       backoff instead of taking the instance down. A broken sink, a port
       someone else took or a full object store stops that domain, not the edge
@@ -39,6 +39,7 @@ defmodule Ankusa.Instance do
 
   alias Ankusa.Config
   alias Ankusa.Instance.Isolated
+  alias Ankusa.Listener
 
   @spec start_link(Config.t() | atom()) :: Supervisor.on_start()
   def start_link(%Config{} = config) do
@@ -97,7 +98,8 @@ defmodule Ankusa.Instance do
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
         claim_check_children(config, opts) ++
-        admin_children(config)
+        admin_children(config) ++
+        metrics_listener_children(config)
 
     # `:any_significant`: the registry watcher is the only significant child.
     # Its exit takes this supervisor down, and the instance's parent restarts
@@ -111,13 +113,14 @@ defmodule Ankusa.Instance do
     [{Isolated, instance: config.instance, domain: domain, children: children}]
   end
 
-  # The admin API's Prometheus reporter, first of all: it attaches its handlers
+  # The Prometheus reporter behind `/metrics` (admin API or metrics listener),
+  # first of all: it attaches its handlers
   # synchronously (`start_async: false`), so the events every later child emits
   # while starting — boot-time dispatch of the stored backlog, ingest the edge
   # accepts before the rest of the tree is up — are counted. The gauge poller
   # beside it samples state (queue depth, pen, disk) on its own interval.
   defp metrics_children(config, opts) do
-    if config.admin.enabled,
+    if config.admin.enabled or config.metrics.enabled,
       do: isolated(config, :metrics, [{Ankusa.Metrics, opts}, {Ankusa.Metrics.Gauges, opts}]),
       else: []
   end
@@ -202,9 +205,8 @@ defmodule Ankusa.Instance do
           batcher_children(config, opts) ++
           [
             {Bandit,
-             plug: {Ankusa.Edge.Router, [instance: config.instance]},
-             scheme: :http,
-             port: config.port}
+             Listener.bandit_options(config, config.listener.tls) ++
+               [plug: {Ankusa.Edge.Router, [instance: config.instance]}, port: config.port]}
           ]
 
       [
@@ -251,7 +253,8 @@ defmodule Ankusa.Instance do
   # up.
   defp routes_admin_children(config) do
     if routes?(config) do
-      Logger.warning(
+      warn_unauthenticated(
+        config.routes.admin,
         "[ankusa] route management API on " <>
           "#{listen_addr(config.routes.admin, "routes.admin.ip")} is unauthenticated; " <>
           "do not expose it publicly, front it with your own proxy or network policy"
@@ -260,7 +263,7 @@ defmodule Ankusa.Instance do
       isolated(config, :routes_admin, [
         bandit_child(
           Ankusa.Routes.Router,
-          config.instance,
+          config,
           config.routes.admin,
           "routes.admin.ip"
         )
@@ -296,7 +299,8 @@ defmodule Ankusa.Instance do
   # leaves the listener up: until it is back, reads go straight to the store.
   defp claim_check_children(config, opts) do
     if Config.role?(config, :claim_check) do
-      Logger.warning(
+      warn_unauthenticated(
+        config.claim_check,
         "[ankusa] claim-check API on #{listen_addr(config.claim_check, "claim_check.ip")} " <>
           "performs no authentication; " <>
           "front it with your own proxy, mesh, or network policy"
@@ -315,7 +319,7 @@ defmodule Ankusa.Instance do
             {Ankusa.ClaimCheck.Reader, opts},
             bandit_child(
               Ankusa.ClaimCheck.Router,
-              config.instance,
+              config,
               config.claim_check,
               "claim_check.ip"
             )
@@ -356,30 +360,48 @@ defmodule Ankusa.Instance do
   # has started.
   defp admin_children(config) do
     if config.admin.enabled do
-      Logger.warning(
+      warn_unauthenticated(
+        config.admin,
         "[ankusa] admin API on #{listen_addr(config.admin, "admin.ip")} is unauthenticated; " <>
           "do not expose it " <>
           "publicly, front it with your own proxy or network policy"
       )
 
       isolated(config, :admin, [
-        bandit_child(Ankusa.Admin.Router, config.instance, config.admin, "admin.ip")
+        bandit_child(Ankusa.Admin.Router, config, config.admin, "admin.ip")
       ])
     else
       []
     end
   end
 
-  defp bandit_child(plug_module, instance, %{port: port, ip: ip}, key) do
+  defp bandit_child(plug_module, %Config{} = config, %{port: port, ip: ip, tls: tls}, key) do
     Supervisor.child_spec(
       {Bandit,
-       plug: {plug_module, [instance: instance]},
-       scheme: :http,
-       ip: Config.listen_ip!(ip, key),
-       port: port},
+       Listener.bandit_options(config, tls) ++
+         [
+           plug: {plug_module, [instance: config.instance]},
+           ip: Config.listen_ip!(ip, key),
+           port: port
+         ]},
       id: plug_module
     )
   end
+
+  # The metrics listener, after the admin API: it only serves what the reporter
+  # (started first, see `metrics_children/2`) has collected.
+  defp metrics_listener_children(%Config{metrics: %{enabled: true} = metrics} = config) do
+    isolated(config, :metrics_listener, [
+      bandit_child(Ankusa.Metrics.Router, config, metrics, "metrics.ip")
+    ])
+  end
+
+  defp metrics_listener_children(_config), do: []
+
+  # A listener with no TLS client verification has no authentication of its
+  # own; one that demands a client certificate from your CA has.
+  defp warn_unauthenticated(%{tls: %{verify: :verify_peer}}, _message), do: :ok
+  defp warn_unauthenticated(_section, message), do: Logger.warning(message)
 
   defp listen_addr(%{ip: ip, port: port}, key) do
     "#{:inet.ntoa(Config.listen_ip!(ip, key))}:#{port}"

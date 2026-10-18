@@ -46,6 +46,7 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
   | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
   | `ANKUSA_BACKUP_ENABLED` | `backup.enabled` |
+  | `ANKUSA_METRICS_ENABLED`, `ANKUSA_METRICS_PORT`, `ANKUSA_METRICS_IP` | `metrics.enabled/port/ip` |
 
   Sources are deliberately **not** env-overridable: they carry behaviour
   (verifier, sinks), and behaviour in an env var is unreadable in review.
@@ -62,11 +63,16 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix)
-  @admin_keys ~w(enabled port ip gauge_interval_ms)
+  @admin_keys ~w(enabled port ip gauge_interval_ms tls)
+  @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2)
+  @metrics_keys ~w(enabled port ip tls)
+  @tls_keys ~w(certfile keyfile cacertfile verify versions ciphers)
+  @tls_verifies ~w(verify_none verify_peer)
+  @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue max_queue_bytes)
   @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
@@ -77,7 +83,7 @@ defmodule AnkusaServer.Config do
   @gcs_keys ~w(bucket endpoint auth token)
   @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
-                       read_cache_bytes read_cache_max_entry_bytes)
+                       read_cache_bytes read_cache_max_entry_bytes tls)
   @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
@@ -89,7 +95,7 @@ defmodule AnkusaServer.Config do
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
-  @routes_admin_keys ~w(port ip)
+  @routes_admin_keys ~w(port ip tls)
   @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants)
   @rate_limit_keys ~w(rate burst)
@@ -280,7 +286,10 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_S3_REGION", ["storage", "s3", "region"]},
     {"ANKUSA_GCS_BUCKET", ["storage", "gcs", "bucket"]},
     {"ANKUSA_STORAGE_KEY_PREFIX", ["storage", "key_prefix"]},
-    {"ANKUSA_BACKUP_ENABLED", ["backup", "enabled"]}
+    {"ANKUSA_BACKUP_ENABLED", ["backup", "enabled"]},
+    {"ANKUSA_METRICS_ENABLED", ["metrics", "enabled"]},
+    {"ANKUSA_METRICS_PORT", ["metrics", "port"]},
+    {"ANKUSA_METRICS_IP", ["metrics", "ip"]}
   ]
 
   defp apply_env_overrides(doc, env) do
@@ -332,7 +341,9 @@ defmodule AnkusaServer.Config do
     opts =
       node_section(doc) ++
         http_section(doc) ++
+        listener_section(doc) ++
         admin_section(doc) ++
+        metrics_section(doc) ++
         routes_section(doc) ++
         rate_limits_section(doc) ++
         quarantine_section(doc) ++
@@ -433,7 +444,82 @@ defmodule AnkusaServer.Config do
         |> put_opt(:port, int_opt(admin, "port", ["admin"]))
         |> put_opt(:ip, string_opt(admin, "ip", ["admin"]))
         |> put_opt(:gauge_interval_ms, int_opt(admin, "gauge_interval_ms", ["admin"]))
+        |> put_opt(:tls, tls_opt(admin, ["admin"]))
     ]
+  end
+
+  # ── listener / metrics / tls ────────────────────────────────────────────────
+
+  defp listener_section(doc) do
+    listener = section!(doc, "listener", @listener_keys, [])
+    path = ["listener"]
+
+    [
+      listener:
+        []
+        |> put_opt(:tls, tls_opt(listener, path))
+        |> put_opt(:max_connections, int_opt(listener, "max_connections", path))
+        |> put_opt(:num_acceptors, int_opt(listener, "num_acceptors", path))
+        |> put_opt(:read_timeout_ms, int_opt(listener, "read_timeout_ms", path))
+        |> put_opt(:body_read_timeout_ms, int_opt(listener, "body_read_timeout_ms", path))
+        |> put_opt(:request_deadline_ms, int_opt(listener, "request_deadline_ms", path))
+        |> put_opt(
+          :max_requests_per_connection,
+          int_opt(listener, "max_requests_per_connection", path)
+        )
+        |> put_opt(:max_header_count, int_opt(listener, "max_header_count", path))
+        |> put_opt(:max_header_length, int_opt(listener, "max_header_length", path))
+        |> put_opt(:http2, bool_opt(listener, "http2", path))
+    ]
+  end
+
+  defp metrics_section(doc) do
+    metrics = section!(doc, "metrics", @metrics_keys, [])
+    path = ["metrics"]
+
+    [
+      metrics:
+        []
+        |> put_opt(:enabled, bool_opt(metrics, "enabled", path))
+        |> put_opt(:port, int_opt(metrics, "port", path))
+        |> put_opt(:ip, string_opt(metrics, "ip", path))
+        |> put_opt(:tls, tls_opt(metrics, path))
+    ]
+  end
+
+  # A listener's `tls` block, or nil (plain HTTP). Core checks the files and
+  # the combination (`verify_peer` needs `cacertfile`).
+  defp tls_opt(parent, path) do
+    case parent["tls"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["tls"]
+        tls = section!(value, @tls_keys, path)
+
+        []
+        |> put_opt(:certfile, string_opt(tls, "certfile", path))
+        |> put_opt(:keyfile, string_opt(tls, "keyfile", path))
+        |> put_opt(:cacertfile, string_opt(tls, "cacertfile", path))
+        |> put_opt(:verify, atom_enum_opt(tls, "verify", @tls_verifies, path))
+        |> put_opt(:versions, tls_versions(tls, path))
+        |> put_opt(:ciphers, tls["ciphers"] && string_list!(tls["ciphers"], path ++ ["ciphers"]))
+    end
+  end
+
+  defp tls_versions(tls, path) do
+    case tls["versions"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["versions"]
+
+        value
+        |> string_list!(path)
+        |> Enum.map(&Map.fetch!(@tls_versions, enum!(&1, Map.keys(@tls_versions), path)))
+    end
   end
 
   # ── batcher / dispatch ──────────────────────────────────────────────────────
@@ -601,6 +687,7 @@ defmodule AnkusaServer.Config do
           :read_cache_max_entry_bytes,
           int_opt(claim_check, "read_cache_max_entry_bytes", path)
         )
+        |> put_opt(:tls, tls_opt(claim_check, path))
     ]
   end
 
@@ -771,6 +858,7 @@ defmodule AnkusaServer.Config do
     []
     |> put_opt(:port, int_opt(admin, "port", path))
     |> put_opt(:ip, string_opt(admin, "ip", path))
+    |> put_opt(:tls, tls_opt(admin, path))
   end
 
   defp routes_ip_rules(routes, path) do

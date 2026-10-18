@@ -17,6 +17,9 @@ HTTP_PORT="${SMOKE_HTTP_PORT:-4000}"
 ADMIN_PORT="${SMOKE_ADMIN_PORT:-4002}"
 BASE_URL=http://127.0.0.1:$HTTP_PORT
 ADMIN_URL=http://127.0.0.1:$ADMIN_PORT
+# The mutual-TLS container's ingest and metrics ports.
+MTLS_PORT="${SMOKE_MTLS_PORT:-4010}"
+METRICS_PORT="${SMOKE_METRICS_PORT:-4014}"
 
 WORK="$(mktemp -d)"
 
@@ -25,8 +28,9 @@ cleanup() {
   if [ "$rc" -ne 0 ]; then
     echo "--- container logs ($NAME) ---" >&2
     docker logs "$NAME" >&2 || true
+    docker logs "$NAME-mtls" >&2 2>&1 || true
   fi
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker rm -f "$NAME" "$NAME-mtls" >/dev/null 2>&1 || true
   rm -rf "$WORK"
   exit "$rc"
 }
@@ -93,6 +97,69 @@ echo "==> config, with no credentials at all"
 code=$(http_code "$WORK/config" "$ADMIN_URL/v1/config")
 [ "$code" = "200" ] || fail "/v1/config returned $code: $(cat "$WORK/config")"
 grep -q '"demo"' "$WORK/config" || fail "/v1/config does not mention the demo source"
+
+echo "==> mutual TLS on the ingest listener, and a metrics listener that serves only metrics"
+# The same TLS fixtures core's tests use: a throwaway CA, a server certificate
+# for localhost, a client certificate that CA signed, and one a different CA did.
+TLS_DIR="$(cd "$(dirname "$0")/../../ankusa/test/fixtures/tls" && pwd)"
+cat >"$WORK/mtls.yml" <<'EOF'
+node: {data_dir: /var/lib/ankusa}
+listener:
+  tls:
+    certfile: /tls/server.pem
+    keyfile: /tls/server-key.pem
+    cacertfile: /tls/ca.pem
+    verify: verify_peer
+metrics: {enabled: true, ip: 0.0.0.0}
+sources:
+  demo: {verify: {type: none}, on_verify_failure: accept_flag, sinks: [{type: log}]}
+EOF
+docker rm -f "$NAME-mtls" >/dev/null 2>&1 || true
+docker run -d --name "$NAME-mtls" \
+  -p "127.0.0.1:$MTLS_PORT:4000" -p "127.0.0.1:$METRICS_PORT:4004" \
+  -v "$WORK/mtls.yml:/etc/ankusa/ankusa.yml:ro" -v "$TLS_DIR:/tls:ro" "$IMAGE" >/dev/null
+
+ready=false
+for _ in $(seq 1 30); do
+  if [ "$(http_code "$WORK/mready" "http://127.0.0.1:$METRICS_PORT/ready")" = "200" ]; then
+    ready=true
+    break
+  fi
+  [ "$(docker inspect -f '{{.State.Running}}' "$NAME-mtls")" = "true" ] ||
+    fail "the mTLS container exited during startup"
+  sleep 1
+done
+[ "$ready" = "true" ] || fail "the metrics listener's /ready never returned 200 within 30s"
+
+# One hook POSTed over the TLS listener with `openssl s_client`; prints the
+# response. Extra arguments carry (or withhold) the client certificate.
+tls_post() {
+  printf 'POST /webhooks/demo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{"id":"evt_mtls"}' |
+    openssl s_client -quiet -connect "127.0.0.1:$MTLS_PORT" -servername localhost \
+      -CAfile "$TLS_DIR/ca.pem" -verify_return_error "$@" 2>/dev/null || true
+}
+
+reply=$(tls_post -cert "$TLS_DIR/client.pem" -key "$TLS_DIR/client-key.pem")
+echo "$reply" | grep -q '^HTTP/1.1 201' || fail "the pinned client certificate was not accepted: $reply"
+echo "$reply" | grep -q '"status":"accepted"' || fail "the mTLS POST was not accepted: $reply"
+
+reply=$(tls_post)
+! echo "$reply" | grep -q '^HTTP/1.1' || fail "a client with no certificate was served: $reply"
+
+reply=$(tls_post -cert "$TLS_DIR/stranger.pem" -key "$TLS_DIR/stranger-key.pem")
+! echo "$reply" | grep -q '^HTTP/1.1' || fail "a client certificate from another CA was served: $reply"
+
+# Plain HTTP to a TLS port gets nothing.
+code=$(http_code "$WORK/plain" --max-time 5 "http://127.0.0.1:$MTLS_PORT/ready" || true)
+[ "$code" = "000" ] || fail "plain HTTP to the TLS listener returned $code"
+
+code=$(http_code "$WORK/mmetrics" "http://127.0.0.1:$METRICS_PORT/metrics")
+[ "$code" = "200" ] || fail "the metrics listener's /metrics returned $code"
+for path in /v1/config /v1/dlq /v1/wal; do
+  code=$(http_code "$WORK/m404" "http://127.0.0.1:$METRICS_PORT$path")
+  [ "$code" = "404" ] || fail "the metrics listener answered $path with $code, expected 404"
+done
+docker rm -f "$NAME-mtls" >/dev/null 2>&1 || true
 
 echo "==> a missing config file exits 78 (EX_CONFIG)"
 set +e

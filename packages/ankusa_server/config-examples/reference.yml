@@ -38,6 +38,39 @@ http:
   # Segments before the source id. "/" means no prefix.
   prefix: /webhooks
 
+# Connection limits and timeouts, applied to EVERY HTTP listener below (ingest,
+# admin, routes.admin, claim_check, metrics), plus the ingest port's TLS.
+listener:
+  # Open connections per listener, spread over the acceptors; past it new
+  # connections are closed.
+  max_connections: 20000
+  # null = two per scheduler.
+  num_acceptors: null
+  # A connection that sends nothing for this long is closed: a request head
+  # dribbled in a byte at a time, or an idle keep-alive.
+  read_timeout_ms: 10000
+  # One read of the request body, and the whole body, must finish within
+  # these (408 on the ingest port otherwise).
+  body_read_timeout_ms: 15000
+  request_deadline_ms: 30000
+  # A keep-alive connection is closed after this many requests.
+  max_requests_per_connection: 1000
+  max_header_count: 64
+  max_header_length: 16384
+  # HTTP/1.1 only by default.
+  http2: false
+  # TLS for the ingest listener (admin, routes.admin, claim_check and metrics
+  # each take their own `tls:` of the same shape). Off = plain HTTP.
+  # tls:
+  #   certfile: /etc/ankusa/tls/server.pem
+  #   keyfile: /etc/ankusa/tls/server-key.pem
+  #   # mTLS: a client without a certificate from this CA is refused at the
+  #   # handshake. verify_peer requires cacertfile.
+  #   cacertfile: /etc/ankusa/tls/ca.pem
+  #   verify: verify_peer          # verify_none (default) | verify_peer
+  #   versions: [tlsv1.2, tlsv1.3]
+  #   ciphers: [ECDHE-RSA-AES256-GCM-SHA384]   # default: Erlang/OTP's
+
 admin:
   # The operator API (health, /metrics, /v1/config, DLQ, quarantine). The image
   # defaults this on because it is the only way to operate a container without
@@ -53,6 +86,22 @@ admin:
   # /health (the process answers) and GET /ready (the store takes a synced
   # write; 503 + Retry-After otherwise) on this port and on the ingest port.
   gauge_interval_ms: 15000
+  # A TLS block for the admin listener, shaped like `listener.tls` above.
+  # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem,
+  #       cacertfile: /etc/ankusa/tls/ops-ca.pem, verify: verify_peer}
+
+metrics:
+  # A listener that serves only /metrics, /health and /ready (404 for
+  # everything else), so a scraper needs no route to the admin API above. It
+  # also works with `admin.enabled: false`.
+  # [env ANKUSA_METRICS_ENABLED]
+  enabled: false
+  # [env ANKUSA_METRICS_PORT]
+  port: 4004
+  # [env ANKUSA_METRICS_IP] loopback by default; 0.0.0.0 to scrape from outside.
+  ip: 127.0.0.1
+  # A TLS block, shaped like `listener.tls`.
+  # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
 
 routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
@@ -117,6 +166,8 @@ routes:
     port: 4003
     # The address it binds; 0.0.0.0 exposes it on every interface.
     ip: 127.0.0.1
+    # A TLS block for this listener, shaped like `listener.tls` above.
+    # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
 
   # Routes an operator cannot wait for the API to create: a standalone node
   # (no Redis) loses API-created routes on restart, but not these. Applied on
@@ -264,6 +315,8 @@ claim_check:
   # [env ANKUSA_CLAIM_CHECK_IP] the address the gateway binds. Loopback by
   # default; set 0.0.0.0 to reach it from outside the container.
   ip: 127.0.0.1
+  # A TLS block for the gateway, shaped like `listener.tls` above.
+  # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
   # Target size of one pack object; a body larger than this still gets a pack
   # of its own. Core defaults this to 16 MiB.
   pack_max_bytes: 16777216

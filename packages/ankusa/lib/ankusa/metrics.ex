@@ -6,7 +6,9 @@ defmodule Ankusa.Metrics do
   Every deployment wants metrics, so this ships in core rather than in an
   adapter package: one `TelemetryMetricsPrometheus.Core` reporter per instance,
   named `:"ankusa_metrics_\#{instance}"` (bounded — one atom per configured
-  instance) and scraped by the admin API's `GET /metrics`.
+  instance) and scraped by the admin API's `GET /metrics`, or by the metrics
+  listener's (`Ankusa.Metrics.Router`, `metrics.enabled`), which serves nothing
+  else.
 
   `:telemetry` handlers are global to the VM, so a reporter sees only its own
   instance: every definition keeps just the events whose `:instance` metadata

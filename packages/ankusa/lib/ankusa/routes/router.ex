@@ -223,7 +223,11 @@ defmodule Ankusa.Routes.Router do
   # ── request parsing ─────────────────────────────────────────────────────────
 
   defp read_json(conn) do
-    case Ankusa.Http.read_body_limited(conn, @max_body) do
+    case Ankusa.Http.read_body_limited(
+           conn,
+           @max_body,
+           Ankusa.Http.read_opts(Ankusa.config(instance(conn)))
+         ) do
       {:ok, body, conn} ->
         case JSON.decode(body) do
           {:ok, decoded} when is_map(decoded) -> {:ok, decoded, conn}
