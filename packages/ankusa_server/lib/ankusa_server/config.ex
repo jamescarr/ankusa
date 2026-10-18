@@ -69,7 +69,9 @@ defmodule AnkusaServer.Config do
   @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
-  @http_keys ~w(port max_body_bytes routing prefix)
+  @http_keys ~w(port max_body_bytes routing prefix store_headers)
+  @store_headers_keys ~w(drop hash)
+  @store_headers_fields %{"drop" => :drop, "hash" => :hash}
   @admin_keys ~w(enabled port ip gauge_interval_ms tls auth)
   @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2)
   @metrics_keys ~w(enabled port ip tls)
@@ -115,7 +117,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers trust_url_tenant)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers store_headers trust_url_tenant)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -454,6 +456,7 @@ defmodule AnkusaServer.Config do
     []
     |> put_opt(:port, int_opt(http, "port", ["http"]))
     |> put_opt(:max_body_bytes, int_opt(http, "max_body_bytes", ["http"]))
+    |> put_opt(:store_headers, store_headers(http, ["http"]))
     |> put_opt(:route_resolver, route_resolver(http))
   end
 
@@ -1432,6 +1435,7 @@ defmodule AnkusaServer.Config do
       |> Keyword.put(:sinks, sinks!(source, path))
       |> put_opt(:dedupe, dedupe(source, path))
       |> put_opt(:forward_headers, forward_headers(source, path))
+      |> put_opt(:store_headers, store_headers(source, path))
       |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
 
     check_sink_schemes!(opts[:sinks], egress, path)
@@ -1529,6 +1533,32 @@ defmodule AnkusaServer.Config do
       other ->
         raise ConfigError,
           message: type_error(path ++ ["forward_headers"], "a list of header names", other)
+    end
+  end
+
+  # `nil` (absent), or `%{drop: [...], hash: [...]}` with each key optional: an
+  # absent key inherits (the default list for `http`, the instance's for a
+  # source). Names are lowercased; `Ankusa.Edge.StoredHeaders` re-validates.
+  defp store_headers(section, path) do
+    case section["store_headers"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["store_headers"]
+        spec = section!(value, @store_headers_keys, path)
+
+        for {key, names} <- spec, into: %{} do
+          {Map.fetch!(@store_headers_fields, key), header_names!(names, path ++ [key])}
+        end
+    end
+  end
+
+  defp header_names!(names, path) do
+    if is_list(names) and Enum.all?(names, &(is_binary(&1) and &1 != "")) do
+      Enum.map(names, &String.downcase/1)
+    else
+      raise ConfigError, message: type_error(path, "a list of header names", names)
     end
   end
 

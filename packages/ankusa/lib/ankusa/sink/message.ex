@@ -137,7 +137,10 @@ defmodule Ankusa.Sink.Message do
 
   Names are lowercased; repeated names are joined with `", "` in arrival
   order. Never forwarded: `#{Enum.join(@never_forwarded, "` `")}`, plus any
-  `x-ankusa-*` header.
+  `x-ankusa-*` header. A header the stored-header policy dropped
+  (`Ankusa.Edge.StoredHeaders`) is not in the hook at all, so no
+  `forward_headers` setting brings it back; a hashed one is forwarded as its
+  `sha256:<hex>` digest.
   """
   @spec forwarded_headers(Envelope.t(), :default | [String.t()]) :: %{String.t() => String.t()}
   def forwarded_headers(env, mode \\ :default)

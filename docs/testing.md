@@ -36,6 +36,15 @@ mise run test:integration             # +21 tests against the floci emulators (s
 
 The always-on tests cover:
 
+- **Stored-header policy** (`stored_headers_test.exs`, `edge_test.exs`,
+  `storage_test.exs`): `stored_headers_test.exs` covers drop, hash, case
+  folding, the untouched fast path and the config and source validation;
+  `edge_test.exs` (`stored-header policy`) posts a signed hook carrying
+  `authorization` and `cookie`, checks it verifies and that neither the stored
+  hook, its raw store row, a sink message nor a quarantine entry holds them, a
+  source override, the dedupe key read before a header is dropped and the
+  `dropped_headers` telemetry count; `storage_test.exs` (`segment has no
+  authorization header`) checks the archive segment and claim pack objects.
 - **Ingest dedupe and metrics** (`dedupe_test.exs`, `metrics_test.exs`):
   `dedupe_test.exs` covers a provider retry collapsing to the original id with
   `duplicate: true`, a key past its TTL committing again, two entries sharing

@@ -294,6 +294,53 @@ defmodule Ankusa.StorageTest do
     assert {:ok, 0} == Compactor.tick(inst)
   end
 
+  test "segment has no authorization header, and neither has a claim pack made from the archived hook" do
+    config = start(roles: [:edge, :storage])
+    inst = config.instance
+    body = :binary.copy("b", 200)
+
+    headers = [
+      {"authorization", "Bearer sk_live_topsecret"},
+      {"Cookie", "sid=topsecret-session"},
+      {"x-keep", "visible"}
+    ]
+
+    assert {:ok, %Envelope{} = env} =
+             Ankusa.Edge.Ingest.ingest(inst, request("acme", body, headers))
+
+    assert {:ok, 1} == Compactor.tick(inst)
+
+    {:ok, keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+    assert [_ | _] = keys
+
+    for key <- keys do
+      assert {:ok, object} = Ankusa.BlobStore.get(inst, :segments, key)
+      refute object =~ "topsecret"
+      refute String.downcase(object) =~ "authorization"
+      refute String.downcase(object) =~ "cookie"
+    end
+
+    # the archived hook reads back with the headers the policy left
+    assert {:ok, fetched} = Storage.fetch(inst, env.id)
+    assert fetched.headers == [{"x-keep", "visible"}]
+    assert fetched.body == body
+
+    # a body over the inline threshold is checked in as a claim pack
+    ctx = %{instance: inst, source_id: "acme", tenant_id: "default", attempt: 1}
+    assert {:ok, json} = Ankusa.Sink.Message.encode(fetched, ctx, 100)
+    refute json =~ "topsecret"
+    assert "urn:ankusa:claim:v1:default:" <> _ = JSON.decode!(json)["claim"]
+
+    [{_index, mod, opts}] = Ankusa.ClaimCheck.Stores.list(Ankusa.config(inst))
+    assert {:ok, [_ | _] = claim_keys} = mod.list(inst, "claims/", opts)
+
+    for key <- claim_keys do
+      assert {:ok, pack} = mod.get(inst, key, opts)
+      refute pack =~ "topsecret"
+      refute String.downcase(pack) =~ "authorization"
+    end
+  end
+
   test "a hook survives one clear and is reclaimed once both clear (archive, then delivery)" do
     config = start(roles: [:edge, :dispatch, :storage], sinks: [{GateSink, [pid: self()]}])
     inst = config.instance

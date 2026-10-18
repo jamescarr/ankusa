@@ -74,6 +74,8 @@ defmodule AnkusaServer.ConfigTest do
     end
 
     assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
+
+    assert config.store_headers == Ankusa.Edge.StoredHeaders.default()
     assert config.route_resolver == {Ankusa.RouteResolver.Path, [prefix: ["webhooks"]]}
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) |> Enum.sort() == ["github", "open", "standard", "stripe"]
@@ -1185,6 +1187,69 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "sources.demo.forward_headers"
     assert error.message =~ "a list of header names"
+  end
+
+  test "store_headers: the http lists and a source override parse, lowercase, and reject other shapes" do
+    default = Ankusa.Edge.StoredHeaders.default()
+    assert Config.load!(path: tmp_config("{}\n"), env: %{}).config.store_headers == default
+
+    config =
+      Config.load!(
+        path:
+          tmp_config("""
+          http:
+            store_headers: {drop: [Authorization, X-Foo], hash: [X-Tenant-Token]}
+          sources:
+            a: {verify: {type: none}, store_headers: {hash: [Cookie]}, sinks: [{type: log}]}
+            b: {verify: {type: none}, store_headers: {drop: []}, sinks: [{type: log}]}
+            c: {verify: {type: none}, sinks: [{type: log}]}
+          """),
+        env: %{}
+      ).config
+
+    assert config.store_headers == %{drop: ["authorization", "x-foo"], hash: ["x-tenant-token"]}
+
+    {Ankusa.SourceStore.Static, opts} = config.source_store
+    sources = opts[:sources]
+    assert sources["a"][:store_headers] == %{hash: ["cookie"]}
+    assert sources["b"][:store_headers] == %{drop: []}
+    assert sources["c"][:store_headers] == nil
+    assert Ankusa.Source.new("a", sources["a"]).store_headers == %{drop: nil, hash: ["cookie"]}
+
+    # only `hash` given: `drop` keeps the default
+    only_hash = tmp_config("http: {store_headers: {hash: [x-a]}}\n")
+
+    assert Config.load!(path: only_hash, env: %{}).config.store_headers ==
+             %{drop: default.drop, hash: ["x-a"]}
+
+    path =
+      tmp_config("""
+      sources:
+        demo:
+          verify: {type: none}
+          store_headers: {drop: authorization}
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.demo.store_headers.drop"
+    assert error.message =~ "a list of header names"
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("http: {store_headers: [authorization]}\n"), env: %{})
+      end
+
+    assert error.message =~ "http.store_headers"
+    assert error.message =~ "a mapping"
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("http: {store_headers: {keep: []}}\n"), env: %{})
+      end
+
+    assert error.message =~ "http.store_headers"
+    assert error.message =~ "keep"
   end
 
   test "an unknown verifier type lists the valid ones" do

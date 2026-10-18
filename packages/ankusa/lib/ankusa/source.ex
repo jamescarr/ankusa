@@ -26,7 +26,11 @@ defmodule Ankusa.Source do
     # %Ankusa.Dedupe{} or nil; the provider event key collapsed at ingest
     dedupe: nil,
     # :default | [header names]; provider request headers forwarded to sinks
-    forward_headers: :default
+    forward_headers: :default,
+    # nil (the instance's `store_headers` policy), or %{drop: [..] | nil, hash:
+    # [..] | nil}: which request headers the stored hook keeps, per key over the
+    # instance's policy (see `Ankusa.Edge.StoredHeaders`)
+    store_headers: nil
   ]
 
   @type policy :: :reject | :quarantine | :accept_flag
@@ -38,7 +42,8 @@ defmodule Ankusa.Source do
           trust_url_tenant: boolean(),
           sinks: [{module(), keyword()}],
           dedupe: Ankusa.Dedupe.t() | nil,
-          forward_headers: :default | [String.t()]
+          forward_headers: :default | [String.t()],
+          store_headers: Ankusa.Edge.StoredHeaders.override() | nil
         }
 
   @doc """
@@ -70,7 +75,12 @@ defmodule Ankusa.Source do
       trust_url_tenant: trust,
       sinks: Map.get(opts, :sinks, [{Ankusa.Sink.Log, []}]),
       dedupe: Ankusa.Dedupe.new!(Map.get(opts, :dedupe)),
-      forward_headers: forward_headers(id, Map.get(opts, :forward_headers, :default))
+      forward_headers: forward_headers(id, Map.get(opts, :forward_headers, :default)),
+      store_headers:
+        Ankusa.Edge.StoredHeaders.normalize_override!(
+          Map.get(opts, :store_headers),
+          "source #{inspect(id)}: store_headers"
+        )
     }
   end
 
