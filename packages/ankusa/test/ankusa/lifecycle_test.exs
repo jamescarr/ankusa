@@ -91,6 +91,22 @@ defmodule Ankusa.LifecycleTest do
     end
   end
 
+  defmodule RecordPlug do
+    @moduledoc "A loopback listener that reports every request path to the test."
+
+    @behaviour Plug
+    import Plug.Conn
+
+    @impl true
+    def init(opts), do: opts
+
+    @impl true
+    def call(conn, opts) do
+      send(opts[:test], {:request, conn.request_path})
+      send_resp(conn, 200, "ok")
+    end
+  end
+
   @doc false
   def report(event, _measurements, meta, pid), do: send(pid, {:telemetry, event, meta})
 
@@ -421,6 +437,53 @@ defmodule Ankusa.LifecycleTest do
                )
 
       assert_receive {:telemetry, [:ankusa, :lifecycle, :dropped], %{reason: :not_running}}
+    end
+
+    test "an HTTP lifecycle sink aimed at loopback is refused by the egress policy, never sent" do
+      attach([[:ankusa, :lifecycle, :dropped], [:ankusa, :lifecycle, :delivered]])
+      port = Ankusa.TestHelpers.free_port()
+
+      start_supervised!(
+        {Bandit, plug: {RecordPlug, test: self()}, scheme: :http, ip: {127, 0, 0, 1}, port: port}
+      )
+
+      sink = {Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events", timeout_ms: 500}
+
+      # Plain http is allowed here; the loopback address still is not.
+      config =
+        start_instance(
+          dispatch: [retry: @fast_retry],
+          egress: %{allow_insecure_http: true},
+          lifecycle: %{sinks: [sink]}
+        )
+
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+
+      assert_receive {:telemetry, [:ankusa, :lifecycle, :dropped], %{reason: :gave_up}}, 2_000
+      refute_received {:request, _}
+    end
+
+    test "the same sink delivers once egress allows the address" do
+      attach([[:ankusa, :lifecycle, :delivered]])
+      port = Ankusa.TestHelpers.free_port()
+
+      start_supervised!(
+        {Bandit, plug: {RecordPlug, test: self()}, scheme: :http, ip: {127, 0, 0, 1}, port: port}
+      )
+
+      config =
+        start_instance(
+          dispatch: [retry: @fast_retry],
+          egress: %{allow_insecure_http: true, allow_cidrs: ["127.0.0.0/8"]},
+          lifecycle: %{sinks: [{Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events"}]}
+        )
+
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+
+      assert_receive {:request, "/events"}, 2_000
+
+      assert_receive {:telemetry, [:ankusa, :lifecycle, :delivered], %{sink: "Ankusa.Sink.Http"}},
+                     2_000
     end
   end
 

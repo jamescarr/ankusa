@@ -20,6 +20,12 @@ defmodule Ankusa.Sink.Http do
     * `:req_options` — transport options for the HTTP client (custom Finch pool,
                        proxy, or `plug:` for `Req.Test` in tests). See
                        `Ankusa.HttpClient` for the accepted keys
+    * `:cacertfile` — a PEM CA bundle to verify the receiver's certificate
+                       against (a private CA); default: the system's trust store
+    * `:allow_insecure_tls` — `true` skips certificate verification for this
+                       sink (default `false`; a `verify_none` in `:req_options`
+                       is refused without it). Such a sink's connection is
+                       also pinned to the address the egress check resolved
 
   The original `env.body` is sent verbatim with the envelope's content-type
   (falling back to `application/octet-stream`). Identity headers `x-ankusa-id`,
@@ -52,11 +58,24 @@ defmodule Ankusa.Sink.Http do
   Redirects are never followed: this body is the hook, and a followed redirect
   would re-send it as a `GET`. A `3xx` is reported as its status, for the
   source's retry policy to act on.
+
+  ## Egress policy
+
+  Every attempt is checked against `Ankusa.Config`'s `egress` policy before a
+  byte is sent (`Ankusa.HttpClient.Egress`): `https` only unless the policy
+  allows `http`, and no address on the private network, loopback or link-local
+  range (the cloud metadata service included) unless the policy allows it. A
+  denied target is `{:error, {:permanent, {:egress_denied, reason}}}`: dead-letter
+  now, like a `401`; fix the policy or the URL, then replay. A name that does not
+  resolve is `{:error, {:egress_denied, {:resolve, host, reason}}}` and is retried.
+  The policy comes from the instance in `ctx.instance`; a ctx with none gets the
+  default, which denies the private ranges.
   """
 
   @behaviour Ankusa.Sink
 
   alias Ankusa.{Envelope, HttpClient}
+  alias Ankusa.HttpClient.Egress
   alias Ankusa.Sink.Http.Signer
   alias Ankusa.Sink.Message
 
@@ -65,10 +84,78 @@ defmodule Ankusa.Sink.Http do
 
   @impl true
   def deliver(env, ctx, opts) do
-    with {:ok, signature} <- signature(env, opts) do
-      send_hook(env, ctx, opts, signature)
+    with {:ok, pinned} <- egress(ctx, opts),
+         {:ok, signature} <- signature(env, opts) do
+      send_hook(env, ctx, opts, signature, pinned)
     end
   end
+
+  @doc """
+  Raise `ArgumentError` unless `opts` is a usable HTTP sink config: the
+  `:req_options` are transport-only and keep TLS verification on, and
+  `:allow_insecure_tls` is a boolean and `:cacertfile` names a file. Boot
+  (`Ankusa.HttpClient.Egress.validate_config!/1`) and the image's config loader
+  call it, so a bad sink fails at load instead of at its first delivery.
+  """
+  @spec validate_opts!(keyword()) :: :ok
+  def validate_opts!(opts) do
+    insecure? = Keyword.get(opts, :allow_insecure_tls, false)
+
+    unless is_boolean(insecure?) do
+      raise ArgumentError,
+            "Sink.Http allow_insecure_tls must be true or false, got: #{inspect(insecure?)}"
+    end
+
+    HttpClient.validate!(Keyword.get(opts, :req_options, []), insecure?)
+
+    case Keyword.get(opts, :cacertfile) do
+      nil ->
+        :ok
+
+      path when is_binary(path) ->
+        unless File.regular?(path) do
+          raise ArgumentError, "Sink.Http cacertfile #{inspect(path)} is not a readable file"
+        end
+
+        :ok
+
+      other ->
+        raise ArgumentError, "Sink.Http cacertfile must be a path, got: #{inspect(other)}"
+    end
+  end
+
+  # The policy check, and the address to connect to. A denied target is permanent
+  # (the same URL is denied until the policy changes); a failed lookup is not.
+  defp egress(ctx, opts) do
+    pin_opts =
+      [timeout: Keyword.get(opts, :timeout_ms, 5000), pin_https: insecure_tls?(opts)] ++
+        resolver_option(ctx)
+
+    case Egress.pin(Keyword.fetch!(opts, :url), policy(ctx), pin_opts) do
+      {:ok, pinned} -> {:ok, pinned}
+      {:error, {:egress_denied, {:resolve, _host, _reason}}} = lookup_failed -> lookup_failed
+      {:error, {:egress_denied, _reason} = denied} -> {:error, {:permanent, denied}}
+    end
+  end
+
+  defp policy(ctx) do
+    with instance when is_atom(instance) and instance != nil <- ctx[:instance],
+         {:ok, config} <- Ankusa.fetch_config(instance) do
+      config.egress
+    else
+      _no_config -> Egress.default_policy()
+    end
+  end
+
+  # `ctx.egress_resolver` replaces the DNS lookup: tests only, dispatch never sets it.
+  defp resolver_option(ctx) do
+    case ctx[:egress_resolver] do
+      nil -> []
+      resolver -> [resolver: resolver]
+    end
+  end
+
+  defp insecure_tls?(opts), do: Keyword.get(opts, :allow_insecure_tls, false)
 
   defp signature(env, opts) do
     case Keyword.get(opts, :secret) do
@@ -83,7 +170,7 @@ defmodule Ankusa.Sink.Http do
     end
   end
 
-  defp send_hook(env, ctx, opts, signature) do
+  defp send_hook(env, ctx, opts, signature, pinned) do
     timeout = Keyword.get(opts, :timeout_ms, 5000)
 
     opts_headers =
@@ -106,18 +193,22 @@ defmodule Ankusa.Sink.Http do
       Message.forwarded_headers(env, ctx[:forward_headers] || :default)
       |> Enum.reject(fn {name, _value} -> owned?(name, own) or owned?(name, opts_headers) end)
 
-    headers = forwarded ++ own ++ opts_headers
+    headers = forwarded ++ own ++ pin_headers(pinned, opts_headers) ++ opts_headers
 
     client_opts =
-      Keyword.put(
-        Keyword.get(opts, :req_options, []),
+      opts
+      |> Keyword.get(:req_options, [])
+      |> merge_connect_options(pinned.connect_options)
+      |> Keyword.put(
         :max_response_bytes,
         Keyword.get(opts, :max_response_bytes, @default_max_response_bytes)
       )
+      |> Keyword.put(:allow_insecure_tls, insecure_tls?(opts))
+      |> put_cacertfile(Keyword.get(opts, :cacertfile))
 
     case HttpClient.request_with_headers(
            Keyword.get(opts, :method, :post),
-           Keyword.fetch!(opts, :url),
+           pinned.url,
            headers,
            env.body,
            timeout,
@@ -142,6 +233,25 @@ defmodule Ankusa.Sink.Http do
         {:error, reason}
     end
   end
+
+  # The `host` header that names the receiver when the URL names its address,
+  # unless the operator configured one of their own.
+  defp pin_headers(%{headers: headers}, opts_headers),
+    do: Enum.reject(headers, fn {name, _value} -> owned?(name, opts_headers) end)
+
+  defp merge_connect_options(req_options, []), do: req_options
+
+  defp merge_connect_options(req_options, pinned) do
+    Keyword.update(req_options, :connect_options, pinned, fn existing ->
+      Keyword.merge(existing, pinned, fn
+        :transport_opts, mine, theirs -> Keyword.merge(mine, theirs)
+        _key, _mine, theirs -> theirs
+      end)
+    end)
+  end
+
+  defp put_cacertfile(client_opts, nil), do: client_opts
+  defp put_cacertfile(client_opts, path), do: Keyword.put(client_opts, :cacertfile, path)
 
   @doc false
   # `Retry-After` as milliseconds from now: delay-seconds, or an IMF-fixdate

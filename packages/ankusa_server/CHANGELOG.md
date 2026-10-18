@@ -32,9 +32,23 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `ankusa_claim_check_gateway_duration_seconds`,
   `ankusa_claim_check_reads_total` and `ankusa_claim_check_read_limit`/
   `_read_inflight`/`_read_queued` on `/metrics`.
+- **`egress` section** (`allow_insecure_http`, `deny_cidrs`, `allow_cidrs`,
+  `allow_hosts`, `deny_hosts`) and the HTTP sink keys `cacertfile` and
+  `allow_insecure_tls`: where `type: http` sinks (sources' and
+  `lifecycle.sinks`) may connect, and how their TLS is verified. See the
+  `ankusa` changelog and [`configuration.md#egress`](../../docs/configuration.md#egress).
 
 ### Changed
 
+- **Breaking:** a `type: http` sink URL must be `https://` to load (a plain
+  `http://` one needs `egress.allow_insecure_http: true`), and at delivery its
+  host may not resolve to a loopback, private or link-local address unless
+  `egress.allow_cidrs` or `egress.allow_hosts` allows it. The same check runs
+  when the admin API writes a source (`400 invalid_source`). A source already
+  stored by `source_store.type: persistent` or `redis` with an `http://` sink is
+  skipped at boot with a warning until `allow_insecure_http` is set. Existing
+  `type: http` deployments to a private receiver add, for example,
+  `egress: {allow_insecure_http: true, allow_hosts: [worker]}`.
 - The image's dependencies are relocked to their latest releases: `brod
   4.7.0` (Kafka), `amqp 4.3.0` (RabbitMQ), `req 0.7.5` on `finch 0.24.0`, and
   `ed25519`/`kcl 1.5.2` (NATS nkeys).

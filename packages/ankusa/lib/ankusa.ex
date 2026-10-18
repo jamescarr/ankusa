@@ -46,4 +46,13 @@ defmodule Ankusa do
   def config(instance \\ :default) do
     :persistent_term.get({__MODULE__, :config, instance})
   end
+
+  @doc "Fetch the instance config, or `:error` when the instance has none (it never started)."
+  @spec fetch_config(atom()) :: {:ok, Config.t()} | :error
+  def fetch_config(instance) do
+    case :persistent_term.get({__MODULE__, :config, instance}, nil) do
+      nil -> :error
+      config -> {:ok, config}
+    end
+  end
 end
