@@ -61,8 +61,33 @@ defmodule Ankusa.Admin.Redact do
   def config(%Ankusa.Config{} = config) do
     config
     |> Map.from_struct()
+    |> redact_auth()
     |> open_map()
   end
+
+  # The control planes' `auth` blocks (`Ankusa.Admin.Auth`): a token entry keeps
+  # its id and scopes but not its hash (a low-entropy token is brute-forceable
+  # from it), a JWKS URL goes through the URL rules, and static keys are not
+  # shown at all. Mode, claim names and the subject map are shown as they are.
+  defp redact_auth(config) do
+    config
+    |> update_in([:admin, :auth], &auth_view/1)
+    |> update_in([:routes, :admin, :auth], &auth_view/1)
+    |> update_in([:claim_check, :auth], &auth_view/1)
+  end
+
+  defp auth_view(%{tokens: tokens, jwt: jwt} = auth) do
+    jwks_url = jwt.jwks_url && redact_url(jwt.jwks_url)
+
+    %{
+      auth
+      | tokens: Enum.map(tokens, &%{&1 | sha256: @redacted}),
+        jwt: %{jwt | jwks_url: jwks_url, keys: Enum.map(jwt.keys, fn _key -> @redacted end)}
+    }
+  end
+
+  # A bare `%Ankusa.Config{}` that never went through `new/1` has only a mode.
+  defp auth_view(auth), do: auth
 
   @doc """
   A redacted, JSON-encodable view of one tenant-scoped source, built from the

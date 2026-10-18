@@ -21,6 +21,8 @@ admin:
   enabled: true
   port: 4002
   ip: 0.0.0.0
+  # Demo: nothing publishes this port. Real deployments set auth.mode.
+  auth: {mode: none, allow_insecure: true}
 
 wal:
   type: disk
@@ -41,6 +43,8 @@ storage:
 claim_check:
   port: 4001
   ip: 0.0.0.0
+  # Demo: the compose network is the boundary. Real deployments set auth.mode.
+  auth: {mode: none, allow_insecure: true}
 
 # Deny-by-default routing, shared by every edge node through Redis. The Redis
 # store seeds a namespace once, on its first boot.

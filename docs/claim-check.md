@@ -157,10 +157,16 @@ older ones are still found. **Removing a store makes the claims in it
 unreadable**; remove one only once its packs are past retention. Each store
 needs its own lifecycle rule (see [Retention](#retention)).
 
-**The gateway does no authentication or authorization.** Who may read what is
-decided in front of it: a service mesh, Envoy, an API gateway, a cloud load
-balancer with OIDC. It logs a warning saying so at startup, the same as the
-admin API.
+**The gateway authenticates and authorizes every read** (`claim_check.auth`, see
+[Control-plane authentication](configuration.md#control-plane-authentication)):
+`401` without an accepted credential (bearer token, OIDC access token or client
+certificate), `403` unless the caller holds `claims:read` and the claim's
+tenant (`tenant:<tenant_id>` or `tenant:*`). `mode: none` is accepted on
+loopback only, or with `allow_insecure: true` when a service mesh, Envoy or an
+API gateway in front authenticates every caller; the node logs a warning at
+startup when it has no authentication of its own. Readers send the credential
+as `Authorization: Bearer` (the TypeScript client's `headers` option, the Elixir
+SDK's `:headers`).
 
 ### Under load
 

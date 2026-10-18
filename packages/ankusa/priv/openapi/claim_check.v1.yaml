@@ -17,15 +17,21 @@ info:
     the queue message carries next to the ref, which is never sent to the
     gateway.
 
-    This API performs no authentication or authorization. Deployers secure it
-    at their own boundary (a service mesh, Envoy, an API gateway, network
-    policy). The tenant is a path segment so that layer can authorize by
-    route without reading bodies. A shared cache must sit behind that layer,
-    never in front of it.
+    Every operation except `GET /health` needs a credential
+    (`claim_check.auth`): a static bearer token (`mode: token`), an OIDC
+    access token (`mode: jwt`) or a client certificate (`mode: mtls`).
+    Reading a claim needs the `claims:read` scope **and** the tenant of the
+    path, as `tenant:<tenant_id>` or `tenant:*`: `401` without an accepted
+    credential, `403` without the scope. `mode: none` is accepted on a
+    loopback address only, or with `allow_insecure: true` when a mesh or
+    proxy in front of the port authenticates every caller. A shared cache
+    must sit behind that layer, never in front of it.
 servers:
   - url: http://localhost:4001
     description: Local development listener (default `claim_check.port`).
-security: []
+security:
+  - bearerAuth: []
+  - mutualTLS: []
 tags:
   - name: claims
     description: Read claim bytes.
@@ -67,6 +73,10 @@ paths:
             suffix:
               value: bytes=-1024
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The claim's bytes.
           headers:
@@ -117,6 +127,7 @@ paths:
   /health:
     get:
       operationId: getHealth
+      security: []
       tags: [operations]
       summary: Liveness probe
       responses:
@@ -127,6 +138,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/Health'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        `Authorization: Bearer <token>`: an OIDC/OAuth2 access token
+        (`mode: jwt`) or a static token (`mode: token`).
+    mutualTLS:
+      type: mutualTLS
+      description: |
+        A client certificate presented to a listener with `tls.verify:
+        verify_peer` (`mode: mtls`), mapped to scopes by `auth.mtls.subject_map`.
   headers:
     CacheControl:
       description: |
@@ -187,6 +211,13 @@ components:
             - invalid_id
             - not_found
             - store_unavailable
+            - unauthenticated
+            - forbidden
+        scope:
+          type: string
+          description: |
+            Present on `forbidden`; the scope the principal lacks
+            (`claims:read`, or `tenant:<tenant_id>`).
     Health:
       type: object
       required: [status]
@@ -218,3 +249,32 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: |
+        `401`. `unauthenticated`: no credential, or one that is wrong, expired
+        or unknown. A fault in the reader's configuration, not in the claim:
+        fix the credential and retry; do not dead-letter the message.
+      headers:
+        WWW-Authenticate:
+          description: Always `Bearer realm="ankusa"`.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: {error: unauthenticated}
+    Forbidden:
+      description: |
+        `403`. `forbidden`: the credential is good, but its principal lacks
+        `claims:read` or the path's tenant (`scope` names it). Like `401`, a
+        reader configuration fault: do not dead-letter the message.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missingScope:
+              value: {error: forbidden, scope: 'claims:read'}
+            otherTenant:
+              value: {error: forbidden, scope: 'tenant:acme'}
