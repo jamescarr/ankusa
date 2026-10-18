@@ -11,8 +11,8 @@ for f in tools/*/mix.exs; do
   echo "==> $d"
   (
     cd "$d"
+    (mix_cache_warm "$d" "$d" dev --check-locked)
     mix deps.get --check-locked
-    (mix_cache_warm "$d" "$d" dev)
     mix deps.unlock --check-unused
     mix hex.audit
     if [ -f .formatter.exs ]; then mix format --check-formatted; fi

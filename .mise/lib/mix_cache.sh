@@ -20,7 +20,7 @@
 # stale, save": `.mise/tasks/build` and the checks must agree on the cache key
 # or each would miss the other's entries.
 mix_cache_warm() {
-  local dir=$1 label=$2 env=$3
+  local dir=$1 label=$2 env=$3 lock=${4:-}
   local cache_name cache_root cache key tmp err present log stale n refetch i e os
   export MIX_ENV="$env"
 
@@ -62,14 +62,33 @@ mix_cache_warm() {
   # of which carry this checkout's path, so cloned directories need no
   # recompile. Existing entries are never overwritten: a local build in
   # progress wins.
+  #
+  # A Hex dep's compiled beams are restored only when its deps/ directory came
+  # from this same entry. A dep directory that was already here (an earlier
+  # `mix deps.get`) is source only — it has no compiled priv/, RocksDB's NIF
+  # included — and restored beams would make Mix skip rebuilding it, so the
+  # app would fail to load.
+  restored_deps=" "
   if [ -d "$cache" ]; then
     mkdir -p deps "_build/$env/lib"
-    for src in "$cache"/deps/* "$cache"/lib/*; do
+    for src in "$cache"/deps/*; do
       [ -e "$src" ] || continue
-      case "$src" in
-        "$cache"/deps/*) n="deps/${src##*/}" ;;
-        *) n="_build/$env/lib/${src##*/}" ;;
-      esac
+      n="deps/${src##*/}"
+      if [ ! -e "$n" ] && [ ! -L "$n" ]; then
+        _mix_cache_clone "$src" "$n"
+        restored_deps="$restored_deps${src##*/} "
+      fi
+    done
+    for src in "$cache"/lib/*; do
+      [ -e "$src" ] || continue
+      app=${src##*/}
+      if [ -e "deps/$app" ]; then
+        case "$restored_deps" in
+          *" $app "*) ;;
+          *) continue ;;
+        esac
+      fi
+      n="_build/$env/lib/$app"
       [ -e "$n" ] || [ -L "$n" ] || _mix_cache_clone "$src" "$n"
     done
     touch "$cache"
@@ -83,7 +102,8 @@ mix_cache_warm() {
     if [ -e "$n" ]; then present="$present${n##*/} "; fi
   done
 
-  mix deps.get
+  # shellcheck disable=SC2086 # $lock is empty or --check-locked
+  mix deps.get $lock
 
   log="_build/$env/deps-compile.log"
   mkdir -p "_build/$env"
@@ -128,7 +148,8 @@ mix_cache_warm() {
     esac
   done
   if [ -n "$refetch" ]; then
-    mix deps.get
+    # shellcheck disable=SC2086 # $lock is empty or --check-locked
+    mix deps.get $lock
     stale=$(_mix_cache_stale_deps) || stale=""
   fi
 
