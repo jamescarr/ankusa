@@ -17,6 +17,12 @@ import (
 // text (no (?m) here), so a trailing newline does not match.
 var claimRefPattern = regexp.MustCompile(`^urn:ankusa:claim:v1:([A-Za-z0-9_-]{1,64}):([0-7][0-9A-HJKMNP-TV-Z]{25})$`)
 
+// claimRefV2Pattern matches urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>:
+// exp_unix is a decimal of 1-12 digits with no leading zero, signature 43
+// unpadded base64url characters. The gateway checks the signature; the SDK
+// only carries it.
+var claimRefV2Pattern = regexp.MustCompile(`^urn:ankusa:claim:v2:([A-Za-z0-9_-]{1,64}):([0-7][0-9A-HJKMNP-TV-Z]{25}):([1-9][0-9]{0,11}):([A-Za-z0-9_-]{43})$`)
+
 // claimSHA256Pattern matches the queue message's `sha256` field: the digest
 // of the claim's bytes, 64 lowercase hex characters.
 var claimSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -26,13 +32,22 @@ type ParsedClaimRef struct {
 	TenantID string `json:"tenant_id"`
 	ClaimID  string `json:"claim_id"`
 	// Path is where the gateway serves the claim's bytes:
-	// /v1/claims/{tenant_id}/{claim_id}.
+	// /v1/claims/{tenant_id}/{claim_id}, followed by
+	// ?exp={exp_unix}&sig={signature} for a v2 ref.
 	Path string `json:"path"`
 }
 
-// ParseClaimRef parses urn:ankusa:claim:v1:<tenant>:<claim_id>. Anything else
-// is an *InvalidClaimRefError.
+// ParseClaimRef parses urn:ankusa:claim:v1:<tenant>:<claim_id> and
+// urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>. Anything
+// else is an *InvalidClaimRefError.
 func ParseClaimRef(ref string) (ParsedClaimRef, error) {
+	if match := claimRefV2Pattern.FindStringSubmatch(ref); match != nil {
+		return ParsedClaimRef{
+			TenantID: match[1],
+			ClaimID:  match[2],
+			Path:     "/v1/claims/" + match[1] + "/" + match[2] + "?exp=" + match[3] + "&sig=" + match[4],
+		}, nil
+	}
 	match := claimRefPattern.FindStringSubmatch(ref)
 	if match == nil {
 		return ParsedClaimRef{}, &InvalidClaimRefError{Message: fmt.Sprintf("invalid claim-check ref: %q", ref)}

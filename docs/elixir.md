@@ -30,7 +30,7 @@ config :ankusa,
   sources: %{
     "stripe" => [
       verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: System.get_env("STRIPE_WHSEC")},
-      sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe"}]
+      sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", secret: System.get_env("SINK_WHSEC")}]
     ]
   }
 ```

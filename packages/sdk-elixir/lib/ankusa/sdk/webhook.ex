@@ -22,9 +22,13 @@ defmodule Ankusa.SDK.Webhook do
   Names are matched case-insensitively, so anything from a Plug `req_headers`
   list to a hand-built map works. In a list the *first* occurrence of a name
   wins, matching HTTP's rule for repeated headers.
+
+  `receive_delivery/3` is the receiver-side decision on top of them: it checks
+  the delivery's signature (HTTP sinks are signed by default) and then parses
+  the headers. `Ankusa.SDK.Receiver` is a Plug around it.
   """
 
-  alias Ankusa.SDK.MissingHookIdError
+  alias Ankusa.SDK.{InvalidSignatureError, MissingHookIdError, Signature}
 
   defmodule Headers do
     @moduledoc """
@@ -82,6 +86,62 @@ defmodule Ankusa.SDK.Webhook do
   end
 
   def parse_headers(_headers), do: build(%{})
+
+  @doc """
+  Decide whether to accept one HTTP-sink delivery, and parse its headers.
+
+  `Ankusa.Sink.Http` signs every delivery unless it is configured
+  `allow_unsigned: true`, so a receiver is closed unless it is told
+  otherwise. Options:
+
+    * `:secrets` — the sink's secret (`whsec_` + base64, or any other string
+      used as its own bytes), or a list of them during a rotation. With any,
+      the delivery MUST verify (`Ankusa.SDK.Signature.verify/4`, same errors,
+      `:tolerance_seconds` and `:now`); `:allow_unsigned` does not weaken it.
+    * `:allow_unsigned` — `true` accepts a delivery with no secret configured,
+      unverified. Default `false`: with no `:secrets` every delivery is
+      refused with an `invalid_secret` `Ankusa.SDK.InvalidSignatureError`.
+    * `:tolerance_seconds`, `:now` — see `Ankusa.SDK.Signature.verify/4`.
+
+  Returns `{:ok, %{headers: headers, verified: verified?}}` (`verified` is
+  `false` only for an allowed unsigned delivery),
+  `{:error, %Ankusa.SDK.InvalidSignatureError{}}`
+  (answer `401`), or `{:error, %Ankusa.SDK.MissingHookIdError{}}` (`400`). The
+  signature is judged first, so a delivery that fails it is a `401` even when
+  it also lacks `x-ankusa-id`. `body` must be the raw bytes received.
+  """
+  @spec receive_delivery(term(), binary(), keyword()) ::
+          {:ok, %{headers: Headers.t(), verified: boolean()}}
+          | {:error, InvalidSignatureError.t() | MissingHookIdError.t()}
+  def receive_delivery(headers, body, opts \\ []) when is_binary(body) do
+    secrets = opts |> Keyword.get(:secrets, []) |> List.wrap()
+    allow_unsigned? = Keyword.get(opts, :allow_unsigned, false)
+
+    with {:ok, verified?} <- check_signature(headers, body, secrets, allow_unsigned?, opts),
+         {:ok, parsed} <- parse_headers(headers) do
+      {:ok, %{headers: parsed, verified: verified?}}
+    end
+  end
+
+  defp check_signature(_headers, _body, [], false, _opts) do
+    {:error,
+     %InvalidSignatureError{
+       message:
+         "no secret configured: deliveries are signed, so the receiver needs the sink's " <>
+           "secret (or allow_unsigned: true to accept unsigned ones)",
+       code: "invalid_secret",
+       field: nil
+     }}
+  end
+
+  defp check_signature(_headers, _body, [], true, _opts), do: {:ok, false}
+
+  defp check_signature(headers, body, secrets, _allow_unsigned?, opts) do
+    case Signature.verify(headers, body, secrets, Keyword.take(opts, [:tolerance_seconds, :now])) do
+      {:ok, _verified} -> {:ok, true}
+      {:error, _error} = error -> error
+    end
+  end
 
   defp build(headers) do
     case fetch(headers, "x-ankusa-id") do

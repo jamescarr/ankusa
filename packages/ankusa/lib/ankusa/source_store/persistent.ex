@@ -49,7 +49,8 @@ defmodule Ankusa.SourceStore.Persistent do
 
   require Logger
 
-  alias Ankusa.{Audit, Config, Crypto.Envelope, SourceStore.Table, Store}
+  alias Ankusa.Admin.Redact
+  alias Ankusa.{Audit, Config, Crypto.Envelope, Lifecycle, SourceStore.Table, Store}
   alias Ankusa.Audit.Context
   alias Ankusa.Store.Keys
 
@@ -226,13 +227,18 @@ defmodule Ankusa.SourceStore.Persistent do
       {:put, :default, Keys.source_revision(tenant, name), Integer.to_string(revision)}
     ]
 
-    attrs = %{
-      action: "source.delete",
-      tenant: tenant,
-      resource: source_id,
-      before_hash: Audit.digest(state.instance, current.spec),
-      revision: revision
-    }
+    # The deletion's event reports the source as it was: nothing is left to read.
+    attrs =
+      Map.merge(
+        %{
+          action: "source.delete",
+          tenant: tenant,
+          resource: source_id,
+          before_hash: Audit.digest(state.instance, current.spec),
+          revision: revision
+        },
+        Lifecycle.outbox(state.instance, fn -> Redact.source_entry(current) end)
+      )
 
     Audit.commit(state.instance, context, attrs, ops)
   end
@@ -264,18 +270,23 @@ defmodule Ankusa.SourceStore.Persistent do
         {:put, :default, Keys.source_revision(tenant, name), Integer.to_string(revision)}
       ]
 
-      attrs = %{
-        action: if(mode == :create, do: "source.create", else: "source.update"),
-        tenant: tenant,
-        resource: source_id,
-        before_hash: current && Audit.digest(state.instance, current.spec),
-        after_hash: Audit.digest(state.instance, spec),
-        revision: revision
-      }
+      stored = Map.put(stored, :revision, revision)
+
+      attrs =
+        Map.merge(
+          %{
+            action: if(mode == :create, do: "source.create", else: "source.update"),
+            tenant: tenant,
+            resource: source_id,
+            before_hash: current && Audit.digest(state.instance, current.spec),
+            after_hash: Audit.digest(state.instance, spec),
+            revision: revision
+          },
+          Lifecycle.outbox(state.instance, fn -> Redact.source_entry(stored) end)
+        )
 
       case Audit.commit(state.instance, context, attrs, ops) do
         :ok ->
-          stored = Map.put(stored, :revision, revision)
           Table.put_rows(state.table, stored, source)
           {:ok, stored}
 

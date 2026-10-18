@@ -45,7 +45,8 @@ defmodule Ankusa.SourceStore do
   spec: a supervisor prints its children's start arguments.
   """
 
-  alias Ankusa.{Audit, Config, Source}
+  alias Ankusa.Admin.Redact
+  alias Ankusa.{Audit, Config, Lifecycle, Source}
   alias Ankusa.Audit.Context
 
   @typedoc """
@@ -112,7 +113,10 @@ defmodule Ankusa.SourceStore do
               | {:error, :invalid, String.t()}
               | {:error, :store_unavailable}
 
-  @optional_callbacks put: 5, put: 6, get: 3, list_tenant: 2, delete: 3, delete: 4
+  @doc false
+  @callback ready?(instance :: atom()) :: boolean()
+
+  @optional_callbacks put: 5, put: 6, get: 3, list_tenant: 2, delete: 3, delete: 4, ready?: 1
 
   # Same rule as `Ankusa.ClaimCheck.Ref.valid_tenant?/1`: an identity that names
   # a storage partition and a URL path segment must not need encoding.
@@ -128,6 +132,18 @@ defmodule Ankusa.SourceStore do
   def list(instance) do
     %Config{source_store: {mod, _}} = Ankusa.config(instance)
     mod.list(instance)
+  end
+
+  @doc """
+  Whether the store has loaded what it serves. A store that can start empty and
+  fill from elsewhere (Redis) says so with the optional `ready?/1` callback; one
+  without it is always ready. `Ankusa.Lifecycle.reconcile/2` waits for it before
+  it reads a source to settle a change nobody saw finish.
+  """
+  @spec ready?(atom()) :: boolean()
+  def ready?(instance) do
+    %Config{source_store: {mod, _}} = Ankusa.config(instance)
+    not exports?(mod, :ready?, 1) or mod.ready?(instance)
   end
 
   @doc """
@@ -154,24 +170,16 @@ defmodule Ankusa.SourceStore do
       %Config{source_store: {mod, _}} = Ankusa.config(instance)
       context = Context.from_opts(opts)
 
-      result =
-        cond do
-          exports?(mod, :put, 6) ->
-            mod.put(instance, tenant, name, spec, mode, audit: context)
+      cond do
+        exports?(mod, :put, 6) ->
+          mod.put(instance, tenant, name, spec, mode, audit: context)
 
-          exports?(mod, :put, 5) ->
-            audited_put(mod, instance, context, {tenant, name}, spec, mode)
+        exports?(mod, :put, 5) ->
+          audited_put(mod, instance, context, {tenant, name}, spec, mode)
 
-          true ->
-            {:error, :read_only}
-        end
-
-      with {:ok, stored} <- result do
-        action = if mode == :create, do: :created, else: :updated
-        Ankusa.Lifecycle.source_changed(instance, action, stored)
+        true ->
+          {:error, :read_only}
       end
-
-      result
     end
   end
 
@@ -194,12 +202,20 @@ defmodule Ankusa.SourceStore do
     end)
   end
 
-  defp put_outcome(instance, {:ok, stored}),
-    do: %{
+  # The outcome of a store call that changed a source; the entity of its event
+  # when lifecycle events are on.
+  defp put_outcome(instance, {:ok, stored}) do
+    outcome = %{
       result: "ok",
       after_hash: Audit.digest(instance, stored.spec),
       revision: Map.get(stored, :revision)
     }
+
+    case Lifecycle.outbox(instance, fn -> Redact.source_entry(stored) end) do
+      %{entity: _} = outbox -> outcome |> Map.merge(outbox) |> Map.put(:publish, true)
+      none -> Map.merge(outcome, none)
+    end
+  end
 
   defp put_outcome(_instance, {:error, :store_unavailable}), do: %{result: "failed"}
   defp put_outcome(_instance, _rejected), do: :discard
@@ -251,20 +267,11 @@ defmodule Ankusa.SourceStore do
 
       cond do
         exports?(mod, :delete, 4) ->
-          prior = prior(mod, instance, tenant, name)
-
-          announce_delete(
-            instance,
-            mod.delete(instance, tenant, name, audit: context),
-            prior,
-            tenant,
-            name
-          )
+          mod.delete(instance, tenant, name, audit: context)
 
         exports?(mod, :delete, 3) ->
           prior = prior(mod, instance, tenant, name)
-          result = audited_delete(mod, instance, context, tenant, name, prior)
-          announce_delete(instance, result, prior, tenant, name)
+          audited_delete(mod, instance, context, tenant, name, prior)
 
         true ->
           {:error, :read_only}
@@ -277,33 +284,32 @@ defmodule Ankusa.SourceStore do
   defp prior(mod, instance, tenant, name),
     do: if(exports?(mod, :get, 3), do: mod.get(instance, tenant, name), else: :error)
 
-  defp announce_delete(instance, :ok, prior, tenant, name) do
-    entry =
-      case prior do
-        {:ok, stored} -> stored
-        :error -> %{tenant: tenant, name: name}
-      end
-
-    Ankusa.Lifecycle.source_changed(instance, :deleted, entry)
-    :ok
-  end
-
-  defp announce_delete(_instance, other, _prior, _tenant, _name), do: other
-
   defp audited_delete(mod, instance, context, tenant, name, prior) do
-    attrs = %{
-      action: "source.delete",
-      tenant: tenant,
-      resource: "#{tenant}.#{name}",
-      before_hash: with({:ok, stored} <- prior, do: Audit.digest(instance, stored.spec))
-    }
+    entity =
+      Lifecycle.outbox(instance, fn ->
+        case prior do
+          {:ok, stored} -> Redact.source_entry(stored)
+          :error -> %{"tenant" => tenant, "name" => name}
+        end
+      end)
+
+    attrs =
+      Map.merge(
+        %{
+          action: "source.delete",
+          tenant: tenant,
+          resource: "#{tenant}.#{name}",
+          before_hash: with({:ok, stored} <- prior, do: Audit.digest(instance, stored.spec))
+        },
+        entity
+      )
 
     Audit.record(instance, context, attrs, fn ->
       result = mod.delete(instance, tenant, name)
 
       outcome =
         case result do
-          :ok -> %{result: "ok"}
+          :ok -> %{result: "ok", publish: Map.has_key?(attrs, :entity)}
           {:error, :store_unavailable} -> %{result: "failed"}
           _rejected -> :discard
         end
@@ -361,5 +367,57 @@ defmodule Ankusa.SourceStore.Static do
   defp sources(instance) do
     %Config{source_store: {_mod, opts}} = Ankusa.config(instance)
     Keyword.get(opts, :sources, %{})
+  end
+
+  @doc """
+  Replace the sources a running instance serves with `sources` (the same
+  `source_id => keyword/map` shape as the `:sources` option), without a restart.
+
+  This is how a config reload rotates a secret: the caller re-reads its config,
+  resolves its secrets again and publishes the result. Every source is built
+  and checked with the rules the instance boots under (`wal: :none` durability,
+  a shared source with no verifier, the verifier's own options, egress), so a
+  spec that would refuse to boot is refused here and the instance keeps serving
+  the sources it has. Nothing is applied unless all of them pass.
+
+  Reads see the new config on their next `fetch/2`, so a hook already being
+  verified finishes against the secret it started with. Returns the ids that
+  were added, removed, or changed, sorted. Raises `ArgumentError` naming the
+  source when a spec is refused, and `ArgumentError` when the instance does
+  not run `Ankusa.SourceStore.Static`: a writable store keeps its sources
+  elsewhere.
+  """
+  @spec publish(atom(), %{String.t() => keyword() | map() | Source.t()}) :: {:ok, [String.t()]}
+  def publish(instance, sources) when is_map(sources) do
+    %Config{source_store: {__MODULE__, opts}} =
+      config =
+      case Ankusa.config(instance) do
+        %Config{source_store: {__MODULE__, _}} = config ->
+          config
+
+        %Config{source_store: {mod, _}} ->
+          raise ArgumentError,
+                "#{inspect(__MODULE__)}.publish/2 needs the static source store, " <>
+                  "instance #{inspect(instance)} runs #{inspect(mod)}"
+      end
+
+    old = config |> Ankusa.Queue.static_sources() |> Map.new()
+    updated = %Config{config | source_store: {__MODULE__, Keyword.put(opts, :sources, sources)}}
+
+    Ankusa.Queue.validate_config!(updated)
+    Ankusa.Verifier.validate_config!(updated)
+    Ankusa.Verifier.validate_shared!(updated)
+    Ankusa.HttpClient.Egress.validate_config!(updated)
+
+    new = updated |> Ankusa.Queue.static_sources() |> Map.new()
+    :ok = Ankusa.put_config(updated)
+
+    changed =
+      (Map.keys(old) ++ Map.keys(new))
+      |> Enum.uniq()
+      |> Enum.filter(&(Map.get(old, &1) != Map.get(new, &1)))
+      |> Enum.sort()
+
+    {:ok, changed}
   end
 end

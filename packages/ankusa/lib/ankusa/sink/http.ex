@@ -9,10 +9,17 @@ defmodule Ankusa.Sink.Http do
     * `:method`     — HTTP method (default `:post`)
     * `:headers`    — extra request headers as `[{key, value}]` strings
     * `:timeout_ms` — request/connect timeout (default `5000`)
-    * `:secret`     — sign every delivery ([Standard
+    * `:secret`     — **required unless `allow_unsigned: true`.** Signs every
+                       delivery ([Standard
                        Webhooks](https://www.standardwebhooks.com/)): a
                        `whsec_…` secret, or a list of them while rotating (one
                        `v1,` signature each). See `Ankusa.Sink.Http.Signer`
+    * `:allow_unsigned` — `true` sends deliveries with no signature (default
+                       `false`). Without it a sink with no `:secret` is refused
+                       by `validate_opts!/1` at load, and a delivery attempt
+                       for one that skipped it is dead-lettered: any host that
+                       can reach the receiver's URL could otherwise inject
+                       hooks. A `:secret` still signs when this is also set
     * `:max_response_bytes` — read at most this much of the response body
                        (default `65_536`); a longer one is cut off and the
                        connection closed. Only the status is used, so a large
@@ -36,7 +43,7 @@ defmodule Ankusa.Sink.Http do
   when a failed check was let through by `on_verify_failure: accept_flag` (treat
   that hook as unverified), `x-ankusa-dedupe-key` and `x-ankusa-replay-id` when
   the hook carries them, and `webhook-id`/`webhook-timestamp`/`webhook-signature`
-  with a `:secret`.
+  with a `:secret` (always, unless `allow_unsigned: true`).
   Provider request headers are forwarded per the source's `forward_headers`
   option (see `Ankusa.Sink.Message.forwarded_headers/2`); a forwarded name that
   collides with one of these or with `opts[:headers]` is dropped.
@@ -91,14 +98,18 @@ defmodule Ankusa.Sink.Http do
   end
 
   @doc """
-  Raise `ArgumentError` unless `opts` is a usable HTTP sink config: the
-  `:req_options` are transport-only and keep TLS verification on, and
-  `:allow_insecure_tls` is a boolean and `:cacertfile` names a file. Boot
+  Raise `ArgumentError` unless `opts` is a usable HTTP sink config: it has a
+  `:secret` or `allow_unsigned: true`, the `:req_options` are
+  transport-only and keep TLS verification on, `:allow_insecure_tls` is a
+  boolean and `:cacertfile` names a file. Boot
   (`Ankusa.HttpClient.Egress.validate_config!/1`) and the image's config loader
-  call it, so a bad sink fails at load instead of at its first delivery.
+  call it, so a bad sink fails at load instead of at its first delivery; the
+  admin API turns the same failure into `400 invalid_source`.
   """
   @spec validate_opts!(keyword()) :: :ok
   def validate_opts!(opts) do
+    validate_signing!(opts)
+
     insecure? = Keyword.get(opts, :allow_insecure_tls, false)
 
     unless is_boolean(insecure?) do
@@ -121,6 +132,35 @@ defmodule Ankusa.Sink.Http do
 
       other ->
         raise ArgumentError, "Sink.Http cacertfile must be a path, got: #{inspect(other)}"
+    end
+  end
+
+  defp validate_signing!(opts) do
+    unsigned? = Keyword.get(opts, :allow_unsigned, false)
+
+    unless is_boolean(unsigned?) do
+      raise ArgumentError,
+            "Sink.Http allow_unsigned must be true or false, got: #{inspect(unsigned?)}"
+    end
+
+    case {signing_secret(opts), unsigned?} do
+      {nil, false} ->
+        raise ArgumentError,
+              "Sink.Http requires secret: deliveries are signed so the receiver can tell " <>
+                "them from anything else that reaches its URL (set allow_unsigned: true " <>
+                "to send them unsigned)"
+
+      _signed_or_allowed ->
+        :ok
+    end
+  end
+
+  # `nil`, `""` and `[]` name no secret: a sink configured with one is unsigned
+  # in all but name, so it is held to the same rule as one with no `:secret`.
+  defp signing_secret(opts) do
+    case Keyword.get(opts, :secret) do
+      empty when empty in [nil, "", []] -> nil
+      secret -> secret
     end
   end
 
@@ -157,12 +197,18 @@ defmodule Ankusa.Sink.Http do
 
   defp insecure_tls?(opts), do: Keyword.get(opts, :allow_insecure_tls, false)
 
+  # A sink that skipped `validate_opts!/1` (a source built in code, or read from
+  # a store written before this rule) is still refused here: it would send hooks
+  # anyone can forge. Permanent: the same config fails until it is fixed.
   defp signature(env, opts) do
-    case Keyword.get(opts, :secret) do
-      nil ->
+    case {signing_secret(opts), Keyword.get(opts, :allow_unsigned, false)} do
+      {nil, true} ->
         {:ok, []}
 
-      secrets ->
+      {nil, _unsigned} ->
+        {:error, {:permanent, :unsigned_sink}}
+
+      {secrets, _unsigned} ->
         case Signer.headers(env.id, env.body, secrets, System.system_time(:second)) do
           {:ok, headers} -> {:ok, headers}
           :error -> {:error, {:permanent, :bad_secret}}

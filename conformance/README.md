@@ -50,7 +50,13 @@ then runs every registered SDK's native runner.
 ### Inputs by operation
 
 - `parse_claim_ref`: `{"ref": string}` → `ok` is
-  `{"tenant_id", "claim_id", "path"}`.
+  `{"tenant_id", "claim_id", "path"}`. A v1 ref
+  (`urn:ankusa:claim:v1:<tenant>:<claim_id>`) gives the bare gateway path; a
+  v2 ref (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`,
+  `exp_unix` 1–12 decimal digits with no leading zero, `signature` exactly 43
+  characters of `[A-Za-z0-9_-]`) gives the same path followed by
+  `?exp=<exp_unix>&sig=<signature>`. No SDK checks the signature or the
+  expiry: the gateway does, and `redeem` sends the path as parsed.
 - `parse_headers`: `{"headers": {string: string}}` → `ok` is
   `{"id", "source", "tenant": string|null, "content_type": string|null,
   "dedupe_key": string|null, "replay_id": string|null,
@@ -146,6 +152,32 @@ then runs every registered SDK's native runner.
      are ignored; no `v1,` entry equal (constant-time) to the base64
      HMAC-SHA256 of any secret → `no_matching_signature`
      (`field: "webhook-signature"`).
+- `receive_delivery`: `{"headers": {string: string}, "body": Body,
+  "receiver": {"secrets"?: [string], "allow_unsigned"?: bool,
+  "tolerance_seconds"?: int}, "now": int}` → `ok` is the `parse_headers`
+  object plus `"verified": bool`. This is the receiver-side decision every
+  SDK offers its users (the Elixir SDK's `Receiver` plug is built on it),
+  separate from any web framework: HTTP sinks are signed by default, so a
+  receiver is closed unless it is told otherwise. `receiver` is the
+  receiver's configuration; `secrets` defaults to `[]`, `allow_unsigned` to
+  `false`, `tolerance_seconds` to 300. The rules run in this order and the
+  first failure wins:
+  1. `secrets` non-empty → verify the delivery exactly as `verify_signature`
+     does (same checks, same errors, same `now` and tolerance); `verified` is
+     `true` on success. `allow_unsigned` changes nothing here: a configured
+     secret is never weakened.
+  2. `secrets` empty and `allow_unsigned` false → `InvalidSignatureError`
+     (`retryable=false`, `code: "invalid_secret"`, `field: null`), whatever
+     the headers say.
+  3. `secrets` empty and `allow_unsigned` true → skip the signature;
+     `verified` is `false`.
+  4. The hook headers are parsed as `parse_headers` does; a missing or empty
+     `x-ankusa-id` → `MissingHookIdError`. So the signature outcome decides
+     first: a delivery that fails it is `InvalidSignatureError` even when it
+     also has no `x-ankusa-id`.
+
+  A web receiver maps `InvalidSignatureError` to `401`, `MissingHookIdError`
+  to `400`.
 
 ### Helpers
 

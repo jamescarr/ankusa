@@ -13,6 +13,68 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Claim gateway authorization and signed, expiring refs (SEC-11).** The
+  gateway's built-in check (`claims:read` plus `tenant:<t>`/`tenant:*`, a
+  tenant-A credential on a tenant-B path is `403`) can be replaced with
+  `claim_check.authorize: {mod, fun, args}`, called before anything is read
+  with `%{principal, tenant_id, claim_id, conn}`. New **v2 refs**,
+  `urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<base64url hmac-sha256>`,
+  are minted when `claim_check.ref_signing_keys` (`[current | previous]`, each
+  at least 16 bytes, shown as `[REDACTED]` by `/v1/config`) is set, expire
+  after `claim_check.ref_ttl_ms` (default: the retention, else 30 days), and
+  redeem at `GET /v1/claims/<t>/<c>?exp=&sig=`: a signature no key produced is
+  `400 bad_signature`, a good one past its expiry `410 ref_expired`, and a v1
+  ref `400 unsigned_ref` once keys are set (unless
+  `claim_check.accept_unsigned_refs: true`; `redeem/3` applies the same rule,
+  `Ankusa.ClaimCheck.verify_ref/2`). `Ankusa.ClaimCheck.Ref` parses both
+  grammars and has `sign/3`, `verify/3` and `signed/4`. With no keys nothing
+  changes: refs stay v1 and are served. `claim_check.max_concurrent_reads`
+  (default 1024, `0` = no cap) sheds a node's excess requests as `503
+  overloaded` + `Retry-After` before any read. The OpenAPI contract and the
+  AsyncAPI `claim` pattern describe v2; conformance has the `claim_ref.v2` and
+  `claim_check.redeem.signed` cases. A pre-SEC-11 node reads a v2 ref as
+  invalid: roll the gateways and the SDK readers before setting keys on the
+  writers.
+- **`Ankusa.SecretProvider` and `Ankusa.SourceStore.Static.publish/2` (SEC-9).**
+  The behaviour (`fetch(ref, opts)` returning `{:ok, binary} | {:error,
+  :not_found | :unavailable}`) a secret manager implements; the `ankusa_server`
+  image resolves `${sm:<provider>:<ref>}` through it. `publish/2` replaces the
+  sources a running instance with the static source store serves, after the
+  checks it boots under (durability under `wal: :none`, shared sources without a
+  verifier, verifier options, egress), and returns the ids that changed; a
+  refused spec applies nothing. Reads see the new spec on their next
+  `fetch/2`.
+- **Durable lifecycle outbox with revisions (SEC-2.b).** Lifecycle events are
+  no longer queued in memory: the audit row of a source or route change is
+  flagged `publish: true` and committed, with the redacted entity beside it
+  (`<<?o, seq>>`; an audit row still never holds a spec), in the same synced
+  batch as the change. `Ankusa.Lifecycle.Publisher` is a cursor reader over
+  those rows (`m:lifecycle_cursor`, synced on every advance; a first boot
+  starts at the end of the trail), so a `kill -9` right after
+  `SourceStore.put/5` returns still delivers `source.created` after the
+  restart, and events arrive in commit order. Events carry `revision`, `actor`,
+  `instance`, `sequence` and the full redacted entity on delete; the event `id`
+  is derived from the row (a keyed hash laid out as a UUID, version 8) and
+  `time` is the commit time, so a redelivery after a crash, or a replay, is the
+  same event and a consumer dedupes on `id`. `Ankusa.Replay` has a fourth kind,
+  `:lifecycle` (`since`/`until`, and the SEC-7 `tenants` filter; `POST /v1/replays
+  {"kind": "lifecycle"}`) that re-emits a window of the trail, adding `replayid`. A
+  pending audit row of a route or Redis-store source (a node killed mid-change)
+  is settled by comparing the subject's present state with the row's
+  `before_hash`/`after_hash`: applied (`ok`, announced), not applied (`failed`,
+  not announced) or neither (stays `interrupted`, announces a state-refresh
+  `updated`/`deleted` event with the current entity and revision).
+  `Ankusa.SourceStore` gains the optional `ready?/1` callback for it. The
+  `LifecycleEventV1` schema in the AsyncAPI document names the new attributes.
+  **Breaking:** the in-memory queue and its `:queue_full` / `:not_running`
+  drop reasons are gone (`ankusa_lifecycle_dropped_total` has `gave_up` and
+  `unreadable`), `Lifecycle.source_changed/3` and `route_changed/3` and
+  `Publisher.publish/4` are removed, a route deletion's `data` is the whole
+  route (it was `{"id": ...}`), and a node with lifecycle sinks but no store
+  runs no publisher. The store gains the `m:lifecycle_cursor` key and the `?o`
+  key family in the `audit` column family: additive, no format bump; a release
+  that predates them ignores both (and leaves orphaned `?o` rows when it prunes).
+
 - **Verifier hardening (SEC-8).** `Ankusa.Verifier.Hmac` caps `:tolerance` at
   `Ankusa.Verifier.max_tolerance_seconds/0` (3600 s): `validate_opts/1` returns
   `{:error, :bad_tolerance}` for anything but an integer from 0 to 3600,
@@ -252,6 +314,16 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - `Ankusa.fetch_config/1`, `Ankusa.HttpClient.validate!/2` (public).
 
 ### Changed
+
+- **Breaking (SEC-10):** `Sink.Http` is signed by default. `validate_opts!/1`
+  (so boot, and the image's loader) refuses a sink with neither `:secret` nor
+  `allow_unsigned: true` (`Sink.Http requires secret: …`), and a delivery
+  attempt for one that skipped validation is dead-lettered
+  (`{:error, {:permanent, :unsigned_sink}}`) instead of being sent unsigned.
+  `allow_unsigned: true` sends no signature headers and is for a receiver that
+  cannot verify; a `:secret` still signs when both are set. A deployment that
+  delivers unsigned adds `allow_unsigned: true` to those sinks, or better, a
+  `:secret` the receiver verifies (every SDK's `receive_delivery`).
 
 - **Breaking:** `Sink.Http` refuses, at delivery, a URL that is not `https`
   or that resolves to a denied address, with the default policy. A deployment

@@ -6,6 +6,23 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `ParsedClaimRef::parse()` and `ClaimCheckClient::redeem()` accept signed,
+  expiring v2 refs
+  (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
+  parsed `path` carries `?exp=&sig=` and `redeem()` requests it as is. The
+  gateway's `400 bad_signature` and `410 ref_expired` are a
+  `ClaimRejectedError`. The SDK never checks the signature or the expiry.
+- `Ankusa\Webhook\Receiver::receive($headers, $body, $secrets, $allowUnsigned,
+  $toleranceSeconds, $now)`, the receiver-side decision on one HTTP-sink
+  delivery. The sink signs every delivery unless configured
+  `allow_unsigned: true`, so a receiver is closed by default: with `$secrets`
+  the delivery must verify (as `Signature::verify`); with none and no
+  `$allowUnsigned` it throws `InvalidSignatureError` (`invalid_secret`). The
+  signature is judged before the hook id. Returns a `ReceivedDelivery`
+  (`headers`, `verified`).
+
 ### Changed
 
 - Accepts `guzzlehttp/guzzle ^8.2` and `guzzlehttp/psr7 ^3.1` as well as

@@ -121,6 +121,25 @@ defmodule Ankusa.Config do
               # who may read claims: see `Ankusa.Admin.Auth`. `mode: :none` is
               # accepted on loopback only
               auth: %{mode: :none},
+              # `{module, fun, args}`: called before every claim read, after
+              # authentication, as `apply(module, fun, [ctx | args])` with
+              # `ctx = %{principal, tenant_id, claim_id, conn}`; it returns
+              # `:ok` or `{:error, :forbidden}`. nil = the built-in check: the
+              # principal holds `claims:read` and `tenant:<t>` or `tenant:*`
+              authorize: nil,
+              # HMAC keys for v2 refs (`Ankusa.ClaimCheck.Ref`), each at least
+              # 16 bytes, `[current | previous]`: a ref is signed with the
+              # first and accepted if any signed it. [] mints v1 refs
+              ref_signing_keys: [],
+              # how long a v2 ref is good for, from the moment it is minted;
+              # nil = the retention (`retention_days`), else 30 days
+              ref_ttl_ms: nil,
+              # whether a v1 ref (no signature, no expiry) is still served;
+              # nil = only while `ref_signing_keys` is empty
+              accept_unsigned_refs: nil,
+              # claim requests the gateway serves at once, node-wide; past it
+              # a request is `503` + `Retry-After`. 0 = no limit
+              max_concurrent_reads: 1024,
               # target size of one pack object; a body larger than this still
               # gets a pack of its own
               pack_max_bytes: 16 * 1024 * 1024,
@@ -534,7 +553,8 @@ defmodule Ankusa.Config do
     {[:storage, :interval_ms], "storage.interval_ms"},
     {[:claim_check, :read_retries], "claim_check.read_retries"},
     {[:claim_check, :read_queue_max], "claim_check.read_queue_max"},
-    {[:claim_check, :read_cache_bytes], "claim_check.read_cache_bytes"}
+    {[:claim_check, :read_cache_bytes], "claim_check.read_cache_bytes"},
+    {[:claim_check, :max_concurrent_reads], "claim_check.max_concurrent_reads"}
   ]
 
   @key_prefix ~r"\A([A-Za-z0-9._-]+/)+\z"
@@ -564,6 +584,22 @@ defmodule Ankusa.Config do
       "claim_check.retention_days",
       "nil or an integer >= 1",
       &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    check!(
+      config,
+      [:claim_check, :ref_ttl_ms],
+      "claim_check.ref_ttl_ms",
+      "nil or a positive integer",
+      &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    check!(
+      config,
+      [:claim_check, :accept_unsigned_refs],
+      "claim_check.accept_unsigned_refs",
+      "nil, true or false",
+      &(&1 == nil or is_boolean(&1))
     )
 
     check!(

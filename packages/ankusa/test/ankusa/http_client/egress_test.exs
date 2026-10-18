@@ -360,6 +360,7 @@ defmodule Ankusa.HttpClient.EgressTest do
     test "rejects verify_none on any HTTP sink the config names" do
       insecure = [
         url: "https://hooks.example/",
+        allow_unsigned: true,
         req_options: [connect_options: [transport_opts: [verify: :verify_none]]]
       ]
 
@@ -388,13 +389,40 @@ defmodule Ankusa.HttpClient.EgressTest do
       config =
         Config.new(
           lifecycle: %{
-            sinks: [{Ankusa.Sink.Http, url: "https://h.example/", cacertfile: "/nope/ca.pem"}]
+            sinks: [
+              {Ankusa.Sink.Http,
+               url: "https://h.example/", allow_unsigned: true, cacertfile: "/nope/ca.pem"}
+            ]
           }
         )
 
       assert_raise ArgumentError, ~r/cacertfile "\/nope\/ca.pem" is not a readable file/, fn ->
         Egress.validate_config!(config)
       end
+    end
+
+    test "an HTTP sink with no secret and no allow_unsigned fails at load, naming the rule" do
+      lifecycle = Config.new(lifecycle: %{sinks: [{Ankusa.Sink.Http, url: "https://h.example/"}]})
+
+      assert_raise ArgumentError, ~r/requires secret/, fn ->
+        Egress.validate_config!(lifecycle)
+      end
+
+      source =
+        Config.new(
+          source_store:
+            {Ankusa.SourceStore.Static,
+             sources: %{"s" => [sinks: [{Ankusa.Sink.Http, url: "https://h.example/"}]]}}
+        )
+
+      assert_raise ArgumentError, ~r/requires secret/, fn -> Egress.validate_config!(source) end
+
+      signed =
+        Config.new(
+          lifecycle: %{sinks: [{Ankusa.Sink.Http, url: "https://h.example/", secret: "s3cret"}]}
+        )
+
+      assert :ok = Egress.validate_config!(signed)
     end
   end
 end

@@ -25,9 +25,9 @@ use ankusa::{
     AdminClient, AdminError, ClaimCheckClient, ClaimCheckError, ClientBuilder, DryRunRequest,
     InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules,
     ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError,
-    ReplayPatch, ReplaySpec, RouteInput, RoutePatch, RoutesClient, RoutesError, Transport,
-    TransportError, VerifyOptions, decode_message, parse_claim_ref, parse_headers,
-    verify_signature,
+    ReceiveError, ReceiveOptions, ReplayPatch, ReplaySpec, RouteInput, RoutePatch, RoutesClient,
+    RoutesError, Transport, TransportError, VerifyOptions, decode_message, parse_claim_ref,
+    parse_headers, receive_delivery, verify_signature,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -265,6 +265,46 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
             let verified =
                 verify_signature(&headers, &body, &secrets, options).map_err(OpError::Signature)?;
             Ok(json!({ "id": verified.id, "timestamp": verified.timestamp }))
+        }
+        "receive_delivery" => {
+            let headers = input_headers(case);
+            let body = body_bytes(case.input.get("body"));
+            let receiver = &case.input["receiver"];
+            let options = ReceiveOptions {
+                secrets: receiver
+                    .get("secrets")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                allow_unsigned: receiver
+                    .get("allow_unsigned")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                tolerance_seconds: receiver.get("tolerance_seconds").and_then(Value::as_u64),
+                now: Some(input_required(case, "now")),
+            };
+            let delivery =
+                receive_delivery(&headers, &body, &options).map_err(|err| match err {
+                    ReceiveError::Signature(err) => OpError::Signature(err),
+                    ReceiveError::MissingHookId(err) => OpError::Hook(err),
+                    other => panic!("unexpected receive error: {other}"),
+                })?;
+            let parsed = delivery.headers;
+            Ok(json!({
+                "verified": delivery.verified,
+                "id": parsed.id,
+                "source": parsed.source,
+                "tenant": parsed.tenant,
+                "content_type": parsed.content_type,
+                "dedupe_key": parsed.dedupe_key,
+                "replay_id": parsed.replay_id,
+                "idempotency_key": parsed.idempotency_key,
+            }))
         }
         "parse_headers" => {
             let headers = input_headers(case);

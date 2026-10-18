@@ -130,6 +130,31 @@ pass several during a rotation. `VerifyOptions::tolerance_seconds` (default
 constant time; a failure is an `InvalidSignatureError` with `code` and
 `field`, never retryable.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default. `receive_delivery`
+is the one call that decides: with the sink's `secrets` it verifies as above;
+with none, and no `allow_unsigned`, it refuses every delivery
+(`InvalidSignatureError`, code `invalid_secret`) — otherwise any host that can
+reach your URL could inject hooks. A configured secret is never weakened by
+`allow_unsigned`. The signature is judged before the hook id, so a delivery
+that fails it is a `401` even when it also lacks `x-ankusa-id`
+(`ReceiveError::MissingHookId`, `400`).
+
+```rust
+use ankusa::http::HeaderMap;
+use ankusa::{receive_delivery, ReceiveError, ReceiveOptions};
+
+let options = ReceiveOptions {
+    secrets: vec!["whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw".to_owned()],
+    ..ReceiveOptions::default()
+};
+let headers = HeaderMap::new();
+let err = receive_delivery(&headers, b"{}", &options).unwrap_err();
+assert!(matches!(err, ReceiveError::Signature(_)));
+```
+
 ## Consuming queue messages
 
 An Ankusa sink delivers the `v: 1` queue message as JSON: the body inline
