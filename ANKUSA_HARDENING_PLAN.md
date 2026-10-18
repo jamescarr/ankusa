@@ -267,7 +267,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 2 — Tenant isolation at 10⁶ tenants
 
-- [ ] **TEN-1.a — ADR: tenant in the store key layout** · P0 · Deps: F6 `[design-gate]`
+- [x] **TEN-1.a — ADR: tenant in the store key layout** · P0 · Deps: F6 `[design-gate]`
   *Why:* hooks/deliveries/due/inflight/dead/archive keys carry no tenant (`store/keys.ex:30-43,48-78`); counting, bounding or purging one tenant's rows is a full scan; gauges fold whole index families every 15 s (`metrics/gauges.ex:105-124`).
   *Change:* ADR deciding: dense tenant ordinal (`tenants` CF: `ord → tenant_id`, `tenant_id → ord`, assigned by the single writer at first sight), due key `<<?d, ord::32, at::64, seq::64, sink::16>>`, inflight/dead likewise, a `counters` row per tenant (`pending, scheduled, inflight, dead, bytes, archive_pending`) maintained in every transition batch, per-tenant scan cursors for TEN-3, migration v2→v3 rewriting index rows in bounded resumable batches, and the rollback boundary.
   *Done when:* `docs/adr/0001-tenant-key-layout.md` merged with Proof section naming TEN-1.b's tests.
