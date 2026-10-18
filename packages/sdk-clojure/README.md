@@ -193,6 +193,33 @@ bytes; pass several during a rotation. `{:tolerance-seconds 300}` (the
 default) bounds the `webhook-timestamp` window. Signatures are compared with
 `MessageDigest/isEqual`.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default.
+`webhook/receive-delivery` is the one call that decides: with the sink's
+`:secrets` it verifies as above; with none, and no `:allow-unsigned true`, it
+refuses every delivery (`InvalidSignatureError`, `:code "invalid_secret"`) —
+otherwise any host that can reach your URL could inject hooks. A configured
+secret is never weakened by `:allow-unsigned`. The signature is judged before
+the hook id, so a delivery that fails it is a `401` even when it also lacks
+`x-ankusa-id` (`MissingHookIdError`, `400`).
+
+```clojure
+(require '[ankusa.sdk.webhook :as webhook]
+         '[ankusa.sdk.errors :as errors])
+
+(try
+  (webhook/receive-delivery (:headers request) raw-body-bytes {:secrets [secret]})
+  ;; the parse-headers map plus :verified (false only for an unsigned delivery
+  ;; :allow-unsigned true let through)
+  (catch clojure.lang.ExceptionInfo e
+    (case (name (errors/error-type e))
+      "InvalidSignatureError" {:status 401 :body (str "invalid signature: " (:code (ex-data e)))}
+      "MissingHookIdError" {:status 400}
+      (throw e))))
+```
+
 ## Consuming queue messages
 
 Ankusa publishes each delivery as a JSON v1 message over the configured

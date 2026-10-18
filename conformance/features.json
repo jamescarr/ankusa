@@ -25,7 +25,8 @@
     "admin_quarantine",
     "decode_message",
     "idempotency_key",
-    "verify_signature"
+    "verify_signature",
+    "receive_delivery"
   ],
   "features": [
     {"id": "claim_ref.parse", "description": "Parse urn:ankusa:claim:v1:<tenant>:<claim_id> into tenant_id, claim_id, and the /v1/claims/{tenant_id}/{claim_id} path; anything else raises InvalidClaimRefError."},
@@ -45,6 +46,7 @@
     {"id": "message.idempotency_key", "description": "The idempotency key: the message's idempotency_key field (or the x-ankusa-idempotency-key header) when present; otherwise computed as tenant:source_id:dedupe_key (tenant 'default' when null) for a non-empty dedupe_key, else id. With include_replay and a replay_id, append #replay:<replay_id>."},
     {"id": "webhook.verify_signature", "description": "Verify a Standard Webhooks signature: webhook-signature holds space-separated v1,<base64> entries, each an HMAC-SHA256 over <webhook-id>.<webhook-timestamp>.<body> with one configured secret (whsec_ + base64 key, or the raw UTF-8 bytes of any other string); any matching entry for any secret passes (constant-time compare); webhook-timestamp must be within tolerance_seconds (default 300) of now. Header names are case-insensitive. Returns the id and the timestamp."},
     {"id": "webhook.verify_signature.errors", "description": "Failures raise InvalidSignatureError(retryable=false, code, field), checked in this order: no secret, or a whsec_ secret whose remainder is not valid base64 -> invalid_secret (field null); a missing or empty webhook-id, webhook-timestamp, webhook-signature (in that order) -> missing_header (field = that header); a timestamp that is not all decimal digits -> invalid_timestamp; |now - timestamp| > tolerance -> timestamp_out_of_tolerance (both field webhook-timestamp); no matching v1 entry (other versions are ignored) -> no_matching_signature (field webhook-signature)."},
+    {"id": "webhook.require_signature", "description": "A receiver of Ankusa's HTTP sink (receive_delivery) requires a signature by default. With secrets configured it verifies the delivery exactly as verify_signature does and answers InvalidSignatureError (a 401) for a missing or bad signature; allow_unsigned does not weaken a configured secret. With no secrets and no allow_unsigned it refuses every delivery with InvalidSignatureError(invalid_secret, field null), so an unconfigured receiver is never open. allow_unsigned: true with no secrets accepts a delivery unverified (verified=false). The signature is checked before the hook id: a delivery with no x-ankusa-id raises MissingHookIdError only once it passed (or was allowed to skip) the signature check. Success returns the parsed delivery headers plus verified."},
     {"id": "routes.crud", "description": "Create, list, read, replace, update, and delete route definitions over the route-management listener (routes.admin.port)."},
     {"id": "routes.ip_rules", "description": "Get and replace the global IP rules."},
     {"id": "routes.dry_run", "description": "Dry-run a request against the route table and return the decision without capturing anything."},

@@ -217,6 +217,7 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
     message?: string;
     include_replay?: boolean;
     spec?: Record<string, unknown>;
+    receiver?: { secrets?: string[]; allow_unsigned?: boolean; tolerance_seconds?: number };
   };
   const gateway = input.gateway as Gateway;
   const client = input.client ?? {};
@@ -233,6 +234,27 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         now: input.now as number,
         ...(input.tolerance_seconds === undefined ? {} : { toleranceSeconds: input.tolerance_seconds as number }),
       });
+    }
+    case "receive_delivery": {
+      const receiver = input.receiver ?? {};
+      const received = sdk.receiveDelivery({
+        headers: input.headers ?? {},
+        body: bodyBytes(input.body as Body | undefined),
+        now: input.now as number,
+        ...(receiver.secrets === undefined ? {} : { secrets: receiver.secrets }),
+        ...(receiver.allow_unsigned === undefined ? {} : { allowUnsigned: receiver.allow_unsigned }),
+        ...(receiver.tolerance_seconds === undefined ? {} : { toleranceSeconds: receiver.tolerance_seconds }),
+      });
+      return {
+        verified: received.verified,
+        id: received.id,
+        source: received.source,
+        tenant: received.tenant,
+        content_type: received.contentType,
+        dedupe_key: received.dedupeKey,
+        replay_id: received.replayId,
+        idempotency_key: received.idempotencyKey,
+      };
     }
     case "parse_headers": {
       const parsed = sdk.parseHeaders(input.headers ?? {});

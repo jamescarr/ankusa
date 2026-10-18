@@ -15,6 +15,13 @@ this project follows [Semantic Versioning](https://semver.org/).
   and `410 ref_expired` are a `ClaimRejectedError`; its `503 overloaded` is a
   `ClaimCheckUnavailableError`. The SDK never checks the signature or the
   expiry.
+- `receiveDelivery({ headers, body, secrets?, allowUnsigned?, toleranceSeconds?, now? })`,
+  the receiver-side decision on one HTTP-sink delivery. The sink signs every
+  delivery unless configured `allow_unsigned: true`, so a receiver is closed by
+  default: with `secrets` the delivery must verify (as `verifySignature`); with
+  none and no `allowUnsigned: true` it throws `InvalidSignatureError`
+  (`invalid_secret`). The signature is judged before the hook id. Returns the
+  parsed headers plus `verified`.
 
 ### Changed
 

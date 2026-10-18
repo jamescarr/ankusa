@@ -130,7 +130,10 @@ The always-on tests cover:
   the `BlobStore.Azure` request plumbing (Put Blob headers, SAS appending vs.
   bearer `:token_provider`, `get_range` windows, `list` XML, `:not_found`); the
   `Ankusa.BlobStore.Azure.ManagedIdentity` token provider (IMDS fetch shape,
-  caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
+  caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, the
+  signed-by-default rule (a sink with neither `secret` nor `allow_unsigned: true`
+  fails `validate_opts!/1` with "requires secret", and a delivery for one that
+  skipped it is dead-lettered unsent), and the
   rule that a redirect is reported rather than followed; the shared
   `Ankusa.HttpClient` allowlist; the egress policy (`Ankusa.HttpClient.Egress`:
   loopback, metadata, private ranges, mapped IPv6 and odd IPv4 spellings,
@@ -580,6 +583,13 @@ runner also runs inside its own `mise run check:package <pkg>`. Adding a
 feature to `features.json` makes every SDK fail until it implements the
 feature; the vector format and runner contract are in
 `conformance/README.md`.
+
+`webhook.require_signature` (`cases/receive.json`) is the receiver half of
+signed-by-default: every SDK's `receive_delivery` refuses an unsigned delivery
+unless told `allow_unsigned`, verifies a signed one, and judges the signature
+before the hook id. The Elixir `Ankusa.SDK.Receiver` plug is tested on top of it
+(`receiver_test.exs`: it refuses to start without a secret, answers `401` to an
+unsigned POST).
 
 ## Verifying the worked example
 

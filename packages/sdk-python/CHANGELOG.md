@@ -13,6 +13,14 @@ this project follows [Semantic Versioning](https://semver.org/).
   parsed `path` carries `?exp=&sig=` and `redeem` requests it as is. The
   gateway's `400 bad_signature` and `410 ref_expired` are a
   `ClaimRejectedError`. The SDK never checks the signature or the expiry.
+- `receive_delivery(headers, body, *, secrets=(), allow_unsigned=False,
+  tolerance_seconds=300, now=None)`, the receiver-side decision on one
+  HTTP-sink delivery. The sink signs every delivery unless configured
+  `allow_unsigned: true`, so a receiver is closed by default: with `secrets`
+  the delivery must verify (as `verify_signature`); with none and no
+  `allow_unsigned=True` it raises `InvalidSignatureError` (`invalid_secret`).
+  The signature is judged before the hook id. Returns a `ReceivedDelivery`
+  (`headers`, `verified`).
 
 ## [0.5.0] - 2026-10-14
 

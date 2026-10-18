@@ -111,6 +111,16 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Changed
 
+- **Breaking (SEC-10):** a `type: http` sink needs a `secret` (a `whsec_`
+  secret, or a list while rotating) to load, or `allow_unsigned: true` to send
+  deliveries with no signature. The same check runs when the admin API writes a
+  source (`400 invalid_source`); a source already stored by
+  `source_store.type: persistent` or `redis` with an unsigned HTTP sink is
+  skipped at boot with a warning until it is rewritten with a `secret` (or
+  `allow_unsigned: true`). Every shipped example config sets
+  `secret: "${SINK_WHSEC}"`; the quickstart demo sets `allow_unsigned: true`
+  because its worker does not verify.
+
 - **Breaking:** a `type: http` sink URL must be `https://` to load (a plain
   `http://` one needs `egress.allow_insecure_http: true`), and at delivery its
   host may not resolve to a loopback, private or link-local address unless

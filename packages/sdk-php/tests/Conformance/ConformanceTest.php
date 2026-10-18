@@ -28,6 +28,7 @@ use Ankusa\Tests\Support\RecordingHttpClient;
 use Ankusa\Webhook\HookHeaders;
 use Ankusa\Webhook\InvalidSignatureError;
 use Ankusa\Webhook\MissingHookIdError;
+use Ankusa\Webhook\Receiver;
 use Ankusa\Webhook\Signature;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -239,6 +240,7 @@ final class ConformanceTest extends TestCase
                 \array_key_exists('tolerance_seconds', $inp) ? self::int($inp, 'tolerance_seconds') : Signature::DEFAULT_TOLERANCE_SECONDS,
                 self::int($inp, 'now'),
             ),
+            'receive_delivery' => self::receivedDelivery($inp),
             'redeem' => self::redeem($inp, $conn),
             'health' => self::claimCheck($conn)->health(),
             'routes_health' => self::routes($conn)->health(),
@@ -264,6 +266,36 @@ final class ConformanceTest extends TestCase
             'idempotency_key' => self::idempotencyKey($inp),
             default => self::fail("unknown conformance operation {$operation}"),
         };
+    }
+
+    /**
+     * @param array<string, mixed> $inp
+     *
+     * @return array<string, mixed>
+     */
+    private static function receivedDelivery(array $inp): array
+    {
+        $receiver = self::object($inp['receiver'] ?? null, 'receiver');
+        $received = Receiver::receive(
+            self::stringMap($inp['headers'] ?? null),
+            self::bodyBytes($inp['body'] ?? null),
+            self::secrets($receiver),
+            ($receiver['allow_unsigned'] ?? false) === true,
+            \array_key_exists('tolerance_seconds', $receiver) ? self::int($receiver, 'tolerance_seconds') : Signature::DEFAULT_TOLERANCE_SECONDS,
+            self::int($inp, 'now'),
+        );
+        $headers = $received->headers;
+
+        return [
+            'verified' => $received->verified,
+            'id' => $headers->id,
+            'source' => $headers->source,
+            'tenant' => $headers->tenant,
+            'content_type' => $headers->contentType,
+            'dedupe_key' => $headers->dedupeKey,
+            'replay_id' => $headers->replayId,
+            'idempotency_key' => $headers->idempotencyKey,
+        ];
     }
 
     /*

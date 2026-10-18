@@ -643,7 +643,10 @@ defmodule Ankusa.Admin.RouterTest do
            sources: %{
              "stripe" => [
                verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_leakhunter"},
-               sinks: [{Ankusa.Sink.Http, url: "https://hooks:leakhunter@sink.internal/h"}]
+               sinks: [
+                 {Ankusa.Sink.Http,
+                  url: "https://hooks:leakhunter@sink.internal/h", allow_unsigned: true}
+               ]
              ]
            }}
       )
@@ -692,6 +695,7 @@ defmodule Ankusa.Admin.RouterTest do
     sink =
       {Ankusa.Sink.Http,
        url: "https://sink.example/hook",
+       allow_unsigned: true,
        headers: [{"authorization", "Bearer leakhunter"}, {"x-team", "payments"}]}
 
     config =
@@ -711,6 +715,30 @@ defmodule Ankusa.Admin.RouterTest do
              JSON.decode!(conn.resp_body)["source_store"]["opts"]["sources"]["a"]["sinks"]
 
     assert headers == %{"authorization" => "[REDACTED]", "x-team" => "[REDACTED]"}
+  end
+
+  test "GET /v1/config hides a sink's secret and shows whether a sink is unsigned" do
+    signed = {Ankusa.Sink.Http, url: "https://sink.example/a", secret: "whsec_leakhunter"}
+    unsigned = {Ankusa.Sink.Http, url: "https://sink.example/b", allow_unsigned: true}
+
+    config =
+      test_config(
+        roles: [:dispatch],
+        admin: %{enabled: true},
+        source_store: {Ankusa.SourceStore.Static, sources: %{"a" => [sinks: [signed, unsigned]]}}
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+
+    refute conn.resp_body =~ "leakhunter"
+
+    assert [%{"opts" => signed_opts}, %{"opts" => unsigned_opts}] =
+             JSON.decode!(conn.resp_body)["source_store"]["opts"]["sources"]["a"]["sinks"]
+
+    assert signed_opts["secret"] == "[REDACTED]"
+    assert unsigned_opts["allow_unsigned"] == true
   end
 
   test "GET /v1/config shows only allowlisted adapter options and hides the rest" do
@@ -734,7 +762,11 @@ defmodule Ankusa.Admin.RouterTest do
           {Ankusa.SourceStore.Static,
            sources: %{
              "a" => [
-               sinks: [{Ankusa.Sink.Http, url: "https://h.example/p?token=LEAK&x=1"}, custom]
+               sinks: [
+                 {Ankusa.Sink.Http,
+                  url: "https://h.example/p?token=LEAK&x=1", allow_unsigned: true},
+                 custom
+               ]
              ]
            }}
       )

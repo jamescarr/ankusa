@@ -36,6 +36,7 @@ import io.github.jamescarr.ankusa.routes.RoutesUnavailableError;
 import io.github.jamescarr.ankusa.webhook.HookHeaders;
 import io.github.jamescarr.ankusa.webhook.InvalidSignatureError;
 import io.github.jamescarr.ankusa.webhook.MissingHookIdError;
+import io.github.jamescarr.ankusa.webhook.Receiver;
 import io.github.jamescarr.ankusa.webhook.Signature;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -211,6 +212,7 @@ public final class ConformanceTest {
       case "parse_claim_ref" -> ParsedClaimRef.parse(text(vector, "ref"));
       case "parse_headers" -> HookHeaders.parse(headerMap(vector));
       case "verify_signature" -> verifySignature(vector);
+      case "receive_delivery" -> receiveDelivery(vector);
       case "decode_message" -> Message.decode(text(vector, "message"));
       case "idempotency_key" -> Map.of("key", idempotencyKey(vector));
       case "redeem" ->
@@ -396,6 +398,38 @@ public final class ConformanceTest {
                 : Duration.ofSeconds(tolerance.asLong()),
             Instant.ofEpochSecond(vector.input().get("now").asLong()));
     return Map.of("id", verified.id(), "timestamp", verified.timestamp());
+  }
+
+  /**
+   * Runs {@code receive_delivery}: the receiver configuration is the vector's {@code receiver}, the
+   * result is the parsed headers plus {@code verified}.
+   */
+  private static ObjectNode receiveDelivery(CaseSpec vector) {
+    JsonNode body = vector.input().get("body");
+    byte[] bytes =
+        body == null
+            ? new byte[0]
+            : Gateway.bodyBytes(MAPPER.treeToValue(body, BodySpec.class), MAPPER);
+    JsonNode receiver = vector.input().get("receiver");
+    JsonNode secretNodes = receiver.get("secrets");
+    List<String> secrets =
+        secretNodes == null
+            ? List.of()
+            : MAPPER.treeToValue(secretNodes, new TypeReference<List<String>>() {});
+    JsonNode allowUnsigned = receiver.get("allow_unsigned");
+    JsonNode tolerance = receiver.get("tolerance_seconds");
+    Receiver.Options options =
+        new Receiver.Options(
+            secrets,
+            allowUnsigned != null && allowUnsigned.asBoolean(false),
+            tolerance == null
+                ? Signature.DEFAULT_TOLERANCE
+                : Duration.ofSeconds(tolerance.asLong()),
+            Instant.ofEpochSecond(vector.input().get("now").asLong()));
+    Receiver.Received received = Receiver.receive(headerMap(vector), bytes, options);
+    ObjectNode result = MAPPER.valueToTree(received.headers());
+    result.put("verified", received.verified());
+    return result;
   }
 
   /**

@@ -44,10 +44,16 @@ defmodule Ankusa.Sink.HttpTest do
   end
 
   # A public address literal under `https`: the default egress policy admits it
-  # without a DNS lookup, and `Req.Test` answers before any socket opens.
+  # without a DNS lookup, and `Req.Test` answers before any socket opens. Sinks
+  # are signed by default (SEC-10): these tests are about everything else, so
+  # they opt out unless they bring a `:secret`.
   defp opts(path, extra \\ []) do
-    [url: "https://203.0.113.10" <> path, req_options: [plug: {Req.Test, __MODULE__}]] ++ extra
+    [url: "https://203.0.113.10" <> path, req_options: [plug: {Req.Test, __MODULE__}]] ++
+      unsigned(extra) ++ extra
   end
+
+  defp unsigned(extra),
+    do: if(Keyword.has_key?(extra, :secret), do: [], else: [allow_unsigned: true])
 
   test "forwards the body verbatim, with the identity headers and content type", %{
     capture: capture
@@ -152,6 +158,7 @@ defmodule Ankusa.Sink.HttpTest do
     assert_raise ArgumentError, ~r/unsupported :req_options key :params/, fn ->
       Sink.Http.deliver(envelope(), %{attempt: 1},
         url: "https://203.0.113.10/hooks",
+        allow_unsigned: true,
         req_options: [params: [a: 1], plug: {Req.Test, __MODULE__}]
       )
     end
@@ -346,6 +353,68 @@ defmodule Ankusa.Sink.HttpTest do
       assert Agent.get(capture, & &1) == []
     end
 
+    test "allow_unsigned: true sends no signature headers", %{capture: capture} do
+      assert :ok = Sink.Http.deliver(envelope(), %{attempt: 1}, opts("/hooks"))
+
+      assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+      refute Enum.any?(headers, fn {name, _} -> String.starts_with?(name, "webhook-") end)
+    end
+
+    test "allow_unsigned beside a secret still signs", %{capture: capture} do
+      assert :ok =
+               Sink.Http.deliver(
+                 envelope(),
+                 %{attempt: 1},
+                 opts("/hooks", secret: @secret, allow_unsigned: true)
+               )
+
+      assert [{"POST", "/hooks", headers, _body}] = Agent.get(capture, & &1)
+      assert Enum.any?(headers, fn {name, _} -> name == "webhook-signature" end)
+    end
+
+    test "a sink with no secret that skipped validation is dead-lettered, and nothing is sent", %{
+      capture: capture
+    } do
+      unsigned = [url: "https://203.0.113.10/hooks", req_options: [plug: {Req.Test, __MODULE__}]]
+
+      assert Sink.Http.deliver(envelope(), %{attempt: 1}, unsigned) ==
+               {:error, {:permanent, :unsigned_sink}}
+
+      assert Agent.get(capture, & &1) == []
+    end
+
+    test "requires secret: validate_opts! refuses a sink with neither a secret nor allow_unsigned" do
+      assert_raise ArgumentError, ~r/requires secret/, fn ->
+        Sink.Http.validate_opts!(url: "https://hooks.example/")
+      end
+
+      assert_raise ArgumentError, ~r/requires secret/, fn ->
+        Sink.Http.validate_opts!(url: "https://hooks.example/", allow_unsigned: false)
+      end
+
+      for empty <- ["", []] do
+        assert_raise ArgumentError, ~r/requires secret/, fn ->
+          Sink.Http.validate_opts!(url: "https://hooks.example/", secret: empty)
+        end
+      end
+
+      assert :ok = Sink.Http.validate_opts!(url: "https://hooks.example/", secret: @secret)
+      assert :ok = Sink.Http.validate_opts!(url: "https://hooks.example/", allow_unsigned: true)
+
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: "https://hooks.example/",
+                 secret: [@secret],
+                 allow_unsigned: true
+               )
+    end
+
+    test "allow_unsigned must be a boolean" do
+      assert_raise ArgumentError, ~r/allow_unsigned must be true or false/, fn ->
+        Sink.Http.validate_opts!(url: "https://hooks.example/", allow_unsigned: "yes")
+      end
+    end
+
     test "signs exactly what the SDK conformance vectors expect" do
       %{"cases" => cases} =
         "../../conformance/cases/signature.json" |> File.read!() |> JSON.decode!()
@@ -412,7 +481,7 @@ defmodule Ankusa.Sink.HttpTest do
       Sink.Http.deliver(
         envelope(),
         ctx,
-        [url: url, req_options: [plug: {Req.Test, __MODULE__}]] ++ extra
+        [url: url, allow_unsigned: true, req_options: [plug: {Req.Test, __MODULE__}]] ++ extra
       )
     end
 
@@ -547,7 +616,10 @@ defmodule Ankusa.Sink.HttpTest do
         })
 
       assert :ok =
-               Sink.Http.deliver(envelope(), ctx, url: "http://hooks.invalid:#{port}/deliveries")
+               Sink.Http.deliver(envelope(), ctx,
+                 url: "http://hooks.invalid:#{port}/deliveries",
+                 allow_unsigned: true
+               )
 
       assert_received {:request, ["hooks.invalid:" <> _], "/deliveries"}
     end
@@ -558,13 +630,18 @@ defmodule Ankusa.Sink.HttpTest do
 
     test "rejects verify_none" do
       assert_raise ArgumentError, ~r/verify_none/, fn ->
-        Sink.Http.validate_opts!(url: "https://hooks.example/", req_options: @insecure)
+        Sink.Http.validate_opts!(
+          url: "https://hooks.example/",
+          allow_unsigned: true,
+          req_options: @insecure
+        )
       end
 
       # at delivery too, for a sink that never went through config validation
       assert {:error, {:raised, %ArgumentError{message: message}}} =
                Sink.safe_deliver(Sink.Http, envelope(), %{attempt: 1},
                  url: "https://203.0.113.10/",
+                 allow_unsigned: true,
                  req_options: @insecure
                )
 
@@ -575,12 +652,17 @@ defmodule Ankusa.Sink.HttpTest do
       assert :ok =
                Sink.Http.validate_opts!(
                  url: "https://hooks.example/",
+                 allow_unsigned: true,
                  req_options: @insecure,
                  allow_insecure_tls: true
                )
 
       assert_raise ArgumentError, ~r/allow_insecure_tls must be true or false/, fn ->
-        Sink.Http.validate_opts!(url: "https://hooks.example/", allow_insecure_tls: "yes")
+        Sink.Http.validate_opts!(
+          url: "https://hooks.example/",
+          allow_unsigned: true,
+          allow_insecure_tls: "yes"
+        )
       end
     end
   end

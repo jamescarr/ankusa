@@ -131,7 +131,7 @@ defmodule AnkusaServer.Config do
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms secret max_response_bytes cacertfile allow_insecure_tls)
+  @http_sink_keys ~w(type url method headers timeout_ms secret allow_unsigned max_response_bytes cacertfile allow_insecure_tls)
   @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
   @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms)
   @sasl_keys ~w(mechanism username password)
@@ -1809,6 +1809,7 @@ defmodule AnkusaServer.Config do
           |> put_opt(:max_response_bytes, int_opt(sink, "max_response_bytes", path))
           |> put_opt(:cacertfile, string_opt(sink, "cacertfile", path))
           |> put_opt(:allow_insecure_tls, bool_opt(sink, "allow_insecure_tls", path))
+          |> put_opt(:allow_unsigned, bool_opt(sink, "allow_unsigned", path))
 
         validate_http_sink!(opts, path)
         {Ankusa.Sink.Http, opts}

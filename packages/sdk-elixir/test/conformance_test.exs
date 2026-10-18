@@ -158,6 +158,34 @@ defmodule Ankusa.SDK.ConformanceTest do
     %{"id" => verified.id, "timestamp" => verified.timestamp}
   end
 
+  defp run("receive_delivery", _case, _params_by_id, input, _base_url, _recorder) do
+    receiver = input["receiver"]
+
+    opts =
+      [now: input["now"], secrets: receiver["secrets"] || []] ++
+        if(receiver["allow_unsigned"], do: [allow_unsigned: true], else: []) ++
+        if(receiver["tolerance_seconds"],
+          do: [tolerance_seconds: receiver["tolerance_seconds"]],
+          else: []
+        )
+
+    body = ConformanceGateway.body_bytes(input["body"])
+
+    %{headers: headers, verified: verified?} =
+      unwrap!(Webhook.receive_delivery(input["headers"], body, opts))
+
+    %{
+      "verified" => verified?,
+      "id" => headers.id,
+      "source" => headers.source,
+      "tenant" => headers.tenant,
+      "content_type" => headers.content_type,
+      "dedupe_key" => headers.dedupe_key,
+      "replay_id" => headers.replay_id,
+      "idempotency_key" => headers.idempotency_key
+    }
+  end
+
   defp run("parse_headers", _case, _params_by_id, input, _base_url, _recorder) do
     headers = unwrap!(Webhook.parse_headers(input["headers"]))
 
