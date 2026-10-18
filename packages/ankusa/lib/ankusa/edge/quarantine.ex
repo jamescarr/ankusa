@@ -157,6 +157,8 @@ defmodule Ankusa.Edge.Quarantine do
   @spec recent(atom(), non_neg_integer()) :: {:ok, [map()]} | {:error, term()}
   def recent(_instance, 0), do: {:ok, []}
 
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def recent(instance, limit) when is_integer(limit) and limit > 0 do
     %{lo: lo, hi: hi} = Keys.family(:quarantine)
 
@@ -480,6 +482,8 @@ defmodule Ankusa.Edge.Quarantine do
 
   # Trusted, internally written data (the reason may be any term), but a
   # summary a scan cannot read must not wedge it.
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp decode_summary(value) do
     case :erlang.binary_to_term(value) do
       %{} = summary -> {:ok, summary}
@@ -489,6 +493,8 @@ defmodule Ankusa.Edge.Quarantine do
     ArgumentError -> :error
   end
 
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp decode_held(bin, received_at, id, summary) do
     case :erlang.binary_to_term(bin) do
       %{method: _} = map ->

@@ -107,6 +107,8 @@ defmodule Ankusa.Store.Backup do
   end
 
   @impl true
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
     %Config{} = config = Ankusa.config(instance)
@@ -213,6 +215,8 @@ defmodule Ankusa.Store.Backup do
 
   # ── one backup ────────────────────────────────────────────────────────────
 
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp backup(state) do
     started = System.monotonic_time()
     dir = checkpoint_dir(state.config)
@@ -437,6 +441,8 @@ defmodule Ankusa.Store.Backup do
   defp reverse_entries(error), do: error
 
   # One file in memory at a time.
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp upload(instance, store, path, name, kind, key) do
     with {:ok, bin} <- File.read(path),
          :ok <- put(instance, store, key, bin) do
@@ -583,6 +589,8 @@ defmodule Ankusa.Store.Backup do
 
   @doc "Remove the marker `reconcile_pending?/1` looks for, once the reconcile succeeded."
   @spec clear_restore_marker(Path.t()) :: :ok | {:error, term()}
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   def clear_restore_marker(path) do
     case File.rm(Path.join(path, @restore_marker)) do
       ok when ok in [:ok, {:error, :enoent}] -> Ankusa.Fsync.fsync_dir(path)
@@ -637,6 +645,8 @@ defmodule Ankusa.Store.Backup do
     end)
   end
 
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp clear_dir(path) do
     with {:ok, names} <- File.ls(path) do
       Enum.reduce_while(names, :ok, fn name, :ok ->
@@ -831,6 +841,8 @@ defmodule Ankusa.Store.Backup do
     end
   end
 
+  # Trusted: the operator's own backup artifact, never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp decode_idx(bin) do
     case :erlang.binary_to_term(bin, [:safe]) do
       idx when is_map(idx) and map_size(idx) > 0 -> {:ok, idx}
@@ -910,6 +922,8 @@ defmodule Ankusa.Store.Backup do
 
   defp checkpoint_dir(config), do: Config.path(config, "store.checkpoint")
 
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp remove(dir) do
     case File.rm_rf(dir) do
       {:ok, _removed} -> :ok

@@ -47,8 +47,8 @@ defmodule Ankusa.Lifecycle do
   tenant, `"default"`.
   """
 
-  alias Ankusa.{Config, Envelope, Source}
   alias Ankusa.Admin.Redact
+  alias Ankusa.{Config, Envelope, Source}
   alias Ankusa.Lifecycle.Publisher
   alias Ankusa.Routes.Route
 
@@ -56,6 +56,9 @@ defmodule Ankusa.Lifecycle do
   @content_type "application/cloudevents+json"
 
   @type action :: :created | :updated | :deleted
+
+  @typedoc "A `Source` with no tenant: each lifecycle event names its own."
+  @type lifecycle_source :: %Source{tenant_id: nil}
 
   @doc "The reserved source id lifecycle events travel under."
   @spec source_id() :: String.t()
@@ -68,7 +71,7 @@ defmodule Ankusa.Lifecycle do
   Built as a struct literal: `Ankusa.Source.new/2` requires a tenant, and the
   tenant of a lifecycle event varies per event.
   """
-  @spec source(atom()) :: {:ok, Source.t()} | :error
+  @spec source(atom()) :: {:ok, lifecycle_source()} | :error
   def source(instance) do
     case Ankusa.config(instance).lifecycle.sinks do
       [] -> :error

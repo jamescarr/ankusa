@@ -76,6 +76,8 @@ defmodule Ankusa.Envelope do
 
   @doc "Inverse of `to_binary/1`."
   @spec from_binary(binary()) :: t()
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
   def from_binary(bin) do
     # Trusted, internally-written data. NOT `:safe`: envelopes legitimately carry
     # module atoms (e.g. `verification.provider`) that a fresh decoding node may

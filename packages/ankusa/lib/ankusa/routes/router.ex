@@ -82,13 +82,15 @@ defmodule Ankusa.Routes.Router do
   post "/admin/routes/test" do
     instance = instance(conn)
 
-    with {:ok, body, conn} <- read_json(conn) do
-      case Routes.dry_run(instance, body) do
-        {:ok, result} -> send_json(conn, 200, result)
-        {:error, {:invalid, field, message}} -> invalid_request(conn, field, message)
-      end
-    else
-      {:error, :body, conn} -> invalid_body(conn)
+    case read_json(conn) do
+      {:ok, body, conn} ->
+        case Routes.dry_run(instance, body) do
+          {:ok, result} -> send_json(conn, 200, result)
+          {:error, {:invalid, field, message}} -> invalid_request(conn, field, message)
+        end
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
     end
   end
 
@@ -109,9 +111,8 @@ defmodule Ankusa.Routes.Router do
   post "/admin/routes" do
     instance = instance(conn)
 
-    with {:ok, body, conn} <- read_json(conn) do
-      conn |> write(Routes.create(instance, body), 201)
-    else
+    case read_json(conn) do
+      {:ok, body, conn} -> conn |> write(Routes.create(instance, body), 201)
       {:error, :body, conn} -> invalid_body(conn)
     end
   end
@@ -128,9 +129,8 @@ defmodule Ankusa.Routes.Router do
   put "/admin/routes/:id" do
     instance = instance(conn)
 
-    with {:ok, body, conn} <- read_json(conn) do
-      conn |> write(Routes.replace(instance, id, body), 200)
-    else
+    case read_json(conn) do
+      {:ok, body, conn} -> conn |> write(Routes.replace(instance, id, body), 200)
       {:error, :body, conn} -> invalid_body(conn)
     end
   end
@@ -138,9 +138,8 @@ defmodule Ankusa.Routes.Router do
   patch "/admin/routes/:id" do
     instance = instance(conn)
 
-    with {:ok, body, conn} <- read_json(conn) do
-      conn |> write(Routes.update(instance, id, body), 200)
-    else
+    case read_json(conn) do
+      {:ok, body, conn} -> conn |> write(Routes.update(instance, id, body), 200)
       {:error, :body, conn} -> invalid_body(conn)
     end
   end
@@ -162,19 +161,21 @@ defmodule Ankusa.Routes.Router do
   put "/admin/ip-rules" do
     instance = instance(conn)
 
-    with {:ok, body, conn} <- read_json(conn) do
-      case Routes.put_ip_rules(instance, body) do
-        {:ok, ip_rules} ->
-          send_json(conn, 200, ip_rules_json(ip_rules))
+    case read_json(conn) do
+      {:ok, body, conn} ->
+        case Routes.put_ip_rules(instance, body) do
+          {:ok, ip_rules} ->
+            send_json(conn, 200, ip_rules_json(ip_rules))
 
-        {:error, {:invalid, field, message}} ->
-          send_json(conn, 400, %{error: "invalid_ip_rules", field: field, message: message})
+          {:error, {:invalid, field, message}} ->
+            send_json(conn, 400, %{error: "invalid_ip_rules", field: field, message: message})
 
-        {:error, reason} ->
-          store_error(conn, reason)
-      end
-    else
-      {:error, :body, conn} -> invalid_body(conn)
+          {:error, reason} ->
+            store_error(conn, reason)
+        end
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
     end
   end
 

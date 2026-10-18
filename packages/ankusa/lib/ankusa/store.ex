@@ -91,6 +91,9 @@ defmodule Ankusa.Store do
     }
   end
 
+  # rocksdb's spec says `new_cache/2` cannot fail, but the open path answers an
+  # unexpected `{:error, _}` with a refused open rather than a crash.
+  @dialyzer {:no_match, init: 1}
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
@@ -183,6 +186,8 @@ defmodule Ankusa.Store do
     end
   end
 
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   defp publish(instance, path, cache, db, cfs, config, origin) do
     table = :"ankusa_store_#{instance}"
 
@@ -944,6 +949,8 @@ defmodule Ankusa.Store do
   defp raised_by_nif?([{:rocksdb, _fun, _args, _location} | _]), do: true
   defp raised_by_nif?(_stacktrace), do: false
 
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   defp handles(instance) do
     table = :"ankusa_store_#{instance}"
 

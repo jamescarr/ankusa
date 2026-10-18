@@ -48,7 +48,7 @@ defmodule Ankusa.SDK.Routes do
   @spec new(String.t(), keyword()) :: t()
   def new(base_url, opts \\ []), do: %__MODULE__{http: HTTP.new(base_url, opts)}
 
-  @doc "Liveness probe: `GET /health` → `{\"status\", \"routes\"}`."
+  @doc ~S|Liveness probe: `GET /health` → `{"status", "routes"}`.|
   @spec health(t()) :: {:ok, term()} | {:error, Exception.t()}
   def health(%__MODULE__{} = client), do: json(client, :get, "/health")
 

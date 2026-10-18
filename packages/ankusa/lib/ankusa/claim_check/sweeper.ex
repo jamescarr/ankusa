@@ -22,8 +22,8 @@ defmodule Ankusa.ClaimCheck.Sweeper do
 
   require Logger
 
-  alias Ankusa.{Config, Telemetry}
   alias Ankusa.ClaimCheck.{Ref, Stores}
+  alias Ankusa.{Config, Telemetry}
 
   # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -105,6 +105,8 @@ defmodule Ankusa.ClaimCheck.Sweeper do
   # One partition that cannot be removed (a permission, a busy mount) is
   # logged and skipped; the sweep goes on to the next, and the next tick tries
   # it again.
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp remove(dir) do
     case File.rm_rf(dir) do
       {:ok, _removed} ->

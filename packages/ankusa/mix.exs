@@ -16,7 +16,16 @@ defmodule Ankusa.MixProject do
       package: package(),
       source_url: @source_url,
       homepage_url: @source_url,
-      docs: docs()
+      docs: docs(),
+      # The floor `mix test --cover` enforces in `mise run check:package`;
+      # the shared test helpers are not product code.
+      test_coverage: [
+        summary: [threshold: 85],
+        ignore_modules: [~r/^Ankusa\.Test\./, Ankusa.TestHelpers]
+      ],
+      # Every PLT lives under _build, which CI caches (keyed on the toolchain pins
+      # and mix.lock), so a run rebuilds a PLT only when one of them changes.
+      dialyzer: [plt_core_path: "_build/plts", plt_local_path: "_build/plts"]
     ]
   end
 
@@ -158,7 +167,12 @@ defmodule Ankusa.MixProject do
       # listeners from the examples in it, so the document and the code cannot
       # drift apart.
       {:yaml_elixir, "~> 2.12", only: :test},
-      {:ex_doc, "~> 0.40", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
+      # Static analysis gates run by `mise run check:package` (dev only, so they
+      # never reach a consumer's dependency tree).
+      {:credo, "~> 1.7", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
+      {:sobelow, "~> 0.14", only: :dev, runtime: false}
     ]
   end
 

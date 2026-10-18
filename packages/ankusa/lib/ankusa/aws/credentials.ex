@@ -80,6 +80,8 @@ defmodule Ankusa.AWS.Credentials do
     end
   end
 
+  # The path comes from operator config or this node's own index, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp assume_role(opts, env, file, role) do
     with {:ok, token} <- File.read(file) do
       session = non_empty(env["AWS_ROLE_SESSION_NAME"]) || "ankusa"
@@ -228,8 +230,12 @@ defmodule Ankusa.AWS.Credentials do
   # Drop every cached credential (tests).
   def clear do
     case :ets.whereis(@table) do
-      :undefined -> :ok
-      tid -> :ets.delete_all_objects(tid) && :ok
+      :undefined ->
+        :ok
+
+      tid ->
+        :ets.delete_all_objects(tid)
+        :ok
     end
   end
 

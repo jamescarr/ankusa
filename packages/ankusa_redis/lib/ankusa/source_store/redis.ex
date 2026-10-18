@@ -284,43 +284,45 @@ defmodule Ankusa.SourceStore.Redis.State do
     config = Ankusa.config(instance)
     {_mod, store_opts} = config.source_store
 
-    with {:ok, table} <- take_table(instance) do
-      state = %{
-        instance: instance,
-        namespace: namespace,
-        table: table,
-        decoder: Keyword.get(store_opts, :decoder),
-        conn: Ankusa.via(instance, :source_redis),
-        pubsub: Ankusa.via(instance, :source_redis_pubsub),
-        tick_ms: Keyword.fetch!(opts, :tick_ms),
-        version: 0,
-        # said once per outage: the namespace lost its version key while this
-        # node holds API-managed sources
-        warned_missing?: false
-      }
+    case take_table(instance) do
+      {:ok, table} ->
+        state = %{
+          instance: instance,
+          namespace: namespace,
+          table: table,
+          decoder: Keyword.get(store_opts, :decoder),
+          conn: Ankusa.via(instance, :source_redis),
+          pubsub: Ankusa.via(instance, :source_redis_pubsub),
+          tick_ms: Keyword.fetch!(opts, :tick_ms),
+          version: 0,
+          # said once per outage: the namespace lost its version key while this
+          # node holds API-managed sources
+          warned_missing?: false
+        }
 
-      case :ets.lookup(table, :meta) do
-        [{:meta, version}] ->
-          resume(%{state | version: version})
+        case :ets.lookup(table, :meta) do
+          [{:meta, version}] ->
+            resume(%{state | version: version})
 
-        [] ->
-          # First boot: subscribe, and wait for Redis to confirm it, BEFORE
-          # loading, so a write in between is a message in the mailbox.
-          Table.insert_seeds(table, Keyword.get(store_opts, :sources, %{}))
+          [] ->
+            # First boot: subscribe, and wait for Redis to confirm it, BEFORE
+            # loading, so a write in between is a message in the mailbox.
+            Table.insert_seeds(table, Keyword.get(store_opts, :sources, %{}))
 
-          with :ok <- subscribe(state),
-               {:ok, state} <- load(state) do
-            # Once per boot, not on every reload: a resumed store and every
-            # later sync load the same entries again.
-            Ankusa.Verifier.warn_stored_shared(config, Table.stored_sources(table))
-            Process.send_after(self(), :tick, state.tick_ms)
-            {:ok, state}
-          else
-            {:error, reason} -> {:stop, reason}
-          end
-      end
-    else
-      {:error, reason} -> {:stop, {:source_table, reason}}
+            with :ok <- subscribe(state),
+                 {:ok, state} <- load(state) do
+              # Once per boot, not on every reload: a resumed store and every
+              # later sync load the same entries again.
+              Ankusa.Verifier.warn_stored_shared(config, Table.stored_sources(table))
+              Process.send_after(self(), :tick, state.tick_ms)
+              {:ok, state}
+            else
+              {:error, reason} -> {:stop, reason}
+            end
+        end
+
+      {:error, reason} ->
+        {:stop, {:source_table, reason}}
     end
   end
 
@@ -425,16 +427,14 @@ defmodule Ankusa.SourceStore.Redis.State do
   end
 
   defp subscribe(state) do
-    case Redix.PubSub.subscribe(state.pubsub, state.namespace, self()) do
-      {:ok, ref} ->
-        receive do
-          {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
-        after
-          @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
-        end
+    # `subscribe/3` answers `{:ok, ref}` only (its spec): a pub/sub connection
+    # that is down exits the call instead, which this process's supervisor sees.
+    {:ok, ref} = Redix.PubSub.subscribe(state.pubsub, state.namespace, self())
 
-      {:error, reason} ->
-        {:error, {:pubsub_subscribe_failed, reason}}
+    receive do
+      {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
+    after
+      @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
     end
   end
 
@@ -442,20 +442,16 @@ defmodule Ankusa.SourceStore.Redis.State do
   # subscribes without waiting: the confirmation, whenever Redis answers,
   # triggers the load. Nothing here blocks on Redis.
   defp resume(state) do
-    case Redix.PubSub.subscribe(state.pubsub, state.namespace, self()) do
-      {:ok, _ref} ->
-        Logger.info(
-          "[ankusa_redis] source store restarted with a loaded mirror " <>
-            "(#{length(Table.stored_keys(state.table))} sources); serving it and loading " <>
-            "from Redis once the subscription is confirmed"
-        )
+    {:ok, _ref} = Redix.PubSub.subscribe(state.pubsub, state.namespace, self())
 
-        Process.send_after(self(), :tick, state.tick_ms)
-        {:ok, state}
+    Logger.info(
+      "[ankusa_redis] source store restarted with a loaded mirror " <>
+        "(#{length(Table.stored_keys(state.table))} sources); serving it and loading " <>
+        "from Redis once the subscription is confirmed"
+    )
 
-      {:error, reason} ->
-        {:stop, {:pubsub_subscribe_failed, reason}}
-    end
+    Process.send_after(self(), :tick, state.tick_ms)
+    {:ok, state}
   end
 
   # ── reading Redis into the mirror ───────────────────────────────────────────

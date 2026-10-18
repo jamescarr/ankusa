@@ -365,5 +365,7 @@ defmodule Ankusa.ClaimCheck.Stores do
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   defp table(instance), do: :"ankusa_claim_stores_#{instance}"
 end

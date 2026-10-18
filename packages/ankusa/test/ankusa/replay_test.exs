@@ -9,8 +9,8 @@ defmodule Ankusa.ReplayTest do
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.{Envelope, Replay, Store, UUIDv7}
   alias Ankusa.Dispatch.Pipeline
+  alias Ankusa.{Envelope, Replay, Store, UUIDv7}
   alias Ankusa.Queue.Deliveries
   alias Ankusa.Storage.Compactor
   alias Ankusa.Store.Keys

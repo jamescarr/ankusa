@@ -33,8 +33,8 @@ defmodule Ankusa.Admin.Router do
 
   use Plug.Router, copy_opts_to_assign: :ankusa_opts
 
-  alias Ankusa.Config
   alias Ankusa.Admin.Redact
+  alias Ankusa.Config
   alias Ankusa.Edge.RateLimiter
 
   # A replay body is a filter, not a payload: three optional scalar keys. 64 KiB
@@ -212,16 +212,18 @@ defmodule Ankusa.Admin.Router do
   defp quarantine_index(conn) do
     params = Plug.Conn.fetch_query_params(conn).query_params
 
-    with {:ok, limit} <- int_param(params, "limit", @default_limit) do
-      case Ankusa.Edge.Quarantine.recent(instance(conn), clamp_limit(limit)) do
-        {:ok, entries} ->
-          send_json(conn, 200, %{entries: Enum.map(entries, &quarantine_entry/1)})
+    case int_param(params, "limit", @default_limit) do
+      {:ok, limit} ->
+        case Ankusa.Edge.Quarantine.recent(instance(conn), clamp_limit(limit)) do
+          {:ok, entries} ->
+            send_json(conn, 200, %{entries: Enum.map(entries, &quarantine_entry/1)})
 
-        {:error, _reason} ->
-          send_json(conn, 503, %{error: "store_unavailable"})
-      end
-    else
-      {:error, field} -> invalid_filter(conn, field)
+          {:error, _reason} ->
+            send_json(conn, 503, %{error: "store_unavailable"})
+        end
+
+      {:error, field} ->
+        invalid_filter(conn, field)
     end
   end
 
@@ -566,28 +568,30 @@ defmodule Ankusa.Admin.Router do
 
   defp replay_create(conn) do
     with_replay_body(conn, fn map, conn ->
-      with {:ok, spec} <- replay_spec(map) do
-        case Ankusa.Replay.start(instance(conn), spec) do
-          {:ok, :created, job} ->
-            send_json(conn, 202, Ankusa.Replay.to_json(job))
+      case replay_spec(map) do
+        {:ok, spec} ->
+          case Ankusa.Replay.start(instance(conn), spec) do
+            {:ok, :created, job} ->
+              send_json(conn, 202, Ankusa.Replay.to_json(job))
 
-          {:ok, :existing, job} ->
-            send_json(conn, 200, Ankusa.Replay.to_json(job))
+            {:ok, :existing, job} ->
+              send_json(conn, 200, Ankusa.Replay.to_json(job))
 
-          {:error, {:invalid, field}} ->
-            invalid_filter(conn, field)
+            {:error, {:invalid, field}} ->
+              invalid_filter(conn, field)
 
-          {:error, :too_many_replays} ->
-            send_json(conn, 409, %{error: "too_many_replays"})
+            {:error, :too_many_replays} ->
+              send_json(conn, 409, %{error: "too_many_replays"})
 
-          {:error, {:role_not_enabled, role}} ->
-            send_json(conn, 409, %{error: "role_not_enabled", role: to_string(role)})
+            {:error, {:role_not_enabled, role}} ->
+              send_json(conn, 409, %{error: "role_not_enabled", role: to_string(role)})
 
-          {:error, :store_unavailable} ->
-            send_json(conn, 503, %{error: "store_unavailable"})
-        end
-      else
-        {:error, field} -> invalid_filter(conn, field)
+            {:error, :store_unavailable} ->
+              send_json(conn, 503, %{error: "store_unavailable"})
+          end
+
+        {:error, field} ->
+          invalid_filter(conn, field)
       end
     end)
   end
@@ -609,16 +613,18 @@ defmodule Ankusa.Admin.Router do
 
   defp replay_update(conn, id) do
     with_replay_body(conn, fn map, conn ->
-      with {:ok, patch} <- replay_patch(map) do
-        case Ankusa.Replay.update(instance(conn), id, patch) do
-          {:ok, job} -> send_json(conn, 200, Ankusa.Replay.to_json(job))
-          {:error, :not_found} -> send_json(conn, 404, %{error: "replay_not_found"})
-          {:error, :finished} -> send_json(conn, 409, %{error: "replay_finished"})
-          {:error, {:invalid, field}} -> invalid_filter(conn, field)
-          {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
-        end
-      else
-        {:error, field} -> invalid_filter(conn, field)
+      case replay_patch(map) do
+        {:ok, patch} ->
+          case Ankusa.Replay.update(instance(conn), id, patch) do
+            {:ok, job} -> send_json(conn, 200, Ankusa.Replay.to_json(job))
+            {:error, :not_found} -> send_json(conn, 404, %{error: "replay_not_found"})
+            {:error, :finished} -> send_json(conn, 409, %{error: "replay_finished"})
+            {:error, {:invalid, field}} -> invalid_filter(conn, field)
+            {:error, :store_unavailable} -> send_json(conn, 503, %{error: "store_unavailable"})
+          end
+
+        {:error, field} ->
+          invalid_filter(conn, field)
       end
     end)
   end

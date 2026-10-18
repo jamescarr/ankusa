@@ -353,6 +353,8 @@ defmodule Ankusa.Routes.Snapshot do
 
   @doc "The instance's snapshot table name."
   @spec table(atom()) :: atom()
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   def table(instance), do: :"ankusa_routes_#{instance}"
 
   # The instance's `Ankusa.Routes.TableOwner` creates the table and lends it to
