@@ -33,6 +33,19 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   Behaviour change: listeners are now HTTP/1.1 only and close idle connections
   after 10 s; set `listener.http2: true` / `listener.read_timeout_ms` to
   restore Bandit's behaviour.
+- **Store format version, migration registry, downgrade guard.** The store
+  records its layout version under `m:format_version` (this release writes
+  format 1; a store without the key is format 1 and is stamped on first open).
+  A release that changes the key layout registers a migration in the store's
+  migration registry; on boot, before serving, migrations run in order in
+  bounded synced batches, each recording its place in `m:migrating:<to>` so a
+  node killed mid-migration resumes at the next boot. A store written by a
+  newer release refuses to open with `{:store_format_newer, found, supported}`
+  instead of being read by code that ignores its keys. New tasks:
+  `mix ankusa.store.migrate [--dry-run]` shows (or applies) the plan for a
+  data directory, and `mix ankusa.store.fixture <path>` packs a seeded store
+  as a `test/fixtures/store-v<n>.tar.zst` upgrade fixture. Upgrade order and
+  rollback: [`deployment.md`](../../docs/deployment.md#upgrading-between-releases).
 - `t:Ankusa.Net.cidr/0`, the type of a parsed CIDR range, now in the specs of
   `Ankusa.Net.parse_cidr/1` and `Ankusa.Net.ClientIP.resolve/2` in place of
   `%CIDR{}`.

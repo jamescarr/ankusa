@@ -22,7 +22,7 @@ Column families, all in that one database:
 
 | Family | Holds |
 | --- | --- |
-| `default` | the next-seq marker, migration markers, API-managed sources, rate-limit overrides, replay jobs (`j:<id>`) |
+| `default` | the next-seq marker, the store format version (`m:format_version`, see [Upgrading between releases](deployment.md#upgrading-between-releases)), migration markers, API-managed sources, rate-limit overrides, replay jobs (`j:<id>`) |
 | `hooks` | each committed hook, keyed by its `seq` |
 | `deliveries` | one delivery row per hook and sink |
 | `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs, ingest dedupe keys (`?u`) and their expiry index (`?e`) |

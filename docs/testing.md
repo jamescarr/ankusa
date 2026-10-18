@@ -70,6 +70,17 @@ The always-on tests cover:
   artifact that shows up after the first boot is never imported over live
   data, and under `wal: :none` the queue artifacts are left for a node that
   has a queue.
+- **Store upgrade** (`store_upgrade_test.exs`): current code boots every
+  checked-in fixture `test/fixtures/store-v<n>.tar.zst` (a store written at
+  format `n`, packed by `mix ankusa.store.fixture <path>` at the release that
+  introduced it) and finds its pending and dead-lettered hooks, quarantine pen,
+  API sources, archived hooks by id (`Storage.fetch/2`) and ingest dedupe keys.
+  A new format ships its migration in the store's migration registry and its
+  fixture in the same PR. An unversioned store is stamped format 1; a store
+  newer than the release refuses to open naming both versions (and so do
+  `mix ankusa.store.migrate` and its `--dry-run`); a migration killed after four
+  of ten batches resumes at the fifth, never repeating a committed batch; a
+  registry with a gap refuses rather than skip a format.
 - **HTTP adapters** (outbound): the SigV4 signing `BlobStore.S3` puts on the
   wire, pinned against AWS's published reference signatures and against the
   request `Req.Test` captures; the RSA-SHA256 *Signature version 1* signing
