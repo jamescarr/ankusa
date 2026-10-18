@@ -37,7 +37,7 @@ Why the package split (and when a new adapter earns its own package):
 | Stage | Modules |
 | --- | --- |
 | Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/publish.ex`, `edge/quarantine.ex`, `edge/rate_limiter.ex`, `edge/route_guard.ex`, `dedupe.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,none,schemes}.ex` |
-| Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `store.ex`, `store/{keys,migrate}.ex`, `store/backup.ex` (checkpoint upload + boot restore), `fsync.ex` |
+| Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `store.ex`, `store/{keys,migrate,migration}.ex` (the store format version and its migration registry), `store/backup.ex` (checkpoint upload + boot restore), `fsync.ex` |
 | Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex`, `blob_store/azure/managed_identity.ex` |
 | Dispatch (sinks, retries, DLQ) | `dispatch/pipeline.ex`, `dispatch/replayer.ex`, `replay.ex`, `sink.ex`, `sink/{log,http,message,description,sqs,google_pubsub}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
 | Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,stores,sweeper,cache,reader}.ex` (`stores.ex`: the claim store list, placement, write failover + breaker, read search; `cache.ex` + `reader.ex`: the gateway's read cache, and its coalescing, per-store adaptive limit, queue and deadline) |
@@ -92,6 +92,9 @@ one; CI runs the same tasks this table does.
 | `mise run new:adapter <name>` | scaffold `packages/ankusa_<name>/` |
 | `mise run status` | every package's version, last tag, published or not |
 | `mise run docker:smoke` | build `jamescarr/ankusa:dev`, run `packages/ankusa_server/scripts/smoke.sh` against it |
+| `mise run bench` | core's in-process ingest → dispatch bench (`N`, `CONCURRENCY`, `BODY_BYTES`, `SINK_LATENCY_MS` pass through) |
+| `mise run bench:gate` | the perf regression gate: bench matrix (512 B / 10 KB), median of 3, vs. `packages/ankusa/bench/baseline.json`; p99 > 1.2× or ingest/s < 0.8× fails ([`testing.md`](docs/testing.md#perf-gate-mise-run-benchgate)) |
+| `mise run bench:soak` | build the image and soak it under loadgen (`DURATION`, default 3600 s); fails on `missing > 0` or RSS growth > 5 % |
 | `mise run build [pkg]` | local only: build one Mix package from source (default `ankusa_server`); compiled Hex deps come from a cache in `~/.cache/ankusa/mix` shared by every worktree, their warnings go to `_build/<env>/deps-compile.log`, ours stay fatal |
 
 ## Run the checks before calling work done
@@ -108,6 +111,7 @@ until they pass too.
 | `tools/*` | `mise run check:tools` |
 | an SDK (`packages/sdk-*`) or `conformance/` | `mise run check:conformance` (also part of `mise run check`) |
 | core's object-store adapters | `mise run test:integration` |
+| a hot-path file (`edge/`, `queue/`, `store/`, `dispatch/`, `verifier/`, `routes/`, `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`, `route_resolver.ex`, `sink/message.ex`, `sink/http.ex` under `packages/ankusa/lib/ankusa/`) | `mise run bench:gate`; put before/after numbers in the PR |
 | the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) | `mise run test:crash`, and `scripts/drills/flakey.sh` where Docker can run `--privileged` |
 | the claim check, route or source stores, or anything a second node shares | `examples/fleet-e2e/run.sh` (`mise run e2e` before a release) |
 | anything, before tagging a release | `mise run e2e` |

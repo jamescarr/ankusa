@@ -7,7 +7,8 @@ defmodule Ankusa.Store do
   the quarantine pen, API-managed sources, rate-limit overrides and the
   archive catalogue. Column families:
 
-    * `default` — sequence, migration markers, sources, rate limits
+    * `default` — sequence, the store format version (`m:format_version`),
+      migration markers, sources, rate limits
     * `hooks` — `<<seq::64>>` → envelope
     * `deliveries` — `<<seq::64, sink::16>>` → delivery row
     * `index` — due/inflight/dead rows, archive obligations, cleared markers,
@@ -105,11 +106,15 @@ defmodule Ankusa.Store do
     retry_open_ms = Keyword.get(opts, :retry_open_ms, @retry_open_ms)
     reopen_interval_ms = Keyword.get(opts, :reopen_interval_ms, @reopen_interval_ms)
 
+    # `origin` is how the directory came to hold a database; `migrations` is the
+    # format registry this open applies (a test passes its own).
     with :ok <- Ankusa.Fsync.mkdir_p(path, config.data_dir),
          {:ok, origin} <- maybe_restore(config, path) do
+      boot = %{origin: origin, migrations: Keyword.get(opts, :migrations, Migrate.migrations())}
+
       case :rocksdb.new_cache(:lru, @cache_bytes) do
         {:ok, cache} ->
-          with {:ok, state} <- open_and_publish(instance, path, cache, config, origin) do
+          with {:ok, state} <- open_and_publish(instance, path, cache, config, boot) do
             {:ok,
              Map.merge(state, %{
                retry_open_ms: retry_open_ms,
@@ -170,13 +175,13 @@ defmodule Ankusa.Store do
     {:stop, {:store_restore_failed, path, reason}}
   end
 
-  defp open_and_publish(instance, path, cache, config, origin) do
+  defp open_and_publish(instance, path, cache, config, boot) do
     case :rocksdb.open(String.to_charlist(path), @db_opts, descriptors(cache)) do
       {:ok, db, cf_handles} ->
         cfs = @cf_names |> Enum.zip(cf_handles) |> Map.new()
 
         case put_sentinels(db, cfs) do
-          :ok -> publish(instance, path, cache, db, cfs, config, origin)
+          :ok -> publish(instance, path, cache, db, cfs, config, boot)
           {:error, reason} -> close_and_fail(path, cache, db, cfs, {:sentinels, reason})
         end
 
@@ -188,7 +193,7 @@ defmodule Ankusa.Store do
 
   # The instance name is operator config: one atom per instance, never request input.
   # sobelow_skip ["DOS.BinToAtom"]
-  defp publish(instance, path, cache, db, cfs, config, origin) do
+  defp publish(instance, path, cache, db, cfs, config, boot) do
     table = :"ankusa_store_#{instance}"
 
     created =
@@ -206,14 +211,15 @@ defmodule Ankusa.Store do
 
       # Handles are published, so the import and the archive reconciliation
       # can use `write/3` and `get/3`.
-      case after_open(config, origin, path) do
+      case after_open(config, boot, path) do
         :ok ->
           {:ok, %{db: db, cache: cache, cfs: cfs, table: table, path: path}}
 
         {:error, reason} ->
-          # A 0.3 data dir this node could not read completely and trustworthily
-          # must not boot as if it were the whole story, and neither must a
-          # restored store whose archive could not be squared with the bucket.
+          # A store newer than this release, a format migration that failed, a
+          # 0.3 data dir this node could not read completely and trustworthily,
+          # and a restored store whose archive could not be squared with the
+          # bucket must not boot as if they were fine.
           # The reason names what failed; the artifact is untouched. Nobody
           # else has the handles yet, so the table can go after the close.
           {_, _} = close_db(db, cfs)
@@ -235,8 +241,8 @@ defmodule Ankusa.Store do
 
   defp durability(_config), do: "Durable to power loss on THIS host only."
 
-  defp after_open(config, origin, path) do
-    with :ok <- run_migration(config) do
+  defp after_open(config, %{origin: origin, migrations: migrations}, path) do
+    with :ok <- run_migration(config, migrations) do
       reconcile_archive(config, origin, path)
     end
   end
@@ -274,8 +280,8 @@ defmodule Ankusa.Store do
   # error mid-read). Whatever it raises becomes a refusal to start, which goes
   # through the same close path as any other: never `init/1` crashing with the
   # database still open.
-  defp run_migration(config) do
-    Migrate.run(config)
+  defp run_migration(config, migrations) do
+    Migrate.run(config, migrations)
   rescue
     exception ->
       Logger.error(

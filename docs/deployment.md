@@ -213,6 +213,43 @@ queue on pool checkout.
 Measured numbers from a full ingest → dispatch → consumer run are recorded in
 [`testing.md`](testing.md#load-and-end-to-end-kind--oban).
 
+## Upgrading between releases
+
+The store carries a **format version** (`m:format_version` in its `default`
+column family; this release writes format 1). A store without the key is
+format 1 — every store written before the marker existed — and is stamped on
+its first open. A release that changes the key layout adds a migration to the
+store's migration registry; on boot, before the node serves, the
+migrations from the store's format up to the release's run in order, each in
+bounded synced batches. A migration records its place in `m:migrating:<to>`
+with every batch, so a node killed mid-migration resumes at the next boot
+instead of starting over, and the new format is stamped only in the batch that
+finishes it. Migrations are forward-only.
+
+Preview what a boot would do, without opening the store (read-only, safe
+beside a running node):
+
+```sh
+mix ankusa.store.migrate --dry-run --data-dir /var/lib/ankusa --instance default
+```
+
+It prints the store's format, the migrations still to run and, for an
+interrupted one, the cursor it resumes at. Without `--dry-run` the task
+migrates the store and exits; stop the node that owns it first.
+
+Upgrade in this order:
+
+1. **Back up.** Let a backup complete (`backup.enabled`) or copy the store
+   directory while the node is stopped. This is the rollback.
+2. **One pod at a time.** Replace a node, wait for `/ready`, then the next.
+   Each node migrates its own store; nodes share no store. N and N−1 read each
+   other's data within a minor release, so a fleet is safe mid-rollout.
+3. **Do not roll back past a format bump.** An older release refuses a newer
+   store at boot (`{:store_format_newer, found, supported}`, see below)
+   rather than ignore the keys it does not know. To go back, stop the node and
+   restore the pre-upgrade backup; the hooks acked after the upgrade are in
+   the newer format and are lost with it, so roll forward when you can.
+
 ## Upgrading from 0.3
 
 0.3 kept hand-rolled on-disk formats — `wal/`, `dlq/`, `quarantine/`,
@@ -248,10 +285,12 @@ due row) and an HTTP sink's `ordered` (deliveries are not ordered). In core,
 
 Hooks and delivery rows are stored in a versioned encoding (v0 = the bare Erlang
 term, v1 = a two-byte tag and a version byte in front of it; see
-[`storage.md`](storage.md#encoding-and-versions)). A release reads the
-versions it knows, and a release only starts *writing* a version once the
-release before it can read it. That makes a rollback of one minor safe, and
-puts the boundary here:
+[`storage.md`](storage.md#encoding-and-versions)). That version is separate
+from the store's format version in
+[Upgrading between releases](#upgrading-between-releases), which the boot
+guard checks. A release reads the versions it knows, and a release only starts
+*writing* a version once the release before it can read it. That makes a
+rollback of one minor safe, and puts the boundary here:
 
 | Running | Reads | Writes | Roll back to |
 | --- | --- | --- | --- |
@@ -264,12 +303,15 @@ run the release that writes v1, do not roll back past the release that reads
 it. Upgrade 0.6 to the release that writes v1 *through* the release that
 reads it, never directly. If a node must go below the boundary anyway, restore
 the data directory from a backup taken before the first v1 write; the hooks
-acked after it are lost with it.
+acked after it are lost with it. The change that flips the write default to v1
+bumps the store format in the same release, so the guard refuses the older
+image at boot (`{:store_format_newer, found, supported}`) instead of that
+release raising on rows one at a time.
 
 ## When a node refuses to start
 
-The store never treats a database it cannot read as empty. Two refusals name
-the file and what to do:
+The store never treats a database it cannot read as empty. These refusals name
+the file or version and what to do:
 
 - **`{:store_open_failed, path, reason}`** — RocksDB damage before the torn
   tail, or an unreadable directory. Check the disk; restore the volume from
@@ -282,6 +324,17 @@ the file and what to do:
 - **`{:corrupt_legacy_wal_record, path, seq, reason}`** — a 0.3 WAL frame that
   passes its checksum but is no envelope. The node will not guess; move the
   0.3 directory aside to start without it.
+- **`{:store_format_newer, found, supported}`** — the store was written by a
+  newer release (`found`) than this one understands (`supported`), typically
+  after a rollback. Run the newer release again, or stop the node and restore
+  the backup taken before the upgrade (see
+  [Upgrading between releases](#upgrading-between-releases)). The node
+  imports and migrates nothing before refusing.
+- **`{:store_migration_failed, to, reason}`** / **`{:missing_migration, found, target}`** —
+  a format migration raised or returned an error, or this release has no
+  migration leaving the store's format. A failed migration resumes at the last
+  batch it committed on the next boot; `mix ankusa.store.migrate --dry-run`
+  shows where.
 
 ## Worked examples
 
