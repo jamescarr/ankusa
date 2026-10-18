@@ -55,14 +55,16 @@ Every top-level section, with its keys and defaults:
 | `node` | `roles` (`[edge, dispatch, storage]`; under `wal.type: none` the queue's readers — `dispatch`, `storage` — are dropped, so an all-role node becomes `[edge]`), `data_dir` (`/var/lib/ankusa`) |
 | `log` | `level` (`info`), `banner` (`true`; the ASCII-art banner on start) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
-| `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled) |
+| `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
+| `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`) |
+| `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) |
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
-| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) and [Under load](claim-check.md#under-load) |
+| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) and [Under load](claim-check.md#under-load) |
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
-| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
+| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
@@ -170,6 +172,7 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
 | `ANKUSA_STORAGE_KEY_PREFIX` | `storage.key_prefix` |
 | `ANKUSA_BACKUP_ENABLED` | `backup.enabled` |
+| `ANKUSA_METRICS_ENABLED`, `ANKUSA_METRICS_PORT`, `ANKUSA_METRICS_IP` | `metrics.enabled/port/ip` |
 
 When the config names no static keys, the S3 adapter looks for credentials in
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), then web
@@ -294,6 +297,13 @@ config :ankusa,
 | `data_dir` | `"./data"` | Root for on-disk state; actual paths are `<data_dir>/<instance>/{store,segments}`: the node's RocksDB store and the LocalFS blob root. |
 | `roles` | `[:edge, :dispatch, :storage]` | Which children boot. `:claim_check` is a fourth, **opt-in** role. See [`claim-check.md`](claim-check.md). `ANKUSA_ROLES=edge,dispatch` (comma-separated) overrides this at runtime in the default Ankusa.Application. The roles divide the hook's life: `:edge` accepts and commits it, `:dispatch` delivers it, `:storage` archives it, and the hook is deleted once its last obligation clears — so `edge,dispatch` and `edge,dispatch,storage` both reclaim delivered hooks, and an archive that is off or behind never holds up delivery. All the roles share one node-local store, so they run in one BEAM (see [`deployment.md`](deployment.md)). With `wal: :none` the roles that only read the queue (`:dispatch`, `:storage`) are dropped from this list rather than rejected, so an existing all-role deployment can flip `wal.type` with no other change; `GET /health` on the admin port reports the effective roles. |
 | `port` | `4000` | Bandit HTTP port. `PORT` env var overrides in the default Ankusa.Application. |
+| `listener.max_connections`, `listener.num_acceptors` | `20_000`, `nil` (two per scheduler) | Open connections per listener, spread over the acceptors; past it new connections are closed. Positive integers. |
+| `listener.read_timeout_ms` | `10_000` | A connection that sends nothing for this long is closed (slowloris, idle keep-alive). |
+| `listener.body_read_timeout_ms`, `listener.request_deadline_ms` | `15_000`, `30_000` | One read of the request body, and the whole body, must complete within these; the ingest port answers `408` past either. |
+| `listener.max_requests_per_connection` | `1_000` | A keep-alive connection is closed after this many requests. |
+| `listener.max_header_count`, `listener.max_header_length` | `64`, `16_384` | Request-head limits, enforced before any body is read. |
+| `listener.http2` | `false` | Serve HTTP/2 (off: HTTP/1.1 only). |
+| `listener.tls` | `nil` | The ingest listener's TLS block (`certfile`, `keyfile`, `cacertfile`, `verify`, `versions`, `ciphers`). The `listener` limits apply to every listener; this key is the ingest port's alone. See [Listeners](#listeners-limits-tls-and-mtls). |
 | `max_body_bytes` | `8_000_000` | Hard cap on a request body. A `Content-Length` over it is `413` before any of the body is read; a body without one (chunked) is cut off at the cap while streaming. |
 | `route_resolver` | `{Ankusa.RouteResolver.Path, []}` | `{module, opts}` implementing `Ankusa.RouteResolver`: catch-URL scheme. See [`multi-tenancy.md`](multi-tenancy.md). |
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); `Ankusa.SourceStore.Redis` (`ankusa_redis`, the image's `source_store.type: redis`) keeps them in Redis, shared across nodes; the rest is read-only. |
@@ -342,6 +352,10 @@ config :ankusa,
 | `admin.port` | `4002` | The admin API's Bandit port. |
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
 | `admin.gauge_interval_ms` | `15_000` | How often `Ankusa.Metrics.Gauges` samples store/queue/quarantine depth, disk free, dispatch in-flight and open breakers for `/metrics`. |
+| `admin.tls` | `nil` | A TLS block for the admin listener; see [Listeners](#listeners-limits-tls-and-mtls). |
+| `metrics.enabled`, `metrics.port`, `metrics.ip` | `false`, `4004`, `"127.0.0.1"` | A listener serving only `/metrics`, `/health` and `/ready` (`Ankusa.Metrics.Router`); see [A separate metrics listener](#a-separate-metrics-listener). |
+| `metrics.tls` | `nil` | A TLS block for the metrics listener. |
+| `claim_check.tls`, `routes.admin.tls` | `nil` | A TLS block for the claim-check gateway and the route-management API. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
 | `routes.max_routes` | `10_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. |
 | `routes.store` | `{Ankusa.Routes.Store.ETS, []}` | `{module, opts}` implementing `Ankusa.Routes.Store`. `Ankusa.Routes.Store.Redis` (package `ankusa_redis`) shares definitions across nodes. |
@@ -363,7 +377,14 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 `claim_check.store_cooldown_ms`, `claim_check.read_deadline_ms`,
 `claim_check.read_timeout_ms`, `claim_check.read_max_inflight`,
 `claim_check.read_cache_max_entry_bytes`, `backup.interval_ms`,
-`backup.keep`, `admin.gauge_interval_ms` and `routes.max_routes` must be positive;
+`backup.keep`, `admin.gauge_interval_ms`, `routes.max_routes` and every
+numeric `listener.*` key (`max_connections`, `num_acceptors`, the three
+timeouts, `max_requests_per_connection`, `max_header_count`,
+`max_header_length`) must be positive; `listener.http2` and `metrics.enabled`
+are booleans, `metrics.ip` an IP address, and a `tls` block names existing
+`certfile`/`keyfile`, a `verify` of `verify_none`/`verify_peer` (the latter
+with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
+`ciphers`;
 `batcher.max_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
 `claim_check.read_retries`, `claim_check.read_queue_max` and
 `claim_check.read_cache_bytes` may be `0` (no linger, roll at once, a
@@ -375,6 +396,73 @@ claim cache);
 `breaker_max_open_ms` ≥ `breaker_open_ms`. An embedded source whose verifier secret is missing or
 undecodable fails boot too (`source <id>: verifier secret is missing or
 undecodable`), instead of rejecting every hook later.
+
+#### Listeners: limits, TLS and mTLS
+
+Bandit's own defaults suit a browser-facing app, not a webhook edge, so every
+HTTP listener the instance runs (ingest, admin, route management, claim-check
+gateway, metrics) is started with the `listener` limits instead:
+
+- **Idle and slow clients.** A connection that sends nothing for
+  `listener.read_timeout_ms` (10 s) is closed: this bounds a request head
+  dribbled in a byte at a time (slowloris) and an idle keep-alive. One read of
+  a request body must complete within `body_read_timeout_ms` (15 s), and the
+  whole body within `request_deadline_ms` (30 s) however it is chunked; the
+  ingest port answers `408` past either.
+- **Connections.** `max_connections` (20 000) is spread over `num_acceptors`
+  (default: two per scheduler); past it new connections are closed, not queued.
+  A keep-alive connection is closed after `max_requests_per_connection` (1 000)
+  requests, so a load balancer re-spreads long-lived clients.
+- **Request heads.** More than `max_header_count` (64) headers, or a header
+  line over `max_header_length` (16 384 bytes), is refused before any body is
+  read.
+- **HTTP/2** is off (`http2: false`): the listeners speak HTTP/1.1, which is
+  what webhook providers send.
+
+`listener.tls` is the ingest listener's TLS block; `admin.tls`,
+`routes.admin.tls`, `claim_check.tls` and `metrics.tls` give each of the other
+listeners its own, with the same keys:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `certfile`, `keyfile` | required | PEM server certificate and its private key. Relative paths resolve against the working directory; both must exist at boot (`check-config` checks them too) |
+| `cacertfile` | none | PEM bundle of the CAs that sign *client* certificates; required by `verify: verify_peer` |
+| `verify` | `verify_none` | `verify_peer` is mutual TLS: a client without a certificate that chains to `cacertfile` is refused at the handshake, and the accepted certificate is the request's `Plug.Conn.get_peer_data/1` `:ssl_cert` (the identity the admin authentication work builds on) |
+| `versions` | `[tlsv1.2, tlsv1.3]` | protocol versions offered |
+| `ciphers` | Erlang/OTP defaults | cipher suites by OpenSSL name (`ECDHE-RSA-AES256-GCM-SHA384`) or TLS 1.3 name (`TLS_AES_256_GCM_SHA384`); an unknown name fails boot |
+
+A listener with a `tls` block is HTTPS only (plain HTTP to it gets no answer);
+one without is plain HTTP. The private key's file path is shown by
+`GET /v1/config` (a path is not a secret); the key itself is never read into
+the config. The boot log's "unauthenticated" warning for the admin,
+route-management and claim-check listeners is skipped when that listener
+demands client certificates, because a client certificate is authentication.
+
+```yaml
+listener:
+  tls:
+    certfile: /etc/ankusa/tls/server.pem
+    keyfile: /etc/ankusa/tls/server-key.pem
+    cacertfile: /etc/ankusa/tls/ca.pem   # providers present a client cert
+    verify: verify_peer
+admin:
+  tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem,
+        cacertfile: /etc/ankusa/tls/ops-ca.pem, verify: verify_peer}
+```
+
+Certificates are read when the listener starts: replacing one takes a restart.
+
+#### A separate metrics listener
+
+`GET /metrics` is also served by the admin API, which mutates sources, replays
+and the quarantine pen. `metrics.enabled: true` starts one more listener
+(`metrics.port`, default 4004, on `metrics.ip`, default `127.0.0.1`) that
+serves **only** `GET /metrics`, `GET /health` and `GET /ready` and answers
+`404` to everything else, so a Prometheus job or a kubelet probe can be given a
+route to it and none to the operator API. It works with `admin.enabled: false`
+(it then also starts the metrics reporter and the gauge poller), and the admin
+listener keeps serving `/metrics` either way. `metrics.tls` secures it like any
+other listener.
 
 #### The admin API
 

@@ -59,34 +59,18 @@ defmodule Ankusa.Admin.Router do
   plug(:dispatch)
 
   get "/health" do
-    config = config(conn)
-
-    send_json(conn, 200, %{
-      status: "ok",
-      instance: to_string(config.instance),
-      version: to_string(Application.spec(:ankusa, :vsn)),
-      roles: config.roles |> Enum.map(&to_string/1) |> Enum.sort()
-    })
+    Ankusa.Metrics.Router.health(conn)
   end
 
   # Readiness, not liveness: 503 while this node's store cannot take a synced
   # write. See `Ankusa.Health`.
   get "/ready" do
-    case Ankusa.Health.ready(instance(conn)) do
-      {:ok, body} ->
-        send_json(conn, 200, body)
-
-      {:error, body} ->
-        conn |> Plug.Conn.put_resp_header("retry-after", "1") |> send_json(503, body)
-    end
+    Ankusa.Metrics.Router.ready(conn)
   end
 
+  # Also served, alone, by the metrics listener (`Ankusa.Metrics.Router`).
   get "/metrics" do
-    conn
-    # Prometheus's text exposition format version is a parameter, not a
-    # charset: the header is written verbatim.
-    |> Plug.Conn.put_resp_header("content-type", "text/plain; version=0.0.4")
-    |> Plug.Conn.send_resp(200, Ankusa.Metrics.scrape(instance(conn)))
+    Ankusa.Metrics.Router.metrics(conn)
   end
 
   get "/v1/wal" do
@@ -427,7 +411,7 @@ defmodule Ankusa.Admin.Router do
   # or not an object is the same `invalid_source`: all mean "the spec isn't a
   # JSON object".
   defp with_source_body(conn, fun) do
-    case Ankusa.Http.read_body_limited(conn, @max_source_body) do
+    case Ankusa.Http.read_body_limited(conn, @max_source_body, read_opts(conn)) do
       {:ok, body, conn} ->
         case JSON.decode(body) do
           {:ok, map} when is_map(map) -> fun.(map, conn)
@@ -522,7 +506,7 @@ defmodule Ankusa.Admin.Router do
   # oversized, unparseable, or not an object is the same `invalid_rate_limit`,
   # whose message is the parser's.
   defp with_rate_limit_body(conn, fun) do
-    case Ankusa.Http.read_body_limited(conn, @max_rate_limit_body) do
+    case Ankusa.Http.read_body_limited(conn, @max_rate_limit_body, read_opts(conn)) do
       {:ok, body, conn} ->
         case JSON.decode(body) do
           {:ok, map} when is_map(map) -> fun.(map, conn)
@@ -632,7 +616,7 @@ defmodule Ankusa.Admin.Router do
   # A replay body is a spec, not a payload: read it as a JSON object with a
   # modest size cap. Unknown keys and malformed bodies are `invalid_filter`.
   defp with_replay_body(conn, fun) do
-    case Ankusa.Http.read_body_limited(conn, @max_replay_body) do
+    case Ankusa.Http.read_body_limited(conn, @max_replay_body, read_opts(conn)) do
       {:ok, body, conn} ->
         case decode_filter(body) do
           {:ok, map} -> fun.(map, conn)
@@ -843,6 +827,8 @@ defmodule Ankusa.Admin.Router do
 
   defp invalid_filter(conn, field),
     do: send_json(conn, 400, %{error: "invalid_filter", field: field})
+
+  defp read_opts(%Plug.Conn{} = conn), do: Ankusa.Http.read_opts(config(conn))
 
   defp config(%Plug.Conn{} = conn), do: Ankusa.config(instance(conn))
 

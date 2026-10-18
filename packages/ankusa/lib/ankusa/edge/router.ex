@@ -5,7 +5,8 @@ defmodule Ankusa.Edge.Router do
   (`Ankusa.RouteResolver`, default `POST /webhooks/:source_id`) to a
   `Ankusa.Route`, refuse on a `Content-Length` over the limit, look the source
   up (`Ankusa.Edge.Ingest.lookup/2`), refuse header bytes no sink can carry
-  (`400 invalid_header`), only then read the body (bounded), and
+  (`400 invalid_header`), only then read the body (bounded in size, and in time
+  by `listener.request_deadline_ms`: `408`), and
   hand off to `Ankusa.Edge.Ingest`. A request refused at any step before the
   read is answered without its body being read. No JSON parsing here.
 
@@ -55,12 +56,14 @@ defmodule Ankusa.Edge.Router do
   # ── capture ───────────────────────────────────────────────────────────────
 
   defp capture(conn, instance) do
+    config = Ankusa.config(instance)
+    max = config.max_body_bytes
+
     with {:ok, route} <- resolve(conn, instance),
-         max = Ankusa.config(instance).max_body_bytes,
          :ok <- check_content_length(conn, instance, max),
          {:ok, source, tenant_id} <- lookup(conn, instance, route),
          :ok <- check_headers(conn, instance),
-         {:ok, body, conn} <- read_body(conn, instance, max) do
+         {:ok, body, conn} <- read_body(conn, instance, config) do
       respond(
         conn,
         Ingest.ingest(instance, source, tenant_id, %{
@@ -127,13 +130,17 @@ defmodule Ankusa.Edge.Router do
     end
   end
 
-  defp read_body(conn, instance, max) do
-    case Ankusa.Http.read_body_limited(conn, max) do
+  defp read_body(conn, instance, config) do
+    case Ankusa.Http.read_body_limited(conn, config.max_body_bytes, Ankusa.Http.read_opts(config)) do
       {:ok, body, conn} ->
         {:ok, body, conn}
 
       {:too_large, conn} ->
-        {:refused, too_large(conn, instance, max)}
+        {:refused, too_large(conn, instance, config.max_body_bytes)}
+
+      # The body did not arrive within `listener.request_deadline_ms`.
+      {:error, :request_deadline, conn} ->
+        {:refused, refuse(conn, instance, :body_read_failed, 408, %{error: "request_timeout"})}
 
       {:error, reason, conn} ->
         {:refused,
