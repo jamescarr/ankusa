@@ -59,14 +59,15 @@ jobs:
       # The PLT also covers the path-dependency `ankusa`, so an adapter that
       # calls a function core newly gained fails dialyzer against a stale PLT:
       # bump the `v` below when that happens (SEC-4: `Ankusa.Crypto.Envelope`;
-      # SEC-8: `Ankusa.Verifier.max_tolerance_seconds/0`).
+      # SEC-8: `Ankusa.Verifier.max_tolerance_seconds/0`; SEC-9:
+      # `Ankusa.SecretProvider`, `Ankusa.SourceStore.Static.publish/2`).
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -293,6 +294,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - run: mise run test:crash
+      # The drill runs as root inside its container, so every file it wrote to
+      # the .cache/crash mount is root-owned — and the cache action's post step
+      # (a tar as the runner user) cannot read them, so the cache was never
+      # saved and every run recompiled RocksDB and the rest of the deps from
+      # source (~8 min). Hand the tree back before that post step. `always()`:
+      # a failed drill still leaves an entry the next run can restore.
+      - name: make the compiled-deps cache readable
+        if: always()
+        run: |
+          [ -d .cache/crash ] || exit 0
+          sudo chown -R "$(id -u):$(id -g)" .cache/crash
 
   # The same drill on ext4 over device-mapper (I/O error windows, then a
   # power-loss cut), which is what catches a hook acked without an fsync.
@@ -327,3 +339,11 @@ jobs:
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi
+      # Same root-owned cache as the tmpfs job above; the `if:` keeps this step
+      # after a skipped drill too (a runner without device-mapper still warms
+      # nothing, and the chown is a no-op when the container never wrote).
+      - name: make the compiled-deps cache readable
+        if: always()
+        run: |
+          [ -d .cache/crash ] || exit 0
+          sudo chown -R "$(id -u):$(id -g)" .cache/crash

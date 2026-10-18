@@ -40,6 +40,10 @@ defmodule Ankusa.Store.Keys do
   def audit_seq, do: "m:audit_seq"
   def audit_key, do: "m:audit_key"
 
+  # The last audit `seq` the lifecycle publisher has delivered to every
+  # lifecycle sink (`Ankusa.Lifecycle.Publisher`): 8 bytes, big-endian.
+  def lifecycle_cursor, do: "m:lifecycle_cursor"
+
   # ── hooks ─────────────────────────────────────────────────────────────────
 
   def hook(seq), do: <<seq::64>>
@@ -97,6 +101,11 @@ defmodule Ankusa.Store.Keys do
   def audit(seq, at) when is_integer(seq) and is_integer(at), do: <<?a, seq::64, at::64>>
   def audit_pending(seq) when is_integer(seq), do: <<?p, seq::64>>
 
+  # The redacted entity a lifecycle event carries, beside the audit row of the
+  # same `seq` and in the same batch. It is not in the row: an audit row never
+  # holds a spec, and the entity (a source's view, a route) is one even redacted.
+  def lifecycle_entity(seq) when is_integer(seq), do: <<?o, seq::64>>
+
   # ── decoders ──────────────────────────────────────────────────────────────
 
   def decode_due(<<?d, at::64, seq::64, sink::16>>), do: {at, seq, sink}
@@ -105,6 +114,7 @@ defmodule Ankusa.Store.Keys do
   def decode_cleared(<<?c, seq::64, kind::8, sink::16>>), do: {seq, kind, sink}
   def decode_delivery(<<seq::64, sink::16>>), do: {seq, sink}
   def decode_audit(<<?a, seq::64, at::64>>), do: {seq, at}
+  def decode_lifecycle_entity(<<?o, seq::64>>), do: seq
   def decode_audit_pending(<<?p, seq::64>>), do: seq
   def decode_source_revision(<<"v:", rest::binary>>), do: decode_source(<<"s:", rest::binary>>)
 
@@ -154,7 +164,8 @@ defmodule Ankusa.Store.Keys do
     replays: %{cf: :default, lo: "j:", hi: <<"j:", 0xFF>>},
     source_revisions: %{cf: :default, lo: "v:", hi: <<"v:", 0xFF>>},
     audit: %{cf: :audit, lo: <<?a>>, hi: <<?a, @ff16::binary>>},
-    audit_pending: %{cf: :audit, lo: <<?p>>, hi: <<?p, @ff8::binary>>}
+    audit_pending: %{cf: :audit, lo: <<?p>>, hi: <<?p, @ff8::binary>>},
+    lifecycle_entities: %{cf: :audit, lo: <<?o>>, hi: <<?o, @ff8::binary>>}
   }
 
   @doc "The column family, low and high sentinel of a scanned key family."

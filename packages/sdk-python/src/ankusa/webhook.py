@@ -29,8 +29,10 @@ __all__ = [
     "HookHeaders",
     "InvalidSignatureError",
     "MissingHookIdError",
+    "ReceivedDelivery",
     "VerifiedSignature",
     "parse_headers",
+    "receive_delivery",
     "verify_signature",
 ]
 
@@ -165,6 +167,55 @@ def verify_signature(
             return VerifiedSignature(id=hook_id, timestamp=timestamp)
 
     raise InvalidSignatureError("no_matching_signature", "webhook-signature", "no webhook-signature entry matches")
+
+
+@dataclass(frozen=True, slots=True)
+class ReceivedDelivery:
+    """An accepted delivery: its identity, and whether its signature verified."""
+
+    headers: HookHeaders
+    # False only for an unsigned delivery ``allow_unsigned`` let through.
+    verified: bool
+
+
+def receive_delivery(
+    headers: Mapping[str, str],
+    body: bytes | str,
+    *,
+    secrets: str | Sequence[str] = (),
+    allow_unsigned: bool = False,
+    tolerance_seconds: int = 300,
+    now: int | None = None,
+) -> ReceivedDelivery:
+    """Judge one HTTP-sink delivery: is it signed, and what is its identity.
+
+    Ankusa's HTTP sink signs every delivery unless it is configured
+    ``allow_unsigned: true``, so a receiver is closed by default: without the
+    sink's ``secrets`` (or an explicit ``allow_unsigned=True``) it refuses every
+    delivery, because any host that can reach the receiver's URL could
+    otherwise inject hooks. With ``secrets`` the delivery MUST verify
+    (``verify_signature``); ``allow_unsigned`` does not weaken that.
+
+    ``body`` must be the raw bytes received. Raises ``InvalidSignatureError``
+    (answer ``401``) when there is no valid signature -- ``invalid_secret`` when
+    no secret is configured and ``allow_unsigned`` is not set -- and
+    ``MissingHookIdError`` (``400``) when ``x-ankusa-id`` is absent. The
+    signature is judged first.
+    """
+    configured = [secrets] if isinstance(secrets, str) else list(secrets)
+    if configured:
+        verify_signature(headers, body, configured, tolerance_seconds=tolerance_seconds, now=now)
+        verified = True
+    elif allow_unsigned:
+        verified = False
+    else:
+        raise InvalidSignatureError(
+            "invalid_secret",
+            None,
+            "no secret configured: deliveries are signed, so the receiver needs the sink's secret "
+            "(or allow_unsigned=True)",
+        )
+    return ReceivedDelivery(headers=parse_headers(headers), verified=verified)
 
 
 def _decode_secrets(secrets: list[str]) -> list[bytes]:

@@ -106,7 +106,9 @@ defmodule Ankusa.AsyncApiTest do
         source_store:
           static(%{
             "quiet" => [sinks: [{Ankusa.Sink.Log, []}]],
-            "relay" => [sinks: [{Ankusa.Sink.Http, url: "https://sink.invalid/hook"}]]
+            "relay" => [
+              sinks: [{Ankusa.Sink.Http, url: "https://sink.invalid/hook", allow_unsigned: true}]
+            ]
           })
       )
 
@@ -245,8 +247,8 @@ defmodule Ankusa.AsyncApiTest do
     channel = map["channels"] |> Map.values() |> Enum.find(&(&1["address"] == "ankusa.lifecycle"))
 
     assert channel["description"] ==
-             "Ankusa lifecycle events (CloudEvents 1.0, structured), published from memory: " <>
-               "retried, not persisted, not ordered"
+             "Ankusa lifecycle events (CloudEvents 1.0, structured), read from the audit trail: " <>
+               "durable, in commit order, at least once, replayable"
 
     assert %{"ankusa_lifecycle" => message} = channel["messages"]
     assert message["name"] == "ankusa:lifecycle"

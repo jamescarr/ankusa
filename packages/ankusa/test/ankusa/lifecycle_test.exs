@@ -1,16 +1,30 @@
 defmodule Ankusa.LifecycleTest do
   @moduledoc """
   Lifecycle events: a source or route created, updated, or deleted becomes one
-  CloudEvents 1.0 message on `config.lifecycle.sinks`, published from memory by
-  `Ankusa.Lifecycle.Publisher` and never written to the store.
+  CloudEvents 1.0 message on `config.lifecycle.sinks`, read by
+  `Ankusa.Lifecycle.Publisher` from the audit row the change committed with:
+  durable across a `kill -9`, in revision order, with an id derived from the row.
   """
 
   use ExUnit.Case, async: false
 
   import Ankusa.TestHelpers
 
-  alias Ankusa.{Config, Edge.Ingest, Envelope, Lifecycle.Publisher, Routes, SourceStore}
+  alias Ankusa.{
+    Audit,
+    Config,
+    Edge.Ingest,
+    Envelope,
+    Lifecycle,
+    LifecycleHarness,
+    Routes,
+    SourceStore,
+    Store
+  }
+
+  alias Ankusa.Audit.Context
   alias Ankusa.SourceStore.Persistent
+  alias Ankusa.Store.Keys
 
   defmodule CaptureSink do
     @moduledoc "Reports every delivery as `{:lifecycle, ctx, env, decoded_body}`, then follows `:outcome`."
@@ -91,6 +105,20 @@ defmodule Ankusa.LifecycleTest do
     end
   end
 
+  defmodule StaggerSink do
+    @moduledoc "Slows a delivery the lower its revision is (300 ms minus 100 ms per revision), so a publisher that did not wait would reorder."
+
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, ctx, opts) do
+      event = JSON.decode!(env.body)
+      Process.sleep(max(0, 300 - 100 * Map.get(event, "revision", 3)))
+      send(Keyword.fetch!(opts, :to), {:lifecycle, ctx, env, event})
+      :ok
+    end
+  end
+
   defmodule RecordPlug do
     @moduledoc "A loopback listener that reports every request path to the test."
 
@@ -147,21 +175,35 @@ defmodule Ankusa.LifecycleTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
-  defp envelope(id, tenant \\ "acme") do
-    body = JSON.encode!(%{"id" => id})
+  defp next_event(timeout \\ 5_000) do
+    receive do
+      {:lifecycle, ctx, env, event} -> {ctx, env, event}
+    after
+      timeout -> flunk("no lifecycle event within #{timeout}ms")
+    end
+  end
 
-    %Envelope{
-      id: id,
-      source_id: "ankusa:lifecycle",
-      tenant_id: tenant,
-      received_at: System.system_time(:millisecond),
-      method: "POST",
-      path: "/_ankusa/lifecycle",
-      headers: [],
-      content_type: "application/cloudevents+json",
-      body: body,
-      size: byte_size(body)
-    }
+  defp rows(instance) do
+    {:ok, entries} = Audit.page(instance, 0, 100)
+    for {_seq, {:ok, row}} <- entries, do: row
+  end
+
+  defp eventually(fun, deadline_ms \\ 5_000) do
+    do_eventually(fun, System.monotonic_time(:millisecond) + deadline_ms)
+  end
+
+  defp do_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("the condition was still false after the deadline")
+
+      true ->
+        Process.sleep(25)
+        do_eventually(fun, deadline)
+    end
   end
 
   describe "with a lifecycle sink" do
@@ -259,7 +301,11 @@ defmodule Ankusa.LifecycleTest do
       :ok = Routes.delete(instance, "stripe")
       assert_receive {:lifecycle, _, _, %{"type" => "io.ankusa.route.deleted"} = deleted}, 2_000
       assert deleted["subject"] == "stripe"
-      assert deleted["data"] == %{"id" => "stripe"}
+      assert deleted["data"]["id"] == "stripe"
+      assert deleted["data"]["path"] == "/webhooks/stripe"
+      # The deletion is the route's fourth change; `data` is the route as it was.
+      assert deleted["revision"] == 4
+      assert deleted["data"]["revision"] == 3
     end
 
     test "the reserved source is not reachable by ingest", %{config: config} do
@@ -397,48 +443,6 @@ defmodule Ankusa.LifecycleTest do
                      3_000
     end
 
-    test "a full queue drops the event and counts it" do
-      attach([[:ankusa, :lifecycle, :dropped], [:ankusa, :lifecycle, :delivered]])
-
-      config = test_config(lifecycle: %{sinks: [{GateSink, to: self()}]})
-      put_config(config)
-      start_supervised!({Publisher, instance: config.instance, max_pending: 1})
-
-      :ok =
-        Publisher.publish(config.instance, envelope("one"), "io.ankusa.source.created", "acme.a")
-
-      assert_receive {:gated, delivering, "one"}, 2_000
-
-      # The first is still in flight, so the bound of 1 is reached.
-      :ok =
-        Publisher.publish(config.instance, envelope("two"), "io.ankusa.source.created", "acme.b")
-
-      assert_receive {:telemetry, [:ankusa, :lifecycle, :dropped],
-                      %{reason: :queue_full, type: "io.ankusa.source.created"}}
-
-      send(delivering, :go)
-      assert_receive {:telemetry, [:ankusa, :lifecycle, :delivered], %{sink: sink}}, 2_000
-      assert sink == inspect(GateSink)
-      refute_receive {:gated, _, "two"}, 100
-    end
-
-    test "with the publisher down the event is dropped and counted, never raised" do
-      attach([[:ankusa, :lifecycle, :dropped]])
-
-      config = test_config(lifecycle: %{sinks: [{CaptureSink, to: self()}]})
-      put_config(config)
-
-      assert :ok =
-               Publisher.publish(
-                 config.instance,
-                 envelope("one"),
-                 "io.ankusa.source.created",
-                 "acme.a"
-               )
-
-      assert_receive {:telemetry, [:ankusa, :lifecycle, :dropped], %{reason: :not_running}}
-    end
-
     test "an HTTP lifecycle sink aimed at loopback is refused by the egress policy, never sent" do
       attach([[:ankusa, :lifecycle, :dropped], [:ankusa, :lifecycle, :delivered]])
       port = Ankusa.TestHelpers.free_port()
@@ -447,7 +451,9 @@ defmodule Ankusa.LifecycleTest do
         {Bandit, plug: {RecordPlug, test: self()}, scheme: :http, ip: {127, 0, 0, 1}, port: port}
       )
 
-      sink = {Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events", timeout_ms: 500}
+      sink =
+        {Ankusa.Sink.Http,
+         url: "http://127.0.0.1:#{port}/events", allow_unsigned: true, timeout_ms: 500}
 
       # Plain http is allowed here; the loopback address still is not.
       config =
@@ -475,7 +481,11 @@ defmodule Ankusa.LifecycleTest do
         start_instance(
           dispatch: [retry: @fast_retry],
           egress: %{allow_insecure_http: true, allow_cidrs: ["127.0.0.0/8"]},
-          lifecycle: %{sinks: [{Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events"}]}
+          lifecycle: %{
+            sinks: [
+              {Ankusa.Sink.Http, url: "http://127.0.0.1:#{port}/events", allow_unsigned: true}
+            ]
+          }
         )
 
       {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
@@ -504,6 +514,324 @@ defmodule Ankusa.LifecycleTest do
     assert {:ok, body} = Ankusa.ClaimCheck.redeem(config.instance, claim, sha256)
     assert body == env.body
     assert %{"type" => "io.ankusa.route.created", "subject" => "stripe"} = JSON.decode!(body)
+  end
+
+  describe "the outbox" do
+    test "ordered by revision: three rapid updates arrive in revision order, whatever each takes" do
+      config = start_instance(lifecycle: %{sinks: [{StaggerSink, to: self()}]})
+
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :update)
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :update)
+
+      events = for _ <- 1..3, do: elem(next_event(), 2)
+
+      assert Enum.map(events, & &1["revision"]) == [1, 2, 3]
+
+      assert Enum.map(events, & &1["type"]) ==
+               [
+                 "io.ankusa.source.created",
+                 "io.ankusa.source.updated",
+                 "io.ankusa.source.updated"
+               ]
+
+      sequences = Enum.map(events, &String.to_integer(&1["sequence"]))
+      assert sequences == Enum.sort(sequences)
+      assert events |> Enum.map(& &1["id"]) |> Enum.uniq() |> length() == 3
+      refute_receive {:lifecycle, _, _, _}, 200
+    end
+
+    test "an event carries revision, actor, instance, sequence and the row's time" do
+      config = start_instance()
+      context = %Context{actor: "alice"}
+
+      {:ok, _} =
+        SourceStore.put(config.instance, "acme", "billing", @spec_map, :create, audit: context)
+
+      {_ctx, env, event} = next_event()
+
+      assert event["revision"] == 1
+      assert event["data"]["revision"] == 1
+      assert event["actor"] == "alice"
+      assert event["instance"] == to_string(config.instance)
+
+      assert event["id"] =~
+               ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
+
+      assert env.dedupe_key == event["id"]
+
+      [row] = rows(config.instance)
+      assert String.to_integer(event["sequence"]) == row.seq
+      assert {:ok, time, 0} = DateTime.from_iso8601(event["time"])
+      assert DateTime.to_unix(time, :millisecond) == row.at
+
+      :ok = SourceStore.delete(config.instance, "acme", "billing", audit: context)
+      {_ctx, _env, deleted} = next_event()
+      assert deleted["type"] == "io.ankusa.source.deleted"
+      assert deleted["revision"] == 2
+    end
+
+    test "publishing the same row twice yields the same event id, body and idempotency key" do
+      config = start_instance()
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+      {_ctx, live, _event} = next_event()
+
+      {:ok, [{seq, {:ok, row}}]} = Audit.page(config.instance, 0, 10)
+      {:ok, entity} = Audit.entity(config.instance, seq)
+
+      {:ok, again} = Lifecycle.envelope(config.instance, row, entity)
+      {:ok, replayed} = Lifecycle.envelope(config.instance, row, entity, "replay-1")
+
+      assert again.id == live.id
+      assert replayed.id == live.id
+      assert again.body == live.body
+      assert Envelope.idempotency_key(again) == Envelope.idempotency_key(live)
+
+      # `replayid` rides only on the replay path.
+      assert JSON.decode!(replayed.body)["replayid"] == "replay-1"
+      refute Map.has_key?(JSON.decode!(live.body), "replayid")
+    end
+
+    test "a publisher that died before the cursor moved delivers the event again, same id" do
+      config = start_instance()
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+      {_ctx, first, _event} = next_event()
+
+      [row] = rows(config.instance)
+      cursor = <<row.seq::64>>
+
+      eventually(fn ->
+        Store.get(config.instance, :default, Keys.lifecycle_cursor()) == {:ok, cursor}
+      end)
+
+      # As if the node had died after the sink confirmed and before the write.
+      :ok =
+        Store.write(config.instance, [{:put, :default, Keys.lifecycle_cursor(), <<0::64>>}],
+          sync: true
+        )
+
+      Process.exit(Ankusa.whereis(config.instance, :lifecycle), :kill)
+
+      {_ctx, second, _event} = next_event()
+      assert second.id == first.id
+    end
+
+    test "the row is flagged and the entity sits beside it, redacted; the row holds none" do
+      config = start_instance()
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+      next_event()
+
+      [row] = rows(config.instance)
+      assert row.publish
+      refute Map.has_key?(row, :entity)
+
+      {:ok, entity} = Audit.entity(config.instance, row.seq)
+      assert entity["verify"]["secret"] == "[REDACTED]"
+
+      {:ok, stored} = Store.get(config.instance, :audit, Keys.audit(row.seq, row.at))
+      refute String.contains?(stored, "s3cr3t")
+    end
+
+    test "what changed while lifecycle events were off is history" do
+      config = start_instance(lifecycle: %{sinks: []})
+      {:ok, _} = SourceStore.put(config.instance, "acme", "old", @spec_map, :create)
+
+      [row] = rows(config.instance)
+      refute row.publish
+      assert Audit.entity(config.instance, row.seq) == :not_found
+
+      stop_supervised!({Ankusa.Instance, config.instance})
+      config = %{config | lifecycle: %{sinks: [{CaptureSink, to: self()}]}}
+      start_supervised!({Ankusa.Instance, config})
+
+      {:ok, _} = SourceStore.put(config.instance, "acme", "new", @spec_map, :create)
+      assert {_ctx, _env, %{"subject" => "acme.new"}} = next_event()
+      refute_receive {:lifecycle, _, _, _}, 200
+    end
+  end
+
+  describe "survives kill" do
+    @harness Path.expand("../support/lifecycle_harness.exs", __DIR__)
+
+    test "source.created is delivered after kill -9 right after SourceStore.put/5 returns" do
+      data_dir = unique_data_dir(:lifecycle_harness)
+      on_exit(fn -> File.rm_rf(data_dir) end)
+
+      port =
+        Port.open({:spawn_executable, System.find_executable("elixir")}, [
+          :binary,
+          :exit_status,
+          {:line, 4096},
+          args: [@harness, "serve"],
+          env: [
+            {~c"ERL_LIBS", String.to_charlist(Mix.Project.build_path() <> "/lib")},
+            {~c"DATA_DIR", String.to_charlist(data_dir)}
+          ]
+        ])
+
+      on_exit(fn -> kill_if_alive(port) end)
+      {:os_pid, os_pid} = Port.info(port, :os_pid)
+      await_put_done(port)
+
+      # The child's only sink never confirms, so the event cannot have been
+      # delivered: it exists only as what the change committed with.
+      {_, 0} = System.cmd("kill", ["-9", Integer.to_string(os_pid)])
+      assert_receive {^port, {:exit_status, 137}}, 10_000
+
+      config = LifecycleHarness.config(data_dir, [{CaptureSink, to: self()}])
+      start_supervised!({Ankusa.Instance, config})
+
+      assert {%{tenant_id: "acme"}, _env,
+              %{
+                "type" => "io.ankusa.source.created",
+                "subject" => "acme.billing",
+                "revision" => 1
+              }} = next_event(30_000)
+
+      refute_receive {:lifecycle, _, _, _}, 300
+    end
+
+    defp await_put_done(port) do
+      receive do
+        {^port, {:data, {:eol, "PUT_DONE"}}} -> :ok
+        {^port, {:data, {:eol, _other}}} -> await_put_done(port)
+        {^port, {:exit_status, status}} -> flunk("the harness exited with #{status}")
+      after
+        90_000 -> flunk("the harness never finished its change")
+      end
+    end
+
+    defp kill_if_alive(port) do
+      case Port.info(port, :os_pid) do
+        {:os_pid, os_pid} ->
+          System.cmd("kill", ["-9", Integer.to_string(os_pid)], stderr_to_stdout: true)
+          :ok
+
+        nil ->
+          :ok
+      end
+    end
+  end
+
+  describe "a change nobody saw finish" do
+    setup do
+      config = start_instance()
+      {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
+      next_event()
+      {:ok, current} = SourceStore.get(config.instance, "acme", "billing")
+
+      %{
+        config: config,
+        hash: Audit.digest(config.instance, current.spec),
+        attrs: %{
+          action: "source.update",
+          tenant: "acme",
+          resource: "acme.billing",
+          revision: 5
+        }
+      }
+    end
+
+    # A caller that begins a change and dies before it finishes it.
+    defp left_pending(instance, attrs) do
+      parent = self()
+
+      {pid, ref} =
+        spawn_monitor(fn ->
+          {:ok, _} = Audit.begin(instance, Context.system(), attrs)
+          send(parent, :began)
+        end)
+
+      assert_receive :began
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    end
+
+    defp settled_row(instance) do
+      eventually(fn -> length(rows(instance)) == 2 end)
+      List.last(rows(instance))
+    end
+
+    test "a state that is the one the change was heading to is applied, and announced", ctx do
+      left_pending(
+        ctx.config.instance,
+        Map.merge(ctx.attrs, %{before_hash: "x", after_hash: ctx.hash})
+      )
+
+      assert {_ctx, _env, %{"type" => "io.ankusa.source.updated", "revision" => 5} = event} =
+               next_event()
+
+      assert event["data"]["source_id"] == "acme.billing"
+      row = settled_row(ctx.config.instance)
+      assert %{result: "ok", publish: true, detail: %{"reconciled" => "applied"}} = row
+    end
+
+    test "a state that is the one it started from was not applied, and is not announced", ctx do
+      left_pending(
+        ctx.config.instance,
+        Map.merge(ctx.attrs, %{before_hash: ctx.hash, after_hash: "y"})
+      )
+
+      row = settled_row(ctx.config.instance)
+      assert %{result: "failed", publish: false, detail: %{"reconciled" => "not_applied"}} = row
+      refute_receive {:lifecycle, _, _, _}, 300
+    end
+
+    test "a state that is neither stays interrupted and announces what is there now", ctx do
+      left_pending(
+        ctx.config.instance,
+        Map.merge(ctx.attrs, %{before_hash: "x", after_hash: "y"})
+      )
+
+      # The current revision, not the one the interrupted change was heading to.
+      assert {_ctx, _env, %{"type" => "io.ankusa.source.updated", "revision" => 1} = event} =
+               next_event()
+
+      assert event["data"]["source_id"] == "acme.billing"
+      row = settled_row(ctx.config.instance)
+      assert %{result: "interrupted", publish: true, detail: %{"reconciled" => "diverged"}} = row
+    end
+
+    test "an absent subject that was not the aim is announced as deleted", ctx do
+      :ok = SourceStore.delete(ctx.config.instance, "acme", "billing")
+      next_event()
+
+      attrs = Map.merge(ctx.attrs, %{action: "source.update", before_hash: "x", after_hash: "y"})
+      left_pending(ctx.config.instance, attrs)
+
+      assert {_ctx, _env, %{"type" => "io.ankusa.source.deleted", "data" => data}} = next_event()
+      assert data == %{"tenant" => "acme", "name" => "billing"}
+    end
+
+    test "a deletion that was applied is announced with the entity the row recorded", ctx do
+      :ok = SourceStore.delete(ctx.config.instance, "acme", "billing")
+      next_event()
+
+      attrs = %{
+        action: "source.delete",
+        tenant: "acme",
+        resource: "acme.billing",
+        before_hash: ctx.hash,
+        entity: %{"tenant" => "acme", "name" => "billing", "last" => "view"}
+      }
+
+      left_pending(ctx.config.instance, attrs)
+
+      assert {_ctx, _env, %{"type" => "io.ankusa.source.deleted", "data" => data}} = next_event()
+      assert data["last"] == "view"
+    end
+
+    test "a row a killed node left pending is settled at the next boot", ctx do
+      attrs = Map.merge(ctx.attrs, %{before_hash: "x", after_hash: ctx.hash})
+      {:ok, _pending} = Audit.begin(ctx.config.instance, Context.system(), attrs)
+
+      stop_supervised!({Ankusa.Instance, ctx.config.instance})
+      start_supervised!({Ankusa.Instance, ctx.config})
+
+      assert {_ctx, _env, %{"type" => "io.ankusa.source.updated", "revision" => 5}} =
+               next_event(15_000)
+
+      assert %{result: "ok"} = settled_row(ctx.config.instance)
+    end
   end
 
   describe "validate_config!/1" do

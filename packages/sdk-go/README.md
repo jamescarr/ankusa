@@ -146,6 +146,37 @@ pass several during a rotation. `VerifyOptions.ToleranceSeconds` (default
 300) bounds the `webhook-timestamp` window. A failure is
 `*InvalidSignatureError` with `Code` and `Field`, never retryable.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default.
+`ReceiveDelivery` is the one call that decides: with the sink's `Secrets` it
+verifies as above; with none, and no `AllowUnsigned`, it refuses every
+delivery (`*InvalidSignatureError`, `Code` `invalid_secret`) — otherwise any
+host that can reach your URL could inject hooks. A configured secret is never
+weakened by `AllowUnsigned`. The signature is judged before the hook id, so a
+delivery that fails it is a `401` even when it also lacks `x-ankusa-id`
+(`*MissingHookIdError`, `400`).
+
+```go
+body, _ := io.ReadAll(r.Body)
+received, err := ankusa.ReceiveDelivery(r.Header, body, ankusa.ReceiveOptions{
+	Secrets: []string{os.Getenv("ANKUSA_WHSEC")},
+})
+var badSignature *ankusa.InvalidSignatureError
+var noID *ankusa.MissingHookIdError
+switch {
+case errors.As(err, &badSignature):
+	http.Error(w, `{"error":"invalid_signature"}`, http.StatusUnauthorized)
+	return
+case errors.As(err, &noID):
+	http.Error(w, `{"error":"missing x-ankusa-id"}`, http.StatusBadRequest)
+	return
+}
+// received.ID, received.IdempotencyKey(false), ...; received.Verified is false
+// only for an unsigned delivery AllowUnsigned let through.
+```
+
 ## Consuming queue messages
 
 A worker reading a broker's deliveries gets the v1 queue message as JSON.

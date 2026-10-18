@@ -203,6 +203,31 @@ bounds how old or new `webhook-timestamp` may be. Failures are
 `invalid_timestamp`, `timestamp_out_of_tolerance`, `no_matching_signature`),
 the offending header in `field`, and `retryable: false`.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default.
+`receiveDelivery` is the one call that decides: with the sink's `secrets` it
+verifies as above; with none, and no `allowUnsigned: true`, it refuses every
+delivery (`InvalidSignatureError`, code `invalid_secret`) — otherwise any host
+that can reach your URL could inject hooks. A configured secret is never
+weakened by `allowUnsigned`. The signature is judged before the hook id, so a
+delivery that fails it is a `401` even when it also lacks `x-ankusa-id`
+(`MissingHookIdError`, `400`).
+
+```ts
+import { InvalidSignatureError, MissingHookIdError, receiveDelivery } from "ankusa";
+
+try {
+  const hook = receiveDelivery({ headers: req.headers, body: rawBody, secrets: [process.env.ANKUSA_WHSEC!] });
+  // hook.id, hook.idempotencyKey, ... and hook.verified (false only for an allowed unsigned delivery)
+} catch (err) {
+  if (err instanceof InvalidSignatureError) return res.status(401).json({ error: "invalid_signature", code: err.code });
+  if (err instanceof MissingHookIdError) return res.status(400).json({ error: "missing x-ankusa-id" });
+  throw err;
+}
+```
+
 ## Consuming queue messages
 
 Ankusa's broker sinks (RabbitMQ, Kafka, NATS, Redis) carry a JSON envelope

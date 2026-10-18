@@ -9,6 +9,21 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `ParsedClaimRef.parse` and `ClaimCheckClient.redeem` accept signed,
+  expiring v2 refs
+  (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
+  parsed `path` ends in `?exp=&sig=` and `redeem` requests it as is. The
+  gateway's `400 bad_signature` and `410 ref_expired` are a
+  `ClaimRejectedError`. The SDK never checks the signature or the expiry.
+- `webhook/Receiver.receive(headers, body, Receiver.Options)`, the
+  receiver-side decision on one HTTP-sink delivery. The sink signs every
+  delivery unless configured `allow_unsigned: true`, so a receiver is closed
+  by default: `Options.signed(secrets)` makes the delivery verify (as
+  `Signature.verify`); `Options.unsigned()` is the explicit opt-out, and any
+  other options with no secrets throw `InvalidSignatureError`
+  (`invalid_secret`). The signature is judged before the hook id. Returns a
+  `Receiver.Received` (`headers`, `verified`).
+
 - `ClaimCheckClient`: `redeem(ref, sha256)` fetches a claim's bytes from the
   claim-check gateway and verifies them against the expected digest before
   returning them, and `health()` is a liveness probe. `ParsedClaimRef.parse`

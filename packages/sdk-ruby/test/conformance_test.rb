@@ -106,6 +106,23 @@ class ConformanceTest < Minitest::Test
       options[:tolerance_seconds] = input.fetch("tolerance_seconds") if input.key?("tolerance_seconds")
       verified = Ankusa.verify_signature(input.fetch("headers"), body_bytes(input["body"]), input.fetch("secrets"), **options)
       {"id" => verified.id, "timestamp" => verified.timestamp}
+    when "receive_delivery"
+      receiver = input.fetch("receiver")
+      options = {now: input.fetch("now"), secrets: receiver.fetch("secrets", []),
+                 allow_unsigned: receiver.fetch("allow_unsigned", false)}
+      options[:tolerance_seconds] = receiver.fetch("tolerance_seconds") if receiver.key?("tolerance_seconds")
+      received = Ankusa.receive_delivery(input.fetch("headers"), body_bytes(input["body"]), **options)
+      headers = received.headers
+      {
+        "verified" => received.verified,
+        "id" => headers.id,
+        "source" => headers.source,
+        "tenant" => headers.tenant,
+        "content_type" => headers.content_type,
+        "dedupe_key" => headers.dedupe_key,
+        "replay_id" => headers.replay_id,
+        "idempotency_key" => headers.to_h[:idempotency_key]
+      }
     when "parse_headers"
       headers = Ankusa.parse_headers(input.fetch("headers"))
       {

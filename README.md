@@ -75,7 +75,13 @@ sources:
       - type: http
         url: http://worker:8080/hooks
         timeout_ms: 5000
+        allow_unsigned: true   # demo only: this worker does not verify
 ```
+
+Deliveries are signed by default: a real sink sets `secret: ${WORKER_WHSEC}`
+and its receiver verifies the signature
+([`docs/integrations.md`](docs/integrations.md#signed-deliveries)). The demo
+opts out, because its worker does not verify.
 
 The worker is
 [a small FastAPI app](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
