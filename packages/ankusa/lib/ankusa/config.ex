@@ -11,6 +11,30 @@ defmodule Ankusa.Config do
             roles: [:edge, :dispatch, :storage],
             # Bandit edge
             port: 4000,
+            # limits for every HTTP listener this instance runs (the edge, the admin
+            # and route-management APIs, the claim-check gateway, the metrics
+            # listener), and the TLS block of the ingest listener (see
+            # `Ankusa.Listener`).
+            listener: %{
+              # nil, or %{certfile, keyfile, cacertfile, verify, versions, ciphers}
+              tls: nil,
+              # open connections per listener, spread over the acceptors
+              max_connections: 20_000,
+              # nil = two per scheduler, filled in by `new/1`
+              num_acceptors: nil,
+              # a connection that sends nothing for this long is closed: it bounds a
+              # request head dribbled in byte by byte, and an idle keep-alive
+              read_timeout_ms: 10_000,
+              # one read of the request body must complete within this
+              body_read_timeout_ms: 15_000,
+              # the whole body must arrive within this, however it is chunked
+              request_deadline_ms: 30_000,
+              # a keep-alive connection is closed after this many requests
+              max_requests_per_connection: 1_000,
+              max_header_count: 64,
+              max_header_length: 16_384,
+              http2: false
+            },
             # {module, opts} implementing Ankusa.RouteResolver (URL scheme → identity)
             route_resolver: {Ankusa.RouteResolver.Path, []},
             max_body_bytes: 8_000_000,
@@ -86,6 +110,8 @@ defmodule Ankusa.Config do
               port: 4001,
               # address the claim gateway binds; "0.0.0.0" exposes it on every interface
               ip: "127.0.0.1",
+              # nil (plain HTTP) or a TLS block, shaped like `listener.tls`
+              tls: nil,
               # target size of one pack object; a body larger than this still
               # gets a pack of its own
               pack_max_bytes: 16 * 1024 * 1024,
@@ -146,7 +172,20 @@ defmodule Ankusa.Config do
             },
             # operator HTTP API + Prometheus /metrics, unauthenticated; off by
             # default for embedded use
-            admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
+            admin: %{
+              enabled: false,
+              port: 4002,
+              ip: "127.0.0.1",
+              gauge_interval_ms: 15_000,
+              # nil (plain HTTP) or a TLS block, shaped like `listener.tls`
+              tls: nil
+            },
+            # a listener that serves only `/metrics`, `/health` and `/ready`
+            # (`Ankusa.Metrics.Router`), so a scraper needs no route to the
+            # mutating admin API. Off by default; the admin API keeps serving
+            # `/metrics` either way. Also starts the metrics reporter and the
+            # gauge poller when the admin API is off.
+            metrics: %{enabled: false, port: 4004, ip: "127.0.0.1", tls: nil},
             # route management: the allowlist guard plus its admin API. Off by
             # default, and off means "capture every POST", as it always has. On
             # means deny-by-default: a request is captured only if it matches an
@@ -173,7 +212,7 @@ defmodule Ankusa.Config do
               # its own listener; unauthenticated by design, same stance as
               # the operator admin API — front it with your own proxy or
               # network policy
-              admin: %{port: 4003, ip: "127.0.0.1"},
+              admin: %{port: 4003, ip: "127.0.0.1", tls: nil},
               # 1 in log_sample rejections is logged at :debug (0 = silent)
               log_sample: 100,
               # 403, or 404 for uniformity with :no_route
@@ -269,9 +308,12 @@ defmodule Ankusa.Config do
 
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
-  sections (`:batcher`, `:dispatch`, `:storage`, `:claim_check`, `:backup`,
-  `:admin`, `:routes`, `:rate_limits`, `:quarantine`, `:lifecycle`, `:egress`) over the
-  defaults.
+  sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
+  `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:quarantine`,
+  `:lifecycle`, `:egress`) over the defaults. Every `tls` block (`listener.tls`,
+  `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
+  validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
+  `listener.num_acceptors: nil` becomes two per scheduler.
 
   `:routes` is nested one level deeper than the rest (`:routes` has its own
   `:cache`, `:ip_rules`, and `:admin` sections), so `put_routes/2` merges those
@@ -300,12 +342,14 @@ defmodule Ankusa.Config do
           put_routes(acc, v)
 
         k in [
+          :listener,
           :batcher,
           :dispatch,
           :storage,
           :claim_check,
           :backup,
           :admin,
+          :metrics,
           :rate_limits,
           :quarantine,
           :lifecycle,
@@ -323,6 +367,7 @@ defmodule Ankusa.Config do
     |> normalize_wal()
     |> validate_listen_ips!()
     |> validate_egress!()
+    |> normalize_listeners!()
     |> validate_ranges!()
   end
 
@@ -349,6 +394,7 @@ defmodule Ankusa.Config do
     listen_ip!(config.admin.ip, "admin.ip")
     listen_ip!(config.claim_check.ip, "claim_check.ip")
     listen_ip!(config.routes.admin.ip, "routes.admin.ip")
+    listen_ip!(config.metrics.ip, "metrics.ip")
     config
   end
 
@@ -359,6 +405,29 @@ defmodule Ankusa.Config do
     config
   end
 
+  # Every `tls` block is checked and normalised here (files exist, `verify_peer`
+  # has its CA), and the acceptor count the section leaves open is settled.
+  defp normalize_listeners!(config) do
+    listener = config.listener
+
+    listener = %{
+      listener
+      | tls: Ankusa.Listener.normalize_tls!(listener.tls, "listener.tls"),
+        num_acceptors: listener.num_acceptors || Ankusa.Listener.default_acceptors()
+    }
+
+    %{
+      config
+      | listener: listener,
+        admin: put_tls!(config.admin, "admin.tls"),
+        claim_check: put_tls!(config.claim_check, "claim_check.tls"),
+        metrics: put_tls!(config.metrics, "metrics.tls"),
+        routes: %{config.routes | admin: put_tls!(config.routes.admin, "routes.admin.tls")}
+    }
+  end
+
+  defp put_tls!(section, key),
+    do: %{section | tls: Ankusa.Listener.normalize_tls!(section.tls, key)}
   # Types and ranges of the numeric keys, so `0` partitions or a negative
   # concurrency fail at boot with the key's name instead of misbehaving later.
   # Module-specific rules (dispatch breakers, claim retention, quarantine
@@ -367,7 +436,8 @@ defmodule Ankusa.Config do
     {[:port], "port"},
     {[:admin, :port], "admin.port"},
     {[:claim_check, :port], "claim_check.port"},
-    {[:routes, :admin, :port], "routes.admin.port"}
+    {[:routes, :admin, :port], "routes.admin.port"},
+    {[:metrics, :port], "metrics.port"}
   ]
 
   @positive [
@@ -391,7 +461,15 @@ defmodule Ankusa.Config do
     {[:backup, :interval_ms], "backup.interval_ms"},
     {[:backup, :keep], "backup.keep"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
-    {[:routes, :max_routes], "routes.max_routes"}
+    {[:routes, :max_routes], "routes.max_routes"},
+    {[:listener, :max_connections], "listener.max_connections"},
+    {[:listener, :num_acceptors], "listener.num_acceptors"},
+    {[:listener, :read_timeout_ms], "listener.read_timeout_ms"},
+    {[:listener, :body_read_timeout_ms], "listener.body_read_timeout_ms"},
+    {[:listener, :request_deadline_ms], "listener.request_deadline_ms"},
+    {[:listener, :max_requests_per_connection], "listener.max_requests_per_connection"},
+    {[:listener, :max_header_count], "listener.max_header_count"},
+    {[:listener, :max_header_length], "listener.max_header_length"}
   ]
 
   # `0` means something for these: no linger before a commit, roll at once,
@@ -442,6 +520,13 @@ defmodule Ankusa.Config do
       ~s(\"\" or path segments each ending in "/" such as "node-a/"),
       &(&1 == "" or (is_binary(&1) and Regex.match?(@key_prefix, &1)))
     )
+
+    for {path, key} <- [
+          {[:listener, :http2], "listener.http2"},
+          {[:metrics, :enabled], "metrics.enabled"}
+        ] do
+      check!(config, path, key, "true or false", &is_boolean/1)
+    end
 
     config
   end

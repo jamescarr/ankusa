@@ -7,23 +7,33 @@ defmodule Ankusa.Property.EnvelopeTest do
   alias Ankusa.Envelope
   alias Ankusa.Generators, as: G
 
-  property "from_binary/1 inverts to_binary/1, field for field" do
-    check all env <- G.envelope() do
-      assert Envelope.from_binary(Envelope.to_binary(env)) == env
+  property "from_binary/1 inverts to_binary/1, field for field, in both encodings" do
+    check all env <- G.envelope(), version <- member_of([0, 1]) do
+      assert Envelope.from_binary(Envelope.to_binary(env, version: version)) == {:ok, env}
     end
   end
 
   property "the encoding is byte-stable: re-encoding what was decoded gives the same bytes" do
-    check all env <- G.envelope() do
-      bin = Envelope.to_binary(env)
-      assert Envelope.to_binary(Envelope.from_binary(bin)) == bin
+    check all env <- G.envelope(), version <- member_of([0, 1]) do
+      bin = Envelope.to_binary(env, version: version)
+      {:ok, decoded} = Envelope.from_binary(bin)
+      assert Envelope.to_binary(decoded, version: version) == bin
     end
   end
 
   property "the body travels verbatim, whatever bytes it holds" do
     check all env <- G.envelope(), body <- G.bytes(8192) do
       env = %{env | body: body, size: byte_size(body)}
-      assert Envelope.from_binary(Envelope.to_binary(env)).body == body
+      assert {:ok, %Envelope{body: ^body}} = Envelope.from_binary(Envelope.to_binary(env))
+    end
+  end
+
+  property "from_binary/1 never raises: arbitrary bytes are an envelope or an error value" do
+    check all bytes <- one_of([G.bytes(256), map(G.bytes(256), &("AE" <> &1))]) do
+      result = Envelope.from_binary(bytes)
+
+      assert match?({:ok, %Envelope{}}, result) or
+               result in [{:error, :undecodable}, {:error, :unsupported_envelope_version}]
     end
   end
 

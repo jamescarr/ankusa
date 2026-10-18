@@ -63,7 +63,8 @@ defmodule AnkusaServer.ConfigTest do
              enabled: true,
              port: 4002,
              ip: "127.0.0.1",
-             gauge_interval_ms: 15_000
+             gauge_interval_ms: 15_000,
+             tls: nil
            }
 
     assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
@@ -125,7 +126,8 @@ defmodule AnkusaServer.ConfigTest do
              enabled: true,
              port: 4002,
              ip: "127.0.0.1",
-             gauge_interval_ms: 15_000
+             gauge_interval_ms: 15_000,
+             tls: nil
            }
 
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
@@ -444,6 +446,146 @@ defmodule AnkusaServer.ConfigTest do
 
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "admin.ip"
+  end
+
+  describe "listener hardening and TLS" do
+    @tls_dir Path.expand("../../../ankusa/test/fixtures/tls", __DIR__)
+    @sources "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    test "the listener, metrics and TLS sections load into core's config" do
+      path =
+        tmp_config("""
+        listener:
+          max_connections: 5000
+          num_acceptors: 16
+          read_timeout_ms: 5000
+          body_read_timeout_ms: 8000
+          request_deadline_ms: 20000
+          max_requests_per_connection: 500
+          max_header_count: 32
+          max_header_length: 8192
+          http2: true
+          tls:
+            certfile: #{@tls_dir}/server.pem
+            keyfile: #{@tls_dir}/server-key.pem
+            cacertfile: #{@tls_dir}/ca.pem
+            verify: verify_peer
+            versions: [tlsv1.3]
+            ciphers: [TLS_AES_256_GCM_SHA384]
+        admin:
+          tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}
+        claim_check:
+          tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}
+        routes:
+          admin:
+            tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}
+        metrics:
+          enabled: true
+          port: 9100
+          ip: 0.0.0.0
+          tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}
+        #{@sources}
+        """)
+
+      config = Config.load!(path: path, env: %{}).config
+
+      assert %{
+               max_connections: 5000,
+               num_acceptors: 16,
+               read_timeout_ms: 5000,
+               body_read_timeout_ms: 8000,
+               request_deadline_ms: 20_000,
+               max_requests_per_connection: 500,
+               max_header_count: 32,
+               max_header_length: 8192,
+               http2: true,
+               tls: %{
+                 verify: :verify_peer,
+                 versions: [:"tlsv1.3"],
+                 ciphers: ["TLS_AES_256_GCM_SHA384"],
+                 cacertfile: cacertfile
+               }
+             } = config.listener
+
+      assert cacertfile == Path.join(@tls_dir, "ca.pem")
+
+      for tls <- [
+            config.admin.tls,
+            config.claim_check.tls,
+            config.routes.admin.tls,
+            config.metrics.tls
+          ] do
+        assert %{verify: :verify_none, versions: [:"tlsv1.2", :"tlsv1.3"]} = tls
+      end
+
+      assert %{enabled: true, port: 9100, ip: "0.0.0.0"} = config.metrics
+    end
+
+    test "without the sections the hardened defaults apply and nothing is TLS" do
+      config = Config.load!(path: tmp_config(@sources), env: %{}).config
+
+      assert config.listener.read_timeout_ms == 10_000
+      assert config.listener.http2 == false
+      assert config.listener.tls == nil
+      assert config.metrics == %{enabled: false, port: 4004, ip: "127.0.0.1", tls: nil}
+    end
+
+    test "ANKUSA_METRICS_* turn the metrics listener on and move it" do
+      path = tmp_config(@sources)
+
+      config =
+        Config.load!(
+          path: path,
+          env: %{
+            "ANKUSA_METRICS_ENABLED" => "true",
+            "ANKUSA_METRICS_PORT" => "9200",
+            "ANKUSA_METRICS_IP" => "0.0.0.0"
+          }
+        ).config
+
+      assert %{enabled: true, port: 9200, ip: "0.0.0.0"} = config.metrics
+    end
+
+    test "a bad listener or TLS key fails load! naming it" do
+      tls = "certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem"
+
+      for {yaml, message} <- [
+            {"listener: {timeout: 1}", ~s(listener: unknown key "timeout")},
+            {"listener: {tls: {#{tls}, password: x}}", ~s(listener.tls: unknown key "password")},
+            {"listener: {tls: {#{tls}, verify: maybe}}",
+             ~s(listener.tls.verify: unknown value "maybe")},
+            {"listener: {tls: {#{tls}, versions: [ssl3]}}",
+             ~s(listener.tls.versions: unknown value "ssl3")},
+            {"listener: {read_timeout_ms: fast}",
+             "listener.read_timeout_ms: expected an integer"},
+            {"listener: {http2: sure}", "listener.http2: expected a boolean"},
+            {"metrics: {port: nope}", "metrics.port: expected an integer"},
+            {"admin: {tls: {#{tls}, verify: nope}}", ~s(admin.tls.verify: unknown value "nope")}
+          ] do
+        path = tmp_config("#{yaml}\n#{@sources}")
+        error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+        assert error.message =~ message, "#{yaml}: #{error.message}"
+      end
+    end
+
+    test "core's TLS checks run at load, so check-config catches them" do
+      tls = "certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem"
+
+      for {yaml, message} <- [
+            {"listener: {tls: {#{tls}, verify: verify_peer}}",
+             "listener.tls.cacertfile is required with listener.tls.verify: :verify_peer"},
+            {"admin: {tls: {certfile: #{@tls_dir}/server.pem}}",
+             "admin.tls.keyfile is required when admin.tls is set"},
+            {"claim_check: {tls: {certfile: /nope.pem, keyfile: /nope-key.pem}}",
+             "claim_check.tls.certfile must be a readable file"},
+            {"listener: {max_connections: 0}",
+             "listener.max_connections must be a positive integer, got 0"}
+          ] do
+        path = tmp_config("#{yaml}\n#{@sources}")
+        error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+        assert error.message =~ message, "#{yaml}: #{error.message}"
+      end
+    end
   end
 
   # ── wal.type: none ──────────────────────────────────────────────────────────
@@ -882,7 +1024,7 @@ defmodule AnkusaServer.ConfigTest do
              rules: [%{action: :allow, cidr: "203.0.113.0/24"}]
            }
 
-    assert routes.admin == %{port: 4100, ip: "127.0.0.1"}
+    assert routes.admin == %{port: 4100, ip: "127.0.0.1", tls: nil}
 
     assert [%{"id" => "seed", "path" => "/hooks/seed", "metadata" => %{"owner" => "acme"}}] =
              routes.seed
@@ -1029,7 +1171,7 @@ defmodule AnkusaServer.ConfigTest do
     assert routes.enabled
     assert routes.max_routes == 10_000
     assert routes.store == {Ankusa.Routes.Store.ETS, []}
-    assert routes.admin == %{port: 4003, ip: "127.0.0.1"}
+    assert routes.admin == %{port: 4003, ip: "127.0.0.1", tls: nil}
     assert routes.ip_denied_status == 403
     assert routes.log_sample == 100
     assert routes.trusted_proxies == []

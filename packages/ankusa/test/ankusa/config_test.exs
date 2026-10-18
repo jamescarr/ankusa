@@ -41,7 +41,7 @@ defmodule Ankusa.ConfigTest do
       refute config.routes.enabled
       assert config.routes.store == {Ankusa.Routes.Store.ETS, []}
       assert config.routes.trusted_proxies == []
-      assert config.routes.admin == %{port: 4003, ip: "127.0.0.1"}
+      assert config.routes.admin == %{port: 4003, ip: "127.0.0.1", tls: nil}
     end
 
     test "listeners bind loopback by default" do
@@ -428,6 +428,162 @@ defmodule Ankusa.ConfigTest do
       assert_raise ArgumentError, "backup.blob_store must be nil or {module, opts}", fn ->
         Ankusa.Store.Backup.validate_config!(Config.new(backup: %{blob_store: "s3://secret"}))
       end
+    end
+  end
+
+  describe "the listener and metrics sections" do
+    @tls_dir Path.expand("../fixtures/tls", __DIR__)
+    @listener_positive ~w(max_connections num_acceptors read_timeout_ms body_read_timeout_ms
+                          request_deadline_ms max_requests_per_connection max_header_count
+                          max_header_length)a
+
+    defp tls(overrides \\ []) do
+      Keyword.merge(
+        [
+          certfile: Path.join(@tls_dir, "server.pem"),
+          keyfile: Path.join(@tls_dir, "server-key.pem")
+        ],
+        overrides
+      )
+    end
+
+    test "defaults: hardened limits, no TLS, a metrics listener that is off" do
+      config = Config.new()
+
+      assert %{
+               tls: nil,
+               max_connections: 20_000,
+               read_timeout_ms: 10_000,
+               body_read_timeout_ms: 15_000,
+               request_deadline_ms: 30_000,
+               max_requests_per_connection: 1_000,
+               max_header_count: 64,
+               max_header_length: 16_384,
+               http2: false
+             } = config.listener
+
+      assert config.listener.num_acceptors == System.schedulers_online() * 2
+      assert config.metrics == %{enabled: false, port: 4004, ip: "127.0.0.1", tls: nil}
+
+      for section <- [config.admin, config.claim_check, config.routes.admin] do
+        assert section.tls == nil
+      end
+    end
+
+    test "an explicit acceptor count is kept" do
+      assert Config.new(listener: %{num_acceptors: 7}).listener.num_acceptors == 7
+    end
+
+    test "every numeric listener key is a positive integer" do
+      for key <- @listener_positive do
+        assert_raise ArgumentError,
+                     "listener.#{key} must be a positive integer, got 0",
+                     fn -> Config.new(listener: %{key => 0}) end
+      end
+    end
+
+    test "listener.http2 and metrics.enabled are booleans, metrics.port a port, metrics.ip an IP" do
+      assert_raise ArgumentError, ~s(listener.http2 must be true or false, got "yes"), fn ->
+        Config.new(listener: %{http2: "yes"})
+      end
+
+      assert_raise ArgumentError, ~s(metrics.enabled must be true or false, got "yes"), fn ->
+        Config.new(metrics: %{enabled: "yes"})
+      end
+
+      assert_raise ArgumentError,
+                   "metrics.port must be an integer from 0 to 65535, got 70000",
+                   fn ->
+                     Config.new(metrics: %{port: 70_000})
+                   end
+
+      assert_raise ArgumentError, ~r/metrics\.ip must be an IP address/, fn ->
+        Config.new(metrics: %{ip: "localhost"})
+      end
+    end
+
+    test "an unknown listener or metrics key is refused" do
+      assert_raise ArgumentError, "unknown Ankusa.Config key: listener.timeout", fn ->
+        Config.new(listener: %{timeout: 1})
+      end
+
+      assert_raise ArgumentError, "unknown Ankusa.Config key: metrics.token", fn ->
+        Config.new(metrics: %{token: "x"})
+      end
+    end
+
+    test "a TLS block is normalised on every listener that takes one" do
+      for {opts, get} <- [
+            {[listener: %{tls: tls()}], & &1.listener.tls},
+            {[admin: %{tls: tls()}], & &1.admin.tls},
+            {[claim_check: %{tls: tls()}], & &1.claim_check.tls},
+            {[metrics: %{tls: tls()}], & &1.metrics.tls},
+            {[routes: %{admin: %{tls: tls()}}], & &1.routes.admin.tls}
+          ] do
+        assert %{
+                 certfile: certfile,
+                 keyfile: keyfile,
+                 cacertfile: nil,
+                 verify: :verify_none,
+                 versions: [:"tlsv1.2", :"tlsv1.3"],
+                 ciphers: nil
+               } = opts |> Config.new() |> get.()
+
+        assert certfile == Path.join(@tls_dir, "server.pem")
+        assert keyfile == Path.join(@tls_dir, "server-key.pem")
+      end
+    end
+
+    test "verify_peer needs the CA that signs client certificates" do
+      ca = Path.join(@tls_dir, "ca.pem")
+
+      assert_raise ArgumentError,
+                   ~r/listener\.tls\.cacertfile is required with .*verify_peer/,
+                   fn ->
+                     Config.new(listener: %{tls: tls(verify: :verify_peer)})
+                   end
+
+      tls = Config.new(listener: %{tls: tls(verify: :verify_peer, cacertfile: ca)}).listener.tls
+      assert %{verify: :verify_peer, cacertfile: ^ca} = tls
+    end
+
+    test "a TLS block with a missing file, unknown key or bad value fails naming the key" do
+      assert_raise ArgumentError, "admin.tls.certfile is required when admin.tls is set", fn ->
+        Config.new(admin: %{tls: [keyfile: Path.join(@tls_dir, "server-key.pem")]})
+      end
+
+      assert_raise ArgumentError, ~r/claim_check\.tls\.keyfile must be a readable file/, fn ->
+        Config.new(claim_check: %{tls: tls(keyfile: "/no/such/key.pem")})
+      end
+
+      assert_raise ArgumentError, "unknown Ankusa.Config key: metrics.tls.password", fn ->
+        Config.new(metrics: %{tls: tls(password: "x")})
+      end
+
+      assert_raise ArgumentError,
+                   ~r/listener\.tls\.verify must be :verify_peer or :verify_none/,
+                   fn ->
+                     Config.new(listener: %{tls: tls(verify: :maybe)})
+                   end
+
+      assert_raise ArgumentError, ~r/listener\.tls\.versions must be a non-empty list/, fn ->
+        Config.new(listener: %{tls: tls(versions: [:tlsv1])})
+      end
+
+      assert_raise ArgumentError,
+                   ~r/listener\.tls\.ciphers has an unknown cipher suite: "nope"/,
+                   fn ->
+                     Config.new(listener: %{tls: tls(ciphers: ["nope"])})
+                   end
+
+      assert_raise ArgumentError, ~r/listener\.tls must be nil or a map/, fn ->
+        Config.new(listener: %{tls: "on"})
+      end
+    end
+
+    test "known cipher suites are accepted" do
+      config = Config.new(listener: %{tls: tls(ciphers: ["ECDHE-RSA-AES256-GCM-SHA384"])})
+      assert config.listener.tls.ciphers == ["ECDHE-RSA-AES256-GCM-SHA384"]
     end
   end
 end

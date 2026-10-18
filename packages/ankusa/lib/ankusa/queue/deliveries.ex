@@ -37,12 +37,49 @@ defmodule Ankusa.Queue.Deliveries do
   def unresolved_dead, do: @unresolved_dead
   def unresolved?(sink), do: sink >= @unresolved_dead
 
+  # Row encoding, versioned like `Ankusa.Envelope.to_binary/2`:
+  #
+  #   v0  the bare term, as every release up to 0.6 wrote it (the default here)
+  #   v1  `<<"AD", 1, term::binary>>` (`version: 1`)
+  #
+  # This release reads both and still writes v0, so a rollback to the previous
+  # release keeps reading every row; the default flips to 1 one minor later
+  # (`docs/deployment.md`, "Rolling back a minor"). A row is a plain map and
+  # its keys pass through untouched: a key this node does not know (a field a
+  # newer node added) survives every rewrite of the row.
+  @write_version 0
+
+  @spec encode_row(map(), keyword()) :: binary()
+  def encode_row(row, opts \\ []) do
+    term = :erlang.term_to_binary(row)
+
+    case Keyword.get(opts, :version, @write_version) do
+      0 -> term
+      1 -> <<"AD", 1, term::binary>>
+    end
+  end
+
+  @spec decode_row(binary()) ::
+          {:ok, map()} | {:error, :unsupported_delivery_row_version | :undecodable}
+  def decode_row(<<"AD", 1, term::binary>>), do: decode_term(term)
+
+  def decode_row(<<"AD", _version, _term::binary>>),
+    do: {:error, :unsupported_delivery_row_version}
+
+  def decode_row(bin) when is_binary(bin), do: decode_term(bin)
+
   # Plain `binary_to_term`: rows hold module atoms, the same reason
   # `Envelope.from_binary/1` is not `:safe`.
-  def encode_row(row), do: :erlang.term_to_binary(row)
   # Trusted, internally written data (this node's own store rows); never request input.
   # sobelow_skip ["Misc.BinToTerm"]
-  def decode_row(bin), do: :erlang.binary_to_term(bin)
+  defp decode_term(term) do
+    case :erlang.binary_to_term(term) do
+      %{} = row -> {:ok, row}
+      _ -> {:error, :undecodable}
+    end
+  rescue
+    ArgumentError -> {:error, :undecodable}
+  end
 
   @type due :: %{
           key: binary(),
@@ -60,7 +97,7 @@ defmodule Ankusa.Queue.Deliveries do
   @spec row(atom(), pos_integer(), integer()) :: {:ok, map()} | :not_found | {:error, term()}
   def row(instance, seq, sink) do
     case Store.get(instance, :deliveries, Keys.delivery(seq, sink)) do
-      {:ok, bin} -> {:ok, decode_row(bin)}
+      {:ok, bin} -> decode_row(bin)
       other -> other
     end
   end
@@ -109,7 +146,9 @@ defmodule Ankusa.Queue.Deliveries do
 
   @doc """
   Everything a claimed row needs to run: its row, its hook (`nil` if gone) and
-  the hook's stored claim-check ref (`nil` if none). Same order as `dues`.
+  the hook's stored claim-check ref (`nil` if none). Same order as `dues`. A
+  row or hook that does not decode is `{:error, reason}` instead (see
+  `decode_row/1`, `Envelope.from_binary/1`): the Pipeline dead-letters it.
   """
   @spec load(atom(), [due()]) :: {:ok, [map()]} | {:error, term()}
   def load(_instance, []), do: {:ok, []}
@@ -143,7 +182,13 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
-  defp decode_hook(seq, {:ok, bin}), do: %{Envelope.from_binary(bin) | seq: seq}
+  defp decode_hook(seq, {:ok, bin}) do
+    case Envelope.from_binary(bin) do
+      {:ok, env} -> %{env | seq: seq}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp decode_hook(_seq, :not_found), do: nil
 
   # Trusted, internally written data (this node's own store rows); never request input.
@@ -151,7 +196,13 @@ defmodule Ankusa.Queue.Deliveries do
   defp decode_claim({:ok, bin}), do: :erlang.binary_to_term(bin)
   defp decode_claim(:not_found), do: nil
 
-  defp decode_stored_row({:ok, bin}), do: decode_row(bin)
+  defp decode_stored_row({:ok, bin}) do
+    case decode_row(bin) do
+      {:ok, row} -> row
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp decode_stored_row(:not_found), do: nil
 
   @doc "The concrete sink indexes that already have a row for `seq`."
@@ -261,13 +312,29 @@ defmodule Ankusa.Queue.Deliveries do
 
     with {:ok, rows} <- Store.multi_get(instance, :deliveries, keys),
          found = for({entry, {:ok, bin}} <- Enum.zip(entries, rows), do: with_row(entry, bin)),
+         found = Enum.reject(found, &is_nil/1),
          {tagged, legacy} = Enum.split_with(found, &Map.has_key?(&1.row, :source_id)),
          {:ok, legacy} <- legacy_of_source(instance, legacy, source_id) do
       fun.(Enum.filter(tagged, &(&1.row.source_id == source_id)) ++ legacy, acc)
     end
   end
 
-  defp with_row(entry, bin), do: Map.put(entry, :row, decode_row(bin))
+  # A row that does not decode belongs to no source this scan can name: it is
+  # skipped (and said so), and the Pipeline dead-letters it when it comes due.
+  defp with_row(entry, bin) do
+    case decode_row(bin) do
+      {:ok, row} ->
+        Map.put(entry, :row, row)
+
+      {:error, reason} ->
+        Logger.warning(
+          "[ankusa] delivery row #{entry.seq}/#{entry.sink} does not decode (#{reason}); " <>
+            "left out of the source scan"
+        )
+
+        nil
+    end
+  end
 
   defp legacy_of_source(_instance, [], _source_id), do: {:ok, []}
 
@@ -277,7 +344,7 @@ defmodule Ankusa.Queue.Deliveries do
     with {:ok, hooks} <- Store.multi_get(instance, :hooks, Enum.map(seqs, &Keys.hook/1)) do
       mine =
         for {seq, {:ok, bin}} <- Enum.zip(seqs, hooks),
-            Envelope.from_binary(bin).source_id == source_id,
+            match?({:ok, %{source_id: ^source_id}}, Envelope.from_binary(bin)),
             into: MapSet.new(),
             do: seq
 
@@ -343,14 +410,28 @@ defmodule Ankusa.Queue.Deliveries do
     ]
   end
 
-  @doc "Dead-letter the row. `row` carries the final attempt count."
-  def dead_ops(seq, sink, row, at, error, %Envelope{} = env) do
+  @unknown_source "unknown"
+
+  @doc """
+  The `{source_id, id}` a dead row is filed under. `env` is the hook, or what
+  `Envelope.from_binary/1` answered when it did not decode: then the source is
+  the row's (`"unknown"` when the row is no help either) and there is no id.
+  """
+  @spec owner(Envelope.t() | term(), map()) :: {String.t(), String.t() | nil}
+  def owner(%Envelope{source_id: source_id, id: id}, _row), do: {source_id, id}
+  def owner(_undecoded, row), do: {Map.get(row, :source_id) || @unknown_source, nil}
+
+  @doc """
+  Dead-letter the row. `row` carries the final attempt count; `env` is the
+  hook or its decode error (see `owner/2`).
+  """
+  def dead_ops(seq, sink, row, at, error, env) do
     row = %{row | state: :dead, at: at, error: error}
 
     [
       {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
       {:delete, :index, Keys.inflight(seq, sink)},
-      {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary({env.source_id, env.id})}
+      {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary(owner(env, row))}
     ]
   end
 
@@ -482,28 +563,37 @@ defmodule Ankusa.Queue.Deliveries do
   # job's cursor simply moves past it, so one corrupt row cannot wedge the
   # replay engine on it forever.
   defp revive_row(key, seq, sink, {:ok, bin}, now, replay_id, n) do
-    row =
-      decode_row(bin)
-      |> Map.merge(%{state: :pending, attempts: 0, at: now, error: nil})
-      |> Map.put(:replay, replay_id)
+    case decode_row(bin) do
+      {:ok, %{size: size} = row} when is_integer(size) ->
+        row =
+          row
+          |> Map.merge(%{state: :pending, attempts: 0, at: now, error: nil})
+          |> Map.put(:replay, replay_id)
 
-    {[
-       {:delete, :index, key},
-       {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
-       {:put, :index, Keys.due(now, seq, sink), <<row.size::32>>}
-     ], n + 1}
-  rescue
-    error ->
-      Logger.warning(
-        "[ankusa] dead row #{seq}/#{sink} does not decode and was left in the DLQ: " <>
-          Exception.message(error)
-      )
+        {[
+           {:delete, :index, key},
+           {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
+           {:put, :index, Keys.due(now, seq, sink), <<size::32>>}
+         ], n + 1}
 
-      {[], n}
+      {:error, reason} ->
+        left_in_dlq(seq, sink, reason, n)
+
+      {:ok, _no_size} ->
+        left_in_dlq(seq, sink, :malformed_row, n)
+    end
   end
 
   defp revive_row(key, _seq, _sink, :not_found, _now, _replay_id, n) do
     {[{:delete, :index, key}], n}
+  end
+
+  defp left_in_dlq(seq, sink, reason, n) do
+    Logger.warning(
+      "[ankusa] dead row #{seq}/#{sink} does not decode and was left in the DLQ: #{reason}"
+    )
+
+    {[], n}
   end
 
   @doc """
@@ -530,9 +620,14 @@ defmodule Ankusa.Queue.Deliveries do
           {source_id, id} = :erlang.binary_to_term(value)
 
           cond do
-            not matches?(filter, source_id, id, at) -> {:cont, acc}
-            kept_n < limit -> {:cont, {total + 1, kept_n + 1, [{at, seq, sink} | kept]}}
-            true -> {:cont, {total + 1, kept_n, kept}}
+            not matches?(filter, source_id, id, at) ->
+              {:cont, acc}
+
+            kept_n < limit ->
+              {:cont, {total + 1, kept_n + 1, [{at, seq, sink, {source_id, id}} | kept]}}
+
+            true ->
+              {:cont, {total + 1, kept_n, kept}}
           end
         end,
         reverse: true
@@ -544,24 +639,28 @@ defmodule Ankusa.Queue.Deliveries do
            Store.multi_get(
              instance,
              :deliveries,
-             Enum.map(kept, fn {_, seq, sink} -> Keys.delivery(seq, sink) end)
+             Enum.map(kept, fn {_, seq, sink, _} -> Keys.delivery(seq, sink) end)
            ),
          {:ok, hooks} <-
-           Store.multi_get(instance, :hooks, Enum.map(kept, fn {_, seq, _} -> Keys.hook(seq) end)) do
+           Store.multi_get(
+             instance,
+             :hooks,
+             Enum.map(kept, fn {_, seq, _, _} -> Keys.hook(seq) end)
+           ) do
       {entries, orphans} =
         [kept, rows, hooks]
         |> Enum.zip()
         |> Enum.reduce({[], []}, fn
-          {{at, seq, _sink}, {:ok, row}, {:ok, hook}}, {entries, orphans} ->
+          {{at, seq, _sink, owner}, {:ok, row}, {:ok, hook}}, {entries, orphans} ->
             entry = %{
-              envelope: %{Envelope.from_binary(hook) | seq: seq},
+              envelope: listed_envelope(hook, seq, at, owner, row),
               reason: row_error(row),
               at: at
             }
 
             {[entry | entries], orphans}
 
-          {{_at, seq, sink}, _row, _hook}, {entries, orphans} ->
+          {{_at, seq, sink, _owner}, _row, _hook}, {entries, orphans} ->
             {entries, [{seq, sink} | orphans]}
         end)
 
@@ -579,13 +678,44 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
+  # A hook this node cannot decode (an envelope version it does not know, say)
+  # still lists, as a stub built from what the dead key and the row hold: an
+  # operator must see the dead letter and why it died.
+  defp listed_envelope(hook, seq, at, {source_id, id}, row) do
+    case Envelope.from_binary(hook) do
+      {:ok, env} ->
+        %{env | seq: seq}
+
+      {:error, _reason} ->
+        size =
+          case decode_row(row) do
+            {:ok, %{size: size}} when is_integer(size) -> size
+            _ -> 0
+          end
+
+        %Envelope{
+          id: id,
+          source_id: source_id,
+          received_at: at,
+          method: "",
+          path: "",
+          headers: [],
+          body: "",
+          size: size,
+          seq: seq
+        }
+    end
+  end
+
   # A delivery row that does not decode still lists: the replay engine leaves
   # such a row in the DLQ (see `revive_row/7`), so listing must not raise on
   # it and take the whole page down.
   defp row_error(bin) do
-    decode_row(bin).error
-  rescue
-    _ -> "undecodable delivery row"
+    case decode_row(bin) do
+      {:ok, row} -> Map.get(row, :error)
+      {:error, :unsupported_delivery_row_version} -> "unsupported delivery row version"
+      {:error, :undecodable} -> "undecodable delivery row"
+    end
   end
 
   defp matches?(filter, source_id, id, at) do

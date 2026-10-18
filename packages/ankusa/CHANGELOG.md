@@ -13,6 +13,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Hardened listeners, TLS/mTLS on every listener, a separate metrics
+  listener (SEC-6).** The new `listener` config section sets what Bandit's
+  defaults left open, on every HTTP listener the instance runs:
+  `read_timeout_ms` (10 s: a connection that sends nothing, or dribbles its
+  request head, is closed), `body_read_timeout_ms` (15 s) and
+  `request_deadline_ms` (30 s: the ingest port answers `408`),
+  `max_connections` (20 000, over `num_acceptors`, default two per scheduler),
+  `max_requests_per_connection` (1 000), `max_header_count` (64),
+  `max_header_length` (16 384) and `http2` (`false`). `listener.tls`,
+  `admin.tls`, `routes.admin.tls`, `claim_check.tls` and `metrics.tls` take a
+  TLS block (`certfile`, `keyfile`, `cacertfile`, `verify`, `versions`,
+  `ciphers`, `Ankusa.Listener`); `verify: :verify_peer` demands a client
+  certificate (mTLS) and makes it available as the request's peer
+  certificate. `metrics: %{enabled, ip, port}` starts `Ankusa.Metrics.Router`,
+  a listener that serves only `/metrics`, `/health` and `/ready`; the admin
+  API keeps serving `/metrics`. `Ankusa.Http.read_body_limited/3` takes
+  `:read_timeout` and `:deadline`. Every new key is range-checked at boot.
+  Behaviour change: listeners are now HTTP/1.1 only and close idle connections
+  after 10 s; set `listener.http2: true` / `listener.read_timeout_ms` to
+  restore Bandit's behaviour.
 - **Store format version, migration registry, downgrade guard.** The store
   records its layout version under `m:format_version` (this release writes
   format 1; a store without the key is format 1 and is stamped on first open).
@@ -119,6 +139,24 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   (`allow_insecure_http: true`, and `allow_cidrs` or `allow_hosts` naming the
   receiver). A static or lifecycle sink with an unsupported `:req_options` key
   now fails at boot instead of at its first delivery.
+- **Hooks and delivery rows have a versioned encoding.** `Ankusa.Envelope`
+  gains `to_binary/2` (`version: 0 | 1`; v1 is `"AE"`, `1`, then the term) and
+  a delivery row gets the same scheme (`"AD"`, `1`). Both are read in the old
+  bare form (v0) and in v1; this release still *writes* v0, so a rollback to
+  0.6 keeps reading every row, and the release after it writes v1 (see
+  `docs/deployment.md`, "Rolling back a minor"). A field a newer node added is
+  ignored on an envelope and kept on a row, whether or not this VM has seen
+  its atom (decoding does not use `binary_to_term/2`'s `:safe`, which would
+  reject it). **Breaking for callers of the internals:**
+  `Ankusa.Envelope.from_binary/1`
+  now returns `{:ok, envelope} | {:error, :unsupported_envelope_version |
+  :undecodable}` instead of the struct or a raise. Every reader handles the
+  error: dispatch dead-letters the delivery (reason
+  `:unsupported_envelope_version`, `:unsupported_delivery_row_version` or
+  `:undecodable`) and lists it in the DLQ, `Ankusa.Queue.hooks/3` returns
+  `{:error, {:corrupt_value, :hooks, _}}`, a replay skips the hook, the
+  compactor logs it, and the 0.3 import refuses to boot with
+  `{:corrupt_legacy_wal_record, path, seq, reason}`.
 - Requires `async_api_spex ~> 0.2` from Hex (was `~> 0.1`, which excluded
   0.2.0, the release this package is built and tested against).
 - **Breaking:** `claim_check.blob_store` is now `claim_check.blob_stores`, a

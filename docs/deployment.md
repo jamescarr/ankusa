@@ -65,8 +65,9 @@ node's data directory needs a persistent volume.
 | 4001 | claim check gateway (`claim_check` role) | your own proxy or network policy |
 | 4002 | admin API + `/metrics` | your own proxy or network policy |
 | 4003 | route management API (`routes.admin.ip`, default `127.0.0.1`; only when `routes.enabled`) | your own proxy or network policy |
+| 4004 | metrics listener: only `/metrics`, `/health`, `/ready` (`metrics.enabled`, default off; `metrics.ip`, default `127.0.0.1`) | your Prometheus / kubelet network rule |
 
-Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` (or `admin.ip` / `claim_check.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them.
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `claim_check.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. Every listener, ingest included, can terminate TLS, and demand a client certificate (mTLS) with `verify: verify_peer`: see [Listeners: limits, TLS and mTLS](configuration.md#listeners-limits-tls-and-mtls). The admin, route-management and claim-check APIs still have no authentication of their own; `verify_peer` is what keeps a client without your CA's certificate off them.
 
 `/var/lib/ankusa` holds the node's store (`store/`: hooks, delivery rows, the
 quarantine pen, API-managed sources, rate-limit overrides, the archive
@@ -121,7 +122,9 @@ probe from outside the pod hits the pod address, and `:4002` binds loopback
 unless `admin.ip` says otherwise), so a node with a full disk leaves the
 load balancer instead of being restarted in a loop. The image's
 `HEALTHCHECK` runs `docker-entrypoint healthcheck`, which asks `/ready` on the
-ingest port and falls back to the admin port for a node without `:edge`, so
+ingest port and falls back to the admin port, then the metrics port, for a node
+without `:edge` or whose ingest listener terminates TLS (the probe is plain
+HTTP), so
 `docker ps` shows `unhealthy` while the store refuses writes and `healthy`
 again once space frees.
 
@@ -281,6 +284,33 @@ due row) and an HTTP sink's `ordered` (deliveries are not ordered). In core,
 `wal: {Ankusa.WAL.DiskLog, _}` raises `ArgumentError` with a hint to use
 `wal: :disk`; any other value but `:disk` or `:none` raises too.
 
+## Rolling back a minor
+
+Hooks and delivery rows are stored in a versioned encoding (v0 = the bare Erlang
+term, v1 = a two-byte tag and a version byte in front of it; see
+[`storage.md`](storage.md#encoding-and-versions)). That version is separate
+from the store's format version in
+[Upgrading between releases](#upgrading-between-releases), which the boot
+guard checks. A release reads the versions it knows, and a release only starts
+*writing* a version once the release before it can read it. That makes a
+rollback of one minor safe, and puts the boundary here:
+
+| Running | Reads | Writes | Roll back to |
+| --- | --- | --- | --- |
+| 0.6 and earlier | v0 | v0 | n/a |
+| the first release with versioned encodings | v0, v1 | v0 | 0.6: safe, every row it wrote is v0 |
+| the release after it | v0, v1 | v1 | the first release with versioned encodings: safe; 0.6: **not supported** |
+
+0.6 reads a v1 row with a bare `binary_to_term` and raises, so once a node has
+run the release that writes v1, do not roll back past the release that reads
+it. Upgrade 0.6 to the release that writes v1 *through* the release that
+reads it, never directly. If a node must go below the boundary anyway, restore
+the data directory from a backup taken before the first v1 write; the hooks
+acked after it are lost with it. The change that flips the write default to v1
+bumps the store format in the same release, so the guard refuses the older
+image at boot (`{:store_format_newer, found, supported}`) instead of that
+release raising on rows one at a time.
+
 ## When a node refuses to start
 
 The store never treats a database it cannot read as empty. These refusals name
@@ -294,6 +324,9 @@ the file or version and what to do:
   a 0.3 WAL with valid frames after the damage, or an unreadable `.cursors` or
   `.truncated` sidecar. Acked hooks after the damage would be lost, so the
   node will not guess. Move the 0.3 directory aside to start without it.
+- **`{:corrupt_legacy_wal_record, path, seq, reason}`** — a 0.3 WAL frame that
+  passes its checksum but is no envelope. The node will not guess; move the
+  0.3 directory aside to start without it.
 - **`{:store_format_newer, found, supported}`** — the store was written by a
   newer release (`found`) than this one understands (`supported`), typically
   after a rollback. Run the newer release again, or stop the node and restore

@@ -8,6 +8,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- `listener` (`max_connections`, `num_acceptors`, `read_timeout_ms`,
+  `body_read_timeout_ms`, `request_deadline_ms`, `max_requests_per_connection`,
+  `max_header_count`, `max_header_length`, `http2`, `tls`), `metrics`
+  (`enabled`, `port`, `ip`, `tls`; env `ANKUSA_METRICS_ENABLED`,
+  `ANKUSA_METRICS_PORT`, `ANKUSA_METRICS_IP`) and a `tls` block
+  (`certfile`, `keyfile`, `cacertfile`, `verify`, `versions`, `ciphers`) on
+  `admin`, `routes.admin` and `claim_check`: TLS and mutual TLS on every
+  listener, a metrics listener that serves only `/metrics`, `/health` and
+  `/ready`, and hardened connection limits. The image's `HEALTHCHECK` falls
+  back to the admin and then the metrics listener when the ingest listener
+  terminates TLS. See the `ankusa` changelog and `docs/configuration.md`.
 - `claim_check.stores`: a list of claim stores (each the `claim_check.store`
   shape), exclusive with `store`. A pack whose store fails is written to the
   next one, a store that fails a write or a read is skipped by writes and

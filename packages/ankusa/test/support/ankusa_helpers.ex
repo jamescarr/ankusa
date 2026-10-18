@@ -95,6 +95,28 @@ defmodule Ankusa.TestHelpers do
     Enum.map(hooks, & &1.id)
   end
 
+  @doc """
+  `env` encoded as a newer node (N+1) would write it: `version` 0 (bare term) or
+  1 (`"AE", 1`), plus one extra key this node knows nothing about. The key is
+  spliced into the encoded bytes under a random name, so its atom is not in
+  this VM's atom table (a test that built the map with `Map.put/3` would intern
+  it itself and prove nothing). Returns `{field_name, binary}`.
+  """
+  def envelope_from_the_future(%Ankusa.Envelope{} = env, version \\ 1) do
+    name = "n1_" <> Base.encode16(:crypto.strong_rand_bytes(10), case: :lower)
+    placeholder = String.duplicate("p", byte_size(name))
+
+    term =
+      env
+      |> Map.from_struct()
+      |> Map.put(String.to_atom(placeholder), "added by N+1")
+      |> :erlang.term_to_binary([:deterministic])
+      |> :binary.replace(placeholder, name)
+
+    bin = if version == 1, do: <<"AE", 1, term::binary>>, else: term
+    {name, bin}
+  end
+
   @doc "Build a raw ingest request map for `Ankusa.Edge.Ingest`/router."
   def request(source_id, body, headers \\ []) do
     %{
