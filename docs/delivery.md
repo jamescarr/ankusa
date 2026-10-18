@@ -281,7 +281,11 @@ Provider request headers are forwarded to every sink per the source's
 `forward_headers` option (see [`configuration.md`](configuration.md#sources)):
 `Sink.Http` sends them as request headers, and the queue sinks carry them in
 the message's `headers` object. Authentication and framing headers and every
-`x-ankusa-*` name are never forwarded. So a header-borne id such as
+`x-ankusa-*` name are never forwarded. A header the source's `store_headers`
+policy dropped at ingest is not in the stored hook at all, so no
+`forward_headers` setting forwards it; a hashed one is forwarded as its
+`sha256:<hex>` digest (see
+[`configuration.md#stored-headers`](configuration.md#stored-headers)). So a header-borne id such as
 `X-GitHub-Delivery` or `webhook-id` reaches the consumer as a forwarded header,
 and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
 `x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,

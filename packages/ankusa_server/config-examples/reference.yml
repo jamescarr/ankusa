@@ -37,6 +37,16 @@ http:
   routing: path
   # Segments before the source id. "/" means no prefix.
   prefix: /webhooks
+  # Which request headers a hook is STORED with, applied after the signature is
+  # verified (the verifier and the dedupe key see every header). A dropped
+  # header is in no stored hook, archive segment, quarantine pen or sink message;
+  # a hashed one keeps its name and its value becomes "sha256:<hex>". A name in
+  # both lists is dropped. A source's own store_headers overrides these lists
+  # key by key (an absent drop/hash inherits). Do not drop a header a source's
+  # verifier needs: a quarantine replay re-verifies the stored hook.
+  store_headers:
+    drop: [authorization, proxy-authorization, cookie, set-cookie, x-api-key, x-auth-token]
+    hash: []
 
 # Connection limits and timeouts, applied to EVERY HTTP listener below (ingest,
 # admin, routes.admin, claim_check, metrics), plus the ingest port's TLS.
@@ -488,6 +498,7 @@ sources:
       tolerance_seconds: 300
     # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
     # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
+    # store_headers: {drop: [x-internal-auth], hash: [x-tenant-token]}   # absent = the http.store_headers lists above
     # At least one. Every sink is tried on every delivered hook.
     sinks:
       - {type: log}

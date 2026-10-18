@@ -38,6 +38,12 @@ defmodule Ankusa.Config do
             # {module, opts} implementing Ankusa.RouteResolver (URL scheme → identity)
             route_resolver: {Ankusa.RouteResolver.Path, []},
             max_body_bytes: 8_000_000,
+            # which provider request headers a hook is stored with, applied after
+            # verification (`Ankusa.Edge.StoredHeaders`): `drop` removes a header
+            # from the stored hook (and so from segments, claim packs and sink
+            # messages), `hash` keeps it with its value replaced by
+            # "sha256:<hex>". A source's own `store_headers` overrides it per key.
+            store_headers: Ankusa.Edge.StoredHeaders.default(),
             # {module, opts} implementing Ankusa.SourceStore
             source_store: {Ankusa.SourceStore.Static, sources: %{}},
             # :disk (the RocksDB store: every hook is on disk before the ack) or
@@ -369,6 +375,7 @@ defmodule Ankusa.Config do
     |> validate_egress!()
     |> normalize_listeners!()
     |> validate_ranges!()
+    |> normalize_store_headers!()
   end
 
   @doc "The address a listener binds: a strict IPv4/IPv6 literal string, or an `:inet` address tuple."
@@ -403,6 +410,13 @@ defmodule Ankusa.Config do
   defp validate_egress!(config) do
     Ankusa.HttpClient.Egress.validate_policy!(config.egress)
     config
+  end
+
+  defp normalize_store_headers!(config) do
+    %{
+      config
+      | store_headers: Ankusa.Edge.StoredHeaders.normalize!(config.store_headers, "store_headers")
+    }
   end
 
   # Every `tls` block is checked and normalised here (files exist, `verify_peer`

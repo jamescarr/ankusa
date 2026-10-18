@@ -209,7 +209,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/source_store/persistent.ex:170-190`, `packages/ankusa_redis/lib/ankusa/source_store/redis.ex:30-50`, `admin/redact.ex:6-44`, `blob_store/{s3,gcs,azure,oci}.ex` put functions, `store/backup.ex:440-448`.
   *Evidence:* —
 
-- [ ] **SEC-5 — Stored-header policy** · P0 · Deps: —
+- [x] **SEC-5 — Stored-header policy** · P0 · Deps: —
   *Why:* every provider header, `Authorization`/`Cookie`/`x-api-key` included, is stored verbatim in the hook and archived forever; `@never_forwarded` only governs forwarding (`edge/ingest.ex:312-320`, `sink/message.ex:50-53`).
   *Change:* `Config` `http.store_headers: %{drop: ["authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token"], hash: []}` and per-source `store_headers` override; applied in `Ingest.build_envelope/3` **after** verification (the verifier keeps the raw list in memory); hashed names stored as `sha256:<hex>`; dropped count on telemetry metadata.
   *Done when:* a POST with `authorization` + `cookie` verifies, and the header is absent from the stored hook, the segment object and the claim pack; the message to sinks never carries it.
