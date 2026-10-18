@@ -1,0 +1,468 @@
+{
+  "cases": [
+    {
+      "id": "receive.signed_ok",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-tenant": "acme",
+          "content-type": "application/json",
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ]
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "verified": true,
+          "id": "01a0",
+          "source": "demo",
+          "tenant": "acme",
+          "content_type": "application/json",
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null
+        }
+      }
+    },
+    {
+      "id": "receive.signed_rotation_ok",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ]
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "verified": true,
+          "id": "01a0",
+          "source": "",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null
+        }
+      }
+    },
+    {
+      "id": "receive.tolerance_option_ok",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ],
+          "tolerance_seconds": 400
+        },
+        "now": 1614265680
+      },
+      "expect": {
+        "ok": {
+          "verified": true,
+          "id": "01a0",
+          "source": "",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null
+        }
+      }
+    },
+    {
+      "id": "receive.unsigned_refused_by_default",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo"
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {},
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "receive.unsigned_refused_with_empty_secrets",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0"
+        },
+        "body": {
+          "text": "{}"
+        },
+        "receiver": {
+          "secrets": [],
+          "allow_unsigned": false
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "receive.unsigned_with_secret_refused",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo"
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ]
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "missing_header",
+          "field": "webhook-id"
+        }
+      }
+    },
+    {
+      "id": "receive.wrong_secret_refused",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+          ]
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "no_matching_signature",
+          "field": "webhook-signature"
+        }
+      }
+    },
+    {
+      "id": "receive.tampered_body_refused",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232315}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ]
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "no_matching_signature",
+          "field": "webhook-signature"
+        }
+      }
+    },
+    {
+      "id": "receive.stale_refused",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ]
+        },
+        "now": 1614265631
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "timestamp_out_of_tolerance",
+          "field": "webhook-timestamp"
+        }
+      }
+    },
+    {
+      "id": "receive.bad_secret_refused_even_with_allow_unsigned",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0"
+        },
+        "body": {
+          "text": "{}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_!!!"
+          ],
+          "allow_unsigned": true
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "receive.allow_unsigned_does_not_weaken_a_secret",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo"
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ],
+          "allow_unsigned": true
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "missing_header",
+          "field": "webhook-id"
+        }
+      }
+    },
+    {
+      "id": "receive.allow_unsigned_ok",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0",
+          "x-ankusa-source": "demo",
+          "x-ankusa-tenant": "acme",
+          "x-ankusa-idempotency-key": "acme:demo:evt_1",
+          "content-type": "application/json"
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "allow_unsigned": true
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "verified": false,
+          "id": "01a0",
+          "source": "demo",
+          "tenant": "acme",
+          "content_type": "application/json",
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": "acme:demo:evt_1"
+        }
+      }
+    },
+    {
+      "id": "receive.allow_unsigned_empty_secrets_ok",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-id": "01a0"
+        },
+        "body": {
+          "text": "{}"
+        },
+        "receiver": {
+          "secrets": [],
+          "allow_unsigned": true
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "verified": false,
+          "id": "01a0",
+          "source": "",
+          "tenant": null,
+          "content_type": null,
+          "dedupe_key": null,
+          "replay_id": null,
+          "idempotency_key": null
+        }
+      }
+    },
+    {
+      "id": "receive.signature_checked_before_hook_id",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {},
+        "body": {
+          "text": "{}"
+        },
+        "receiver": {},
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "receive.signed_without_hook_id",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "receiver": {
+          "secrets": [
+            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+          ]
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "MissingHookIdError"
+        }
+      }
+    },
+    {
+      "id": "receive.allow_unsigned_without_hook_id",
+      "feature": "webhook.require_signature",
+      "operation": "receive_delivery",
+      "input": {
+        "headers": {
+          "x-ankusa-source": "demo"
+        },
+        "body": {
+          "text": "{}"
+        },
+        "receiver": {
+          "allow_unsigned": true
+        },
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "MissingHookIdError"
+        }
+      }
+    }
+  ]
+}

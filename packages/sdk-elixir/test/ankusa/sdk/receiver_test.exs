@@ -22,8 +22,14 @@ defmodule Ankusa.SDK.ReceiverTest do
 
   @body ~s({"id":"evt_1"})
 
+  # The receiver is closed by default; most of these tests are about everything
+  # else, so they opt out unless they bring a `:secret`.
   defp receiver_opts(opts \\ []) do
-    Receiver.init(Keyword.merge([handler: {Ankusa.SDK.ReceiverTestHandler, self()}], opts))
+    signing = if Keyword.has_key?(opts, :secret), do: [], else: [allow_unsigned: true]
+
+    Receiver.init(
+      Keyword.merge([handler: {Ankusa.SDK.ReceiverTestHandler, self()}] ++ signing, opts)
+    )
   end
 
   defp post(path, body, headers \\ []) do
@@ -188,6 +194,74 @@ defmodule Ankusa.SDK.ReceiverTest do
     end
   end
 
+  describe "signed by default" do
+    test "init/1 refuses a receiver with neither :secret nor allow_unsigned: true" do
+      assert_raise ArgumentError, ~r/the :secret option is required/, fn ->
+        Receiver.init(handler: Ankusa.SDK.ReceiverTestHandler)
+      end
+
+      assert_raise ArgumentError, ~r/the :secret option is required/, fn ->
+        Receiver.init(handler: Ankusa.SDK.ReceiverTestHandler, allow_unsigned: false)
+      end
+
+      assert_raise ArgumentError, ~r/:allow_unsigned must be true or false/, fn ->
+        Receiver.init(handler: Ankusa.SDK.ReceiverTestHandler, allow_unsigned: "yes")
+      end
+    end
+
+    test "an unsigned POST to a receiver with a secret is 401 and never reaches the handler" do
+      opts =
+        Receiver.init(
+          handler: {Ankusa.SDK.ReceiverTestHandler, self()},
+          secret: "whsec_" <> Base.encode64("receiver-test-key")
+        )
+
+      conn = post("/", @body, "x-ankusa-id": "01a0") |> Receiver.call(opts)
+
+      assert conn.status == 401
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_signature"
+      refute_received {:hook, _hook}
+    end
+
+    test "the signature is judged before the hook id: no x-ankusa-id and no signature is 401" do
+      opts =
+        Receiver.init(
+          handler: {Ankusa.SDK.ReceiverTestHandler, self()},
+          secret: "whsec_" <> Base.encode64("receiver-test-key")
+        )
+
+      conn = post("/", @body) |> Receiver.call(opts)
+      assert conn.status == 401
+    end
+
+    test "allow_unsigned: true accepts an unsigned delivery" do
+      opts =
+        Receiver.init(
+          handler: {Ankusa.SDK.ReceiverTestHandler, self()},
+          allow_unsigned: true
+        )
+
+      conn = post("/", @body, "x-ankusa-id": "01a0") |> Receiver.call(opts)
+
+      assert conn.status == 202
+      assert_received {:hook, %Hook{body: @body}}
+    end
+
+    test "allow_unsigned: true does not weaken a configured secret" do
+      opts =
+        Receiver.init(
+          handler: {Ankusa.SDK.ReceiverTestHandler, self()},
+          secret: "whsec_" <> Base.encode64("receiver-test-key"),
+          allow_unsigned: true
+        )
+
+      conn = post("/", @body, "x-ankusa-id": "01a0") |> Receiver.call(opts)
+
+      assert conn.status == 401
+      refute_received {:hook, _hook}
+    end
+  end
+
   describe "with :secret" do
     @secret "whsec_" <> Base.encode64("receiver-test-key")
 
@@ -247,6 +321,14 @@ defmodule Ankusa.SDK.ReceiverTest do
         |> Receiver.call(receiver_opts(secret: ["whsec_" <> Base.encode64("old"), @secret]))
 
       assert conn.status == 202
+    end
+
+    test "a signed delivery without x-ankusa-id is 400, after the signature passed" do
+      headers = signed(@body) |> Keyword.delete(:"x-ankusa-id")
+      conn = post("/", @body, headers) |> Receiver.call(receiver_opts(secret: @secret))
+
+      assert conn.status == 400
+      assert JSON.decode!(conn.resp_body) == %{"error" => "missing x-ankusa-id"}
     end
   end
 end

@@ -137,7 +137,7 @@ Add the provider as a second source under `sources:` in `ankusa.yml`:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
     on_verify_failure: quarantine
     sinks:
-      - {type: http, url: "http://worker:8080/hooks"}
+      - {type: http, url: "http://worker:8080/hooks", allow_unsigned: true}
 ```
 
 Pass the secret in as an environment variable by adding `environment:

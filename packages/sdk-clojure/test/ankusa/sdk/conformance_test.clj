@@ -82,6 +82,14 @@
                                          (cond-> {:now (get input "now")}
                                            (contains? input "tolerance_seconds")
                                            (assoc :tolerance-seconds (get input "tolerance_seconds"))))
+    "receive_delivery" (let [receiver (get input "receiver")]
+                         (webhook/receive-delivery (get input "headers")
+                                                   (gateway/body-bytes (get input "body"))
+                                                   (cond-> {:now (get input "now")
+                                                            :secrets (get receiver "secrets")
+                                                            :allow-unsigned (true? (get receiver "allow_unsigned"))}
+                                                     (contains? receiver "tolerance_seconds")
+                                                     (assoc :tolerance-seconds (get receiver "tolerance_seconds")))))
     "decode_message" (message/decode (get input "message"))
     "idempotency_key" (let [m (if (contains? input "message")
                                 (message/decode (get input "message"))
@@ -133,6 +141,14 @@
                      "dedupe_key" (:dedupe-key result)
                      "replay_id" (:replay-id result)
                      "idempotency_key" (:idempotency-key result)}
+    "receive_delivery" {"verified" (:verified result)
+                        "id" (:id result)
+                        "source" (:source result)
+                        "tenant" (:tenant result)
+                        "content_type" (:content-type result)
+                        "dedupe_key" (:dedupe-key result)
+                        "replay_id" (:replay-id result)
+                        "idempotency_key" (:idempotency-key result)}
     "decode_message" {"v" (:v result)
                       "id" (:id result)
                       "source_id" (:source-id result)

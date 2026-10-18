@@ -72,4 +72,42 @@ module Ankusa
     (value.nil? || value.empty?) ? nil : value
   end
   private_class_method :presence
+
+  # An accepted delivery: its identity (`HookHeaders`), and whether its
+  # signature verified (`false` only for an unsigned delivery `allow_unsigned`
+  # let through).
+  ReceivedDelivery = Data.define(:headers, :verified)
+
+  # Judges one HTTP-sink delivery: is it signed, and what is its identity.
+  #
+  # Ankusa's HTTP sink signs every delivery unless it is configured
+  # `allow_unsigned: true`, so a receiver is closed by default: without the
+  # sink's `secrets` (or an explicit `allow_unsigned: true`) it refuses every
+  # delivery, because any host that can reach the receiver's URL could
+  # otherwise inject hooks. With `secrets` the delivery MUST verify
+  # (`Ankusa.verify_signature`); `allow_unsigned` does not weaken that.
+  #
+  # `body` must be the raw bytes received. Raises `InvalidSignatureError`
+  # (answer 401) when there is no valid signature -- `invalid_secret` when no
+  # secret is configured and `allow_unsigned` is not set -- and
+  # `MissingHookIdError` (400) when `x-ankusa-id` is absent. The signature is
+  # judged first.
+  def self.receive_delivery(headers, body, secrets: [], allow_unsigned: false, tolerance_seconds: 300, now: nil)
+    configured = Array(secrets)
+    verified =
+      if !configured.empty?
+        verify_signature(headers, body, configured, tolerance_seconds: tolerance_seconds, now: now)
+        true
+      elsif allow_unsigned
+        false
+      else
+        raise InvalidSignatureError.new(
+          "no secret configured: deliveries are signed, so the receiver needs the sink's secret " \
+          "(or allow_unsigned: true)",
+          code: "invalid_secret"
+        )
+      end
+
+    ReceivedDelivery.new(headers: parse_headers(headers), verified: verified)
+  end
 end

@@ -78,6 +78,58 @@ func ParseHeaders(h http.Header) (HookHeaders, error) {
 	}, nil
 }
 
+// ReceiveOptions configures ReceiveDelivery. The zero value refuses every
+// delivery: Ankusa's HTTP sink signs unless it is configured allow_unsigned,
+// so a receiver needs the sink's secret (or AllowUnsigned) to accept anything.
+type ReceiveOptions struct {
+	// Secrets are the sink's secrets ("whsec_" + base64, or any other string
+	// used as its own bytes); several during a rotation. With any, the
+	// delivery must verify, and AllowUnsigned does not weaken that.
+	Secrets []string
+	// AllowUnsigned accepts a delivery when no secret is configured,
+	// unverified. Any host that can reach the receiver's URL can then inject
+	// hooks.
+	AllowUnsigned bool
+	// ToleranceSeconds bounds |now - webhook-timestamp|; nil means 300.
+	ToleranceSeconds *int64
+	// Now is the unix time to judge the timestamp against; nil means the clock.
+	Now *int64
+}
+
+// ReceivedDelivery is an accepted delivery: its identity, and whether its
+// signature verified (false only for an unsigned delivery AllowUnsigned let
+// through).
+type ReceivedDelivery struct {
+	HookHeaders
+	Verified bool `json:"verified"`
+}
+
+// ReceiveDelivery judges one HTTP-sink delivery: is it signed, and what is its
+// identity. body must be the raw bytes received. The error is an
+// *InvalidSignatureError (answer 401) when there is no valid signature —
+// invalid_secret when no secret is configured and AllowUnsigned is not set —
+// or a *MissingHookIdError (400) when x-ankusa-id is absent. The signature is
+// judged first.
+func ReceiveDelivery(h http.Header, body []byte, opts ReceiveOptions) (ReceivedDelivery, error) {
+	verified := false
+	switch {
+	case len(opts.Secrets) > 0:
+		if _, err := VerifySignature(h, body, opts.Secrets, VerifyOptions{ToleranceSeconds: opts.ToleranceSeconds, Now: opts.Now}); err != nil {
+			return ReceivedDelivery{}, err
+		}
+		verified = true
+	case opts.AllowUnsigned:
+	default:
+		return ReceivedDelivery{}, &InvalidSignatureError{Code: "invalid_secret"}
+	}
+
+	hook, err := ParseHeaders(h)
+	if err != nil {
+		return ReceivedDelivery{}, err
+	}
+	return ReceivedDelivery{HookHeaders: hook, Verified: verified}, nil
+}
+
 // headerValue returns the first value for name. The canonical key is tried
 // first, then every key is compared case-insensitively, so a map built with
 // non-canonical keys works too.

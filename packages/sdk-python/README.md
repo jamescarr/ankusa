@@ -140,6 +140,31 @@ any other string used as its own bytes); `tolerance_seconds` (default 300)
 bounds the `webhook-timestamp` window. Failures carry `code`, `field` and
 `retryable=False`.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default.
+`receive_delivery` is the one call that decides: with the sink's `secrets` it
+verifies as above; with none, and no `allow_unsigned=True`, it refuses every
+delivery (`InvalidSignatureError`, code `invalid_secret`) -- otherwise any host
+that can reach your URL could inject hooks. A configured secret is never
+weakened by `allow_unsigned`. The signature is judged before the hook id, so a
+delivery that fails it is a `401` even when it also lacks `x-ankusa-id`
+(`MissingHookIdError`, `400`).
+
+```python
+from ankusa import InvalidSignatureError, MissingHookIdError, receive_delivery
+
+try:
+    received = receive_delivery(request.headers, raw_body, secrets=[os.environ["ANKUSA_WHSEC"]])
+except InvalidSignatureError as err:
+    return 401, {"error": "invalid_signature", "code": err.code}
+except MissingHookIdError:
+    return 400, {"error": "missing x-ankusa-id"}
+# received.headers is the HookHeaders; received.verified is False only for an
+# unsigned delivery allow_unsigned=True let through.
+```
+
 ## Consuming queue messages
 
 Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message

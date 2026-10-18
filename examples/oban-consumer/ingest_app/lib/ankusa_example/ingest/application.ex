@@ -49,12 +49,14 @@ defmodule AnkusaExample.Ingest.Application do
   # quickstart — this example is about the pipeline, not verification, so
   # `Verifier.None` here. Swap in `{Ankusa.Verifier.Hmac, scheme: :stripe}` etc.
   # for a real provider exactly as documented in the root README.
+  # The sink is unsigned (`allow_unsigned: true`) because the demo consumer
+  # does not verify; a real one sets `secret:` and verifies the signature.
   defp source do
     [
       verifier: {Ankusa.Verifier.None, []},
       on_verify_failure: :accept_flag,
       sinks: [
-        {Ankusa.Sink.Http, url: consumer_url(), timeout_ms: 5_000}
+        {Ankusa.Sink.Http, url: consumer_url(), timeout_ms: 5_000, allow_unsigned: true}
       ]
     ]
   end
