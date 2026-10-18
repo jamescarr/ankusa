@@ -49,7 +49,7 @@ docker run -d --name ankusa \
   -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 -e ANKUSA_ADMIN_TOKEN \
   -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -v ankusa-data:/var/lib/ankusa \
-  -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
+  -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL -e SINK_WHSEC \
   jamescarr/ankusa:edge
 ```
 
@@ -62,7 +62,7 @@ sources:
     verify: {type: stripe, secret: "${STRIPE_WHSEC}", tolerance_seconds: 300}
     on_verify_failure: quarantine
     sinks:
-      - {type: http, url: "${SINK_URL}", method: post, timeout_ms: 5000}
+      - {type: http, url: "${SINK_URL}", method: post, timeout_ms: 5000, secret: "${SINK_WHSEC}"}
 ```
 
 Secrets never go in the file: reference them as `${VAR}` and pass the values as
@@ -153,6 +153,7 @@ sources:
       - type: http
         url: http://worker:8080/hooks
         timeout_ms: 5000
+        allow_unsigned: true   # demo only: a sink needs a `secret` unless it says so
 ```
 
 - The raw body verbatim, with the provider's `content-type`.

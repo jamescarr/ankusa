@@ -284,6 +284,16 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **Breaking (SEC-10):** `Sink.Http` is signed by default. `validate_opts!/1`
+  (so boot, and the image's loader) refuses a sink with neither `:secret` nor
+  `allow_unsigned: true` (`Sink.Http requires secret: …`), and a delivery
+  attempt for one that skipped validation is dead-lettered
+  (`{:error, {:permanent, :unsigned_sink}}`) instead of being sent unsigned.
+  `allow_unsigned: true` sends no signature headers and is for a receiver that
+  cannot verify; a `:secret` still signs when both are set. A deployment that
+  delivers unsigned adds `allow_unsigned: true` to those sinks, or better, a
+  `:secret` the receiver verifies (every SDK's `receive_delivery`).
+
 - **Breaking:** `Sink.Http` refuses, at delivery, a URL that is not `https`
   or that resolves to a denied address, with the default policy. A deployment
   that delivers to a plain-http or private-network receiver sets `egress`

@@ -4,15 +4,16 @@
 #   wal.type : disk (the default) — the node's RocksDB store on local disk; it
 #              survives process crash and power loss on this host
 #   storage  : local filesystem
-#   secrets  : STRIPE_WHSEC, GITHUB_WEBHOOK_SECRET (injected via ${VAR})
-#   sink     : SINK_URL, an HTTP endpoint you own
+#   secrets  : STRIPE_WHSEC, GITHUB_WEBHOOK_SECRET, SINK_WHSEC (injected via ${VAR})
+#   sink     : SINK_URL, an HTTP endpoint you own; every delivery is signed with
+#              SINK_WHSEC (a whsec_ secret), which that endpoint verifies
 #
 # Run it with:
 #
 #   docker run --rm -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 \
 #     -v "$PWD/single-node.yml:/etc/ankusa/ankusa.yml" \
 #     -v ankusa-data:/var/lib/ankusa \
-#     -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
+#     -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL -e SINK_WHSEC \
 #     jamescarr/ankusa
 
 node:
@@ -35,6 +36,7 @@ sources:
       - type: http
         url: "${SINK_URL}"
         method: post
+        secret: "${SINK_WHSEC}"
         timeout_ms: 5000
         headers:
           x-ankusa-source: stripe
@@ -48,5 +50,6 @@ sources:
       - type: http
         url: "${SINK_URL}"
         method: post
+        secret: "${SINK_WHSEC}"
         headers:
           x-ankusa-source: github

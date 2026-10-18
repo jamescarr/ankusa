@@ -9,6 +9,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `ankusa.sdk.webhook/receive-delivery`, the receiver-side decision on one
+  HTTP-sink delivery. The sink signs every delivery unless configured
+  `allow_unsigned: true`, so a receiver is closed by default: with `:secrets`
+  the delivery must verify (as `signature/verify`); with none and no
+  `:allow-unsigned true` it throws `InvalidSignatureError` (`"invalid_secret"`).
+  The signature is judged before the hook id. Returns the `parse-headers` map
+  plus `:verified`.
+
 - `ankusa.sdk.claim-check`: `redeem` fetches a claim's bytes from the
   claim-check gateway and verifies them against the expected digest before
   returning them, and `health` is a liveness probe. `ankusa.sdk.claim-ref/parse`

@@ -37,6 +37,7 @@ sources:
       - type: http
         url: "${SINK_URL}"
         method: post
+        secret: "${SINK_WHSEC}"
 
   demo:
     verify: {type: none}

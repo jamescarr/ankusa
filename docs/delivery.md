@@ -208,7 +208,7 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature with `secret`. Status mapping below. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature: `secret` is required unless `allow_unsigned: true`. Status mapping below. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -217,8 +217,17 @@ See [`claim-check.md`](claim-check.md).
 | `Sink.GooglePubSub` | none (core: `req`) | Publishes to a Google Cloud Pub/Sub topic (`topics.publish`, a bearer token from your `:token_provider`), confirmed by Pub/Sub's `200`. Detailed below. |
 
 ```elixir
-sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
+sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", secret: "whsec_…", timeout_ms: 5_000}]
 ```
+
+Deliveries are **signed by default**: a sink with neither `secret` nor
+`allow_unsigned: true` is refused at load (and `400 invalid_source` from the
+admin API), and one that skipped that check is dead-lettered at its first
+attempt (`{:permanent, :unsigned_sink}`) rather than sent unsigned. Every SDK
+receiver (`receive_delivery`; the Elixir `Ankusa.SDK.Receiver` plug) is closed
+by default in the same way, so an unsigned POST to a receiver is `401`. Tests:
+`sink/http_test.exs` ("requires secret"), `ankusa_server/config_test.exs`
+("signed by default"), and the `webhook.require_signature` conformance cases.
 
 `Sink.Http` reads the status and at most `max_response_bytes` (64 KiB) of the
 response, then closes the connection, so a large or endless response cannot

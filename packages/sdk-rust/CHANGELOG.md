@@ -6,6 +6,17 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `receive_delivery(headers, body, &ReceiveOptions)`, the receiver-side
+  decision on one HTTP-sink delivery, with `ReceiveOptions` (`secrets`,
+  `allow_unsigned`, `tolerance_seconds`, `now`), `ReceivedDelivery` and
+  `ReceiveError`. The sink signs every delivery unless configured
+  `allow_unsigned: true`, so a receiver is closed by default: with `secrets`
+  the delivery must verify (as `verify_signature`); with none and no
+  `allow_unsigned` it returns `InvalidSignatureError` (`invalid_secret`). The
+  signature is judged before the hook id.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

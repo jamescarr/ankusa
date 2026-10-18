@@ -6,6 +6,21 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Ankusa.SDK.Webhook.receive_delivery/3`, the receiver-side decision on one
+  HTTP-sink delivery (signature, then headers) without Plug. Options
+  `:secrets`, `:allow_unsigned`, `:tolerance_seconds`, `:now`.
+
+### Changed
+
+- **Breaking (SEC-10):** `Ankusa.SDK.Receiver` is signed by default. The sink
+  signs every delivery unless configured `allow_unsigned: true`, so the plug
+  now needs the sink's `:secret` and raises at `init/1` without one; pass
+  `allow_unsigned: true` to accept unsigned deliveries (a configured `:secret`
+  is never weakened by it). The signature is judged before `x-ankusa-id`: a
+  request with neither is `401`, not `400`.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

@@ -33,7 +33,7 @@ pub struct InvalidSignatureError {
 }
 
 impl InvalidSignatureError {
-    fn new(code: &'static str, field: Option<&'static str>) -> Self {
+    pub(crate) fn new(code: &'static str, field: Option<&'static str>) -> Self {
         Self { code, field }
     }
 

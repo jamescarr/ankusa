@@ -192,6 +192,32 @@ Secrets are `whsec_` + base64, or any other string used as its own UTF-8
 bytes; pass several during a rotation. `DEFAULT_TOLERANCE` is 5 minutes.
 Signatures are compared with `MessageDigest.isEqual`.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default.
+`Receiver.receive` is the one call that decides: with the sink's secrets
+(`Receiver.Options.signed(List.of(secret))`) it verifies as above; with none,
+and not `Receiver.Options.unsigned()`, it refuses every delivery
+(`InvalidSignatureError`, code `invalid_secret`) — otherwise any host that can
+reach your URL could inject hooks. A configured secret is never weakened by
+`allowUnsigned`. The signature is judged before the hook id, so a delivery
+that fails it is a `401` even when it also lacks `x-ankusa-id`
+(`MissingHookIdError`, `400`).
+
+```java
+try {
+  Receiver.Received received =
+      Receiver.receive(headers, body, Receiver.Options.signed(List.of(secret)));
+  // received.headers() is the HookHeaders; received.verified() is false only
+  // for a delivery Options.unsigned() let through.
+} catch (InvalidSignatureError e) {
+  response.setStatus(401);
+} catch (MissingHookIdError e) {
+  response.setStatus(400);
+}
+```
+
 ## Consuming queue messages
 
 Ankusa publishes each delivery as a JSON v1 message over the configured

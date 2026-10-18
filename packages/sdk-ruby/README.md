@@ -148,6 +148,32 @@ pass several during a rotation. `tolerance_seconds:` (default 300) bounds the
 `webhook-timestamp` window. Failures are `Ankusa::InvalidSignatureError` with
 `code` and `field`, never retryable.
 
+### Receiving a delivery (signed by default)
+
+Ankusa's HTTP sink signs every delivery unless it is configured
+`allow_unsigned: true`, so a receiver is closed by default.
+`Ankusa.receive_delivery` is the one call that decides: with the sink's
+`secrets:` it verifies as above; with none, and no `allow_unsigned: true`, it
+refuses every delivery (`Ankusa::InvalidSignatureError`, code
+`invalid_secret`) — otherwise any host that can reach your URL could inject
+hooks. A configured secret is never weakened by `allow_unsigned:`. The
+signature is judged before the hook id, so a delivery that fails it is a `401`
+even when it also lacks `x-ankusa-id` (`Ankusa::MissingHookIdError`, `400`).
+
+```ruby
+begin
+  received = Ankusa.receive_delivery(header_map(env), body, secrets: [ENV.fetch("ANKUSA_WHSEC")])
+  # received.headers is the HookHeaders; received.verified is false only for an
+  # unsigned delivery `allow_unsigned: true` let through.
+rescue Ankusa::InvalidSignatureError => e
+  return [401, {"content-type" => "application/json"},
+    [JSON.generate(error: "invalid_signature", code: e.code)]]
+rescue Ankusa::MissingHookIdError
+  return [400, {"content-type" => "application/json"},
+    [JSON.generate(error: "missing x-ankusa-id")]]
+end
+```
+
 ## Consuming queue messages
 
 Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message
