@@ -166,6 +166,8 @@ defmodule Ankusa.ClaimCheck.Reader do
     ArgumentError -> :ok
   end
 
+  # The instance name is operator config: one atom per instance, never request input.
+  # sobelow_skip ["DOS.BinToAtom"]
   defp gate(instance), do: :"ankusa_claim_gate_#{instance}"
 
   # A request process killed mid-request never released: forget the dead ones.
