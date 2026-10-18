@@ -2,6 +2,7 @@
 #MISE description="Every example app: locked deps, format, :prod compile, the TypeScript workers' typecheck, the Python worker's lockfile, the Rust worker's fmt/clippy, and the Helm charts' lint/template"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+source "$MISE_PROJECT_ROOT/.mise/lib/mix_cache.sh"
 cd "$ROOT"
 
 # dist/ must exist: each worker's `ankusa` dependency is a file: link to the
@@ -20,6 +21,10 @@ for f in examples/*/*/mix.exs; do
   echo "==> $d"
   (
     cd "$d"
+    # Same shared dep cache as `mise run build`: an example used to compile
+    # RocksDB's C++ NIF from source here (each app has its own _build). The
+    # restore comes before deps.get so the cached deps keep their priv/.
+    (MIX_ENV=prod mix_cache_warm "$d" "$d" prod --check-locked)
     mix deps.get --check-locked
     mix deps.unlock --check-unused
     mix hex.audit
