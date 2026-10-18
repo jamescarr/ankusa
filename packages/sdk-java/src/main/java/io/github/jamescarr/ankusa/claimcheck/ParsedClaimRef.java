@@ -9,8 +9,8 @@ import java.util.regex.Pattern;
  *
  * @param tenantId the tenant the claim belongs to
  * @param claimId the claim's ULID
- * @param path the gateway path this reference is redeemed at; a signed (v2) reference's path ends in
- *     {@code ?exp=<exp_unix>&sig=<signature>}
+ * @param path the gateway path this reference is redeemed at; a signed (v2) reference's path ends
+ *     in {@code ?exp=<exp_unix>&sig=<signature>}
  */
 public record ParsedClaimRef(String tenantId, String claimId, String path) {
 
