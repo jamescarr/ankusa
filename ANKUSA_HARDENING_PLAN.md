@@ -111,7 +111,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/bench/core_bench.exs:134-157`, `.mise/tasks/bench`, `tools/loadgen/`, `.github/workflows/ci.yml:38-73`.
   *Evidence:* —
 
-- [ ] **F2 — Crash-consistency drill in CI (ENOSPC, EIO, kill under load)** · P0 · Deps: —
+- [x] **F2 — Crash-consistency drill in CI (ENOSPC, EIO, kill under load)** · P0 · Deps: —
   *Why:* the only crash test is `kill -9` of a child BEAM (`packages/ankusa/test/ankusa/loss_test.exs:40`); ENOSPC was a hand-run container probe (`docs/critical-review.md:171-177`); fsync order is checked by `strace`, not in CI (`docs/testing.md:113-118`).
   *Change:* extract the child-BEAM harness from `loss_test.exs` into `packages/ankusa/test/support/crash_harness.exs` (start instance on `DATA_DIR`, ingest at `RATE`, print `ACK <id>` per 201). `.mise/tasks/test/crash`: in `elixir:<pinned>-alpine` with `--tmpfs /data:size=96m`, run the harness, fill the disk with a filler file at +5 s, assert `503 store_unavailable` and `/ready` 503 while full, delete the filler, assert 201 and `/ready` 200 resume, `kill -9` at +20 s under load, reopen the store with `Ankusa.Store` only and assert every printed `ACK` id reads back. `scripts/drills/flakey.sh`: the same harness on a `dm-flakey` loop device (drop writes for 2 s windows) — run by `release:preflight` on a privileged runner when available, otherwise documented. CI job `crash` in `ci.yml`.
   *Done when:* `crash` job is green on `main`; the drill fails if `Queue.Writer` is patched to skip `sync: true` (prove once, revert).

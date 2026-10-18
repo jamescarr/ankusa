@@ -3,11 +3,13 @@ defmodule Ankusa.LossTest do
   The loss checker: the project's credibility. Every acked id must be readable
   after a crash. Zero tolerance.
 
-  This is an OS-level crash. A separate `elixir -e` BEAM owns the same store and
-  ingests concurrently; the parent waits for 500 acks and then `kill -9`s it, so
-  the child gets no chance to flush anything. `Ankusa.Queue.Writer` commits with
-  `sync: true` *before* the ingest acks, so every printed id must read back from
-  the reopened store.
+  This is an OS-level crash. A separate BEAM running `test/support/crash_harness.exs`
+  (`Ankusa.CrashHarness`) owns the same store and ingests concurrently; the
+  parent waits for 500 acks and then `kill -9`s it, so the child gets no chance
+  to flush anything. `Ankusa.Queue.Writer` commits with `sync: true` *before*
+  the ingest acks, so every printed id must read back from the reopened store.
+  The container drills in `scripts/drills/` run the same harness under ENOSPC,
+  EIO and a power-loss cut.
   """
   use ExUnit.Case, async: false
 
@@ -15,18 +17,14 @@ defmodule Ankusa.LossTest do
 
   @count 500
   @ack_deadline_ms 30_000
+  @harness Path.expand("../support/crash_harness.exs", __DIR__)
 
   test "every acked hook survives a hard crash of the whole instance" do
-    config =
-      test_config(
-        roles: [:edge],
-        source_store:
-          {Ankusa.SourceStore.Static,
-           sources: %{"load" => [verifier: {Ankusa.Verifier.None, []}]}},
-        batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
-      )
+    data_dir = unique_data_dir(:crash_harness)
+    on_exit(fn -> File.rm_rf(data_dir) end)
+    config = Ankusa.CrashHarness.config(data_dir)
 
-    port = start_child(config)
+    port = start_child(data_dir)
     on_exit(fn -> kill_if_alive(port) end)
     {:os_pid, os_pid} = Port.info(port, :os_pid)
 
@@ -55,68 +53,19 @@ defmodule Ankusa.LossTest do
 
   # ── child BEAM ────────────────────────────────────────────────────────────
 
-  defp start_child(config) do
-    encoded = config |> :erlang.term_to_binary() |> Base.encode64()
-
+  # The child has no Mix and no `:ankusa` application: the harness starts the
+  # registry and one `:edge` instance itself, from the build's `ERL_LIBS`.
+  defp start_child(data_dir) do
     Port.open({:spawn_executable, System.find_executable("elixir")}, [
       :binary,
       :exit_status,
       {:line, 4096},
-      args: ["-e", child_code()],
+      args: [@harness, "serve"],
       env: [
         {~c"ERL_LIBS", String.to_charlist(Mix.Project.build_path() <> "/lib")},
-        {~c"ANKUSA_CRASH_CONFIG", String.to_charlist(encoded)}
+        {~c"DATA_DIR", String.to_charlist(data_dir)}
       ]
     ])
-  end
-
-  # The child has no Mix and no `:ankusa` application, so it starts the registry
-  # itself, then one `:edge` instance over the parent's config, then 32
-  # concurrent ingesters. Every `{:ok, env}` is printed after the synced commit.
-  defp child_code do
-    ~S"""
-    config =
-      System.get_env("ANKUSA_CRASH_CONFIG")
-      |> Base.decode64!()
-      |> :erlang.binary_to_term()
-
-    {:ok, _} = Registry.start_link(keys: :unique, name: Ankusa.Registry)
-    Ankusa.put_config(config)
-    {:ok, _} = Ankusa.Instance.start_link(config)
-
-    defmodule Ankusa.LossTestRunner do
-      def run(instance) do
-        for _ <- 1..32 do
-          spawn(fn -> loop(instance) end)
-        end
-
-        Process.sleep(:infinity)
-      end
-
-      defp loop(instance) do
-        req = %{
-          source_id: "load",
-          method: "POST",
-          path: "/webhooks/load",
-          headers: [],
-          body: ~s({"n":1})
-        }
-
-        try do
-          case Ankusa.Edge.Ingest.ingest(instance, req) do
-            {:ok, env} -> IO.puts("ACK #{env.id}")
-            _ -> :ok
-          end
-        rescue
-          _ -> :ok
-        end
-
-        loop(instance)
-      end
-    end
-
-    Ankusa.LossTestRunner.run(config.instance)
-    """
   end
 
   # If the test fails before the explicit kill, do not leave the child BEAM
