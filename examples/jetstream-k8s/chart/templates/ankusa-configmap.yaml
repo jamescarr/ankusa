@@ -19,6 +19,11 @@ data:
     admin:
       enabled: true
       ip: 0.0.0.0
+      # Demo: the cluster network is the boundary. Real deployments set
+      # auth.mode to token, jwt or mtls instead (docs/configuration.md).
+      auth:
+        mode: none
+        allow_insecure: true
     claim_check:
       store:
         {{- include "demo.claimStore" . | nindent 8 }}

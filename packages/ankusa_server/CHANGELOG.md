@@ -8,6 +8,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- `admin.auth`, `routes.admin.auth` and `claim_check.auth` (`mode`
+  `none`/`token`/`jwt`/`mtls`, `allow_insecure`, `tokens` with `token:` (hashed
+  at load) or `sha256:` and `scopes`, `jwt`, `mtls.subject_map`), and the env
+  shortcuts `ANKUSA_ADMIN_TOKEN`, `ANKUSA_ROUTES_ADMIN_TOKEN` and
+  `ANKUSA_CLAIM_CHECK_TOKEN` (one token per control plane). **Breaking:** the
+  image refuses to boot with `ANKUSA_ADMIN_IP=0.0.0.0` (or an off-loopback
+  `claim_check.ip` / `routes.admin.ip`) and no authentication: add
+  `ANKUSA_ADMIN_TOKEN`, an `auth` block, or `auth: {mode: none, allow_insecure:
+  true}` behind your own proxy. The shipped fanout configs take
+  `CLAIM_CHECK_TOKEN`. See the `ankusa` changelog and `docs/configuration.md`.
+
 - `listener` (`max_connections`, `num_acceptors`, `read_timeout_ms`,
   `body_read_timeout_ms`, `request_deadline_ms`, `max_requests_per_connection`,
   `max_header_count`, `max_header_length`, `http2`, `tls`), `metrics`

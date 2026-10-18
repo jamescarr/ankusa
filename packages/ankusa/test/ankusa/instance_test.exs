@@ -431,6 +431,58 @@ defmodule Ankusa.InstanceTest do
     end
 
     @tag :capture_log
+    test "mtls principal: the client certificate's identity decides what the admin API allows" do
+      port = free_port()
+      other = free_port()
+
+      admin = fn port, subject_map ->
+        %{
+          enabled: true,
+          port: port,
+          tls: [
+            certfile: fixture("server.pem"),
+            keyfile: fixture("server-key.pem"),
+            cacertfile: fixture("ca.pem"),
+            verify: :verify_peer
+          ],
+          auth: %{mode: :mtls, mtls: %{subject_map: subject_map}}
+        }
+      end
+
+      config =
+        test_config(
+          roles: [:edge],
+          admin: admin.(port, %{"cn:ankusa-test-client" => ["config:read"]})
+        )
+
+      start_supervised!({Ankusa.Instance, config}, id: :mapped)
+      eventually(fn -> listening?(port) end)
+
+      client = {fixture("client.pem"), fixture("client-key.pem")}
+      stranger = {fixture("stranger.pem"), fixture("stranger-key.pem")}
+
+      # The mapped certificate is a principal holding config:read and nothing else.
+      assert {:ok, "HTTP/1.1 200" <> _} = tls_get(port, "/v1/config", client)
+      assert {:ok, "HTTP/1.1 403" <> forbidden} = tls_get(port, "/v1/dlq", client)
+      assert forbidden =~ ~s("scope":"dlq:read")
+      assert {:ok, "HTTP/1.1 200" <> _} = tls_get(port, "/health", client)
+
+      # No certificate, or one another CA signed, never gets as far as a request.
+      assert {:error, _} = tls_get(port, "/v1/config", nil)
+      assert {:error, _} = tls_get(port, "/v1/config", stranger)
+
+      # A certificate the CA vouches for but nobody mapped is 401, not a principal.
+      unmapped =
+        test_config(roles: [:edge], admin: admin.(other, %{"cn:someone-else" => ["config:read"]}))
+
+      start_supervised!({Ankusa.Instance, unmapped}, id: :unmapped)
+      eventually(fn -> listening?(other) end)
+
+      assert {:ok, "HTTP/1.1 401" <> _} = tls_get(other, "/v1/config", client)
+      assert {:ok, "HTTP/1.1 200" <> _} = tls_get(other, "/health", client)
+    end
+
+    @tag :capture_log
     test "a tls listener without verify_peer serves a client that has no certificate" do
       port = free_port()
 

@@ -112,6 +112,9 @@ defmodule Ankusa.Config do
               ip: "127.0.0.1",
               # nil (plain HTTP) or a TLS block, shaped like `listener.tls`
               tls: nil,
+              # who may read claims: see `Ankusa.Admin.Auth`. `mode: :none` is
+              # accepted on loopback only
+              auth: %{mode: :none},
               # target size of one pack object; a body larger than this still
               # gets a pack of its own
               pack_max_bytes: 16 * 1024 * 1024,
@@ -170,15 +173,17 @@ defmodule Ankusa.Config do
               # Keys go under storage.key_prefix either way: backups are per node.
               blob_store: nil
             },
-            # operator HTTP API + Prometheus /metrics, unauthenticated; off by
-            # default for embedded use
+            # operator HTTP API + Prometheus /metrics; off by default for embedded
+            # use. Authenticated per `auth` (see `Ankusa.Admin.Auth`); `mode: :none`
+            # is accepted on loopback only
             admin: %{
               enabled: false,
               port: 4002,
               ip: "127.0.0.1",
               gauge_interval_ms: 15_000,
               # nil (plain HTTP) or a TLS block, shaped like `listener.tls`
-              tls: nil
+              tls: nil,
+              auth: %{mode: :none}
             },
             # a listener that serves only `/metrics`, `/health` and `/ready`
             # (`Ankusa.Metrics.Router`), so a scraper needs no route to the
@@ -209,10 +214,9 @@ defmodule Ankusa.Config do
               trusted_proxies: [],
               # global rules: a floor. A route's own ip_rules replace this list
               ip_rules: %{default: :allow, rules: []},
-              # its own listener; unauthenticated by design, same stance as
-              # the operator admin API — front it with your own proxy or
-              # network policy
-              admin: %{port: 4003, ip: "127.0.0.1", tls: nil},
+              # its own listener, authenticated per `auth` like the operator
+              # admin API (see `Ankusa.Admin.Auth`)
+              admin: %{port: 4003, ip: "127.0.0.1", tls: nil, auth: %{mode: :none}},
               # 1 in log_sample rejections is logged at :debug (0 = silent)
               log_sample: 100,
               # 403, or 404 for uniformity with :no_route
@@ -370,7 +374,9 @@ defmodule Ankusa.Config do
   end
 
   # Every `tls` block is checked and normalised here (files exist, `verify_peer`
-  # has its CA), and the acceptor count the section leaves open is settled.
+  # has its CA), the acceptor count the section leaves open is settled, and so is
+  # every control plane's `auth` block (see `Ankusa.Admin.Auth`): it is checked
+  # against the listener's own address and TLS block, so it runs after them.
   defp normalize_listeners!(config) do
     listener = config.listener
 
@@ -380,18 +386,31 @@ defmodule Ankusa.Config do
         num_acceptors: listener.num_acceptors || Ankusa.Listener.default_acceptors()
     }
 
+    routes_admin = put_tls!(config.routes.admin, "routes.admin.tls")
+    routes_enabled? = config.routes.enabled == true and :edge in config.roles
+
     %{
       config
       | listener: listener,
-        admin: put_tls!(config.admin, "admin.tls"),
-        claim_check: put_tls!(config.claim_check, "claim_check.tls"),
+        admin:
+          config.admin |> put_tls!("admin.tls") |> put_auth!("admin.auth", config.admin.enabled),
+        claim_check:
+          config.claim_check
+          |> put_tls!("claim_check.tls")
+          |> put_auth!("claim_check.auth", :claim_check in config.roles),
         metrics: put_tls!(config.metrics, "metrics.tls"),
-        routes: %{config.routes | admin: put_tls!(config.routes.admin, "routes.admin.tls")}
+        routes: %{
+          config.routes
+          | admin: put_auth!(routes_admin, "routes.admin.auth", routes_enabled?)
+        }
     }
   end
 
   defp put_tls!(section, key),
     do: %{section | tls: Ankusa.Listener.normalize_tls!(section.tls, key)}
+
+  defp put_auth!(section, key, enabled?),
+    do: %{section | auth: Ankusa.Admin.Auth.normalize!(section.auth, key, section, enabled?)}
 
   # Types and ranges of the numeric keys, so `0` partitions or a negative
   # concurrency fail at boot with the key's name instead of misbehaving later.

@@ -8,9 +8,12 @@
 #
 #   topology : one all-role `ankusa` node (edge, dispatch, storage) behind
 #              nginx
-#   auth     : nginx. Ingest (4000) is open — providers sign their own hooks.
-#              The admin API (4002) is behind basic auth, which is the whole
-#              point of this file.
+#   auth     : nginx, then the node. Ingest (4000) is open — providers sign
+#              their own hooks. The admin API (4002) is behind basic auth at
+#              nginx, which then presents the node's service token
+#              (`ANKUSA_ADMIN_TOKEN` below, set in nginx.conf as well): the node
+#              refuses any caller that does not hold it, so a container that
+#              reaches it on the compose network is not enough.
 #   proof    : POST /webhooks/demo returns 201; :4002 returns 401 without
 #              credentials.
 #
@@ -18,8 +21,9 @@
 # network and nowhere else, so there is no way to reach an admin API by
 # accident.
 #
-# Credentials here are examples: replace compose/htpasswd before this faces
-# anything real. Regenerate the password file with
+# Credentials here are examples: replace compose/htpasswd and the token (here
+# and in compose/nginx.conf) before this faces anything real. Regenerate the
+# password file with
 #
 #   docker run --rm httpd:2.4-alpine htpasswd -nbB admin 'your-password'
 
@@ -29,6 +33,8 @@ services:
     environment:
       # nginx reaches the container interface, not its loopback.
       ANKUSA_ADMIN_IP: "0.0.0.0"
+      # The service token nginx presents. An example, like the password file.
+      ANKUSA_ADMIN_TOKEN: "proxy-example-token-replace-me"
     volumes:
       # The data volume: the RocksDB store (hooks, DLQ, quarantine pen), local segments. Losing it
       # loses un-dispatched hooks, so back it.

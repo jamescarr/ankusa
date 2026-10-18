@@ -148,6 +148,10 @@ defmodule Ankusa.MixProject do
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
       # string-to-sign / HMAC-chain code; signs Ankusa.BlobStore.S3 and Ankusa.Sink.SQS.
       {:aws_signature, "~> 0.4"},
+      # JWT/JWS verification for `Ankusa.Admin.Auth.JWT` (OIDC bearer tokens on
+      # the control planes). Every deployment that exposes an admin port beyond
+      # loopback wants real authentication, so it lives in core.
+      {:jose, "~> 1.11"},
       # Built-in Prometheus mapping of Ankusa.Telemetry (Ankusa.Metrics).
       # Every deployment wants metrics, so they live in core rather than an
       # adapter package.

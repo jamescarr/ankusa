@@ -67,7 +67,7 @@ node's data directory needs a persistent volume.
 | 4003 | route management API (`routes.admin.ip`, default `127.0.0.1`; only when `routes.enabled`) | your own proxy or network policy |
 | 4004 | metrics listener: only `/metrics`, `/health`, `/ready` (`metrics.enabled`, default off; `metrics.ip`, default `127.0.0.1`) | your Prometheus / kubelet network rule |
 
-Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `claim_check.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. Every listener, ingest included, can terminate TLS, and demand a client certificate (mTLS) with `verify: verify_peer`: see [Listeners: limits, TLS and mTLS](configuration.md#listeners-limits-tls-and-mtls). The admin, route-management and claim-check APIs still have no authentication of their own; `verify_peer` is what keeps a client without your CA's certificate off them.
+Every surface is on its own port so it can be firewalled on its own. 4001/4002/4003/4004 listen on `127.0.0.1` by default; inside a container set `ANKUSA_ADMIN_IP` / `ANKUSA_CLAIM_CHECK_IP` / `ANKUSA_METRICS_IP` (or `admin.ip` / `claim_check.ip` / `metrics.ip`, and `routes.admin.ip` for 4003) to `0.0.0.0` before a published port can reach them. Every listener, ingest included, can terminate TLS, and demand a client certificate (mTLS) with `verify: verify_peer`: see [Listeners: limits, TLS and mTLS](configuration.md#listeners-limits-tls-and-mtls). The admin, route-management and claim-check APIs authenticate their callers (`admin.auth`, `routes.admin.auth`, `claim_check.auth`: a bearer token, an OIDC access token, or a client certificate, each with scopes): off loopback they refuse to boot with `mode: none` unless `allow_insecure: true` says something in front authenticates every caller. The image takes `ANKUSA_ADMIN_TOKEN` / `ANKUSA_CLAIM_CHECK_TOKEN` / `ANKUSA_ROUTES_ADMIN_TOKEN` for the simple case; see [Control-plane authentication](configuration.md#control-plane-authentication).
 
 `/var/lib/ankusa` holds the node's store (`store/`: hooks, delivery rows, the
 quarantine pen, API-managed sources, rate-limit overrides, the archive
@@ -147,7 +147,7 @@ Both compose files are worked examples:
 docker compose -f docker-compose.proxy.yml up -d --wait
 curl -XPOST localhost:4000/webhooks/demo -d '{"id":"f1"}'    # 201
 curl localhost:4002/v1/dlq                                   # 401 (nginx)
-curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]}
+curl -u admin:change-me localhost:4002/v1/dlq                # {"total":0,"entries":[]} (nginx adds the node's token)
 ```
 
 Image tags:

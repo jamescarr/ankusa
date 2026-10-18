@@ -361,4 +361,100 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     @impl true
     def list(_, _, _), do: {:ok, []}
   end
+
+  describe "authentication and tenant scope" do
+    alias Ankusa.Admin.Auth.Token
+
+    defp token(id, scopes), do: %{id: id, sha256: Token.hash(id), scopes: scopes}
+
+    defp authed_call(inst, method, path, token) do
+      conn = Plug.Test.conn(method, path, "")
+
+      conn =
+        if token,
+          do: Plug.Conn.put_req_header(conn, "authorization", "Bearer " <> token),
+          else: conn
+
+      Router.call(conn, Router.init(instance: inst))
+    end
+
+    setup do
+      inst = :"ccra#{System.unique_integer([:positive])}"
+      dir = Ankusa.TestHelpers.unique_data_dir(inst)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      tokens = [
+        token("acme-reader", ["claims:read", "tenant:acme"]),
+        token("any-reader", ["claims:read", "tenant:*"]),
+        token("acme-writer", ["sources:write", "tenant:acme"])
+      ]
+
+      config =
+        Config.new(
+          instance: inst,
+          data_dir: dir,
+          roles: [:claim_check],
+          claim_check: %{auth: %{mode: :token, tokens: tokens}}
+        )
+
+      Ankusa.put_config(config)
+
+      {:ok, acme} = ClaimCheck.check_in(inst, "acme", [%{id: "a", body: "acme bytes"}])
+      {:ok, globex} = ClaimCheck.check_in(inst, "globex", [%{id: "g", body: "globex bytes"}])
+
+      %{inst: inst, acme: Ref.path(acme["a"].ref), globex: Ref.path(globex["g"].ref)}
+    end
+
+    test "401 with no credential or a wrong one, for GET and HEAD alike", %{
+      inst: inst,
+      acme: acme
+    } do
+      for method <- [:get, :head], token <- [nil, "guess"] do
+        conn = authed_call(inst, method, acme, token)
+        assert conn.status == 401
+        assert Plug.Conn.get_resp_header(conn, "www-authenticate") == [~s(Bearer realm="ankusa")]
+      end
+
+      # Nothing about the claim — not even that it is missing — to a stranger.
+      assert authed_call(inst, :get, "/v1/claims/acme/nonexistent", nil).status == 401
+    end
+
+    test "/health needs no credential", %{inst: inst} do
+      assert authed_call(inst, :get, "/health", nil).status == 200
+    end
+
+    test "tenant scope: a tenant's token reads its own claims and 403s on another tenant's",
+         %{inst: inst, acme: acme, globex: globex} do
+      ok = authed_call(inst, :get, acme, "acme-reader")
+      assert {ok.status, ok.resp_body} == {200, "acme bytes"}
+      assert authed_call(inst, :head, acme, "acme-reader").status == 200
+
+      denied = authed_call(inst, :get, globex, "acme-reader")
+      assert denied.status == 403
+
+      assert %{"error" => "forbidden", "scope" => "tenant:globex"} =
+               JSON.decode!(denied.resp_body)
+
+      refute denied.resp_body =~ "globex bytes"
+
+      assert authed_call(inst, :head, globex, "acme-reader").status == 403
+    end
+
+    test "tenant:* reads every tenant's claims", %{inst: inst, acme: acme, globex: globex} do
+      assert authed_call(inst, :get, acme, "any-reader").resp_body == "acme bytes"
+      assert authed_call(inst, :get, globex, "any-reader").resp_body == "globex bytes"
+    end
+
+    test "403 for a token without claims:read, even for its own tenant", %{inst: inst, acme: acme} do
+      conn = authed_call(inst, :get, acme, "acme-writer")
+      assert conn.status == 403
+      assert %{"scope" => "claims:read"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a missing claim is 404 to an authorized caller only", %{inst: inst} do
+      path = "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}"
+      assert authed_call(inst, :get, path, "acme-reader").status == 404
+      assert authed_call(inst, :get, path, "guess").status == 401
+    end
+  end
 end

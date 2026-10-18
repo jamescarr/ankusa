@@ -13,6 +13,30 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Authentication and scopes on every control plane (SEC-1).** The admin API,
+  the route-management API and the claim-check gateway authenticate every
+  request but `GET /health` / `GET /ready` (`401` with `www-authenticate`, `403`
+  naming the missing scope). New `admin.auth`, `routes.admin.auth` and
+  `claim_check.auth` blocks pick the `mode`: `:token` (SHA-256-hashed bearer
+  tokens with scopes), `:jwt` (`Ankusa.Admin.Auth.JWT`: OIDC access tokens
+  verified with `jose` against a cached, refreshed JWKS or static keys; checks
+  `iss`, `aud`, `exp`, `nbf`; scopes from `scope`, tenants from
+  `ankusa_tenants`), `:mtls` (`Ankusa.Admin.Auth.MTLS`: the `verify_peer`
+  client certificate, mapped by `mtls.subject_map`), or `:none`. A caller is an
+  `Ankusa.Principal` (`conn.assigns.principal`) with scopes (`metrics:read`,
+  `config:read`, `sources:*`, `dlq:*`, `replays:*`, `quarantine:*`,
+  `rate_limits:*`, `routes:*`, `claims:read`) and tenants (`tenant:<id>`,
+  `tenant:*`); resources that span tenants need `tenant:*`. `jose` is a new
+  core dependency. The OpenAPI documents declare the security scheme and the
+  `401`/`403` responses.
+
+- **Breaking: `mode: :none` is refused on a non-loopback address.** A running
+  admin, route-management or claim-check listener bound anywhere but loopback
+  now fails `Ankusa.Config.new/1` unless its `auth.mode` is `:token`, `:jwt` or
+  `:mtls`, or `auth.allow_insecure: true` says a proxy or mesh in front
+  authenticates every caller. `/v1/config` shows each token's `id` and scopes
+  but never its hash.
+
 - **Hardened listeners, TLS/mTLS on every listener, a separate metrics
   listener (SEC-6).** The new `listener` config section sets what Bandit's
   defaults left open, on every HTTP listener the instance runs:

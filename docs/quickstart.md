@@ -119,9 +119,12 @@ curl localhost:4002/v1/quarantine  # hooks held after a failed verification
 curl -XPOST localhost:4002/v1/replays -d '{"kind":"quarantine"}'
 ```
 
-Port 4002 is unauthenticated, so never publish it: the compose file binds it to
-`127.0.0.1` on the host, and `ankusa.yml` sets `admin.ip: 0.0.0.0` so that
-published port reaches the API inside the container.
+Port 4002 is the operator API: never publish it publicly. The compose file binds
+it to `127.0.0.1` on the host, and `ankusa.yml` sets `admin.ip: 0.0.0.0` with
+`auth.allow_insecure: true` so that published port reaches the API inside the
+container; this demo is open to anything that can reach it. A real deployment
+sets `admin.auth` (a token, your OIDC provider, or client certificates; see
+[Control-plane authentication](configuration.md#control-plane-authentication)).
 
 ## 6. Point a real provider at it
 

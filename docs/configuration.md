@@ -56,15 +56,15 @@ Every top-level section, with its keys and defaults:
 | `log` | `level` (`info`), `banner` (`true`; the ASCII-art banner on start) |
 | `http` | `port` (4000), `max_body_bytes` (8000000), `routing` (`path` \| `tenant_path`), `prefix` (`/webhooks`) |
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
-| `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`) |
+| `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) |
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
-| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) and [Under load](claim-check.md#under-load) |
+| `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576). See [`claim-check.md`](claim-check.md#a-dedicated-claim-store) and [Under load](claim-check.md#under-load) |
 | `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
-| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
+| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
@@ -163,6 +163,9 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
 | `ANKUSA_ADMIN_IP` | `admin.ip` |
 | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
+| `ANKUSA_ADMIN_TOKEN` | `admin.auth`: one bearer token holding every scope and `tenant:*`; replaces the file's `admin.auth` block. Only its SHA-256 is kept. See [Control-plane authentication](#control-plane-authentication) |
+| `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.auth`: one token holding `routes:read`, `routes:write` and `tenant:*` |
+| `ANKUSA_CLAIM_CHECK_TOKEN` | `claim_check.auth`: one token holding `claims:read` and `tenant:*` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
@@ -353,16 +356,18 @@ config :ankusa,
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
 | `admin.gauge_interval_ms` | `15_000` | How often `Ankusa.Metrics.Gauges` samples store/queue/quarantine depth, disk free, dispatch in-flight and open breakers for `/metrics`. |
 | `admin.tls` | `nil` | A TLS block for the admin listener; see [Listeners](#listeners-limits-tls-and-mtls). |
+| `admin.auth` | `%{mode: :none}` | Who may call the admin API: `mode` (`:none`, `:token`, `:jwt`, `:mtls`), `allow_insecure`, `tokens`, `jwt`, `mtls`. `mode: :none` is accepted only when `admin.ip` is loopback (or `allow_insecure: true`). See [Control-plane authentication](#control-plane-authentication). |
 | `metrics.enabled`, `metrics.port`, `metrics.ip` | `false`, `4004`, `"127.0.0.1"` | A listener serving only `/metrics`, `/health` and `/ready` (`Ankusa.Metrics.Router`); see [A separate metrics listener](#a-separate-metrics-listener). |
 | `metrics.tls` | `nil` | A TLS block for the metrics listener. |
 | `claim_check.tls`, `routes.admin.tls` | `nil` | A TLS block for the claim-check gateway and the route-management API. |
+| `routes.admin.auth`, `claim_check.auth` | `%{mode: :none}` | The same block for the route-management API and the claim-check gateway. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
 | `routes.max_routes` | `10_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. |
 | `routes.store` | `{Ankusa.Routes.Store.ETS, []}` | `{module, opts}` implementing `Ankusa.Routes.Store`. `Ankusa.Routes.Store.Redis` (package `ankusa_redis`) shares definitions across nodes. |
 | `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. Entries are keyed by the published snapshot's `epoch`, so publishing a snapshot retires every earlier decision at once. Only short requests are cached — at most 16 path segments and 256 bytes of path — because the key is the sender's own path; a longer one is still decided correctly, but by a scan of the whole route table on every request, and its `[:ankusa, :routes, :match]` event carries `cacheable: false` so that cost is visible. `max_size` is approximate between the adapter's 1s memory checks, and an eviction only costs a re-scan: it can never change a decision. `ttl_ms` must stay under `gc_interval_ms`. |
 | `routes.trusted_proxies` | `[]` | CIDRs whose peers may set `X-Forwarded-For`. Empty means the header is never read. |
 | `routes.ip_rules` | `%{default: :allow, rules: []}` | Ordered global rules, first match wins, plus the `default` when none match. |
-| `routes.admin.port` | `4003` | The management API's own Bandit port. Unauthenticated by design, same as `admin.port`; front it with your own proxy or network policy. |
+| `routes.admin.port` | `4003` | The management API's own Bandit port. Authenticated by `routes.admin.auth`, like `admin.port`. |
 | `routes.admin.ip` | `"127.0.0.1"` | The address the management API binds, same rules as `claim_check.ip`. |
 | `routes.log_sample` | `100` | 1 in N rejections is logged at `:debug`; `0` disables it. |
 | `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. With `403` a sender can tell a route that has its own `ip_rules` (which denied it) from a path that does not exist (`404`); `404` removes that distinction. |
@@ -427,16 +432,16 @@ listeners its own, with the same keys:
 | --- | --- | --- |
 | `certfile`, `keyfile` | required | PEM server certificate and its private key. Relative paths resolve against the working directory; both must exist at boot (`check-config` checks them too) |
 | `cacertfile` | none | PEM bundle of the CAs that sign *client* certificates; required by `verify: verify_peer` |
-| `verify` | `verify_none` | `verify_peer` is mutual TLS: a client without a certificate that chains to `cacertfile` is refused at the handshake, and the accepted certificate is the request's `Plug.Conn.get_peer_data/1` `:ssl_cert` (the identity the admin authentication work builds on) |
+| `verify` | `verify_none` | `verify_peer` is mutual TLS: a client without a certificate that chains to `cacertfile` is refused at the handshake, and the accepted certificate is the request's `Plug.Conn.get_peer_data/1` `:ssl_cert`, which `auth.mode: mtls` maps to a principal |
 | `versions` | `[tlsv1.2, tlsv1.3]` | protocol versions offered |
 | `ciphers` | Erlang/OTP defaults | cipher suites by OpenSSL name (`ECDHE-RSA-AES256-GCM-SHA384`) or TLS 1.3 name (`TLS_AES_256_GCM_SHA384`); an unknown name fails boot |
 
 A listener with a `tls` block is HTTPS only (plain HTTP to it gets no answer);
 one without is plain HTTP. The private key's file path is shown by
 `GET /v1/config` (a path is not a secret); the key itself is never read into
-the config. The boot log's "unauthenticated" warning for the admin,
-route-management and claim-check listeners is skipped when that listener
-demands client certificates, because a client certificate is authentication.
+the config. The boot log's "no authentication" warning for the admin,
+route-management and claim-check listeners is skipped when that listener's
+`auth.mode` is not `none`, or when it demands client certificates.
 
 ```yaml
 listener:
@@ -499,14 +504,95 @@ role also gets
 `GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit`,
 which read and adjust this node's per-tenant ingest limits
 ([Rate limits](#rate-limits)); a store that cannot be read or written answers
-`503 store_unavailable`. Everything here
-is **unauthenticated by design**: put it behind your own
-proxy, SSO, or network policy. The HTTP contract is
+`503 store_unavailable`. Every route but `GET /health` and `GET /ready` needs a
+credential and a scope: see [Control-plane
+authentication](#control-plane-authentication). The HTTP contract is
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml).
 
 With `admin.enabled: true` it also serves `GET /asyncapi.json`, the AsyncAPI
 document of the channels this node publishes to ([AsyncAPI and lifecycle
 events](asyncapi.md)).
+
+#### Control-plane authentication
+
+The admin API, the route-management API and the claim-check gateway each carry
+an `auth` block (`admin.auth`, `routes.admin.auth`, `claim_check.auth`). A
+request is authenticated into a principal (an id, a list of scopes, and the
+tenants it may act on), and each route needs a scope: `401` when there is no
+accepted credential (with `www-authenticate: Bearer realm="ankusa"`, the same
+body whatever was wrong), `403` `{"error":"forbidden","scope":"…"}` when the
+principal lacks the scope. Scopes are checked before anything else, so a caller
+without them learns nothing about the node's roles or data. `GET /health` and
+`GET /ready` need nothing; the [metrics listener](#a-separate-metrics-listener)
+is the unauthenticated way to scrape.
+
+| `mode` | Credential | Use it for |
+| --- | --- | --- |
+| `none` (default) | none | loopback only: `Ankusa.Config.new/1` refuses it on any other `ip` unless `allow_insecure: true` says a mesh or proxy in front of the port authenticates every caller (a `verify_peer` listener is not enough: use `mtls`) |
+| `token` | `Authorization: Bearer <token>`, matched against SHA-256 hashes | development, CI and scripts. Hash a random 32-byte value, not a password |
+| `jwt` | `Authorization: Bearer <access token>` from your OIDC provider | people and services that sign in through SSO; revocation is the provider's |
+| `mtls` | the client certificate of a `verify_peer` listener | service-to-service inside your own PKI |
+
+Scopes (`Ankusa.Principal`): `metrics:read` (`/metrics`, `/v1/wal`),
+`config:read` (`/v1/config`, `/asyncapi.json`), `sources:read` and
+`sources:write`, `dlq:read`, `replays:read` and `replays:write`,
+`quarantine:read` and `quarantine:write`, `rate_limits:read` and
+`rate_limits:write`, `routes:read` and `routes:write`, `claims:read`, and
+`dlq:write`, which starting a `dlq` replay also needs (`quarantine:write` for a
+`quarantine` replay). `config:write` and `audit:read` are reserved: no route
+uses them yet. Tenants are scopes too: `tenant:<id>` for one, `tenant:*` for all.
+A tenant's resources (its sources and rate limit, its claims) need that tenant;
+resources that span tenants (the DLQ, replay jobs, the quarantine pen, the
+rate-limit listing, route definitions and IP rules) need `tenant:*` until they
+are filtered by tenant, so a tenant-limited token cannot read another tenant's
+rows.
+
+```yaml
+admin:
+  ip: 0.0.0.0
+  auth:
+    mode: token
+    tokens:
+      - id: ci
+        token: "${CI_ADMIN_TOKEN}"        # hashed at load; or sha256: <hex>
+        scopes: [dlq:read, replays:write, dlq:write, "tenant:*"]
+      - id: acme-support
+        sha256: "<64 hex characters: printf %s \"$TOKEN\" | shasum -a 256>"
+        scopes: [sources:read, sources:write, "tenant:acme"]
+```
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:4002/v1/dlq
+```
+
+**JWT.** `jwt.issuer` and `jwt.audience` (a string, or a list: any one is
+accepted) are required, with `jwt.jwks_url` (https; http only to a loopback
+host) and/or `jwt.keys` (public JWKs or PEM keys). A token is accepted when it
+is signed with an asymmetric algorithm (`RS*`, `PS*`, `ES*`, `EdDSA`; never
+`none` or `HS*`) by one of those keys, its `iss` and `aud` match, `exp` is in
+the future and `nbf`, when present, is not (`jwt.leeway_s`, default 30,
+forgives clock skew), and `sub` is set. The scopes come from the
+`jwt.scope_claim` claim (default `scope`: a space-delimited string or a list;
+scopes this system does not define, such as `openid`, are ignored) and the
+tenants from `jwt.tenants_claim` (default `ankusa_tenants`: `["acme"]`, or
+`["*"]` for all) together with any `tenant:<id>` scope. The JWKS is fetched
+after boot (a slow provider does not delay it) and every `jwt.refresh_ms`
+(default 5 minutes); a token naming an unknown `kid` refetches it, at most once
+per `jwt.min_refresh_ms` (default 10 s). A failed fetch is a warning and keeps
+the keys already loaded; until the first fetch succeeds every token is refused.
+
+**mTLS.** `mode: mtls` needs the listener's `tls` block with `verify:
+verify_peer`. `mtls.subject_map` maps a certificate identity to scopes:
+`"cn:<common name>"`, or one of its subject alternative names
+(`"dns:…"`, `"email:…"`, `"uri:…"`, `"ip:…"`). The first identity of the
+certificate (SANs, then the common name) found in the map is the principal. A
+valid certificate nobody mapped is `401`.
+
+Tokens and keys are validated at load, and the redacted `GET /v1/config` shows
+each token's `id` and scopes but never its hash. The claim-check gateway's
+readers are your SDK clients: send the token in `Authorization` (the
+TypeScript `createClaimCheckClient({ baseUrl, headers })` and the Elixir SDK's
+`:headers` option take it as is).
 
 #### Route management
 
@@ -578,10 +664,11 @@ report `503 store_unavailable`. The Redis store seeds a namespace once, on its
 first boot, so a route deleted there is not resurrected by a restart.
 
 **Management API**, on `routes.admin.port` (its own listener, never the ingest
-port). **Unauthenticated by design** — the same stance as the operator admin
-API (`admin.port`): Ankusa doesn't know what auth scheme a deployment wants,
-so it doesn't pick one for you. Front this port with your own proxy, mesh, or
-network policy before exposing it. The HTTP contract is the `routes` tag of
+port), authenticated by `routes.admin.auth` like the operator admin API (see
+[Control-plane authentication](#control-plane-authentication)): `routes:read`
+for `GET` and the dry run, `routes:write` for everything else, and in both
+cases `tenant:*`, since route definitions and IP rules belong to no tenant.
+The HTTP contract is the `routes` tag of
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
 examples included — and
 [`test/ankusa/routes/router_openapi_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/test/ankusa/routes/router_openapi_test.exs)

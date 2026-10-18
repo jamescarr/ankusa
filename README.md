@@ -23,8 +23,9 @@ container. Grow into a fleet by changing config, not code.
 ### 1. Run it
 
 ```sh
+export ANKUSA_ADMIN_TOKEN=$(openssl rand -hex 32)   # the admin API needs a credential off loopback
 docker run -d --name ankusa \
-  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 \
+  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 -e ANKUSA_ADMIN_TOKEN \
   -v ankusa-data:/var/lib/ankusa \
   jamescarr/ankusa:edge
 

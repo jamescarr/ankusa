@@ -420,15 +420,15 @@ flowchart LR
     X --> QB[queue B\nowned by consumer B]
     QA --> CA[Worker A\nno store credentials]
     QB --> CB[Worker B\nno store credentials]
-    CA & CB -->|GET /v1/claims/...| CC["claim-check\n:claim_check role\nread-only, no auth"]
+    CA & CB -->|GET /v1/claims/...| CC["claim-check\n:claim_check role\nread-only, authenticated"]
     CC --> Obj
 ```
 
 A consumer that shouldn't hold object-store credentials (any worker, in any
 language, or a third party) redeems the reference with `GET /v1/claims/...`
 against a `claim_check`-role node instead of reading the object store. The
-gateway is read-only and does no authentication; whatever fronts it decides
-who may read what. See [`claim-check.md`](claim-check.md) for the API and the
+gateway is read-only and authenticates its readers (`claim_check.auth`: `claims:read`
+plus the claim's tenant). See [`claim-check.md`](claim-check.md) for the API and the
 reference format.
 
 Worked end to end, dockerized, in

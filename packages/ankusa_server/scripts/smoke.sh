@@ -17,6 +17,9 @@ HTTP_PORT="${SMOKE_HTTP_PORT:-4000}"
 ADMIN_PORT="${SMOKE_ADMIN_PORT:-4002}"
 BASE_URL=http://127.0.0.1:$HTTP_PORT
 ADMIN_URL=http://127.0.0.1:$ADMIN_PORT
+# The admin API listens off loopback in the container, so it needs a credential:
+# a throwaway token for this run (`ANKUSA_ADMIN_TOKEN` gives it every scope).
+ADMIN_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 # The mutual-TLS container's ingest and metrics ports.
 MTLS_PORT="${SMOKE_MTLS_PORT:-4010}"
 METRICS_PORT="${SMOKE_METRICS_PORT:-4014}"
@@ -50,7 +53,7 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo "==> starting $IMAGE"
 docker run -d --name "$NAME" -p "127.0.0.1:$HTTP_PORT:4000" -p "127.0.0.1:$ADMIN_PORT:4002" \
-  -e ANKUSA_ADMIN_IP=0.0.0.0 "$IMAGE" >/dev/null
+  -e ANKUSA_ADMIN_IP=0.0.0.0 -e ANKUSA_ADMIN_TOKEN="$ADMIN_TOKEN" "$IMAGE" >/dev/null
 
 echo "==> waiting for the admin API"
 ready=false
@@ -89,14 +92,21 @@ done
 [ "$health" = "healthy" ] || fail "container health is '$health' after 40s"
 
 echo "==> metrics"
-curl -s "$ADMIN_URL/metrics" >"$WORK/metrics"
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$ADMIN_URL/metrics" >"$WORK/metrics"
 grep -q 'ankusa_ingest_requests_total' "$WORK/metrics" ||
   fail "/metrics has no ingest counter"
 
-echo "==> config, with no credentials at all"
-code=$(http_code "$WORK/config" "$ADMIN_URL/v1/config")
-[ "$code" = "200" ] || fail "/v1/config returned $code: $(cat "$WORK/config")"
+echo "==> config: 401 without a credential or with a wrong token, 200 with the token"
+code=$(http_code "$WORK/denied" "$ADMIN_URL/v1/config")
+[ "$code" = "401" ] || fail "/v1/config with no credential returned $code, expected 401"
+code=$(http_code "$WORK/denied" -H "Authorization: Bearer wrong-token" "$ADMIN_URL/v1/config")
+[ "$code" = "401" ] || fail "/v1/config with a wrong token returned $code, expected 401"
+code=$(http_code "$WORK/denied" "$ADMIN_URL/metrics")
+[ "$code" = "401" ] || fail "/metrics with no credential returned $code, expected 401"
+code=$(http_code "$WORK/config" -H "Authorization: Bearer $ADMIN_TOKEN" "$ADMIN_URL/v1/config")
+[ "$code" = "200" ] || fail "/v1/config with the token returned $code: $(cat "$WORK/config")"
 grep -q '"demo"' "$WORK/config" || fail "/v1/config does not mention the demo source"
+! grep -q "$ADMIN_TOKEN" "$WORK/config" || fail "/v1/config shows the admin token"
 
 echo "==> mutual TLS on the ingest listener, and a metrics listener that serves only metrics"
 # The same TLS fixtures core's tests use: a throwaway CA, a server certificate

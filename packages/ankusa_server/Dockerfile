@@ -69,7 +69,7 @@ VOLUME /var/lib/ankusa
 # 4000 ingest, 4001 claim check (:claim_check role), 4002 admin/metrics, 4003
 # route management (`routes.enabled` on an `edge` node; it does not listen
 # otherwise). Publishing more than 4000 is a deliberate act: 4001, 4002 and
-# 4003 are unauthenticated (see README).
+# 4003 authenticate their callers off loopback (see README).
 EXPOSE 4000 4001 4002 4003
 
 # Readiness, not liveness: unhealthy while the store cannot take a synced write
