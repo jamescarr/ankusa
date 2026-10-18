@@ -57,7 +57,14 @@ The always-on tests cover:
   increasing seqs (the hook's seq comes from its key); seqs never repeat after
   every hook is delivered, reclaimed and the instance restarts; a commit while
   the store is down is refused and recovers with a higher seq; and
-  `[:commit, :stop]` measures successful commits only.
+  `[:commit, :stop]` measures successful commits only. Encodings
+  (`envelope_test.exs`, `queue_test.exs`, `dispatch_test.exs`): a hook and a
+  delivery row read in the bare v0 form and in v1 (`"AE"`/`"AD"` + version
+  byte); a field a newer node added to an envelope decodes (the test splices
+  in a key whose atom this VM never interned, which `binary_to_term(_, [:safe])`
+  would reject) and an added row key survives a rewrite; an unknown version
+  is an error value, and the pipeline dead-letters such a hook or row with
+  that reason and lists it in the DLQ instead of raising.
 - **Migration** (`store_migrate_test.exs`): a 0.3 data dir imports once — only
   what 0.3 had not finished (undelivered hooks deliver, unarchived hooks
   archive), dead letters carry over and replay to the current sinks, the
@@ -91,7 +98,13 @@ The always-on tests cover:
   `Ankusa.BlobStore.Azure.ManagedIdentity` token provider (IMDS fetch shape,
   caching, expiry-window refresh); `Sink.Http` forwarding, status mapping, and the
   rule that a redirect is reported rather than followed; the shared
-  `Ankusa.HttpClient` allowlist.
+  `Ankusa.HttpClient` allowlist; the egress policy (`Ankusa.HttpClient.Egress`:
+  loopback, metadata, private ranges, mapped IPv6 and odd IPv4 spellings,
+  DNS rebinding including an answer that moves between attempts, `allow_cidrs`
+  and `allow_hosts`, and that an `http` delivery really connects to the checked
+  address over a socket) and TLS verification against a real `https` listener
+  with a private CA (untrusted, `cacertfile`, hostname mismatch,
+  `allow_insecure_tls`, `verify_none` refused).
 - **Edge**: accept/verify/quarantine/load-shed/oversize, shedding with
   `503` once the batcher's queue fills while a commit is in flight, pluggable
   route resolvers (`Path` and `TenantPath`), and that the same body posted
@@ -185,7 +198,8 @@ The always-on tests cover:
   spelling; a pack built from 1–600 claims of 0–1 MiB reads back byte for byte
   by `Pack.locate/2` and by a standard ZIP reader (and the 65 532-claim
   ceiling builds, one more is refused); `Envelope.from_binary/1` inverts
-  `to_binary/1` field for field; `Ingest.check_headers/1` never raises and
+  `to_binary/1,2` field for field in both encodings and never raises on
+  arbitrary bytes; `Ingest.check_headers/1` never raises and
   agrees with the byte-class definition on raw bytes; `Net.parse_cidr/1` is an
   error or the exact range its prefix names, with the IPv4-mapped refusal;
   the 0.3 import's frame scanner forgives a torn tail (every whole frame

@@ -493,6 +493,9 @@ defmodule Ankusa.Edge.Quarantine do
     ArgumentError -> :error
   end
 
+  defp decode_held(<<"AE", _::binary>> = bin, _received_at, _id, _summary),
+    do: Envelope.from_binary(bin)
+
   # Trusted, internally written data (this node's own store rows); never request input.
   # sobelow_skip ["Misc.BinToTerm"]
   defp decode_held(bin, received_at, id, summary) do

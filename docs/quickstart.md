@@ -20,7 +20,9 @@ flowchart LR
 ```
 
 [`ankusa.yml`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/ankusa.yml)
-declares one source (`demo`) with one HTTP sink pointed at the worker;
+declares one source (`demo`) with one HTTP sink pointed at the worker, and an
+`egress` block that lets that sink reach the worker: a sink may not connect to a
+private address (or use plain `http`) unless the config says so;
 [`worker.py`](https://github.com/jamescarr/ankusa/blob/main/examples/quickstart/worker.py)
 is a small [FastAPI](https://fastapi.tiangolo.com/) app that prints what it receives.
 

@@ -134,9 +134,17 @@ directly when the config does not name static keys.
 
 ## Deliver to your worker
 
-An HTTP sink forwards every hook to your own service, raw body and all:
+An HTTP sink forwards every hook to your own service, raw body and all. The URL
+must be `https://`, and may not resolve to a loopback, private or link-local
+address (the cloud metadata service included) unless the `egress` section allows
+it, as it does here for a plain-http worker on a private network
+([`docs/configuration.md#egress`](../../docs/configuration.md#egress)):
 
 ```yaml
+egress:
+  allow_insecure_http: true
+  allow_hosts: [worker]
+
 sources:
   demo:
     verify: {type: none}

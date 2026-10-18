@@ -58,9 +58,15 @@ sleep 1 && docker compose logs worker
 # received id=01a0... source=demo bytes=36 body={"id":"evt_1","type":"invoice.paid"}
 ```
 
-The wiring is one sink in `ankusa.yml`:
+The wiring is one sink in `ankusa.yml`. The worker is plain `http://` at a
+private address, which sinks may not reach unless `egress` says so (a production
+sink is an `https://` URL on a public name and needs no `egress` block):
 
 ```yaml
+egress:
+  allow_insecure_http: true
+  allow_hosts: [worker]
+
 sources:
   demo:
     verify: {type: none}

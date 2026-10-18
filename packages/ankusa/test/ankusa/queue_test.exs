@@ -8,6 +8,7 @@ defmodule Ankusa.QueueTest do
   import Ankusa.TestHelpers
 
   alias Ankusa.{Envelope, Queue}
+  alias Ankusa.Queue.Deliveries
   alias Ankusa.Sink.Log
 
   defp config(overrides) do
@@ -143,6 +144,139 @@ defmodule Ankusa.QueueTest do
       Ankusa.Store.write(inst, [{:put, :hooks, Ankusa.Store.Keys.hook(5), "garbage"}], sync: true)
 
     assert {:error, {:corrupt_value, :hooks, _message}} = Queue.hooks(inst, 0, 10)
+  end
+
+  describe "delivery row encoding" do
+    @row %{
+      module: Log,
+      state: :pending,
+      attempts: 2,
+      at: 1_737_500_000_000,
+      error: nil,
+      size: 12,
+      source_id: "load"
+    }
+
+    test "the default encoding is the bare term every release up to 0.6 wrote" do
+      assert Deliveries.encode_row(@row) == :erlang.term_to_binary(@row)
+      assert Deliveries.decode_row(:erlang.term_to_binary(@row)) == {:ok, @row}
+    end
+
+    test "v1 is the AD prefix, the version byte and the same term" do
+      v1 = Deliveries.encode_row(@row, version: 1)
+
+      assert <<"AD", 1, term::binary>> = v1
+      assert term == Deliveries.encode_row(@row)
+      assert Deliveries.decode_row(v1) == {:ok, @row}
+    end
+
+    test "a key a newer node added passes through, and survives a rewrite" do
+      future = Map.put(@row, :first_attempt_at, 1_737_500_000_001)
+
+      for version <- [0, 1] do
+        assert {:ok, ^future} =
+                 future |> Deliveries.encode_row(version: version) |> Deliveries.decode_row()
+      end
+    end
+
+    test "an unknown version is an error value, and so is damage" do
+      <<"AD", 1, term::binary>> = Deliveries.encode_row(@row, version: 1)
+
+      assert Deliveries.decode_row(<<"AD", 9, term::binary>>) ==
+               {:error, :unsupported_delivery_row_version}
+
+      for bad <- ["", "garbage", <<"AD", 1>>, :erlang.term_to_binary(7)] do
+        assert Deliveries.decode_row(bad) == {:error, :undecodable}
+      end
+    end
+
+    test "rows the writer commits decode, with the keys the pipeline reads" do
+      config = config(roles: [:edge])
+      start_supervised!({Ankusa.Instance, config})
+
+      {:ok, [{:committed, env}]} =
+        Queue.enqueue(config.instance, [%{envelope: envelope(1), sinks: [{Log, []}]}])
+
+      assert {:ok, %{module: Log, state: :pending, attempts: 0, source_id: "load"}} =
+               Deliveries.row(config.instance, env.seq, 0)
+    end
+  end
+
+  test "a stored hook in an envelope version this node does not know is a corrupt_value error, not a crash" do
+    config = config(roles: [:edge])
+    inst = config.instance
+    start_supervised!({Ankusa.Instance, config})
+
+    <<"AE", 1, term::binary>> = Envelope.to_binary(envelope(1), version: 1)
+
+    :ok =
+      Ankusa.Store.write(
+        inst,
+        [{:put, :hooks, Ankusa.Store.Keys.hook(5), <<"AE", 9, term::binary>>}],
+        sync: true
+      )
+
+    assert {:error, {:corrupt_value, :hooks, message}} = Queue.hooks(inst, 0, 10)
+    assert message =~ "unsupported_envelope_version"
+  end
+
+  test "a hook written by a newer node (v1 envelope, an added field) reads back on this one" do
+    config = config(roles: [:edge])
+    inst = config.instance
+    start_supervised!({Ankusa.Instance, config})
+
+    env = envelope(1)
+    {_field, bin} = Ankusa.TestHelpers.envelope_from_the_future(env, 1)
+
+    :ok = Ankusa.Store.write(inst, [{:put, :hooks, Ankusa.Store.Keys.hook(5), bin}], sync: true)
+
+    assert {:ok, [read]} = Queue.hooks(inst, 0, 10)
+    assert read == %{env | seq: 5}
+  end
+
+  test "a \"AE\", 9 hook is dead-lettered by the pipeline with reason :unsupported_envelope_version" do
+    config = config(roles: [:edge, :dispatch])
+    inst = config.instance
+    start_supervised!({Ankusa.Instance, config})
+
+    at = System.system_time(:millisecond) - 1_000
+    <<"AE", 1, term::binary>> = Envelope.to_binary(envelope(1), version: 1)
+    hook = <<"AE", 9, term::binary>>
+
+    row =
+      Deliveries.encode_row(%{
+        module: Log,
+        state: :pending,
+        attempts: 0,
+        at: at,
+        error: nil,
+        size: byte_size(hook),
+        source_id: "load"
+      })
+
+    :ok =
+      Ankusa.Store.write(
+        inst,
+        [
+          {:put, :hooks, Ankusa.Store.Keys.hook(7), hook},
+          {:put, :deliveries, Ankusa.Store.Keys.delivery(7, 0), row},
+          {:put, :index, Ankusa.Store.Keys.due(at, 7, 0), <<byte_size(hook)::32>>}
+        ],
+        sync: true
+      )
+
+    assert {:ok, _} = Ankusa.Dispatch.Pipeline.tick(inst)
+
+    assert {:ok, %{state: :dead, error: ":unsupported_envelope_version"}} =
+             Deliveries.row(inst, 7, 0)
+
+    # The dead letter lists, with the reason, under the source its row names;
+    # the hook stays stored for a node that can read it.
+    assert {:ok, %{total: 1, entries: [entry]}} = Queue.dead(inst, limit: 10)
+    assert entry.reason == ":unsupported_envelope_version"
+    assert entry.envelope.source_id == "load"
+    assert entry.envelope.seq == 7
+    assert {:ok, ^hook} = Ankusa.Store.get(inst, :hooks, Ankusa.Store.Keys.hook(7))
   end
 
   test "an orphaned dead key is logged and not counted in total" do

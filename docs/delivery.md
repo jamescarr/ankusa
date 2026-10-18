@@ -224,6 +224,16 @@ sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5
 response, then closes the connection, so a large or endless response cannot
 pin the attempt or its memory. Redirects are never followed.
 
+Before a byte is sent, every attempt is checked against the `egress` policy
+([`configuration.md#egress`](configuration.md#egress)): `https` only unless the
+policy allows `http`, and no address on the loopback, private or link-local
+ranges (the cloud metadata service included) unless the policy allows it. A
+denied target is `{:permanent, {:egress_denied, reason}}`: dead-letter now, then
+fix the policy or the URL and replay. A name that does not resolve is retried.
+`https` connections verify the peer's certificate and hostname; a sink's
+`cacertfile` names a private CA, and `allow_insecure_tls: true` is the only way to
+turn verification off.
+
 | Status | Result |
 | --- | --- |
 | `2xx` | `:ok` |

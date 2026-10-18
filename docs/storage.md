@@ -65,6 +65,36 @@ commit still consumes seqs. `[:ankusa, :commit, :stop]` reports `batch_size`,
 off has no obligations at all: it is acked and stamped with a seq but not
 stored.
 
+### Encoding and versions
+
+A hook (the `hooks` family, and each record of an archive segment) is an
+`Ankusa.Envelope`; a delivery row (the `deliveries` family) is a map. Both are
+Erlang terms and both carry a version:
+
+| Value | v0 | v1 |
+| --- | --- | --- |
+| hook | the bare `term_to_binary` of the envelope's fields (every release up to 0.6) | `"AE"`, `1`, the same term |
+| delivery row | the bare `term_to_binary` of the row map (every release up to 0.6) | `"AD"`, `1`, the same term |
+
+Readers take both. A key a reader does not know is not an error: an envelope
+drops it, a row keeps it (so a field a newer node added survives this node
+rewriting the row on a retry). Decoding does not depend on which atoms the
+reader's VM has seen, so a newer node's new field never makes a row
+unreadable. A version the reader does not know, or bytes that are no value at
+all, is an error value (`:unsupported_envelope_version`,
+`:unsupported_delivery_row_version`, `:undecodable`), never a raise: dispatch
+dead-letters the delivery with that reason (the hook stays stored, and the
+dead letter lists in `GET /v1/dlq`), a replay counts the hook as skipped, the
+compactor logs it and drops its archive obligation, `Ankusa.Queue.hooks/3`
+returns `{:error, {:corrupt_value, :hooks, _}}`, and the 0.3 import refuses
+to boot with `{:corrupt_legacy_wal_record, path, seq, reason}`.
+
+This release writes v0. The release after it writes v1, so a rollback of
+*this* release to 0.6 still reads every row; see
+[Rolling back a minor](deployment.md#rolling-back-a-minor). Proof:
+`envelope_test.exs`, `queue_test.exs` and `dispatch_test.exs` (see
+[`testing.md`](testing.md)).
+
 ### Durability, corruption, full disk
 
 - One `sync: true` batch per commit: hundreds of hooks, one fsync. The boot

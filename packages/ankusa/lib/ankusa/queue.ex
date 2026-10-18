@@ -122,7 +122,7 @@ defmodule Ankusa.Queue do
            {0, []},
            fn key, bin, {n, acc} ->
              if n < limit do
-               {:cont, {n + 1, [stamp(key, bin) | acc]}}
+               stamp(key, bin, n, acc)
              else
                {:halt, {n, acc}}
              end
@@ -133,7 +133,17 @@ defmodule Ankusa.Queue do
     end
   end
 
-  defp stamp(<<seq::64>>, bin), do: %{Envelope.from_binary(bin) | seq: seq}
+  # A hook that does not decode (corrupt, or an envelope version this node
+  # does not know) stops the read with a named error, not a raise.
+  defp stamp(<<seq::64>>, bin, n, acc) do
+    case Envelope.from_binary(bin) do
+      {:ok, env} ->
+        {:cont, {n + 1, [%{env | seq: seq} | acc]}}
+
+      {:error, reason} ->
+        {:error, {:corrupt_value, :hooks, "hook #{seq} does not decode: #{reason}"}}
+    end
+  end
 
   @doc """
   Store statistics: `next_seq` (exact), `hooks` and `deliveries` (RocksDB key

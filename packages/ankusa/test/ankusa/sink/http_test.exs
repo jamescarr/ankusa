@@ -43,8 +43,10 @@ defmodule Ankusa.Sink.HttpTest do
     )
   end
 
+  # A public address literal under `https`: the default egress policy admits it
+  # without a DNS lookup, and `Req.Test` answers before any socket opens.
   defp opts(path, extra \\ []) do
-    [url: "http://sink.test" <> path, req_options: [plug: {Req.Test, __MODULE__}]] ++ extra
+    [url: "https://203.0.113.10" <> path, req_options: [plug: {Req.Test, __MODULE__}]] ++ extra
   end
 
   test "forwards the body verbatim, with the identity headers and content type", %{
@@ -149,7 +151,7 @@ defmodule Ankusa.Sink.HttpTest do
     # rewrites a signed URL, `auth:` adds a second credential.
     assert_raise ArgumentError, ~r/unsupported :req_options key :params/, fn ->
       Sink.Http.deliver(envelope(), %{attempt: 1},
-        url: "http://sink.test/hooks",
+        url: "https://203.0.113.10/hooks",
         req_options: [params: [a: 1], plug: {Req.Test, __MODULE__}]
       )
     end
@@ -360,6 +362,226 @@ defmodule Ankusa.Sink.HttpTest do
                )
 
       assert Map.new(signed)["webhook-signature"] == headers["webhook-signature"]
+    end
+  end
+
+  describe "egress policy" do
+    @instance :sink_http_egress_test
+
+    defmodule HostEcho do
+      @moduledoc false
+      @behaviour Plug
+      import Plug.Conn
+
+      @impl true
+      def init(opts), do: opts
+
+      @impl true
+      def call(conn, opts) do
+        send(opts[:test], {:request, get_req_header(conn, "host"), conn.request_path})
+        send_resp(conn, 200, "ok")
+      end
+    end
+
+    # Stores an instance config carrying `egress`, and returns the ctx dispatch
+    # would hand the sink for it.
+    defp ctx(egress \\ %{}, extra \\ %{}) do
+      Ankusa.put_config(Ankusa.Config.new(instance: @instance, egress: egress))
+      on_exit(fn -> :persistent_term.erase({Ankusa, :config, @instance}) end)
+      Map.merge(%{instance: @instance, attempt: 1}, extra)
+    end
+
+    # DNS from a map of name => addresses; an IP literal answers as itself, as
+    # `:inet.getaddrs/2` does, and any other name is NXDOMAIN.
+    defp zone(names) do
+      fn name, family ->
+        addresses =
+          case :inet.parse_address(name) do
+            {:ok, literal} -> [literal]
+            {:error, _} -> Map.get(names, List.to_string(name), [])
+          end
+
+        case Enum.filter(addresses, &(tuple_size(&1) == 4 == (family == :inet))) do
+          [] -> {:error, :nxdomain}
+          matching -> {:ok, matching}
+        end
+      end
+    end
+
+    defp send_to(url, ctx, extra \\ []) do
+      Sink.Http.deliver(
+        envelope(),
+        ctx,
+        [url: url, req_options: [plug: {Req.Test, __MODULE__}]] ++ extra
+      )
+    end
+
+    test "denies loopback", %{capture: capture} do
+      ctx = ctx(%{}, %{egress_resolver: zone(%{"localhost" => [{127, 0, 0, 1}]})})
+
+      for url <- [
+            "https://127.0.0.1:4003/v1/sources",
+            "https://127.0.0.1/",
+            "https://[::1]/",
+            "https://localhost/",
+            "https://0.0.0.0/",
+            "https://[::ffff:127.0.0.1]/"
+          ] do
+        assert {:error, {:permanent, {:egress_denied, {:address, _host, _ip}}}} =
+                 send_to(url, ctx),
+               url
+      end
+
+      assert Agent.get(capture, & &1) == [], "nothing was sent"
+    end
+
+    test "denies metadata", %{capture: capture} do
+      ctx = ctx()
+
+      assert {:error, {:permanent, {:egress_denied, {:address, _, "169.254.169.254"}}}} =
+               send_to("https://169.254.169.254/latest/meta-data/iam/security-credentials/", ctx)
+
+      assert {:error, {:permanent, {:egress_denied, {:address, _, "fd00:ec2::254"}}}} =
+               send_to("https://[fd00:ec2::254]/latest/meta-data/", ctx)
+
+      assert {:error, {:permanent, {:egress_denied, {:host, "metadata.google.internal"}}}} =
+               send_to("https://metadata.google.internal/computeMetadata/v1/", ctx)
+
+      assert Agent.get(capture, & &1) == []
+    end
+
+    test "denies RFC1918", %{capture: capture} do
+      ctx = ctx()
+
+      for url <- ["https://10.1.2.3/", "https://172.16.5.5/", "https://192.168.0.10/"] do
+        assert {:error, {:permanent, {:egress_denied, {:address, _, _}}}} = send_to(url, ctx), url
+      end
+
+      assert Agent.get(capture, & &1) == []
+    end
+
+    test "denies rebinding", %{capture: capture} do
+      # One public record, one private: the stub a rebinding attacker serves.
+      mixed = zone(%{"rebind.example" => [{203, 0, 113, 10}, {127, 0, 0, 1}]})
+
+      assert {:error, {:permanent, {:egress_denied, {:address, "rebind.example", "127.0.0.1"}}}} =
+               send_to("https://rebind.example/", ctx(%{}, %{egress_resolver: mixed}))
+
+      # The answer moves between attempts: every attempt looks again.
+      {:ok, answer} = Agent.start_link(fn -> {203, 0, 113, 10} end)
+
+      flipping = fn _name, family ->
+        if family == :inet, do: {:ok, [Agent.get(answer, & &1)]}, else: {:error, :nxdomain}
+      end
+
+      ctx = ctx(%{}, %{egress_resolver: flipping})
+      assert :ok = send_to("https://flip.example/", ctx)
+
+      Agent.update(answer, fn _ -> {169, 254, 169, 254} end)
+
+      assert {:error,
+              {:permanent, {:egress_denied, {:address, "flip.example", "169.254.169.254"}}}} =
+               send_to("https://flip.example/", ctx)
+
+      assert [_one_delivery] = Agent.get(capture, & &1)
+    end
+
+    test "a name that does not resolve is retried, not dead-lettered" do
+      ctx = ctx(%{}, %{egress_resolver: zone(%{})})
+
+      assert {:error, {:egress_denied, {:resolve, "gone.example", :nxdomain}}} =
+               send_to("https://gone.example/", ctx)
+    end
+
+    test "plain http is denied by default, allowed by allow_insecure_http", %{capture: capture} do
+      assert {:error, {:permanent, {:egress_denied, {:scheme, "http"}}}} =
+               send_to("http://203.0.113.10/hooks", ctx())
+
+      assert :ok = send_to("http://203.0.113.10/hooks", ctx(%{allow_insecure_http: true}))
+      assert [{"POST", "/hooks", _, _}] = Agent.get(capture, & &1)
+    end
+
+    test "allows allow_cidrs and allow_hosts", %{capture: capture} do
+      internal = zone(%{"hooks.internal" => [{10, 1, 2, 3}], "worker" => [{172, 18, 0, 3}]})
+
+      assert :ok =
+               send_to(
+                 "https://hooks.internal/deliveries",
+                 ctx(%{allow_cidrs: ["10.0.0.0/8"]}, %{egress_resolver: internal})
+               )
+
+      assert :ok =
+               send_to(
+                 "https://worker:8080/deliveries",
+                 ctx(%{allow_hosts: ["worker"]}, %{egress_resolver: internal})
+               )
+
+      # the allowance is as wide as it was written
+      assert {:error, {:permanent, {:egress_denied, {:address, "worker", "172.18.0.3"}}}} =
+               send_to(
+                 "https://worker:8080/deliveries",
+                 ctx(%{allow_cidrs: ["10.0.0.0/8"]}, %{egress_resolver: internal})
+               )
+
+      assert length(Agent.get(capture, & &1)) == 2
+    end
+
+    test "an instance that never started gets the default policy, not no policy" do
+      ctx = %{instance: :sink_http_never_started, attempt: 1}
+
+      assert {:error, {:permanent, {:egress_denied, {:address, _, _}}}} =
+               send_to("https://127.0.0.1/", ctx)
+    end
+
+    test "an http connection goes to the address that was checked, under the name's host header" do
+      port = Ankusa.TestHelpers.free_port()
+
+      start_supervised!(
+        {Bandit, plug: {HostEcho, test: self()}, scheme: :http, ip: {127, 0, 0, 1}, port: port}
+      )
+
+      # `.invalid` never resolves: only the pinned address can reach the listener.
+      ctx =
+        ctx(%{allow_insecure_http: true, allow_cidrs: ["127.0.0.0/8"]}, %{
+          egress_resolver: zone(%{"hooks.invalid" => [{127, 0, 0, 1}]})
+        })
+
+      assert :ok =
+               Sink.Http.deliver(envelope(), ctx, url: "http://hooks.invalid:#{port}/deliveries")
+
+      assert_received {:request, ["hooks.invalid:" <> _], "/deliveries"}
+    end
+  end
+
+  describe "TLS verification" do
+    @insecure [connect_options: [transport_opts: [verify: :verify_none]]]
+
+    test "rejects verify_none" do
+      assert_raise ArgumentError, ~r/verify_none/, fn ->
+        Sink.Http.validate_opts!(url: "https://hooks.example/", req_options: @insecure)
+      end
+
+      # at delivery too, for a sink that never went through config validation
+      assert {:error, {:raised, %ArgumentError{message: message}}} =
+               Sink.safe_deliver(Sink.Http, envelope(), %{attempt: 1},
+                 url: "https://203.0.113.10/",
+                 req_options: @insecure
+               )
+
+      assert message =~ "verify_none"
+    end
+
+    test "allow_insecure_tls is the one way past it, per sink" do
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: "https://hooks.example/",
+                 req_options: @insecure,
+                 allow_insecure_tls: true
+               )
+
+      assert_raise ArgumentError, ~r/allow_insecure_tls must be true or false/, fn ->
+        Sink.Http.validate_opts!(url: "https://hooks.example/", allow_insecure_tls: "yes")
+      end
     end
   end
 end
