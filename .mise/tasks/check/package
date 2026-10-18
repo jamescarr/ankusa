@@ -4,6 +4,7 @@
 #USAGE flag "--keep-infra" help="leave the package's docker-compose services running afterwards"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+source "$MISE_PROJECT_ROOT/.mise/lib/mix_cache.sh"
 cd "$ROOT"
 
 pkg="$usage_pkg"
@@ -39,6 +40,17 @@ fi
 echo "==> $pkg ($kind)"
 case "$kind" in
   hex | docker)
+    # Deps come from the shared cache `mise run build` keeps (see
+    # .mise/lib/mix_cache.sh), restored per env instead of compiled here: a
+    # fresh worktree used to compile every dep from source for each env the
+    # steps below use — RocksDB's C++ NIF in dev for credo/dialyzer/docs,
+    # again in test for the suite — which is what held the repo-wide check's
+    # lock for those minutes. The subshells keep MIX_ENV local. Restore comes
+    # before `deps.get`: the cache pairs sources with their compiled priv/,
+    # while deps.get alone leaves source-only directories.
+    for env in dev test; do
+      (MIX_ENV="$env" mix_cache_warm "$dir" "$pkg" "$env" --check-locked)
+    done
     mix deps.get --check-locked
     mix deps.unlock --check-unused
     # Retired packages and published security advisories fail the build. CI sets
