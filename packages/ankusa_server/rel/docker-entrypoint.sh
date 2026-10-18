@@ -18,11 +18,14 @@ case "${1:-start}" in
   print-config) exec /opt/ankusa/bin/ankusa eval 'AnkusaServer.CLI.print_config()' ;;
   version) exec /opt/ankusa/bin/ankusa eval 'AnkusaServer.CLI.version()' ;;
   # The ingress listener first (an :edge node always has it); a node without
-  # the :edge role answers the same probe on the admin listener. Both run
-  # `Ankusa.Health.ready/1`, so a 503 on one is a 503 on the other.
+  # the :edge role, or whose ingress listener terminates TLS (this probe is
+  # plain HTTP), answers the same probe on the admin listener, then on the
+  # metrics listener. All run `Ankusa.Health.ready/1`, so a 503 on one is a 503
+  # on the others.
   healthcheck)
     curl -fsS "http://127.0.0.1:${ANKUSA_HTTP_PORT:-${PORT:-4000}}/ready" >/dev/null 2>&1 ||
-      exec curl -fsS "http://127.0.0.1:${ANKUSA_ADMIN_PORT:-4002}/ready" >/dev/null
+      curl -fsS "http://127.0.0.1:${ANKUSA_ADMIN_PORT:-4002}/ready" >/dev/null 2>&1 ||
+      exec curl -fsS "http://127.0.0.1:${ANKUSA_METRICS_PORT:-4004}/ready" >/dev/null
     ;;
   remote) exec /opt/ankusa/bin/ankusa remote ;;
   rpc) shift; exec /opt/ankusa/bin/ankusa rpc "$@" ;;

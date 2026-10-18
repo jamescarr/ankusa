@@ -13,6 +13,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Hardened listeners, TLS/mTLS on every listener, a separate metrics
+  listener (SEC-6).** The new `listener` config section sets what Bandit's
+  defaults left open, on every HTTP listener the instance runs:
+  `read_timeout_ms` (10 s: a connection that sends nothing, or dribbles its
+  request head, is closed), `body_read_timeout_ms` (15 s) and
+  `request_deadline_ms` (30 s: the ingest port answers `408`),
+  `max_connections` (20 000, over `num_acceptors`, default two per scheduler),
+  `max_requests_per_connection` (1 000), `max_header_count` (64),
+  `max_header_length` (16 384) and `http2` (`false`). `listener.tls`,
+  `admin.tls`, `routes.admin.tls`, `claim_check.tls` and `metrics.tls` take a
+  TLS block (`certfile`, `keyfile`, `cacertfile`, `verify`, `versions`,
+  `ciphers`, `Ankusa.Listener`); `verify: :verify_peer` demands a client
+  certificate (mTLS) and makes it available as the request's peer
+  certificate. `metrics: %{enabled, ip, port}` starts `Ankusa.Metrics.Router`,
+  a listener that serves only `/metrics`, `/health` and `/ready`; the admin
+  API keeps serving `/metrics`. `Ankusa.Http.read_body_limited/3` takes
+  `:read_timeout` and `:deadline`. Every new key is range-checked at boot.
+  Behaviour change: listeners are now HTTP/1.1 only and close idle connections
+  after 10 s; set `listener.http2: true` / `listener.read_timeout_ms` to
+  restore Bandit's behaviour.
 - **Store format version, migration registry, downgrade guard.** The store
   records its layout version under `m:format_version` (this release writes
   format 1; a store without the key is format 1 and is stamped on first open).

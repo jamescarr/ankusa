@@ -341,4 +341,183 @@ defmodule Ankusa.InstanceTest do
 
     assert message == "source gh: verifier secret is missing or undecodable"
   end
+
+  describe "listeners" do
+    @tls_dir Path.expand("../fixtures/tls", __DIR__)
+
+    defp fixture(name), do: Path.join(@tls_dir, name)
+
+    # One HTTPS GET over `:ssl`, verifying the server against the fixture CA and
+    # presenting `client` (`{certfile, keyfile}`) when given. A refused client
+    # certificate shows up either as a failed handshake or, under TLS 1.3, as an
+    # error on the first read, so both are `{:error, _}`.
+    defp tls_get(port, path, client) do
+      opts =
+        [
+          :binary,
+          active: false,
+          verify: :verify_peer,
+          cacertfile: fixture("ca.pem"),
+          server_name_indication: ~c"localhost"
+        ] ++
+          case client do
+            nil -> []
+            {cert, key} -> [certfile: cert, keyfile: key]
+          end
+
+      case :ssl.connect(~c"127.0.0.1", port, opts, 5_000) do
+        {:ok, sock} ->
+          result =
+            with :ok <- :ssl.send(sock, "GET #{path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+                 do: :ssl.recv(sock, 0, 5_000)
+
+          :ssl.close(sock)
+          result
+
+        {:error, _} = error ->
+          error
+      end
+    end
+
+    defp http_get(port, path) do
+      Req.get!("http://127.0.0.1:#{port}#{path}", retry: false, decode_body: false)
+    end
+
+    defp listening?(port) do
+      case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false]) do
+        {:ok, sock} ->
+          :gen_tcp.close(sock)
+          true
+
+        {:error, _} ->
+          false
+      end
+    end
+
+    @tag :capture_log
+    test "tls listener requires client cert" do
+      port = free_port()
+
+      config =
+        test_config(
+          roles: [:edge],
+          port: port,
+          listener: %{
+            tls: [
+              certfile: fixture("server.pem"),
+              keyfile: fixture("server-key.pem"),
+              cacertfile: fixture("ca.pem"),
+              verify: :verify_peer
+            ]
+          }
+        )
+
+      start_supervised!({Ankusa.Instance, config})
+      eventually(fn -> listening?(port) end)
+
+      # The pinned client: served.
+      assert {:ok, "HTTP/1.1 200" <> _} =
+               tls_get(port, "/health", {fixture("client.pem"), fixture("client-key.pem")})
+
+      # No certificate at all: refused.
+      assert {:error, _} = tls_get(port, "/health", nil)
+
+      # A certificate some other CA signed: refused.
+      assert {:error, _} =
+               tls_get(port, "/health", {fixture("stranger.pem"), fixture("stranger-key.pem")})
+
+      # And the listener is TLS only: a plain-HTTP client gets no answer.
+      assert {:error, _} = Req.get("http://127.0.0.1:#{port}/health", retry: false)
+    end
+
+    @tag :capture_log
+    test "a tls listener without verify_peer serves a client that has no certificate" do
+      port = free_port()
+
+      config =
+        test_config(
+          roles: [:edge],
+          port: port,
+          listener: %{
+            tls: [certfile: fixture("server.pem"), keyfile: fixture("server-key.pem")]
+          }
+        )
+
+      start_supervised!({Ankusa.Instance, config})
+      eventually(fn -> listening?(port) end)
+
+      assert {:ok, "HTTP/1.1 200" <> _} = tls_get(port, "/health", nil)
+    end
+
+    @tag :capture_log
+    test "admin, route-management, claim-check and metrics listeners take their own tls block" do
+      [admin, routes, claim, metrics] = Enum.map(1..4, fn _ -> free_port() end)
+      tls = [certfile: fixture("server.pem"), keyfile: fixture("server-key.pem")]
+
+      config =
+        test_config(
+          roles: [:edge, :claim_check],
+          admin: %{enabled: true, port: admin, tls: tls},
+          routes: %{enabled: true, admin: %{port: routes, tls: tls}},
+          claim_check: %{port: claim, tls: tls},
+          metrics: %{enabled: true, port: metrics, tls: tls}
+        )
+
+      start_supervised!({Ankusa.Instance, config})
+
+      for {port, path} <- [
+            {admin, "/health"},
+            {routes, "/health"},
+            {claim, "/health"},
+            {metrics, "/health"}
+          ] do
+        eventually(fn -> listening?(port) end)
+        assert {:ok, "HTTP/1.1 " <> _} = tls_get(port, path, nil), "port #{port} is not TLS"
+      end
+    end
+
+    test "metrics listener serves only metrics" do
+      port = free_port()
+      config = test_config(roles: [:edge], metrics: %{enabled: true, port: port})
+      start_supervised!({Ankusa.Instance, config})
+      eventually(fn -> listening?(port) end)
+
+      metrics = http_get(port, "/metrics")
+      assert metrics.status == 200
+      assert [content_type] = Req.Response.get_header(metrics, "content-type")
+      assert content_type =~ "text/plain"
+
+      assert http_get(port, "/health").status == 200
+      assert http_get(port, "/ready").status == 200
+
+      # None of the operator API is here.
+      for path <- ["/v1/config", "/v1/dlq", "/v1/wal", "/v1/quarantine", "/asyncapi.json", "/"] do
+        assert http_get(port, path).status == 404, "#{path} is served by the metrics listener"
+      end
+
+      assert Req.post!("http://127.0.0.1:#{port}/v1/replays", retry: false, body: "{}").status ==
+               404
+
+      assert Req.delete!("http://127.0.0.1:#{port}/v1/quarantine", retry: false).status == 404
+    end
+
+    test "the admin listener keeps serving /metrics when the metrics listener is on" do
+      [admin, metrics] = [free_port(), free_port()]
+
+      config =
+        test_config(
+          roles: [:edge],
+          admin: %{enabled: true, port: admin},
+          metrics: %{enabled: true, port: metrics}
+        )
+
+      start_supervised!({Ankusa.Instance, config})
+      eventually(fn -> listening?(admin) and listening?(metrics) end)
+
+      assert http_get(admin, "/metrics").status == 200
+      assert http_get(admin, "/v1/config").status == 200
+      assert http_get(metrics, "/metrics").status == 200
+      assert http_get(metrics, "/v1/config").status == 404
+    end
+  end
 end

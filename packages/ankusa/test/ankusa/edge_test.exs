@@ -555,6 +555,77 @@ defmodule Ankusa.EdgeTest do
     end
   end
 
+  # The listener answers 408 on the way out or just closes: either way the
+  # socket is gone within the timeout.
+  defp assert_closed(sock) do
+    case :gen_tcp.recv(sock, 0, 3_000) do
+      {:ok, "HTTP/1.0 408" <> _} -> assert {:error, :closed} = :gen_tcp.recv(sock, 0, 3_000)
+      {:error, :closed} -> :ok
+      other -> flunk("expected the connection to be closed, got #{inspect(other)}")
+    end
+  end
+
+  test "closes idle header read" do
+    config =
+      start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]},
+        port: free_port(),
+        listener: %{read_timeout_ms: 200}
+      )
+
+    # A request head dribbled in and never finished.
+    {:ok, slow} = :gen_tcp.connect({127, 0, 0, 1}, config.port, [:binary, active: false])
+    :ok = :gen_tcp.send(slow, "POST /webhooks/demo HTTP/1.1\r\nHost: localhost\r\nX-Slow: ")
+    assert_closed(slow)
+
+    # A connection that never says anything at all.
+    {:ok, silent} = :gen_tcp.connect({127, 0, 0, 1}, config.port, [:binary, active: false])
+    assert_closed(silent)
+
+    assert stored_ids(config.instance) == []
+  end
+
+  test "a body that has not arrived within request_deadline_ms is answered 408" do
+    config =
+      start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]},
+        port: free_port(),
+        listener: %{request_deadline_ms: 300, body_read_timeout_ms: 10_000}
+      )
+
+    # 1 of 100 promised bytes: without the deadline the 10 s read timeout
+    # would hold the connection past `raw_post`'s 2 s wait.
+    assert {:ok, "HTTP/1.1 408" <> _} = raw_post(config.port, "/webhooks/demo", 100, "x")
+    assert stored_ids(config.instance) == []
+  end
+
+  test "a keep-alive connection is closed after max_requests_per_connection" do
+    config = start_edge(%{}, port: free_port(), listener: %{max_requests_per_connection: 2})
+    {:ok, sock} = :gen_tcp.connect({127, 0, 0, 1}, config.port, [:binary, active: false])
+
+    answered =
+      Enum.count(1..5, fn _ ->
+        with :ok <- :gen_tcp.send(sock, "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+             {:ok, "HTTP/1.1 200" <> _} <- :gen_tcp.recv(sock, 0, 2_000) do
+          true
+        else
+          _closed -> false
+        end
+      end)
+
+    assert answered == 2
+  end
+
+  test "more headers than max_header_count are refused" do
+    config =
+      start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]},
+        port: free_port(),
+        listener: %{max_header_count: 5}
+      )
+
+    headers = Enum.map(1..10, &"X-H#{&1}: v")
+    assert {:ok, "HTTP/1.0 431" <> _} = raw_post(config.port, "/webhooks/demo", 1, "x", headers)
+    assert stored_ids(config.instance) == []
+  end
+
   test "Ingest.ingest/2 refuses a header with an undeliverable byte" do
     config = start_edge(%{"demo" => [verifier: {Ankusa.Verifier.None, []}]})
     req = request("demo", "x", [{"x-note", "caf\xC3\xA9"}])
