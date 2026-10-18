@@ -21,21 +21,6 @@ pull requests happen in the main repository.
 composer require jamescarr/ankusa
 ```
 
-Until the first release is on Packagist, depend on it as a local path, the same
-way the Elixir packages in this monorepo depend on `ankusa` core before their
-first Hex release:
-
-```json
-{
-    "repositories": [
-        { "type": "path", "url": "../../packages/sdk-php" }
-    ],
-    "require": {
-        "jamescarr/ankusa": "*"
-    }
-}
-```
-
 PHP 8.3 or newer. `guzzlehttp/guzzle` and its PSR-7/PSR-18 interfaces are
 installed as dependencies; any other PSR-18 client can be injected instead.
 

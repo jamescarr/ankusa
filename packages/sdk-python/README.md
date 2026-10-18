@@ -23,6 +23,8 @@ Or with [`uv`](https://docs.astral.sh/uv/):
 uv add ankusa
 ```
 
+Python 3.11 or newer.
+
 ## Claim-check client
 
 Redeem a claim-check ref, verify the bytes it returns against the message's

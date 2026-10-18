@@ -26,6 +26,7 @@ reverse.
 npm install ankusa
 ```
 
+Node 20 or newer (ESM only).
 ### Use
 
 ```ts
