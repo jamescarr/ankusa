@@ -58,14 +58,15 @@ jobs:
       # cache key: a run rebuilds a PLT only when the toolchain or a dep changed.
       # The PLT also covers the path-dependency `ankusa`, so an adapter that
       # calls a function core newly gained fails dialyzer against a stale PLT:
-      # bump the `v` below when that happens (SEC-4: `Ankusa.Crypto.Envelope`).
+      # bump the `v` below when that happens (SEC-4: `Ankusa.Crypto.Envelope`;
+      # SEC-8: `Ankusa.Verifier.max_tolerance_seconds/0`).
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
