@@ -29,6 +29,9 @@ defmodule Ankusa.BlobStore.OCI do
     * `:timeout_ms`      — default `10_000`, for both connect and response
     * `:req_options`     — transport options for the HTTP client. See
                            `Ankusa.HttpClient` for the accepted keys
+    * `:retries`         — default `2`: extra attempts after a transport error
+                           or a `408`/`429`/`5xx`, each re-signed with a fresh
+                           `date`. See `Ankusa.BlobStore.Retry`
 
   ## Identity
 
@@ -66,44 +69,50 @@ defmodule Ankusa.BlobStore.OCI do
 
   @behaviour Ankusa.BlobStore
 
+  alias Ankusa.BlobStore.Retry
   alias Ankusa.HttpClient
 
   @generic_headers ["date", "(request-target)", "host"]
   @body_headers ["content-length", "content-type", "x-content-sha256"]
 
   @impl true
-  def put(_instance, key, data, opts) do
-    body = IO.iodata_to_binary(data)
+  def put(instance, key, data, opts) do
     url = object_url(opts, key)
 
     extra = [
       {"content-type", "application/octet-stream"},
-      {"x-content-sha256", sha256_base64(body)}
+      {"x-content-sha256", sha256_base64(data)}
     ]
 
-    case request(opts, :put, url, body, extra) do
+    case request(instance, opts, :put, url, data, extra) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl true
-  def get(_instance, key, opts), do: request(opts, :get, object_url(opts, key), nil, [])
+  def get(instance, key, opts),
+    do: request(instance, opts, :get, object_url(opts, key), nil, [])
 
   @impl true
-  def get_range(_instance, key, offset, length, opts) do
+  def get_range(instance, key, offset, length, opts) do
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, object_url(opts, key), nil, [{"range", range}])
+    request(instance, opts, :get, object_url(opts, key), nil, [{"range", range}])
   end
 
   @impl true
-  def delete(_instance, key, opts) do
-    _ = request(opts, :delete, object_url(opts, key), nil, [])
+  def delete(instance, key, opts) do
+    _ = request(instance, opts, :delete, object_url(opts, key), nil, [])
     :ok
   end
 
+  # Every page (`nextStartWith` → `start`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts) do
+  def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
+
+  defp list_pages(instance, opts, prefix, start, acc) do
+    query = [{"prefix", prefix}] ++ if(start, do: [{"start", start}], else: [])
+
     url =
       endpoint(opts) <>
         "/n/" <>
@@ -111,37 +120,48 @@ defmodule Ankusa.BlobStore.OCI do
         "/b/" <>
         bucket(opts) <>
         "/o" <>
-        "?" <> URI.encode_query([{"prefix", prefix}], :rfc3986)
+        "?" <> URI.encode_query(query, :rfc3986)
 
-    case request(opts, :get, url, nil, []) do
-      {:ok, body} ->
-        case JSON.decode(body) do
-          {:ok, %{"objects" => objects}} -> objects |> Enum.map(& &1["name"]) |> Enum.sort()
-          {:ok, _no_objects} -> []
-          {:error, _reason} -> []
-        end
+    with {:ok, body} <- request(instance, opts, :get, url, nil, []),
+         {:ok, page} when is_map(page) <- JSON.decode(body) do
+      acc = [page |> Map.get("objects", []) |> Enum.map(& &1["name"]) | acc]
 
-      {:error, _reason} ->
-        []
+      case page["nextStartWith"] do
+        next when is_binary(next) and next != "" ->
+          list_pages(instance, opts, prefix, next, acc)
+
+        _ ->
+          {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      {:ok, _not_a_page} -> {:error, :list_unreadable}
     end
   end
 
   # ── requests ──────────────────────────────────────────────────────────────
 
-  defp request(opts, method, url, body, extra_headers) do
-    date = rfc1123_date(:calendar.universal_time())
-    headers = [{"date", date} | extra_headers]
-    authorization = sign(opts, method, url, headers, body)
+  defp request(instance, opts, method, url, body, extra_headers) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
+    req_options = Keyword.get(opts, :req_options, [])
 
-    case HttpClient.request(
-           method,
-           url,
-           [{"authorization", authorization} | headers],
-           body,
-           timeout,
-           Keyword.get(opts, :req_options, [])
-         ) do
+    # Signed per attempt: the signature covers the `date` header.
+    result =
+      Retry.run(instance, opts, fn ->
+        headers = [{"date", rfc1123_date(:calendar.universal_time())} | extra_headers]
+        authorization = sign(opts, method, url, headers, body)
+
+        HttpClient.request(
+          method,
+          url,
+          [{"authorization", authorization} | headers],
+          body,
+          timeout,
+          req_options
+        )
+      end)
+
+    case result do
       # Keep the status visible so 404 can mean :not_found.
       {:ok, status, body} when status in 200..299 -> {:ok, body}
       {:ok, 404, _body} -> {:error, :not_found}
@@ -182,7 +202,7 @@ defmodule Ankusa.BlobStore.OCI do
   defp header_value("host", _method, url, _headers, _body), do: authority(url)
 
   defp header_value("content-length", _method, _url, _headers, body),
-    do: Integer.to_string(byte_size(body))
+    do: Integer.to_string(IO.iodata_length(body))
 
   defp header_value(name, _method, _url, headers, _body) do
     {^name, value} = List.keyfind(headers, name, 0)

@@ -95,6 +95,11 @@ export function createClaimCheckClient(options: ClaimCheckClientOptions): ClaimC
     // An empty error body arrives as `undefined`; the Python client reports it
     // as "".
     const body = errorBody === undefined ? "" : errorBody;
+    // A gateway (or a proxy in front of it) that is throttling or timing out is
+    // telling the caller to come back, not that the claim is gone.
+    if (status === 408 || status === 429) {
+      throw new ClaimCheckUnavailableError(`claim-check gateway busy (${status}): ${JSON.stringify(body)}`);
+    }
     if (status >= 400 && status < 500) {
       throw new ClaimRejectedError(`claim-check rejected redeem (${status}): ${JSON.stringify(body)}`, status, body);
     }

@@ -1,0 +1,52 @@
+# Durable mode: each pod commits a hook to its own store (RocksDB on its PVC)
+# before it answers 201, then dispatches it to JetStream in the background,
+# with retries, a per-sink circuit breaker and a DLQ. A sink outage is a
+# backlog on disk, not a 503. Bodies above inline_max_bytes are checked in to
+# the claim store at dispatch time.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ankusa-durable-config
+  labels:
+    {{- include "demo.labels" "ankusa-durable" | nindent 4 }}
+data:
+  ankusa.yml: |
+    node:
+      roles: [edge, dispatch, storage]
+      data_dir: /var/lib/ankusa
+    log:
+      banner: false
+    wal:
+      type: disk
+    admin:
+      enabled: true
+      ip: 0.0.0.0
+      # The queue gauges (pending, scheduled, dead, disk) the panel reads;
+      # the default 15 s makes a backlog look frozen.
+      gauge_interval_ms: 2000
+    dispatch:
+      breaker_failures: {{ int .Values.durable.breaker.failures }}
+      breaker_open_ms: {{ int .Values.durable.breaker.openMs }}
+      breaker_max_open_ms: {{ int .Values.durable.breaker.maxOpenMs }}
+      retry:
+        base_ms: {{ int .Values.durable.retry.base_ms }}
+        max_ms: {{ int .Values.durable.retry.max_ms }}
+        max_attempts: {{ int .Values.durable.retry.max_attempts }}
+    claim_check:
+      store:
+        {{- include "demo.claimStore" . | nindent 8 }}
+    sources:
+      durable:
+        verify: {type: none}
+        # Unlike direct mode, the queue writer collapses a repeated key: a
+        # provider retry that reaches the same pod is answered
+        # `"duplicate": true` and stored once. Each pod has its own store, so
+        # the dedupe is per pod, not fleet-wide.
+        dedupe: {header: x-demo-event-id}
+        sinks:
+          - type: nats
+            servers: {{ printf "%s:%d" .Values.nats.host (int .Values.nats.port) | quote }}
+            # Inside the consumer's `ankusa.>` stream.
+            subject: ankusa.durable
+            inline_max_bytes: {{ int .Values.ankusa.inlineMaxBytes }}
+            publish_timeout_ms: 4000

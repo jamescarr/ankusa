@@ -355,4 +355,79 @@ defmodule Ankusa.ConfigTest do
       end
     end
   end
+
+  describe "ranges" do
+    test "a numeric key out of range fails at Config.new/1, naming the key" do
+      assert_raise ArgumentError, "batcher.partitions must be a positive integer, got 0", fn ->
+        Config.new(batcher: %{partitions: 0})
+      end
+
+      assert_raise ArgumentError, "dispatch.concurrency must be a positive integer, got 0", fn ->
+        Config.new(dispatch: %{concurrency: 0})
+      end
+
+      assert_raise ArgumentError, "port must be an integer from 0 to 65535, got 70000", fn ->
+        Config.new(port: 70_000)
+      end
+
+      assert_raise ArgumentError,
+                   "batcher.max_delay_ms must be a non-negative integer, got -1",
+                   fn ->
+                     Config.new(batcher: %{max_delay_ms: -1})
+                   end
+
+      for key <- [:read_retries, :read_queue_max, :read_cache_bytes] do
+        assert_raise ArgumentError,
+                     "claim_check.#{key} must be a non-negative integer, got -1",
+                     fn -> Config.new(claim_check: %{key => -1}) end
+      end
+
+      for key <- [
+            :store_cooldown_ms,
+            :read_deadline_ms,
+            :read_timeout_ms,
+            :read_max_inflight,
+            :read_cache_max_entry_bytes
+          ] do
+        assert_raise ArgumentError,
+                     "claim_check.#{key} must be a positive integer, got 0",
+                     fn -> Config.new(claim_check: %{key => 0}) end
+      end
+    end
+
+    test "a key prefix is empty or slash-terminated segments" do
+      assert %Config{} = Config.new(storage: %{key_prefix: "fleet/node-a/"})
+
+      for bad <- ["node-a", "/node-a/", "a//", "a b/"] do
+        assert_raise ArgumentError, ~r/storage.key_prefix must be/, fn ->
+          Config.new(storage: %{key_prefix: bad})
+        end
+      end
+    end
+  end
+
+  describe "the backup section" do
+    test "a zero interval or keep fails at Config.new/1, naming the key" do
+      assert_raise ArgumentError, "backup.interval_ms must be a positive integer, got 0", fn ->
+        Config.new(backup: %{interval_ms: 0})
+      end
+
+      assert_raise ArgumentError, "backup.keep must be a positive integer, got 0", fn ->
+        Config.new(backup: %{keep: 0})
+      end
+    end
+
+    test "Ankusa.Store.Backup.validate_config!/1 checks the flag and the store's shape" do
+      assert :ok = Ankusa.Store.Backup.validate_config!(Config.new(backup: %{enabled: true}))
+
+      assert_raise ArgumentError, ~s(backup.enabled must be a boolean, got "yes"), fn ->
+        Ankusa.Store.Backup.validate_config!(Config.new(backup: %{enabled: "yes"}))
+      end
+
+      # The bad value is not echoed: it may carry credentials.
+      assert_raise ArgumentError, "backup.blob_store must be nil or {module, opts}", fn ->
+        Ankusa.Store.Backup.validate_config!(Config.new(backup: %{blob_store: "s3://secret"}))
+      end
+    end
+  end
 end

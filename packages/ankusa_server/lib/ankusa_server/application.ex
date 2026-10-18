@@ -36,13 +36,16 @@ defmodule AnkusaServer.Application do
     Logger.configure(level: loaded.log_level)
     config = loaded.config
 
+    if loaded.banner, do: AnkusaServer.Banner.print()
+
     Logger.info(
       "[ankusa] ankusa_server #{version()} roles=#{inspect(config.roles)} http=#{config.port} " <>
         "admin=#{admin(config)} routes=#{routes(config)} wal=#{Ankusa.Queue.label(config.wal)} " <>
         "sources=#{sources(config)}"
     )
 
-    Supervisor.start_link([{Ankusa.Instance, config}],
+    # The GCP token cache first: the blob store and Pub/Sub sinks ask it for tokens.
+    Supervisor.start_link([AnkusaServer.GcpToken, {Ankusa.Instance, config}],
       strategy: :one_for_one,
       name: AnkusaServer.Supervisor
     )

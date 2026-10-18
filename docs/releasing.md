@@ -16,14 +16,18 @@ the files in it decide where it publishes:
 | `sdk-php` | Packagist package `jamescarr/ankusa` (`composer.json`) | `sdk-php-vX.Y.Z` | [`release-php.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-php.yml) |
 | `sdk-elixir` | Hex package `ankusa_sdk` (`mix.exs`) | `sdk-elixir-vX.Y.Z` | [`release.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release.yml) |
 | `sdk-java` | Maven Central `io.github.jamescarr:ankusa-sdk` (`build.sbt`) | `sdk-java-vX.Y.Z` | [`release-maven.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-maven.yml) |
+| `sdk-clojure` | Clojars `io.github.jamescarr/ankusa-clj` (`deps.edn`, `build.clj`) | `sdk-clojure-vX.Y.Z` | [`release-clojars.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/release-clojars.yml) |
 
 The npm, PyPI, and crates.io packages are all named `ankusa`, the RubyGems gem
 is `ankusa-sdk` because RubyGems' `ankusa` belongs to an unrelated project, the
 Elixir SDK publishes as `ankusa_sdk` because Hex's `ankusa` is this repo's
-core, and the Java SDK publishes under the `io.github.jamescarr` group because
-that is the namespace GitHub verifies for this account; each one's tag prefix
-is its directory name, not the package name, so none can be confused with the
-Hex core's `ankusa-vX.Y.Z` or with each other.
+core, the Java SDK publishes under the `io.github.jamescarr` group because
+that is the namespace GitHub verifies for this account, and the Clojure SDK
+is `ankusa-clj` because the Clojure CLI resolves from Maven Central and
+Clojars together, so `ankusa-sdk` in the same group would collide with the Java
+SDK's artifact; each one's tag prefix is its directory name, not the package
+name, so none can be confused with the Hex core's `ankusa-vX.Y.Z` or with each
+other.
 
 ## The flow
 
@@ -142,6 +146,11 @@ Repository secrets, under Settings → Secrets and variables → Actions.
   `PGP_PASSPHRASE`. The Central Portal has no OIDC trusted publishing, so all
   four are repository secrets. Setup: see
   [Java SDK (Maven Central)](#java-sdk-maven-central) below.
+- **Clojars (the Clojure SDK):** `CLOJARS_USERNAME`, the Clojars account that
+  owns the group, and `CLOJARS_PASSWORD`, a deploy token for that account (not
+  its password). Clojars has no OIDC trusted publishing, so both are
+  repository secrets. Setup: see [Clojure SDK (Clojars)](#clojure-sdk-clojars)
+  below.
 
 ## Python SDK (PyPI)
 
@@ -595,3 +604,53 @@ accepted the bundle. The release workflow runs the same check in a loop for up
 to an hour: the portal answers `PUBLISHED` before repo1 serves the POM.
 `sonaRelease` cannot be exercised locally without the real token, so
 `release-maven.yml` is only exercised by an actual tag.
+
+## Clojure SDK (Clojars)
+
+`sdk-clojure` publishes as `io.github.jamescarr/ankusa-clj` on Clojars, from
+[`packages/sdk-clojure/build.clj`](https://github.com/jamescarr/ankusa/blob/main/packages/sdk-clojure/build.clj),
+whose column-0 `(def lib '...)` and `(def version "...")` forms are the
+coordinates — `pkg_version` and `pkg_registry_code` read them with `sed` and
+`release:prepare` rewrites `version`, exactly as they do for the other kinds.
+The artifact is `ankusa-clj`, not `ankusa-sdk`: the Clojure CLI resolves from
+Maven Central and Clojars together, and Central already has
+`io.github.jamescarr:ankusa-sdk` for the Java SDK.
+
+The jar is built by tools.build (`clojure -T:build jar`) and holds only
+`ankusa/sdk/**` sources plus `META-INF`; its POM lists `org.clojure/clojure` and
+`org.clojure/data.json` and no build or test tool. `mise run check:package
+sdk-clojure` builds it and asserts both, so the shape the release uploads is the
+shape CI gated on. The `format`, `lint`, and `test` tools are `deps.edn`
+aliases (cljfmt, clj-kondo, the Cognitect test runner); mise has no entries for
+them.
+
+Publishing is `clojure -T:build deploy`, which uploads the jar `jar` already
+built with deps-deploy and never rebuilds, so the jar the workflow attested is
+the jar Clojars serves.
+
+Needed once, before the first `release:tag sdk-clojure`, all by the repository
+owner:
+
+1. Create a Clojars account and verify the `io.github.jamescarr` group through
+   GitHub (<https://clojars.org/verify/group>). That is what lets the account
+   deploy under the group.
+2. Generate a deploy token (Dashboard → Deploy Tokens) and store the account
+   name as the `CLOJARS_USERNAME` repository secret and the token as
+   `CLOJARS_PASSWORD`. deps-deploy reads both names out of the environment.
+
+The flow is the same as every other package ([above](#the-flow)):
+
+```sh
+mise run status                              # version, last tag, published?, commits since
+mise run release:prepare minor sdk-clojure   # or patch | major | 0.3.0
+# review and merge the PR it opens, then:
+git switch main && git pull
+mise run release:tag sdk-clojure
+mise run release:watch sdk-clojure           # the tag run builds, uploads, and waits for Clojars
+mise run release:verify sdk-clojure          # HTTP 200 for the POM on repo.clojars.org
+```
+
+`release:verify` reads the POM at
+`https://repo.clojars.org/io/github/jamescarr/ankusa-clj/<version>/ankusa-clj-<version>.pom`.
+`clojure -T:build deploy` cannot be exercised locally without the real token,
+so `release-clojars.yml` is only exercised by an actual tag.

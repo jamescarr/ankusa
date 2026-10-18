@@ -6,9 +6,10 @@ nothing here requires it to know the gateway's status codes to get that
 right.
 
 Non-retryable: the ref or expected sha256 is malformed, the gateway said
-``404``/other ``4xx``, or the bytes that came back don't match the sha256.
-Retryable: the gateway said ``5xx``/``503``, or the request never completed
-(network error, timeout).
+``404`` or another ``4xx`` (except ``408``/``429``), or the bytes that came
+back don't match the sha256.
+Retryable: the gateway said ``5xx``, ``408`` or ``429``, or the request never
+completed (network error, timeout).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ class ClaimNotFoundError(ClaimCheckError):
 
 
 class ClaimRejectedError(ClaimCheckError):
-    """The gateway rejected the request (``400`` or any other non-404 ``4xx``)."""
+    """The gateway rejected the request (``400`` or any other ``4xx`` but ``404``, ``408`` and ``429``)."""
 
     retryable = False
 

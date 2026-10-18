@@ -11,7 +11,8 @@ defmodule Ankusa.StoreTest do
 
   setup do
     config = test_config(roles: [:edge])
-    start_supervised!({Store, instance: config.instance, config: config})
+    put_config(config)
+    start_supervised!({Store, instance: config.instance})
     %{config: config, instance: config.instance}
   end
 
@@ -157,7 +158,7 @@ defmodule Ankusa.StoreTest do
       stop_supervised!({Store, inst})
 
       flip_mid(largest(config, ".blob"))
-      start_supervised!({Store, instance: inst, config: config})
+      start_supervised!({Store, instance: inst})
 
       hi = Keys.family(:hooks).hi
 
@@ -176,7 +177,7 @@ defmodule Ankusa.StoreTest do
       stop_supervised!({Store, inst})
 
       flip_mid(largest(config, ".sst"))
-      start_supervised!({Store, instance: inst, config: config})
+      start_supervised!({Store, instance: inst})
 
       {lo, hi} = Keys.range(<<?d>>)
 
@@ -199,11 +200,11 @@ defmodule Ankusa.StoreTest do
       original = File.read!(log)
 
       flip_mid(log)
-      assert {:error, error} = start_supervised({Store, instance: inst, config: config})
+      assert {:error, error} = start_supervised({Store, instance: inst})
       assert inspect(error) =~ "store_open_failed"
 
       File.write!(log, binary_part(original, 0, byte_size(original) - 100))
-      start_supervised!({Store, instance: inst, config: config})
+      start_supervised!({Store, instance: inst})
 
       # Only the final, partly written record may be lost.
       for seq <- 1..49 do
@@ -224,11 +225,42 @@ defmodule Ankusa.StoreTest do
     end
   end
 
+  describe "ready/1" do
+    test "writes the probe key synced, and reuses the answer for a second", %{instance: inst} do
+      assert :ok = Store.ready(inst)
+      assert {:ok, <<first::64>>} = Store.get(inst, :default, Keys.meta("ready_probe"))
+
+      # Inside the cache window: no second write, the same timestamp.
+      Process.sleep(5)
+      assert :ok = Store.ready(inst)
+      assert {:ok, <<^first::64>>} = Store.get(inst, :default, Keys.meta("ready_probe"))
+
+      Process.sleep(1_050)
+      assert :ok = Store.ready(inst)
+      assert {:ok, <<second::64>>} = Store.get(inst, :default, Keys.meta("ready_probe"))
+      assert second > first
+    end
+
+    test "a store that is not running answers :store_unavailable" do
+      assert Store.ready(:no_such_instance) == {:error, :store_unavailable}
+    end
+
+    test "a write another process saw fail turns it unready even while the probe fits",
+         %{instance: inst} do
+      assert :ok = Store.ready(inst)
+
+      # What a refused ingest batch reports; the cached `:ok` must not hide it.
+      Store.report_write_failure(inst, :enospc)
+      assert Store.ready(inst) == {:error, :write_failed}
+    end
+  end
+
   describe "a store that failed to reopen" do
     test "opens again by itself once whatever blocked it is gone" do
       cfg = test_config(roles: [:edge])
       inst = cfg.instance
-      pid = start_supervised!({Store, instance: inst, config: cfg, retry_open_ms: 20})
+      put_config(cfg)
+      pid = start_supervised!({Store, instance: inst, retry_open_ms: 20})
       :ok = Store.write(inst, [{:put, :hooks, Keys.hook(1), "kept"}], sync: true)
 
       good = :sys.get_state(pid).path
@@ -252,7 +284,8 @@ defmodule Ankusa.StoreTest do
       cfg = test_config(roles: [:edge])
       inst = cfg.instance
 
-      opts = [instance: inst, config: cfg, retry_open_ms: 20, reopen_interval_ms: 60_000]
+      put_config(cfg)
+      opts = [instance: inst, retry_open_ms: 20, reopen_interval_ms: 60_000]
       pid = start_supervised!({Store, opts})
 
       :ok = Store.write(inst, [{:put, :hooks, Keys.hook(1), "kept"}], sync: true)

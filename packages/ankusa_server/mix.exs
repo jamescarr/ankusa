@@ -4,7 +4,7 @@ defmodule AnkusaServer.MixProject do
   # Read by the release tooling: `sed -n 's/^  @version "\(.*\)"$/\1/p'`.
   # Independent of core's version — this project is its own artifact (a Docker
   # image), tagged `ankusa_server-vX.Y.Z`, and is never published to Hex.
-  @version "0.4.0"
+  @version "0.6.0"
 
   def project do
     [
@@ -18,7 +18,9 @@ defmodule AnkusaServer.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger], mod: {AnkusaServer.Application, []}]
+    # `:os_mon` for `:disksup` only (see config/config.exs): the disk gauges in
+    # `Ankusa.Metrics.Gauges`.
+    [extra_applications: [:logger, :os_mon], mod: {AnkusaServer.Application, []}]
   end
 
   # One image with every adapter: the operator picks the WAL and sink they need

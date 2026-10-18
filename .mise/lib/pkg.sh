@@ -5,7 +5,8 @@
 # and its kind comes from the files in it:
 #   package.json -> npm, else Dockerfile -> docker, else mix.exs -> hex,
 #   else pyproject.toml -> python, else Cargo.toml -> cargo, else *.gemspec -> ruby,
-#   else go.mod -> go, else composer.json -> php, else build.sbt -> java.
+#   else go.mod -> go, else composer.json -> php, else build.sbt -> java,
+#   else deps.edn -> clojure.
 #
 # Written for bash 3.2 (macOS /bin/bash): no mapfile, no associative arrays.
 
@@ -55,6 +56,9 @@ _pkg_gemspec() {
 # A column-0 `<key> := "<value>"` setting from packages/<name>/build.sbt.
 _pkg_sbt_setting() { sed -n "s/^$2 := \"\(.*\)\"\$/\1/p" "$ROOT/$1/build.sbt"; }
 
+# The `(def lib '<group>/<artifact>)` coordinate from packages/<name>/build.clj.
+_pkg_clj_lib() { sed -n "s/^(def lib '\(.*\))\$/\1/p" "$ROOT/$1/build.clj"; }
+
 pkg_kind() {
   local dir
   dir=$(pkg_dir "$1") || exit 1
@@ -76,20 +80,22 @@ pkg_kind() {
     echo php
   elif [ -f "$ROOT/$dir/build.sbt" ]; then
     echo java
+  elif [ -f "$ROOT/$dir/deps.edn" ]; then
+    echo clojure
   else
-    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, go.mod, composer.json, or build.sbt"
+    fail "$dir has no package.json, Dockerfile, mix.exs, pyproject.toml, Cargo.toml, *.gemspec, go.mod, composer.json, build.sbt, or deps.edn"
   fi
 }
 
 # `ankusa` first (everything else depends on it), then the other Hex packages,
 # then Docker images, then npm packages, then Python ones, then Cargo ones, then
-# Ruby gems, then Go modules, then PHP ones, then Java ones; byte order within
-# each group.
+# Ruby gems, then Go modules, then PHP ones, then Java ones, then Clojure ones;
+# byte order within each group.
 pkg_names() {
   local kind name all
   all=$(_pkg_all)
   if [ -d "$ROOT/packages/ankusa" ]; then echo ankusa; fi
-  for kind in hex docker npm python cargo ruby go php java; do
+  for kind in hex docker npm python cargo ruby go php java clojure; do
     for name in $all; do
       if [ "$name" != ankusa ] && [ "$(pkg_kind "$name")" = "$kind" ]; then
         printf '%s\n' "$name"
@@ -123,6 +129,7 @@ pkg_version() {
     go) v=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' "$ROOT/$dir/version.go") ;;
     php) v=$(sed -n "s/^    public const string VERSION = '\(.*\)';\$/\1/p" "$ROOT/$dir/src/Version.php") ;;
     java) v=$(_pkg_sbt_setting "$dir" version) ;;
+    clojure) v=$(sed -n 's/^(def version "\(.*\)")$/\1/p' "$ROOT/$dir/build.clj") ;;
   esac
   [ -n "$v" ] || fail "could not read the version of $1 from $dir"
   printf '%s\n' "$v"
@@ -163,7 +170,7 @@ pkg_notes() {
 
 # HTTP status of NAME@VERSION on its registry: 200 published, 404 not.
 pkg_registry_code() {
-  local dir kind url npm_name pypi_name crate_name gem_name hex_name module composer_name meta code maven_group maven_artifact
+  local dir kind url npm_name pypi_name crate_name gem_name hex_name module composer_name meta code maven_group maven_artifact clj_lib clj_group clj_artifact
   dir=$(pkg_dir "$1") || exit 1
   kind=$(pkg_kind "$1") || exit 1
   case "$kind" in
@@ -218,6 +225,15 @@ pkg_registry_code() {
       [ -n "$maven_group" ] && [ -n "$maven_artifact" ] || fail "could not read organization/name from $dir/build.sbt"
       url="https://repo1.maven.org/maven2/${maven_group//.//}/$maven_artifact/$2/$maven_artifact-$2.pom"
       ;;
+    clojure)
+      # Coordinates come from build.clj; the Clojars repo serves the POM as
+      # soon as a deploy lands.
+      clj_lib=$(_pkg_clj_lib "$dir")
+      [ -n "$clj_lib" ] || fail "could not read the lib coordinate from $dir/build.clj"
+      clj_group=${clj_lib%/*}
+      clj_artifact=${clj_lib#*/}
+      url="https://repo.clojars.org/${clj_group//.//}/$clj_artifact/$2/$clj_artifact-$2.pom"
+      ;;
   esac
   # curl prints 000 and exits non-zero when the registry is unreachable; the
   # 000 is the useful part. crates.io answers 403 to curl's own user agent, so
@@ -236,6 +252,7 @@ pkg_workflow() {
     go) echo release-go.yml ;;
     php) echo release-php.yml ;;
     java) echo release-maven.yml ;;
+    clojure) echo release-clojars.yml ;;
   esac
 }
 
@@ -260,6 +277,9 @@ pkg_secrets() {
     # Maven Central's Central Portal has no OIDC trusted publishing: a portal
     # user token, plus the PGP key sbt-pgp signs with.
     java) echo SONATYPE_USERNAME SONATYPE_PASSWORD PGP_SECRET PGP_PASSPHRASE ;;
+    # Clojars takes a deploy token as the password; the token goes in
+    # CLOJARS_PASSWORD.
+    clojure) echo CLOJARS_USERNAME CLOJARS_PASSWORD ;;
   esac
 }
 

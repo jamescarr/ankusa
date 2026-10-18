@@ -90,7 +90,8 @@ defmodule Ankusa.AsyncApi do
         {:ok, source} ->
           describe_all(source.sinks, source_id, tenant_for(resolver, source), false)
 
-        :error ->
+        # A miss, or a store that cannot answer right now: nothing to describe.
+        _error_or_unavailable ->
           []
       end
     end)

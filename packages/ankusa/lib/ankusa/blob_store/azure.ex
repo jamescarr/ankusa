@@ -34,6 +34,8 @@ defmodule Ankusa.BlobStore.Azure do
     * `:req_options`    — transport options for the HTTP client, e.g. a custom
                            Finch pool, a proxy, or `plug:` for `Req.Test` in
                            tests. See `Ankusa.HttpClient` for the accepted keys
+    * `:retries`        — default `2`: extra attempts after a transport error
+                           or a `408`/`429`/`5xx`. See `Ankusa.BlobStore.Retry`
 
   ## Local dev
 
@@ -56,62 +58,75 @@ defmodule Ankusa.BlobStore.Azure do
   # See Ankusa.BlobStore.S3 for why this false-positive suppression exists.
   @compile {:no_warn_undefined, [:xmerl_scan, :xmerl_xpath]}
 
+  alias Ankusa.BlobStore.Retry
   alias Ankusa.HttpClient
 
   @api_version "2024-11-04"
 
   @impl true
-  def put(_instance, key, data, opts) do
+  def put(instance, key, data, opts) do
     headers = [
       {"x-ms-blob-type", "BlockBlob"},
       {"content-type", "application/octet-stream"}
     ]
 
-    case request(opts, :put, blob_url(opts, key), IO.iodata_to_binary(data), headers) do
+    case request(instance, opts, :put, blob_url(opts, key), data, headers) do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl true
-  def get(_instance, key, opts), do: request(opts, :get, blob_url(opts, key), nil, [])
+  def get(instance, key, opts),
+    do: request(instance, opts, :get, blob_url(opts, key), nil, [])
 
   @impl true
-  def get_range(_instance, key, offset, length, opts) do
+  def get_range(instance, key, offset, length, opts) do
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, blob_url(opts, key), nil, [{"range", range}])
+    request(instance, opts, :get, blob_url(opts, key), nil, [{"range", range}])
   end
 
   @impl true
-  def delete(_instance, key, opts) do
-    _ = request(opts, :delete, blob_url(opts, key), nil, [])
+  def delete(instance, key, opts) do
+    _ = request(instance, opts, :delete, blob_url(opts, key), nil, [])
     :ok
   end
 
+  # Every page (`NextMarker`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts) do
-    query = [{"restype", "container"}, {"comp", "list"}, {"prefix", prefix}]
+  def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
+
+  defp list_pages(instance, opts, prefix, marker, acc) do
+    query =
+      [{"restype", "container"}, {"comp", "list"}, {"prefix", prefix}] ++
+        if(marker, do: [{"marker", marker}], else: [])
+
     url = endpoint(opts) <> "/" <> container(opts) <> query_suffix(query, opts)
 
-    case request(opts, :get, url, nil, []) do
-      {:ok, body} -> parse_list_keys(body)
-      {:error, _reason} -> []
+    with {:ok, body} <- request(instance, opts, :get, url, nil, []),
+         {:ok, keys, next} <- parse_list_page(body) do
+      acc = [keys | acc]
+
+      case next do
+        nil -> {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+        marker -> list_pages(instance, opts, prefix, marker, acc)
+      end
     end
   end
 
   # ── requests ──────────────────────────────────────────────────────────────
 
-  defp request(opts, method, url, body, headers) do
+  defp request(instance, opts, method, url, body, headers) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
+    req_options = Keyword.get(opts, :req_options, [])
 
-    case HttpClient.request(
-           method,
-           url,
-           auth_headers(opts) ++ version_header(opts) ++ headers,
-           body,
-           timeout,
-           Keyword.get(opts, :req_options, [])
-         ) do
+    result =
+      Retry.run(instance, opts, fn ->
+        all_headers = auth_headers(opts) ++ version_header(opts) ++ headers
+        HttpClient.request(method, url, all_headers, body, timeout, req_options)
+      end)
+
+    case result do
       # Keep the status visible so 404 can mean :not_found.
       {:ok, status, body} when status in 200..299 -> {:ok, body}
       {:ok, 404, _body} -> {:error, :not_found}
@@ -180,17 +195,27 @@ defmodule Ankusa.BlobStore.Azure do
   # ── ListBlobs XML (stdlib :xmerl, the same approach as S3's ListObjectsV2) ──
 
   # A 200 body is not guaranteed to be ListBlobs XML — a proxy error page or an
-  # emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document,
-  # and this runs inside the claim-check sweeper, so a bad body has to read as
-  # "no keys" instead of taking that process down.
-  defp parse_list_keys(xml_body) do
+  # emulator quirk will do it. `:xmerl_scan` *exits* on a malformed document;
+  # that is an error for the listing, never a crash of the caller.
+  defp parse_list_page(xml_body) do
     {doc, _rest} = :xmerl_scan.string(:binary.bin_to_list(xml_body), quiet: true)
 
-    ~c"//Blob/Name/text()"
-    |> :xmerl_xpath.string(doc)
-    |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
-    |> Enum.sort()
+    keys =
+      ~c"//Blob/Name/text()"
+      |> :xmerl_xpath.string(doc)
+      |> Enum.map(fn {:xmlText, _parents, _pos, _lang, value, _type} -> List.to_string(value) end)
+
+    next =
+      case :xmerl_xpath.string(~c"//NextMarker/text()", doc) do
+        [{:xmlText, _parents, _pos, _lang, value, _type} | _] when value != [] ->
+          List.to_string(value)
+
+        _ ->
+          nil
+      end
+
+    {:ok, keys, next}
   catch
-    :exit, _not_xml -> []
+    :exit, _not_xml -> {:error, :list_unreadable}
   end
 end

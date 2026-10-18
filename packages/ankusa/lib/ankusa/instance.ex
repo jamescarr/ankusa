@@ -11,19 +11,22 @@ defmodule Ankusa.Instance do
   The tree is `:rest_for_one`, and what the instance does when a part of it
   fails depends on which part:
 
-    * **The core** — the store, the source store and the edge subtree (routes,
-      queue writer, quarantine, rate limiter, batchers, ingress listener) — is
+    * **The core** — the claim stores' breaker table
+      (`Ankusa.ClaimCheck.Stores`), the store, the source store and the edge
+      subtree (routes, queue writer, quarantine, rate limiter, batchers,
+      ingress listener) — is
       what acks hooks. A crash there restarts whatever depends on it: the edge
       restarts with the store it writes to, and everything started after it
       restarts with the edge. A core that keeps crashing exhausts this
       supervisor's budget and the instance stops, for its parent to restart.
-    * **Every other domain** — dispatch, archive/storage, lifecycle events,
-      metrics, and the admin, route-admin and claim-check listeners — runs
-      under `Ankusa.Instance.Isolated`. It has its own restart budget, and when
-      that is exhausted it is restarted later with backoff instead of taking
-      the instance down. A broken sink, a port someone else took or a full
-      object store stops that domain, not the edge acking hooks; the hooks wait
-      in the store and are dispatched when the domain returns.
+    * **Every other domain** — dispatch, archive/storage, store backup,
+      lifecycle events, metrics, and the admin, route-admin and claim-check
+      listeners — runs under `Ankusa.Instance.Isolated`. It has its own
+      restart budget, and when that is exhausted it is restarted later with
+      backoff instead of taking the instance down. A broken sink, a port
+      someone else took or a full object store stops that domain, not the edge
+      acking hooks; the hooks wait in the store and are dispatched when the
+      domain returns.
     * **The registry** — a restart of `Ankusa.Registry` forgets every name an
       instance process registered. `Ankusa.Instance.RegistryWatch` notices and
       stops the instance, so whatever supervises it starts it again, every
@@ -37,43 +40,63 @@ defmodule Ankusa.Instance do
   alias Ankusa.Config
   alias Ankusa.Instance.Isolated
 
-  @spec start_link(Config.t()) :: Supervisor.on_start()
+  @spec start_link(Config.t() | atom()) :: Supervisor.on_start()
   def start_link(%Config{} = config) do
-    Supervisor.start_link(__MODULE__, config, name: Ankusa.via(config.instance, :instance))
+    Ankusa.put_config(config)
+    start_link(config.instance)
   end
 
+  def start_link(instance) when is_atom(instance) do
+    Supervisor.start_link(__MODULE__, instance, name: Ankusa.via(instance, :instance))
+  end
+
+  @doc """
+  The child spec for the instance `config` describes. Building it stores the
+  config (`Ankusa.put_config/1`), so the parent's spec, its supervisor reports
+  and `:sys.get_status/1` name only the instance, and every (re)start reads the
+  config back. Build it only for an instance you are about to start: it
+  replaces that name's stored config.
+  """
   def child_spec(%Config{} = config) do
+    Ankusa.put_config(config)
+
     %{
       id: {__MODULE__, config.instance},
-      start: {__MODULE__, :start_link, [config]},
+      start: {__MODULE__, :start_link, [config.instance]},
       type: :supervisor
     }
   end
 
   @impl true
-  def init(%Config{} = config) do
-    # read-mostly config for every call site, no Application.get_env buried deep
-    Ankusa.put_config(config)
+  def init(instance) when is_atom(instance) do
+    # Every child reads the config back by name (`Ankusa.config/1`): a
+    # supervisor prints its children's start arguments.
+    config = Ankusa.config(instance)
     Ankusa.ClaimCheck.validate_config!(config)
+    Ankusa.Verifier.validate_config!(config)
+    Ankusa.Verifier.validate_shared!(config)
     Ankusa.Routes.validate_config!(config)
     Ankusa.Queue.validate_config!(config)
     Ankusa.Lifecycle.validate_config!(config)
     Ankusa.Edge.RateLimiter.validate_config!(config)
     Ankusa.Edge.Quarantine.validate_config!(config)
     Ankusa.Dispatch.Pipeline.validate_config!(config)
-    opts = [instance: config.instance, config: config]
+    Ankusa.Store.Backup.validate_config!(config)
+    opts = [instance: config.instance]
 
     children =
       [{Ankusa.Instance.RegistryWatch, config.instance}] ++
         metrics_children(config, opts) ++
+        claim_store_children(opts) ++
         store_children(config, opts) ++
+        backup_children(config, opts) ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
         edge_children(config, opts) ++
         routes_admin_children(config) ++
         dispatch_children(config, opts) ++
         storage_children(config, opts) ++
-        claim_check_children(config) ++
+        claim_check_children(config, opts) ++
         admin_children(config)
 
     # `:any_significant`: the registry watcher is the only significant child.
@@ -91,22 +114,44 @@ defmodule Ankusa.Instance do
   # The admin API's Prometheus reporter, first of all: it attaches its handlers
   # synchronously (`start_async: false`), so the events every later child emits
   # while starting — boot-time dispatch of the stored backlog, ingest the edge
-  # accepts before the rest of the tree is up — are counted.
+  # accepts before the rest of the tree is up — are counted. The gauge poller
+  # beside it samples state (queue depth, pen, disk) on its own interval.
   defp metrics_children(config, opts) do
-    if config.admin.enabled, do: isolated(config, :metrics, [{Ankusa.Metrics, opts}]), else: []
+    if config.admin.enabled,
+      do: isolated(config, :metrics, [{Ankusa.Metrics, opts}, {Ankusa.Metrics.Gauges, opts}]),
+      else: []
   end
+
+  # The claim stores' write breakers (`Ankusa.ClaimCheck.Stores`): an ETS
+  # table every claim writer shares — dispatch, the edge's direct-mode
+  # publish — so it starts before them. One small process, in every role.
+  defp claim_store_children(opts), do: [{Ankusa.ClaimCheck.Stores, opts}]
 
   # The node's local store. Roles that read or write hooks, deliveries or the
   # archive need it; a writable source store needs it too, because it is where
   # the sources live. It must start before every child that reads from it: the
   # source store, the edge, dispatch and storage.
   defp store_children(config, opts) do
-    if Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
-         match?({Ankusa.SourceStore.Persistent, _}, config.source_store) do
-      [{Ankusa.Store, opts}]
-    else
-      []
-    end
+    if store?(config), do: [{Ankusa.Store, opts}], else: []
+  end
+
+  # The store's backup uploader, right behind the store: under `:rest_for_one`
+  # a store restart restarts it too. An unreachable object store fails
+  # backups, never the store or the edge.
+  defp backup_children(%Config{backup: %{enabled: true}} = config, opts) do
+    if store?(config), do: isolated(config, :backup, [{Ankusa.Store.Backup, opts}]), else: []
+  end
+
+  defp backup_children(_config, _opts), do: []
+
+  @doc """
+  Whether this instance runs the node-local store (`Ankusa.Store`): any of the
+  `:edge`, `:dispatch` or `:storage` roles, or a persistent source store.
+  """
+  @spec store?(Config.t()) :: boolean()
+  def store?(%Config{} = config) do
+    Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) or
+      match?({Ankusa.SourceStore.Persistent, _}, config.source_store)
   end
 
   # The one process that assigns seqs and commits hooks, in the edge subtree
@@ -119,11 +164,11 @@ defmodule Ankusa.Instance do
   # edge accepts a request, since every ingest reads through it. A read-only
   # store is config-only and has no process: `function_exported?/1` on a module
   # that may not be loaded yet needs `Code.ensure_loaded/1` first.
-  defp source_store_children(config, _opts) do
+  defp source_store_children(config, opts) do
     {store_mod, _store_opts} = config.source_store
 
     if Code.ensure_loaded?(store_mod) and function_exported?(store_mod, :start_link, 1) do
-      [{store_mod, config}]
+      [{store_mod, opts}]
     else
       []
     end
@@ -187,6 +232,8 @@ defmodule Ankusa.Instance do
       cache_name = Ankusa.via(config.instance, :routes_cache)
 
       [
+        # Owns the snapshot table across store restarts (see TableOwner).
+        {Ankusa.Routes.TableOwner, opts},
         {store_mod, opts},
         {Ankusa.Routes.Cache, [name: cache_name] ++ cache_opts(config)}
       ]
@@ -244,7 +291,10 @@ defmodule Ankusa.Instance do
     ]
   end
 
-  defp claim_check_children(config) do
+  # The gateway's read cache and reader start before its listener, in the same
+  # subtree. `Isolated` restarts children one for one, so a reader crash
+  # leaves the listener up: until it is back, reads go straight to the store.
+  defp claim_check_children(config, opts) do
     if Config.role?(config, :claim_check) do
       Logger.warning(
         "[ankusa] claim-check API on #{listen_addr(config.claim_check, "claim_check.ip")} " <>
@@ -252,14 +302,25 @@ defmodule Ankusa.Instance do
           "front it with your own proxy, mesh, or network policy"
       )
 
-      isolated(config, :claim_check, [
-        bandit_child(
-          Ankusa.ClaimCheck.Router,
-          config.instance,
-          config.claim_check,
-          "claim_check.ip"
-        )
-      ])
+      cache =
+        if config.claim_check.read_cache_bytes > 0,
+          do: [{Ankusa.ClaimCheck.Cache, opts}],
+          else: []
+
+      isolated(
+        config,
+        :claim_check,
+        cache ++
+          [
+            {Ankusa.ClaimCheck.Reader, opts},
+            bandit_child(
+              Ankusa.ClaimCheck.Router,
+              config.instance,
+              config.claim_check,
+              "claim_check.ip"
+            )
+          ]
+      )
     else
       []
     end

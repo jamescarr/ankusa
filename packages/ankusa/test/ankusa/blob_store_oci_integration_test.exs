@@ -57,10 +57,12 @@ defmodule Ankusa.BlobStore.OCIIntegrationTest do
     key = key("listed")
     assert :ok = OCI.put(:i, key, "x", opts())
 
-    assert key in OCI.list(:i, "seg/it-listed", opts())
+    assert {:ok, keys} = OCI.list(:i, "seg/it-listed", opts())
+    assert key in keys
 
     assert :ok = OCI.delete(:i, key, opts())
     assert {:error, :not_found} = OCI.get(:i, key, opts())
-    refute key in OCI.list(:i, "seg/it-listed", opts())
+    assert {:ok, keys} = OCI.list(:i, "seg/it-listed", opts())
+    refute key in keys
   end
 end

@@ -14,9 +14,9 @@ use Ankusa\AnkusaException;
  * failure or an identifier rejected before any request).
  *
  * Non-retryable: `404` (no such source), `400` (a rejected spec, or a bad
- * tenant/name caught before the request), `409` (already exists, or a read-only
- * store), and a `GET /health` version mismatch. Retryable: the API is
- * unreachable, timed out, or answered `5xx`.
+ * tenant/name caught before the request), `409` (already exists, undelivered
+ * hooks on delete, or a read-only store), and a `GET /health` version
+ * mismatch. Retryable: the API is unreachable, timed out, or answered `5xx`.
  */
 abstract class SourcesError extends \RuntimeException implements AnkusaException
 {

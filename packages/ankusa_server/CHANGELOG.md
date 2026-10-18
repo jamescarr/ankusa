@@ -8,6 +8,91 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- `claim_check.stores`: a list of claim stores (each the `claim_check.store`
+  shape), exclusive with `store`. A pack whose store fails is written to the
+  next one, a store that fails a write or a read is skipped by writes and
+  searched last by reads for `claim_check.store_cooldown_ms` (default 30000),
+  and the gateway searches every store.
+  `claim_check.placement: ordered | hash` (default `ordered`) picks a new
+  pack's store. See the `ankusa` changelog.
+- `claim_check.key_layout: flat | sharded` (default `flat`): `sharded` adds a
+  `shard=<c>/` folder under the tenant, 32 key prefixes per tenant, so a busy
+  tenant doesn't hit S3's per-prefix request limit. The gateway reads both
+  layouts.
+- `ankusa_blob_store_retries_total` and
+  `ankusa_claim_check_store_breaker_transitions_total` on `/metrics`.
+- `claim_check.read_deadline_ms` (5000), `read_timeout_ms` (3000),
+  `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256),
+  `read_cache_bytes` (134217728) and `read_cache_max_entry_bytes` (1048576):
+  the gateway caches pack indexes and claims, coalesces concurrent reads,
+  backs off a throttling store with an adaptive per-store limit, and answers
+  every request within the deadline. Its `503 store_unavailable` carries a
+  random `Retry-After` of 1–3 s. See the `ankusa` changelog.
+- `ankusa_claim_check_gateway_requests_total`,
+  `ankusa_claim_check_gateway_duration_seconds`,
+  `ankusa_claim_check_reads_total` and `ankusa_claim_check_read_limit`/
+  `_read_inflight`/`_read_queued` on `/metrics`.
+
+### Fixed
+
+- The image's NATS client is `gnat 1.18.1`: no gnat process holds the NATS
+  password, token or nkey seed in the clear. See the `ankusa_nats` changelog.
+
+## [0.6.0] - 2026-10-14
+
+### Added
+
+- Every delivery says how the hook was verified: `Sink.Http` sends
+  `x-ankusa-verification` (`ok`, `failed` or `skipped`) and, for a hook a
+  source accepted despite a failed check (`on_verify_failure: accept_flag`),
+  `x-ankusa-verification-flagged: true`; a queue sink's message carries
+  `verification: {status, flagged}`. The admin API's source routes show
+  `trust_url_tenant`.
+- `idle_timeout_ms` on `rabbitmq`, `kafka`, `nats` and `redis` sinks: close a
+  broker connection after that long with no delivery (default 10 minutes, `0`
+  never).
+- Source key `trust_url_tenant` (default `false`). With
+  `routing: tenant_path`, a source with `tenant: default` and
+  `verify: {type: none}` files hooks under whatever tenant the URL names:
+  boot and `check-config` now refuse it (exit 78, naming the source) unless it
+  sets `trust_url_tenant: true`, and an admin API write of one is
+  `400 invalid_source`. One `source_store: persistent`/`redis` already held
+  keeps serving, with a warning at boot. `config-examples/multi-tenant.yml`'s
+  `demo` source sets it.
+- `source_store.type: redis` (`url`, `namespace`, `tick_ms`; env
+  `ANKUSA_SOURCE_STORE_URL`; a `url` with no `type` means `redis`): sources
+  created through the admin API are shared by every node through
+  `ankusa_redis`'s `Ankusa.SourceStore.Redis`. The three keys are rejected on
+  `static`/`persistent`.
+- YAML keys for everything core added: `admin.gauge_interval_ms`,
+  `batcher.max_queue_bytes`, `dispatch.sink_concurrency`,
+  `dispatch.breaker_failures` / `breaker_open_ms` / `breaker_max_open_ms`,
+  `storage.key_prefix` (env `ANKUSA_STORAGE_KEY_PREFIX`), `claim_check.store`
+  (a dedicated claim store, same shape as `storage` plus `root`),
+  `storage.s3.session_token`, http sink `secret` and `max_response_bytes`,
+  rabbitmq sink `max_inflight`, kafka sink `max_record_bytes`.
+- A `backup` section (`enabled`, `interval_ms`, `keep`, `store` — the
+  `claim_check.store` shape; env `ANKUSA_BACKUP_ENABLED`) for core's store
+  backup: with it on and segments (or `backup.store`) in a bucket, a container
+  started on an empty volume restores the latest backup before it serves, and
+  exits with `store_restore_failed` when the bucket can't be read.
+  `check-config` runs `Ankusa.Store.Backup.validate_config!/1`.
+- `docker-entrypoint remote` (an IEx shell in the running node) and
+  `docker-entrypoint rpc EXPR`. Distribution stays on, bound to loopback with
+  epmd (`rel/vm.args.eex`, `rel/env.sh.eex`); `RELEASE_DISTRIBUTION=none`
+  turns it off.
+- GCP metadata tokens (GCS and Pub/Sub) come from `AnkusaServer.GcpToken`,
+  one cached token fetched single-flight and refreshed before expiry.
+- `type: sqs` sinks (`Ankusa.Sink.SQS`): `queue_url`, `region`, `endpoint`,
+  `message_group_id`, `inline_max_bytes`, `max_message_bytes`, `timeout_ms`,
+  and optional static `access_key_id` / `secret_access_key` /
+  `session_token` (else the `AWS_*` env, IRSA, or the instance role).
+  `reference.yml` documents it.
+- `type: google_pubsub` sinks (`Ankusa.Sink.GooglePubSub`): `project`,
+  `topic`, `endpoint`, `ordering_key`, `inline_max_bytes`,
+  `max_message_bytes`, `timeout_ms`, and `auth` (`metadata` | `token` |
+  `none`, default `metadata`; `token` is required when `auth: token`), the
+  same choice `storage.gcs.auth` offers. `reference.yml` documents it.
 - Every sink now sends the tenant-scoped idempotency key: the message gains
   `idempotency_key` (still `v: 1`), `Sink.Http` sends `x-ankusa-idempotency-key`,
   and RabbitMQ, Kafka and NATS send `ankusa_idempotency_key`. It is
@@ -21,7 +106,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 - A `quarantine:` section (`burst`, `rate`, `max_bytes`): one quarantine
   bucket per source, and a cap on the pen's bytes. A full pen answers
   `503 quarantine_full`; a source over its bucket answers
-  `429 quarantine_rate_limited` (it used to be `401 verification_failed`).
+  `429 quarantine_rate_limited`.
 - `verify.secret` takes a list of strings (at most 8), newest first, for a
   secret rotation with no cut-over: `secret: ["${NEW}", "${OLD}"]`.
 - Release held hooks with `POST /v1/replays {"kind":"quarantine"}`, and purge
@@ -33,21 +118,43 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   binds (a strict IPv4 or IPv6 literal, default `127.0.0.1`), and the
   `ANKUSA_ADMIN_IP` and `ANKUSA_CLAIM_CHECK_IP` overrides. `check-config`
   rejects anything that is not an IP address, naming the key.
+- Replay jobs: `POST /v1/replays` (`kind: dlq | archive | quarantine`),
+  `GET /v1/replays` and `GET|PATCH /v1/replays/{id}`.
+- Source key `dedupe` (a preset, or `{preset|header|json, ttl_seconds}`): a
+  repeat of an event inside the TTL answers `201` with the original `id` and
+  `"duplicate": true`. Source key `forward_headers`.
+- `wal.publish_timeout_ms` (default `8000`): the deadline every sink must
+  confirm under with `wal.type: none`.
+- Metrics `ankusa_replay_moved_total`, `ankusa_replay_throttled_total` and
+  `ankusa_quarantine_full_total`.
 
 ### Changed
 
-- `GET /asyncapi.json`: `SinkMessageV1` now requires `idempotency_key`, and
-  `SinkMessageHeadersV1` requires `ankusa_idempotency_key`. A consumer that
-  validates messages against the previous document rejects the new field only
-  if it also forbids additional properties.
+- The image's `HEALTHCHECK` asks `GET /ready` (`docker-entrypoint
+  healthcheck`, ingest port first, then admin), so a node whose store refuses
+  writes reports `unhealthy`.
+- An unresolved `${…}` in the file is a load error naming the key (a
+  substituted value that itself contains `${` is fine); a static source whose
+  verifier secret is missing or undecodable fails `check-config` and boot.
+- `AnkusaServer.GcpToken` answers `:error` to every caller for a second after
+  a failed metadata fetch, so a queue of callers behind a dead metadata server
+  costs one request.
+- `:os_mon` runs (disk gauges); only `disksup` is configured. The image adds
+  `coreutils`: `disksup` runs `df -lk -x squashfs`, which busybox's `df`
+  rejects.
+- `GET /asyncapi.json`: `SinkMessageV1` now requires `sha256`, `dedupe_key`,
+  `replay_id`, `idempotency_key` and `headers`, and `SinkMessageHeadersV1`
+  requires `ankusa_idempotency_key`. A consumer that validates messages
+  against the previous document rejects the new fields only if it also
+  forbids additional properties.
 - **Breaking: an empty `verify.secret` is a load error.** An empty string, or
   an empty element of a secret list (an unset `${OLD:-}` included), fails
   `check-config` and the boot, naming the key (`sources.a.verify.secret[1]:
   must not be empty`). It used to load and verify with the empty HMAC key,
   which accepts anything signed with it.
-- A source over its quarantine bucket answers `429 quarantine_rate_limited`
-  with `Retry-After`, not `401 verification_failed`; a full pen answers
-  `503 quarantine_full` with `Retry-After: 60`.
+- **Breaking: a source over its quarantine bucket answers `429
+  quarantine_rate_limited`** with `Retry-After`, not `401 verification_failed`;
+  a full pen answers `503 quarantine_full` with `Retry-After: 60`.
 - **The default retry policy retries for about 6 hours:** `dispatch.retry`
   defaults to `max_ms: 300000` and `max_attempts: 84` (they were `30000` and
   `12`, about 83 s). A deployment that relied on the old default to
@@ -68,19 +175,38 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   shown only under known non-secret keys, and every other value (a
   `sas_token`, a `private_key`, an NATS `jwt`) is `"[REDACTED]"`; URL query
   values are redacted too. `print-config` uses the same view.
+- **Breaking for dashboards: refused requests are no longer on
+  `ankusa_ingest_requests_total`.** Requests for sources that do not exist no
+  longer count under `ankusa_ingest_requests_total{outcome="unknown_source"}`;
+  a panel that sums that counter for all traffic must add
+  `ankusa_ingest_refused_total`.
+- **Breaking: `POST /v1/dlq/replay` is removed.** Use
+  `POST /v1/replays {"kind":"dlq"}`.
+- `Sink.Http` forwards the provider's request headers by default (per the
+  source's `forward_headers`) and adds `x-ankusa-dedupe-key` and
+  `x-ankusa-replay-id` when present.
+- `wal.type: none` publishes to all of a source's sinks concurrently under
+  `wal.publish_timeout_ms`; any failure or timeout is a `503`.
+- **Breaking: every RabbitMQ publish is `mandatory`.** A publish to an
+  exchange with no bound queue now retries and then dead-letters instead of
+  silently answering `201`. RabbitMQ also sets AMQP `message_id` to the hook
+  id.
+- NATS sets `Nats-Msg-Id` on every publish (the hook `id`, or
+  `id:replay:<replay_id>` on a replay).
 
 ### Fixed
 
 - `GET /metrics` no longer grows with unauthenticated traffic: requests for
   sources that do not exist are one `ankusa_ingest_refused_total` series, not
-  a `source_id` series per URL. They also no longer count under
-  `ankusa_ingest_requests_total{outcome="unknown_source"}`; a panel that sums
-  that counter for all traffic must add the refused counter.
+  a `source_id` series per URL.
 - A `Content-Length` above `http.max_body_bytes`, or a source that does not
   exist, is answered before the request body is read.
 - The image's HTTP client stack is `mint 1.11.0` (was `1.10.1`, which has
   three published advisories: EEF-CVE-2026-91043, EEF-CVE-2026-94194 and
   EEF-CVE-2026-92103) and `hpax 1.1.0`.
+- The image's HTTP server is `bandit 1.13.1` (was `1.12.5`, which has two
+  published advisories: EEF-CVE-2026-105659 and EEF-CVE-2026-105660) on
+  `thousand_island 1.6.0`.
 - An unreachable object store is retried with backoff (up to 60 s) instead of
   every second, and any failed store write asks the store for a rate-limited
   reopen, not only ingest's: a fallback for a latched RocksDB write error after
@@ -220,7 +346,7 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `publish_timeout_ms` (`5000`), `tls`, and an `auth` block taking one scheme
   (`username` + `password`, `token`, or `nkey_seed` + `jwt`). The stream has
   to exist: the sink never creates one.
-- [`config-examples/nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/ankusa_server/config-examples/nats-fanout.yml),
+- [`config-examples/nats-fanout.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/nats-fanout.yml),
   and a `nats` sink in `reference.yml`.
 - `dispatch.concurrency` (default 32), `dispatch.max_inflight` (4096) and
   `dispatch.max_inflight_bytes` (134217728), for the now-concurrent dispatch
@@ -253,7 +379,8 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   fleet (Postgres + S3), Kafka/RabbitMQ fan-out, and multi-tenant examples.
 - Compose files for a single node and for a fleet behind nginx basic auth.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.4.0...ankusa_server-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.3.0...ankusa_server-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.4...ankusa_server-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa_server-v0.2.1...ankusa_server-v0.2.4

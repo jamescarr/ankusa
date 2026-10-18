@@ -108,6 +108,11 @@ defmodule Ankusa.LifecycleTest do
   @doc false
   def decoder(_source_id, _spec), do: [sinks: [{Ankusa.Sink.Log, []}]]
 
+  # Under `wal: :none` a source write needs a durable sink.
+  @doc false
+  def durable_decoder(_source_id, _spec),
+    do: [sinks: [{Ankusa.Sink.Http, [url: "http://sink.test"]}]]
+
   defp start_instance(overrides \\ []) do
     base = [
       source_store: {Persistent, decoder: &__MODULE__.decoder/2},
@@ -257,7 +262,12 @@ defmodule Ankusa.LifecycleTest do
   end
 
   test "an event is published under wal: :none too" do
-    config = start_instance(roles: [:edge], wal: :none)
+    config =
+      start_instance(
+        roles: [:edge],
+        wal: :none,
+        source_store: {Persistent, decoder: &__MODULE__.durable_decoder/2}
+      )
 
     {:ok, _} = SourceStore.put(config.instance, "acme", "billing", @spec_map, :create)
     assert_receive {:lifecycle, _, _, %{"type" => "io.ankusa.source.created"}}, 2_000
@@ -376,7 +386,7 @@ defmodule Ankusa.LifecycleTest do
 
       config = test_config(lifecycle: %{sinks: [{GateSink, to: self()}]})
       put_config(config)
-      start_supervised!({Publisher, instance: config.instance, config: config, max_pending: 1})
+      start_supervised!({Publisher, instance: config.instance, max_pending: 1})
 
       :ok =
         Publisher.publish(config.instance, envelope("one"), "io.ankusa.source.created", "acme.a")

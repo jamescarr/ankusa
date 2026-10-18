@@ -105,6 +105,41 @@ paths:
                 routesPort:
                   summary: On `routes.admin.port`
                   value: {status: ok, routes: 1}
+  /ready:
+    servers:
+      - url: http://localhost:4002
+        description: Operator API listener (default `admin.port`).
+    get:
+      operationId: getReady
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        `200` while this node can ack a hook: on a node that runs the local
+        store, a synced write to it succeeds (the answer is cached for 1 s).
+        `503` with `Retry-After: 1` while it cannot — a full disk, a store
+        that is closed or reopening — and `200` again on its own once it can.
+        A node without a store is always ready (`store: none`). `/health`
+        stays a liveness probe.
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example: {status: ready, instance: default, store: ok}
+        '503':
+          description: Not ready.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Always `1`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+              example: {status: unavailable, instance: default, store: write_failed}
   /metrics:
     get:
       operationId: getMetrics
@@ -961,6 +996,22 @@ components:
           items:
             type: string
             enum: [claim_check, dispatch, edge, storage]
+    Readiness:
+      type: object
+      required: [status, instance, store]
+      properties:
+        status:
+          type: string
+          enum: [ready, unavailable]
+        instance:
+          type: string
+        store:
+          type: string
+          enum: [ok, none, store_unavailable, write_failed]
+          description: |
+            `none` on a node without a local store; `store_unavailable` when
+            the store is closed or does not answer; `write_failed` when the
+            probe write failed.
     Wal:
       type: object
       required: [instance, wal]

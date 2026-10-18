@@ -90,7 +90,7 @@ defmodule Ankusa.Edge.RouteGuard do
   # ── decisions ───────────────────────────────────────────────────────────────
 
   defp guard(conn, instance, config) do
-    case Routes.snapshot(instance) do
+    case Routes.meta(instance) do
       nil ->
         if sampled?(config) do
           Logger.warning(

@@ -6,14 +6,38 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
+- `Webhook\Signature::verify($headers, $body, $secrets, $toleranceSeconds = 300, $now = null)`
+  verifies the Standard Webhooks signature an HTTP sink with a `secret` adds,
+  comparing with `hash_equals`; failures throw
+  `Webhook\InvalidSignatureError` (`$errorCode`, `$field`, never retryable).
 - `Message::$idempotencyKey` and `HookHeaders::$idempotencyKey`, the key Ankusa
   ships (the message's `idempotency_key`, the `x-ankusa-idempotency-key`
   header). `idempotencyKey()` on both returns it, and for a message or
   delivery that predates it computes `tenant:source_id:dedupe_key` (tenant
   `default` when there is none) when a dedupe key is set, else the id, plus
   `#replay:<replay_id>` with `includeReplay: true`.
+- `AdminClient::createReplay(array $spec)`, `getReplay(string $id)`,
+  `listReplays()` and `updateReplay(string $id, array $patch)` for replay jobs
+  (`kind` `dlq`, `archive` or `quarantine`).
+- `Ankusa\Message\Message::decode(string $data)` and `InvalidMessageError`
+  (`$errorCode`, `$field`, `isRetryable()` always false) for the v1 queue
+  message (inline or claim body, `sha256`, `dedupeKey`, `replayId`,
+  `headers`).
+- `HookHeaders::$dedupeKey` and `$replayId`, from `x-ankusa-dedupe-key` and
+  `x-ankusa-replay-id`.
+
+### Changed
+
+- `ClaimCheckClient::redeem()` throws `ClaimCheckUnavailableError`
+  (retryable) for a gateway `408` or `429` instead of `ClaimRejectedError`.
+
+### Removed
+
+- `AdminClient::replayDeadLetters()`: `POST /v1/dlq/replay` no longer exists.
 
 ## [0.3.0] - 2026-10-01
 
@@ -52,5 +76,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   always goes out as `content-type: application/json`, replacing any
   caller-supplied `Content-Type` rather than duplicating it.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-php-v0.3.0...sdk-php-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-php-v0.3.0

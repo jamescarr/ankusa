@@ -219,7 +219,7 @@
       "operation": "redeem",
       "input": {
         "gateway": {
-          "status": 429
+          "status": 410
         },
         "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
         "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
@@ -228,8 +228,47 @@
         "error": {
           "class": "ClaimRejectedError",
           "retryable": false,
-          "status": 429,
+          "status": 410,
           "body": ""
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.throttled",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 429,
+          "headers": {
+            "retry-after": "3"
+          }
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
+        }
+      },
+      "feature": "claim_check.redeem.error_classification"
+    },
+    {
+      "id": "redeem.error.request_timeout",
+      "operation": "redeem",
+      "input": {
+        "gateway": {
+          "status": 408
+        },
+        "ref": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
+        "sha256": "8e1bed597394cf01672e49232d9929c8bc6b3d6ea4e2f489517ec88701f01581"
+      },
+      "expect": {
+        "error": {
+          "class": "ClaimCheckUnavailableError",
+          "retryable": true
         }
       },
       "feature": "claim_check.redeem.error_classification"

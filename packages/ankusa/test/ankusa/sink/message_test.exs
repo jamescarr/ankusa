@@ -31,6 +31,11 @@ defmodule Ankusa.Sink.MessageTest do
     )
   end
 
+  defp list_claims(instance) do
+    [{0, mod, opts}] = ClaimCheck.Stores.list(Ankusa.config(instance))
+    mod.list(instance, "claims/", opts)
+  end
+
   test "a body of exactly inline_max_bytes rides inline", %{ctx: ctx} do
     env = envelope(:binary.copy("a", 100))
 
@@ -61,15 +66,18 @@ defmodule Ankusa.Sink.MessageTest do
     assert {:ok, ^body} = ClaimCheck.redeem(ctx.instance, decoded["claim"], decoded["sha256"])
   end
 
-  test "checking the same envelope in again rewrites its object instead of adding one",
+  test "each check-in gets a fresh, random pack id dated by check-in time, not receive time",
        %{ctx: ctx} do
-    env = envelope(:crypto.strong_rand_bytes(101))
+    month_ago = System.system_time(:millisecond) - 30 * 86_400_000
+    env = %{envelope(:crypto.strong_rand_bytes(101)) | received_at: month_ago}
 
-    assert {:ok, first} = Message.encode(env, ctx, 100)
-    assert {:ok, second} = Message.encode(env, ctx, 100)
+    assert {:ok, first} = Message.check_in(ctx.instance, env)
+    assert {:ok, second} = Message.check_in(ctx.instance, env)
+    assert first.ref != second.ref
 
-    assert JSON.decode!(first)["claim"] == JSON.decode!(second)["claim"]
-    assert [_one] = Ankusa.BlobStore.list(ctx.instance, "claims/")
+    today = Date.utc_today() |> Date.to_iso8601()
+    assert {:ok, [_, _] = keys} = list_claims(ctx.instance)
+    assert Enum.all?(keys, &String.contains?(&1, "/dt=#{today}/"))
   end
 
   test "a claim dispatch already checked in is used as-is, with no second write", %{ctx: ctx} do
@@ -83,7 +91,7 @@ defmodule Ankusa.Sink.MessageTest do
     assert {:ok, json} = Message.encode(env, Map.put(ctx, :claim, claim), 100)
     decoded = JSON.decode!(json)
     assert {decoded["claim"], decoded["sha256"]} == {Ref.to_string(claim.ref), claim.sha256}
-    assert Ankusa.BlobStore.list(ctx.instance, "claims/") == []
+    assert list_claims(ctx.instance) == {:ok, []}
   end
 
   test "a failed check-in is tagged :claim_check", %{ctx: ctx} do
@@ -98,6 +106,7 @@ defmodule Ankusa.Sink.MessageTest do
     env =
       envelope("hello", %{
         dedupe_key: "evt_1",
+        verification: %Ankusa.Verification{status: :ok},
         headers: [{"x-github-event", "push"}, {"X-Custom", "v"}]
       })
 
@@ -117,6 +126,31 @@ defmodule Ankusa.Sink.MessageTest do
     assert decoded["idempotency_key"] == "t1:src:evt_1"
     assert decoded["replay_id"] == "rid"
     assert decoded["headers"] == %{"x-github-event" => "push", "x-custom" => "v"}
+    assert decoded["verification"] == %{"status" => "ok", "flagged" => false}
+  end
+
+  test "a hook accepted after a failed check says so, without the reason", %{ctx: ctx} do
+    env =
+      envelope("hello", %{
+        verification: %Ankusa.Verification{status: :failed, flagged: true, reason: :no_match}
+      })
+
+    assert {:ok, json} = Message.encode(env, ctx, 100)
+    assert JSON.decode!(json)["verification"] == %{"status" => "failed", "flagged" => true}
+    refute json =~ "reason"
+    refute json =~ "no_match"
+  end
+
+  test "a hook nothing checked encodes as skipped: no verifier, or no ingest", %{ctx: ctx} do
+    # `Verifier.None` accepts everything, so its `:ok` says nothing about the sender.
+    none = %Ankusa.Verification{status: :ok, provider: Ankusa.Verifier.None}
+
+    for verification <- [none, nil] do
+      assert {:ok, json} =
+               Message.encode(envelope("hello", %{verification: verification}), ctx, 100)
+
+      assert JSON.decode!(json)["verification"] == %{"status" => "skipped", "flagged" => false}
+    end
   end
 
   test "absent dedupe_key/replay_id encode as null and headers as {}", %{ctx: ctx} do

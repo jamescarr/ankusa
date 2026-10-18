@@ -152,4 +152,137 @@ defmodule Ankusa.Sink.KafkaTest do
     assert {:error, _} = result
     assert elapsed_us < 2_000_000
   end
+
+  test "an idle brod client is stopped, and the next delivery starts a new one", %{
+    instance: inst,
+    topic: topic
+  } do
+    opts = opts(topic, idle_timeout_ms: 1_000, produce_timeout_ms: 5_000)
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), opts)
+
+    client = :"ankusa_kafka.#{inst}.default"
+    old = Process.whereis(client)
+    ref = Process.monitor(old)
+    reaper = Ankusa.Sink.Kafka.Reaper
+
+    # Floored at the produce timeout plus a second.
+    assert [{^client, ^old, _last, 6_000}] = :ets.lookup(reaper, client)
+
+    true = :ets.update_element(reaper, client, {3, System.monotonic_time(:millisecond) - 6_000})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+
+    assert_receive {:DOWN, ^ref, :process, ^old, _reason}, 5_000
+    assert Process.whereis(client) == nil
+
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), opts)
+    assert is_pid(Process.whereis(client)) and Process.whereis(client) != old
+    assert length(fetch_all(topic)) == 2
+  end
+
+  test "the supervisor's status never prints the brokers or credentials the client started with",
+       %{instance: inst, topic: topic} do
+    assert :ok = Kafka.deliver(envelope(), ctx(inst), opts(topic))
+
+    # The client is a `:temporary` child, so its DynamicSupervisor keeps no start
+    # args for it: the brokers (and any `:sasl` credentials) live only in brod's
+    # own state. Find the child first, so the refute is not vacuous.
+    supervisor = Ankusa.Sink.Kafka.Supervisor
+    client = Process.whereis(:"ankusa_kafka.#{inst}.default")
+    assert is_pid(client)
+
+    assert Enum.any?(
+             DynamicSupervisor.which_children(supervisor),
+             &match?({_, ^client, _, _}, &1)
+           )
+
+    printed = inspect(:sys.get_status(supervisor), limit: :infinity, printable_limit: :infinity)
+    refute printed =~ inspect(hd(@hosts))
+  end
+
+  test "a brod client's crash report never prints the SASL password", %{
+    instance: inst,
+    topic: topic
+  } do
+    canary = "s3cr3t-canary-#{System.unique_integer([:positive])}"
+    opts = [brokers: ["127.0.0.1:1"], topic: topic, sasl: {:plain, "ankusa", canary}]
+    name = :"ankusa_kafka.#{inst}.default"
+
+    # No broker answers, so the client exits during init and logs a crash report
+    # carrying its state.
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        try do
+          Kafka.deliver(envelope(), ctx(inst), opts)
+        catch
+          :exit, _ -> :exit
+        end
+
+        wait_until_gone(name, System.monotonic_time(:millisecond) + 5_000)
+        Process.sleep(200)
+      end)
+
+    assert log =~ "ankusa_kafka.#{inst}.default"
+    refute log =~ canary
+  end
+
+  defp wait_until_gone(name, deadline) do
+    if Process.whereis(name) != nil and System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(20)
+      wait_until_gone(name, deadline)
+    end
+  end
+
+  defp high_watermark(topic) do
+    {:ok, {hw, _messages}} = :brod.fetch(@hosts, topic, 0, 0)
+    hw
+  end
+
+  test "a record over max_record_bytes is permanent and never produced", %{
+    instance: inst,
+    topic: topic
+  } do
+    # Inline, base64 in the message: about 1.2 MB of value.
+    body = :crypto.strong_rand_bytes(900_000)
+    env = envelope(%{body: body, size: byte_size(body)})
+
+    assert {:error, {:permanent, {:message_too_large, size, 1_000_000}}} =
+             Kafka.deliver(env, ctx(inst), opts(topic, inline_max_bytes: 4_000_000))
+
+    assert size > 1_000_000
+    assert high_watermark(topic) == 0
+  end
+
+  test "raising max_record_bytes (with the topic's limit) produces it", %{instance: inst} do
+    topic = "ankusa.big.#{System.unique_integer([:positive])}"
+
+    :ok =
+      :brod.create_topics(
+        @hosts,
+        [
+          %{
+            name: topic,
+            num_partitions: 1,
+            replication_factor: 1,
+            assignments: [],
+            configs: [%{name: "max.message.bytes", value: "4000000"}]
+          }
+        ],
+        %{timeout: 5_000}
+      )
+
+    on_exit(fn -> :brod.delete_topics(@hosts, [topic], 5_000) end)
+
+    body = :crypto.strong_rand_bytes(900_000)
+    env = envelope(%{body: body, size: byte_size(body)})
+
+    assert :ok =
+             Kafka.deliver(
+               env,
+               ctx(inst),
+               opts(topic, inline_max_bytes: 4_000_000, max_record_bytes: 2_000_000)
+             )
+
+    assert high_watermark(topic) == 1
+  end
 end

@@ -128,6 +128,24 @@ key := hook.IdempotencyKey(false)
 `ContentType`, `DedupeKey`, `ReplayID`, and `ShippedIdempotencyKey` are `nil`
 when absent or empty).
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way:
+
+```go
+body, _ := io.ReadAll(r.Body) // the raw bytes, exactly as received
+if _, err := ankusa.VerifySignature(r.Header, body, []string{os.Getenv("ANKUSA_WHSEC")}, ankusa.VerifyOptions{}); err != nil {
+	http.Error(w, `{"error":"invalid_signature"}`, http.StatusUnauthorized)
+	return
+}
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own bytes;
+pass several during a rotation. `VerifyOptions.ToleranceSeconds` (default
+300) bounds the `webhook-timestamp` window. A failure is
+`*InvalidSignatureError` with `Code` and `Field`, never retryable.
+
 ## Consuming queue messages
 
 A worker reading a broker's deliveries gets the v1 queue message as JSON.
@@ -179,9 +197,10 @@ bit decides dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64 lowercase hex chars |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`Status`, `Body`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`Status`, `Body`) |
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
-| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, an unfollowed `3xx`, or any other non-`200` |
+| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `408`, `429`, `5xx`, an unfollowed `3xx`, or any other non-`200` |
+| `InvalidSignatureError` | `false` | `VerifySignature` refused a delivery (`Code`, `Field`) |
 | `InvalidMessageError` | `false` | `DecodeMessage` could not decode the queue message (`Code`, `Field`) |
 | `MissingHookIdError` | `false` | `x-ankusa-id` is absent or empty |
 | `InvalidRouteIdError` | `false` | route id is empty or exactly `.`/`..` |

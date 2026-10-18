@@ -255,6 +255,7 @@ defmodule Ankusa.InstanceTest do
       test_config(
         roles: [:edge, :dispatch, :storage],
         claim_check: %{retention_days: 7},
+        backup: %{enabled: true},
         lifecycle: %{sinks: [sink]},
         source_store: {Ankusa.SourceStore.Persistent, sources: %{"demo" => [sinks: [sink]]}}
       )
@@ -281,9 +282,63 @@ defmodule Ankusa.InstanceTest do
           :lifecycle,
           :source_store,
           :replayer,
-          {:isolated, :dispatch}
+          :backup,
+          {:isolated, :dispatch},
+          {:isolated, :backup}
         ] do
       refute printed.(key) =~ @canary, "#{inspect(key)} printed the config in its status"
     end
+  end
+
+  test "no supervisor of the instance, nor the instance's parent, prints configuration" do
+    sink = {Ankusa.Sink.Log, [token: @canary]}
+
+    config =
+      test_config(
+        roles: [:edge, :dispatch, :storage],
+        claim_check: %{retention_days: 7},
+        backup: %{enabled: true},
+        lifecycle: %{sinks: [sink]},
+        source_store: {Ankusa.SourceStore.Persistent, sources: %{"demo" => [sinks: [sink]]}}
+      )
+
+    inst = config.instance
+
+    parent =
+      start_supervised!(%{
+        id: :instance_parent,
+        type: :supervisor,
+        start: {Supervisor, :start_link, [[{Ankusa.Instance, config}], [strategy: :one_for_one]]}
+      })
+
+    printed = fn pid ->
+      pid |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+    end
+
+    supervisors =
+      [parent | Enum.map([:instance, :edge, :batcher_sup], &Ankusa.whereis(inst, &1))] ++
+        Enum.map([:dispatch, :storage, :backup, :lifecycle], &Isolated.subtree(inst, &1))
+
+    for sup <- supervisors do
+      assert is_pid(sup)
+      refute printed.(sup) =~ @canary, "#{inspect(sup)} printed the config in its status"
+    end
+  end
+
+  test "a configured source whose HMAC secret is empty refuses to boot, naming the source" do
+    config =
+      test_config(
+        roles: [:edge],
+        source_store:
+          {Ankusa.SourceStore.Static,
+           sources: %{"gh" => [verifier: {Ankusa.Verifier.Hmac, scheme: :github, secret: ""}]}}
+      )
+
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {%ArgumentError{message: message}, _stack}} =
+             Ankusa.Instance.start_link(config)
+
+    assert message == "source gh: verifier secret is missing or undecodable"
   end
 end

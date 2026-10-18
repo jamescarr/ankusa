@@ -12,7 +12,10 @@ defmodule Ankusa.Sink.Kafka.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {DynamicSupervisor, name: Ankusa.Sink.Kafka.Supervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Ankusa.Sink.Kafka.Supervisor, strategy: :one_for_one},
+      # Stops a brod client no delivery has used for its `:idle_timeout_ms`.
+      {Ankusa.Sink.Reaper,
+       name: Ankusa.Sink.Kafka.Reaper, supervisor: Ankusa.Sink.Kafka.Supervisor}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.Kafka.TopSup)

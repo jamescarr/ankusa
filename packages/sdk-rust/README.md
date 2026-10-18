@@ -105,6 +105,31 @@ assert_eq!(hook_id(&headers)?, "01a0");
 and its `idempotency_key(include_replay)` applies the same rule as `Message`
 below.
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way. Verify the raw
+body before trusting it; answer `401` when it fails:
+
+```rust
+use ankusa::http::HeaderMap;
+use ankusa::{verify_signature, InvalidSignatureError, VerifyOptions};
+
+fn verify(headers: &HeaderMap, body: &[u8], secret: &str) -> Result<(), InvalidSignatureError> {
+    verify_signature(headers, body, &[secret], VerifyOptions::default())?;
+    Ok(())
+}
+
+let err = verify(&HeaderMap::new(), b"{}", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw").unwrap_err();
+assert_eq!(err.code, "missing_header");
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own bytes;
+pass several during a rotation. `VerifyOptions::tolerance_seconds` (default
+300) bounds the `webhook-timestamp` window. Signatures are compared in
+constant time; a failure is an `InvalidSignatureError` with `code` and
+`field`, never retryable.
+
 ## Consuming queue messages
 
 An Ankusa sink delivers the `v: 1` queue message as JSON: the body inline
@@ -213,7 +238,8 @@ println!("{} of {} dead letters", page.entries.len(), page.total);
 ```
 
 Replay jobs are managed on the same listener. `create_replay` starts one (a
-`dlq` job over dead-lettered rows, or an `archive` job over a time window) and
+`dlq` job over dead-lettered rows, an `archive` job over a time window, or a
+`quarantine` job that re-verifies held hooks and releases those that pass) and
 returns the running job when the same spec is posted twice, so a proxy retry is
 safe:
 

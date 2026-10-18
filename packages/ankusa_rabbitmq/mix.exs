@@ -1,7 +1,7 @@
 defmodule AnkusaRabbitmq.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.6.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   # Forced split: `ankusa` core stays free of the
@@ -47,7 +47,7 @@ defmodule AnkusaRabbitmq.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :credentials_obfuscation],
       mod: {Ankusa.Sink.RabbitMQ.Application, []}
     ]
   end
@@ -76,10 +76,10 @@ defmodule AnkusaRabbitmq.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      # `~> 0.5`, not older: `deliver/3` calls `Ankusa.Envelope.idempotency_key/1`,
-      # which core ships from 0.5.0 (it is not in 0.4.x), so Hex must never pair
-      # this with an older core.
-      [{:ankusa, "~> 0.5"}]
+      # `~> 0.6`, not older: idle connections are closed by `Ankusa.Sink.Reaper`,
+      # which core ships from 0.6.0, so Hex must never pair this with an older
+      # core. Publish core first.
+      [{:ankusa, "~> 0.6"}]
     end
   end
 end

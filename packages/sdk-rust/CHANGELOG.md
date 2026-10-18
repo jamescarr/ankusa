@@ -6,8 +6,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
+- `verify_signature(headers, body, secrets, VerifyOptions)` verifies the
+  Standard Webhooks signature an HTTP sink with a `secret` adds, comparing in
+  constant time (`hmac`); failures are `InvalidSignatureError` (`code`,
+  `field`, never retryable). New dependency: `hmac`.
 - `decode_message` and `Message`, for consumers of Ankusa's queue: the inline
   (`body_base64`) and claim (`claim`) body forms, `sha256`/size/tenant
   validation, forwarded `headers`, the shipped `idempotency_key` field, and
@@ -18,12 +24,18 @@ this project follows [Semantic Versioning](https://semver.org/).
   `x-ankusa-idempotency-key`) and `idempotency_key(include_replay)`.
 - `AdminClient` gains `create_replay`, `get_replay`, `list_replays`, and
   `update_replay`, with the `Replay`, `ReplayList`, `ReplaySpec`, and
-  `ReplayPatch` models.
+  `ReplayPatch` models. Kinds are `dlq`, `archive` and `quarantine`;
+  `ReplaySpec`'s `id`/`since`/`until` apply to `quarantine` too.
 
 ### Changed
 
-- Replaced `AdminClient::replay_dead_letters` and its `ReplayFilter`/`Replayed`
-  models with the replay-job API above.
+- `ClaimCheckClient::redeem` returns `ClaimCheckError::Unavailable`
+  (retryable) for a gateway `408` or `429` instead of `Rejected`.
+
+### Removed
+
+- `AdminClient::replay_dead_letters` and its `ReplayFilter`/`Replayed` models,
+  replaced by the replay-job API above.
 
 ## [0.3.0] - 2026-10-01
 
@@ -55,5 +67,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   the crate drives its own HTTP client or none at all), and `ClientBuilder`
   for shared base URL, headers, and timeout.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-rust-v0.3.0...sdk-rust-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-rust-v0.3.0

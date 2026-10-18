@@ -19,7 +19,11 @@ defmodule Ankusa.Edge.RateLimitTest do
   defp start_edge(
          rate_limits,
          sources \\ %{
-           "demo" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{Ankusa.Sink.Log, []}]]
+           "demo" => [
+             verifier: {Ankusa.Verifier.None, []},
+             trust_url_tenant: true,
+             sinks: [{Ankusa.Sink.Log, []}]
+           ]
          }
        ) do
     config =
@@ -209,15 +213,15 @@ defmodule Ankusa.Edge.RateLimitTest do
     Process.flag(:trap_exit, true)
 
     assert {:error, {:rate_limits_load_failed, :store_unavailable}} =
-             RateLimiter.start_link(instance: config.instance, config: config)
+             RateLimiter.start_link(instance: config.instance)
   end
 
   defp start_store!(config) do
-    start_supervised!({Ankusa.Store, instance: config.instance, config: config})
+    start_supervised!({Ankusa.Store, instance: config.instance})
   end
 
   defp start_limiter(config) do
-    {:ok, pid} = RateLimiter.start_link(instance: config.instance, config: config)
+    {:ok, pid} = RateLimiter.start_link(instance: config.instance)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
     {:ok, pid}
   end

@@ -1,7 +1,7 @@
 defmodule Ankusa.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.6.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   def project do
@@ -119,7 +119,7 @@ defmodule Ankusa.MixProject do
   defp deps do
     [
       async_api_spex_dep(),
-      {:bandit, "~> 1.12.5"},
+      {:bandit, "~> 1.13"},
       {:plug, "~> 1.18"},
       # CIDR parsing and range membership for the route-management IP rules and
       # trusted proxies (`Ankusa.Routes`, `Ankusa.Net.ClientIP`). `Ankusa.Net`
@@ -127,18 +127,21 @@ defmodule Ankusa.MixProject do
       # the prefix bit math is the package's.
       {:cidr, "~> 1.2"},
       # HTTP client for the S3/GCS blob stores, the claim-check Remote adapter,
-      # and Sink.Http. Replaces hand-rolled :httpc plumbing (and starts its own
+      # Sink.Http and Sink.SQS. Replaces hand-rolled :httpc plumbing (and starts its own
       # Finch pool, so embedders configure nothing).
       {:req, "~> 0.7"},
       # AWS Signature V4 — the signing implementation behind the official
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
-      # string-to-sign / HMAC-chain code in Ankusa.BlobStore.S3.
+      # string-to-sign / HMAC-chain code; signs Ankusa.BlobStore.S3 and Ankusa.Sink.SQS.
       {:aws_signature, "~> 0.4"},
       # Built-in Prometheus mapping of Ankusa.Telemetry (Ankusa.Metrics).
       # Every deployment wants metrics, so they live in core rather than an
       # adapter package.
       {:telemetry_metrics, "~> 1.2"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
+      # Periodic gauge measurements for `Ankusa.Metrics` (`Ankusa.Metrics.Gauges`:
+      # queue depth, oldest-due age, pen and disk usage).
+      {:telemetry_poller, "~> 1.1"},
       # The route-management decision cache (`Ankusa.Routes.Cache`). Every
       # deployment that turns routes on wants a decision cache, so it lives in
       # core rather than an adapter package — the Redis *definitions* store is

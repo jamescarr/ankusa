@@ -6,8 +6,17 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
+- `Ankusa.SDK.Signature.verify/4` verifies the Standard Webhooks signature an
+  HTTP sink with a `secret` adds, comparing with `:crypto.hash_equals/2`;
+  failures are `Ankusa.SDK.InvalidSignatureError` (`code`, `field`, never
+  retryable). `Ankusa.SDK.Receiver` takes `:secret` (one or a list) and
+  `:tolerance_seconds`, and answers `401`
+  `{"error":"invalid_signature","code":...}` to a delivery that doesn't
+  verify.
 - `Ankusa.SDK.Message.decode/1` now carries `dedupe_key`, `replay_id`,
   `idempotency_key` and `headers`, verifies an inline body's length and sha256,
   checks a claim's tenant against `tenant_id`, and rejects a claim that isn't a
@@ -23,7 +32,13 @@ follows [Semantic Versioning](https://semver.org/).
   `x-ankusa-replay-id` and `x-ankusa-idempotency-key` and keeps every request
   header.
 - `Ankusa.SDK.Admin.create_replay/2`, `get_replay/2`, `list_replays/1` and
-  `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`).
+  `update_replay/3` for the replay-job API (`POST/GET/PATCH /v1/replays`;
+  kinds `dlq`, `archive`, `quarantine`).
+
+### Changed
+
+- `Ankusa.SDK.ClaimCheck.redeem/3` returns `ClaimCheckUnavailableError`
+  (retryable) for a gateway `408` or `429` instead of `ClaimRejectedError`.
 
 ### Removed
 
@@ -71,5 +86,6 @@ follows [Semantic Versioning](https://semver.org/).
 - The language-neutral conformance runner
   (`test/conformance_test.exs`), passing every vector in `conformance/cases`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-elixir-v0.3.0...sdk-elixir-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/releases/tag/sdk-elixir-v0.3.0

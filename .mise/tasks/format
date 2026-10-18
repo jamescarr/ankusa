@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="mix format every Mix project; gofmt every Go package; google-java-format every sbt package"
+#MISE description="mix format every Mix project; gofmt every Go package; google-java-format every sbt package; cljfmt every Clojure package"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
@@ -22,6 +22,11 @@ for p in $(pkg_names); do
       d=$(pkg_dir "$p")
       echo "==> $d"
       (cd "$d" && sbt --server --batch "javafmtAll")
+      ;;
+    clojure)
+      d=$(pkg_dir "$p")
+      echo "==> $d"
+      (cd "$d" && clojure -M:fmt fix src test build.clj)
       ;;
   esac
 done

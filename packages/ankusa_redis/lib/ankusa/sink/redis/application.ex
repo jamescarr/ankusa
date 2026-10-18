@@ -14,7 +14,10 @@ defmodule Ankusa.Sink.Redis.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {DynamicSupervisor, name: Ankusa.Sink.Redis.Supervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Ankusa.Sink.Redis.Supervisor, strategy: :one_for_one},
+      # Stops a connection no delivery has used for its `:idle_timeout_ms`.
+      {Ankusa.Sink.Reaper,
+       name: Ankusa.Sink.Redis.Reaper, supervisor: Ankusa.Sink.Redis.Supervisor}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.Redis.TopSup)

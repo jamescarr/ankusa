@@ -32,7 +32,7 @@ Queue sinks   Ankusa --> your consumer --> Message.decode/1       +--> MyApp.Hoo
 # mix.exs
 def deps do
   [
-    {:ankusa_sdk, "~> 0.3"}
+    {:ankusa_sdk, "~> 0.5"}
   ]
 end
 ```
@@ -81,9 +81,9 @@ Every failure carries `retryable`, so a consumer needs exactly one bit:
 | --- | --- | --- |
 | `Ankusa.SDK.InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64-char lowercase hex |
 | `Ankusa.SDK.ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `Ankusa.SDK.ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`:status`, `:body`) |
+| `Ankusa.SDK.ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`:status`, `:body`) |
 | `Ankusa.SDK.ClaimIntegrityError` | `false` | sha256 of the returned bytes doesn't match |
-| `Ankusa.SDK.ClaimCheckUnavailableError` | `true` | gateway unreachable, or answered anything else |
+| `Ankusa.SDK.ClaimCheckUnavailableError` | `true` | gateway unreachable, `408`, `429`, or answered anything else |
 
 `health/1` hits `GET /health` for a liveness probe.
 
@@ -134,8 +134,29 @@ end
 ```
 
 Options: `:handler` (a module, or `{module, arg}`), `:path` (only that path is
-handled; everything else passes through untouched), and `:max_body_bytes`
-(default `8_000_000`, the same cap core's ingest applies to a raw body).
+handled; everything else passes through untouched), `:max_body_bytes`
+(default `8_000_000`, the same cap core's ingest applies to a raw body), and
+`:secret` / `:tolerance_seconds` for a signed sink (below).
+
+### Signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way. Give the receiver
+the same secret and it verifies each delivery before your handler sees it,
+answering `401` `{"error":"invalid_signature","code":...}` otherwise:
+
+```elixir
+plug Ankusa.SDK.Receiver,
+  handler: MyApp.Hooks,
+  secret: System.fetch_env!("ANKUSA_WHSEC"),
+  tolerance_seconds: 300
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own bytes;
+pass a list during a rotation. The check on its own is
+`Ankusa.SDK.Signature.verify/4`, returning `{:error,
+%Ankusa.SDK.InvalidSignatureError{code: ..., field: ...}}` (never retryable);
+the comparison is `:crypto.hash_equals/2`.
 
 The handler sees one value whichever transport delivered the hook:
 
@@ -294,7 +315,7 @@ unfollowed redirect, a non-JSON success body, or unreachable; retryable).
 ## Admin client
 
 The operator API on `admin.port` (default `4002`): health, Prometheus metrics,
-the redacted config, the DLQ, and the quarantine list.
+the redacted config, the DLQ, replay jobs, and the quarantine list.
 
 ```elixir
 admin = Ankusa.SDK.Admin.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
@@ -304,7 +325,8 @@ admin = Ankusa.SDK.Admin.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
 {:ok, %{"total" => total}} = Ankusa.SDK.Admin.list_dead_letters(admin, limit: 10)
 {:ok, _} = Ankusa.SDK.Admin.list_quarantined(admin)
 
-# Replay jobs: re-send the dead-letter queue, or an archived time window.
+# Replay jobs: re-send the dead-letter queue ("dlq"), an archived time window
+# ("archive"), or re-verify held hooks and release those that pass ("quarantine").
 {:ok, replay} = Ankusa.SDK.Admin.create_replay(admin, %{"kind" => "dlq", "rate" => 500})
 {:ok, replay} = Ankusa.SDK.Admin.get_replay(admin, replay["id"])
 {:ok, %{"replays" => replays}} = Ankusa.SDK.Admin.list_replays(admin)

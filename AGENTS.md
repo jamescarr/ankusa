@@ -23,7 +23,7 @@ flowchart LR
 | `packages/async_api_spex` | Generic AsyncAPI 3.0 library, no Ankusa code (structs, `use AsyncApiSpex.Schema`/`Message`/`Channel`/`Spec` — the last three decorate an app's existing structs and publishing modules into a document — validator, `AsyncApiSpex.Plug.RenderSpec`, `mix async_api_spex.gen`). Core depends on it for `Ankusa.AsyncApi`; every project that path-depends on core and builds in `:prod` (the adapters, `ankusa_server`, the examples) pins it by path with `override: true`. Publish it to Hex before core. |
 | `conformance/` | Language-neutral SDK vectors (`features.json`, `cases/*.json`) and the checker (`check.mjs`) every `packages/sdk-*` must pass; `mise run check:conformance`. |
 | `packages/ankusa_server` | The `jamescarr/ankusa` Docker image: core + every adapter, driven entirely by YAML (`config.ex` is the loader). Not published to Hex. |
-| `packages/sdk-typescript`, `sdk-python`, `sdk-rust`, `sdk-ruby`, `sdk-go`, `sdk-php`, `sdk-elixir`, `sdk-java` | Published client SDKs (npm `ankusa`, PyPI `ankusa`, crates.io `ankusa`, RubyGems `ankusa-sdk`, Go module `github.com/jamescarr/ankusa/packages/sdk-go`, Packagist `jamescarr/ankusa`, Hex `ankusa_sdk`, Maven Central `io.github.jamescarr:ankusa-sdk`) for writing worker consumers. |
+| `packages/sdk-typescript`, `sdk-python`, `sdk-rust`, `sdk-ruby`, `sdk-go`, `sdk-php`, `sdk-elixir`, `sdk-java`, `sdk-clojure` | Published client SDKs (npm `ankusa`, PyPI `ankusa`, crates.io `ankusa`, RubyGems `ankusa-sdk`, Go module `github.com/jamescarr/ankusa/packages/sdk-go`, Packagist `jamescarr/ankusa`, Hex `ankusa_sdk`, Maven Central `io.github.jamescarr:ankusa-sdk`, Clojars `io.github.jamescarr/ankusa-clj`) for writing worker consumers. |
 | `examples/*` | Runnable Docker-composed demos, one per delivery transport; see [`examples/README.md`](examples/README.md). |
 | `tools/loadgen` | Load generator used by the `oban-consumer` example. |
 | `docs/*` | Prose docs, see table below. Index: [`docs/README.md`](docs/README.md). |
@@ -36,16 +36,16 @@ Why the package split (and when a new adapter earns its own package):
 
 | Stage | Modules |
 | --- | --- |
-| Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/quarantine.ex`, `edge/route_guard.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,none,schemes}.ex` |
-| Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `store.ex`, `store/{keys,migrate}.ex`, `fsync.ex` |
-| Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex` |
-| Dispatch (sinks, retries, DLQ) | `dispatch.ex`, `dispatch/pipeline.ex`, `sink.ex`, `sink/{log,http,message,description}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
-| Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,sweeper}.ex` |
+| Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/publish.ex`, `edge/quarantine.ex`, `edge/rate_limiter.ex`, `edge/route_guard.ex`, `dedupe.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,none,schemes}.ex` |
+| Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `store.ex`, `store/{keys,migrate}.ex`, `store/backup.ex` (checkpoint upload + boot restore), `fsync.ex` |
+| Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex`, `blob_store/azure/managed_identity.ex` |
+| Dispatch (sinks, retries, DLQ) | `dispatch/pipeline.ex`, `dispatch/replayer.ex`, `replay.ex`, `sink.ex`, `sink/{log,http,message,description,sqs,google_pubsub}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
+| Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,stores,sweeper,cache,reader}.ex` (`stores.ex`: the claim store list, placement, write failover + breaker, read search; `cache.ex` + `reader.ex`: the gateway's read cache, and its coalescing, per-store adaptive limit, queue and deadline) |
 | Route management | `routes.ex`, `routes/{route,matcher,snapshot,cache,router,store}.ex`, `routes/store/ets.ex`, `net.ex`, `net/client_ip.ex` |
-| Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex` + `instance/{isolated,registry_watch}.ex` (failure domains, registry watch), `source.ex`, `source_store.ex`, `lifecycle.ex` + `lifecycle/publisher.ex`, `async_api.ex` + `async_api/schemas.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex`, `ulid.ex`, `uuid_v7.ex` |
+| Ops / cross-cutting | `application.ex`, `config.ex`, `instance.ex` + `instance/{isolated,registry_watch}.ex` (failure domains, registry watch), `source.ex`, `source_store.ex` + `source_store/persistent.ex`, `lifecycle.ex` + `lifecycle/publisher.ex`, `async_api.ex` + `async_api/schemas.ex`, `envelope.ex`, `codec.ex` + `codec/raw.ex`, `admin/router.ex`, `admin/redact.ex`, `telemetry.ex`, `metrics.ex`, `http.ex`, `http_client.ex`, `aws/credentials.ex` (AWS credential chain for S3 and SQS), `ulid.ex`, `uuid_v7.ex` |
 
 `packages/ankusa_server/lib/ankusa_server`: `application.ex`, `cli.ex`,
-`config.ex` (YAML → core config), `config_error.ex`, `gcs_token.ex`.
+`config.ex` (YAML → core config), `config_error.ex`, `gcp_token.ex`.
 
 ### Docs index
 
@@ -64,7 +64,8 @@ Why the package split (and when a new adapter earns its own package):
 | [`elixir.md`](docs/elixir.md) | embed the library in your own app |
 | [`testing.md`](docs/testing.md) | running the suites, local infra, what each one covers |
 | [`packaging.md`](docs/packaging.md) | why adapters are separate packages, and how to add one |
-| [`releasing.md`](docs/releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, Packagist, or Maven Central |
+| [`critical-review.md`](docs/critical-review.md) | the 2026-10 end-to-end review: findings by root cause, and which are fixed |
+| [`releasing.md`](docs/releasing.md) | releasing any package: Hex (core, adapters, and the Elixir SDK), the server image, npm, PyPI, crates.io, RubyGems, Go, Packagist, Maven Central, or Clojars |
 
 Exact callback signatures and options: module docs on [HexDocs](https://hexdocs.pm/ankusa).
 
@@ -85,11 +86,12 @@ one; CI runs the same tasks this table does.
 | `mise run check:conformance` | validate `conformance/` and run every `packages/sdk-*` against its vectors |
 | `mise run test:integration` | `ankusa` core's object-store adapters vs. the floci emulators |
 | `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`) |
-| `mise run format` | `mix format`, `gofmt`, and google-java-format across every package — run before pushing, not after CI complains |
+| `mise run format` | `mix format`, `gofmt`, google-java-format, and cljfmt across every package — run before pushing, not after CI complains |
 | `mise run deps` | refresh every `mix.lock` after adding/removing a core dependency |
 | `mise run new:adapter <name>` | scaffold `packages/ankusa_<name>/` |
 | `mise run status` | every package's version, last tag, published or not |
 | `mise run docker:smoke` | build `jamescarr/ankusa:dev`, run `packages/ankusa_server/scripts/smoke.sh` against it |
+| `mise run build [pkg]` | local only: build one Mix package from source (default `ankusa_server`); compiled Hex deps come from a cache in `~/.cache/ankusa/mix` shared by every worktree, their warnings go to `_build/<env>/deps-compile.log`, ours stay fatal |
 
 ## Run the checks before calling work done
 
@@ -113,7 +115,8 @@ after adding or removing one, run `mise run deps` and commit every `mix.lock`
 it changes. CI runs `mix deps.get --check-locked` and
 `mix deps.unlock --check-unused` everywhere — including the examples — so a
 `deps.get` that rewrites a stale lock, or a lock entry for a dependency nobody
-declares, fails the build instead of passing quietly.
+declares, fails the build instead of passing quietly. `mix hex.audit` runs
+beside them, so a locked version with a published advisory fails it too.
 
 What each suite covers: [`docs/testing.md`](docs/testing.md).
 

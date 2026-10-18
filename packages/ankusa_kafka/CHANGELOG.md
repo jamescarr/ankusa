@@ -7,13 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-14
+
 ### Added
 
+- `:max_record_bytes` (default `1_000_000`): a record whose value plus key is
+  larger is refused before it is produced, as `{:error, {:permanent, _}}`.
+- `:idle_timeout_ms` (default `600_000`, `0` never, at least
+  `:produce_timeout_ms` plus 1 s): a brod client with no delivery for that
+  long is stopped (`Ankusa.Sink.Reaper`, requires core's) and the next
+  delivery starts a new one.
 - Every record carries the `ankusa_idempotency_key` header: the same
   tenant-scoped key as the message's `idempotency_key`
   (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
   0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
   which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+- `ankusa_dedupe_key` and `ankusa_replay_id` record headers when present.
+
+### Changed
+
+- A broker `message_too_large`, `invalid_message` or `invalid_record` is
+  `{:error, {:permanent, reason}}`: dead-lettered at once instead of retried
+  for the whole retry policy. Requires `ankusa ~> 0.6` (sink error classes);
+  publish core first.
+
+### Fixed
+
+- A `:sasl` password is held in a closure (`brod_utils:init_sasl_opt/1`, as
+  `brod_sup` does before it starts a client), so neither brod's client state
+  nor its crash report, for example when no broker answers, prints it.
 
 ## [0.4.0] - 2026-10-02
 
@@ -83,7 +105,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - Synchronous produce with `acks=all`
 - Kafka headers: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `content_type`
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.4.0...ankusa_kafka-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.3.0...ankusa_kafka-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.1...ankusa_kafka-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_kafka-v0.2.0...ankusa_kafka-v0.2.1

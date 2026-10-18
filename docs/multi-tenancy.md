@@ -30,8 +30,11 @@ router.
             {:ok, Ankusa.Route.t()} | :error
 ```
 
-The router (`Ankusa.Edge.Router`) is a catch-all `POST` that does nothing but
-call the configured resolver, then hand the result to `Ankusa.Edge.Ingest`. A
+The router (`Ankusa.Edge.Router`) is a catch-all `POST`. In order it: runs the
+route guard (when routes are enabled), calls the configured resolver, checks
+`Content-Length` against `max_body_bytes` (`413`), looks the source up before
+reading any body (`404`), checks header bytes (`400 invalid_header`), reads
+the body within the bound, then hands the result to `Ankusa.Edge.Ingest`. A
 resolver does **URL-scheme work only**: it never reads the body, verifies a
 signature, or touches storage. It answers "which endpoint is this?" and
 nothing else; policy (verify/sinks) still comes from `Ankusa.SourceStore`
@@ -49,9 +52,10 @@ config :ankusa, route_resolver: {Ankusa.RouteResolver.Path, prefix: ["webhooks"]
 ```
 
 **`Ankusa.RouteResolver.TenantPath`** resolves `POST /webhooks/:tenant_id/:source_id`.
-The tenant is carried in the URL and is **authoritative**: it wins over
-whatever the resolved source's own `tenant_id` says. One instance serves
-many tenants over one path scheme.
+The tenant is carried in the URL and names the tenant a *shared* source (one
+whose `tenant_id` is `"default"`) stores the hook under: one instance serves
+many tenants over one path scheme. A source that belongs to a tenant answers
+only that tenant's URL; see [binding](#tenant-scoping-what-tenant_id-actually-does).
 
 ```elixir
 config :ankusa, route_resolver: {Ankusa.RouteResolver.TenantPath, prefix: ["webhooks"]}
@@ -112,15 +116,62 @@ An unresolvable URL shape returns `:error`, which the router turns into a
 
 Resolution order for a given request: `route.tenant_id` (if the resolver set
 one) wins; otherwise `source.tenant_id` (if the source's config set one);
-otherwise `"default"`. This means `TenantPath` and per-source `tenant_id`
-can coexist: a resolver-provided tenant always overrides a source's
-declared one, never the reverse.
+otherwise `"default"`.
+
+**A tenant's source answers only its tenant.** A source whose `tenant_id` is
+anything but `"default"` is bound to that tenant: a route naming another
+tenant (`POST /webhooks/globex/acme-stripe` for a source owned by `acme`) is
+the same `404` as a source that does not exist, so one tenant cannot write
+into another's storage scope and the URL reveals nothing about which sources
+other tenants have. A `"default"` source is shared — the one `stripe` source
+behind `/webhooks/:tenant/stripe` for every customer — and stores each hook
+under the URL's tenant. (`"default"` is what a source gets when none is set,
+which is why it means "shared" rather than "owned by a tenant called
+default".)
+
+A shared source trusts the URL's tenant: anyone who can post to
+`/webhooks/<victim>/stripe` files hooks under `<victim>`'s storage scope and
+spends its rate limit. Give a shared source a real verifier (the provider's
+signature), so only the provider's hooks get in, or give each tenant a source
+of its own, which the binding above then protects. A source created through
+the admin API under the tenant `default` is shared the same way.
+
+When the tenant comes from the request (any resolver but `RouteResolver.Path`),
+a shared source with no verifier (`verify: {type: none}`, or
+`Ankusa.Verifier.None`) has to say that it means it: `trust_url_tenant: true`,
+the same key in YAML, an admin API spec and the Elixir source options.
+Without it:
+
+- a source in the config refuses to boot, and the image's `check-config`
+  exits 78, naming the source — on every node that reads that config,
+  whatever its roles;
+- an admin API write (`POST`/`PUT` under `/v1/tenants/default/sources`) is
+  `400 invalid_source` with the same message;
+- a source the store already held from before the rule (an API-managed one
+  written by an older node) keeps serving as it did, and the node logs a
+  warning naming it at boot. Saving it again needs the flag, or a verifier.
+
+A source that sets the flag behaves exactly as an unflagged one did before:
+the request's tenant is taken as given.
+
+The rule does not cover a shared source that has a verifier but
+`on_verify_failure: accept_flag`: a request that fails verification is still
+committed, flagged, under whatever tenant the URL names. It spends the
+source's quarantine bucket rather than that tenant's rate limit, but it lands
+in the tenant's storage scope. Every delivery says so: the message's
+`verification.flagged` is `true` and `Sink.Http` sends
+`x-ankusa-verification-flagged: true` (see
+[`delivery.md`](delivery.md#idempotent-receivers)), so a consumer can refuse
+or set aside a hook that was not verified, and the tenant it names with it.
+Under tenant routing, give a shared source `reject` or `quarantine` instead if
+nothing downstream checks the flag.
 
 ## Dynamic sources
 
 Everything above is a store decision, not a boot-time one: the router resolves
 a `source_id` and asks the configured `Ankusa.SourceStore` for it, so a source
-can appear at runtime with no redeploy. Two stores ship:
+can appear at runtime with no redeploy. Core ships two stores, and
+`ankusa_redis` a third (below):
 
 - **`SourceStore.Static`** (the default) reads sources declared in `config.exs`
   and nothing else. The admin API's write routes answer
@@ -133,19 +184,32 @@ can appear at runtime with no redeploy. Two stores ship:
   store, so a created or updated source works immediately and survives a
   restart. That is what makes a product minting per-customer catch URLs
   possible without a redeploy: `RouteResolver`/`Route` gave you the URL shape,
-  this gives you the runtime endpoint.
+  this gives you the runtime endpoint. Deleting a source that still has
+  undelivered hooks on the node is `409 source_has_deliveries`; add
+  `?deliveries=dead_letter` to dead-letter them first, so a source re-created
+  under the same name starts with an empty queue.
 
 `SourceStore.Persistent` keeps its sources in this node's store, so it is
 node-local like the rest of it: that node's admin API writes, that node's edge
-reads. A fleet wants either one node serving the source API, or an external
-store — a DB-backed `SourceStore.Ecto`, read-through cached, invalidated on
-write — which the `Ankusa.SourceStore` behaviour is the seam for.
+reads. A fleet whose nodes all serve the source API uses
+**`SourceStore.Redis`** (package `ankusa_redis`; the image's
+`source_store.type: redis` with `url`, and optionally `namespace` and
+`tick_ms`): the same API and validation, but API-managed sources live in
+Redis, and every node configured with the same `namespace` serves them. Each
+node reads from an in-memory mirror, never from Redis on the request path; a
+write bumps a version and publishes it, and the other nodes reload within a
+pub/sub round trip (or the `tick_ms` check, if they missed it). Seeds from
+`sources:` stay this node's config and are never written to Redis. A node
+that cannot reach Redis on its first boot refuses to start rather than run
+with no sources; once running, an outage leaves the mirror serving hooks, and
+source writes fail until Redis is back.
 
-One consequence for `wal.type: none`: its boot check — every statically
-configured source needs at least one sink whose `:ok` means durable
-(`Ankusa.Sink.durable?/2`, enforced by `Ankusa.Queue.validate_config!/1`) —
-only sees sources in the config. A source created at runtime through the admin
-API is not checked, because the store's decoder has no instance config, so a
-`wal: :none` node with a writable source store can be handed a log-only source
-at runtime. Give runtime-created sources durable sinks, or run `wal.type: disk`
-on the node that serves the admin API's source routes.
+One consequence for `wal.type: none`: every source needs at least one sink
+whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`). Boot enforces it for
+sources in the config (`Ankusa.Queue.validate_config!/1`), and a source
+write enforces it for the rest: the admin API refuses to create a source, or
+update one, into a source with no durable sink (`400 invalid_source`), whichever
+writable store holds it. A source that arrives without that check — stored
+before it existed, or written to a shared Redis source store by a node that
+runs `wal.type: disk` — is answered `503` at ingest until it is updated to have
+a durable sink.

@@ -6,6 +6,52 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
+### Added
+
+- `Ankusa.SourceStore.Redis`: API-managed, tenant-scoped sources kept in Redis
+  and shared by every node configured with the same `namespace` (a hash of
+  sources and a version counter; Lua-scripted writes; pub/sub invalidation with
+  a `tick_ms` safety net). Reads go to an ETS mirror that survives a restart of
+  the store's state process. Seeds stay config-only. A first boot against an
+  unreachable Redis fails; a write during an outage answers
+  `{:error, :store_unavailable}` (the admin API's `503 store_unavailable`).
+- `Ankusa.Sink.Redis`: `:idle_timeout_ms` (default `600_000`, `0` never, at
+  least `:publish_timeout_ms` plus 1 s): a connection with no delivery for that
+  long is closed (`Ankusa.Sink.Reaper`, requires core's) and the next delivery
+  opens a new one.
+
+### Changed
+
+- Requires `ankusa ~> 0.6` (the ETS route snapshot API, and the source table
+  `SourceStore.Redis` shares with `SourceStore.Persistent`); publish core first.
+- The Redis route store keeps serving its last known table when the
+  namespace's version key disappears (a flushed or evicted Redis) instead of
+  publishing an empty table that rejects every webhook; it logs a warning
+  once and reloads when the namespace is written again. It publishes through
+  core's ETS route snapshot and drops retired generations on request.
+- The Redis sink's connection dials on its own (`sync_connect: false`), so a
+  dead Redis never blocks the supervisor that starts it.
+- `Ankusa.Routes.Store.Redis` and `Ankusa.SourceStore.Redis` start with
+  `[instance: instance]` (core's new store contract) and read their options
+  from `Ankusa.config(instance)`: no child spec of theirs carries the config,
+  the seeds or the decoder. Their Redix connections get the URL's password as
+  Redix's `{m, f, a}` form, so neither a child spec nor Redix's state holds it.
+- `SourceStore.Redis` refuses a write of a shared source with no verifier
+  under a resolver that takes the tenant from the request unless it sets
+  `trust_url_tenant: true` (`{:error, :invalid, message}`), and names one
+  already in Redis in a warning at first boot.
+- A route store restarted after the instance has published a table resumes from
+  that table without waiting on Redis (its connections dial in the background),
+  so a store that crashes during a Redis outage does not hold the edge down. It
+  loads once the subscription is confirmed and on every tick. A first boot
+  still fails loudly.
+- `Ankusa.Sink.Redis` registers its connection under a digest of the URL
+  instead of the URL, and starts Redix with the URL's password as an
+  `{m, f, a}` over a closure: the password is in no registry key, child spec
+  or Redix state.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added
@@ -93,7 +139,8 @@ follows [Semantic Versioning](https://semver.org/).
 - Depends on `ankusa` `~> 0.2`, which introduced `Ankusa.Routes.Store` and
   `Ankusa.Routes.Snapshot`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.4.0...ankusa_redis-v0.5.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.3.0...ankusa_redis-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_redis-v0.2.4...ankusa_redis-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/releases/tag/ankusa_redis-v0.2.4

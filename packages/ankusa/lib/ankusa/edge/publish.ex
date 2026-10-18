@@ -23,12 +23,29 @@ defmodule Ankusa.Edge.Publish do
 
   @spec publish(atom(), Source.t(), Envelope.t()) ::
           {:ok, Envelope.t()} | {:error, :store_unavailable}
-  def publish(_instance, %Source{sinks: []}, %Envelope{} = env) do
-    Logger.warning("[ankusa] source #{env.source_id} has no sinks; nothing can ack")
+  def publish(instance, %Source{} = source, %Envelope{} = env) do
+    if durable?(source),
+      do: deliver(instance, source, env),
+      else: refuse(env)
+  end
+
+  # Boot refuses a static source with no durable sink and a source write is
+  # refused the same way, but a source can still get here without either check:
+  # one stored before the write check existed, or one written to a shared
+  # (Redis) source store by a node that runs `wal: :disk`. Acking it would be a
+  # `2xx` with no durable copy anywhere, so it is a `503` instead.
+  defp durable?(%Source{sinks: sinks}),
+    do: Enum.any?(sinks, fn {mod, opts} -> Sink.durable?(mod, opts) end)
+
+  defp refuse(env) do
+    Logger.warning(
+      "[ankusa] source #{env.source_id} has no durable sink; under wal: :none nothing can ack it"
+    )
+
     {:error, :store_unavailable}
   end
 
-  def publish(instance, %Source{} = source, %Envelope{} = env) do
+  defp deliver(instance, %Source{} = source, %Envelope{} = env) do
     with {:ok, ctx} <- ctx(instance, source, env) do
       timeout = Ankusa.config(instance).direct_publish_timeout_ms
 
@@ -72,7 +89,7 @@ defmodule Ankusa.Edge.Publish do
           end
         end)
 
-      Enum.each(outcomes, fn {_mod, outcome} -> emit(instance, outcome) end)
+      Enum.each(outcomes, fn {mod, outcome} -> emit(instance, env, mod, outcome) end)
 
       if Enum.all?(outcomes, &match?({_mod, :ok}, &1)) do
         {:ok, env}
@@ -130,13 +147,16 @@ defmodule Ankusa.Edge.Publish do
     end)
   end
 
-  # Same event dispatch emits, so `/metrics` counts this path with no change:
-  # one attempt, no retry — the provider is the retry.
-  defp emit(instance, result) do
+  # Same event, and the same metadata, dispatch emits, so `/metrics` counts this
+  # path with no change (a missing `sink` tag would drop the event): one
+  # attempt, no retry — the provider is the retry.
+  defp emit(instance, env, mod, result) do
     Ankusa.Telemetry.emit([:dispatch, :stop], %{}, %{
       instance: instance,
       result: result,
-      attempts: 1
+      attempts: 1,
+      sink: mod,
+      source_id: env.source_id
     })
   end
 end

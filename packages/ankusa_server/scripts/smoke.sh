@@ -12,8 +12,11 @@ set -euo pipefail
 
 IMAGE="${1:?usage: smoke.sh IMAGE}"
 NAME=ankusa-smoke
-BASE_URL=http://127.0.0.1:4000
-ADMIN_URL=http://127.0.0.1:4002
+# Host ports; override when 4000/4002 are taken on this machine.
+HTTP_PORT="${SMOKE_HTTP_PORT:-4000}"
+ADMIN_PORT="${SMOKE_ADMIN_PORT:-4002}"
+BASE_URL=http://127.0.0.1:$HTTP_PORT
+ADMIN_URL=http://127.0.0.1:$ADMIN_PORT
 
 WORK="$(mktemp -d)"
 
@@ -42,7 +45,7 @@ http_code() {
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo "==> starting $IMAGE"
-docker run -d --name "$NAME" -p 127.0.0.1:4000:4000 -p 127.0.0.1:4002:4002 \
+docker run -d --name "$NAME" -p "127.0.0.1:$HTTP_PORT:4000" -p "127.0.0.1:$ADMIN_PORT:4002" \
   -e ANKUSA_ADMIN_IP=0.0.0.0 "$IMAGE" >/dev/null
 
 echo "==> waiting for the admin API"
@@ -66,6 +69,20 @@ echo "==> ingest: accepted"
 code=$(http_code "$WORK/first" -XPOST "$BASE_URL/webhooks/demo" -d '{"id":"evt_smoke"}')
 [ "$code" = "201" ] || fail "first POST returned $code: $(cat "$WORK/first")"
 grep -q '"status":"accepted"' "$WORK/first" || fail "first POST was not accepted: $(cat "$WORK/first")"
+
+echo "==> ready: the store takes a synced write"
+code=$(http_code "$WORK/ready" "$BASE_URL/ready")
+[ "$code" = "200" ] || fail "/ready returned $code: $(cat "$WORK/ready")"
+grep -q '"store":"ok"' "$WORK/ready" || fail "/ready did not report the store: $(cat "$WORK/ready")"
+
+echo "==> the image's HEALTHCHECK (GET /ready) turns healthy"
+health=""
+for _ in $(seq 1 40); do
+  health=$(docker inspect -f '{{.State.Health.Status}}' "$NAME")
+  [ "$health" = "healthy" ] && break
+  sleep 1
+done
+[ "$health" = "healthy" ] || fail "container health is '$health' after 40s"
 
 echo "==> metrics"
 curl -s "$ADMIN_URL/metrics" >"$WORK/metrics"

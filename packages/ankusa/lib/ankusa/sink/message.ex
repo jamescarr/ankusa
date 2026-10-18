@@ -1,7 +1,7 @@
 defmodule Ankusa.Sink.Message do
   @moduledoc """
   The wire format every queue-style sink publishes (`Sink.RabbitMQ`,
-  `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`), so a consumer parses one format
+  `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`), so a consumer parses one format
   regardless of transport.
 
   A body of at most `inline_max_bytes` (default 64 KiB) rides inline,
@@ -10,17 +10,23 @@ defmodule Ankusa.Sink.Message do
   lowercase hex sha256 the reader checks the redeemed bytes against (see
   `docs/claim-check.md`). Every message carries `sha256`, `dedupe_key`,
   `replay_id`, `idempotency_key` (the tenant-scoped key a consumer dedupes on:
-  `Ankusa.Envelope.idempotency_key/1`) and the forwarded provider `headers`:
+  `Ankusa.Envelope.idempotency_key/1`), `verification` (how the hook was
+  verified at ingest: `status` is `"ok"`, `"failed"` or `"skipped"`, and
+  `flagged` is `true` when a failed check was let through by the source's
+  `on_verify_failure: accept_flag`, so a consumer treats that hook as
+  unverified) and the forwarded provider `headers`:
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 245,
        "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+       "verification": {"status": "ok", "flagged": false},
        "headers": {"x-github-event": "push"},
        "sha256": "2cf24dba...", "body_base64": "eyJpZCI6..."}
 
       {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme",
        "received_at": 1737500000000, "content_type": "application/json", "size": 3145728,
        "dedupe_key": "evt_1", "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+       "verification": {"status": "ok", "flagged": false},
        "headers": {},
        "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002",
        "sha256": "3bea8a9a07c1e8dc..."}
@@ -31,7 +37,7 @@ defmodule Ankusa.Sink.Message do
   Base64 inflates the inline body by 4/3, so `inline_max_bytes * 4/3` plus
   ~1 KiB of envelope must stay under the smallest message limit on the path
   (Kafka `max.message.bytes`, 1 MiB by default; NATS `max_payload`, 1 MiB;
-  SQS, 256 KiB). The 64 KiB default is about 88 KiB encoded, under all of
+  SQS, 1 MiB). The 64 KiB default is about 88 KiB encoded, under all of
   them. Nothing here enforces it: an oversized message fails at the broker and
   goes through the source's retry policy like any other sink error.
   """
@@ -76,6 +82,7 @@ defmodule Ankusa.Sink.Message do
       dedupe_key: env.dedupe_key,
       replay_id: Map.get(ctx, :replay_id),
       idempotency_key: Envelope.idempotency_key(env),
+      verification: verification(env.verification),
       headers: forwarded_headers(env, Map.get(ctx, :forward_headers, :default))
     }
 
@@ -96,6 +103,28 @@ defmodule Ankusa.Sink.Message do
           {:error, {:claim_check, reason}}
       end
     end
+  end
+
+  @doc """
+  The metadata a queue sink carries outside the body, as `{name, value}` pairs in
+  this order: `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
+  `ankusa_message_version` ("1"), `ankusa_idempotency_key`, `content_type`
+  ("application/json"), `ankusa_dedupe_key`, `ankusa_replay_id`. A pair whose value
+  is `nil` or `""` is left out (no tenant, no dedupe key, not a replay).
+  """
+  @spec attributes(Envelope.t(), Ankusa.Sink.ctx()) :: [{String.t(), String.t()}]
+  def attributes(%Envelope{} = env, ctx) do
+    [
+      {"ankusa_id", env.id},
+      {"ankusa_source_id", env.source_id},
+      {"ankusa_tenant_id", env.tenant_id},
+      {"ankusa_message_version", "1"},
+      {"ankusa_idempotency_key", Envelope.idempotency_key(env)},
+      {"content_type", "application/json"},
+      {"ankusa_dedupe_key", env.dedupe_key},
+      {"ankusa_replay_id", ctx[:replay_id]}
+    ]
+    |> Enum.filter(fn {_name, value} -> is_binary(value) and value != "" end)
   end
 
   @doc """
@@ -134,15 +163,20 @@ defmodule Ankusa.Sink.Message do
   end
 
   @doc """
-  Check `env`'s body in on its own, as a one-claim pack. The pack id is
-  derived from the envelope (its receive time and a hash of its id), so a
-  retry rewrites the same object instead of orphaning one.
+  Check `env`'s body in on its own, as a one-claim pack under a fresh pack id
+  (`Ref.new_pack_id/0`: the current time and 64 random bits, the entropy every
+  batch pack has). Nothing about the id is derivable from the hook, and its
+  date partition is the check-in day, so retention counts from when the object
+  was written.
+
+  Dispatch persists the ref with the attempt's outcome (`fresh_claim`, see
+  `Ankusa.Dispatch.Pipeline`), so a retry reuses it. A crash between the
+  check-in and that write orphans one object, which retention sweeps.
   """
   @spec check_in(atom(), Envelope.t()) ::
           {:ok, ClaimCheck.claim()} | {:error, ClaimCheck.reason()}
   def check_in(instance, %Envelope{} = env) do
-    <<entropy::binary-8, _::binary>> = :crypto.hash(:sha256, env.id)
-    opts = [pack_id: Ref.pack_id(env.received_at, entropy)]
+    opts = [pack_id: Ref.new_pack_id()]
 
     with {:ok, claims} <- ClaimCheck.check_in(instance, env.tenant_id, [claim_item(env)], opts) do
       {:ok, Map.fetch!(claims, env.id)}
@@ -163,4 +197,28 @@ defmodule Ankusa.Sink.Message do
 
   defp claim(%{claim: %{ref: %Ref{}} = claim}, _env), do: {:ok, claim}
   defp claim(ctx, env), do: check_in(ctx.instance, env)
+
+  @doc """
+  How the hook was verified, as every sink carries it: `status` is `:ok`,
+  `:failed` or `:skipped`, and `flagged` is `true` when a failed check was let
+  through by the source's `on_verify_failure: :accept_flag`.
+
+  `:skipped` is a hook nothing checked: a source whose verifier is
+  `Ankusa.Verifier.None` (which accepts everything, so its `:ok` says nothing
+  about authenticity), or an envelope that never went through ingest (a
+  lifecycle event, `verification: nil`). The reason and scheme stay off the
+  wire: a failed-but-accepted hook is the consumer's to distrust, not to
+  diagnose.
+  """
+  @spec verification(Ankusa.Verification.t() | nil) :: %{
+          status: Ankusa.Verification.status(),
+          flagged: boolean()
+        }
+  def verification(%Ankusa.Verification{provider: Ankusa.Verifier.None}),
+    do: %{status: :skipped, flagged: false}
+
+  def verification(%Ankusa.Verification{status: status, flagged: flagged}),
+    do: %{status: status, flagged: flagged}
+
+  def verification(nil), do: %{status: :skipped, flagged: false}
 end

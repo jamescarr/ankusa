@@ -6,21 +6,59 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-14
+
 ### Added
 
+- `:max_inflight` (default 256): publishes awaiting a confirm per connection;
+  past it a publish answers `{:error, :busy}` without being sent.
+- `:idle_timeout_ms` (default `600_000`, `0` never, at least 16 s): a
+  connection with no delivery for that long is closed (`Ankusa.Sink.Reaper`,
+  requires core's) and the next delivery opens a new one, so a deleted or
+  re-pointed source no longer leaves its connection open for the life of the
+  node.
 - Every publish carries the `ankusa_idempotency_key` AMQP header: the same
   tenant-scoped key as the message's `idempotency_key`
   (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
   0.5 or newer**: the key comes from `Ankusa.Envelope.idempotency_key/1`,
   which 0.4.x does not have, so the Hex requirement is now `~> 0.5`.
+- AMQP `message_id` is the hook id; the `ankusa_dedupe_key` and
+  `ankusa_replay_id` AMQP headers are set when present.
 
-### Fixed
+### Changed
 
-- A publish no queue is bound to receive is no longer reported as delivered:
-  every publish is `mandatory`, and `deliver/3` answers
+- Requires `ankusa ~> 0.6` (`Ankusa.Sink.Reaper`); publish core first.
+- Stopping a connection process closes its AMQP connection: `amqp_client`
+  owns that connection, so it used to outlive the process. Publishes waiting
+  on it answer `{:error, :not_connected}`.
+- Confirms are asynchronous: many publishes are outstanding on the channel at
+  once and each caller is answered on its own confirm, so one slow confirm no
+  longer serializes every delivery on the connection.
+- A publish still queued in the connection when its caller's deadline passed
+  answers `{:error, :expired}` and is never sent.
+- The connection dials after it starts (`handle_continue`), so a dead broker
+  never blocks the supervisor; it is registered under a digest of the URL,
+  and its `format_status/1` redacts the URL, so a password never appears in a
+  process name, `:sys.get_state/1` or a crash report.
+- The connection's child spec carries only the options the connection reads,
+  with the URL inside a closure, so `:sys.get_status/1` of
+  `Ankusa.Sink.RabbitMQ.Supervisor`, or a supervisor report, never prints
+  the password.
+- **Breaking: `Ankusa.Sink.RabbitMQ.Connection.publish/4`'s fourth argument is
+  a keyword list of properties** (`message_id:`, `headers:`), not a header
+  list.
+- **Breaking: every publish is mandatory.** A publish no queue is bound to
+  receive is no longer reported as delivered: `deliver/3` answers
   `{:error, {:unroutable, routing_key}}` instead of `:ok`, so the hook is
   retried and then dead-lettered (a `503` under `wal.type: none`) rather than
   settled while the broker kept nothing. There is no option to turn this off.
+
+### Fixed
+
+- amqp_client's processes hold the connection password encrypted: the
+  application sets a random `credentials_obfuscation` secret at start unless
+  the host already set one, so `:sys.get_status/1` or a crash report of an
+  amqp_client process no longer prints `{:plaintext, password}`.
 - A channel the broker closes (a `404` publishing to a deleted exchange, a `406`)
   is reopened at once on the same connection, re-declaring the exchange. The
   publish it interrupted answers `{:error, {:channel_closed, reason}}`.
@@ -109,7 +147,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - The message is built by `Ankusa.Sink.Message` (in `ankusa`), shared
   with `ankusa_kafka`, so both sinks publish byte-identical messages.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.4.0...ankusa_rabbitmq-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.3.0...ankusa_rabbitmq-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.1...ankusa_rabbitmq-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_rabbitmq-v0.2.0...ankusa_rabbitmq-v0.2.1

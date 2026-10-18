@@ -145,16 +145,6 @@ defmodule Ankusa.Instance.Isolated do
 
   def terminate(_reason, _state), do: :ok
 
-  # Crash reports print a process's state, and the subtree's child specs carry
-  # sink options (broker URLs, credentials, tokens).
-  @impl true
-  def format_status(%{state: %{children: children} = state} = status) do
-    ids = Enum.map(children, fn child -> Supervisor.child_spec(child, []).id end)
-    %{status | state: %{state | children: ids}}
-  end
-
-  def format_status(status), do: status
-
   # ── subtree ───────────────────────────────────────────────────────────────
 
   defp start_subtree(children), do: Supervisor.start_link(children, strategy: :one_for_one)

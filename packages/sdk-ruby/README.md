@@ -73,9 +73,9 @@ consumer needs exactly one bit to decide dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64-char lowercase hex |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`.status`, `.body`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`.status`, `.body`) |
 | `ClaimIntegrityError` | `false` | sha256 of the returned bytes doesn't match |
-| `ClaimCheckUnavailableError` | `true` | gateway `5xx`/`503`, or unreachable |
+| `ClaimCheckUnavailableError` | `true` | gateway `5xx`, `408`, `429`, or unreachable |
 
 `health` hits `GET /health` for a liveness probe. There's no `close`: the
 default transport opens one connection per request.
@@ -116,7 +116,8 @@ def call(env)
 end
 ```
 
-`HookHeaders#id` is what a receiver dedupes on: delivery is at-least-once (see
+`HookHeaders#idempotency_key` is what a receiver dedupes on, not the hook id
+(`x-ankusa-id` stays required): delivery is at-least-once (see
 "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
 so the same hook can arrive twice after a retry. When the source extracted the
@@ -126,9 +127,32 @@ Ankusa computed and shipped in `x-ankusa-idempotency-key` — see "Consuming
 queue messages". Header lookup is always case-insensitive, regardless of
 whether the mapping passed in already is.
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way:
+
+```ruby
+# Inside a Rack app's `call(env)`, before anything parses the body:
+begin
+  body = env["rack.input"].read # the raw request body, exactly as received
+  Ankusa.verify_signature(header_map(env), body, [ENV.fetch("ANKUSA_WHSEC")])
+rescue Ankusa::InvalidSignatureError => e
+  return [401, {"content-type" => "application/json"},
+    [JSON.generate(error: "invalid_signature", code: e.code)]]
+end
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own bytes;
+pass several during a rotation. `tolerance_seconds:` (default 300) bounds the
+`webhook-timestamp` window. Failures are `Ankusa::InvalidSignatureError` with
+`code` and `field`, never retryable.
+
 ## Consuming queue messages
 
-Every sink — HTTP, RabbitMQ, Kafka, NATS — delivers one JSON message per hook:
+Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message
+per hook (the HTTP sink sends the original body plus `x-ankusa-*` headers
+instead):
 the identity fields, the body (inline `body_base64` or a claim-check `claim`),
 `sha256`, and, when present, `dedupe_key`, `replay_id`, `idempotency_key` and
 the forwarded provider `headers`. `Ankusa.decode_message` validates all of it
@@ -186,7 +210,8 @@ headers with `Ankusa.parse_headers(headers).idempotency_key`, which reads
 When a sink has grown a backlog, or a downstream processor failed after the
 sink accepted a batch, re-drive it with a replay job over the admin client (see
 "Admin client" below): `"kind" => "dlq"` re-sends rows that dead-lettered,
-`"kind" => "archive"` re-sends hooks over a time window. Replays keep the
+`"kind" => "archive"` re-sends hooks over a time window, `"kind" => "quarantine"`
+re-verifies held hooks and releases those that pass. Replays keep the
 original `id` and `dedupe_key` and add `replay_id`.
 
 ## Routes client
@@ -311,10 +336,10 @@ lib/ankusa/
   sources.rb            # the tenant-scoped source-management client (admin.port)
 test/
   test_helper.rb
-  test_conformance.rb     # runs the language-neutral vectors in conformance/
-  test_routes.rb
-  test_admin.rb
-  test_sources.rb
+  conformance_test.rb     # runs the language-neutral vectors in conformance/
+  routes_test.rb
+  admin_test.rb
+  sources_test.rb
 ```
 
 ## Develop

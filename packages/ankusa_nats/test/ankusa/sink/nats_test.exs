@@ -77,6 +77,19 @@ defmodule Ankusa.Sink.NATSTest do
 
   defp opts(subject, extra \\ []), do: [servers: @servers, subject: subject] ++ extra
 
+  # The sink connects in the background: the first delivery of an instance
+  # waits for the connection, the way a retry would.
+  defp deliver(env, ctx, opts, tries \\ 100) do
+    case NATS.deliver(env, ctx, opts) do
+      {:error, :not_connected} when tries > 0 ->
+        Process.sleep(50)
+        deliver(env, ctx, opts, tries - 1)
+
+      result ->
+        result
+    end
+  end
+
   test "an inline message carries the payload, subject, and headers, and is stored", %{
     instance: inst,
     subject: subject,
@@ -86,7 +99,7 @@ defmodule Ankusa.Sink.NATSTest do
     {:ok, _sid} = Gnat.sub(admin, self(), subject)
 
     env = envelope(%{dedupe_key: "evt_1"})
-    assert :ok = NATS.deliver(env, Map.put(ctx(inst), :replay_id, "rid"), opts(subject))
+    assert :ok = deliver(env, Map.put(ctx(inst), :replay_id, "rid"), opts(subject))
 
     assert_receive {:msg, %{topic: ^subject, body: body, headers: headers}}, 2_000
 
@@ -128,7 +141,7 @@ defmodule Ankusa.Sink.NATSTest do
     body = :crypto.strong_rand_bytes(20_000)
     env = envelope(%{body: body, size: byte_size(body)})
 
-    assert :ok = NATS.deliver(env, ctx(inst), opts(subject, inline_max_bytes: 1_000))
+    assert :ok = deliver(env, ctx(inst), opts(subject, inline_max_bytes: 1_000))
 
     assert_receive {:msg, %{body: payload}}, 2_000
     decoded = JSON.decode!(payload)
@@ -144,10 +157,10 @@ defmodule Ankusa.Sink.NATSTest do
   } do
     {:ok, _sid} = Gnat.sub(admin, self(), "ankusa.test.#{suffix}.>")
 
-    assert :ok = NATS.deliver(envelope(), ctx(inst), opts("ankusa.test.#{suffix}.fixed"))
+    assert :ok = deliver(envelope(), ctx(inst), opts("ankusa.test.#{suffix}.fixed"))
 
     assert :ok =
-             NATS.deliver(
+             deliver(
                envelope(%{source_id: "other"}),
                ctx(inst),
                opts(&"ankusa.test.#{suffix}.dyn.#{&1.source_id}")
@@ -165,7 +178,7 @@ defmodule Ankusa.Sink.NATSTest do
   } do
     subject = "ankusa.missing.#{suffix}.hooks"
 
-    assert {:error, :no_stream} = NATS.deliver(envelope(), ctx(inst), opts(subject))
+    assert {:error, :no_stream} = deliver(envelope(), ctx(inst), opts(subject))
     assert {:ok, %{streams: []}} = Stream.list(admin, subject: subject)
   end
 
@@ -195,7 +208,7 @@ defmodule Ankusa.Sink.NATSTest do
     # in the same ack, so a sink that only looks for a stream name and a
     # sequence reads this as a success.
     assert {:error, {:jetstream, %{"code" => 400, "description" => description}}} =
-             NATS.deliver(envelope(), ctx(inst), opts(subject))
+             deliver(envelope(), ctx(inst), opts(subject))
 
     assert description =~ "maximum"
 
@@ -203,13 +216,117 @@ defmodule Ankusa.Sink.NATSTest do
     assert info.state.messages == 0
   end
 
-  test "an unreachable server fails fast instead of hanging" do
+  test "a hook over the server's max_payload is permanent and the connection survives", %{
+    instance: inst,
+    subject: subject
+  } do
+    # The base64 body in the message is ~1.33 MB, over the server's 1 MiB
+    # `max_payload`. gnat refuses it before sending; the server used to close
+    # the connection instead, cutting off every publish in flight.
+    body = :binary.copy("a", 1_000_000)
+    o = opts(subject, inline_max_bytes: 2_000_000)
+
+    assert :ok = deliver(envelope(), ctx(inst), o)
+    conn = Ankusa.whereis(inst, {:nats_conn, :default})
+
+    assert {:error, {:permanent, :max_payload_exceeded}} =
+             NATS.deliver(envelope(%{body: body, size: byte_size(body)}), ctx(inst), o)
+
+    assert Ankusa.whereis(inst, {:nats_conn, :default}) == conn
+    assert :ok = NATS.deliver(envelope(), ctx(inst), o)
+  end
+
+  test "an unreachable server is :not_connected at once; the handshake never blocks the caller" do
     inst = :"nats_down_#{System.unique_integer([:positive])}"
     opts = [servers: ["127.0.0.1:1"], subject: "whatever", connection_timeout: 1_000]
 
     {elapsed_us, result} = :timer.tc(fn -> NATS.deliver(envelope(), ctx(inst), opts) end)
 
-    assert {:error, :econnrefused} = result
-    assert elapsed_us < 2_000_000
+    assert {:error, :not_connected} = result
+    assert elapsed_us < 100_000
+
+    # Its supervisor keeps trying in the background; asking again stays fast.
+    {elapsed_us, result} = :timer.tc(fn -> NATS.deliver(envelope(), ctx(inst), opts) end)
+    assert {:error, :not_connected} = result
+    assert elapsed_us < 100_000
+  end
+
+  test "the supervisor's child spec never prints the connection's credentials" do
+    canary = "s3cr3t-canary"
+    inst = :"nats_canary_#{System.unique_integer([:positive])}"
+    opts = [servers: ["127.0.0.1:1"], subject: "whatever", password: canary, token: canary]
+
+    assert {:error, :not_connected} = NATS.deliver(envelope(), ctx(inst), opts)
+    assert is_pid(Ankusa.whereis(inst, {:nats_sup, :default}))
+
+    status = :sys.get_status(Ankusa.Sink.NATS.Supervisor)
+    printed = inspect(status, limit: :infinity, printable_limit: :infinity)
+    # The child spec is in the status, so the refute below is not vacuous.
+    assert printed =~ "start_connection_supervisor"
+    refute printed =~ canary
+  end
+
+  test "gnat's processes hold the connection's secrets only as closures", %{
+    instance: inst,
+    subject: subject
+  } do
+    canary = "s3cr3t-canary"
+    o = opts(subject, password: canary, token: canary, nkey_seed: canary)
+
+    # The server requires no auth, so gnat never resolves the secrets; the
+    # connection comes up and both processes keep the settings in their state.
+    assert :ok = deliver(envelope(), ctx(inst), o)
+
+    for pid <- [
+          Ankusa.whereis(inst, {:nats_conn, :default}),
+          Ankusa.whereis(inst, {:nats_sup, :default})
+        ] do
+      # `:sys.get_state/1` skips `format_status/1`, so this is the state itself,
+      # not gnat's redaction of it.
+      printed = inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity)
+
+      assert printed =~ "password: #Function<"
+      refute printed =~ canary
+    end
+  end
+
+  test "the connection is registered in the instance's registry, not as a global atom", %{
+    instance: inst,
+    subject: subject
+  } do
+    assert :ok = deliver(envelope(), ctx(inst), opts(subject))
+    assert is_pid(Ankusa.whereis(inst, {:nats_conn, :default}))
+    refute Process.whereis(:"ankusa_nats.#{inst}.default")
+  end
+
+  test "an idle connection is closed, and the next delivery opens a new one", %{
+    instance: inst,
+    subject: subject,
+    stream: stream,
+    admin: admin
+  } do
+    opts = opts(subject, idle_timeout_ms: 1_000, publish_timeout_ms: 5_000)
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+
+    sup = Ankusa.whereis(inst, {:nats_sup, :default})
+    conn = Ankusa.whereis(inst, {:nats_conn, :default})
+    conn_ref = Process.monitor(conn)
+    key = {inst, {:nats_sup, :default}}
+    reaper = Ankusa.Sink.NATS.Reaper
+
+    # Floored at the publish timeout plus a second.
+    assert [{^key, ^sup, _last, 6_000}] = :ets.lookup(reaper, key)
+
+    true = :ets.update_element(reaper, key, {3, System.monotonic_time(:millisecond) - 6_000})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+
+    assert_receive {:DOWN, ^conn_ref, :process, ^conn, _reason}, 5_000
+    assert Ankusa.whereis(inst, {:nats_sup, :default}) == nil
+    assert Ankusa.whereis(inst, {:nats_conn, :default}) == nil
+
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+    assert Ankusa.whereis(inst, {:nats_conn, :default}) not in [nil, conn]
+    assert {:ok, %{state: %{messages: 2}}} = Stream.info(admin, stream)
   end
 end

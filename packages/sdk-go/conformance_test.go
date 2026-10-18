@@ -178,6 +178,21 @@ func dispatch(t *testing.T, c conformanceCase, recorder *recorder) (any, error) 
 	case "parse_headers":
 		return ankusa.ParseHeaders(headerInput(t, c.Input["headers"]))
 
+	case "verify_signature":
+		opts := ankusa.VerifyOptions{}
+		now := decode[int64](t, c.Input["now"])
+		opts.Now = &now
+		if raw, ok := c.Input["tolerance_seconds"]; ok {
+			tolerance := decode[int64](t, raw)
+			opts.ToleranceSeconds = &tolerance
+		}
+		return ankusa.VerifySignature(
+			headerInput(t, c.Input["headers"]),
+			bodyBytes(t, decode[*bodySpec](t, c.Input["body"])),
+			decode[[]string](t, c.Input["secrets"]),
+			opts,
+		)
+
 	case "decode_message":
 		return ankusa.DecodeMessage([]byte(decode[string](t, c.Input["message"])))
 

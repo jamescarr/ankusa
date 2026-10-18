@@ -1,0 +1,5 @@
+{:linters {:missing-docstring {:level :warning}
+           :warn-on-reflection {:level :warning}}
+ ;; build.clj's `lib` and `version` are read by regex in .mise/lib (pkg.sh,
+ ;; release.exs), so they stay bare `(def name value)` lines.
+ :config-in-ns {build {:linters {:missing-docstring {:level :off}}}}}

@@ -6,19 +6,24 @@ defmodule Ankusa.ClaimCheck.Sweeper do
   any other blob store at boot, so this process only ever runs against
   `BlobStore.LocalFS`.
 
-  Claim objects live in day partitions, `claims/tenant=<t>/dt=<yyyy-mm-dd>/`,
-  so each tick removes whole partition directories: a day is deleted once every
-  object in it is older than `retention_days`, which means a claim is always
-  kept for at least that long. Nothing is listed object by object. A directory
-  that isn't a well-formed partition is left alone rather than guessed at.
+  Claim objects live in day partitions, `claims/tenant=<t>/dt=<yyyy-mm-dd>/`
+  (or `claims/tenant=<t>/shard=<c>/dt=<yyyy-mm-dd>/` under the `:sharded` key
+  layout — both are swept, whatever `claim_check.key_layout` says now), in
+  every store of `claim_check.blob_stores`, so each tick removes whole
+  partition directories: a day is deleted once every object in it is older
+  than `retention_days`, which means a claim is always kept for at least that
+  long. Nothing is listed object by object. A directory that isn't a
+  well-formed partition is left alone rather than guessed at.
   S3/GCS-backed claims are never covered here; use a bucket lifecycle rule on
   the `claims/` prefix instead (see `docs/claim-check.md`).
   """
 
   use GenServer
 
+  require Logger
+
   alias Ankusa.{Config, Telemetry}
-  alias Ankusa.ClaimCheck.Ref
+  alias Ankusa.ClaimCheck.{Ref, Stores}
 
   # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -39,7 +44,7 @@ defmodule Ankusa.ClaimCheck.Sweeper do
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
-    %Config{} = config = Keyword.fetch!(opts, :config)
+    %Config{} = config = Ankusa.config(instance)
     interval = config.claim_check.sweep_interval_ms
     schedule(interval)
     {:ok, %{instance: instance, config: config, interval: interval}}
@@ -82,35 +87,61 @@ defmodule Ankusa.ClaimCheck.Sweeper do
     partitions = partitions(config)
     expired = Enum.filter(partitions, fn {_dir, date} -> Date.compare(date, cutoff) == :lt end)
 
-    Enum.each(expired, fn {dir, _date} -> File.rm_rf!(dir) end)
+    deleted = Enum.count(expired, fn {dir, _date} -> remove(dir) end)
 
     Telemetry.emit(
       [:claim_check, :sweep],
       %{
-        deleted: length(expired),
+        deleted: deleted,
         scanned: length(partitions),
         duration: System.monotonic_time() - started
       },
       %{instance: state.instance}
     )
 
-    {length(expired), length(partitions)}
+    {deleted, length(partitions)}
   end
 
-  # Every `claims/tenant=*/dt=*` directory under the LocalFS root, with its date.
+  # One partition that cannot be removed (a permission, a busy mount) is
+  # logged and skipped; the sweep goes on to the next, and the next tick tries
+  # it again.
+  defp remove(dir) do
+    case File.rm_rf(dir) do
+      {:ok, _removed} ->
+        true
+
+      {:error, reason, path} ->
+        Logger.warning(
+          "[ankusa] claim retention could not remove #{path} (#{inspect(reason)}); " <>
+            "retrying on the next sweep"
+        )
+
+        false
+    end
+  end
+
+  # Every `claims/tenant=*/dt=*` and `claims/tenant=*/shard=*/dt=*` directory
+  # under each claim store's root, with its date. `validate_config!/1` makes
+  # every store LocalFS whenever this process runs. Two stores on one root
+  # (or one on the default root spelled out) are one root here, so nothing is
+  # scanned or counted twice.
   defp partitions(config) do
-    [Config.path(config, "segments"), Ref.claims_prefix(), "tenant=*", "dt=*"]
-    |> Path.join()
-    |> Path.wildcard()
-    |> Enum.filter(&File.dir?/1)
-    |> Enum.flat_map(fn dir ->
-      with "dt=" <> date <- Path.basename(dir),
-           {:ok, date} <- Date.from_iso8601(date) do
-        [{dir, date}]
-      else
-        _ -> []
-      end
-    end)
+    roots =
+      for {_index, Ankusa.BlobStore.LocalFS, opts} <- Stores.list(config),
+          uniq: true,
+          do: Keyword.get(opts, :root) || Config.path(config, "segments")
+
+    for root <- roots,
+        glob <- [
+          [root, Ref.claims_prefix(), "tenant=*", "dt=*"],
+          [root, Ref.claims_prefix(), "tenant=*", "shard=*", "dt=*"]
+        ],
+        dir <- glob |> Path.join() |> Path.wildcard(),
+        File.dir?(dir),
+        "dt=" <> date <- [Path.basename(dir)],
+        {:ok, date} <- [Date.from_iso8601(date)] do
+      {dir, date}
+    end
   end
 
   defp schedule(interval) when is_integer(interval) and interval > 0 do

@@ -7,14 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `gnat ~> 1.18`. The sink hands `:password`, `:token` and
+  `:nkey_seed` to gnat as zero-arity functions, so neither the `Gnat`
+  connection nor its `Gnat.ConnectionSupervisor` holds them in the clear in
+  its state, `:sys.get_status/1` or a crash report.
+- A publish over the server's `max_payload` is
+  `{:error, {:permanent, :max_payload_exceeded}}` and is dead-lettered at once.
+  gnat 1.18 refuses it before sending; on 1.17 the server closed the
+  connection, cutting off every publish in flight on it.
+
+## [0.6.0] - 2026-10-14
+
 ### Added
 
+- `:idle_timeout_ms` (default `600_000`, `0` never, at least
+  `:publish_timeout_ms` plus 1 s): a connection with no delivery for that long
+  is closed (`Ankusa.Sink.Reaper`, requires core's) and the next delivery
+  opens a new one.
 - Every message carries the `ankusa_idempotency_key` header: the same
   tenant-scoped key as the message's `idempotency_key`
-  (`Ankusa.Envelope.idempotency_key/1`), always present. `Nats-Msg-Id` is
-  unchanged. **Requires `ankusa` 0.5 or newer**: the key comes from
+  (`Ankusa.Envelope.idempotency_key/1`), always present. **Requires `ankusa`
+  0.5 or newer**: the key comes from
   `Ankusa.Envelope.idempotency_key/1`, which 0.4.x does not have, so the Hex
   requirement is now `~> 0.5`.
+- `ankusa_dedupe_key` and `ankusa_replay_id` headers when present.
+
+### Changed
+
+- Requires `ankusa ~> 0.6` (`Ankusa.Sink.Reaper`); publish core first.
+- The connection is a `Gnat.ConnectionSupervisor` registered through the
+  instance's registry: starting it returns at once and the handshake runs in
+  that supervisor, so a slow or dead server no longer stalls the
+  `DynamicSupervisor` (and every other delivery) behind it. It reconnects on
+  its own with a 2 s backoff; `deliver/3` returns `{:error, :not_connected}`
+  meanwhile.
+- The connection supervisor's child spec holds the connection settings inside
+  a closure, so `:sys.get_status/1` of `Ankusa.Sink.NATS.Supervisor`, or a
+  supervisor report, never prints a password, token or nkey seed.
+- **Breaking: every publish sets `Nats-Msg-Id`** to the hook `id`
+  (`id:replay:<replay_id>` on a replay), so a stream's duplicate window drops
+  a re-publish of the same delivery inside the window (0.4.0 set none).
 
 ## [0.4.0] - 2026-10-02
 
@@ -79,7 +113,8 @@ No code changes. Released as 0.3.0 in step with `ankusa` 0.3.0 and the other pac
 - The message `claim` field is now a claim-check ref URN string instead of a
   nested ticket object, breaking for consumers; the message `v` stays `1`.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.4.0...ankusa_nats-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.3.0...ankusa_nats-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.2.1...ankusa_nats-v0.3.0
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/ankusa_nats-v0.2.0...ankusa_nats-v0.2.1

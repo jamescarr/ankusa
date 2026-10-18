@@ -13,6 +13,9 @@ defmodule Ankusa.Admin.RouterTest do
   alias Ankusa.Config
   alias Ankusa.Admin.Router
   alias Ankusa.Dispatch.Pipeline
+  alias Ankusa.Queue.Deliveries
+  alias Ankusa.Store
+  alias Ankusa.Store.Keys
 
   # Always fails, so with `max_attempts: 1` one attempt dead-letters the row.
   defmodule AlwaysFailSink do
@@ -63,7 +66,9 @@ defmodule Ankusa.Admin.RouterTest do
         admin: %{enabled: true, port: 0},
         source_store: {Ankusa.SourceStore.Static, sources: sources},
         dispatch: %{
-          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false}
+          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
+          # These tests fill the DLQ: a breaker would park the rows instead.
+          breaker_failures: 0
         }
       )
 
@@ -842,8 +847,8 @@ defmodule Ankusa.Admin.RouterTest do
         )
 
       put_config(config)
-      start_supervised!({Ankusa.Store, instance: config.instance, config: config})
-      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(config)
+      start_supervised!({Ankusa.Store, instance: config.instance})
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
       %{inst: config.instance, config: config}
@@ -868,6 +873,7 @@ defmodule Ankusa.Admin.RouterTest do
              }
 
       assert created["on_verify_failure"] == "reject"
+      assert created["trust_url_tenant"] == false
       assert created["sinks"] == [%{"type" => "log"}]
       refute conn.resp_body =~ "s3cr3t"
 
@@ -1069,8 +1075,8 @@ defmodule Ankusa.Admin.RouterTest do
         )
 
       put_config(config)
-      start_supervised!({Ankusa.Store, instance: config.instance, config: config})
-      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(config)
+      start_supervised!({Ankusa.Store, instance: config.instance})
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
       conn = call(config.instance, :delete, "/v1/tenants/acme/sources/billing")
@@ -1108,6 +1114,196 @@ defmodule Ankusa.Admin.RouterTest do
       conn = call(inst, :post, "/v1/tenants/acme/sources", oversized)
       assert conn.status == 400
       assert %{"error" => "invalid_source"} = JSON.decode!(conn.resp_body)
+    end
+
+    test "a write the store cannot persist is 503 store_unavailable, not 400", %{
+      inst: inst
+    } do
+      body = JSON.encode!(spec(%{"name" => "billing"}))
+      assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
+
+      # The source table survives; the store it persists to is gone.
+      stop_supervised!({Ankusa.Store, inst})
+
+      for conn <- [
+            call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "x"}))),
+            call(inst, :put, "/v1/tenants/acme/sources/billing", JSON.encode!(spec(%{}))),
+            call(inst, :delete, "/v1/tenants/acme/sources/billing")
+          ] do
+        assert conn.status == 503
+        assert JSON.decode!(conn.resp_body) == %{"error" => "store_unavailable"}
+        assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+      end
+
+      assert call(inst, :get, "/v1/tenants/acme/sources/billing").status == 200
+    end
+  end
+
+  describe "a shared source under a tenant-path resolver" do
+    setup do
+      config =
+        test_config(
+          roles: [:dispatch],
+          admin: %{enabled: true},
+          route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+          source_store: {Ankusa.SourceStore.Persistent, decoder: &decoder/2}
+        )
+
+      put_config(config)
+      start_supervised!({Ankusa.Store, instance: config.instance})
+      {:ok, pid} = Ankusa.SourceStore.Persistent.start_link(instance: config.instance)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      %{inst: config.instance}
+    end
+
+    test "trust_url_tenant is what lets an unverified one be written, and the view shows it", %{
+      inst: inst
+    } do
+      open = %{"name" => "open", "verify" => %{"type" => "none"}}
+
+      conn = call(inst, :post, "/v1/tenants/default/sources", JSON.encode!(spec(open)))
+      assert conn.status == 400
+      assert JSON.decode!(conn.resp_body)["error"] == "invalid_source"
+
+      conn =
+        call(
+          inst,
+          :post,
+          "/v1/tenants/default/sources",
+          JSON.encode!(spec(Map.put(open, "trust_url_tenant", true)))
+        )
+
+      assert conn.status == 201
+
+      assert %{"name" => "open", "trust_url_tenant" => true} =
+               created = JSON.decode!(conn.resp_body)
+
+      conn = call(inst, :get, "/v1/tenants/default/sources/open")
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body) == created
+
+      conn = call(inst, :get, "/v1/tenants/default/sources")
+      assert %{"entries" => [^created]} = JSON.decode!(conn.resp_body)
+    end
+  end
+
+  describe "source delete with undelivered rows" do
+    test "DELETE with queued rows is 409 source_has_deliveries and keeps the source" do
+      config = start_backlog_instance([:edge, :dispatch])
+      create_source!(config.instance, "billing")
+      ingest!(config, "acme.billing", "one")
+      ingest!(config, "acme.billing", "two")
+      # One failed attempt each; then both rows wait out an hour's backoff.
+      assert {:ok, 0} = Pipeline.tick(config.instance)
+
+      conn = call(config.instance, :delete, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 409
+
+      assert JSON.decode!(conn.resp_body) == %{
+               "error" => "source_has_deliveries",
+               "pending" => 2,
+               "inflight" => 0
+             }
+
+      assert call(config.instance, :get, "/v1/tenants/acme/sources/billing").status == 200
+    end
+
+    test "?deliveries=dead_letter dead-letters the backlog, then deletes; a re-created source starts empty" do
+      config = start_backlog_instance([:edge, :dispatch])
+      inst = config.instance
+      create_source!(inst, "billing")
+      create_source!(inst, "other")
+      ingest!(config, "acme.billing", "one")
+      ingest!(config, "acme.billing", "two")
+      ingest!(config, "acme.other", "three")
+      assert {:ok, 0} = Pipeline.tick(inst)
+
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/billing?deliveries=dead_letter")
+      assert conn.status == 204
+
+      assert {:ok, %{total: 2, entries: entries}} = Ankusa.Queue.dead(inst, limit: 10)
+      assert Enum.map(entries, & &1.envelope.body) |> Enum.sort() == ["one", "two"]
+      assert Enum.all?(entries, &(&1.reason == inspect({:source_gone, "acme.billing"})))
+      assert call(inst, :get, "/v1/tenants/acme/sources/billing").status == 404
+
+      # Another source's backlog is untouched.
+      assert {:ok, %{pending: 1, inflight: 0}} =
+               Ankusa.Queue.pending_for_source(inst, "acme.other")
+
+      create_source!(inst, "billing")
+
+      assert {:ok, %{pending: 0, inflight: 0}} =
+               Ankusa.Queue.pending_for_source(inst, "acme.billing")
+
+      assert {:ok, 0} = Pipeline.tick(inst)
+      assert {:ok, %{total: 2}} = Ankusa.Queue.dead(inst, limit: 10)
+    end
+
+    test "an unknown ?deliveries= value is 400 invalid_filter" do
+      config = start_backlog_instance([:edge, :dispatch])
+      create_source!(config.instance, "billing")
+
+      conn = call(config.instance, :delete, "/v1/tenants/acme/sources/billing?deliveries=drop")
+      assert conn.status == 400
+
+      assert JSON.decode!(conn.resp_body) == %{
+               "error" => "invalid_filter",
+               "field" => "deliveries"
+             }
+
+      assert call(config.instance, :get, "/v1/tenants/acme/sources/billing").status == 200
+    end
+
+    test "?deliveries=dead_letter on a node without dispatch is 409 role_not_enabled" do
+      config = start_backlog_instance([:edge])
+      create_source!(config.instance, "billing")
+      ingest!(config, "acme.billing", "one")
+
+      conn =
+        call(config.instance, :delete, "/v1/tenants/acme/sources/billing?deliveries=dead_letter")
+
+      assert conn.status == 409
+
+      assert JSON.decode!(conn.resp_body) == %{
+               "error" => "role_not_enabled",
+               "role" => "dispatch"
+             }
+
+      assert call(config.instance, :get, "/v1/tenants/acme/sources/billing").status == 200
+    end
+
+    test "rows written before rows carried their source are matched by their hook" do
+      config = start_backlog_instance([:edge])
+      inst = config.instance
+      create_source!(inst, "billing")
+      create_source!(inst, "other")
+      ingest!(config, "acme.billing", "one")
+      ingest!(config, "acme.billing", "two")
+      ingest!(config, "acme.other", "three")
+
+      {:ok, dues} = Deliveries.due(inst, System.system_time(:millisecond), 0, 10, 1_000_000)
+      assert [first, second, third] = Enum.sort_by(dues, & &1.seq)
+
+      # `first` and `third` lose `source_id`, as rows from before it existed;
+      # `second` is claimed (in flight).
+      for due <- [first, third] do
+        {:ok, row} = Deliveries.row(inst, due.seq, due.sink)
+        legacy = Deliveries.encode_row(Map.delete(row, :source_id))
+        :ok = Store.write(inst, [{:put, :deliveries, Keys.delivery(due.seq, due.sink), legacy}])
+      end
+
+      :ok = Deliveries.claim(inst, [second])
+
+      assert {:ok, %{pending: 1, inflight: 1}} =
+               Ankusa.Queue.pending_for_source(inst, "acme.billing")
+
+      assert {:ok, %{pending: 1, inflight: 0}} =
+               Ankusa.Queue.pending_for_source(inst, "acme.other")
+
+      conn = call(inst, :delete, "/v1/tenants/acme/sources/billing")
+      assert conn.status == 409
+      assert %{"pending" => 1, "inflight" => 1} = JSON.decode!(conn.resp_body)
     end
   end
 
@@ -1223,16 +1419,46 @@ defmodule Ankusa.Admin.RouterTest do
     )
   end
 
+  # An instance with `roles` over a writable source store. Dispatch fails every
+  # attempt and backs off for an hour, so after one `Pipeline.tick/1` each row
+  # sits pending for the rest of the test.
+  defp start_backlog_instance(roles) do
+    config =
+      test_config(
+        roles: roles,
+        admin: %{enabled: true, port: 0},
+        source_store: {Ankusa.SourceStore.Persistent, decoder: &decoder/2},
+        dispatch: %{
+          retry:
+            {Ankusa.RetryPolicy.Exponential, base_ms: 3_600_000, max_attempts: 10, jitter: false},
+          breaker_failures: 0
+        }
+      )
+
+    put_config(config)
+    start_supervised!({Ankusa.Instance, config})
+    config
+  end
+
+  defp create_source!(inst, name) do
+    body = JSON.encode!(%{"name" => name, "sinks" => [%{"type" => "fail"}]})
+    assert call(inst, :post, "/v1/tenants/acme/sources", body).status == 201
+  end
+
   # Stands in for `AnkusaServer.Config.source_from_map!/2`: the store only cares
   # that the decoder returns source options or raises.
   defp decoder(_source_id, spec) do
     case Map.get(spec, "sinks") do
-      [_ | _] = sinks -> [sinks: Enum.map(sinks, &sink/1)]
-      _ -> raise ArgumentError, "sinks must be a non-empty list"
+      [_ | _] = sinks ->
+        [sinks: Enum.map(sinks, &sink/1), trust_url_tenant: spec["trust_url_tenant"] || false]
+
+      _ ->
+        raise ArgumentError, "sinks must be a non-empty list"
     end
   end
 
   defp sink(%{"type" => "log"}), do: {Ankusa.Sink.Log, []}
+  defp sink(%{"type" => "fail"}), do: {AlwaysFailSink, []}
   defp sink(%{"type" => "http"} = spec), do: {Ankusa.Sink.Http, [url: spec["url"] || "http://x"]}
   defp sink(other), do: raise(ArgumentError, "unknown sink: #{inspect(other)}")
 end

@@ -168,7 +168,11 @@ defmodule Ankusa.SDK.Sources do
   @doc """
   Delete a source: `DELETE /v1/tenants/{tenant}/sources/{name}`.
 
-  Returns `:ok` on `2xx` (`204` with an empty body).
+  Returns `:ok` on `2xx` (`204` with an empty body). A source that still has
+  undelivered hooks on the server's node is `409 source_has_deliveries`:
+  `{:error, %Ankusa.SDK.SourceConflictError{}}` whose `body` carries that
+  `"error"` and the `"pending"`/`"inflight"` counts. This function never sends
+  the admin API's `?deliveries=dead_letter`.
   """
   @spec delete_source(t(), term(), term()) :: :ok | {:error, Exception.t()}
   def delete_source(%__MODULE__{} = client, tenant, name) do

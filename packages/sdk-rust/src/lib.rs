@@ -8,6 +8,7 @@ mod claim_ref;
 mod client;
 mod message;
 mod routes;
+mod signature;
 mod transport;
 mod webhook;
 
@@ -29,6 +30,10 @@ pub use crate::routes::{
     Access, DryRunIpRule, DryRunReason, DryRunRequest, DryRunResult, IpRule, IpRuleScope, IpRules,
     ListRoutesParams, Route, RouteInput, RoutePage, RoutePatch, RoutesClient, RoutesError,
     RoutesHealth, RoutesRejection,
+};
+pub use crate::signature::{
+    DEFAULT_TOLERANCE_SECONDS, InvalidSignatureError, VerifiedSignature, VerifyOptions,
+    verify_signature,
 };
 pub use crate::transport::{ReqwestTransport, Transport, TransportError};
 pub use crate::webhook::{HookHeaders, MissingHookIdError, parse_headers};

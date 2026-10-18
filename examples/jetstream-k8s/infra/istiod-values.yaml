@@ -1,0 +1,15 @@
+meshConfig:
+  accessLogFile: /dev/stdout
+  defaultConfig:
+    # Apps connect to NATS and the Kubernetes API as they boot; start them only
+    # once their sidecar can carry the traffic.
+    holdApplicationUntilProxyStarts: true
+    # Envoy closes drained TCP connections after this. The control panel's
+    # "deny" levers are AuthorizationPolicies: new connections are refused at
+    # once, existing NATS connections are cut when Envoy drains them.
+    drainDuration: 5s
+global:
+  proxy:
+    resources:
+      requests: {cpu: 10m, memory: 64Mi}
+      limits: {memory: 256Mi}

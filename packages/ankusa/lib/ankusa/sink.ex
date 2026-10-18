@@ -7,6 +7,21 @@ defmodule Ankusa.Sink do
   Delivery is at-least-once. Return `:ok` on success; `{:error, reason}` triggers
   the source's `Ankusa.RetryPolicy`.
 
+  ## Error classes
+
+  Two shapes of `reason` change what dispatch does with a failure:
+
+    * `{:permanent, term}` — retrying cannot help (a `410 Gone`, a record the
+      broker will never take). The row is dead-lettered after this attempt,
+      whatever attempts the retry policy had left, and the failure does not
+      count towards the sink's circuit breaker.
+    * `{:retry_after, ms, term}` — the sink asked for a pause (`Retry-After`).
+      The next attempt is no sooner than `ms` (capped at an hour) or the
+      policy's own backoff, whichever is later; the policy still decides when
+      to give up.
+
+  Every other `reason` is transient and follows the retry policy.
+
   Deliveries are **not ordered**: hooks for one sink may be delivered in any
   order, and a retry runs after whatever is due before it. A Kafka partition key
   or an AMQP routing key only keeps the order hooks were *published* in, so it
@@ -34,7 +49,23 @@ defmodule Ankusa.Sink do
           optional(atom()) => term()
         }
 
-  @callback deliver(Envelope.t(), ctx(), opts :: keyword()) :: :ok | {:error, term()}
+  @typedoc "What `c:deliver/3` may return; see \"Error classes\"."
+  @type failure :: {:permanent, term()} | {:retry_after, pos_integer(), term()} | term()
+
+  @callback deliver(Envelope.t(), ctx(), opts :: keyword()) :: :ok | {:error, failure()}
+
+  @doc """
+  The class of a sink's error `reason` (see "Error classes"): `{:permanent,
+  term}`, `{:retry_after, ms, term}` with a positive integer `ms`, or
+  `{:transient, reason}` for anything else.
+  """
+  @spec classify(term()) ::
+          {:permanent, term()} | {:retry_after, pos_integer(), term()} | {:transient, term()}
+  def classify({:permanent, _term} = reason), do: reason
+
+  def classify({:retry_after, ms, _term} = reason) when is_integer(ms) and ms > 0, do: reason
+
+  def classify(reason), do: {:transient, reason}
 
   @doc """
   The largest body this sink sends inline, or `nil` if it never uses the claim

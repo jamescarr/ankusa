@@ -19,7 +19,8 @@ defmodule Ankusa.Storage do
     %Config{storage: %{codec: {codec, _}}} = Ankusa.config(instance)
 
     with {:ok, {segment_key, offset, length, seq}} <- locate(instance, event_id),
-         {:ok, frame} <- Ankusa.BlobStore.get_range(instance, segment_key, offset, length),
+         {:ok, frame} <-
+           Ankusa.BlobStore.get_range(instance, :segments, segment_key, offset, length),
          {:ok, payload} <- codec.decode_record(frame) do
       {:ok, %{Envelope.from_binary(payload) | seq: seq}}
     else
@@ -40,7 +41,7 @@ defmodule Ankusa.Storage do
   end
 
   defp locate_in(instance, %{key: key, idx_key: idx_key}, event_id) do
-    with {:ok, bin} <- Ankusa.BlobStore.get(instance, idx_key),
+    with {:ok, bin} <- Ankusa.BlobStore.get(instance, :segments, idx_key),
          {:ok, {offset, length, seq}} <- Map.fetch(:erlang.binary_to_term(bin), event_id) do
       {:ok, {key, offset, length, seq}}
     else

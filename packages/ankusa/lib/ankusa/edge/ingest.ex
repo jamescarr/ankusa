@@ -45,7 +45,11 @@ defmodule Ankusa.Edge.Ingest do
   refusal goes through `refused/2`, so a metric label built from it is bounded.
   """
   @type refusal ::
-          :unknown_source | :payload_too_large | :body_read_failed | :invalid_header
+          :unknown_source
+          | :payload_too_large
+          | :body_read_failed
+          | :invalid_header
+          | :store_unavailable
 
   @type raw_request :: %{
           required(:method) => String.t(),
@@ -72,19 +76,47 @@ defmodule Ankusa.Edge.Ingest do
   checked here, before anything is written: a bad one from any RouteResolver is
   a 404, like an unknown source, not a dispatch failure after the provider was
   already acked. A miss is counted as a `:unknown_source` refusal.
+
+  A source owned by a tenant (any `tenant_id` but `"default"`, the value a
+  source gets when none is given) answers only for that tenant: a route that
+  names a different one is the same `404` as a missing source, so the URL's
+  tenant learns nothing about another tenant's sources. A `"default"` source
+  is shared: it serves whatever tenant the route names (one `stripe` source
+  behind `/webhooks/:tenant/stripe` for every customer).
+
+  A source store that cannot answer (`{:error, :unavailable}`) is
+  `{:error, :store_unavailable}`, a `503` the provider retries, never a `404`.
   """
   @spec lookup(atom(), Ankusa.Route.t()) ::
-          {:ok, Source.t(), tenant_id :: String.t()} | {:error, :unknown_source}
+          {:ok, Source.t(), tenant_id :: String.t()}
+          | {:error, :unknown_source | :store_unavailable}
   def lookup(instance, %Ankusa.Route{} = route) do
-    with {:ok, %Source{} = source} <- Ankusa.SourceStore.fetch(instance, route.source_id),
-         tenant_id = route.tenant_id || source.tenant_id,
-         true <- Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id) do
-      {:ok, source, tenant_id}
-    else
+    case Ankusa.SourceStore.fetch(instance, route.source_id) do
+      {:ok, %Source{} = source} ->
+        tenant_id = route.tenant_id || source.tenant_id
+
+        if bound_elsewhere?(source, route) or not Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id),
+          do: unknown_source(instance),
+          else: {:ok, source, tenant_id}
+
+      {:error, :unavailable} ->
+        refused(instance, :store_unavailable)
+        {:error, :store_unavailable}
+
       _ ->
-        refused(instance, :unknown_source)
-        {:error, :unknown_source}
+        unknown_source(instance)
     end
+  end
+
+  defp bound_elsewhere?(%Source{tenant_id: "default"}, _route), do: false
+  defp bound_elsewhere?(_source, %Ankusa.Route{tenant_id: nil}), do: false
+
+  defp bound_elsewhere?(%Source{tenant_id: own}, %Ankusa.Route{tenant_id: asked}),
+    do: own != asked
+
+  defp unknown_source(instance) do
+    refused(instance, :unknown_source)
+    {:error, :unknown_source}
   end
 
   @doc """
@@ -106,7 +138,7 @@ defmodule Ankusa.Edge.Ingest do
          :ok <- check_headers(req.headers) do
       ingest(instance, source, tenant_id, req)
     else
-      {:error, :unknown_source} = error ->
+      {:error, reason} = error when reason in [:unknown_source, :store_unavailable] ->
         error
 
       {:invalid_header, name} ->
@@ -165,31 +197,35 @@ defmodule Ankusa.Edge.Ingest do
   end
 
   # The charge comes after verification, and only for hooks verification
-  # accepted: a forged flood is free, so it can never lock a tenant out of its
-  # own budget. Quarantine has its own per-source bucket and never spends a
-  # tenant's.
+  # accepted cleanly: a forged flood never spends a tenant's budget, so it can
+  # never lock a tenant out of it. A hook accepted *flagged* (`accept_flag`)
+  # spends its source's quarantine bucket instead, so a forged flood is not
+  # free either; quarantined hooks spend the same bucket in `Quarantine.put/3`.
   defp admit(instance, source, env) do
-    # A forged, flag-accepted request must not claim a provider event key and
-    # suppress the real event, so no key is extracted when the hook was flagged.
-    env =
-      if match?(%Verification{flagged: true}, env.verification) do
-        env
-      else
-        %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
+    if match?(%Verification{flagged: true}, env.verification) do
+      # A forged, flag-accepted request must not claim a provider event key and
+      # suppress the real event, so no key is extracted when the hook was flagged.
+      case Quarantine.hit(instance, env.source_id) do
+        :ok -> commit(instance, source, env)
+        {:rate_limited, ms} -> {:error, {:quarantine_rate_limited, ms}}
+        {:error, :store_unavailable} -> {:error, :store_unavailable}
       end
+    else
+      env = %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
 
-    case RateLimiter.hit(instance, env.tenant_id) do
-      :ok ->
-        commit(instance, source, env)
+      case RateLimiter.hit(instance, env.tenant_id) do
+        :ok ->
+          commit(instance, source, env)
 
-      {:error, {:rate_limited, _}} = limited ->
-        Ankusa.Telemetry.emit([:rate_limit, :rejected], %{}, %{
-          instance: instance,
-          tenant_id: env.tenant_id,
-          source_id: env.source_id
-        })
+        {:error, {:rate_limited, _}} = limited ->
+          Ankusa.Telemetry.emit([:rate_limit, :rejected], %{}, %{
+            instance: instance,
+            tenant_id: env.tenant_id,
+            source_id: env.source_id
+          })
 
-        limited
+          limited
+      end
     end
   end
 

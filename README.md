@@ -13,9 +13,9 @@ _**Don't fight the traffic. Steer it.**_
 
 Ankusa is a self-hosted webhook receiver. Point Stripe, GitHub, or any provider
 at it: every hook is written to a durable local store before Ankusa answers
-`2xx`, every accepted POST is stored under a fresh `id`, and each hook is
-delivered to your own worker over HTTP, RabbitMQ, Kafka, NATS JetStream, or
-Redis pub/sub, with retries, a dead-letter queue, and replay. Start with one
+`2xx`, every accepted POST is stored under a fresh `id` (unless the source sets `dedupe`), and each hook is
+delivered to your own worker over HTTP, RabbitMQ, Kafka, NATS JetStream,
+Redis pub/sub, Amazon SQS, or Google Cloud Pub/Sub, with retries, a dead-letter queue, and replay. Start with one
 container. Grow into a fleet by changing config, not code.
 
 ## Quickstart
@@ -84,8 +84,8 @@ accepts it is one config key. By default (`wal.type: disk` — the queue's mode,
 named for the log it replaced) the hook is written to the node's RocksDB store,
 the fsync lands first, and `201 accepted` is the only committed response —
 there is no `200`. If a node dies before the write, the provider never got an
-ack and retries; that retry is a new hook with a new `id`, stored and delivered
-again, because ingest does no deduplication and delivery is at-least-once.
+ack and retries; unless the source sets [`dedupe`](docs/configuration.md#sources), that retry is a new hook with a new `id`, stored and delivered
+again, and delivery is at-least-once.
 Under `wal.type: none` the node keeps no store at all: it publishes to the
 source's sinks inside the request and acks on the broker's confirm. Either way,
 when the destination slows down,
@@ -112,7 +112,7 @@ flowchart LR
 
 - Signature verification via a configurable HMAC engine, with named schemes for Stripe, GitHub, Standard Webhooks, Shopify, and Slack, plus any body-HMAC scheme you describe in config
 - Multi-tenant catch URLs, with a pluggable resolver for custom schemes
-- Delivery over HTTP, RabbitMQ, Kafka, NATS JetStream, and Redis pub/sub, with
+- Delivery over HTTP, RabbitMQ, Kafka, NATS JetStream, Redis pub/sub, Amazon SQS, and Google Cloud Pub/Sub, with
   retries, backoff, a dead letter queue, and replay
 - Quarantine for hooks that fail verification, so nothing is silently dropped
 - Archiving to S3, GCS, Azure Blob Storage, OCI Object Storage, Cloudflare R2, or MinIO
@@ -126,8 +126,8 @@ replace that piece and keep the rest.
 
 When one box is not enough, run N independent all-role nodes behind a load
 balancer. Each node has its own data volume, its own store, and its own
-DLQ/admin API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ, or
-Redis pub/sub.
+DLQ/admin API. Archive to S3 or GCS, and fan out to Kafka, NATS, RabbitMQ,
+Redis pub/sub, SQS, or Google Cloud Pub/Sub.
 A disk-mode node keeps `edge`, `dispatch`, and `storage` in one BEAM node, so a
 node is the unit of scale: add nodes, not roles. Give each node **its own
 bucket** (or LocalFS) for segments. Segment keys are
@@ -143,7 +143,7 @@ flowchart LR
     E1 --> ST1[("own store\n+ volume")]
     E2 --> ST2[("own store\n+ volume")]
     E3 --> ST3[("own store\n+ volume")]
-    ST1 & ST2 & ST3 --> Q[Kafka / NATS / RabbitMQ / HTTP]
+    ST1 & ST2 & ST3 --> Q[Kafka / NATS / RabbitMQ / SQS / HTTP]
     ST1 & ST2 & ST3 --> S[(S3 / GCS)]
     Q --> W[Your workers]
 ```

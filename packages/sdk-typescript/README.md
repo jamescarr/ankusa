@@ -27,7 +27,6 @@ npm install ankusa
 ```
 
 Node 20 or newer (ESM only).
-
 ### Use
 
 ```ts
@@ -70,9 +69,9 @@ consumer needs exactly one bit to decide dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64 lowercase hex chars |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`.status`, `.body`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`.status`, `.body`) |
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
-| `ClaimCheckUnavailableError` | `true` | gateway `5xx`/`503`, or unreachable |
+| `ClaimCheckUnavailableError` | `true` | gateway `5xx`, `408`, `429`, or unreachable |
 
 `health()` hits `GET /health` for a liveness probe.
 
@@ -128,7 +127,8 @@ await admin.listDeadLetters({ limit: 10 });
 await admin.listQuarantined();
 
 // A replay job re-sends dead rows (`kind: "dlq"`) or archived hooks over a
-// `received_at` window (`kind: "archive"`), at `rate` items per second and
+// `received_at` window (`kind: "archive"`), or held hooks re-verified and
+// released when they pass (`kind: "quarantine"`), at `rate` items per second and
 // only while live traffic leaves dispatch capacity free.
 const job = await admin.createReplay({ kind: "dlq", source_id: "demo", rate: 500 });
 await admin.getReplay(job.id);
@@ -178,11 +178,37 @@ has a dedupe rule; `replayId` is set only on replayed deliveries;
 `idempotencyKey` is the tenant-scoped key Ankusa computed and shipped in
 `x-ankusa-idempotency-key`.
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way. Verify before you
+trust the body:
+
+```ts
+import { InvalidSignatureError, verifySignature } from "ankusa";
+
+try {
+  // `rawBody` is the request body exactly as received, not re-serialized JSON.
+  verifySignature({ headers: req.headers, body: rawBody, secrets: [process.env.ANKUSA_WHSEC!] });
+} catch (err) {
+  if (err instanceof InvalidSignatureError) return res.status(401).json({ error: "invalid_signature", code: err.code });
+  throw err;
+}
+```
+
+`secrets` is one secret or several during a rotation (`whsec_` + base64, or
+any other string used as its own bytes). `toleranceSeconds` (default 300)
+bounds how old or new `webhook-timestamp` may be. Failures are
+`InvalidSignatureError` with `code` (`invalid_secret`, `missing_header`,
+`invalid_timestamp`, `timestamp_out_of_tolerance`, `no_matching_signature`),
+the offending header in `field`, and `retryable: false`.
+
 ## Consuming queue messages
 
-Ankusa's sinks carry a JSON envelope (`v: 1`) alongside the body — as the
-broker payload for RabbitMQ/Kafka/NATS/Redis, or as the HTTP body for the
-webhook helper. `decodeMessage` parses it and verifies the bytes it names, so
+Ankusa's broker sinks (RabbitMQ, Kafka, NATS, Redis) carry a JSON envelope
+(`v: 1`) alongside the body as the broker payload. The HTTP sink sends the
+original body verbatim plus `x-ankusa-*` headers; read those with the webhook
+helper. `decodeMessage` parses the envelope and verifies the bytes it names, so
 a consumer never touches a corrupt or truncated body:
 
 ```ts
@@ -243,7 +269,6 @@ src/
     ref.ts
     errors.ts
     claim-check-schema.d.ts   # generated, see "Develop"
-    client.test.ts
   routes/              # the route-management client (routes.admin.port)
     index.ts
     client.ts
@@ -262,6 +287,8 @@ src/
   message/             # the queue-message decoder + idempotency-key helper
     index.ts
     message.test.ts
+  conformance/         # shared SDK conformance suite
+    conformance.test.ts
 ```
 
 A future client (say, an ingest helper) gets its own `src/<name>/` directory

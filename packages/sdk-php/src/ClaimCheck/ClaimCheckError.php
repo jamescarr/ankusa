@@ -15,9 +15,10 @@ use Ankusa\AnkusaException;
  * right.
  *
  * Non-retryable: the ref or expected sha256 is malformed, the gateway said
- * `404`/other `4xx`, or the bytes that came back don't match the sha256.
- * Retryable: the gateway said `5xx`/`503`, or the request never completed
- * (network error, timeout).
+ * `404` or another `4xx` (except `408`/`429`), or the bytes that came back
+ * don't match the sha256.
+ * Retryable: the gateway said `5xx`, `408` or `429`, or the request never
+ * completed (network error, timeout).
  */
 abstract class ClaimCheckError extends \RuntimeException implements AnkusaException
 {

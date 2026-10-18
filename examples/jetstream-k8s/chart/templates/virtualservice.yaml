@@ -1,0 +1,54 @@
+# One VirtualService, so the control panel's fault lever has stable JSON-patch
+# paths: the two ingest routes are /spec/http/0 (direct) and /spec/http/1
+# (durable), and the panel patches both. Keep them first and in this order.
+# The monitoring routes (Grafana, Prometheus) go after them and before the
+# control panel's catch-all. Neither rewrites: both serve under their prefix.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: demo-routes
+  labels:
+    {{- include "demo.labels" "gateway" | nindent 4 }}
+spec:
+  hosts: ["*"]
+  gateways: [demo-gateway]
+  http:
+    - name: ankusa-ingest
+      match:
+        - uri: {exact: /webhooks/demo}
+      route:
+        - destination:
+            host: ankusa
+            port: {number: 4000}
+      # Istio retries a 503 twice by default; that would hide exactly what the
+      # fleet returned. The sender retries on its own and counts it.
+      retries: {attempts: 0}
+      timeout: 15s
+    - name: ankusa-durable
+      match:
+        - uri: {exact: /webhooks/durable}
+      route:
+        - destination:
+            host: ankusa-durable
+            port: {number: 4000}
+      retries: {attempts: 0}
+      timeout: 15s
+    - name: grafana
+      match:
+        - uri: {prefix: /grafana}
+      route:
+        - destination:
+            host: grafana
+            port: {number: 3000}
+    - name: prometheus
+      match:
+        - uri: {prefix: /prometheus}
+      route:
+        - destination:
+            host: prometheus
+            port: {number: 9090}
+    - name: control-panel
+      route:
+        - destination:
+            host: control-panel
+            port: {number: 4100}

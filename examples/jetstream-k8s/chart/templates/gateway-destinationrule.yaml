@@ -1,0 +1,14 @@
+# The control panel posts its synthetic webhooks to the ingress gateway Service
+# from inside the mesh. The gateway's port-80 server speaks plain HTTP, so the
+# caller's sidecar must not originate (auto-)mTLS to it.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: gateway-plaintext
+  labels:
+    {{- include "demo.labels" "gateway" | nindent 4 }}
+spec:
+  host: {{ .Values.gateway.serviceHost }}
+  trafficPolicy:
+    tls:
+      mode: DISABLE

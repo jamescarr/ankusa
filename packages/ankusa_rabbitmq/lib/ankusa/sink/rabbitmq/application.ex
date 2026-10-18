@@ -16,8 +16,18 @@ defmodule Ankusa.Sink.RabbitMQ.Application do
 
   @impl true
   def start(_type, _args) do
+    # amqp_client encrypts every connection's password with credentials_obfuscation,
+    # but only once a secret is set; until then it keeps {:plaintext, password} in its
+    # processes' state. Set a random one unless the host application already set its own.
+    if :credentials_obfuscation.secret() == :"$pending-secret" do
+      :ok = :credentials_obfuscation.set_secret(:crypto.strong_rand_bytes(32))
+    end
+
     children = [
-      {DynamicSupervisor, name: Ankusa.Sink.RabbitMQ.Supervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Ankusa.Sink.RabbitMQ.Supervisor, strategy: :one_for_one},
+      # Stops a connection no delivery has used for its `:idle_timeout_ms`.
+      {Ankusa.Sink.Reaper,
+       name: Ankusa.Sink.RabbitMQ.Reaper, supervisor: Ankusa.Sink.RabbitMQ.Supervisor}
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Ankusa.Sink.RabbitMQ.TopSup)

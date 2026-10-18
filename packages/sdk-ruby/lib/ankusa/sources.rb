@@ -21,7 +21,9 @@ module Ankusa
   class SourceNotFoundError < SourcesError
   end
 
-  # 409 source_exists: a source with that name already exists.
+  # 409 source_exists: a source with that name already exists; or
+  # 409 source_has_deliveries: a delete found the source still has undelivered
+  # hooks. The body's "error" says which.
   class SourceConflictError < SourcesError
   end
 
@@ -169,7 +171,10 @@ module Ankusa
     # Delete a source: DELETE /v1/tenants/<tenant>/sources/<name>.
     #
     # Succeeds with no return value (the server answers 204 with an empty body);
-    # a missing source raises `SourceNotFoundError`.
+    # a missing source raises `SourceNotFoundError`. A source that still has
+    # undelivered hooks on the server's node raises `SourceConflictError` whose
+    # body's "error" is "source_has_deliveries" (with "pending"/"inflight"
+    # counts); this method never sends the admin API's ?deliveries=dead_letter.
     def delete_source(tenant, name)
       validate_tenant(tenant)
       validate_name(name)

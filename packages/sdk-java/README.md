@@ -15,7 +15,7 @@ immutable and safe to share across threads.
 
 ## Install
 
-Not on Maven Central until the first release (0.3.0). Until then, build it
+Not on Maven Central until its first Maven Central release. Until then, build it
 into your local Maven repository and depend on version `0.0.0`:
 
 ```sh
@@ -28,14 +28,14 @@ Maven:
 <dependency>
   <groupId>io.github.jamescarr</groupId>
   <artifactId>ankusa-sdk</artifactId>
-  <version>0.0.0</version> <!-- 0.3.0 from Maven Central once released -->
+  <version>0.0.0</version> <!-- the Maven Central version once released -->
 </dependency>
 ```
 
 Gradle (with `mavenLocal()` in `repositories` until the release):
 
 ```kotlin
-implementation("io.github.jamescarr:ankusa-sdk:0.0.0") // 0.3.0 once released
+implementation("io.github.jamescarr:ankusa-sdk:0.0.0") // the Maven Central version once released
 ```
 
 On the module path the jar is the automatic module `io.github.jamescarr.ankusa`.
@@ -92,7 +92,8 @@ percent-encoded as one path segment.
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, replay jobs, and the quarantine list.
+the redacted config, the AsyncAPI document, the DLQ, replay jobs, and the
+quarantine pen (list and purge).
 
 ```java
 AdminClient admin = new AdminClient("http://localhost:4002");
@@ -102,7 +103,11 @@ String metrics = admin.metrics();                       // Prometheus text
 DlqPage dlq = admin.listDeadLetters(ListDeadLettersParams.builder().limit(10).build());
 QuarantinePage quarantine = admin.listQuarantined();
 
-// Replay dead letters, or redrive an archived time window, without flooding live traffic.
+// Delete held hooks for good. Run a "quarantine" replay first to keep the ones that now verify.
+QuarantinePurge purged = admin.purgeQuarantined(PurgeQuarantinedParams.builder().sourceId("demo").limit(100).build());
+Map<String, Object> asyncApi = admin.asyncApi();        // AsyncAPI 3.0 document, no credentials
+
+// Replay dead letters ("dlq"), redrive an archived time window ("archive"), or re-verify and release held hooks ("quarantine"), without flooding live traffic.
 Replay replay = admin.createReplay(ReplaySpec.builder().kind("dlq").sourceId("demo").rate(500).build());
 Replay state = admin.getReplay(replay.id());
 Replay paused = admin.updateReplay(replay.id(), ReplayPatch.builder().state("paused").build());
@@ -116,6 +121,13 @@ delaying live hooks; `updateReplay` pauses, resumes, cancels, or re-paces one.
 `getReplay` on a missing id is an `AdminRejectedError(404, "replay_not_found")`,
 and `updateReplay` on a finished job is an
 `AdminRejectedError(409, "replay_finished")`.
+
+`purgeQuarantined` ANDs its filters and the listener clamps `limit` to
+1..10000 (default 1000), so an empty `PurgeQuarantinedParams` deletes the
+oldest 1000 held hooks; there is no no-argument overload on purpose. The SDK
+does not validate the bounds: a negative one, or `until` before `since`, is an
+`AdminRejectedError(400, "invalid_filter")`. A `QuarantineEntry` from before the
+listener recorded a tenant and size has `tenantId()` and `size()` null.
 
 `metrics()` is empty on a node that has not captured, dispatched, or redeemed
 anything yet: a Prometheus series only exists once its first event fires.
@@ -155,14 +167,36 @@ String key = hook.idempotencyKey(false); // the key Ankusa shipped; same rule as
 
 `HookHeaders.parse` also takes a `Map<String, List<String>>` (header names
 matched case-insensitively). `x-ankusa-id` is required — a missing or empty
-one is `MissingHookIdError`; dedupe on it, since delivery is at-least-once.
+one is `MissingHookIdError`. Delivery is at-least-once: dedupe on
+`idempotencyKey(false)`, not the hook id.
 `source()` defaults to `""`; `tenant()`, `contentType()`, `dedupeKey()`,
 `replayId()` and `idempotencyKey()` are null when absent (a `dedupeKey`,
 `replayId` or `idempotencyKey` header that is present but empty is also null).
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way. Verify the raw
+body before trusting it; answer `401` when it fails:
+
+```java
+try {
+  Signature.verify(
+      request::getHeader, body, List.of(secret), Signature.DEFAULT_TOLERANCE, Instant.now());
+} catch (InvalidSignatureError e) {
+  response.setStatus(401); // e.code(), e.field()
+}
+```
+
+Secrets are `whsec_` + base64, or any other string used as its own UTF-8
+bytes; pass several during a rotation. `DEFAULT_TOLERANCE` is 5 minutes.
+Signatures are compared with `MessageDigest.isEqual`.
+
 ## Consuming queue messages
 
-Ankusa publishes each delivery as a JSON v1 message over the configured sink.
+Ankusa publishes each delivery as a JSON v1 message over the configured
+messaging sink (RabbitMQ, Kafka, NATS, Redis); the HTTP sink sends the
+original body plus `x-ankusa-*` headers instead.
 Decode it, verify the body, and dedupe before doing any work: delivery is
 at-least-once, and a provider retry or a replay must not re-run the effect.
 
@@ -250,10 +284,11 @@ its own subtypes (`ClaimCheckError`, `RoutesError`, `AdminError`,
 | --- | --- | --- |
 | `InvalidClaimRefError` | `false` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64 lowercase hex chars |
 | `ClaimNotFoundError` | `false` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `false` | gateway `4xx` other than `404` (`status()`, `body()`) |
+| `ClaimRejectedError` | `false` | gateway `4xx` other than `404`, `408`, `429` (`status()`, `body()`) |
 | `ClaimIntegrityError` | `false` | the bytes' sha256 doesn't match the expected `sha256` |
-| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, an unfollowed `3xx`, or any other non-`200` |
+| `ClaimCheckUnavailableError` | `true` | gateway unreachable, timeout, `5xx`, `408`, `429`, an unfollowed `3xx`, or any other non-`200` |
 | `MissingHookIdError` | `false` | `x-ankusa-id` is absent or empty |
+| `InvalidSignatureError` | `false` | a signed delivery does not verify (`code()`, `field()`) |
 | `InvalidMessageError` | `false` | a queue message is not a valid v1 message (`code()`, `field()`) |
 | `InvalidRouteIdError` | `false` | route id is null, empty, or exactly `.`/`..` |
 | `RouteNotFoundError` | `false` | routes listener `404` |

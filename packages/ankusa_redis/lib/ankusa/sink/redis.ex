@@ -35,28 +35,29 @@ defmodule Ankusa.Sink.Redis do
   ## Process model
 
   The first `deliver/3` for an `{instance, url}` pair starts a `Redix`
-  connection under this package's `DynamicSupervisor`, **synchronously**
-  (`sync_connect: true`): by the time `deliver/3` has a connection to publish
-  through, the socket is up or the start already returned the reason it
-  isn't. A failed first connect is `{:error, {:connection, reason}}`
-  (`:econnrefused`, `:timeout`, a rejected credential), retried by the
-  source's `Ankusa.RetryPolicy`, then dead-lettered, exactly like any other
-  sink failure; errors answered by a live server (NOAUTH, WRONGPASS) are
-  `{:error, {:redis, message}}`.
+  connection under this package's `DynamicSupervisor` and returns at once
+  (`sync_connect: false`): the connect runs in the connection, never in the
+  caller or the `DynamicSupervisor`, so a slow or dead server cannot stall
+  other deliveries behind it. A publish before the socket is up is `{:error,
+  {:connection, :closed}}`, retried by the source's `Ankusa.RetryPolicy`, then
+  dead-lettered, exactly like any other sink failure; errors answered by a
+  live server (NOAUTH, WRONGPASS) are `{:error, {:redis, message}}`.
 
-  The child is `:temporary` — a server that is down must not crash-loop
-  against the supervisor — so nothing is restarted here, and the next
-  `deliver/3` tries again inside the retry policy. Once connected, Redix
-  reconnects on its own with backoff, and a publish sent meanwhile is
-  `{:error, {:connection, :closed}}`. In the narrow window where the
-  connection dies between the registry lookup and the call, `deliver/3`
+  Redix keeps (re)connecting on its own with backoff, and a publish sent
+  meanwhile is `{:error, {:connection, :closed}}`. In the narrow window where
+  the connection dies between the registry lookup and the call, `deliver/3`
   returns `{:error, :not_connected}` — also just a retry.
 
-  Connections are keyed by URL and registered as `{:redis_sink, url}` under
-  the instance's registry, so two sinks pointed at the same server share one
-  connection, and two pointed at different servers never do. Servers,
-  credentials, and database are fixed by the first delivery that starts the
-  connection; use a different `:url` for a different server.
+  Connections are keyed by URL and registered under a digest of it
+  (`connection_key/1`) in the instance's registry, so two sinks pointed at the
+  same server share one connection, and two pointed at different servers never
+  do. Servers, credentials, and database are fixed by the first delivery that
+  starts the connection; use a different `:url` for a different server.
+
+  The URL's password is in neither the registry key nor the connection's child
+  spec: Redix is started with host/port/database options and a password MFA
+  whose argument is a closure, so `:sys.get_status/1` of the supervisor or the
+  connection, and a supervisor report, never print it.
 
   ## opts
 
@@ -66,6 +67,10 @@ defmodule Ankusa.Sink.Redis do
     * `:inline_max_bytes`   — default 64 KiB (65,536), configurable
     * `:publish_timeout_ms` — how long `deliver/3` waits for the `PUBLISH`
                               reply; default `5_000`
+    * `:idle_timeout_ms`    — close the connection after this long without a
+                              delivery through it, default `600_000` (10 min);
+                              `0` never. Never under `:publish_timeout_ms` plus
+                              1 s. See `Ankusa.Sink.Reaper`
   """
 
   @behaviour Ankusa.Sink
@@ -73,6 +78,7 @@ defmodule Ankusa.Sink.Redis do
   alias Ankusa.Envelope
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
+  alias Ankusa.Sink.Reaper
 
   @default_publish_timeout_ms 5_000
 
@@ -83,6 +89,8 @@ defmodule Ankusa.Sink.Redis do
 
     with {:ok, conn} <- ensure_connection(ctx.instance, url),
          {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
+      idle = Reaper.idle_ms(opts, timeout + 1_000)
+      :ok = Reaper.touch(Ankusa.Sink.Redis.Reaper, reaper_key(ctx.instance, url), conn, idle)
       publish(conn, channel(env, opts), payload, timeout)
     end
   end
@@ -171,23 +179,28 @@ defmodule Ankusa.Sink.Redis do
   # The registry lookup first: the common case must not serialize every
   # delivery through the DynamicSupervisor.
   defp ensure_connection(instance, url) do
-    case Ankusa.whereis(instance, key(url)) do
+    case Ankusa.whereis(instance, connection_key(url)) do
       pid when is_pid(pid) -> {:ok, pid}
       nil -> start_connection(instance, url)
     end
   end
 
-  # `sync_connect: true`: the socket is up, or this returns the reason it
-  # isn't — no "connected" connection that is still dialing.
+  # `sync_connect: false`: the connection dials on its own, and keeps doing so
+  # with backoff; the start never waits on the network. `:temporary` because a
+  # connection that does exit (a bad URL) is started again by the next
+  # `deliver/3`, not crash-looped here.
   defp start_connection(instance, url) do
+    key = connection_key(url)
+    password = {__MODULE__, :connection_password, [fn -> Ankusa.Redis.Options.password(url) end]}
+
     child = %{
-      id: key(url),
+      id: key,
       start:
-        {Redix, :start_link, [url, [name: Ankusa.via(instance, key(url)), sync_connect: true]]},
-      # :temporary: restarting a synchronous connect that keeps failing would
-      # crash-loop past the supervisor's intensity and take the application
-      # down. The next `deliver/3` starts it again, inside the source's retry
-      # policy.
+        {Redix, :start_link,
+         [
+           Ankusa.Redis.Options.start_opts(url, password) ++
+             [name: Ankusa.via(instance, key), sync_connect: false]
+         ]},
       restart: :temporary
     }
 
@@ -199,5 +212,19 @@ defmodule Ankusa.Sink.Redis do
     end
   end
 
-  defp key(url), do: {:redis_sink, url}
+  @doc false
+  # The registry key (and child id) of the connection for `url`: a digest, so a
+  # password in the URL never lands in the registry.
+  @spec connection_key(String.t()) :: {:redis_sink, binary()}
+  def connection_key(url), do: {:redis_sink, binary_part(:crypto.hash(:sha256, url), 0, 16)}
+
+  @doc false
+  # Redix's password MFA: the closure resolves the password when Redix dials.
+  @spec connection_password((-> String.t() | nil)) :: String.t() | nil
+  def connection_password(fun) when is_function(fun, 0), do: fun.()
+
+  # The reaper prints its key when it closes a connection, and the URL may
+  # carry a password: a digest of it, as the RabbitMQ sink names connections.
+  defp reaper_key(instance, url),
+    do: {instance, {:redis_sink, Base.encode16(binary_part(:crypto.hash(:sha256, url), 0, 8))}}
 end

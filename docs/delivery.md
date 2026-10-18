@@ -17,7 +17,13 @@ is *now*, so a config fix applies to the backlog and no fun or secret is ever
 persisted. If the sinks were reordered a row falls back to the one sink with
 its module; if it cannot be bound it is dead-lettered as
 `{:sink_gone, index, module}`, and a deleted source as
-`{:source_gone, source_id}`.
+`{:source_gone, source_id}`. The admin API refuses to delete a source with
+rows still queued on the node (`409 source_has_deliveries`) unless asked to
+dead-letter them (`?deliveries=dead_letter`): dispatch then writes them to the
+DLQ as `{:source_gone, source_id}` at once, so no later source of the same
+name inherits them. A hook accepted while the delete runs can still be queued
+after it; dispatch dead-letters it the same way when it claims it, unless the
+name was re-created first.
 
 **Deliveries are not ordered.** Two hooks for one sink may run in either
 order, and a retry runs after whatever is due before it. A Kafka partition key
@@ -39,11 +45,44 @@ the next hook. A sink that **raises, throws, or exits** is treated exactly
 like one returning `{:error, reason}`: the retry policy still applies, and the
 pipeline keeps running.
 
+If the source store cannot answer for a row's source (a store read error, not
+a missing source), the row is written back due a second later with its
+attempts unchanged, never dead-lettered as `{:source_gone, _}`; a replay job
+in the same state retries its page on the next tick.
+
 An attempt that has not returned after `dispatch.attempt_timeout_ms` (default
 30 s) is killed and counts as a failed attempt, `{:attempt_timeout, ms}`, so a
 hung sink frees its slot; the fallback claim check-in runs inside the same
 deadline. The sink may still complete the delivery after the kill; consumers
 dedupe on the idempotency key.
+
+### A slow or dead sink
+
+Claimed rows wait in one queue per **sink key** — `{source_id, sink index,
+sink module}` — and free slots go round-robin across the keys that have work,
+so one source's backlog never queues ahead of every other source's.
+`dispatch.sink_concurrency` (default `nil`) caps how many attempts one key
+runs at once; set it below `concurrency` so a destination that answers slowly
+can hold at most that many slots for `attempt_timeout_ms` each.
+
+A destination that is down trips its key's **circuit breaker**:
+`dispatch.breaker_failures` (default 5; `0` disables breakers) consecutive
+failures that are not `{:permanent, _}` open it. While it is open the key's
+rows are *parked* — written back due when the breaker's period ends, attempts
+unchanged — instead of each spending an attempt and a slot. The period starts
+at `dispatch.breaker_open_ms` (30 s) and doubles per consecutive open up to
+`dispatch.breaker_max_open_ms` (5 min). Then one attempt runs as a probe:
+success closes the breaker, failure reopens it for longer. Every transition
+emits `[:ankusa, :dispatch, :breaker]` (counted on `/metrics` as
+`ankusa_dispatch_breaker_transitions_total`), an open logs a warning, and the
+`ankusa_dispatch_breakers_open` gauge is the number open now.
+
+Two consequences to know: breakers live in the dispatch process's memory, so a
+restart closes them all and the first wave after it can again hold slots for
+one `attempt_timeout_ms`; and parked rows spend no attempts, so while a
+breaker stays open a row's retry horizon is not bounded by wall-clock time.
+A test or a deployment that wants every failure to reach the DLQ on the
+retry policy's schedule sets `breaker_failures: 0`.
 
 ### Replay jobs
 
@@ -55,7 +94,8 @@ max 100 000), and only while dispatch's oldest-due lag is at most `max_lag_ms`
 (default 2 000) and its in-flight window is not full, so a replay uses only
 the capacity live traffic leaves free and can be left running. Jobs are
 durable: the cursor commits in the same batch as the rows it moved, a restart
-resumes it, and a job whose deliveries keep dead-lettering pauses itself.
+resumes it, and a job whose deliveries keep dead-lettering, or keep being
+parked behind an open circuit breaker, pauses itself.
 A `dlq` job touches only rows dead-lettered at or before its own creation, so
 rows that die again during the replay are never picked up twice by one job.
 Replayed deliveries keep the hook's original `id`, `dedupe_key` and
@@ -73,36 +113,41 @@ every sink of the source **concurrently**, all under one overall deadline
 timeout), and answers `201` only once every sink has confirmed. No polling, no
 concurrency window — and **the rest of this section does not apply**:
 
-- no retry policy: the first sink refusal is the answer, a `503` with
-  `Retry-After`, and the provider's retry *is* the retry;
+- no retry policy: any sink failure, crash or timeout makes the answer a `503`
+  with `Retry-After`, and the provider's retry *is* the retry; sinks that
+  already confirmed keep their copy;
 - no dead-letter queue and no replay: nothing is committed, so there are no
   rows to replay from;
-- no `dispatch.*` limits — publishes happen inside the request and never
-  overlap, so the destination's own keying is the only ordering in this mode.
+- no `dispatch.*` limits — publishes to a hook's sinks overlap, so the
+  destination's own keying is the only ordering in this mode.
 
 What still applies is the sink contract below, plus one optional callback:
 `c:Ankusa.Sink.durable?/1`. A sink's `:ok` must mean the hook is accepted by
-something that outlives this node, and boot refuses a `wal: :none` config in
-which no sink of a statically configured source can promise that
-(`Ankusa.Queue.validate_config!/1`). `Sink.Log` returns `false` — nothing durable
+something that outlives this node, and under `wal: :none` a source none of
+whose sinks can promise that is refused: at boot for a statically configured
+source (`Ankusa.Queue.validate_config!/1`), and on write for one created or
+updated at runtime — the admin API answers `400 invalid_source`
+(`Ankusa.Queue.check_durable/2`). A source that arrives without that check
+(stored before it existed, or written to a shared source store by a
+`wal: disk` node) is answered `503` at ingest. `Sink.Log` returns `false` — nothing durable
 happened — and so does `Sink.Redis`: pub/sub keeps no copy, so a subscriber
 that disconnects after the publish loses the message. Every other shipped sink
-confirms durably. A source created at runtime through the admin API is not
-checked, so keep the source store static when you can.
+confirms durably.
 
 The check is "at least one durable sink", not "every sink is durable": a
 non-durable sink is still a required confirmer. A source with `[Kafka, Redis]`
 boots, yet every request is a `503` while Redis has no subscribers — and
-because sinks run in declaration order, Kafka has already stored the hook each
+because sinks publish concurrently, Kafka has already stored the hook each
 time, so every provider retry duplicates it there. Put a pub/sub sink in a
 `wal: none` source only where that is what you want (replayable hooks are
 better served by `wal.type: disk`, which keeps the non-durable sink's failures
 in the DLQ instead of in the provider's retry loop).
 
-The one piece of local state this mode has is the quarantine pen: entries are
+Local state in this mode is small: the quarantine pen (entries are
 written to the store only for a source whose `on_verify_failure` is
-`quarantine` — the default, `reject`, appends nothing. With no dispatch role
-there is no replay job to release them, only `GET` and `DELETE
+`quarantine` — the default, `reject`, appends nothing), API-managed sources, and
+rate-limit overrides. With no dispatch role
+there is no replay job to release pen entries, only `GET` and `DELETE
 /v1/quarantine`. See [Quarantine](#quarantine).
 
 ## `Ankusa.Sink`
@@ -118,23 +163,38 @@ raised exception, throw, or exit is treated as `{:error, ...}` too, and so is
 any other return value (`{:error, {:bad_return, value}}`) on every path:
 dispatch, lifecycle events, and the `wal: :none` ack.
 
+**Error classes.** Two reason shapes change what dispatch does:
+
+| `reason` | Dispatch |
+| --- | --- |
+| `{:permanent, term}` | Dead-letter after this attempt, whatever the policy had left; does not count towards the circuit breaker. For what retrying cannot fix: a `410 Gone`, a record the broker will never take. |
+| `{:retry_after, ms, term}` | Next attempt no sooner than `ms` (capped at one hour) or the policy's backoff, whichever is later; the policy still decides when to give up. |
+| anything else | Transient: the retry policy. |
+
+`Ankusa.Sink.classify/1` returns the class of a reason.
+
 Deliveries are **not ordered**: hooks for one sink may be delivered in any
 order, and a retry runs after whatever is due before it. A consumer that needs
 order has to rebuild it from data it receives (not from the sink's key, which
 only keeps the order hooks were published in) and tolerate redelivery.
 
-Sinks may also implement two optional callbacks: `inline_max_bytes/1`, which
-tells dispatch how large a body this sink sends inline, and `durable?/1`,
+Sinks may also implement three optional callbacks: `inline_max_bytes/1`, which
+tells dispatch how large a body this sink sends inline; `durable?/1`,
 which says whether `:ok` means the hook is durably accepted (`wal.type: none`
-acks on that promise; default `true`):
+acks on that promise; default `true`); and `describe/2`, where the sink
+publishes, for the AsyncAPI document (only messaging sinks implement it):
 
 ```elixir
 @callback inline_max_bytes(opts :: keyword()) :: pos_integer() | nil
 @callback durable?(opts :: keyword()) :: boolean()
-@optional_callbacks inline_max_bytes: 1, durable?: 1
+@callback describe(
+            subject :: %{source_id: String.t(), tenant_id: String.t() | nil},
+            opts :: keyword()
+          ) :: Ankusa.Sink.Description.t()
+@optional_callbacks inline_max_bytes: 1, durable?: 1, describe: 2
 ```
 
-A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`) returns its
+A queue sink (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`, `Sink.SQS`, `Sink.GooglePubSub`) returns its
 `inline_max_bytes` (default 64 KiB). Dispatch checks a body in **once**, before
 any sink runs, when it is larger than at least one of its source's sinks'
 thresholds, and hands the resulting claim reference to every sink and every
@@ -148,15 +208,44 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-tenant` (when set) headers. `2xx` is `:ok`; anything else (including transport failure) is `{:error, reason}`. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature with `secret`. Status mapping below. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
 | `Sink.Redis` | `:redix`, separate `ankusa_redis` package | Publishes to a Redis pub/sub channel (`PUBLISH`) and reports zero subscribers as an error. Detailed below. |
+| `Sink.SQS` | none (core: `req` + `aws_signature`) | Sends to an SQS queue (`SendMessage`, SigV4), standard or FIFO, confirmed by SQS's `200`. Detailed below. |
+| `Sink.GooglePubSub` | none (core: `req`) | Publishes to a Google Cloud Pub/Sub topic (`topics.publish`, a bearer token from your `:token_provider`), confirmed by Pub/Sub's `200`. Detailed below. |
 
 ```elixir
 sinks: [{Ankusa.Sink.Http, url: "https://example.internal/stripe", timeout_ms: 5_000}]
 ```
+
+`Sink.Http` reads the status and at most `max_response_bytes` (64 KiB) of the
+response, then closes the connection, so a large or endless response cannot
+pin the attempt or its memory. Redirects are never followed.
+
+| Status | Result |
+| --- | --- |
+| `2xx` | `:ok` |
+| `400`, `401`, `403`, `404`, `410`, `413`, `422` | `{:permanent, {:status, s}}`: dead-letter now. A credential or `secret` fix is followed by a DLQ replay, not hours of retries against a receiver that keeps refusing. |
+| `408`, `429`, `5xx` with `Retry-After` (seconds or an HTTP-date) | `{:retry_after, ms, {:status, s}}` |
+| anything else, a transport failure, a timeout | transient: the retry policy |
+
+With `secret` (a `whsec_…` secret, or a list while rotating) every delivery
+carries `webhook-id` (the hook id), `webhook-timestamp` and
+`webhook-signature` (`v1,<base64 HMAC-SHA256>` of `id.timestamp.body`, one
+entry per secret); a secret that does not decode fails the attempt as
+`{:permanent, :bad_secret}`, and boot rejects one in a static source. Every
+SDK verifies the signature; see
+[`integrations.md`](integrations.md#signed-deliveries).
+
+The broker sinks (`Sink.RabbitMQ`, `Sink.Kafka`, `Sink.NATS`, `Sink.Redis`)
+open one connection per broker on first use and close it after
+`idle_timeout_ms` with no delivery through it (default 10 minutes, `0`
+keeps it for good; `Ankusa.Sink.Reaper`), so a deleted or re-pointed source
+does not leave its connection open for the life of the node. The next
+delivery opens a new one; a delivery caught by the close fails that attempt
+and is retried.
 
 ### Idempotent receivers
 
@@ -171,10 +260,12 @@ on the idempotency key; the ids it is built from mean different things:
 - `x-ankusa-id`, the message `id` on a queue sink, identifies **one stored
   hook**. Every redelivery of that hook (a retry, a DLQ replay, a dispatch
   restart) carries the same `id`.
-- A provider retry is a **different stored hook** with a different `id`. With
-  no provider event key configured the idempotency key is that `id` and cannot
-  collapse them: configure the source's `dedupe`, or dedupe on the provider's
-  own event id in the body (e.g. Stripe's `id`).
+- A provider retry is a **different stored hook** with a different `id`
+  unless the source sets `dedupe` (see [`dedupe`](configuration.md#sources)),
+  which collapses a repeat within the TTL into the original. Without it the
+  idempotency key is that `id` and cannot collapse them: configure the
+  source's `dedupe`, or dedupe on the provider's own event id in the body
+  (e.g. Stripe's `id`).
 
 Provider request headers are forwarded to every sink per the source's
 `forward_headers` option (see [`configuration.md`](configuration.md#sources)):
@@ -183,11 +274,20 @@ the message's `headers` object. Authentication and framing headers and every
 `x-ankusa-*` name are never forwarded. So a header-borne id such as
 `X-GitHub-Delivery` or `webhook-id` reaches the consumer as a forwarded header,
 and as `dedupe_key` when the source extracts it. `Sink.Http` adds its own
-`x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key` and (when set)
-`x-ankusa-tenant`, `x-ankusa-dedupe-key` and `x-ankusa-replay-id`; a message
-carries `id`, `source_id`, `tenant_id`, `received_at`, `content_type`, `size`,
-`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `headers` and the body
-(or claim).
+`x-ankusa-id`, `x-ankusa-source`, `x-ankusa-idempotency-key`,
+`x-ankusa-verification` and (when set) `x-ankusa-tenant`, `x-ankusa-dedupe-key`
+and `x-ankusa-replay-id`; a message carries `id`, `source_id`, `tenant_id`,
+`received_at`, `content_type`, `size`, `sha256`, `dedupe_key`, `replay_id`,
+`idempotency_key`, `verification`, `headers` and the body (or claim).
+
+**Verification.** Every delivery says how the hook was verified at ingest:
+`x-ankusa-verification` on `Sink.Http` and the message's `verification` object
+on a queue sink, `{"status": "ok" | "failed" | "skipped", "flagged": bool}`.
+`skipped` is a hook nothing verified (a source with no verifier, or a lifecycle
+event). `flagged` is `true` for a hook a source accepted despite a failed check
+(`on_verify_failure: accept_flag`): `Sink.Http` then also sends
+`x-ankusa-verification-flagged: true`. Treat a flagged hook, and the tenant it
+names, as unverified. The failure's reason is not on the wire.
 
 ### `Sink.RabbitMQ`: queue delivery
 
@@ -231,13 +331,14 @@ Message shape (`Ankusa.Sink.Message`, byte-identical for `Sink.Kafka`):
 // inline
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/json", "size": 245, "dedupe_key": "evt_1", "replay_id": null,
- "idempotency_key": "acme:stripe:evt_1",
+ "idempotency_key": "acme:stripe:evt_1", "verification": {"status": "ok", "flagged": false},
  "headers": {"x-github-event": "push"}, "sha256": "2cf24d...", "body_base64": "eyJpZCI6..."}
 
 // fat payload
 {"v": 1, "id": "01a0...", "source_id": "stripe", "tenant_id": "acme", "received_at": 173...,
  "content_type": "application/octet-stream", "size": 3145728, "dedupe_key": "evt_1",
- "replay_id": null, "idempotency_key": "acme:stripe:evt_1", "headers": {},
+ "replay_id": null, "idempotency_key": "acme:stripe:evt_1",
+ "verification": {"status": "ok", "flagged": false}, "headers": {},
  "claim": "urn:ankusa:claim:v1:acme:01M39VMD8RA3C5HR4RBV67Y002", "sha256": "3bea8a..."}
 ```
 
@@ -246,8 +347,9 @@ consumers must ignore keys they don't know.
 
 Every message carries `sha256` (lowercase hex, inline bodies too), the
 provider event `dedupe_key` (or `null`), the `replay_id` of the replay job when
-this delivery is a replay (else `null`), the `idempotency_key` (below), and the
-forwarded provider request `headers` (lowercased; the source's
+this delivery is a replay (else `null`), the `idempotency_key` (below), the
+`verification` result (see [Idempotent receivers](#idempotent-receivers) above),
+and the forwarded provider request `headers` (lowercased; the source's
 `forward_headers` option decides which — see
 [`configuration.md`](configuration.md#sources)).
 
@@ -276,17 +378,22 @@ claim-check gateway and checks the bytes against the message's `sha256`. See
 call `Ankusa.ClaimCheck.redeem/3`, which does both.)
 
 **Connection lifecycle**: one supervised connection + confirm-mode channel
-per `(instance, exchange)`, started on demand by the first `deliver/3` call,
-registered through the same `Ankusa.Registry`/`Ankusa.via` every other
-instance-scoped process uses (own `DynamicSupervisor`, booted by
-`ankusa_rabbitmq`'s own `Application`, zero changes to `ankusa` core). Every
-publish is `mandatory` and waits for the broker's **confirm** of that publish,
-so `deliver/3` returns `:ok` only when at least one queue bound to the exchange
-accepted the message, never just because a socket took it. Surviving a broker
-restart is the queue's property: messages are always published `persistent`,
-and durable classic and quorum queues persist them before confirming. Every
-other result is an error that flows straight into the source's
-`Ankusa.RetryPolicy`:
+per `(instance, url, exchange)`, started on demand by the first `deliver/3`
+call, registered through the same `Ankusa.Registry`/`Ankusa.via` every other
+instance-scoped process uses under a digest of the URL (a password in the URL
+never appears in a process name, and `:sys.get_state/1` on the connection
+shows it redacted). Its own `DynamicSupervisor` is booted by
+`ankusa_rabbitmq`'s own `Application`, zero changes to `ankusa` core. The
+connection dials after it starts, so a dead broker never stalls the
+supervisor. Every publish is `mandatory` and is answered on the broker's
+**confirm** of that publish, so `deliver/3` returns `:ok` only when at least
+one queue bound to the exchange accepted the message, never just because a
+socket took it. Confirms are asynchronous: up to `:max_inflight` (default 256)
+publishes are outstanding on the channel at once, so one slow confirm never
+serializes the rest. Surviving a broker restart is the queue's property:
+messages are always published `persistent`, and durable classic and quorum
+queues persist them before confirming. Every other result is an error that
+flows straight into the source's `Ankusa.RetryPolicy`:
 
 | Result | Meaning |
 | --- | --- |
@@ -294,12 +401,15 @@ other result is an error that flows straight into the source's
 | `{:error, {:unroutable, routing_key}}` | The exchange routed it to no queue. |
 | `{:error, :nacked}` | The broker refused it, e.g. a queue's `reject-publish` overflow. |
 | `{:error, :confirm_timeout}` | No confirm within `:confirm_timeout_ms` (milliseconds, default 5000). |
+| `{:error, :busy}` | `:max_inflight` publishes already await confirms on this connection; nothing was sent. |
+| `{:error, :expired}` | The caller's deadline passed while the publish waited in the connection's mailbox; it was never sent, so an abandoned call is never published behind the caller's back. |
 | `{:error, {:channel_closed, reason}}` | The broker closed the channel before the confirm (a publish to a deleted exchange is a `404`). The channel is reopened at once on the same connection, re-declaring the exchange. |
 | `{:error, {:publish_failed, reason}}` | The publish itself failed. |
 | `{:error, :not_connected}` | No channel yet. Connection loss doesn't crash the GenServer; it reconnects every `:retry_ms` (default 5000). |
 
 There is no option to turn `mandatory` off, and no separate reconnect policy
-to get wrong.
+to get wrong. A connection whose sink is removed from config stays up until
+the node restarts (nothing reaps idle connections).
 
 ### `Sink.Kafka`: topic delivery
 
@@ -337,9 +447,18 @@ single-partition topic.
 **`deliver/3` returns `:ok` only once every in-sync replica has the record**
 (`required_acks: -1`, then a synchronous wait bounded by
 `:produce_timeout_ms`, default 5s), the Kafka equivalent of RabbitMQ's
-publisher confirms. brod's producer is not idempotent, so a produce retried
-after a lost ack can duplicate a record. Delivery is at-least-once anyway,
-and consumers dedupe on the `idempotency_key`.
+publisher confirms. brod's producer is not idempotent, and a produce that
+timed out cannot be cancelled, so it may still land and its retry duplicate
+it. Delivery is at-least-once anyway, and consumers dedupe on the
+`idempotency_key`.
+
+**A record the broker will never take is dead-lettered at once**
+(`{:permanent, reason}`): one whose value plus key exceeds
+`:max_record_bytes` (default 1,000,000, just under the broker's 1 MiB
+`message.max.bytes`; raise it with the topic's `max.message.bytes`) is refused
+before it is produced, and a broker `message_too_large`, `invalid_message` or
+`invalid_record` is permanent too. Retrying any of them for days would only
+fill the log.
 
 **Client lifecycle**: one brod client per `(instance, :client)`, started on
 demand by the first `deliver/3` call under `ankusa_kafka`'s own
@@ -347,8 +466,8 @@ demand by the first `deliver/3` call under `ankusa_kafka`'s own
 reconnects, leader changes, and metadata refresh. A brod client id must be a
 registered atom, so it is `:"ankusa_kafka.<instance>.<client>"`. Both parts
 come from config, so the number of atoms is bounded and two instances never
-collide. Unreachable brokers, unknown topics, timeouts, and oversized
-messages all surface as `{:error, reason}`.
+collide. Unreachable brokers, unknown topics and timeouts surface as
+`{:error, reason}`.
 
 ### `Sink.NATS`: subject delivery
 
@@ -388,29 +507,38 @@ acknowledgement, `{"stream":"ANKUSA","seq":42}`, awaited up to
 a permission violation, or no answering stream all come back as
 `{:error, reason}`. Note that an error ack carries `"seq": 0` *and* an
 `"error"` in the same body, so a sink that only checks for a stream name and a
-sequence would report a refused hook as delivered.
+sequence would report a refused hook as delivered. The one permanent error is
+`{:permanent, :max_payload_exceeded}`: a message over the server's
+`max_payload` (1 MiB by default) is refused by gnat before it is sent, and is
+dead-lettered at once rather than retried. It takes an `:inline_max_bytes`
+raised past that limit; at the default (64 KiB) a larger body is claim-checked.
 
 **The subject is the address, the headers are the metadata.** Each message
-carries the same five headers the Kafka sink sets (`ankusa_id`,
+carries the same headers the Kafka sink sets — always `ankusa_id`,
 `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`,
-`content_type`), so a consumer parses one set of fields regardless of
+`ankusa_idempotency_key` and `content_type`, plus `ankusa_dedupe_key` and
+`ankusa_replay_id` when present — and `Nats-Msg-Id` (below), so a consumer
+parses one set of fields regardless of
 transport. Unlike Kafka, there is no separate record key: NATS has no
 partition-ordering contract to lean on and no partition count to change under
 you. Order within a subject is the order the stream received it.
 
-**Connection lifecycle**: one gnat connection per `(instance, connection)`,
-started on demand by the first `deliver/3` under `ankusa_nats`'s own
-`DynamicSupervisor` (`ankusa` core unchanged). gnat completes the handshake
-before the start returns, so a `deliver/3` either has a live connection or a
-concrete reason it doesn't (`:econnrefused`, `:timeout`, an authorization
-error). A lost socket stops that connection. The child is `:temporary`, so
-nothing crash-loops, and the next `deliver/3` reconnects inside the source's
-retry policy. Server names are tried in the order given.
+**Connection lifecycle**: one `Gnat.ConnectionSupervisor` per `(instance,
+connection)`, started on demand by the first `deliver/3` under `ankusa_nats`'s
+own `DynamicSupervisor` and found through the instance's registry (nothing
+registered globally, so two instances never share a connection; `ankusa` core
+unchanged). The start returns at once and the handshake runs in that
+supervisor, so a slow or dead server never stalls other deliveries behind it.
+It connects to one of `:servers` at a time, picked at random per attempt
+(gnat's behaviour), and reconnects with a 2 s backoff whenever the socket
+closes. While the connection is not up `deliver/3` returns
+`{:error, :not_connected}`, retried by the source's retry policy.
 
 **At-least-once, as everywhere else.** A publish whose ack is lost can still
-have been stored, so consumers dedupe on the `idempotency_key`. JetStream's own
-`Nats-Msg-Id` duplicate window is the consumer's tool, deliberately not set
-here: a hook replayed from the DLQ is a *new*, intended publish.
+have been stored, so consumers dedupe on the `idempotency_key`. Every publish
+also sets `Nats-Msg-Id` to the hook's `id` — or `id:replay:<replay_id>` on a
+replay — so JetStream's duplicate window collapses a re-publish of one
+delivery, while a deliberate replay carries a distinct id and is stored.
 
 ### `Sink.Redis`: pub/sub delivery
 
@@ -449,8 +577,9 @@ moment later — never sees the message. Two consequences:
   :no_subscribers}` still turns every ingest into a `503`.
 
 **The channel is the address, the JSON is the metadata.** Pub/sub has no
-headers, so the five fields the Kafka and NATS sinks put in headers (`id`,
-`source_id`, `tenant_id`, message version, content type) travel only inside
+headers, so the fields the Kafka and NATS sinks put in headers (`id`,
+`source_id`, `tenant_id`, message version, content type, idempotency key, and
+the dedupe key and replay id when present) travel only inside
 the `Ankusa.Sink.Message` body; a consumer decodes it and reads them there.
 The same applies to a claim ticket for a fat payload: redeem it with
 `Ankusa.ClaimCheck.redeem/3` or
@@ -471,6 +600,133 @@ for a server that isn't there, `{:connection, :timeout}`, or
 Redix reconnects on its own with backoff and a publish sent meanwhile is
 `{:error, {:connection, :closed}}`; the child is `:temporary`, so nothing
 crash-loops against a server that is gone.
+
+### `Sink.SQS`: queue delivery
+
+The same `Ankusa.Sink.Message`, sent to an Amazon SQS queue, standard or FIFO.
+Consumers on SQS (Lambda, Celery's SQS transport, a worker polling
+`ReceiveMessage`) read it directly, with no Kafka-to-SQS bridge in between. The
+sink lives in `ankusa` core: it is one SigV4-signed HTTPS `POST` per delivery
+through `Ankusa.HttpClient`, with the signer `BlobStore.S3` already uses and
+the same credential chain (`Ankusa.AWS.Credentials`), so it adds no
+dependency and starts no process.
+
+```elixir
+sinks: [
+  {Ankusa.Sink.SQS,
+   queue_url: "https://sqs.us-east-1.amazonaws.com/123456789012/hooks.fifo",
+   region: "us-east-1",
+   message_group_id: "stripe",                  # FIFO default: "tenant/source"; or a 1-arity fun
+   inline_max_bytes: 65_536,                    # above this the message carries a claim reference
+   max_message_bytes: 1_048_576,                # body + attributes; larger is dead-lettered at once
+   timeout_ms: 5_000}
+   # endpoint: "http://localhost:4566"          # default: the queue URL's origin
+   # access_key_id:/secret_access_key:/session_token: — else AWS_* env, IRSA, IMDSv2
+]
+```
+
+**It never creates the queue.** A queue's type, retention, visibility timeout,
+redrive policy and encryption are an operator's contract. A queue that does
+not exist is `{:error, {:sqs, 400, "QueueDoesNotExist", message}}`, into the
+retry policy and then the DLQ, the way `Sink.NATS` treats a missing stream.
+
+**`deliver/3` returns `:ok` only once SQS has the message.** That is a `200`
+from `SendMessage` whose `MD5OfMessageBody` matches the MD5 of the body sent;
+SQS answers `200` after storing the message redundantly, so the sink is
+durable for [direct mode](#direct-mode). The other outcomes:
+
+| Outcome | Result |
+| --- | --- |
+| body + attributes over `max_message_bytes` (1 MiB, SQS's limit) | permanent `{:message_too_large, size, max}`, before any request |
+| SQS refuses the message itself: `InvalidMessageContents`, `InvalidParameterValue` | permanent `{:sqs, status, code, message}`: dead-lettered at once |
+| any other SQS error: `QueueDoesNotExist`, `AccessDenied`, throttling, a 5xx | transient `{:sqs, status, code, message}`: the retry policy |
+| a non-2xx that is not an SQS error document (a proxy) | transient `{:status, status, body}` |
+| a `200` with a mismatched MD5, no credentials, a transport failure | transient |
+
+**FIFO when the queue URL ends `.fifo`** (AWS requires the suffix). Each send
+carries a `MessageGroupId`, `message_group_id` or by default
+`"tenant_id/source_id"` (`"/source_id"` without a tenant), the scope of the
+Kafka sink's default key: one group's messages are received in order. Its
+`MessageDeduplicationId` is the hook's `id`, or `id:replay:<replay_id>` on a
+replay (the `Nats-Msg-Id` rule), so SQS collapses a retry after a lost
+response while a deliberate replay is stored. SQS's deduplication window is
+**5 minutes**: a retry later than that can store a second copy, so consumers
+still dedupe on the `idempotency_key`. On a standard queue the sink sends no
+deduplication id, and a `MessageGroupId` only when `message_group_id` is set
+(fair queues).
+
+**The queue is the address, message attributes are the metadata.** Each
+message carries `String` attributes `ankusa_id`, `ankusa_source_id`,
+`ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key` and
+`content_type`, plus `ankusa_dedupe_key` and `ankusa_replay_id` when present:
+the Kafka header set, at most 8 of SQS's 10 attributes. `ankusa_tenant_id` is
+left out when the hook has no tenant, because SQS refuses an empty attribute
+value. SQS counts attributes toward the size limit, so `max_message_bytes`
+checks body plus attributes.
+
+### `Sink.GooglePubSub`: Google Cloud Pub/Sub delivery
+
+The same `Ankusa.Sink.Message`, published to a Google Cloud Pub/Sub topic.
+Consumers on Pub/Sub (Cloud Run, Dataflow, a worker pulling a subscription)
+read it directly. Like `Sink.SQS`, the sink lives in `ankusa` core: one
+`topics.publish` REST `POST` per delivery through `Ankusa.HttpClient`, so it
+adds no dependency and starts no process. Auth is a `:token_provider` MFA, as
+for `BlobStore.GCS`; Ankusa bundles no OAuth client. (The `ankusa_server`
+image ships one for the metadata server, `auth: metadata`.)
+
+```elixir
+sinks: [
+  {Ankusa.Sink.GooglePubSub,
+   project: "my-project",
+   topic: "ankusa-hooks",                       # the topic id, not projects/.../topics/...
+   token_provider: {MyApp.Auth, :gcp_token, []},  # {:ok, token} | :error; omit for an emulator
+   ordering_key: "stripe",                      # default none; a string, or a 1-arity fun
+   inline_max_bytes: 65_536,                    # above this the message carries a claim reference
+   max_message_bytes: 10_000_000,               # data + attributes + key; larger is dead-lettered at once
+   timeout_ms: 5_000}
+   # endpoint: "https://us-east1-pubsub.googleapis.com"  # default: https://pubsub.googleapis.com
+]
+```
+
+**It never creates the topic or a subscription.** Retention, schema,
+encryption and who may subscribe are an operator's contract. A topic that does
+not exist is `{:error, {:pubsub, 404, "NOT_FOUND", message}}`, into the retry
+policy and then the DLQ. A topic with **no subscription** (and no topic
+message retention) answers `200` and discards the message: the sink cannot
+detect it.
+
+**`deliver/3` returns `:ok` only once Pub/Sub has the message.** That is a
+`200` whose reply names the one message id; Pub/Sub answers `200` after
+persisting the message, so the sink is durable for [direct mode](#direct-mode).
+The other outcomes:
+
+| Outcome | Result |
+| --- | --- |
+| data + attributes + ordering key over `max_message_bytes` (10 MB, Pub/Sub's limit) | permanent `{:message_too_large, size, max}`, before any request |
+| Pub/Sub refuses the message itself: `INVALID_ARGUMENT` | permanent `{:pubsub, status, "INVALID_ARGUMENT", message}`: dead-lettered at once |
+| any other Pub/Sub error: `NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED`, `UNAVAILABLE` | transient `{:pubsub, status, google_status, message}`: the retry policy |
+| a non-200 that is not a Google error document (a proxy) | transient `{:status, status, body}` |
+| a `200` that does not name one message id, a transport failure | transient |
+| the `:token_provider` answers `:error` | transient `:no_credentials`, no request sent |
+
+**There is no publish-side deduplication.** Delivery is at-least-once, so
+consumers dedupe on the `idempotency_key` (the `ankusa_idempotency_key`
+attribute).
+
+**The topic is the address, message attributes are the metadata.** Each message
+carries attributes `ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`,
+`ankusa_message_version`, `ankusa_idempotency_key` and `content_type`, plus
+`ankusa_dedupe_key` and `ankusa_replay_id` when present: the same set
+`Sink.SQS` sends (`Ankusa.Sink.Message.attributes/2`). `ankusa_tenant_id` is
+left out when the hook has no tenant. Pub/Sub counts attributes and the
+ordering key toward the size limit, so `max_message_bytes` checks all three
+with the data.
+
+**Ordering is opt-in.** With `ordering_key` set, the message carries an
+`orderingKey`, which orders delivery only on a subscription with message
+ordering enabled, published through one regional endpoint, and caps that key's
+throughput at about 1 MB/s. Ankusa's own deliveries are unordered (see
+[`Ankusa.Sink`](#ankusasink)), so no key is sent by default.
 
 ## `Ankusa.RetryPolicy`
 
@@ -526,7 +782,8 @@ The job drips rows into the delivery queue at `rate` items per second (default
 oldest-due lag stays under `max_lag_ms`, 2 s by default), so it can be left
 running against live traffic. It is durable — the cursor commits in the same
 batch as the rows it moves — so a restart resumes it; a job whose deliveries
-keep dead-lettering pauses itself. Replayed deliveries keep the hook's
+keep dead-lettering, or keep being parked behind an open breaker, pauses
+itself. Replayed deliveries keep the hook's
 original `id`, `dedupe_key` and `idempotency_key` and carry the job id as
 `replay_id`.
 `Ankusa.Replay.get/2` and `update/3` watch and steer it

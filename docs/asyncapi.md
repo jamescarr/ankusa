@@ -27,18 +27,21 @@ SASL password, no header value.
 | operation | channel | `send`: Ankusa is the publisher |
 
 Every message's payload is [`SinkMessageV1`](delivery.md): the `Ankusa.Sink.Message`
-envelope (`id`, `source_id`, `tenant_id`, `received_at`, `size`, and `body_base64`
-or `claim` + `sha256`), narrowed to the source. The provider's own body is opaque
+envelope (`id`, `source_id`, `tenant_id`, `received_at`, `content_type`, `size`,
+`sha256`, `dedupe_key`, `replay_id`, `idempotency_key`, `verification`, `headers`,
+and `body_base64` or `claim`), narrowed to the source. The provider's own body is opaque
 bytes inside it; the document does not describe it.
 
 What a consumer learns per transport:
 
 | Sink | Address | Bindings and headers |
 | --- | --- | --- |
-| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), the five `ankusa_*` headers |
-| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; no headers |
-| `nats` | the `subject` | the five `ankusa_*` headers |
+| `kafka` | the `topic` | record key (`<tenant>/<source_id>` unless `key:` is set), six always-present headers (`ankusa_id`, `ankusa_source_id`, `ankusa_tenant_id`, `ankusa_message_version`, `ankusa_idempotency_key`, `content_type`) plus optional `ankusa_dedupe_key` and `ankusa_replay_id` |
+| `rabbitmq` | the routing key (`ankusa.<source_id>` unless `routing_key:` is set) | exchange name, type, vhost; the document advertises no headers, though the wire carries AMQP `message_id` and an `ankusa_idempotency_key` header (plus optional `ankusa_dedupe_key` and `ankusa_replay_id`), which it does not describe |
+| `nats` | the `subject` | the same six always-present headers and optional `ankusa_dedupe_key`/`ankusa_replay_id` as Kafka, plus `Nats-Msg-Id` |
 | `redis` | the `channel` | none: pub/sub has no headers |
+| `sqs` | the queue name (`hooks.fifo`) | the `sqs` channel binding (`queue.name`, `queue.fifoQueue`); the document advertises no headers, though each message carries the Kafka header set as SQS message attributes (`ankusa_tenant_id` only when the hook has a tenant), which it does not describe |
+| `google_pubsub` | `projects/<project>/topics/<topic>` | the `googlepubsub` channel binding, plus the `orderingKey` message binding when a static `ordering_key` is set; the document advertises no headers, though each message carries the Kafka header set as Pub/Sub message attributes (`ankusa_tenant_id` only when the hook has a tenant), which it does not describe |
 
 Kafka is one topic with the source in the record key, not a topic per source, so
 two Kafka sources on one topic are one channel with two messages. When a
@@ -149,7 +152,8 @@ an existing struct), `use AsyncApiSpex.Channel` and `use AsyncApiSpex.Spec` to
 declare a publishing module's topic and broker and assemble the document from
 those modules, a validator, a Plug
 (`AsyncApiSpex.Plug.RenderSpec`) that serves a document as
-`application/asyncapi+json`, and `mix async_api_spex.gen` to write one to a file.
+`application/asyncapi+json`, another (`AsyncApiSpex.Plug.Viewer`) that renders
+it as a browsable HTML page, and `mix async_api_spex.gen` to write one to a file.
 Its README shows an app declaring its channels.
 
 `Ankusa.AsyncApi.document/1` returns the `%AsyncApiSpex.Document{}` for an

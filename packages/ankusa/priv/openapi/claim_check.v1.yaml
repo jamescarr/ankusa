@@ -44,15 +44,53 @@ paths:
         Returns exactly the claim's bytes. Claims are written once and never
         rewritten, so a response is cacheable forever. The server does not
         verify integrity: the reader MUST check the bytes against the
-        message's `sha256`.
+        message's `sha256` (a ranged read can only be checked once the whole
+        claim has been reassembled).
+
+        One `bytes` range is served as `206`; several ranges, another unit, a
+        malformed `Range`, or any `If-Range` (claims carry no validator) are
+        ignored and answered `200` with the whole claim.
+      parameters:
+        - name: Range
+          in: header
+          required: false
+          description: |
+            One byte range: `bytes=first-last`, `bytes=first-` or
+            `bytes=-suffix_length` (RFC 9110 §14.1.2). `last` past the claim's
+            end is clamped to it.
+          schema:
+            type: string
+            pattern: '^bytes=(\d+-\d*|-\d+)$'
+          examples:
+            span:
+              value: bytes=0-1023
+            suffix:
+              value: bytes=-1024
       responses:
         '200':
           description: The claim's bytes.
           headers:
             Cache-Control:
-              description: Always `public, max-age=31536000, immutable`.
+              $ref: '#/components/headers/CacheControl'
+            Accept-Ranges:
+              $ref: '#/components/headers/AcceptRanges'
+          content:
+            application/octet-stream:
               schema:
                 type: string
+                contentMediaType: application/octet-stream
+        '206':
+          description: The requested range of the claim's bytes.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Accept-Ranges:
+              $ref: '#/components/headers/AcceptRanges'
+            Content-Range:
+              description: '`bytes first-last/length`, `length` the whole claim''s size.'
+              schema:
+                type: string
+                pattern: '^bytes \d+-\d+/\d+$'
           content:
             application/octet-stream:
               schema:
@@ -62,6 +100,18 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '416':
+          description: |
+            The range starts at or past the claim's end (or is `bytes=-0`, or
+            the claim is empty). Empty body.
+          headers:
+            Accept-Ranges:
+              $ref: '#/components/headers/AcceptRanges'
+            Content-Range:
+              description: '`bytes */length`, `length` the whole claim''s size.'
+              schema:
+                type: string
+                pattern: '^bytes \*/\d+$'
         '503':
           $ref: '#/components/responses/StoreUnavailable'
   /health:
@@ -77,6 +127,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/Health'
 components:
+  headers:
+    CacheControl:
+      description: |
+        Always `private, max-age=31536000, immutable`: the path is a
+        capability, so only the reader may cache it.
+      schema:
+        type: string
+    AcceptRanges:
+      description: Always `bytes`.
+      schema:
+        type: string
+        const: bytes
   parameters:
     TenantId:
       name: tenant_id

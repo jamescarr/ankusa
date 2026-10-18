@@ -6,8 +6,14 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
+- `verify_signature(headers, body, secrets, *, tolerance_seconds=300, now=None)`
+  verifies the Standard Webhooks signature an HTTP sink with a `secret` adds,
+  comparing in constant time; failures raise `InvalidSignatureError` (`code`,
+  `field`, `retryable=False`).
 - `message.Message`, `message.decode_message()`, and `message.InvalidMessageError`
   (with `code`, `field` and `retryable=False`): decode and validate the v1
   queue message every sink delivers — the inline (`body_base64`) and
@@ -24,7 +30,13 @@ this project follows [Semantic Versioning](https://semver.org/).
   `HookHeaders.idempotency_key`, parsed from `x-ankusa-dedupe-key` /
   `x-ankusa-replay-id` / `x-ankusa-idempotency-key`.
 - `AdminClient.create_replay()`, `get_replay()`, `list_replays()` and
-  `update_replay()` for the `POST/GET/PATCH /v1/replays` replay-job API.
+  `update_replay()` for the `POST/GET/PATCH /v1/replays` replay-job API (kinds
+  `dlq`, `archive`, `quarantine`).
+
+### Changed
+
+- `ClaimCheckClient.redeem()` raises `ClaimCheckUnavailableError` (retryable)
+  for a gateway `408` or `429` instead of `ClaimRejectedError`.
 
 ### Removed
 
@@ -121,7 +133,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `content-type` into a `HookHeaders` dataclass, raising
   `MissingHookIdError` if `x-ankusa-id` is absent.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.3.0...sdk-python-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.4...sdk-python-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-python-v0.2.1...sdk-python-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/releases/tag/sdk-python-v0.2.1

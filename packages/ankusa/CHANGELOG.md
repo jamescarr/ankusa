@@ -13,6 +13,206 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Several claim stores, with failover.** `claim_check.blob_stores` takes a
+  list of `{module, opts}` (buckets, regions, providers) and
+  `claim_check.placement` picks a new pack's store: `:ordered` (default) the
+  first, the others only while it is down; `:hash` spreads packs over every
+  store by the pack id's random bits. A failed pack write moves on to the
+  next store at once, and a store whose write failed, or that could not
+  answer a read, is skipped by writes and searched last by reads for
+  `claim_check.store_cooldown_ms` (default 30 s); a throttled answer (`429`,
+  `503`) never opens the breaker. A read searches every store under both key
+  layouts, healthy stores first, so a failed-over pack is still found, and a
+  store that could not answer is not asked again within the same read; a
+  miss while some store could not answer is `{:unavailable, reason}`, never
+  `:not_found`. A `check_in/4` that tried several stores fails with
+  `{:unavailable, [{store, reason}, ...]}` in attempt order (`{:unavailable,
+  reason}` after a single attempt, as before). Refs, the gateway API and the
+  SDKs are unchanged: the store is a function of the ref and the config.
+  `Ankusa.ClaimCheck.validate_config!/1` rejects a bad `blob_stores`,
+  `placement` or `key_layout`, and `retention_days` with any non-LocalFS
+  claim store. New `Ankusa.ClaimCheck.Stores`, supervised in every role;
+  `Ankusa.ClaimCheck.location` gains `:store`;
+  `[:ankusa, :claim_check, :check_in]` gains `:store`, and
+  `[:ankusa, :claim_check, :store_breaker]` /
+  `ankusa_claim_check_store_breaker_transitions_total` count breaker opens and
+  closes.
+- **Sharded claim keys.** `claim_check.key_layout: :sharded` writes packs
+  under `claims/tenant=<t>/shard=<c>/dt=<d>/<pack>`, `c` being the pack id's
+  eleventh character: 32 prefixes per tenant, so one busy tenant's writes
+  spread over 32 object-store partitions instead of throttling (S3
+  `503 SlowDown`) on one. Opt-in (default `:flat`, the existing layout); reads
+  try both layouts whatever it says, and the LocalFS sweeper sweeps both.
+  `Ankusa.ClaimCheck.Ref.object_keys/3` and `shard/1`.
+- `[:ankusa, :blob_store, :retry]` on every HTTP blob-store retry, counted by
+  `ankusa_blob_store_retries_total{status}`.
+- **The claim gateway stays fast while an object store throttles or hangs.**
+  A `:claim_check` node caches pack indexes and claims in memory
+  (`Ankusa.ClaimCheck.Cache`, `claim_check.read_cache_bytes`, default
+  128 MiB; a claim over `read_cache_max_entry_bytes`, default 1 MiB, is never
+  cached), and reads the store through `Ankusa.ClaimCheck.Reader`: concurrent
+  reads of one pack index or claim share one store request; per store, an
+  adaptive limit on concurrent reads (ceiling `read_max_inflight`, default
+  48, under the HTTP client's 50 connections per host) halves on a throttle
+  (`429`, `503`) or an unreachable store and grows back by one per round of
+  successes; reads past it queue up to
+  `read_queue_max` (default 256) and the rest are shed at once; and every
+  request is answered within `read_deadline_ms` (default 5 s) — a store read
+  that outlives it still fills the cache. Claim reads use
+  `read_timeout_ms` (3 s) and `read_retries` (1) instead of the store's own
+  write timeouts. `Ankusa.ClaimCheck.locate/4`, `read/4` and `read_bytes/5`
+  take a `:deadline`; `Ankusa.ClaimCheck.location` gains `:tenant_id`,
+  `:pack_id` and `:index`; `Ankusa.ClaimCheck.deadline/1` and
+  `Ankusa.ClaimCheck.Stores.throttled?/1` are new. Telemetry:
+  `[:ankusa, :claim_check, :gateway]`, `:read`, `:read_limit` and
+  `:read_state`; on `/metrics`,
+  `ankusa_claim_check_gateway_requests_total{method,status}`,
+  `ankusa_claim_check_gateway_duration_seconds` (buckets up to 10 s, past
+  the deadline), `ankusa_claim_check_reads_total{kind,source,result}` and
+  `ankusa_claim_check_read_limit`/`_read_inflight`/`_read_queued{store}`.
+
+### Changed
+
+- **Breaking:** `claim_check.blob_store` is now `claim_check.blob_stores`, a
+  list (`blob_stores: [{mod, opts}]`); a config still naming `blob_store`
+  fails `Ankusa.Config.new/1` with `unknown Ankusa.Config key:
+  claim_check.blob_store`. `Ankusa.ClaimCheck`'s `claim_store/1` and the
+  `:claims` scope of `Ankusa.BlobStore` are gone: claim packs go through
+  `Ankusa.ClaimCheck.Stores`.
+- **Breaking:** `Ankusa.ClaimCheck.Ref`'s `object_key/2` and `key/1` take a
+  layout: `Ankusa.ClaimCheck.Ref.object_key/3`, `Ankusa.ClaimCheck.Ref.key/2`.
+  `Ankusa.BlobStore.Retry`'s `run/2` is `Ankusa.BlobStore.Retry.run/3`, the
+  instance first.
+- `Ankusa.BlobStore.Retry` jitters each delay to between half and all of
+  200 ms / 1 s / 5 s, so nodes throttled together don't retry in lockstep.
+- Metric labels with integer values (an HTTP status, a store index) are
+  reported as that number instead of `other`.
+- The claim gateway's `503 store_unavailable` carries `Retry-After` of a
+  random 1–3 s instead of a fixed `1`, and logs throttles, sheds and missed
+  deadlines at `:debug` (they are counted by
+  `ankusa_claim_check_reads_total`).
+- `Ankusa.HttpClient` answers `{:error, %RuntimeError{}}` when the HTTP
+  client's connection pool cannot hand out a connection within its checkout
+  timeout, instead of letting that raise out of the adapter: the retry and
+  the breaker see it as the transport failure it is.
+
+## [0.6.0] - 2026-10-14
+
+### Added
+
+- Every delivery says how the hook was verified at ingest. The v1 message
+  (`Ankusa.Sink.Message`, every queue sink) carries
+  `verification: {"status": "ok" | "failed" | "skipped", "flagged": bool}`,
+  and `Sink.Http` sends `x-ankusa-verification` always and
+  `x-ankusa-verification-flagged: true` for a hook its source accepted despite
+  a failed check (`on_verify_failure: :accept_flag`). `skipped` is a source
+  with no verifier (`Verifier.None`) or a lifecycle event. The reason stays
+  off the wire. `SinkMessageV1` requires the field; `v` stays `1`.
+  `Ankusa.Sink.Message.verification/1` is the one place that decides it.
+- `GET /v1/tenants/:tenant/sources[/:name]` shows `trust_url_tenant`.
+- `trust_url_tenant` on `%Ankusa.Source{}` (default `false`), and
+  `Ankusa.Verifier.check_shared/2`, `validate_shared!/1` and
+  `warn_stored_shared/2`: see the E5 entry under Changed.
+- An internal `SourceStore.Table` module: the ETS layout and spec handling
+  `SourceStore.Persistent` and `ankusa_redis`'s `SourceStore.Redis` share.
+  A source-store read while the store restarts answers
+  `{:error, :unavailable}` instead of raising.
+- `Ankusa.Queue.pending_for_source/2`: one source's pending and in-flight
+  delivery rows in this node's queue.
+- `Ankusa.Dispatch.Pipeline.dead_letter_source/2`: dead-letter one source's
+  pending rows now, inside the pipeline.
+- `Ankusa.ClaimCheck.locate/3` and `read_bytes/4`: find a claim, and read any
+  range of it, without reading it whole.
+- `Ankusa.BlobStore.Retry`, the retry loop the HTTP blob stores share.
+- `Ankusa.Sink.Reaper`: stops a sink adapter's connection after its
+  `:idle_timeout_ms` without a delivery. The broker adapters (`ankusa_rabbitmq`,
+  `ankusa_kafka`, `ankusa_nats`, `ankusa_redis`) run one each.
+- **`Ankusa.Sink.GooglePubSub`**: publishes hooks to a Google Cloud Pub/Sub
+  topic with one `topics.publish` `POST` per delivery, the same
+  `Ankusa.Sink.Message` data as the other queue sinks and the same metadata
+  as message attributes. No new dependency (`req`). Auth is a caller-supplied
+  `:token_provider` MFA, as for `BlobStore.GCS`; one that answers `:error`
+  is `:no_credentials` (retried, no request sent). `:ok` only on a `200`
+  naming the message id. A message over `:max_message_bytes` (10 MB) and
+  `INVALID_ARGUMENT` are permanent; every other Pub/Sub error (a missing
+  topic included: the sink never creates one) is retried. Optional
+  `:ordering_key` (a string or a function of the envelope). `describe/2`
+  reports the AsyncAPI `googlepubsub` bindings. The admin config view shows
+  `project` and `ordering_key`.
+- `Ankusa.Sink.Message.attributes/2`: the `{name, value}` metadata pairs a
+  queue sink carries outside the body, now shared by `Sink.SQS` and
+  `Sink.GooglePubSub`.
+
+- **Store backup and restore** (`Ankusa.Store.Backup`, `backup.*`, off by
+  default). Every `backup.interval_ms` (60 s) the store writes a RocksDB
+  checkpoint (`Ankusa.Store.checkpoint/2`, off the store process so `/ready`
+  keeps answering) and the uploader puts it in the `:backup` blob-store scope
+  (`backup.blob_store`, else `storage.blob_store`, under `storage.key_prefix`):
+  `.sst`/`.blob` files once each, the rest per backup, a sha256 manifest, then
+  `backup/LATEST`. `backup.keep` (3) backups are kept. A store directory with
+  no database restores `LATEST` at boot, every file checked, and refuses to
+  start (`{:store_restore_failed, path, reason}`) when the backup can't be read
+  instead of starting empty. A restored or new store is then reconciled with
+  the segment store: `m:next_seq` moves past the highest archived seq and
+  uncatalogued segments are catalogued from their `.idx`. New telemetry
+  `[:ankusa, :backup, :stop | :state]` and metrics `ankusa_backup_runs_total`,
+  `ankusa_backup_age_seconds`.
+
+- **Readiness.** `GET /ready` on the ingest and admin listeners
+  (`Ankusa.Health.ready/1`): `200` while this node's store takes a synced
+  write (`Ankusa.Store.ready/1`, checked at most once a second, reopening the
+  store when a write fails) and no write has failed in the last 5 s, else
+  `503` with `Retry-After: 1` and
+  `store: "write_failed" | "store_unavailable"`. `/health` stays liveness.
+- **State gauges.** `Ankusa.Metrics.Gauges` (a `telemetry_poller`, new
+  dependency) samples the store, the queue index, the quarantine pen and disk
+  space every `admin.gauge_interval_ms` (15 s), and dispatch reports its
+  scheduler, as `[:ankusa, :store | :queue | :quarantine | :disk | :dispatch,
+  :state]` events and `/metrics` gauges (`ankusa_queue_pending`,
+  `ankusa_queue_oldest_due_age_seconds`, `ankusa_disk_free_bytes`,
+  `ankusa_dispatch_breakers_open`, …). `[:ankusa, :dispatch, :stop]` carries
+  `sink` and `source_id`; delivery counters gain a `sink` label.
+- **Per-sink isolation and circuit breakers.** Dispatch queues claimed rows
+  per `{source_id, sink index, module}` and hands slots round-robin across
+  them; `dispatch.sink_concurrency` caps one key's concurrent attempts. A key
+  that fails `dispatch.breaker_failures` (5) times in a row is parked for
+  `breaker_open_ms` (30 s), doubling up to `breaker_max_open_ms` (5 min), then
+  probed; parked rows spend no attempts. `[:ankusa, :dispatch, :breaker]` on
+  every transition.
+- **Sink error classes.** `{:error, {:permanent, term}}` dead-letters after
+  the attempt; `{:error, {:retry_after, ms, term}}` delays the next attempt
+  (capped at an hour). `Ankusa.Sink.classify/1`.
+- **Signed HTTP deliveries.** `Sink.Http` `:secret` (a `whsec_` secret or a
+  list) adds Standard Webhooks `webhook-id`/`webhook-timestamp`/
+  `webhook-signature` headers (`Ankusa.Sink.Http.Signer`).
+  `:max_response_bytes` (64 KiB) caps what is read of a response.
+- **Shared buckets.** `storage.key_prefix` puts every segment key under a
+  per-node prefix; `claim_check.blob_store` gives claims a store of their own
+  (a `LocalFS` one takes `:root`). Claim keys are never prefixed, so one
+  gateway serves every node.
+- **S3 credential chain.** With no static keys the S3 adapter reads
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, then web
+  identity (IRSA, STS `AssumeRoleWithWebIdentity`), then IMDSv2, caching
+  temporary credentials until shortly before expiry; `:session_token` is
+  signed when set.
+- Claim gateway: `HEAD /v1/claims/{tenant}/{claim_id}`.
+- `batcher.max_queue_bytes` (256 MiB): load shedding by buffered body bytes
+  as well as records; `[:ankusa, :load_shed]` carries `bytes`.
+- Boot-time range validation of every numeric config key (`"<key> must be
+  <constraint>, got <value>"`), and of embedded sources' verifier secrets
+  (`Ankusa.Verifier.validate_config!/1`, `Ankusa.Verifier.Hmac.validate_opts/1`).
+- **`Ankusa.Sink.SQS`**: delivers hooks to an Amazon SQS queue with one
+  SigV4-signed `SendMessage` per delivery, the same `Ankusa.Sink.Message`
+  body as the other queue sinks, and the Kafka header set as message
+  attributes. No new dependency (`req` + `aws_signature`). `:ok` only on a
+  `200` whose `MD5OfMessageBody` matches the body sent. A `.fifo` queue gets
+  `MessageGroupId` (`:message_group_id`, default `"tenant/source"`) and
+  `MessageDeduplicationId` (the hook id, `id:replay:<replay_id>` on a
+  replay). A message over `:max_message_bytes` (1 MiB), `InvalidMessageContents`
+  and `InvalidParameterValue` are permanent; every other SQS error (a missing
+  queue included: the sink never creates one) is retried. `describe/2`
+  reports the AsyncAPI `sqs` channel binding. The admin config view shows
+  `queue_url` and `message_group_id`.
 - **Ingest dedupe.** `Ankusa.Dedupe` extracts a provider event key (a delivery
   header such as GitHub's `x-github-delivery`, or a JSON field such as
   Stripe's `"id"`) from every accepted hook, configured per source as
@@ -47,7 +247,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   option, `:default` forwards everything except auth/framing/hop-by-hop and
   `x-ankusa-*` headers). `Sink.Http` forwards them as request headers, with
   `x-ankusa-dedupe-key`/`x-ankusa-replay-id`; RabbitMQ carries the hook id as
-  AMQP `message_id` plus the dedupe/replay AMQP headers; Kafka and NATS carry
+  AMQP `message_id` plus the dedupe/replay AMQP headers; NATS sets `Nats-Msg-Id`
+  on every publish (the hook `id`, or `id:replay:<replay_id>` on a replay); Kafka and NATS carry
   them as record headers. All 8 SDKs decode the message, verify its integrity,
   and read the idempotency key (below; `#replay:<replay_id>` is appended when
   asked); the conformance suite covers it.
@@ -55,7 +256,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   returns the tenant-scoped key a consumer dedupes on:
   `tenant:source_id:dedupe_key` when the hook has a dedupe key (`default` when
   it has no tenant), else its `id`. It ships as the message's
-  `idempotency_key` field (additive, still `v: 1`; required in `SinkMessageV1`),
+  `idempotency_key` field (additive, still `v: 1`; `SinkMessageV1` now requires
+  `sha256`, `dedupe_key`, `replay_id`, `idempotency_key` and `headers`, and
+  `SinkMessageHeadersV1` gains `ankusa_dedupe_key`, `ankusa_replay_id` and
+  `Nats-Msg-Id`),
   the `x-ankusa-idempotency-key` header on `Sink.Http`, and the
   `ankusa_idempotency_key` header on RabbitMQ, Kafka and NATS. Ingest dedupe
   scopes by tenant and source, so two tenants' hooks with one provider event id
@@ -106,6 +310,10 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   source, defaults 100 and 20/s) and `max_bytes` (the pen's byte cap, default
   1 GiB). New telemetry event `[:ankusa, :quarantine, :full]` and metric
   `ankusa_quarantine_full_total`.
+- Metrics `ankusa_replay_moved_total{instance,kind}` and
+  `ankusa_replay_throttled_total{instance,reason}`, telemetry events
+  `[:ankusa, :replay, :moved | :throttled | :state]`, and
+  `outcome="duplicate"` on `ankusa_ingest_requests_total`.
 - `Ankusa.Verifier.Hmac` accepts `secret: [new, old]`: every key is tried, so
   a secret rotation needs no cut-over. An empty list or an element that is not
   a usable key is `{:error, :bad_secret}`.
@@ -139,10 +347,65 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- Requires `bandit ~> 1.13` (was `~> 1.12.5`, which held every app on
+  1.12.x: 1.12.5 has two published advisories, EEF-CVE-2026-105659 and
+  EEF-CVE-2026-105660, fixed in 1.13.0).
+- `Ankusa.BlobStore.S3.Credentials` is now `Ankusa.AWS.Credentials` (ETS table
+  `:ankusa_aws_credentials`), shared by `BlobStore.S3` and `Sink.SQS`. The
+  chain and its options are unchanged.
+- **Circuit breakers are on by default** (`dispatch.breaker_failures: 5`): a
+  sink that keeps failing has its rows parked, without spending attempts,
+  instead of each retrying on the policy's schedule, so they reach the DLQ
+  later than before. `breaker_failures: 0` keeps the old behaviour. A replay
+  job counts its rows parked behind an open breaker toward auto-pause.
+- `Sink.Http` maps `400`, `401`, `403`, `404`, `410`, `413`, `422` to
+  `{:permanent, {:status, s}}` (dead-letter now) and honours `Retry-After` on
+  `408`, `429` and `5xx`.
+- **Breaking:** `Ankusa.BlobStore` calls take a scope —
+  `put(instance, :segments | :claims, key, data)` and so on — and the
+  `list/3` callback returns `{:ok, keys} | {:error, reason}`, following every
+  adapter's pagination (S3, GCS, Azure, OCI) to the end.
+- **Breaking:** `c:Ankusa.SourceStore.fetch/2` may return
+  `{:error, :unavailable}`: ingest answers `503 store_unavailable` instead of
+  `404`, dispatch reschedules the row a second later with attempts unchanged
+  instead of dead-lettering it as `:source_gone`, and a replay job retries
+  its page.
+- **Breaking:** the route snapshot lives in a per-instance ETS table
+  published in generations (`Ankusa.Routes.Snapshot`), not
+  `:persistent_term`; the removed `Ankusa.Routes.snapshot` function is replaced by
+  `Ankusa.Routes.meta/1`.
+- A source with a `tenant_id` other than `"default"` answers only routes
+  naming that tenant (any other is `404`); `"default"` sources stay shared.
+- A hook accepted flagged (`accept_flag`) spends its source's quarantine
+  bucket.
+- Single-claim pack ids are the check-in time plus 64 random bits (no longer
+  derived from the hook id and its receive time); retention counts from
+  check-in.
+- Claim gateway: `cache-control: private, max-age=31536000, immutable`; `503`
+  bodies carry only the error code; a store `403` is
+  `503 store_forbidden` with `Retry-After: 60`.
+- **Breaking (E5):** under a resolver that takes the tenant from the request
+  (any but `Ankusa.RouteResolver.Path`), a source that is shared
+  (`tenant_id: "default"`), has `Ankusa.Verifier.None` and does not set
+  `trust_url_tenant: true` is refused: a configured one stops the instance
+  from starting (`ArgumentError` naming the source, on every node whatever
+  its roles), and a `SourceStore.Persistent` write of one is
+  `{:error, :invalid, message}` (the admin API's `400 invalid_source`). One
+  the store already held keeps serving, and is named in a warning at boot.
+  Set `trust_url_tenant: true` to keep a deliberately open shared endpoint.
+- **Breaking (O2):** no supervisor in the instance tree holds the
+  `%Ankusa.Config{}` any more. `Ankusa.Instance.child_spec/1` and
+  `start_link/1` store the config (`Ankusa.put_config/1`) and pass only the
+  instance name; every child is started with `[instance: instance]` and reads
+  `Ankusa.config(instance)`. A custom `Ankusa.SourceStore` or
+  `Ankusa.Routes.Store` that runs a process now gets `start_link([instance:
+  instance])` instead of `start_link(%Ankusa.Config{})` /
+  `opts[:config]`, and reads its options from `Ankusa.config(instance)`.
+  `SourceStore.Persistent.start_link/1` takes `[instance: instance]`.
+  `:sys.get_status/1` of the instance's parent, the instance and its
+  subtrees no longer prints sink options or verifier secrets.
 - Delivery rows may carry `replay: replay_id`, the job a replayed delivery is
   attributed to.
-- `GET /v1/dlq` is unchanged; `POST /v1/dlq/replay` is replaced by the replay
-  jobs API above.
 - `Ankusa.Queue.enqueue/3` takes an optional `deadline` (a
   `System.monotonic_time(:millisecond)` value) and waits for the commit's
   outcome instead of timing out after 5 s. The writer refuses, without
@@ -185,8 +448,24 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   refusals. A panel that sums `ankusa_ingest_requests_total` for "all
   traffic" must add the refused counter. `source_id` on `[:ankusa, :ingest]`
   and on the metrics built from it is now always a configured source's id.
-  `Ankusa.Edge.Ingest.ingest/2` is unchanged and still returns
-  `{:error, :unknown_source}`.
+  `Ankusa.Edge.Ingest.ingest/2` still returns `{:error, :unknown_source}` for
+  one.
+- **Breaking for callers that match exhaustively: a duplicate is a new
+  result.** `Ankusa.Edge.Ingest.ingest/2` and `ingest/4` may return
+  `{:duplicate, env}` (besides `{:ok, env}`), `Ankusa.Edge.Batcher.commit/4`
+  returns `{:duplicate, env}` besides `{:committed, env}`, and
+  `Ankusa.Queue.enqueue/3` returns
+  `{:ok, [{:committed, env} | {:duplicate, env}]}`.
+- **Breaking for embedders: the supervision tree is split into failure
+  domains.** The batcher, queue writer, quarantine, rate limiter, routes and
+  ingress listener now live under `Ankusa.via(instance, :edge)`; dispatch,
+  storage, lifecycle, metrics and the listeners under `Ankusa.Instance.Isolated`
+  subtrees, so `Supervisor.terminate_child/2` / `which_children/1` on the
+  instance root no longer finds them. See "Failure domains" under Added.
+- **Breaking for HTTP-sink receivers and queue consumers: provider request
+  headers are forwarded by default.** `forward_headers: :default` forwards
+  every header except auth/framing/hop-by-hop and `x-ankusa-*`; set
+  `forward_headers: [...]` to narrow it.
 - **Breaking: the admin API (4002), route management API (4003) and claim
   gateway (4001) listen on `127.0.0.1` by default.** They used to bind every
   interface and are unauthenticated. A deployment that reaches one from another
@@ -227,11 +506,74 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Removed
 
-- `Ankusa.Dispatch` (`Ankusa.Dispatch.replay/2`) — replaced by
+- **Breaking: `POST /v1/dlq/replay`.** Replaced by `POST /v1/replays` with
+  `kind: "dlq"`; `GET /v1/dlq` is unchanged.
+- `Ankusa.Dispatch` (`replay/1`, `replay/2`) — replaced by
   `Ankusa.Replay.start/2`.
 
 ### Fixed
 
+- Under `wal: :none`, a source written at runtime (`Ankusa.SourceStore.put/5`,
+  the admin API's source routes) with no durable sink is refused with
+  `{:error, :invalid, message}` (`400 invalid_source`), as boot already
+  refused a static one: it would have answered `201` with no durable copy
+  anywhere. Every writable source store applies the new
+  `Ankusa.Queue.check_durable/2` before a write, and `Ankusa.Edge.Publish`
+  answers `503` for a source that reaches ingest without that check (stored
+  before it, or written to a shared source store by a `wal: :disk` node)
+  instead of acking it with no durable copy.
+- A store restored from backup (or created fresh with a backup configured)
+  keeps its `RESTORE-IN-PROGRESS` marker until `reconcile_archive` has
+  succeeded. A node that died, or whose reconcile failed, between the restore
+  and the reconcile now reconciles on its next boot instead of opening as an
+  existing store and reusing archived seqs.
+- A backup refuses to run when the prefix's latest backup belongs to another
+  store (`{:foreign_backup, theirs, ours}`, logged at error level): each store
+  gets an id (`m:store_id`) on its first backup, carried by its checkpoints
+  and recorded in every manifest. Two nodes on one prefix no longer purge each
+  other's backups. A node whose `LATEST` was moved by another writer of the
+  same store (an old host beside its replacement) refuses too
+  (`{:prefix_shared, latest}`).
+- Blob files of the hooks and quarantine column families are capped at 64 MiB
+  (`blob_file_size`; RocksDB's default is 256 MiB), bounding what one backup
+  upload or restore holds in memory.
+- `DELETE /v1/tenants/:tenant/sources/:name` no longer answers `204` while
+  this node's queue still holds undelivered rows for the source: it is
+  `409 source_has_deliveries` (`{"pending": n, "inflight": m}`) and nothing is
+  deleted. `?deliveries=dead_letter` dead-letters the pending rows first, as
+  `{:source_gone, source_id}` (needs the `:dispatch` role, `409
+  role_not_enabled` otherwise; `503 dispatch_unavailable` if the pipeline
+  cannot answer), then deletes; rows in flight settle on their own. A source
+  re-created under the same name no longer inherits the old backlog.
+- Delivery rows record their `source_id`, so one source's rows are found
+  without reading every hook. Rows written before keep working: they are
+  matched by their hook's source.
+- The claim gateway serves one `Range: bytes=` range as `206` with
+  `Content-Range` (`416` past the end), from one ranged store read, and every
+  claim response says `Accept-Ranges: bytes`. Several ranges, other units and
+  any `If-Range` get the whole claim. `HEAD` reads only the pack's index, not
+  the claim.
+- The S3, GCS, Azure and OCI blob stores retry a transport error or a `408`,
+  `429`, `500`, `502`, `503` or `504` (`:retries`, default 2 extra attempts,
+  200 ms then 1 s apart), re-signing each attempt; any other answer is
+  returned at once, mapped as before. `put` sends its iodata as is instead of
+  copying a segment into one binary first.
+- The claim sweeper no longer stops at a partition it cannot delete
+  (`File.rm_rf/1`, logged); `claim_check.retention_days` must be `nil` or
+  ≥ 1, and `sweep_interval_ms` positive.
+- The S3 and Azure managed-identity credential caches are created when the
+  `:ankusa` application starts; they used to belong to whichever request or task
+  filled them first and vanished with it, so temporary credentials were
+  fetched again on almost every call.
+- The route snapshot table is owned by `Ankusa.Routes.TableOwner` and lent to
+  the routes store, so a store crash no longer deletes it, and the restarted
+  store resumes from it (`Ankusa.Routes.Snapshot.adopt/1`): the ETS store keeps
+  API-created routes across a store crash instead of re-seeding from config.
+- A `{:permanent, _}` answer to a breaker's probe closes the breaker; it used
+  to leave the probe slot taken, parking the key forever.
+- `storage.key_prefix` is applied when a segment is named and the catalogue
+  keeps the full key, so changing the prefix no longer strands archived
+  segments.
 - `Ankusa.Verifier.Hmac` fails closed on an empty key. A missing, `nil` or
   empty `:secret`, an empty list, or a list element that is empty or does not
   decode is `{:error, :bad_secret}` for every hook. It used to HMAC with the
@@ -291,8 +633,6 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   dispatch domain, which stopped delivery for every tenant.
 - A quarantine pen write that does not answer within 5 s is `503
   store_unavailable` with `Retry-After: 1`, not a crashed request.
-- `Ankusa.Dispatch.Replayer` keeps only the codec module in its state, so its
-  crash reports and `:sys.get_status/1` no longer print the config.
 
 ## [0.4.0] - 2026-10-02
 
@@ -821,7 +1161,8 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   defaults to `false`, so depending on `ankusa` never binds a port as a side
   effect.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.4.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.6.0...HEAD
+[0.6.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.4.0...ankusa-v0.6.0
 [0.4.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.3.0...ankusa-v0.4.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.4...ankusa-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/ankusa-v0.2.1...ankusa-v0.2.4

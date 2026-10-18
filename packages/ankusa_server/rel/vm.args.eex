@@ -1,0 +1,16 @@
+## Flags for the release VM (`mix release` renders this file; see
+## https://www.erlang.org/doc/man/erl.html).
+
+## No scheduler busy-waiting. A container under a CPU quota pays for the spin
+## as throttled time, and the edge's work arrives in bursts anyway.
++sbwt none
++sbwtdcpu none
++sbwtdio none
+
+## The distribution listener binds loopback only (epmd is pinned to loopback by
+## ERL_EPMD_ADDRESS in env.sh.eex): `bin/ankusa remote` and `rpc` work from
+## inside the container, nothing outside it can connect.
+-kernel inet_dist_use_interface {127,0,0,1}
+
+## Shell history for `remote` sessions, kept under $HOME (the data volume).
+-kernel shell_history enabled

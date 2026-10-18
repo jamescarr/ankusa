@@ -25,7 +25,7 @@ services:
       # pass the values here.
       #   STRIPE_WHSEC: ${STRIPE_WHSEC}
     volumes:
-      # The data volume: WAL, quarantine log, DLQ, local segments. Losing it
+      # The data volume: the RocksDB store (hooks, DLQ, quarantine pen), local segments. Losing it
       # loses un-dispatched hooks, so back it.
       - ankusa-data:/var/lib/ankusa
       # Your config. The image's baked-in demo config is used until you mount

@@ -29,22 +29,26 @@ defmodule Ankusa.Metrics do
   reasons are terms (`{:unavailable, {:status, 503, body}}`) and some tags are
   modules. Both would be an unbounded or unusable label, so every tag value goes
   through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
-  modules become strings (`"Ankusa.Sink.Http"`), and anything else
-  becomes `:other`. `:outcome` on ingest is already one of a fixed set
+  modules become strings (`"Ankusa.Sink.Http"`), integers are rendered as
+  numbers (only ever a store index or an HTTP status, both bounded), and
+  anything else becomes `:other`. `:outcome` on ingest is already one of a fixed set
   (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
   `:quarantine_rate_limited`, `:quarantine_full`, `:overload` or
   `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
   `:source_id` is bounded because it is only ever a configured source's id: a
   request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
-  `:payload_too_large`, `:body_read_failed` or `:invalid_header`, never on a series that carries
-  the id from the URL.
+  `:payload_too_large`, `:body_read_failed`, `:invalid_header` or
+  `:store_unavailable`, never on a series that carries the id from the URL.
   """
 
   import Telemetry.Metrics
 
   # 1 ms … 2.5 s, which covers a local WAL commit through a slow upstream sink.
   @seconds_buckets [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]
+  # The claim gateway answers at up to `claim_check.read_deadline_ms` (5 s by
+  # default): the tail this histogram exists for sits past 2.5 s.
+  @gateway_seconds_buckets @seconds_buckets ++ [5, 10]
 
   @doc """
   Child spec for this instance's metrics reporter.
@@ -160,7 +164,14 @@ defmodule Ankusa.Metrics do
         "ankusa.dispatch.deliveries.total",
         scoped(own,
           event_name: [:ankusa, :dispatch, :stop],
-          tags: [:instance, :result]
+          tags: [:instance, :result, :sink]
+        )
+      ),
+      counter(
+        "ankusa.dispatch.breaker.transitions.total",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :breaker],
+          tags: [:instance, :sink, :state]
         )
       ),
       counter(
@@ -217,6 +228,44 @@ defmodule Ankusa.Metrics do
         )
       ),
       counter(
+        "ankusa.claim_check.store_breaker.transitions.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :store_breaker],
+          tags: [:instance, :store, :state]
+        )
+      ),
+      counter(
+        "ankusa.claim_check.gateway.requests.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          tags: [:instance, :method, :status]
+        )
+      ),
+      distribution(
+        "ankusa.claim_check.gateway.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :gateway],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance, :method],
+          reporter_options: [buckets: @gateway_seconds_buckets]
+        )
+      ),
+      counter(
+        "ankusa.claim_check.reads.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read],
+          tags: [:instance, :kind, :source, :result]
+        )
+      ),
+      counter(
+        "ankusa.blob_store.retries.total",
+        scoped(own,
+          event_name: [:ankusa, :blob_store, :retry],
+          tags: [:instance, :status]
+        )
+      ),
+      counter(
         "ankusa.lifecycle.delivered.total",
         scoped(own,
           event_name: [:ankusa, :lifecycle, :delivered],
@@ -229,8 +278,62 @@ defmodule Ankusa.Metrics do
           event_name: [:ankusa, :lifecycle, :dropped],
           tags: [:instance, :type, :reason]
         )
+      ),
+      counter(
+        "ankusa.backup.runs.total",
+        scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
       )
-    ]
+    ] ++ gauges(own) ++ read_gauges(own)
+  end
+
+  # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue
+  # index, the pen and the disk every `admin.gauge_interval_ms`, and dispatch
+  # reports its scheduler on every housekeeping tick. A gauge whose probe fails
+  # keeps its last value (the probe logs at `:debug`).
+  defp gauges(own) do
+    for {name, event, measurement, unit} <- [
+          {"ankusa.store.hooks", [:ankusa, :store, :state], :hooks, :unit},
+          {"ankusa.store.deliveries", [:ankusa, :store, :state], :deliveries, :unit},
+          {"ankusa.store.disk.bytes", [:ankusa, :store, :state], :disk_bytes, :byte},
+          {"ankusa.queue.pending", [:ankusa, :queue, :state], :pending, :unit},
+          {"ankusa.queue.scheduled", [:ankusa, :queue, :state], :scheduled, :unit},
+          {"ankusa.queue.inflight", [:ankusa, :queue, :state], :inflight, :unit},
+          {"ankusa.queue.dead", [:ankusa, :queue, :state], :dead, :unit},
+          {"ankusa.queue.archive_pending", [:ankusa, :queue, :state], :archive_pending, :unit},
+          {"ankusa.queue.oldest_due_age.seconds", [:ankusa, :queue, :state],
+           &oldest_due_age_seconds/1, :second},
+          {"ankusa.quarantine.bytes", [:ankusa, :quarantine, :state], :bytes, :byte},
+          {"ankusa.quarantine.entries", [:ankusa, :quarantine, :state], :entries, :unit},
+          {"ankusa.disk.free.bytes", [:ankusa, :disk, :state], :free_bytes, :byte},
+          {"ankusa.disk.total.bytes", [:ankusa, :disk, :state], :total_bytes, :byte},
+          {"ankusa.dispatch.running", [:ankusa, :dispatch, :state], :running, :unit},
+          {"ankusa.dispatch.claimed", [:ankusa, :dispatch, :state], :claimed, :unit},
+          {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
+          {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
+          {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
+          {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}
+        ] do
+      last_value(
+        name,
+        scoped(own, event_name: event, measurement: measurement, unit: unit, tags: [:instance])
+      )
+    end
+  end
+
+  # The gateway reader's per-store state, every second. Tagged by store too,
+  # which `gauges/1` (tags `[:instance]` only) can't do.
+  defp read_gauges(own) do
+    for measurement <- [:limit, :inflight, :queued] do
+      last_value(
+        "ankusa.claim_check.read.#{measurement}",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :read_state],
+          measurement: measurement,
+          unit: :unit,
+          tags: [:instance, :store]
+        )
+      )
+    end
   end
 
   # What every definition shares: only this instance's events (ANDed with a
@@ -258,7 +361,10 @@ defmodule Ankusa.Metrics do
   end
 
   defp normalize_value({tag, _rest}), do: tag
+  defp normalize_value(v) when is_integer(v), do: Integer.to_string(v)
   defp normalize_value(_other), do: :other
+
+  defp oldest_due_age_seconds(%{oldest_due_age_ms: ms}), do: ms / 1000
 
   defp duration_seconds(%{duration: native}) when is_integer(native) do
     System.convert_time_unit(native, :native, :microsecond) / 1_000_000

@@ -187,13 +187,17 @@ public final class SourcesClient {
   /**
    * Deletes a source: {@code DELETE /v1/tenants/<tenant>/sources/<name>}.
    *
-   * <p>The response body is ignored.
+   * <p>The response body is ignored. A source that still has undelivered hooks on the server's node
+   * is {@code 409 source_has_deliveries}; this method never sends the admin API's {@code
+   * ?deliveries=dead_letter}.
    *
    * @param tenant the tenant that owns the source
    * @param name the source's name
    * @throws SourceInvalidError when {@code tenant} or {@code name} is not a valid identifier;
    *     nothing is sent
    * @throws SourceNotFoundError when the tenant has no such source
+   * @throws SourceConflictError when the source still has undelivered hooks ({@code body()} carries
+   *     {@code error: source_has_deliveries} and the {@code pending}/{@code inflight} counts)
    * @throws SourceStoreReadOnlyError when the deployment's source store is read-only
    * @throws SourcesUnavailableError when the admin API is unreachable
    * @throws VersionMismatchError when an expected version was set and the server reports another

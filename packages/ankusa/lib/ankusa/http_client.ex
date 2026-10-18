@@ -1,15 +1,18 @@
 defmodule Ankusa.HttpClient do
   @moduledoc """
-  The one place the outbound adapters issue HTTP requests: `Ankusa.BlobStore.S3`,
-  `Ankusa.BlobStore.GCS`, and `Ankusa.Sink.Http`.
+  The one place the outbound adapters issue HTTP requests: the object stores
+  (`Ankusa.BlobStore.S3`, `GCS`, `Azure`, `OCI`), `Ankusa.Sink.Http`,
+  `Ankusa.Sink.SQS`, and `Ankusa.Sink.GooglePubSub`.
 
-  Those three share more than a client. Every request they send is a *function of
-  its own bytes* — a signed S3 URL, a forwarded hook body — which makes four
-  options part of each adapter's contract rather than a preference:
+  Those adapters share more than a client. Every request they send is a *function
+  of its own bytes* — a signed S3 URL, a signed `SendMessage`, a forwarded hook
+  body — which makes four options part of each adapter's contract rather than a
+  preference:
 
     * `retry: false` — retries belong to the framework's own loops
-      (`Ankusa.RetryPolicy`, the batcher's backoff). Req's default retry would
-      add hidden latency inside the retry it is already being wrapped in.
+      (`Ankusa.RetryPolicy` for the sinks, `Ankusa.BlobStore.Retry` around one
+      object-store request, re-signed per attempt). Req's default retry would
+      add hidden latency inside those, and resend a signature as it ages.
     * `redirect: false` — a followed redirect re-issues a POST as a GET, so a
       302 from a sink endpoint would be reported as a successful delivery. A
       redirect on a signed request is never more useful: the signature covers the
@@ -17,7 +20,8 @@ defmodule Ankusa.HttpClient do
     * `http_errors: :return` — a non-2xx status is a value each adapter maps
       (`{:error, :not_found}`), not an exception.
     * `decode_body: false` — these bodies are segments, claims and hook payloads,
-      not JSON.
+      not JSON; the one JSON reply (SQS's) is checked against the bytes sent, so
+      its adapter decodes it itself.
 
   ## `:req_options` is an allowlist
 
@@ -38,6 +42,12 @@ defmodule Ankusa.HttpClient do
   `timeout_ms` is applied to both the connection and the response. A
   `:connect_options` in `req_options` is merged over it, so supplying a proxy
   never drops the timeout.
+
+  `:max_response_bytes` in `opts` (not a transport option; it is taken out
+  before the request is built) stops reading the response once its body passes
+  that many bytes: the body is then `{:truncated, bytes_read}` and the
+  connection is closed rather than drained. Without it the whole body is read,
+  which the blob stores need.
   """
   @spec request(
           atom(),
@@ -48,6 +58,26 @@ defmodule Ankusa.HttpClient do
           keyword()
         ) :: {:ok, non_neg_integer(), term()} | {:error, term()}
   def request(method, url, headers, body, timeout_ms, opts \\ []) do
+    case request_with_headers(method, url, headers, body, timeout_ms, opts) do
+      {:ok, status, _headers, body} -> {:ok, status, body}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  `request/6`, plus the response headers (`%{lowercase_name => [value]}`), for
+  callers that read one such as `retry-after`.
+  """
+  @spec request_with_headers(
+          atom(),
+          String.t(),
+          [{String.t(), String.t()}],
+          iodata() | nil,
+          timeout(),
+          keyword()
+        ) :: {:ok, non_neg_integer(), %{String.t() => [String.t()]}, term()} | {:error, term()}
+  def request_with_headers(method, url, headers, body, timeout_ms, opts \\ []) do
+    {max_bytes, opts} = Keyword.pop(opts, :max_response_bytes)
     validate!(opts)
 
     request =
@@ -62,16 +92,45 @@ defmodule Ankusa.HttpClient do
         receive_timeout: timeout_ms,
         connect_options:
           Keyword.merge([timeout: timeout_ms], Keyword.get(opts, :connect_options, []))
-      ] ++ Keyword.drop(opts, [:connect_options]) ++ body_option(body)
+      ] ++ Keyword.drop(opts, [:connect_options]) ++ body_option(body) ++ cap_option(max_bytes)
 
     case Req.request(request) do
-      {:ok, %Req.Response{status: status, body: body}} -> {:ok, status, body}
-      {:error, reason} -> {:error, reason}
+      {:ok, %Req.Response{status: status, headers: headers, body: body}} ->
+        {:ok, status, headers, body}
+
+      {:error, reason} ->
+        {:error, reason}
     end
+  rescue
+    # Finch raises when no pooled connection frees up within its checkout
+    # timeout (5 s by default): that is a transport failure like a refused
+    # connection, for the caller's retry and breaker to see, not a crash of
+    # whatever was reading.
+    error in RuntimeError -> {:error, error}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp body_option(nil), do: []
   defp body_option(body), do: [body: body]
+
+  defp cap_option(nil), do: []
+
+  # Accumulate into the response body until it passes `max`, then stop reading
+  # (`:halt` closes the connection instead of returning it to the pool).
+  defp cap_option(max) when is_integer(max) and max >= 0 do
+    [
+      into: fn {:data, data}, {req, resp} ->
+        body = if is_binary(resp.body), do: resp.body <> data, else: data
+
+        if byte_size(body) > max do
+          {:halt, {req, %{resp | body: {:truncated, byte_size(body)}}}}
+        else
+          {:cont, {req, %{resp | body: body}}}
+        end
+      end
+    ]
+  end
 
   defp validate!(opts) do
     case Keyword.keys(opts) -- @transport_options do

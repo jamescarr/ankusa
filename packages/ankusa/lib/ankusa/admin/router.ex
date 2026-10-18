@@ -69,6 +69,18 @@ defmodule Ankusa.Admin.Router do
     })
   end
 
+  # Readiness, not liveness: 503 while this node's store cannot take a synced
+  # write. See `Ankusa.Health`.
+  get "/ready" do
+    case Ankusa.Health.ready(instance(conn)) do
+      {:ok, body} ->
+        send_json(conn, 200, body)
+
+      {:error, body} ->
+        conn |> Plug.Conn.put_resp_header("retry-after", "1") |> send_json(503, body)
+    end
+  end
+
   get "/metrics" do
     conn
     # Prometheus's text exposition format version is a parameter, not a
@@ -325,13 +337,86 @@ defmodule Ankusa.Admin.Router do
         invalid_source(conn, invalid_name_message(name))
 
       true ->
-        case Ankusa.SourceStore.delete(instance(conn), tenant, name) do
-          # 204 carries no body: there is nothing left to describe.
-          :ok -> Plug.Conn.send_resp(conn, 204, "")
-          {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
-          {:error, :invalid, message} -> invalid_source(conn, message)
-          {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
+        params = Plug.Conn.fetch_query_params(conn).query_params
+
+        case deliveries_param(params) do
+          {:ok, mode} -> delete_source(conn, tenant, name, mode)
+          {:error, field} -> invalid_filter(conn, field)
         end
+    end
+  end
+
+  defp deliveries_param(params) do
+    case Map.fetch(params, "deliveries") do
+      :error -> {:ok, nil}
+      {:ok, "dead_letter"} -> {:ok, :dead_letter}
+      {:ok, _other} -> {:error, "deliveries"}
+    end
+  end
+
+  # Rows still queued for a source would be dead-lettered as `source_gone`
+  # once it is gone — or delivered to the sinks of a source re-created under
+  # the same name. So this node's queue is checked first: a source with rows
+  # is refused (`409 source_has_deliveries`) unless the caller chose
+  # `?deliveries=dead_letter`, which dead-letters the pending ones now
+  # (claimed ones settle on their own). Node-local, like the DLQ. A source
+  # this node's store cannot read (missing, or config-only) skips the check:
+  # `SourceStore.delete/3` answers for it.
+  defp delete_source(conn, tenant, name, mode) do
+    instance = instance(conn)
+    config = config(conn)
+    source_id = Ankusa.SourceStore.Table.source_id(tenant, name)
+
+    with true <- config.wal == :disk and Ankusa.Instance.store?(config),
+         {:ok, _stored} <- Ankusa.SourceStore.get(instance, tenant, name) do
+      case Ankusa.Queue.pending_for_source(instance, source_id) do
+        {:ok, %{pending: 0, inflight: 0}} ->
+          delete_and_reply(conn, tenant, name)
+
+        {:ok, counts} when mode == nil ->
+          send_json(conn, 409, Map.put(counts, :error, "source_has_deliveries"))
+
+        {:ok, %{pending: 0}} ->
+          delete_and_reply(conn, tenant, name)
+
+        {:ok, _counts} ->
+          dead_letter_and_delete(conn, config, tenant, name, source_id)
+
+        {:error, _reason} ->
+          source_store_unavailable(conn)
+      end
+    else
+      _ -> delete_and_reply(conn, tenant, name)
+    end
+  end
+
+  defp dead_letter_and_delete(conn, config, tenant, name, source_id) do
+    if Config.role?(config, :dispatch) do
+      case Ankusa.Dispatch.Pipeline.dead_letter_source(instance(conn), source_id) do
+        {:ok, _dead} ->
+          delete_and_reply(conn, tenant, name)
+
+        {:error, :unavailable} ->
+          conn
+          |> Plug.Conn.put_resp_header("retry-after", "1")
+          |> send_json(503, %{error: "dispatch_unavailable"})
+
+        {:error, _reason} ->
+          source_store_unavailable(conn)
+      end
+    else
+      send_json(conn, 409, %{error: "role_not_enabled", role: "dispatch"})
+    end
+  end
+
+  defp delete_and_reply(conn, tenant, name) do
+    case Ankusa.SourceStore.delete(instance(conn), tenant, name) do
+      # 204 carries no body: there is nothing left to describe.
+      :ok -> Plug.Conn.send_resp(conn, 204, "")
+      {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
+      {:error, :invalid, message} -> invalid_source(conn, message)
+      {:error, :store_unavailable} -> source_store_unavailable(conn)
+      {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
     end
   end
 
@@ -361,6 +446,7 @@ defmodule Ankusa.Admin.Router do
       {:error, :invalid, message} -> invalid_source(conn, message)
       {:error, :exists} -> send_json(conn, 409, %{error: "source_exists"})
       {:error, :not_found} -> send_json(conn, 404, %{error: "source_not_found"})
+      {:error, :store_unavailable} -> source_store_unavailable(conn)
       {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
     end
   end
@@ -455,6 +541,14 @@ defmodule Ankusa.Admin.Router do
 
   defp invalid_source(conn, message),
     do: send_json(conn, 400, %{error: "invalid_source", message: message})
+
+  # The store could not persist the write (a Redis outage, a failed sync): the
+  # request was fine, so the client retries rather than fixes it.
+  defp source_store_unavailable(conn) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "1")
+    |> send_json(503, %{error: "store_unavailable"})
+  end
 
   defp invalid_rate_limit(conn, message),
     do: send_json(conn, 400, %{error: "invalid_rate_limit", message: message})

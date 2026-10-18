@@ -32,6 +32,7 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_ROLES` | `node.roles` (comma-separated) |
   | `ANKUSA_DATA_DIR` | `node.data_dir` |
   | `ANKUSA_LOG_LEVEL` | `log.level` |
+  | `ANKUSA_BANNER` | `log.banner` |
   | `ANKUSA_HTTP_PORT`, else `PORT` | `http.port` |
   | `ANKUSA_ADMIN_PORT` | `admin.port` |
   | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
@@ -39,10 +40,12 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
   | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
   | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
+  | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
   | `ANKUSA_WAL_TYPE` | `wal.type` |
   | `ANKUSA_STORAGE_TYPE` | `storage.type` |
   | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
   | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
+  | `ANKUSA_BACKUP_ENABLED` | `backup.enabled` |
 
   Sources are deliberately **not** env-overridable: they carry behaviour
   (verifier, sinks), and behaviour in an env var is unreadable in review.
@@ -59,25 +62,30 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check sources source_store lifecycle)
+  @root_keys ~w(node log http admin routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store lifecycle)
   @node_keys ~w(roles data_dir)
-  @log_keys ~w(level)
+  @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix)
-  @admin_keys ~w(enabled port ip)
-  @batcher_keys ~w(partitions max_batch max_delay_ms max_queue)
-  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms retry)
+  @admin_keys ~w(enabled port ip gauge_interval_ms)
+  @batcher_keys ~w(partitions max_batch max_delay_ms max_queue max_queue_bytes)
+  @dispatch_keys ~w(batch concurrency max_inflight max_inflight_bytes attempt_timeout_ms sink_concurrency breaker_failures breaker_open_ms breaker_max_open_ms retry)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type publish_timeout_ms)
-  @storage_keys ~w(type roll_bytes roll_ms s3 gcs)
-  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key)
+  @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs)
+  @blob_store_keys ~w(type root s3 gcs)
+  @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token)
   @gcs_keys ~w(bucket endpoint auth token)
-  @claim_check_keys ~w(port retention_days pack_max_bytes ip)
-  @source_store_keys ~w(type)
+  @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
+                       read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
+                       read_cache_bytes read_cache_max_entry_bytes)
+  @backup_keys ~w(enabled interval_ms keep store)
+  @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
   @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
   @routes_store_keys ~w(type url namespace tick_ms)
-  # Keys the Redis store owns; the ETS store must not silently drop them.
-  @routes_redis_only_keys ~w(url namespace tick_ms)
+  # Keys a Redis store owns (`routes.store`, `source_store`); the other store
+  # types must not silently drop them.
+  @redis_only_keys ~w(url namespace tick_ms)
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
@@ -89,7 +97,7 @@ defmodule AnkusaServer.Config do
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
   @max_secrets 8
-  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers)
+  @source_keys ~w(tenant on_verify_failure verify sinks dedupe forward_headers trust_url_tenant)
   @dedupe_keys ~w(preset header json ttl_seconds)
   @dedupe_presets %{
     "github" => :github,
@@ -101,13 +109,15 @@ defmodule AnkusaServer.Config do
   @verify_keys ~w(type secret tolerance_seconds)
   @verify_hmac_keys ~w(type secret tolerance_seconds signature_header parse sig_prefix sig_key version signed hash encoding secret_decode timestamp_header)
   @log_sink_keys ~w(type)
-  @http_sink_keys ~w(type url method headers timeout_ms)
-  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes)
-  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes ssl sasl)
+  @http_sink_keys ~w(type url method headers timeout_ms secret max_response_bytes)
+  @rabbitmq_sink_keys ~w(type url exchange exchange_type routing_key inline_max_bytes max_inflight idle_timeout_ms)
+  @kafka_sink_keys ~w(type brokers topic key inline_max_bytes max_record_bytes ssl sasl idle_timeout_ms)
   @sasl_keys ~w(mechanism username password)
-  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth)
+  @nats_sink_keys ~w(type servers subject inline_max_bytes publish_timeout_ms tls auth idle_timeout_ms)
   @nats_auth_keys ~w(username password token nkey_seed jwt)
-  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms)
+  @redis_sink_keys ~w(type url channel inline_max_bytes publish_timeout_ms idle_timeout_ms)
+  @sqs_sink_keys ~w(type queue_url region endpoint message_group_id inline_max_bytes max_message_bytes timeout_ms access_key_id secret_access_key session_token)
+  @google_pubsub_sink_keys ~w(type project topic endpoint ordering_key inline_max_bytes max_message_bytes timeout_ms auth token)
 
   @roles ~w(edge dispatch storage claim_check)
   @routes_store_types ~w(ets redis)
@@ -117,14 +127,14 @@ defmodule AnkusaServer.Config do
   @scheme_hashes ~w(sha256 sha512 sha1)
   @scheme_encodings ~w(hex base64)
   @scheme_secret_decodes ~w(raw whsec_base64)
-  @sink_types ~w(log http rabbitmq kafka nats redis)
+  @sink_types ~w(log http rabbitmq kafka nats redis sqs google_pubsub)
   @policies ~w(reject quarantine accept_flag)
   @routings ~w(path tenant_path)
   @log_levels ~w(debug info warning error)
   @exchange_types ~w(topic direct fanout headers)
 
-  @typedoc "A loaded config plus the log level the file asked for."
-  @type loaded :: %{config: Ankusa.Config.t(), log_level: Logger.level()}
+  @typedoc "A loaded config plus the log level and banner switch the file asked for."
+  @type loaded :: %{config: Ankusa.Config.t(), log_level: Logger.level(), banner: boolean()}
 
   @var_re ~r/\$\{([A-Z0-9_]+)(:-([^}]*))?\}/
 
@@ -144,7 +154,7 @@ defmodule AnkusaServer.Config do
       |> interpolate(env, [])
       |> apply_env_overrides(env)
 
-    %{config: config!(doc), log_level: log_level!(doc)}
+    %{config: config!(doc), log_level: log_level!(doc), banner: banner?(doc)}
   end
 
   @doc """
@@ -222,6 +232,17 @@ defmodule AnkusaServer.Config do
   end
 
   defp interpolate(value, env, path) when is_binary(value) do
+    # Whatever in the file still reads `${` once the variable references are
+    # taken out did not match the grammar (`${stripe_secret}`, `${A-B}`): left
+    # alone it would become a literal secret or URL, so it is an error. Only
+    # the template is checked: a substituted value may contain `${` itself.
+    if value |> then(&Regex.replace(@var_re, &1, "")) |> String.contains?("${") do
+      raise ConfigError,
+        message:
+          "#{render_path(path)}: unresolved ${…} (variable names are [A-Z0-9_]+; " <>
+            "use ${NAME:-} for an empty default)"
+    end
+
     Regex.replace(@var_re, value, fn _match, name, marker, default ->
       case Map.fetch(env, name) do
         {:ok, replacement} ->
@@ -245,18 +266,21 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ROLES", ["node", "roles"]},
     {"ANKUSA_DATA_DIR", ["node", "data_dir"]},
     {"ANKUSA_LOG_LEVEL", ["log", "level"]},
+    {"ANKUSA_BANNER", ["log", "banner"]},
     {"ANKUSA_ADMIN_PORT", ["admin", "port"]},
     {"ANKUSA_ADMIN_IP", ["admin", "ip"]},
     {"ANKUSA_CLAIM_CHECK_PORT", ["claim_check", "port"]},
     {"ANKUSA_CLAIM_CHECK_IP", ["claim_check", "ip"]},
     {"ANKUSA_ROUTES_ENABLED", ["routes", "enabled"]},
     {"ANKUSA_ROUTES_STORE_URL", ["routes", "store", "url"]},
+    {"ANKUSA_SOURCE_STORE_URL", ["source_store", "url"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
     {"ANKUSA_S3_REGION", ["storage", "s3", "region"]},
-    {"ANKUSA_S3_ENDPOINT", ["storage", "s3", "endpoint"]},
-    {"ANKUSA_GCS_BUCKET", ["storage", "gcs", "bucket"]}
+    {"ANKUSA_GCS_BUCKET", ["storage", "gcs", "bucket"]},
+    {"ANKUSA_STORAGE_KEY_PREFIX", ["storage", "key_prefix"]},
+    {"ANKUSA_BACKUP_ENABLED", ["backup", "enabled"]}
   ]
 
   defp apply_env_overrides(doc, env) do
@@ -297,6 +321,11 @@ defmodule AnkusaServer.Config do
     String.to_existing_atom(level)
   end
 
+  defp banner?(doc) do
+    log = section!(doc, "log", @log_keys, [])
+    bool_opt(log, "banner", ["log"]) != false
+  end
+
   defp config!(doc) do
     check_keys!(doc, @root_keys, [])
 
@@ -312,12 +341,15 @@ defmodule AnkusaServer.Config do
         wal_section(doc) ++
         storage_section(doc) ++
         claim_check_section(doc) ++
+        backup_section(doc) ++
         source_store_section(doc) ++
         lifecycle_section(doc)
 
     try do
       config = Ankusa.Config.new(opts)
       Ankusa.ClaimCheck.validate_config!(config)
+      Ankusa.Verifier.validate_config!(config)
+      Ankusa.Verifier.validate_shared!(config)
       # The image validates what core validates, at the same moment: a route
       # config that would refuse to boot must fail `check-config` too, with the
       # same message.
@@ -326,6 +358,7 @@ defmodule AnkusaServer.Config do
       Ankusa.Edge.Quarantine.validate_config!(config)
       Ankusa.Dispatch.Pipeline.validate_config!(config)
       Ankusa.Queue.validate_config!(config)
+      Ankusa.Store.Backup.validate_config!(config)
       Ankusa.Lifecycle.validate_config!(config)
       config
     rescue
@@ -396,6 +429,7 @@ defmodule AnkusaServer.Config do
         [enabled: bool!(Map.get(admin, "enabled", true), ["admin", "enabled"])]
         |> put_opt(:port, int_opt(admin, "port", ["admin"]))
         |> put_opt(:ip, string_opt(admin, "ip", ["admin"]))
+        |> put_opt(:gauge_interval_ms, int_opt(admin, "gauge_interval_ms", ["admin"]))
     ]
   end
 
@@ -411,6 +445,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:max_batch, int_opt(batcher, "max_batch", ["batcher"]))
         |> put_opt(:max_delay_ms, int_opt(batcher, "max_delay_ms", ["batcher"]))
         |> put_opt(:max_queue, int_opt(batcher, "max_queue", ["batcher"]))
+        |> put_opt(:max_queue_bytes, int_opt(batcher, "max_queue_bytes", ["batcher"]))
     ]
   end
 
@@ -426,6 +461,10 @@ defmodule AnkusaServer.Config do
         |> put_opt(:max_inflight, int_opt(dispatch, "max_inflight", ["dispatch"]))
         |> put_opt(:max_inflight_bytes, int_opt(dispatch, "max_inflight_bytes", ["dispatch"]))
         |> put_opt(:attempt_timeout_ms, int_opt(dispatch, "attempt_timeout_ms", ["dispatch"]))
+        |> put_opt(:sink_concurrency, int_opt(dispatch, "sink_concurrency", ["dispatch"]))
+        |> put_opt(:breaker_failures, int_opt(dispatch, "breaker_failures", ["dispatch"]))
+        |> put_opt(:breaker_open_ms, int_opt(dispatch, "breaker_open_ms", ["dispatch"]))
+        |> put_opt(:breaker_max_open_ms, int_opt(dispatch, "breaker_max_open_ms", ["dispatch"]))
         |> put_opt(:retry, retry_policy(retry))
     ]
   end
@@ -464,27 +503,40 @@ defmodule AnkusaServer.Config do
 
   defp storage_section(doc) do
     storage = section!(doc, "storage", @storage_keys, [])
-    s3 = section!(storage, "s3", @s3_keys, ["storage"])
-    gcs = section!(storage, "gcs", @gcs_keys, ["storage"])
-
-    blob_store =
-      case enum!(storage["type"] || "local", ~w(local s3 gcs), ["storage", "type"]) do
-        "local" -> {Ankusa.BlobStore.LocalFS, []}
-        "s3" -> {Ankusa.BlobStore.S3, s3_opts!(s3)}
-        "gcs" -> {Ankusa.BlobStore.GCS, gcs_opts!(gcs)}
-      end
 
     [
       storage:
-        [blob_store: blob_store]
+        [blob_store: blob_store!(storage, ["storage"], false)]
         |> put_opt(:roll_bytes, int_opt(storage, "roll_bytes", ["storage"]))
         |> put_opt(:roll_ms, int_opt(storage, "roll_ms", ["storage"]))
+        |> put_opt(:key_prefix, string_opt(storage, "key_prefix", ["storage"]))
     ]
   end
 
-  defp s3_opts!(s3) do
-    path = ["storage", "s3"]
+  # `{module, opts}` from a `type: local|s3|gcs` section with its `s3:`/`gcs:`
+  # children: `storage` itself, `claim_check.store` and each entry of
+  # `claim_check.stores`. `root?` allows a LocalFS `root` (only a dedicated
+  # claim store has one; segments live under `data_dir`).
+  defp blob_store!(section, path, root?) do
+    s3 = section!(section, "s3", @s3_keys, path)
+    gcs = section!(section, "gcs", @gcs_keys, path)
 
+    case enum!(section["type"] || "local", ~w(local s3 gcs), path ++ ["type"]) do
+      "local" ->
+        case root? && string_opt(section, "root", path) do
+          root when is_binary(root) -> {Ankusa.BlobStore.LocalFS, [root: root]}
+          _ -> {Ankusa.BlobStore.LocalFS, []}
+        end
+
+      "s3" ->
+        {Ankusa.BlobStore.S3, s3_opts!(s3, path ++ ["s3"])}
+
+      "gcs" ->
+        {Ankusa.BlobStore.GCS, gcs_opts!(gcs, path ++ ["gcs"])}
+    end
+  end
+
+  defp s3_opts!(s3, path) do
     [
       bucket: required_string!(s3, "bucket", path),
       region: required_string!(s3, "region", path)
@@ -492,24 +544,30 @@ defmodule AnkusaServer.Config do
     |> put_opt(:endpoint, string_opt(s3, "endpoint", path))
     |> put_opt(:access_key_id, string_opt(s3, "access_key_id", path))
     |> put_opt(:secret_access_key, string_opt(s3, "secret_access_key", path))
+    |> put_opt(:session_token, string_opt(s3, "session_token", path))
   end
 
-  defp gcs_opts!(gcs) do
-    path = ["storage", "gcs"]
+  defp gcs_opts!(gcs, path) do
     bucket = required_string!(gcs, "bucket", path)
 
-    opts = [bucket: bucket] |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))
+    ([bucket: bucket] |> put_opt(:endpoint, string_opt(gcs, "endpoint", path))) ++
+      gcp_auth!(gcs, path)
+  end
 
-    case enum!(gcs["auth"] || "metadata", ~w(metadata token none), path ++ ["auth"]) do
+  # `auth: metadata | token | none` (default metadata) on any GCP section.
+  defp gcp_auth!(section, path) do
+    case enum!(section["auth"] || "metadata", ~w(metadata token none), path ++ ["auth"]) do
       "none" ->
-        opts
+        []
 
       "metadata" ->
-        opts ++ [token_provider: {AnkusaServer.GcsToken, :metadata, []}]
+        [token_provider: {AnkusaServer.GcpToken, :metadata, []}]
 
       "token" ->
-        token = required_string!(gcs, "token", path)
-        opts ++ [token_provider: {AnkusaServer.GcsToken, :static, [token]}]
+        [
+          token_provider:
+            {AnkusaServer.GcpToken, :static, [required_string!(section, "token", path)]}
+        ]
     end
   end
 
@@ -517,14 +575,95 @@ defmodule AnkusaServer.Config do
 
   defp claim_check_section(doc) do
     claim_check = section!(doc, "claim_check", @claim_check_keys, [])
+    path = ["claim_check"]
 
     [
       claim_check:
         []
-        |> put_opt(:port, int_opt(claim_check, "port", ["claim_check"]))
-        |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", ["claim_check"]))
-        |> put_opt(:retention_days, int_opt(claim_check, "retention_days", ["claim_check"]))
-        |> put_opt(:ip, string_opt(claim_check, "ip", ["claim_check"]))
+        |> put_opt(:port, int_opt(claim_check, "port", path))
+        |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", path))
+        |> put_opt(:retention_days, int_opt(claim_check, "retention_days", path))
+        |> put_opt(:ip, string_opt(claim_check, "ip", path))
+        |> put_opt(:blob_stores, claim_stores!(claim_check))
+        |> put_opt(:placement, atom_enum_opt(claim_check, "placement", ~w(ordered hash), path))
+        |> put_opt(:key_layout, atom_enum_opt(claim_check, "key_layout", ~w(flat sharded), path))
+        |> put_opt(:store_cooldown_ms, int_opt(claim_check, "store_cooldown_ms", path))
+        |> put_opt(:read_deadline_ms, int_opt(claim_check, "read_deadline_ms", path))
+        |> put_opt(:read_timeout_ms, int_opt(claim_check, "read_timeout_ms", path))
+        |> put_opt(:read_retries, int_opt(claim_check, "read_retries", path))
+        |> put_opt(:read_max_inflight, int_opt(claim_check, "read_max_inflight", path))
+        |> put_opt(:read_queue_max, int_opt(claim_check, "read_queue_max", path))
+        |> put_opt(:read_cache_bytes, int_opt(claim_check, "read_cache_bytes", path))
+        |> put_opt(
+          :read_cache_max_entry_bytes,
+          int_opt(claim_check, "read_cache_max_entry_bytes", path)
+        )
+    ]
+  end
+
+  # `store` (one mapping) and `stores` (a list of them, in failover order) both
+  # become `claim_check.blob_stores`; neither (or null) = nil, the storage
+  # bucket.
+  defp claim_stores!(claim_check) do
+    case {claim_check["store"], claim_check["stores"]} do
+      {nil, nil} ->
+        nil
+
+      {_store, nil} ->
+        store = section!(claim_check, "store", @blob_store_keys, ["claim_check"])
+        [blob_store!(store, ["claim_check", "store"], true)]
+
+      {nil, [_ | _] = stores} ->
+        stores
+        |> Enum.with_index()
+        |> Enum.map(fn {entry, index} ->
+          claim_store!(entry, ["claim_check", "stores", index])
+        end)
+
+      {nil, []} ->
+        raise ConfigError, message: "claim_check.stores: must not be empty"
+
+      {nil, other} ->
+        raise ConfigError,
+          message: type_error(["claim_check", "stores"], "a list of stores", other)
+
+      {_store, _stores} ->
+        raise ConfigError,
+          message: "claim_check: store and stores are exclusive; list every store under stores"
+    end
+  end
+
+  defp claim_store!(entry, path) when is_map(entry) do
+    entry |> section!(@blob_store_keys, path) |> blob_store!(path, true)
+  end
+
+  defp claim_store!(entry, path),
+    do: raise(ConfigError, message: type_error(path, "a mapping", entry))
+
+  # ── backup ──────────────────────────────────────────────────────────────────
+
+  # `store` takes the claim store's shape (`root` allowed for a local store); unset
+  # means the storage bucket, under `storage.key_prefix` either way.
+  defp backup_section(doc) do
+    backup = section!(doc, "backup", @backup_keys, [])
+
+    blob_store =
+      case backup["store"] do
+        nil ->
+          nil
+
+        _store ->
+          store = section!(backup, "store", @blob_store_keys, ["backup"])
+          blob_store!(store, ["backup", "store"], true)
+      end
+
+    [
+      backup:
+        []
+        |> put_opt(:enabled, bool_opt(backup, "enabled", ["backup"]))
+        |> put_opt(:interval_ms, int_opt(backup, "interval_ms", ["backup"]))
+        |> put_opt(:keep, int_opt(backup, "keep", ["backup"]))
+        |> put_opt(:blob_store, blob_store)
     ]
   end
 
@@ -593,7 +732,7 @@ defmodule AnkusaServer.Config do
   end
 
   defp reject_redis_only_keys!(store, path) do
-    case Enum.filter(@routes_redis_only_keys, &(Map.get(store, &1) != nil)) do
+    case Enum.filter(@redis_only_keys, &(Map.get(store, &1) != nil)) do
       [] ->
         :ok
 
@@ -757,20 +896,37 @@ defmodule AnkusaServer.Config do
 
   # ── sources ─────────────────────────────────────────────────────────────────
 
+  # A URL with no `type` means Redis, as for `routes.store`: a file that sets
+  # one has said it wants sources shared, and the other types have no URL.
   defp source_store_section(doc) do
     sources = sources!(doc)
     store = section!(doc, "source_store", @source_store_keys, [])
+    path = ["source_store"]
+    decoder = &AnkusaServer.Config.source_from_map!/2
 
-    case enum!(store["type"] || "static", ~w(static persistent), ["source_store", "type"]) do
+    type =
+      enum!(
+        store["type"] || (store["url"] && "redis") || "static",
+        ~w(static persistent redis),
+        path ++ ["type"]
+      )
+
+    case type do
       "static" ->
+        reject_redis_only_keys!(store, path)
         [source_store: {Ankusa.SourceStore.Static, sources: sources}]
 
       "persistent" ->
-        [
-          source_store:
-            {Ankusa.SourceStore.Persistent,
-             sources: sources, decoder: &AnkusaServer.Config.source_from_map!/2}
-        ]
+        reject_redis_only_keys!(store, path)
+        [source_store: {Ankusa.SourceStore.Persistent, sources: sources, decoder: decoder}]
+
+      "redis" ->
+        opts =
+          [url: required_string!(store, "url", path), sources: sources, decoder: decoder]
+          |> put_opt(:namespace, string_opt(store, "namespace", path))
+          |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))
+
+        [source_store: {Ankusa.SourceStore.Redis, opts}]
     end
   end
 
@@ -833,6 +989,7 @@ defmodule AnkusaServer.Config do
     |> Keyword.put(:sinks, sinks!(source, path))
     |> put_opt(:dedupe, dedupe(source, path))
     |> put_opt(:forward_headers, forward_headers(source, path))
+    |> put_opt(:trust_url_tenant, bool_opt(source, "trust_url_tenant", path))
   end
 
   # `nil`, a preset name (`github`, `stripe`, …), or a map with exactly one of
@@ -1098,11 +1255,24 @@ defmodule AnkusaServer.Config do
       "http" ->
         check_keys!(sink, @http_sink_keys, path)
 
+        secret =
+          case sink["secret"] do
+            nil ->
+              nil
+
+            value ->
+              secrets = secret!(value, path ++ ["secret"])
+              non_empty_secret!(secrets, path ++ ["secret"])
+              secrets
+          end
+
         {Ankusa.Sink.Http,
          [url: required_string!(sink, "url", path)]
          |> put_opt(:method, atom_enum_opt(sink, "method", ~w(post put patch), path))
          |> put_opt(:headers, headers(sink["headers"], path ++ ["headers"]))
-         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))}
+         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+         |> put_opt(:secret, secret)
+         |> put_opt(:max_response_bytes, int_opt(sink, "max_response_bytes", path))}
 
       "rabbitmq" ->
         check_keys!(sink, @rabbitmq_sink_keys, path)
@@ -1112,7 +1282,9 @@ defmodule AnkusaServer.Config do
          |> put_opt(:url, string_opt(sink, "url", path))
          |> put_opt(:exchange_type, atom_enum_opt(sink, "exchange_type", @exchange_types, path))
          |> put_opt(:routing_key, string_opt(sink, "routing_key", path))
-         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))}
+         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_inflight, int_opt(sink, "max_inflight", path))
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
       "kafka" ->
         check_keys!(sink, @kafka_sink_keys, path)
@@ -1124,8 +1296,10 @@ defmodule AnkusaServer.Config do
          ]
          |> put_opt(:key, string_opt(sink, "key", path))
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_record_bytes, int_opt(sink, "max_record_bytes", path))
          |> put_opt(:ssl, bool_opt(sink, "ssl", path))
-         |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))}
+         |> put_opt(:sasl, sasl(sink["sasl"], path ++ ["sasl"]))
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
 
       "nats" ->
         check_keys!(sink, @nats_sink_keys, path)
@@ -1138,6 +1312,7 @@ defmodule AnkusaServer.Config do
           |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
           |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
           |> put_opt(:tls, bool_opt(sink, "tls", path))
+          |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))
 
         {Ankusa.Sink.NATS, connection ++ nats_auth(sink["auth"], path ++ ["auth"])}
 
@@ -1150,7 +1325,39 @@ defmodule AnkusaServer.Config do
            channel: required_string!(sink, "channel", path)
          ]
          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
-         |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))}
+         |> put_opt(:publish_timeout_ms, int_opt(sink, "publish_timeout_ms", path))
+         |> put_opt(:idle_timeout_ms, int_opt(sink, "idle_timeout_ms", path))}
+
+      "sqs" ->
+        check_keys!(sink, @sqs_sink_keys, path)
+
+        {Ankusa.Sink.SQS,
+         [
+           queue_url: required_string!(sink, "queue_url", path),
+           region: required_string!(sink, "region", path)
+         ]
+         |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+         |> put_opt(:message_group_id, string_opt(sink, "message_group_id", path))
+         |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+         |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+         |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))
+         |> put_opt(:access_key_id, string_opt(sink, "access_key_id", path))
+         |> put_opt(:secret_access_key, string_opt(sink, "secret_access_key", path))
+         |> put_opt(:session_token, string_opt(sink, "session_token", path))}
+
+      "google_pubsub" ->
+        check_keys!(sink, @google_pubsub_sink_keys, path)
+
+        {Ankusa.Sink.GooglePubSub,
+         ([
+            project: required_string!(sink, "project", path),
+            topic: required_string!(sink, "topic", path)
+          ]
+          |> put_opt(:endpoint, string_opt(sink, "endpoint", path))
+          |> put_opt(:ordering_key, string_opt(sink, "ordering_key", path))
+          |> put_opt(:inline_max_bytes, int_opt(sink, "inline_max_bytes", path))
+          |> put_opt(:max_message_bytes, int_opt(sink, "max_message_bytes", path))
+          |> put_opt(:timeout_ms, int_opt(sink, "timeout_ms", path))) ++ gcp_auth!(sink, path)}
     end
   end
 

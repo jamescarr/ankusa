@@ -1,7 +1,7 @@
 defmodule AnkusaRedis.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.5.0"
   @source_url "https://github.com/jamescarr/ankusa"
 
   # Forced split: `ankusa` core stays free of `:redix`, and every deployment
@@ -18,7 +18,7 @@ defmodule AnkusaRedis.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
-        "Ankusa Redis adapters: a route store shared across edge nodes, and a pub/sub sink.",
+        "Ankusa Redis adapters: route and source stores shared across edge nodes, and a pub/sub sink.",
       package: package(),
       source_url: @source_url,
       homepage_url: @source_url,
@@ -83,7 +83,12 @@ defmodule AnkusaRedis.MixProject do
         {:async_api_spex, path: "../async_api_spex", override: true}
       ]
     else
-      [{:ankusa, "~> 0.4"}]
+      # `~> 0.6`, not older: the route store publishes through the ETS
+      # `Ankusa.Routes.Snapshot` (`publish/1,2`, `mutate/3`,
+      # `drop_generation/2`), and the source store reads and writes through
+      # core's internal `Ankusa.SourceStore.Table`; core ships both from 0.6.0.
+      # Publish core first.
+      [{:ankusa, "~> 0.6"}]
     end
   end
 end

@@ -13,8 +13,8 @@ that one sentence.
 - **Crash before the accept:** no `2xx` was sent. The provider retries. Nothing
   was lost because nothing was promised.
 - **Crash after the accept, before the HTTP response leaves:** the provider
-  retries anyway (it never saw the `2xx`). Ingest does no deduplication, so
-  that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
+  retries anyway (it never saw the `2xx`). Without a source
+  [`dedupe:`](configuration.md#sources) setting, that retry is a new hook: a fresh `id`, stored and delivered again. Delivery
   is at-least-once; consumers are idempotent receivers.
 - **Store slow or down:** `503` with `Retry-After`. Under `wal.type: disk` that
   is the store refusing a commit; under `wal.type: none` it is a sink refusing
@@ -33,6 +33,15 @@ RocksDB database per instance at `<data_dir>/<instance>/store`, owned by the
 `Ankusa.Store` process; it is local to one BEAM node, so run every store
 role together and scale out with independent nodes. See
 [Deployment topologies](#deployment-topologies).
+
+Losing the box is covered by [`backup`](configuration.md#backup), off by
+default: every `backup.interval_ms` (60 s) a checkpoint of the store goes to
+an object store, and a node that starts on an empty `data_dir` restores the
+latest one before it opens the store — or refuses to start when the backup
+location can't be read, never "starts empty". Hooks acked after the last
+backup are lost with the box (their archive copies, if the compactor wrote
+any, are catalogued again); the startup log names the interval. See
+[`storage.md`](storage.md#backup-and-restore).
 
 `wal.type: none` makes the node stateless instead: no queue, no batcher, no
 dispatch pipeline, no compactor, no DLQ, and the only role left is `:edge`. The
@@ -80,16 +89,16 @@ honest ack:
 flowchart LR
     P[Provider] -->|POST catch URL| E[Edge: Bandit + Router]
     E --> IG[Ingest: verify]
-    IG -->|in the request| SK[Sinks, declaration order]
+    IG -->|in the request| SK[Sinks, concurrently]
     SK -->|every sink confirmed| A[201 accepted]
-    SK -->|first refusal| R[503 + Retry-After]
+    SK -->|any failure or timeout| R[503 + Retry-After]
 ```
 
 No batcher, no queue, no compactor, no dispatch pipeline, no DLQ. The request
 process publishes to each of the source's sinks and answers only once all have
 confirmed (`Kafka` `acks=all`, a publisher confirm, a JetStream ack, an HTTP
-`2xx`); the first refusal is the `503`, and the provider — not a retry policy —
-is the retry. `Ankusa.Sink.durable?/2` is the contract behind that promise, and
+`2xx`); any failure or timeout is the `503`, and the provider — not a retry policy —
+is the retry. `c:Ankusa.Sink.durable?/1` is the contract behind that promise, and
 boot refuses a `wal: :none` config in which no sink of a static source can make
 it. Detail in [`delivery.md`](delivery.md#direct-mode).
 
@@ -100,7 +109,10 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    pluggable seam that turns a URL into `%Ankusa.Route{source_id, tenant_id}`
    (see [`multi-tenancy.md`](multi-tenancy.md)). It then does everything that
    can refuse the request *before reading its body*: a `Content-Length` above
-   `max_body_bytes` is `413`, and a source that does not exist is `404`. Only
+   `max_body_bytes` is `413`, and a source that does not exist is `404` — so
+   is a source owned by one tenant asked for under another tenant's URL (a
+   source with the default tenant `"default"` is shared and answers any
+   tenant), and a source store that cannot answer is `503`, never `404`. Only
    then does it read the body, still bounded by `max_body_bytes` as it streams
    (a chunked body has no length to check up front). Refusals are counted on
    `ankusa_ingest_refused_total{instance,reason}` and never create a
@@ -120,7 +132,10 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
      (`rate_limits`) before anything is written. Over the limit is `429` with
      `Retry-After`, nothing stored — and because the charge comes after
      verification, a flood of forged requests spends no budget and can never
-     lock a tenant out. See
+     lock a tenant out. A forged hook is not free either: one accepted
+     *flagged* (`accept_flag`) or quarantined spends its source's quarantine
+     bucket (`429 quarantine_rate_limited` past it), and a flagged hook gets
+     no dedupe key, so it cannot suppress the real event. See
      [`configuration.md#rate-limits`](configuration.md#rate-limits).
 3. **`Ankusa.Edge.Batcher`** (one GenServer per partition, default two)
    receives the envelope and **blocks the caller** until the batch it lands
@@ -129,11 +144,13 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    it and commits the instant the previous one returns. `max_batch`
    (default 256) bounds one batch, `max_delay_ms` (default 0) adds no linger.
    Every blocked caller is replied to only after that commit returns; that's
-   what makes the ack honest. The queue is bounded (`max_queue`, default
-   10,000, counting buffered *and* in-flight records): full means `503` with
+   what makes the ack honest. The queue is bounded twice — `max_queue`
+   (default 10,000) records and `max_queue_bytes` (default 256 MiB) of body,
+   both counting buffered *and* in-flight records: full means `503` with
    `Retry-After`, never a promise the store can't back.
 4. **`Ankusa.Queue`** commits the batch to the store durably and returns
-   `{:committed, envelope}` (with `seq` assigned) per record, in the original
+   `{:committed, envelope}` (with `seq` assigned) or `{:duplicate, envelope}`
+   (the original's `id`; nothing stored) per record, in the original
    order. The edge maps this to
    `201`/`202`/`401`/`404`/`413`/`429`/`503`; a body it cannot read at all
    (client disconnect, read timeout) is `400`, kept distinct from `413` rather
@@ -142,10 +159,11 @@ it. Detail in [`delivery.md`](delivery.md#direct-mode).
    refused before the body is read: no sink can carry it.
 
 Under `wal: :none` steps 3 and 4 do not exist: **`Ankusa.Edge.Publish`** asks
-each of the source's `Ankusa.Sink`s, in declaration order, in the request
-process. The status mapping below is unchanged, but the `201` now waits on
-every sink's confirm instead of the store commit. A sink refusing — or raising,
-or throwing, or exiting — is the `503`, and nothing is retried here.
+all of the source's `Ankusa.Sink`s at once, concurrently, in the request
+process, under one deadline (`direct_publish_timeout_ms`, default 8 s). The
+status mapping below is unchanged, but the `201` now waits on
+every sink's confirm instead of the store commit. A sink refusing, raising,
+throwing, exiting or missing the deadline is the `503`, and nothing is retried here.
 
 From here, ingest is done. Two independent consumers work off the same store:
 
@@ -159,19 +177,21 @@ From here, ingest is done. Two independent consumers work off the same store:
 - **`Ankusa.Dispatch.Pipeline`** is a scheduler over delivery rows: it claims
   due rows (up to `dispatch.concurrency` at a time, bounded by
   `dispatch.max_inflight` claims and `dispatch.max_inflight_bytes` of stored
-  hook bodies), delivers each to the sink its row was bound to, retries per
-  the source's `Ankusa.RetryPolicy`, and dead-letters on give-up. Delivery is
-  not ordered; a consumer that needs order has to rebuild it from data it
-  receives and tolerate redelivery. Detail in [`delivery.md`](delivery.md).
+  hook bodies), queues them per sink key, hands slots round-robin across the
+  keys, delivers each to the sink its row was bound to, retries per the
+  source's `Ankusa.RetryPolicy`, parks a key whose circuit breaker is open,
+  and dead-letters on give-up. Delivery is not ordered; a consumer that needs
+  order has to rebuild it from data it receives and tolerate redelivery.
+  Detail in [`delivery.md`](delivery.md).
 
 ## Guarantees, by component
 
 | Component | Guarantee |
 | --- | --- |
-| `Ankusa.Store` (the `wal.type: disk` queue) | One RocksDB database per instance. A commit is one synced batch: the hook, one pending delivery row per sink, an archive obligation while `:storage` runs, and the seq marker. A torn tail (an unacked write) is dropped on open; damage before it refuses to start (`{:store_open_failed, …}`) rather than silently shortening a read. LocalFS blob writes are fsynced (temp file, rename, directory). |
+| `Ankusa.Store` (the `wal.type: disk` queue) | One RocksDB database per instance. A commit is one synced batch: the hook, one pending delivery row per sink, an archive obligation while `:storage` runs, the seq marker, and, for a hook with a dedupe key, the dedupe key and its expiry key. A torn tail (an unacked write) is dropped on open; damage before it refuses to start (`{:store_open_failed, …}`) rather than silently shortening a read. LocalFS blob writes are fsynced (temp file, rename, directory). |
 | Group-commit batcher | One process per partition; the store commit runs in a supervised task, so commits pipeline while callers block until their own commit returns; bounded queue (buffered + in-flight) sheds load as `503` rather than queuing unboundedly. Every record carries a deadline (15 s by default) for its batch to *start* committing: a record still buffered at its deadline behind a stalled commit is answered `503` and dropped, and the writer refuses a batch that missed its deadline. A batch the writer has started is never abandoned, so a stall never answers `503` for a hook it then commits; a process dying while the writer is mid-commit (the commit task, the batcher, or the writer after its sync) still can, and the provider's retry stores that hook again. |
-| Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `wal.type: none` it is every sink's confirm. Ingest does no deduplication, so a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
-| `wal: :none` (direct ack) | Ingest publishes to every sink in the request and answers `201` only after each confirmed; the first refusal is a `503` with `Retry-After`, with no internal retry. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `Ankusa.Sink.durable?/2` is the per-sink promise, checked at boot for every static source. The quarantine pen is the only local state this mode has at all; it lives in the store, and rows appear only for a source that asks for it. |
+| Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `wal.type: none` it is every sink's confirm. A source with [`dedupe:`](configuration.md#sources) collapses hooks sharing a provider event key within the TTL (default 72 h): the repeat gets `201` with the original `id` and `"duplicate": true`, and nothing new is stored. Without it, a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
+| `wal: :none` (direct ack) | Ingest publishes to every sink concurrently in the request, under one deadline (`direct_publish_timeout_ms`, default 8 s), and answers `201` only after each confirmed; any sink failure, crash or timeout is a `503` with `Retry-After`, with no internal retry, and sinks that confirmed keep their copy. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `c:Ankusa.Sink.durable?/1` is the per-sink promise, checked at boot for every static source. The local state this mode keeps is the quarantine pen (rows appear only for a source that asks for it), API-managed sources and rate-limit overrides, all in the store. |
 | Compactor | Never writes one object per hook: it takes archive obligations byte-sized up to `storage.roll_bytes` and packs them into one immutable segment plus one index object. A failed blob write ends the tick and the same hooks are retried next tick. |
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and bounded by `dispatch.max_inflight`/`max_inflight_bytes`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal. Not ordered: ordering lanes are gone, and a consumer that needs order has to rebuild it from data it receives. DLQ entries are dead delivery rows; a replay moves them back to pending, so a replayed hook leaves the DLQ. |
 | Quarantine | A durable pen in the store, bounded twice: a token bucket per source (`quarantine.burst`/`rate`, default 100 / 20 per s; over it, `429 quarantine_rate_limited`) and a cap on its total bytes (`quarantine.max_bytes`, default 1 GiB; a full pen answers `503 quarantine_full` and never evicts a held hook). It survives a restart, its byte count too, and a store that cannot write is a `503` that spends no token. A `quarantine` replay job re-verifies held hooks against the source's current verifier and commits the ones that pass with their original `id`; `DELETE /v1/quarantine` purges the rest. A secret list (`secret: [new, old]`) keeps a rotation out of the pen in the first place. |
@@ -236,17 +256,38 @@ aws s3api put-bucket-lifecycle-configuration --bucket ankusa-archive \
 
 ## Instance model
 
-Every process is registered through a single `Registry` (`Ankusa.Registry`)
-with a `via` tuple keyed by instance name (`Ankusa.via(instance, key)`). There
-are no global process names anywhere in the framework. That's what makes two
+Every instance-scoped process is registered through a single `Registry`
+(`Ankusa.Registry`) with a `via` tuple keyed by instance name
+(`Ankusa.via(instance, key)`) — the adapters' connections too
+(`Sink.RabbitMQ` keys its connection by a digest of the URL, `Sink.NATS` by
+its `:connection`). Nothing registers a `:global` or cluster-wide name. The
+node-local names left are shared by every instance on purpose: each adapter
+package's own `DynamicSupervisor` (started by its `Application`); brod's
+client id, an atom that `Sink.Kafka` scopes as
+`:"ankusa_kafka.<instance>.<client>"`; the AWS credential cache
+(`:ankusa_aws_credentials`), one ETS table keyed by credential source; and, in
+the image only, `AnkusaServer.GcpToken`. Each instance's route snapshot is
+its own named ETS table. That's what makes two
 independent instances runnable in one VM (and what makes the test suite
 `async: true`-safe for anything that doesn't share on-disk state).
 
-Config is a `%Ankusa.Config{}` struct built once and passed down the
-supervision tree at start (`Ankusa.Instance`'s `init/1`), then cached in
-`:persistent_term` for read-mostly access. No `Application.get_env/2`
-buried in call sites, and instance-scoped config falls out of the struct for
-free.
+Config is a `%Ankusa.Config{}` struct built once and cached in
+`:persistent_term` when the instance is started (`Ankusa.Instance`'s
+`child_spec/1` or `start_link/1`). Children are handed only the instance's
+name and read the struct back with `Ankusa.config/1`, so no supervisor's child
+specs, crash reports or `:sys.get_status/1` carry the secrets in it. No
+`Application.get_env/2` buried in call sites, and instance-scoped config falls
+out of the struct for free. Data that changes at runtime stays out of
+`:persistent_term` (whose
+every update copies into every process that read it): the route table is an
+ETS table the routes store writes (a small owner process keeps it across a
+store restart, and the restarted store resumes from it: API-created routes
+survive a store crash, and the Redis store resumes from it without waiting on
+Redis). One route edit rewrites that route's rows and
+a `:meta` row; a whole-table publish (boot, seed, a Redis reload) writes a new
+generation and flips `:meta` to it, so readers see one table or the other.
+A thousand route edits cost a thousand small inserts, not a thousand global
+copies.
 
 **Roles** (`:edge`, `:dispatch`, `:storage`) boot independently based on
 `config.roles`. The same release runs all three on a laptop, and `roles` is
@@ -344,22 +385,28 @@ there is no queue, only `:edge` runs, and every replica is independent
 An ingest fleet publishes to a RabbitMQ exchange (`Sink.RabbitMQ`, separate
 `ankusa_rabbitmq` package), a Kafka topic (`Sink.Kafka`, separate
 `ankusa_kafka` package), a NATS JetStream subject (`Sink.NATS`, separate
-`ankusa_nats` package), or a Redis pub/sub channel (`Sink.Redis`, separate
-`ankusa_redis` package); either way fat payloads are checked in through
+`ankusa_nats` package), a Redis pub/sub channel (`Sink.Redis`, separate
+`ankusa_redis` package), an SQS queue (`Sink.SQS`, in core), or a Google
+Cloud Pub/Sub topic (`Sink.GooglePubSub`, in core); either way fat
+payloads are checked in through
 `Ankusa.ClaimCheck` with only a claim reference on the queue, and the message
 itself is the same `Ankusa.Sink.Message`. With RabbitMQ each consumer owns its
 **own** queue and binding. The framework never declares one, so adding a
 fifth consumer later is a change on the consumer side only, not a config
 change here. Kafka has no bindings: the consumer side owns a consumer group
-instead, and one that wants SQS or another broker in between runs a bridge
-(see [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)).
+instead. SQS is a direct sink; a consumer that wants another broker in between
+runs a bridge (see [`examples/kafka-sqs-consumer/`](https://github.com/jamescarr/ankusa/tree/main/examples/kafka-sqs-consumer/)
+for the shape).
 
 Each ingest node here is an ordinary all-role node, the topology-1 shape, with
-its own store, and the nodes share nothing but the broker and the
-provider's traffic. Give each node **its own bucket** (or its own LocalFS
-directory) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg` and
-remote blob stores ignore the instance, so nodes sharing one bucket overwrite
-each other's segments.
+its own store, and the nodes share nothing but the broker, the provider's
+traffic, and — if you like — one bucket. Segment keys are
+`seg/<first_seq>-<last_seq>.seg`, so nodes sharing a bucket each set their
+own `storage.key_prefix` (`node-a/`, …) or they overwrite each other's
+segments. Claim keys are never prefixed — claim ids are unique across nodes —
+so the claim store (the bucket, or a dedicated `claim_check.store`, or a list
+of them with failover, `claim_check.stores`) is shared by every node and one
+gateway serves them all.
 
 ```mermaid
 flowchart LR
@@ -410,24 +457,40 @@ flowchart LR
 
 The trade is the retry: with no queue there is no retry policy, no dead-letter
 queue, and no replay — a `503` with `Retry-After` is the whole retry mechanism,
-so the provider must retry and consumers must dedupe on the provider's own
-event id, as they always have. Every statically configured source needs at
-least one sink whose `:ok` means durable (`Ankusa.Sink.durable?/2`); boot
-refuses the config otherwise, and a source created at runtime through the admin
-API is not checked. Every sink in the list still has to confirm, so a
-non-durable one that cannot — Redis pub/sub with no subscriber — is a `503`
-for every request, not a silently skipped hop. The quarantine pen is the only
-local state this topology has: rows in the store, added only for a source
-that asks for it. See
+so the provider must retry and consumers must dedupe on the idempotency key,
+which is the hook `id` unless the source sets
+[`dedupe`](configuration.md#sources). Every source needs at least one sink
+whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`): boot refuses a config
+whose static source has none, and the admin API refuses to create or update a
+source into one (`400 invalid_source`). Every sink in the list still has to
+confirm, so a non-durable one that cannot — Redis pub/sub with no subscriber —
+is a `503` for every request, not a silently skipped hop. The local state this topology
+has is the quarantine pen (rows in the store, added only for a source that
+asks for it), API-managed sources and rate-limit overrides. See
 [`delivery.md#direct-mode`](delivery.md#direct-mode) and
 [`config-examples/direct.yml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_server/config-examples/direct.yml).
 
 ## Telemetry
 
 Every stage emits `:telemetry` events under the `[:ankusa, ...]` prefix:
-`ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `quarantine`,
-`rate_limit`, `claim_check`, `instance` (a failure domain going down or coming
+`ingest`, `commit`, `verify`, `load_shed`, `dispatch`, `compact`, `backup`, `quarantine`,
+`rate_limit`, `claim_check`, `replay`, `lifecycle`, `routes`, `instance` (a failure domain going down or coming
 back). Components emit events; they never call each
 other's reporters, so wiring a metrics/tracing backend is additive, never a
 code change to the pipeline itself. See `Ankusa.Telemetry`'s moduledoc for
 the full event list and measurement/metadata shapes.
+
+Counters say what happened; the `:state` events (`[:ankusa, :store | :queue |
+:quarantine | :disk | :dispatch, :state]`) say where the node stands.
+`Ankusa.Metrics.Gauges` samples the store, the queue index, the quarantine
+pen and the data volume's disk every `admin.gauge_interval_ms` (15 s), and
+dispatch reports its scheduler on every housekeeping tick, so `/metrics`
+carries `ankusa_store_hooks`, `ankusa_queue_pending` / `_scheduled` /
+`_inflight` / `_dead` / `_archive_pending`, `ankusa_queue_oldest_due_age_seconds`,
+`ankusa_quarantine_bytes`, `ankusa_disk_free_bytes`, `ankusa_dispatch_running`
+/ `_claimed` / `_runnable` and `ankusa_dispatch_breakers_open` — enough to
+alert on a growing backlog, a filling disk or an open breaker before a
+provider sees a `503`. Per-delivery counters carry the sink module as a
+`sink` label. With `backup.enabled`, the uploader reports after every attempt:
+`ankusa_backup_age_seconds` (since the last successful backup — the data a
+lost host would take with it) and `ankusa_backup_runs_total{result}`.

@@ -13,6 +13,27 @@ defmodule Ankusa.SourceStore do
   only reads (like `Ankusa.SourceStore.Static`) leaves them out and the facade
   answers `{:error, :read_only}` / `:error` / `[]`. See
   `Ankusa.SourceStore.Persistent` for the writable implementation.
+
+  ## Three answers to `fetch/2`
+
+  `{:ok, source}` and `:error` are verdicts: the source exists, or it does not
+  (the edge answers `404`, dispatch dead-letters the source's rows as
+  `{:source_gone, id}`). A store backed by something that can fail — a
+  database, a network service — returns `{:error, :unavailable}` when it could
+  not tell: the edge answers `503 store_unavailable` with `Retry-After: 1`,
+  dispatch reschedules the row without spending an attempt, and a replay
+  stops at that entry and retries it on its next tick. Never answer `:error`
+  for "I could not look": that turns an outage into lost hooks.
+
+  Writes follow the same rule: a store that could not persist a `put/5` or
+  `delete/3` answers `{:error, :store_unavailable}` (the admin API's
+  `503 store_unavailable`), never `{:error, :invalid, _}`, which tells the
+  caller its request is wrong.
+
+  A store that runs a process exports `start_link/1`. `Ankusa.Instance` starts
+  it with `[instance: instance]`, and it reads its options from
+  `Ankusa.config(instance).source_store`. Never put configuration in a child
+  spec: a supervisor prints its children's start arguments.
   """
 
   alias Ankusa.{Config, Source}
@@ -30,7 +51,7 @@ defmodule Ankusa.SourceStore do
         }
 
   @callback fetch(instance :: atom(), source_id :: String.t()) ::
-              {:ok, Source.t()} | :error
+              {:ok, Source.t()} | :error | {:error, :unavailable}
   @callback list(instance :: atom()) :: [String.t()]
 
   @callback put(
@@ -44,12 +65,16 @@ defmodule Ankusa.SourceStore do
               | {:error, :invalid, String.t()}
               | {:error, :exists}
               | {:error, :not_found}
+              | {:error, :store_unavailable}
   @callback get(instance :: atom(), tenant :: String.t(), name :: String.t()) ::
               {:ok, stored()} | :error
   @callback list_tenant(instance :: atom(), tenant :: String.t()) :: [stored()]
 
   @callback delete(instance :: atom(), tenant :: String.t(), name :: String.t()) ::
-              :ok | {:error, :not_found} | {:error, :invalid, String.t()}
+              :ok
+              | {:error, :not_found}
+              | {:error, :invalid, String.t()}
+              | {:error, :store_unavailable}
 
   @optional_callbacks put: 5, get: 3, list_tenant: 2, delete: 3
 
@@ -57,7 +82,7 @@ defmodule Ankusa.SourceStore do
   # a storage partition and a URL path segment must not need encoding.
   @identity_regex ~r/\A[A-Za-z0-9_-]{1,64}\z/
 
-  @spec fetch(atom(), String.t()) :: {:ok, Source.t()} | :error
+  @spec fetch(atom(), String.t()) :: {:ok, Source.t()} | :error | {:error, :unavailable}
   def fetch(instance, source_id) do
     %Config{source_store: {mod, _}} = Ankusa.config(instance)
     mod.fetch(instance, source_id)
@@ -81,6 +106,7 @@ defmodule Ankusa.SourceStore do
           | {:error, :invalid, String.t()}
           | {:error, :exists}
           | {:error, :not_found}
+          | {:error, :store_unavailable}
           | {:error, :read_only}
   def put(instance, tenant, name, spec, mode) do
     with :ok <- validate_identity(tenant, "tenant"),
@@ -126,7 +152,11 @@ defmodule Ankusa.SourceStore do
   A store that does not export `delete/3` is read-only: `{:error, :read_only}`.
   """
   @spec delete(atom(), String.t(), String.t()) ::
-          :ok | {:error, :not_found} | {:error, :invalid, String.t()} | {:error, :read_only}
+          :ok
+          | {:error, :not_found}
+          | {:error, :invalid, String.t()}
+          | {:error, :store_unavailable}
+          | {:error, :read_only}
   def delete(instance, tenant, name) do
     with :ok <- validate_identity(tenant, "tenant"),
          :ok <- validate_identity(name, "name") do

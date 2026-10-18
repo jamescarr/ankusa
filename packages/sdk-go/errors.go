@@ -26,7 +26,7 @@ type ClaimNotFoundError struct {
 	ClaimID  string
 }
 
-// ClaimRejectedError reports a gateway 4xx other than 404. Body is the
+// ClaimRejectedError reports a gateway 4xx other than 404, 408 and 429. Body is the
 // response body decoded as JSON when the Content-Type is JSON, and the raw
 // string otherwise (possibly "" for an empty body).
 type ClaimRejectedError struct {
@@ -42,7 +42,8 @@ type ClaimIntegrityError struct {
 }
 
 // ClaimCheckUnavailableError reports a claim-check gateway that could not be
-// reached, timed out, or answered anything other than 200/404/4xx. Retryable.
+// reached, timed out, answered 408 or 429, or answered anything else other
+// than 200/404/4xx. Retryable.
 type ClaimCheckUnavailableError struct {
 	Message string
 	Cause   error

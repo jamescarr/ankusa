@@ -6,8 +6,15 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-14
+
 ### Added
 
+- `verifySignature({ headers, body, secrets, toleranceSeconds?, now? })`
+  verifies the Standard Webhooks signature an HTTP sink with a `secret` adds
+  (`webhook-id`, `webhook-timestamp`, `webhook-signature`), comparing in
+  constant time and checking the timestamp window (default 300 s). Failures
+  are `InvalidSignatureError` (`code`, `field`, `retryable: false`).
 - `decodeMessage(data: string | Uint8Array)`, the queue-message decoder: parses
   the v1 envelope, checks the body forms and integrity (`size_mismatch`,
   `integrity`, `tenant_mismatch`), and ignores unknown keys. Every failure is
@@ -35,13 +42,11 @@ this project follows [Semantic Versioning](https://semver.org/).
   `tenant_id` and `size`, and the schema gains `purgeQuarantined`
   (`DELETE /v1/quarantine`).
 
-### Removed
-
-- `replayDeadLetters()`, `ReplayFilter`, and `Replayed`: the server's
-  `POST /v1/dlq/replay` is gone in favour of replay jobs.
-
 ### Changed
 
+- `redeem()` treats a gateway `408` or `429` as `ClaimCheckUnavailableError`
+  (retryable) instead of `ClaimRejectedError`: a throttled or timed-out
+  gateway is a reason to come back, not a missing claim.
 - The generated admin types (`src/admin/admin-schema.d.ts`) are regenerated
   from the server's current OpenAPI document: the replay routes replace
   `/v1/dlq/replay`, and `GET /v1/wal`, `GET /v1/rate-limits` and
@@ -49,6 +54,11 @@ this project follows [Semantic Versioning](https://semver.org/).
   node's store (`next_seq`, `hooks`, `deliveries`, `disk_bytes`), and the
   mutated routes type a `503` (`NodeStoreUnavailable`,
   `{"error": "store_unavailable"}`).
+
+### Removed
+
+- `replayDeadLetters()`, `ReplayFilter`, and `Replayed`: the server's
+  `POST /v1/dlq/replay` is gone in favour of replay jobs.
 
 ## [0.3.0] - 2026-10-01
 
@@ -138,7 +148,8 @@ this project follows [Semantic Versioning](https://semver.org/).
   `ClaimCheckUnavailableError`), each carrying a `retryable` boolean, so a
   consumer needs exactly one bit to route a failure to dead-letter or retry.
 
-[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.3.0...HEAD
+[Unreleased]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.5.0...HEAD
+[0.5.0]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.3.0...sdk-typescript-v0.5.0
 [0.3.0]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.2.4...sdk-typescript-v0.3.0
 [0.2.4]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.2.1...sdk-typescript-v0.2.4
 [0.2.1]: https://github.com/jamescarr/ankusa/compare/sdk-typescript-v0.1.0...sdk-typescript-v0.2.1

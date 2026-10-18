@@ -22,10 +22,10 @@ Column families, all in that one database:
 
 | Family | Holds |
 | --- | --- |
-| `default` | the next-seq marker, migration markers, API-managed sources, rate-limit overrides |
+| `default` | the next-seq marker, migration markers, API-managed sources, rate-limit overrides, replay jobs (`j:<id>`) |
 | `hooks` | each committed hook, keyed by its `seq` |
 | `deliveries` | one delivery row per hook and sink |
-| `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs |
+| `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs, ingest dedupe keys (`?u`) and their expiry index (`?e`) |
 | `archive` | the segment catalogue, and locations imported from a 0.3 node's index |
 | `quarantine` | the quarantine pen: one summary and one body key per held envelope |
 
@@ -42,7 +42,7 @@ entry = %{envelope: envelope, sinks: [{Ankusa.Sink.Http, url: "https://example.i
 
 {:ok, hooks} = Ankusa.Queue.hooks(:default, 0, 100)            # seq > 0, ascending
 {:ok, %{next_seq: _, hooks: _, deliveries: _, disk_bytes: _}} = Ankusa.Queue.stats(:default)
-{:ok, %{total: _, entries: _}} = Ankusa.Queue.dead(:default, source_id: "stripe")
+{:ok, %{total: _, entries: _}} = Ankusa.Queue.dead(:default, source_id: "stripe", limit: 100)
 ```
 
 ### The commit: one synced batch
@@ -54,6 +54,7 @@ entry = %{envelope: envelope, sinks: [{Ankusa.Sink.Http, url: "https://example.i
 - one pending delivery row and one due key per sink of its source, bound by
   sink index and module at ack time;
 - an archive obligation, but only while the `:storage` role runs;
+- the dedupe key and its expiry entry, for a hook with a dedupe key;
 - the next-seq marker.
 
 The batch is atomic: a commit either lands whole or nothing is acked, and a
@@ -104,8 +105,9 @@ dispatch pipeline, no DLQ. Ingest verifies, publishes to the source's sinks
 inside the request (`Ankusa.Edge.Publish`), and answers `201` only once every
 sink has confirmed. `c:Ankusa.Sink.durable?/1` is the promise that makes a
 sink's `:ok` mean "something that outlives this node accepted it" — true for
-every shipped sink except `Sink.Log` and `Sink.Redis` — and boot refuses a
-`wal: :none` config in which a static source has no durable sink. One durable
+every shipped sink except `Sink.Log` and `Sink.Redis` — and a `wal: :none`
+node refuses a source with no durable sink: at boot for a static one, on write
+for one managed through the admin API. One durable
 sink is enough to pass that check, but *every* sink still has to confirm, so a
 non-durable sink that cannot (Redis with no subscriber) turns every ingest
 into a `503`. Nothing is committed and no segment is written, so the two-tier
@@ -121,21 +123,95 @@ dependency beyond RocksDB itself. Every store-backed role (`edge`, `dispatch`,
 `storage`) reads that same database, and RocksDB is single-process, so they
 must all run in **one** BEAM node; splitting them across processes or hosts is
 not supported. It is durable to process crash and power loss **on that box**,
-not to losing the box. See "Scaling out" below.
+not to losing the box — unless [`backup`](#backup-and-restore) is on. See
+"Scaling out" below.
 
 ```elixir
 config :ankusa, wal: :disk   # the default
 ```
 
+### Backup and restore
+
+`backup.enabled` (off by default) turns on `Ankusa.Store.Backup`, which closes
+the gap above to `backup.interval_ms` (60 s): what a lost host takes with it
+is the hooks acked since the last backup.
+
+- **Backup.** Every interval the store writes a RocksDB checkpoint (memtables
+  flushed, files hard-linked under `<data_dir>/<instance>/store.checkpoint`,
+  in a process of its own so `/ready` keeps answering), and the uploader puts
+  it in the object store — `backup.blob_store`, else `storage.blob_store` —
+  under `storage.key_prefix`: `backup/sst/<name>` for every `.sst` and
+  `.blob` file (immutable, so each is uploaded once and shared by every
+  backup that lists it), `backup/<id>/<name>` for the manifest, options, WAL
+  and `CURRENT`, then `backup/<id>/manifest.json` (every file with its size
+  and sha256), then `backup/LATEST`. A backup exists only once `LATEST` names
+  it. After each one, backups beyond `backup.keep` (3) and every shared file
+  no kept backup lists are deleted; a purge that can't list the store or read
+  a kept manifest deletes nothing. A failed attempt is retried with the
+  compactor's backoff and never touches the store or the edge.
+- **Restore.** A store directory with no `CURRENT` file holds no database. With
+  `backup.enabled`, `Ankusa.Store` then restores `LATEST` before opening:
+  every file is checked against the manifest's size and sha256 and written
+  durably, `CURRENT` last, so a restore that fails part-way leaves no database
+  and the next boot starts it over. No `LATEST` at all starts an empty store.
+  A backup location that can't be read, a manifest that doesn't parse or a
+  file that fails its checksum refuses the boot
+  (`{:store_restore_failed, path, reason}`): an empty directory with a backup
+  configured is never taken as empty. Database files (`MANIFEST-*`, `.sst`,
+  `.blob`, `.log`) without a `CURRENT` that no interrupted restore left behind
+  are refused too (`{:unrecognized_store_files, names}`), never deleted: that
+  may be a damaged store worth recovering by hand.
+- **The archive.** A restored (or newly created) store may be behind the
+  segments in the bucket: hooks acked after the backup may already be
+  archived. Before the queue writer starts, `m:next_seq` moves past the
+  highest archived seq, so no new segment key overwrites one, and every
+  segment without a catalogue row is catalogued from its `.idx` object (with
+  the restored hooks' archive obligations it settles), so `Ankusa.Storage.fetch/2`
+  finds those hooks again. Their delivery state is gone with the host. The
+  restore leaves a `RESTORE-IN-PROGRESS` marker beside `CURRENT` until this
+  reconcile succeeds: a boot that finds both (the node died, or the reconcile
+  failed, in between) logs "reconciling now" and reconciles before serving,
+  instead of opening the database as an existing, reconciled store.
+- **Where to point it.** With `LocalFS` the backup lives on the same disk as the
+  store, and the node logs a warning saying so. Use a bucket: `storage.type:
+  s3|gcs`, or a `backup.store` of its own. Backups are per node, so nodes
+  sharing a bucket need distinct `storage.key_prefix`es, exactly as for
+  segments. Each store gets an id (`m:store_id`) on its first backup, carried
+  by every checkpoint and recorded in each manifest; a node whose prefix
+  already holds the latest backup of another store refuses to back up (no
+  upload, no purge), logs `backup refused … already holds backups of store
+  …` at error level, and counts it as a failed run. A replacement node takes
+  over by starting with the same config on an empty volume: it restores the
+  latest backup and inherits the id. If the old host comes back beside its
+  replacement, both hold that id; the first of them to find `LATEST` moved
+  by the other (after it has backed up once itself) refuses with
+  `backup refused: … a backup of this store that this node did not write`.
+  Retire one of them and restart the one you keep (it stays refused until
+  then).
+- **Bucket lifecycle rules.** Keep `<key_prefix>backup/` out of every
+  expiration rule. Retention is `backup.keep`; a shared `backup/sst/*` file is
+  listed by every later backup that still uses it, whatever its age, and an
+  expired one makes the restore fail (`{:download_failed, key, _}`) and the
+  node refuse to boot.
+- **Costs.** An upload reads one file into memory at a time; RocksDB files here
+  are bounded by the 64 MiB write buffers and the 64 MiB blob file size the
+  store sets. Each backup uploads the files written since the previous one,
+  plus a few small per-backup files.
+- **Watching it.** `ankusa_backup_age_seconds` is the time since the last
+  successful backup — the data a lost host would take with it — and
+  `ankusa_backup_runs_total{result}` counts attempts.
+
 ## Scaling out
 
 One node is one local store. To scale, run **N independent all-role
 nodes behind a load balancer**. Each with its own data volume and its own
-DLQ/admin API. Each node also needs **its own bucket** (or its own LocalFS
-root) for segments: segment keys are `seg/<first_seq>-<last_seq>.seg` (with
-the sibling `.idx` object), which name no instance or node, and remote blob
-stores ignore the `instance` argument, so two nodes sharing a bucket silently
-overwrite each other's segments. See [`deployment.md`](deployment.md) for the
+DLQ/admin API. Segment keys are `seg/<first_seq>-<last_seq>.seg` (with the
+sibling `.idx` object), which name no instance or node, so two nodes writing
+the same keys would silently overwrite each other's segments: give each node
+its own `storage.key_prefix` (`node-a/`, `node-b/`) and they can share one
+bucket, or give each its own bucket or LocalFS root. Claims are never
+prefixed — pack ids carry 64 random bits, so every node's claims can share
+one place and one gateway. See [`deployment.md`](deployment.md) for the
 operational shape.
 
 Under `wal: :none` none of this applies: there is no queue, no segment story
@@ -150,8 +226,25 @@ whatever answers the sink) is the only shared state. See
 @callback get(instance, key, opts) :: {:ok, binary()} | {:error, term()}
 @callback get_range(instance, key, offset, length, opts) :: {:ok, binary()} | {:error, term()}
 @callback delete(instance, key, opts) :: :ok
-@callback list(instance, prefix :: String.t(), opts) :: [String.t()]
+@callback list(instance, prefix :: String.t(), opts) :: {:ok, [String.t()]} | {:error, term()}
 ```
+
+Callers go through the facade, which names a **scope** on every call —
+`Ankusa.BlobStore.put(instance, :segments | :backup, key, data)` and so on.
+`:segments` resolves `storage.blob_store`. `storage.key_prefix` is applied
+once, when the compactor names a new segment
+(`Ankusa.BlobStore.object_key/3`), and the archive catalogue records the full
+key, which every later read uses verbatim: changing the prefix moves new
+segments only and never strands archived ones. `list/3` lists this node's
+segments under its prefix and returns full keys. Claim packs bypass the
+facade: `Ankusa.ClaimCheck.Stores` writes and reads them across
+`claim_check.blob_stores` (`claim_check.stores` in YAML; failing over between stores), never prefixed.
+Adapters see full keys and stay prefix-unaware.
+
+`list/3` returns `{:ok, keys}` or `{:error, reason}` — a listing that failed
+halfway is an error, never a shorter list — and every remote adapter follows
+its store's pagination (S3 continuation tokens, GCS page tokens, Azure
+markers, OCI `nextStartWith`) to the end.
 
 `get_range/5` exists because the compactor never writes one object per
 hook. Segments hold many records, and a single range `GET` reads exactly
@@ -165,18 +258,34 @@ claim consistently regardless of which store is configured.
 
 Two independent namespaces share one `BlobStore` by default and never
 collide: `seg/...` (each segment written by `Ankusa.Storage.Compactor`, plus
-its sibling `.idx` index object) and `claims/...` (`Ankusa.ClaimCheck`, packed
-per tenant per dispatch batch, one object holding many claims under
-`claims/tenant=<t>/dt=<day>/<pack_id>`). Retention differs per namespace
-too. See [`claim-check.md#retention`](claim-check.md#retention).
+its sibling `.idx` index object, under `storage.key_prefix`) and `claims/...`
+(`Ankusa.ClaimCheck`, packed per tenant per dispatch batch, one object holding
+many claims under `claims/tenant=<t>/dt=<day>/<pack_id>`, or
+`claims/tenant=<t>/shard=<c>/dt=<day>/<pack_id>` with
+`claim_check.key_layout: :sharded`; or in stores of their own with
+`claim_check.blob_stores`). Retention differs per namespace too. See
+[`claim-check.md#retention`](claim-check.md#retention).
 
 | Adapter | Deps | Notes |
 | --- | --- | --- |
 | `BlobStore.LocalFS` | none | Default. Durable writes: temp file fsync, rename, directory fsync; `put` returns `{:error, reason}` instead of raising. `get_range` uses `:file.pread/3`, never slurps the whole segment. |
-| `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. |
+| `BlobStore.S3` | `aws_signature` + `req` | SigV4 signing via [`aws_signature`](https://hex.pm/packages/aws_signature), the implementation behind the official aws-elixir SDK, with HTTP through `Req`. Path-style addressing works unmodified against AWS, MinIO, Cloudflare R2, and the [floci](https://floci.io) emulator. `list/3` parses `ListObjectsV2` XML via stdlib `:xmerl`. Credentials: `:access_key_id`/`:secret_access_key` (+ `:session_token`), else `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, else web identity (IRSA: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, through STS `AssumeRoleWithWebIdentity`), else the EC2 instance profile (IMDSv2); temporary credentials are cached until shortly before they expire. |
 | `BlobStore.GCS` | `req` | GCS JSON API. `:token_provider` opt (an MFA returning `{:ok, bearer_token}`) is required against real GCS. The adapter carries no OAuth2 dependency of its own; wire up whatever your deployment already uses (Goth, ADC). Unauthenticated against the `floci-gcp` emulator. |
 | `BlobStore.Azure` | `req` | Azure Blob REST. Carries **no credential dependency**, the same stance as GCS: a pre-generated `:sas_token` (Shared Access Signature), or a `:token_provider` MFA, including the built-in `Ankusa.BlobStore.Azure.ManagedIdentity`, the best credential for a service running on Azure (no secret, short-lived Entra ID tokens from IMDS). No Shared-Key signing of its own. Unauthenticated against the `floci-az` emulator. |
 | `BlobStore.OCI` | none | OCI Object Storage. The one adapter that signs its own requests, OCI has no bearer/SAS shortcut covering arbitrary `put`/`get`/`list`, using OTP's `:public_key` (RSA-SHA256 *Signature version 1*), no dependency. Two credential shapes: a static API key (`:tenancy_ocid`/`:user_ocid`/`:key_fingerprint`/`:private_key`), or the instance-principal / session-token output of the OCI SDK via `:key_id: "ST$<token>"` + `:private_key`. Signing is pinned against OCI's reference vectors in `test/ankusa/blob_store_oci_signing_test.exs`; `floci-oci` parses but never verifies the signature, so any locally generated key works there. |
+
+**The HTTP adapters retry a transient failure** (`Ankusa.BlobStore.Retry`): a
+transport error (refused, reset, timed out) or a `408`, `429`, `500`, `502`,
+`503` or `504` is sent again after 200 ms, then after 1 s — three attempts in
+all by default — and S3 and OCI re-sign each attempt. Anything else (`404`,
+`403`, another `4xx`) is answered at once. The adapter option `:retries` is
+the number of extra attempts (`2`; `0` for a single attempt); like
+`:timeout_ms` it is Elixir config only. Each call is idempotent, a `PUT`
+writing the same bytes to the same key, so a timed-out write that did land is
+safe to repeat. A worst-case call is three timeouts plus the waits. `put`
+hands the adapter's iodata to the HTTP client as is: a segment is not copied
+into one binary first. `LocalFS` does neither: a POSIX error is not
+transient.
 
 ```elixir
 # S3 / MinIO / R2
@@ -252,7 +361,7 @@ Local dev/test emulators via [floci](https://floci.io) (no cloud account):
 # floci (S3, :4566) + floci-gcp (GCS, :4588) + floci-az (Azure, :4577) + floci-oci (OCI, :4599),
 # buckets/containers auto-created
 docker compose -f packages/ankusa/docker-compose.integration.yml up -d
-(cd packages/ankusa && mix test --include integration)
+(cd packages/ankusa && mix test --only integration)
 docker compose -f packages/ankusa/docker-compose.integration.yml down -v
 ```
 

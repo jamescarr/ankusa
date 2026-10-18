@@ -55,7 +55,9 @@ defmodule Ankusa.ReplayTest do
             roles: [:edge, :dispatch],
             source_store: {Ankusa.SourceStore.Static, sources: sources},
             dispatch: %{
-              retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false}
+              retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
+              # Replays re-drive rows that fail again: a breaker would park them.
+              breaker_failures: 0
             }
           ],
           overrides
@@ -128,6 +130,23 @@ defmodule Ankusa.ReplayTest do
     end
   end
 
+  # Receives `{:replayed, id, replay_id}` until every id in `ids` has arrived at
+  # least once; a repeat is fine (dispatch is at-least-once), a stranger is not.
+  defp collect_replayed(seen, ids, replay_id) do
+    if MapSet.equal?(seen, ids) do
+      seen
+    else
+      receive do
+        {:replayed, id, rid} ->
+          assert rid == replay_id
+          assert MapSet.member?(ids, id)
+          collect_replayed(MapSet.put(seen, id), ids, replay_id)
+      after
+        5_000 -> flunk("#{MapSet.size(ids) - MapSet.size(seen)} ids were never delivered")
+      end
+    end
+  end
+
   test "pacing: a job moves dead rows at its rate and delivers each once with replay_id" do
     config = start(%{"src" => [sinks: [{RecordSink, pid: self()}]]})
     inst = config.instance
@@ -197,7 +216,7 @@ defmodule Ankusa.ReplayTest do
       job
     else
       if System.monotonic_time(:millisecond) > deadline do
-        flunk("replay job #{id} never reached the expected state")
+        flunk("replay job #{id} never reached the expected state: #{inspect(job)}")
       else
         Process.sleep(50)
         poll_job_until(inst, id, fun, deadline)
@@ -321,7 +340,7 @@ defmodule Ankusa.ReplayTest do
       end
     end)
 
-    # Everything still gets delivered exactly once and the job finishes.
+    # Every row is delivered and the job finishes.
     poll(
       fn ->
         case Replay.get(inst, job.id) do
@@ -334,15 +353,11 @@ defmodule Ankusa.ReplayTest do
 
     ids = MapSet.new(envs, & &1.id)
 
-    received =
-      for _ <- 1..300 do
-        assert_receive {:replayed, id, replay_id}, 2_000
-        assert MapSet.member?(ids, id)
-        assert replay_id == job.id
-        id
-      end
-
-    assert MapSet.new(received) == ids
+    # The replayer moves each dead row exactly once (its cursor is committed
+    # with the rows: `moved: 300` above). Dispatch redelivers a row whose
+    # delivery was in flight when the instance stopped, which at-least-once
+    # allows, so an id may arrive twice; every id must arrive at least once.
+    assert collect_replayed(MapSet.new(), ids, job.id) == ids
     assert {:ok, %{total: 0}} = Ankusa.Queue.dead(inst, limit: 10)
   end
 
@@ -363,6 +378,30 @@ defmodule Ankusa.ReplayTest do
     assert paused.error =~ "auto-paused"
     assert paused.error =~ "replayed deliveries dead-lettered again"
     assert paused.dead >= 100
+    assert paused.moved < 500
+  end
+
+  test "auto-pause: a replay into a destination whose breaker opens pauses itself" do
+    config =
+      start(%{"src" => [sinks: [{AlwaysFail, []}]]},
+        dispatch: %{
+          retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
+          breaker_failures: 5,
+          breaker_open_ms: 60_000,
+          breaker_max_open_ms: 60_000
+        }
+      )
+
+    inst = config.instance
+    dead_rows(inst, 500, AlwaysFail)
+
+    assert {:ok, :created, job} = Replay.start(inst, %{kind: :dlq, rate: 100})
+
+    # Five attempts open the breaker; every row after them is parked, never
+    # dead-lettered, so only the parked count can pause the job.
+    paused = poll_job_state(inst, job.id, fn job -> job.state == :paused end, 20_000)
+
+    assert paused.error =~ "parked behind an open circuit breaker"
     assert paused.moved < 500
   end
 

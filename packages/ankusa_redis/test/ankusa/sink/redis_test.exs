@@ -38,6 +38,19 @@ defmodule Ankusa.Sink.RedisTest do
 
   defp ctx(instance), do: %{instance: instance, source_id: "src", tenant_id: "t1", attempt: 1}
 
+  # The connection dials in the background: the first delivery of an instance
+  # waits for it, the way a retry would.
+  defp deliver(env, ctx, opts, tries \\ 100) do
+    case Redis.deliver(env, ctx, opts) do
+      {:error, {:connection, _reason}} when tries > 0 ->
+        Process.sleep(20)
+        deliver(env, ctx, opts, tries - 1)
+
+      result ->
+        result
+    end
+  end
+
   # Subscribes and waits for the server to confirm, so a publish made after
   # this returns is counted by `PUBLISH` — which is the whole point of the
   # sink's zero-subscriber error.
@@ -59,7 +72,7 @@ defmodule Ankusa.Sink.RedisTest do
     {ps, ref} = subscribe!(channel)
 
     env = envelope()
-    assert :ok = Redis.deliver(env, ctx(inst), url: @url, channel: channel)
+    assert :ok = deliver(env, ctx(inst), url: @url, channel: channel)
 
     assert_receive {:redix_pubsub, ^ps, ^ref, :message, %{channel: ^channel, payload: payload}},
                    2_000
@@ -77,7 +90,7 @@ defmodule Ankusa.Sink.RedisTest do
     channel: channel
   } do
     assert {:error, :no_subscribers} =
-             Redis.deliver(envelope(), ctx(inst), url: @url, channel: channel)
+             deliver(envelope(), ctx(inst), url: @url, channel: channel)
   end
 
   test "a fat payload is checked in through ClaimCheck and the message carries a ticket", %{
@@ -94,7 +107,7 @@ defmodule Ankusa.Sink.RedisTest do
     env = envelope(%{body: body, size: byte_size(body)})
 
     assert :ok =
-             Redis.deliver(env, ctx(inst), url: @url, channel: channel, inline_max_bytes: 1_000)
+             deliver(env, ctx(inst), url: @url, channel: channel, inline_max_bytes: 1_000)
 
     assert_receive {:redix_pubsub, ^ps, ^ref, :message, %{payload: payload}}, 2_000
     decoded = JSON.decode!(payload)
@@ -112,10 +125,10 @@ defmodule Ankusa.Sink.RedisTest do
 
     {ps, ref} = subscribe!([fixed, dynamic])
 
-    assert :ok = Redis.deliver(envelope(), ctx(inst), url: @url, channel: fixed)
+    assert :ok = deliver(envelope(), ctx(inst), url: @url, channel: fixed)
 
     assert :ok =
-             Redis.deliver(
+             deliver(
                envelope(%{source_id: "other"}),
                ctx(inst),
                url: @url,
@@ -146,7 +159,7 @@ defmodule Ankusa.Sink.RedisTest do
     end
   end
 
-  test "an unreachable server fails fast instead of hanging" do
+  test "an unreachable server is a connection error at once; the connect never blocks the caller" do
     {micros, result} =
       :timer.tc(fn ->
         Redis.deliver(
@@ -157,8 +170,64 @@ defmodule Ankusa.Sink.RedisTest do
         )
       end)
 
-    assert result == {:error, {:connection, :econnrefused}}
-    assert micros < 2_000_000
+    assert {:error, {:connection, _reason}} = result
+    assert micros < 100_000
+  end
+
+  test "an idle connection is closed, and the next delivery opens a new one", %{
+    instance: inst,
+    channel: channel
+  } do
+    {ps, ref} = subscribe!(channel)
+    opts = [url: @url, channel: channel, idle_timeout_ms: 1_000, publish_timeout_ms: 5_000]
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+    assert receive_message(ps, ref) == channel
+
+    old = Ankusa.whereis(inst, Redis.connection_key(@url))
+    mon = Process.monitor(old)
+    reaper = Ankusa.Sink.Redis.Reaper
+
+    # Keyed by a digest of the URL, never the URL (it may carry a password);
+    # floored at the publish timeout plus a second.
+    assert [{{^inst, {:redis_sink, digest}} = key, ^old, _last, 6_000}] =
+             Enum.filter(:ets.tab2list(reaper), &match?({{^inst, _}, _, _, _}, &1))
+
+    refute digest =~ "localhost"
+
+    true = :ets.update_element(reaper, key, {3, System.monotonic_time(:millisecond) - 6_000})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+
+    assert_receive {:DOWN, ^mon, :process, ^old, _reason}, 5_000
+    assert Ankusa.whereis(inst, Redis.connection_key(@url)) == nil
+
+    assert :ok = deliver(envelope(), ctx(inst), opts)
+    assert receive_message(ps, ref) == channel
+    assert Ankusa.whereis(inst, Redis.connection_key(@url)) not in [nil, old]
+  end
+
+  test "the URL's password is in no registry key or connection state", %{
+    instance: inst
+  } do
+    canary = "s3cr3t-canary"
+    url = "redis://:#{canary}@127.0.0.1:1"
+    printed = &inspect(&1, limit: :infinity, printable_limit: :infinity)
+
+    assert {:error, _} = Redis.deliver(envelope(), ctx(inst), url: url, channel: "x")
+
+    pid = Ankusa.whereis(inst, Redis.connection_key(url))
+    assert is_pid(pid)
+
+    # The connection is `:temporary`, so its DynamicSupervisor keeps no start
+    # args; what can print the password is Redix's state and the registry key.
+    # Each check first finds what it looks at, so the refutes are not vacuous.
+    connection = printed.(:sys.get_status(pid))
+    assert connection =~ "connection_password"
+    refute connection =~ canary
+
+    keys = Registry.select(Ankusa.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    assert {inst, Redis.connection_key(url)} in keys
+    refute printed.(keys) =~ canary
   end
 
   defp receive_message(ps, ref) do

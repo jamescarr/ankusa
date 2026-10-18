@@ -1,0 +1,474 @@
+{
+  "cases": [
+    {
+      "id": "signature.ok.reference",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.ok.second_secret",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.ok.rotation",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,O4Gjv1HqPqsMrjmczoggs/sWA8gZD0VyHG+fLh4+ktI= v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.ok.uppercase_headers",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "Webhook-Id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "Webhook-Timestamp": "1614265330",
+          "Webhook-Signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.ok.binary_body",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,8CGq/11JvjhkgLmuLjiFOAJHIj4HRMYNvr3bb0Xjuvw="
+        },
+        "body": {
+          "base64": "aMOpbGxvIP8AgCBlbmQ="
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.ok.raw_secret",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,RygtTnLIGTWu8Cyl+ruiz7FHMf3vABxz89IvBzGpYW4="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "a raw shared secret"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.ok.tolerance_edge",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265630
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.ok.zero_tolerance",
+      "feature": "webhook.verify_signature",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330,
+        "tolerance_seconds": 0
+      },
+      "expect": {
+        "ok": {
+          "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "timestamp": 1614265330
+        }
+      }
+    },
+    {
+      "id": "signature.error.stale",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265631
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "timestamp_out_of_tolerance",
+          "field": "webhook-timestamp"
+        }
+      }
+    },
+    {
+      "id": "signature.error.future",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265029
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "timestamp_out_of_tolerance",
+          "field": "webhook-timestamp"
+        }
+      }
+    },
+    {
+      "id": "signature.error.missing_signature",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330"
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "missing_header",
+          "field": "webhook-signature"
+        }
+      }
+    },
+    {
+      "id": "signature.error.empty_id",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "missing_header",
+          "field": "webhook-id"
+        }
+      }
+    },
+    {
+      "id": "signature.error.invalid_timestamp",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "16142653x0",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_timestamp",
+          "field": "webhook-timestamp"
+        }
+      }
+    },
+    {
+      "id": "signature.error.v2_only",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v2,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "no_matching_signature",
+          "field": "webhook-signature"
+        }
+      }
+    },
+    {
+      "id": "signature.error.tampered_body",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232315}"
+        },
+        "secrets": [
+          "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "no_matching_signature",
+          "field": "webhook-signature"
+        }
+      }
+    },
+    {
+      "id": "signature.error.invalid_secret",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_!!!"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "signature.error.unpadded_secret",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "description": "A whsec_ secret is strict, padded base64 (as core decodes it): an unpadded one is invalid_secret, never a key some SDKs accept and others refuse.",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [
+          "whsec_dGVzdA"
+        ],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    },
+    {
+      "id": "signature.error.no_secrets",
+      "feature": "webhook.verify_signature.errors",
+      "operation": "verify_signature",
+      "input": {
+        "headers": {
+          "webhook-id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+          "webhook-timestamp": "1614265330",
+          "webhook-signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+        },
+        "body": {
+          "text": "{\"test\": 2432232314}"
+        },
+        "secrets": [],
+        "now": 1614265330
+      },
+      "expect": {
+        "error": {
+          "class": "InvalidSignatureError",
+          "retryable": false,
+          "code": "invalid_secret",
+          "field": null
+        }
+      }
+    }
+  ]
+}

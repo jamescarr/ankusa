@@ -281,12 +281,7 @@ defmodule Ankusa.Routes.Router do
 
   defp ip_rules_json(rules), do: Route.rules_json(rules)
 
-  defp route_count(instance) do
-    case Routes.snapshot(instance) do
-      nil -> 0
-      snapshot -> map_size(snapshot.by_id)
-    end
-  end
+  defp route_count(instance), do: Ankusa.Routes.Snapshot.count(instance)
 
   defp max_routes(%Plug.Conn{} = conn), do: Ankusa.config(instance(conn)).routes.max_routes
 

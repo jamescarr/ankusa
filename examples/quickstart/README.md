@@ -51,11 +51,11 @@ from this directory.
 ## Write your own worker
 
 - Ankusa POSTs the hook's **raw body verbatim**, with the provider's `content-type`.
-- Identity is in headers: `x-ankusa-id`, `x-ankusa-source`, and
-  `x-ankusa-tenant` when the source has one.
+- Identity is in headers: `x-ankusa-id`, `x-ankusa-source`,
+  `x-ankusa-idempotency-key`, and `x-ankusa-tenant` when the source has one.
 - **`2xx` means delivered.** Anything else, a timeout (default 5s), or a redirect
   is retried per `dispatch.retry`, then dead-lettered.
-- **Dedupe on `x-ankusa-id`**: delivery is at-least-once, so the same hook can
+- **Dedupe on `x-ankusa-idempotency-key`**: delivery is at-least-once, so the same hook can
   arrive twice after a retry.
 - Point `url:` at your service. Compose service names resolve; outside compose,
   use a host the container can reach.

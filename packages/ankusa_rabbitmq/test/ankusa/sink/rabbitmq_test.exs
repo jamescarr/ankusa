@@ -1,6 +1,7 @@
 defmodule Ankusa.Sink.RabbitMQTest do
   @moduledoc """
   Requires a live RabbitMQ: `docker compose up -d --wait` in this directory.
+  `AMQP_URL` (default `amqp://guest:guest@localhost:5673`) points elsewhere.
   """
 
   use ExUnit.Case, async: false
@@ -8,7 +9,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
   alias Ankusa.{Envelope, UUIDv7}
   alias Ankusa.Sink.RabbitMQ
 
-  @amqp_url "amqp://guest:guest@localhost:5673"
+  @amqp_url System.get_env("AMQP_URL", "amqp://guest:guest@localhost:5673")
 
   setup do
     instance = :"rmq_#{System.unique_integer([:positive])}"
@@ -93,7 +94,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
     env = envelope(%{dedupe_key: "evt_1"})
 
     assert :ok =
-             RabbitMQ.deliver(env, Map.put(ctx(inst), :replay_id, "rid"),
+             deliver_when_connected(env, Map.put(ctx(inst), :replay_id, "rid"),
                exchange: exch,
                url: @amqp_url
              )
@@ -140,7 +141,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
 
     opts = [exchange: exch, url: @amqp_url, inline_max_bytes: 1_000]
 
-    assert :ok = RabbitMQ.deliver(env, ctx(inst), opts)
+    assert :ok = deliver_when_connected(env, ctx(inst), opts)
 
     {payload, _meta} = get_message(chan, queue)
     decoded = JSON.decode!(payload)
@@ -159,7 +160,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
     env = envelope()
 
     assert :ok =
-             RabbitMQ.deliver(env, ctx(inst),
+             deliver_when_connected(env, ctx(inst),
                exchange: exch,
                url: @amqp_url,
                routing_key: "custom.key"
@@ -186,7 +187,8 @@ defmodule Ankusa.Sink.RabbitMQTest do
     exch = "ankusa.test.unbound.#{System.unique_integer([:positive])}"
     opts = [exchange: exch, url: @amqp_url]
 
-    assert {:error, {:unroutable, "ankusa.src"}} = RabbitMQ.deliver(envelope(), ctx(inst), opts)
+    assert {:error, {:unroutable, "ankusa.src"}} =
+             deliver_when_connected(envelope(), ctx(inst), opts)
 
     {:ok, %{queue: queue}} = AMQP.Queue.declare(chan, "", exclusive: true)
     :ok = AMQP.Queue.bind(chan, queue, exch, routing_key: "#")
@@ -205,7 +207,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
   } do
     opts = [exchange: exch, url: @amqp_url, retry_ms: 200]
 
-    assert :ok = RabbitMQ.deliver(envelope(), ctx(inst), opts)
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
     get_message(chan, queue)
 
     :ok = AMQP.Exchange.delete(chan, exch)
@@ -236,7 +238,7 @@ defmodule Ankusa.Sink.RabbitMQTest do
     :ok = AMQP.Queue.bind(chan, queue, exch, routing_key: "#")
 
     assert {:error, :nacked} =
-             RabbitMQ.deliver(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
+             deliver_when_connected(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
   end
 
   test "an unreachable broker fails fast with :not_connected instead of hanging" do
@@ -248,5 +250,171 @@ defmodule Ankusa.Sink.RabbitMQTest do
                exchange: "whatever",
                url: "amqp://guest:guest@127.0.0.1:1"
              )
+  end
+
+  defp connection(inst, exch, url \\ @amqp_url),
+    do: Ankusa.whereis(inst, RabbitMQ.connection_key(url, exch))
+
+  test "a publish whose caller already gave up is answered :expired and never sent", %{
+    instance: inst,
+    exchange: exch,
+    chan: chan,
+    queue: queue
+  } do
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
+    get_message(chan, queue)
+
+    conn = connection(inst, exch)
+    past = System.monotonic_time(:millisecond) - 1
+
+    assert GenServer.call(conn, {:publish, "ankusa.src", "late", [], past}) == {:error, :expired}
+
+    Process.sleep(200)
+    assert {:empty, _} = AMQP.Basic.get(chan, queue, no_ack: true)
+  end
+
+  test "publishes are confirmed concurrently, many in flight at once", %{
+    instance: inst,
+    exchange: exch,
+    chan: chan,
+    queue: queue
+  } do
+    opts = [exchange: exch, url: @amqp_url]
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+    get_message(chan, queue)
+    conn = connection(inst, exch)
+
+    sampler =
+      Task.async(fn ->
+        Stream.repeatedly(fn -> map_size(:sys.get_state(conn).pending) end)
+        |> Stream.take(2_000)
+        |> Enum.max()
+      end)
+
+    results =
+      1..10
+      |> Enum.map(fn _ ->
+        Task.async(fn ->
+          for _ <- 1..10, do: RabbitMQ.deliver(envelope(), ctx(inst), opts)
+        end)
+      end)
+      |> Enum.flat_map(&Task.await(&1, 30_000))
+
+    assert results == List.duplicate(:ok, 100)
+    assert Task.await(sampler, 30_000) > 1
+
+    received =
+      Stream.repeatedly(fn -> AMQP.Basic.get(chan, queue, no_ack: true) end)
+      |> Enum.take_while(&match?({:ok, _, _}, &1))
+
+    assert length(received) == 100
+  end
+
+  test "one exchange on two brokers is two connections", %{instance: inst, exchange: exch} do
+    other = "amqp://guest:guest@127.0.0.1:1"
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
+
+    assert {:error, :not_connected} =
+             RabbitMQ.deliver(envelope(), ctx(inst), exchange: exch, url: other)
+
+    a = connection(inst, exch)
+    b = connection(inst, exch, other)
+    assert is_pid(a) and is_pid(b) and a != b
+  end
+
+  # Makes the reaper's row for `key` look idle for its whole `idle_ms`, then
+  # runs one sweep to completion.
+  defp sweep_as_idle(key) do
+    reaper = Ankusa.Sink.RabbitMQ.Reaper
+    [{^key, _pid, _last, idle}] = :ets.lookup(reaper, key)
+    true = :ets.update_element(reaper, key, {3, System.monotonic_time(:millisecond) - idle})
+    send(reaper, :tick)
+    :sys.get_state(reaper)
+  end
+
+  test "an idle connection is closed at the broker, and the next delivery opens a new one", %{
+    instance: inst,
+    exchange: exch,
+    chan: chan,
+    queue: queue
+  } do
+    opts = [exchange: exch, url: @amqp_url, idle_timeout_ms: 1_000]
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+    get_message(chan, queue)
+
+    old = connection(inst, exch)
+    amqp = :sys.get_state(old).conn.pid
+    ref = Process.monitor(amqp)
+    key = {inst, RabbitMQ.connection_key(@amqp_url, exch)}
+
+    # Floored at the publish call's 15 s plus a second.
+    assert [{^key, ^old, _last, 16_000}] = :ets.lookup(Ankusa.Sink.RabbitMQ.Reaper, key)
+
+    sweep_as_idle(key)
+
+    assert_receive {:DOWN, ^ref, :process, ^amqp, _reason}, 5_000
+    assert connection(inst, exch) == nil
+
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+    get_message(chan, queue)
+    assert is_pid(connection(inst, exch)) and connection(inst, exch) != old
+  end
+
+  test "idle_timeout_ms: 0 keeps the connection for good", %{instance: inst, exchange: exch} do
+    opts = [exchange: exch, url: @amqp_url, idle_timeout_ms: 0]
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), opts)
+
+    key = {inst, RabbitMQ.connection_key(@amqp_url, exch)}
+    assert :ets.lookup(Ankusa.Sink.RabbitMQ.Reaper, key) == []
+  end
+
+  test "a crash report never prints the URL's password or the pending bodies", %{
+    instance: inst,
+    exchange: exch
+  } do
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
+    {:status, _pid, _module, items} = :sys.get_status(connection(inst, exch))
+    printed = inspect(items, limit: :infinity)
+
+    refute printed =~ "guest:guest"
+    assert printed =~ @amqp_url |> URI.parse() |> Map.put(:userinfo, nil) |> URI.to_string()
+
+    # Nor does the supervisor's copy of the connection's child spec.
+    supervisor = :sys.get_status(Ankusa.Sink.RabbitMQ.Supervisor)
+    refute inspect(supervisor, limit: :infinity, printable_limit: :infinity) =~ "guest:guest"
+  end
+
+  test "amqp_client's processes hold the connection password only encrypted", %{
+    instance: inst,
+    exchange: exch
+  } do
+    assert :ok = deliver_when_connected(envelope(), ctx(inst), exchange: exch, url: @amqp_url)
+
+    printed =
+      for pid <- Process.list(),
+          amqp_client_process?(pid),
+          status = sys_status(pid),
+          status != nil,
+          do: inspect(status, limit: :infinity, printable_limit: :infinity)
+
+    assert Enum.any?(printed, &(&1 =~ ":amqp_params_network"))
+    refute Enum.any?(printed, &(&1 =~ ~s({:plaintext, "guest"})))
+  end
+
+  defp amqp_client_process?(pid) do
+    with {:dictionary, dict} <- Process.info(pid, :dictionary),
+         {_, call} when is_tuple(call) <- List.keyfind(dict, :"$initial_call", 0) do
+      call
+      |> Tuple.to_list()
+      |> Enum.any?(&(is_atom(&1) and String.starts_with?(Atom.to_string(&1), "amqp_")))
+    else
+      _ -> false
+    end
+  end
+
+  defp sys_status(pid) do
+    :sys.get_status(pid, 1_000)
+  catch
+    :exit, _ -> nil
   end
 end

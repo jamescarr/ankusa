@@ -23,6 +23,9 @@ defmodule Ankusa.BlobStore.GCS do
     * `:req_options`    — transport options for the HTTP client, e.g. a custom
                            Finch pool, a proxy, or `plug:` for `Req.Test` in
                            tests. See `Ankusa.HttpClient` for the accepted keys
+    * `:retries`        — default `2`: extra attempts after a transport error
+                           or a `408`/`429`/`5xx`, each with a fresh token from
+                           `:token_provider`. See `Ankusa.BlobStore.Retry`
 
   ## Local dev
 
@@ -38,52 +41,61 @@ defmodule Ankusa.BlobStore.GCS do
 
   @behaviour Ankusa.BlobStore
 
+  alias Ankusa.BlobStore.Retry
   alias Ankusa.HttpClient
 
   @impl true
-  def put(_instance, key, data, opts) do
+  def put(instance, key, data, opts) do
     url = media_url(opts, "o", [{"uploadType", "media"}, {"name", key}])
 
-    case request(opts, :post, url, IO.iodata_to_binary(data), [], "application/octet-stream") do
+    case request(instance, opts, :post, url, data, [], "application/octet-stream") do
       {:ok, _body} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   @impl true
-  def get(_instance, key, opts) do
+  def get(instance, key, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [{"alt", "media"}])
-    request(opts, :get, url, "", [], nil)
+    request(instance, opts, :get, url, "", [], nil)
   end
 
   @impl true
-  def get_range(_instance, key, offset, length, opts) do
+  def get_range(instance, key, offset, length, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [{"alt", "media"}])
     range = "bytes=#{offset}-#{offset + length - 1}"
-    request(opts, :get, url, nil, [{"range", range}], nil)
+    request(instance, opts, :get, url, nil, [{"range", range}], nil)
   end
 
   @impl true
-  def delete(_instance, key, opts) do
+  def delete(instance, key, opts) do
     url = media_url(opts, "o/" <> URI.encode_www_form(key), [])
-    _ = request(opts, :delete, url, nil, [], nil)
+    _ = request(instance, opts, :delete, url, nil, [], nil)
     :ok
   end
 
+  # Every page (`nextPageToken`), and a failed page fails the listing.
   @impl true
-  def list(_instance, prefix, opts) do
-    url = media_url(opts, "o", [{"prefix", prefix}])
+  def list(instance, prefix, opts), do: list_pages(instance, opts, prefix, nil, [])
 
-    case request(opts, :get, url, nil, [], nil) do
-      {:ok, body} ->
-        case JSON.decode(body) do
-          {:ok, %{"items" => items}} -> items |> Enum.map(& &1["name"]) |> Enum.sort()
-          {:ok, _no_items} -> []
-          {:error, _reason} -> []
-        end
+  defp list_pages(instance, opts, prefix, token, acc) do
+    query = [{"prefix", prefix}] ++ if(token, do: [{"pageToken", token}], else: [])
 
-      {:error, _reason} ->
-        []
+    with {:ok, body} <-
+           request(instance, opts, :get, media_url(opts, "o", query), nil, [], nil),
+         {:ok, page} when is_map(page) <- JSON.decode(body) do
+      acc = [page |> Map.get("items", []) |> Enum.map(& &1["name"]) | acc]
+
+      case page["nextPageToken"] do
+        next when is_binary(next) and next != "" ->
+          list_pages(instance, opts, prefix, next, acc)
+
+        _ ->
+          {:ok, acc |> Enum.reverse() |> Enum.concat() |> Enum.sort()}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      {:ok, _not_a_page} -> {:error, :list_unreadable}
     end
   end
 
@@ -108,17 +120,17 @@ defmodule Ankusa.BlobStore.GCS do
   defp query_suffix([]), do: ""
   defp query_suffix(query), do: "?" <> URI.encode_query(query)
 
-  defp request(opts, method, url, body, headers, content_type) do
+  defp request(instance, opts, method, url, body, headers, content_type) do
     timeout = Keyword.get(opts, :timeout_ms, 10_000)
+    req_options = Keyword.get(opts, :req_options, [])
 
-    case HttpClient.request(
-           method,
-           url,
-           auth_headers(opts) ++ headers ++ content_type_header(content_type),
-           body,
-           timeout,
-           Keyword.get(opts, :req_options, [])
-         ) do
+    result =
+      Retry.run(instance, opts, fn ->
+        all_headers = auth_headers(opts) ++ headers ++ content_type_header(content_type)
+        HttpClient.request(method, url, all_headers, body, timeout, req_options)
+      end)
+
+    case result do
       # Keep the status visible so 404 can mean :not_found.
       {:ok, status, body} when status in 200..299 -> {:ok, body}
       {:ok, 404, _body} -> {:error, :not_found}

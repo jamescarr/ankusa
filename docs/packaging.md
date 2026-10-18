@@ -44,7 +44,7 @@ packages/
                               zero-external-dep default adapter
                               (BlobStore.{LocalFS,S3,GCS,Azure,OCI},
                               Codec.Raw, all Verifiers,
-                              Sink.{Log,Http}, RetryPolicy.Exponential,
+                              Sink.{Log,Http,SQS,GooglePubSub}, RetryPolicy.Exponential,
                               RouteResolver.{Path,TenantPath})
   ankusa_rabbitmq             path-dep on ankusa + amqp. Ankusa.Sink.RabbitMQ.
   ankusa_kafka                path-dep on ankusa + brod. Ankusa.Sink.Kafka.
@@ -82,6 +82,13 @@ packages/
                               the JDK's HttpClient plus Jackson 3 and the
                               JSpecify annotations; a pure HTTP client like
                               the other SDKs.
+  sdk-clojure                 the `io.github.jamescarr/ankusa-clj` Clojars
+                              client SDK, built with the Clojure CLI and
+                              tools.build. Native Clojure on the JDK's
+                              HttpClient plus `org.clojure/data.json`; a pure
+                              HTTP client like the other SDKs. The `ankusa-clj`
+                              name keeps it apart from the Java SDK's
+                              `ankusa-sdk` on Maven Central.
 examples/                     deployable demos; not published packages
 tools/loadgen/                load generator for the examples
 conformance/                  language-neutral SDK conformance vectors + checker
@@ -252,6 +259,7 @@ container as they do on disk:
 # examples/rabbitmq-consumer/ingest_app/Dockerfile
 WORKDIR /repo
 COPY packages/ankusa ./packages/ankusa                   # ankusa core
+COPY packages/async_api_spex ./packages/async_api_spex
 COPY packages/ankusa_rabbitmq ./packages/ankusa_rabbitmq
 COPY examples/rabbitmq-consumer/ingest_app ./examples/rabbitmq-consumer/ingest_app
 WORKDIR /repo/examples/rabbitmq-consumer/ingest_app
@@ -269,7 +277,7 @@ services:
 
 **Depending on `ankusa` directly *and* transitively through an adapter
 package needs `override: true`.** Each adapter package's own
-`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.1`) whenever Mix
+`mix.exs` picks its Hex entry for `:ankusa` (`~> 0.6` for every adapter) whenever Mix
 evaluates it as a nested dependency: Mix builds dependencies under `:prod`
 by default regardless of *your* project's `Mix.env()`, so the adapter
 package's dev/test-only path-dep branch never gets hit there. A wrapper app
@@ -283,6 +291,7 @@ mix.exs is overriding a child dependency." Fix: mark your direct entry
 defp deps do
   [
     {:ankusa, path: "../../../packages/ankusa", override: true},
+    {:async_api_spex, path: "../../../packages/async_api_spex", override: true},
     {:ankusa_rabbitmq, path: "../../../packages/ankusa_rabbitmq"}
   ]
 end

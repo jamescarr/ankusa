@@ -75,6 +75,7 @@ defmodule Ankusa.AsyncApiTest do
 
     assert %{"SinkMessageV1" => %{"required" => required}} = map["components"]["schemas"]
     assert "id" in required
+    assert "verification" in required
   end
 
   test "different addresses, brokers, and bindings are different channels and servers" do
@@ -112,6 +113,64 @@ defmodule Ankusa.AsyncApiTest do
     refute Map.has_key?(map, "channels")
     refute Map.has_key?(map, "servers")
     refute Map.has_key?(map, "operations")
+  end
+
+  test "an SQS sink is an sqs server and a queue channel with the sqs binding" do
+    queue_url = "https://sqs.us-east-1.amazonaws.com/1/hooks.fifo"
+
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [sinks: [{Ankusa.Sink.SQS, queue_url: queue_url, region: "us-east-1"}]]
+          })
+      )
+
+    assert [{_server_id, %{"host" => "sqs.us-east-1.amazonaws.com", "protocol" => "sqs"}}] =
+             Map.to_list(map["servers"])
+
+    assert [{_channel_id, channel}] = Map.to_list(map["channels"])
+    assert channel["address"] == "hooks.fifo"
+
+    assert channel["bindings"] == %{
+             "sqs" => %{
+               "queue" => %{"name" => "hooks.fifo", "fifoQueue" => true},
+               "bindingVersion" => "0.3.0"
+             }
+           }
+
+    refute Map.has_key?(channel["messages"]["stripe"], "headers")
+  end
+
+  test "a Google Pub/Sub sink is a googlepubsub server and a topic channel with the ordering key" do
+    map =
+      document_map(
+        source_store:
+          static(%{
+            "stripe" => [
+              sinks: [{Ankusa.Sink.GooglePubSub, project: "p", topic: "hooks", ordering_key: "k"}]
+            ]
+          })
+      )
+
+    assert [{_server_id, server}] = Map.to_list(map["servers"])
+
+    assert Map.take(server, ["host", "protocol"]) == %{
+             "host" => "pubsub.googleapis.com",
+             "protocol" => "googlepubsub"
+           }
+
+    assert [{_channel_id, channel}] = Map.to_list(map["channels"])
+    assert channel["address"] == "projects/p/topics/hooks"
+    assert channel["bindings"] == %{"googlepubsub" => %{"bindingVersion" => "0.2.0"}}
+
+    message = channel["messages"]["stripe"]
+
+    assert message["bindings"] == %{
+             "googlepubsub" => %{"orderingKey" => "k", "bindingVersion" => "0.2.0"}
+           }
+
+    refute Map.has_key?(message, "headers")
   end
 
   test "an address a function computes per hook is a channel of its own, with no address" do

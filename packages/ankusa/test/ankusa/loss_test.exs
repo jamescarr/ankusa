@@ -42,7 +42,8 @@ defmodule Ankusa.LossTest do
     assert status == 137, "expected SIGKILL (137), got #{status}"
 
     # Reopen only the store over the same data dir and read every hook back.
-    start_supervised!({Ankusa.Store, instance: config.instance, config: config})
+    put_config(config)
+    start_supervised!({Ankusa.Store, instance: config.instance})
     {:ok, hooks} = Ankusa.Queue.hooks(config.instance, 0, 1_000_000)
     stored = MapSet.new(hooks, & &1.id)
 

@@ -13,8 +13,8 @@ import tools.jackson.core.JacksonException;
 
 /**
  * Operates against the Ankusa operator listener ({@code admin.port}, default 4002): health,
- * Prometheus metrics, the redacted configuration, the dead-letter queue, replay jobs, and the
- * quarantine list.
+ * Prometheus metrics, the redacted configuration, the AsyncAPI document, the dead-letter queue,
+ * replay jobs, and the quarantine pen (list and purge).
  *
  * <p>Every answer is node-local, so a fleet operator queries each node's admin port. The listener
  * authenticates nobody on its own; the headers in {@link ClientOptions} are for whatever boundary a
@@ -102,6 +102,28 @@ public final class AdminClient {
    */
   public Map<String, @Nullable Object> config() {
     TransportResponse response = send("GET", "/v1/config", null);
+    requireSuccess(response);
+    try {
+      return Json.readObject(response.body());
+    } catch (JacksonException | NullPointerException e) {
+      throw invalidBody(response, e);
+    }
+  }
+
+  /**
+   * Reads the AsyncAPI 3.0 document of this instance's messaging channels.
+   *
+   * <p>The document is built from the sources and sinks configured now. It carries no credentials,
+   * and the call is not gated on a role.
+   *
+   * @return the document's fields, in the order the body gave them
+   * @throws RoleNotEnabledError when the listener refuses the call for a missing role
+   * @throws AdminRejectedError when the listener refuses the call with another 4xx
+   * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx, or
+   *     answers with a body that is not a JSON object
+   */
+  public Map<String, @Nullable Object> asyncApi() {
+    TransportResponse response = send("GET", "/asyncapi.json", null);
     requireSuccess(response);
     try {
       return Json.readObject(response.body());
@@ -244,6 +266,44 @@ public final class AdminClient {
     }
     return decode(
         send("GET", HttpCore.withQuery("/v1/quarantine", query), null), QuarantinePage.class);
+  }
+
+  /**
+   * Deletes quarantined hooks.
+   *
+   * <p>The filters are ANDed, and the listener clamps {@code limit} to 1..10000, default 1000, so
+   * params with no filter delete the oldest {@code limit} entries. Deleted hooks are gone for good:
+   * run a {@code quarantine} replay job first to keep the ones that now verify.
+   *
+   * @param params which entries to delete; pass them on purpose, because an empty purge deletes
+   *     1000 hooks
+   * @return how many entries were deleted and the bytes they held
+   * @throws RoleNotEnabledError when the node is not running the {@code edge} role
+   * @throws AdminRejectedError when the listener refuses the call with another 4xx, including
+   *     {@code 400 invalid_filter}
+   * @throws AdminUnavailableError when the listener is unreachable, answers anything but 2xx
+   *     (including {@code 503 store_unavailable}), or answers with a body that is not a purge
+   *     result
+   */
+  public QuarantinePurge purgeQuarantined(PurgeQuarantinedParams params) {
+    LinkedHashMap<String, String> query = new LinkedHashMap<>();
+    if (params.sourceId() != null) {
+      query.put("source_id", params.sourceId());
+    }
+    if (params.id() != null) {
+      query.put("id", params.id());
+    }
+    if (params.since() != null) {
+      query.put("since", params.since().toString());
+    }
+    if (params.until() != null) {
+      query.put("until", params.until().toString());
+    }
+    if (params.limit() != null) {
+      query.put("limit", params.limit().toString());
+    }
+    return decode(
+        send("DELETE", HttpCore.withQuery("/v1/quarantine", query), null), QuarantinePurge.class);
   }
 
   /** Sends one request, turning every transport failure into an unavailable listener. */

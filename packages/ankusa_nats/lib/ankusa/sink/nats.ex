@@ -27,7 +27,9 @@ defmodule Ankusa.Sink.NATS do
   when the ack never arrives, `:no_stream` when no stream covers the subject,
   and `{:jetstream, %{"code" => 400, "description" => "message size exceeds
   maximum allowed"}}` for a publish the stream itself refuses (size, TTL,
-  permissions).
+  permissions). The one exception is `{:permanent, :max_payload_exceeded}`: a
+  publish larger than the server's `max_payload` is refused by gnat before it is
+  sent, and is dead-lettered at once.
 
   A publish whose ack is lost can still have been stored, so delivery is
   at-least-once. Every publish sets `Nats-Msg-Id` to the hook's `id` — or
@@ -50,47 +52,47 @@ defmodule Ankusa.Sink.NATS do
 
   ## Process model
 
-  The first `deliver/3` for an `{instance, connection}` pair starts a gnat
-  connection under this package's `DynamicSupervisor`, **synchronously** —
-  gnat completes the NATS handshake before its start call returns — so by the
-  time `deliver/3` has a connection to publish through, the socket is up or
-  the start already returned the reason it isn't. Servers are tried in the
-  order given; a failed connect is `{:error, reason}` (`:econnrefused`,
-  `:timeout`, a rejected credential), retried by the source's
-  `Ankusa.RetryPolicy`, then dead-lettered, exactly like any other sink
-  failure.
+  The first `deliver/3` for an `{instance, connection}` pair starts a
+  `Gnat.ConnectionSupervisor` under this package's `DynamicSupervisor`. The
+  start returns at once: the NATS handshake runs in that supervisor, never in
+  the caller or the `DynamicSupervisor`, so a slow or dead server cannot stall
+  other deliveries behind it. It connects to one of `:servers`, picked at
+  random per attempt (gnat's behaviour), and reconnects with a 2 s backoff
+  whenever the socket closes.
 
-  gnat stops its process when the socket closes, and the child is
-  `:temporary`: nothing crash-loops trying to reach a server that is gone, and
-  the next `deliver/3` reconnects inside the retry policy. There is no
-  separate reconnect policy to get wrong. In the narrow window where the
-  connection dies between that check and the publish, `deliver/3` returns
-  `{:error, :not_connected}` — also just a retry.
-
-  The connection has to register a name, and a name has to be an atom, so it
-  is `:"ankusa_nats.<instance>.<connection>"`: both parts come from config, so
-  the atom count is bounded and two instances never share a connection.
-  Servers and credentials are fixed by the first delivery that starts it; use
-  a different `:connection` for a different cluster.
+  Both processes are found through the instance's registry
+  (`Ankusa.via(instance, {:nats_conn, connection})`): nothing is registered
+  globally, and two instances never share a connection. While the connection
+  is not up — the first delivery, a reconnect — `deliver/3` returns
+  `{:error, :not_connected}`, retried by the source's `Ankusa.RetryPolicy`
+  like any other sink failure. Servers and credentials are fixed by the first
+  delivery that starts it; use a different `:connection` for a different
+  cluster.
 
   ## opts
 
     * `:servers`             — required; `"host:port"` strings or `{host, port}`
-                               tuples, tried in order. More than one is
-                               failover, not fan-out: one connection to one
-                               server at a time.
+                               tuples. More than one is failover, not fan-out:
+                               one connection to one server (picked at random
+                               per attempt) at a time.
     * `:subject`             — required; a string, or `(Envelope.t() -> String.t())`
     * `:inline_max_bytes`    — default 64 KiB (65,536), configurable
     * `:publish_timeout_ms`  — how long `deliver/3` waits for the JetStream
                                publish ack; default `5_000`
     * `:connection`          — atom naming the gnat connection; default `:default`
+    * `:idle_timeout_ms`     — close the connection after this long without a
+                               delivery through it, default `600_000` (10 min);
+                               `0` never. Never under `:publish_timeout_ms` plus
+                               1 s. See `Ankusa.Sink.Reaper`
     * `:client_name`         — the name this client reports to NATS monitoring
     * `:tls`, `:ssl_opts`, `:tcp_opts`, `:connection_timeout`, `:ping_interval`,
       `:inbox_prefix`        — passed to gnat's connection settings
     * credentials            — `:username` (needs `:password`), `:password`,
                                `:token`, or `:nkey_seed` (with `:jwt` for
-                               operator-mode accounts). gnat sends exactly one
-                               scheme, choosing in that order, so set one.
+                               operator-mode accounts); each secret is handed
+                               to gnat as a zero-arity function, so no gnat
+                               process holds it in the clear. gnat sends exactly
+                               one scheme, choosing in that order, so set one.
 
   `:no_responders` is always on. It costs nothing when the server answers, and
   it turns "no stream covers this subject and nothing else is listening" into
@@ -103,6 +105,7 @@ defmodule Ankusa.Sink.NATS do
   alias Ankusa.Envelope
   alias Ankusa.Sink.Description
   alias Ankusa.Sink.Message
+  alias Ankusa.Sink.Reaper
 
   @default_publish_timeout_ms 5_000
 
@@ -110,13 +113,17 @@ defmodule Ankusa.Sink.NATS do
   # `:servers` and minus `:name`, which `:client_name` maps onto.
   @connection_settings ~w(tls ssl_opts tcp_opts connection_timeout ping_interval inbox_prefix username password token nkey_seed jwt)a
 
+  # The settings gnat (>= 1.18) resolves through a zero-arity function; see
+  # `hide_secret/1`. `:jwt` and `:username` are not secrets gnat resolves.
+  @secret_settings [:password, :token, :nkey_seed]
+
   @impl true
   def deliver(%Envelope{} = env, ctx, opts) do
     subject = subject(env, opts)
     timeout = Keyword.get(opts, :publish_timeout_ms, @default_publish_timeout_ms)
-    conn = connection(ctx.instance, Keyword.get(opts, :connection, :default))
+    connection = Keyword.get(opts, :connection, :default)
 
-    with :ok <- ensure_connection(conn, opts),
+    with {:ok, conn} <- ensure_connection(ctx.instance, connection, opts, timeout),
          {:ok, payload} <- Message.encode(env, ctx, Message.inline_max_bytes(opts)) do
       publish(conn, subject, payload, headers(env, ctx), timeout)
     end
@@ -168,14 +175,20 @@ defmodule Ankusa.Sink.NATS do
       {:error, :no_responders} ->
         {:error, :no_stream}
 
+      # gnat refuses a body over the server's `max_payload` before sending it
+      # (it used to be the server closing the connection, cutting off every
+      # publish in flight). Retrying cannot shrink the hook.
+      {:error, :max_payload_exceeded} ->
+        {:error, {:permanent, :max_payload_exceeded}}
+
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  # The connection is addressed by its registered name, not a pid: gnat stops
-  # that process when the socket closes, so the name is unregistered and the
-  # call exits. That is this sink's "not connected", and it is the caller's to
+  # gnat stops the connection process when the socket closes (its supervisor
+  # starts a new one), so a pid looked up a moment ago may be gone and the call
+  # exits. That is this sink's "not connected", and it is the caller's to
   # absorb — the dispatch pipeline retries it like any other sink error.
   defp request(conn, subject, payload, headers, timeout) do
     Gnat.request(conn, subject, payload, headers: headers, receive_timeout: timeout)
@@ -239,43 +252,69 @@ defmodule Ankusa.Sink.NATS do
 
   # ── connection lifecycle ────────────────────────────────────────────────
 
-  defp connection(instance, connection), do: :"ankusa_nats.#{instance}.#{connection}"
-
   # `whereis` first: the common case must not serialize every delivery through
-  # the DynamicSupervisor.
-  defp ensure_connection(conn, opts) do
-    if Process.whereis(conn), do: :ok, else: start_connection(conn, opts)
-  end
+  # the DynamicSupervisor. The supervisor answers its start at once and
+  # connects (and reconnects) on its own; the connection is there or it is not.
+  # The idle sweep stops the supervisor, which takes its connection with it.
+  @doc false
+  @spec ensure_connection(atom(), atom(), keyword(), pos_integer()) ::
+          {:ok, pid()} | {:error, term()}
+  def ensure_connection(instance, connection, opts, timeout) do
+    with {:ok, sup} <- ensure_supervisor(instance, connection, opts) do
+      idle = Reaper.idle_ms(opts, timeout + 1_000)
+      :ok = Reaper.touch(Ankusa.Sink.NATS.Reaper, {instance, {:nats_sup, connection}}, sup, idle)
 
-  # Servers in order, first one that connects wins. gnat handshakes inside
-  # `init/1`, so `start_link` answers once the socket is either up or
-  # definitively not.
-  defp start_connection(conn, opts) do
-    Enum.reduce_while(servers(opts), {:error, :no_servers}, fn settings, _last_error ->
-      child = %{
-        id: conn,
-        start: {Gnat, :start_link, [settings, [name: conn]]},
-        # :temporary: a connection that drops, or a server that is down, must
-        # not be restarted here — restarting a synchronous connect that keeps
-        # failing would crash-loop past the supervisor's intensity and take the
-        # application down. The next `deliver/3` starts it again, inside the
-        # source's retry policy.
-        restart: :temporary
-      }
-
-      case DynamicSupervisor.start_child(Ankusa.Sink.NATS.Supervisor, child) do
-        {:ok, _pid} -> {:halt, :ok}
-        {:error, {:already_started, _pid}} -> {:halt, :ok}
-        {:error, reason} -> {:cont, {:error, reason}}
+      case Ankusa.whereis(instance, {:nats_conn, connection}) do
+        nil -> {:error, :not_connected}
+        pid -> {:ok, pid}
       end
-    end)
+    end
   end
+
+  defp ensure_supervisor(instance, connection, opts) do
+    case Ankusa.whereis(instance, {:nats_sup, connection}) do
+      pid when is_pid(pid) -> {:ok, pid}
+      nil -> start_supervisor(instance, connection, opts)
+    end
+  end
+
+  # The settings carry credentials (password, token, nkey seed): the child spec
+  # holds them only inside a closure, which `inspect` prints without its
+  # captured values, so the DynamicSupervisor's status and reports never show
+  # them. Each secret is also a closure inside the settings (`hide_secret/1`),
+  # so gnat's processes hold no plaintext either.
+  defp start_supervisor(instance, connection, opts) do
+    settings = %{
+      connection_settings: servers(opts),
+      name: Ankusa.via(instance, {:nats_conn, connection}),
+      backoff_period: 2_000
+    }
+
+    child = %{
+      id: {Gnat.ConnectionSupervisor, instance, connection},
+      start:
+        {__MODULE__, :start_connection_supervisor,
+         [fn -> settings end, [name: Ankusa.via(instance, {:nats_sup, connection})]]},
+      restart: :permanent
+    }
+
+    case DynamicSupervisor.start_child(Ankusa.Sink.NATS.Supervisor, child) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec start_connection_supervisor((-> map()), keyword()) :: GenServer.on_start()
+  def start_connection_supervisor(settings_fun, opts) when is_function(settings_fun, 0),
+    do: Gnat.ConnectionSupervisor.start_link(settings_fun.(), opts)
 
   defp servers(opts) do
     overrides =
       opts
       |> Keyword.take(@connection_settings)
-      |> Map.new()
+      |> Map.new(&hide_secret/1)
       |> put_opt(:name, Keyword.get(opts, :client_name))
       |> Map.put(:no_responders, true)
 
@@ -284,6 +323,13 @@ defmodule Ankusa.Sink.NATS do
     |> server_list()
     |> Enum.map(fn server -> Map.merge(overrides, server_settings(server)) end)
   end
+
+  # gnat (>= 1.18) calls a zero-arity function for these at each handshake, so
+  # neither its connection nor its supervisor ever holds the plaintext.
+  defp hide_secret({key, value}) when key in @secret_settings and is_binary(value),
+    do: {key, fn -> value end}
+
+  defp hide_secret(pair), do: pair
 
   # `:servers` is a list of `"host:port"` strings or `{host, port}` tuples; a
   # YAML loader may also hand over one comma-separated string.

@@ -11,8 +11,9 @@ module Ankusa
   # right.
   #
   # Non-retryable: the ref or expected sha256 is malformed, the gateway said
-  # 404/other 4xx, or the bytes that came back don't match the sha256.
-  # Retryable: the gateway said 5xx/503, or the request never completed
+  # 404 or another 4xx (except 408/429), or the bytes that came back don't
+  # match the sha256.
+  # Retryable: the gateway said 5xx, 408 or 429, or the request never completed
   # (network error, timeout).
   class ClaimCheckError < Error
     def retryable? = false
@@ -28,7 +29,7 @@ module Ankusa
   class ClaimNotFoundError < ClaimCheckError
   end
 
-  # The gateway rejected the request (400 or any other non-404 4xx).
+  # The gateway rejected the request (400 or any other 4xx but 404, 408 and 429).
   class ClaimRejectedError < ClaimCheckError
     attr_reader :status, :body
 
@@ -46,7 +47,7 @@ module Ankusa
   class ClaimIntegrityError < ClaimCheckError
   end
 
-  # The gateway is unreachable, or answered 5xx/503. Safe to retry.
+  # The gateway is unreachable, or answered 5xx, 408 or 429. Safe to retry.
   class ClaimCheckUnavailableError < ClaimCheckError
     def retryable? = true
   end
@@ -131,6 +132,13 @@ module Ankusa
       status = response.status
       if status == 404
         raise ClaimNotFoundError, "claim not found: #{parsed.tenant_id}/#{parsed.claim_id}"
+      end
+
+      # A gateway (or a proxy in front of it) that is throttling or timing out
+      # is telling the caller to come back, not that the claim is gone.
+      if [408, 429].include?(status)
+        raise ClaimCheckUnavailableError,
+          "claim-check gateway busy (#{status}): #{Connection.error_body(response).inspect}"
       end
 
       if status >= 400 && status < 500

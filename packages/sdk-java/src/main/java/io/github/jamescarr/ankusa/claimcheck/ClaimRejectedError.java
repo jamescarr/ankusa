@@ -3,7 +3,8 @@ package io.github.jamescarr.ankusa.claimcheck;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The gateway answered a 4xx other than 404: it understood the reference and refused it.
+ * The gateway answered a 4xx other than 404, 408 and 429: it understood the reference and refused
+ * it.
  *
  * <p>What it said is on {@link #body()}. Never retryable — the same request will be refused the
  * same way.

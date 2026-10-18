@@ -30,7 +30,7 @@ flowchart LR
   example: a small Plug.Router app whose `/deliveries` handler is the
   handoff point: it records/enqueues an Oban job per delivery, and the job
   writes the idempotent result into `processed_webhooks`, keyed by
-  `ankusa_id`, so a replayed delivery does not double-process. Dispatch is
+  `idempotency_key` (`ankusa_id` is an indexed column), so a replayed delivery does not double-process. Dispatch is
   at-least-once, so this idempotency is what makes the pipeline exactly-once
   end to end.
 - `postgres` is one StatefulSet holding one database: `consumer` (Oban's own
@@ -73,7 +73,7 @@ running for inspection.
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `CLUSTER` | `ankusa-e2e` | kind cluster name |
-| `RATE` | `100` | requests/sec for the steady and chaos phases |
+| `RATE` | `300` | requests/sec for the steady and chaos phases |
 | `DURATION` | `60` | seconds for the steady and chaos phases |
 | `BURST_SECONDS` | `15` | seconds for the closed-loop burst phase |
 | `CONCURRENCY` | `64` | concurrent in-flight requests during the burst phase (no rate cap) |

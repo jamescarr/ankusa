@@ -1,0 +1,48 @@
+# Grafana's provisioning: the Prometheus datasource, a file dashboard provider,
+# and the dashboard itself (files/grafana/ankusa.json). The dashboard ConfigMap
+# stays last.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  labels:
+    {{- include "demo.labels" "grafana" | nindent 4 }}
+data:
+  prometheus.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090/prometheus
+        isDefault: true
+        editable: false
+        # The scrape interval, so $__rate_interval in the dashboard is right.
+        jsonData: {timeInterval: "5s"}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-providers
+  labels:
+    {{- include "demo.labels" "grafana" | nindent 4 }}
+data:
+  ankusa.yaml: |
+    apiVersion: 1
+    providers:
+      - name: ankusa
+        type: file
+        disableDeletion: false
+        allowUiUpdates: false
+        options: {path: /etc/grafana/dashboards}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  labels:
+    {{- include "demo.labels" "grafana" | nindent 4 }}
+data:
+  ankusa.json: |
+    {{- .Files.Get "files/grafana/ankusa.json" | nindent 4 }}

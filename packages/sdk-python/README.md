@@ -11,9 +11,15 @@ here as they're built.
 
 ## Install
 
+From PyPI:
+
 ```sh
 pip install ankusa
-# or
+```
+
+Or with [`uv`](https://docs.astral.sh/uv/):
+
+```sh
 uv add ankusa
 ```
 
@@ -67,9 +73,9 @@ so a consumer needs exactly one bit to decide dead-letter vs. retry:
 | --- | --- | --- |
 | `InvalidClaimRefError` | `False` | `ref` isn't a well-formed claim-check URN, or `sha256` isn't 64-char lowercase hex |
 | `ClaimNotFoundError` | `False` | gateway `404`: expired by retention, or never written |
-| `ClaimRejectedError` | `False` | gateway `4xx` other than `404` (`.status`, `.body`) |
+| `ClaimRejectedError` | `False` | gateway `4xx` other than `404`, `408`, `429` (`.status`, `.body`) |
 | `ClaimIntegrityError` | `False` | sha256 of the returned bytes doesn't match |
-| `ClaimCheckUnavailableError` | `True` | gateway `5xx`/`503`, or unreachable |
+| `ClaimCheckUnavailableError` | `True` | gateway `5xx`, `408`, `429`, or unreachable |
 
 `health()` hits `GET /health` for a liveness probe.
 
@@ -99,7 +105,8 @@ def do_POST(self):
     ...
 ```
 
-`HookHeaders.id` is what a receiver dedupes on: delivery is at-least-once
+`HookHeaders.idempotency_key` (via `idempotency_key(hook)`) is what a receiver
+dedupes on, not the hook id (`x-ankusa-id` stays required): delivery is at-least-once
 (see "HTTP handoff" in
 [`docs/integrations.md`](https://github.com/jamescarr/ankusa/blob/main/docs/integrations.md)),
 so the same hook can arrive twice after a retry. When the source extracts the
@@ -113,10 +120,31 @@ already is.
 [`examples/quickstart/worker.py`](https://github.com/jamescarr/ankusa/tree/main/examples/quickstart/worker.py)
 uses this.
 
+### Verifying signed deliveries
+
+An HTTP sink with a `secret` signs every delivery the
+[Standard Webhooks](https://www.standardwebhooks.com/) way:
+
+```python
+from ankusa import InvalidSignatureError, verify_signature
+
+try:
+    # the raw request body, exactly as received
+    verify_signature(request.headers, raw_body, [os.environ["ANKUSA_WHSEC"]])
+except InvalidSignatureError as err:
+    return 401, {"error": "invalid_signature", "code": err.code}
+```
+
+`secrets` is one secret or several during a rotation (`whsec_` + base64, or
+any other string used as its own bytes); `tolerance_seconds` (default 300)
+bounds the `webhook-timestamp` window. Failures carry `code`, `field` and
+`retryable=False`.
+
 ## Consuming queue messages
 
-Every sink — HTTP, RabbitMQ, Kafka, NATS — delivers one JSON message per
-hook: the identity fields, the body (inline `body_base64` or a claim-check
+Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message
+per hook (the HTTP sink sends the original body plus `x-ankusa-*` headers
+instead): the identity fields, the body (inline `body_base64` or a claim-check
 `claim`), `sha256`, and, when present, `dedupe_key`, `replay_id`,
 `idempotency_key` and the forwarded provider `headers`. `decode_message`
 validates all of it and `idempotency_key` gives the value to store in a
@@ -175,8 +203,9 @@ and `hook.tenant` playing `source_id` and `tenant_id`).
 
 When a sink has grown a backlog, or a downstream processor failed after the
 sink accepted a batch, re-drive it with a replay job over the admin client
-(see "Admin client" above): `kind: "dlq"` re-sends rows that dead-lettered,
-`kind: "archive"` re-sends hooks over a time window. Replays keep the original
+(see "Admin client" below): `kind: "dlq"` re-sends rows that dead-lettered,
+`kind: "archive"` re-sends hooks over a time window, `kind: "quarantine"`
+re-verifies held hooks and releases those that pass. Replays keep the original
 `id` and `dedupe_key` and add `replay_id`.
 
 ## Routes client

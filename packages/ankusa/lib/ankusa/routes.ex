@@ -53,13 +53,15 @@ defmodule Ankusa.Routes do
   def enabled?(instance), do: Ankusa.config(instance).routes.enabled
 
   @doc """
-  The compiled route table, or `nil` when no store has published one.
+  The route table's `:meta` row (`Ankusa.Routes.Snapshot`: generation,
+  version, epoch, IP rules, trusted proxies, count), or `nil` when no store has
+  published one.
 
   The guard treats `nil` as a rejection: routes are enabled, so a table that
   isn't loaded means "nothing is allowed", not "everything is".
   """
-  @spec snapshot(atom()) :: map() | nil
-  def snapshot(instance), do: Snapshot.get(instance)
+  @spec meta(atom()) :: Snapshot.meta() | nil
+  def meta(instance), do: Snapshot.meta(instance)
 
   @doc """
   Decide a request against the IP rules and the route table; `segments` are
@@ -127,10 +129,10 @@ defmodule Ankusa.Routes do
 
     routes =
       instance
-      |> snapshot()
+      |> meta()
       |> then(fn
         nil -> []
-        s -> Map.values(s.by_id)
+        meta -> Snapshot.routes(instance, meta)
       end)
       |> then(fn rs ->
         case cursor do
@@ -158,12 +160,12 @@ defmodule Ankusa.Routes do
   @doc "Fetch one route definition."
   @spec get(atom(), String.t()) :: {:ok, Route.t()} | {:error, :not_found}
   def get(instance, id) do
-    case snapshot(instance) do
+    case meta(instance) do
       nil ->
         {:error, :not_found}
 
-      snapshot ->
-        fetch(snapshot, id)
+      meta ->
+        fetch(instance, meta, id)
     end
   end
 
@@ -184,10 +186,10 @@ defmodule Ankusa.Routes do
     with {:ok, route} <- Route.from_attrs(attrs) do
       instance
       |> write(fn ->
-        with {:ok, snapshot} <- writable_snapshot(instance),
-             :ok <- unique_id(snapshot, route),
-             :ok <- no_conflict(snapshot, route) do
-          put(route, Store.insert(instance, route, snapshot.version))
+        with {:ok, meta} <- writable_meta(instance),
+             :ok <- unique_id(instance, meta, route),
+             :ok <- no_conflict(instance, meta, route) do
+          put(route, Store.insert(instance, route, meta.version))
         end
       end)
       |> announce(instance, :created)
@@ -209,18 +211,18 @@ defmodule Ankusa.Routes do
     with {:ok, route} <- Route.from_attrs(attrs, id: id) do
       result =
         write(instance, fn ->
-          with {:ok, snapshot} <- writable_snapshot(instance),
-               :ok <- no_conflict(snapshot, route) do
-            case Map.fetch(snapshot.by_id, id) do
+          with {:ok, meta} <- writable_meta(instance),
+               :ok <- no_conflict(instance, meta, route) do
+            case Snapshot.fetch(instance, meta, id) do
               {:ok, existing} ->
                 # The stored route is what gets returned: `inserted_at` is the one the
                 # route already had, and the caller has to be told that, not the
                 # timestamp this call happened to mint.
                 stored = %{route | inserted_at: existing.inserted_at}
-                stored |> put(Store.replace(instance, stored, snapshot.version)) |> tag(:updated)
+                stored |> put(Store.replace(instance, stored, meta.version)) |> tag(:updated)
 
               :error ->
-                route |> put(Store.insert(instance, route, snapshot.version)) |> tag(:created)
+                route |> put(Store.insert(instance, route, meta.version)) |> tag(:created)
             end
           end
         end)
@@ -246,19 +248,19 @@ defmodule Ankusa.Routes do
           | {:error, {:conflict, String.t()}}
           | {:error, :not_found | :too_many_routes | :store_unavailable}
   def update(instance, id, patch) do
-    # The route being patched and the conflict check both come from ONE snapshot:
-    # reading them separately would let a concurrent writer slip between the two
-    # reads and have its change overwritten by this merge.
+    # The route being patched and the conflict check are both validated against
+    # ONE version: a concurrent writer that slips between the reads moves the
+    # version, the store refuses this write as stale, and it is re-read.
     instance
     |> write(fn ->
-      with {:ok, snapshot} <- writable_snapshot(instance),
-           {:ok, existing} <- fetch(snapshot, id),
+      with {:ok, meta} <- writable_meta(instance),
+           {:ok, existing} <- fetch(instance, meta, id),
            {:ok, patch} <- patch_attrs(patch),
            attrs = Map.merge(attrs_of(existing), patch),
            {:ok, route} <- Route.from_attrs(attrs, id: id),
            route = %{route | inserted_at: existing.inserted_at},
-           :ok <- no_conflict(snapshot, route) do
-        put(route, Store.replace(instance, route, snapshot.version))
+           :ok <- no_conflict(instance, meta, route) do
+        put(route, Store.replace(instance, route, meta.version))
       end
     end)
     |> announce(instance, :updated)
@@ -283,7 +285,7 @@ defmodule Ankusa.Routes do
   """
   @spec ip_rules(atom()) :: %{default: :allow | :deny, rules: [Route.ip_rule()]}
   def ip_rules(instance) do
-    case snapshot(instance) do
+    case meta(instance) do
       nil ->
         %{default: default, rules: rules} = Ankusa.config(instance).routes.ip_rules
 
@@ -292,8 +294,8 @@ defmodule Ankusa.Routes do
           {:error, _message} -> %{default: default, rules: []}
         end
 
-      snapshot ->
-        snapshot.ip_rules
+      meta ->
+        meta.ip_rules
     end
   end
 
@@ -355,7 +357,7 @@ defmodule Ankusa.Routes do
   # even when its own rules rejected the sender — that is the case an operator
   # most needs named.
   defp evaluate(instance, method, segments, ip, cache? \\ true) do
-    case snapshot(instance) do
+    case meta(instance) do
       # No route table loaded: routes are on with nothing to match, so nothing
       # is allowed. The guard logs a warning and rejects the same way.
       nil ->
@@ -382,7 +384,14 @@ defmodule Ankusa.Routes do
                 %{decision: {:reject, reason}, cached: cached, ip_rule: nil, route_id: nil}
 
               {:match, id} ->
-                route_ip(Map.fetch!(table.by_id, id), id, cached, ip)
+                case Snapshot.fetch(instance, table, id) do
+                  {:ok, route} ->
+                    route_ip(route, id, cached, ip)
+
+                  # Deleted between the match and this read.
+                  :error ->
+                    %{decision: {:reject, :no_route}, cached: cached, ip_rule: nil, route_id: nil}
+                end
             end
         end
     end
@@ -425,7 +434,7 @@ defmodule Ankusa.Routes do
     if cache? and Cache.cacheable?(segments) do
       cached_match(instance, table, cache_config, method, segments)
     else
-      {scan(table.patterns, method, segments), false}
+      {Snapshot.scan(instance, table, method, segments), false}
     end
   end
 
@@ -435,7 +444,7 @@ defmodule Ankusa.Routes do
         {decision, true}
 
       :error ->
-        decision = scan(table.patterns, method, segments)
+        decision = Snapshot.scan(instance, table, method, segments)
 
         Cache.store(
           instance,
@@ -447,29 +456,6 @@ defmodule Ankusa.Routes do
         )
 
         {decision, false}
-    end
-  end
-
-  # The pattern list is a priority list (see Ankusa.Routes.Snapshot), so the
-  # first enabled route matching both method and path wins. A path match for
-  # another method is remembered only to report `:method` instead of `:no_route`;
-  # both are 404 to the sender, so nothing is confirmed either way.
-  defp scan(patterns, method, segments) do
-    patterns
-    |> Enum.reduce_while(:no_route, fn %{route: route, segments: pattern}, acc ->
-      if Matcher.match?(pattern, segments) do
-        cond do
-          not route.enabled -> {:cont, acc}
-          method in route.methods -> {:halt, {:ok, route.id}}
-          true -> {:cont, :method}
-        end
-      else
-        {:cont, acc}
-      end
-    end)
-    |> case do
-      {:ok, id} -> {:match, id}
-      reason -> {:reject, reason}
     end
   end
 
@@ -583,22 +569,25 @@ defmodule Ankusa.Routes do
   # A store that has not published a table cannot be written through: there is no
   # version to validate against, and nothing to check a conflict against. That is
   # the transient store error, not a crash.
-  defp writable_snapshot(instance) do
-    case snapshot(instance) do
+  defp writable_meta(instance) do
+    case meta(instance) do
       nil -> {:error, :store_unavailable}
-      snapshot -> {:ok, snapshot}
+      meta -> {:ok, meta}
     end
   end
 
   defp clamp_limit(limit) when is_integer(limit), do: limit |> max(1) |> min(@max_limit)
   defp clamp_limit(_limit), do: @default_limit
 
-  defp unique_id(snapshot, route) do
-    if Map.has_key?(snapshot.by_id, route.id), do: {:error, {:conflict, route.id}}, else: :ok
+  defp unique_id(instance, meta, route) do
+    case Snapshot.fetch(instance, meta, route.id) do
+      {:ok, _existing} -> {:error, {:conflict, route.id}}
+      :error -> :ok
+    end
   end
 
-  defp fetch(snapshot, id) do
-    case Map.fetch(snapshot.by_id, id) do
+  defp fetch(instance, meta, id) do
+    case Snapshot.fetch(instance, meta, id) do
       {:ok, route} -> {:ok, route}
       :error -> {:error, :not_found}
     end
@@ -608,16 +597,16 @@ defmodule Ankusa.Routes do
   # same compiled pattern and at least one method in common. Disabled routes are
   # exempt — they capture nothing, so a staging definition may sit next to a live
   # one. Compiled segments are compared, so an enabled route is never re-parsed.
-  defp no_conflict(snapshot, route) do
+  defp no_conflict(instance, meta, route) do
     if route.enabled do
       new = Matcher.compile(route)
 
-      case Enum.find(snapshot.patterns, fn %{route: other, segments: other_segments} ->
+      case Enum.find(Snapshot.patterns(instance, meta), fn {other, other_segments} ->
              other.id != route.id and other.enabled and other_segments == new and
                Enum.any?(other.methods, &(&1 in route.methods))
            end) do
         nil -> :ok
-        %{route: other} -> {:error, {:conflict, other.id}}
+        {other, _segments} -> {:error, {:conflict, other.id}}
       end
     else
       :ok

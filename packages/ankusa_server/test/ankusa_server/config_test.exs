@@ -22,6 +22,7 @@ defmodule AnkusaServer.ConfigTest do
     "GCS_BUCKET" => "fixture-gcs-bucket",
     "STRIPE_WHSEC" => "whsec_fixture-stripe-secret",
     "SINK_URL" => "http://sink.fixture.invalid/hooks",
+    "SINK_WHSEC" => "whsec_c2luay1maXh0dXJl",
     "RABBITMQ_URL" => "amqp://ankusa:fixture-rabbit-password@rabbitmq:5672",
     "RABBITMQ_EXCHANGE" => "ankusa.hooks",
     "KAFKA_BROKERS" => "redpanda:9092",
@@ -34,15 +35,17 @@ defmodule AnkusaServer.ConfigTest do
     "NATS_PASSWORD" => "fixture-nats-password",
     # A password in the URL userinfo: the printed config must redact it.
     "REDIS_SINK_URL" => "redis://:fixture-redis-password@redis:6379",
+    "SQS_QUEUE_URL" => "https://sqs.us-east-1.amazonaws.com/000000000000/fixture.fifo",
     "STANDARD_WEBHOOKS_SECRET" => "whsec_Zml4dHVyZQ==",
-    "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret"
+    "GITHUB_WEBHOOK_SECRET" => "fixture-github-secret",
+    "GCP_TOKEN" => "fixture-gcp-token"
   }
 
   @fixture_secrets ~w(fixture-s3-secret
                       whsec_fixture-stripe-secret fixture-rabbit-password
                       fixture-kafka-password fixture-nats-password fixture-github-secret
-                      fixture-redis-password
-                      whsec_Zml4dHVyZQ==)
+                      fixture-redis-password fixture-gcp-token
+                      whsec_Zml4dHVyZQ== whsec_c2luay1maXh0dXJl)
 
   # ── the shipped configs ─────────────────────────────────────────────────────
 
@@ -56,7 +59,13 @@ defmodule AnkusaServer.ConfigTest do
   test "the reference config spells out the whole schema" do
     config = Config.load!(path: "config-examples/reference.yml", env: @fixture_env).config
 
-    assert config.admin == %{enabled: true, port: 4002, ip: "127.0.0.1"}
+    assert config.admin == %{
+             enabled: true,
+             port: 4002,
+             ip: "127.0.0.1",
+             gauge_interval_ms: 15_000
+           }
+
     assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
     assert config.route_resolver == {Ankusa.RouteResolver.Path, [prefix: ["webhooks"]]}
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
@@ -75,14 +84,50 @@ defmodule AnkusaServer.ConfigTest do
              Ankusa.Sink.RabbitMQ,
              Ankusa.Sink.Kafka,
              Ankusa.Sink.NATS,
-             Ankusa.Sink.Redis
+             Ankusa.Sink.Redis,
+             Ankusa.Sink.SQS,
+             Ankusa.Sink.GooglePubSub
            ]
+
+    {Ankusa.Sink.Http, http_opts} = Enum.at(sinks, 1)
+    assert http_opts[:secret] == @fixture_env["SINK_WHSEC"]
+    assert http_opts[:max_response_bytes] == 65_536
+
+    assert %{
+             sink_concurrency: nil,
+             breaker_failures: 5,
+             breaker_open_ms: 30_000,
+             breaker_max_open_ms: 300_000
+           } = config.dispatch
+
+    assert config.batcher.max_queue_bytes == 268_435_456
+    assert config.storage.key_prefix == ""
+
+    assert %{
+             blob_stores: nil,
+             placement: :ordered,
+             key_layout: :flat,
+             store_cooldown_ms: 30_000,
+             read_deadline_ms: 5_000,
+             read_timeout_ms: 3_000,
+             read_retries: 1,
+             read_max_inflight: 48,
+             read_queue_max: 256,
+             read_cache_bytes: 134_217_728,
+             read_cache_max_entry_bytes: 1_048_576
+           } = config.claim_check
   end
 
   test "the baked image config is the demo: admin on, one open source" do
     config = Config.load!(path: "rel/ankusa.yml", env: %{}).config
 
-    assert config.admin == %{enabled: true, port: 4002, ip: "127.0.0.1"}
+    assert config.admin == %{
+             enabled: true,
+             port: 4002,
+             ip: "127.0.0.1",
+             gauge_interval_ms: 15_000
+           }
+
     assert {Ankusa.SourceStore.Static, opts} = config.source_store
     assert Map.keys(opts[:sources]) == ["demo"]
   end
@@ -131,6 +176,207 @@ defmodule AnkusaServer.ConfigTest do
     path = tmp_config("node: {data_dir: \"${DATA_DIR:-}\"}\n")
 
     assert Config.load!(path: path, env: %{}).config.data_dir == ""
+  end
+
+  test "a ${…} that is not a variable reference fails instead of staying literal" do
+    path =
+      tmp_config("""
+      sources:
+        stripe:
+          verify: {type: stripe, secret: "${stripe_secret}"}
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+
+    assert error.message ==
+             "sources.stripe.verify.secret: unresolved ${…} (variable names are [A-Z0-9_]+; " <>
+               "use ${NAME:-} for an empty default)"
+  end
+
+  test "a substituted value may itself contain ${" do
+    path =
+      tmp_config("""
+      sources:
+        stripe:
+          verify: {type: stripe, secret: "${STRIPE_WHSEC}"}
+          sinks: [{type: log}]
+      """)
+
+    loaded = Config.load!(path: path, env: %{"STRIPE_WHSEC" => "whsec_a${b}c"})
+    %{verifier: {_hmac, opts}} = source_from(loaded.config, "stripe")
+    assert opts[:secret] == "whsec_a${b}c"
+  end
+
+  test "a verify secret that does not decode fails the load, naming the source" do
+    path =
+      tmp_config("""
+      sources:
+        hooks:
+          verify: {type: standard_webhooks, secret: "whsec_!!!"}
+          sinks: [{type: log}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "source hooks: verifier secret is missing or undecodable"
+  end
+
+  test "an out-of-range number fails the load with core's message" do
+    path =
+      tmp_config(
+        "batcher: {partitions: 0}\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+      )
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "batcher.partitions must be a positive integer, got 0"
+  end
+
+  test "claim_check.store and storage.key_prefix land in core's config" do
+    path =
+      tmp_config("""
+      storage: {key_prefix: "node-a/"}
+      claim_check:
+        store:
+          type: s3
+          s3: {bucket: claims, region: us-east-1, session_token: tok}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+    assert config.storage.key_prefix == "node-a/"
+
+    assert [{Ankusa.BlobStore.S3, opts}] = config.claim_check.blob_stores
+    assert opts[:bucket] == "claims"
+    assert opts[:session_token] == "tok"
+    assert config.storage.blob_store == {Ankusa.BlobStore.LocalFS, []}
+  end
+
+  test "claim_check.stores lands as blob_stores in list order, with placement, layout and cooldown" do
+    path =
+      tmp_config("""
+      claim_check:
+        stores:
+          - type: s3
+            s3: {bucket: claims-east, region: us-east-1}
+          - type: gcs
+            gcs: {bucket: claims-gcs, auth: none}
+        placement: hash
+        key_layout: sharded
+        store_cooldown_ms: 5000
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    cc = Config.load!(path: path, env: %{}).config.claim_check
+
+    assert [{Ankusa.BlobStore.S3, s3}, {Ankusa.BlobStore.GCS, gcs}] = cc.blob_stores
+    assert {s3[:bucket], s3[:region]} == {"claims-east", "us-east-1"}
+    assert gcs[:bucket] == "claims-gcs"
+    assert {cc.placement, cc.key_layout, cc.store_cooldown_ms} == {:hash, :sharded, 5000}
+  end
+
+  test "unset or null, claim_check keeps core's store, placement, layout and cooldown defaults" do
+    for section <- ["", "claim_check: {store: null, stores: null}\n"] do
+      path =
+        tmp_config(section <> "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+      cc = Config.load!(path: path, env: %{}).config.claim_check
+
+      assert {cc.blob_stores, cc.placement, cc.key_layout, cc.store_cooldown_ms} ==
+               {nil, :ordered, :flat, 30_000}
+    end
+  end
+
+  test "claim_check read keys land in core's config, and core's ranges name a bad one" do
+    path =
+      tmp_config("""
+      claim_check: {read_deadline_ms: 2500, read_cache_bytes: 0, read_queue_max: 0}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    cc = Config.load!(path: path, env: %{}).config.claim_check
+    assert {cc.read_deadline_ms, cc.read_cache_bytes, cc.read_queue_max} == {2500, 0, 0}
+
+    path =
+      tmp_config("""
+      claim_check: {read_timeout_ms: 0}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "claim_check.read_timeout_ms must be a positive integer, got 0"
+  end
+
+  test "claim_check store/stores mistakes fail the load, naming the key" do
+    for {yaml, message} <- [
+          {"claim_check: {store: {type: local}, stores: [{type: local}]}",
+           "claim_check: store and stores are exclusive; list every store under stores"},
+          {"claim_check: {stores: []}", "claim_check.stores: must not be empty"},
+          {"claim_check: {stores: {type: local}}",
+           ~s(claim_check.stores: expected a list of stores, got %{"type" => "local"})},
+          {"claim_check: {stores: [local]}",
+           ~s(claim_check.stores[0]: expected a mapping, got "local")},
+          {"claim_check: {stores: [{type: local, bucket: x}]}",
+           ~s(claim_check.stores[0]: unknown key "bucket")},
+          {"claim_check: {placement: nope}",
+           ~s(claim_check.placement: unknown value "nope"; expected one of ordered, hash)},
+          {"claim_check: {key_layout: hashed}",
+           ~s(claim_check.key_layout: unknown value "hashed"; expected one of flat, sharded)}
+        ] do
+      path =
+        tmp_config(yaml <> "\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
+  end
+
+  test "the backup section lands in core's config, the env flag overrides it, unknown keys are named" do
+    path =
+      tmp_config("""
+      backup:
+        enabled: true
+        interval_ms: 30000
+        keep: 5
+        store: {type: s3, s3: {bucket: b, region: r}}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    backup = Config.load!(path: path, env: %{}).config.backup
+    assert %{enabled: true, interval_ms: 30_000, keep: 5} = backup
+    assert {Ankusa.BlobStore.S3, opts} = backup.blob_store
+    assert opts[:bucket] == "b"
+    assert opts[:region] == "r"
+
+    # Off by default, and the storage bucket unless a store is named.
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+    assert %{enabled: false, blob_store: nil} = Config.load!(path: path, env: %{}).config.backup
+
+    assert Config.load!(path: path, env: %{"ANKUSA_BACKUP_ENABLED" => "true"}).config.backup.enabled
+
+    path = tmp_config("backup: {enabled: true, foo: 1}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(backup: unknown key "foo")
+
+    path = tmp_config("backup: {keep: 0}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "backup.keep must be a positive integer, got 0"
+  end
+
+  test "log.banner is on by default, the file or ANKUSA_BANNER turns it off, a non-boolean is named" do
+    demo = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+
+    banner = fn yaml, env -> Config.load!(path: tmp_config(yaml), env: env).banner end
+
+    assert banner.(demo, %{}) == true
+    assert banner.(demo, %{"ANKUSA_BANNER" => "false"}) == false
+    assert banner.("log: {banner: false}\n" <> demo, %{}) == false
+
+    error =
+      assert_raise ConfigError, fn ->
+        Config.load!(path: tmp_config("log: {banner: maybe}\n"), env: %{})
+      end
+
+    assert error.message == ~s(log.banner: expected a boolean, got "maybe")
   end
 
   # ── env overrides ───────────────────────────────────────────────────────────
@@ -937,10 +1183,10 @@ defmodule AnkusaServer.ConfigTest do
 
   test "storage.gcs.auth selects the token provider" do
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "metadata"})
-    assert opts[:token_provider] == {AnkusaServer.GcsToken, :metadata, []}
+    assert opts[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
 
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "token", token: "ya29.static"})
-    assert opts[:token_provider] == {AnkusaServer.GcsToken, :static, ["ya29.static"]}
+    assert opts[:token_provider] == {AnkusaServer.GcpToken, :static, ["ya29.static"]}
 
     assert {Ankusa.BlobStore.GCS, opts} = gcs_opts(%{auth: "none"})
     refute Keyword.has_key?(opts, :token_provider)
@@ -962,17 +1208,23 @@ defmodule AnkusaServer.ConfigTest do
         full:
           tenant: acme
           on_verify_failure: accept_flag
-          verify: {type: standard_webhooks, secret: "whsec_abc", tolerance_seconds: 60}
+          verify: {type: standard_webhooks, secret: "whsec_YWJj", tolerance_seconds: 60}
           sinks:
             - {type: http, url: "http://sink.invalid/h", method: put, timeout_ms: 250,
                headers: {x-one: "1"}}
+            - {type: rabbitmq, exchange: ankusa.full, idle_timeout_ms: 0}
             - {type: kafka, brokers: ["b:9092"], topic: t, ssl: true,
-               sasl: {mechanism: scram_sha_512, username: u, password: p}}
+               sasl: {mechanism: scram_sha_512, username: u, password: p},
+               idle_timeout_ms: 120000}
             - {type: nats, servers: "${NATS_SERVERS}", subject: "ankusa.full",
                inline_max_bytes: 4096, publish_timeout_ms: 250,
-               auth: {username: nu, password: np}}
+               auth: {username: nu, password: np}, idle_timeout_ms: 30000}
             - {type: redis, url: "redis://redis:6379", channel: ankusa.full,
-               inline_max_bytes: 2048, publish_timeout_ms: 300}
+               inline_max_bytes: 2048, publish_timeout_ms: 300, idle_timeout_ms: "60000"}
+            - {type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h.fifo",
+               region: us-east-1, message_group_id: g, max_message_bytes: 262144}
+            - {type: google_pubsub, project: p, topic: t, ordering_key: k,
+               max_message_bytes: 1000}
       """)
 
     env = %{"NATS_SERVERS" => "n1:4222,n2:4222"}
@@ -986,7 +1238,7 @@ defmodule AnkusaServer.ConfigTest do
 
     assert source.verifier ==
              {Ankusa.Verifier.Hmac,
-              [scheme: :standard_webhooks, secret: "whsec_abc", tolerance: 60]}
+              [scheme: :standard_webhooks, secret: "whsec_YWJj", tolerance: 60]}
 
     assert [
              {Ankusa.Sink.Http,
@@ -996,14 +1248,18 @@ defmodule AnkusaServer.ConfigTest do
                 headers: [{"x-one", "1"}],
                 timeout_ms: 250
               ]},
+             {Ankusa.Sink.RabbitMQ, [exchange: "ankusa.full", idle_timeout_ms: 0]},
              {Ankusa.Sink.Kafka, kafka},
              {Ankusa.Sink.NATS, nats},
-             {Ankusa.Sink.Redis, redis}
+             {Ankusa.Sink.Redis, redis},
+             {Ankusa.Sink.SQS, sqs},
+             {Ankusa.Sink.GooglePubSub, pubsub}
            ] = source.sinks
 
     assert kafka[:brokers] == ["b:9092"]
     assert kafka[:ssl] == true
     assert kafka[:sasl] == {:scram_sha_512, "u", "p"}
+    assert kafka[:idle_timeout_ms] == 120_000
 
     # The comma-separated env var form of `servers` too.
     assert nats[:servers] == ["n1:4222", "n2:4222"]
@@ -1012,11 +1268,69 @@ defmodule AnkusaServer.ConfigTest do
     assert nats[:publish_timeout_ms] == 250
     assert nats[:username] == "nu"
     assert nats[:password] == "np"
+    assert nats[:idle_timeout_ms] == 30_000
 
     assert redis[:url] == "redis://redis:6379"
     assert redis[:channel] == "ankusa.full"
     assert redis[:inline_max_bytes] == 2048
     assert redis[:publish_timeout_ms] == 300
+    assert redis[:idle_timeout_ms] == 60_000
+
+    assert sqs[:queue_url] == "https://sqs.us-east-1.amazonaws.com/1/h.fifo"
+    assert sqs[:region] == "us-east-1"
+    assert sqs[:message_group_id] == "g"
+    assert sqs[:max_message_bytes] == 262_144
+
+    assert pubsub[:project] == "p"
+    assert pubsub[:topic] == "t"
+    assert pubsub[:ordering_key] == "k"
+    assert pubsub[:max_message_bytes] == 1000
+    assert pubsub[:token_provider] == {AnkusaServer.GcpToken, :metadata, []}
+  end
+
+  test "an sqs sink requires queue_url and names an unknown key" do
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: sqs, region: us-east-1}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "sources.a.sinks[0]"
+    assert error.message =~ "queue_url"
+
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: sqs, queue_url: "https://sqs.us-east-1.amazonaws.com/1/h", region: us-east-1, queue: x}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(unknown key "queue")
+  end
+
+  test "a google_pubsub sink requires project and topic, and auth: token requires a token" do
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: google_pubsub, project: p}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(sources.a.sinks[0]: missing required key "topic")
+
+    path =
+      tmp_config("""
+      sources:
+        a:
+          sinks: [{type: google_pubsub, project: p, topic: t, auth: token}]
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == ~s(sources.a.sinks[0]: missing required key "token")
   end
 
   test "a NATS auth block takes exactly one scheme, and only whole ones" do
@@ -1153,11 +1467,32 @@ defmodule AnkusaServer.ConfigTest do
     path =
       tmp_config("""
       http: {routing: tenant_path, prefix: /hooks}
-      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      sources: {demo: {verify: {type: none}, trust_url_tenant: true, sinks: [{type: log}]}}
       """)
 
     assert Config.load!(path: path, env: %{}).config.route_resolver ==
              {Ankusa.RouteResolver.TenantPath, [prefix: ["hooks"]]}
+  end
+
+  test "routing tenant_path refuses an unverified shared source unless it trusts the URL's tenant" do
+    open =
+      tmp_config("""
+      http: {routing: tenant_path}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    assert_raise ConfigError,
+                 ~r/source demo is shared \(tenant_id "default"\) and has no verifier/,
+                 fn -> Config.load!(path: open, env: %{}) end
+
+    trusted =
+      tmp_config("""
+      http: {routing: tenant_path}
+      sources: {demo: {verify: {type: none}, trust_url_tenant: true, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: trusted, env: %{}).config
+    assert source_from(config, "demo").trust_url_tenant == true
   end
 
   # ── source_store ────────────────────────────────────────────────────────────
@@ -1187,6 +1522,51 @@ defmodule AnkusaServer.ConfigTest do
     assert is_function(opts[:decoder], 2)
   end
 
+  test "source_store: redis carries the URL, namespace, tick, seeds and decoder" do
+    path =
+      tmp_config("""
+      source_store: {type: redis, url: "redis://cache:6379", namespace: "ankusa:sources", tick_ms: 5000}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    config = Config.load!(path: path, env: %{}).config
+
+    assert {Ankusa.SourceStore.Redis, opts} = config.source_store
+    assert opts[:url] == "redis://cache:6379"
+    assert opts[:namespace] == "ankusa:sources"
+    assert opts[:tick_ms] == 5000
+    assert Map.keys(opts[:sources]) == ["demo"]
+    assert is_function(opts[:decoder], 2)
+  end
+
+  test "source_store: a URL alone, from the file or ANKUSA_SOURCE_STORE_URL, means redis" do
+    path = tmp_config("source_store: {url: \"redis://cache:6379\"}")
+    assert {Ankusa.SourceStore.Redis, _} = Config.load!(path: path, env: %{}).config.source_store
+
+    path = tmp_config("sources: {}")
+    env = %{"ANKUSA_SOURCE_STORE_URL" => "redis://from-env:6379"}
+
+    assert {Ankusa.SourceStore.Redis, opts} =
+             Config.load!(path: path, env: env).config.source_store
+
+    assert opts[:url] == "redis://from-env:6379"
+  end
+
+  test "source_store: Redis keys on another type are an error, not dropped" do
+    path = tmp_config("source_store: {type: persistent, url: \"redis://cache:6379\"}")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(source_store: "url" is only valid with type: redis)
+
+    path = tmp_config("source_store: {type: static}")
+    env = %{"ANKUSA_SOURCE_STORE_URL" => "redis://from-env:6379"}
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: env) end
+    assert error.message =~ ~s(source_store: "url" is only valid with type: redis)
+
+    path = tmp_config("source_store: {type: redis}")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ ~s(source_store: missing required key "url")
+  end
+
   test "source_from_map!/2 is the YAML validation, wrapped" do
     opts =
       Config.source_from_map!("acme.new", %{"sinks" => [%{"type" => "log"}]})
@@ -1212,12 +1592,12 @@ defmodule AnkusaServer.ConfigTest do
   test "an unknown source_store type is rejected by name" do
     path =
       tmp_config(
-        "source_store: {type: redis}\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}"
+        "source_store: {type: postgres}\nsources: {demo: {verify: {type: none}, sinks: [{type: log}]}}"
       )
 
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ "source_store.type"
-    assert error.message =~ ~s(unknown value "redis")
+    assert error.message =~ ~s(unknown value "postgres")
   end
 
   test "an unknown source_store key is rejected" do

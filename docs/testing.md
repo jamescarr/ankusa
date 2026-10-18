@@ -13,11 +13,16 @@ suite — `mise run check:conformance`, below.
 
 ```sh
 mise run check:package ankusa         # no external infra needed
-mise run test:integration             # +16 tests against the floci emulators (see below)
+mise run test:integration             # +21 tests against the floci emulators (see below)
 ```
 
 The always-on tests cover:
 
+- **Ingest dedupe and metrics** (`dedupe_test.exs`, `metrics_test.exs`):
+  `dedupe_test.exs` covers a provider retry collapsing to the original id with
+  `duplicate: true`, a key past its TTL committing again, two entries sharing
+  a key in one batch, per-tenant keys and the writer's expiry sweep;
+  `metrics_test.exs` covers the scrape's bounded labels and series.
 - **Store and queue** (`store_test.exs`, `queue_test.exs`): the RocksDB store
   applies one batch across column families (puts, deletes, range deletes) and
   refuses an unreadable or missing store with `:store_unavailable` rather than
@@ -190,11 +195,20 @@ The always-on tests cover:
   validates. The adapters' `*_describe_test.exs` pin what each sink advertises
   (and that no credential reaches it) without a broker.
 
-The 16 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+The 24 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,
-`:not_found`, `list`+`delete`. Excluded by default
+`:not_found`, `list`+`delete`. `store/backup_s3_integration_test.exs` runs a
+store backup and restore through floci S3. `sink/sqs_integration_test.exs`
+delivers through `Sink.SQS` to floci's SQS and reads the queue back: the
+`Ankusa.Sink.Message` body, the message attributes and FIFO group, one stored
+message for a retried FIFO delivery and a second for a replay, a missing queue
+as an `{:sqs, 400, _, _}` error, and a standard queue.
+`sink/google_pubsub_integration_test.exs` publishes through
+`Sink.GooglePubSub` to floci-gcp's Pub/Sub and pulls the subscription back:
+the `Ankusa.Sink.Message` data and attributes, an ordering key, and a missing
+topic as a transient error. Excluded by default
 (`test_helper.exs`:`ExUnit.start(exclude: [:integration])`) because they
 need live infra:
 
@@ -202,15 +216,22 @@ need live infra:
 mise run test:integration
 ```
 
-It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 on
-:4566, floci-gcp on :4588, floci-az on :4577, floci-oci on :4599), waits for
-the bucket/container bootstrap, runs `mix test --include integration` in
-`packages/ankusa`, and tears the emulators down.
+It starts `packages/ankusa/docker-compose.integration.yml` (floci S3 and SQS on
+:4566, floci-gcp (GCS and Pub/Sub) on :4588, floci-az on :4577, floci-oci on :4599), waits for
+the bucket/container bootstrap, runs `mix test --only integration` (the tagged tests alone; the rest is
+`check:package ankusa`'s) in
+`packages/ankusa`, and tears the emulators down. CI runs it as the
+`core integration (floci)` job.
+
+Every floci emulator runs in `persistent` storage mode (the images default to
+in-memory) with its state on a named Docker volume, so it survives an emulator
+restart; the task's `down -v` removes those volumes, so each run starts empty.
+The example compose files that use floci do the same.
 
 ## `async_api_spex`: `mix test`
 
 ```sh
-mise run check:package async_api_spex    # 57 tests, no external infra needed
+mise run check:package async_api_spex    # 62 tests + the standalone scaffold, no external infra needed
 ```
 
 Covers: a document declared with `use AsyncApiSpex.Schema` / `Message` encoding
@@ -218,7 +239,9 @@ to the exact AsyncAPI 3.0 JSON (lowerCamel keys, no nulls, `$ref`s into
 `components`, `x-` extensions inlined), two modules claiming one component name
 raising, each validator rule failing with one error that names its JSON path,
 bad macro options raising at compile time, `AsyncApiSpex.Plug.RenderSpec`
-answering `application/asyncapi+json`, and `mix async_api_spex.gen` writing a
+answering `application/asyncapi+json`, `AsyncApiSpex.Plug.Viewer` answering an
+HTML page that loads the document (with a `</script>` in its config unable to
+close the page's script block), and `mix async_api_spex.gen` writing a
 decodable file. The decorators (`Schema` `fields:`, `use AsyncApiSpex.Channel`,
 `use AsyncApiSpex.Spec`) are covered by the README's shop example producing the
 exact server, channel, operation, message, and schema JSON, `otp_app:` discovery,
@@ -227,20 +250,32 @@ schema that references itself, channel options that fail only when the
 document is built (a server host that evaluates to `nil`, colliding message
 keys), and the main compile-time option errors.
 
+After the suite, `packages/async_api_spex/scripts/standalone.sh` proves the
+library outside this repo: it fails if `lib/` mentions Ankusa, then scaffolds a
+fresh `mix new` app depending on only the checkout (by path) and `plug`,
+decorates a producer and a consumer that share a Kafka server, assembles the
+document with `otp_app:`, and checks it validates, that `RenderSpec` and the
+`Viewer` answer from a `Plug.Router`, and that `mix async_api_spex.gen` writes
+it, all under `mix compile --warnings-as-errors`. `KEEP=1` leaves the scaffold
+in place.
+
 ## `ankusa_rabbitmq`: `mix test`
 
 Same pattern: every test needs live RabbitMQ (on :5673 AMQP, :15673
 management UI):
 
 ```sh
-mise run check:package ankusa_rabbitmq   # 8 tests
+mise run check:package ankusa_rabbitmq   # 11 tests
 ```
 
+Seven tests are in `rabbitmq_test.exs` and four in `rabbitmq_describe_test.exs`.
 Covers: inline-payload publish + decode, fat-payload claim check-in (message
 carries a claim reference and its sha256, the claim round-trips through `Ankusa.ClaimCheck.redeem/3`
 against a real `BlobStore`), routing key as both a static string and a
-function, and a fast-fail check (`:econnrefused`, not a hang) against an
-unreachable broker.
+function, `{:error, {:unroutable, key}}` for a mandatory publish with no bound
+queue, a broker-closed channel being reopened with the exchange re-declared,
+`{:error, :nacked}`, and an unreachable broker asserting
+`{:error, :not_connected}` (not `:econnrefused`, and not a hang).
 
 ## `ankusa_kafka`: `mix test`
 
@@ -277,7 +312,10 @@ Each test creates its own stream with `Gnat.Jetstream.API.Stream.create/2`
 (`subjects: ["ankusa.test.<n>.>"]`, memory storage) and deletes it in
 `on_exit`, so nothing depends on a stream being pre-provisioned. Covers:
 
-- an inline message: the subject it landed on, the five headers, the
+- an inline message: the subject it landed on, the nine headers asserted in
+  `nats_test.exs` (`nats-msg-id`, `ankusa_id`, `ankusa_source_id`,
+  `ankusa_tenant_id`, `ankusa_idempotency_key`, `ankusa_message_version`,
+  `content_type`, `ankusa_dedupe_key`, `ankusa_replay_id`), the
   `Ankusa.Sink.Message` body, **and** `Gnat.Jetstream.API.Stream.info` reporting
   the message as stored, which is what proves the `:ok` came from JetStream's
   publish ack rather than from a successful socket write;
@@ -332,8 +370,9 @@ messages.
 
 `packages/sdk-python`, `packages/sdk-typescript`, `packages/sdk-rust`,
 `packages/sdk-ruby`, `packages/sdk-go`, `packages/sdk-php`,
-`packages/sdk-elixir`, and `packages/sdk-java` are the eight client SDKs.
-Rather than hand-write each one's edge-case tests, all eight are checked
+`packages/sdk-elixir`, `packages/sdk-java`, and `packages/sdk-clojure` are the
+nine client SDKs.
+Rather than hand-write each one's edge-case tests, all nine are checked
 against the same language-neutral vectors in `conformance/`: a feature manifest
 (`features.json`), JSON cases (`cases/*.json`), and a native runner per SDK
 (`packages/sdk-python/tests/test_conformance.py`,
@@ -345,10 +384,13 @@ against the same language-neutral vectors in `conformance/`: a feature manifest
 stands up PHP's built-in server on a free port to answer as the mock gateway —
 `packages/sdk-elixir/test/conformance_test.exs`, whose runner hand-writes a
 `:gen_tcp` gateway so it can abandon a delayed response mid-flight the way the
-timeout vectors require, and
+timeout vectors require,
 `packages/sdk-java/src/test/java/io/github/jamescarr/ankusa/conformance/ConformanceTest.java`,
 a JUnit Jupiter `@TestFactory` that starts the JDK's own
-`com.sun.net.httpserver.HttpServer` for the mock gateway).
+`com.sun.net.httpserver.HttpServer` for the mock gateway, and
+`packages/sdk-clojure/test/ankusa/sdk/conformance_test.clj`, which registers
+one `clojure.test` var per case and uses the same JDK `HttpServer` as the mock
+gateway).
 
 ```sh
 mise run check:conformance    # validate conformance/, then run every SDK
@@ -389,6 +431,23 @@ python3 -c "import json;print(json.dumps({'id':'evt_2','items':[{'n':i} for i in
   | curl -XPOST localhost:4000/webhooks/demo -H 'content-type: application/json' --data-binary @-
 docker compose logs worker   # via=inline, then via=claim:<id>
 docker compose down -v
+```
+
+[`examples/jetstream-k8s/`](https://github.com/jamescarr/ankusa/tree/main/examples/jetstream-k8s/)
+is a manual drill on a real `kind` cluster. CI only does what
+`mise run check:examples` does for it: builds and typechecks the consumer,
+compiles and format-checks the control panel, and runs `helm lint` /
+`helm template` on the
+chart. The cluster itself is brought up by hand, and the drills in that
+example's README (autoscaling, the claim path, killing pods, cutting
+connections with Istio `AuthorizationPolicy`, gateway faults) are the test:
+
+```sh
+examples/jetstream-k8s/run.sh
+curl -i -XPOST localhost:8080/webhooks/demo -H 'content-type: application/json' \
+  -H 'x-demo-event-id: v1' -d '{"id":"evt_1"}'     # 201 through the Envoy gateway
+open http://localhost:8080/                          # the control panel
+examples/jetstream-k8s/run.sh down
 ```
 
 Follow `ankusa_rabbitmq`/`ankusa_kafka`/`ankusa_nats`/`ankusa_redis`: a

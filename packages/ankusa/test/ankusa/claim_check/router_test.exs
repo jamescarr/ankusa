@@ -9,7 +9,8 @@ defmodule Ankusa.ClaimCheck.RouterTest do
   use ExUnit.Case, async: false
 
   alias Ankusa.{ClaimCheck, Config, UUIDv7}
-  alias Ankusa.ClaimCheck.{Ref, Router}
+  alias Ankusa.ClaimCheck.{Cache, Reader, Ref, Router, Stores}
+  alias Ankusa.Test.CountingBlobStore
 
   setup do
     inst = :"ccr#{System.unique_integer([:positive])}"
@@ -36,13 +37,26 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
   defp error(conn), do: JSON.decode!(conn.resp_body)["error"]
 
+  # What a `:claim_check` node runs beside the listener, under the test's
+  # config with `claim_check` merged in.
+  defp start_reader(inst, claim_check) do
+    config = Ankusa.config(inst)
+    Ankusa.put_config(%{config | claim_check: Map.merge(config.claim_check, claim_check)})
+    start_supervised!({Stores, instance: inst})
+
+    if Ankusa.config(inst).claim_check.read_cache_bytes > 0,
+      do: start_supervised!({Cache, instance: inst})
+
+    start_supervised!({Reader, instance: inst})
+  end
+
   test "GET /health", %{inst: inst} do
     conn = call(inst, :get, "/health")
     assert conn.status == 200
     assert %{"status" => "ok"} = JSON.decode!(conn.resp_body)
   end
 
-  test "GET on a ref's path returns exactly its bytes, cacheable forever", %{inst: inst} do
+  test "GET on a ref's path returns exactly its bytes, privately cacheable forever", %{inst: inst} do
     body = :crypto.strong_rand_bytes(4096)
     ref = check_in(inst, body)
 
@@ -53,8 +67,155 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     assert Plug.Conn.get_resp_header(conn, "content-type") == ["application/octet-stream"]
 
     assert Plug.Conn.get_resp_header(conn, "cache-control") == [
-             "public, max-age=31536000, immutable"
+             "private, max-age=31536000, immutable"
            ]
+  end
+
+  test "HEAD answers the size without the body", %{inst: inst} do
+    body = :crypto.strong_rand_bytes(4096)
+    ref = check_in(inst, body)
+
+    conn = call(inst, :head, Ref.path(ref))
+
+    assert conn.status == 200
+    assert conn.resp_body == ""
+    assert Plug.Conn.get_resp_header(conn, "content-length") == ["4096"]
+  end
+
+  defp get_range(inst, path, range) do
+    Plug.Test.conn(:get, path)
+    |> Plug.Conn.put_req_header("range", range)
+    |> Router.call(Router.init(instance: inst))
+  end
+
+  defp header(conn, name), do: Plug.Conn.get_resp_header(conn, name)
+
+  describe "Range" do
+    setup %{inst: inst} do
+      body = :crypto.strong_rand_bytes(4096)
+      %{body: body, path: Ref.path(check_in(inst, body))}
+    end
+
+    test "bytes=a-b is 206 with exactly those bytes", %{inst: inst, body: body, path: path} do
+      conn = get_range(inst, path, "bytes=10-13")
+
+      assert conn.status == 206
+      assert conn.resp_body == binary_part(body, 10, 4)
+      assert header(conn, "content-range") == ["bytes 10-13/4096"]
+      assert header(conn, "accept-ranges") == ["bytes"]
+      assert header(conn, "cache-control") == ["private, max-age=31536000, immutable"]
+    end
+
+    test "an open or overlong end runs to the claim's last byte", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      for range <- ["bytes=4000-", "bytes=4000-99999"] do
+        conn = get_range(inst, path, range)
+
+        assert conn.status == 206
+        assert conn.resp_body == binary_part(body, 4000, 96)
+        assert header(conn, "content-range") == ["bytes 4000-4095/4096"]
+      end
+    end
+
+    test "bytes=-n is the last n bytes, all of it when n exceeds the claim", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      conn = get_range(inst, path, "bytes=-100")
+      assert conn.status == 206
+      assert conn.resp_body == binary_part(body, 3996, 100)
+      assert header(conn, "content-range") == ["bytes 3996-4095/4096"]
+
+      conn = get_range(inst, path, "bytes=-5000")
+      assert conn.status == 206
+      assert conn.resp_body == body
+      assert header(conn, "content-range") == ["bytes 0-4095/4096"]
+    end
+
+    test "a range past the end, or bytes=-0, is 416 with the claim's length", %{
+      inst: inst,
+      path: path
+    } do
+      for range <- ["bytes=5000-", "bytes=4096-4100", "bytes=-0"] do
+        conn = get_range(inst, path, range)
+
+        assert conn.status == 416, "#{range} returned #{conn.status}"
+        assert conn.resp_body == ""
+        assert header(conn, "content-range") == ["bytes */4096"]
+        assert header(conn, "accept-ranges") == ["bytes"]
+      end
+    end
+
+    test "several ranges, another unit, or a malformed spec is ignored: 200 whole", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      for range <- ["bytes=0-1,3-4", "items=0-1", "bytes=5-3", "bytes=-", "bytes=a-b", "bytes"] do
+        conn = get_range(inst, path, range)
+
+        assert conn.status == 200, "#{range} returned #{conn.status}"
+        assert conn.resp_body == body
+        assert header(conn, "content-range") == []
+        assert header(conn, "accept-ranges") == ["bytes"]
+      end
+    end
+
+    test "an If-Range makes the request whole: claims carry no validator", %{
+      inst: inst,
+      body: body,
+      path: path
+    } do
+      conn =
+        Plug.Test.conn(:get, path)
+        |> Plug.Conn.put_req_header("range", "bytes=10-13")
+        |> Plug.Conn.put_req_header("if-range", ~s("abc"))
+        |> Router.call(Router.init(instance: inst))
+
+      assert conn.status == 200
+      assert conn.resp_body == body
+    end
+
+    test "HEAD ignores Range and answers the whole length", %{inst: inst, path: path} do
+      conn =
+        Plug.Test.conn(:head, path)
+        |> Plug.Conn.put_req_header("range", "bytes=10-13")
+        |> Router.call(Router.init(instance: inst))
+
+      assert conn.status == 200
+      assert conn.resp_body == ""
+      assert header(conn, "content-length") == ["4096"]
+      assert header(conn, "accept-ranges") == ["bytes"]
+      assert header(conn, "content-range") == []
+    end
+
+    test "a range of a missing claim is still 404", %{inst: inst} do
+      path = "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}"
+      conn = get_range(inst, path, "bytes=0-1")
+
+      assert conn.status == 404
+      assert error(conn) == "not_found"
+    end
+  end
+
+  test "a store that refuses the credential is 503 store_forbidden, its body kept out", %{
+    inst: inst,
+    config: config
+  } do
+    Ankusa.put_config(%{
+      config
+      | storage: %{config.storage | blob_store: {__MODULE__.ForbiddenStore, []}}
+    })
+
+    conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+
+    assert {conn.status, JSON.decode!(conn.resp_body)} == {503, %{"error" => "store_forbidden"}}
+    assert Plug.Conn.get_resp_header(conn, "retry-after") == ["60"]
+    refute conn.resp_body =~ "AccessDenied"
   end
 
   test "a malformed tenant or claim id is 400", %{inst: inst} do
@@ -96,7 +257,11 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     assert conn.status == 404
   end
 
-  test "a store that can't be reached is 503 with Retry-After", %{inst: inst, config: config} do
+  @tag :capture_log
+  test "a store that can't be reached is 503 with a jittered Retry-After", %{
+    inst: inst,
+    config: config
+  } do
     Ankusa.put_config(%{
       config
       | storage: %{config.storage | blob_store: {__MODULE__.DownStore, []}}
@@ -104,8 +269,67 @@ defmodule Ankusa.ClaimCheck.RouterTest do
 
     conn = call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
 
+    assert {conn.status, JSON.decode!(conn.resp_body)} == {503, %{"error" => "store_unavailable"}}
+    assert [retry_after] = Plug.Conn.get_resp_header(conn, "retry-after")
+    assert retry_after in ["1", "2", "3"]
+  end
+
+  @tag :capture_log
+  test "every claim request emits its method, status and duration", %{inst: inst, config: config} do
+    test = self()
+    handler = "router-test-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:ankusa, :claim_check, :gateway],
+      fn _event, measurements, meta, _ ->
+        if meta.instance == inst, do: send(test, {:gateway, measurements, meta})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    path = Ref.path(check_in(inst, "found"))
+    call(inst, :get, path)
+    assert_received {:gateway, %{duration: d}, %{method: "GET", status: 200}} when d > 0
+
+    call(inst, :head, path)
+    assert_received {:gateway, _measurements, %{method: "HEAD", status: 200}}
+
+    get_range(inst, path, "bytes=99-")
+    assert_received {:gateway, _measurements, %{method: "GET", status: 416}}
+
+    call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+    assert_received {:gateway, _measurements, %{method: "GET", status: 404}}
+
+    Ankusa.put_config(%{
+      config
+      | storage: %{config.storage | blob_store: {__MODULE__.DownStore, []}}
+    })
+
+    call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+    assert_received {:gateway, _measurements, %{method: "GET", status: 503}}
+  end
+
+  test "a store slower than read_deadline_ms is 503 at the deadline, not when it answers", %{
+    inst: inst
+  } do
+    root = Path.join(System.tmp_dir!(), "ankusa_claims_#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    start_reader(inst, %{
+      read_deadline_ms: 100,
+      blob_stores: [{CountingBlobStore, root: root, range_delay_ms: 400}]
+    })
+
+    {elapsed_us, conn} =
+      :timer.tc(fn ->
+        call(inst, :get, "/v1/claims/acme/#{Ref.claim_id(Ref.new_pack_id(), 0)}")
+      end)
+
     assert {conn.status, error(conn)} == {503, "store_unavailable"}
-    assert Plug.Conn.get_resp_header(conn, "retry-after") == ["1"]
+    assert div(elapsed_us, 1000) < 250
   end
 
   defmodule DownStore do
@@ -119,6 +343,22 @@ defmodule Ankusa.ClaimCheck.RouterTest do
     @impl true
     def delete(_, _, _), do: :ok
     @impl true
-    def list(_, _, _), do: []
+    def list(_, _, _), do: {:ok, []}
+  end
+
+  defmodule ForbiddenStore do
+    @behaviour Ankusa.BlobStore
+    @impl true
+    def put(_, _, _, _), do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+    @impl true
+    def get(_, _, _), do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+    @impl true
+    def get_range(_, _, _, _, _),
+      do: {:error, {:status, 403, "<Error><Code>AccessDenied</Code></Error>"}}
+
+    @impl true
+    def delete(_, _, _), do: :ok
+    @impl true
+    def list(_, _, _), do: {:ok, []}
   end
 end

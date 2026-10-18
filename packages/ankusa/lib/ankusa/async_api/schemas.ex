@@ -25,6 +25,7 @@ defmodule Ankusa.AsyncApi.SinkMessage do
         "dedupe_key",
         "replay_id",
         "idempotency_key",
+        "verification",
         "headers"
       ],
       "properties" => %{
@@ -65,6 +66,19 @@ defmodule Ankusa.AsyncApi.SinkMessage do
             "The tenant-scoped key a consumer dedupes on: `tenant:source_id:dedupe_key` when a " <>
               "dedupe key was extracted, else `id`. Read this; do not rebuild it."
         },
+        "verification" => %{
+          "type" => "object",
+          "required" => ["status", "flagged"],
+          "properties" => %{
+            "status" => %{"enum" => ["ok", "failed", "skipped"]},
+            "flagged" => %{"type" => "boolean"}
+          },
+          "description" =>
+            "How the hook was verified at ingest. `flagged: true` means the signature check " <>
+              "failed and the source's `on_verify_failure: accept_flag` let it through: treat " <>
+              "the hook, and the tenant it names, as unverified. `skipped` is a hook nothing " <>
+              "checked: a source with no verifier, or a lifecycle event."
+        },
         "headers" => %{
           "type" => "object",
           "description" =>
@@ -98,7 +112,8 @@ end
 defmodule Ankusa.AsyncApi.SinkMessageHeaders do
   @moduledoc """
   The application headers Kafka and NATS carry beside a `SinkMessageV1` body.
-  RabbitMQ and Redis carry none.
+  Redis carries none; RabbitMQ sends `ankusa_idempotency_key` (and the optional
+  dedupe/replay keys) as AMQP headers, which this schema does not describe for it.
   """
 
   use AsyncApiSpex.Schema,

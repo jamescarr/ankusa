@@ -68,10 +68,11 @@ public final class ClaimCheckClient {
    * @throws InvalidClaimRefError when {@code ref} is not a claim-check reference, or {@code sha256}
    *     is not 64 lower-case hex characters; nothing is sent
    * @throws ClaimNotFoundError when the gateway has no such claim
-   * @throws ClaimRejectedError when the gateway refuses the redemption with another 4xx
+   * @throws ClaimRejectedError when the gateway refuses the redemption with another 4xx (not 408 or
+   *     429)
    * @throws ClaimIntegrityError when the returned bytes do not match {@code sha256}
-   * @throws ClaimCheckUnavailableError when the gateway is unreachable, answers something other
-   *     than 200/404/4xx, or the request times out
+   * @throws ClaimCheckUnavailableError when the gateway is unreachable, answers 408, 429 or
+   *     anything else other than 200/404/4xx, or the request times out
    */
   public byte[] redeem(String ref, String sha256) {
     ParsedClaimRef parsed = ParsedClaimRef.parse(ref);
@@ -94,7 +95,10 @@ public final class ClaimCheckClient {
       throw new ClaimNotFoundError(parsed.tenantId(), parsed.claimId());
     }
 
-    if (response.status() >= 400 && response.status() <= 499) {
+    // A gateway (or a proxy in front of it) that is throttling or timing out is telling the caller
+    // to come back, not that the claim is gone.
+    boolean busy = response.status() == 408 || response.status() == 429;
+    if (!busy && response.status() >= 400 && response.status() <= 499) {
       throw new ClaimRejectedError(response.status(), Json.errorBody(response.body()));
     }
 

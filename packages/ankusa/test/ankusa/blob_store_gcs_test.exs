@@ -38,10 +38,12 @@ defmodule Ankusa.BlobStore.GCSTest do
     key = key("listed")
     assert :ok = GCS.put(:i, key, "x", @opts)
 
-    assert key in GCS.list(:i, "seg/it-listed", @opts)
+    assert {:ok, keys} = GCS.list(:i, "seg/it-listed", @opts)
+    assert key in keys
 
     assert :ok = GCS.delete(:i, key, @opts)
     assert {:error, :not_found} = GCS.get(:i, key, @opts)
-    refute key in GCS.list(:i, "seg/it-listed", @opts)
+    assert {:ok, keys} = GCS.list(:i, "seg/it-listed", @opts)
+    refute key in keys
   end
 end

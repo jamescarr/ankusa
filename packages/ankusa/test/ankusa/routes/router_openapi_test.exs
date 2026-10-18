@@ -590,13 +590,10 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     @impl true
     def start_link(opts) do
       instance = Keyword.fetch!(opts, :instance)
-      %{routes: routes_config} = Keyword.fetch!(opts, :config)
+      %{routes: routes_config} = Ankusa.config(instance)
       {:ok, %{routes: routes, ip_rules: ip_rules}} = Snapshot.initial_table(routes_config)
 
-      Snapshot.put(
-        instance,
-        Snapshot.build(%{instance: instance, routes: routes, ip_rules: ip_rules, version: 1})
-      )
+      Snapshot.publish(%{instance: instance, routes: routes, ip_rules: ip_rules, version: 1})
 
       Agent.start_link(fn -> nil end, name: Ankusa.via(instance, :routes_store))
     end

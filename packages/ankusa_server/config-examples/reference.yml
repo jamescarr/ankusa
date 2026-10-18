@@ -7,7 +7,7 @@
 #
 #   S3_BUCKET  S3_REGION  S3_ENDPOINT
 #   AWS_ACCESS_KEY_ID         AWS_SECRET_ACCESS_KEY  GCS_BUCKET
-#   STRIPE_WHSEC  SINK_URL  RABBITMQ_URL
+#   STRIPE_WHSEC  SINK_URL  SINK_WHSEC  RABBITMQ_URL
 #   RABBITMQ_EXCHANGE         KAFKA_BROKERS  KAFKA_TOPIC  KAFKA_USERNAME
 #   KAFKA_SASL_PASSWORD       NATS_SERVERS  NATS_SUBJECT  NATS_USERNAME
 #   NATS_PASSWORD             STANDARD_WEBHOOKS_SECRET   GITHUB_WEBHOOK_SECRET
@@ -19,12 +19,14 @@ node:
   # [env ANKUSA_ROLES] which OTP roles run here. One all-roles process is fine
   # to start with; split for scale (edge in front, dispatch+storage behind).
   roles: [edge, dispatch, storage]
-  # [env ANKUSA_DATA_DIR] WAL, quarantine, DLQ, and local segments land here.
+  # [env ANKUSA_DATA_DIR] the RocksDB store (hooks, delivery rows and DLQ, quarantine pen, API-managed sources, rate-limit overrides) and local segments land here.
   data_dir: /var/lib/ankusa
 
 log:
   # [env ANKUSA_LOG_LEVEL] debug | info | warning | error
   level: info
+  # [env ANKUSA_BANNER] the ASCII-art banner printed to stdout on start
+  banner: true
 
 http:
   # [env ANKUSA_HTTP_PORT, else PORT] the ingest listener.
@@ -46,6 +48,11 @@ admin:
   # [env ANKUSA_ADMIN_IP] the address it binds. Loopback by default, so inside
   # a container `-p 4002:4002` does not reach it; set 0.0.0.0 to publish it.
   ip: 127.0.0.1
+  # How often the /metrics gauges (store, queue and quarantine depth, disk
+  # free, dispatch in-flight, open breakers) are sampled. Health is GET
+  # /health (the process answers) and GET /ready (the store takes a synced
+  # write; 503 + Retry-After otherwise) on this port and on the ingest port.
+  gauge_interval_ms: 15000
 
 routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
@@ -112,8 +119,9 @@ routes:
     ip: 127.0.0.1
 
   # Routes an operator cannot wait for the API to create: a standalone node
-  # (no Redis) loses API-created routes on restart, but not these. Loaded only
-  # on a first boot, and only when routes are enabled.
+  # (no Redis) loses API-created routes on restart, but not these. Applied on
+  # every boot with the default ETS store; the Redis store seeds once per
+  # namespace. Only when routes are enabled.
   seed: []
   # - id: stripe
   #   path: /webhooks/stripe
@@ -135,7 +143,7 @@ rate_limits:
   #
   # Limits can also be adjusted per tenant at runtime, without a restart:
   # `PUT /v1/tenants/{tenant}/rate-limit` on the admin port, persisted in the
-  # node's store (the same node-local model as API-managed sources). A runtime
+  # node's store (node-local, like `source_store.type: persistent`). A runtime
   # value beats the ones below.
   #
   # `rate` is hooks per second (fractions are allowed: 0.5 is one every two
@@ -164,7 +172,7 @@ quarantine:
   max_bytes: 1073741824
 
 batcher:
-  # The WAL serializes commits itself, so partitions beyond a couple only
+  # The queue writer serializes commits itself, so partitions beyond a couple only
   # add contention.
   partitions: 2
   max_batch: 256
@@ -174,6 +182,9 @@ batcher:
   # Full queue = shed load with 503 rather than grow without bound. Counts
   # buffered *and* in-flight records.
   max_queue: 10000
+  # The same bound in bytes of body (default 256 MiB): a burst of large hooks
+  # sheds load before it can exhaust memory, whatever the record count.
+  max_queue_bytes: 268435456
 
 dispatch:
   batch: 128
@@ -188,6 +199,17 @@ dispatch:
   # as a failed attempt (the sink may still complete it; consumers dedupe on
   # the idempotency key). Keep it above every sink's own timeout.
   attempt_timeout_ms: 30000
+  # Per-sink isolation. Each sink of each source has its own queue; at most
+  # sink_concurrency attempts of one sink run at once (null = only the global
+  # `concurrency`), so a slow destination cannot take every slot.
+  sink_concurrency: null
+  # A sink that fails breaker_failures times in a row (0 = never) is skipped
+  # for breaker_open_ms, doubling on each consecutive open up to
+  # breaker_max_open_ms; its rows wait (attempts unchanged) and one probe
+  # closes it. Breaker state is in memory: a restart closes every breaker.
+  breaker_failures: 5
+  breaker_open_ms: 30000
+  breaker_max_open_ms: 300000
   retry:
     base_ms: 100
     max_ms: 300000
@@ -198,9 +220,11 @@ dispatch:
 wal:
   # [env ANKUSA_WAL_TYPE] disk — the local RocksDB store; every hook is on disk before the ack, so it survives process crash and power loss on this host, not the loss of the host.
   #                        none — no local queue: ingest publishes to the source's sinks in the request and acks on
-  #                               their confirm. The node keeps no hook state, runs only the `edge` role, and every
+  #                               their confirm. The node keeps no hook state, drops the `dispatch` and `storage` roles, and every
   #                               source must have a durable sink (a broker ack, a publisher confirm, an upstream 2xx).
   type: disk
+  # wal.type: none only: the deadline every sink must confirm under; keep it below the provider's timeout.
+  publish_timeout_ms: 8000
 
 storage:
   # [env ANKUSA_STORAGE_TYPE] local | s3 | gcs
@@ -208,15 +232,22 @@ storage:
   # Segment rollover: whichever comes first.
   roll_bytes: 16777216
   roll_ms: 30000
-  # Used only when type: s3. Omit access_key_id/secret_access_key to fall back
-  # to AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (static keys only: instance
-  # profiles and IRSA are not supported by this adapter yet).
+  # [env ANKUSA_STORAGE_KEY_PREFIX] prepended to every segment key ("" or one
+  # or more `name/` parts), so several nodes can share one bucket: give each
+  # its own, e.g. "node-a/". Claims are never prefixed (see claim_check.store).
+  key_prefix: ""
+  # Used only when type: s3. Credentials come from, in order: these keys, the
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN env vars,
+  # web identity (IRSA: AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN), then the
+  # EC2 instance profile (IMDSv2).
   s3:
     bucket: "${S3_BUCKET}"
     region: "${S3_REGION}"
     endpoint: "${S3_ENDPOINT}"
     access_key_id: "${AWS_ACCESS_KEY_ID}"
     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+    # Temporary credentials only, beside the two keys above.
+    # session_token: "${AWS_SESSION_TOKEN}"
   # Used only when type: gcs.
   gcs:
     bucket: "${GCS_BUCKET}"
@@ -239,8 +270,85 @@ claim_check:
   # LocalFS retention only. nil disables the sweeper; use a bucket lifecycle
   # rule for S3/GCS.
   retention_days: null
+  # Where claims live: unset = the storage bucket above. Same shape as
+  # `storage` (type local | s3 | gcs, its s3:/gcs: block, plus `root` for a
+  # local store). Set it identically on every claim-writing node and on the
+  # gateway; give the gateway's credential read *and* list (s3:ListBucket), or
+  # a missing claim reads as 403 instead of 404.
+  # store:
+  #   type: s3
+  #   s3: {bucket: "${CLAIMS_BUCKET}", region: "${S3_REGION}"}
+  # Or several stores (buckets, regions, providers), exclusive with `store`:
+  # a pack whose store fails is written to the next one, and the gateway
+  # searches every store, so a failed-over pack is still found. Each entry has
+  # the `store` shape. Removing a store makes the packs in it unreadable:
+  # remove one only after its packs have aged out.
+  # stores:
+  #   - type: s3
+  #     s3: {bucket: "${CLAIMS_BUCKET}", region: us-east-1}
+  #   - type: s3
+  #     s3: {bucket: "${CLAIMS_BUCKET_WEST}", region: us-west-2}
+  # Which store a new pack goes to: ordered = the first, the others only while
+  # it is down; hash = spread packs evenly over every store, the rest taking
+  # over while one is down.
+  placement: ordered
+  # A store that failed a write, or could not answer a read, is skipped by
+  # writes and searched last by reads for this long (ms), then tried again.
+  store_cooldown_ms: 30000
+  # flat = claims/tenant=<t>/dt=<d>/<pack>. sharded adds shard=<c>/ under the
+  # tenant: 32 key prefixes per tenant, so one busy tenant's writes spread
+  # over 32 object-store partitions instead of throttling (503 SlowDown) on
+  # one. The gateway reads both layouts whatever this says; tools that read
+  # the bucket directly (Spark partition discovery) see the extra folder.
+  key_layout: flat
+  # Reads (the gateway): one request's reads, the pack index and then the
+  # bytes, finish within this (ms); past it the gateway answers 503 with
+  # Retry-After 1-3, and the store read that outlived it still fills the cache.
+  read_deadline_ms: 5000
+  # Per store request while reading a claim (ms), and the retries after a
+  # failed one. A store's own timeout_ms/retries are for writes.
+  read_timeout_ms: 3000
+  read_retries: 1
+  # Per store: the ceiling of the gateway's adaptive limit on concurrent store
+  # reads. It halves when the store throttles (429, 503 SlowDown) or does not
+  # answer, and grows back by one per round of successes. Under the HTTP
+  # client's 50 connections per host, so no read waits for one.
+  read_max_inflight: 48
+  # Per store: reads waiting for a slot. Past this a read is shed at once
+  # (503); 0 = never wait.
+  read_queue_max: 256
+  # Memory for cached pack indexes and claims (bytes); 0 = no cache.
+  read_cache_bytes: 134217728
+  # A claim larger than this (bytes) is served but never cached.
+  read_cache_max_entry_bytes: 1048576
   # The gateway performs no authentication. Keep 4001 internal and put your
   # proxy, mesh, or network policy in front of it, the same as 4002.
+
+backup:
+  # [env ANKUSA_BACKUP_ENABLED] continuous backup of this node's store to an
+  # object store, and restore at boot: a node that starts with an empty data_dir
+  # restores the latest backup before it opens the store, and refuses to start
+  # if the backup location cannot be read (never starts empty). Off by default.
+  # With `storage.type: local` and no `store` below, the backup lives on the
+  # same disk as the store and does not survive losing the host; point
+  # `backup.store` (or `storage`) at a bucket.
+  enabled: false
+  # How often a checkpoint is uploaded: a lost host loses at most the hooks
+  # acked since the last backup. Files already uploaded are not uploaded again.
+  interval_ms: 60000
+  # Backups kept; older ones, and the files only they used, are deleted after
+  # each successful upload.
+  keep: 3
+  # Where backups live: unset = the storage bucket above. Same shape as
+  # `claim_check.store` (type local | s3 | gcs, its s3:/gcs: block, plus `root`
+  # for a local store). Keys are always under storage.key_prefix: backups are
+  # per node, so give each node sharing a bucket its own prefix (a node whose
+  # prefix holds another store's backups refuses to back up, and logs why).
+  # Keep <key_prefix>backup/ out of any bucket expiration rule: `keep` is the
+  # retention, and an expired shared file breaks every backup that lists it.
+  # store:
+  #   type: s3
+  #   s3: {bucket: "${BACKUP_BUCKET}", region: "${S3_REGION}"}
 
 lifecycle:
   # Where a lifecycle event goes when a source or route is created, updated, or
@@ -255,12 +363,31 @@ lifecycle:
       brokers: ["${KAFKA_BROKERS}"]
       topic: ankusa.lifecycle
 
+# static     -> sources from `sources:` below only; the admin API cannot write.
+# persistent -> plus API-managed, tenant-scoped sources kept in this node's
+#               store (node-local: another node's admin API does not see them).
+# redis      -> plus API-managed sources kept in Redis and shared by every node
+#               with the same namespace (ankusa_redis); a `url` with no `type`
+#               means redis.
+source_store:
+  type: static
+  # The three keys below are only valid with `type: redis`.
+  # [env ANKUSA_SOURCE_STORE_URL]
+  # url: redis://cache:6379
+  # Share sources across nodes by giving them the same namespace; defaults to
+  # ankusa:sources:<instance>.
+  # namespace: ankusa:sources
+  # How often a node re-reads the version in case it missed a broadcast: the
+  # worst-case staleness after a disconnect.
+  # tick_ms: 30000
+
 sources:
   # One source per provider endpoint. The id is the catch-URL segment:
   # POST /webhooks/stripe here.
   stripe:
     # Scopes storage. With routing: tenant_path the URL wins.
     tenant: default
+    # trust_url_tenant: false   # with routing: tenant_path, a tenant: default source with verify type none must set this to true
     # reject | quarantine | accept_flag (what happens when verification fails)
     on_verify_failure: reject
     # none | stripe | github | standard_webhooks | shopify | slack | hmac.
@@ -275,6 +402,8 @@ sources:
       # Every entry must be non-empty: an unset ${OLD:-} is a load error.
       # secret: ["${STRIPE_WHSEC_NEW}", "${STRIPE_WHSEC}"]
       tolerance_seconds: 300
+    # dedupe: stripe   # a preset (github | standard_webhooks | svix | shopify | stripe), or {header: X-Event-Id} / {json: data.id}, plus optional ttl_seconds (259200)
+    # forward_headers: [stripe-signature]   # absent = every header except auth/framing/hop-by-hop and x-ankusa-*
     # At least one. Every sink is tried on every delivered hook.
     sinks:
       - {type: log}
@@ -285,6 +414,12 @@ sources:
         timeout_ms: 5000
         headers:
           x-ankusa-env: prod
+        # Sign every delivery (Standard Webhooks: webhook-id, -timestamp,
+        # -signature); a whsec_ secret, or a list while rotating. Every SDK
+        # verifies it (see docs/integrations.md).
+        secret: "${SINK_WHSEC}"
+        # Only the status is used; at most this much of the response is read.
+        max_response_bytes: 65536
       - type: rabbitmq
         url: "${RABBITMQ_URL}"
         exchange: "${RABBITMQ_EXCHANGE}"
@@ -292,6 +427,9 @@ sources:
         exchange_type: topic
         routing_key: "ankusa.stripe"
         inline_max_bytes: 8192
+        # Publishes awaiting a broker confirm on this connection; past it a
+        # publish fails fast as busy (retried) instead of queueing.
+        max_inflight: 256
       - type: kafka
         # A list of host:port, or one comma-separated string — so
         # `brokers: "${KAFKA_BROKERS}"` takes "host:port,host:port" from env.
@@ -300,6 +438,9 @@ sources:
         # Static string only (a fun is an embedding API, not a config surface).
         key: stripe
         inline_max_bytes: 8192
+        # The largest value + key produced; a bigger record is dead-lettered at
+        # once instead of being retried against the broker's message.max.bytes.
+        max_record_bytes: 1000000
         # Omit both to talk to a plaintext broker.
         ssl: false
         sasl:
@@ -310,7 +451,7 @@ sources:
       - type: nats
         # A list of host:port, or one comma-separated string — so
         # `servers: "${NATS_SERVERS}"` takes "host:port,host:port" from env.
-        # More than one is failover order, not fan-out.
+        # More than one is failover (one at a time, picked at random), not fan-out.
         servers: ["${NATS_SERVERS}"]
         # A subject, not a stream: the sink never creates one, so a stream that
         # covers this subject has to exist.
@@ -337,6 +478,51 @@ sources:
         inline_max_bytes: 8192
         # How long to wait for Redis to answer the PUBLISH.
         publish_timeout_ms: 5000
+      - type: sqs
+        # The queue must exist: the sink never creates one, so a missing queue
+        # is an error (retried, then dead-lettered). A URL ending .fifo is a
+        # FIFO queue: MessageDeduplicationId is the hook id (SQS dedupes for
+        # 5 minutes), MessageGroupId the message_group_id below.
+        queue_url: "${SQS_QUEUE_URL}"
+        region: us-east-1
+        # Default: the queue URL's origin. Set it for a VPC endpoint or an
+        # emulator (http://localhost:4566).
+        # endpoint: https://sqs.us-east-1.amazonaws.com
+        # Static string only. Default "<tenant>/<source>" on a FIFO queue; on a
+        # standard queue it is sent only when set (fair queues).
+        # message_group_id: stripe
+        inline_max_bytes: 8192
+        # The largest body + message attributes sent; a bigger message is
+        # dead-lettered at once. SQS's limit, 1 MiB; lower it to the queue's
+        # MaximumMessageSize.
+        max_message_bytes: 1048576
+        timeout_ms: 5000
+        # Omit all three to use AWS_* env vars, IRSA, or the EC2 instance role.
+        # access_key_id: "${AWS_ACCESS_KEY_ID}"
+        # secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+        # session_token: "${AWS_SESSION_TOKEN}"
+      - type: google_pubsub
+        # The topic must exist: the sink never creates a topic or a
+        # subscription, so a missing topic is an error (retried, then
+        # dead-lettered). A topic with no subscription accepts the publish and
+        # drops the message.
+        project: my-project
+        topic: ankusa-hooks
+        # Default: https://pubsub.googleapis.com. Set it for a regional
+        # endpoint or the floci-gcp emulator (http://localhost:4588).
+        # endpoint: https://pubsub.googleapis.com
+        # Static string only. Orders messages only on a subscription with
+        # message ordering enabled; default: no ordering key.
+        # ordering_key: stripe
+        inline_max_bytes: 8192
+        # The largest data + attributes + ordering key sent; a bigger message
+        # is dead-lettered at once. Pub/Sub's limit, 10 MB.
+        max_message_bytes: 10000000
+        timeout_ms: 5000
+        # metadata (default): the GCE/GKE metadata server. token: the bearer
+        # token below. none: no credential, for an emulator.
+        auth: token
+        token: "${GCP_TOKEN}"
 
   # A second source, showing the other verifier and the quarantine policy.
   standard:
@@ -369,4 +555,6 @@ sources:
   #     sig_prefix: "sha256="
   #     timestamp_header: "X-Custom-Timestamp"
   #     tolerance_seconds: 300
+  #     parse: whole            # whole | csv_pairs (with sig_key: v1) | space_versions (with version: "v1,")
+  #     secret_decode: raw      # raw | whsec_base64
   #   sinks: [{type: log}]

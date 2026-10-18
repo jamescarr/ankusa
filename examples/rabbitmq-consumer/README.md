@@ -20,7 +20,7 @@ flowchart LR
 
 **What each piece is doing:**
 
-- `ingest/`: a real `Ankusa.Instance` (`ANKUSA_ROLES=edge,dispatch,storage`,
+- `ingest_app/`: a real `Ankusa.Instance` (`ANKUSA_ROLES=edge,dispatch,storage`,
   the default), configured entirely from environment variables.
   `Ankusa.Sink.RabbitMQ` publishes every delivered hook to the
   `ankusa.events` exchange; `Ankusa.BlobStore.S3` backs both segment
@@ -39,8 +39,8 @@ flowchart LR
   [`priv/openapi/claim_check.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/claim_check.v1.yaml)
   (`npm run generate:types`) instead of a hand-maintained ref type,
   see ["Redeem a claim"](https://github.com/jamescarr/ankusa/blob/main/docs/claim-check.md#redeem-a-claim).
-- `floci`: local S3-compatible emulator (see the root README's "Object
-  store adapters" section); stands in for real S3/R2/MinIO.
+- `floci`: local S3-compatible emulator (see
+  [`docs/storage.md`](../../docs/storage.md)); stands in for real S3/R2/MinIO.
 
 ## Small vs. fat payloads
 
@@ -106,15 +106,11 @@ docker compose down -v
 
 ## Scaling the ingest fleet
 
-`docker compose up --build --scale ingest=3` runs three independent ingest
-containers, each with its own local store, all publishing to the same
-exchange, checking claims in against the same `claim-check` gateway, and
-writing to the same bucket. Nothing about `Ankusa.Sink.RabbitMQ` or
-`Ankusa.BlobStore.S3` changes: that's the "durable state, not RPC" rule
-holding here exactly like it does between the edge/dispatch/storage roles
-inside one instance. (You'd need a load balancer in front for the ingest
-port at that point, a deployment concern, not something the framework
-does for you.)
+This compose file runs one ingest container: it publishes host port 4000, so a
+second replica cannot bind it. A fleet needs one host port per node or a load
+balancer in front, and its own bucket per node, because segment keys are
+`seg/<first>-<last>.seg` and would collide in a shared one. See
+[`docs/deployment.md`](../../docs/deployment.md).
 
 ## What's stubbed on purpose
 
