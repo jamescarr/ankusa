@@ -428,6 +428,7 @@ defmodule Ankusa.Config do
 
   defp put_tls!(section, key),
     do: %{section | tls: Ankusa.Listener.normalize_tls!(section.tls, key)}
+
   # Types and ranges of the numeric keys, so `0` partitions or a negative
   # concurrency fail at boot with the key's name instead of misbehaving later.
   # Module-specific rules (dispatch breakers, claim retention, quarantine
