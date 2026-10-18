@@ -69,7 +69,12 @@ mise run release:verify ankusa_nats
 
 The pre-tag gate is `mise run e2e` (the kind + Oban end-to-end proof,
 [`examples/oban-consumer/run.sh`](https://github.com/jamescarr/ankusa/blob/main/examples/oban-consumer/run.sh))
-passing locally.
+passing locally. Tagging `ankusa` also runs the power-loss crash drill
+(`scripts/drills/flakey.sh`, [`testing.md`](testing.md#crash-consistency-drill-mise-run-testcrash))
+from `release:preflight`: it needs a Docker host that allows `--privileged`
+containers with loop and device-mapper devices, and where there is none the
+preflight prints `SKIPPED` and the drill is a manual step, run on such a host
+before tagging.
 
 ### Ordering: core first
 

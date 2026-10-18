@@ -69,8 +69,10 @@ stored.
 
 - One `sync: true` batch per commit: hundreds of hooks, one fsync. The boot
   line says it plainly: `[ankusa] store at <path>. Durable to power loss on
-  THIS host only.` `kill -9` loses no acked hook; RocksDB recovers its own WAL.
-  Local `BlobStore.LocalFS` writes are durable too (see below).
+  THIS host only.` `kill -9` loses no acked hook; RocksDB recovers its own WAL
+  (`loss_test.exs`, and the [crash drill](testing.md#crash-consistency-drill-mise-run-testcrash),
+  which also cuts power under load). Local `BlobStore.LocalFS` writes are
+  durable too (see below).
 - RocksDB opens with `paranoid_checks` and
   `wal_recovery_mode: tolerate_corrupted_tail_records`: a torn trailing write
   (the last, never-acked one) is dropped. Damage anywhere before it refuses to
@@ -85,7 +87,9 @@ stored.
   dispatch, the archive, the quarantine pen, source and rate-limit edits) also
   tells the Store, whichever process saw it, and the Store closes and reopens
   itself at most once every 5 s. That clears a latched RocksDB write error if
-  one outlives the freed space.
+  one outlives the freed space. The crash drill fills a 96 MiB tmpfs under load
+  and checks the `503`s, the `/ready` flip and the resume
+  ([`testing.md`](testing.md#crash-consistency-drill-mise-run-testcrash)).
 - Stop an instance cleanly (supervisor shutdown, `docker stop`'s SIGTERM) and
   the store closes with it. SIGKILL keeps the data (RocksDB WAL recovery), but a
   node halted mid-write-load with the DB open can segfault at exit.

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Crash-consistency drill: ENOSPC on a 96 MiB tmpfs, then kill -9 under load; every acked hook must read back (needs docker)"
+set -euo pipefail
+source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
+cd "$ROOT"
+
+exec scripts/drills/crash.sh tmpfs

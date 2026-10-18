@@ -173,7 +173,8 @@ The always-on tests cover:
   [`architecture.md`](architecture.md), not just
   the description of it. The `wal.type: none` half is backed by
   `edge_direct_test.exs`, which asserts the response really does wait for the
-  sink's confirm — and is a `503` when that confirm never comes.
+  sink's confirm — and is a `503` when that confirm never comes. A full disk,
+  a failing disk and a power cut are the crash drill's, below.
 - **Lifecycle events** (`lifecycle_test.exs`): through a real instance, a
   source's create/update/delete and a route's create/replace/patch/delete each
   deliver one CloudEvent to the configured sink, the source's secret arrives
@@ -459,6 +460,51 @@ AMQP, SigV4, whatever) is actually right. Every adapter in this repo that
 talks to external infrastructure is tested against a real instance of that
 infrastructure, not a stand-in for it. That standard applies to new
 adapters too.
+
+## Crash-consistency drill: `mise run test:crash`
+
+`loss_test.exs` proves the commit order against a `kill -9`. The drill proves
+what that cannot: a full disk, a failing disk, and a power cut. It needs
+`docker`, runs the same child-BEAM harness
+([`crash_harness.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/test/support/crash_harness.exs),
+shared with `loss_test.exs`) in the `elixir:<version>-alpine` image the server
+builds with, and prints one line:
+
+```sh
+mise run test:crash
+# acked=14940 recovered=14940 missing=0 enospc_503=1 resumed=true
+```
+
+- **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 96 MiB
+  tmpfs. The harness ingests `RATE` (default 1000) hooks/s of `BODY_BYTES`
+  (default 10 KiB) each; at +5 s a filler file takes every free byte. RocksDB
+  pre-allocates its WAL (about 70 MiB here), so the node keeps acking until
+  that is used up: the filler stays until a POST has answered
+  `503 store_unavailable` and `/ready` `503` (the store then reopens itself and
+  may serve again for a while, so the 503s come in bursts). Then the filler is
+  deleted, and a `201` and `/ready` `200` must come back on their own. The
+  instance is `kill -9`ed under load once it has served again for 5 s and at
+  least 20 s into the run, the store is reopened with `Ankusa.Store` alone,
+  and every id the harness printed as acked must read back (`missing=0`).
+- **EIO and power loss** (`scripts/drills/flakey.sh`): `/data` is ext4 on a
+  device-mapper device over a loop device. Two 2 s windows (+5 s, +10 s) where
+  every I/O fails, with the same `503`/resume assertions, then at +20 s a power
+  cut: the device fails every I/O, the instance is killed, the filesystem is
+  unmounted, repaired and remounted, so anything not fsynced is gone. A tmpfs
+  cannot show a missing fsync, because `kill -9` loses nothing the kernel
+  already holds (with `Queue.Writer` patched to `sync: false` the tmpfs drill
+  still reports `missing=0`); this variant can: the same patch gives
+  `acked=9344 recovered=5600 missing=3744` and exit status 1. It needs `docker run
+  --privileged` with loop and device-mapper support in the Docker host's
+  kernel and exits `2` where it has neither. `release:preflight` runs it
+  before a core tag; CI runs it as the job `crash-powerloss` (GitHub's
+  `ubuntu-latest` allows it; on a runner that does not, the job reports a
+  skip). Where no privileged Docker host exists, it is a manual pre-release step.
+  The windows use device-mapper's `error` target rather than `dm-flakey`, a
+  module some kernels lack; the fault is the same, I/O errors for 2 s.
+
+`RATE`, `BODY_BYTES`, `FAULT_AT` and `KILL_AT` (seconds) tune a run. Compiled
+deps are kept in `.cache/crash`, so only the first run builds RocksDB.
 
 ## Core bench: `bench/core_bench.exs`
 

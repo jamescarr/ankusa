@@ -82,3 +82,6 @@ examples/oban-consumer/.e2e-out/
 # Perf gate and soak outputs (`mise run bench:gate`, `mise run bench:soak`).
 packages/ankusa/bench/last.json
 /soak-out/
+
+# Compiled deps the crash drill keeps between runs (scripts/drills/crash.sh).
+/.cache/
