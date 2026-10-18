@@ -90,6 +90,7 @@ defmodule Ankusa.Instance do
     children =
       [{Ankusa.Instance.RegistryWatch, config.instance}] ++
         metrics_children(config, opts) ++
+        auth_children(config) ++
         claim_store_children(opts) ++
         store_children(config, opts) ++
         backup_children(config, opts) ++
@@ -113,6 +114,19 @@ defmodule Ankusa.Instance do
   # `Ankusa.Instance.Isolated`.
   defp isolated(config, domain, children) do
     [{Isolated, instance: config.instance, domain: domain, children: children}]
+  end
+
+  # The signing keys of every control plane that runs `auth.mode: :jwt`
+  # (`Ankusa.Admin.Auth.JWT.Keys`), before the listeners that read them. It
+  # fetches a JWKS after it is up, so a slow identity provider never delays boot.
+  defp auth_children(config) do
+    if Enum.any?(control_plane_auth(config), &(&1.mode == :jwt)),
+      do: isolated(config, :auth, [{Ankusa.Admin.Auth.JWT.Keys, [instance: config.instance]}]),
+      else: []
+  end
+
+  defp control_plane_auth(config) do
+    [config.admin.auth, config.routes.admin.auth, config.claim_check.auth]
   end
 
   # The Prometheus reporter behind `/metrics` (admin API or metrics listener),
@@ -258,8 +272,8 @@ defmodule Ankusa.Instance do
       warn_unauthenticated(
         config.routes.admin,
         "[ankusa] route management API on " <>
-          "#{listen_addr(config.routes.admin, "routes.admin.ip")} is unauthenticated; " <>
-          "do not expose it publicly, front it with your own proxy or network policy"
+          "#{listen_addr(config.routes.admin, "routes.admin.ip")} has no authentication " <>
+          "(routes.admin.auth.mode: none); set routes.admin.auth before exposing it beyond this host"
       )
 
       isolated(config, :routes_admin, [
@@ -304,8 +318,8 @@ defmodule Ankusa.Instance do
       warn_unauthenticated(
         config.claim_check,
         "[ankusa] claim-check API on #{listen_addr(config.claim_check, "claim_check.ip")} " <>
-          "performs no authentication; " <>
-          "front it with your own proxy, mesh, or network policy"
+          "has no authentication (claim_check.auth.mode: none); " <>
+          "set claim_check.auth before exposing it beyond this host"
       )
 
       cache =
@@ -364,9 +378,8 @@ defmodule Ankusa.Instance do
     if config.admin.enabled do
       warn_unauthenticated(
         config.admin,
-        "[ankusa] admin API on #{listen_addr(config.admin, "admin.ip")} is unauthenticated; " <>
-          "do not expose it " <>
-          "publicly, front it with your own proxy or network policy"
+        "[ankusa] admin API on #{listen_addr(config.admin, "admin.ip")} has no authentication " <>
+          "(admin.auth.mode: none); set admin.auth before exposing it beyond this host"
       )
 
       isolated(config, :admin, [
@@ -400,8 +413,10 @@ defmodule Ankusa.Instance do
 
   defp metrics_listener_children(_config), do: []
 
-  # A listener with no TLS client verification has no authentication of its
-  # own; one that demands a client certificate from your CA has.
+  # A listener with no authentication of its own warns at boot. One that
+  # authenticates (`auth.mode`) does not, and neither does one that demands a
+  # client certificate from your CA.
+  defp warn_unauthenticated(%{auth: %{mode: mode}}, _message) when mode != :none, do: :ok
   defp warn_unauthenticated(%{tls: %{verify: :verify_peer}}, _message), do: :ok
   defp warn_unauthenticated(_section, message), do: Logger.warning(message)
 

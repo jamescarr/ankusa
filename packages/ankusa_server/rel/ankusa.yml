@@ -10,11 +10,11 @@
 # override individual fields with ANKUSA_* env vars. Every key with its default
 # is documented in config-examples/reference.yml.
 #
-# SECURITY: nothing here is authenticated. The admin API on 4002 and the
-# claim-check gateway on 4001 listen on 127.0.0.1 inside the container unless
-# ANKUSA_ADMIN_IP / ANKUSA_CLAIM_CHECK_IP (or admin.ip / claim_check.ip) say
-# otherwise — do NOT publish those ports publicly; front them with your own
-# proxy or network policy.
+# SECURITY: the admin API on 4002 and the claim-check gateway on 4001 listen on
+# 127.0.0.1 inside the container unless ANKUSA_ADMIN_IP / ANKUSA_CLAIM_CHECK_IP
+# (or admin.ip / claim_check.ip) say otherwise, and off loopback they refuse to
+# boot without authentication: set ANKUSA_ADMIN_TOKEN / ANKUSA_CLAIM_CHECK_TOKEN,
+# or an `auth` block (jwt, mtls, token). Do NOT publish those ports publicly.
 
 node:
   data_dir: /var/lib/ankusa

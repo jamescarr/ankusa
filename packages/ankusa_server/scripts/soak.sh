@@ -50,6 +50,8 @@ ADMIN_PORT="${SOAK_ADMIN_PORT:-4002}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OUT="${SOAK_OUT:-$ROOT/soak-out}"
 ADMIN_URL=http://127.0.0.1:$ADMIN_PORT
+# Off loopback the admin API needs a credential: a throwaway token for this run.
+ADMIN_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -93,7 +95,7 @@ echo "==> starting $IMAGE"
 docker run -d --name "$NAME" \
   --log-opt max-size=10m --log-opt max-file=2 \
   -p "127.0.0.1:$HTTP_PORT:4000" -p "127.0.0.1:$ADMIN_PORT:4002" \
-  -e ANKUSA_ADMIN_IP=0.0.0.0 "$IMAGE" >/dev/null
+  -e ANKUSA_ADMIN_IP=0.0.0.0 -e ANKUSA_ADMIN_TOKEN="$ADMIN_TOKEN" "$IMAGE" >/dev/null
 
 echo "==> waiting for /health"
 ready=false
@@ -126,7 +128,7 @@ while kill -0 "$LOADGEN_PID" 2>/dev/null; do
   if [ "$SECONDS" -ge "$next" ]; then
     n=$((n + 1))
     next=$((next + SAMPLE_INTERVAL))
-    curl -s "$ADMIN_URL/metrics" >"$OUT/metrics-$n.prom"
+    curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$ADMIN_URL/metrics" >"$OUT/metrics-$n.prom"
     rss=$(container_rss_kb)
     echo "$((SECONDS - start)),$rss" >>"$OUT/samples.csv"
     echo "    sample $n at $((SECONDS - start))s: rss ${rss} kB, delivered $(metric_sum "$OUT/metrics-$n.prom" ankusa_dispatch_deliveries_total 'result="ok"')"
@@ -145,7 +147,7 @@ shed=$(field shed)
 echo "==> draining (accepted $accepted)"
 drain_deadline=$((SECONDS + DRAIN_TIMEOUT))
 while :; do
-  curl -s "$ADMIN_URL/metrics" >"$OUT/metrics-final.prom"
+  curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$ADMIN_URL/metrics" >"$OUT/metrics-final.prom"
   backlog=$(($(metric_sum "$OUT/metrics-final.prom" ankusa_queue_pending) + $(metric_sum "$OUT/metrics-final.prom" ankusa_queue_scheduled) + $(metric_sum "$OUT/metrics-final.prom" ankusa_queue_inflight)))
   delivered=$(metric_sum "$OUT/metrics-final.prom" ankusa_dispatch_deliveries_total 'result="ok"')
   if [ "$backlog" -eq 0 ] && [ "$delivered" -ge "$accepted" ]; then break; fi

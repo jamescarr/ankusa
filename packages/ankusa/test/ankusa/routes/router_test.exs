@@ -13,6 +13,7 @@ defmodule Ankusa.Routes.RouterTest do
 
   import Ankusa.TestHelpers
 
+  alias Ankusa.Admin.Auth.Token
   alias Ankusa.Routes.Router
 
   defp start(routes_opts, extra_opts \\ []), do: start_routes(routes_opts, extra_opts)
@@ -20,6 +21,13 @@ defmodule Ankusa.Routes.RouterTest do
   defp call(config, method, path, opts \\ []) do
     body = Keyword.get(opts, :body)
     conn = Plug.Test.conn(method, path, body)
+
+    conn =
+      case Keyword.get(opts, :token) do
+        nil -> conn
+        token -> Plug.Conn.put_req_header(conn, "authorization", "Bearer " <> token)
+      end
+
     Router.call(conn, Router.init(instance: config.instance))
   end
 
@@ -232,7 +240,7 @@ defmodule Ankusa.Routes.RouterTest do
   end
 
   describe "the listener" do
-    test "binds its own port, unauthenticated by design" do
+    test "binds its own port" do
       port = free_port()
 
       # `free_port/0` closes the socket it opened, so the OS can hand the same
@@ -272,6 +280,103 @@ defmodule Ankusa.Routes.RouterTest do
 
       listed = Req.get!("http://127.0.0.1:#{port}/admin/routes")
       assert Enum.map(listed.body["routes"], & &1["id"]) == ["a"]
+    end
+  end
+
+  describe "authentication and scopes" do
+    # Every documented endpoint, with whether it reads (`routes:read`) or
+    # writes (`routes:write`).
+    @endpoints [
+      {:get, "/admin/routes", "routes:read"},
+      {:post, "/admin/routes", "routes:write"},
+      {:post, "/admin/routes/test", "routes:read"},
+      {:get, "/admin/routes/a", "routes:read"},
+      {:put, "/admin/routes/a", "routes:write"},
+      {:patch, "/admin/routes/a", "routes:write"},
+      {:delete, "/admin/routes/a", "routes:write"},
+      {:get, "/admin/ip-rules", "routes:read"},
+      {:put, "/admin/ip-rules", "routes:write"}
+    ]
+
+    defp token(id, scopes), do: %{id: id, sha256: Token.hash(id), scopes: scopes}
+
+    setup do
+      tokens = [
+        token("operator", ["routes:read", "routes:write", "tenant:*"]),
+        token("reader", ["routes:read", "tenant:*"]),
+        token("writer", ["routes:write", "tenant:*"]),
+        token("acme", ["routes:read", "routes:write", "tenant:acme"])
+      ]
+
+      %{config: start(admin: [auth: %{mode: :token, tokens: tokens}])}
+    end
+
+    test "401 for every endpoint without a credential, and for a wrong token", %{config: config} do
+      for {method, path, _scope} <- @endpoints, token <- [nil, "guess"] do
+        response = call(config, method, path, token: token, body: "{}")
+        assert response.status == 401, "#{method} #{path} answered #{response.status}"
+
+        assert Plug.Conn.get_resp_header(response, "www-authenticate") == [
+                 ~s(Bearer realm="ankusa")
+               ]
+      end
+
+      # Not even a 404 for a path that does not exist.
+      assert call(config, :get, "/nowhere").status == 401
+      assert call(config, :get, "/nowhere", token: "operator").status == 404
+    end
+
+    test "/health needs no credential", %{config: config} do
+      assert call(config, :get, "/health").status == 200
+    end
+
+    test "403 names the scope a token lacks: reading is not writing", %{config: config} do
+      for {method, path, scope} <- @endpoints do
+        lacking = if scope == "routes:read", do: "writer", else: "reader"
+        response = call(config, method, path, token: lacking, body: "{}")
+
+        assert response.status == 403,
+               "#{lacking} on #{method} #{path} answered #{response.status}"
+
+        assert %{"error" => "forbidden", "scope" => ^scope} = json(response)
+      end
+    end
+
+    test "a token for one tenant is refused: routes belong to no tenant, so tenant:* is required",
+         %{config: config} do
+      for {method, path, _scope} <- @endpoints do
+        response = call(config, method, path, token: "acme", body: "{}")
+        assert response.status == 403, "#{method} #{path} answered #{response.status}"
+        assert %{"scope" => "tenant:*"} = json(response)
+      end
+    end
+
+    test "the right scopes get the real answers", %{config: config} do
+      created =
+        call(config, :post, "/admin/routes",
+          token: "operator",
+          body: ~s({"id":"a","path":"/hooks/a"})
+        )
+
+      assert created.status == 201
+
+      assert call(config, :get, "/admin/routes/a", token: "reader").status == 200
+      assert call(config, :get, "/admin/routes", token: "reader").status == 200
+      assert call(config, :get, "/admin/ip-rules", token: "reader").status == 200
+
+      # The dry run is a POST that changes nothing: a reader may run it.
+      dry =
+        call(config, :post, "/admin/routes/test",
+          token: "reader",
+          body: ~s({"method":"POST","path":"/hooks/a","ip":"203.0.113.7"})
+        )
+
+      assert dry.status == 200
+
+      assert call(config, :patch, "/admin/routes/a", token: "writer", body: ~s({"enabled":false})).status ==
+               200
+
+      assert call(config, :delete, "/admin/routes/a", token: "writer").status == 204
     end
   end
 end

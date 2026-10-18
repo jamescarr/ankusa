@@ -21,6 +21,11 @@ data:
     admin:
       enabled: true
       ip: 0.0.0.0
+      # Demo: the cluster network is the boundary. Real deployments set
+      # auth.mode to token, jwt or mtls instead (docs/configuration.md).
+      auth:
+        mode: none
+        allow_insecure: true
       # The queue gauges (pending, scheduled, dead, disk) the panel reads;
       # the default 15 s makes a backlog look frozen.
       gauge_interval_ms: 2000

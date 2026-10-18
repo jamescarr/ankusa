@@ -19,8 +19,9 @@ never arrived.
 ## Quick start
 
 ```sh
+export ANKUSA_ADMIN_TOKEN=$(openssl rand -hex 32)   # the admin API needs a credential off loopback
 docker run -d --name ankusa \
-  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 \
+  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 -e ANKUSA_ADMIN_TOKEN \
   -v ankusa-data:/var/lib/ankusa \
   jamescarr/ankusa:edge
 
@@ -45,7 +46,7 @@ Mount a YAML file at `/etc/ankusa/ankusa.yml` (or point `ANKUSA_CONFIG` at it):
 
 ```sh
 docker run -d --name ankusa \
-  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 \
+  -p 4000:4000 -p 127.0.0.1:4002:4002 -e ANKUSA_ADMIN_IP=0.0.0.0 -e ANKUSA_ADMIN_TOKEN \
   -v "$PWD/ankusa.yml:/etc/ankusa/ankusa.yml:ro" \
   -v ankusa-data:/var/lib/ankusa \
   -e STRIPE_WHSEC -e GITHUB_WEBHOOK_SECRET -e SINK_URL \
@@ -110,6 +111,9 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
 | `ANKUSA_ADMIN_IP` | `admin.ip` |
 | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
+| `ANKUSA_ADMIN_TOKEN` | `admin.auth`: one bearer token holding every scope and `tenant:*` (replaces the file's block; only its SHA-256 is kept) |
+| `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.auth`: one token holding `routes:read`, `routes:write`, `tenant:*` |
+| `ANKUSA_CLAIM_CHECK_TOKEN` | `claim_check.auth`: one token holding `claims:read`, `tenant:*` |
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` (`true`/`false`) |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` (a URL with no `type` means `redis`) |
@@ -225,19 +229,19 @@ So:
 
 - **Publish only port 4000.** Providers authenticate themselves by signing the
   body, and Ankusa verifies that signature against the source's secret.
-- **Put 4002 (admin/metrics) behind your own proxy, SSO, or network policy.** It
-  ships unauthenticated on purpose: it cannot know your identity provider, and a
-  half-authentication scheme is worse than none. `GET /v1/config` is redacted
-  anyway, because a proxy may let many people read it.
-- **Put 4001 (claim check) behind your proxy, mesh, or network policy, the
-  same as 4002.** The claim-check API performs no authentication of its own:
-  it exists so non-BEAM consumers can fetch large payloads without holding
-  storage credentials. Keep it internal and decide who may read what in the
-  layer in front of it.
-- **Put 4003 (route management) behind your proxy or network policy, the same
-  as 4002.** It edits the route definitions the edge enforces and
-  authenticates nobody, by the same deliberate decision. It only listens when
-  `routes.enabled` is set on an `edge` node, and publishing it is your call.
+- **Authenticate 4002 (admin/metrics).** Off loopback it refuses to boot
+  without credentials: set `ANKUSA_ADMIN_TOKEN`, or an `admin.auth` block with
+  `mode: jwt` (your OIDC provider), `mtls` or `token`. Each route needs a scope
+  (`dlq:read`, `replays:write`, ...); `401` without a credential, `403` without
+  the scope. `GET /v1/config` is redacted anyway. See
+  [Control-plane authentication](../../docs/configuration.md#control-plane-authentication).
+- **Authenticate 4001 (claim check) the same way** (`claim_check.auth`, or
+  `ANKUSA_CLAIM_CHECK_TOKEN`): reading a claim needs `claims:read` and the
+  claim's tenant. Consumers send the token as `Authorization: Bearer`. Keep it
+  on your internal network regardless.
+- **Authenticate 4003 (route management)** with `routes.admin.auth` (or
+  `ANKUSA_ROUTES_ADMIN_TOKEN`). It edits the route definitions the edge
+  enforces, and only listens when `routes.enabled` is set on an `edge` node.
 - **Point Prometheus at 4002 through your proxy, with read-only credentials.**
 
 All three listeners bind `127.0.0.1` by default. A proxy or a Prometheus in

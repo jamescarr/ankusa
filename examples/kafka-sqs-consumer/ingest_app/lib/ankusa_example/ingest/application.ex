@@ -41,7 +41,10 @@ defmodule AnkusaExample.Ingest.Application do
       claim_check: %{
         port: env_int("CLAIM_CHECK_PORT", 4001),
         # reached as http://claim-check:4001 from the other containers
-        ip: "0.0.0.0"
+        ip: "0.0.0.0",
+        # Demo: the compose network is the boundary. Real deployments set
+        # auth.mode to :token, :jwt or :mtls (docs/configuration.md).
+        auth: %{mode: :none, allow_insecure: true}
       }
     )
   end

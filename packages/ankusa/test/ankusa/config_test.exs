@@ -41,7 +41,7 @@ defmodule Ankusa.ConfigTest do
       refute config.routes.enabled
       assert config.routes.store == {Ankusa.Routes.Store.ETS, []}
       assert config.routes.trusted_proxies == []
-      assert config.routes.admin == %{port: 4003, ip: "127.0.0.1", tls: nil}
+      assert Map.delete(config.routes.admin, :auth) == %{port: 4003, ip: "127.0.0.1", tls: nil}
     end
 
     test "listeners bind loopback by default" do
@@ -584,6 +584,301 @@ defmodule Ankusa.ConfigTest do
     test "known cipher suites are accepted" do
       config = Config.new(listener: %{tls: tls(ciphers: ["ECDHE-RSA-AES256-GCM-SHA384"])})
       assert config.listener.tls.ciphers == ["ECDHE-RSA-AES256-GCM-SHA384"]
+    end
+  end
+
+  describe "control-plane auth" do
+    @tls_dir Path.expand("../fixtures/tls", __DIR__)
+    @sha String.duplicate("ab", 32)
+
+    defp public_jwk do
+      {_, map} =
+        {:ec, "P-256"} |> JOSE.JWK.generate_key() |> JOSE.JWK.to_public() |> JOSE.JWK.to_map()
+
+      map
+    end
+
+    defp mtls_tls(section \\ %{}) do
+      Map.merge(
+        %{
+          certfile: Path.join(@tls_dir, "server.pem"),
+          keyfile: Path.join(@tls_dir, "server-key.pem"),
+          cacertfile: Path.join(@tls_dir, "ca.pem"),
+          verify: :verify_peer
+        },
+        section
+      )
+    end
+
+    defp token(overrides \\ %{}),
+      do: Map.merge(%{id: "ci", sha256: @sha, scopes: ["dlq:read", "tenant:acme"]}, overrides)
+
+    @sections [
+      {"admin", :admin},
+      {"routes.admin", :routes_admin},
+      {"claim_check", :claim_check}
+    ]
+
+    # Boot options that start one control plane's listener, with `section_opts`
+    # (a map merged into that section) applied.
+    defp opts(:admin, section_opts), do: [admin: Map.merge(%{enabled: true}, section_opts)]
+
+    defp opts(:routes_admin, section_opts),
+      do: [roles: [:edge], routes: %{enabled: true, admin: section_opts}]
+
+    defp opts(:claim_check, section_opts), do: [roles: [:claim_check], claim_check: section_opts]
+
+    defp auth_of(config, :admin), do: config.admin.auth
+    defp auth_of(config, :routes_admin), do: config.routes.admin.auth
+    defp auth_of(config, :claim_check), do: config.claim_check.auth
+
+    test "every control plane defaults to mode none with the other blocks empty" do
+      config = Config.new()
+
+      for {_key, section} <- @sections do
+        assert %{
+                 mode: :none,
+                 allow_insecure: false,
+                 tokens: [],
+                 jwt: %{
+                   issuer: nil,
+                   audience: nil,
+                   jwks_url: nil,
+                   keys: [],
+                   refresh_ms: 300_000,
+                   min_refresh_ms: 10_000,
+                   leeway_s: 30,
+                   scope_claim: "scope",
+                   tenants_claim: "ankusa_tenants"
+                 },
+                 mtls: %{subject_map: %{}}
+               } = auth_of(config, section)
+      end
+    end
+
+    test "refuses none on 0.0.0.0, for every control plane that runs" do
+      for {key, section} <- @sections, ip <- ["0.0.0.0", "::", "10.1.2.3", {0, 0, 0, 0}] do
+        message =
+          ~r/#{Regex.escape(key)}\.auth\.mode is :none but #{Regex.escape(key)}\.ip \(.*\) is not a loopback address/
+
+        assert_raise ArgumentError, message, fn ->
+          section |> opts(%{ip: ip}) |> Config.new()
+        end
+      end
+    end
+
+    test "none is accepted on loopback, in either family" do
+      for {_key, section} <- @sections,
+          ip <- ["127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1", {127, 0, 0, 1}] do
+        assert section |> opts(%{ip: ip}) |> Config.new() |> auth_of(section) |> Map.fetch!(:mode) ==
+                 :none
+      end
+    end
+
+    test "a listener this instance does not run is not held to the rule" do
+      assert Config.new(admin: %{enabled: false, ip: "0.0.0.0"}).admin.ip == "0.0.0.0"
+      assert Config.new(claim_check: %{ip: "0.0.0.0"}).claim_check.ip == "0.0.0.0"
+
+      assert Config.new(routes: %{enabled: false, admin: %{ip: "0.0.0.0"}}).routes.admin.ip ==
+               "0.0.0.0"
+
+      # Route management only runs on the edge.
+      assert Config.new(roles: [:dispatch], routes: %{enabled: true, admin: %{ip: "0.0.0.0"}}).routes.enabled
+    end
+
+    test "allow_insecure says something in front authenticates, and is the only way to keep none" do
+      for {_key, section} <- @sections do
+        config =
+          section
+          |> opts(%{ip: "0.0.0.0", auth: %{mode: :none, allow_insecure: true}})
+          |> Config.new()
+
+        assert %{mode: :none, allow_insecure: true} = auth_of(config, section)
+      end
+
+      # A client-certificate listener is still not authentication by itself.
+      assert_raise ArgumentError, ~r/admin\.auth\.mode is :none but admin\.ip/, fn ->
+        Config.new(admin: %{enabled: true, ip: "0.0.0.0", tls: mtls_tls()})
+      end
+    end
+
+    test "the authenticating modes are accepted on any address" do
+      jwt = %{issuer: "https://idp.test/", audience: "ankusa", keys: [public_jwk()]}
+
+      for {_key, section} <- @sections,
+          auth <- [
+            %{mode: :token, tokens: [token()]},
+            %{mode: :jwt, jwt: jwt},
+            %{mode: :mtls, mtls: %{subject_map: %{"cn:ops" => ["dlq:read"]}}}
+          ] do
+        tls = if auth.mode == :mtls, do: mtls_tls(), else: nil
+        config = section |> opts(%{ip: "0.0.0.0", tls: tls, auth: auth}) |> Config.new()
+        assert auth_of(config, section).mode == auth.mode
+      end
+    end
+
+    test "mtls needs a verify_peer listener and a subject map" do
+      auth = %{mode: :mtls, mtls: %{subject_map: %{"cn:ops" => ["dlq:read"]}}}
+
+      assert_raise ArgumentError,
+                   ~r/admin\.auth\.mode: :mtls needs admin\.tls with verify: :verify_peer/,
+                   fn ->
+                     Config.new(admin: %{auth: auth})
+                   end
+
+      assert_raise ArgumentError,
+                   ~r/admin\.auth\.mode: :mtls needs admin\.tls with verify: :verify_peer/,
+                   fn ->
+                     Config.new(
+                       admin: %{
+                         auth: auth,
+                         tls: mtls_tls(%{verify: :verify_none, cacertfile: nil})
+                       }
+                     )
+                   end
+
+      assert_raise ArgumentError,
+                   ~r/admin\.auth\.mtls\.subject_map must be a non-empty map/,
+                   fn ->
+                     Config.new(admin: %{auth: %{mode: :mtls}, tls: mtls_tls()})
+                   end
+
+      config = Config.new(admin: %{auth: auth, tls: mtls_tls()})
+      assert config.admin.auth.mtls.subject_map == %{"cn:ops" => ["dlq:read"]}
+    end
+
+    test "mode token needs tokens, each a unique id, a sha256 and known scopes" do
+      assert_raise ArgumentError,
+                   ~r/admin\.auth\.tokens must be a non-empty list with admin\.auth\.mode: :token/,
+                   fn ->
+                     Config.new(admin: %{auth: %{mode: :token}})
+                   end
+
+      bad = [
+        {token(%{sha256: "nothex"}),
+         ~r/admin\.auth\.tokens\[0\]\.sha256 must be the 64-character hex SHA-256/},
+        {token(%{id: ""}), ~r/admin\.auth\.tokens\[0\]\.id must be a non-empty printable string/},
+        {token(%{scopes: []}), ~r/admin\.auth\.tokens\[0\]\.scopes must be a non-empty list/},
+        {token(%{scopes: ["tenant:acme"]}),
+         ~r/must name at least one scope besides tenant scopes/},
+        {token(%{scopes: ["dlq:read", "admin:all"]}), ~r/has unknown scopes \["admin:all"\]/},
+        {Map.put(token(), :secret, "x"),
+         ~r/unknown Ankusa.Config key: admin\.auth\.tokens\[0\]\.secret/}
+      ]
+
+      for {entry, message} <- bad do
+        assert_raise ArgumentError, message, fn ->
+          Config.new(admin: %{auth: %{mode: :token, tokens: [entry]}})
+        end
+      end
+
+      assert_raise ArgumentError, ~r/admin\.auth\.tokens has two entries with the same id/, fn ->
+        Config.new(
+          admin: %{
+            auth: %{mode: :token, tokens: [token(), token(%{sha256: String.duplicate("cd", 32)})]}
+          }
+        )
+      end
+    end
+
+    test "a token's sha256 is normalised to lowercase" do
+      upper = String.upcase(@sha)
+      config = Config.new(admin: %{auth: %{mode: :token, tokens: [token(%{sha256: upper})]}})
+      assert [%{sha256: @sha}] = config.admin.auth.tokens
+    end
+
+    test "mode jwt needs an issuer, an audience and a key source" do
+      jwk = public_jwk()
+      ok = %{issuer: "https://idp.test/", audience: "ankusa", keys: [jwk]}
+
+      for {missing, message} <- [
+            {:issuer, ~r/admin\.auth\.jwt\.issuer must be set with admin\.auth\.mode: :jwt/},
+            {:audience, ~r/admin\.auth\.jwt\.audience must be set with admin\.auth\.mode: :jwt/},
+            {:keys, ~r/needs admin\.auth\.jwt\.jwks_url or admin\.auth\.jwt\.keys/}
+          ] do
+        assert_raise ArgumentError, message, fn ->
+          Config.new(admin: %{auth: %{mode: :jwt, jwt: Map.delete(ok, missing)}})
+        end
+      end
+
+      config = Config.new(admin: %{auth: %{mode: :jwt, jwt: %{ok | audience: ["a", "b"]}}})
+      assert config.admin.auth.jwt.audience == ["a", "b"]
+    end
+
+    test "the jwks_url is https, or http to a loopback host" do
+      ok = %{issuer: "https://idp.test/", audience: "ankusa"}
+
+      for url <- [
+            "https://idp.test/jwks.json",
+            "http://127.0.0.1:9/jwks",
+            "http://localhost/jwks",
+            "http://[::1]:9/jwks"
+          ] do
+        assert Config.new(admin: %{auth: %{mode: :jwt, jwt: Map.put(ok, :jwks_url, url)}}).admin.auth.jwt.jwks_url ==
+                 url
+      end
+
+      for url <- ["http://idp.test/jwks.json", "ftp://idp.test/jwks", "idp.test/jwks", 42] do
+        assert_raise ArgumentError, ~r/admin\.auth\.jwt\.jwks_url must be/, fn ->
+          Config.new(admin: %{auth: %{mode: :jwt, jwt: Map.put(ok, :jwks_url, url)}})
+        end
+      end
+    end
+
+    test "jwt keys must be public asymmetric keys, and the numeric keys are range checked" do
+      ok = %{issuer: "https://idp.test/", audience: "ankusa", keys: [public_jwk()]}
+      {_, private} = {:ec, "P-256"} |> JOSE.JWK.generate_key() |> JOSE.JWK.to_map()
+
+      assert_raise ArgumentError,
+                   ~r/admin\.auth\.jwt\.keys\[0\] must be a public RSA, EC or OKP key/,
+                   fn ->
+                     Config.new(admin: %{auth: %{mode: :jwt, jwt: %{ok | keys: [private]}}})
+                   end
+
+      for {key, value} <- [
+            refresh_ms: 999,
+            min_refresh_ms: -1,
+            leeway_s: 3_601,
+            scope_claim: "",
+            tenants_claim: 1
+          ] do
+        assert_raise ArgumentError, ~r/admin\.auth\.jwt\.#{key} must be/, fn ->
+          Config.new(admin: %{auth: %{mode: :jwt, jwt: Map.put(ok, key, value)}})
+        end
+      end
+    end
+
+    test "an unknown auth key, a bad mode or a bad flag is refused naming the key" do
+      assert_raise ArgumentError, "unknown Ankusa.Config key: admin.auth.token", fn ->
+        Config.new(admin: %{auth: %{token: "x"}})
+      end
+
+      assert_raise ArgumentError, "unknown Ankusa.Config key: claim_check.auth.jwt.secret", fn ->
+        Config.new(claim_check: %{auth: %{jwt: %{secret: "x"}}})
+      end
+
+      assert_raise ArgumentError,
+                   ~r/routes\.admin\.auth\.mode must be one of \[:jwt, :mtls, :none, :token\], got :basic/,
+                   fn ->
+                     Config.new(routes: %{admin: %{auth: %{mode: :basic}}})
+                   end
+
+      assert_raise ArgumentError, ~r/admin\.auth\.allow_insecure must be true or false/, fn ->
+        Config.new(admin: %{auth: %{allow_insecure: "yes"}})
+      end
+
+      assert_raise ArgumentError, ~r/admin\.auth must be a map or keyword list/, fn ->
+        Config.new(admin: %{auth: "jwt"})
+      end
+    end
+
+    test "an auth block may be a keyword list, like every other section" do
+      config =
+        Config.new(
+          admin: [auth: [mode: :token, tokens: [[id: "ci", sha256: @sha, scopes: ["dlq:read"]]]]]
+        )
+
+      assert [%{id: "ci", scopes: ["dlq:read"]}] = config.admin.auth.tokens
     end
   end
 end

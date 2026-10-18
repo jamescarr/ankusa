@@ -38,6 +38,9 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_CLAIM_CHECK_PORT` | `claim_check.port` |
   | `ANKUSA_ADMIN_IP` | `admin.ip` |
   | `ANKUSA_CLAIM_CHECK_IP` | `claim_check.ip` |
+  | `ANKUSA_ADMIN_TOKEN` | `admin.auth`: one bearer token holding every scope and `tenant:*` (see below) |
+  | `ANKUSA_ROUTES_ADMIN_TOKEN` | `routes.admin.auth`: one token holding `routes:read`, `routes:write`, `tenant:*` |
+  | `ANKUSA_CLAIM_CHECK_TOKEN` | `claim_check.auth`: one token holding `claims:read`, `tenant:*` |
   | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
   | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
   | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
@@ -67,10 +70,15 @@ defmodule AnkusaServer.Config do
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix)
-  @admin_keys ~w(enabled port ip gauge_interval_ms tls)
+  @admin_keys ~w(enabled port ip gauge_interval_ms tls auth)
   @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2)
   @metrics_keys ~w(enabled port ip tls)
   @tls_keys ~w(certfile keyfile cacertfile verify versions ciphers)
+  @auth_keys ~w(mode allow_insecure tokens jwt mtls)
+  @auth_modes ~w(none token jwt mtls)
+  @auth_token_keys ~w(id token sha256 scopes)
+  @auth_jwt_keys ~w(issuer audience jwks_url keys refresh_ms min_refresh_ms leeway_s scope_claim tenants_claim)
+  @auth_mtls_keys ~w(subject_map)
   @tls_verifies ~w(verify_none verify_peer)
   @tls_versions %{"tlsv1.2" => :"tlsv1.2", "tlsv1.3" => :"tlsv1.3"}
   @batcher_keys ~w(partitions max_batch max_delay_ms max_queue max_queue_bytes)
@@ -86,7 +94,7 @@ defmodule AnkusaServer.Config do
   @secrets_keys ~w(kek kek_previous)
   @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
-                       read_cache_bytes read_cache_max_entry_bytes tls)
+                       read_cache_bytes read_cache_max_entry_bytes tls auth)
   @backup_keys ~w(enabled interval_ms keep store)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
@@ -99,7 +107,7 @@ defmodule AnkusaServer.Config do
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
-  @routes_admin_keys ~w(port ip tls)
+  @routes_admin_keys ~w(port ip tls auth)
   @routes_seed_keys ~w(id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants)
   @rate_limit_keys ~w(rate burst)
@@ -296,8 +304,19 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_METRICS_IP", ["metrics", "ip"]}
   ]
 
+  # A token in the environment is how a container gets operable without a
+  # mounted config file. It replaces that listener's whole `auth` block, and is
+  # hashed when the config loads: the plaintext never reaches `Ankusa.Config`.
+  @token_overrides [
+    {"ANKUSA_ADMIN_TOKEN", ["admin"], Ankusa.Principal.scopes() ++ ["tenant:*"]},
+    {"ANKUSA_ROUTES_ADMIN_TOKEN", ["routes", "admin"],
+     ["routes:read", "routes:write", "tenant:*"]},
+    {"ANKUSA_CLAIM_CHECK_TOKEN", ["claim_check"], ["claims:read", "tenant:*"]}
+  ]
+
   defp apply_env_overrides(doc, env) do
     doc = Enum.reduce(@env_overrides, doc, &override(&2, &1, env))
+    doc = Enum.reduce(@token_overrides, doc, &token_override(&2, &1, env))
 
     # `PORT` is the fallback every container platform sets; `ANKUSA_HTTP_PORT`
     # is the explicit one and wins.
@@ -312,6 +331,24 @@ defmodule AnkusaServer.Config do
     case Map.fetch(env, var) do
       {:ok, value} -> put_path(doc, path, value)
       :error -> doc
+    end
+  end
+
+  defp token_override(doc, {var, path, scopes}, env) do
+    case Map.fetch(env, var) do
+      {:ok, ""} ->
+        raise ConfigError, message: "#{var} is set but empty"
+
+      {:ok, token} ->
+        auth = %{
+          "mode" => "token",
+          "tokens" => [%{"id" => var, "token" => token, "scopes" => scopes}]
+        }
+
+        put_path(doc, path ++ ["auth"], auth)
+
+      :error ->
+        doc
     end
   end
 
@@ -455,6 +492,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:ip, string_opt(admin, "ip", ["admin"]))
         |> put_opt(:gauge_interval_ms, int_opt(admin, "gauge_interval_ms", ["admin"]))
         |> put_opt(:tls, tls_opt(admin, ["admin"]))
+        |> put_opt(:auth, auth_opt(admin, ["admin"]))
     ]
   end
 
@@ -529,6 +567,173 @@ defmodule AnkusaServer.Config do
         value
         |> string_list!(path)
         |> Enum.map(&Map.fetch!(@tls_versions, enum!(&1, Map.keys(@tls_versions), path)))
+    end
+  end
+
+  # ── control-plane auth ──────────────────────────────────────────────────────
+
+  # A control plane's `auth` block (`Ankusa.Admin.Auth`), or nil. Core checks
+  # what has to go together: a mode needs its own block, and `mode: none` is
+  # only accepted on loopback.
+  defp auth_opt(parent, path) do
+    case parent["auth"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["auth"]
+        auth = section!(value, @auth_keys, path)
+
+        []
+        |> put_opt(:mode, atom_enum_opt(auth, "mode", @auth_modes, path))
+        |> put_opt(:allow_insecure, bool_opt(auth, "allow_insecure", path))
+        |> put_opt(:tokens, auth_tokens(auth, path))
+        |> put_opt(:jwt, auth_jwt(auth, path))
+        |> put_opt(:mtls, auth_mtls(auth, path))
+    end
+  end
+
+  defp auth_tokens(auth, path) do
+    case auth["tokens"] do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        list
+        |> Enum.with_index()
+        |> Enum.map(fn {entry, index} -> auth_token!(entry, path ++ ["tokens", index]) end)
+
+      other ->
+        raise ConfigError,
+          message: type_error(path ++ ["tokens"], "a list of token entries", other)
+    end
+  end
+
+  # A token is given as itself (`token: ${CI_TOKEN}`), hashed here, or as the
+  # hash of one (`sha256:`): the plaintext never reaches `Ankusa.Config`.
+  defp auth_token!(entry, path) do
+    token = section!(entry, @auth_token_keys, path)
+
+    sha256 =
+      case {token["token"], token["sha256"]} do
+        {nil, nil} ->
+          raise ConfigError, message: "#{render_path(path)}: needs token or sha256"
+
+        {plain, nil} ->
+          plain = expect_string(plain, path ++ ["token"])
+
+          if plain == "",
+            do:
+              raise(ConfigError, message: "#{render_path(path ++ ["token"])}: must not be empty")
+
+          Ankusa.Admin.Auth.Token.hash(plain)
+
+        {nil, hex} ->
+          expect_string(hex, path ++ ["sha256"])
+
+        {_plain, _hex} ->
+          raise ConfigError,
+            message: "#{render_path(path)}: token and sha256 are alternatives; give one"
+      end
+
+    scopes =
+      case token["scopes"] do
+        nil -> raise ConfigError, message: "#{render_path(path)}: missing required key \"scopes\""
+        value -> string_list!(value, path ++ ["scopes"])
+      end
+
+    %{id: required_string!(token, "id", path), sha256: sha256, scopes: scopes}
+  end
+
+  defp auth_jwt(auth, path) do
+    case auth["jwt"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["jwt"]
+        jwt = section!(value, @auth_jwt_keys, path)
+
+        []
+        |> put_opt(:issuer, string_opt(jwt, "issuer", path))
+        |> put_opt(:audience, jwt_audience(jwt, path))
+        |> put_opt(:jwks_url, string_opt(jwt, "jwks_url", path))
+        |> put_opt(:keys, jwt_keys(jwt, path))
+        |> put_opt(:refresh_ms, int_opt(jwt, "refresh_ms", path))
+        |> put_opt(:min_refresh_ms, int_opt(jwt, "min_refresh_ms", path))
+        |> put_opt(:leeway_s, int_opt(jwt, "leeway_s", path))
+        |> put_opt(:scope_claim, string_opt(jwt, "scope_claim", path))
+        |> put_opt(:tenants_claim, string_opt(jwt, "tenants_claim", path))
+    end
+  end
+
+  # One audience, or several (a token carrying any of them is accepted).
+  defp jwt_audience(jwt, path) do
+    case jwt["audience"] do
+      nil ->
+        nil
+
+      audience when is_binary(audience) ->
+        audience
+
+      list when is_list(list) ->
+        string_list!(list, path ++ ["audience"])
+
+      other ->
+        raise ConfigError, message: type_error(path ++ ["audience"], "a string or a list", other)
+    end
+  end
+
+  # Public keys: JWK mappings, or PEM strings. Core checks each one.
+  defp jwt_keys(jwt, path) do
+    case jwt["keys"] do
+      nil ->
+        nil
+
+      list when is_list(list) ->
+        list
+        |> Enum.with_index()
+        |> Enum.map(fn
+          {key, _index} when is_map(key) or is_binary(key) ->
+            key
+
+          {other, index} ->
+            raise ConfigError,
+              message: type_error(path ++ ["keys", index], "a JWK mapping or a PEM string", other)
+        end)
+
+      other ->
+        raise ConfigError, message: type_error(path ++ ["keys"], "a list of keys", other)
+    end
+  end
+
+  # `subject_map` keys name a certificate identity: `cn:<name>`, `dns:<name>`,
+  # `email:<address>`, `uri:<uri>` or `ip:<address>` (quote them in YAML).
+  defp auth_mtls(auth, path) do
+    case auth["mtls"] do
+      nil ->
+        nil
+
+      value ->
+        path = path ++ ["mtls"]
+        mtls = section!(value, @auth_mtls_keys, path)
+
+        case mtls["subject_map"] do
+          nil ->
+            []
+
+          map when is_map(map) ->
+            [
+              subject_map:
+                Map.new(map, fn {subject, scopes} ->
+                  {to_string(subject),
+                   string_list!(scopes, path ++ ["subject_map", to_string(subject)])}
+                end)
+            ]
+
+          other ->
+            raise ConfigError, message: type_error(path ++ ["subject_map"], "a mapping", other)
+        end
     end
   end
 
@@ -741,6 +946,7 @@ defmodule AnkusaServer.Config do
           int_opt(claim_check, "read_cache_max_entry_bytes", path)
         )
         |> put_opt(:tls, tls_opt(claim_check, path))
+        |> put_opt(:auth, auth_opt(claim_check, path))
     ]
   end
 
@@ -912,6 +1118,7 @@ defmodule AnkusaServer.Config do
     |> put_opt(:port, int_opt(admin, "port", path))
     |> put_opt(:ip, string_opt(admin, "ip", path))
     |> put_opt(:tls, tls_opt(admin, path))
+    |> put_opt(:auth, auth_opt(admin, path))
   end
 
   defp routes_ip_rules(routes, path) do

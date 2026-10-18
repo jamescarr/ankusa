@@ -10,11 +10,15 @@ admin:
   enabled: true
   port: 4002
   ip: 0.0.0.0
+  # Demo: published on 127.0.0.1 only. Real deployments set auth.mode.
+  auth: {mode: none, allow_insecure: true}
 
 claim_check:
   port: 4001
   # the worker calls http://ankusa:4001
   ip: 0.0.0.0
+  # Demo: the compose network is the boundary. Real deployments set auth.mode.
+  auth: {mode: none, allow_insecure: true}
 
 # Short on purpose, so a missing stream dead-letters in seconds, not minutes:
 # 6 attempts over roughly 8-15s. The default is 84 attempts, backing off to 5 min (about 6 hours).

@@ -11,16 +11,22 @@ services:
       # Ingest. Safe to publish: providers authenticate with their own
       # signatures (that is what a verifier is for).
       - "4000:4000"
-      # Admin API and /metrics — unauthenticated by design. Bound to loopback so
-      # it is reachable from this host (curl, a Prometheus on the same box) and
-      # from nowhere else. To read it remotely, front it with your own proxy;
-      # compose/docker-compose.proxy.yml shows nginx basic auth doing exactly
-      # that.
+      # Admin API and /metrics — authenticated with the bearer token below
+      # (`Authorization: Bearer $ANKUSA_ADMIN_TOKEN`). Bound to loopback so it
+      # is reachable from this host (curl, a Prometheus on the same box) and
+      # from nowhere else. To let people in remotely, give them their own
+      # credentials (`admin.auth` with `mode: jwt` or `mtls`, see
+      # docs/configuration.md) or front it with a proxy;
+      # compose/docker-compose.proxy.yml shows nginx basic auth doing that.
       - "127.0.0.1:4002:4002"
     environment:
       # The published loopback port reaches the container's interface, not its
       # loopback, so the admin API has to listen on every interface in here.
       ANKUSA_ADMIN_IP: "0.0.0.0"
+      # One bearer token holding every admin scope. Generate it once:
+      #   export ANKUSA_ADMIN_TOKEN=$(openssl rand -hex 32)
+      # Only its SHA-256 is kept in the node's config.
+      ANKUSA_ADMIN_TOKEN: "${ANKUSA_ADMIN_TOKEN:?export ANKUSA_ADMIN_TOKEN first (openssl rand -hex 32)}"
       # Secrets are injected, never baked: mount ${VAR}s in the config file and
       # pass the values here.
       #   STRIPE_WHSEC: ${STRIPE_WHSEC}
