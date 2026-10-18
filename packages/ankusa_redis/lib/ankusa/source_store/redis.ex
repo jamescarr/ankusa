@@ -118,8 +118,10 @@ defmodule Ankusa.SourceStore.Redis do
   @impl Ankusa.SourceStore
   defdelegate list_tenant(instance, tenant), to: Table
 
-  # Whether the mirror has been loaded from Redis (it carries the version it was
-  # built from): what `Ankusa.Lifecycle.reconcile/2` waits for.
+  @doc """
+  Whether the mirror has been loaded from Redis (it carries the version it was
+  built from): what `Ankusa.Lifecycle.reconcile/2` waits for.
+  """
   @impl Ankusa.SourceStore
   def ready?(instance) do
     :ets.lookup(Table.table(instance), :meta) != []
