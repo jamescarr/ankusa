@@ -254,6 +254,7 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         dedupe_key: received.dedupeKey,
         replay_id: received.replayId,
         idempotency_key: received.idempotencyKey,
+        verification: received.verification,
       };
     }
     case "parse_headers": {
@@ -266,6 +267,7 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         dedupe_key: parsed.dedupeKey,
         replay_id: parsed.replayId,
         idempotency_key: parsed.idempotencyKey,
+        verification: parsed.verification,
       };
     }
     case "decode_message": {
