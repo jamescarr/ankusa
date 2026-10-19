@@ -36,7 +36,7 @@ defmodule Ankusa.Metrics do
   anything else becomes `:other`. `:outcome` on ingest is already one of a fixed set
   (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
   `:tenant_overload`, `:quarantine_rate_limited`, `:dedupe_pending`, `:quarantine_full`,
-  `:overload` or `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
+  `:overload`, `:tenant_limit` or `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
   `:source_id` is bounded because it is only ever a configured source's id: a
   request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
@@ -321,7 +321,7 @@ defmodule Ankusa.Metrics do
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
       )
-    ] ++ gauges(own) ++ read_gauges(own)
+    ] ++ gauges(own) ++ read_gauges(own) ++ tenant_gauges(own)
   end
 
   # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue
@@ -338,6 +338,7 @@ defmodule Ankusa.Metrics do
           {"ankusa.queue.inflight", [:ankusa, :queue, :state], :inflight, :unit},
           {"ankusa.queue.dead", [:ankusa, :queue, :state], :dead, :unit},
           {"ankusa.queue.archive_pending", [:ankusa, :queue, :state], :archive_pending, :unit},
+          {"ankusa.tenants", [:ankusa, :queue, :state], :tenants, :unit},
           {"ankusa.queue.oldest_due_age.seconds", [:ankusa, :queue, :state],
            &oldest_due_age_seconds/1, :second},
           {"ankusa.quarantine.bytes", [:ankusa, :quarantine, :state], :bytes, :byte},
@@ -349,6 +350,8 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
+          {"ankusa.dispatch.active_tenants", [:ankusa, :dispatch, :state], :active_tenants,
+           :unit},
           {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}
         ] do
       last_value(
@@ -356,6 +359,24 @@ defmodule Ankusa.Metrics do
         scoped(own, event_name: event, measurement: measurement, unit: unit, tags: [:instance])
       )
     end
+  end
+
+  # The tenants with the most first-attempt rows waiting (`Ankusa.Metrics.Gauges`
+  # reports the top 100 from the queue counters). A tenant that leaves the top is
+  # reported once as 0. Every tenant that ever entered it keeps a series until
+  # the cardinality policy (`metrics.max_series_per_metric`, TEN-7) bounds them.
+  defp tenant_gauges(own) do
+    [
+      last_value(
+        "ankusa.tenant.pending",
+        scoped(own,
+          event_name: [:ankusa, :tenant, :state],
+          measurement: :pending,
+          unit: :unit,
+          tags: [:instance, :tenant]
+        )
+      )
+    ]
   end
 
   # The gateway reader's per-store state, every second. Tagged by store too,

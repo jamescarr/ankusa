@@ -188,9 +188,8 @@ defmodule Ankusa.DispatchTest do
         inst,
         [
           {:put, :hooks, Keys.hook(seq), bin},
-          {:put, :deliveries, Keys.delivery(seq, 0), row},
-          {:put, :index, Keys.due(at, seq, 0), <<byte_size(bin)::32>>}
-        ],
+          {:put, :deliveries, Keys.delivery(seq, 0), row}
+        ] ++ due_index_ops(inst, seq, 0, at, byte_size(bin), env.tenant_id || "default"),
         sync: true
       )
   end
@@ -228,12 +227,21 @@ defmodule Ankusa.DispatchTest do
     assert stored_ids(inst) == []
   end
 
-  # Dispatch scans from just under the last due time it claimed, not from the
-  # start of time. A commit is stamped before its fsync and visible after it, so
-  # a stalled commit can land beneath that floor: its wake carries the stamp so
-  # the scan goes back for it.
+  # Dispatch scans a tenant from just under the last due time it claimed for it,
+  # not from the start of time. A commit is stamped before its fsync and visible
+  # after it, so a stalled commit can land beneath that cursor: its wake carries
+  # the stamp so the scan goes back for it. (A tenant that drains loses its
+  # cursor, so the tenant here keeps a row due in an hour.)
   test "a row that became visible below the scan floor is delivered when its wake arrives" do
     inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
+
+    write_pending!(
+      inst,
+      999_999,
+      build_env("src1"),
+      TagSink,
+      System.system_time(:millisecond) + 3_600_000
+    )
 
     # Deliver one hook, so the scan floor climbs to just under its due time.
     first = enqueue!(inst, build_env("src1")).id
@@ -253,6 +261,61 @@ defmodule Ankusa.DispatchTest do
     late_id = late.id
     assert {:ok, _} = Pipeline.tick(inst)
     assert_receive {:delivered, :a, ^late_id}
+  end
+
+  # ADR 0001 §5: a tick walks the active-tenant index, not every tenant. 1 000
+  # tenants have a row, 997 of them not due for an hour: only the 3 with work
+  # due are visited, and `[:dispatch, :state]` says so. The 3 are written last
+  # and come due together, so no scan can see them one at a time.
+  test "a tick visits only tenants with work" do
+    inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
+    far = System.system_time(:millisecond) + 3_600_000
+
+    for n <- 4..1_000 do
+      env = %{build_env("src1") | tenant_id: "tenant-#{n}"}
+      write_pending!(inst, 10_000 + n, env, TagSink, far)
+    end
+
+    due_at = System.system_time(:millisecond) + 300
+
+    ids =
+      for n <- 1..3 do
+        env = %{build_env("src1") | tenant_id: "tenant-#{n}"}
+        write_pending!(inst, 10_000 + n, env, TagSink, due_at)
+        env.id
+      end
+
+    handler = "visits-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:ankusa, :dispatch, :state],
+        &__MODULE__.forward_state/4,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    Process.sleep(max(due_at - System.system_time(:millisecond), 0) + 50)
+    assert {:ok, _settled} = Pipeline.tick(inst)
+    for id <- ids, do: assert_receive({:delivered, :a, ^id}, 5_000)
+
+    assert await_active_tenants() == 3
+  end
+
+  @doc false
+  def forward_state(_event, measurements, _meta, pid),
+    do: send(pid, {:dispatch_state, measurements})
+
+  # The first non-zero `active_tenants` the housekeeping tick reports.
+  defp await_active_tenants do
+    receive do
+      {:dispatch_state, %{active_tenants: 0}} -> await_active_tenants()
+      {:dispatch_state, %{active_tenants: n}} -> n
+    after
+      5_000 -> flunk("dispatch reported no visited tenants")
+    end
   end
 
   # Outcomes are written in batches, and the capacity they free is claimed when
@@ -688,9 +751,8 @@ defmodule Ankusa.DispatchTest do
         inst,
         [
           {:put, :hooks, Keys.hook(seq), hook_bin},
-          {:put, :deliveries, Keys.delivery(seq, 0), row_bin},
-          {:put, :index, Keys.due(at, seq, 0), <<byte_size(hook_bin)::32>>}
-        ],
+          {:put, :deliveries, Keys.delivery(seq, 0), row_bin}
+        ] ++ due_index_ops(inst, seq, 0, at, byte_size(hook_bin)),
         sync: true
       )
   end

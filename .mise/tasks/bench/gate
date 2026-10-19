@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Perf regression gate: core_bench matrix vs packages/ankusa/bench/baseline.json (p99 > 1.2x or ingest/s < 0.8x fails)"
+#MISE description="Perf regression gate: core_bench matrix vs packages/ankusa/bench/baseline.json (p99 > 1.2x or ingest/s < 0.8x fails), plus the self-asserting tenant benches"
 set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT/packages/ankusa"
@@ -11,6 +11,18 @@ cd "$ROOT/packages/ankusa"
 export MIX_ENV=test
 mix deps.get --check-locked
 mix compile
+
+# The tenant benches assert their own flatness (ADR 0001): the gauge tick and
+# the dispatch scan must cost the same at 10^3 and 10^6 queued rows and at 10 and
+# 10^5 tenants. They have no baseline entry. A rebaseline run measures the base
+# commit's sources, which have neither the tenant layout nor these benches'
+# APIs, so it skips them.
+if [ "${BENCH_REBASELINE:-}" != 1 ] && [ "${BENCH_REBASELINE:-}" != true ]; then
+  for bench in gauges_bench dispatch_tick_bench; do
+    echo "==> bench/$bench.exs"
+    MIX_ENV=test mix run "bench/$bench.exs"
+  done
+fi
 unset MIX_ENV
 
 exec elixir bench/gate.exs

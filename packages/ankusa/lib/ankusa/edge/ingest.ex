@@ -66,6 +66,7 @@ defmodule Ankusa.Edge.Ingest do
           | {:error,
              :unknown_source
              | :overload
+             | :tenant_limit
              | :store_unavailable
              | :quarantine_full
              | {:invalid_header, String.t() | nil}
@@ -431,6 +432,7 @@ defmodule Ankusa.Edge.Ingest do
         {:committed, committed} -> {:ok, committed}
         {:duplicate, duplicate} -> {:duplicate, duplicate}
         {:error, :overload} -> {:error, :overload}
+        {:error, :tenant_limit} -> {:error, :tenant_limit}
         {:error, {:tenant_overload, _ms}} = refused -> tenant_overload(instance, env, refused)
         {:error, :store_unavailable} -> {:error, :store_unavailable}
       end

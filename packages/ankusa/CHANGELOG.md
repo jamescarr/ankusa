@@ -38,6 +38,36 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `breaker_min_calls`, `breaker_failure_rate`, `breaker_open_ms`),
   `dedupe.scope`, `rate_limits.scope`; `RateLimiter.fleet_charges/3`. Tests:
   `edge_fleet_test.exs`, `config_test.exs`.
+- **Tenant key layout, per-tenant counters and the active-tenant index
+  (TEN-1.b, [ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)).** Store
+  format 3. Every tenant gets a dense ordinal (`tenants` column family, assigned
+  once at its first committed hook, never reused); due, claimed and dead rows
+  lead their keys with it (`?D`, `?F`, `?X` beside the global `?x`), so one
+  tenant's rows are one contiguous range. Six counters per tenant and for the
+  node (`pending`, `scheduled`, `inflight`, `dead`, `bytes`, `archive_pending`;
+  `pending` is now first-attempt rows and `scheduled` retry rows, their sum
+  unchanged) live in a `counters` column family written only as
+  `erlang_merge_operator` `int_add` operands in the same synced batch as the
+  transition, so counts and rows agree after a `kill -9`. An active-tenant index
+  (`?A`, one marker per tenant per second with a due row, cleaned by
+  delete-then-verify) makes a dispatch scan cost the tenants with work due, not
+  all tenants; the scan keeps a cursor per tenant. New: `Queue.pending_for_tenant/2`
+  and `dead_for_tenant/2` (constant time), `Queue.purge_tenant/3` (synced chunks
+  of 500 rows, resumable by calling it again), `tenants.max` (default 1 000 000;
+  a hook of a tenant past it is `503 tenant_limit` with `Retry-After: 300`), the
+  series `ankusa_tenants`, `ankusa_dispatch_active_tenants` and
+  `ankusa_tenant_pending{tenant}` (the 100 tenants with the most pending). The
+  queue gauges read counters instead of folding the index, so a gauge tick costs
+  the same at 10³ and 10⁶ queued rows and at 10 and 10⁵ tenants
+  (`bench/gauges_bench.exs`, `bench/dispatch_tick_bench.exs`, run by `mise run
+  bench:gate`); a tenant-limited `GET /v1/dlq` is one range scan of that tenant's
+  rows instead of a hook read per dead row. The v2 → v3 migration re-keys the
+  rows in bounded, resumable batches and seeds the counters from them; a release
+  that writes format 2 refuses a format 3 store, so rolling back past this
+  release needs a backup taken before the upgrade
+  ([Upgrading between releases](../../docs/deployment.md#upgrading-between-releases)).
+  `mix ankusa.store.fixture` writes the new layout (`store-v3.tar.zst`).
+
 - **Admission at the edge: per tenant, per source, per address, per node
   (TEN-2).** `rate_limits` gains `per_ip` and `node` (`%{rate, burst}`, hooks
   per second per client address and for the whole node; off by default) and

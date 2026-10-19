@@ -129,58 +129,113 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
     end
   end
 
+  # Two lives of one instance. The first delivers: hooks of the default tenant
+  # and of `acme` wait out a retry, `doomed` ones (of the default tenant and of
+  # `deadonly`, a tenant with nothing else) are dead-lettered, and the archived
+  # ones are compacted. The second runs no dispatch, so what it ingests stays
+  # pending with its archive obligation, and one row is claimed and left, as a
+  # crash leaves it.
   defp seed(config) do
     inst = config.instance
     {:ok, sup} = Ankusa.Instance.start_link(config)
 
+    delivered =
+      try do
+        seed_delivered(inst)
+      after
+        Supervisor.stop(sup)
+      end
+
+    {:ok, sup} = Ankusa.Instance.start_link(%{config | roles: [:edge, :storage]})
+
     try do
-      demo = for n <- 1..5, do: ingest!(inst, "demo", "demo-#{n}", [{"x-event-id", "evt-#{n}"}])
-      dup = Ingest.ingest(inst, request("demo", "demo-1", [{"x-event-id", "evt-1"}]))
-      {:duplicate, %Envelope{id: original}} = dup
-      original == hd(demo) or Mix.raise("the dedupe key did not collapse onto its first hook")
-
-      doomed = for n <- 1..3, do: ingest!(inst, "doomed", "doomed-#{n}", [])
-      archived = for n <- 1..4, do: ingest!(inst, "archived", "archived-#{n}", [])
-
-      {:ok, _settled} = Pipeline.tick(inst)
-      {:ok, segments} = Compactor.tick(inst)
-      segments >= 1 or Mix.raise("nothing was archived")
-
-      quarantined = for n <- 1..2, do: quarantine!(inst, "q-#{n}")
-      for name <- ["billing", "crm"], do: put_source!(inst, "acme", name)
-
-      {:ok, _updated} =
-        SourceStore.put(inst, "acme", "crm", %{"sinks" => [%{"type" => "log"}]}, :update)
-
-      {:ok, _limit} =
-        Ankusa.Edge.RateLimiter.put_override(inst, "acme", %{"rate" => 5, "burst" => 10})
-
-      {:ok, %{entries: trail}} = Audit.list(inst, limit: 1000)
-
-      {:ok, version} = Store.get(inst, :default, Keys.format_version())
-      {:ok, hooks} = Queue.hooks(inst, 0, 100_000)
-      stored = Enum.map(hooks, & &1.id)
-      Enum.all?(archived, &(&1 not in stored)) or Mix.raise("an archived hook was not reclaimed")
-
-      %{
-        "format_version" => String.to_integer(version),
-        "hook_ids" => stored,
-        "pending_ids" => demo,
-        "dead_ids" => doomed,
-        "archived_ids" => demo ++ doomed ++ archived,
-        "quarantine_ids" => quarantined,
-        "sources" => [["acme", "billing"], ["acme", "crm"]],
-        "revisions" => %{"acme.billing" => 1, "acme.crm" => 2},
-        "audit" => trail |> Enum.reverse() |> Enum.map(&[&1.action, &1.resource]),
-        "dedupe" => for({id, n} <- Enum.with_index(demo, 1), do: ["demo", "evt-#{n}", id]),
-        "segments" => segments
-      }
+      seed_waiting(inst, delivered)
     after
       Supervisor.stop(sup)
     end
   end
 
-  defp request(source_id, body, headers) do
+  defp seed_delivered(inst) do
+    demo = for n <- 1..5, do: ingest!(inst, "demo", "demo-#{n}", [{"x-event-id", "evt-#{n}"}])
+    dup = Ingest.ingest(inst, request("demo", "demo-1", [{"x-event-id", "evt-1"}]))
+    {:duplicate, %Envelope{id: original}} = dup
+    original == hd(demo) or Mix.raise("the dedupe key did not collapse onto its first hook")
+
+    acme =
+      for n <- 1..2, do: ingest!(inst, "demo", "acme-#{n}", [{"x-event-id", "acme-#{n}"}], "acme")
+
+    doomed = for n <- 1..3, do: ingest!(inst, "doomed", "doomed-#{n}", [])
+    dead_only = for n <- 1..2, do: ingest!(inst, "doomed", "deadonly-#{n}", [], "deadonly")
+    archived = for n <- 1..4, do: ingest!(inst, "archived", "archived-#{n}", [])
+    acme_archived = [ingest!(inst, "archived", "acme-archived", [], "acme")]
+
+    {:ok, _settled} = Pipeline.tick(inst)
+    {:ok, segments} = Compactor.tick(inst)
+    segments >= 1 or Mix.raise("nothing was archived")
+
+    quarantined = for n <- 1..2, do: quarantine!(inst, "q-#{n}")
+    for name <- ["billing", "crm"], do: put_source!(inst, "acme", name)
+
+    {:ok, _updated} =
+      SourceStore.put(inst, "acme", "crm", %{"sinks" => [%{"type" => "log"}]}, :update)
+
+    {:ok, _limit} =
+      Ankusa.Edge.RateLimiter.put_override(inst, "acme", %{"rate" => 5, "burst" => 10})
+
+    {:ok, %{entries: trail}} = Audit.list(inst, limit: 1000)
+
+    %{
+      demo: demo,
+      acme: acme,
+      doomed: doomed ++ dead_only,
+      archived: demo ++ acme ++ doomed ++ dead_only ++ archived ++ acme_archived,
+      reclaimed: archived ++ acme_archived,
+      quarantined: quarantined,
+      trail: trail,
+      segments: segments
+    }
+  end
+
+  defp seed_waiting(inst, delivered) do
+    now = System.system_time(:millisecond)
+
+    waiting =
+      for tenant <- ["acme", "globex"], n <- 1..2 do
+        ingest!(inst, "demo", "waiting-#{tenant}-#{n}", [], tenant)
+      end
+
+    {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "acme")
+
+    {:ok, [due | _]} =
+      Ankusa.Queue.Deliveries.due_for_tenant(inst, ord, now + 60_000, 0, 1, 1_000_000)
+
+    :ok = Ankusa.Queue.Deliveries.claim(inst, [due])
+
+    {:ok, version} = Store.get(inst, :default, Keys.format_version())
+    {:ok, hooks} = Queue.hooks(inst, 0, 100_000)
+    stored = Enum.map(hooks, & &1.id)
+
+    Enum.all?(delivered.reclaimed, &(&1 not in stored)) or
+      Mix.raise("an archived hook was not reclaimed")
+
+    %{
+      "format_version" => String.to_integer(version),
+      "hook_ids" => stored,
+      "pending_ids" => delivered.demo ++ delivered.acme ++ waiting,
+      "dead_ids" => delivered.doomed,
+      "archived_ids" => delivered.archived,
+      "quarantine_ids" => delivered.quarantined,
+      "sources" => [["acme", "billing"], ["acme", "crm"]],
+      "revisions" => %{"acme.billing" => 1, "acme.crm" => 2},
+      "audit" => delivered.trail |> Enum.reverse() |> Enum.map(&[&1.action, &1.resource]),
+      "dedupe" =>
+        for({id, n} <- Enum.with_index(delivered.demo, 1), do: ["demo", "evt-#{n}", id]),
+      "segments" => delivered.segments,
+      "tenants" => ["default", "acme", "globex", "deadonly"]
+    }
+  end
+
+  defp request(source_id, body, headers, tenant \\ nil) do
     %{
       source_id: source_id,
       method: "POST",
@@ -188,10 +243,11 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
       headers: headers,
       body: body
     }
+    |> then(&if(tenant, do: Map.put(&1, :tenant_id, tenant), else: &1))
   end
 
-  defp ingest!(inst, source_id, body, headers) do
-    {:ok, %Envelope{id: id}} = Ingest.ingest(inst, request(source_id, body, headers))
+  defp ingest!(inst, source_id, body, headers, tenant \\ nil) do
+    {:ok, %Envelope{id: id}} = Ingest.ingest(inst, request(source_id, body, headers, tenant))
     id
   end
 

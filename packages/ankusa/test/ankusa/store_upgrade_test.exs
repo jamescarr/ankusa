@@ -132,9 +132,9 @@ defmodule Ankusa.StoreUpgradeTest do
       assert Store.get(inst, :default, Keys.format_version()) == {:ok, "1"}
       stop_supervised!({Store, inst})
 
-      # This release's registry takes it to format 2.
+      # This release's registry takes it to format 3.
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "2"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "3"}
     end
 
     test "format 1 sources become revision 1, and a replayed step keeps a revision it set" do
@@ -158,16 +158,16 @@ defmodule Ankusa.StoreUpgradeTest do
     test "refuses newer format, naming both versions" do
       inst = open_store()
       config = Ankusa.config(inst)
-      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "3"}], sync: true)
+      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "4"}], sync: true)
       stop_supervised!({Store, inst})
 
       assert {:error, error} = start_supervised({Store, instance: inst})
-      assert {:store_format_newer, 3, 2} = find(error, &match?({:store_format_newer, _, _}, &1))
+      assert {:store_format_newer, 4, 3} = find(error, &match?({:store_format_newer, _, _}, &1))
 
       # The same refusal from the tasks an operator runs.
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
 
-      assert_raise Mix.Error, ~r/format 3 is newer than 2/, fn ->
+      assert_raise Mix.Error, ~r/format 4 is newer than 3/, fn ->
         MigrateTask.run(["--dry-run" | args])
       end
 
@@ -175,9 +175,10 @@ defmodule Ankusa.StoreUpgradeTest do
         MigrateTask.run(args)
       end
 
-      # A release whose registry reaches format 3 opens it as it is.
-      start_supervised!({Store, instance: inst, migrations: [{1, 2, Rewrite}, {2, 3, Rewrite}]})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "3"}
+      # A release whose registry reaches format 4 opens it as it is.
+      migrations = [{1, 2, Rewrite}, {2, 3, Rewrite}, {3, 4, Rewrite}]
+      start_supervised!({Store, instance: inst, migrations: migrations})
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "4"}
     end
 
     test "a format version that is not a number refuses to open" do
@@ -251,26 +252,364 @@ defmodule Ankusa.StoreUpgradeTest do
                {:ok,
                 %{
                   found: 1,
-                  current: 2,
-                  pending: [{1, 2, Ankusa.Store.Migrations.AuditTrail}],
+                  current: 3,
+                  pending: [
+                    {1, 2, Ankusa.Store.Migrations.AuditTrail},
+                    {2, 3, Ankusa.Store.Migrations.TenantKeys}
+                  ],
                   resume: nil
                 }}
 
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
       MigrateTask.run(["--dry-run" | args])
       assert_received {:mix_shell, :info, ["store: " <> _]}
-      assert_received {:mix_shell, :info, ["format: 1 (this release: 2)"]}
+      assert_received {:mix_shell, :info, ["format: 1 (this release: 3)"]}
       assert_received {:mix_shell, :info, ["  1 -> 2: " <> _]}
+
+      assert_received {:mix_shell, :info,
+                       ["  2 -> 3: re-key due/inflight/dead by tenant ordinal" <> _]}
 
       MigrateTask.run(args)
       assert_received {:mix_shell, :info, [line]}
-      assert line =~ "is at format 2"
+      assert line =~ "is at format 3"
 
       empty = Path.join(config.data_dir, "nowhere")
       assert Migrate.plan(empty) == {:error, :no_store}
       MigrateTask.run(["--dry-run", "--data-dir", empty, "--instance", "x"])
       assert_received {:mix_shell, :info, ["no store there yet: nothing to migrate"]}
     end
+  end
+
+  alias Ankusa.Queue.{Deliveries, Tenants}
+  alias Ankusa.Store.Migrations.AuditTrail
+
+  # Fails on its `crash_after`-th step call, otherwise is `TenantKeys`.
+  defmodule CrashingTenantKeys do
+    @moduledoc false
+    @behaviour Ankusa.Store.Migration
+
+    @impl true
+    def describe, do: "TenantKeys, killable"
+
+    @impl true
+    def step(instance, cursor) do
+      calls = :persistent_term.get({__MODULE__, :calls}, 0)
+
+      if :persistent_term.get({__MODULE__, :crash_after}, :never) == calls,
+        do: raise("killed mid-migration")
+
+      :persistent_term.put({__MODULE__, :calls}, calls + 1)
+      Ankusa.Store.Migrations.TenantKeys.step(instance, cursor)
+    end
+  end
+
+  # Store format 2 -> 3: tenant ordinals, re-keyed due/inflight rows, the
+  # by-tenant dead index and the counters seeded from what the rows say.
+  describe "the tenant keys migration (format 2 -> 3)" do
+    setup do
+      on_exit(fn ->
+        :persistent_term.erase({CrashingTenantKeys, :calls})
+        :persistent_term.erase({CrashingTenantKeys, :crash_after})
+      end)
+    end
+
+    test "v2 fixture upgrades to v3 with counters equal to a fold" do
+      {config, manifest} = unpack_fixture(Path.join(@fixtures, "store-v2.tar.zst"))
+      inst = config.instance
+      assert manifest["format_version"] == 2
+
+      start_supervised!({Store, instance: inst})
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "3"}
+
+      # The fixture holds the default tenant only: its retry rows and its dead
+      # rows, whichever side of the migration's clock the retries fell on.
+      assert {:ok, 1} = Tenants.ord(inst, "default")
+      assert {:ok, 1} = Tenants.count(inst)
+
+      assert {:ok, %{pending: pending, scheduled: scheduled}} =
+               Queue.pending_for_tenant(inst, "default")
+
+      assert pending + scheduled == length(manifest["pending_ids"])
+      assert {:ok, %{dead: dead}} = Queue.dead_for_tenant(inst, "default")
+      assert dead == length(manifest["dead_ids"])
+
+      assert stored_counters(inst) == folded_counters(inst)
+      assert Map.keys(stored_counters(inst)) == [0, 1]
+    end
+
+    test "tenant migration allocates each ordinal once" do
+      inst = seeded_v2_store()
+      start_supervised!({Store, instance: inst})
+
+      assert {:ok, 4} = Tenants.count(inst)
+      assert {:ok, 5} = Tenants.next_ord(inst)
+      names = for ord <- 1..4, do: elem(Tenants.name(inst, ord), 1)
+      assert Enum.sort(names) == ["acme", "deadonly", "default", "globex"]
+
+      for {name, ord} <- Enum.with_index(names, 1),
+          do: assert({:ok, ^ord} = Tenants.ord(inst, name))
+    end
+
+    test "a hook with no tenant or no envelope files under default" do
+      inst = seeded_v2_store()
+      start_supervised!({Store, instance: inst})
+
+      # Seq 6 has no tenant, 7 holds bytes that are no envelope, 8 has no hook.
+      assert {:ok, default} = Tenants.ord(inst, "default")
+
+      assert for(
+               {{ord, _at, seq, _sink}, _size, _kind} <- fold_rows(inst, :due),
+               seq in [6, 7, 8],
+               do: ord
+             ) ==
+               [default, default, default]
+
+      assert {:ok, %{pending: 3}} = Queue.pending_for_tenant(inst, "default")
+      assert stored_counters(inst) == folded_counters(inst)
+    end
+
+    test "resumes interrupted tenant migration without double counting" do
+      migrations = [{1, 2, AuditTrail}, {2, 3, CrashingTenantKeys}]
+
+      # An uninterrupted run is the reference, and counts its own steps.
+      reference = seeded_v2_store(1_200)
+      start_supervised!({Store, instance: reference, migrations: migrations}, id: :reference)
+      steps = :persistent_term.get({CrashingTenantKeys, :calls})
+      assert steps >= 7
+      expected = snapshot(reference)
+      assert stored_counters(reference) == folded_counters(reference)
+      stop_supervised!(:reference)
+
+      # Killed before step k, for every k: the next boot finishes the job and
+      # lands on the same rows and the same counts.
+      for k <- 0..(steps - 1) do
+        inst = seeded_v2_store(1_200)
+        :persistent_term.put({CrashingTenantKeys, :calls}, 0)
+        :persistent_term.put({CrashingTenantKeys, :crash_after}, k)
+
+        assert {:error, error} = start_supervised({Store, instance: inst, migrations: migrations})
+
+        assert {:store_migration_failed, 3, _} =
+                 find(error, &match?({:store_migration_failed, _, _}, &1))
+
+        :persistent_term.erase({CrashingTenantKeys, :crash_after})
+        start_supervised!({Store, instance: inst, migrations: migrations}, id: {:resumed, k})
+
+        assert Store.get(inst, :default, Keys.format_version()) == {:ok, "3"}
+        assert snapshot(inst) == expected, "killed before step #{k}"
+        stop_supervised!({:resumed, k})
+      end
+    end
+
+    test "a format 2 release refuses a format 3 store" do
+      inst = seeded_v2_store()
+      start_supervised!({Store, instance: inst}, id: :v3)
+      stop_supervised!(:v3)
+
+      # What a release that writes format 2 has for a registry.
+      assert {:error, error} =
+               start_supervised({Store, instance: inst, migrations: [{1, 2, AuditTrail}]})
+
+      assert {:store_format_newer, 3, 2} = find(error, &match?({:store_format_newer, _, _}, &1))
+    end
+
+    test "a restored format 2 backup migrates on boot" do
+      root = unique_data_dir(:bucket)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      config =
+        test_config(
+          roles: [:edge],
+          source_store: {Ankusa.SourceStore.Static, sources: %{}},
+          storage: %{interval_ms: 0, blob_store: {Ankusa.BlobStore.LocalFS, root: root}},
+          backup: %{enabled: true, interval_ms: 3_600_000}
+        )
+
+      put_config(config)
+      inst = config.instance
+
+      # A release that writes format 2 takes the backup.
+      start_supervised!({Store, instance: inst, migrations: [{1, 2, AuditTrail}]}, id: :v2)
+      start_supervised!({Ankusa.Store.Backup, instance: inst}, id: :v2_backup)
+      seed_v2!(inst, 0)
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "2"}
+      assert {:ok, %{uploaded: uploaded}} = Ankusa.Store.Backup.run(inst)
+      assert uploaded > 0
+
+      # The host is gone; the next boot restores the backup and migrates it.
+      stop_supervised!(:v2_backup)
+      stop_supervised!(:v2)
+      File.rm_rf!(config.data_dir)
+      start_supervised!({Ankusa.Instance, config})
+
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "3"}
+      assert {:ok, 4} = Tenants.count(inst)
+      assert stored_counters(inst) == folded_counters(inst)
+      assert {:ok, %{dead: 2}} = Queue.dead_for_tenant(inst, "deadonly")
+    end
+
+    test "the v3 fixture task writes a store that boots" do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "ankusa_fixture_v3_#{System.unique_integer([:positive])}.tar.zst"
+        )
+
+      on_exit(fn -> File.rm(path) end)
+
+      written = Fixture.build(path)
+      assert written["format_version"] == 3
+      assert written["tenants"] == ["default", "acme", "globex", "deadonly"]
+
+      # Boot it with the store alone, so nothing moves under the count.
+      {config, manifest} = unpack_fixture(path)
+      inst = config.instance
+      start_supervised!({Store, instance: inst})
+
+      for tenant <- manifest["tenants"], do: assert({:ok, _} = Tenants.ord(inst, tenant))
+      assert {:ok, %{inflight: inflight}} = Queue.pending_for_tenant(inst, "acme")
+      assert inflight >= 1
+      assert {:ok, %{dead: 2}} = Queue.dead_for_tenant(inst, "deadonly")
+
+      assert {:ok, %{pending: 0, scheduled: 0, inflight: 0}} =
+               Queue.pending_for_tenant(inst, "deadonly")
+
+      assert stored_counters(inst) == folded_counters(inst)
+
+      # The checked-in v3 fixture is what this task wrote at the release that
+      # introduced format 3.
+      assert File.exists?(Path.join(@fixtures, "store-v3.tar.zst"))
+    end
+  end
+
+  # ── a store of format 2, written by hand ───────────────────────────────
+
+  defp seeded_v2_store(extra \\ 0) do
+    inst = open_store()
+    seed_v2!(inst, extra)
+    stop_supervised!({Store, inst})
+    inst
+  end
+
+  defp hook(tenant, n) do
+    Envelope.to_binary(%Envelope{
+      id: "evt-#{tenant}-#{n}",
+      source_id: "load",
+      tenant_id: tenant,
+      received_at: 1,
+      method: "POST",
+      path: "/",
+      headers: [],
+      body: "b",
+      size: 1
+    })
+  end
+
+  defp delivery_row do
+    Deliveries.encode_row(%{
+      module: Ankusa.Sink.Log,
+      state: :pending,
+      attempts: 0,
+      at: 1,
+      error: nil,
+      size: 100,
+      source_id: "load"
+    })
+  end
+
+  # Hooks, delivery rows and the format 2 index of: acme seqs 1-3 (1 and 2 due,
+  # 3 a retry) and 11 (an archive obligation), globex 4 (a retry, and a dead
+  # second sink) and 5 (claimed), no tenant 6, garbage 7, no hook 8, `deadonly`
+  # 9 and 10 (dead) and no tenant 12 (an archive obligation). `extra` more due
+  # rows of seq 1, to take the migration through several steps.
+  defp seed_v2!(inst, extra) do
+    past = 1_000
+    # Fixed, so two seeded stores hold the same keys (2100-01-01).
+    future = 4_102_444_800_000
+
+    hooks = [
+      {1, hook("acme", 1)},
+      {2, hook("acme", 2)},
+      {3, hook("acme", 3)},
+      {4, hook("globex", 4)},
+      {5, hook("globex", 5)},
+      {6, hook(nil, 6)},
+      {7, "not an envelope"},
+      {9, hook("deadonly", 9)},
+      {10, hook("deadonly", 10)},
+      {11, hook("acme", 11)},
+      {12, hook(nil, 12)}
+    ]
+
+    due =
+      for {seq, at} <- [
+            {1, past},
+            {2, past},
+            {3, future},
+            {4, future},
+            {6, past},
+            {7, past},
+            {8, past}
+          ],
+          do: {:put, :index, Keys.due_v2(at, seq, 0), <<100::32>>}
+
+    more = for sink <- 1..extra//1, do: {:put, :index, Keys.due_v2(past, 1, sink), <<100::32>>}
+
+    dead = fn at, seq, sink, owner ->
+      {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary(owner)}
+    end
+
+    :ok =
+      Store.write(
+        inst,
+        for({seq, bin} <- hooks, do: {:put, :hooks, Keys.hook(seq), bin}) ++
+          for(seq <- 1..10, do: {:put, :deliveries, Keys.delivery(seq, 0), delivery_row()}) ++
+          [{:put, :deliveries, Keys.delivery(4, 1), delivery_row()}] ++
+          due ++
+          more ++
+          [
+            {:put, :index, Keys.inflight_v2(5, 0), <<100::32>>},
+            dead.(500, 4, 1, {"load", "evt-globex-4b"}),
+            dead.(501, 9, 0, {"load", "evt-deadonly-9"}),
+            dead.(502, 10, 0, {"load", "evt-deadonly-10"}),
+            {:put, :index, Keys.archive_pending(11), <<100::32>>},
+            {:put, :index, Keys.archive_pending(12), <<100::32>>},
+            {:put, :default, Keys.format_version(), "2"}
+          ],
+        sync: true
+      )
+  end
+
+  # Every row the migration writes, and the counters.
+  defp snapshot(inst) do
+    families = [
+      :due,
+      :inflight,
+      :dead,
+      :dead_by_tenant,
+      :active,
+      :archive_pending,
+      :tenants,
+      :tenant_ords
+    ]
+
+    {Map.new(families, fn family -> {family, fold_rows(inst, family)} end), stored_counters(inst)}
+  end
+
+  defp fold_rows(inst, :due) do
+    for {key, <<size::32, kind::8>>} <- fold_raw(inst, :due),
+        do: {Keys.decode_due(key), size, kind}
+  end
+
+  defp fold_rows(inst, family), do: fold_raw(inst, family)
+
+  defp fold_raw(inst, family) do
+    %{lo: lo, hi: hi} = Keys.family(family)
+
+    {:ok, rows} =
+      Store.fold(inst, family, {lo, hi}, [], fn k, v, acc -> {:cont, [{k, v} | acc]} end)
+
+    Enum.reverse(rows)
   end
 
   defp open_store do

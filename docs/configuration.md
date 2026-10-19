@@ -84,6 +84,7 @@ Every top-level section, with its keys and defaults:
 | `fleet` | `store` (`{type: redis, url, namespace, pool_size}`; absent with both scopes `node`), `timeout_ms` (20; 1–1000), `pending_ttl_ms` (30000), `breaker_window_ms` (1000), `breaker_min_calls` (20), `breaker_failure_rate` (0.5), `breaker_open_ms` (5000). The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`. See [Fleet scope](#fleet-scope) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones. Read with `GET /v1/audit` (scope `audit:read`). Per node |
+| `tenants` | `max` (1000000, an integer from 1 to 4294967294). How many tenants the node's store hands a dense ordinal to ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)); the hook of one past it is refused with `503 {"error":"tenant_limit"}` and `Retry-After: 300`. Tenants it already knows are never refused, and a tenant keeps its ordinal forever. Per node |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
 | `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`). Where `type: http` sinks may connect, checked on every attempt. See [Egress](#egress) |
 
@@ -434,7 +435,7 @@ Never `Application.get_env/2` scattered through call sites:
 Built with `Ankusa.Config.new/1` from a keyword list; unknown keys raise
 `ArgumentError` at boot (fail fast on a typo, not at 3am). `:batcher`,
 `:dispatch`, `:storage`, `:claim_check`, `:backup`, `:admin`, `:rate_limits`,
-`:quarantine`, `:audit`, `:lifecycle` and `:egress` are maps and get **deep-merged** over the
+`:quarantine`, `:audit`, `:tenants`, `:lifecycle` and `:egress` are maps and get **deep-merged** over the
 defaults. Pass only the keys you want to change.
 
 The example lists the keys `Ankusa.Config.new/1` accepts, at their defaults. As `config :ankusa` app env, the autostarted default instance reads only `:autostart`, `:port`, `:data_dir`, `:roles` and `:sources`; pass the rest to `Ankusa.Config.new/1` or an `Ankusa.Instance` child spec.
@@ -524,6 +525,7 @@ config :ankusa,
   },
   quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824},
   audit: %{retention_days: 365},
+  tenants: %{max: 1_000_000},
   lifecycle: %{sinks: []},
   egress: %{
     allow_insecure_http: false,
@@ -634,6 +636,7 @@ config :ankusa,
 | `fleet.breaker_window_ms`, `fleet.breaker_min_calls`, `fleet.breaker_failure_rate`, `fleet.breaker_open_ms` | `1000`, `20`, `0.5`, `5000` | The fleet breaker: once `breaker_min_calls` calls in a `breaker_window_ms` window were made and `breaker_failure_rate` (a number above 0, at most 1) of them failed or timed out, every hook is answered from this node for `breaker_open_ms`, then one probe decides. Positive integers except the rate. |
 | `quarantine.burst`, `quarantine.rate`, `quarantine.max_bytes` | `100`, `20`, `1_073_741_824` | The quarantine pen: one token bucket per source (`burst` hooks back to back, refilled `rate` per second; over it, `429 quarantine_rate_limited`) and a cap on the pen's total bytes (a hook that would cross it is `503 quarantine_full`; the pen never evicts). See [`delivery.md#quarantine`](delivery.md#quarantine). |
 | `audit.retention_days` | `365` | Days the audit trail keeps a row. An hourly sweep deletes older rows, oldest first, in bounded batches (`[:ankusa, :audit, :pruned]`). A positive integer. Every committed row emits `[:ankusa, :audit]`. See [Architecture](architecture.md#guarantees-by-component). |
+| `tenants.max` | `1_000_000` | The most tenants the store knows (each gets an ordinal at its first committed hook, none is ever reused). A hook of a tenant one past it is refused with `503 tenant_limit` and `Retry-After: 300`, tagged `outcome: :tenant_limit` on the ingest metrics; a known tenant is never refused. Not a secret, so `/v1/config` shows it. An integer from 1 to 4294967294; the store holds about 80 B per tenant plus six counters of 40 B. |
 
 Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 <constraint>, got <value>"`: every port is `0..65535`; `max_body_bytes`,
@@ -658,7 +661,7 @@ retry, no waiting for a slot, no claim cache, no request cap);
 `claim_check.ref_ttl_ms` is `nil` or ≥ 1, `claim_check.accept_unsigned_refs` is
 `nil`, `true` or `false`, and every `claim_check.ref_signing_keys` entry is at
 least 16 bytes;
-`claim_check.retention_days` is `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `storage.key_prefix` is `""` or
+`claim_check.retention_days` is `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `tenants.max` is an integer from 1 to 4294967294; `storage.key_prefix` is `""` or
 `name/` parts; `dispatch.sink_concurrency` is `nil` or `1..concurrency`,
 `dispatch.breaker_failures` ≥ 0, `breaker_open_ms` positive and
 `breaker_max_open_ms` ≥ `breaker_open_ms`. An embedded source whose verifier secret is missing or

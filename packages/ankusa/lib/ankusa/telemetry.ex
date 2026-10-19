@@ -28,9 +28,10 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id` |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
   | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:state` (`:open`, `:closed`) |
-  | `[:ankusa, :dispatch, :state]` | `:running`, `:claimed`, `:claimed_bytes`, `:runnable`, `:breakers_open` | `:instance` |
+  | `[:ankusa, :dispatch, :state]` | `:running`, `:claimed`, `:claimed_bytes`, `:runnable`, `:breakers_open`, `:active_tenants` (the most tenants one scan visited since the last report) | `:instance` |
   | `[:ankusa, :store, :state]` | `:hooks`, `:deliveries`, `:disk_bytes`, `:next_seq` | `:instance` |
-  | `[:ankusa, :queue, :state]` | `:pending`, `:scheduled`, `:inflight`, `:dead`, `:archive_pending`, `:oldest_due_age_ms` | `:instance` |
+  | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:tenants`, `:oldest_due_age_ms` | `:instance` |
+  | `[:ankusa, :tenant, :state]` | `:pending` (one event per tenant of the top 100 by pending) | `:instance`, `:tenant` |
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |

@@ -64,7 +64,10 @@ defmodule Ankusa.Store.Migrate do
   # `mix ankusa.store.fixture` output for the new format
   # (`test/fixtures/store-v<to>.tar.zst`). Applied in order, so `from` of each
   # entry is the `to` of the one before it; `{1, 2, module}` is the first.
-  @migrations [{1, 2, Ankusa.Store.Migrations.AuditTrail}]
+  @migrations [
+    {1, 2, Ankusa.Store.Migrations.AuditTrail},
+    {2, 3, Ankusa.Store.Migrations.TenantKeys}
+  ]
 
   @type migration :: {pos_integer(), pos_integer(), module()}
 
@@ -101,9 +104,41 @@ defmodule Ankusa.Store.Migrate do
     # release does not understand.
     with {:ok, found} <- read_format(ctx.instance),
          :ok <- refuse_newer(found, current_format(migrations)),
+         :ok <- reopen_for_import(ctx, found, migrations),
          :ok <- import_legacy(ctx) do
       upgrade_format(ctx.instance, migrations)
     end
+  end
+
+  # The 0.3 import writes queue rows in the format 2 layout, and the format 2 -> 3
+  # migration is what moves them (ordinals, markers, counters: one code path). A
+  # store already at format 3 that is about to import queue artifacts (a node
+  # that ran `wal: :none` until now) is put back to format 2 first, so the
+  # migration runs over what the import writes; it leaves rows already in the new
+  # shape alone. A crash in between resumes at the next boot: the format says 2.
+  defp reopen_for_import(ctx, found, migrations) when is_integer(found) and found >= 3 do
+    tenant_keys? = Enum.any?(migrations, &match?({2, 3, _module}, &1))
+
+    with true <- tenant_keys?,
+         {:ok, false} <- migration_done?(ctx),
+         true <- queue_import_pending?(ctx) do
+      Logger.info("[ankusa] importing 0.3 queue artifacts into a format #{found} store")
+
+      Store.write(ctx.instance, [{:put, :default, Keys.format_version(), "2"}], sync: true)
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> :ok
+    end
+  end
+
+  defp reopen_for_import(_ctx, _found, _migrations), do: :ok
+
+  defp queue_import_pending?(ctx) do
+    Enum.any?([:wal, :dlq], fn artifact ->
+      File.exists?(path(ctx.config, artifact)) and
+        not queue_artifact_without_queue?(ctx, artifact) and
+        not marked?(ctx, Keys.meta("imported:" <> Atom.to_string(artifact)))
+    end)
   end
 
   defp import_legacy(ctx) do
@@ -277,7 +312,7 @@ defmodule Ankusa.Store.Migrate do
   defp with_default_cf(path, fun) do
     with {:ok, names} <- :rocksdb.list_column_families(path, []),
          {:ok, db, handles} <-
-           :rocksdb.open_readonly(path, [], Enum.map(names, &{&1, []})) do
+           :rocksdb.open_readonly(path, [], Enum.map(names, &column_family_opts/1)) do
       try do
         {~c"default", cf} = Enum.find(Enum.zip(names, handles), &(elem(&1, 0) == ~c"default"))
         fun.(db, cf)
@@ -287,6 +322,11 @@ defmodule Ankusa.Store.Migrate do
       end
     end
   end
+
+  defp column_family_opts(~c"counters"),
+    do: {~c"counters", [merge_operator: :erlang_merge_operator]}
+
+  defp column_family_opts(name), do: {name, []}
 
   defp plan_from(db, cf, migrations) do
     current = current_format(migrations)
@@ -932,7 +972,7 @@ defmodule Ankusa.Store.Migrate do
 
     [
       {:put, :deliveries, Keys.delivery(seq, unresolved), row},
-      {:put, :index, Keys.due(0, seq, unresolved), <<size::32>>}
+      {:put, :index, Keys.due_v2(0, seq, unresolved), <<size::32>>}
     ]
   end
 
