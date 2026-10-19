@@ -1299,4 +1299,62 @@ defmodule Ankusa.ConfigTest do
                Config.new(dedupe: [max_entries: 1, max_entries_per_tenant: 1]).dedupe
     end
   end
+
+  describe "retention and ceilings (DUR-2.b)" do
+    test "the defaults" do
+      config = Config.new()
+
+      assert config.queue.dlq == %{
+               retention_days: 30,
+               max_rows: 10_000_000,
+               max_bytes: 53_687_091_200
+             }
+
+      assert config.quarantine.retention_days == 14
+      assert config.storage.catalogue_retention_days == 365
+      assert config.archive == %{retention_days: nil}
+    end
+
+    test "a queue.dlq override keeps the other defaults" do
+      assert %{retention_days: 7, max_rows: 10_000_000, max_bytes: 53_687_091_200} =
+               Config.new(queue: %{dlq: %{retention_days: 7}}).queue.dlq
+    end
+
+    test "every retention and ceiling is a positive integer" do
+      for {section, key, label} <- [
+            {:queue, [:dlq, :retention_days], "queue.dlq.retention_days"},
+            {:queue, [:dlq, :max_rows], "queue.dlq.max_rows"},
+            {:queue, [:dlq, :max_bytes], "queue.dlq.max_bytes"},
+            {:storage, [:catalogue_retention_days], "storage.catalogue_retention_days"},
+            {:quarantine, [:retention_days], "quarantine.retention_days"}
+          ],
+          bad <- [0, -1, 1.5, "10", nil] do
+        value =
+          case key do
+            [:dlq, leaf] -> %{dlq: %{leaf => bad}}
+            [leaf] -> %{leaf => bad}
+          end
+
+        assert_raise ArgumentError, ~r/#{Regex.escape(label)} must be an integer >= 1/, fn ->
+          Config.new([{section, value}])
+        end
+      end
+    end
+
+    test "archive.retention_days is nil or an integer, and not past the catalogue's" do
+      assert Config.new(archive: %{retention_days: 3}).archive.retention_days == 3
+
+      for bad <- [0, -1, 1.5, "10"] do
+        assert_raise ArgumentError,
+                     ~r/archive\.retention_days must be nil or an integer >= 1/,
+                     fn ->
+                       Config.new(archive: %{retention_days: bad})
+                     end
+      end
+
+      assert_raise ArgumentError, ~r/archive\.retention_days \(40\) must not exceed/, fn ->
+        Config.new(archive: %{retention_days: 40}, storage: %{catalogue_retention_days: 30})
+      end
+    end
+  end
 end

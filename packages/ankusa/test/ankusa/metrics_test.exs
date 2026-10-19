@@ -305,6 +305,37 @@ defmodule Ankusa.MetricsTest do
       assert scrape =~ ~r/^ankusa_dedupe_pruned_total\{instance="#{inst}"\} 5(\.0)?$/m
     end
 
+    test "the dlq, audit-size and pruned series follow the counters and events" do
+      config = start_instance()
+      inst = config.instance
+
+      :telemetry.execute([:ankusa, :dlq, :evicted], %{count: 4, bytes: 40}, %{
+        instance: inst,
+        tenant_id: "acme",
+        reason: "max_rows",
+        ids: ["a"],
+        seqs: [1]
+      })
+
+      :telemetry.execute([:ankusa, :quarantine, :pruned], %{count: 2, bytes: 9}, %{instance: inst})
+
+      :telemetry.execute([:ankusa, :archive, :pruned], %{segments: 3, objects: 0, legacy: 1}, %{
+        instance: inst
+      })
+
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert gauge(scrape, "ankusa_dlq_rows", inst) == 0.0
+      assert gauge(scrape, "ankusa_dlq_bytes", inst) == 0.0
+      assert gauge(scrape, "ankusa_dlq_full", inst) == 0.0
+      assert gauge(scrape, "ankusa_audit_rows", inst) != nil
+      assert gauge(scrape, "ankusa_audit_outbox_backlog", inst) == 0.0
+      assert scrape =~ ~r/^ankusa_dlq_evicted_total\{.*reason="max_rows".*\} 4(\.0)?$/m
+      assert scrape =~ ~r/^ankusa_quarantine_pruned_total\{instance="#{inst}"\} 2(\.0)?$/m
+      assert scrape =~ ~r/^ankusa_archive_catalogue_pruned_total\{instance="#{inst}"\} 3(\.0)?$/m
+    end
+
     test "a probe that fails emits nothing and the others still run" do
       config = start_instance()
       inst = config.instance

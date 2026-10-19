@@ -385,6 +385,9 @@ quarantine:
   # (POST /v1/replays {"kind": "quarantine"}) or purge (DELETE /v1/quarantine)
   # on the admin port to make room.
   max_bytes: 1073741824
+  # Days a quarantined hook is held (default 14): an hourly sweep deletes older
+  # entries unless a running or paused quarantine replay job can still reach them.
+  retention_days: 14
 
 batcher:
   # The queue writer serializes commits itself, so partitions beyond a couple only

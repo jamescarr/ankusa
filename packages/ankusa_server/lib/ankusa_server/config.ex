@@ -71,7 +71,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress audit tenants)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
@@ -94,7 +94,7 @@ defmodule AnkusaServer.Config do
   @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type publish_timeout_ms)
-  @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs)
+  @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs catalogue_retention_days)
   @blob_store_keys ~w(type root s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token sse)
   @gcs_keys ~w(bucket endpoint auth token sse)
@@ -130,8 +130,11 @@ defmodule AnkusaServer.Config do
   @hook_limit_keys ~w(rate burst)
   @rate_limit_sources_keys ~w(default)
   @source_limit_keys ~w(bytes_per_second burst_bytes)
-  @quarantine_keys ~w(burst rate max_bytes)
-  @audit_keys ~w(retention_days)
+  @quarantine_keys ~w(burst rate max_bytes retention_days)
+  @audit_keys ~w(retention_days max_rows max_bytes outbox_max_backlog)
+  @queue_keys ~w(dlq)
+  @dlq_keys ~w(retention_days max_rows max_bytes)
+  @archive_keys ~w(retention_days)
   @tenants_keys ~w(max)
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
@@ -516,6 +519,8 @@ defmodule AnkusaServer.Config do
         fleet_section(doc) ++
         quarantine_section(doc) ++
         audit_section(doc) ++
+        queue_section(doc) ++
+        archive_section(doc) ++
         tenants_section(doc) ++
         batcher_section(doc) ++
         dispatch_section(doc) ++
@@ -985,6 +990,10 @@ defmodule AnkusaServer.Config do
         |> put_opt(:roll_bytes, int_opt(storage, "roll_bytes", ["storage"]))
         |> put_opt(:roll_ms, int_opt(storage, "roll_ms", ["storage"]))
         |> put_opt(:key_prefix, string_opt(storage, "key_prefix", ["storage"]))
+        |> put_opt(
+          :catalogue_retention_days,
+          int_opt(storage, "catalogue_retention_days", ["storage"])
+        )
     ]
   end
 
@@ -1558,6 +1567,7 @@ defmodule AnkusaServer.Config do
         |> put_opt(:burst, int_opt(quarantine, "burst", path))
         |> put_opt(:rate, number_opt(quarantine, "rate", path))
         |> put_opt(:max_bytes, int_opt(quarantine, "max_bytes", path))
+        |> put_opt(:retention_days, int_opt(quarantine, "retention_days", path))
     ]
   end
 
@@ -1569,7 +1579,38 @@ defmodule AnkusaServer.Config do
     path = ["audit"]
     audit = section!(doc, "audit", @audit_keys, [])
 
-    [audit: [] |> put_opt(:retention_days, int_opt(audit, "retention_days", path))]
+    [
+      audit:
+        []
+        |> put_opt(:retention_days, int_opt(audit, "retention_days", path))
+        |> put_opt(:max_rows, int_opt(audit, "max_rows", path))
+        |> put_opt(:max_bytes, int_opt(audit, "max_bytes", path))
+        |> put_opt(:outbox_max_backlog, int_opt(audit, "outbox_max_backlog", path))
+    ]
+  end
+
+  # ── queue.dlq and archive ───────────────────────────────────────────────────
+
+  # Types only; the ranges are core's (`Ankusa.Config`).
+  defp queue_section(doc) do
+    queue = section!(doc, "queue", @queue_keys, [])
+    dlq = section!(queue, "dlq", @dlq_keys, ["queue"])
+    path = ["queue", "dlq"]
+
+    [
+      queue: [
+        dlq:
+          []
+          |> put_opt(:retention_days, int_opt(dlq, "retention_days", path))
+          |> put_opt(:max_rows, int_opt(dlq, "max_rows", path))
+          |> put_opt(:max_bytes, int_opt(dlq, "max_bytes", path))
+      ]
+    ]
+  end
+
+  defp archive_section(doc) do
+    archive = section!(doc, "archive", @archive_keys, [])
+    [archive: [] |> put_opt(:retention_days, int_opt(archive, "retention_days", ["archive"]))]
   end
 
   # ── tenants ─────────────────────────────────────────────────────────────────

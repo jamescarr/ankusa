@@ -68,6 +68,7 @@ defmodule Ankusa.Edge.Ingest do
              | :overload
              | :tenant_limit
              | :dedupe_quota
+             | :dlq_full
              | :store_unavailable
              | :quarantine_full
              | {:invalid_header, String.t() | nil}
@@ -422,8 +423,17 @@ defmodule Ankusa.Edge.Ingest do
   defp commit(instance, source, env) do
     case Ankusa.config(instance).wal do
       :none -> Publish.publish(instance, source, env)
-      _ -> buffered_commit(instance, source, env)
+      _ -> buffered_or_full(instance, source, env)
     end
+  end
+
+  # A DLQ over `queue.dlq.max_rows`/`max_bytes` with no archived row left to evict
+  # refuses new hooks (`503 dlq_full`) rather than discard an acked one
+  # (`Ankusa.Queue.DlqReaper`): a `:persistent_term` read.
+  defp buffered_or_full(instance, source, env) do
+    if Ankusa.Queue.DlqReaper.full?(instance),
+      do: {:error, :dlq_full},
+      else: buffered_commit(instance, source, env)
   end
 
   # The sinks travel with the hook: the queue writes one delivery row per sink in

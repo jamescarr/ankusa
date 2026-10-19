@@ -938,6 +938,17 @@ synced chunks. A
 same filter selects them.
 Delivery is at-least-once, so a replayed hook is a redelivery.
 
+### Retention and the DLQ ceilings
+
+`queue.dlq` bounds the dead-letter queue (see [`configuration.md`](configuration.md)):
+rows older than `retention_days`, and the oldest rows while the DLQ is over
+`max_rows` or `max_bytes`, are evicted by `Ankusa.Queue.DlqReaper`, but only once
+the hook is archived and `Storage.fetch/2` can find it. Anything else is
+back-pressure: new hooks get `503 dlq_full` until the compactor drains, so the
+disk stays flat by draining the archive and never by deleting an acked hook.
+`DELETE /v1/dlq?tenant&source_id&since&until&limit` (scope `dlq:write`) runs the
+same eviction on demand and answers `{deleted, bytes, unarchived, more}`.
+
 ## Quarantine
 
 A durable holding pen for envelopes whose source has

@@ -80,6 +80,7 @@ defmodule Ankusa.Admin.Auth do
   @challenge ~s(Bearer realm="ankusa")
   @max_token_bytes 8_192
 
+  @mutating ["POST", "PUT", "PATCH", "DELETE"]
   @defaults %{
     mode: :none,
     allow_insecure: false,
@@ -150,7 +151,7 @@ defmodule Ankusa.Admin.Auth do
           Plug.Conn.t()
   def authorize(conn, scope, fun) when is_function(fun, 1) do
     case missing_scope(conn.assigns.principal, List.wrap(scope)) do
-      nil -> fun.(conn)
+      nil -> proceed(conn, fn -> fun.(conn) end)
       missing -> forbidden(conn, missing)
     end
   end
@@ -170,7 +171,7 @@ defmodule Ankusa.Admin.Auth do
 
     cond do
       missing = missing_scope(principal, List.wrap(scope)) -> forbidden(conn, missing)
-      Principal.tenant?(principal, tenant) -> fun.(conn)
+      Principal.tenant?(principal, tenant) -> proceed(conn, fn -> fun.(conn) end)
       true -> forbidden(conn, "tenant:#{tenant}")
     end
   end
@@ -189,7 +190,7 @@ defmodule Ankusa.Admin.Auth do
 
     cond do
       missing = missing_scope(principal, List.wrap(scope)) -> forbidden(conn, missing)
-      Principal.all_tenants?(principal) -> fun.(conn)
+      Principal.all_tenants?(principal) -> proceed(conn, fn -> fun.(conn) end)
       true -> forbidden(conn, "tenant:*")
     end
   end
@@ -224,22 +225,43 @@ defmodule Ankusa.Admin.Auth do
 
       is_binary(requested) ->
         if Principal.tenant?(principal, requested),
-          do: fun.(conn, [requested]),
+          do: proceed(conn, fn -> fun.(conn, [requested]) end),
           else: forbidden(conn, "tenant:#{requested}")
 
       Principal.all_tenants?(principal) ->
-        fun.(conn, nil)
+        proceed(conn, fn -> fun.(conn, nil) end)
 
       principal.tenants == [] ->
         forbidden(conn, "tenant:*")
 
       true ->
-        fun.(conn, principal.tenants)
+        proceed(conn, fn -> fun.(conn, principal.tenants) end)
     end
   end
 
   defp missing_scope(principal, scopes),
     do: Enum.find(scopes, &(not Principal.scope?(principal, &1)))
+
+  # A change (`POST`, `PUT`, `PATCH`, `DELETE`) is refused with `503
+  # audit_backlog` and `Retry-After: 60` while the audit trail is over its
+  # ceilings or the lifecycle outbox is too far behind (`Ankusa.Audit.refusing?/1`):
+  # nothing is dropped to make room, and every change is audited in its own batch,
+  # so a change that cannot be audited must not be made. Checked after the caller
+  # is authenticated and authorized, so an unauthorized caller learns nothing.
+  defp proceed(%Plug.Conn{method: method} = conn, run) when method in @mutating do
+    instance = Keyword.get(conn.assigns[:ankusa_opts] || [], :instance, :default)
+
+    if Ankusa.Audit.refusing?(instance) do
+      conn
+      |> put_resp_header("retry-after", "60")
+      |> Http.send_json(503, %{error: "audit_backlog"})
+      |> halt()
+    else
+      run.()
+    end
+  end
+
+  defp proceed(_conn, run), do: run.()
 
   # Halted, so `authorize_global/3` also works as a plug ahead of `:dispatch`.
   defp forbidden(conn, scope) do

@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`queue.dlq`, `quarantine.retention_days`, `storage.catalogue_retention_days`,
+  `archive.retention_days` and `audit.max_rows|max_bytes|outbox_max_backlog`
+  (DUR-2.b).** YAML keys for the DLQ, quarantine, catalogue and audit retention and
+  ceilings. Store format 5: an image that writes format 4 cannot open the store
+  afterwards. See `docs/configuration.md`.
+
 - **`dedupe.max_entries` and `dedupe.max_entries_per_tenant` (DUR-2.a).** The most
   live ingest-dedupe keys the node, and one tenant, holds (defaults 100 000 000 and
   30 000 000, integers ≥ 1); a hook whose key would pass either is `503

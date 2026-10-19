@@ -557,6 +557,289 @@ defmodule Ankusa.Queue.DeliveriesTest do
     end
   end
 
+  # ── DUR-2.b: retention ───────────────────────────────────────────────────
+
+  # Dead-letter every due row at `at` (its time of death), with its hook, as the
+  # dispatch pipeline does.
+  defp kill_all(inst, at \\ System.system_time(:millisecond)) do
+    for {d, i} <- Enum.with_index(due_rows(inst)) do
+      {:ok, bin} = Store.get(inst, :hooks, Keys.hook(d.seq))
+      {:ok, env} = Envelope.from_binary(bin)
+      row = row!(inst, d.seq, d.sink)
+
+      write!(
+        inst,
+        Deliveries.dead_ops({:due, d.key, d.kind}, d.ord, d.seq, d.sink, row, at + i, "x", env)
+      )
+    end
+  end
+
+  defp listen(event) do
+    handler = {:b35, event, make_ref()}
+    pid = self()
+
+    :telemetry.attach(
+      handler,
+      event,
+      fn _event, measurements, meta, _ -> send(pid, {event, measurements, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  @day_ms 86_400_000
+
+  describe "dlq reaper" do
+    alias Ankusa.Queue.DlqReaper
+    alias Ankusa.Storage.Compactor
+
+    test "dlq reaper: a DLQ over max_rows shrinks by archived rows only, with a counter, an audit row and an event" do
+      inst = start_instance(queue: %{dlq: %{max_rows: 3}})
+      enqueue(inst, "acme", 3)
+      kill_all(inst)
+      assert {:ok, %{dead: 6, dead_bytes: bytes}} = Counters.read(inst, 0)
+      assert bytes > 0
+
+      # The compactor archives the hooks: they are now recoverable from a segment.
+      assert {:ok, 1} = Compactor.tick(inst)
+      listen([:ankusa, :dlq, :evicted])
+      start_supervised!({DlqReaper, instance: inst})
+
+      assert {:ok, %{evicted: 3, full: false}} = DlqReaper.reap(inst)
+      assert {:ok, %{dead: 3}} = Counters.read(inst, 0)
+      assert_counters_equal_fold(inst)
+      refute DlqReaper.full?(inst)
+
+      assert_receive {[:ankusa, :dlq, :evicted], %{count: 3},
+                      %{reason: "max_rows", tenant_id: "acme", ids: ids, seqs: seqs}}
+
+      assert length(ids) == 3 and length(seqs) == 3
+
+      # An evicted hook is archived and findable, whether or not it was reclaimed.
+      for id <- Enum.uniq(ids),
+          do: assert({:ok, %Envelope{id: ^id}} = Ankusa.Storage.fetch(inst, id))
+
+      # One batched audit row, not one per hook.
+      assert {:ok, %{entries: [row]}} = Ankusa.Audit.list(inst, action: "dlq.evict")
+      assert row.actor == "system"
+      assert %{"count" => 3, "reason" => "max_rows", "seqs" => [_, _]} = row.detail
+    end
+
+    test "dlq reaper: rows past retention_days go, newer ones stay, and the byte counter follows" do
+      inst = start_instance(queue: %{dlq: %{retention_days: 1}})
+      enqueue(inst, "acme", 2)
+      kill_all(inst, System.system_time(:millisecond) - 3 * @day_ms)
+      enqueue(inst, "acme", 1)
+      kill_all(inst)
+      assert {:ok, 1} = Compactor.tick(inst)
+      start_supervised!({DlqReaper, instance: inst})
+
+      assert {:ok, %{evicted: 4, full: false}} = DlqReaper.reap(inst)
+      assert {:ok, %{dead: 2, dead_bytes: kept}} = Counters.read(inst, 0)
+      assert kept > 0
+      assert_counters_equal_fold(inst)
+
+      assert {:ok, %{entries: [%{detail: %{"reason" => "retention"}}]}} =
+               Ankusa.Audit.list(inst, action: "dlq.evict")
+    end
+
+    test "dlq reaper never evicts an unarchived hook" do
+      # No :storage role: nothing is ever archived, so nothing is recoverable.
+      inst = start_instance(roles: [:edge], queue: %{dlq: %{max_rows: 2, retention_days: 1}})
+      enqueue(inst, "acme", 3)
+      kill_all(inst, System.system_time(:millisecond) - 3 * @day_ms)
+      hooks = stored_ids(inst)
+      start_supervised!({DlqReaper, instance: inst})
+      refute DlqReaper.full?(inst)
+
+      # Over the ceiling and past retention, yet nothing goes: the pressure shows.
+      assert {:ok, %{evicted: 0, full: true}} = DlqReaper.reap(inst)
+      assert DlqReaper.full?(inst)
+      assert {:ok, %{dead: 6}} = Counters.read(inst, 0)
+      assert stored_ids(inst) == hooks
+      assert_counters_equal_fold(inst)
+
+      # ...and the edge refuses new hooks with a Retry-After instead.
+      conn = route_through_edge(%{instance: inst}, request("load", ~s({"n":1})))
+      assert conn.status == 503
+      assert Plug.Conn.get_resp_header(conn, "retry-after") == ["60"]
+      assert JSON.decode!(conn.resp_body) == %{"error" => "dlq_full"}
+
+      # An operator's purge is bound by the same rule.
+      assert {:ok, %{deleted: 0, unarchived: 6}} = DlqReaper.evict(inst, %{}, 100)
+      assert {:ok, %{dead: 6}} = Counters.read(inst, 0)
+    end
+
+    test "dlq reaper: a purge deletes archived rows of the filter's tenant and source only" do
+      inst = start_instance()
+      enqueue(inst, "acme", 2)
+      enqueue(inst, "globex", 1)
+      kill_all(inst)
+      assert {:ok, 1} = Compactor.tick(inst)
+      start_supervised!({DlqReaper, instance: inst})
+
+      filter = %{tenants: ["acme"], source_id: "load"}
+
+      assert {:ok, %{deleted: 4, unarchived: 0, bytes: bytes}} =
+               DlqReaper.evict(inst, filter, 100, audit: %Ankusa.Audit.Context{actor: "ops"})
+
+      assert bytes > 0
+      assert {:ok, %{dead: 0}} = Queue.dead_for_tenant(inst, "acme")
+      assert {:ok, %{dead: 2}} = Queue.dead_for_tenant(inst, "globex")
+      assert_counters_equal_fold(inst)
+
+      assert {:ok, %{entries: [%{actor: "ops", tenant: "acme"}]}} =
+               Ankusa.Audit.list(inst, action: "dlq.purge")
+    end
+  end
+
+  describe "quarantine retention" do
+    alias Ankusa.Edge.Quarantine
+
+    defp hold(inst, age_ms) do
+      env = %{envelope("acme") | received_at: System.system_time(:millisecond) - age_ms}
+      assert :ok = Quarantine.put(inst, env, :bad_signature)
+      env
+    end
+
+    test "quarantine retention: entries past retention_days are deleted, with an audit row" do
+      inst = start_instance(quarantine: %{retention_days: 1})
+      old = hold(inst, 3 * @day_ms)
+      older = hold(inst, 5 * @day_ms)
+      fresh = hold(inst, 1_000)
+      assert {:ok, %{bytes: before_bytes}} = Quarantine.held(inst)
+      listen([:ankusa, :quarantine, :pruned])
+
+      assert {:ok, %{deleted: 2, bytes: freed, more: false}} = Quarantine.prune(inst)
+      assert freed > 0
+      assert_receive {[:ankusa, :quarantine, :pruned], %{count: 2}, _}
+
+      assert {:ok, entries} = Quarantine.recent(inst, 10)
+      assert Enum.map(entries, & &1.id) == [fresh.id]
+      refute Enum.any?(entries, &(&1.id in [old.id, older.id]))
+      assert {:ok, %{bytes: after_bytes, entries: 1}} = Quarantine.held(inst)
+      assert after_bytes == before_bytes - freed
+
+      assert {:ok, %{entries: [%{detail: %{"deleted" => 2}}]}} =
+               Ankusa.Audit.list(inst, action: "quarantine.retention")
+    end
+
+    test "quarantine retention: an entry a live replay job can still reach stays until it ends" do
+      inst = start_instance(roles: [:edge, :dispatch], quarantine: %{retention_days: 1})
+      for age <- [3, 4, 5], do: hold(inst, age * @day_ms)
+
+      # A slow job over the whole pen: it releases one entry a second.
+      assert {:ok, :created, job} =
+               Ankusa.Replay.start(inst, %{kind: :quarantine, rate: 1})
+
+      assert {:ok, %{deleted: 0}} = Quarantine.prune(inst)
+
+      assert {:ok, _} = Ankusa.Replay.update(inst, job.id, %{state: :cancelled})
+      assert {:ok, %{deleted: deleted}} = Quarantine.prune(inst)
+      assert deleted >= 1
+    end
+  end
+
+  describe "catalogue retention" do
+    alias Ankusa.Storage.Compactor
+
+    # A hook whose id says it was received `age_ms` ago, with no sinks (so it is
+    # archived and then reclaimed) or with the two test sinks (so it stays owed).
+    defp old_hook(inst, age_ms, sinks) do
+      id = Ankusa.UUIDv7.generate(System.system_time(:millisecond) - age_ms)
+      env = %{envelope("acme") | id: id}
+      {:ok, [{:committed, _}]} = Queue.enqueue(inst, [%{envelope: env, sinks: sinks}])
+      id
+    end
+
+    test "catalogue retention: a segment's row goes once its newest hook is past retention, and fetch stops finding it" do
+      inst = start_instance(storage: %{catalogue_retention_days: 1})
+      old = old_hook(inst, 3 * @day_ms, [])
+      assert {:ok, 1} = Compactor.tick(inst)
+      fresh = old_hook(inst, 1_000, [])
+      assert {:ok, 1} = Compactor.tick(inst)
+      assert {:ok, %Envelope{}} = Ankusa.Storage.fetch(inst, old)
+      listen([:ankusa, :archive, :pruned])
+
+      assert {:ok, %{segments: 1, legacy: 0, objects: 0}} = Compactor.prune_catalogue(inst)
+      assert_receive {[:ankusa, :archive, :pruned], %{segments: 1}, _}
+      assert Ankusa.Storage.fetch(inst, old) == :error
+      assert {:ok, %Envelope{}} = Ankusa.Storage.fetch(inst, fresh)
+    end
+
+    test "catalogue retention: archive.retention_days also deletes the segment objects" do
+      inst =
+        start_instance(storage: %{catalogue_retention_days: 30}, archive: %{retention_days: 1})
+
+      old_hook(inst, 3 * @day_ms, [])
+      assert {:ok, 1} = Compactor.tick(inst)
+      assert {:ok, [_seg, _idx] = keys} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+
+      assert {:ok, %{segments: 1, objects: 2}} = Compactor.prune_catalogue(inst)
+      assert {:ok, []} = Ankusa.BlobStore.list(inst, :segments, "seg/")
+      assert length(keys) == 2
+    end
+
+    test "catalogue retention: a segment holding a hook that is still owed, or one a live archive replay reads, stays" do
+      inst = start_instance(storage: %{catalogue_retention_days: 1})
+      owed = old_hook(inst, 3 * @day_ms, @sinks)
+      assert {:ok, 1} = Compactor.tick(inst)
+      assert {:ok, %{segments: 0}} = Compactor.prune_catalogue(inst)
+      assert {:ok, %Envelope{}} = Ankusa.Storage.fetch(inst, owed)
+
+      # Nobody owes it any more: the row is free to go.
+      assert {:ok, _} = Queue.purge_tenant(inst, "acme", [:pending])
+      assert {:ok, %{segments: 1}} = Compactor.prune_catalogue(inst)
+      assert Ankusa.Storage.fetch(inst, owed) == :error
+    end
+
+    test "catalogue retention: a live archive replay job keeps the segments it can still read" do
+      inst =
+        start_instance(
+          roles: [:edge, :dispatch, :storage],
+          storage: %{catalogue_retention_days: 1}
+        )
+
+      for _ <- 1..3, do: old_hook(inst, 3 * @day_ms, [])
+      assert {:ok, 1} = Compactor.tick(inst)
+      now = System.system_time(:millisecond)
+
+      assert {:ok, :created, job} =
+               Ankusa.Replay.start(inst, %{
+                 kind: :archive,
+                 from: now - 4 * @day_ms,
+                 to: now - 2 * @day_ms,
+                 rate: 1
+               })
+
+      assert {:ok, %{segments: 0}} = Compactor.prune_catalogue(inst)
+      assert {:ok, _} = Ankusa.Replay.update(inst, job.id, %{state: :cancelled})
+      assert {:ok, %{segments: 1}} = Compactor.prune_catalogue(inst)
+    end
+
+    test "catalogue retention: a 0.3 import's location rows go with their hook's age" do
+      inst = start_instance(storage: %{catalogue_retention_days: 1})
+      old = Ankusa.UUIDv7.generate(System.system_time(:millisecond) - 3 * @day_ms)
+      fresh = Ankusa.UUIDv7.generate()
+      location = :erlang.term_to_binary({"seg/x", 0, 10, 1})
+
+      :ok =
+        Store.write(
+          inst,
+          [
+            {:put, :archive, Keys.legacy_location(old), location},
+            {:put, :archive, Keys.legacy_location(fresh), location}
+          ],
+          sync: true
+        )
+
+      assert {:ok, %{legacy: 1}} = Compactor.prune_catalogue(inst)
+      assert Archive.legacy_location(inst, old) == :error
+      assert {:ok, _} = Archive.legacy_location(inst, fresh)
+    end
+  end
+
   describe "the layout" do
     test "only Deliveries builds a ?D, ?F, ?X or ?A key" do
       lib = Path.expand("../../../lib", __DIR__)

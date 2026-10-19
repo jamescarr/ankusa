@@ -321,6 +321,16 @@ defmodule Ankusa.Edge.Router do
     |> send_json(503, %{error: "dedupe_quota"})
   end
 
+  # The dead-letter queue is over `queue.dlq.max_rows`/`max_bytes` and has no row
+  # whose hook is archived left to evict (`Ankusa.Queue.DlqReaper`): the node
+  # cannot drain, and an acked hook is never deleted to make room, so a new hook
+  # is refused until the archive catches up. A minute is a fair retry.
+  defp respond(conn, {:error, :dlq_full}) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "60")
+    |> send_json(503, %{error: "dlq_full"})
+  end
+
   defp respond(conn, {:error, reason}) when reason in [:overload, :store_unavailable] do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "1")

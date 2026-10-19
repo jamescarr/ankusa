@@ -1,8 +1,8 @@
 defmodule Ankusa.Queue.Deliveries.Counters do
   @moduledoc false
 
-  # Per-tenant queue counters (ADR 0001, section 4): seven `counters` rows per
-  # tenant, plus the same seven under ordinal 0 for the node. Every row is changed
+  # Per-tenant queue counters (ADR 0001, section 4): eight `counters` rows per
+  # tenant, plus the same eight under ordinal 0 for the node. Every row is changed
   # only by blind merge operands (`{:merge, :counters, key, delta}`), in the same
   # batch as the index change it describes, so concurrent writers (the Writer,
   # the Pipeline, the Replayer, the archive compactor) cannot lose a count and a
@@ -18,7 +18,8 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     dead: 4,
     bytes: 5,
     archive_pending: 6,
-    dedupe: 7
+    dedupe: 7,
+    dead_bytes: 8
   }
 
   @names Map.keys(@fields)
@@ -26,8 +27,18 @@ defmodule Ankusa.Queue.Deliveries.Counters do
   # `dedupe` counts the live `?u` keys (DUR-2): the writer adds one for every
   # key it inserts, the `Ankusa.Queue.DedupeSweeper` takes one off for every
   # key it expires, so `dedupe.max_entries` is checked from one counter read.
+  # `dead_bytes` is the stored size of the dead rows (`dead_ops` adds it, a
+  # revive, a purge and the `Ankusa.Queue.DlqReaper` take it off), so
+  # `queue.dlq.max_bytes` is checked from one counter read too.
   @type field ::
-          :pending | :scheduled | :inflight | :dead | :bytes | :archive_pending | :dedupe
+          :pending
+          | :scheduled
+          | :inflight
+          | :dead
+          | :bytes
+          | :archive_pending
+          | :dedupe
+          | :dead_bytes
   @type delta :: {ord :: non_neg_integer(), field(), integer()}
 
   @doc "The counter fields, in `Keys.counter/2` order."
@@ -74,7 +85,7 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     end
   end
 
-  @doc "The seven counters of `ord` (0 is the node), each `0` when never written."
+  @doc "The eight counters of `ord` (0 is the node), each `0` when never written."
   @spec read(atom(), non_neg_integer()) :: {:ok, %{field() => integer()}} | {:error, term()}
   def read(instance, ord) do
     names = fields()
