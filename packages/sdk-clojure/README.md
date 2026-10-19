@@ -221,6 +221,12 @@ the hook id, so a delivery that fails it is a `401` even when it also lacks
       (throw e))))
 ```
 
+`(:verification hook)` (also on `parse-headers` and `decode-message` results)
+says how the *node* verified the hook at ingest, `nil` from a node older than
+the field. `(:flagged (:verification hook))` being `true` means the node
+accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
+unverified.
+
 ## Consuming queue messages
 
 Ankusa publishes each delivery as a JSON v1 message over the configured

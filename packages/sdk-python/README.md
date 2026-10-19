@@ -165,6 +165,11 @@ except MissingHookIdError:
 # unsigned delivery allow_unsigned=True let through.
 ```
 
+`hook.verification` (also on `parse_headers` and `decode_message` results) says
+how the *node* verified the hook at ingest, `None` from a node older than the
+field. `hook.verification.flagged is True` means the node accepted a failed
+check (`on_verify_failure: accept_flag`) — treat it as unverified.
+
 ## Consuming queue messages
 
 Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message

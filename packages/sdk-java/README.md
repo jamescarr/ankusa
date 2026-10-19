@@ -219,6 +219,12 @@ try {
 }
 ```
 
+`hook.verification()` (also on `Receiver.parseHeaders` and
+`Receiver.decodeMessage` results) says how the *node* verified the hook at
+ingest, `null` from a node older than the field. `hook.verification().flagged()
+== true` means the node accepted a failed check
+(`on_verify_failure: accept_flag`) — treat it as unverified.
+
 ## Consuming queue messages
 
 Ankusa publishes each delivery as a JSON v1 message over the configured

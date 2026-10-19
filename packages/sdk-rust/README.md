@@ -155,6 +155,12 @@ let err = receive_delivery(&headers, b"{}", &options).unwrap_err();
 assert!(matches!(err, ReceiveError::Signature(_)));
 ```
 
+`hook.verification` (also on `parse_headers` and `decode_message` results) is
+an `Option<Verification>` saying how the *node* verified the hook at ingest,
+`None` from a node older than the field. `verification.flagged == true` means
+the node accepted a failed check (`on_verify_failure: accept_flag`) — treat it
+as unverified.
+
 ## Consuming queue messages
 
 An Ankusa sink delivers the `v: 1` queue message as JSON: the body inline

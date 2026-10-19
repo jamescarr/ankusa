@@ -174,6 +174,12 @@ rescue Ankusa::MissingHookIdError
 end
 ```
 
+`hook.verification` (also on `Ankusa.parse_headers` and `Ankusa.decode_message`
+results) says how the *node* verified the hook at ingest, `nil` from a node
+older than the field. `hook.verification&.flagged == true` means the node
+accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
+unverified.
+
 ## Consuming queue messages
 
 Every message sink — RabbitMQ, Kafka, NATS, Redis — delivers one JSON message

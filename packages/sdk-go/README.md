@@ -178,6 +178,12 @@ case errors.As(err, &noID):
 // only for an unsigned delivery AllowUnsigned let through.
 ```
 
+`hook.Verification` (also on `ParseHeaders` and `DecodeMessage` results) is a
+`*Verification` saying how the *node* verified the hook at ingest, `nil` from
+a node older than the field. `Verification.Flagged == true` means the node
+accepted a failed check (`on_verify_failure: accept_flag`) — treat it as
+unverified.
+
 ## Consuming queue messages
 
 A worker reading a broker's deliveries gets the v1 queue message as JSON.

@@ -231,6 +231,11 @@ try {
 }
 ```
 
+**Trust:** `hook.verification` (also on `parseHeaders` and `decodeMessage` results)
+says how the *node* verified the hook at ingest, `null` from a node older than
+the field. `hook.verification?.flagged === true` means the node accepted a
+failed check (`on_verify_failure: accept_flag`) — treat it as unverified.
+
 ## Consuming queue messages
 
 Ankusa's broker sinks (RabbitMQ, Kafka, NATS, Redis) carry a JSON envelope

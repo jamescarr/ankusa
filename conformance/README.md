@@ -60,10 +60,14 @@ then runs every registered SDK's native runner.
 - `parse_headers`: `{"headers": {string: string}}` → `ok` is
   `{"id", "source", "tenant": string|null, "content_type": string|null,
   "dedupe_key": string|null, "replay_id": string|null,
-  "idempotency_key": string|null}`. `dedupe_key` comes from
+  "idempotency_key": string|null, "verification": {"status": string,
+  "flagged": bool}|null}`. `dedupe_key` comes from
   `x-ankusa-dedupe-key`, `replay_id` from `x-ankusa-replay-id`,
   `idempotency_key` from `x-ankusa-idempotency-key`; each is `null` when the
-  header is absent or empty.
+  header is absent or empty. `verification` comes from
+  `x-ankusa-verification`/`x-ankusa-verification-flagged` (`flagged` is
+  `true` only when the latter header is exactly `"true"`); `null` when
+  `x-ankusa-verification` is absent or empty.
 - `redeem`: `{"client"?: Client, "gateway": Gateway, "ref": string, "sha256": string}`
   → `ok` is `{"body": Body}`. Runners compare bytes: both the expected `Body`
   and the returned bytes become `{"base64": ...}` before deep-equal.
@@ -73,9 +77,14 @@ then runs every registered SDK's native runner.
   `{"v", "id", "source_id", "tenant_id", "received_at", "content_type",
   "size", "body_base64": string|null, "claim": string|null,
   "sha256": string|null, "dedupe_key": string|null,
-  "replay_id": string|null, "idempotency_key": string|null, "headers": {}}`.
+  "replay_id": string|null, "idempotency_key": string|null, "headers": {},
+  "verification": {"status": string, "flagged": bool}|null}`.
   `body_base64` here is the decoded body re-encoded as standard base64, so
-  runners compare bytes. The decode rules run in order and the first failure
+  runners compare bytes. `verification` is the message's `verification`
+  key verbatim; absent or `null` → `null` (a node older than the field);
+  present but not an object of a non-empty string `status` and a boolean
+  `flagged` → `invalid_field` (field `verification`); any `status` value
+  passes through unvalidated. The decode rules run in order and the first failure
   wins; every failure raises
   `InvalidMessageError` with `retryable=false`, `code`, and `field`
   (string or null):
