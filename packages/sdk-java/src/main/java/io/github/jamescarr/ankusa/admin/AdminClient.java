@@ -342,7 +342,7 @@ public final class AdminClient {
       throw new RoleNotEnabledError(stringField(body, "role"));
     }
     if (status >= 400 && status <= 499) {
-      throw new AdminRejectedError(status, stringField(body, "error"));
+      throw new AdminRejectedError(status, stringField(body, "error"), stringField(body, "scope"));
     }
     throw new AdminUnavailableError("admin listener error (" + status + ")", null);
   }

@@ -1,5 +1,6 @@
 package io.github.jamescarr.ankusa.routes;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -17,9 +18,12 @@ import org.jspecify.annotations.Nullable;
  * @param enabled whether the route is served
  * @param ipRules the rules that decide which addresses may reach it
  * @param metadata free-form caller metadata, returned verbatim
+ * @param revision counts the definition's changes, from 1 at creation; re-creating a deleted
+ *     route starts again at 1; null from a node older than the field
  * @param insertedAt when the route was created
  * @param updatedAt when the route was last changed
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public record Route(
     String id,
     String path,
@@ -27,6 +31,7 @@ public record Route(
     boolean enabled,
     List<IpRule> ipRules,
     Map<String, @Nullable Object> metadata,
+    @Nullable Integer revision,
     Instant insertedAt,
     Instant updatedAt) {
 

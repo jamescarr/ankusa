@@ -9,6 +9,12 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `revision` on `Route`: counts the definition's changes, from 1 at creation;
+  re-creating a deleted route starts again at 1; null from a node older than
+  the field.
+- `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403
+  forbidden` says the credential lacks (control planes require a credential
+  since Ankusa 0.6).
 - `verification` on parsed headers, decoded messages and received deliveries:
   how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a
   node older than the field).

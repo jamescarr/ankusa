@@ -535,6 +535,8 @@ public final class ConformanceTest {
           return rejected.conflictingId();
         case "max_routes":
           return rejected.maxRoutes();
+        case "scope":
+          return rejected.scope();
         default:
           break;
       }
@@ -544,6 +546,8 @@ public final class ConformanceTest {
           return rejected.status();
         case "code":
           return rejected.code();
+        case "scope":
+          return rejected.scope();
         default:
           break;
       }

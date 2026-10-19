@@ -18,15 +18,24 @@ public final class AdminRejectedError extends AdminError {
   private final @Nullable String code;
 
   /**
+   * The scope a {@code 403 forbidden} says the credential lacks, or null when the body named
+   * none.
+   */
+  private final @Nullable String scope;
+
+  /**
    * Creates the error.
    *
    * @param status the HTTP status the listener answered
    * @param code the body's {@code error} field, or null when the body named none
+   * @param scope the scope a {@code 403 forbidden} says the credential lacks, or null when the
+   *     body named none
    */
-  public AdminRejectedError(int status, @Nullable String code) {
+  public AdminRejectedError(int status, @Nullable String code, @Nullable String scope) {
     super(message(status, code));
     this.status = status;
     this.code = code;
+    this.scope = scope;
   }
 
   /**
@@ -45,6 +54,15 @@ public final class AdminRejectedError extends AdminError {
    */
   public @Nullable String code() {
     return code;
+  }
+
+  /**
+   * The scope a {@code 403 forbidden} says the credential lacks.
+   *
+   * @return the scope, or null when the body named none
+   */
+  public @Nullable String scope() {
+    return scope;
   }
 
   private static String message(int status, @Nullable String code) {

@@ -30,6 +30,12 @@ public final class RoutesRejectedError extends RoutesError {
   private final @Nullable Integer maxRoutes;
 
   /**
+   * The scope a {@code 403 forbidden} says the credential lacks, or null when the body named
+   * none.
+   */
+  private final @Nullable String scope;
+
+  /**
    * Creates the error.
    *
    * @param status the HTTP status the listener answered
@@ -38,6 +44,8 @@ public final class RoutesRejectedError extends RoutesError {
    * @param detail the message the body carried, or null
    * @param conflictingId the id the body named as conflicting, or null
    * @param maxRoutes the route limit the body named, or null
+   * @param scope the scope a {@code 403 forbidden} says the credential lacks, or null when the
+   *     body named none
    */
   public RoutesRejectedError(
       int status,
@@ -45,7 +53,8 @@ public final class RoutesRejectedError extends RoutesError {
       @Nullable String field,
       @Nullable String detail,
       @Nullable String conflictingId,
-      @Nullable Integer maxRoutes) {
+      @Nullable Integer maxRoutes,
+      @Nullable String scope) {
     super(message(status, code, detail));
     this.status = status;
     this.code = code;
@@ -53,6 +62,7 @@ public final class RoutesRejectedError extends RoutesError {
     this.detail = detail;
     this.conflictingId = conflictingId;
     this.maxRoutes = maxRoutes;
+    this.scope = scope;
   }
 
   /**
@@ -107,6 +117,15 @@ public final class RoutesRejectedError extends RoutesError {
    */
   public @Nullable Integer maxRoutes() {
     return maxRoutes;
+  }
+
+  /**
+   * The scope a {@code 403 forbidden} says the credential lacks.
+   *
+   * @return the scope, or null when the body named none
+   */
+  public @Nullable String scope() {
+    return scope;
   }
 
   /** Builds the message from the status and whichever of the code and detail are present. */
