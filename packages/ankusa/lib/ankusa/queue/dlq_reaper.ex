@@ -153,7 +153,7 @@ defmodule Ankusa.Queue.DlqReaper do
 
     with {:ok, aged} <-
            evict_range(instance, {lo, <<?x, cutoff::64>>}, %{}, @max_chunks, :infinity, fn _ ->
-             {:ok, "retention"}
+             {:ok, "retention", @chunk}
            end),
          {:ok, trimmed} <-
            evict_range(
@@ -180,9 +180,15 @@ defmodule Ankusa.Queue.DlqReaper do
   # `{:ok, reason}` while the DLQ is over a ceiling, `:under` when it is not.
   defp over_reason(counters, dlq) do
     cond do
-      counters.dead > dlq.max_rows -> {:ok, "max_rows"}
-      counters.dead_bytes > dlq.max_bytes -> {:ok, "max_bytes"}
-      true -> :under
+      counters.dead > dlq.max_rows ->
+        {:ok, "max_rows", counters.dead - dlq.max_rows}
+
+      counters.dead_bytes > dlq.max_bytes ->
+        average = max(div(counters.dead_bytes, max(counters.dead, 1)), 1)
+        {:ok, "max_bytes", div(counters.dead_bytes - dlq.max_bytes, average) + 1}
+
+      true ->
+        :under
     end
   end
 
@@ -232,7 +238,7 @@ defmodule Ankusa.Queue.DlqReaper do
              @max_chunks,
              limit,
              fn _ ->
-               {:ok, "purge"}
+               {:ok, "purge", @chunk}
              end,
              context
            ) do
@@ -280,7 +286,7 @@ defmodule Ankusa.Queue.DlqReaper do
       with {:ok, counters} <- Counters.read(job.instance, 0) do
         case job.reason_fun.(counters) do
           :under -> {:ok, acc}
-          {:ok, reason} -> walk_chunk(job, range, chunks, acc, want, reason)
+          {:ok, reason, hint} -> walk_chunk(job, range, chunks, acc, min(want, hint), reason)
         end
       end
     end
@@ -288,8 +294,8 @@ defmodule Ankusa.Queue.DlqReaper do
 
   defp walk_chunk(job, {_lower, upper} = range, chunks, acc, want, reason) do
     with {:ok, candidates, last, exhausted?} <-
-           Deliveries.dead_candidates(job.instance, range, job.filter, want, @max_scan),
-         {:ok, done} <- evict_chunk(job.instance, candidates, reason, job.context) do
+           Deliveries.dead_candidates(job.instance, range, job.filter, @chunk, @max_scan),
+         {:ok, done} <- evict_chunk(job.instance, candidates, reason, job.context, want) do
       acc = %{
         acc
         | deleted: acc.deleted + done.deleted,
@@ -306,12 +312,13 @@ defmodule Ankusa.Queue.DlqReaper do
 
   # One chunk: the rows whose hook is recoverable are evicted (a synced batch per
   # tenant with its audit row), the others are counted and left.
-  defp evict_chunk(_instance, [], _reason, _context),
+  defp evict_chunk(_instance, [], _reason, _context, _want),
     do: {:ok, %{deleted: 0, bytes: 0, unarchived: 0}}
 
-  defp evict_chunk(instance, candidates, reason, context) do
+  defp evict_chunk(instance, candidates, reason, context, want) do
     with {:ok, recoverable, unarchived} <- split_recoverable(instance, candidates),
-         {:ok, evicted} <- evict_by_tenant(instance, recoverable, reason, context) do
+         {:ok, evicted} <-
+           evict_by_tenant(instance, Enum.take(recoverable, want), reason, context) do
       {:ok,
        %{
          deleted: length(evicted),
