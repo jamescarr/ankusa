@@ -94,6 +94,14 @@ class ConformanceTest < Minitest::Test
 
   private
 
+  # `nil` stays `nil`; a `Verification` becomes the plain hash a vector
+  # compares against.
+  def verification_hash(verification)
+    return nil if verification.nil?
+
+    {"status" => verification.status, "flagged" => verification.flagged}
+  end
+
   def run_operation(operation, case_hash, requests)
     input = case_hash.fetch("input")
 
@@ -121,7 +129,8 @@ class ConformanceTest < Minitest::Test
         "content_type" => headers.content_type,
         "dedupe_key" => headers.dedupe_key,
         "replay_id" => headers.replay_id,
-        "idempotency_key" => headers.to_h[:idempotency_key]
+        "idempotency_key" => headers.to_h[:idempotency_key],
+        "verification" => verification_hash(headers.verification)
       }
     when "parse_headers"
       headers = Ankusa.parse_headers(input.fetch("headers"))
@@ -132,7 +141,8 @@ class ConformanceTest < Minitest::Test
         "content_type" => headers.content_type,
         "dedupe_key" => headers.dedupe_key,
         "replay_id" => headers.replay_id,
-        "idempotency_key" => headers.to_h[:idempotency_key]
+        "idempotency_key" => headers.to_h[:idempotency_key],
+        "verification" => verification_hash(headers.verification)
       }
     when "decode_message"
       message = Ankusa.decode_message(input.fetch("message"))
@@ -150,7 +160,8 @@ class ConformanceTest < Minitest::Test
         "dedupe_key" => message.dedupe_key,
         "replay_id" => message.replay_id,
         "idempotency_key" => message.to_h[:idempotency_key],
-        "headers" => message.headers
+        "headers" => message.headers,
+        "verification" => verification_hash(message.verification)
       }
     when "idempotency_key"
       include_replay = input.fetch("include_replay", false)
