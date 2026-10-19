@@ -75,11 +75,29 @@ defmodule Ankusa.Audit do
   redacted an entity is one. `Ankusa.Lifecycle.Publisher` reads the flagged
   rows in `seq` order with `page/3` and keeps its place in `m:lifecycle_cursor`.
 
+  ## Restores and event identity
+
+  A store that came back from a backup (`Ankusa.Store` leaves
+  `m:incarnation_pending`) re-issues the `seq` numbers of every change the lost
+  one made after the backup, and some of those were already published. So the
+  first thing this process does on such a boot is open a new *incarnation*:
+  one history entry `{from seq, fresh id}` in `m:incarnation`, written with an
+  `instance.restore` row (event `io.ankusa.instance.restored`, carrying the
+  incarnation and the restored `seq`) in one synced batch, before any change is
+  taken. `incarnation/2` tells `Ankusa.Lifecycle` which id a row's event id is
+  keyed with: rows of the restored trail keep the ids they were published
+  under, every row from the new incarnation on gets a different one.
+
+
   ## Retention
 
   `audit.retention_days` (default 365). An hourly sweep deletes rows (and the
   lifecycle entities beside them) older than that, oldest first, in bounded
-  batches, and emits `[:ankusa, :audit, :pruned]`. Every committed row emits
+  batches, and emits `[:ankusa, :audit, :pruned]`. While `lifecycle.sinks` is
+  set it never deletes a row at or above `m:lifecycle_cursor`, however old: a
+  lifecycle sink that is down longer than the retention keeps the events it has
+  not seen. The expired rows it holds back are emitted as `blocked_by_cursor` on
+  `[:ankusa, :audit, :retention]` after every sweep. Every committed row emits
   `[:ankusa, :audit]`.
   """
 
@@ -350,6 +368,24 @@ defmodule Ankusa.Audit do
   def last_seq(instance), do: load_seq(instance)
 
   @doc """
+  The incarnation the audit row `seq` was written in: the id of the newest
+  restore at or before it, `nil` for a store that was never restored from a
+  backup (and for the rows before its first restore).
+  """
+  @spec incarnation(atom(), pos_integer()) :: String.t() | nil
+  def incarnation(instance, seq) do
+    case :ets.lookup(table(instance), :incarnations) do
+      [{:incarnations, history}] ->
+        Enum.find_value(history, fn %{"from" => from, "id" => id} -> if seq >= from, do: id end)
+
+      [] ->
+        nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @doc """
   The redacted entity of the row `seq` (a row flagged `publish: true`), or
   `:not_found` when it was pruned.
   """
@@ -485,9 +521,11 @@ defmodule Ankusa.Audit do
 
     with {:ok, key} <- load_key(instance),
          {:ok, last_seq} <- load_seq(instance),
+         {:ok, history} <- load_incarnations(instance),
+         {:ok, restored} <- load_incarnation_pending(instance),
          {:ok, leftovers} <- load_pending(instance) do
       :ets.new(table(instance), [:named_table, :protected, read_concurrency: true])
-      true = :ets.insert(table(instance), {:key, key})
+      true = :ets.insert(table(instance), [{:key, key}, {:incarnations, history}])
 
       # A source or a route is settled once its store has loaded (see
       # `handle_info(:reconcile, _)`); everything else is settled now.
@@ -503,14 +541,15 @@ defmodule Ankusa.Audit do
         reconcile_until: System.monotonic_time(:millisecond) + @reconcile_ms
       }
 
-      case resolve_leftovers(state, now) do
-        {:ok, state} ->
-          Process.send_after(self(), :prune, prune_interval)
-          if deferred != [], do: Process.send_after(self(), :reconcile, @reconcile_tick_ms)
-          {:ok, state}
-
-        {:error, reason} ->
-          {:stop, {:audit_recovery_failed, reason}}
+      # The restore row goes first: it takes `last_seq + 1`, the first seq of
+      # the new incarnation, before any leftover is settled or change taken.
+      with {:ok, state} <- announce_restore(state, restored, history, last_seq),
+           {:ok, state} <- resolve_leftovers(state, now) do
+        Process.send_after(self(), :prune, prune_interval)
+        if deferred != [], do: Process.send_after(self(), :reconcile, @reconcile_tick_ms)
+        {:ok, state}
+      else
+        {:error, reason} -> {:stop, {:audit_recovery_failed, reason}}
       end
     else
       {:error, reason} -> {:stop, {:audit_open_failed, reason}}
@@ -532,17 +571,9 @@ defmodule Ankusa.Audit do
 
   @impl true
   def handle_call({:commit, context, attrs, ops}, _from, state) do
-    seq = state.next_seq
-    row = context |> row(attrs, seq) |> then(&%{&1 | publish: is_map(&1.entity)})
-    {stored, entity_ops} = split_entity(row)
-
-    batch =
-      ops ++ [{:put, :audit, Keys.audit(seq, row.at), encode(stored)}, seq_op(seq) | entity_ops]
-
-    case Store.write(state.instance, batch, sync: true) do
-      :ok ->
-        emit(state.instance, stored)
-        {:reply, :ok, %{state | next_seq: seq + 1}}
+    case commit_row(state, context, attrs, ops) do
+      {:ok, state} ->
+        {:reply, :ok, state}
 
       {:error, reason} ->
         Logger.error("[ankusa] could not commit #{attrs.action}: #{inspect(reason)}")
@@ -806,6 +837,86 @@ defmodule Ankusa.Audit do
     end
   end
 
+  # The history of incarnations, newest first: `[%{"from" => seq, "id" => id}]`.
+  defp load_incarnations(instance) do
+    case Store.get(instance, :default, Keys.meta("incarnation")) do
+      :not_found ->
+        {:ok, []}
+
+      {:ok, json} ->
+        with {:ok, history} when is_list(history) <- JSON.decode(json),
+             true <- Enum.all?(history, &valid_incarnation?/1) do
+          {:ok, history}
+        else
+          _ -> {:error, :bad_incarnation}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp valid_incarnation?(%{"from" => from, "id" => id}),
+    do: is_integer(from) and from >= 1 and is_binary(id)
+
+  defp valid_incarnation?(_other), do: false
+
+  # The id a restore left for this boot to announce (`nil` when none).
+  defp load_incarnation_pending(instance) do
+    case Store.get(instance, :default, Keys.meta("incarnation_pending")) do
+      {:ok, id} -> {:ok, id}
+      :not_found -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp announce_restore(state, nil, _history, _last_seq), do: {:ok, state}
+
+  defp announce_restore(state, incarnation, history, last_seq) do
+    instance = state.instance
+    history = [%{"from" => last_seq + 1, "id" => incarnation} | history]
+    facts = %{"incarnation" => incarnation, "restored_sequence" => last_seq}
+
+    attrs =
+      Map.merge(
+        %{action: "instance.restore", resource: to_string(instance), detail: facts},
+        Lifecycle.outbox(instance, fn -> facts end)
+      )
+
+    ops = [
+      {:put, :default, Keys.meta("incarnation"), JSON.encode!(history)},
+      {:delete, :default, Keys.meta("incarnation_pending")}
+    ]
+
+    # In the table before the row is committed: the row is the new incarnation's
+    # first event, and its id is keyed with it.
+    true = :ets.insert(table(instance), {:incarnations, history})
+
+    with {:ok, state} <- commit_row(state, Context.system(), attrs, ops) do
+      Logger.warning(
+        "[ankusa] store restored from a backup: audit trail resumes after seq #{last_seq} " <>
+          "as incarnation #{incarnation}"
+      )
+
+      {:ok, state}
+    end
+  end
+
+  # The change's ops and its audit row in one synced batch.
+  defp commit_row(state, context, attrs, ops) do
+    seq = state.next_seq
+    row = context |> row(attrs, seq) |> then(&%{&1 | publish: is_map(&1.entity)})
+    {stored, entity_ops} = split_entity(row)
+
+    batch =
+      ops ++ [{:put, :audit, Keys.audit(seq, row.at), encode(stored)}, seq_op(seq) | entity_ops]
+
+    with :ok <- Store.write(state.instance, batch, sync: true) do
+      emit(state.instance, stored)
+      {:ok, %{state | next_seq: seq + 1}}
+    end
+  end
+
   # Pending rows a previous run left: it died between the change's first and
   # last step.
   defp load_pending(instance) do
@@ -833,43 +944,78 @@ defmodule Ankusa.Audit do
     end)
   end
 
+  # Retention never passes the lifecycle outbox: a row (and its entity) is kept
+  # while its `seq` is at or above `m:lifecycle_cursor`, however old it is, so
+  # one lifecycle sink that is down for longer than `audit.retention_days`
+  # cannot lose the `source.*` and `route.*` events no sink has seen. The rows
+  # that are old enough but held back are counted into
+  # `[:ankusa, :audit, :retention]` (`blocked_by_cursor`, `ankusa_audit_retention_blocked_by_cursor`)
+  # and logged, so the backlog is alarmed on rather than silently growing.
   defp do_prune(instance) do
-    days = Ankusa.config(instance).audit.retention_days
-    cutoff = System.system_time(:millisecond) - days * @day_ms
-    deleted = prune_batches(instance, cutoff, @prune_batches, 0)
+    config = Ankusa.config(instance)
+    cutoff = System.system_time(:millisecond) - config.audit.retention_days * @day_ms
 
-    case deleted do
-      {:ok, count} ->
-        if count > 0,
-          do: Telemetry.emit([:audit, :pruned], %{count: count}, %{instance: instance})
+    with {:ok, floor} <- outbox_floor(instance, config),
+         {:ok, count, held} <- prune_batches(instance, cutoff, floor, @prune_batches, 0) do
+      if count > 0,
+        do: Telemetry.emit([:audit, :pruned], %{count: count}, %{instance: instance})
 
-        {:ok, count}
+      Telemetry.emit([:audit, :retention], %{blocked_by_cursor: held}, %{instance: instance})
 
+      if held > 0 do
+        Logger.warning(
+          "[ankusa] audit retention is held back by the lifecycle outbox: at least #{held} " <>
+            "row(s) older than audit.retention_days are kept because no lifecycle sink has " <>
+            "confirmed them (m:lifecycle_cursor); a lifecycle sink is down or stuck"
+        )
+      end
+
+      {:ok, count}
+    else
       {:error, reason} ->
         Logger.warning("[ankusa] pruning the audit trail failed: #{inspect(reason)}")
         {:error, reason}
     end
   end
 
-  defp prune_batches(_instance, _cutoff, 0, total), do: {:ok, total}
+  # The `seq` retention may not reach: the lifecycle cursor while lifecycle
+  # sinks are configured and the publisher has written one, else no floor.
+  defp outbox_floor(_instance, %{lifecycle: %{sinks: []}}), do: {:ok, nil}
 
-  defp prune_batches(instance, cutoff, left, total) do
+  defp outbox_floor(instance, _config) do
+    case Store.get(instance, :default, Keys.lifecycle_cursor()) do
+      {:ok, <<seq::64>>} -> {:ok, seq}
+      {:ok, _bad} -> {:error, {:corrupt_value, :lifecycle_cursor}}
+      :not_found -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @held_max 10_000
+
+  defp prune_batches(_instance, _cutoff, _floor, 0, total), do: {:ok, total, 0}
+
+  defp prune_batches(instance, cutoff, floor, left, total) do
     %{lo: lo, hi: hi} = Keys.family(:audit)
 
     scan =
-      Store.fold(instance, :audit, {lo, hi}, {0, []}, fn key, _value, {n, keys} ->
-        {_seq, at} = Keys.decode_audit(key)
+      Store.fold(instance, :audit, {lo, hi}, {0, [], 0}, fn key, _value, {n, keys, held} = acc ->
+        {seq, at} = Keys.decode_audit(key)
 
-        if at < cutoff and n < @prune_batch,
-          do: {:cont, {n + 1, [key | keys]}},
-          else: {:halt, {n, keys}}
+        cond do
+          at >= cutoff -> {:halt, acc}
+          floor != nil and seq >= floor and held < @held_max -> {:cont, {n, keys, held + 1}}
+          floor != nil and seq >= floor -> {:halt, acc}
+          n < @prune_batch -> {:cont, {n + 1, [key | keys], held}}
+          true -> {:halt, acc}
+        end
       end)
 
-    with {:ok, {n, keys}} <- scan,
+    with {:ok, {n, keys, held}} <- scan,
          :ok <- Store.write(instance, Enum.flat_map(keys, &prune_ops/1), sync: false) do
       if n < @prune_batch,
-        do: {:ok, total + n},
-        else: prune_batches(instance, cutoff, left - 1, total + n)
+        do: {:ok, total + n, held},
+        else: prune_batches(instance, cutoff, floor, left - 1, total + n)
     end
   end
 

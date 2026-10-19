@@ -21,14 +21,21 @@ defmodule Ankusa.Routes.Snapshot do
 
   Rows, all tagged with a *generation*:
 
-    * `{:meta, %{gen, version, epoch, ip_rules, trusted_proxies, count}}` — the
-      one row a reader starts from;
-    * `{{:pattern, gen, priority, id}, route, segments}` — every route, enabled
-      or not, in priority order (the table's own key order);
+    * `{:meta, %{gen, version, epoch, ip_rules, trusted_proxies, count,
+      max_prefix}}` — the one row a reader starts from;
+    * `{{:lit, gen, prefix, priority, id}, enabled, methods, segments}` — every
+      route, enabled or not, in the *literal-prefix index*: `prefix` is the
+      leading run of literal segments of its pattern (at most 8), so
+      `/hooks/stripe/:id` lives under `["hooks", "stripe"]` and `/:tenant/hook`
+      under `[]`. A bucket is one contiguous run of keys in priority order;
     * `{{:id, gen, id}, route}`;
     * `{{:tenant, gen, tenant_id, id}}` — the `{tenant, id}` index: one key per
       route, so a tenant's routes come back id-ascending from a walk over its
-      own keys, not over every tenant's.
+      own keys, not over every tenant's;
+    * `{{:conflict, gen, pattern, method}, id}` — the `{compiled pattern,
+      method}` index of the *enabled* routes (`pattern` is the segments as one
+      binary, `hooks/:/*`), so "does an enabled route already capture this" is
+      a lookup, not a scan.
 
   A reader reads `:meta` once and uses its `gen` for every other row.
   `publish/1` (boot, a Redis reload) writes a whole new generation, then flips
@@ -37,8 +44,16 @@ defmodule Ankusa.Routes.Snapshot do
   still there. `mutate/3` (one route created, replaced or deleted in the ETS
   store) edits the current generation in place and writes a new `:meta`.
 
-  Every route is a pattern row, enabled or not; the guard skips a disabled
+  Every route is a prefix-index row, enabled or not; the guard skips a disabled
   one at match time, so toggling `enabled` is a state change, not a recompile.
+
+  ## Matching
+
+  A request's candidates are the buckets of every prefix of its own segments
+  (`[]`, `[s0]`, `[s0, s1]`, … up to `meta.max_prefix`, at most 8): a few
+  short ordered walks, merged in priority order, so a miss costs the handful of
+  patterns that share the request's leading literals, never every pattern in
+  the table.
 
   ## Ordering
 
@@ -68,37 +83,47 @@ defmodule Ankusa.Routes.Snapshot do
   # its rows in microseconds, so a second is generous.
   @drop_after_ms 1_000
 
+  # A bucket's prefix is at most this many segments: a pattern with a longer
+  # literal run shares the bucket of its first `@max_prefix`, and a request
+  # probes at most `@max_prefix + 1` buckets.
+  @max_prefix 8
+
+  # Routes written per `:ets.insert/2` while a generation is published: the
+  # row list stays small and the scheduler gets to preempt between batches.
+  @batch 2_000
+
+  # What one route costs a node, in bytes: its rows in the snapshot table plus
+  # the store's own copy of the definition. `bench/routes_bench.exs` measures
+  # it (about 4.9 KB for a route with the default fields at 10^6 routes) and
+  # fails if it passes this figure. The boot check of
+  # `routes.memory_budget_bytes` multiplies by it.
+  @route_bytes_estimate 5_120
+
   @type meta :: %{
           gen: pos_integer(),
           version: pos_integer(),
           epoch: pos_integer(),
           ip_rules: %{default: :allow | :deny, rules: [Route.ip_rule()]},
           trusted_proxies: [term()],
-          count: non_neg_integer()
+          count: non_neg_integer(),
+          max_prefix: non_neg_integer()
         }
 
+  @doc "What `count` routes are estimated to cost a node, in bytes."
+  @spec estimated_bytes(non_neg_integer()) :: non_neg_integer()
+  def estimated_bytes(count), do: count * @route_bytes_estimate
+
   @doc """
-  Compile a store's state into a snapshot. `state` is the stores'
-  `%{instance:, routes:, ip_rules:, version:}` map; `trusted_proxies` is folded
-  in from the instance's config, so the guard reads them once per request.
+  Would `count` routes fit in `budget` bytes (`routes.memory_budget_bytes`)? A
+  store asks before it publishes a load, so a table that does not fit is
+  refused at boot instead of by the OOM killer.
   """
-  @spec build(map()) :: map()
-  def build(state) do
-    %{routes: routes, ip_rules: ip_rules, version: version, instance: instance} = state
-
-    placed =
-      Enum.map(routes, fn {_id, %Route{} = route} ->
-        %{route: route, segments: Matcher.compile(route)}
-      end)
-
-    %{
-      version: version,
-      epoch: System.unique_integer([:positive, :monotonic]),
-      patterns: Enum.sort_by(placed, &priority/1),
-      by_id: Map.new(routes, fn {id, route} -> {id, route} end),
-      ip_rules: ip_rules,
-      trusted_proxies: trusted_proxies(instance)
-    }
+  @spec check_budget(non_neg_integer(), pos_integer()) ::
+          :ok | {:error, {:routes_over_budget, non_neg_integer(), pos_integer()}}
+  def check_budget(count, budget) do
+    if estimated_bytes(count) > budget,
+      do: {:error, {:routes_over_budget, count, budget}},
+      else: :ok
   end
 
   @doc """
@@ -122,34 +147,43 @@ defmodule Ankusa.Routes.Snapshot do
   @spec publish(map()) :: :ok
   def publish(state) do
     table = ensure_table(state.instance)
-    snapshot = build(state)
     old = current_gen(table)
     gen = System.unique_integer([:positive, :monotonic])
 
-    patterns =
-      Enum.map(snapshot.patterns, fn %{route: route, segments: segments} = placed ->
-        {pattern_key(gen, placed), route, segments}
+    max_prefix =
+      state.routes
+      |> Stream.map(fn {_id, %Route{} = route} -> route end)
+      |> Stream.chunk_every(@batch)
+      |> Enum.reduce(0, fn batch, max_prefix ->
+        max(max_prefix, insert_batch(table, gen, batch))
       end)
-
-    ids = Enum.map(snapshot.by_id, fn {id, route} -> {{:id, gen, id}, route} end)
-
-    tenants =
-      Enum.map(snapshot.by_id, fn {id, route} -> {{:tenant, gen, route.tenant_id, id}} end)
-
-    true = :ets.insert(table, patterns ++ ids ++ tenants)
 
     meta = %{
       gen: gen,
-      version: snapshot.version,
-      epoch: snapshot.epoch,
-      ip_rules: snapshot.ip_rules,
-      trusted_proxies: snapshot.trusted_proxies,
-      count: map_size(snapshot.by_id)
+      version: state.version,
+      epoch: System.unique_integer([:positive, :monotonic]),
+      ip_rules: state.ip_rules,
+      trusted_proxies: trusted_proxies(state.instance),
+      count: map_size(state.routes),
+      max_prefix: max_prefix
     }
 
     true = :ets.insert(table, {:meta, meta})
     if old, do: Process.send_after(self(), {:drop_generation, old}, @drop_after_ms)
     :ok
+  end
+
+  # One batch of a generation's rows; the longest prefix it indexed.
+  defp insert_batch(table, gen, routes) do
+    {rows, max_prefix} =
+      Enum.reduce(routes, {[], 0}, fn route, {rows, max_prefix} ->
+        segments = Matcher.compile(route)
+        prefix = prefix(segments)
+        {rows(gen, route, segments, prefix) ++ rows, max(max_prefix, length(prefix))}
+      end)
+
+    true = :ets.insert(table, rows)
+    max_prefix
   end
 
   @doc """
@@ -163,14 +197,15 @@ defmodule Ankusa.Routes.Snapshot do
   def mutate(state, change, {action, route_id}) do
     table = table(state.instance)
     [{:meta, meta}] = :ets.lookup(table, :meta)
-    apply_change(table, meta.gen, change)
+    prefix_length = apply_change(table, meta.gen, change)
 
     meta = %{
       meta
       | version: state.version,
         epoch: System.unique_integer([:positive, :monotonic]),
         ip_rules: state.ip_rules,
-        count: map_size(state.routes)
+        count: map_size(state.routes),
+        max_prefix: max(meta.max_prefix, prefix_length)
     }
 
     true = :ets.insert(table, {:meta, meta})
@@ -178,56 +213,114 @@ defmodule Ankusa.Routes.Snapshot do
     state
   end
 
+  # The length of the prefix the change indexed (0 for one that indexed none).
   defp apply_change(table, gen, {:put, %Route{id: id} = route}) do
-    placed = %{route: route, segments: Matcher.compile(route)}
-    key = pattern_key(gen, placed)
+    segments = Matcher.compile(route)
+    prefix = prefix(segments)
     previous = :ets.lookup(table, {:id, gen, id})
 
     # The new rows first: a reader walking now sees the old pattern, the new
     # one, or both, never neither.
-    true =
-      :ets.insert(table, [
-        {key, route, placed.segments},
-        {{:id, gen, id}, route},
-        {{:tenant, gen, route.tenant_id, id}}
-      ])
+    true = :ets.insert(table, rows(gen, route, segments, prefix))
 
     with [{_key, %Route{} = old}] <- previous do
-      old_key = pattern_key(gen, place(old))
-      if old_key != key, do: :ets.delete(table, old_key)
+      old_segments = Matcher.compile(old)
 
-      if old.tenant_id != route.tenant_id,
-        do: :ets.delete(table, {:tenant, gen, old.tenant_id, id})
+      stale =
+        keys(gen, old, old_segments, prefix(old_segments)) -- keys(gen, route, segments, prefix)
+
+      Enum.each(stale, &delete_key(table, &1, id))
     end
 
-    :ok
+    length(prefix)
   end
 
   defp apply_change(table, gen, {:delete, id}) do
-    case :ets.lookup(table, {:id, gen, id}) do
-      [{_key, %Route{} = old}] ->
-        :ets.delete(table, pattern_key(gen, place(old)))
-        :ets.delete(table, {:tenant, gen, old.tenant_id, id})
-        :ets.delete(table, {:id, gen, id})
-
-      [] ->
-        :ok
+    with [{_key, %Route{} = old}] <- :ets.lookup(table, {:id, gen, id}) do
+      segments = Matcher.compile(old)
+      Enum.each(keys(gen, old, segments, prefix(segments)), &delete_key(table, &1, id))
     end
 
-    :ok
+    0
   end
 
-  defp apply_change(_table, _gen, :ip_rules), do: :ok
+  defp apply_change(_table, _gen, :ip_rules), do: 0
 
-  defp place(route), do: %{route: route, segments: Matcher.compile(route)}
+  # Every row of one route. The `:lit` row carries what a scan needs
+  # (`enabled`, `methods`, the compiled pattern) rather than the whole route,
+  # so a route costs one copy of its definition (the `:id` row), not two.
+  defp rows(gen, %Route{} = route, segments, prefix) do
+    [
+      {lit_key(gen, route, segments, prefix), route.enabled, route.methods, segments},
+      {{:id, gen, route.id}, route},
+      {{:tenant, gen, route.tenant_id, route.id}}
+      | Enum.map(conflict_keys(gen, route, segments), &{&1, route.id})
+    ]
+  end
+
+  defp keys(gen, %Route{} = route, segments, prefix) do
+    [
+      lit_key(gen, route, segments, prefix),
+      {:id, gen, route.id},
+      {:tenant, gen, route.tenant_id, route.id}
+      | conflict_keys(gen, route, segments)
+    ]
+  end
+
+  # Ascending sort key inside a bucket: negative literal count is "most
+  # literals first", a wildcard sorts after everything without one, then the id.
+  defp lit_key(gen, %Route{id: id}, segments, prefix) do
+    {literal_count, wildcard?} = Matcher.specificity(segments)
+    {:lit, gen, prefix, {-literal_count, if(wildcard?, do: 1, else: 0)}, id}
+  end
+
+  # Only an enabled route captures anything, so only it is in the conflict index.
+  defp conflict_keys(gen, %Route{enabled: true, methods: methods}, segments) do
+    pattern = pattern_key(segments)
+    Enum.map(methods, &{:conflict, gen, pattern, &1})
+  end
+
+  defp conflict_keys(_gen, %Route{}, _segments), do: []
+
+  # The compiled pattern as one small binary: a literal never holds `/`, `:` or
+  # `*` (`Matcher.segments/1`), so the join names one pattern and no other, and
+  # the key costs a few bytes instead of a copy of the segment list.
+  defp pattern_key(segments) do
+    Enum.map_join(segments, "/", fn
+      {:literal, literal} -> literal
+      :param -> ":"
+      :wildcard -> "*"
+    end)
+  end
+
+  # A conflict key only goes with the route that holds it: a table that was
+  # loaded with two enabled routes on one pattern (nothing but a hand-edited
+  # Redis can) keeps the holder's entry when the other one is deleted.
+  defp delete_key(table, {:conflict, _gen, _segments, _method} = key, id) do
+    case :ets.lookup(table, key) do
+      [{_key, ^id}] -> :ets.delete(table, key)
+      _other -> true
+    end
+  end
+
+  defp delete_key(table, key, _id), do: :ets.delete(table, key)
+
+  # The leading run of literal segments, as strings, capped at `@max_prefix`.
+  defp prefix(segments) do
+    segments
+    |> Enum.take_while(&match?({:literal, _literal}, &1))
+    |> Enum.take(@max_prefix)
+    |> Enum.map(fn {:literal, literal} -> literal end)
+  end
 
   @doc "Delete every row of an old generation (the owner's `{:drop_generation, gen}`)."
   @spec drop_generation(atom(), pos_integer()) :: :ok
   def drop_generation(instance, gen) do
     :ets.select_delete(table(instance), [
-      {{{:pattern, gen, :_, :_}, :_, :_}, [], [true]},
+      {{{:lit, gen, :_, :_, :_}, :_, :_, :_}, [], [true]},
       {{{:id, gen, :_}, :_}, [], [true]},
-      {{{:tenant, gen, :_, :_}}, [], [true]}
+      {{{:tenant, gen, :_, :_}}, [], [true]},
+      {{{:conflict, gen, :_, :_}, :_}, [], [true]}
     ])
 
     :ok
@@ -441,9 +534,10 @@ defmodule Ankusa.Routes.Snapshot do
 
         # The old owner's `{:drop_generation, old}` timer died with it.
         :ets.select_delete(table, [
-          {{{:pattern, :"$1", :_, :_}, :_, :_}, [{:"/=", :"$1", gen}], [true]},
+          {{{:lit, :"$1", :_, :_, :_}, :_, :_, :_}, [{:"/=", :"$1", gen}], [true]},
           {{{:id, :"$1", :_}, :_}, [{:"/=", :"$1", gen}], [true]},
-          {{{:tenant, :"$1", :_, :_}}, [{:"/=", :"$1", gen}], [true]}
+          {{{:tenant, :"$1", :_, :_}}, [{:"/=", :"$1", gen}], [true]},
+          {{{:conflict, :"$1", :_, :_}, :_}, [{:"/=", :"$1", gen}], [true]}
         ])
 
         {:ok,
@@ -502,6 +596,34 @@ defmodule Ankusa.Routes.Snapshot do
     |> Stream.reject(&is_nil/1)
   end
 
+  @doc """
+  Every route of `meta`'s generation, id ascending, as a lazy stream that
+  starts after `after_id` (`nil` for the first). It walks the `:id` rows from
+  the cursor, so its cost is the page read, not the table.
+  """
+  @spec routes_after(atom(), meta(), String.t() | nil) :: Enumerable.t()
+  def routes_after(instance, %{gen: gen}, after_id) do
+    table = table(instance)
+
+    Stream.unfold({:id, gen, after_id || ""}, fn key ->
+      case next_key(table, key) do
+        {:id, ^gen, id} = next ->
+          # A route deleted between `next` and `lookup` is skipped by the `nil`.
+          route =
+            case :ets.lookup(table, {:id, gen, id}) do
+              [{_key, %Route{} = route}] -> route
+              [] -> nil
+            end
+
+          {route, next}
+
+        _end_of_ids ->
+          nil
+      end
+    end)
+    |> Stream.reject(&is_nil/1)
+  end
+
   # A table that is gone (the instance is stopping) ends the walk.
   defp next_key(table, key) do
     :ets.next(table, key)
@@ -509,14 +631,93 @@ defmodule Ankusa.Routes.Snapshot do
     ArgumentError -> :"$end_of_table"
   end
 
-  @doc "Every `{route, segments}` of `meta`'s generation, in priority order."
-  @spec patterns(atom(), meta()) :: [{Route.t(), [Matcher.segment()]}]
-  def patterns(instance, %{gen: gen}) do
-    :ets.select(table(instance), [
-      {{{:pattern, gen, :_, :_}, :"$1", :"$2"}, [], [{{:"$1", :"$2"}}]}
-    ])
+  @doc """
+  The enabled route that already captures `route`'s request class — the same
+  compiled pattern and at least one method in common, other than `route`
+  itself — or `:none`. One lookup per method of `route`, whatever the table
+  holds.
+  """
+  @spec conflict(atom(), meta(), Route.t()) :: {:ok, Route.t()} | :none
+  def conflict(instance, %{gen: gen} = meta, %Route{id: id, methods: methods} = route) do
+    table = table(instance)
+    pattern = pattern_key(Matcher.compile(route))
+
+    Enum.find_value(methods, :none, fn method ->
+      with [{_key, holder_id}] when holder_id != id <-
+             :ets.lookup(table, {:conflict, gen, pattern, method}),
+           {:ok, holder} <- fetch(instance, meta, holder_id) do
+        {:ok, holder}
+      else
+        _no_holder -> nil
+      end
+    end)
+  rescue
+    ArgumentError -> :none
+  end
+
+  @doc """
+  Every other route whose pattern overlaps `route`'s — some request path both
+  capture (`Ankusa.Routes.Matcher.overlap?/2`) — whatever its methods, whether
+  it is enabled, and whichever tenant owns it (each returned route carries its
+  `tenant_id`, so "does another tenant already hold part of this path space"
+  is a filter over the answer). `limit` stops the walk after that many.
+
+  It reads the prefix index along one chain: the buckets of every proper prefix
+  of the route's own literal prefix, and the contiguous run of buckets at or
+  under it (list order keeps everything that extends a prefix next to it), so
+  the cost is a seek per level plus the routes sharing the route's leading
+  literals, not the table. A pattern that starts with a parameter or wildcard
+  has no literal prefix and can overlap anything, so for it the run is the
+  whole index.
+  """
+  @spec overlaps(atom(), meta(), Route.t(), pos_integer() | :infinity) :: [Route.t()]
+  def overlaps(instance, %{gen: gen} = meta, %Route{id: id} = route, limit \\ :infinity) do
+    table = table(instance)
+    segments = Matcher.compile(route)
+    prefix = prefix(segments)
+    depth = length(prefix)
+
+    found =
+      0..depth
+      |> Stream.flat_map(fn level ->
+        lit_keys(table, gen, Enum.take(prefix, level), level == depth)
+      end)
+      |> Stream.filter(fn key ->
+        elem(key, 4) != id and overlapping?(table, key, segments)
+      end)
+      |> Stream.flat_map(fn key ->
+        case fetch(instance, meta, elem(key, 4)) do
+          {:ok, other} -> [other]
+          :error -> []
+        end
+      end)
+
+    if limit == :infinity, do: Enum.to_list(found), else: Enum.take(found, limit)
   rescue
     ArgumentError -> []
+  end
+
+  defp overlapping?(table, key, segments) do
+    case :ets.lookup(table, key) do
+      [{_key, _enabled, _methods, pattern}] -> Matcher.overlap?(segments, pattern)
+      [] -> false
+    end
+  end
+
+  # The `:lit` keys of the bucket `prefix`, and of every bucket under it when
+  # `extending?`, in key order.
+  defp lit_keys(table, gen, prefix, extending?) do
+    Stream.unfold({:lit, gen, prefix, {}, ""}, fn key ->
+      case next_key(table, key) do
+        {:lit, ^gen, bucket, _priority, _id} = next ->
+          if bucket == prefix or (extending? and :lists.prefix(prefix, bucket)),
+            do: {next, next},
+            else: nil
+
+        _end_of_run ->
+          nil
+      end
+    end)
   end
 
   @doc "How many routes the current generation holds (0 with none loaded)."
@@ -532,26 +733,54 @@ defmodule Ankusa.Routes.Snapshot do
   The route matching `method` and `segments`: the first enabled route in
   priority order whose pattern matches and that serves the method. A path
   that matches only for other methods is `{:reject, :method}`, nothing at all
-  `{:reject, :no_route}`; both are 404 to the sender. Walks the table's own
-  key order and stops at the first hit.
+  `{:reject, :no_route}`; both are 404 to the sender. Walks the buckets of the
+  request's own literal prefixes, merged in priority order, and stops at the
+  first hit.
   """
   @spec scan(atom(), meta(), String.t(), [String.t()]) ::
           {:match, String.t()} | {:reject, :no_route | :method}
-  def scan(instance, %{gen: gen}, method, segments) do
+  def scan(instance, %{gen: gen, max_prefix: max_prefix}, method, segments) do
     table = table(instance)
-    walk(table, :ets.next(table, {:pattern, gen, {}, ""}), gen, method, segments, :no_route)
+
+    cursors =
+      segments
+      |> probe_prefixes(max_prefix, [], [[]])
+      |> Enum.flat_map(&cursor(table, gen, &1, {:lit, gen, &1, {}, ""}))
+
+    merge(table, gen, cursors, method, segments, :no_route)
   rescue
     ArgumentError -> {:reject, :no_route}
   end
 
-  defp walk(table, {:pattern, gen, _priority, _id} = key, gen, method, segments, acc) do
+  # `[]`, `[s0]`, `[s0, s1]`, … up to `max` segments or the request's own end.
+  defp probe_prefixes(_segments, 0, _reversed, acc), do: acc
+  defp probe_prefixes([], _max, _reversed, acc), do: acc
+
+  defp probe_prefixes([segment | rest], max, reversed, acc) do
+    reversed = [segment | reversed]
+    probe_prefixes(rest, max - 1, reversed, [Enum.reverse(reversed) | acc])
+  end
+
+  # The first row of `prefix`'s bucket after `from`, as a merge cursor, or none.
+  defp cursor(table, gen, prefix, from) do
+    case :ets.next(table, from) do
+      {:lit, ^gen, ^prefix, priority, id} = key -> [{priority, id, key, prefix}]
+      _end_of_bucket -> []
+    end
+  end
+
+  defp merge(_table, _gen, [], _method, _segments, reason), do: {:reject, reason}
+
+  defp merge(table, gen, cursors, method, segments, acc) do
+    {{_priority, id, key, prefix}, others} = take_min(cursors)
+
     acc =
       case :ets.lookup(table, key) do
-        [{_key, route, pattern}] ->
+        [{_key, enabled, methods, pattern}] ->
           if Matcher.match?(pattern, segments) do
             cond do
-              not route.enabled -> acc
-              method in route.methods -> {:ok, route.id}
+              not enabled -> acc
+              method in methods -> {:ok, id}
               true -> :method
             end
           else
@@ -565,21 +794,21 @@ defmodule Ankusa.Routes.Snapshot do
 
     case acc do
       {:ok, id} -> {:match, id}
-      acc -> walk(table, :ets.next(table, key), gen, method, segments, acc)
+      acc -> merge(table, gen, cursor(table, gen, prefix, key) ++ others, method, segments, acc)
     end
   end
 
-  defp walk(_table, _end_or_other_gen, _gen, _method, _segments, reason), do: {:reject, reason}
+  # The cursor whose next row sorts first, and the others (at most
+  # `@max_prefix` of them).
+  defp take_min([first | rest]), do: take_min(rest, first, [])
+  defp take_min([], min, others), do: {min, others}
 
-  # Ascending sort key: negative literal count is "most literals first", a
-  # wildcard sorts after everything without one.
-  defp priority(%{route: route, segments: segments}) do
-    {literal_count, wildcard?} = Matcher.specificity(segments)
-    {-literal_count, if(wildcard?, do: 1, else: 0), route.id}
+  defp take_min([cursor | rest], min, others) do
+    if before?(cursor, min),
+      do: take_min(rest, cursor, [min | others]),
+      else: take_min(rest, min, [cursor | others])
   end
 
-  defp pattern_key(gen, placed) do
-    {neg_literals, wildcard, id} = priority(placed)
-    {:pattern, gen, {neg_literals, wildcard}, id}
-  end
+  defp before?({priority, id, _key, _prefix}, {other_priority, other_id, _other, _prefix2}),
+    do: priority < other_priority or (priority == other_priority and id < other_id)
 end

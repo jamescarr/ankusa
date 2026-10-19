@@ -8,6 +8,20 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Streaming loads and incremental writes for 10⁶ entries (TEN-9).** The route
+  store and the source store read their hash a page at a time (`HSCAN … COUNT
+  1000`, `Ankusa.Redis.Scan`) instead of one `HGETALL`, with `timeout_ms`
+  (default 5 s, every command, a page included) and `load_timeout_ms` (default
+  5 min, the whole load) as store options. The version is read before and after
+  a scan (an `HSCAN` is not a snapshot): a scan that saw it move is repeated up
+  to three times and then kept with the earlier version, so the next broadcast
+  or tick loads again. A write that arrives in step with a node's version is
+  applied to the route snapshot as one row change (`Snapshot.mutate/3`) instead
+  of republishing the whole table; only a write that raced a peer's reloads it.
+  A route table that does not fit `routes.memory_budget_bytes` refuses the boot
+  (and keeps the serving table on a reload). The `GenServer.call` timeout of a
+  write is `3 × timeout_ms + load_timeout_ms`, since a write that raced a peer
+  reloads the table inside it.
 - **`Ankusa.RateLimiter.Store.Redis` (TEN-6)**: the fleet store behind core's
   `rate_limits.scope: :fleet` and `dedupe.scope: :fleet`, implementing
   `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store`. One `EVALSHA` per hook runs

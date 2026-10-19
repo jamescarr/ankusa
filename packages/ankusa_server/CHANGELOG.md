@@ -8,6 +8,26 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`dedupe.max_entries` and `dedupe.max_entries_per_tenant` (DUR-2.a).** The most
+  live ingest-dedupe keys the node, and one tenant, holds (defaults 100 000 000 and
+  30 000 000, integers ≥ 1); a hook whose key would pass either is `503
+  dedupe_quota` with `Retry-After: 60`. The image's store moves to **format 4** on
+  first boot (a resumable migration counting the existing dedupe keys); an older
+  image cannot open it afterwards. See `docs/configuration.md`.
+- **`backup.secondary`, `verify_interval_ms`, `signing_key`, `timeout_ms`,
+  `final_timeout_ms`, `max_age_ms`, `require_fresh` (DUR-6).** A second backup
+  store with restore fallback, a verify job, HMAC-SHA256-signed manifests (a list
+  or comma-separated `${VAR}`, each at least 32 bytes), a final backup on SIGTERM,
+  and a `/ready` `backup: stale` label (`503` with `require_fresh`). See
+  `config-examples/reference.yml` and `docs/storage.md#backup-and-restore`.
+- **`routes.memory_budget_bytes`, `routes.store.timeout_ms`/`load_timeout_ms` and
+  `source_store.timeout_ms`/`load_timeout_ms` (TEN-9).** `routes.max_routes`
+  defaults to 1 000 000 (was 10 000) behind `routes.memory_budget_bytes` (default
+  8589934592), checked at boot against ~5 KiB per route. The two timeouts are
+  Redis-only keys, like `tick_ms` (a config error with `type: ets`): `timeout_ms`
+  bounds each Redis command and `load_timeout_ms` a whole load, which now reads
+  the routes and sources a page at a time. See `config-examples/reference.yml`
+  and `docs/configuration.md#route-management`.
 - **`metrics.detail` and `metrics.max_series_per_metric` (TEN-7).** The scrape's
   cardinality policy: `detail` is `tenant` (default: `tenant_id` on the per-hook
   series), `source` (`tenant_id` and `source_id`) or `none` (neither, and no

@@ -222,14 +222,22 @@ defmodule Ankusa.TestHelpers do
 
   @doc """
   What the queue counters must be, folded from the index families: `%{ord =>
-  %{pending, scheduled, inflight, dead, bytes, archive_pending}}`, ordinal 0
+  %{pending, scheduled, inflight, dead, bytes, archive_pending, dedupe}}, ordinal 0
   the sum of the others. Only tenants with a non-zero counter appear.
   """
   def folded_counters(instance) do
     alias Ankusa.Store
     alias Ankusa.Store.Keys
 
-    zero = %{pending: 0, scheduled: 0, inflight: 0, dead: 0, bytes: 0, archive_pending: 0}
+    zero = %{
+      pending: 0,
+      scheduled: 0,
+      inflight: 0,
+      dead: 0,
+      bytes: 0,
+      archive_pending: 0,
+      dedupe: 0
+    }
 
     bump = fn acc, ord, field, n ->
       Map.update(acc, ord, %{zero | field => n}, &%{&1 | field => &1[field] + n})
@@ -280,6 +288,12 @@ defmodule Ankusa.TestHelpers do
         bump.(acc, ord, :archive_pending, 1)
       end)
 
+    acc =
+      fold.(:dedupe_expiry, acc, fn key, _v, acc ->
+        {_at, tenant, _source, _key} = Keys.decode_dedupe_expiry(key)
+        bump.(acc, tenant_ord!(instance, tenant), :dedupe, 1)
+      end)
+
     total =
       Enum.reduce(acc, zero, fn {_ord, counters}, total ->
         Map.merge(total, counters, fn _field, a, b -> a + b end)
@@ -291,7 +305,16 @@ defmodule Ankusa.TestHelpers do
   @doc "The counters as stored, for the ordinals of `folded_counters/1` and any more with a row."
   def stored_counters(instance) do
     {:ok, next} = Ankusa.Queue.Tenants.next_ord(instance)
-    zero = %{pending: 0, scheduled: 0, inflight: 0, dead: 0, bytes: 0, archive_pending: 0}
+
+    zero = %{
+      pending: 0,
+      scheduled: 0,
+      inflight: 0,
+      dead: 0,
+      bytes: 0,
+      archive_pending: 0,
+      dedupe: 0
+    }
 
     for ord <- 0..(next - 1), reduce: %{} do
       acc ->

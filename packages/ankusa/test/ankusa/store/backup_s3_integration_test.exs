@@ -24,6 +24,10 @@ defmodule Ankusa.Store.BackupS3IntegrationTest do
     secret_access_key: "test"
   ]
 
+  # Stands in for another region's bucket (`docker-compose.integration.yml`).
+  @secondary_opts Keyword.put(@opts, :bucket, "ankusa-backup-secondary-dev")
+  @signing_key String.duplicate("s", 40)
+
   test "a backup in S3 brings every hook back after the data dir is lost" do
     prefix = "it-backup-#{System.unique_integer([:positive])}-#{System.os_time(:millisecond)}/"
 
@@ -52,6 +56,71 @@ defmodule Ankusa.Store.BackupS3IntegrationTest do
     File.rm_rf!(config.data_dir)
     start_supervised!({Ankusa.Instance, config})
 
+    assert stored_ids(inst) == Enum.map(committed, & &1.id)
+  end
+
+  # DUR-6 through a real S3 API: signed manifests, verify, and the secondary
+  # bucket. The primary's backup is corrupted in place and the host is lost.
+  test "signed manifest, verify detects corruption, and the secondary bucket restores every acked id" do
+    prefix = "it-dur6-#{System.unique_integer([:positive])}-#{System.os_time(:millisecond)}/"
+
+    config =
+      test_config(
+        roles: [:edge],
+        source_store:
+          {Ankusa.SourceStore.Static, sources: %{"acme" => %{sinks: [{Ankusa.Sink.Log, []}]}}},
+        storage: %{interval_ms: 0, blob_store: {S3, @opts}, key_prefix: prefix},
+        backup: %{
+          enabled: true,
+          interval_ms: 3_600_000,
+          signing_key: [@signing_key],
+          secondary: {S3, @secondary_opts}
+        }
+      )
+
+    inst = config.instance
+    start_supervised!({Ankusa.Instance, config})
+
+    committed = for n <- 1..200, do: enqueue!(inst, envelope(n))
+    assert {:ok, %{id: id}} = Backup.run(inst)
+
+    # Both buckets hold the same backup objects.
+    assert {:ok, keys} = S3.list(inst, prefix <> "backup/", @opts)
+    assert {:ok, second} = S3.list(inst, prefix <> "backup/", @secondary_opts)
+    assert Enum.sort(keys) == Enum.sort(second)
+    assert (prefix <> "backup/LATEST") in second
+
+    # The manifest is signed, and both buckets verify.
+    assert {:ok, manifest} = S3.get(inst, prefix <> "backup/#{id}/manifest.json", @opts)
+    assert %{"signature" => signature} = JSON.decode!(manifest)
+    assert byte_size(signature) == 64
+    assert {:ok, %{id: ^id, files: files}} = Backup.verify(inst)
+    assert files > 0
+    assert {:ok, %{id: ^id}} = Backup.verify(inst, target: :secondary)
+
+    # One shared file of the primary is overwritten with a flipped byte.
+    sst_key = Enum.find(keys, &String.contains?(&1, "backup/sst/"))
+    assert {:ok, <<first, rest::binary>>} = S3.get(inst, sst_key, @opts)
+    assert :ok = S3.put(inst, sst_key, <<Bitwise.bxor(first, 1), rest::binary>>, @opts)
+    assert {:error, {:checksum_mismatch, _name}} = Backup.verify(inst)
+    assert {:ok, %{id: ^id}} = Backup.verify(inst, target: :secondary)
+
+    stop_supervised!({Ankusa.Instance, inst})
+
+    # A restore with the wrong key refuses (both buckets carry our signature).
+    Process.flag(:trap_exit, true)
+    File.rm_rf!(config.data_dir)
+    wrong = %{config | backup: %{config.backup | signing_key: [String.duplicate("w", 40)]}}
+
+    assert {:error,
+            {:shutdown,
+             {:failed_to_start_child, {Ankusa.Store, _},
+              {:store_restore_failed, _path, {:manifest_invalid, _id, :bad_signature}}}}} =
+             Ankusa.Instance.start_link(wrong)
+
+    # With the right key the corrupt primary is skipped and the secondary restores.
+    File.rm_rf!(config.data_dir)
+    start_supervised!({Ankusa.Instance, config})
     assert stored_ids(inst) == Enum.map(committed, & &1.id)
   end
 

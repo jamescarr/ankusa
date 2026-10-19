@@ -79,6 +79,7 @@ route-management API, or `Ankusa.SourceStore.put/5`, `delete/3` and
 | `io.ankusa.source.created` / `updated` / `deleted` | a webhook endpoint (source) changes | `<tenant>.<name>` |
 | `io.ankusa.route.created` / `updated` / `deleted` | a route changes (`PUT` on a new id is `created`) | the route id |
 | `io.ankusa.tenant.deleted` | a tenant was erased ([`multi-tenancy.md`](multi-tenancy.md#erasing-a-tenant)), after the `deleted` event of each of its sources and routes; `data` is `{"tenant": <id>}`, no entity | the tenant id |
+| `io.ankusa.instance.restored` | the store was restored from a backup, before any new change | the instance name |
 
 The body is a [CloudEvents 1.0](https://cloudevents.io) structured-mode event:
 `specversion`, `id`, `source` (`urn:ankusa:instance:<instance>`), `type`,
@@ -90,12 +91,18 @@ route's definition). These attributes say which change an event is:
 
 | attribute | |
 | --- | --- |
-| `id` | derived from the change, never minted: the same event has the same `id` however often it is sent |
+| `id` | derived from the change, never minted: the same event has the same `id` however often it is sent. A restored store re-issues `sequence` numbers the lost node already published, under different `id`s |
 | `revision` | the subject's change counter, `1` at creation; absent for a store that keeps none (the Redis source store) |
 | `actor` | the principal id that made the change (`system` for code) |
 | `instance` | the instance name |
 | `sequence` | the instance's audit sequence number, a decimal string: events of one instance are totally ordered by it |
 | `replayid` | only on an event a replay job re-sent |
+
+`io.ankusa.instance.restored` carries `incarnation` (the fresh id later event
+ids are keyed with) and `restored_sequence` (the last `sequence` the restored
+trail held) in `data`. `sequence` and per-subject `revision` restart after it:
+a consumer that ignores updates whose `revision` is not above the highest it
+has seen must reset that state for the instance when it receives this event.
 
 The event travels as the `body_base64` of an ordinary `SinkMessageV1` (so the
 `content_type` is `application/cloudevents+json`, and the document names the

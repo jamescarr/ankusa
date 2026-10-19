@@ -42,15 +42,18 @@ defmodule Ankusa.Queue do
   half-way: an abandoned call would commit anyway, unacknowledged.
 
   An entry's reply is `{:error, :tenant_limit}` instead when its tenant would
-  be one past `tenants.max`, and `{:error, :tenant_erasing}` when an erase of
-  its tenant is running (`Ankusa.Tenant`): that hook is not written.
+  be one past `tenants.max`, or `{:error, :tenant_erasing}` when an erase of
+  its tenant is running (`Ankusa.Tenant`): that hook is not written. It is
+  `{:error, :dedupe_quota}` when its dedupe key would be a new live key past
+  `dedupe.max_entries` or `dedupe.max_entries_per_tenant`: the hook is not
+  written either, and never stored without its key.
   """
   @spec enqueue(atom(), [entry()], integer() | :infinity) ::
           {:ok,
            [
              {:committed, Envelope.t()}
              | {:duplicate, Envelope.t()}
-             | {:error, :tenant_limit | :tenant_erasing}
+             | {:error, :tenant_limit | :tenant_erasing | :dedupe_quota}
            ]}
           | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do

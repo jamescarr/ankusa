@@ -105,15 +105,16 @@ defmodule AnkusaServer.Config do
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
                        read_cache_bytes read_cache_max_entry_bytes max_concurrent_reads
                        ref_signing_keys ref_ttl_ms accept_unsigned_refs tls auth)
-  @backup_keys ~w(enabled interval_ms keep store)
-  @source_store_keys ~w(type url namespace tick_ms)
+  @backup_keys ~w(enabled interval_ms keep store secondary timeout_ms verify_interval_ms
+                  signing_key final_timeout_ms max_age_ms require_fresh)
+  @source_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   @lifecycle_keys ~w(sinks)
   @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts)
-  @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
-  @routes_store_keys ~w(type url namespace tick_ms)
+  @routes_keys ~w(enabled max_routes memory_budget_bytes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
+  @routes_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   # Keys a Redis store owns (`routes.store`, `source_store`); the other store
   # types must not silently drop them.
-  @redis_only_keys ~w(url namespace tick_ms)
+  @redis_only_keys ~w(url namespace tick_ms timeout_ms load_timeout_ms)
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
@@ -121,7 +122,7 @@ defmodule AnkusaServer.Config do
   @routes_seed_keys ~w(id tenant_id source_id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants per_ip node sources scope)
   @scopes ~w(node fleet)
-  @dedupe_scope_keys ~w(scope)
+  @dedupe_scope_keys ~w(scope max_entries max_entries_per_tenant)
   @fleet_keys ~w(store timeout_ms pending_ttl_ms breaker_window_ms breaker_min_calls breaker_failure_rate breaker_open_ms)
   @fleet_store_keys ~w(type url namespace pool_size)
   @fleet_store_types ~w(redis)
@@ -1186,24 +1187,43 @@ defmodule AnkusaServer.Config do
   defp backup_section(doc) do
     backup = section!(doc, "backup", @backup_keys, [])
 
-    blob_store =
-      case backup["store"] do
-        nil ->
-          nil
-
-        _store ->
-          store = section!(backup, "store", @blob_store_keys, ["backup"])
-          blob_store!(store, ["backup", "store"], true)
-      end
-
     [
       backup:
         []
         |> put_opt(:enabled, bool_opt(backup, "enabled", ["backup"]))
         |> put_opt(:interval_ms, int_opt(backup, "interval_ms", ["backup"]))
         |> put_opt(:keep, int_opt(backup, "keep", ["backup"]))
-        |> put_opt(:blob_store, blob_store)
+        |> put_opt(:blob_store, backup_store(backup, "store"))
+        |> put_opt(:secondary, backup_store(backup, "secondary"))
+        |> put_opt(:timeout_ms, int_opt(backup, "timeout_ms", ["backup"]))
+        |> put_opt(:verify_interval_ms, int_opt(backup, "verify_interval_ms", ["backup"]))
+        |> put_opt(:final_timeout_ms, int_opt(backup, "final_timeout_ms", ["backup"]))
+        |> put_opt(:max_age_ms, int_opt(backup, "max_age_ms", ["backup"]))
+        |> put_opt(:require_fresh, bool_opt(backup, "require_fresh", ["backup"]))
+        |> put_opt(:signing_key, backup_signing_keys(backup))
     ]
+  end
+
+  # `store` and `secondary` take the claim store's shape; unset leaves the key
+  # to core's default.
+  defp backup_store(backup, key) do
+    case backup[key] do
+      nil ->
+        nil
+
+      _store ->
+        store = section!(backup, key, @blob_store_keys, ["backup"])
+        blob_store!(store, ["backup", key], true)
+    end
+  end
+
+  # `[current, previous...]`: a list, or one comma-separated string (`${VAR}`).
+  # Empty or null leaves the manifests unsigned.
+  defp backup_signing_keys(backup) do
+    case backup["signing_key"] do
+      empty when empty in [nil, [], ""] -> nil
+      keys -> string_list!(keys, ["backup", "signing_key"])
+    end
   end
 
   # ── routes ──────────────────────────────────────────────────────────────────
@@ -1220,6 +1240,7 @@ defmodule AnkusaServer.Config do
         []
         |> put_opt(:enabled, bool_opt(routes, "enabled", path))
         |> put_opt(:max_routes, int_opt(routes, "max_routes", path))
+        |> put_opt(:memory_budget_bytes, int_opt(routes, "memory_budget_bytes", path))
         |> put_opt(:log_sample, int_opt(routes, "log_sample", path))
         |> put_opt(:ip_denied_status, int_opt(routes, "ip_denied_status", path))
         |> put_opt(:trusted_proxies, trusted_proxies(routes, path))
@@ -1266,7 +1287,9 @@ defmodule AnkusaServer.Config do
         {Ankusa.Routes.Store.Redis,
          [url: required_string!(store, "url", path)]
          |> put_opt(:namespace, string_opt(store, "namespace", path))
-         |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))}
+         |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))
+         |> put_opt(:timeout_ms, int_opt(store, "timeout_ms", path))
+         |> put_opt(:load_timeout_ms, int_opt(store, "load_timeout_ms", path))}
     end
   end
 
@@ -1396,7 +1419,7 @@ defmodule AnkusaServer.Config do
     ]
   end
 
-  # `dedupe.scope` and the `fleet` block behind both fleet scopes
+  # `dedupe.{scope, max_entries, max_entries_per_tenant}` and the `fleet` block behind both fleet scopes
   # (`Ankusa.Edge.Fleet`). A store with a `url` and no `type` is Redis, the one
   # fleet store there is.
   defp fleet_section(doc) do
@@ -1405,7 +1428,11 @@ defmodule AnkusaServer.Config do
     path = ["fleet"]
 
     [
-      dedupe: put_opt([], :scope, atom_enum_opt(dedupe, "scope", @scopes, ["dedupe"])),
+      dedupe:
+        []
+        |> put_opt(:scope, atom_enum_opt(dedupe, "scope", @scopes, ["dedupe"]))
+        |> put_opt(:max_entries, int_opt(dedupe, "max_entries", ["dedupe"]))
+        |> put_opt(:max_entries_per_tenant, int_opt(dedupe, "max_entries_per_tenant", ["dedupe"])),
       fleet:
         []
         |> put_opt(:store, fleet_store(fleet, path))
@@ -1665,6 +1692,8 @@ defmodule AnkusaServer.Config do
           [url: required_string!(store, "url", path), sources: sources, decoder: decoder]
           |> put_opt(:namespace, string_opt(store, "namespace", path))
           |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))
+          |> put_opt(:timeout_ms, int_opt(store, "timeout_ms", path))
+          |> put_opt(:load_timeout_ms, int_opt(store, "load_timeout_ms", path))
 
         [source_store: {Ankusa.SourceStore.Redis, opts}]
     end

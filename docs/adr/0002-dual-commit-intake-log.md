@@ -1,0 +1,326 @@
+# ADR 0002: Dual-commit intake log (`wal.type: dual`)
+
+- Status: accepted, 2026-10-19
+- Plan: `DUR-1.a`; implemented by `DUR-1.b`; consumes `F5` (the fleet drill), `DUR-6` (backups carry `m:intake_offset`, restores mint an incarnation) and `TEN-6` (the two-phase fleet dedupe claim); bounded by `DUR-2` (ceilings)
+- Store format: unchanged, whatever version is current when DUR-1.b lands (new `m:` rows only, additive; section 12)
+- New wire format: intake record v1 (section 4)
+
+## Context
+
+An acked hook survives its host and nothing more. Today (`wal.type: disk`):
+
+- `Queue.Writer.commit_admitted/5` (`queue/writer.ex`) assigns seqs, builds one batch (hook, delivery rows, dedupe keys, counters, `m:next_seq`) and commits it with `Store.write(…, sync: true)`; the `201` leaves when `Edge.Batcher` hands the batch's result back to its blocked callers. The only serialization points between accept and `201` are the batcher partition (one commit task in flight per partition, default two) and that commit (rule 6).
+- A lost host loses every hook acked since the last backup. With `backup.enabled` (DUR-6, #136) that is at most `backup.interval_ms` (60 s) of hooks, none after a clean stop; without it, everything on the box. `docs/architecture.md` says so, and the startup line says so (`durability/1` in `store.ex`: "a lost host loses at most the hooks acked since the last backup").
+- 60 s of acked hooks at 10³ req/s per node is 6·10⁴ hooks the provider will not resend, because it saw a `201`. That is not acceptable as *the* answer to host loss for an ingestion tier that must never lose an acked hook (ground rule 1).
+
+The decision already taken (plan, Context): host-loss durability is a **dual-commit intake log**: ack only after the hook is fsynced on this host **and** a publish to a replicated broker topic is confirmed. Kafka first (`ankusa_kafka`, `brod`, `acks=all`), JetStream second; if `brod` cannot give a confirmed-at-quorum publish within the attempt deadline, DUR-1 falls back to JetStream as the first adapter and this ADR records why. This record fixes everything else.
+
+What is already in place and must be reused, verified against main (`bfdde76`):
+
+| Fact | Where |
+| --- | --- |
+| `m:intake_offset` is a reserved meta row (`<<offset::64>>`); every checkpoint carries it, and every manifest records `intake_offset` | `store/keys.ex` (`meta("intake_offset")`), `store/backup.ex` (`read_intake_offset/1`, manifest v2) |
+| A store restored from a backup mints an incarnation (`m:incarnation_pending`, `io.ankusa.instance.restored`) | `store.ex` (`mint_incarnation/2`) |
+| Backups refuse a foreign or shared prefix (`{:foreign_backup, …}`, `{:prefix_shared, …}`), so two live stores cannot share one node's backups unnoticed | `store/backup.ex` (`check_owner/3`) |
+| A fleet dedupe claim is *pending* until the commit settles; `promote` makes it *committed* under the hook id, `release` deletes it iff it is still this claim's pending entry; a lost settle costs a duplicate or a delay, never a hook | `dedupe/store.ex`, `edge/fleet.ex` (`settle/3`) |
+| `Batcher` collapses any batch-level `{:error, _}` from `Queue.enqueue` into `{:error, :store_unavailable}` for every caller, while per-item results (`{:error, :tenant_limit}`) pass through | `edge/batcher.ex` (`handle_info({ref, result}, …)`), `queue/writer.ex` (`with_refused/2`) |
+| `brod` 4.7 (`ankusa_kafka`'s lock) has `required_acks: -1`, `ack_timeout`, `max_retries`, `partition_onwire_limit`, `produce_sync_offset/5` and `sync_produce_request_offset/2` (the base offset comes back with the ack). It has **no idempotent producer** (no producer id / epoch / sequence outside `brod_transaction`, which needs a transactional id and a coordinator round trip per transaction) | `brod` 4.7.0 `src/brod_producer.erl`, `src/brod.erl`, `src/brod_transaction.erl` |
+| `Sink.Kafka` already configures `required_acks: -1`, `allow_topic_auto_creation: false`, hashes keys with `:hash` (`erlang:phash2/1`) and never creates topics | `packages/ankusa_kafka/lib/ankusa/sink/kafka.ex` |
+| The fleet drill (F5) has two nodes, a Postgres consumer table, `loadgen.verify` reporting `missing`, `extra_deliveries` and `duplicate_hooks`, and a chaos phase that `docker kill`s `ankusa-a` | `examples/fleet-e2e/run.sh` |
+
+`brod` answers the plan's contingency: a `required_acks: -1` produce returns success only after the broker has the record on every in-sync replica, and the broker (not the client) refuses the produce with `not_enough_replicas` when the in-sync set is smaller than the topic's `min.insync.replicas`. That is a confirmed-at-quorum publish within the attempt deadline (`ack_timeout`), so **Kafka stays the first adapter**. What `brod` lacks is idempotent producing: a produce whose ack is lost and which is then retried can land twice. The design below never depends on exactly-once publishing; every reader dedupes (section 6).
+
+The question the dual write opens, and the reason this is a design gate: **two durable writes cannot be made atomic.** Every request ends with one of four states of the pair (local, log): both, neither, local only, log only. The first two are the two honest answers (`201`, or `503` with nothing stored). The other two answer `503` to the provider and *still exist*: a hook the dispatcher will deliver, or a record sitting in a log until some recovery reads it. TEN-6's two-phase claim makes this sharp: a failed commit **releases** the claim, so the provider's retry is admitted as a new hook, and one dedupe key now has two hook ids (`duplicate_hooks > 0`). Section 3 fixes the rule.
+
+## Decision
+
+### 1. The promise, per mode
+
+`wal.type` gains a third value, `dual` (the key name is historical; the YAML key stays `wal.type`).
+
+| Mode | `2xx` means | A hook acked under it is lost when |
+| --- | --- | --- |
+| `disk` | fsynced on this host | this host is lost, after the last backup |
+| `dual` | fsynced on this host **and** confirmed in the intake log | this host **and** every in-sync replica of the intake log's partition are lost together (Kafka: `replication.factor ≥ 3`, `min.insync.replicas ≥ 2`, so two brokers, both before they fsync, plus the host) |
+| `none` | every sink confirmed | (unchanged) |
+
+The startup log states it in one line, from `Intake` (`c:describe/1`) and the store:
+
+> `[ankusa] store at <path>. Durable to power loss on this host AND confirmed in the intake log <topic> (acks=all, min.insync.replicas=<n>, replicas=<r>) before every 2xx: an acked hook is lost only if this host and every in-sync replica of the log are lost together; backed up every <ms> ms for faster recovery.`
+
+When topic verification is switched off (`intake.verify_topic: false`) the line says `intake topic settings UNVERIFIED` instead of the parenthesis. Hooks held in the quarantine pen (`202 quarantined`: a hold, not an acceptance for delivery) and the rows of API-managed sources and rate-limit overrides are host-local state, not hooks, and stay outside the promise; released hooks go through the dual commit like any other (section 2). Archive replay (`Queue.redrive/3`) writes hooks whose durable copy is the archive and whose job cursor re-drives them; it does not publish to the log.
+
+### 2. Ack ordering: both halves in parallel, both required
+
+The commit under `wal.type: dual`, in `Queue.Writer` (the one process that already assigns seqs and runs the synced write; no new singleton, no new `GenServer.call` on the request path; rule 6):
+
+1. **Admission** (unchanged: deadline, caller alive, tenant ordinals, dedupe check) plus three new refusals that happen **before either half is touched** and therefore store nothing (section 7): the intake breaker is open, the pending ceilings are full (section 10), or a hook's encoded size exceeds `intake.max_record_bytes`.
+2. **Assign seqs and build the batch ops** exactly as today.
+3. **Start the publish**: `Task.Supervisor.async_nolink` runs `Intake.publish_batch(instance, records, timeout: intake.publish_timeout_ms)` for the batch's records (one record per hook that has a `hooks` put; a hook that consumes a seq and writes nothing is not published).
+4. **Local synced write** of the batch, in the writer, concurrently with the publish.
+5. The writer does **not** wait: it records the batch in the pending set (section 5) and returns `{:noreply, state}`. The publish task's result arrives as a message; the writer then replies to the batcher's caller (`GenServer.reply/2`). Batches therefore pipeline: the next batch's local write overlaps the previous batch's publish wait. The batcher already allows one commit task in flight per partition, so at most `batcher.partitions` (default 2) batches are in the writer's pending set at once.
+6. **Reply**:
+   - local `:ok` and log `:ok` → per-item `{:committed, env}` (the `201`);
+   - otherwise → per-item results of section 3.
+
+Why parallel and not "publish, then local" (the plan's first sketch) or "local, then publish": ack latency is `max(fsync, confirm)` instead of `fsync + confirm`; an fsync of 1–3 ms hides inside a Kafka confirm of a few ms, so dual costs roughly the broker round trip, not that plus the disk. The order does not matter for correctness, because correctness comes from section 3, not from sequencing: in *any* order a crash leaves one of the four states, and the rule below handles all four. Seqs are pre-assigned by the writer, which is what lets the record and the local row share an identity (`(node, seq)` and the hook `id`).
+
+The ack path stays a single synced batch plus one broker round trip. `Queue.enqueue/3`'s signature is unchanged; only its per-item result set grows.
+
+### 3. Half-persisted hooks: the rule
+
+Both halves end in `503` for the provider. The half that persisted still exists. **The rule: once the writer has issued either half for a record, that record is carried to completion; nothing is undone.** A hook that is in either place is *committed*; a record that is in neither is the only thing a `503` may leave behind.
+
+Why not undo (the alternative, rule "a"): undoing needs a synced local delete (first case) or an abort record in the log (second case), and the undo is itself an I/O on a neighbour of the failure that just happened. A log that refused the hook cannot be trusted to take its tombstone, and a disk that failed the local write cannot be trusted to take the delete; a failed undo is exactly the orphan the rule was meant to prevent, so a reconciler is needed anyway, and then the simpler design is the one whose reconciler *completes* instead of *erases*. Undo also turns every log hiccup into a provider retry of a hook the node already holds. It is rejected; Consequences compares the two.
+
+The four outcomes of one record:
+
+| Local | Log | Provider gets | What happens next |
+| --- | --- | --- | --- |
+| ok | ok | `201` | claim promoted by `Ingest` as today |
+| failed | failed or timed out | `503 store_unavailable` | carried: republish, then local write (the bin is held in the pending set) |
+| ok | failed or timed out | `503 intake_unavailable` | **carried**: the hook is in the store and is delivered normally; the reconciler republishes `(node, seq)` until the log confirms |
+| failed | ok | `503 store_unavailable` | **carried**: the record is in the log; the reconciler writes the local half with the original seq from the held bin |
+
+Rules that make "carried" safe for the provider's retry (rule 5, TEN-6):
+
+1. **The claim is neither promoted nor released** for a carried record. `Ingest` receives `{:error, {:half, reason, hook_id}}` for it and calls `Intake.Reconciler.hold(instance, hook_id, claim)` instead of `Fleet.settle/3`. The reconciler promotes the claim (`{:promote, claim, hook_id}`) when both halves are confirmed, which is when a retry may be answered `201 duplicate` with the first id. `hold/3` returns `:completed` if the reconciler already finished (a race), and `Ingest` then settles with `promote` itself. Only a record the writer refused **before touching either half** (admission refusals, section 2 step 1) releases its claim, because nothing exists.
+2. **A retry that meets an unconfirmed original is never answered `201`.** Under `dedupe.scope: node` the writer's dedupe check consults the pending set (indexed by hook id, by seq, and by `{tenant, source, dedupe_key}`) in addition to the `?u` rows: a hit on an unconfirmed record is `503 intake_pending` with `Retry-After: 1`, counted under `ankusa_intake_refused_total{reason="pending_dedupe"}`. Under `dedupe.scope: fleet` another node meets the claim still *pending* and answers `409 dedupe_pending` (existing behaviour). A `201 duplicate` is therefore only ever sent for a hook confirmed in both places.
+3. **The claim cannot expire under a healthy reconciler**: `intake.reconcile_deadline_ms` (default 20 000) must be less than `fleet.pending_ttl_ms` (default 30 000) when `dedupe.scope: fleet`; boot refuses otherwise. A record the reconciler has not completed within that deadline is **stuck**: the claim is released (a retry is then admitted as a new hook with the same `idempotency_key`, never an acked loss), the reconciler keeps retrying forever, and `ankusa_intake_reconcile_stuck` goes above zero. That is the one sanctioned way for a carried hook to produce a second hook id, and it needs a half to stay failed for more than `reconcile_deadline_ms`.
+4. **Sources without `dedupe:` are unchanged**: a provider retry of an unacked hook is a new hook with a new id, delivered again, exactly as after a lost `2xx` today (`architecture.md`, "Crash after the accept, before the HTTP response leaves"). Dual deployments should configure `dedupe:` on every source (documented in `delivery.md` by DUR-1.b).
+5. **Delivery of a carried hook is not gated.** A hook whose log half is missing is delivered by dispatch as soon as its local rows exist; gating dispatch on log confirmation would need a second write per commit and a new key family, and buys nothing the provider can observe (it was never told `201`). The cost is stated in Consequences.
+
+The same rule covers a crash. The pending set is in memory, so a node that dies in a half state is covered by **boot recovery** (section 8), not by the live reconciler: the log record is replayed, or the local hook above the watermark is republished. The claim then expires after `fleet.pending_ttl_ms` and the retry is a new hook with the same `idempotency_key`; no acked hook is lost, because none was acked.
+
+### 4. The intake record (versioned, rule 9)
+
+One record per hook, written by `Ankusa.Intake.publish_batch/3`, read by `Intake.replay/4`:
+
+| Part | Content |
+| --- | --- |
+| value | the exact `hooks` column family value: `Envelope.to_binary/2` (already versioned: bare term or `<<"AE", version, term>>`; a reader that does not know the envelope version skips the record and counts it). Sinks are **not** in the record: replay resolves them from the source's current configuration, as archive replay does |
+| header `ankusa_intake_v` | `"1"`. Additive changes keep `"1"`; a change an N−1 reader cannot skip bumps it; a reader skips (counts, logs once per minute) a version it does not know, and never fails a replay on one |
+| header `ankusa_intake_kind` | `"hook"`. Reserved: `"probe"`, `"tombstone"`. A reader skips kinds it does not know |
+| header `ankusa_intake_node` | the node id (`intake.node_id`) |
+| header `ankusa_intake_seq` | the seq, decimal |
+| header `ankusa_intake_id` | the hook id |
+| header `ankusa_intake_incarnation` | `m:incarnation` of the writing store, or `"0"` |
+| headers `ankusa_intake_tenant`, `ankusa_intake_source` | tenant id (`default` for `nil`), source id; for filtering and diagnostics, never authoritative |
+| key (Kafka) | the node id |
+| subject / `Nats-Msg-Id` (JetStream) | `ankusa.intake.<fleet>.<node>` / `<node>:<seq>` |
+
+The body of a hook is in the record, so the intake topic holds customer payloads: it is a data store, with the confidentiality of the object store that holds archive segments (TLS, SASL/ACLs, encryption at rest on the brokers' volumes). The record size is bounded by `intake.max_record_bytes` (section 10); no secret is in a record (hooks hold none; verification secrets never enter an envelope).
+
+### 5. The pending set and the reconciler
+
+**Pending set** (ETS, owned by the writer, `:public` read for the reconciler and `Health`): one entry per record not yet confirmed in **both** places, holding `seq`, `id`, `{tenant, source, dedupe_key}` (when present), the encoded hook `bin`, the batch's local `ops` (so the local half can be re-applied), `state` (`:both_pending | :half_local | :half_log`), `first_at`, and the held claim once `hold/3` supplies it. Indexed by seq (the key), by id and by dedupe triple (secondary ETS tables). It is the only place the carried half lives, and it is bounded (section 10).
+
+**`Ankusa.Intake.Reconciler`** (a supervised GenServer per instance under `Ankusa.via(instance, :intake_reconciler)`, started only under `wal.type: dual`, before the edge): the live component that completes carried records, **not** boot-time recovery.
+
+- `:half_local` (local ok, log missing): `Intake.publish_batch/3` again for up to 256 records at a time, the bin taken from the pending set, or from the `hooks` column family if the entry was dropped after a writer restart. On `:ok`: remove the entry, `Fleet.settle(claim, {:ok, env})` (promote), advance the watermark (below).
+- `:half_log` (log ok, local missing): `Queue.Writer` handles `{:complete_local, entries}`, a call used only on this failure path (not on the request path): for each entry it does one point read of `hooks/<seq>`; if the row exists the first write landed after all (an error returned for a batch that persisted) and nothing is written; else it re-applies the entry's stored `ops` in one synced batch. Counters ride in those ops as merge operands and a batch is atomic, so re-applying an absent batch is exact and the read prevents applying a present one twice.
+- `:both_pending`: local first (it is the cheaper half and makes the hook deliverable), then publish.
+- **Retry policy:** per record, exponential from 100 ms to 5 s, jittered; a `throttled` class honours `retry_after`; a `permanent` class (the record is larger than the topic accepts, the topic is gone) never completes, goes straight to *stuck*, and logs once per minute. No give-up: a carried hook is never dropped by the reconciler.
+- **Bounded lag:** `intake.reconcile_deadline_ms` (20 s) is the budget after which an entry is *stuck* (rule 3 of section 3). `ankusa_intake_reconcile_oldest_age_seconds` is the age of the oldest entry, and `ankusa_intake_reconcile_stuck` counts entries past the deadline: the alert is `stuck > 0`.
+
+**Watermark.** `m:intake_seq` (`<<seq::64>>`, new meta row) is the highest seq `w` such that every seq `≤ w` the node ever admitted is confirmed in the log or had no record. The writer computes it from the pending set (`min pending seq − 1`, or `next_seq − 1` when empty) and writes it, `sync: false`, in the next commit batch and on a `intake.offset_flush_ms` (1 000) tick. Boot recovery republishes the local hooks above it (section 8). A watermark that lags costs a few redundant republishes; one that ran ahead would lose a hook, so it is only ever advanced from confirmed state.
+
+**Offset.** `m:intake_offset` (existing row, `<<offset::64>>`) is the highest log offset in this node's partition whose record is **also in the local store, durably** (set from the confirmed offsets of batches whose local write returned, never ahead of them). It is flushed with the watermark. A checkpoint therefore never claims an offset the checkpointed store does not hold, which is the invariant `Backup` already relies on ("what the manifest records is never ahead of what the checkpoint holds"). `m:intake_partition` and `m:intake_node` (new meta rows) record the partition this node writes and the node id it was stamped with; both are in the store, so every restore carries them and the manifest needs no new field.
+
+### 6. The adapter behaviour and "confirmed"
+
+`Ankusa.Intake` (core; the plan's callbacks, refined: the record carries the metadata its headers need, the confirm returns the log position the offset needs, and two callbacks the boot sequence needs):
+
+```elixir
+@type record :: {seq :: non_neg_integer(), bin :: binary(), meta :: %{id: String.t(), tenant: String.t(), source: String.t(), incarnation: String.t()}}
+@type class :: :not_found | :unavailable | :throttled | :permanent   # rule 2; {class, retry_after_ms} allowed
+
+@callback publish_batch(instance :: atom(), [record()], opts :: keyword()) ::
+            {:ok, %{position: non_neg_integer()}} | {:error, class() | {class(), retry_after_ms :: pos_integer()}}
+@callback replay(instance :: atom(), from :: non_neg_integer() | :earliest, (replayed -> :ok | {:error, term()}), opts :: keyword()) ::
+            {:ok, last_position :: non_neg_integer() | nil} | {:error, class()}
+@callback ready?(instance :: atom()) :: boolean()
+@callback verify(instance :: atom()) :: :ok | {:error, term()}   # boot: topology, retention, record size
+@callback describe(instance :: atom()) :: String.t()              # the startup sentence
+```
+
+`publish_batch/3` blocks until the batch is confirmed or `opts[:timeout]` runs out, then returns; the writer runs it in a task (section 2) so the call stays simple. `replayed` is `%{position, node, seq, id, kind, version, bin}`; the adapter filters by node and skips unknown kinds and versions *before* calling the function. `ready?/1` is a cheap local answer (client up, leader known), never a produce. Per-adapter, **"confirmed" means**:
+
+- **`Ankusa.Intake.Kafka`** (`ankusa_kafka`; its own `brod` client `:"ankusa_kafka.<instance>.intake"`, never the sink's): a produce sent with `required_acks: -1` and `ack_timeout: intake.publish_timeout_ms` that `brod:sync_produce_request_offset/2` reports `ok` for, i.e. **every in-sync replica has the batch and the in-sync set was at least the topic's `min.insync.replicas`**. The producer is configured `partition_onwire_limit: 1` (one produce on the wire per partition: seq order is log order), `max_retries: 0` (the adapter makes one attempt per call and the reconciler owns every retry, so the attempt deadline is real), `allow_topic_auto_creation: false`. The record's partition is **explicit**: `m:intake_partition`, chosen once at the node's first dual boot as `phash2(node_id) rem partition_count` (the same hash as `Sink.Kafka`) and never recomputed, so growing the topic never remaps a node. Required topic settings, **verified at boot by `verify/1`** (DescribeConfigs through `kafka_protocol`, the library `brod` is built on; if the broker or its ACLs refuse it the node is not ready and says `intake topic unverified`, unless `intake.verify_topic: false`): `replication.factor ≥ 3`, `min.insync.replicas ≥ 2`, `unclean.leader.election.enable = false`, `retention.ms ≥ 2 · backup.max_age_ms` (section 9), `max.message.bytes ≥ intake.max_record_bytes`. Broker error codes map to the four classes: `not_enough_replicas`, `not_enough_replicas_after_append` (the record *was* appended, so the outcome is unknown and the republish is what resolves it), `leader_not_available`, `request_timed_out` and a missed `ack_timeout` are `unavailable`; a produce response whose `throttle_time_ms` is non-zero is `throttled` with that `retry_after`; `unknown_topic_or_partition` is `not_found`; `message_too_large`, `invalid_record` and `topic_authorization_failed` are `permanent`.
+  - **`brod` has no idempotent producer.** A produce whose ack is lost (a timeout the broker nevertheless completed) and that the reconciler then retries writes `(node, seq)` twice, and a record may land behind newer ones. The compensation is on the read side and total: **replay applies a record only through the seq-keyed idempotent rule of section 8** (present with the same hook id → skipped), so a duplicate or reordered record changes nothing. Nothing in this design assumes exactly-once publishing, with or without `enable.idempotence`; if a later `brod` offers it, enabling it only removes duplicate records from the log.
+- **`Ankusa.Intake.JetStream`** (second; `ankusa_nats`, a `Gnat` connection of its own, stream **R3**, `Nats-Msg-Id = <node>:<seq>`, subject `ankusa.intake.<fleet>.<node>`): the JetStream **publish acknowledgement**, which a replicated stream sends only after the message is committed by the stream's quorum (`Sink.NATS` already treats the ack as the confirm). The stream is operator-owned like every other stream here (the adapter never creates or edits one); `verify/1` checks `num_replicas ≥ 3`, `max_age ≥ 2 · backup.max_age_ms`, `max_msg_size ≥ intake.max_record_bytes` and the duplicate window. `Nats-Msg-Id` collapses a republish within the window; a republish after the window is a duplicate record, and the same read-side rule absorbs it. `position` is the stream sequence; replay is an ordered consumer from `position + 1` on the node's subject.
+- **`Ankusa.Intake.Memory`** (core, under `lib/` so `ankusa_server` tests and the fleet drill's fake can use it; not documented as a production mode): an ETS-and-file log with injectable latency and per-call faults, the test double every `queue_dual_test.exs` case drives.
+
+**Attempt deadline.** `intake.publish_timeout_ms`, default **2 000** (range 100–60 000, and strictly less than the batcher's record deadline, 15 s). One attempt per `publish_batch` call. It is deliberately shorter than a provider's HTTP timeout, so the provider sees an answer. A timeout is `unavailable`: the record may still have landed, which is why a failed publish is always followed by a republish rather than by an assumption.
+
+### 7. The refusal when the log is unavailable: never disk-only
+
+Under `wal.type: dual` there is no degraded mode. **A node that cannot confirm in the log refuses; it never acks on local fsync alone.**
+
+- **Breaker.** `Ankusa.Intake.Gate` (its state lives in an ETS table the writer reads inside its own process; no `:persistent_term.put` on the request path, rule 6): `closed` → `open` after `intake.breaker_failures` (default 3) consecutive failed publish attempts, or when `ready?/1` is false for the probe; `open` → `half_open` after `intake.probe_ms` (1 000), which admits **one batch at a time**; its confirm closes the breaker, its failure reopens it. The probe is a real batch (no probe record), and that batch's hooks, if it fails, are carried like any other.
+- **While open:** `Queue.Writer` replies `{:error, :intake_unavailable}` **before** assigning a seq or writing anything, per item; `Ingest` releases the claim (nothing exists); `Edge.Router` answers **`503`** with body `{"error":"intake_unavailable"}` and `Retry-After: intake.retry_after_s` (default 2), tagged `outcome: :intake_unavailable` on the ingest metrics (a new member of the fixed outcome set in the `Ankusa.Metrics` moduledoc). No hook is stored, so a log outage does not generate half-persisted hooks after the breaker trips; the at most `breaker_failures` batches in flight when it trips are carried by the reconciler.
+- **Readiness.** `Health.ready/1` gains `intake`: `"up"`, `"down"` (breaker open, `503` readiness so the load balancer drains the node) or `"recovering"` (boot replay running, section 8). A fleet whose log is down answers `503` everywhere: that is the honest outcome, and it is the same answer `wal.type: none` gives when its sinks are down.
+- **Other refusals** share the `503`: `intake_unavailable` for a full pending set (section 10) and `intake_pending` for a retry meeting an unconfirmed original (section 3). Router mapping and the metrics outcome set grow by exactly these two members.
+- **Not a refusal:** a carried hook's *original* request already got its `503`; the refusal answers *new* traffic.
+
+### 8. Recovery
+
+**Who replays.** The node itself, at boot, every boot; and the same code offline as `mix ankusa.recover`. There is no separate recovery fleet and no peer takeover: a replacement node starts with the **same `intake.node_id`** as the lost one (a stateful identity: a StatefulSet pod name, an instance tag), restores from the backup (DUR-6, primary then secondary, signature checked), and replays the log for that node id. Adopting a dead peer's log into a *running* node with its own seqs needs an exactly-once cursor and re-publication under the adopter's identity; it is out of scope here and needs its own ADR if wanted.
+
+`Ankusa.Intake.Recovery.run/2`, executed in `Store.after_open` (the same place the migration and the incarnation run) before the node serves, with `Health.ready` saying `intake: "recovering"`:
+
+1. **Identity.** Compare `m:intake_node` with `intake.node_id` (stamp it on a store that has none). A mismatch refuses boot with `{:intake_node_mismatch, stamped, configured}`: restoring node a's backup into node b is an operator error that would interleave two seq spaces.
+2. **Topology.** `Intake.verify/1`. If the log cannot be reached the node waits (`ready: false`, retried every `intake.probe_ms`); only opening the store may crash (rule 2).
+3. **Replay the tail.** `Intake.replay/4` from `m:intake_offset + 1` (`:earliest` when the store has no offset), for this node's partition (all partitions when the store has no `m:intake_partition`, filtered by the `ankusa_intake_node` header). Records are applied in chunks of 500 in one synced batch each, with the offset advanced in the same batch. **The apply rule is keyed by seq and hook id:**
+
+   | Row at `hooks/<seq>` | Action |
+   | --- | --- |
+   | absent | write the hook with its **original seq**, its delivery rows (sinks resolved from the source's current config; an unknown source is counted `unroutable` and keeps only its archive obligation), its dedupe keys (expiry = `received_at + ttl`), counters through the `Deliveries` op builders, and raise `m:next_seq` to `max(next_seq, seq + 1)` in the same batch |
+   | present, same hook id | skip (`present`): the common case, and every duplicate or reordered record |
+   | present, **different** hook id | a seq collision (two live nodes shared a node id and one was not fenced): never overwrite; write the record under a **fresh seq** (the next one), count `ankusa_intake_replay_total{result="collision"}` and log an error naming both ids |
+
+   Preserving seqs keeps the archive catalogue, segments and `reconcile_archive/1` consistent (segments written after the backup already carry those seqs). Replay is idempotent by construction (one apply per `(seq, id)`), so a crash mid-replay, a second replay, `mix ankusa.recover` run twice, and a log that holds duplicates all converge.
+4. **How far back.** From the offset of the store that was restored. The log must reach back to it: if the earliest retained position is above `offset + 1` and the store's origin is `:restored` (or it is fresh with a non-empty log for this node), boot refuses with `{:intake_truncated, wanted, earliest}` and the node stays unready; the operator decides with `mix ankusa.recover --allow-gap`, which logs the gap and writes an audit row. On an ordinary restart (origin `:existing`) a gap is only a warning, because every hook in it is in the local store. Retention is what makes the guarantee true, so `verify/1` requires `retention ≥ 2 · backup.max_age_ms` (section 9).
+5. **Republish the local tail.** Every `hooks` row with seq `> m:intake_seq` is republished with `publish_batch/3` (bounded by the pending ceiling; a range scan of the `hooks` column family, which is seq-keyed), because a crash can leave local hooks the log never confirmed. Idempotent: duplicates are absorbed by rule 3. The watermark moves to `next_seq − 1` when it is done.
+6. Flip to ready.
+
+**What replay does to deliveries.** Hooks committed locally after the restored checkpoint and delivered before the host died are redelivered by the replacement (it has no memory of the delivery): the same hook id, the same `idempotency_key`, bounded by the hooks acked in the window since the last backup. Consumers dedupe on the `idempotency_key` as for any at-least-once redelivery; a fresher backup shrinks the number, and the final checkpoint on a clean stop (DUR-6) makes it zero because the offset is the log head. `extra_deliveries` in the drill is bounded by that count; `duplicate_hooks` (two hook *ids* for one key) stays 0.
+
+**`mix ankusa.recover --instance <i> [--node <id>] [--from <offset>|earliest|backup] [--dry-run] [--allow-gap]`** runs steps 1–5 against a **stopped** store (same config file, same code path as boot) and prints `records=… applied=… present=… collided=… unroutable=… republished=…`; exit 0 on success. `--node` asserts the id (step 1); `--from backup` is the default (the store's offset); `--dry-run` reads and counts without writing. `intake.recover_on_boot` (default `true`) lets an operator run the steps by hand instead of at boot.
+
+### 9. What the backup and its secondary mean once the log exists
+
+The log becomes the **recovery point**; the backup stops being it.
+
+- **Recovery point:** for an acked hook, `backup(manifest) ∪ log since manifest.intake_offset`. The hooks in the backup are what covers a backlog older than the log's retention (a sink down for six hours with a 1-hour retention); the log covers everything since. This is why `backup.enabled` and `backup.max_age_ms` are **required** under `wal.type: dual` (boot refuses without them) and why `verify/1` requires topic retention `≥ 2 · backup.max_age_ms`: a restore of a backup as old as `max_age_ms` plus the replay margin must still find its offset.
+- **The backup's job** is now (1) bounding replay time and redelivery volume (section 8), (2) carrying everything the log does not hold: delivery state, the DLQ, quarantine, API-managed sources, rate-limit overrides, the audit trail, the archive catalogue, `m:incarnation`, and (3) the backlog older than log retention. `backup.require_fresh` keeps its meaning (an unready node with a stale backup); under dual a stale backup is a longer boot, not a loss.
+- **The secondary (cross-region) backup** restores like the primary and is, by design, older: its `intake_offset` is older, and replay from it reaches further back; the retention rule above is what allows that, and the drill's secondary-restore case proves the loss-free path with the primary gone too. The signed manifest, `verify/2`, `m:incarnation` and `io.ankusa.instance.restored` apply unchanged to a dual node.
+- **Order of a restore.** The store comes back from the backup first (DUR-6, boot), then `Recovery.run/2` brings it forward from the log. The incarnation is minted at the restore and the replayed hooks keep their seqs, so the lifecycle event ids of the new incarnation differ from the lost one's, as DUR-6 requires.
+
+### 10. Bounds (rule 3) and the pending set's ceilings (DUR-2)
+
+| Structure | Count ceiling | Byte ceiling | Sweep | Gauge | Refusal |
+| --- | --- | --- | --- | --- | --- |
+| pending set (carried and in-flight records) | `intake.pending.max_records` (default 50 000; 1–10⁷) | `intake.pending.max_bytes` (default 256 MiB; counts bins **and** held ops) | the reconciler, as entries complete; none drop on their own | `ankusa_intake_pending_records`, `ankusa_intake_pending_bytes` | `503 intake_unavailable` (`ankusa_intake_refused_total{reason="backlog"}`) **before** the writer assigns a seq |
+| one record | `intake.max_record_bytes` (default 10 000 000) | the same | n/a | n/a | boot refuses `max_record_bytes < max_body_bytes + 65 536`, so a body the node accepts always fits; `verify/1` checks the topic's `max.message.bytes` |
+| log retention | the log's | the log's | the broker | `ankusa_intake_offset_lag_seconds` | `verify/1` refuses retention `< 2 · backup.max_age_ms` |
+| breaker | one state | n/a | `intake.probe_ms` | `ankusa_intake_ready` | `503 intake_unavailable` |
+| replay chunk | 500 records | one chunk in memory | n/a | `ankusa_intake_replay_total` | n/a |
+
+DUR-2 (#135) lists the pending set in its ceilings table; the two keys above are its entries. Memory is bounded by `max_bytes` plus index overhead.
+
+### 11. Configuration, metrics, health
+
+**Config** (rule 13: each has a default, a range check, a `configuration.md` row and a `/v1/config` redaction decision):
+
+| Key (YAML) | Default | Range / rule | Redaction |
+| --- | --- | --- | --- |
+| `wal.type` | `disk` | `disk \| none \| dual` | — |
+| `intake.type` | required under `dual` | `kafka \| jetstream` | — |
+| `intake.node_id` | required under `dual` | `[a-z0-9._-]{1,64}`, stable across replacement | — |
+| `intake.fleet` | `default` | same alphabet; part of the topic/subject | — |
+| `intake.topic` | `ankusa.intake.<fleet>` | Kafka topic / JetStream stream name | — |
+| `intake.kafka.brokers`, `ssl`, `sasl` | required for `kafka` | as `Sink.Kafka` | `sasl` and ssl key material redacted as in the sink's config |
+| `intake.jetstream.url`, `stream`, credentials | required for `jetstream` | as `Sink.NATS` | credentials redacted |
+| `intake.publish_timeout_ms` | `2000` | 100–60 000, `<` the batcher record deadline | — |
+| `intake.reconcile_deadline_ms` | `20000` | 1 000–600 000; `<` `fleet.pending_ttl_ms` under `dedupe.scope: fleet` | — |
+| `intake.breaker_failures`, `intake.probe_ms`, `intake.retry_after_s` | `3`, `1000`, `2` | 1–100, 100–60 000, 1–300 | — |
+| `intake.offset_flush_ms` | `1000` | 100–60 000 | — |
+| `intake.pending.max_records`, `max_bytes` | `50000`, 256 MiB | section 10 | — |
+| `intake.max_record_bytes` | `10000000` | `≥ max_body_bytes + 65 536` | — |
+| `intake.recover_on_boot`, `intake.verify_topic` | `true`, `true` | boolean; `false` changes the startup line | — |
+
+Boot refuses `wal.type: dual` unless `intake.type` and `intake.node_id` are set, `backup.enabled` is `true` with `backup.max_age_ms` set, the roles include `:edge` and the queue's readers (dual keeps every role), and the cross-key rules above hold. `ankusa_server`'s YAML loader maps the keys and `ANKUSA_WAL_TYPE=dual`.
+
+**Metrics** (names follow the existing `ankusa_*` convention; labels are fixed sets, none from request input; series count is independent of tenant count, rule 8):
+
+- `ankusa_intake_publish_duration_seconds{outcome}` (histogram; `outcome` ∈ `ok | unavailable | throttled | permanent | not_found`)
+- `ankusa_intake_failures_total{class}` (the four classes)
+- `ankusa_intake_pending_records`, `ankusa_intake_pending_bytes`
+- `ankusa_intake_reconcile_oldest_age_seconds`, `ankusa_intake_reconcile_stuck`, `ankusa_intake_reconciled_total{half}` (`local | log`)
+- `ankusa_intake_refused_total{reason}` (`breaker | backlog | pending_dedupe | record_too_large`)
+- `ankusa_intake_offset_lag_seconds`, `ankusa_intake_ready` (0/1)
+- `ankusa_intake_replay_total{result}` (`applied | present | collision | unroutable | skipped_unknown`) and `ankusa_intake_replay_duration_seconds` (boot)
+
+**SLIs:** intake publish p99; intake failure ratio (`failures / publishes`); `503 intake_unavailable` rate at the edge (the availability cost of the log); oldest reconcile age. Alerts: `stuck > 0`, `ankusa_intake_ready == 0` for more than one probe interval, `offset_lag_seconds` above `3 · offset_flush_ms`. Numeric targets are set by DUR-1.b from its measured bench and recorded in its PR. `GET /v1/wal` (`409 wal_disabled` under `none`) gains an `intake` object (`node`, `partition`, `offset`, `watermark`, `pending`, `state`).
+
+### 12. Rollback boundary and compatibility (rule 9)
+
+- **Nothing in the store changes shape.** The new state is meta rows in the `default` column family (`m:intake_seq`, `m:intake_node`, `m:intake_partition`; `m:intake_offset` already exists). A release that does not know them ignores them (meta rows are read by name), so the store format does not change and this work registers no migration of its own; the upgrade test adds a store with the rows to the existing fixtures' matrix. Manifests are unchanged (`intake_offset` was added by DUR-6).
+- **Going back to an older release** is safe at the storage level. Going back to `wal.type: disk` is a **durability downgrade the operator must choose**, and it is documented as such: it ends the promise of section 1 from that moment, the startup line changes, and hooks in the pending set at the switch (`GET /v1/wal` → `intake.pending`; drain it to zero first) stay in the store but are not in the log. Going `disk → dual` again is safe: boot recovery republishes every hook above the watermark, so hooks acked under `disk` become covered at that boot.
+- **The intake record** is a wire format with a version header and reserved kinds (section 4): an N−1 reader skips what it does not know, an N reader reads N−1. The intake topic's name and partition count are the operator's; the node's explicit partition (section 6) survives a partition-count change.
+- **`wal.type: dual` is opt-in** and the default stays `disk`; the first dual boot of an existing store stamps the rows, republishes the whole local `hooks` family above watermark 0 (bounded by the ceilings, chunked), and only then reports ready.
+
+### 13. Alternatives considered
+
+| Alternative | Why not |
+| --- | --- |
+| **Undo the persisted half** before answering (synced local delete, or an abort record in the log) | The undo can fail with the cause that failed the write, so a reconciler is needed anyway; a failed undo is the orphan; every log hiccup becomes a retry of a hook the node already holds (section 3) |
+| Sequential: publish, then local write (the plan's first sketch), or local, then publish | Ack latency is the sum, not the max; correctness is the same either way, so there is nothing to buy with it |
+| Block the writer until the publish confirms | A broker stall freezes the commit serializer for `publish_timeout_ms` per batch; pipelining costs one pending set the design needs for carried records anyway |
+| Gate dispatch on log confirmation (rows invisible until confirmed) | A second write per commit and a new key family (a store format bump) to avoid delivering a hook the provider was never acked for; the cost of not gating is one duplicate delivery with the same `idempotency_key` in a window that needs a node loss during an intake outage |
+| Promote the claim as soon as *either* half is durable | A node meeting the promoted key would answer `201 duplicate` for a hook that may not be in the log, which is an ack the promise does not cover |
+| `brod_transaction` per batch for exactly-once publishing | One coordinator round trip per transaction on the ack path (rule 6), a transactional id per node to fence, and it still does not make local plus log atomic; read-side idempotence is needed regardless |
+| Recovery by a separate replay service or a peer adopting the log | Needs an exactly-once cursor and re-publication under the adopter's identity (section 8); deferred to its own ADR |
+| `wal.type: disk` plus a faster backup (seconds) | Still a loss window the provider cannot see; object-store request rates at 100 nodes make seconds-level checkpoints a cost problem, not a guarantee |
+
+## Consequences
+
+- **Provider-visible.** Every `2xx` under dual is in two places. A log outage is `503 intake_unavailable` fleet-wide with `Retry-After`; a provider that does not retry on `5xx` loses what it sent during the outage, as it does for every other `503` (the one window nothing can close, `architecture.md`). New `503` bodies: `intake_unavailable`, `intake_pending`; new ingest outcomes with the same names.
+- **Ack latency and throughput.** Latency is `max(local fsync, log confirm)` plus a message hop, not their sum (section 2), so dual costs roughly one broker round trip over `disk`. Each node's throughput is bounded by `batcher.partitions` batches in flight; at 10³ req/s per node (the plan's targets, 10⁴–10⁵ fleet-wide over 100 nodes) that is far below the 256-hook batch limit. A broker slower than `publish_timeout_ms` turns into `503` rather than queueing (rule 3). DUR-1.b measures all of it (`bench/intake_bench.exs`, below) and `bench:gate` guards the default mode (the writer is a hot-path file).
+- **Loss window.** `disk`: this host, back to the last backup. `dual`: this host **and** every in-sync replica of the log's partition together (and, for the hooks in the log only, retention not yet passed). Kafka's own caveat belongs in the docs: `acks=all` with `min.insync.replicas=2` replicates before it fsyncs, so two brokers losing power in the same instant lose the record; rack- or zone-aware replicas and (if wanted) `flush.messages=1` close it.
+- **Rule "b" (carry to completion) against rule "a" (undo).**
+
+  | | **(b) carry, chosen** | (a) undo |
+  | --- | --- | --- |
+  | Provider-visible on a half failure | `503`; the retry is answered `201 duplicate` with the *first* id as soon as the hook is complete, `503 intake_pending` before that | `503`; the retry is a **new** hook |
+  | Hooks per dedupe key | one, unless a half stays failed past `reconcile_deadline_ms` (then two ids, one `idempotency_key`, no loss) | one, unless the undo fails (then two, and an orphan) |
+  | Ack latency | unchanged: the half failure costs no extra I/O before the `503` | unchanged on success; an extra synced delete or an extra publish on a failure |
+  | Loss window | unchanged by a failure: nothing acked is ever withdrawn | unchanged for acked hooks; a failed undo may leave an orphan that boot recovery resurrects as a delivery nobody acked |
+  | Components | the reconciler (first-class, bounded, gauged) | a reconciler anyway, plus tombstone records and honouring them in replay |
+  | Operator signal | `reconcile_oldest_age`, `reconcile_stuck` | the same, plus an undo-failure counter |
+- **Cost of "carried, not gated".** A hook whose log half is missing can be delivered before it is in the log. If the node is lost while that is true, the provider (never acked) retries into a new hook with the same `idempotency_key`: one extra delivery, never a loss.
+- **Operators.** A node has an identity (`intake.node_id`) that must be stable across replacement; a broker with a three-broker, `min.insync.replicas=2` topic and a retention at least twice `backup.max_age_ms`; one more thing in the readiness probe. `docs/deployment.md` gains a "Host loss and the intake log" section: provision the topic, size it (`records/s × mean hook size × retention`), the replacement procedure (start with the lost node's id, empty volume), `mix ankusa.recover`, and the `disk` downgrade.
+- **Cost on the broker.** Every hook's body is written once more (and replicated): at the plan's mean 10 KB × 10⁴–10⁵ req/s fleet-wide that is 100 MB/s – 1 GB/s of produce before replication; sizing is the operator's and is documented; claim-checked large payloads travel in the record whole (bounded by `intake.max_record_bytes`).
+- **Bounded structures** (rule 3): section 10; DUR-2 (#135) registers the pending set's two keys in its table.
+- **Later work must keep true:** no `Queue.Writer` change adds a `GenServer.call` or a synchronous wait on the request path (the publish is a task, the reply a message); every writer of delivery rows under `dual` goes through the dual commit except archive replay and the quarantine pen (section 1); a new refusal in the dual path is `503` with `Retry-After` and a metric reason; the watermark and offset only ever advance from confirmed state; replay stays idempotent by `(seq, hook id)`; a new intake adapter implements `Ankusa.Intake` and passes the adapter conformance cases in `queue_dual_test.exs`.
+- **Docs DUR-1.b updates in the same PR:** `docs/architecture.md` (the core invariant, the loss window per mode, the guarantees table, the request path), `docs/storage.md` (the intake rows, backup and recovery), `docs/deployment.md` (the section above), `docs/configuration.md` (every key of section 11), `docs/delivery.md` (idempotent receivers and recovery redelivery), `docs/testing.md` (the cases below), `AGENTS.md` (the repo map and the `mix ankusa.recover` task).
+- **Out of scope, decided elsewhere or later:** adopting a peer's log into a running node (own ADR); a second adapter's build order (JetStream after Kafka, same behaviour); fencing producers at the broker (the `prefix_shared` check and the replay collision rule contain a duplicate node id; a hard fence is not worth a transaction per batch); per-tenant intake topics (tenants share the node's stream, isolation is the queue's, TEN-3).
+
+## Proof
+
+Everything below is named so DUR-1.b's PR can be checked against this list; a missing or renamed case needs an amendment to this ADR in the same PR. Every half-persist case is driven by `Ankusa.Intake.Memory` fault injection or an injected store write failure, **one half at a time**, and asserts on the consumer-visible counts, not only on return values.
+
+**The ack path** (`packages/ankusa/test/ankusa/queue_dual_test.exs`):
+
+- `no ack without intake confirm` (the plan's case: a publish held open, a request in flight, no `201` until the confirm; the reply is also withheld while only the log half is done)
+- `ack waits for both halves and costs the max, not the sum` (fsync stalled 30 ms, publish 30 ms: ack within 45 ms; the sequential figure is 60 ms)
+- `publish fails after local commit: 503 intake_unavailable, one hook id per dedupe key, one delivery` (local ok, log `unavailable`: the hook is delivered once; the claim is not released; the retry is `503 intake_pending` until the reconciler republishes, then `201 duplicate` with the first id; asserts exactly one hook id and exactly one delivery to the sink)
+- `local commit fails after publish: 503 store_unavailable, one hook id per dedupe key, one delivery` (log ok, store write error injected once: the reconciler writes the local half with the original seq; the retry is `409 dedupe_pending`/`503 intake_pending` before and `201 duplicate` with the first id after; exactly one hook id and one delivery)
+- the two cases above again under `dedupe.scope: node` and under `dedupe.scope: fleet` (the fleet case against the Redis double used by `edge_fleet_test.exs`: the claim stays pending, is promoted on completion, and `release` is not called)
+- `both halves fail: the record is carried and completes when either recovers`
+- `refused before either half: nothing is written and the claim is released` (breaker open, pending ceiling, record too large)
+- `a retry that meets an unconfirmed original is never answered 201`
+- `publish timeout is a failure and a republish applies once` (the record lands, the ack is lost, the reconciler republishes; the log holds two records; replay applies one)
+- `intake_unavailable reaches the provider with Retry-After` (router mapping, `edge_test.exs`) and `Batcher passes per-item intake results through`
+- `breaker opens after breaker_failures, half-opens one batch, closes on confirm` and `a down intake never degrades to disk-only` (every `201` in the window has a record in the log; zero `201` while open)
+- `pending set refuses at max_records and at max_bytes`
+- `startup log states the dual loss window` and `startup log says UNVERIFIED when verify_topic is false`
+
+**The reconciler** (`test/ankusa/intake/reconciler_test.exs`): `completes the log half after the intake returns`, `completes the local half once the store write succeeds`, `does not reapply a local half that already landed` (counters equal a fold), `a stuck entry past reconcile_deadline_ms releases the claim and raises the gauge`, `permanent class goes straight to stuck and is not dropped`, `hold returns completed when the reconciler won the race`, `claims promote only when both halves are confirmed`.
+
+**Recovery** (`test/ankusa/intake/recovery_test.exs`, `test/ankusa/store/backup_test.exs`): `replays the tail after m:intake_offset on every boot`, `applies a record once (same id present is skipped; duplicate and reordered records change nothing)`, `replay preserves seqs and raises next_seq`, `a seq collision with a different id is re-sequenced, never overwritten`, `republishes local hooks above the watermark`, `unknown version and kind are skipped and counted`, `an unknown source is unroutable`, `truncated log refuses a restored store and warns on an existing one`, `node id mismatch refuses boot`, `mix ankusa.recover is the same path as boot and a second run changes nothing` (`mix ankusa.recover --dry-run` writes nothing), `restore carries m:intake_offset, m:intake_node and m:intake_partition`, `the offset never runs ahead of the checkpointed store`, `a clean stop leaves an offset at the log head`, and `an old format fixture with no intake rows boots under dual and republishes` (upgrade matrix, `store_upgrade_test.exs`).
+
+**Config, health, metrics:** `config_test.exs` (a range test for every key in section 11; `dual` requires `intake.type`, `intake.node_id`, `backup.enabled` and `backup.max_age_ms`; `reconcile_deadline_ms < fleet.pending_ttl_ms`; `max_record_bytes ≥ max_body_bytes + 65 536`), the `/v1/config` redaction case for `intake.kafka.sasl` and JetStream credentials, `health_test.exs` (`ready reports intake up, down and recovering`), `metrics_test.exs` (the series set above; the count does not grow with the number of tenants).
+
+**The Kafka adapter** (`packages/ankusa_kafka/test/ankusa/intake/kafka_test.exs`, against a three-broker KRaft compose added to that package): `publish_batch is confirmed at quorum` (position equals the broker's offset), `confirms with one broker down and is unavailable (not_enough_replicas) with two down`, `verify refuses min.insync.replicas below 2, retention below 2x backup.max_age_ms and max.message.bytes below max_record_bytes`, `explicit partition survives a partition-count change`, `replay filters by node and skips unknown kinds`, `a duplicate record is returned twice and applied once upstream`, `error codes map to the four classes`. A JetStream mirror of these cases ships with the second adapter.
+
+**Crash** (`test/ankusa/loss_test.exs`, run by `mise run test:crash`): `dual: kill -9 under load and an emptied data dir, boot recovery delivers every acked id` (file-backed `Intake.Memory`; acked ids equal recovered ids).
+
+**The fleet drill** (`examples/fleet-e2e/run.sh --wal dual --kill-node`, extends F5; compose gains a three-broker Kafka, `min.insync.replicas=2`, and `wal.type: dual` with `intake.node_id` per node): at 1 000 req/s, `docker kill` of `ankusa-a` **and removal of its data volume** (host loss, not a process crash), a replacement started with `ankusa-a`'s node id on an empty volume that restores from the backup bucket and replays the log; then the intake brokers stopped for a window and restarted. Asserts: **`missing=0`** (every `201` id is in the consumer table, i.e. every acked id is delivered from the log or the backup), `sha_mismatches=0`, **`duplicate_hooks=0`**, `extra_deliveries` bounded by the hooks acked since the killed node's last backup (the redelivery of section 8), zero `201` during the broker outage and `503 intake_unavailable` for every request in it, and the node `ready` again after. A second run with the secondary bucket only (primary deleted) must also report `missing=0`. `run.sh --wal disk --kill-node` must still report the loss the mode promises, so the drill proves the difference.
+
+**Bench** (self-asserting, from `mise run bench:gate`): `mix run bench/intake_bench.exs` (new): `Intake.Memory` with 5 ms confirm latency and a stalled fsync; passes only if p50 ack latency is within `max(fsync, confirm) + 5 ms` and throughput is at least 0.8 × `disk` at the same latency. `mise run bench:gate` → PASS with before/after numbers in the PR (`queue/writer.ex`, `edge/batcher.ex`, `store.ex` are hot-path files, rule 10).
+
+**Commands for DUR-1.b:** `mix test test/ankusa/queue_dual_test.exs test/ankusa/intake test/ankusa/store/backup_test.exs test/ankusa/store_upgrade_test.exs test/ankusa/loss_test.exs test/ankusa/config_test.exs test/ankusa/health_test.exs test/ankusa/metrics_test.exs test/ankusa/edge_test.exs` (core), `mise run check:package ankusa`, `ankusa_kafka`, `ankusa_nats` (the adapter modules), `ankusa_server` (the YAML loader), `mise run test:crash`, `scripts/drills/flakey.sh` where Docker can run `--privileged`, `examples/fleet-e2e/run.sh --wal dual --kill-node`, `mise run bench:gate`, `mise run check`.
+
+**This ADR's own proof:** the PR merges, and `mise run check:links` passes.

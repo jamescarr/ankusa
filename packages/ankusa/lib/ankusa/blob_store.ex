@@ -126,8 +126,20 @@ defmodule Ankusa.BlobStore do
   end
 
   @doc """
+  The second object store backups are also written to (`backup.secondary`),
+  under the same `storage.key_prefix`; `nil` when none is configured.
+  """
+  @spec secondary_config(Config.t()) :: {module(), keyword(), String.t()} | nil
+  def secondary_config(%Config{backup: backup, storage: storage}) do
+    case Map.get(backup, :secondary) do
+      {mod, opts} -> {mod, opts, Map.get(storage, :key_prefix, "")}
+      nil -> nil
+    end
+  end
+
+  @doc """
   Check the `:sse` option of every blob store the config names
-  (`storage.blob_store`, `backup.blob_store`, `claim_check.blob_stores`).
+  (`storage.blob_store`, `backup.blob_store`, `backup.secondary`, `claim_check.blob_stores`).
   """
   @spec validate_config!(Config.t()) :: :ok
   def validate_config!(%Config{storage: storage, backup: backup, claim_check: claim_check}) do
@@ -136,7 +148,11 @@ defmodule Ankusa.BlobStore do
       |> List.wrap()
       |> Enum.with_index(fn store, index -> {"claim_check.blob_stores[#{index}]", store} end)
 
-    [{"storage.blob_store", storage.blob_store}, {"backup.blob_store", backup.blob_store}]
+    [
+      {"storage.blob_store", storage.blob_store},
+      {"backup.blob_store", backup.blob_store},
+      {"backup.secondary", Map.get(backup, :secondary)}
+    ]
     |> Kernel.++(claim_stores)
     |> Enum.each(fn
       {where, {mod, opts}} when is_atom(mod) -> Ankusa.BlobStore.SSE.validate!(mod, opts, where)

@@ -111,6 +111,27 @@ The always-on tests cover:
   would reject) and an added row key survives a rewrite; an unknown version
   is an error value, and the pipeline dead-letters such a hook or row with
   that reason and lists it in the DLQ instead of raising.
+- **Backup and restore** (`store/backup_test.exs`, `lifecycle_test.exs`): a
+  backup, a wiped `data_dir` and a restart bring back every acked hook;
+  retention keeps `backup.keep` backups and what they reference; a second node
+  on one prefix is refused. `verify detects corruption` flips a byte, shortens,
+  deletes a file and breaks a manifest, and sees each (`Backup.verify/2` writes
+  nothing: no `put`), and the verify job reports every target on
+  `[:ankusa, :backup, :verify]` (`ankusa_backup_verify_failed_total` in
+  `metrics_test.exs`). `manifest signature` refuses an unsigned, mis-signed or
+  tampered manifest at restore (and accepts a rotated key list, and no key at
+  all with a warning); a backup of a newer store format is refused.
+  `final checkpoint on stop` stops an instance cleanly and restores
+  `LATEST` — newer than the last periodic backup — with every acked id; a final
+  backup slower than `backup.final_timeout_ms` is abandoned without holding the
+  stop. `secondary restore` loses the primary bucket and restores every acked
+  id from the secondary, falls back when the primary fails its checksum, and
+  refuses with the primary's reason when both do; a failing secondary fails the
+  run without making the primary upload again. `/ready` says `backup: stale`
+  past `backup.max_age_ms` and is `503` only with `require_fresh`. In
+  `lifecycle_test.exs`, `opens a new incarnation` restores a backup taken
+  before two published events and shows `io.ankusa.instance.restored` first,
+  and the re-issued sequence numbers under different event ids.
 - **Migration** (`store_migrate_test.exs`): a 0.3 data dir imports once — only
   what 0.3 had not finished (undelivered hooks deliver, unarchived hooks
   archive), dead letters carry over and replay to the current sinks, the
@@ -911,7 +932,7 @@ and the heavy tenant's peak claimed rows and running attempts, and exits 1 if
 the light tenant's p99 is more than 2× its solo p99 (or over 25 ms) or the
 heavy tenant passes its window.
 
-`mise run bench:gate` also runs two self-asserting scripts first, with no
+`mise run bench:gate` also runs three self-asserting scripts first, with no
 baseline entry:
 [`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
 times `Ankusa.Metrics.Gauges.measure/1` and
@@ -929,7 +950,17 @@ as amended in TEN-1.b: a store a thousand times bigger costs a little more per
 seek, on a CI runner the gauge tick went from 0.27 ms at 10⁵ rows to 0.59 ms at
 10⁶, while a tick that grew with the queue would cost tens of milliseconds or
 more at the top of either axis).
-A rebaseline run (`BENCH_REBASELINE=1`) skips them: it measures the
+[`bench/routes_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/routes_bench.exs)
+publishes 10⁶ routes over 10⁵ distinct first segments (10⁵ routes in the gate:
+`ROUTES_BENCH_N`) and exits 1 unless the first publish and a reload each take
+under 60 s (scaled below 10⁶), a request no route matches is decided in under
+1 ms at p99 with the decision cache out of the picture (`Routes.dry_run/2`),
+one create and one list page cost no more than 3× (plus 5 ms: a create is a
+synced audit write) what they cost at 10³ routes, and a route costs no more
+than the per-route estimate `routes.memory_budget_bytes` is checked with. Its
+Redis half (boot and reload through `HSCAN`) is
+`packages/ankusa_redis/bench/routes_load_bench.exs`. A rebaseline run
+(`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 
 CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on

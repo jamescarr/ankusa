@@ -74,16 +74,16 @@ Every top-level section, with its keys and defaults:
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `storage.s3.sse`, `storage.gcs.sse` | `type` (`aes256` \| `kms`), `key_id` (the KMS key; required for `kms` on GCS, optional on S3). Server-side encryption sent on every object this store writes; the same `sse:` key is accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. See [Encryption at rest](storage.md#encryption-at-rest) |
 | `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), `max_concurrent_reads` (1024; 0 = no cap), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). `claim_check.authorize` is Elixir config only. See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
-| `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
-| `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
+| `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`), `secondary` (a second store of the same shape: every backup is written to both, restore falls back to it), `timeout_ms` (120000), `verify_interval_ms` (unset = never), `signing_key` (a string or a list, e.g. `["${BACKUP_SIGNING_KEY}"]`: the first signs, any verifies), `final_timeout_ms` (20000), `max_age_ms` (unset = no `/ready` label), `require_fresh` (`false`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
+| `routes` | `enabled` (`false`), `max_routes` (1000000), `memory_budget_bytes` (8589934592), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms`/`store.timeout_ms`/`store.load_timeout_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
-| `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
+| `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000), `timeout_ms` (5000), `load_timeout_ms` (300000) — the last five only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `secrets` | `kek` (a 32-byte key, base64, optionally `<id>:<base64>`; use `${VAR}`), `kek_previous` (a list, or one comma-separated string, of keys that may still decrypt). With a `kek`, the secrets of API-managed sources are encrypted before they are stored (`source_store.type: persistent` or `redis`); unset, they are stored as plain JSON. See [Encryption at rest](storage.md#encryption-at-rest). `providers.<name>` (`type: aws` or `vault`, and their settings) and `cache_ttl_ms` (`0`) name the secret managers `${sm:<name>:<ref>}` reads from; see [Secret sources](#secret-sources) |
 | `rate_limits` | `default` (`null` = unlimited; **required** with `routing: tenant_path`), `tenants` (`{tenant_id: {rate, burst, ...}}`; a limit may add `bytes_per_second`, `burst_bytes`, `max_body_bytes`, `max_queue`, `max_queue_bytes`), `per_ip` (`{rate, burst}` or `null`), `node` (`{rate, burst}` or `null`), `sources` (`default: {bytes_per_second, burst_bytes}`; 100 MB/s, `null` = off), `scope` (`node` \| `fleet`; default `node`). Per node, except the tenant quota under `scope: fleet`. `per_ip`, `node` and `sources` are charged before the body is read; the tenant's after verification. See [Rate limits](#rate-limits) |
-| `dedupe` | `scope` (`node` \| `fleet`; default `node`). Where a source's provider event key (its `dedupe:`) collapses: `fleet` claims it in `fleet.store` first. Needs `fleet.store`. See [Fleet scope](#fleet-scope) |
+| `dedupe` | `scope` (`node` \| `fleet`; default `node`). Where a source's provider event key (its `dedupe:`) collapses: `fleet` claims it in `fleet.store` first. Needs `fleet.store`. See [Fleet scope](#fleet-scope). `max_entries` (100000000) and `max_entries_per_tenant` (30000000), integers ≥ 1: the most live dedupe keys the node, and one tenant, holds; past either a new key is `503 dedupe_quota`, `Retry-After: 60` |
 | `fleet` | `store` (`{type: redis, url, namespace, pool_size}`; absent with both scopes `node`), `timeout_ms` (20; 1–1000), `pending_ttl_ms` (30000), `breaker_window_ms` (1000), `breaker_min_calls` (20), `breaker_failure_rate` (0.5), `breaker_open_ms` (5000). The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`. See [Fleet scope](#fleet-scope) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
-| `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones. Read with `GET /v1/audit` (scope `audit:read`). Per node |
+| `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones, but never a row a lifecycle sink has not yet seen (`m:lifecycle_cursor`). Read with `GET /v1/audit` (scope `audit:read`). Per node |
 | `tenants` | `max` (1000000, an integer from 1 to 4294967294). How many tenants the node's store hands a dense ordinal to ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)); the hook of one past it is refused with `503 {"error":"tenant_limit"}` and `Retry-After: 300`. Tenants it already knows are never refused, and a tenant keeps its ordinal forever. Per node |
 | `lifecycle` | `sinks` (required and non-empty when the section is present; omit the section to turn events off). Sinks, shaped like a source's, that receive a CloudEvent when a source or route is created, updated, or deleted. See [AsyncAPI and lifecycle events](asyncapi.md) |
 | `egress` | `allow_insecure_http` (`false`: `http` sink URLs fail the load), `deny_cidrs` (loopback, RFC 1918, carrier-grade NAT, link-local, unique-local IPv6 and the unspecified addresses; setting it replaces the list), `allow_cidrs` (`[]`), `allow_hosts` (`[]`), `deny_hosts` (`[metadata.google.internal]`). Where `type: http` sinks may connect, checked on every attempt. See [Egress](#egress) |
@@ -512,11 +512,24 @@ config :ankusa,
     accept_unsigned_refs: nil,
     authorize: nil
   },
-  backup: %{enabled: false, interval_ms: 60_000, keep: 3, blob_store: nil},
+  backup: %{
+    enabled: false,
+    interval_ms: 60_000,
+    keep: 3,
+    blob_store: nil,
+    secondary: nil,
+    timeout_ms: 120_000,
+    verify_interval_ms: nil,
+    signing_key: [],
+    final_timeout_ms: 20_000,
+    max_age_ms: nil,
+    require_fresh: false
+  },
   admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
   routes: %{
     enabled: false,
-    max_routes: 10_000,
+    max_routes: 1_000_000,
+    memory_budget_bytes: 8_589_934_592,
     store: {Ankusa.Routes.Store.ETS, []},
     cache: %{max_size: 50_000, ttl_ms: 30_000, negative_ttl_ms: 5_000, gc_interval_ms: 60_000},
     trusted_proxies: [],
@@ -616,6 +629,13 @@ config :ankusa,
 | `backup.interval_ms` | `60_000` | How often a checkpoint is uploaded: the most a lost host loses. Only files the last backup doesn't already have are uploaded. |
 | `backup.keep` | `3` | Backups kept; older ones, and the files only they used, are deleted after each successful backup. |
 | `backup.blob_store` | `nil` | `{module, opts}` for backup objects; `nil` uses `storage.blob_store`. Keys are under `storage.key_prefix` either way: a backup is one node's, and a node whose prefix holds another store's backups refuses to back up. With `LocalFS` the backup shares the host's fate, and the node logs a warning saying so. |
+| `backup.secondary` | `nil` | `{module, opts}` of a second object store (another region or provider), under the same `storage.key_prefix`. Every backup is written to the primary and then to it, with the same checks; a run succeeds only when both hold it (a failing secondary is retried with backoff, and the primary is not uploaded again meanwhile). At restore the primary is tried first; if it is unreachable, empty, or fails a check, the secondary is. Its `:sse` option is checked like every other store's. |
+| `backup.timeout_ms` | `120_000` | The most one object-store call of a backup, a verify or a restore may take before it counts as failed. A positive integer. |
+| `backup.verify_interval_ms` | `nil` | Every this often the latest backup of every store is read back and checked (manifest signature, every file's size and sha256) without writing anything; a failure is logged and counted by `ankusa_backup_verify_failed_total{target}`. `nil` = never. A positive integer. |
+| `backup.signing_key` | `[]` | HMAC-SHA256 key(s), each a string of at least 32 bytes (`openssl rand -base64 32`), as a string or a list: the first signs every manifest, any of them verifies, so a rotation lists the new key first and keeps the old one until its backups have aged out. With keys configured a restore refuses an unsigned or mis-signed manifest (`{:manifest_invalid, id, :unsigned \| :bad_signature}`); with none it checks nothing. `/v1/config` shows each as `[REDACTED]`. |
+| `backup.final_timeout_ms` | `20_000` | A clean stop (SIGTERM, `docker stop`) takes one last backup before the store closes, at most this long. A positive integer; the supervisor waits this plus 10 s. |
+| `backup.max_age_ms` | `nil` | `/ready` carries `"backup": "fresh"` or `"stale"` once the last successful backup is older than this (or the uploader is not running). `nil` = no label. At least `backup.interval_ms`. |
+| `backup.require_fresh` | `false` | A stale backup makes `/ready` answer `503`. Needs `backup.max_age_ms`. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
@@ -629,9 +649,10 @@ config :ankusa,
 | `claim_check.tls`, `routes.admin.tls` | `nil` | A TLS block for the claim-check gateway and the route-management API. |
 | `routes.admin.auth`, `claim_check.auth` | `%{mode: :none}` | The same block for the route-management API and the claim-check gateway. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
-| `routes.max_routes` | `10_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. |
+| `routes.max_routes` | `1_000_000` | Hard cap on definitions. Creating one past it is a `409`; nothing is ever evicted. The table is indexed (see [Route management](#route-management)), so a miss, a create and a list page cost the same at a million routes as at a thousand. |
+| `routes.memory_budget_bytes` | `8_589_934_592` | What this node may spend on route definitions. At boot `max_routes` is multiplied by the per-route estimate (5 KiB: the snapshot rows plus the store's copy of the definition, measured by `bench/routes_bench.exs`; a million routes are about 5 GB of RAM) and a cap that does not fit is a config error naming both keys; a table that a Redis store loads that does not fit refuses the boot (or, on a reload, keeps the table the node is serving). Lower `max_routes` or raise the budget, never one without the other. |
 | `routes.store` | `{Ankusa.Routes.Store.ETS, []}` | `{module, opts}` implementing `Ankusa.Routes.Store`. `Ankusa.Routes.Store.Redis` (package `ankusa_redis`) shares definitions across nodes. |
-| `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. Entries are keyed by the published snapshot's `epoch`, so publishing a snapshot retires every earlier decision at once. Only short requests are cached — at most 16 path segments and 256 bytes of path — because the key is the sender's own path; a longer one is still decided correctly, but by a scan of the whole route table on every request, and its `[:ankusa, :routes, :match]` event carries `cacheable: false` so that cost is visible. `max_size` is approximate between the adapter's 1s memory checks, and an eviction only costs a re-scan: it can never change a decision. `ttl_ms` must stay under `gc_interval_ms`. |
+| `routes.cache.*` | `max_size: 50_000`, `ttl_ms: 30_000`, `negative_ttl_ms: 5_000`, `gc_interval_ms: 60_000` | The per-request decision cache. Entries are keyed by the published snapshot's `epoch`, so publishing a snapshot retires every earlier decision at once. Only short requests are cached — at most 16 path segments and 256 bytes of path — because the key is the sender's own path; a longer one is still decided correctly, but by a match against the table's index on every request, and its `[:ankusa, :routes, :match]` event carries `cacheable: false` so that cost is visible. `max_size` is approximate between the adapter's 1s memory checks, and an eviction only costs a re-match: it can never change a decision. `ttl_ms` must stay under `gc_interval_ms`. |
 | `routes.trusted_proxies` | `[]` | CIDRs whose peers may set `X-Forwarded-For`. Empty means the header is never read. |
 | `routes.ip_rules` | `%{default: :allow, rules: []}` | Ordered global rules, first match wins, plus the `default` when none match. |
 | `routes.admin.port` | `4003` | The management API's own Bandit port. Authenticated by `routes.admin.auth`, like `admin.port`. |
@@ -644,13 +665,15 @@ config :ankusa,
 | `rate_limits.sources` | `%{default: %{bytes_per_second: 100_000_000}}` | Body bytes per second for each source, charged before the body is read with its declared `Content-Length` (a body with none is charged when read): `429 source_rate_limited`. `%{default: %{bytes_per_second: n, burst_bytes: n}}` (`burst_bytes` defaults to one second's worth); `%{default: nil}` switches it off. CPU protection, not a quota. |
 | `rate_limits.scope` | `:node` | `:node` or `:fleet`. Where the tenant quota (`default`, `tenants`: hooks and bytes per second) is counted. `:fleet` shares one bucket per tenant across every edge node through `fleet.store`; `per_ip`, `node` and `sources` stay per node. Needs `fleet.store`. See [Fleet scope](#fleet-scope). |
 | `dedupe.scope` | `:node` | `:node` or `:fleet`. `:fleet` claims a source's provider event key in `fleet.store` before the commit, so a retry on another node is `201 duplicate` (the first hook's id) or `409 dedupe_pending`, never a second hook. Needs `fleet.store`. See [Fleet scope](#fleet-scope). |
+| `dedupe.max_entries` | `100_000_000` | The most live dedupe keys the node's index holds (about 200 B of disk each). A hook whose key would be a new one past it is refused with `503 dedupe_quota` and `Retry-After: 60` (`outcome="dedupe_quota"` on `ankusa_ingest_requests_total`); it is never stored without its key. Keys expire on their own after the source's ttl (72 h by default), swept by `Ankusa.Queue.DedupeSweeper`; `ankusa_dedupe_keys` is the live count. An integer ≥ 1. Per node. |
+| `dedupe.max_entries_per_tenant` | `30_000_000` | The same bound for one tenant, so one tenant cannot fill the node's share: a tenant at 100 hooks/s with the 72 h ttl holds about 26 M keys. An integer ≥ 1. |
 | `fleet.store` | `nil` | `{module, opts}` implementing `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store`: `{Ankusa.RateLimiter.Store.Redis, url: "redis://…", namespace: "ankusa:fleet", pool_size: 4}` from `ankusa_redis`. Required by either `:fleet` scope; `nil` or `{module, keyword}`. |
 | `fleet.timeout_ms` | `20` | The hard budget of one fleet-store call, an integer from 1 to 1000. A call that fails or runs out of it is answered from this node alone. |
 | `fleet.pending_ttl_ms` | `30000` | How long a claimed dedupe key is "in flight" before another node may claim it; a positive integer, longer than the slowest commit. |
 | `fleet.breaker_window_ms`, `fleet.breaker_min_calls`, `fleet.breaker_failure_rate`, `fleet.breaker_open_ms` | `1000`, `20`, `0.5`, `5000` | The fleet breaker: once `breaker_min_calls` calls in a `breaker_window_ms` window were made and `breaker_failure_rate` (a number above 0, at most 1) of them failed or timed out, every hook is answered from this node for `breaker_open_ms`, then one probe decides. Positive integers except the rate. |
 | `quarantine.burst`, `quarantine.rate`, `quarantine.max_bytes` | `100`, `20`, `1_073_741_824` | The quarantine pen: one token bucket per source (`burst` hooks back to back, refilled `rate` per second; over it, `429 quarantine_rate_limited`) and a cap on the pen's total bytes (a hook that would cross it is `503 quarantine_full`; the pen never evicts). See [`delivery.md#quarantine`](delivery.md#quarantine). |
-| `audit.retention_days` | `365` | Days the audit trail keeps a row. An hourly sweep deletes older rows, oldest first, in bounded batches (`[:ankusa, :audit, :pruned]`). A positive integer. Every committed row emits `[:ankusa, :audit]`. See [Architecture](architecture.md#guarantees-by-component). |
-| `tenants.max` | `1_000_000` | The most tenants the store knows (each gets an ordinal at its first committed hook, none is ever reused). A hook of a tenant one past it is refused with `503 tenant_limit` and `Retry-After: 300`, tagged `outcome: :tenant_limit` on the ingest metrics; a known tenant is never refused. Not a secret, so `/v1/config` shows it. An integer from 1 to 4294967294; the store holds about 80 B per tenant plus six counters of 40 B. |
+| `audit.retention_days` | `365` | Days the audit trail keeps a row. An hourly sweep deletes older rows, oldest first, in bounded batches (`[:ankusa, :audit, :pruned]`). A positive integer. Every committed row emits `[:ankusa, :audit]`. While `lifecycle.sinks` is set, a row (and its lifecycle entity) at or above `m:lifecycle_cursor` is never deleted, however old: a lifecycle sink that is down longer than the retention keeps the events it has not seen, and the held rows are reported as `ankusa_audit_retention_blocked_by_cursor`. See [Architecture](architecture.md#guarantees-by-component). |
+| `tenants.max` | `1_000_000` | The most tenants the store knows (each gets an ordinal at its first committed hook, none is ever reused). A hook of a tenant one past it is refused with `503 tenant_limit` and `Retry-After: 300`, tagged `outcome: :tenant_limit` on the ingest metrics; a known tenant is never refused. Not a secret, so `/v1/config` shows it. An integer from 1 to 4294967294; the store holds about 80 B per tenant plus seven counters of 40 B. |
 
 Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 <constraint>, got <value>"`: every port is `0..65535`; `max_body_bytes`,
@@ -659,8 +682,9 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 `claim_check.store_cooldown_ms`, `claim_check.read_deadline_ms`,
 `claim_check.read_timeout_ms`, `claim_check.read_max_inflight`,
 `claim_check.read_cache_max_entry_bytes`, `backup.interval_ms`,
-`backup.keep`, `admin.gauge_interval_ms`, `metrics.max_series_per_metric`,
-`routes.max_routes` and every
+`backup.keep`, `backup.timeout_ms`, `backup.final_timeout_ms`,
+`admin.gauge_interval_ms`, `metrics.max_series_per_metric`,
+`routes.max_routes`, `routes.memory_budget_bytes` and every
 numeric `listener.*` key (`max_connections`, `num_acceptors`, the three
 timeouts, `max_requests_per_connection`, `max_header_count`,
 `max_header_length`) must be positive; `listener.http2` and `metrics.enabled`
@@ -989,16 +1013,37 @@ routes:
   store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes}
 ```
 
-`store.url`, `store.namespace`, and `store.tick_ms` are Redis-store keys: with
-`type: ets` any of them is a config error, not a silently ignored key (a `url`
-with no `type` at all still means Redis).
+`store.url`, `store.namespace`, `store.tick_ms`, `store.timeout_ms`, and
+`store.load_timeout_ms` are Redis-store keys: with `type: ets` any of them is a
+config error, not a silently ignored key (a `url` with no `type` at all still
+means Redis). `timeout_ms` (default 5000) bounds every Redis command; a load
+reads the definitions a page at a time (`HSCAN`, 1000 per page) so it applies
+to each page, and `load_timeout_ms` (default 300000) is the deadline of the
+whole load. A million definitions boot and reload without a command near
+either.
 
 Every node with the same `namespace` enforces the same routes: writes bump a
 version counter and publish it, each node reloads on the broadcast, and a
 periodic tick (`tick_ms`, default 30s) is the safety net for a missed one. A
+write that arrives in step with the node's version is applied to its snapshot as
+one row change; only a write that raced a peer's reloads the whole table. A
 node keeps serving its in-memory snapshot through a Redis outage; only writes
 report `503 store_unavailable`. The Redis store seeds a namespace once, on its
 first boot, so a route deleted there is not resurrected by a restart.
+
+**Matching at scale.** Routes are indexed by the literal segments their pattern
+starts with (`/hooks/stripe/:id` under `hooks/stripe`, up to eight segments), so
+a request is matched against the few routes that share its leading literals,
+not the whole table: a miss with the decision cache out of the picture is
+microseconds at a million routes (`bench/routes_bench.exs`). A pattern that
+*starts* with a parameter or a wildcard (`/:tenant/hook`) has no literal to
+index under and joins one shared list that every request is matched against,
+so keep those few; put the literal first (`/hooks/:tenant/...`). Creating a
+route checks for a conflicting enabled route by pattern and method in one
+lookup, and the route list pages straight from the cursor, so neither slows as
+the table grows. The same index answers "which existing patterns overlap this
+one, and which tenant owns each" (`Ankusa.Routes.Snapshot.overlaps/4`, for a
+future cross-tenant overlap check) by walking one prefix chain, not the table.
 
 **Management API**, on `routes.admin.port` (its own listener, never the ingest
 port), authenticated by `routes.admin.auth` like the operator admin API (see

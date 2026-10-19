@@ -30,6 +30,68 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   sources naming the tenant, and `default`, are refused with `409`.
   Proof: `test/ankusa/tenant_test.exs`, `tenant_s3_integration_test.exs`.
 
+- **Dedupe ceilings, the dedupe sweeper and audit retention behind the outbox
+  (DUR-2.a).** `dedupe.max_entries` (default 100 000 000) and
+  `dedupe.max_entries_per_tenant` (default 30 000 000) bound the live ingest-dedupe
+  keys: a hook whose key would be a new one past either is refused with
+  `503 {"error":"dedupe_quota"}` and `Retry-After: 60` (`outcome="dedupe_quota"` on
+  `ankusa_ingest_requests_total`), never stored without its key. The count is the new
+  `dedupe` counter (field 7 of the `counters` family, so the check is one read per
+  commit batch), and the expiry sweep moved out of `Ankusa.Queue.Writer` into the
+  supervised `Ankusa.Queue.DedupeSweeper`, which runs back to back while full
+  chunks of expired keys keep coming (the old sweep was capped at 2 000 keys per
+  10 s) and has the writer apply each chunk, deleting a key only if a refresh did
+  not replace it. **Store format 4**: the migration `3 -> 4` counts the `?e` keys
+  of a format 3 store, resumably; `test/fixtures/store-v4.tar.zst`. A format 3
+  release cannot open a format 4 store (no downgrade across this change). New
+  series `ankusa_dedupe_keys`, `ankusa_dedupe_pruned_total`. The audit trail's
+  retention (`audit.retention_days`) no longer deletes a row, or its lifecycle
+  entity, at or above `m:lifecycle_cursor` while `lifecycle.sinks` is set, so a
+  lifecycle sink that is down longer than the retention cannot lose events it has
+  not seen; `ankusa_audit_retention_blocked_by_cursor` reports the expired rows
+  held back. See `docs/storage.md#ingest-dedupe-keys-bounded-expired-outside-the-writer`.
+- **Backup verification, signed manifests, a final backup on stop and a secondary
+  region (DUR-6).** `Ankusa.Store.Backup.verify/2` reads the latest backup back
+  (manifest, every file's size and sha256) without writing, on
+  `backup.verify_interval_ms`, counted by `ankusa_backup_verify_failed_total{target}`.
+  `backup.signing_key` (a string or a list, each at least 32 bytes) signs every
+  manifest with HMAC-SHA256 (manifest version 2; version 1 is still read) and a
+  restore refuses an unsigned or mis-signed one. A clean stop takes one last
+  backup under `backup.final_timeout_ms` (20 s). `backup.timeout_ms` bounds each
+  object-store call. `backup.max_age_ms` puts `"backup": "fresh" | "stale"` on
+  `/ready`, `503` only with `backup.require_fresh`. `backup.secondary` is a second
+  object store every backup is also written to, and restore falls back to. The
+  manifest records the store format (a backup of a newer one is refused at
+  restore) and `m:intake_offset`. `Backup.restore/2` is now `restore/3`.
+- **A restore is announced (DUR-6).** A store restored from a backup writes a
+  fresh `m:incarnation` and, before taking any change, emits
+  `io.ankusa.instance.restored` (`incarnation`, `restored_sequence`); lifecycle
+  event ids of rows from then on are keyed with the incarnation, so audit
+  sequence numbers the lost node had already published are not reused as event
+  ids. Rows of the restored trail keep their ids.
+- **Routes at 10⁶ entries (TEN-9).** The route snapshot is indexed by the
+  literal segments a pattern starts with (`{:lit, gen, prefix, priority, id}`,
+  up to eight), so a request is matched against the few routes that share its
+  leading literals, merged in priority order, instead of every pattern in the
+  table: a miss with the decision cache out of the picture is microseconds at a
+  million routes, with the same answers as the old walk (the new
+  `routes/snapshot_test.exs` checks it against the old walk on random tables).
+  Enabled routes are also indexed by `{compiled pattern, method}`, so the
+  create/replace/update conflict check is one lookup per method, not a scan of
+  every pattern; `Routes.list/2` pages from its cursor with `:ets.next/2`
+  instead of sorting the table; publishing a generation inserts in batches of
+  2 000 routes and no longer sorts. New `routes.memory_budget_bytes` (default
+  8 GiB): at boot `max_routes` is multiplied by an estimate of what a route
+  costs (`Snapshot.estimated_bytes/1`) and a cap that does not fit is an
+  `ArgumentError` naming both keys; a store refuses a load that does not fit
+  (`Snapshot.check_budget/2`). `bench/routes_bench.exs` (10⁶ routes over 10⁵
+  paths by default; `mise run bench:gate` runs it at 10⁵) asserts boot and
+  reload time, miss p99 < 1 ms, create/list flat in the table size and bytes
+  per route against the estimate. The same prefix index backs
+  `Snapshot.overlaps/4` (every route whose pattern shares a request path with
+  a candidate, each carrying its `tenant_id`; one prefix chain, not the table)
+  and `Matcher.overlap?/2`: the query a cross-tenant path-overlap check
+  (TEN-4.b) needs. Nothing calls it yet.
 - **Per-tenant observability with a cardinality policy (TEN-7).** `metrics.detail`
   (`:tenant` by default, `:source`, `:none`) says which identity labels the
   per-hook Prometheus series carry, and `metrics.max_series_per_metric` (default
@@ -534,6 +596,12 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- `routes.max_routes` defaults to 1 000 000 (was 10 000, TEN-9); the cap is
+  still hard and nothing is evicted, and it is checked against the new
+  `routes.memory_budget_bytes`. The snapshot's `:pattern` rows are replaced by
+  `:lit` rows, `:meta` gains `max_prefix`, and a `:conflict` index is added;
+  `Snapshot.patterns/2` and `Snapshot.build/1` are gone (nothing outside the
+  snapshot read them).
 - **`dispatch.sink_concurrency` defaults to `8` (was `nil`), and the per-tenant
   windows of `dispatch.tenants.default` apply by default (TEN-3).** A
   deployment whose hooks all share one tenant (none, or one tenant id) is held

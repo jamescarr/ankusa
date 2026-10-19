@@ -130,6 +130,25 @@ defmodule Ankusa.ConfigTest do
       end
     end
 
+    test "checks max_routes against routes.memory_budget_bytes at boot" do
+      assert_raise ArgumentError, ~r/routes\.memory_budget_bytes/, fn ->
+        validated(memory_budget_bytes: 0)
+      end
+
+      # The default cap fits the default budget; a larger cap does not, and the
+      # message names both keys.
+      assert :ok = validated(max_routes: 1_000_000)
+
+      error =
+        assert_raise ArgumentError, ~r/routes\.max_routes \(10000000\)/, fn ->
+          validated(max_routes: 10_000_000)
+        end
+
+      assert error.message =~ "routes.memory_budget_bytes (8589934592)"
+
+      assert :ok = validated(max_routes: 10_000_000, memory_budget_bytes: 100 * 1_073_741_824)
+    end
+
     test "rejects a store that is not a {module, opts} pair" do
       assert_raise ArgumentError, ~r/routes\.store/, fn -> validated(store: "ets") end
     end
@@ -666,6 +685,64 @@ defmodule Ankusa.ConfigTest do
         Ankusa.Store.Backup.validate_config!(Config.new(backup: %{blob_store: "s3://secret"}))
       end
     end
+
+    test "timeouts, verify interval, freshness and signing keys are range-checked at Config.new/1" do
+      for key <- [:timeout_ms, :final_timeout_ms] do
+        assert_raise ArgumentError, "backup.#{key} must be a positive integer, got 0", fn ->
+          Config.new(backup: %{key => 0})
+        end
+      end
+
+      assert_raise ArgumentError,
+                   "backup.verify_interval_ms must be nil or a positive integer, got 0",
+                   fn -> Config.new(backup: %{verify_interval_ms: 0}) end
+
+      assert Config.new(backup: %{verify_interval_ms: 1}).backup.verify_interval_ms == 1
+
+      assert_raise ArgumentError,
+                   "backup.max_age_ms must be nil or an integer >= backup.interval_ms (60000), got 1000",
+                   fn -> Config.new(backup: %{max_age_ms: 1_000}) end
+
+      assert_raise ArgumentError, "backup.require_fresh needs backup.max_age_ms", fn ->
+        Config.new(backup: %{require_fresh: true})
+      end
+
+      assert Config.new(backup: %{require_fresh: true, max_age_ms: 120_000}).backup.max_age_ms ==
+               120_000
+    end
+
+    test "backup.signing_key is a string or a list of long-enough strings, kept as a list" do
+      key = String.duplicate("k", 32)
+      assert Config.new().backup.signing_key == []
+      assert Config.new(backup: %{signing_key: nil}).backup.signing_key == []
+      assert Config.new(backup: %{signing_key: key}).backup.signing_key == [key]
+
+      assert Config.new(backup: %{signing_key: [key, key <> "2"]}).backup.signing_key == [
+               key,
+               key <> "2"
+             ]
+
+      message =
+        "backup.signing_key must be a string or a list of strings of at least 32 bytes each"
+
+      for bad <- ["short", ["short"], [key, 1], 5] do
+        error =
+          assert_raise ArgumentError, message, fn -> Config.new(backup: %{signing_key: bad}) end
+
+        refute error.message =~ "short"
+      end
+    end
+
+    test "backup.secondary must be nil or {module, opts}" do
+      assert :ok =
+               Ankusa.Store.Backup.validate_config!(
+                 Config.new(backup: %{secondary: {Ankusa.BlobStore.LocalFS, root: "/tmp/x"}})
+               )
+
+      assert_raise ArgumentError, "backup.secondary must be nil or {module, opts}", fn ->
+        Ankusa.Store.Backup.validate_config!(Config.new(backup: %{secondary: "s3://secret"}))
+      end
+    end
   end
 
   describe "the listener and metrics sections" do
@@ -1154,7 +1231,7 @@ defmodule Ankusa.ConfigTest do
       config = Config.new()
 
       assert config.rate_limits.scope == :node
-      assert config.dedupe == %{scope: :node}
+      assert config.dedupe.scope == :node
       assert config.fleet.store == nil
       assert config.fleet.timeout_ms == 20
     end
@@ -1202,6 +1279,24 @@ defmodule Ankusa.ConfigTest do
           ] do
         assert_raise ArgumentError, message, fn -> Config.new(fleet: [{key, value}]) end
       end
+    end
+  end
+
+  describe "dedupe ceilings" do
+    test "the defaults bound the index" do
+      assert %{max_entries: 100_000_000, max_entries_per_tenant: 30_000_000, scope: :node} =
+               Config.new().dedupe
+    end
+
+    test "max_entries and max_entries_per_tenant are positive integers" do
+      for key <- [:max_entries, :max_entries_per_tenant], bad <- [0, -1, 1.5, "10", nil] do
+        assert_raise ArgumentError, ~r/dedupe\.#{key} must be an integer >= 1/, fn ->
+          Config.new(dedupe: [{key, bad}])
+        end
+      end
+
+      assert %{max_entries: 1, max_entries_per_tenant: 1} =
+               Config.new(dedupe: [max_entries: 1, max_entries_per_tenant: 1]).dedupe
     end
   end
 end

@@ -243,7 +243,7 @@ defmodule Ankusa.TenantTest do
             {:default, Keys.erase(tenant)},
             {:tenants, Keys.tenant_ord(tenant)},
             {:index, Keys.dedupe(tenant, "#{tenant}.billing", "evt-1")}
-          ] ++ for(f <- 1..6, do: {:counters, Keys.counter(ord, f)}),
+          ] ++ for(f <- 1..7, do: {:counters, Keys.counter(ord, f)}),
           fn {cf, key} -> point.(cf, key) end
         ),
       quarantine:
@@ -305,10 +305,13 @@ defmodule Ankusa.TenantTest do
       expires = System.system_time(:millisecond) + 3_600_000
 
       dedupe = fn tenant ->
+        {:ok, tenant_ord} = Tenants.ord(inst, tenant)
+
         [
           {:put, :index, Keys.dedupe(tenant, "#{tenant}.billing", "evt-1"),
            <<expires::64, "original">>},
           {:put, :index, Keys.dedupe_expiry(expires, tenant, "#{tenant}.billing", "evt-1"), <<>>}
+          | Ankusa.Queue.Deliveries.Counters.ops([{tenant_ord, :dedupe, 1}])
         ]
       end
 

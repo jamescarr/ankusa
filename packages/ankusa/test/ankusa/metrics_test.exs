@@ -216,6 +216,29 @@ defmodule Ankusa.MetricsTest do
     def deliver(_env, _ctx, _opts), do: :ok
   end
 
+  test "a failed backup verify is counted per target, a clean one is not" do
+    config = start_instance()
+    inst = config.instance
+
+    verify = fn target, result ->
+      Ankusa.Telemetry.emit([:backup, :verify], %{duration: 1, files: 3, bytes: 9}, %{
+        instance: inst,
+        target: target,
+        result: result,
+        reason: nil
+      })
+    end
+
+    verify.(:primary, :ok)
+    verify.(:primary, :none)
+    verify.(:secondary, :error)
+    verify.(:secondary, :error)
+
+    scrape = Ankusa.Metrics.scrape(inst)
+    assert scrape =~ ~r/ankusa_backup_verify_failed_total\{[^}]*target="secondary"[^}]*\} 2/
+    refute scrape =~ ~r/ankusa_backup_verify_failed_total\{[^}]*target="primary"/
+  end
+
   test "deliveries are counted per sink under dispatch and in direct mode" do
     sources = %{"q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]}
 
@@ -265,6 +288,21 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_quarantine_entries", inst) == 1.0
       assert gauge(scrape, "ankusa_quarantine_bytes", inst) > 0.0
       assert gauge(scrape, "ankusa_sink_http_pool_origins", inst) == 0.0
+    end
+
+    test "the dedupe and audit-retention series follow their events" do
+      config = start_instance()
+      inst = config.instance
+
+      :telemetry.execute([:ankusa, :audit, :retention], %{blocked_by_cursor: 7}, %{instance: inst})
+
+      :telemetry.execute([:ankusa, :dedupe, :pruned], %{count: 5}, %{instance: inst})
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert gauge(scrape, "ankusa_audit_retention_blocked_by_cursor", inst) == 7.0
+      assert gauge(scrape, "ankusa_dedupe_keys", inst) == 0.0
+      assert scrape =~ ~r/^ankusa_dedupe_pruned_total\{instance="#{inst}"\} 5(\.0)?$/m
     end
 
     test "a probe that fails emits nothing and the others still run" do

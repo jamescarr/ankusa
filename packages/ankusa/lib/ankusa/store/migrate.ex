@@ -66,7 +66,8 @@ defmodule Ankusa.Store.Migrate do
   # entry is the `to` of the one before it; `{1, 2, module}` is the first.
   @migrations [
     {1, 2, Ankusa.Store.Migrations.AuditTrail},
-    {2, 3, Ankusa.Store.Migrations.TenantKeys}
+    {2, 3, Ankusa.Store.Migrations.TenantKeys},
+    {3, 4, Ankusa.Store.Migrations.DedupeCounters}
   ]
 
   @type migration :: {pos_integer(), pos_integer(), module()}

@@ -443,6 +443,63 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message == "backup.keep must be a positive integer, got 0"
   end
 
+  test "backup verify, signing, secondary and freshness keys land in core's config" do
+    key1 = String.duplicate("a", 40)
+    key2 = String.duplicate("b", 40)
+
+    path =
+      tmp_config("""
+      backup:
+        enabled: true
+        timeout_ms: 5000
+        verify_interval_ms: 600000
+        final_timeout_ms: 10000
+        max_age_ms: 300000
+        require_fresh: true
+        signing_key: ["${KEY1}", "${KEY2}"]
+        secondary: {type: s3, s3: {bucket: dr, region: eu-west-1}}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    backup = Config.load!(path: path, env: %{"KEY1" => key1, "KEY2" => key2}).config.backup
+
+    assert %{
+             timeout_ms: 5000,
+             verify_interval_ms: 600_000,
+             final_timeout_ms: 10_000,
+             max_age_ms: 300_000,
+             require_fresh: true,
+             signing_key: [^key1, ^key2]
+           } = backup
+
+    assert {Ankusa.BlobStore.S3, opts} = backup.secondary
+    assert opts[:bucket] == "dr"
+    assert opts[:region] == "eu-west-1"
+
+    # One comma-separated string is a list too; none leaves manifests unsigned.
+    path = tmp_config("backup: {signing_key: \"${KEYS}\"}\n")
+
+    assert Config.load!(path: path, env: %{"KEYS" => key1 <> "," <> key2}).config.backup.signing_key ==
+             [key1, key2]
+
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+    assert %{signing_key: [], secondary: nil, verify_interval_ms: nil, max_age_ms: nil} =
+             Config.load!(path: path, env: %{}).config.backup
+
+    path = tmp_config("backup: {require_fresh: true}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "backup.require_fresh needs backup.max_age_ms"
+
+    path =
+      tmp_config(
+        "backup: {secondary: {type: gcs, gcs: {bucket: b, auth: none, sse: {type: kms}}}}\n"
+      )
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "backup.secondary: sse type :kms needs a key_id on gcs"
+  end
+
   @kek Base.encode64(:binary.copy(<<7>>, 32))
   @kek_old Base.encode64(:binary.copy(<<8>>, 32))
 
@@ -1449,6 +1506,7 @@ defmodule AnkusaServer.ConfigTest do
       routes:
         enabled: true
         max_routes: 50
+        memory_budget_bytes: 100000000
         log_sample: 0
         ip_denied_status: 404
         trusted_proxies: ["10.0.0.0/8", "192.168.0.0/16"]
@@ -1468,6 +1526,7 @@ defmodule AnkusaServer.ConfigTest do
 
     assert routes.enabled
     assert routes.max_routes == 50
+    assert routes.memory_budget_bytes == 100_000_000
     assert routes.log_sample == 0
     assert routes.ip_denied_status == 404
     assert routes.trusted_proxies == ["10.0.0.0/8", "192.168.0.0/16"]
@@ -1515,7 +1574,7 @@ defmodule AnkusaServer.ConfigTest do
       tmp_config("""
       routes:
         enabled: true
-        store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes, tick_ms: 5000}
+        store: {type: redis, url: redis://cache:6379, namespace: ankusa:routes, tick_ms: 5000, timeout_ms: 2000, load_timeout_ms: 90000}
       """)
 
     assert {Ankusa.Routes.Store.Redis, opts} =
@@ -1523,6 +1582,8 @@ defmodule AnkusaServer.ConfigTest do
 
     assert opts[:namespace] == "ankusa:routes"
     assert opts[:tick_ms] == 5000
+    assert opts[:timeout_ms] == 2000
+    assert opts[:load_timeout_ms] == 90_000
   end
 
   test "a url with type: ets is rejected instead of silently dropped" do
@@ -1570,6 +1631,15 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message =~ ~s("url", "tick_ms" are only valid with type: redis)
     assert error.message =~ "set type: redis or remove them"
+  end
+
+  test "timeout_ms and load_timeout_ms with an ets store are rejected" do
+    for key <- ~w(timeout_ms load_timeout_ms) do
+      path = tmp_config("routes: {enabled: true, store: {#{key}: 5000}}\n")
+
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message =~ ~s(routes.store: "#{key}" is only valid with type: redis)
+    end
   end
 
   test "type: redis without a url is rejected" do
@@ -1637,7 +1707,8 @@ defmodule AnkusaServer.ConfigTest do
     routes = Config.load!(path: path, env: %{}).config.routes
 
     assert routes.enabled
-    assert routes.max_routes == 10_000
+    assert routes.max_routes == 1_000_000
+    assert routes.memory_budget_bytes == 8_589_934_592
     assert routes.store == {Ankusa.Routes.Store.ETS, []}
     assert Map.delete(routes.admin, :auth) == %{port: 4003, ip: "127.0.0.1", tls: nil}
     assert routes.ip_denied_status == 403
@@ -1740,7 +1811,7 @@ defmodule AnkusaServer.ConfigTest do
     config = Config.load!(path: path, env: %{"FLEET_REDIS" => "redis://redis:6379"}).config
 
     assert config.rate_limits.scope == :fleet
-    assert config.dedupe == %{scope: :fleet}
+    assert config.dedupe.scope == :fleet
 
     assert config.fleet == %{
              store:
@@ -1761,6 +1832,30 @@ defmodule AnkusaServer.ConfigTest do
     assert config.rate_limits.scope == :node
     assert config.dedupe == %Ankusa.Config{}.dedupe
     assert config.fleet == %Ankusa.Config{}.fleet
+  end
+
+  test "dedupe.max_entries and max_entries_per_tenant map to core's config and are range checked" do
+    config =
+      Config.load!(
+        path: tmp_config("dedupe: {max_entries: 500, max_entries_per_tenant: 50}\n"),
+        env: %{}
+      ).config
+
+    assert config.dedupe == %{scope: :node, max_entries: 500, max_entries_per_tenant: 50}
+
+    for {yaml, message} <- [
+          {"dedupe: {max_entries: 0}", "dedupe.max_entries must be an integer >= 1, got 0"},
+          {"dedupe: {max_entries_per_tenant: 0}",
+           "dedupe.max_entries_per_tenant must be an integer >= 1, got 0"},
+          {"dedupe: {max_entries: lots}", ~s(dedupe.max_entries: expected an integer, got "lots")}
+        ] do
+      error =
+        assert_raise ConfigError, fn ->
+          Config.load!(path: tmp_config(yaml <> "\n"), env: %{})
+        end
+
+      assert Exception.message(error) =~ message
+    end
   end
 
   test "a bad fleet key names the key, and core's ranges and scope rules come back as core's message" do
@@ -2643,7 +2738,7 @@ defmodule AnkusaServer.ConfigTest do
   test "source_store: redis carries the URL, namespace, tick, seeds and decoder" do
     path =
       tmp_config("""
-      source_store: {type: redis, url: "redis://cache:6379", namespace: "ankusa:sources", tick_ms: 5000}
+      source_store: {type: redis, url: "redis://cache:6379", namespace: "ankusa:sources", tick_ms: 5000, timeout_ms: 2000, load_timeout_ms: 90000}
       sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
       """)
 
@@ -2653,6 +2748,8 @@ defmodule AnkusaServer.ConfigTest do
     assert opts[:url] == "redis://cache:6379"
     assert opts[:namespace] == "ankusa:sources"
     assert opts[:tick_ms] == 5000
+    assert opts[:timeout_ms] == 2000
+    assert opts[:load_timeout_ms] == 90_000
     assert Map.keys(opts[:sources]) == ["demo"]
     assert is_function(opts[:decoder], 2)
   end

@@ -166,7 +166,12 @@ routes:
   enabled: false
   # A hard cap on definitions. Creating one past it is a 409; nothing is ever
   # evicted — an evicted route would start rejecting real webhooks.
-  max_routes: 10000
+  max_routes: 1000000
+  # What this node may spend on route definitions, in bytes. At boot the cap is
+  # checked against an estimate of ~5 KiB per definition (the snapshot plus the
+  # store's copy): a `max_routes` that does not fit is a config error naming
+  # both keys, and a table loaded from Redis that does not fit refuses the boot.
+  memory_budget_bytes: 8589934592
   # 1 in this many rejections is logged at :debug. 0 disables the sampling.
   log_sample: 100
   # 403, or 404 for uniformity with a path that simply does not exist.
@@ -182,7 +187,7 @@ routes:
     # redis -> definitions in Redis, shared by every edge node (ankusa_redis);
     #          a `url` with no `type` means redis
     type: ets
-    # The three keys below are only valid with `type: redis`. With `type: ets`
+    # The five keys below are only valid with `type: redis`. With `type: ets`
     # (or no `type` at all, which means ets) setting any of them is a config
     # error naming the key, not a silent drop: a fleet that set only a url
     # would otherwise keep every definition to itself while its operator
@@ -195,6 +200,12 @@ routes:
     # The safety net for a missed pub/sub broadcast: how often a node re-reads
     # the version. This is the worst-case staleness after a disconnect.
     # tick_ms: 30000
+    # The timeout of every Redis command, in ms. A load reads the definitions a
+    # page at a time (HSCAN, 1000 per page), so it applies to each page.
+    # timeout_ms: 5000
+    # The deadline of a whole load (boot or reload), in ms: a million
+    # definitions load without any one command near the timeout above.
+    # load_timeout_ms: 300000
 
   cache:
     # The per-request decision cache. A mutation bumps the version, which
@@ -321,6 +332,13 @@ dedupe:
   # node. A key another node has claimed but not yet made durable is 409
   # `dedupe_pending` with Retry-After: the sender retries. Needs `fleet.store`.
   scope: node
+  # The most live dedupe keys this node's index holds, in all and for one tenant
+  # (about 200 B of disk each; a tenant at 100 hooks/s with the 72 h default ttl
+  # holds about 26 million). A hook whose key would be a new one past either is
+  # `503 dedupe_quota` with Retry-After: 60 and is never stored without its key;
+  # keys expire on their own. Integers >= 1.
+  max_entries: 100000000
+  max_entries_per_tenant: 30000000
 
 fleet:
   # The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`.
@@ -606,6 +624,31 @@ backup:
   # store:
   #   type: s3
   #   s3: {bucket: "${BACKUP_BUCKET}", region: "${S3_REGION}"}
+  # A second object store every backup is also written to (another region or
+  # provider), same shape as `store`, under the same key_prefix. Restore falls
+  # back to it when the primary is unreachable, empty or fails a check; a run
+  # succeeds only when both hold the backup.
+  # secondary:
+  #   type: gcs
+  #   gcs: {bucket: "${BACKUP_DR_BUCKET}", auth: metadata}
+  # The most one object-store call of a backup, a verify or a restore may take.
+  timeout_ms: 120000
+  # Read the latest backup of every store back (manifest signature, every
+  # file's size and sha256) this often, writing nothing; a failure is logged and
+  # counted by ankusa_backup_verify_failed_total. Unset = never.
+  # verify_interval_ms: 600000
+  # HMAC-SHA256 key(s) the manifest is signed with, a list or one comma-separated
+  # string, each at least 32 bytes (`openssl rand -base64 32`); the first signs,
+  # any verifies (rotation: new key first). With keys a restore refuses an
+  # unsigned or mis-signed manifest. Keep them out of this file: ${VAR}.
+  # signing_key: ["${BACKUP_SIGNING_KEY}"]
+  # A clean stop (SIGTERM) takes one last backup, at most this long.
+  final_timeout_ms: 20000
+  # `/ready` carries "backup": "stale" once the last successful backup is older
+  # than this (at least interval_ms); unset = no label. `require_fresh: true`
+  # makes a stale backup a 503.
+  # max_age_ms: 300000
+  # require_fresh: false
 
 # Where outbound HTTP may go: every `type: http` sink (a source's, or the
 # lifecycle's) is checked on every attempt, so a sink URL cannot reach this
@@ -661,7 +704,7 @@ lifecycle:
 #               means redis.
 source_store:
   type: static
-  # The three keys below are only valid with `type: redis`.
+  # The five keys below are only valid with `type: redis`.
   # [env ANKUSA_SOURCE_STORE_URL]
   # url: redis://cache:6379
   # Share sources across nodes by giving them the same namespace; defaults to
@@ -670,6 +713,11 @@ source_store:
   # How often a node re-reads the version in case it missed a broadcast: the
   # worst-case staleness after a disconnect.
   # tick_ms: 30000
+  # The timeout of every Redis command, in ms; a load reads the hash a page at a
+  # time (HSCAN, 1000 per page), so it applies to each page.
+  # timeout_ms: 5000
+  # The deadline of a whole load (boot or reload), in ms.
+  # load_timeout_ms: 300000
 
 # Secrets at rest. With a key-encryption key (KEK: 32 random bytes, base64,
 # `openssl rand -base64 32`, optionally `<id>:<base64>`), the secret-bearing

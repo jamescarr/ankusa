@@ -23,6 +23,14 @@ defmodule Ankusa.Store.Keys do
   def meta("migration"), do: "m:migration"
   def meta("ready_probe"), do: "m:ready_probe"
   def meta("store_id"), do: "m:store_id"
+  # Lifecycle event identity across a restore (`Ankusa.Audit`): `incarnation` is
+  # the history of fresh ids a restore from a backup mints (JSON, newest first),
+  # `incarnation_pending` the id a restore wrote and the audit trail has not yet
+  # announced. `intake_offset` is the last intake-log offset the store holds
+  # (written by the intake log, carried by every backup manifest).
+  def meta("incarnation"), do: "m:incarnation"
+  def meta("incarnation_pending"), do: "m:incarnation_pending"
+  def meta("intake_offset"), do: "m:intake_offset"
   def meta("imported:" <> artifact), do: "m:imported:" <> artifact
 
   # The store's layout version (an integer in decimal), and the resumable marker
@@ -96,7 +104,7 @@ defmodule Ankusa.Store.Keys do
 
   # `counters` column family: one merge-operand row per tenant and field, plus
   # the node aggregate under ordinal 0 (`Ankusa.Queue.Deliveries.Counters`).
-  def counter(ord, field) when field in 1..6, do: <<ord::32, field::8>>
+  def counter(ord, field) when field in 1..7, do: <<ord::32, field::8>>
 
   # Ingest dedupe: `?u` maps a provider event key to
   # `<<expires_at::64, original_id::binary>>`, and `?e` is its expiry-sweep
