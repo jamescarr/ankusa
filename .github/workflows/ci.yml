@@ -49,10 +49,42 @@ jobs:
         package: ${{ fromJSON(needs.discover.outputs.packages) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A package job needs one toolchain, not the repo's whole set: the
+      # shared mise cache is 655 MB and restoring it costs 8–16 s of every
+      # job's 18–30 s mise-action step (the tools themselves report "already
+      # installed 0ms" — restore is the cost). Install and cache per kind, so
+      # `sdk-go` (2 s check) restores go, not rust/java/clojure/php too.
+      - id: toolchain
+        name: the package's toolchain
+        run: |
+          set -euo pipefail
+          source .mise/lib/pkg.sh
+          kind=$(pkg_kind "${{ matrix.package }}")
+          case "$kind" in
+            hex | docker) tools="elixir erlang cmake"; cache=hex ;;
+            npm) tools="node"; cache=npm ;;
+            python) tools="uv"; cache=python ;;
+            cargo) tools="rust"; cache=cargo ;;
+            ruby) tools="ruby"; cache=ruby ;;
+            go) tools="go"; cache=go ;;
+            php) tools="http:php http:composer"; cache=php ;;
+            java) tools="java sbt"; cache=java ;;
+            clojure) tools="java clojure"; cache=clojure ;;
+            *)
+              echo "::error::no toolchain for kind $kind"
+              exit 1
+              ;;
+          esac
+          {
+            echo "kind=$kind"
+            echo "tools=$tools"
+            echo "cache=$cache"
+          } >> "$GITHUB_OUTPUT"
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          install_args: ${{ steps.toolchain.outputs.tools }}
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-${{ steps.toolchain.outputs.cache }}" # the default key skips .mise/conf.d/
       # `_build` also holds dialyzer's PLTs (`_build/plts`, see each mix.exs), so
       # this key — the OTP/Elixir pins in .mise.toml plus mix.lock — is the PLT
       # cache key: a run rebuilds a PLT only when the toolchain or a dep changed.
@@ -120,9 +152,15 @@ jobs:
           key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-${{ hashFiles('packages/sdk-rust/Cargo.lock') }}
           restore-keys: |
             cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
+      # Only the Mix projects compile rocksdb/erlang-rocksdb (and brod's
+      # crc32cer) — the cargo/go/java/clojure/php/python/ruby/npm jobs have no
+      # native dependency to link against and no use for `mix`. Both steps
+      # cost 5–11 s of a job whose check can be as short as 2 s (sdk-go).
       - name: rocksdb system deps
+        if: steps.toolchain.outputs.kind == 'hex' || steps.toolchain.outputs.kind == 'docker'
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
-      - run: mix local.hex --force && mix local.rebar --force
+      - if: steps.toolchain.outputs.kind == 'hex' || steps.toolchain.outputs.kind == 'docker'
+        run: mix local.hex --force && mix local.rebar --force
       # check:package pulls each package's docker-compose images from Docker
       # Hub; anonymous pulls from shared runner IPs hit Hub's rate limit.
       - name: Log in to Docker Hub
