@@ -572,6 +572,7 @@ fn error_json(err: &OpError) -> Value {
                     map.insert("message".to_owned(), json!(rejection.message));
                     map.insert("conflicting_id".to_owned(), json!(rejection.conflicting_id));
                     map.insert("max_routes".to_owned(), json!(rejection.max_routes));
+                    map.insert("scope".to_owned(), json!(rejection.scope));
                 }
                 RoutesError::Unavailable(_) => {
                     entry(&mut map, "RoutesUnavailableError", retryable);
@@ -586,10 +587,15 @@ fn error_json(err: &OpError) -> Value {
                     entry(&mut map, "RoleNotEnabledError", retryable);
                     map.insert("role".to_owned(), json!(role));
                 }
-                AdminError::Rejected { status, code } => {
+                AdminError::Rejected {
+                    status,
+                    code,
+                    scope,
+                } => {
                     entry(&mut map, "AdminRejectedError", retryable);
                     map.insert("status".to_owned(), json!(status.as_u16()));
                     map.insert("code".to_owned(), json!(code));
+                    map.insert("scope".to_owned(), json!(scope));
                 }
                 AdminError::Unavailable(_) => {
                     entry(&mut map, "AdminUnavailableError", retryable);

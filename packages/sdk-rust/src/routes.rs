@@ -242,6 +242,7 @@ fn rejection(response: &http::Response<Bytes>) -> RoutesRejection {
         message: string("message"),
         conflicting_id: string("conflicting_id"),
         max_routes: body.get("max_routes").and_then(serde_json::Value::as_u64),
+        scope: string("scope"),
     }
 }
 
@@ -302,6 +303,11 @@ pub struct Route {
     pub ip_rules: Vec<IpRule>,
     /// Free-form JSON for the operator.
     pub metadata: serde_json::Map<String, serde_json::Value>,
+    /// Counts the definition's changes, from 1 at creation. Re-creating a
+    /// deleted route starts again at 1. `None` from a node older than the
+    /// field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
     /// Set once, at creation.
     pub inserted_at: String,
     /// When the definition was last written.
@@ -448,8 +454,8 @@ pub enum RoutesError {
     /// The API has no such route.
     #[error("route not found")]
     NotFound,
-    /// The API refused the request. Boxed: the rejection carries six fields,
-    /// and a `Result` should stay small.
+    /// The API refused the request. Boxed: the rejection carries seven
+    /// fields, and a `Result` should stay small.
     #[error("route-management API rejected the request (HTTP {})", .0.status)]
     Rejected(Box<RoutesRejection>),
     /// No usable answer: a `5xx`, an unfollowed redirect, a timeout, a
@@ -486,6 +492,8 @@ pub struct RoutesRejection {
     pub conflicting_id: Option<String>,
     /// On `too_many_routes`: the configured cap.
     pub max_routes: Option<u64>,
+    /// On a `403`: the scope the credential lacks.
+    pub scope: Option<String>,
 }
 
 #[cfg(test)]

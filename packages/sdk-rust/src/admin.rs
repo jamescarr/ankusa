@@ -243,13 +243,19 @@ fn check(response: http::Response<Bytes>) -> Result<http::Response<Bytes>, Admin
         return Err(AdminError::Rejected {
             status,
             code: string("error"),
+            scope: string("scope"),
         });
     }
     if status.is_client_error() {
+        let body = error_body(response.body());
         return Err(AdminError::Rejected {
             status,
-            code: error_body(response.body())
+            code: body
                 .get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            scope: body
+                .get("scope")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
         });
@@ -466,6 +472,8 @@ pub enum AdminError {
         status: http::StatusCode,
         /// The API's `error` code, e.g. `invalid_filter`.
         code: Option<String>,
+        /// On a `403`: the scope the credential lacks.
+        scope: Option<String>,
     },
     /// No usable answer: a `5xx`, an unfollowed redirect, a timeout, a
     /// transport failure, or a success body that was not JSON.
@@ -580,7 +588,7 @@ mod tests {
     async fn a_missing_replay_is_a_rejection_with_the_body_code() {
         let client = client(Recording::new(404, r#"{"error":"replay_not_found"}"#));
         match client.get_replay("missing").await.expect_err("missing") {
-            AdminError::Rejected { status, code } => {
+            AdminError::Rejected { status, code, .. } => {
                 assert_eq!(status, http::StatusCode::NOT_FOUND);
                 assert_eq!(code.as_deref(), Some("replay_not_found"));
             }
