@@ -32,7 +32,7 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
         end
 
       if failures_left > 0 do
-        {:error, :transient}
+        {:error, Keyword.get(opts, :error, :transient)}
       else
         send(
           Keyword.fetch!(opts, :pid),
@@ -179,5 +179,60 @@ defmodule Ankusa.Dispatch.ClaimCheckTest do
 
     # The failed pack, then one write per hook.
     assert length(puts()) == 3
+  end
+
+  defp lease_rows(inst) do
+    %{lo: lo, hi: hi} = Ankusa.Store.Keys.family(:claim_leases)
+
+    {:ok, rows} =
+      Ankusa.Store.fold(inst, :claim_leases, {lo, hi}, [], fn key, value, acc ->
+        {:cont, [{Ankusa.Store.Keys.decode_claim_lease(key), value} | acc]}
+      end)
+
+    Enum.reverse(rows)
+  end
+
+  test "a delivered hook's pack stays leased for redeem_grace_ms, and its claim row goes" do
+    inst = start([{ClaimSink, name: :a, pid: self(), threshold: 100}], [])
+    before = System.system_time(:millisecond)
+
+    env = append(inst, "acme", fat())
+    assert {:ok, _} = Pipeline.tick(inst)
+    assert_receive {:delivered, :a, id, claim} when id == env.id
+
+    # Reclaimed: the hook and its claim row are gone, the lease is a grace lease
+    # that runs `redeem_grace_ms` (24 h) from the delivery.
+    assert {:ok, []} = Ankusa.Queue.hooks(inst, 0, 10)
+    assert [{{"acme", pack, seq}, <<expires::64>>}] = lease_rows(inst)
+    assert {:ok, ^pack, _index} = Ankusa.ClaimCheck.Ref.locate(claim.ref.claim_id)
+    assert seq == env.seq
+    assert expires >= before + 86_400_000
+    assert expires <= System.system_time(:millisecond) + 86_400_000
+    assert {:ok, %{claim_leases: 1}} = Ankusa.Queue.Deliveries.Counters.read(inst, 0)
+    assert stored_counters(inst) == folded_counters(inst)
+
+    # The consumer of the queue message redeems it after the delivery.
+    assert {:ok, env.body} == redeem(inst, claim)
+  end
+
+  test "a dead-lettered hook keeps its pack's lease held" do
+    {:ok, always} = Agent.start_link(fn -> 1_000 end)
+
+    inst =
+      start(
+        [
+          {ClaimSink,
+           name: :a, pid: self(), threshold: 100, agent: always, error: {:permanent, :refused}}
+        ],
+        []
+      )
+
+    env = append(inst, "acme", fat())
+    assert {:ok, _} = Pipeline.tick(inst)
+
+    assert {:ok, %{dead: 1}} = Ankusa.Queue.dead_for_tenant(inst, "acme")
+    assert [{{"acme", _pack, seq}, <<0::64>>}] = lease_rows(inst)
+    assert seq == env.seq
+    assert stored_counters(inst) == folded_counters(inst)
   end
 end

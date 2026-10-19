@@ -160,9 +160,9 @@ defmodule Ankusa.StoreUpgradeTest do
       assert Store.get(inst, :default, Keys.format_version()) == {:ok, "1"}
       stop_supervised!({Store, inst})
 
-      # This release's registry takes it to format 5.
+      # This release's registry takes it to format 6.
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "5"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
     end
 
     test "format 1 sources become revision 1, and a replayed step keeps a revision it set" do
@@ -186,16 +186,16 @@ defmodule Ankusa.StoreUpgradeTest do
     test "refuses newer format, naming both versions" do
       inst = open_store()
       config = Ankusa.config(inst)
-      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "6"}], sync: true)
+      :ok = Store.write(inst, [{:put, :default, Keys.format_version(), "7"}], sync: true)
       stop_supervised!({Store, inst})
 
       assert {:error, error} = start_supervised({Store, instance: inst})
-      assert {:store_format_newer, 6, 5} = find(error, &match?({:store_format_newer, _, _}, &1))
+      assert {:store_format_newer, 7, 6} = find(error, &match?({:store_format_newer, _, _}, &1))
 
       # The same refusal from the tasks an operator runs.
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
 
-      assert_raise Mix.Error, ~r/format 6 is newer than 5/, fn ->
+      assert_raise Mix.Error, ~r/format 7 is newer than 6/, fn ->
         MigrateTask.run(["--dry-run" | args])
       end
 
@@ -203,17 +203,18 @@ defmodule Ankusa.StoreUpgradeTest do
         MigrateTask.run(args)
       end
 
-      # A release whose registry reaches format 6 opens it as it is.
+      # A release whose registry reaches format 7 opens it as it is.
       migrations = [
         {1, 2, Rewrite},
         {2, 3, Rewrite},
         {3, 4, Rewrite},
         {4, 5, Rewrite},
-        {5, 6, Rewrite}
+        {5, 6, Rewrite},
+        {6, 7, Rewrite}
       ]
 
       start_supervised!({Store, instance: inst, migrations: migrations})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "7"}
     end
 
     test "a format version that is not a number refuses to open" do
@@ -287,12 +288,13 @@ defmodule Ankusa.StoreUpgradeTest do
                {:ok,
                 %{
                   found: 1,
-                  current: 5,
+                  current: 6,
                   pending: [
                     {1, 2, Ankusa.Store.Migrations.AuditTrail},
                     {2, 3, Ankusa.Store.Migrations.TenantKeys},
                     {3, 4, Ankusa.Store.Migrations.DedupeCounters},
-                    {4, 5, Ankusa.Store.Migrations.DlqBytes}
+                    {4, 5, Ankusa.Store.Migrations.DlqBytes},
+                    {5, 6, Ankusa.Store.Migrations.ClaimLeases}
                   ],
                   resume: nil
                 }}
@@ -300,7 +302,7 @@ defmodule Ankusa.StoreUpgradeTest do
       args = ["--data-dir", config.data_dir, "--instance", Atom.to_string(inst)]
       MigrateTask.run(["--dry-run" | args])
       assert_received {:mix_shell, :info, ["store: " <> _]}
-      assert_received {:mix_shell, :info, ["format: 1 (this release: 5)"]}
+      assert_received {:mix_shell, :info, ["format: 1 (this release: 6)"]}
       assert_received {:mix_shell, :info, ["  1 -> 2: " <> _]}
 
       assert_received {:mix_shell, :info,
@@ -311,9 +313,11 @@ defmodule Ankusa.StoreUpgradeTest do
       assert_received {:mix_shell, :info,
                        ["  4 -> 5: count the stored bytes of the dead-letter queue" <> _]}
 
+      assert_received {:mix_shell, :info, ["  5 -> 6: lease the claim packs of live hooks" <> _]}
+
       MigrateTask.run(args)
       assert_received {:mix_shell, :info, [line]}
-      assert line =~ "is at format 5"
+      assert line =~ "is at format 6"
 
       empty = Path.join(config.data_dir, "nowhere")
       assert Migrate.plan(empty) == {:error, :no_store}
@@ -361,7 +365,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 2
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "5"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
 
       # The fixture holds the default tenant only: its retry rows and its dead
       # rows, whichever side of the migration's clock the retries fell on.
@@ -459,7 +463,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert {:error, error} =
                start_supervised({Store, instance: inst, migrations: [{1, 2, AuditTrail}]})
 
-      assert {:store_format_newer, 5, 2} = find(error, &match?({:store_format_newer, _, _}, &1))
+      assert {:store_format_newer, 6, 2} = find(error, &match?({:store_format_newer, _, _}, &1))
     end
 
     test "a restored format 2 backup migrates on boot" do
@@ -491,13 +495,13 @@ defmodule Ankusa.StoreUpgradeTest do
       File.rm_rf!(config.data_dir)
       start_supervised!({Ankusa.Instance, config})
 
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "5"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
       assert {:ok, 4} = Tenants.count(inst)
       assert stored_counters(inst) == folded_counters(inst)
       assert {:ok, %{dead: 2}} = Queue.dead_for_tenant(inst, "deadonly")
     end
 
-    test "the fixture task writes a store that boots (format 5)" do
+    test "the fixture task writes a store that boots (format 6)" do
       path =
         Path.join(
           System.tmp_dir!(),
@@ -507,7 +511,7 @@ defmodule Ankusa.StoreUpgradeTest do
       on_exit(fn -> File.rm(path) end)
 
       written = Fixture.build(path)
-      assert written["format_version"] == 5
+      assert written["format_version"] == 6
       assert written["tenants"] == ["default", "acme", "globex", "deadonly"]
 
       # Boot it with the store alone, so nothing moves under the count.
@@ -525,9 +529,13 @@ defmodule Ankusa.StoreUpgradeTest do
 
       assert stored_counters(inst) == folded_counters(inst)
 
-      # The checked-in v5 fixture is what this task wrote at the release that
-      # introduced format 5.
-      assert File.exists?(Path.join(@fixtures, "store-v5.tar.zst"))
+      # The checked-in v6 fixture is what this task wrote at the release that
+      # introduced format 6, claim-leased hook included.
+      assert File.exists?(Path.join(@fixtures, "store-v6.tar.zst"))
+      assert [claimed] = written["claim_hook_ids"]
+      assert {:ok, %{claim_leases: 1}} = Deliveries.Counters.read(inst, 0)
+      assert [_one] = lease_keys(inst)
+      assert claimed in manifest["hook_ids"]
     end
   end
 
@@ -566,7 +574,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 3
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "5"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
 
       # The fixture holds hooks with their dedupe keys: every one is counted.
       assert {:ok, %{dedupe: live}} = Deliveries.Counters.read(inst, 0)
@@ -674,7 +682,7 @@ defmodule Ankusa.StoreUpgradeTest do
       assert manifest["format_version"] == 4
 
       start_supervised!({Store, instance: inst})
-      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "5"}
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
 
       # The fixture holds dead-lettered hooks: every one is counted in bytes.
       assert {:ok, %{dead: dead, dead_bytes: bytes}} = Deliveries.Counters.read(inst, 0)
@@ -767,6 +775,152 @@ defmodule Ankusa.StoreUpgradeTest do
       end
     end
   end
+
+  # Fails on its `crash_after`-th step call, otherwise is `ClaimLeases`.
+  defmodule CrashingClaimLeases do
+    @moduledoc false
+    @behaviour Ankusa.Store.Migration
+
+    @impl true
+    def describe, do: "ClaimLeases, killable"
+
+    @impl true
+    def step(instance, cursor) do
+      calls = :persistent_term.get({__MODULE__, :calls}, 0)
+
+      if :persistent_term.get({__MODULE__, :crash_after}, :never) == calls,
+        do: raise("killed mid-migration")
+
+      :persistent_term.put({__MODULE__, :calls}, calls + 1)
+      Ankusa.Store.Migrations.ClaimLeases.step(instance, cursor)
+    end
+  end
+
+  # Store format 5 -> 6: a lease for the claim pack of every live hook.
+  describe "the claim leases migration (format 5 -> 6)" do
+    alias Ankusa.ClaimCheck.Ref
+
+    setup do
+      on_exit(fn ->
+        :persistent_term.erase({CrashingClaimLeases, :calls})
+        :persistent_term.erase({CrashingClaimLeases, :crash_after})
+      end)
+    end
+
+    test "v5 fixture upgrades to v6: it holds no claim, so nothing is leased" do
+      {config, manifest} = unpack_fixture(Path.join(@fixtures, "store-v5.tar.zst"))
+      inst = config.instance
+      assert manifest["format_version"] == 5
+
+      start_supervised!({Store, instance: inst})
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
+      assert lease_keys(inst) == []
+      assert {:ok, %{claim_leases: 0}} = Deliveries.Counters.read(inst, 0)
+      assert stored_counters(inst) == folded_counters(inst)
+    end
+
+    test "the v6 fixture boots with the lease of its claim-backed hook held" do
+      {config, manifest} = unpack_fixture(Path.join(@fixtures, "store-v6.tar.zst"))
+      inst = config.instance
+      assert manifest["format_version"] == 6
+      assert [_claimed] = manifest["claim_hook_ids"]
+
+      start_supervised!({Store, instance: inst})
+      assert [{"acme", _pack, seq}] = lease_keys(inst)
+      assert {:ok, <<0::64>>} = Store.get(inst, :index, hd(lease_binaries(inst)))
+      assert {:ok, _claim} = Store.get(inst, :index, Keys.claim(seq))
+      assert {:ok, %{claim_leases: 1}} = Deliveries.Counters.read(inst, 0)
+      assert stored_counters(inst) == folded_counters(inst)
+    end
+
+    # A format 5 store with 1 200 claim rows under two tenants, by hand: the
+    # hooks they belong to are live, so each one's pack must come out leased.
+    defp seeded_v5_claim_store do
+      format5 = Enum.take(Migrate.migrations(), 4)
+
+      config = test_config(roles: [:edge])
+      put_config(config)
+      inst = config.instance
+      start_supervised!({Store, instance: inst, migrations: format5}, id: {:seed, inst})
+
+      {_ords, tenant_ops, _next, []} = Tenants.allocate(1, ["acme", "default"], nil)
+
+      claim_ops =
+        for n <- 1..1_200 do
+          tenant = if rem(n, 2) == 1, do: "acme", else: "default"
+          pack_id = Ref.pack_id(1_700_000_000_000 + n, <<n::64>>)
+          ref = %Ref{tenant_id: tenant, claim_id: Ref.claim_id(pack_id, 0)}
+          {:put, :index, Keys.claim(n), :erlang.term_to_binary(%{ref: ref, sha256: "x"})}
+        end
+
+      :ok = Store.write(inst, tenant_ops ++ claim_ops, sync: true)
+      stop_supervised!({:seed, inst})
+      inst
+    end
+
+    test "leases every claim row, counted per tenant, equal to a fold" do
+      inst = seeded_v5_claim_store()
+      start_supervised!({Store, instance: inst})
+
+      assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
+      assert length(lease_keys(inst)) == 1_200
+      assert {:ok, %{claim_leases: 1_200}} = Deliveries.Counters.read(inst, 0)
+      assert {:ok, %{claim_leases: 600}} = Deliveries.Counters.read(inst, 1)
+      assert {:ok, %{claim_leases: 600}} = Deliveries.Counters.read(inst, 2)
+      assert stored_counters(inst) == folded_counters(inst)
+
+      # Every lease is held, and keyed by the claim's own tenant, pack and seq.
+      for key <- lease_binaries(inst), do: assert({:ok, <<0::64>>} = Store.get(inst, :index, key))
+      assert {"acme", pack, 1} = Enum.find(lease_keys(inst), &match?({_, _, 1}, &1))
+      assert pack == Ref.pack_id(1_700_000_000_001, <<1::64>>)
+    end
+
+    test "resumes interrupted migration without double counting" do
+      migrations = Enum.take(Migrate.migrations(), 4) ++ [{5, 6, CrashingClaimLeases}]
+
+      # An uninterrupted run is the reference, and counts its own steps.
+      reference = seeded_v5_claim_store()
+      start_supervised!({Store, instance: reference, migrations: migrations}, id: :reference)
+      steps = :persistent_term.get({CrashingClaimLeases, :calls})
+      assert steps >= 3
+      assert {:ok, %{claim_leases: 1_200}} = Deliveries.Counters.read(reference, 0)
+      assert stored_counters(reference) == folded_counters(reference)
+      expected = stored_counters(reference)
+      stop_supervised!(:reference)
+
+      # Killed before step k, for every k: the next boot finishes the job and
+      # lands on the same counts, none counted twice.
+      for k <- 0..(steps - 1) do
+        inst = seeded_v5_claim_store()
+        :persistent_term.put({CrashingClaimLeases, :calls}, 0)
+        :persistent_term.put({CrashingClaimLeases, :crash_after}, k)
+
+        assert {:error, error} = start_supervised({Store, instance: inst, migrations: migrations})
+
+        assert {:store_migration_failed, 6, _} =
+                 find(error, &match?({:store_migration_failed, _, _}, &1))
+
+        :persistent_term.erase({CrashingClaimLeases, :crash_after})
+        start_supervised!({Store, instance: inst, migrations: migrations}, id: {:resumed, k})
+
+        assert Store.get(inst, :default, Keys.format_version()) == {:ok, "6"}
+        assert stored_counters(inst) == expected, "killed before step #{k}"
+        assert length(lease_keys(inst)) == 1_200
+        stop_supervised!({:resumed, k})
+      end
+    end
+  end
+
+  defp lease_binaries(inst) do
+    %{lo: lo, hi: hi} = Keys.family(:claim_leases)
+
+    {:ok, keys} =
+      Store.fold(inst, :claim_leases, {lo, hi}, [], fn key, _v, acc -> {:cont, [key | acc]} end)
+
+    Enum.reverse(keys)
+  end
+
+  defp lease_keys(inst), do: Enum.map(lease_binaries(inst), &Keys.decode_claim_lease/1)
 
   # ── a store of format 2, written by hand ───────────────────────────────
 

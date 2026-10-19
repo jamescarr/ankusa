@@ -840,6 +840,162 @@ defmodule Ankusa.Queue.DeliveriesTest do
     end
   end
 
+  # DUR-2.c: the sink-down drill. A sink that never answers for `days` days, with
+  # `hooks` hooks a day: every hook is dead-lettered on its day, archived, and
+  # carries a claim pack that dates from that day and is leased to it. The
+  # retention machinery then runs as it does on its ticks: the compactor, the DLQ
+  # reaper, the catalogue prune and the claim sweeper, each in its own process (the
+  # Writer is none of them). What the node still holds must be the retention
+  # window's worth, whatever the length of the outage.
+  #
+  # The rate is scaled down: `DRILL_HOOKS` (default 20) hooks a day for
+  # `DRILL_DAYS` (default 6) days, with a two-day DLQ and claim retention.
+  describe "dlq reaper: the sink-down drill" do
+    alias Ankusa.ClaimCheck
+    alias Ankusa.ClaimCheck.{Ref, Sweeper}
+    alias Ankusa.Queue.DlqReaper
+    alias Ankusa.Storage.Compactor
+
+    defp drill_env(name, default), do: String.to_integer(System.get_env(name, default))
+
+    defp sink_down(days, hooks) do
+      inst =
+        start_instance(
+          queue: %{dlq: %{retention_days: 2}},
+          storage: %{interval_ms: 0, catalogue_retention_days: 2},
+          archive: %{retention_days: 2},
+          claim_check: %{retention_days: 2, redeem_grace_ms: 500}
+        )
+
+      start_supervised!({DlqReaper, instance: inst}, id: {:reaper, inst})
+      now = System.system_time(:millisecond)
+
+      for age <- (days - 1)..0//-1 do
+        at = now - age * @day_ms
+
+        entries =
+          for _ <- 1..hooks do
+            env = %{envelope("acme") | id: Ankusa.UUIDv7.generate(at), received_at: at}
+            %{envelope: env, sinks: @sinks}
+          end
+
+        {:ok, committed} = Queue.enqueue(inst, entries)
+        {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "acme")
+
+        lease_ops =
+          for {:committed, env} <- committed, reduce: [] do
+            ops ->
+              pack_id = Ref.pack_id(at, :crypto.strong_rand_bytes(8))
+              item = %{id: env.id, body: String.duplicate("x", 200)}
+              {:ok, claims} = ClaimCheck.check_in(inst, "acme", [item], pack_id: pack_id)
+              Deliveries.claim_ops(env.seq, ord, claims[env.id]) ++ ops
+          end
+
+        write!(inst, lease_ops)
+        kill_all(inst, at)
+        {:ok, _segments} = Compactor.tick(inst)
+      end
+
+      inst
+    end
+
+    defp reap_all(inst) do
+      assert {:ok, %{more: more}} = DlqReaper.reap(inst)
+      if more, do: reap_all(inst)
+    end
+
+    defp sweep_all(inst, opts) do
+      report = Sweeper.report(inst, opts)
+
+      if report.leases_pruned + report.packs > 0 or report.backlog > 0 or
+           report.partitions_left > 0,
+         do: sweep_all(inst, opts),
+         else: report
+    end
+
+    defp footprint(inst) do
+      root = Ankusa.Config.path(Ankusa.config(inst), "segments")
+      files = root |> Path.join("**/*") |> Path.wildcard() |> Enum.filter(&File.regular?/1)
+      {packs, segments} = Enum.split_with(files, &String.contains?(&1, "/claims/"))
+      size = fn paths -> paths |> Enum.map(&File.stat!(&1).size) |> Enum.sum() end
+      {:ok, hooks} = Queue.hooks(inst, 0, 1_000_000)
+      {:ok, counters} = Counters.read(inst, 0)
+
+      %{
+        hooks: length(hooks),
+        dead: counters.dead,
+        leases: counters.claim_leases,
+        packs: length(packs),
+        pack_bytes: size.(packs),
+        segments: length(segments),
+        segment_bytes: size.(segments)
+      }
+    end
+
+    # The retention tick, in the order the processes run: the reaper evicts the
+    # dead rows whose hooks are archived, the catalogue prune drops the segments
+    # nobody needs, the sweeper clears the leases whose grace is over and the
+    # packs they no longer hold.
+    defp retention_tick(inst) do
+      reap_all(inst)
+      assert {:ok, _pruned} = Compactor.prune_catalogue(inst)
+      sweep_all(inst, now: System.system_time(:millisecond) + 1_000)
+    end
+
+    @tag timeout: 600_000
+    test "dlq reaper: a sink down for longer than retention keeps the node's footprint flat" do
+      hooks = drill_env("DRILL_HOOKS", "20")
+      days = max(drill_env("DRILL_DAYS", "6"), 4)
+
+      # The outage is as long as the retention window plus one day...
+      short = sink_down(3, hooks)
+      retention_tick(short)
+      window = footprint(short)
+
+      # ...or much longer: the same node holds the same things afterwards.
+      long = sink_down(days, hooks)
+      assert footprint(long).dead == 2 * hooks * days
+
+      # Before the reaper runs, every dead hook's pack is leased: the ones whose day
+      # is past the date cutoff survive the sweeper.
+      kept = Sweeper.report(long, now: System.system_time(:millisecond) + 1_000)
+      assert kept.packs == 0
+      assert kept.kept >= hooks * (days - 3)
+
+      retention_tick(long)
+      counted = [:hooks, :dead, :leases, :packs, :segments]
+      grown = footprint(long)
+      assert Map.take(grown, counted) == Map.take(window, counted)
+      assert_counters_equal_fold(long)
+      assert_counters_equal_fold(short)
+      assert grown.pack_bytes <= window.pack_bytes * 1.1
+      assert grown.segment_bytes <= window.segment_bytes * 1.1
+
+      # Two days of rows are left: ages 0 and 1, two sinks each; their packs and
+      # leases, and the day-2 packs, whose directory is not past the cutoff yet.
+      assert window.hooks == 2 * hooks
+      assert window.dead == 4 * hooks
+      assert window.leases == 2 * hooks
+      assert window.packs == 3 * hooks
+    end
+
+    test "the sweeps run in processes of their own, never in the writer" do
+      inst = start_instance(claim_check: %{retention_days: 2})
+      start_supervised!({DlqReaper, instance: inst})
+
+      writer = Ankusa.whereis(inst, :queue_writer)
+      sweeper = Ankusa.whereis(inst, :claim_check_sweeper)
+      reaper = Ankusa.whereis(inst, :dlq_reaper)
+      assert is_pid(writer) and is_pid(sweeper) and is_pid(reaper)
+      assert length(Enum.uniq([writer, sweeper, reaper])) == 3
+
+      # The Writer applies a chunk of expired dedupe keys the DedupeSweeper found; it
+      # holds no claim, DLQ or file retention code.
+      source = File.read!(Path.expand("../../../lib/ankusa/queue/writer.ex", __DIR__))
+      refute source =~ ~r/ClaimCheck|DlqReaper|File\.rm/
+    end
+  end
+
   describe "the layout" do
     test "only Deliveries builds a ?D, ?F, ?X or ?A key" do
       lib = Path.expand("../../../lib", __DIR__)
