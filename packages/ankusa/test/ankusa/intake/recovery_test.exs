@@ -221,12 +221,7 @@ defmodule Ankusa.Intake.RecoveryTest do
     assert row.resource == "node-a"
     assert row.result == "ok"
 
-    assert row.detail == %{
-             "node" => "node-a",
-             "wanted" => 3,
-             "earliest" => 10,
-             "lost_positions" => 7
-           }
+    assert row.detail == %{node: "node-a", wanted: 3, earliest: 10, lost_positions: 7}
   end
 
   describe "parse_args (mix ankusa.recover and the image's recover command)" do

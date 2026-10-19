@@ -279,18 +279,20 @@ defmodule Ankusa.Intake.Kafka do
   defp replay_partition(s, instance, partition, from, node, fun) do
     with {:ok, start} <- start_offset(s, partition, from),
          {:ok, latest} <- resolve(s, partition, :latest) do
-      replay_from(s, instance, partition, start, latest, node, fun, nil, 0)
+      ctx = %{instance: instance, node: node, fun: fun, latest: latest}
+      replay_from(s, ctx, partition, start, nil, 0)
     end
   end
 
   defp start_offset(s, partition, :earliest), do: resolve(s, partition, :earliest)
   defp start_offset(_s, _partition, position) when is_integer(position), do: {:ok, position}
 
-  defp replay_from(_s, _instance, _partition, cursor, latest, _node, _fun, last, _empty)
+  defp replay_from(_s, %{latest: latest}, _partition, cursor, last, _empty)
        when cursor >= latest,
        do: {:ok, last}
 
-  defp replay_from(s, instance, partition, cursor, latest, node, fun, last, empty) do
+  defp replay_from(s, ctx, partition, cursor, last, empty) do
+    %{instance: instance, node: node, fun: fun} = ctx
     fetch_opts = %{max_wait_time: 1_000, min_bytes: 1, max_bytes: @fetch_bytes}
 
     case guard(fn ->
@@ -300,7 +302,7 @@ defmodule Ankusa.Intake.Kafka do
         {:error, :unavailable}
 
       {:ok, {_high_watermark, []}} ->
-        replay_from(s, instance, partition, cursor, latest, node, fun, last, empty + 1)
+        replay_from(s, ctx, partition, cursor, last, empty + 1)
 
       {:ok, {_high_watermark, messages}} ->
         messages = Enum.filter(messages, &(kafka_message(&1, :offset) >= cursor))
@@ -308,7 +310,7 @@ defmodule Ankusa.Intake.Kafka do
         case apply_messages(messages, instance, node, fun, last) do
           {:ok, last} ->
             next = messages |> List.last() |> kafka_message(:offset) |> Kernel.+(1)
-            replay_from(s, instance, partition, max(next, cursor + 1), latest, node, fun, last, 0)
+            replay_from(s, ctx, partition, max(next, cursor + 1), last, 0)
 
           {:error, class} ->
             {:error, class}
@@ -452,9 +454,8 @@ defmodule Ankusa.Intake.Kafka do
     case guard(fn -> :kpro.connect_any(s.endpoints, s.conn) end) do
       {:ok, connection} ->
         try do
-          with {:ok, kpro_rsp(msg: msg)} <- :kpro.request_sync(connection, request, 5_000) do
-            read_configs(msg)
-          else
+          case :kpro.request_sync(connection, request, 5_000) do
+            {:ok, kpro_rsp(msg: msg)} -> read_configs(msg)
             {:error, reason} -> {:error, classify(reason)}
           end
         after
@@ -690,18 +691,20 @@ defmodule Ankusa.Intake.Kafka do
   # The log is usable when the topic answers and the node's partition has a
   # leader: the partition the node is stamped with, else the one its id maps to.
   defp healthy?(state, {:ok, metadata}) do
-    with {:ok, topic} <- find_topic(metadata, state.settings.topic) do
-      count = length(topic.partitions)
+    case find_topic(metadata, state.settings.topic) do
+      {:ok, topic} ->
+        count = length(topic.partitions)
 
-      wanted =
-        Intake.Pending.partition(state.instance) || partition_for(state.settings.node, count)
+        wanted =
+          Intake.Pending.partition(state.instance) || partition_for(state.settings.node, count)
 
-      Enum.any?(
-        topic.partitions,
-        &(&1.index == wanted and is_integer(&1.leader) and &1.leader >= 0)
-      )
-    else
-      _ -> false
+        Enum.any?(
+          topic.partitions,
+          &(&1.index == wanted and is_integer(&1.leader) and &1.leader >= 0)
+        )
+
+      _ ->
+        false
     end
   end
 

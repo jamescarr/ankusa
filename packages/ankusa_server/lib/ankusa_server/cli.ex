@@ -65,6 +65,7 @@ defmodule AnkusaServer.CLI do
     end
   end
 
+  @spec run_recovery(Ankusa.Config.t(), keyword()) :: no_return()
   defp run_recovery(config, opts) do
     case Ankusa.Intake.Recovery.run_offline(config, opts) do
       {:ok, summary} ->
