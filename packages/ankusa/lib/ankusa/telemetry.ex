@@ -56,10 +56,14 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :audit, :pruned]` | `:count` | `:instance`. Rows the retention sweep (`audit.retention_days`) deleted |
 
   `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
-  `:rejected`, `:rate_limited`, `:quarantine_rate_limited`, `:quarantine_full`,
-  `:overload` or `:store_unavailable`. `:source_id` on `[:ankusa, :ingest]` is
+  `:rejected`, `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
+  `:quarantine_full`, `:overload` or `:store_unavailable`. `:source_id` on
+  `[:ankusa, :ingest]` is
   always a configured source's id: a request for a source that does not exist
   is a refusal, emitted as `[:ankusa, :ingest, :refused]`, never on the span.
+  `[:ankusa, :rate_limit, :rejected]` is a tenant over its quota: hooks or
+  bytes per second (`:rate_limited`) or its share of the batchers
+  (`:tenant_overload`).
   `:status` on `:verify` is `:ok` or `:failed`, independent of what the
   source's `on_verify_failure` policy then decides. `:weak_hash` is `true` when
   the source verifies with SHA-1 (`ankusa_verifier_weak_hash_total`).

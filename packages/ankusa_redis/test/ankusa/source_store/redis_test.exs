@@ -258,7 +258,12 @@ defmodule Ankusa.SourceStore.RedisTest do
   end
 
   test "under a resolver that takes the tenant from the request, an unverified shared source must trust it" do
-    config = node_config([], route_resolver: {Ankusa.RouteResolver.TenantPath, []})
+    config =
+      node_config([],
+        route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+        rate_limits: %{default: %{rate: 1_000, burst: 1_000}}
+      )
+
     start_supervised!({Ankusa.Instance, config}, id: config.instance)
     inst = config.instance
 

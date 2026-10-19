@@ -117,8 +117,11 @@ defmodule AnkusaServer.Config do
   @routes_rule_keys ~w(action cidr)
   @routes_admin_keys ~w(port ip tls auth)
   @routes_seed_keys ~w(id tenant_id source_id path methods enabled ip_rules metadata)
-  @rate_limits_keys ~w(default tenants)
-  @rate_limit_keys ~w(rate burst)
+  @rate_limits_keys ~w(default tenants per_ip node sources)
+  @rate_limit_keys ~w(rate burst bytes_per_second burst_bytes max_body_bytes max_queue max_queue_bytes)
+  @hook_limit_keys ~w(rate burst)
+  @rate_limit_sources_keys ~w(default)
+  @source_limit_keys ~w(bytes_per_second burst_bytes)
   @quarantine_keys ~w(burst rate max_bytes)
   @audit_keys ~w(retention_days)
   # A rotation window needs two keys; a handful covers any overlap a provider
@@ -1316,10 +1319,11 @@ defmodule AnkusaServer.Config do
 
   # ── rate limits ─────────────────────────────────────────────────────────────
 
-  # The server checks shape and types only — that both keys are present, and
-  # that `rate` is a number and `burst` an integer. Ranges and tenant ids are
-  # core's (`Ankusa.Edge.RateLimiter.validate_config!/1`), so the message an
-  # operator sees is the same whether they run the image or embed the library.
+  # The server checks shape and types only — that the required keys are present,
+  # that `rate` is a number and `burst` an integer, and so on. Ranges, tenant ids
+  # and the rule that `routing: tenant_path` needs a `default` are core's
+  # (`Ankusa.Edge.RateLimiter.validate_config!/1`), so the message an operator
+  # sees is the same whether they run the image or embed the library.
   #
   # No env override: a per-tenant map is not env-shaped. `${VAR}` inside the
   # values is how a deployment parameterizes one.
@@ -1332,6 +1336,9 @@ defmodule AnkusaServer.Config do
         []
         |> put_opt(:default, rate_limit_opt(rate_limits, "default", path))
         |> put_opt(:tenants, rate_limit_tenants(rate_limits, path))
+        |> put_opt(:per_ip, hook_limit_opt(rate_limits, "per_ip", path))
+        |> put_opt(:node, hook_limit_opt(rate_limits, "node", path))
+        |> put_opt(:sources, rate_limit_sources(rate_limits, path))
     ]
   end
 
@@ -1359,10 +1366,62 @@ defmodule AnkusaServer.Config do
     end
   end
 
+  # A tenant's (or the default) limit: `rate` and `burst`, plus any of the
+  # optional byte, body and queue keys.
   defp rate_limit!(value, path) do
     limit = section!(value, @rate_limit_keys, path)
+
     %{rate: required_number!(limit, "rate", path), burst: required_int!(limit, "burst", path)}
+    |> put_key(:bytes_per_second, number_opt(limit, "bytes_per_second", path))
+    |> put_key(:burst_bytes, int_opt(limit, "burst_bytes", path))
+    |> put_key(:max_body_bytes, int_opt(limit, "max_body_bytes", path))
+    |> put_key(:max_queue, int_opt(limit, "max_queue", path))
+    |> put_key(:max_queue_bytes, int_opt(limit, "max_queue_bytes", path))
   end
+
+  # `per_ip` and `node`: hooks per second and a burst, nothing more.
+  defp hook_limit_opt(map, key, path) do
+    case map[key] do
+      nil ->
+        nil
+
+      value ->
+        limit = section!(value, @hook_limit_keys, path ++ [key])
+
+        %{
+          rate: required_number!(limit, "rate", path ++ [key]),
+          burst: required_int!(limit, "burst", path ++ [key])
+        }
+    end
+  end
+
+  # `sources.default` only. Absent leaves core's 100 MB/s; an explicit
+  # `default: null` switches the ceiling off.
+  defp rate_limit_sources(rate_limits, path) do
+    case rate_limits["sources"] do
+      nil ->
+        nil
+
+      value ->
+        sources = section!(value, @rate_limit_sources_keys, path ++ ["sources"])
+
+        case Map.fetch(sources, "default") do
+          :error -> nil
+          {:ok, nil} -> %{default: nil}
+          {:ok, limit} -> %{default: source_limit!(limit, path ++ ["sources", "default"])}
+        end
+    end
+  end
+
+  defp source_limit!(value, path) do
+    limit = section!(value, @source_limit_keys, path)
+
+    %{bytes_per_second: required_number!(limit, "bytes_per_second", path)}
+    |> put_key(:burst_bytes, int_opt(limit, "burst_bytes", path))
+  end
+
+  defp put_key(map, _key, nil), do: map
+  defp put_key(map, key, value), do: Map.put(map, key, value)
 
   # ── quarantine ──────────────────────────────────────────────────────────────
 

@@ -1708,13 +1708,65 @@ defmodule AnkusaServer.ConfigTest do
 
     rate_limits = Config.load!(path: path, env: %{"GLOBEX_RATE" => "12.5"}).config.rate_limits
 
+    assert rate_limits ==
+             Map.merge(%Ankusa.Config{}.rate_limits, %{
+               default: %{rate: 0.5, burst: 5},
+               tenants: %{
+                 "acme" => %{rate: 100, burst: 200},
+                 "globex" => %{rate: 12.5, burst: 10}
+               }
+             })
+  end
+
+  test "the admission keys map to core's: per ip, node, sources and a tenant's bytes, body and queue" do
+    path =
+      tmp_config("""
+      rate_limits:
+        per_ip: {rate: 20, burst: 40}
+        node: {rate: 5000.5, burst: "10000"}
+        sources:
+          default: {bytes_per_second: 50000000, burst_bytes: 8000000}
+        default: {rate: 5, burst: 5, max_queue: 100}
+        tenants:
+          acme:
+            rate: 100
+            burst: 200
+            bytes_per_second: 1000000.5
+            burst_bytes: 2000000
+            max_body_bytes: 1000000
+            max_queue: 50
+            max_queue_bytes: 4000000
+      """)
+
+    rate_limits = Config.load!(path: path, env: %{}).config.rate_limits
+
     assert rate_limits == %{
-             default: %{rate: 0.5, burst: 5},
+             per_ip: %{rate: 20, burst: 40},
+             node: %{rate: 5000.5, burst: 10_000},
+             sources: %{default: %{bytes_per_second: 50_000_000, burst_bytes: 8_000_000}},
+             default: %{rate: 5, burst: 5, max_queue: 100},
              tenants: %{
-               "acme" => %{rate: 100, burst: 200},
-               "globex" => %{rate: 12.5, burst: 10}
+               "acme" => %{
+                 rate: 100,
+                 burst: 200,
+                 bytes_per_second: 1_000_000.5,
+                 burst_bytes: 2_000_000,
+                 max_body_bytes: 1_000_000,
+                 max_queue: 50,
+                 max_queue_bytes: 4_000_000
+               }
              }
            }
+  end
+
+  test "sources.default: absent keeps core's 100 MB/s, null switches the ceiling off" do
+    absent = tmp_config("rate_limits: {per_ip: {rate: 1, burst: 1}}\n")
+
+    assert Config.load!(path: absent, env: %{}).config.rate_limits.sources ==
+             %{default: %{bytes_per_second: 100_000_000}}
+
+    off = tmp_config("rate_limits: {sources: {default: null}}\n")
+    assert Config.load!(path: off, env: %{}).config.rate_limits.sources == %{default: nil}
   end
 
   test "no rate_limits section means what core defaults to" do
@@ -1737,7 +1789,26 @@ defmodule AnkusaServer.ConfigTest do
           {"rate_limits: {tenants: [acme]}",
            ~s(rate_limits.tenants: expected a mapping of tenant id to limit, got ["acme"])},
           {"rate_limits: {default: {rate: 0, burst: 1}}",
-           "rate_limits.default.rate must be a number greater than 0, got 0"}
+           "rate_limits.default.rate must be a number greater than 0, got 0"},
+          {"rate_limits: {per_ip: {rate: 1}}",
+           ~s(rate_limits.per_ip: missing required key "burst")},
+          {"rate_limits: {per_ip: {rate: 1, burst: 1, max_queue: 1}}",
+           ~s(rate_limits.per_ip: unknown key "max_queue")},
+          {"rate_limits: {node: {rate: 0, burst: 1}}",
+           "rate_limits.node.rate must be a number greater than 0, got 0"},
+          {"rate_limits: {sources: {other: {bytes_per_second: 1}}}",
+           ~s(rate_limits.sources: unknown key "other")},
+          {"rate_limits: {sources: {default: {burst_bytes: 5}}}",
+           ~s(rate_limits.sources.default: missing required key "bytes_per_second")},
+          {"rate_limits: {sources: {default: {bytes_per_second: fast}}}",
+           ~s(rate_limits.sources.default.bytes_per_second: expected a number, got "fast")},
+          {"rate_limits: {tenants: {acme: {rate: 1, burst: 1, max_queue: lots}}}",
+           ~s(rate_limits.tenants.acme.max_queue: expected an integer, got "lots")},
+          {"rate_limits: {tenants: {acme: {rate: 1, burst: 1, max_queue: 0}}}",
+           "rate_limits.tenants.acme.max_queue must be an integer of at least 1, got 0"},
+          {"rate_limits: {tenants: {acme: {rate: 1, burst: 1, max_body_bytes: 99999999}}}",
+           "rate_limits.tenants.acme.max_body_bytes must be an integer of at least 1 and at " <>
+             "most the instance's max_body_bytes (8000000), got 99999999"}
         ] do
       path = tmp_config(yaml <> "\n")
       error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
@@ -2354,6 +2425,7 @@ defmodule AnkusaServer.ConfigTest do
     path =
       tmp_config("""
       http: {routing: tenant_path, prefix: /hooks}
+      rate_limits: {default: {rate: 50, burst: 100}}
       sources: {demo: {verify: {type: none}, trust_url_tenant: true, sinks: [{type: log}]}}
       """)
 
@@ -2361,10 +2433,23 @@ defmodule AnkusaServer.ConfigTest do
              {Ankusa.RouteResolver.TenantPath, [prefix: ["hooks"]]}
   end
 
+  test "routing tenant_path needs a finite rate_limits.default: the URL names the tenant" do
+    path =
+      tmp_config("""
+      http: {routing: tenant_path}
+      rate_limits: {tenants: {acme: {rate: 5, burst: 5}}}
+      sources: {demo: {verify: {type: none}, trust_url_tenant: true, sinks: [{type: log}]}}
+      """)
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message =~ "rate_limits.default is required with routing: tenant_path"
+  end
+
   test "routing tenant_path refuses an unverified shared source unless it trusts the URL's tenant" do
     open =
       tmp_config("""
       http: {routing: tenant_path}
+      rate_limits: {default: {rate: 50, burst: 100}}
       sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
       """)
 
@@ -2375,6 +2460,7 @@ defmodule AnkusaServer.ConfigTest do
     trusted =
       tmp_config("""
       http: {routing: tenant_path}
+      rate_limits: {default: {rate: 50, burst: 100}}
       sources: {demo: {verify: {type: none}, trust_url_tenant: true, sinks: [{type: log}]}}
       """)
 

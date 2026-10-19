@@ -917,7 +917,8 @@ defmodule Ankusa.EdgeTest do
             "billing" => [verifier: {Ankusa.Verifier.None, []}, tenant_id: "acme"],
             "shared" => [verifier: {Ankusa.Verifier.None, []}, trust_url_tenant: true]
           },
-          route_resolver: {Ankusa.RouteResolver.TenantPath, []}
+          route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+          rate_limits: %{default: %{rate: 1_000, burst: 1_000}}
         )
 
       other = tenant_post(config, "globex", "billing")

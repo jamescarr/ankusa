@@ -70,7 +70,10 @@ defmodule Ankusa.SourceStoreStaticTest do
 
     test "a shared source with no verifier is refused like at boot" do
       instance =
-        start_static(%{"a" => github("s")}, route_resolver: {Ankusa.RouteResolver.TenantPath, []})
+        start_static(%{"a" => github("s")},
+          route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+          rate_limits: %{default: %{rate: 1_000, burst: 1_000}}
+        )
 
       assert_raise ArgumentError, ~r/source open is shared/, fn ->
         SourceStore.Static.publish(instance, %{"open" => [verifier: {Ankusa.Verifier.None, []}]})

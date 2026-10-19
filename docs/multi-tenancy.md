@@ -58,8 +58,18 @@ many tenants over one path scheme. A source that belongs to a tenant answers
 only that tenant's URL; see [binding](#tenant-scoping-what-tenant_id-actually-does).
 
 ```elixir
-config :ankusa, route_resolver: {Ankusa.RouteResolver.TenantPath, prefix: ["webhooks"]}
+config :ankusa,
+  route_resolver: {Ankusa.RouteResolver.TenantPath, prefix: ["webhooks"]},
+  rate_limits: %{default: %{rate: 50, burst: 100}}
 ```
+
+The URL names the tenant, so a sender can invent as many tenants as it likes.
+`TenantPath` therefore refuses to boot without a finite `rate_limits.default`:
+every tenant the config does not list gets that limit rather than none. Give a
+tenant that needs more its own entry, and add `max_queue` (and
+`max_queue_bytes`) so that one tenant cannot fill the batchers for the others
+(`429 tenant_overload`, not `503`); see
+[`configuration.md#rate-limits`](configuration.md#rate-limits).
 
 ```
 POST /webhooks/acme/stripe    →  %Route{tenant_id: "acme", source_id: "stripe"}
