@@ -183,7 +183,7 @@ of 500, resumable by calling it again.
 A source with `dedupe:` makes the writer put two index keys per new provider
 event key, in the commit batch of the hook: `?u` (tenant, source, event key →
 `<<expires_at::64, original_id>>`) and its expiry index `?e`. Both are bounded
-(ground rule 3 of the [hardening plan](hardening.md)):
+(ground rule 3 of the hardening plan, `ANKUSA_HARDENING_PLAN.md`):
 
 | | |
 | --- | --- |
