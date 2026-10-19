@@ -178,6 +178,22 @@ defmodule Ankusa.Config do
               # LocalFS retention only; nil disables the sweeper
               retention_days: nil,
               sweep_interval_ms: 3_600_000,
+              # Claim leases (the LocalFS sweeper never deletes a leased pack): how
+              # long (ms) after its hook is delivered or evicted from the DLQ a
+              # pack stays redeemable, for the consumer of a queue message that
+              # carries the ref. At least the longest a consumer can lag its
+              # broker; default 24 h
+              redeem_grace_ms: 86_400_000,
+              # the most pack objects (and lease rows) one sweep tick deletes;
+              # what is left is `ankusa_claim_check_sweep_backlog` and the next
+              # tick's
+              sweep_max_objects: 10_000,
+              # object-store claims only: the age (days) at which the bucket's
+              # own lifecycle rule expires `claims/` objects, declared so boot can
+              # refuse a rule that is shorter than a claim can be needed (retry
+              # horizon + `queue.dlq.retention_days` + `redeem_grace_ms`); nil =
+              # undeclared (boot warns). A bucket rule cannot see claim leases
+              bucket_expiry_days: nil,
               # [{module, opts}, ...] claim packs are written to; nil =
               # [storage.blob_store]. Claim keys are never prefixed, so one
               # gateway reads every node's claims.
@@ -702,6 +718,8 @@ defmodule Ankusa.Config do
     {[:dispatch, :max_inflight_bytes], "dispatch.max_inflight_bytes"},
     {[:storage, :roll_bytes], "storage.roll_bytes"},
     {[:claim_check, :sweep_interval_ms], "claim_check.sweep_interval_ms"},
+    {[:claim_check, :redeem_grace_ms], "claim_check.redeem_grace_ms"},
+    {[:claim_check, :sweep_max_objects], "claim_check.sweep_max_objects"},
     {[:claim_check, :store_cooldown_ms], "claim_check.store_cooldown_ms"},
     {[:claim_check, :read_deadline_ms], "claim_check.read_deadline_ms"},
     {[:claim_check, :read_timeout_ms], "claim_check.read_timeout_ms"},
@@ -796,13 +814,12 @@ defmodule Ankusa.Config do
       check!(config, path, key, "a non-negative integer", &(is_integer(&1) and &1 >= 0))
     end
 
-    check!(
-      config,
-      [:claim_check, :retention_days],
-      "claim_check.retention_days",
-      "nil or an integer >= 1",
-      &(&1 == nil or (is_integer(&1) and &1 >= 1))
-    )
+    for {path, key} <- [
+          {[:claim_check, :retention_days], "claim_check.retention_days"},
+          {[:claim_check, :bucket_expiry_days], "claim_check.bucket_expiry_days"}
+        ] do
+      check!(config, path, key, "nil or an integer >= 1", &nil_or_positive?/1)
+    end
 
     check!(
       config,
@@ -911,6 +928,8 @@ defmodule Ankusa.Config do
 
     :ok
   end
+
+  defp nil_or_positive?(value), do: value == nil or (is_integer(value) and value >= 1)
 
   defp check!(config, path, key, constraint, valid?) do
     value = get_in(config, Enum.map(path, &Access.key/1))

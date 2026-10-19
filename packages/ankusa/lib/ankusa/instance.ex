@@ -385,11 +385,15 @@ defmodule Ankusa.Instance do
   defp dispatch_children(config, opts) do
     if Config.role?(config, :dispatch),
       do:
-        isolated(config, :dispatch, [
-          {Ankusa.Dispatch.Pipeline, opts},
-          {Ankusa.Dispatch.Replayer, opts},
-          {Ankusa.Queue.DlqReaper, opts}
-        ]),
+        isolated(
+          config,
+          :dispatch,
+          [
+            {Ankusa.Dispatch.Pipeline, opts},
+            {Ankusa.Dispatch.Replayer, opts},
+            {Ankusa.Queue.DlqReaper, opts}
+          ] ++ if(Config.role?(config, :storage), do: [], else: sweeper_children(config, opts))
+        ),
       else: []
   end
 
@@ -405,8 +409,10 @@ defmodule Ankusa.Instance do
     end
   end
 
+  # The claim sweeper: one per node, in the `:storage` subtree when the node has
+  # that role, else in the `:dispatch` one (see `Ankusa.ClaimCheck.Sweeper.run?/1`).
   defp sweeper_children(config, opts) do
-    if config.claim_check.retention_days, do: [{Ankusa.ClaimCheck.Sweeper, opts}], else: []
+    if Ankusa.ClaimCheck.Sweeper.run?(config), do: [{Ankusa.ClaimCheck.Sweeper, opts}], else: []
   end
 
   # The operator API, last, so it only listens once everything it reports on

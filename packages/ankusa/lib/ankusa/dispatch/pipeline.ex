@@ -1292,7 +1292,13 @@ defmodule Ankusa.Dispatch.Pipeline do
       end)
       |> Map.new()
 
-    claim_ops = Enum.flat_map(claims, fn {seq, claim} -> Deliveries.claim_ops(seq, claim) end)
+    ords = Map.new(jobs, &{&1.seq, &1.ord})
+
+    claim_ops =
+      Enum.flat_map(claims, fn {seq, claim} ->
+        Deliveries.claim_ops(seq, Map.fetch!(ords, seq), claim)
+      end)
+
     state = record(state, claim_ops, [])
 
     {waiting, released} =
@@ -1746,7 +1752,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     attempts = job.row.attempts + 1
     now = now_ms()
-    claim_ops = if fresh_claim, do: Deliveries.claim_ops(job.seq, fresh_claim), else: []
+    claim_ops = if fresh_claim, do: Deliveries.claim_ops(job.seq, job.ord, fresh_claim), else: []
 
     {state, ops, pairs} =
       case result do

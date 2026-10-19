@@ -129,6 +129,7 @@ defmodule Ankusa.Metrics.Gauges do
         archive_pending: max(counters.archive_pending, 0),
         dedupe: max(counters.dedupe, 0),
         dead_bytes: max(counters.dead_bytes, 0),
+        claim_leases: max(counters.claim_leases, 0),
         dlq_full: if(Ankusa.Queue.DlqReaper.full?(instance), do: 1, else: 0),
         tenants: tenants,
         oldest_due_age_ms: if(oldest, do: max(0, now - oldest), else: 0)

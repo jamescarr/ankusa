@@ -527,6 +527,22 @@ claim_check:
   # LocalFS retention only. nil disables the sweeper; use a bucket lifecycle
   # rule for S3/GCS.
   retention_days: null
+  # Claim leases (the LocalFS sweeper never deletes a pack a queued or dead
+  # hook still references): how long after its hook is delivered or evicted
+  # from the DLQ a pack stays redeemable, for the consumer of a queue message
+  # that carries the ref. At least the longest a consumer can lag its broker.
+  # Core defaults this to 86400000 (24 h).
+  redeem_grace_ms: 86400000
+  # The most pack objects and lease rows one sweep tick deletes; the rest waits
+  # for the next tick (gauge ankusa_claim_check_sweep_backlog). Core defaults
+  # this to 10000.
+  sweep_max_objects: 10000
+  # S3/GCS claims only: the age in days at which the bucket's own lifecycle
+  # rule expires `claims/` objects. A bucket rule cannot see claim leases, so
+  # declare it and boot refuses one shorter than the retry horizon (21 days
+  # for the default exponential policy) + queue.dlq.retention_days + the
+  # redeem grace; null = undeclared (boot warns).
+  bucket_expiry_days: null
   # Where claims live: unset = the storage bucket above. Same shape as
   # `storage` (type local | s3 | gcs, its s3:/gcs: block, plus `root` for a
   # local store). Set it identically on every claim-writing node and on the

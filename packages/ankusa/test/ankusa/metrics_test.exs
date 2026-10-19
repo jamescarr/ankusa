@@ -336,6 +336,35 @@ defmodule Ankusa.MetricsTest do
       assert scrape =~ ~r/^ankusa_archive_catalogue_pruned_total\{instance="#{inst}"\} 3(\.0)?$/m
     end
 
+    test "the claim lease gauge follows the counter, the sweep series its event" do
+      config = start_instance()
+      inst = config.instance
+
+      :telemetry.execute(
+        [:ankusa, :claim_check, :sweep],
+        %{
+          deleted: 1,
+          scanned: 3,
+          packs: 4,
+          kept: 2,
+          leases_pruned: 6,
+          backlog: 9,
+          partitions_left: 2,
+          duration: 1
+        },
+        %{instance: inst}
+      )
+
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert gauge(scrape, "ankusa_claim_leases", inst) == 0.0
+      assert gauge(scrape, "ankusa_claim_check_sweep_backlog", inst) == 9.0
+      assert gauge(scrape, "ankusa_claim_check_sweep_partitions_left", inst) == 2.0
+      assert scrape =~ ~r/^ankusa_claim_check_pruned_total\{instance="#{inst}"\} 4(\.0)?$/m
+      assert scrape =~ ~r/^ankusa_claim_check_leases_pruned_total\{instance="#{inst}"\} 6(\.0)?$/m
+    end
+
     test "a probe that fails emits nothing and the others still run" do
       config = start_instance()
       inst = config.instance

@@ -1,8 +1,8 @@
 defmodule Ankusa.Queue.Deliveries.Counters do
   @moduledoc false
 
-  # Per-tenant queue counters (ADR 0001, section 4): eight `counters` rows per
-  # tenant, plus the same eight under ordinal 0 for the node. Every row is changed
+  # Per-tenant queue counters (ADR 0001, section 4): nine `counters` rows per
+  # tenant, plus the same nine under ordinal 0 for the node. Every row is changed
   # only by blind merge operands (`{:merge, :counters, key, delta}`), in the same
   # batch as the index change it describes, so concurrent writers (the Writer,
   # the Pipeline, the Replayer, the archive compactor) cannot lose a count and a
@@ -19,7 +19,8 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     bytes: 5,
     archive_pending: 6,
     dedupe: 7,
-    dead_bytes: 8
+    dead_bytes: 8,
+    claim_leases: 9
   }
 
   @names Map.keys(@fields)
@@ -29,7 +30,10 @@ defmodule Ankusa.Queue.Deliveries.Counters do
   # key it expires, so `dedupe.max_entries` is checked from one counter read.
   # `dead_bytes` is the stored size of the dead rows (`dead_ops` adds it, a
   # revive, a purge and the `Ankusa.Queue.DlqReaper` take it off), so
-  # `queue.dlq.max_bytes` is checked from one counter read too.
+  # `queue.dlq.max_bytes` is checked from one counter read too. `claim_leases`
+  # counts the `?l` claim-lease rows (DUR-2.c): `claim_ops/3` adds one for every
+  # lease it writes and the `Ankusa.ClaimCheck.Sweeper` takes one off for every
+  # lease it deletes.
   @type field ::
           :pending
           | :scheduled
@@ -39,6 +43,7 @@ defmodule Ankusa.Queue.Deliveries.Counters do
           | :archive_pending
           | :dedupe
           | :dead_bytes
+          | :claim_leases
   @type delta :: {ord :: non_neg_integer(), field(), integer()}
 
   @doc "The counter fields, in `Keys.counter/2` order."
@@ -85,7 +90,7 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     end
   end
 
-  @doc "The eight counters of `ord` (0 is the node), each `0` when never written."
+  @doc "The nine counters of `ord` (0 is the node), each `0` when never written."
   @spec read(atom(), non_neg_integer()) :: {:ok, %{field() => integer()}} | {:error, term()}
   def read(instance, ord) do
     names = fields()

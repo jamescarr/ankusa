@@ -285,6 +285,22 @@ defmodule Ankusa.Metrics do
           tags: [:instance]
         )
       ),
+      sum(
+        "ankusa.claim_check.pruned.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :sweep],
+          measurement: :packs,
+          tags: [:instance]
+        )
+      ),
+      sum(
+        "ankusa.claim_check.leases_pruned.total",
+        scoped(own,
+          event_name: [:ankusa, :claim_check, :sweep],
+          measurement: :leases_pruned,
+          tags: [:instance]
+        )
+      ),
       counter(
         "ankusa.dispatch.deliveries.total",
         scoped(own,
@@ -440,6 +456,10 @@ defmodule Ankusa.Metrics do
           {"ankusa.dlq.rows", [:ankusa, :queue, :state], :dead, :unit},
           {"ankusa.dlq.bytes", [:ankusa, :queue, :state], :dead_bytes, :byte},
           {"ankusa.dlq.full", [:ankusa, :queue, :state], :dlq_full, :unit},
+          {"ankusa.claim.leases", [:ankusa, :queue, :state], :claim_leases, :unit},
+          {"ankusa.claim_check.sweep.backlog", [:ankusa, :claim_check, :sweep], :backlog, :unit},
+          {"ankusa.claim_check.sweep.partitions_left", [:ankusa, :claim_check, :sweep],
+           :partitions_left, :unit},
           {"ankusa.audit.rows", [:ankusa, :audit, :state], :rows, :unit},
           {"ankusa.audit.bytes", [:ankusa, :audit, :state], :bytes, :byte},
           {"ankusa.audit.outbox_backlog", [:ankusa, :audit, :state], :outbox_backlog, :unit},

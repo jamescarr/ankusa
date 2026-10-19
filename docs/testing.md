@@ -971,6 +971,17 @@ drops back every few minutes; the floor is the live set a leak would raise).
 It also fails when the largest `/metrics` scrape of the run holds more than
 `MAX_SERIES` (10 000) lines (`soak.json`'s `metrics_lines`): the per-node series
 budget of the [cardinality policy](configuration.md#metric-cardinality).
+It also samples `ankusa_dlq_rows` and `ankusa_claim_leases` and fails when the
+highest sample of the last sixth of the run is above the highest of the second
+sixth: with a healthy sink both stay at zero, and a retention gap shows as growth
+(`soak.json`'s `dlq_rows_early`/`dlq_rows_late`, `claim_leases_early`/`claim_leases_late`).
+The same property is proved without a container by the sink-down drill in
+`packages/ankusa/test/ankusa/queue/deliveries_test.exs` (`dlq reaper: the sink-down
+drill`): a sink that never answers for `DRILL_DAYS` (6) days at `DRILL_HOOKS` (20)
+hooks a day, each with a claim pack and a lease, then one retention tick; the
+DLQ, hooks, leases, claim packs and segments left must equal those of a three-day
+outage, whatever the outage length. The rate is scaled down: the drill proves the
+footprint is bounded by retention, not the throughput of 6 h at 10 k/s.
 A run shorter than about ten minutes is still in warm-up and fails this check;
 `MAX_RSS_GROWTH=1` turns it off for a quick smoke of the script. Samples,
 scrapes, the loadgen report and `soak.json` land in

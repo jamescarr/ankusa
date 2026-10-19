@@ -495,6 +495,9 @@ config :ankusa,
     pack_max_bytes: 16_777_216,
     retention_days: nil,
     sweep_interval_ms: 3_600_000,
+    redeem_grace_ms: 86_400_000,
+    sweep_max_objects: 10_000,
+    bucket_expiry_days: nil,
     blob_stores: nil,
     placement: :ordered,
     store_cooldown_ms: 30_000,
@@ -608,8 +611,11 @@ config :ankusa,
 | `claim_check.port` | `4001` | The `:claim_check` role's Bandit port. |
 | `claim_check.ip` | `"127.0.0.1"` | The address the gateway binds: a strict IPv4/IPv6 literal (or an `:inet` tuple). Loopback by default; `"0.0.0.0"` exposes it on every interface, which a container needs before a published port reaches it. |
 | `claim_check.pack_max_bytes` | `16_777_216` | Target size of one claim pack; a body larger than this still gets a pack of its own. Must be a positive integer. |
-| `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the sweeper. |
-| `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. |
+| `claim_check.retention_days` | `nil` | LocalFS-only sweeper retention; `nil` disables the retention pass. A pack a claim lease holds is never deleted, whatever its date. |
+| `claim_check.sweep_interval_ms` | `3_600_000` | Sweeper tick interval. A tick that left work behind is followed by one after 5 s. |
+| `claim_check.redeem_grace_ms` | `86_400_000` | How long after its hook is delivered, or evicted from the DLQ, a claim pack stays leased, so the consumer of a queue message that carries the ref can still redeem it. At least the longest a consumer can lag its broker; ≥ 1. See [`claim-check.md`](claim-check.md#claim-leases). |
+| `claim_check.sweep_max_objects` | `10_000` | The most packs, and the most lease rows, one sweeper tick deletes; the rest is `ankusa_claim_check_sweep_backlog` and waits for the next tick. ≥ 1. |
+| `claim_check.bucket_expiry_days` | `nil` | Object-store claims only: the age, in days, at which the bucket's lifecycle rule expires `claims/` objects. A rule cannot see claim leases, so boot refuses a value below the retry horizon (21 days for the default policy) + `queue.dlq.retention_days` + the redeem grace in days; `nil` logs the minimum instead. `nil` or ≥ 1. |
 | `claim_check.blob_stores` | `nil` | `[{module, opts}, ...]`, the stores claim packs are written to and read from; `nil` uses `[storage.blob_store]`. A `LocalFS` claim store takes `root:` (an absolute path). A failed write moves to the next store; a read searches every one. Removing a store makes its claims unreadable. See [`claim-check.md`](claim-check.md#several-stores-and-failover). |
 | `claim_check.placement` | `:ordered` | Which store a new pack goes to: `:ordered` the first, the others only while it fails; `:hash` the pack id's random bits pick one, spreading packs over every store. |
 | `claim_check.store_cooldown_ms` | `30_000` | A store that failed a write, or could not answer a read, is skipped by later writes and searched last by later reads for this long, then tried again. Positive integer. |
@@ -685,6 +691,7 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 <constraint>, got <value>"`: every port is `0..65535`; `max_body_bytes`,
 `direct_publish_timeout_ms`, the `batcher` and `dispatch` sizes and counts,
 `storage.roll_bytes`, `claim_check.sweep_interval_ms`,
+`claim_check.redeem_grace_ms`, `claim_check.sweep_max_objects`,
 `claim_check.store_cooldown_ms`, `claim_check.read_deadline_ms`,
 `claim_check.read_timeout_ms`, `claim_check.read_max_inflight`,
 `claim_check.read_cache_max_entry_bytes`, `backup.interval_ms`,
@@ -706,7 +713,7 @@ retry, no waiting for a slot, no claim cache, no request cap);
 `claim_check.ref_ttl_ms` is `nil` or ≥ 1, `claim_check.accept_unsigned_refs` is
 `nil`, `true` or `false`, and every `claim_check.ref_signing_keys` entry is at
 least 16 bytes;
-`claim_check.retention_days` is `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `tenants.max` is an integer from 1 to 4294967294; `storage.key_prefix` is `""` or
+`claim_check.retention_days` and `claim_check.bucket_expiry_days` are `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `tenants.max` is an integer from 1 to 4294967294; `storage.key_prefix` is `""` or
 `name/` parts; `dispatch.sink_concurrency` is `nil` or ≥ 1,
 every `dispatch.tenants.default` key and every key of a `dispatch.tenants` entry is
 an integer ≥ 1 (a tenant entry holds only `max_inflight`, `max_inflight_bytes`,

@@ -227,7 +227,7 @@ defmodule Ankusa.TestHelpers do
 
   @doc """
   What the queue counters must be, folded from the index families: `%{ord =>
-  %{pending, scheduled, inflight, dead, bytes, archive_pending, dedupe, dead_bytes}}, ordinal 0
+  %{pending, scheduled, inflight, dead, bytes, archive_pending, dedupe, dead_bytes, claim_leases}, ordinal 0
   the sum of the others. Only tenants with a non-zero counter appear.
   """
   def folded_counters(instance) do
@@ -242,7 +242,8 @@ defmodule Ankusa.TestHelpers do
       bytes: 0,
       archive_pending: 0,
       dedupe: 0,
-      dead_bytes: 0
+      dead_bytes: 0,
+      claim_leases: 0
     }
 
     bump = fn acc, ord, field, n ->
@@ -304,6 +305,12 @@ defmodule Ankusa.TestHelpers do
         bump.(acc, tenant_ord!(instance, tenant), :dedupe, 1)
       end)
 
+    acc =
+      fold.(:claim_leases, acc, fn key, _v, acc ->
+        {tenant, _pack, _seq} = Keys.decode_claim_lease(key)
+        bump.(acc, tenant_ord!(instance, tenant), :claim_leases, 1)
+      end)
+
     total =
       Enum.reduce(acc, zero, fn {_ord, counters}, total ->
         Map.merge(total, counters, fn _field, a, b -> a + b end)
@@ -324,7 +331,8 @@ defmodule Ankusa.TestHelpers do
       bytes: 0,
       archive_pending: 0,
       dedupe: 0,
-      dead_bytes: 0
+      dead_bytes: 0,
+      claim_leases: 0
     }
 
     for ord <- 0..(next - 1), reduce: %{} do

@@ -721,12 +721,54 @@ gets the full retention window from that delivery, not from its arrival.
       "Filter":{"Prefix":"claims/"},"Expiration":{"Days":14}}]}'
   ```
 
-- **Local storage:** set `claim_check.retention_days` (≥ 1) on the node running
-  the `storage` role. It deletes whole `dt=` day directories, under both key
-  layouts and in every local claim store, once everything in them is past
-  retention, every hour; a directory it can't delete is logged and the sweep
-  moves on. Setting `retention_days` with any non-local claim store is a boot
-  error: the sweeper never touches a bucket.
+- **Local storage:** set `claim_check.retention_days` (≥ 1) on a node running
+  the `storage` or `dispatch` role. Every hour (`claim_check.sweep_interval_ms`)
+  it lists each `dt=` day directory past retention, under both key layouts and
+  in every local claim store, and deletes the packs no **claim lease** still
+  holds; a directory goes once it is empty. A pack that is leased survives
+  its date cutoff, so a hook that waits out a long sink outage keeps its body.
+  A directory it can't delete is logged and the sweep moves on. Setting
+  `retention_days` with any non-local claim store is a boot error: the sweeper
+  never touches a bucket.
+
+### Claim leases
+
+Each hook whose body was checked in leases the pack it points into
+(`Keys.claim_lease/3`: tenant, pack id, hook seq), written with the claim in the
+same batch. The lease is **held** while the hook is live, which includes a dead
+letter. When the hook is reclaimed (delivered to every sink, or its dead row was
+evicted from the DLQ, which only happens once the hook is archived) the lease is
+not cleared but runs on for `claim_check.redeem_grace_ms` (24 h by default):
+"delivered" to a queue sink means the broker took a message that carries the
+ref, and its consumer redeems it later. Set the grace to at least the longest a
+consumer can lag its broker. The sweeper deletes a lease once its grace is over,
+or when its hook no longer names that pack, and the gauge `ankusa_claim_leases`
+counts them.
+
+A tick deletes at most `claim_check.sweep_max_objects` packs (default 10 000) and
+as many lease rows; the names it did not examine in the partition it stopped in are
+`ankusa_claim_check_sweep_backlog`, the expired partitions it did not reach
+`ankusa_claim_check_sweep_partitions_left`, and while either is non-zero the
+next tick follows in 5 s. Listing a partition is one `readdir` of that
+directory, so a single day of one tenant should stay well under a million packs
+(`key_layout: sharded` spreads a tenant over 32 directories). A sweep whose lease
+lookups fail deletes nothing. `ankusa_claim_check_pruned_total` counts packs
+deleted and `ankusa_claim_check_leases_pruned_total` leases.
+
+Leases live in the node's own store, so they protect the packs of the hooks this
+node holds. A `LocalFS` root shared between nodes is swept by each of them
+against its own leases: keep `retention_days` longer than any hook can wait, or
+give every node its own root.
+
+**Object-store claims have no lease.** A bucket lifecycle rule expires by age and
+cannot see Ankusa's store, so its age is the real cutoff, and it has to outlast
+the longest a claim can be needed: the retry horizon (21 days for the default
+exponential policy, longer for a custom one), plus `queue.dlq.retention_days`,
+plus `claim_check.redeem_grace_ms`. Declare the rule's age in
+`claim_check.bucket_expiry_days`: boot refuses a value below that sum
+(`21 + 30 + 1 = 52` days by default) and, left undeclared, logs the minimum. (Tagging leased objects so the rule skips them would need a
+tag call in every provider's blob store and a lifecycle filter every provider
+supports; it is not built.)
 
 ## Reading claims from a data platform
 
