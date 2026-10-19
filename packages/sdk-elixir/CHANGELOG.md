@@ -19,6 +19,7 @@ follows [Semantic Versioning](https://semver.org/).
   HTTP-sink delivery (signature, then headers) without Plug. Options
   `:secrets`, `:allow_unsigned`, `:tolerance_seconds`, `:now`.
 - `verification` on parsed headers, decoded messages and received deliveries: how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a node older than the field).
+- `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403 forbidden` says the credential lacks (control planes require a credential since Ankusa 0.6).
 
 ### Changed
 

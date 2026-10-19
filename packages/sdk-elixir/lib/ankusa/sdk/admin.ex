@@ -161,12 +161,14 @@ defmodule Ankusa.SDK.Admin do
 
   defp rejected(status, decoded) do
     code = if is_map(decoded), do: decoded["error"]
+    scope = if is_map(decoded), do: decoded["scope"]
 
     {:error,
      %AdminRejectedError{
        message: "admin listener rejected the request (#{status}): #{inspect(decoded)}",
        status: status,
-       code: code
+       code: code,
+       scope: scope
      }}
   end
 
