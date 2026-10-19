@@ -60,14 +60,24 @@ jobs:
       # calls a function core newly gained fails dialyzer against a stale PLT:
       # bump the `v` below when that happens (SEC-4: `Ankusa.Crypto.Envelope`;
       # SEC-8: `Ankusa.Verifier.max_tolerance_seconds/0`; SEC-9:
-      # `Ankusa.SecretProvider`, `Ankusa.SourceStore.Static.publish/2`).
+      # `Ankusa.SecretProvider`, `Ankusa.SourceStore.Static.publish/2`; SEC-12:
+      # `Ankusa.Verifier.Asymmetric`/`Token`/`ClientCert`, called by the image's
+      # loader).
+      # The `v` is in the restore prefix too, so bumping it still misses.
+      # A mix.lock change alone matches the prefix: the entry built from the
+      # previous lockfile is restored, `mix deps.get --check-locked` fetches
+      # only the delta, and Mix recompiles only the deps that changed. Without
+      # that, every dep bump was a total miss that rebuilt every dep — RocksDB
+      # from source, ~8 min (PR 110: `ankusa` 5.6 -> 18.4 min).
       - name: cache mix deps
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml', format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          restore-keys: |
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -113,7 +123,9 @@ jobs:
           path: |
             packages/ankusa/deps
             packages/ankusa/_build
-          key: mix-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock') }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-integration-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -153,7 +165,9 @@ jobs:
           path: |
             examples/*/*/deps
             examples/*/*/_build
-          key: mix-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml', 'examples/*/*/mix.lock') }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-${{ hashFiles('examples/*/*/mix.lock') }}
+          restore-keys: |
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -230,7 +244,9 @@ jobs:
           path: |
             packages/ankusa/deps
             packages/ankusa/_build
-          key: mix-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock') }}
+          key: mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-${{ hashFiles('packages/ankusa/mix.lock') }}
+          restore-keys: |
+            mix-v5-${{ runner.os }}-${{ runner.arch }}-ankusa-bench-${{ hashFiles('.mise.toml') }}-
       - if: steps.scope.outputs.run == 'true'
         name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
@@ -286,7 +302,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/crash
-          key: crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock', 'packages/ankusa_server/Dockerfile') }}
+          # The image (Dockerfile) is in the prefix: a change to it must not
+          # restore a tree compiled inside another image. A changed lockfile
+          # alone reuses the previous tree, and the drill's
+          # `mix deps.get --check-locked && mix compile` rebuilds only what
+          # changed instead of RocksDB from source (~8 min).
+          key: crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/ankusa_server/Dockerfile') }}-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock') }}
+          restore-keys: |
+            crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/ankusa_server/Dockerfile') }}-
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -323,7 +346,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/crash
-          key: crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock', 'packages/ankusa_server/Dockerfile') }}
+          # The image (Dockerfile) is in the prefix: a change to it must not
+          # restore a tree compiled inside another image. A changed lockfile
+          # alone reuses the previous tree, and the drill's
+          # `mix deps.get --check-locked && mix compile` rebuilds only what
+          # changed instead of RocksDB from source (~8 min).
+          key: crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/ankusa_server/Dockerfile') }}-${{ hashFiles('.mise.toml', 'packages/ankusa/mix.lock') }}
+          restore-keys: |
+            crash-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/ankusa_server/Dockerfile') }}-
       - name: Log in to Docker Hub
         if: env.HAS_DOCKERHUB == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0

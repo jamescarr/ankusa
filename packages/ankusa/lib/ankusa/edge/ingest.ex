@@ -62,7 +62,10 @@ defmodule Ankusa.Edge.Ingest do
           | :store_unavailable
 
   # Extra keys (`:source_id`, `:tenant_id` from a `request`) ride along: a closed
-  # map type here would make every `ingest/2` call "break the contract".
+  # map type here would make every `ingest/2` call "break the contract". The
+  # edge adds `:query` (the raw query string) and, for a source verified by
+  # `Ankusa.Verifier.ClientCert` only, `:peer_cert` (the DER client certificate
+  # the TLS handshake accepted, or `nil`).
   @type raw_request :: %{
           required(:method) => String.t(),
           required(:path) => String.t(),
@@ -205,7 +208,7 @@ defmodule Ankusa.Edge.Ingest do
   defp accept(instance, source, tenant_id, req) do
     env = build_envelope(source, tenant_id, req)
 
-    case verify(instance, source, env) do
+    case verify(instance, source, env, req) do
       {:accept, env} ->
         admit(instance, source, env)
 
@@ -259,12 +262,22 @@ defmodule Ankusa.Edge.Ingest do
   # claim-checked and forwarded from here on is the list the policy leaves.
   # `Ankusa.config/1` is a `:persistent_term` read, and a header list the policy
   # does not touch is the same list, not a copy.
-  defp store_headers(instance, %Source{store_headers: override}, env) do
-    policy = StoredHeaders.resolve(override, Ankusa.config(instance).store_headers)
+  defp store_headers(instance, %Source{store_headers: override, verifier: verifier}, env) do
+    policy =
+      override
+      |> StoredHeaders.resolve(Ankusa.config(instance).store_headers)
+      |> drop_credentials(verifier)
 
     {headers, dropped} = StoredHeaders.strip(env.headers, policy)
     {%{env | headers: headers}, dropped}
   end
+
+  # A token source's credential is the secret itself: whatever the instance
+  # policy says, it is not stored, archived, claim-checked or forwarded.
+  defp drop_credentials(policy, {Ankusa.Verifier.Token, opts}),
+    do: %{policy | drop: Ankusa.Verifier.Token.credential_headers(opts) ++ policy.drop}
+
+  defp drop_credentials(policy, _verifier), do: policy
 
   defp commit_stored(instance, source, env) do
     {env, dropped} = store_headers(instance, source, env)
@@ -273,9 +286,10 @@ defmodule Ankusa.Edge.Ingest do
 
   # ── verification + policy ─────────────────────────────────────────────────
 
-  defp verify(instance, %Source{verifier: {mod, opts}} = source, env) do
+  defp verify(instance, %Source{verifier: {mod, opts}} = source, env, req) do
     scheme = Ankusa.Verifier.scheme_name(mod, opts)
     weak_hash = Ankusa.Verifier.weak_hash?(mod, opts)
+    opts = request_opts(mod, opts, req)
 
     outcome =
       Ankusa.Telemetry.span([:verify], %{instance: instance, source_id: source.id}, fn ->
@@ -300,6 +314,18 @@ defmodule Ankusa.Edge.Ingest do
         end
     end
   end
+
+  # The request context a verifier reads from `opts` (`Ankusa.Verifier`): the
+  # client certificate for `ClientCert`, the query string for `Token`, and nothing
+  # for anybody else, so no other verifier pays for it. The edge's value goes
+  # first, so it is the one `Keyword.get/2` finds.
+  defp request_opts(Ankusa.Verifier.ClientCert, opts, req),
+    do: [{:peer_cert, Map.get(req, :peer_cert)} | opts]
+
+  defp request_opts(Ankusa.Verifier.Token, opts, req),
+    do: [{:query, Map.get(req, :query)} | opts]
+
+  defp request_opts(_mod, opts, _req), do: opts
 
   defp verify_status(:ok), do: :ok
   defp verify_status({:error, _}), do: :failed

@@ -961,6 +961,62 @@ defmodule Ankusa.Admin.RouterTest do
       assert entry["on_verify_failure"] == nil
     end
 
+    test "a token secret and a public key are hidden; where a credential travels and what is pinned is shown",
+         %{inst: inst} do
+      fingerprint = String.duplicate("ab", 32)
+
+      verifiers = %{
+        "tok" => %{
+          "type" => "token",
+          "secret" => "tok-canary",
+          "location" => "header",
+          "header" => "X-Hook"
+        },
+        "query" => %{
+          "type" => "token",
+          "secret" => "tok-canary-2",
+          "location" => "query",
+          "param" => "token"
+        },
+        "asym" => %{
+          "type" => "asymmetric",
+          "public_key" => "whpk_canary-key",
+          "algorithm" => "rsa_sha256",
+          "signature_header" => "X-Sig",
+          "encoding" => "hex"
+        },
+        "cert" => %{
+          "type" => "client_cert",
+          "fingerprints" => [fingerprint],
+          "subjects" => ["cn:ops"]
+        }
+      }
+
+      for {name, verify} <- verifiers do
+        conn =
+          call(
+            inst,
+            :post,
+            "/v1/tenants/acme/sources",
+            JSON.encode!(spec(%{"name" => name, "verify" => verify}))
+          )
+
+        assert conn.status == 201
+        refute conn.resp_body =~ "canary"
+
+        expected =
+          verify
+          |> Map.replace_lazy("secret", fn _ -> "[REDACTED]" end)
+          |> Map.replace_lazy("public_key", fn _ -> "[REDACTED]" end)
+
+        assert JSON.decode!(conn.resp_body)["verify"] == expected
+      end
+
+      listed = call(inst, :get, "/v1/tenants/acme/sources")
+      refute listed.resp_body =~ "canary"
+      assert listed.resp_body =~ fingerprint
+    end
+
     test "PUT replaces the spec and a name in the body is ignored", %{inst: inst} do
       call(inst, :post, "/v1/tenants/acme/sources", JSON.encode!(spec(%{"name" => "billing"})))
 

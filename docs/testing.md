@@ -60,6 +60,25 @@ The always-on tests cover:
   appears on `ankusa_verifier_weak_hash_total`. `mise run lint:pins` is the
   gate for action SHAs and image digests (what runs where:
   [`releasing.md`](releasing.md#supply-chain-pins-sbom-provenance-signature)).
+- **Verifier breadth** (`verifier_test.exs` "Asymmetric", "Token", "ClientCert"
+  and "validate_config!/1 for the asymmetric, token and client-certificate
+  verifiers", `edge_test.exs` "verifier breadth", `instance_test.exs` mutual
+  TLS, `ankusa_server` `config_test.exs` "type standard_webhooks_asym" through
+  "/v1/config shows where a credential travels", `conformance/cases/signature.json`
+  `webhook.verify_signature.asymmetric`): the Standard Webhooks `v1a` reference
+  message verifies under `Verifier.Asymmetric` (the same bytes are the
+  conformance case, which the suite reads), and a wrong key, a stale or future
+  timestamp, a tampered body or id and a signature of the wrong length fail; a
+  rotation list verifies with any key; at most 8 right-length signatures are
+  tried; RSA verifies under a PEM, a PKCS#1 PEM or a bare DER key and refuses a
+  1024-bit one; a token verifies in each of its four locations, rotates, never
+  matches an empty request and is never stored; a client-certificate source
+  accepts only a pinned fingerprint or subject, rejects a request with no
+  certificate, another CA-signed certificate, or a certificate header, and over
+  a real mutual-TLS listener takes the pinned client and refuses the rest; a
+  source with an unusable key, secret or pin, or a certificate source on a
+  listener that asks for no certificate, refuses to boot naming itself; the
+  YAML loader names the key; `/v1/config` hides every `secret` and `public_key`.
 - **Store and queue** (`store_test.exs`, `queue_test.exs`): the RocksDB store
   applies one batch across column families (puts, deletes, range deletes) and
   refuses an unreadable or missing store with `:store_unavailable` rather than

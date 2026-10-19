@@ -1,17 +1,34 @@
 defmodule Ankusa.Verifier.Schemes do
   @moduledoc ~S"""
-  Named presets for `Ankusa.Verifier.Hmac` — the wire details of well-known
-  providers as data, so adding a provider is editing a table, not writing a
-  module.
+  Named presets for `Ankusa.Verifier.Hmac` and `Ankusa.Verifier.Asymmetric` —
+  the wire details of well-known providers as data, so adding a provider is
+  editing a table, not writing a module.
 
   Any body-HMAC provider not listed here is expressed inline as a
-  `%Ankusa.Verifier.Hmac.Scheme{}` (see `validate!/1` for the invariants).
-  Providers that are not body-HMAC (Twilio's URL + sorted-form-param SHA1,
-  PayPal's RSA over a fetched certificate) are not expressible by this engine
-  and stay bespoke `Ankusa.Verifier` modules.
+  `%Ankusa.Verifier.Hmac.Scheme{}`, any public-key one as a
+  `%Ankusa.Verifier.Asymmetric.Scheme{}` (see `validate!/1` for the
+  invariants). Providers that are not a signature over a request-derived
+  string (Twilio's URL + sorted-form-param SHA1, PayPal's RSA over a fetched
+  certificate) are not expressible by these engines and stay bespoke
+  `Ankusa.Verifier` modules.
   """
 
+  alias Ankusa.Verifier.Asymmetric
   alias Ankusa.Verifier.Hmac.Scheme
+
+  @asymmetric_presets %{
+    # Standard Webhooks `v1a`: Ed25519 over `<webhook-id>.<webhook-timestamp>.<body>`,
+    # base64, the verifier holding the provider's `whpk_` public key.
+    standard_webhooks_asym: %Asymmetric.Scheme{
+      signature_header: "webhook-signature",
+      parse: :space_versions,
+      version: "v1a,",
+      signed: "{header:webhook-id}.{header:webhook-timestamp}.{body}",
+      algorithm: :ed25519,
+      encoding: :base64,
+      timestamp: {:header, "webhook-timestamp"}
+    }
+  }
 
   @presets %{
     github: %Scheme{
@@ -63,12 +80,13 @@ defmodule Ankusa.Verifier.Schemes do
   @hashes [:sha256, :sha512, :sha1]
   @encodings [:hex, :base64]
   @secret_decodes [:raw, :whsec_base64]
+  @algorithms [:ed25519, :rsa_sha256]
 
-  @doc "Every named preset, keyed by scheme name."
+  @doc "Every named `Ankusa.Verifier.Hmac` preset, keyed by scheme name."
   @spec all() :: %{atom() => Scheme.t()}
   def all, do: @presets
 
-  @doc "Look up a named preset."
+  @doc "Look up a named `Ankusa.Verifier.Hmac` preset."
   @spec fetch(atom()) :: {:ok, Scheme.t()} | :error
   def fetch(name) when is_atom(name) do
     Map.fetch(@presets, name)
@@ -76,12 +94,58 @@ defmodule Ankusa.Verifier.Schemes do
 
   def fetch(_), do: :error
 
+  @doc "Every named `Ankusa.Verifier.Asymmetric` preset, keyed by scheme name."
+  @spec asymmetric_all() :: %{atom() => Asymmetric.Scheme.t()}
+  def asymmetric_all, do: @asymmetric_presets
+
+  @doc "Look up a named `Ankusa.Verifier.Asymmetric` preset."
+  @spec fetch_asymmetric(atom()) :: {:ok, Asymmetric.Scheme.t()} | :error
+  def fetch_asymmetric(name) when is_atom(name) do
+    Map.fetch(@asymmetric_presets, name)
+  end
+
+  def fetch_asymmetric(_), do: :error
+
   @doc """
-  Validate a scheme descriptor, raising `ArgumentError` naming the offending
-  field on the first violation.
+  Validate a scheme descriptor (`Ankusa.Verifier.Hmac.Scheme` or
+  `Ankusa.Verifier.Asymmetric.Scheme`), raising `ArgumentError` naming the
+  offending field on the first violation.
   """
   @spec validate!(Scheme.t()) :: Scheme.t()
+  @spec validate!(Asymmetric.Scheme.t()) :: Asymmetric.Scheme.t()
   def validate!(%Scheme{} = scheme) do
+    validate_header_and_parse!(scheme)
+
+    unless scheme.hash in @hashes do
+      raise ArgumentError,
+            "scheme.hash must be one of #{inspect(@hashes)}, got: #{inspect(scheme.hash)}"
+    end
+
+    validate_encoding!(scheme)
+
+    unless scheme.secret_decode in @secret_decodes do
+      raise ArgumentError,
+            "scheme.secret_decode must be one of #{inspect(@secret_decodes)}, " <>
+              "got: #{inspect(scheme.secret_decode)}"
+    end
+
+    validate_template!(scheme)
+  end
+
+  def validate!(%Asymmetric.Scheme{} = scheme) do
+    validate_header_and_parse!(scheme)
+
+    unless scheme.algorithm in @algorithms do
+      raise ArgumentError,
+            "scheme.algorithm must be one of #{inspect(@algorithms)}, " <>
+              "got: #{inspect(scheme.algorithm)}"
+    end
+
+    validate_encoding!(scheme)
+    validate_template!(scheme)
+  end
+
+  defp validate_header_and_parse!(scheme) do
     unless is_binary(scheme.signature_header) and scheme.signature_header != "" do
       raise ArgumentError, "scheme.signature_header must be a non-empty string"
     end
@@ -90,23 +154,17 @@ defmodule Ankusa.Verifier.Schemes do
       raise ArgumentError,
             "scheme.parse must be one of #{inspect(@parses)}, got: #{inspect(scheme.parse)}"
     end
+  end
 
-    unless scheme.hash in @hashes do
-      raise ArgumentError,
-            "scheme.hash must be one of #{inspect(@hashes)}, got: #{inspect(scheme.hash)}"
-    end
-
+  defp validate_encoding!(scheme) do
     unless scheme.encoding in @encodings do
       raise ArgumentError,
             "scheme.encoding must be one of #{inspect(@encodings)}, got: #{inspect(scheme.encoding)}"
     end
+  end
 
-    unless scheme.secret_decode in @secret_decodes do
-      raise ArgumentError,
-            "scheme.secret_decode must be one of #{inspect(@secret_decodes)}, " <>
-              "got: #{inspect(scheme.secret_decode)}"
-    end
-
+  # The checks over what `Ankusa.Verifier.Template` reads, common to every scheme.
+  defp validate_template!(scheme) do
     unless valid_timestamp?(scheme.timestamp) do
       raise ArgumentError,
             "scheme.timestamp must be nil, {:header, name}, or {:sig, field}, " <>
