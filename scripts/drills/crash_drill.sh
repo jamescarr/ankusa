@@ -8,8 +8,9 @@
 # hits the disk under it, and the instance is
 # killed under load. Every id the harness printed as acked must read back from
 # the reopened store, and the node must have refused (503 store_unavailable,
-# /ready 503) while the fault lasted and resumed (201, /ready 200) once it
-# cleared.
+# /ready 503 naming a `reason`) while the fault lasted and resumed (201, /ready
+# 200) once it cleared, with the store's failure series (`ankusa_store_*`, read
+# from the metrics listener) showing the write failures and the reopen.
 #
 #   FAULT=enospc  /data is a 96 MiB tmpfs. At +5 s a filler file takes every
 #                 free byte. RocksDB pre-allocates its WAL, so the node keeps
@@ -37,6 +38,7 @@ body_bytes=${BODY_BYTES:-10240}
 port=4000
 fault_at=${FAULT_AT:-5}
 kill_at=${KILL_AT:-20}
+metrics_port=4001
 
 base=http://127.0.0.1:$port
 data=/data
@@ -45,6 +47,7 @@ work=/work
 harness=$work/packages/ankusa/test/support/crash_harness.exs
 acks=/tmp/acks.txt
 body=/tmp/probe.body
+ready_body=/tmp/ready.body
 
 export MIX_ENV=test MIX_DEPS_PATH=/cache/deps MIX_BUILD_ROOT=/cache/build
 export MIX_HOME=/cache/mix HEX_HOME=/cache/hex
@@ -58,7 +61,7 @@ elapsed() { echo $((($(now_ms) - t0) / 1000)); }
 wait_until() { while [ "$(elapsed)" -lt "$1" ]; do sleep 0.2; done; }
 
 post_code() { curl -s -m 5 -o "$body" -w '%{http_code}' -XPOST "$base/webhooks/load" -d '{"probe":1}' || true; }
-ready_code() { curl -s -m 5 -o /dev/null -w '%{http_code}' "$base/ready" || true; }
+ready_code() { curl -s -m 5 -o "$ready_body" -w '%{http_code}' "$base/ready" || true; }
 acked_now() { grep -c '^ACK ' "$acks" || true; }
 
 harness_pid=""
@@ -75,8 +78,14 @@ cleanup() {
     if [ -n "$loop_dev" ]; then losetup -d "$loop_dev" 2>/dev/null || true; fi
   fi
   if [ "$rc" -ne 0 ] && [ -f /tmp/harness.err ]; then
-    echo "--- harness stderr (last 40 lines) ---" >&2
-    tail -n 40 /tmp/harness.err >&2 || true
+    # A refused commit logs once per batch, a thousand lines a second: what the
+    # store itself said is in the lines that are left.
+    echo "--- harness stderr, store lines (last 80 of $(wc -l </tmp/harness.err) lines) ---" >&2
+    grep -v -e 'store commit' -e 'is not running' /tmp/harness.err | tail -n 80 >&2 || true
+  fi
+  if [ "$rc" -ne 0 ] && [ "$fault" = eio ]; then
+    echo "--- kernel log, filesystem lines (last 40) ---" >&2
+    dmesg 2>/dev/null | grep -i -e ext4 -e jbd2 -e 'dm-' -e remount | tail -n 40 >&2 || true
   fi
   exit "$rc"
 }
@@ -84,13 +93,22 @@ trap cleanup EXIT
 
 # ── device-mapper (FAULT=eio) ───────────────────────────────────────────────
 
+# `$1` is a whole table, one segment per line.
 dm_table() {
   dmsetup suspend --noflush "$dm_name"
-  dmsetup reload "$dm_name" --table "0 $sectors $1"
+  dmsetup reload "$dm_name" --table "$1"
   dmsetup resume "$dm_name"
 }
-dm_fail() { dm_table error; }
-dm_heal() { dm_table "linear $loop_dev 0"; }
+# Every I/O on the device fails: the power cut.
+dm_fail() { dm_table "0 $sectors error"; }
+# The file data area fails, the journal and the metadata at the start of the
+# volume (see `dm_setup`) keep working: a disk that has lost sectors, not one
+# the filesystem has to give up on.
+dm_fail_data() {
+  dm_table "0 $meta_sectors linear $loop_dev 0
+$meta_sectors $((sectors - meta_sectors)) error"
+}
+dm_heal() { dm_table "0 $sectors linear $loop_dev 0"; }
 
 dm_setup() {
   if [ ! -e /dev/loop-control ] || ! dmsetup targets 2>/dev/null | grep -q '^error'; then
@@ -105,10 +123,21 @@ dm_setup() {
   sectors=$(blockdev --getsz "$loop_dev")
   dmsetup create "$dm_name" --table "0 $sectors linear $loop_dev 0"
   dmsetup mknodes
-  mkfs.ext4 -q -F "/dev/mapper/$dm_name"
+  # The error windows must not fail the journal. A journal that cannot be
+  # written is aborted, and ext4 then remounts the volume read-only for good
+  # (`Aborting journal on device`, `Remounting filesystem read-only`, whatever
+  # `errors=` says): no application can reopen a store on that, so whether a
+  # run resumed depended on whether a journal commit happened to land in a
+  # window. `packed_meta_blocks` puts the journal, the bitmaps and the inode
+  # tables in one run at the start of the volume, and `dm_fail_data` fails
+  # only what follows it. (No journal at all is no answer: without ordered
+  # data and metadata a failed window leaves a WAL no recovery mode accepts.)
+  mkfs.ext4 -q -F -b 4096 -E packed_meta_blocks=1 -O ^flex_bg "/dev/mapper/$dm_name"
+  first_data_block=$(dumpe2fs "/dev/mapper/$dm_name" 2>/dev/null |
+    sed -n '/^Group 0:/,/^Group 1:/s/^ *Free blocks: *\([0-9][0-9]*\).*/\1/p')
+  [ -n "$first_data_block" ] || fail "cannot tell where the file data area of the volume starts"
+  meta_sectors=$((first_data_block * 8))
   mkdir -p "$data"
-  # `errors=continue`: a failed write window must not remount the filesystem
-  # read-only for good, the way a transient device error would not.
   mount -t ext4 -o errors=continue "/dev/mapper/$dm_name" "$data"
 }
 
@@ -133,7 +162,8 @@ mix local.rebar --force >/dev/null
 
 log "starting the instance: $rate hooks/s on $store ($fault)"
 mkdir -p "$store"
-DATA_DIR=$store HTTP_PORT=$port RATE=$rate BODY_BYTES=$body_bytes elixir "$harness" serve >"$acks" 2>/tmp/harness.err &
+DATA_DIR=$store HTTP_PORT=$port METRICS_PORT=$metrics_port RATE=$rate BODY_BYTES=$body_bytes \
+  elixir "$harness" serve >"$acks" 2>/tmp/harness.err &
 harness_pid=$!
 
 for _ in $(seq 1 240); do
@@ -148,13 +178,17 @@ t0=$(now_ms)
 
 refused=0 # POSTs answered 503 store_unavailable while the fault was on
 not_ready=0 # /ready probes answered 503 while the fault was on
+named=0 # of those, the ones whose body carried a `reason`
 
 # One look at what the node says: a POST and /ready.
 probe_once() {
   if [ "$(post_code)" = 503 ] && grep -q '"error":"store_unavailable"' "$body"; then
     refused=$((refused + 1))
   fi
-  if [ "$(ready_code)" = 503 ]; then not_ready=$((not_ready + 1)); fi
+  if [ "$(ready_code)" = 503 ]; then
+    not_ready=$((not_ready + 1))
+    if grep -q '"reason":"[a-z_]*"' "$ready_body"; then named=$((named + 1)); fi
+  fi
 }
 
 # Probe until `$1` seconds into the run.
@@ -175,11 +209,16 @@ probe_until_refused() {
   done
 }
 
-# The node serves again: a 201 and /ready 200, twice in a row, within 40 s.
+# The node serves again: a 201 and /ready 200, twice in a row, within 40 s. On
+# failure `last_resume_probe` is what the node said last.
+last_resume_probe=""
 await_resume() {
-  local ok=0 deadline=$(($(now_ms) + 40000))
+  local ok=0 deadline=$(($(now_ms) + 40000)) post ready
   while [ "$(now_ms)" -lt "$deadline" ]; do
-    if [ "$(post_code)" = 201 ] && [ "$(ready_code)" = 200 ]; then
+    post=$(post_code)
+    ready=$(ready_code)
+    last_resume_probe="POST $post $(head -c 200 "$body" 2>/dev/null), /ready $ready $(head -c 200 "$ready_body" 2>/dev/null)"
+    if [ "$post" = 201 ] && [ "$ready" = 200 ]; then
       ok=$((ok + 1))
       [ "$ok" -ge 2 ] && return 0
     else
@@ -187,8 +226,15 @@ await_resume() {
     fi
     sleep 0.5
   done
+  # A volume the kernel remounted read-only cannot be reopened by any store.
+  if [ "$fault" = eio ] && grep -q " $data ext4 ro[ ,]" /proc/mounts; then
+    last_resume_probe="$last_resume_probe; the kernel remounted $data read-only"
+  fi
   return 1
 }
+
+# The store's failure series, from the metrics listener.
+store_series() { curl -s -m 5 "http://127.0.0.1:$metrics_port/metrics" | grep '^ankusa_store_' || true; }
 
 wait_until "$fault_at"
 case $fault in
@@ -204,13 +250,13 @@ case $fault in
   eio)
     for window in 1 2; do
       log "+$(elapsed)s: I/O errors, window $window"
-      dm_fail
+      dm_fail_data
       probe_until $(($(elapsed) + 2))
       dm_heal
       log "+$(elapsed)s: device healthy"
       if [ "$window" = 1 ]; then
         # The second window starts 5 s after the first one began.
-        await_resume || fail "the node did not resume after window 1"
+        await_resume || fail "the node did not resume after window 1 (last answer: $last_resume_probe)"
         wait_until $((fault_at + 5))
       fi
     done
@@ -220,10 +266,16 @@ esac
 
 [ "$refused" -gt 0 ] || fail "no POST was answered 503 store_unavailable while the fault was on"
 [ "$not_ready" -gt 0 ] || fail "/ready never answered 503 while the fault was on"
+[ "$named" -gt 0 ] || fail "/ready answered 503 but never named a reason"
 
-await_resume || fail "the node did not resume: a 201 and /ready 200 within 40 s of the fault clearing"
+await_resume || fail "the node did not resume: a 201 and /ready 200 within 40 s of the fault clearing (last answer: $last_resume_probe)"
 acked_at_resume=$(acked_now)
 log "+$(elapsed)s: resumed (acked so far: $acked_at_resume)"
+
+series=$(store_series)
+echo "$series" >&2
+grep -q '^ankusa_store_write_failures_total{' <<<"$series" || fail "no ankusa_store_write_failures_total series after the fault"
+grep -q '^ankusa_store_reopen_total{' <<<"$series" || fail "no ankusa_store_reopen_total series after the fault"
 
 # ── kill under load ─────────────────────────────────────────────────────────
 

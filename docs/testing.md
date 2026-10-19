@@ -96,7 +96,14 @@ The always-on tests cover:
   open while a torn tail drops cleanly; `reopen/1` republishes working handles
   and keeps every committed key, a store left closed by a failed reopen opens
   again by itself, and a reported write failure reopens the store at most once
-  per interval; the database opens with the recovery, blob and buffer
+  per interval; a reported write failure emits `[:store, :write_failed]` with a
+  class from a fixed set (`failure_class/1`) that `ready/1` and `/ready` name, a
+  store that cannot reopen emits `[:store, :reopened]` and `[:store, :unavailable]`
+  per try with the outage growing, retries on a doubling, jittered wait
+  (`reopen backoff`), and starts the backoff over once it opens
+  (`metrics_test.exs` scrapes `ankusa_store_write_failures_total`,
+  `ankusa_store_reopen_total`, `ankusa_store_unavailable_seconds` and
+  `ankusa_store_wal_replay_seconds`, and `health_test.exs` the `reason`); the database opens with the recovery, blob and buffer
   settings asked for (read back from the `OPTIONS` file RocksDB writes, since
   RocksDB keeps its default for a value it cannot parse). The queue writer
   assigns dense, strictly
@@ -838,7 +845,8 @@ mise run test:crash
   instance is `kill -9`ed under load once it has served again for 5 s and at
   least 20 s into the run, the store is reopened with `Ankusa.Store` alone,
   and every id the harness printed as acked must read back (`missing=0`).
-- **EIO and power loss** (`scripts/drills/flakey.sh`): `/data` is ext4 on a
+- **EIO and power loss** (`scripts/drills/flakey.sh`): `/data` is ext4 (no
+  journal, see below) on a
   device-mapper device over a loop device. Two 2 s windows (+5 s, +10 s) where
   every I/O fails, with the same `503`/resume assertions, then at +20 s a power
   cut: the device fails every I/O, the instance is killed, the filesystem is
@@ -854,6 +862,22 @@ mise run test:crash
   skip). Where no privileged Docker host exists, it is a manual pre-release step.
   The windows use device-mapper's `error` target rather than `dm-flakey`, a
   module some kernels lack; the fault is the same, I/O errors for 2 s.
+  The volume has no journal on purpose: a window fails every I/O, the journal's
+  too, and a journal that cannot be written is aborted, after which ext4
+  remounts the volume read-only for good (`Aborting journal on device`,
+  `Remounting filesystem read-only`, whatever `errors=` says). No application
+  can reopen a store on a read-only volume, so with a journal `the node did
+  not resume` depended on whether a journal commit happened to land in a
+  window, while the store's own retry reopened it about 5 s after each window
+  (`ankusa_store_reopen_total`). A drill that fails for that reason prints the
+  kernel's filesystem lines and says the volume went read-only.
+- **What the drills assert about the store's failure reporting.** While the
+  fault is on, `/ready` answers `503` with a `reason` (`no_space` for the
+  tmpfs, `io_error`/`read_only` for the device), and after the node resumed the
+  metrics listener (`METRICS_PORT`, 4001 in the drill) must show
+  `ankusa_store_write_failures_total{class}` and `ankusa_store_reopen_total{result}`;
+  the drill prints every `ankusa_store_*` line, and on a failure the harness's
+  own log (`LOG_LEVEL`, stderr) and the kernel's filesystem lines.
 
 `RATE`, `BODY_BYTES`, `FAULT_AT` and `KILL_AT` (seconds) tune a run. Compiled
 deps are kept in `.cache/crash`, so only the first run builds RocksDB.

@@ -419,7 +419,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/queue/writer.ex:99-150,330-341,466-511`, `edge/batcher.ex:172-200,260-300`, `queue.ex:46-77`.
   *Evidence:* —
 
-- [ ] **DUR-5 — Store failure telemetry and reopen backoff** · P1 · Deps: —
+- [x] **DUR-5 — Store failure telemetry and reopen backoff** · P1 · Deps: —
   *Why:* `handle_cast({:write_failed, …})` and `reopen_db/1` emit nothing (`store.ex:415-445,508-525`); a store closed for hours is visible only through `/ready` and ingest counters.
   *Change:* events `[:ankusa, :store, :write_failed]`, `:reopened`, `:unavailable` with reason class; metrics `ankusa_store_write_failures_total{class}`, `ankusa_store_reopen_total`, `ankusa_store_unavailable_seconds`, `ankusa_store_wal_replay_seconds`; reopen backoff 5 s → 60 s with jitter; `/ready` reason labels.
   *Done when:* the F2 ENOSPC drill shows the counters rising and `/ready` naming the reason, then recovery.

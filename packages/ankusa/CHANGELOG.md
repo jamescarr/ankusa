@@ -13,6 +13,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Store failure telemetry, `/ready` reasons and a reopen backoff (DUR-5).**
+  `[:ankusa, :store, :write_failed]` (one per failed write a process reported and
+  per failed readiness probe, with a `class` from the fixed set
+  `Ankusa.Store.failure_class/1` returns), `[:ankusa, :store, :reopened]` (one
+  per reopen attempt: `:duration` is the WAL replay, `:unavailable_ms` the outage so
+  far) and `[:ankusa, :store, :unavailable]` (`:seconds`, `0` at boot and once
+  open) feed `ankusa_store_write_failures_total{class}`,
+  `ankusa_store_reopen_total{result}`, `ankusa_store_unavailable_seconds` and
+  `ankusa_store_wal_replay_seconds`. `/ready`'s `503` body gains `reason`
+  (`no_space`, `io_error`, `read_only`, `corruption`, `busy`, `timeout`,
+  `not_running`, `other`). A store that fails to reopen retries by itself after
+  5 s, then twice as long each time up to 60 s, each wait jittered down by up to a
+  quarter (`retry_open_ms`, `retry_open_max_ms` store options). **Changed:**
+  `Ankusa.Store.ready/1` answers `{:error, {:store_unavailable | :write_failed,
+  class}}` instead of `{:error, :store_unavailable | :write_failed | raw_reason}`.
+  See `docs/storage.md#durability-corruption-full-disk`.
 - **`queue.rocksdb`: the store's RocksDB settings are config, and `index` and
   `deliveries` carry a bloom filter (DUR-3).** `block_cache_bytes` (64 MiB),
   `bloom_bits_per_key` (10; 0 = off), `max_open_files` (65 536), `compaction_style`

@@ -243,7 +243,7 @@ defmodule Ankusa.StoreTest do
     end
 
     test "a store that is not running answers :store_unavailable" do
-      assert Store.ready(:no_such_instance) == {:error, :store_unavailable}
+      assert Store.ready(:no_such_instance) == {:error, {:store_unavailable, :not_running}}
     end
 
     test "a write another process saw fail turns it unready even while the probe fits",
@@ -252,7 +252,7 @@ defmodule Ankusa.StoreTest do
 
       # What a refused ingest batch reports; the cached `:ok` must not hide it.
       Store.report_write_failure(inst, :enospc)
-      assert Store.ready(inst) == {:error, :write_failed}
+      assert Store.ready(inst) == {:error, {:write_failed, :no_space}}
     end
   end
 
@@ -314,6 +314,157 @@ defmodule Ankusa.StoreTest do
       assert :ok = Store.report_write_failure(inst, :enospc)
       _ = :sys.get_state(pid)
       assert Store.get(inst, :hooks, Keys.hook(1)) == {:ok, "kept"}
+    end
+  end
+
+  describe "failure_class/1" do
+    test "names a RocksDB or file system failure from a fixed set" do
+      for {reason, class} <- [
+            {:enospc, :no_space},
+            {:eio, :io_error},
+            {:erofs, :read_only},
+            {{:corruption, ~c"bad block"}, :corruption},
+            {~c"IO error: No space left on device: While appending to file: 000012.log",
+             :no_space},
+            {"IO error: While fsync: Input/output error", :io_error},
+            {~c"IO error: Read-only file system: While open a file for appending", :read_only},
+            {~c"IO error: lock hold by current process, acquire time 1: While lock file", :busy},
+            {{:io_error, ~c"No space left on device"}, :no_space},
+            {{:io_error, ~c"something else"}, :io_error},
+            {:closed, :other},
+            {{:unexpected, 1}, :other},
+            {[0xD800], :other}
+          ] do
+        assert Store.failure_class(reason) == class, "#{inspect(reason)} should be #{class}"
+      end
+    end
+  end
+
+  describe "write failure telemetry" do
+    test "a reported failure emits write_failed with its class, and /ready names it", %{
+      instance: inst
+    } do
+      attach(inst, [[:ankusa, :store, :write_failed]])
+
+      Store.report_write_failure(inst, ~c"IO error: No space left on device: While appending")
+
+      assert_receive {:telemetry, [:ankusa, :store, :write_failed], %{count: 1},
+                      %{instance: ^inst, class: :no_space, reason: reason}}
+
+      assert reason == ~c"IO error: No space left on device: While appending"
+      assert Store.ready(inst) == {:error, {:write_failed, :no_space}}
+
+      # A different failure replaces the class the node reports, and is counted too.
+      Store.report_write_failure(inst, {:corruption, ~c"bad block"})
+
+      assert_receive {:telemetry, [:ankusa, :store, :write_failed], %{count: 1},
+                      %{class: :corruption}}
+
+      assert Store.ready(inst) == {:error, {:write_failed, :corruption}}
+    end
+
+    test "a malformed batch raises and is not counted as a failed write", %{instance: inst} do
+      attach(inst, [[:ankusa, :store, :write_failed]])
+
+      assert_raise FunctionClauseError, fn ->
+        Store.write(inst, [{:put, :hooks, :not_a_binary, "v"}])
+      end
+
+      refute_receive {:telemetry, [:ankusa, :store, :write_failed], _, _}, 100
+    end
+  end
+
+  describe "reopen backoff" do
+    test "the wait doubles from the base to the ceiling, each one jittered down by a quarter" do
+      for {attempt, ceiling} <- [
+            {0, 5_000},
+            {1, 10_000},
+            {2, 20_000},
+            {3, 40_000},
+            {4, 60_000},
+            {9, 60_000},
+            {500, 60_000}
+          ] do
+        delays = for _ <- 1..300, do: Store.retry_delay_ms(attempt, 5_000, 60_000)
+
+        assert Enum.all?(delays, &(&1 <= ceiling and &1 >= ceiling - div(ceiling, 4)))
+        assert length(Enum.uniq(delays)) > 1, "no jitter at attempt #{attempt}"
+      end
+    end
+
+    test "a store that cannot reopen reports each try, how long it has been closed, and recovers" do
+      cfg = test_config(roles: [:edge])
+      inst = cfg.instance
+      put_config(cfg)
+
+      attach(inst, [[:ankusa, :store, :reopened], [:ankusa, :store, :unavailable]])
+
+      pid = start_supervised!({Store, instance: inst, retry_open_ms: 20, retry_open_max_ms: 60})
+
+      # Boot: the gauge starts at 0.
+      assert_receive {:telemetry, [:ankusa, :store, :unavailable], %{seconds: 0},
+                      %{instance: ^inst, class: :none}}
+
+      refute_receive {:telemetry, [:ankusa, :store, :reopened], _, _}, 50
+
+      good = :sys.get_state(pid).path
+      blocker = Path.join(cfg.data_dir, "blocker")
+      File.write!(blocker, "a file where a directory has to be")
+      :sys.replace_state(pid, fn state -> %{state | path: Path.join(blocker, "store")} end)
+
+      assert {:error, _reason} = Store.reopen(inst)
+
+      assert {:error, {:store_unavailable, class}} = Store.ready(inst)
+      assert class in [:io_error, :other, :busy, :no_space, :read_only, :corruption]
+
+      # The store's own retries keep failing while the path is bad: each one is
+      # a `:reopened` error naming the class, and the outage only grows.
+      failed =
+        for _ <- 1..4 do
+          assert_receive {:telemetry, [:ankusa, :store, :reopened],
+                          %{duration: d, unavailable_ms: ms},
+                          %{instance: ^inst, result: :error, class: ^class}},
+                         2_000
+
+          assert d > 0
+          ms
+        end
+
+      assert failed == Enum.sort(failed)
+      assert List.last(failed) > hd(failed)
+      assert :sys.get_state(pid).retry_attempt >= 4
+
+      assert_receive {:telemetry, [:ankusa, :store, :unavailable], %{seconds: seconds},
+                      %{class: ^class}}
+                     when seconds > 0
+
+      # Space is back: the next retry opens it, the gauge drops to 0 and the
+      # backoff starts over.
+      :sys.replace_state(pid, fn state -> %{state | path: good} end)
+
+      assert_receive {:telemetry, [:ankusa, :store, :reopened], %{unavailable_ms: down_ms},
+                      %{instance: ^inst, result: :ok, class: nil}},
+                     2_000
+
+      assert down_ms >= List.last(failed)
+      assert_receive {:telemetry, [:ankusa, :store, :unavailable], %{seconds: 0}, %{class: :none}}
+      assert %{retry_attempt: 0, retry_ref: nil, closed_at: nil} = :sys.get_state(pid)
+      assert Store.ready(inst) == :ok
+    end
+
+    test "a reopen that works reports how long the replay took" do
+      cfg = test_config(roles: [:edge])
+      inst = cfg.instance
+      put_config(cfg)
+      start_supervised!({Store, instance: inst})
+      attach(inst, [[:ankusa, :store, :reopened]])
+
+      assert :ok = Store.reopen(inst)
+
+      assert_receive {:telemetry, [:ankusa, :store, :reopened], %{duration: duration},
+                      %{instance: ^inst, result: :ok, class: nil}}
+
+      assert System.convert_time_unit(duration, :native, :millisecond) < 30_000
     end
   end
 
@@ -477,6 +628,22 @@ defmodule Ankusa.StoreTest do
   defp cache_capacity(inst) do
     [{:handles, handles}] = :ets.lookup(:"ankusa_store_#{inst}", :handles)
     :rocksdb.cache_info(handles.cache, :capacity)
+  end
+
+  defp attach(inst, events) do
+    test = self()
+    handler = "store-test-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach_many(
+      handler,
+      events,
+      fn event, measurements, meta, _ ->
+        if meta.instance == inst, do: send(test, {:telemetry, event, measurements, meta})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
   end
 
   defp eventually(fun, tries \\ 100) do
