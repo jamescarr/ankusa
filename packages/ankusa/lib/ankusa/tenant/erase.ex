@@ -147,6 +147,7 @@ defmodule Ankusa.Tenant.Erase do
     |> Enum.reduce_while({:ok, 0}, fn {_index, mod, opts}, {:ok, n} ->
       case mod.list(instance, prefix, opts) do
         {:ok, keys} ->
+          # `BlobStore.delete/3` is `:ok` by contract (an absent key is deleted).
           Enum.each(keys, &mod.delete(instance, &1, opts))
           if mod == LocalFS, do: remove_local_dir(instance, opts, prefix)
           {:cont, {:ok, n + length(keys)}}

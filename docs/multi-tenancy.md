@@ -203,6 +203,48 @@ another tenant's routes, and a route's lifecycle events and audit rows carry its
 tenant, so a replay or an audit read filtered to one tenant sees its own route
 changes.
 
+## Erasing a tenant
+
+`DELETE /v1/tenants/{tenant}?confirm={tenant}` (scope `tenants:write` **and**
+`tenant:*`: a token for one tenant cannot erase even its own) or
+`Ankusa.Tenant.delete/3` removes everything this node holds for one tenant, as
+a resumable, audited background job. `?confirm` is the tenant typed again, so a
+wrong path in a script is a `400`, not a deleted customer. The request answers
+`202` once the job's progress row (`m:erase:<tenant>`) is synced, `200` if one
+is already running; `GET /v1/tenants/{tenant}/erase` reports the `stage` or the
+`erased_at` time. `default` and a tenant that a configured (static or seeded)
+source names are `409`.
+
+The tenant is **closed first**: its new hooks are `503 tenant_erasing`, the
+quarantine pen refuses them, dispatch stops claiming its rows, and the queue
+stage waits (bounded, retried) until the tenant's `inflight` counter is 0, so
+an attempt that is running cannot write a delivery row back after its row was
+deleted. Then, in order and each recorded before the next: its sources and
+routes (audited, each a `deleted` lifecycle event), its rate-limit override,
+its pending, in-flight and dead rows and archive obligations (reclaiming the
+hooks nobody else holds), its quarantine rows, every object under
+`claims/tenant=<tenant>/` in every claim store, its dedupe keys, and the
+redacted entities its lifecycle events carry (after the publisher has
+delivered those events). The last stage is one synced batch: the tombstone
+`m:erased:<tenant>`, the tenant's ordinal and counters, and one `tenant.delete`
+audit row, which is the lifecycle event `io.ankusa.tenant.deleted`. A kill
+between stages resumes at the next boot; a kill inside the batch leaves either
+all of it or none.
+
+What stays: the audit rows (hashes, counts, names, never a body), the
+multi-tenant segments in the archive until the bucket's lifecycle rule expires
+them — `Ankusa.Storage.fetch/2` answers `{:error, :gone}` (a `410` where it is
+served) for every hook of the tenant received before the tombstone, and archive
+replay skips them — and any backup that predates the erase (restore, then erase
+again). A lifecycle replay after an erase emits the one `tenant.deleted` event
+and nothing else of the tenant. Ordinals are never reused, so an erased tenant
+still counts towards `tenants.max`. A tenant that sends again is a new tenant.
+Fleet-shared Redis state (`ankusa_redis` rate limits and dedupe keys) is not
+part of this job yet; the sources and routes of a Redis source or route store
+are, because they go through the same store API. Proof:
+`test/ankusa/tenant_test.exs` (`erase leaves no trace`, `resumes after kill -9`,
+`a running attempt cannot put a row back`).
+
 ## Dynamic sources
 
 Everything above is a store decision, not a boot-time one: the router resolves

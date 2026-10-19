@@ -573,7 +573,8 @@ defmodule Ankusa.TenantTest do
       # Before the job has even resumed, the boot closed the tenant.
       assert {:ok, %{state: :erasing, stage: :queue}} = Tenant.status(inst, "acme")
       assert Gate.closed?(inst, "acme")
-      assert {:error, :tenant_erasing} = Ingest.ingest(inst, request("acme.billing", "late"))
+      assert {:error, :tenant_erasing} =
+               Quarantine.put(inst, envelope("acme", "acme.billing"), :bad_signature)
 
       await_erased(inst, "acme", 60_000)
 
@@ -653,6 +654,48 @@ defmodule Ankusa.TenantTest do
       # Nothing started, and nothing closed.
       assert Tenant.status(inst, "acme") == :not_found
       refute Gate.closed?(inst, "acme")
+    end
+
+    test "DELETE /v1/tenants/:tenant erases, GET says where it is, and the audit row names the caller" do
+      config = start_instance()
+      inst = config.instance
+      source!(inst, "acme", "billing", "permanent")
+      source!(inst, "globex", "orders", "permanent")
+      ingest!(inst, "acme.billing", "one")
+
+      call = fn method, path ->
+        conn = Plug.Test.conn(method, path)
+        conn = Ankusa.Admin.Router.call(conn, Ankusa.Admin.Router.init(instance: inst))
+        {conn.status, if(conn.resp_body == "", do: %{}, else: JSON.decode!(conn.resp_body))}
+      end
+
+      assert {404, %{"error" => "erase_not_found"}} = call.(:get, "/v1/tenants/acme/erase")
+      assert {400, %{"error" => "confirm_mismatch"}} = call.(:delete, "/v1/tenants/acme")
+
+      assert {400, %{"error" => "confirm_mismatch"}} =
+               call.(:delete, "/v1/tenants/acme?confirm=globex")
+
+      assert {409, %{"error" => "default_tenant"}} =
+               call.(:delete, "/v1/tenants/default?confirm=default")
+
+      assert {400, _} = call.(:delete, "/v1/tenants/a.b?confirm=a.b")
+
+      assert {202, %{"tenant" => "acme", "state" => "erasing"}} =
+               call.(:delete, "/v1/tenants/acme?confirm=acme")
+
+      await_erased(inst, "acme")
+
+      assert {200, %{"tenant" => "acme", "state" => "erased", "erased_at" => at}} =
+               call.(:get, "/v1/tenants/acme/erase")
+
+      assert {:ok, _, _} = DateTime.from_iso8601(at)
+
+      assert [row] = Enum.filter(audit_rows(inst), &(&1.action == "tenant.delete"))
+      assert row.tenant == "acme"
+      assert row.actor == "anonymous"
+
+      # globex was not touched.
+      assert {:ok, _} = SourceStore.get(inst, "globex", "orders")
     end
   end
 end

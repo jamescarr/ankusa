@@ -31,7 +31,7 @@ the same dependencies, PLT paths and coverage floor.
 
 ```sh
 mise run check:package ankusa         # no external infra needed
-mise run test:integration             # +21 tests against the floci emulators (see below)
+mise run test:integration             # +22 tests against the floci emulators (see below)
 ```
 
 The always-on tests cover:
@@ -304,6 +304,31 @@ The always-on tests cover:
   (`MIX_ENV=test mix run bench/tenant_fairness_bench.exs`, not part of
   `bench:gate`) runs the same 99:1 load through the edge and prints both
   tenants' p99.
+- **Tenant erase** (`tenant_test.exs`, `tenant_s3_integration_test.exs`):
+  `erase leaves no trace` fills a tenant and its neighbour with sources, routes,
+  an override, delivery rows in every state, held hooks, dedupe keys and claim
+  objects, erases one, and scans every column family, the claim store and the
+  edge's tables for its id and ordinal: nothing is left, the counters equal a
+  fold of the rows, and the neighbour is untouched. A lifecycle consumer is
+  told in order (`deleted` of each source and route, then `tenant.deleted`) and
+  a replay of the window emits nothing else of the tenant.
+  `a running attempt cannot put a row back` erases while a slow sink's attempts
+  are running and asserts no row, counter or marker remains, even after the
+  retry would have been due. A tenant being erased takes no hook (`503
+  tenant_erasing`, the quarantine pen too) and one that was erased is a new
+  tenant. `a fetch of an erased hook is gone` archives hooks, erases, and
+  asserts `Storage.fetch/2` is `{:error, :gone}` for them and not for the
+  neighbour's, and that an archive replay skips them. `resumes after kill -9`
+  runs the erase in a child BEAM, kills it with `kill -9` in the `queue` stage
+  while its sink never answers, reopens the store, and asserts the tenant is
+  still closed, the job runs to `erased`, one `tenant.delete` audit row and the
+  `tenant.deleted` event exist, and the neighbour's hooks are all still
+  stored. The request cases cover a wrong `confirm`, `default`, a bad name, a
+  configured source, and the admin routes (`202`, the status, the audit actor);
+  `admin/router_auth_test.exs` has the `401`/`403` cases, a token for the
+  tenant itself included. The S3 test puts claim objects for two tenants in
+  floci, erases one, and asserts its prefix is empty and the other's objects
+  remain.
 - **Filesystem durability** (`fsync_test.exs`): the helpers return an error
   for a path they cannot open, write or rename, never raise, and `write_file`
   replaces content in one step and leaves no temp file. `mkdir_p/2` fsyncs the
@@ -450,7 +475,7 @@ The always-on tests cover:
   validates. The adapters' `*_describe_test.exs` pin what each sink advertises
   (and that no credential reaches it) without a broker.
 
-The 24 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
+The 25 `:integration`-tagged tests (`test/ankusa/blob_store_s3_test.exs`,
 `blob_store_gcs_test.exs`, `blob_store_azure_integration_test.exs`,
 `blob_store_oci_integration_test.exs`) exercise `BlobStore.{S3,GCS,Azure,OCI}`
 against real running emulators: put/get round-trip, `get_range` byte-slicing,

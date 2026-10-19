@@ -174,8 +174,16 @@ a row in). Until TEN-3 that order is the only fairness: a tenant with a long
 backlog is served before one that arrived later in the same scan. A due row
 is never written without its marker (`Deliveries.due_ops/6`), and a counter is
 never changed by hand: both only through the `Deliveries` op builders.
-`Ankusa.Queue.purge_tenant/3` removes a tenant's pending or dead rows in chunks
-of 500, resumable by calling it again.
+`Ankusa.Queue.purge_tenant/3` removes a tenant's pending, in-flight or dead rows
+in chunks of 500, resumable by calling it again; a tenant erase
+([`multi-tenancy.md`](multi-tenancy.md#erasing-a-tenant)) calls it for all
+three. An erase keeps its progress in `m:erase:<tenant>` and, when it is done,
+its tombstone in `m:erased:<tenant>` (`default` family, value `<<at::64>>`):
+`Ankusa.Storage.fetch/2` answers `{:error, :gone}` for a hook of that tenant
+received at or before `at`, and archive replay skips it, while the segment that
+holds its frame stays until the bucket's lifecycle expires it. Both claims are
+tested in `test/ankusa/tenant_test.exs` (`erase leaves no trace`, `a fetch of an
+erased hook is gone`).
 
 ### `:none`: no queue, no store hooks
 
