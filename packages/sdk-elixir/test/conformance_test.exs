@@ -182,7 +182,8 @@ defmodule Ankusa.SDK.ConformanceTest do
       "content_type" => headers.content_type,
       "dedupe_key" => headers.dedupe_key,
       "replay_id" => headers.replay_id,
-      "idempotency_key" => headers.idempotency_key
+      "idempotency_key" => headers.idempotency_key,
+      "verification" => verification_json(headers.verification)
     }
   end
 
@@ -196,7 +197,8 @@ defmodule Ankusa.SDK.ConformanceTest do
       "content_type" => headers.content_type,
       "dedupe_key" => headers.dedupe_key,
       "replay_id" => headers.replay_id,
-      "idempotency_key" => headers.idempotency_key
+      "idempotency_key" => headers.idempotency_key,
+      "verification" => verification_json(headers.verification)
     }
   end
 
@@ -217,7 +219,8 @@ defmodule Ankusa.SDK.ConformanceTest do
       "dedupe_key" => message.dedupe_key,
       "replay_id" => message.replay_id,
       "idempotency_key" => message.idempotency_key,
-      "headers" => message.headers
+      "headers" => message.headers,
+      "verification" => verification_json(message.verification)
     }
   end
 
@@ -470,6 +473,11 @@ defmodule Ankusa.SDK.ConformanceTest do
   end
 
   ## helpers
+
+  defp verification_json(nil), do: nil
+
+  defp verification_json(%{status: status, flagged: flagged}),
+    do: %{"status" => status, "flagged" => flagged}
 
   defp unwrap!({:ok, value}), do: value
   # `routes_delete` expects `ok: null`: a bare `:ok` carries no value.

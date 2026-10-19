@@ -44,6 +44,7 @@ defmodule Ankusa.SDK.Webhook do
             dedupe_key: String.t() | nil,
             replay_id: String.t() | nil,
             idempotency_key: String.t() | nil,
+            verification: %{status: String.t(), flagged: boolean()} | nil,
             headers: %{String.t() => String.t()}
           }
 
@@ -55,6 +56,7 @@ defmodule Ankusa.SDK.Webhook do
       :dedupe_key,
       :replay_id,
       :idempotency_key,
+      :verification,
       headers: %{}
     ]
   end
@@ -155,11 +157,25 @@ defmodule Ankusa.SDK.Webhook do
            dedupe_key: non_empty(headers, "x-ankusa-dedupe-key"),
            replay_id: non_empty(headers, "x-ankusa-replay-id"),
            idempotency_key: non_empty(headers, "x-ankusa-idempotency-key"),
+           verification: verification(headers),
            headers: headers
          }}
 
       _ ->
         {:error, %MissingHookIdError{message: "missing x-ankusa-id header"}}
+    end
+  end
+
+  # `nil` when `x-ankusa-verification` is absent or empty (a sink that
+  # predates the header); otherwise its flag is `true` only for the literal
+  # string `"true"` — anything else (including absent) is `false`.
+  defp verification(headers) do
+    case non_empty(headers, "x-ankusa-verification") do
+      nil ->
+        nil
+
+      status ->
+        %{status: status, flagged: fetch(headers, "x-ankusa-verification-flagged") == "true"}
     end
   end
 

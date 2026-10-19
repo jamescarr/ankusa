@@ -18,6 +18,7 @@ follows [Semantic Versioning](https://semver.org/).
 - `Ankusa.SDK.Webhook.receive_delivery/3`, the receiver-side decision on one
   HTTP-sink delivery (signature, then headers) without Plug. Options
   `:secrets`, `:allow_unsigned`, `:tolerance_seconds`, `:now`.
+- `verification` on parsed headers, decoded messages and received deliveries: how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a node older than the field).
 
 ### Changed
 
