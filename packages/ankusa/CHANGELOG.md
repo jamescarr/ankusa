@@ -13,6 +13,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Tenant erase (TEN-5).** `DELETE /v1/tenants/{tenant}?confirm={tenant}`
+  (new scope `tenants:write`, which also needs `tenant:*`) and
+  `Ankusa.Tenant.delete/3` erase a tenant as a resumable background job
+  (`GET /v1/tenants/{tenant}/erase` reports it): the tenant is closed first
+  (`503 tenant_erasing`, dispatch stops claiming its rows, running attempts
+  drain), then its sources, routes, rate-limit override, pending/inflight/dead
+  rows, archive obligations, quarantine rows, `claims/tenant=<t>/` objects,
+  dedupe keys and lifecycle entities are deleted, and one synced batch commits
+  the tombstone `m:erased:<tenant>` with a `tenant.delete` audit row, which is
+  the new lifecycle event `io.ankusa.tenant.deleted`. Progress is kept in
+  `m:erase:<tenant>`, so a `kill -9` resumes the job at the next boot.
+  `Ankusa.Storage.fetch/2` answers `{:error, :gone}` for an erased tenant's
+  archived hooks and archive and lifecycle replay skip them.
+  `Queue.purge_tenant/3` accepts `:inflight`. Configured (static or seeded)
+  sources naming the tenant, and `default`, are refused with `409`.
+  Proof: `test/ankusa/tenant_test.exs`, `tenant_s3_integration_test.exs`.
 - **DLQ, quarantine and catalogue retention; audit and lifecycle-outbox ceilings
   (DUR-2.b).** `Ankusa.Queue.DlqReaper` evicts dead rows past
   `queue.dlq.retention_days` and over `max_rows`/`max_bytes`, only while their hook

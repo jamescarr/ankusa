@@ -52,9 +52,11 @@ defmodule Ankusa.Lifecycle do
       incarnation it belongs to, laid out as a UUID. The same row is the same id
       whenever and however often it is emitted; a restored store that re-issues
       a `seq` the lost one had published gives it a different one.
-    * `type` — `io.ankusa.source.{created,updated,deleted}` or
-      `io.ankusa.route.{created,updated,deleted}`, or `io.ankusa.instance.restored`
-      (below)
+    * `type` — `io.ankusa.source.{created,updated,deleted}`,
+      `io.ankusa.route.{created,updated,deleted}`, `io.ankusa.tenant.deleted`
+      (a tenant erase, `Ankusa.Tenant`, after the `deleted` event of each source and
+      route it removed; its `data` is `{"tenant": <id>}` and its `subject` the tenant id),
+      or `io.ankusa.instance.restored` (below)
     * `source` — `urn:ankusa:instance:<instance>`
     * `subject` — the source id (`<tenant>.<name>`) or the route id
     * `time` — when the change committed (the row's time, not the publisher's)

@@ -12,6 +12,10 @@ Code.require_file("support/crash_harness.exs", __DIR__)
 # "audit row survives kill".
 Code.require_file("support/audit_harness.exs", __DIR__)
 
+# `Ankusa.EraseHarness`: the child-BEAM harness behind `tenant_test.exs`'s
+# "resumes after kill -9".
+Code.require_file("support/erase_harness.exs", __DIR__)
+
 # `Ankusa.LifecycleHarness`: the child-BEAM harness behind `lifecycle_test.exs`'s
 # "survives kill".
 Code.require_file("support/lifecycle_harness.exs", __DIR__)

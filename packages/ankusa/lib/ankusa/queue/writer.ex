@@ -24,6 +24,7 @@ defmodule Ankusa.Queue.Writer do
   alias Ankusa.Queue.Tenants
   alias Ankusa.Store
   alias Ankusa.Store.Keys
+  alias Ankusa.Tenant.Gate
 
   def start_link(opts) do
     instance = Keyword.fetch!(opts, :instance)
@@ -135,6 +136,11 @@ defmodule Ankusa.Queue.Writer do
     end
   end
 
+  # An erase has just closed a tenant (`Ankusa.Tenant.Gate`): this call returns
+  # after the batch the writer was committing then, so the tenant's ordinal is
+  # settled once it does, and nothing is committed for the tenant after it.
+  def handle_call(:barrier, _from, state), do: {:reply, :ok, state}
+
   # One bounded batch of expired dedupe keys from `Ankusa.Queue.DedupeSweeper`.
   # Each key is deleted only if it still holds the expiry the sweeper saw, so a
   # refresh that landed since is never undone, and its counter goes down in the
@@ -152,7 +158,7 @@ defmodule Ankusa.Queue.Writer do
     tenants = entries |> Enum.map(&Tenants.normalize(&1.tenant_id)) |> Enum.uniq()
 
     with {:ok, admission} <- admit(tenants, state),
-         true <- all_admitted?(tenants, admission) do
+         :ok <- all_admitted(tenants, admission) do
       ops =
         entries
         |> Enum.with_index(state.next_seq)
@@ -217,7 +223,6 @@ defmodule Ankusa.Queue.Writer do
           {:reply, {:error, reason}, state}
       end
     else
-      false -> {:reply, {:error, :tenant_limit}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -234,12 +239,12 @@ defmodule Ankusa.Queue.Writer do
 
     case admit(tenants, state) do
       {:ok, admission} ->
-        tagged = Enum.map(items, &{&1, Map.has_key?(admission.ords, item_tenant(&1))})
+        tagged = Enum.map(items, &{&1, admitted(admission, item_tenant(&1))})
 
-        if extra_ops != [] and Enum.any?(tagged, &(not elem(&1, 1))) do
+        if extra_ops != [] and Enum.any?(tagged, &(elem(&1, 1) != true)) do
           # The caller's ops (a quarantine release's pen deletes) cover every
           # item: refusing one would lose it, so refuse the call.
-          {:reply, {:error, :tenant_limit}, state}
+          {:reply, {:error, refusal(tenants, admission)}, state}
         else
           commit_admitted(tagged, extra_ops, admission, now, state)
         end
@@ -318,7 +323,21 @@ defmodule Ankusa.Queue.Writer do
   # Resolves the ordinals of `tenants`: the cache, then one `multi_get` of the
   # rows of the uncached ones, then new ordinals for those with none (up to
   # `tenants.max`). `ops` are the puts of the new ordinals, for the commit batch.
+  # A tenant an erase has closed (`Ankusa.Tenant.Gate`) gets none and is listed
+  # in `erasing`; the cache is dropped whenever a tenant is closed or opened, so
+  # an ordinal an erase retired is never used again.
   defp admit(tenants, state) do
+    gate = Gate.state(state.instance)
+    sync_epoch(state, gate.epoch)
+
+    {erasing, tenants} =
+      if map_size(gate.tenants) == 0 do
+        {MapSet.new(), tenants}
+      else
+        {closed, open} = Enum.split_with(tenants, &is_map_key(gate.tenants, &1))
+        {MapSet.new(closed), open}
+      end
+
     {known, misses} =
       Enum.reduce(tenants, {%{}, []}, fn tenant, {known, misses} ->
         case :ets.lookup(state.ords, tenant) do
@@ -338,12 +357,50 @@ defmodule Ankusa.Queue.Writer do
         )
 
       cache = Map.merge(stored, new)
-      {:ok, %{ords: Map.merge(known, cache), ops: ops, next_ord: next_ord, cache: cache}}
+
+      {:ok,
+       %{
+         ords: Map.merge(known, cache),
+         ops: ops,
+         next_ord: next_ord,
+         cache: cache,
+         erasing: erasing
+       }}
     end
   end
 
-  defp all_admitted?(tenants, admission),
-    do: Enum.all?(tenants, &Map.has_key?(admission.ords, &1))
+  defp sync_epoch(state, epoch) do
+    case :ets.lookup(state.ords, :epoch) do
+      [{:epoch, ^epoch}] ->
+        :ok
+
+      _moved ->
+        :ets.delete_all_objects(state.ords)
+        :ets.insert(state.ords, {:epoch, epoch})
+    end
+  end
+
+  # `true` for an item that is admitted, else the reason it is refused.
+  defp admitted(admission, tenant) do
+    cond do
+      Map.has_key?(admission.ords, tenant) -> true
+      MapSet.member?(admission.erasing, tenant) -> :tenant_erasing
+      true -> :tenant_limit
+    end
+  end
+
+  # Why a whole call is refused: a tenant being erased, else the tenant cap.
+  defp refusal(tenants, admission) do
+    if Enum.any?(tenants, &MapSet.member?(admission.erasing, &1)),
+      do: :tenant_erasing,
+      else: :tenant_limit
+  end
+
+  defp all_admitted(tenants, admission) do
+    if Enum.all?(tenants, &Map.has_key?(admission.ords, &1)),
+      do: :ok,
+      else: {:error, refusal(tenants, admission)}
+  end
 
   # Cleared whole when full: a miss is one point read.
   defp cache_put(state, cache) do
@@ -354,12 +411,12 @@ defmodule Ankusa.Queue.Writer do
   end
 
   # `results` holds the replies of the admitted items in item order; the refused
-  # ones get `{:error, :tenant_limit}` in their place.
+  # ones get `{:error, reason}` (`:tenant_limit` or `:tenant_erasing`) in their place.
   defp with_refused(tagged, results) do
     {merged, []} =
       Enum.map_reduce(tagged, results, fn
         {_item, true}, [result | rest] -> {result, rest}
-        {_item, false}, rest -> {{:error, :tenant_limit}, rest}
+        {_item, reason}, rest -> {{:error, reason}, rest}
       end)
 
     merged

@@ -891,7 +891,9 @@ Scopes (`Ankusa.Principal`): `metrics:read` (`/metrics`, `/v1/wal`),
 `config:read` (`/v1/config`, `/asyncapi.json`), `sources:read` and
 `sources:write`, `dlq:read`, `replays:read` and `replays:write`,
 `quarantine:read` and `quarantine:write`, `rate_limits:read` and
-`rate_limits:write`, `routes:read` and `routes:write`, `claims:read`, and
+`rate_limits:write`, `routes:read` and `routes:write`, `claims:read`,
+`tenants:write` (`DELETE /v1/tenants/{tenant}` and `GET /v1/tenants/{tenant}/erase`,
+a [tenant erase](multi-tenancy.md#erasing-a-tenant); it also needs `tenant:*`), and
 `dlq:write`, which starting a `dlq` replay also needs (`quarantine:write` for a
 `quarantine` replay). `config:write` is reserved: no route uses it yet.
 `audit:read` reads `GET /v1/audit`: every change to a source, route, IP rule,
