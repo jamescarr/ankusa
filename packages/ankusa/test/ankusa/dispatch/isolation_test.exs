@@ -162,7 +162,7 @@ defmodule Ankusa.Dispatch.IsolationTest do
       assert {:ok, 0} = Pipeline.tick(inst)
 
       assert [%{state: :pending, attempts: 1}] = rows(inst, [seq])
-      assert {:ok, at} = Deliveries.next_due_at(inst, 0)
+      assert {:ok, at} = Deliveries.next_due_at(inst)
       assert at >= before + 60_000
     end
   end

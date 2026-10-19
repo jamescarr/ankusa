@@ -22,13 +22,15 @@ Column families, all in that one database:
 
 | Family | Holds |
 | --- | --- |
-| `default` | the next-seq marker, the store format version (`m:format_version`, see [Upgrading between releases](deployment.md#upgrading-between-releases)), migration markers, API-managed sources (`s:`) and their revisions (`v:`, kept after a source is deleted so a re-created one continues the count), rate-limit overrides, replay jobs (`j:<id>`), the audit sequence (`m:audit_seq`) and the key audit hashes are made with (`m:audit_key`) |
+| `default` | the next-seq marker, the next tenant ordinal (`m:next_ord`), the store format version (`m:format_version`, see [Upgrading between releases](deployment.md#upgrading-between-releases)), migration markers, API-managed sources (`s:`) and their revisions (`v:`, kept after a source is deleted so a re-created one continues the count), rate-limit overrides, replay jobs (`j:<id>`), the audit sequence (`m:audit_seq`) and the key audit hashes are made with (`m:audit_key`) |
 | `hooks` | each committed hook, keyed by its `seq` |
 | `deliveries` | one delivery row per hook and sink |
-| `index` | due / claimed / dead rows, archive obligations, cleared markers, claim-check refs, ingest dedupe keys (`?u`) and their expiry index (`?e`) |
+| `index` | due `?D`, claimed `?F` and dead `?x`/`?X` rows, active-tenant markers `?A`, archive obligations, cleared markers, claim-check refs, ingest dedupe keys (`?u`) and their expiry index (`?e`); see [Tenants, counters and the active index](#tenants-counters-and-the-active-index) |
 | `archive` | the segment catalogue, and locations imported from a 0.3 node's index |
 | `quarantine` | the quarantine pen: one summary and one body key per held envelope |
 | `audit` | the audit trail, `<<?a, seq::64, at::64>>` → a versioned row (`<<"AA", 1, term>>`), in commit order; and the rows of changes still in flight, `<<?p, seq::64>>` (see [Architecture](architecture.md#guarantees-by-component)). Pruned by `audit.retention_days` |
+| `tenants` | tenant ordinal ↔ tenant id: `<<?t, ord::32>>` → id, `<<?n, id>>` → `<<ord::32>>` |
+| `counters` | per-tenant queue counters, `<<ord::32, field::8>>` → an integer, written only as merge operands; ordinal 0 is the node's total |
 
 `Ankusa.Store` owns the DB handle; every other process calls
 `Ankusa.Store.write/3`, `get/3`, `multi_get/3`, `fold/6` and `property/3`
@@ -53,9 +55,13 @@ entry = %{envelope: envelope, sinks: [{Ankusa.Sink.Http, url: "https://example.i
 
 - the hook, keyed by seq;
 - one pending delivery row and one due key per sink of its source, bound by
-  sink index and module at ack time;
+  sink index and module at ack time, each due key with its active-tenant marker;
 - an archive obligation, but only while the `:storage` role runs;
 - the dedupe key and its expiry entry, for a hook with a dedupe key;
+- the counter deltas of all of them (`pending`, `bytes`, `archive_pending`, for
+  the tenant and for the node);
+- the tenant's ordinal and the next-ordinal marker, for a tenant seen for the
+  first time (the Writer is the only process that assigns them);
 - the next-seq marker.
 
 The batch is atomic: a commit either lands whole or nothing is acked, and a
@@ -132,6 +138,44 @@ A hook's obligations are its delivery rows (pending or dead) and, only if
 the hook is deleted — whatever roles the node runs. So a node without the
 archive (`ANKUSA_ROLES=edge,dispatch`) reclaims on delivery, and an archive
 that is behind, off or on another node never blocks delivery.
+
+### Tenants, counters and the active index
+
+Design and reasons: [ADR 0001](adr/0001-tenant-key-layout.md). Every tenant gets
+a dense 32-bit **ordinal** at the first hook the store commits for it
+(`default` is the tenant of a hook with none); ordinals are never reused, 0 is
+the node's own aggregate, and `tenants.max` bounds how many exist (a hook of
+the tenant past it is `503 tenant_limit`). Index keys lead with the ordinal, so
+one tenant's rows are one contiguous range:
+
+| Key (`index` family) | Value | What |
+| --- | --- | --- |
+| `<<?D, ord::32, at::64, seq::64, sink::16>>` | `<<size::32, kind::8>>` | due: `kind` 0 a first attempt, 1 a retry |
+| `<<?F, ord::32, seq::64, sink::16>>` | `<<size::32>>` | claimed by dispatch |
+| `<<?x, at::64, seq::64, sink::16>>` | `{source_id, id, ord}` | dead, in the node-wide time order `GET /v1/dlq` lists |
+| `<<?X, ord::32, at::64, seq::64, sink::16>>` | empty | dead, by tenant |
+| `<<?A, second::64, ord::32>>` | empty | active: the tenant has a due row in that second |
+| `<<?a, seq::64>>` | `<<size::32, ord::32>>` | archive obligation |
+
+`pending`, `scheduled`, `inflight`, `dead`, `bytes` (the stored size of every
+delivery row the tenant holds) and `archive_pending` are kept per tenant and per
+node in the `counters` family, as blind RocksDB merge operands in the same
+batch as the row change they count, so any process may change them and a crash
+leaves rows and counts together or neither. `Ankusa.Queue.pending_for_tenant/2`
+and `dead_for_tenant/2` and every queue gauge read them: O(1), not a scan.
+`pending` is first attempts waiting and `scheduled` retries waiting (a retry
+whose backoff has ended counts until it is claimed).
+
+The active index is what makes a dispatch scan cost the tenants with work due,
+not all tenants: a scan reads the markers up to the current second, claims from
+each tenant named, oldest second first, and removes a marker once its second is
+over and the tenant has nothing due in it (delete, then verify no commit slipped
+a row in). Until TEN-3 that order is the only fairness: a tenant with a long
+backlog is served before one that arrived later in the same scan. A due row
+is never written without its marker (`Deliveries.due_ops/6`), and a counter is
+never changed by hand: both only through the `Deliveries` op builders.
+`Ankusa.Queue.purge_tenant/3` removes a tenant's pending or dead rows in chunks
+of 500, resumable by calling it again.
 
 ### `:none`: no queue, no store hooks
 

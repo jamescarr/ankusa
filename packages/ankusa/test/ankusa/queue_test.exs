@@ -259,9 +259,8 @@ defmodule Ankusa.QueueTest do
         inst,
         [
           {:put, :hooks, Ankusa.Store.Keys.hook(7), hook},
-          {:put, :deliveries, Ankusa.Store.Keys.delivery(7, 0), row},
-          {:put, :index, Ankusa.Store.Keys.due(at, 7, 0), <<byte_size(hook)::32>>}
-        ],
+          {:put, :deliveries, Ankusa.Store.Keys.delivery(7, 0), row}
+        ] ++ due_index_ops(inst, 7, 0, at, byte_size(hook)),
         sync: true
       )
 
@@ -289,10 +288,7 @@ defmodule Ankusa.QueueTest do
     :ok =
       Ankusa.Store.write(
         inst,
-        [
-          {:put, :index, Ankusa.Store.Keys.dead(now, 99, 0xFFFE),
-           :erlang.term_to_binary({"load", "evt_orphan"})}
-        ],
+        dead_index_ops(inst, 99, 0xFFFE, now, "load", "evt_orphan"),
         sync: true
       )
 

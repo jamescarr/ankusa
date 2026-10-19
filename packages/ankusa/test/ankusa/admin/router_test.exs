@@ -1317,7 +1317,10 @@ defmodule Ankusa.Admin.RouterTest do
       ingest!(config, "acme.billing", "two")
       ingest!(config, "acme.other", "three")
 
-      {:ok, dues} = Deliveries.due(inst, System.system_time(:millisecond), 0, 10, 1_000_000)
+      {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "acme")
+
+      {:ok, dues} =
+        Deliveries.due_for_tenant(inst, ord, System.system_time(:millisecond), 0, 10, 1_000_000)
       assert [first, second, third] = Enum.sort_by(dues, & &1.seq)
 
       # `first` and `third` lose `source_id`, as rows from before it existed;

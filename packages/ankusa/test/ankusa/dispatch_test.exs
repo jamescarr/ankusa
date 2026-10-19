@@ -188,9 +188,8 @@ defmodule Ankusa.DispatchTest do
         inst,
         [
           {:put, :hooks, Keys.hook(seq), bin},
-          {:put, :deliveries, Keys.delivery(seq, 0), row},
-          {:put, :index, Keys.due(at, seq, 0), <<byte_size(bin)::32>>}
-        ],
+          {:put, :deliveries, Keys.delivery(seq, 0), row}
+        ] ++ due_index_ops(inst, seq, 0, at, byte_size(bin), env.tenant_id || "default"),
         sync: true
       )
   end
@@ -228,13 +227,15 @@ defmodule Ankusa.DispatchTest do
     assert stored_ids(inst) == []
   end
 
-  # Dispatch scans from just under the last due time it claimed, not from the
-  # start of time. A commit is stamped before its fsync and visible after it, so
-  # a stalled commit can land beneath that floor: its wake carries the stamp so
-  # the scan goes back for it.
+  # Dispatch scans a tenant from just under the last due time it claimed for it,
+  # not from the start of time. A commit is stamped before its fsync and visible
+  # after it, so a stalled commit can land beneath that cursor: its wake carries
+  # the stamp so the scan goes back for it. (A tenant that drains loses its
+  # cursor, so the tenant here keeps a row due in an hour.)
   test "a row that became visible below the scan floor is delivered when its wake arrives" do
     inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
 
+    write_pending!(inst, 999_999, build_env("src1"), TagSink, System.system_time(:millisecond) + 3_600_000)
     # Deliver one hook, so the scan floor climbs to just under its due time.
     first = enqueue!(inst, build_env("src1")).id
     assert {:ok, _} = Pipeline.tick(inst)
@@ -688,9 +689,8 @@ defmodule Ankusa.DispatchTest do
         inst,
         [
           {:put, :hooks, Keys.hook(seq), hook_bin},
-          {:put, :deliveries, Keys.delivery(seq, 0), row_bin},
-          {:put, :index, Keys.due(at, seq, 0), <<byte_size(hook_bin)::32>>}
-        ],
+          {:put, :deliveries, Keys.delivery(seq, 0), row_bin}
+        ] ++ due_index_ops(inst, seq, 0, at, byte_size(hook_bin)),
         sync: true
       )
   end

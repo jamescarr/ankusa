@@ -483,7 +483,12 @@ defmodule Ankusa.Admin.Router do
 
     with true <- config.wal == :disk and Ankusa.Instance.store?(config),
          {:ok, _stored} <- Ankusa.SourceStore.get(instance, tenant, name) do
-      case Ankusa.Queue.pending_for_source(instance, source_id) do
+      # A source owned by a tenant files its hooks under that tenant alone
+      # (`bound_elsewhere?/2` in `Ankusa.Edge.Ingest`); the default tenant's
+      # sources are shared, so those walk every tenant's rows.
+      scope = if tenant == "default", do: [], else: [tenant: tenant]
+
+      case Ankusa.Queue.pending_for_source(instance, source_id, scope) do
         {:ok, %{pending: 0, inflight: 0}} ->
           delete_and_reply(conn, tenant, name)
 

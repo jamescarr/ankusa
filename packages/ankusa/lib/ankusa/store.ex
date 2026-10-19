@@ -9,15 +9,19 @@ defmodule Ankusa.Store do
 
     * `default` — sequence, the store format version (`m:format_version`),
       migration markers, sources and their revisions, rate limits, replay jobs,
-      the audit sequence and key
+      the audit sequence and key, the next tenant ordinal (`m:next_ord`)
     * `hooks` — `<<seq::64>>` → envelope
     * `deliveries` — `<<seq::64, sink::16>>` → delivery row
-    * `index` — due/inflight/dead rows, archive obligations, cleared markers,
-      claim-check refs
+    * `index` — due/inflight/dead rows (tenant-ordinal first, see
+      `Ankusa.Store.Keys`), the by-tenant dead index, active-tenant markers,
+      archive obligations, cleared markers, claim-check refs
     * `archive` — segment catalogue and imported legacy locations
     * `quarantine` — quarantined envelopes
     * `audit` — the audit trail (`<<?a, seq::64, at::64>>`) and the rows of
       mutations still in flight (`<<?p, seq::64>>`), see `Ankusa.Audit`
+    * `tenants` — tenant ordinal ↔ tenant id (`Ankusa.Queue.Tenants`)
+    * `counters` — per-tenant and node-wide queue counters, written only as
+      `{:merge, :counters, key, delta}` operands (`Ankusa.Queue.Deliveries.Counters`)
 
   `Ankusa.Store` is the one process that owns the database handle; every other
   caller reads or writes through the functions here, which run the RocksDB
@@ -44,7 +48,7 @@ defmodule Ankusa.Store do
   alias Ankusa.Store.Keys
   alias Ankusa.Store.Migrate
 
-  @cf_names ~w(default hooks deliveries index archive quarantine audit)a
+  @cf_names ~w(default hooks deliveries index archive quarantine audit tenants counters)a
 
   @cache_bytes 64 * 1024 * 1024
 
@@ -626,6 +630,14 @@ defmodule Ankusa.Store do
   # values land outside the block cache's LSM region.
   defp cf_opts(name) when name in [:hooks, :quarantine], do: large_cf_opts(name)
 
+  # Blind merge operands (`{:merge, ...}` ops) add into one row each, 64 bits
+  # wide (`counter_merge_operator` is a 32-bit `stoi`). A read applies every
+  # operand the memtable still holds for the key, so this family flushes early
+  # and a flush collapses them.
+  defp cf_opts(:counters) do
+    [compression: :none, write_buffer_size: 1024 * 1024, merge_operator: :erlang_merge_operator]
+  end
+
   defp cf_opts(name) do
     [compression: :none, write_buffer_size: buffer_size(name)]
   end
@@ -655,11 +667,17 @@ defmodule Ankusa.Store do
           {:put, atom(), binary(), binary()}
           | {:delete, atom(), binary()}
           | {:delete_range, atom(), binary(), binary()}
+          | {:merge, atom(), binary(), integer()}
 
   @doc """
   Writes `ops` as one atomic batch. `sync: true` returns only once the batch
   is durable. `[]` is a no-op success. Keys and values must be binaries: a
   malformed op raises, it is never reported as an unavailable store.
+
+  `{:merge, cf, key, delta}` adds `delta` to the integer at `key` without
+  reading it (a RocksDB merge operand, `:erlang_merge_operator`'s `int_add`):
+  concurrent batches from different processes cannot lose each other's counts.
+  Only a column family opened with that operator (`counters`) may be merged into.
   """
   @spec write(atom(), [op()], keyword()) :: :ok | {:error, term()}
   def write(instance, ops, opts \\ [])
@@ -701,6 +719,9 @@ defmodule Ankusa.Store do
 
   defp add_op(batch, cfs, {:delete_range, cf, from, to}) when is_binary(from) and is_binary(to),
     do: :rocksdb.batch_delete_range(batch, Map.fetch!(cfs, cf), from, to)
+
+  defp add_op(batch, cfs, {:merge, :counters, k, delta}) when is_binary(k) and is_integer(delta),
+    do: :rocksdb.batch_merge(batch, Map.fetch!(cfs, :counters), k, :erlang.term_to_binary({:int_add, delta}))
 
   # ── reads ─────────────────────────────────────────────────────────────────
 
@@ -760,8 +781,22 @@ defmodule Ankusa.Store do
         ) ::
           {:ok, acc} | {:error, term()}
         when acc: term()
-  def fold(instance, family, {lower, upper}, acc, fun, opts \\ [])
-      when is_atom(family) and is_binary(lower) and is_binary(upper) do
+  def fold(instance, family, range, acc, fun, opts \\ []),
+    do: scan_range(instance, family, range, acc, fun, opts)
+
+  @doc """
+  The first key and value of `family` in the half-open range `{lower, upper}`
+  (the last, with `reverse: true`), or `nil`: one seek, with `fold/6`'s proof
+  that the scan was not cut short by corruption.
+  """
+  @spec first(atom(), atom(), {binary(), binary()}, keyword()) ::
+          {:ok, {binary(), binary()} | nil} | {:error, term()}
+  def first(instance, family, range, opts \\ []) do
+    scan_range(instance, family, range, nil, fn key, value, _acc -> {:halt, {key, value}} end, opts)
+  end
+
+  defp scan_range(instance, family, {lower, upper}, acc, fun, opts)
+       when is_atom(family) and is_binary(lower) and is_binary(upper) do
     %{cf: cf, lo: lo, hi: hi} = Keys.family(family)
     reverse? = Keyword.get(opts, :reverse, false)
     spec = %{family: family, lower: lower, upper: upper, lo: lo, hi: hi, reverse?: reverse?}

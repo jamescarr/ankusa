@@ -260,6 +260,10 @@ defmodule Ankusa.Config do
             # `rate` is hooks per second (fractions allowed), `burst` the most
             # hooks admitted back to back.
             rate_limits: %{default: nil, tenants: %{}},
+            # tenants this node's store will know (`Ankusa.Queue.Tenants` hands
+            # each one a dense ordinal at first sight and never takes it back): a
+            # hook of the one past it is refused with 503 `tenant_limit`
+            tenants: %{max: 1_000_000},
             # the quarantine pen (`Ankusa.Edge.Quarantine`): one token bucket per
             # source (`burst` tokens, `rate` refilled per second) and a cap on the
             # pen's total bytes. A full pen refuses with 503, it never evicts.
@@ -349,7 +353,7 @@ defmodule Ankusa.Config do
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
-  `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:quarantine`,
+  `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:quarantine`, `:tenants`,
   `:lifecycle`, `:egress`, `:secrets`) over the defaults. Every `tls` block (`listener.tls`,
   `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
   validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
@@ -394,6 +398,7 @@ defmodule Ankusa.Config do
           :quarantine,
           :lifecycle,
           :audit,
+          :tenants,
           :egress,
           :secrets
         ] ->
@@ -584,6 +589,14 @@ defmodule Ankusa.Config do
       "claim_check.retention_days",
       "nil or an integer >= 1",
       &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    check!(
+      config,
+      [:tenants, :max],
+      "tenants.max",
+      "an integer from 1 to 4294967294",
+      &(is_integer(&1) and &1 in 1..4_294_967_294)
     )
 
     check!(
