@@ -89,6 +89,7 @@ health, err := admin.Health(ctx)                             // {Status, Instanc
 metrics, err := admin.Metrics(ctx)                           // Prometheus text
 dlq, err := admin.ListDeadLetters(ctx, ankusa.ListDeadLettersParams{Limit: 10})
 quarantine, err := admin.ListQuarantined(ctx, ankusa.ListQuarantinedParams{})
+audit, err := admin.ListAudit(ctx, ankusa.ListAuditParams{Tenant: "acme", Limit: 50}) // {Entries, NextCursor}
 
 // Replay jobs. CreateReplay answers 202 with a new job, or 200 with an
 // existing running/paused job whose filter matches, so a retried POST is
