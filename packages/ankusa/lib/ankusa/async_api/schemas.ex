@@ -170,9 +170,11 @@ defmodule Ankusa.AsyncApi.LifecycleEvent do
     schema: %{
       "type" => "object",
       "description" =>
-        "A webhook endpoint (source) or route was created, updated, or deleted. " <>
-          "`data` is the entity as the admin API shows it, secrets redacted, as the change " <>
-          "left it; for a deletion, as it was the moment before. Delivery is at least once and " <>
+        "A webhook endpoint (source) or route was created, updated, or deleted, or a " <>
+          "whole tenant was erased (`io.ankusa.tenant.deleted`, after the `deleted` event of each " <>
+          "of its sources and routes). `data` is the entity as the admin API shows it, secrets " <>
+          "redacted, as the change left it; for a deletion, as it was the moment before; for " <>
+          "a tenant erase, just `{\"tenant\": <id>}`. Delivery is at least once and " <>
           "in commit order: `id` is derived from the change, so the same event always has " <>
           "the same id, and `revision` lets a consumer ignore a stale update.",
       "required" => [
@@ -196,12 +198,14 @@ defmodule Ankusa.AsyncApi.LifecycleEvent do
             "io.ankusa.source.deleted",
             "io.ankusa.route.created",
             "io.ankusa.route.updated",
-            "io.ankusa.route.deleted"
+            "io.ankusa.route.deleted",
+            "io.ankusa.tenant.deleted"
           ]
         },
         "subject" => %{
           "type" => "string",
-          "description" => "The source id (`<tenant>.<name>`) or the route id."
+          "description" =>
+            "The source id (`<tenant>.<name>`), the route id, or the erased tenant id."
         },
         "time" => %{"type" => "string", "format" => "date-time"},
         "datacontenttype" => %{"const" => "application/json"},

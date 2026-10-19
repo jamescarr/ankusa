@@ -32,7 +32,7 @@ defmodule Ankusa.Queue.Deliveries do
   alias Ankusa.{Envelope, Store}
   alias Ankusa.Queue.Deliveries.Counters
   alias Ankusa.Queue.{Reclaim, Tenants}
-  alias Ankusa.Store.Keys
+  alias Ankusa.Store.{Keys, Sweep}
 
   # Sink indexes that exist only for rows imported from a 0.3 data dir, where
   # the sink a row belonged to was never recorded. The Pipeline expands them
@@ -1330,20 +1330,36 @@ defmodule Ankusa.Queue.Deliveries do
 
   @doc """
   Removes tenant `tenant`'s `:pending` (every due row, first attempts and
-  retries) and/or `:dead` rows, 500 at a time, one synced batch per chunk: the
+  retries), `:inflight` (claimed) and/or `:dead` rows (`kinds` a subset of
+  `[:pending, :inflight, :dead]`), 500 at a time, one synced batch per chunk: the
   index keys, the delivery row, a cleared marker so `Ankusa.Queue.Reclaim`
   removes hooks nobody owes, and the counter deltas. Idempotent, so a run that
-  stopped part-way resumes by being called again; never touches inflight rows.
-  Each chunk runs inside the dispatch Pipeline when it runs on this node, so it
-  cannot race a claim; a replay job over the tenant must not run at the same
-  time (it moves dead rows the same way). Returns the rows removed per kind.
+  stopped part-way resumes by being called again. Each chunk runs inside the
+  dispatch Pipeline when it runs on this node, so it cannot race a claim; a
+  replay job over the tenant must not run at the same time (it moves dead rows
+  the same way).
+
+  `:inflight` is for a tenant dispatch has stopped claiming (`Ankusa.Tenant.Gate`)
+  and whose attempts have all settled (`Ankusa.Tenant.Erase` waits for its
+  `inflight` counter to reach 0): a row claimed by a running attempt would be
+  settled over by that attempt's outcome. What it removes is what a crashed
+  node left claimed. Returns the rows removed per kind (`:pending` and `:dead`
+  always, `:inflight` when asked for).
   """
-  @spec purge_tenant(atom(), String.t(), [:pending | :dead]) ::
-          {:ok, %{pending: non_neg_integer(), dead: non_neg_integer()}} | {:error, term()}
+  @spec purge_tenant(atom(), String.t(), [:pending | :inflight | :dead]) ::
+          {:ok,
+           %{
+             required(:pending) => non_neg_integer(),
+             required(:dead) => non_neg_integer(),
+             optional(:inflight) => non_neg_integer()
+           }}
+          | {:error, term()}
   def purge_tenant(instance, tenant, kinds) do
+    zero = Map.merge(%{pending: 0, dead: 0}, Map.new(kinds, &{&1, 0}))
+
     case Tenants.ord(instance, tenant) do
       {:ok, ord} ->
-        Enum.reduce_while(kinds, {:ok, %{pending: 0, dead: 0}}, fn kind, {:ok, removed} ->
+        Enum.reduce_while(kinds, {:ok, zero}, fn kind, {:ok, removed} ->
           case purge_kind(instance, ord, kind, 0) do
             {:ok, n} -> {:cont, {:ok, Map.put(removed, kind, n)}}
             {:error, reason} -> {:halt, {:error, reason}}
@@ -1351,11 +1367,68 @@ defmodule Ankusa.Queue.Deliveries do
         end)
 
       :not_found ->
-        {:ok, %{pending: 0, dead: 0}}
+        {:ok, zero}
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  Removes the active-tenant markers (`?A`) of ordinal `ord`: a tenant's due rows
+  are gone, so a marker for it only makes a dispatch tick look at an empty
+  range. Idempotent; `{:ok, markers removed}`.
+  """
+  @spec purge_markers(atom(), pos_integer()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def purge_markers(instance, ord) do
+    Sweep.run(
+      instance,
+      :active,
+      fn key, _value ->
+        case Keys.decode_active(key) do
+          {_bucket, ^ord} -> {:ok, {:delete, :index, key}}
+          _ -> :skip
+        end
+      end,
+      fn deletes ->
+        with :ok <- Store.write(instance, deletes, sync: true), do: {:ok, length(deletes)}
+      end,
+      @purge_chunk
+    )
+  end
+
+  @doc """
+  Settles the archive obligations (`?a`) of tenant ordinal `ord`: the rows go,
+  with their `archive_pending` counts, and `Ankusa.Queue.Reclaim` deletes the
+  hooks nothing else holds. The obligations are found by a walk of the whole
+  family (the key carries the sequence, not the tenant), so the cost is the
+  archive backlog, once per erase. Idempotent; `{:ok, obligations removed}`.
+  """
+  @spec purge_archive(atom(), pos_integer()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def purge_archive(instance, ord) do
+    Sweep.run(
+      instance,
+      :archive_pending,
+      fn
+        <<?a, seq::64>>, <<_size::32, ^ord::32>> -> {:ok, seq}
+        _key, _value -> :skip
+      end,
+      fn seqs ->
+        ops =
+          Enum.flat_map(seqs, fn seq ->
+            [
+              {:delete, :index, Keys.archive_pending(seq)},
+              {:put, :index, Keys.cleared(seq, 1, 0), <<>>}
+            ]
+          end) ++ Counters.ops([{ord, :archive_pending, -length(seqs)}])
+
+        with :ok <- Store.write(instance, coalesce(ops), sync: true) do
+          _ = Reclaim.run(instance, Enum.map(seqs, &{&1, Keys.cleared(&1, 1, 0)}))
+          {:ok, length(seqs)}
+        end
+      end,
+      @purge_chunk
+    )
   end
 
   defp purge_kind(instance, ord, kind, removed) do
@@ -1398,6 +1471,35 @@ defmodule Ankusa.Queue.Deliveries do
 
       finish_purge(instance, rows, ops, fn {key, _size, _kind} ->
         {_ord, _at, seq, sink} = Keys.decode_due(key)
+        {seq, sink}
+      end)
+    end
+  end
+
+  defp purge_chunk(instance, ord, :inflight) do
+    {lower, upper} = Keys.range(<<?F, ord::32>>)
+
+    with {:ok, {_n, rows}} <-
+           Store.fold(instance, :inflight, {lower, upper}, {0, []}, fn key,
+                                                                       <<size::32>>,
+                                                                       {n, acc} ->
+             acc = [{key, size} | acc]
+             if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end) do
+      ops =
+        Enum.flat_map(rows, fn {key, size} ->
+          {_ord, seq, sink} = Keys.decode_inflight(key)
+
+          [
+            {:delete, :index, key},
+            {:delete, :deliveries, Keys.delivery(seq, sink)},
+            {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
+            | Counters.ops([{ord, :inflight, -1}, {ord, :bytes, -size}])
+          ]
+        end)
+
+      finish_purge(instance, rows, ops, fn {key, _size} ->
+        {_ord, seq, sink} = Keys.decode_inflight(key)
         {seq, sink}
       end)
     end

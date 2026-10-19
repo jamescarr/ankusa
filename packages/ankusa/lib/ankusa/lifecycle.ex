@@ -50,8 +50,10 @@ defmodule Ankusa.Lifecycle do
     * `id` — derived from the row, never minted: a keyed hash of the instance
       and the row's `seq` laid out as a UUID. The same row is the same id
       whenever and however often it is emitted.
-    * `type` — `io.ankusa.source.{created,updated,deleted}` or
-      `io.ankusa.route.{created,updated,deleted}`
+    * `type` — `io.ankusa.source.{created,updated,deleted}`,
+      `io.ankusa.route.{created,updated,deleted}`, or `io.ankusa.tenant.deleted`
+      (a tenant erase, `Ankusa.Tenant`, after the `deleted` event of each source and
+      route it removed; its `data` is `{"tenant": <id>}` and its `subject` the tenant id)
     * `source` — `urn:ankusa:instance:<instance>`
     * `subject` — the source id (`<tenant>.<name>`) or the route id
     * `time` — when the change committed (the row's time, not the publisher's)

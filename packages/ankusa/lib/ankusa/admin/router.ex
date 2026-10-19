@@ -31,6 +31,7 @@ defmodule Ankusa.Admin.Router do
   | `POST/PUT/DELETE /v1/tenants/:tenant/sources[/:name]` | `sources:write` + `tenant:<tenant>` |
   | `GET /v1/rate-limits` | `rate_limits:read` + a `tenant` (filtered) |
   | `GET/PUT/DELETE /v1/tenants/:tenant/rate-limit` | `rate_limits:read` / `rate_limits:write` + `tenant:<tenant>` |
+  | `DELETE /v1/tenants/:tenant?confirm=<tenant>`, `GET /v1/tenants/:tenant/erase` | `tenants:write` + `tenant:*` |
 
   The DLQ, the quarantine pen, replay jobs and the rate-limit listing hold every
   tenant's rows, so they are filtered by tenant (`Auth.authorize_tenants/4`).
@@ -197,6 +198,16 @@ defmodule Ankusa.Admin.Router do
 
   delete "/v1/tenants/:tenant/rate-limit" do
     tenant_role(conn, "rate_limits:write", tenant, :edge, &rate_limit_delete(&1, tenant))
+  end
+
+  # An erase removes the tenant everywhere on this node, so it needs `tenant:*`
+  # whoever the tenant is: a token for one tenant cannot erase even its own.
+  delete "/v1/tenants/:tenant" do
+    Auth.authorize_global(conn, "tenants:write", &tenant_erase(&1, tenant))
+  end
+
+  get "/v1/tenants/:tenant/erase" do
+    Auth.authorize_global(conn, "tenants:write", &tenant_erase_status(&1, tenant))
   end
 
   match _ do
@@ -569,6 +580,75 @@ defmodule Ankusa.Admin.Router do
       {:error, :read_only} -> send_json(conn, 409, %{error: "source_store_read_only"})
     end
   end
+
+  # ── tenant erase ────────────────────────────────────────────────────────────
+
+  # `?confirm=<tenant>` is the whole confirmation: the name typed again, so a
+  # wrong path in a script is a `400`, not a deleted customer. The job runs in
+  # the background (`Ankusa.Tenant`): `202` once it is recorded, `200` when one
+  # is already running, and `GET .../erase` says where it is.
+  defp tenant_erase(conn, tenant) do
+    params = Plug.Conn.fetch_query_params(conn).query_params
+
+    case Ankusa.Tenant.delete(instance(conn), tenant,
+           confirm: Map.get(params, "confirm"),
+           audit: Context.from_conn(conn)
+         ) do
+      {:ok, :started} ->
+        send_json(conn, 202, %{tenant: tenant, state: "erasing"})
+
+      {:ok, :erasing} ->
+        send_json(conn, 200, %{tenant: tenant, state: "erasing"})
+
+      {:error, :invalid_tenant} ->
+        invalid_tenant(conn)
+
+      {:error, :confirm} ->
+        send_json(conn, 400, %{
+          error: "confirm_mismatch",
+          message: "confirm must be the tenant being erased"
+        })
+
+      {:error, :default_tenant} ->
+        send_json(conn, 409, %{error: "default_tenant"})
+
+      {:error, {:static_sources, ids}} ->
+        send_json(conn, 409, %{error: "tenant_has_configured_sources", sources: Enum.sort(ids)})
+
+      {:error, {:role_not_enabled, role}} ->
+        send_json(conn, 409, %{error: "role_not_enabled", role: to_string(role)})
+
+      {:error, _unavailable} ->
+        source_store_unavailable(conn)
+    end
+  end
+
+  defp tenant_erase_status(conn, tenant) do
+    if valid_identity?(tenant) do
+      case Ankusa.Tenant.status(instance(conn), tenant) do
+        {:ok, %{state: :erasing, stage: stage, started_at: at}} ->
+          send_json(conn, 200, %{
+            tenant: tenant,
+            state: "erasing",
+            stage: Atom.to_string(stage),
+            started_at: iso8601(at)
+          })
+
+        {:ok, %{state: :erased, erased_at: at}} ->
+          send_json(conn, 200, %{tenant: tenant, state: "erased", erased_at: iso8601(at)})
+
+        :not_found ->
+          send_json(conn, 404, %{error: "erase_not_found"})
+
+        {:error, _reason} ->
+          source_store_unavailable(conn)
+      end
+    else
+      invalid_tenant(conn)
+    end
+  end
+
+  defp iso8601(ms), do: ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
 
   # ── per-tenant rate limits ──────────────────────────────────────────────────
 

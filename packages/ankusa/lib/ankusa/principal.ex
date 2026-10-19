@@ -23,6 +23,7 @@ defmodule Ankusa.Principal do
   | `replays:read`, `replays:write` | replay jobs (`dlq:write` / `quarantine:write` as well for those kinds) |
   | `quarantine:read`, `quarantine:write` | the quarantine pen |
   | `rate_limits:read`, `rate_limits:write` | per-tenant rate limits |
+  | `tenants:write` | `DELETE /v1/tenants/:tenant` (a tenant erase) and `GET /v1/tenants/:tenant/erase`; with `tenant:*` |
   | `routes:read`, `routes:write` | route definitions, IP rules, the dry run |
   | `claims:read` | claim-check gateway reads |
   | `audit:read` | reserved for the audit log; no route yet |
@@ -52,6 +53,7 @@ defmodule Ankusa.Principal do
     replays:read replays:write
     quarantine:read quarantine:write
     rate_limits:read rate_limits:write
+    tenants:write
     routes:read routes:write
     claims:read audit:read
   )

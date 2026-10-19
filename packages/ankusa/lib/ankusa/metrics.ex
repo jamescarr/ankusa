@@ -35,7 +35,7 @@ defmodule Ankusa.Metrics do
   numbers (only ever a store index or an HTTP status, both bounded), and
   anything else becomes `:other`. `:outcome` on ingest is already one of a fixed set
   (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
-  `:tenant_overload`, `:quarantine_rate_limited`, `:quarantine_full`, `:overload`, `:tenant_limit` or
+  `:tenant_overload`, `:quarantine_rate_limited`, `:quarantine_full`, `:overload`, `:tenant_limit`, `:tenant_erasing` or
   `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
   `:source_id` is bounded because it is only ever a configured source's id: a
   request for a source that does not exist is counted on

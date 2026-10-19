@@ -92,6 +92,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   alias Ankusa.Queue.{Deliveries, Reclaim, Tenants}
   alias Ankusa.Sink.Message
   alias Ankusa.Store.Keys
+  alias Ankusa.Tenant.Gate
 
   @housekeeping_ms 1_000
   # The longest pause a sink's `{:retry_after, ms, _}` can impose.
@@ -607,7 +608,7 @@ defmodule Ankusa.Dispatch.Pipeline do
     limit = min(dispatch.batch, dispatch.max_inflight - state.claimed)
     budget = dispatch.max_inflight_bytes - state.claimed_bytes
 
-    case Deliveries.active_tenants(state.instance, now, @active_limit) do
+    case state.instance |> Deliveries.active_tenants(now, @active_limit) |> unfenced(state) do
       {:ok, []} ->
         %{state | window_full?: false, served: MapSet.new()}
 
@@ -632,6 +633,19 @@ defmodule Ankusa.Dispatch.Pipeline do
         holdoff(state)
     end
   end
+
+  # Tenants an erase has closed (`Ankusa.Tenant.Gate`) are not claimed from: their
+  # rows are about to be deleted, and a claimed one would be settled over by its
+  # attempt's outcome. Nothing is closed in the usual case: one map read.
+  defp unfenced({:ok, tenants}, state) do
+    ords = Gate.state(state.instance).ords
+
+    if MapSet.size(ords) == 0,
+      do: {:ok, tenants},
+      else: {:ok, Enum.reject(tenants, fn {ord, _buckets} -> MapSet.member?(ords, ord) end)}
+  end
+
+  defp unfenced({:error, reason}, _state), do: {:error, reason}
 
   # Deficit round-robin over the active tenants. A pass gives each tenant, in
   # turn, an equal share of what is left of the page (`share`, at least one row)
@@ -2022,7 +2036,9 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp schedule_next(state) do
-    case Deliveries.next_due_at(state.instance, state.cursors, skip: state.tenant_full) do
+    skip = MapSet.union(state.tenant_full, Gate.state(state.instance).ords)
+
+    case Deliveries.next_due_at(state.instance, state.cursors, skip: skip) do
       {:ok, nil} ->
         cancel_timer(state)
 
@@ -2085,7 +2101,9 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   # A store that cannot answer must not hang `tick/1` callers forever.
   defp due_now?(state) do
-    case Deliveries.next_due_at(state.instance, state.cursors) do
+    skip = Gate.state(state.instance).ords
+
+    case Deliveries.next_due_at(state.instance, state.cursors, skip: skip) do
       {:ok, at} when is_integer(at) -> at <= now_ms()
       _ -> false
     end

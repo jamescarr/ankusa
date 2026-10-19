@@ -42,11 +42,16 @@ defmodule Ankusa.Queue do
   half-way: an abandoned call would commit anyway, unacknowledged.
 
   An entry's reply is `{:error, :tenant_limit}` instead when its tenant would
-  be one past `tenants.max`: that hook is not written.
+  be one past `tenants.max`, and `{:error, :tenant_erasing}` when an erase of
+  its tenant is running (`Ankusa.Tenant`): that hook is not written.
   """
   @spec enqueue(atom(), [entry()], integer() | :infinity) ::
           {:ok,
-           [{:committed, Envelope.t()} | {:duplicate, Envelope.t()} | {:error, :tenant_limit}]}
+           [
+             {:committed, Envelope.t()}
+             | {:duplicate, Envelope.t()}
+             | {:error, :tenant_limit | :tenant_erasing}
+           ]}
           | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do
     GenServer.call(
@@ -62,7 +67,8 @@ defmodule Ankusa.Queue do
   row, with `extra_ops` (the pen deletes and the job's cursor) in the same
   synced batch — so a crash cannot leave a hook both committed and still held,
   or held and gone. `extra_ops` commit even when every entry is a duplicate.
-  A tenant past `tenants.max` is the whole call's `{:error, :tenant_limit}`:
+  A tenant past `tenants.max` (or one being erased) is the whole call's
+  `{:error, :tenant_limit}` (`:tenant_erasing`):
   nothing commits, the pen keeps its entries.
   Never deadline-bound.
   """
@@ -230,13 +236,21 @@ defmodule Ankusa.Queue do
   def dead_for_tenant(instance, tenant), do: Deliveries.dead_for_tenant(instance, tenant)
 
   @doc """
-  Removes `tenant`'s `:pending` (every due row) and/or `:dead` rows (`kinds` a
-  subset of `[:pending, :dead]`) in synced chunks of 500: idempotent, so a run
-  that stopped part-way resumes by being called again, and it never touches
-  claimed rows. Returns the rows removed per kind.
+  Removes `tenant`'s `:pending` (every due row), `:inflight` (claimed rows,
+  for a tenant dispatch has stopped claiming: see `Ankusa.Tenant`) and/or
+  `:dead` rows (`kinds` a subset of `[:pending, :inflight, :dead]`) in synced
+  chunks of 500: idempotent, so a run that stopped part-way resumes by being
+  called again. Without `:inflight` it never touches claimed rows. Returns the
+  rows removed per kind.
   """
-  @spec purge_tenant(atom(), String.t(), [:pending | :dead]) ::
-          {:ok, %{pending: non_neg_integer(), dead: non_neg_integer()}} | {:error, term()}
+  @spec purge_tenant(atom(), String.t(), [:pending | :inflight | :dead]) ::
+          {:ok,
+           %{
+             required(:pending) => non_neg_integer(),
+             required(:dead) => non_neg_integer(),
+             optional(:inflight) => non_neg_integer()
+           }}
+          | {:error, term()}
   def purge_tenant(instance, tenant, kinds), do: Deliveries.purge_tenant(instance, tenant, kinds)
 
   defp next_seq(instance) do

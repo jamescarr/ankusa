@@ -93,6 +93,7 @@ defmodule Ankusa.Instance do
         auth_children(config) ++
         claim_store_children(opts) ++
         store_children(config, opts) ++
+        erase_children(config, opts) ++
         backup_children(config, opts) ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
@@ -152,6 +153,16 @@ defmodule Ankusa.Instance do
   # source store, the edge, dispatch and storage.
   defp store_children(config, opts) do
     if store?(config), do: [{Ankusa.Store, opts}, {Ankusa.Audit, opts}], else: []
+  end
+
+  # Tenant erases (`Ankusa.Tenant`): right behind the store and the audit trail
+  # they write to and ahead of every listener, because its start closes the
+  # tenants whose erase a restart interrupted, before the edge can take one of
+  # their hooks. Its own domain, so a bug in a job never restarts the edge.
+  defp erase_children(config, opts) do
+    if store?(config),
+      do: isolated(config, :tenant_erase, [{Ankusa.Tenant.Eraser, opts}]),
+      else: []
   end
 
   # The store's backup uploader, right behind the store: under `:rest_for_one`

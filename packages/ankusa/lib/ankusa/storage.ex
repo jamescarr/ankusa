@@ -9,12 +9,17 @@ defmodule Ankusa.Storage do
   store) maps each id to `{offset, length, seq}`. Event ids are time-ordered, so
   the id range narrows a lookup to a segment or two. Events archived by a 0.3
   node resolve through the locations imported from its index log.
+
+  A hook of a tenant that was erased (`Ankusa.Tenant`) after the hook was
+  received is `{:error, :gone}` (`410` where it is served): the segment still
+  holds its frame until the bucket's lifecycle expires it, and the tombstone is
+  what keeps it from being read in the meantime.
   """
 
-  alias Ankusa.{Config, Envelope}
+  alias Ankusa.{Config, Envelope, Tenant}
   alias Ankusa.Queue.Archive
 
-  @spec fetch(atom(), String.t()) :: {:ok, Envelope.t()} | :error
+  @spec fetch(atom(), String.t()) :: {:ok, Envelope.t()} | :error | {:error, :gone}
   def fetch(instance, event_id) do
     %Config{storage: %{codec: {codec, _}}} = Ankusa.config(instance)
 
@@ -23,9 +28,18 @@ defmodule Ankusa.Storage do
            Ankusa.BlobStore.get_range(instance, :segments, segment_key, offset, length),
          {:ok, payload} <- codec.decode_record(frame),
          {:ok, env} <- Envelope.from_binary(payload) do
-      {:ok, %{env | seq: seq}}
+      served(instance, %{env | seq: seq})
     else
       _ -> :error
+    end
+  end
+
+  # A tombstone that cannot be read is not "not erased": the answer is `:error`.
+  defp served(instance, env) do
+    case Tenant.erased_at(instance, env.tenant_id || "default") do
+      {:ok, at} when env.received_at <= at -> {:error, :gone}
+      {:error, _reason} -> :error
+      _not_erased_or_later -> {:ok, env}
     end
   end
 

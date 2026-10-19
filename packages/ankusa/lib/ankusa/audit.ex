@@ -22,6 +22,7 @@ defmodule Ankusa.Audit do
   | `quarantine.purge` | held hooks deleted |
   | `replay.create`, `replay.update`, `replay.cancel` | a replay job |
   | `route.create`, `route.update`, `route.delete` | a route definition |
+  | `tenant.delete` | a tenant erase (`Ankusa.Tenant`): one row, with what each stage removed as its `detail`; the erase's own source, route and rate-limit deletions are rows of their own |
   | `ip_rules.put` | the global IP rules |
 
   A request that changes nothing (a validation error, a missing subject) writes
