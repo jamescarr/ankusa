@@ -31,6 +31,12 @@ defmodule Ankusa.Store.Keys do
   def meta("incarnation"), do: "m:incarnation"
   def meta("incarnation_pending"), do: "m:incarnation_pending"
   def meta("intake_offset"), do: "m:intake_offset"
+  # The intake log's other rows (`Ankusa.Intake`, ADR 0002): the watermark (the
+  # highest seq every lower one of which is confirmed in the log or had no
+  # record), and the node id and partition this store was stamped with.
+  def meta("intake_seq"), do: "m:intake_seq"
+  def meta("intake_node"), do: "m:intake_node"
+  def meta("intake_partition"), do: "m:intake_partition"
   # The audit trail's size (`<<rows::64, bytes::64, newest_counted_seq::64>>`),
   # written in every batch that adds or removes a row, so `audit.max_rows` and
   # `audit.max_bytes` are checked in O(1) (`Ankusa.Audit`). A value that does not

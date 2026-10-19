@@ -308,9 +308,23 @@ defmodule Ankusa.Edge.Fleet do
   def settle(_instance, nil, _result), do: :ok
 
   def settle(instance, claim, {tag, %Envelope{id: id}}) when tag in [:ok, :duplicate],
-    do: enqueue(instance, {:promote, claim, id})
+    do: promote(instance, claim, id)
 
-  def settle(instance, claim, _result), do: enqueue(instance, {:release, claim})
+  def settle(instance, claim, _result), do: release(instance, claim)
+
+  @doc """
+  Promote a claim to committed under `hook_id`: the hook is in every place its
+  durability mode promises. `Ankusa.Intake.Reconciler` calls it for a hook
+  carried to completion.
+  """
+  @spec promote(atom(), Ankusa.RateLimiter.Store.claim() | nil, String.t()) :: :ok
+  def promote(_instance, nil, _id), do: :ok
+  def promote(instance, claim, id), do: enqueue(instance, {:promote, claim, id})
+
+  @doc "Release a claim: nothing exists for its key."
+  @spec release(atom(), Ankusa.RateLimiter.Store.claim() | nil) :: :ok
+  def release(_instance, nil), do: :ok
+  def release(instance, claim), do: enqueue(instance, {:release, claim})
 
   defp enqueue(instance, op) do
     table = queue_table(instance)

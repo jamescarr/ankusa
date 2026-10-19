@@ -85,6 +85,8 @@ defmodule Ankusa.Instance do
     Ankusa.Store.Backup.validate_config!(config)
     Ankusa.BlobStore.validate_config!(config)
     Ankusa.HttpClient.Egress.validate_config!(config)
+    Ankusa.Intake.validate_config!(config)
+    if config.wal == :dual, do: Ankusa.Intake.Pending.create(instance)
     opts = [instance: config.instance]
 
     children =
@@ -92,6 +94,7 @@ defmodule Ankusa.Instance do
         metrics_children(config, opts) ++
         auth_children(config) ++
         claim_store_children(opts) ++
+        intake_children(config, opts) ++
         store_children(config, opts) ++
         erase_children(config, opts) ++
         backup_children(config, opts) ++
@@ -193,13 +196,37 @@ defmodule Ankusa.Instance do
   end
 
   # The one process that assigns seqs and commits hooks, in the edge subtree
-  # (only an `:edge` node writes hooks). Only under `wal: :disk`: under
-  # `wal: :none` ingest acks on a sink's confirm and nothing is committed.
-  defp writer_children(%Config{wal: :disk}, opts), do: [{Ankusa.Queue.Writer, opts}]
+  # (only an `:edge` node writes hooks). Under `wal: :disk` and `wal: :dual` (which
+  # adds the intake log); under `wal: :none` ingest acks on a sink's confirm and
+  # nothing is committed.
+  defp writer_children(%Config{wal: wal}, opts) when wal in [:disk, :dual],
+    do: [{Ankusa.Queue.Writer, opts}]
+
   defp writer_children(_config, _opts), do: []
 
+  # `wal: :dual` (ADR 0002): the adapter's own processes (its client, never the
+  # sink's) start before the store, so boot recovery can reach the log.
+  defp intake_children(%Config{wal: :dual} = config, opts),
+    do: [Ankusa.Intake.module(config).child_spec(opts)]
+
+  defp intake_children(_config, _opts), do: []
+
+  # Boot recovery (it replays the log into the store and republishes the local
+  # tail; the node does not serve until it is done), the supervisor of the
+  # writer's publish tasks, and the reconciler that completes carried hooks: all
+  # before the writer, which uses them.
+  defp intake_edge_children(%Config{wal: :dual} = config, opts) do
+    [
+      {Ankusa.Intake.Recovery, opts},
+      {Task.Supervisor, name: Ankusa.via(config.instance, :intake_tasks)},
+      {Ankusa.Intake.Reconciler, opts}
+    ]
+  end
+
+  defp intake_edge_children(_config, _opts), do: []
+
   # Expires the dedupe keys the writer inserts (`Ankusa.Queue.DedupeSweeper`).
-  defp dedupe_sweeper_children(%Config{wal: :disk}, opts),
+  defp dedupe_sweeper_children(%Config{wal: wal}, opts) when wal in [:disk, :dual],
     do: [{Ankusa.Queue.DedupeSweeper, opts}]
 
   defp dedupe_sweeper_children(_config, _opts), do: []
@@ -243,6 +270,7 @@ defmodule Ankusa.Instance do
       # restart of the writer (which it calls) restarts the sweeper.
       edge =
         routes_children(config, opts) ++
+          intake_edge_children(config, opts) ++
           writer_children(config, opts) ++
           fleet_children(config, opts) ++
           [

@@ -30,7 +30,8 @@ defmodule Ankusa.Health do
           required(:status) => String.t(),
           required(:instance) => String.t(),
           required(:store) => String.t(),
-          optional(:backup) => String.t()
+          optional(:backup) => String.t(),
+          optional(:intake) => String.t()
         }
 
   @spec ready(atom()) :: {:ok, body()} | {:error, body()}
@@ -41,10 +42,10 @@ defmodule Ankusa.Health do
     if Instance.store?(config) do
       case Store.ready(instance) do
         :ok ->
-          backup_state(
-            config,
-            %{status: "ready", instance: name, store: "ok"}
-          )
+          with {:ok, body} <-
+                 intake_state(config, %{status: "ready", instance: name, store: "ok"}) do
+            backup_state(config, body)
+          end
 
         {:error, reason} ->
           {:error, %{status: "unavailable", instance: name, store: label(reason)}}
@@ -54,6 +55,21 @@ defmodule Ankusa.Health do
     end
   end
 
+  # `wal: :dual`: `intake` is `"up"`, `"down"` (the breaker is open and the log is
+  # not answering: `503`, so the load balancer drains the node) or
+  # `"recovering"` (boot replay is running: `503`). Other modes have no key.
+  defp intake_state(%{wal: :dual, instance: instance}, body) do
+    case Ankusa.Intake.state(instance) do
+      :up ->
+        {:ok, Map.put(body, :intake, "up")}
+
+      state ->
+        {:error,
+         body |> Map.put(:intake, Atom.to_string(state)) |> Map.put(:status, "unavailable")}
+    end
+  end
+
+  defp intake_state(_config, body), do: {:ok, body}
   # The backup label, and the 503 a stale one earns under `require_fresh`.
   defp backup_state(config, body) do
     case config.backup do

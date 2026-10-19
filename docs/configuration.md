@@ -579,6 +579,18 @@ config :ankusa,
 | `source_store` | `{Ankusa.SourceStore.Static, sources: %{}}` | `{module, opts}` implementing `Ankusa.SourceStore`. `SourceStore.Persistent` adds API-managed, tenant-scoped sources persisted in this node's store (the image's `source_store.type: persistent`); `Ankusa.SourceStore.Redis` (`ankusa_redis`, the image's `source_store.type: redis`) keeps them in Redis, shared across nodes; the rest is read-only. |
 | `wal` | `:disk` | The queue's mode; the name is historical. `:disk` commits every hook into this node's RocksDB store before the ack (`Ankusa.Queue`). `:none` commits nothing: ingest acks on the sink's confirm, and every statically configured source needs at least one sink whose `:ok` means durable (`c:Ankusa.Sink.durable?/1`), so boot refuses a config that cannot make that promise. Under `:none` the queue's reader roles (`:dispatch`, `:storage`) are dropped from `roles`. See [`delivery.md`](delivery.md#direct-mode). |
 | `direct_publish_timeout_ms` | `8_000` | `wal: :none` only: the one deadline every sink must confirm under (YAML `wal.publish_timeout_ms`). Keep it below the provider's own timeout. |
+| `wal` | `:disk` | The queue's durability mode: `:disk` (every hook fsynced on this host before the ack), `:dual` (fsynced on this host **and** confirmed in a replicated intake log; see [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)) or `:none` (ack on the sinks' confirm). `:dual` needs `intake.type`, `intake.node_id`, `backup.enabled` with `backup.max_age_ms`, and the `:edge` role; boot refuses otherwise. |
+| `intake.type` | `nil` | `:kafka` or `:jetstream` (the adapter packages) under `wal: :dual`; `:memory` is a test double (`Ankusa.Intake.Memory`), not a production mode. |
+| `intake.node_id` | `nil` | This node's identity in the log, `[a-z0-9._-]{1,64}`, **stable across a replacement**: the replacement node starts with the lost node's id and replays its records. A store stamped with another id refuses to boot. |
+| `intake.fleet`, `intake.topic` | `"default"`, `nil` | The log's name is `intake.topic`, else `ankusa.intake.<fleet>` (a Kafka topic, a JetStream stream). |
+| `intake.kafka`, `intake.jetstream`, `intake.memory` | `[]` | The adapter's own options (a keyword list, passed through whole). Redacted in `GET /v1/config`: only their keys and non-secret identifiers show. |
+| `intake.publish_timeout_ms` | `2_000` | The one publish attempt's deadline (100-60 000, and under the batcher's 15 s record deadline under `dual`). A timeout is a failure; the reconciler republishes. |
+| `intake.reconcile_deadline_ms` | `20_000` | A half-persisted hook the reconciler has not completed within this is *stuck*: its fleet dedupe claim is released and `ankusa_intake_reconcile_stuck` rises (1 000-600 000; under `dedupe.scope: :fleet` it must be below `fleet.pending_ttl_ms`). |
+| `intake.breaker_failures`, `intake.probe_ms`, `intake.retry_after_s` | `3`, `1_000`, `2` | The breaker opens after this many failed attempts in a row, lets one batch probe after `probe_ms`; while open every new hook is `503 intake_unavailable` with this `Retry-After` (1-100, 100-60 000, 1-300). |
+| `intake.offset_flush_ms` | `1_000` | How often the watermark (`m:intake_seq`) and offset (`m:intake_offset`) are written without traffic (100-60 000). |
+| `intake.pending.max_records`, `intake.pending.max_bytes` | `50_000`, `268_435_456` | The pending set (records not yet confirmed in both places) is bounded; a full set is `503 intake_unavailable` (`ankusa_intake_refused_total{reason="backlog"}`) before a seq is assigned. |
+| `intake.max_record_bytes` | `10_000_000` | One intake record's ceiling; at least `max_body_bytes + 65 536` so a body the node accepts always fits. |
+| `intake.recover_on_boot`, `intake.verify_topic` | `true`, `true` | Replay the log into the store at boot (`false`: run `mix ankusa.recover` by hand); verify the log's settings at boot (`false` says `intake topic settings UNVERIFIED` in the startup line). |
 | `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The queue writer serializes commits itself, so more partitions only add contention. |
 | `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
 | `batcher.max_delay_ms` | `0` | Commit immediately. The store commit runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
@@ -1395,8 +1407,8 @@ the map.
 Swapping a behaviour is a one-line config change, `route_resolver:
 {Ankusa.RouteResolver.TenantPath, []}`, because every pluggable layer is a
 behaviour with `{module, opts}` config, resolved at the call site, never
-hardcoded. The queue is the exception: its mode is `wal: :disk | :none`, not a
-module.
+hardcoded. The queue is the exception: its mode is `wal: :disk | :dual | :none`,
+not a module.
 
 ### Runtime environment overrides
 

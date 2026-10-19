@@ -77,7 +77,26 @@ defmodule Ankusa.Metrics.Gauges do
     if Config.role?(config, :edge), do: probe(instance, :quarantine, &quarantine/1)
     probe(instance, :disk, &disk(&1, config))
     probe(instance, :sink_http, &sink_http/1)
+    if config.wal == :dual, do: probe(instance, :intake, &intake/1)
     :ok
+  end
+
+  # `wal: :dual`: the pending set and the breaker, from the table's counters (no
+  # scan), as `[:ankusa, :intake, :state]`.
+  defp intake(instance) do
+    t = Ankusa.Intake.Pending.table(instance)
+    now = System.monotonic_time(:millisecond)
+    stats = Ankusa.Intake.Pending.stats(t, now)
+    flushed_at = Ankusa.Intake.Pending.meta(t, :flushed_at, now)
+
+    emit(instance, :intake, %{
+      pending_records: stats.records,
+      pending_bytes: stats.bytes,
+      reconcile_oldest_age_seconds: stats.oldest_age_ms / 1000,
+      reconcile_stuck: stats.stuck,
+      offset_lag_seconds: (now - flushed_at) / 1000,
+      ready: if(Ankusa.Intake.Gate.state(t) == :open, do: 0, else: 1)
+    })
   end
 
   defp probe(instance, name, fun) do

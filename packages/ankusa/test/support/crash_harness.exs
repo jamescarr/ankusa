@@ -48,14 +48,28 @@ defmodule Ankusa.CrashHarness do
   @doc "The instance config both the serving child and a reopening parent use."
   def config(data_dir, opts \\ []) do
     Ankusa.Config.new(
-      instance: @instance,
-      data_dir: data_dir,
-      port: Keyword.get(opts, :port, 0),
-      roles: [:edge],
-      source_store:
-        {Ankusa.SourceStore.Static, sources: Map.new(sources(Keyword.get(opts, :tenants, 1)))},
-      batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
+      [
+        instance: @instance,
+        data_dir: data_dir,
+        port: Keyword.get(opts, :port, 0),
+        roles: [:edge],
+        source_store:
+          {Ankusa.SourceStore.Static, sources: Map.new(sources(Keyword.get(opts, :tenants, 1)))},
+        batcher: %{partitions: 4, max_batch: 64, max_delay_ms: 5, max_queue: 100_000}
+      ] ++ dual(Keyword.get(opts, :log))
     )
+  end
+
+  # `log:` runs the node under `wal: :dual` over a file-backed `Intake.Memory`
+  # that outlives the process (and the data dir): the host-loss drill.
+  defp dual(nil), do: []
+
+  defp dual(log) do
+    [
+      wal: :dual,
+      intake: %{type: :memory, node_id: "crash", memory: [path: log]},
+      backup: %{enabled: true, interval_ms: 3_600_000, max_age_ms: 3_600_000}
+    ]
   end
 
   @doc "Boot the instance and ingest until killed."
@@ -63,7 +77,11 @@ defmodule Ankusa.CrashHarness do
     tenants = env_int("TENANTS", 1)
 
     config =
-      config(System.fetch_env!("DATA_DIR"), port: env_int("HTTP_PORT", 0), tenants: tenants)
+      config(System.fetch_env!("DATA_DIR"),
+        port: env_int("HTTP_PORT", 0),
+        tenants: tenants,
+        log: System.get_env("INTAKE_LOG")
+      )
 
     source_ids = tenants |> sources() |> Enum.map(&elem(&1, 0))
     pace_ms = pace_ms(env_int("RATE", 0), env_int("CONCURRENCY", 32))
