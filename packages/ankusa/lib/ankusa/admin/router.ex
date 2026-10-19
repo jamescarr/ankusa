@@ -213,12 +213,22 @@ defmodule Ankusa.Admin.Router do
         send_json(conn, 409, %{error: "wal_disabled"})
 
       _ ->
-        send_json(conn, 200, %{
-          instance: to_string(config.instance),
-          wal: safe_stats(instance(conn))
-        })
+        send_json(
+          conn,
+          200,
+          put_intake(
+            %{instance: to_string(config.instance), wal: safe_stats(instance(conn))},
+            config
+          )
+        )
     end
   end
+
+  # `wal: :dual`: where this node is against the intake log.
+  defp put_intake(body, %{wal: :dual, instance: instance}),
+    do: Map.put(body, :intake, Ankusa.Intake.info(instance))
+
+  defp put_intake(body, _config), do: body
 
   defp dlq_index(conn, tenants) do
     params = Plug.Conn.fetch_query_params(conn).query_params

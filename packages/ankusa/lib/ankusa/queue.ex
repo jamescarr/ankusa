@@ -286,10 +286,12 @@ defmodule Ankusa.Queue do
 
   @doc """
   The configured queue mode's name, for boot banners and `check-config`:
-  `"disk"` for the store-backed queue, `"none"` under `wal: :none`.
+  `"disk"` for the store-backed queue, `"dual"` for the store plus the intake
+  log (`wal: :dual`), `"none"` under `wal: :none`.
   """
-  @spec label(:disk | :none) :: String.t()
+  @spec label(:disk | :dual | :none) :: String.t()
   def label(:none), do: "none"
+  def label(:dual), do: "dual"
   def label(:disk), do: "disk"
 
   # ── boot validation ─────────────────────────────────────────────────────

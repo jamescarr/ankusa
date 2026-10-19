@@ -377,6 +377,37 @@ defmodule Ankusa.Config do
               breaker_failure_rate: 0.5,
               breaker_open_ms: 5_000
             },
+            # The intake log behind `wal: :dual` (`Ankusa.Intake`, ADR 0002): an
+            # acked hook is also confirmed in a replicated broker log. Read only
+            # under `wal: :dual`, where `type` and `node_id` are required;
+            # `node_id` is the node's stable identity, the same on a replacement.
+            # `type` is `:kafka`, `:jetstream` or `:memory` (the test double). `topic`
+            # defaults to `ankusa.intake.<fleet>`. `kafka`/`jetstream`/`memory`
+            # are the adapter's own options (a keyword list), passed through.
+            # `publish_timeout_ms` is the one attempt's deadline; a record the
+            # reconciler has not completed within `reconcile_deadline_ms` is stuck
+            # and releases its fleet dedupe claim. The pending set is bounded by
+            # `pending.max_records` and `pending.max_bytes`; `max_record_bytes`
+            # bounds one record and must fit `max_body_bytes` plus its framing.
+            intake: %{
+              type: nil,
+              node_id: nil,
+              fleet: "default",
+              topic: nil,
+              kafka: [],
+              jetstream: [],
+              memory: [],
+              publish_timeout_ms: 2_000,
+              reconcile_deadline_ms: 20_000,
+              breaker_failures: 3,
+              probe_ms: 1_000,
+              retry_after_s: 2,
+              offset_flush_ms: 1_000,
+              pending: %{max_records: 50_000, max_bytes: 268_435_456},
+              max_record_bytes: 10_000_000,
+              recover_on_boot: true,
+              verify_topic: true
+            },
             # tenants this node's store will know (`Ankusa.Queue.Tenants` hands
             # each one a dense ordinal at first sight and never takes it back): a
             # hook of the one past it is refused with 503 `tenant_limit`
@@ -519,7 +550,8 @@ defmodule Ankusa.Config do
           :audit,
           :tenants,
           :egress,
-          :secrets
+          :secrets,
+          :intake
         ] ->
           put_section(acc, k, v)
 
@@ -535,6 +567,7 @@ defmodule Ankusa.Config do
     |> validate_egress!()
     |> normalize_listeners!()
     |> validate_ranges!()
+    |> validate_intake!()
     |> normalize_store_headers!()
     |> normalize_backup!()
     |> validate_secrets!()
@@ -844,6 +877,129 @@ defmodule Ankusa.Config do
     :ok
   end
 
+  @intake_id ~r/\A[a-z0-9._-]{1,64}\z/
+
+  # The batcher answers a record 503 after this long (`Ankusa.Edge.Batcher.commit/4`'s
+  # default): one intake attempt must end before the provider's answer is due.
+  @batcher_record_deadline_ms 15_000
+
+  # The intake block: every range is checked whatever `wal` is; the cross-key
+  # rules (ADR 0002, section 11) only under `wal: :dual`, which is where the
+  # block is read.
+  defp validate_intake!(config) do
+    for {path, key, lo, hi} <- [
+          {[:intake, :publish_timeout_ms], "intake.publish_timeout_ms", 100, 60_000},
+          {[:intake, :reconcile_deadline_ms], "intake.reconcile_deadline_ms", 1_000, 600_000},
+          {[:intake, :breaker_failures], "intake.breaker_failures", 1, 100},
+          {[:intake, :probe_ms], "intake.probe_ms", 100, 60_000},
+          {[:intake, :retry_after_s], "intake.retry_after_s", 1, 300},
+          {[:intake, :offset_flush_ms], "intake.offset_flush_ms", 100, 60_000},
+          {[:intake, :pending, :max_records], "intake.pending.max_records", 1, 10_000_000}
+        ] do
+      check!(
+        config,
+        path,
+        key,
+        "an integer from #{lo} to #{hi}",
+        &(is_integer(&1) and &1 in lo..hi)
+      )
+    end
+
+    for {path, key} <- [
+          {[:intake, :pending, :max_bytes], "intake.pending.max_bytes"},
+          {[:intake, :max_record_bytes], "intake.max_record_bytes"}
+        ] do
+      check!(config, path, key, "a positive integer", &(is_integer(&1) and &1 >= 1))
+    end
+
+    for {path, key} <- [
+          {[:intake, :recover_on_boot], "intake.recover_on_boot"},
+          {[:intake, :verify_topic], "intake.verify_topic"}
+        ] do
+      check!(config, path, key, "true or false", &is_boolean/1)
+    end
+
+    check!(
+      config,
+      [:intake, :type],
+      "intake.type",
+      "nil, :kafka, :jetstream or :memory",
+      &(&1 in [nil, :kafka, :jetstream, :memory])
+    )
+
+    check!(
+      config,
+      [:intake, :node_id],
+      "intake.node_id",
+      "nil or a string of [a-z0-9._-], 1 to 64 characters",
+      &(&1 == nil or (is_binary(&1) and Regex.match?(@intake_id, &1)))
+    )
+
+    check!(
+      config,
+      [:intake, :fleet],
+      "intake.fleet",
+      "a string of [a-z0-9._-], 1 to 64 characters",
+      &(is_binary(&1) and Regex.match?(@intake_id, &1))
+    )
+
+    check!(
+      config,
+      [:intake, :topic],
+      "intake.topic",
+      "nil or a non-empty string",
+      &(&1 == nil or (is_binary(&1) and &1 != ""))
+    )
+
+    if config.wal == :dual, do: validate_dual!(config)
+    config
+  end
+
+  defp validate_dual!(config) do
+    intake = config.intake
+
+    if intake.type == nil,
+      do: raise(ArgumentError, "wal: :dual needs intake.type (:kafka or :jetstream)")
+
+    if intake.node_id == nil,
+      do: raise(ArgumentError, "wal: :dual needs intake.node_id, stable across a replacement")
+
+    unless config.backup.enabled and is_integer(config.backup.max_age_ms) do
+      raise ArgumentError,
+            "wal: :dual needs backup.enabled and backup.max_age_ms: " <>
+              "the backup is what covers a backlog older than the log's retention"
+    end
+
+    unless :edge in config.roles do
+      raise ArgumentError, "wal: :dual requires the :edge role"
+    end
+
+    check!(
+      config,
+      [:intake, :publish_timeout_ms],
+      "intake.publish_timeout_ms",
+      "less than the batcher's record deadline (#{@batcher_record_deadline_ms} ms)",
+      &(&1 < @batcher_record_deadline_ms)
+    )
+
+    if config.dedupe.scope == :fleet and
+         intake.reconcile_deadline_ms >= config.fleet.pending_ttl_ms do
+      raise ArgumentError,
+            "intake.reconcile_deadline_ms (#{intake.reconcile_deadline_ms}) must be less than " <>
+              "fleet.pending_ttl_ms (#{config.fleet.pending_ttl_ms}) under dedupe.scope: :fleet"
+    end
+
+    floor = config.max_body_bytes + 65_536
+
+    if intake.max_record_bytes < floor do
+      raise ArgumentError,
+            "intake.max_record_bytes (#{intake.max_record_bytes}) must be at least " <>
+              "max_body_bytes + 65536 (#{floor}), so a body the node accepts always fits"
+    end
+
+    :ok
+  end
+
   defp check!(config, path, key, constraint, valid?) do
     value = get_in(config, Enum.map(path, &Access.key/1))
 
@@ -908,6 +1064,7 @@ defmodule Ankusa.Config do
   end
 
   defp normalize_wal(%__MODULE__{wal: :disk} = config), do: config
+  defp normalize_wal(%__MODULE__{wal: :dual} = config), do: config
 
   defp normalize_wal(%__MODULE__{wal: {Ankusa.WAL.DiskLog, _}}) do
     raise ArgumentError,
@@ -915,7 +1072,7 @@ defmodule Ankusa.Config do
   end
 
   defp normalize_wal(%__MODULE__{wal: other}) do
-    raise ArgumentError, "wal must be :disk or :none, got #{inspect(other)}"
+    raise ArgumentError, "wal must be :disk, :dual or :none, got #{inspect(other)}"
   end
 
   # `dispatch.tenants` is a map of maps: a single-level merge would let
@@ -925,8 +1082,37 @@ defmodule Ankusa.Config do
     %{acc | dispatch: %{merged | tenants: merge_tenants(acc.dispatch.tenants, merged.tenants)}}
   end
 
+  # `intake.pending` is one level down, and the adapter blocks are the
+  # adapter's own vocabulary: a keyword list, taken whole.
+  defp put_section(acc, :intake, v) do
+    incoming = section_map(v, "intake")
+    {pending, incoming} = Map.pop(incoming, :pending)
+
+    {adapters, incoming} = Map.split(incoming, [:kafka, :jetstream, :memory])
+
+    adapters =
+      Map.new(adapters, fn {k, opts} -> {k, adapter_opts(opts, "intake.#{k}")} end)
+
+    merged = acc.intake |> then(&merge_known!(&1, incoming, "intake")) |> Map.merge(adapters)
+
+    pending =
+      if pending == nil,
+        do: merged.pending,
+        else: merge_known!(merged.pending, pending, "intake.pending")
+
+    %{acc | intake: %{merged | pending: pending}}
+  end
+
   defp put_section(acc, k, v) do
     Map.put(acc, k, merge_known!(Map.get(acc, k), v, to_string(k)))
+  end
+
+  defp adapter_opts(opts, key) do
+    cond do
+      is_map(opts) -> Map.to_list(opts)
+      is_list(opts) and Keyword.keyword?(opts) -> opts
+      true -> raise ArgumentError, "Ankusa.Config #{key} must be a map or keyword list"
+    end
   end
 
   defp merge_tenants(defaults, %{} = incoming) do

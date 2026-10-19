@@ -386,8 +386,86 @@ defmodule Ankusa.Metrics do
       )
     ]
 
-    (definitions ++ gauges(own) ++ read_gauges(own) ++ tenant_gauges(own, policy.detail))
+    (definitions ++
+       gauges(own) ++
+       intake_metrics(own) ++ read_gauges(own) ++ tenant_gauges(own, policy.detail))
     |> Enum.map(&police(&1, instance, policy))
+  end
+
+  # `wal: :dual` (ADR 0002): publish latency by outcome, failures by class, what
+  # the reconciler completed and refused, replay, and the state gauges
+  # `Ankusa.Metrics.Gauges` samples. Every label is a fixed set; no series is
+  # per tenant. No event, no series: the set is empty under `disk` and `none`.
+  defp intake_metrics(own) do
+    [
+      distribution(
+        "ankusa.intake.publish.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :intake, :publish],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance, :outcome],
+          reporter_options: [buckets: @seconds_buckets]
+        )
+      ),
+      counter(
+        "ankusa.intake.failures.total",
+        scoped(own, event_name: [:ankusa, :intake, :failure], tags: [:instance, :class])
+      ),
+      sum(
+        "ankusa.intake.reconciled.total",
+        scoped(own,
+          event_name: [:ankusa, :intake, :reconciled],
+          measurement: :count,
+          tags: [:instance, :half]
+        )
+      ),
+      sum(
+        "ankusa.intake.refused.total",
+        scoped(own,
+          event_name: [:ankusa, :intake, :refused],
+          measurement: :count,
+          tags: [:instance, :reason]
+        )
+      ),
+      sum(
+        "ankusa.intake.replay.total",
+        scoped(own,
+          event_name: [:ankusa, :intake, :replay],
+          measurement: :count,
+          tags: [:instance, :result]
+        )
+      ),
+      distribution(
+        "ankusa.intake.replay.duration.seconds",
+        scoped(own,
+          event_name: [:ankusa, :intake, :replay_done],
+          measurement: &duration_seconds/1,
+          unit: :second,
+          tags: [:instance],
+          reporter_options: [buckets: @seconds_buckets]
+        )
+      )
+    ] ++
+      for {name, measurement, unit} <- [
+            {"ankusa.intake.pending.records", :pending_records, :unit},
+            {"ankusa.intake.pending.bytes", :pending_bytes, :byte},
+            {"ankusa.intake.reconcile.oldest.age.seconds", :reconcile_oldest_age_seconds,
+             :second},
+            {"ankusa.intake.reconcile.stuck", :reconcile_stuck, :unit},
+            {"ankusa.intake.offset.lag.seconds", :offset_lag_seconds, :second},
+            {"ankusa.intake.ready", :ready, :unit}
+          ] do
+        last_value(
+          name,
+          scoped(own,
+            event_name: [:ankusa, :intake, :state],
+            measurement: measurement,
+            unit: unit,
+            tags: [:instance]
+          )
+        )
+      end
   end
 
   # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue

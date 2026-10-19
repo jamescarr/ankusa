@@ -67,10 +67,23 @@ defmodule Ankusa.Admin.Redact do
 
     # `secrets` holds the key-encryption keys: closed mode shows `kek` and
     # `kek_previous` as `[REDACTED]` and a provider callback as `Mod.fun/arity`.
+    # `intake` is open for its own scalar keys, but its adapter blocks
+    # (`kafka`, `jetstream`, `memory`: brokers, SASL, TLS key material, credentials)
+    # are an adapter's vocabulary, so they go through closed mode.
+    {adapters, plain_intake} = Map.split(fields.intake, [:kafka, :jetstream, :memory])
+
+    intake =
+      plain_intake
+      |> open_map()
+      |> Map.merge(
+        Map.new(adapters, fn {k, opts} -> {to_string(k), closed(to_string(k), opts)} end)
+      )
+
     fields
-    |> Map.delete(:secrets)
+    |> Map.drop([:secrets, :intake])
     |> open_map()
     |> Map.put("secrets", closed("secrets", fields.secrets))
+    |> Map.put("intake", intake)
   end
 
   # The control planes' `auth` blocks (`Ankusa.Admin.Auth`): a token entry keeps

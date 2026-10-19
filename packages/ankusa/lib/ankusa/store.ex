@@ -245,6 +245,8 @@ defmodule Ankusa.Store do
     end
   end
 
+  defp durability(%Config{wal: :dual} = config), do: Ankusa.Intake.durability(config)
+
   defp durability(%Config{backup: %{enabled: true, interval_ms: interval}} = config) do
     {mod, _opts, _prefix} = Ankusa.BlobStore.resolve_config(config, :backup)
 
@@ -262,11 +264,25 @@ defmodule Ankusa.Store do
   defp durability(_config), do: "Durable to power loss on THIS host only."
 
   defp after_open(config, %{origin: origin, migrations: migrations}, path) do
+    note_origin(config, origin)
+
     with :ok <- run_migration(config, migrations),
          :ok <- mint_incarnation(config.instance, origin) do
       reconcile_archive(config, origin, path)
     end
   end
+
+  # How the directory came to hold a database, for boot recovery of `wal: :dual`
+  # (`Ankusa.Intake.Recovery`): a restored store whose log starts above its
+  # offset refuses, an existing one only warns.
+  defp note_origin(%Config{wal: :dual, instance: instance}, origin) do
+    if Ankusa.Intake.Pending.exists?(instance),
+      do: Ankusa.Intake.Pending.put_meta(Ankusa.Intake.Pending.table(instance), :origin, origin)
+
+    :ok
+  end
+
+  defp note_origin(_config, _origin), do: :ok
 
   # A store that came back from a backup is a new incarnation of the instance:
   # it re-issues audit sequence numbers the lost one already published, so the
