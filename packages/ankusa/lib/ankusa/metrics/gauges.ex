@@ -73,6 +73,7 @@ defmodule Ankusa.Metrics.Gauges do
 
     if store?, do: probe(instance, :store, &store/1)
     if store?, do: probe(instance, :queue, &queue/1)
+    if store?, do: probe(instance, :audit, &audit/1)
     if Config.role?(config, :edge), do: probe(instance, :quarantine, &quarantine/1)
     probe(instance, :disk, &disk(&1, config))
     probe(instance, :sink_http, &sink_http/1)
@@ -126,6 +127,13 @@ defmodule Ankusa.Metrics.Gauges do
     end
   end
 
+  # The audit trail's size and the lifecycle outbox's lag, from counters
+  # (`Ankusa.Audit.stats/1`, zeros where no trail runs).
+  defp audit(instance) do
+    %{rows: rows, bytes: bytes, outbox_backlog: backlog} = Ankusa.Audit.stats(instance)
+    emit(instance, :audit, %{rows: rows, bytes: bytes, outbox_backlog: backlog || 0})
+  end
+
   defp queue(instance) do
     now = System.system_time(:millisecond)
 
@@ -139,6 +147,8 @@ defmodule Ankusa.Metrics.Gauges do
         dead: max(counters.dead, 0),
         archive_pending: max(counters.archive_pending, 0),
         dedupe: max(counters.dedupe, 0),
+        dead_bytes: max(counters.dead_bytes, 0),
+        dlq_full: if(Ankusa.Queue.DlqReaper.full?(instance), do: 1, else: 0),
         tenants: tenants,
         oldest_due_age_ms: if(oldest, do: max(0, now - oldest), else: 0)
       })

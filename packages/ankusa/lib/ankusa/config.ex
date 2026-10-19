@@ -113,6 +113,19 @@ defmodule Ankusa.Config do
                 }
               }
             },
+            # The dead-letter queue's ceilings (`Ankusa.Queue.DlqReaper`): a dead
+            # row is evicted once it is older than `retention_days`, and while the
+            # DLQ holds more than `max_rows` rows or `max_bytes` stored bytes, but
+            # only once its hook is archived and the catalogue can find it. A DLQ
+            # over a ceiling with nothing archived refuses new hooks with `503
+            # dlq_full` instead of deleting an acked one. Integers >= 1.
+            queue: %{dlq: %{retention_days: 30, max_rows: 10_000_000, max_bytes: 53_687_091_200}},
+            # How long the archive keeps a segment object (and its index) through
+            # the blob store's `delete/3`: `nil` keeps them (an S3/GCS bucket can
+            # take a lifecycle rule instead), an integer >= 1 deletes the object
+            # together with its catalogue row once the newest hook in it is that
+            # many days old. At most `storage.catalogue_retention_days`.
+            archive: %{retention_days: nil},
             # segment compaction
             storage: %{
               blob_store: {Ankusa.BlobStore.LocalFS, []},
@@ -122,7 +135,12 @@ defmodule Ankusa.Config do
               codec: {Ankusa.Codec.Raw, []},
               roll_bytes: 16 * 1024 * 1024,
               roll_ms: 30_000,
-              interval_ms: 1_000
+              interval_ms: 1_000,
+              # How long the archive catalogue keeps a segment's row (`?S`) after
+              # the newest hook in it, and a 0.3 import's `?L` row after its hook:
+              # `Storage.fetch/2` and an archive replay stop finding a hook past it.
+              # An integer >= 1.
+              catalogue_retention_days: 365
             },
             # claim check: payloads too large to ride inline in a queue message
             claim_check: %{
@@ -413,17 +431,29 @@ defmodule Ankusa.Config do
             # hook of the one past it is refused with 503 `tenant_limit`
             tenants: %{max: 1_000_000},
             # the quarantine pen (`Ankusa.Edge.Quarantine`): one token bucket per
-            # source (`burst` tokens, `rate` refilled per second) and a cap on the
-            # pen's total bytes. A full pen refuses with 503, it never evicts.
-            quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824},
+            # source (`burst` tokens, `rate` refilled per second), a cap on the
+            # pen's total bytes (a full pen refuses with 503, it never evicts a
+            # held hook for room) and `retention_days`: an entry held longer is
+            # deleted by an hourly sweep, unless a live replay job still needs it.
+            quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824, retention_days: 14},
             # where lifecycle events (a source or route created/updated/deleted,
             # as CloudEvents) are delivered: `[{module, opts}]` implementing
             # Ankusa.Sink, run through the WAL and dispatch like a hook. `[]`
             # means lifecycle events are off. See `Ankusa.Lifecycle`.
             lifecycle: %{sinks: []},
-            # the audit trail (`Ankusa.Audit`): rows older than this many days are
-            # deleted by an hourly sweep
-            audit: %{retention_days: 365},
+            # the audit trail (`Ankusa.Audit`): rows older than `retention_days` are
+            # deleted by an hourly sweep, and the trail is bounded in `max_rows` and
+            # `max_bytes` (oldest first, never past the lifecycle outbox's cursor).
+            # A trail that is still over a ceiling, or a lifecycle outbox holding
+            # more than `outbox_max_backlog` events no sink has confirmed, refuses
+            # new control-plane mutations with `503 audit_backlog` instead of
+            # dropping an unpublished row. Integers >= 1.
+            audit: %{
+              retention_days: 365,
+              max_rows: 10_000_000,
+              max_bytes: 5_368_709_120,
+              outbox_max_backlog: 100_000
+            },
             # where outbound HTTP may go (`Ankusa.HttpClient.Egress`): every
             # `Ankusa.Sink.Http` delivery — a source's or a lifecycle sink's — is
             # checked against it on every attempt, and a denied target is a
@@ -546,6 +576,8 @@ defmodule Ankusa.Config do
           :dedupe,
           :fleet,
           :quarantine,
+          :queue,
+          :archive,
           :lifecycle,
           :audit,
           :tenants,
@@ -744,6 +776,40 @@ defmodule Ankusa.Config do
 
   @key_prefix ~r"\A([A-Za-z0-9._-]+/)+\z"
 
+  # The retention windows and ceilings of the DLQ, the pen, the catalogue and the
+  # audit trail (DUR-2.b).
+  defp validate_retention!(config) do
+    for {path, key} <- [
+          {[:queue, :dlq, :retention_days], "queue.dlq.retention_days"},
+          {[:queue, :dlq, :max_rows], "queue.dlq.max_rows"},
+          {[:queue, :dlq, :max_bytes], "queue.dlq.max_bytes"},
+          {[:storage, :catalogue_retention_days], "storage.catalogue_retention_days"},
+          {[:quarantine, :retention_days], "quarantine.retention_days"},
+          {[:audit, :max_rows], "audit.max_rows"},
+          {[:audit, :max_bytes], "audit.max_bytes"},
+          {[:audit, :outbox_max_backlog], "audit.outbox_max_backlog"}
+        ] do
+      check!(config, path, key, "an integer >= 1", &(is_integer(&1) and &1 >= 1))
+    end
+
+    check!(
+      config,
+      [:archive, :retention_days],
+      "archive.retention_days",
+      "nil or an integer >= 1",
+      &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    if config.archive.retention_days != nil and
+         config.archive.retention_days > config.storage.catalogue_retention_days do
+      raise ArgumentError,
+            "archive.retention_days (#{config.archive.retention_days}) must not exceed " <>
+              "storage.catalogue_retention_days (#{config.storage.catalogue_retention_days}): " <>
+              "a segment object is deleted together with its catalogue row, so the " <>
+              "catalogue would forget segments it never deleted"
+    end
+  end
+
   defp validate_ranges!(config) do
     for {path, key} <- @ports do
       check!(
@@ -802,6 +868,8 @@ defmodule Ankusa.Config do
       "an integer >= 1",
       &(is_integer(&1) and &1 >= 1)
     )
+
+    validate_retention!(config)
 
     for key <- [:max_entries, :max_entries_per_tenant] do
       check!(
@@ -1101,6 +1169,11 @@ defmodule Ankusa.Config do
         else: merge_known!(merged.pending, pending, "intake.pending")
 
     %{acc | intake: %{merged | pending: pending}}
+  end
+
+  defp put_section(acc, :queue, v) do
+    merged = merge_known!(acc.queue, v, "queue")
+    %{acc | queue: %{merged | dlq: merge_known!(acc.queue.dlq, merged.dlq, "queue.dlq")}}
   end
 
   defp put_section(acc, k, v) do

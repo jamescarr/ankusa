@@ -73,7 +73,8 @@ defmodule AnkusaServer.ConfigTest do
       assert %{mode: :none, allow_insecure: false, tokens: [], mtls: %{subject_map: %{}}} = auth
     end
 
-    assert config.quarantine == %{burst: 100, rate: 20, max_bytes: 1_073_741_824}
+    assert config.quarantine ==
+             %{burst: 100, rate: 20, max_bytes: 1_073_741_824, retention_days: 14}
 
     assert config.store_headers == Ankusa.Edge.StoredHeaders.default()
     assert config.route_resolver == {Ankusa.RouteResolver.Path, [prefix: ["webhooks"]]}
@@ -2060,7 +2061,7 @@ defmodule AnkusaServer.ConfigTest do
     path = tmp_config("quarantine: {burst: 5, rate: 0.5, max_bytes: 1024}\n")
 
     assert Config.load!(path: path, env: %{}).config.quarantine ==
-             %{burst: 5, rate: 0.5, max_bytes: 1024}
+             %{burst: 5, rate: 0.5, max_bytes: 1024, retention_days: 14}
   end
 
   test "a bad quarantine key names it, and core's ranges come back as core's message" do

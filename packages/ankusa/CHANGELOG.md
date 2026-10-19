@@ -32,6 +32,17 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   Kafka adapter, the YAML keys, the fleet drill and the architecture, storage and
   deployment docs are DUR-1.b.b. `bench/intake_bench.exs` is part of `mise run
   bench:gate`.
+- **DLQ, quarantine and catalogue retention; audit and lifecycle-outbox ceilings
+  (DUR-2.b).** `Ankusa.Queue.DlqReaper` evicts dead rows past
+  `queue.dlq.retention_days` and over `max_rows`/`max_bytes`, only while their hook
+  is archived and findable; otherwise ingest answers `503 dlq_full`.
+  `DELETE /v1/dlq` evicts on demand. `quarantine.retention_days`,
+  `storage.catalogue_retention_days` and `archive.retention_days` bound the pen and
+  the archive catalogue; `audit.max_rows`, `audit.max_bytes` and
+  `audit.outbox_max_backlog` bound the trail and refuse new changes with
+  `503 audit_backlog`. Store format 5 adds the `dead_bytes` counter (migration
+  `4 -> 5`, fixture `store-v5`): a node running format 5 cannot be rolled back to an
+  image that writes format 4. See `docs/storage.md`.
 
 - **Dedupe ceilings, the dedupe sweeper and audit retention behind the outbox
   (DUR-2.a).** `dedupe.max_entries` (default 100 000 000) and

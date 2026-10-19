@@ -107,6 +107,35 @@ defmodule Ankusa.Replay do
     end
   end
 
+  @doc """
+  The earliest `key` (`:since` of a quarantine job, `:from` of an archive job)
+  among the live (`running` or `paused`) jobs of `kind`: what retention must not
+  delete past, because a job still reads from there. A job without the key needs
+  everything (`0`). `:infinity` when this node runs no replayer, so no job can
+  exist; `{:error, :store_unavailable}` when the replayer cannot say, and
+  retention then deletes nothing.
+  """
+  @spec live_floor(atom(), :quarantine | :archive, :since | :from) ::
+          {:ok, non_neg_integer() | :infinity} | {:error, :store_unavailable}
+  def live_floor(instance, kind, key) do
+    case Ankusa.whereis(instance, :replayer) do
+      nil ->
+        {:ok, :infinity}
+
+      _pid ->
+        with {:ok, jobs} <- list(instance) do
+          floor =
+            for %{kind: ^kind, state: state, filter: filter} <- jobs,
+                state in [:running, :paused],
+                reduce: :infinity do
+              floor -> min(floor, Map.get(filter, key) || 0)
+            end
+
+          {:ok, floor}
+        end
+    end
+  end
+
   @doc "One job by id; a job outside `tenants` (see `list/2`) is `:not_found`."
   @spec get(atom(), String.t(), [String.t()] | nil) ::
           {:ok, map()} | {:error, :not_found | :store_unavailable}

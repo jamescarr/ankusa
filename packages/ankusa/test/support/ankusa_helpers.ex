@@ -217,12 +217,17 @@ defmodule Ankusa.TestHelpers do
       {:put, :index, Ankusa.Store.Keys.dead(at, seq, sink),
        :erlang.term_to_binary({source_id, id, ord})},
       {:put, :index, Ankusa.Store.Keys.dead_by_tenant(ord, at, seq, sink), <<>>}
-    ] ++ Ankusa.Queue.Deliveries.Counters.ops([{ord, :dead, 1}, {ord, :bytes, size}])
+    ] ++
+      Ankusa.Queue.Deliveries.Counters.ops([
+        {ord, :dead, 1},
+        {ord, :bytes, size},
+        {ord, :dead_bytes, size}
+      ])
   end
 
   @doc """
   What the queue counters must be, folded from the index families: `%{ord =>
-  %{pending, scheduled, inflight, dead, bytes, archive_pending, dedupe}}, ordinal 0
+  %{pending, scheduled, inflight, dead, bytes, archive_pending, dedupe, dead_bytes}}, ordinal 0
   the sum of the others. Only tenants with a non-zero counter appear.
   """
   def folded_counters(instance) do
@@ -236,7 +241,8 @@ defmodule Ankusa.TestHelpers do
       dead: 0,
       bytes: 0,
       archive_pending: 0,
-      dedupe: 0
+      dedupe: 0,
+      dead_bytes: 0
     }
 
     bump = fn acc, ord, field, n ->
@@ -280,7 +286,11 @@ defmodule Ankusa.TestHelpers do
           end
 
         _ = at
-        acc |> bump.(ord, :dead, 1) |> bump.(ord, :bytes, size)
+
+        acc
+        |> bump.(ord, :dead, 1)
+        |> bump.(ord, :bytes, size)
+        |> bump.(ord, :dead_bytes, size)
       end)
 
     acc =
@@ -313,7 +323,8 @@ defmodule Ankusa.TestHelpers do
       dead: 0,
       bytes: 0,
       archive_pending: 0,
-      dedupe: 0
+      dedupe: 0,
+      dead_bytes: 0
     }
 
     for ord <- 0..(next - 1), reduce: %{} do

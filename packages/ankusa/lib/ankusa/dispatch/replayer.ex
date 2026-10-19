@@ -216,6 +216,11 @@ defmodule Ankusa.Dispatch.Replayer do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
+  # Runs `fun` in this process, between two replay steps: the DLQ reaper's
+  # eviction batches go through here, so a step cannot revive a dead row an
+  # eviction is deleting (`Ankusa.Queue.DlqReaper`).
+  def handle_call({:exclusive, fun}, _from, state), do: {:reply, fun.(), state}
+
   def handle_call({:start, _spec, _context}, _from, %{loaded?: false} = state),
     do: {:reply, {:error, :store_unavailable}, state}
 

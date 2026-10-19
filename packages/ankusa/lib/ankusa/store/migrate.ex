@@ -67,7 +67,8 @@ defmodule Ankusa.Store.Migrate do
   @migrations [
     {1, 2, Ankusa.Store.Migrations.AuditTrail},
     {2, 3, Ankusa.Store.Migrations.TenantKeys},
-    {3, 4, Ankusa.Store.Migrations.DedupeCounters}
+    {3, 4, Ankusa.Store.Migrations.DedupeCounters},
+    {4, 5, Ankusa.Store.Migrations.DlqBytes}
   ]
 
   @type migration :: {pos_integer(), pos_integer(), module()}

@@ -886,7 +886,7 @@ sink's deliveries, the log's records):
 `bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
 by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:
 `Ankusa.Intake.Memory` confirms after 5 ms, one client measures the ack p50 over
-200 requests, 128 clients measure throughput over 6 000. It passes only if the
+200 requests, 512 clients measure throughput over 6 000 (the best of three rounds). It passes only if the
 dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the parallel commit costs the
 larger of fsync and confirm, not their sum) and the dual throughput is at least
 0.8 x the disk's.
