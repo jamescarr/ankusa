@@ -855,7 +855,7 @@ pipeline, so run it on your own hardware rather than reading a figure here.
 
 ### Dual commit: `wal.type: dual`
 
-[ADR 0002](adr/0002-dual-commit-intake-log.md) lists every case; each half of the
+[ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md) lists every case; each half of the
 commit is driven alone with `Ankusa.Intake.Memory` (a file-backed log with
 injectable latency, per-call failures, a lost ack, a held publish) or by taking the
 store down, and asserts on what a consumer sees (the `201`, the stored hooks, the

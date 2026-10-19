@@ -14,7 +14,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 ### Added
 
 - **`wal: :dual`: the ack waits for a replicated intake log too (DUR-1.b.a,
-  [ADR 0002](../../docs/adr/0002-dual-commit-intake-log.md)).** The core of the
+  [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** The core of the
   dual commit: the `Ankusa.Intake` behaviour and `Ankusa.Intake.Memory` (a
   file-backed test double with fault injection), `Queue.Writer` running the synced
   local write and the confirmed publish **in parallel** (both required for the
