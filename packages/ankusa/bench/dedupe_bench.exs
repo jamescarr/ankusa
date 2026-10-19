@@ -1,29 +1,32 @@
 # What the index family's bloom filter buys the ingest dedupe lookup (DUR-3, Proof).
 #
 #     MIX_ENV=test mix run bench/dedupe_bench.exs
-#     KEYS=100000000 CACHE_BYTES=2147483648 MIX_ENV=test mix run bench/dedupe_bench.exs
+#     KEYS=100000000 CACHE_BYTES=1073741824 MIX_ENV=test mix run bench/dedupe_bench.exs
 #
 # The ack path asks the `index` family for a batch of dedupe keys it has never
 # seen (`Store.multi_get/3` in `Queue.Writer.dedupe_check/5`) and then commits
 # them, so the cost of a *miss* in a family holding KEYS dedupe keys is the
-# commit's. Three runs against stores filled with KEYS keys (each a `?u` key and
+# commit's. Four runs against stores filled with KEYS keys (each a `?u` key and
 # its `?e` expiry key, random like a provider's event ids), every sample a batch
 # of fresh keys looked up and then committed with `sync: true`:
 #
 #   before        the settings before DUR-3: no bloom filter, no limit on open files
+#   before_cache  the same store reopened with `CACHE_BYTES` of block cache
 #   after         the new defaults on a store whose files carry the filters
-#   after_cache   the same store with `CACHE_BYTES` of block cache: the index and
-#                 filter blocks live in the cache (`cache_index_and_filter_blocks`),
-#                 so a store this size wants a cache that can hold them
+#   after_cache   the same store reopened with `CACHE_BYTES` of block cache: the
+#                 index and filter blocks live in the cache
+#                 (`cache_index_and_filter_blocks`), so a store this size wants a
+#                 cache that can hold them
 #
 # A filter exists only in files written after it was turned on, so `before` and
-# `after` each fill their own store (and the first is deleted before the second
-# is filled). Prints one JSON line per run and a summary. Environment:
+# `after` each fill their own store (the first is deleted before the second is
+# filled). Prints one JSON line per run and a summary comparing each pair at the
+# same block cache. Environment:
 #
 #   KEYS          dedupe keys in the store (default 1_000_000; the proof run is 100_000_000)
 #   SAMPLES       measured batches per run (default 2_000)
 #   BATCH         keys per batch (default 256, the batcher's `max_batch`)
-#   CACHE_BYTES   block cache of `after_cache` (default 1 GiB)
+#   CACHE_BYTES   block cache of `before_cache` and `after_cache` (default 1 GiB)
 #   BENCH_DIR     where the stores live (default the system temp dir)
 #
 # The files stay in the OS page cache on a machine with the RAM for them: the
@@ -53,13 +56,16 @@ defmodule Bench.Dedupe do
   def open(label, rocksdb, root) do
     dir = Path.join(root, "ankusa_dedupe_bench_#{label}_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
-    {open_at(label, dir, rocksdb), dir}
+    instance = :"dedupe_bench_#{label}_#{System.unique_integer([:positive])}"
+    start(instance, dir, rocksdb)
+    {instance, dir}
   end
 
-  @doc "Opens (or reopens) the store in `dir` with `rocksdb` settings: the instance."
-  def open_at(label, dir, rocksdb) do
-    instance = :"dedupe_bench_#{label}_#{System.unique_integer([:positive])}"
-
+  @doc """
+  Starts the store of `instance` in `dir` with `rocksdb` settings. A reopen
+  uses the instance it was filled under: the store's path is under its name.
+  """
+  def start(instance, dir, rocksdb) do
     config =
       Ankusa.Config.new(
         instance: instance,
@@ -218,12 +224,19 @@ cache_bytes = Dedupe.env_int("CACHE_BYTES", 1_073_741_824)
 root = System.get_env("BENCH_DIR") || System.tmp_dir!()
 
 defaults = Ankusa.Config.new().queue.rocksdb
+cache = %{block_cache_bytes: cache_bytes}
 
 IO.puts(:stderr, "before: filling #{keys} keys without a bloom filter")
-{instance, dir} = Dedupe.open("before", %{bloom_bits_per_key: 0, max_open_files: -1}, root)
+no_filter = %{bloom_bits_per_key: 0, max_open_files: -1}
+{instance, dir} = Dedupe.open("before", no_filter, root)
 Dedupe.fill(instance, keys)
 before = Dedupe.measure(instance, samples, batch)
 Dedupe.line("before", keys, batch, before, Dedupe.sst_bytes(instance))
+Dedupe.close(instance)
+
+Dedupe.start(instance, dir, Map.merge(no_filter, cache))
+before_cache = Dedupe.measure(instance, samples, batch)
+Dedupe.line("before_cache", keys, batch, before_cache, Dedupe.sst_bytes(instance))
 Dedupe.close(instance)
 File.rm_rf!(dir)
 
@@ -234,12 +247,11 @@ IO.puts(
 
 {instance, dir} = Dedupe.open("after", %{}, root)
 Dedupe.fill(instance, keys)
-bytes = Dedupe.sst_bytes(instance)
 after_default = Dedupe.measure(instance, samples, batch)
-Dedupe.line("after", keys, batch, after_default, bytes)
+Dedupe.line("after", keys, batch, after_default, Dedupe.sst_bytes(instance))
 Dedupe.close(instance)
 
-instance = Dedupe.open_at("after_cache", dir, %{block_cache_bytes: cache_bytes})
+Dedupe.start(instance, dir, cache)
 after_cache = Dedupe.measure(instance, samples, batch)
 Dedupe.line("after_cache", keys, batch, after_cache, Dedupe.sst_bytes(instance))
 Dedupe.close(instance)
@@ -249,11 +261,12 @@ change = fn new, old -> Float.round((new - old) / old * 100, 1) end
 
 IO.puts(
   JSON.encode!(%{
-    summary: "commit p99 change vs. before (negative = faster)",
+    summary: "p99 change vs. before at the same block cache (negative = faster)",
     keys: keys,
-    after_pct: change.(after_default.commit.p99_ms, before.commit.p99_ms),
-    after_cache_pct: change.(after_cache.commit.p99_ms, before.commit.p99_ms),
-    multi_get_after_pct: change.(after_default.multi_get.p99_ms, before.multi_get.p99_ms),
-    multi_get_after_cache_pct: change.(after_cache.multi_get.p99_ms, before.multi_get.p99_ms)
+    commit_default_cache_pct: change.(after_default.commit.p99_ms, before.commit.p99_ms),
+    commit_sized_cache_pct: change.(after_cache.commit.p99_ms, before_cache.commit.p99_ms),
+    multi_get_default_cache_pct: change.(after_default.multi_get.p99_ms, before.multi_get.p99_ms),
+    multi_get_sized_cache_pct:
+      change.(after_cache.multi_get.p99_ms, before_cache.multi_get.p99_ms)
   })
 )
