@@ -64,9 +64,13 @@ case "$kind" in
     mix format --check-formatted
     mix compile --warnings-as-errors
     # Static analysis. The credo config is the repo's .credo.exs; dialyzer's PLTs
-    # live under _build (see each mix.exs), which CI caches.
+    # live under _build (see each mix.exs), which CI caches. The shared cache
+    # hands a fresh worktree the toolchain's core PLT, so only this project's
+    # dependency PLT is built here.
     mix credo --strict
+    mix_plt_restore "$pkg"
     mix dialyzer
+    mix_plt_save "$pkg"
     # Plug applications only: the packages that serve HTTP.
     case "$pkg" in
       ankusa | ankusa_server) mix sobelow --exit --skip ;;
