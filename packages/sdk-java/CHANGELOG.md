@@ -9,6 +9,9 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `verification` on parsed headers, decoded messages and received deliveries:
+  how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a
+  node older than the field).
 - `ParsedClaimRef.parse` and `ClaimCheckClient.redeem` accept signed,
   expiring v2 refs
   (`urn:ankusa:claim:v2:<tenant>:<claim_id>:<exp_unix>:<signature>`): the
