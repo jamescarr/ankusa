@@ -317,6 +317,12 @@ defmodule Ankusa.SDK.ConformanceTest do
     with_admin(input, base_url, recorder, &unwrap!(Admin.list_dead_letters(&1, params)))
   end
 
+  defp run("admin_audit_list", test_case, params_by_id, input, base_url, recorder) do
+    params = Map.get(params_by_id, test_case["id"], input["params"])
+
+    with_admin(input, base_url, recorder, &unwrap!(Admin.list_audit(&1, params)))
+  end
+
   defp run("admin_replay_create", _case, _params_by_id, input, base_url, recorder) do
     with_admin(input, base_url, recorder, &unwrap!(Admin.create_replay(&1, input["spec"])))
   end

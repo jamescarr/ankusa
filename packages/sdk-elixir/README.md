@@ -340,6 +340,7 @@ admin = Ankusa.SDK.Admin.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
 {:ok, text} = Ankusa.SDK.Admin.metrics(admin)
 {:ok, %{"total" => total}} = Ankusa.SDK.Admin.list_dead_letters(admin, limit: 10)
 {:ok, _} = Ankusa.SDK.Admin.list_quarantined(admin)
+{:ok, %{"entries" => entries}} = Ankusa.SDK.Admin.list_audit(admin, limit: 10)
 
 # Replay jobs: re-send the dead-letter queue ("dlq"), an archived time window
 # ("archive"), or re-verify held hooks and release those that pass ("quarantine").
