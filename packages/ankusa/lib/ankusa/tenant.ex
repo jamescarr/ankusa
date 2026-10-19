@@ -12,7 +12,7 @@ defmodule Ankusa.Tenant do
 
   `delete/3` writes the job's progress row (`m:erase:<tenant>`, synced) and
   answers; `Ankusa.Tenant.Eraser` runs the job in the background. Its first act
-  is to **close the tenant** (`Ankusa.Tenant.Gate`): from then on the queue
+  is to **close the tenant** (the tenant gate): from then on the queue
   writer answers the tenant's hooks `503 tenant_erasing`, the quarantine pen
   refuses to hold them, and dispatch stops claiming its rows. Then, each stage
   done and recorded before the next:

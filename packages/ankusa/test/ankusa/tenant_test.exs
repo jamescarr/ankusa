@@ -227,8 +227,7 @@ defmodule Ankusa.TenantTest do
           fn {cf, key} -> point.(cf, key) end
         ),
       quarantine:
-        Enum.filter(keys.(:quarantine, & &1), fn <<?s, _at::64, _id::binary>> -> true end)
-        |> Enum.filter(fn key ->
+        Enum.filter(keys.(:quarantine, & &1), fn <<?s, _at::64, _id::binary>> = key ->
           {:ok, value} = Store.get(inst, :quarantine, key)
           :erlang.binary_to_term(value)[:tenant_id] == tenant
         end),
@@ -573,6 +572,7 @@ defmodule Ankusa.TenantTest do
       # Before the job has even resumed, the boot closed the tenant.
       assert {:ok, %{state: :erasing, stage: :queue}} = Tenant.status(inst, "acme")
       assert Gate.closed?(inst, "acme")
+
       assert {:error, :tenant_erasing} =
                Quarantine.put(inst, envelope("acme", "acme.billing"), :bad_signature)
 

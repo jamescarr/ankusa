@@ -5,7 +5,7 @@ defmodule Ankusa.Tenant.Eraser do
   every stage) so a node that is killed resumes them at its next boot.
 
   Started behind the store and the audit trail, before any listener: its `init/1`
-  closes (`Ankusa.Tenant.Gate`) every tenant that has a progress row, so a tenant
+  closes (the tenant gate) every tenant that has a progress row, so a tenant
   whose erase is half done never takes a hook in the window between the node
   accepting requests and the job resuming. The job itself starts a second after
   boot, and a stage that fails because a component it needs has not started yet
