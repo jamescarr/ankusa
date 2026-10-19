@@ -221,6 +221,20 @@ jobs:
           key: mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-${{ hashFiles('examples/*/*/mix.lock') }}
           restore-keys: |
             mix-v5-${{ runner.os }}-${{ runner.arch }}-examples-${{ hashFiles('.mise.toml') }}-
+      # `check:examples` runs `cargo fmt --check && cargo clippy --locked
+      # --all-targets -- -D warnings` for examples/nats-consumer, which
+      # compiles async-nats/tokio/serde from scratch every run (26 s of the
+      # 80 s step; 24–26 s in 439eae5, a69bf9c and d0406db). Same keying as
+      # `sdk-rust`'s target cache: rust's fingerprints are rustc-version
+      # specific, and a Cargo.lock change matches the prefix so cargo
+      # rebuilds only the crates whose sources changed.
+      - name: cache cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: examples/nats-consumer/target
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-examples-nats-consumer-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-${{ hashFiles('examples/nats-consumer/Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-examples-nats-consumer-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
