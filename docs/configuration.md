@@ -68,9 +68,10 @@ Every top-level section, with its keys and defaults:
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
-| `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
+| `batcher` | `partitions` (4), `max_batch` (256), `max_commits` (64), `group_commit_max_bytes` (4194304), `group_commit_max_records` (1024), `group_commit_delay_ms` (1), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
-| `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
+| `wal` | `type` (`disk` \| `dual` \| `none`; the queue's mode — the name is historical; `dual` also confirms every hook in the intake log, see `intake`), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
+| `intake` | The intake log behind `wal.type: dual` ([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)); read whatever `wal.type` is, required under `dual`. `type` (`kafka`; required under `dual`), `node_id` (required under `dual`; `[a-z0-9._-]{1,64}`, the node's **stable** identity, the same on a replacement; `ANKUSA_INTAKE_NODE_ID`), `fleet` (`default`), `topic` (`ankusa.intake.<fleet>`), `kafka` (`brokers`: a list of `host:port`, required; `ssl`: bool; `sasl`: `mechanism` (`plain` \| `scram_sha_256` \| `scram_sha_512`), `username`, `password`; the same shape as a Kafka sink), `publish_timeout_ms` (`2000`; 100–60000, under the batcher's 15 s record deadline: the one publish attempt's deadline), `reconcile_deadline_ms` (`20000`; 1000–600000, and under `fleet.pending_ttl_ms` with `dedupe.scope: fleet`), `breaker_failures` (`3`; 1–100), `probe_ms` (`1000`; 100–60000), `retry_after_s` (`2`; 1–300), `offset_flush_ms` (`1000`; 100–60000), `pending.max_records` (`50000`; 1–10⁷), `pending.max_bytes` (`268435456`), `max_record_bytes` (`10000000`; at least `http.max_body_bytes` + 65536), `recover_on_boot` (`true`), `verify_topic` (`true`; `false` skips the boot check of the topic's settings and the startup line says `intake topic settings UNVERIFIED`). `kafka.sasl` is redacted in `GET /v1/config`. Boot refuses `dual` without `intake.type`, `intake.node_id`, `backup.enabled` and `backup.max_age_ms`. See [Host loss and the intake log](deployment.md#host-loss-and-the-intake-log) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `storage.s3.sse`, `storage.gcs.sse` | `type` (`aes256` \| `kms`), `key_id` (the KMS key; required for `kms` on GCS, optional on S3). Server-side encryption sent on every object this store writes; the same `sse:` key is accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. See [Encryption at rest](storage.md#encryption-at-rest) |
 | `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), `max_concurrent_reads` (1024; 0 = no cap), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). `claim_check.authorize` is Elixir config only. See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
@@ -319,7 +320,8 @@ reconfigured without a new file. Env wins over the file.
 | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
 | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
 | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
-| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `none`; the queue's mode) |
+| `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `dual`, `none`; the queue's mode) |
+| `ANKUSA_INTAKE_NODE_ID` | `intake.node_id` (`wal.type: dual`: the node's stable identity in the intake log) |
 | `ANKUSA_STORAGE_TYPE` | `storage.type` (`local`, `s3`, `gcs`) |
 | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
 | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
@@ -460,8 +462,12 @@ config :ankusa,
   wal: :disk,
   direct_publish_timeout_ms: 8_000,
   batcher: %{
-    partitions: 2,
+    partitions: 4,
     max_batch: 256,
+    max_commits: 64,
+    group_commit_max_bytes: 4_194_304,
+    group_commit_max_records: 1_024,
+    group_commit_delay_ms: 1,
     max_delay_ms: 0,
     max_queue: 10_000,
     max_queue_bytes: 268_435_456
@@ -595,8 +601,12 @@ config :ankusa,
 | `intake.pending.max_records`, `intake.pending.max_bytes` | `50_000`, `268_435_456` | The pending set (records not yet confirmed in both places) is bounded; a full set is `503 intake_unavailable` (`ankusa_intake_refused_total{reason="backlog"}`) before a seq is assigned. |
 | `intake.max_record_bytes` | `10_000_000` | One intake record's ceiling; at least `max_body_bytes + 65 536` so a body the node accepts always fits. |
 | `intake.recover_on_boot`, `intake.verify_topic` | `true`, `true` | Replay the log into the store at boot (`false`: run `mix ankusa.recover` by hand); verify the log's settings at boot (`false` says `intake topic settings UNVERIFIED` in the startup line). |
-| `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The queue writer serializes commits itself, so more partitions only add contention. |
-| `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
+| `batcher.partitions` | `4` | One group-commit `GenServer` per partition: where request bodies are held, delivery rows encoded and dedupe keys read (a prefetch the writer re-validates). Partitions do not add commits: the queue writer merges every partition's queued batches into one group (`batcher.group_commit_*`), so the number buys parallel preparation and fault isolation, not fsyncs. |
+| `batcher.max_batch` | `256` | Flush once this many envelopes have queued in one partition. |
+| `batcher.max_commits` | `64` | Commits one partition keeps in flight. A batch is handed to the writer without waiting for the one ahead, so the writer finds every waiting caller in its mailbox and merges them into one group (and, under `wal.type: dual`, a publish overlaps the next local write); a caller waits for its own group, not for the commit ahead of it plus its own. Measured with 256 closed-loop clients, 10 KB bodies, 4 partitions and a 5 ms fsync (`bench/store_commit.exs`, `SWEEP=1`): 1 slot, 64 hooks per commit and 5.6 k hooks/s; 64 slots, 130 per commit and 10.7 k/s. `1` is the old one-at-a-time behaviour. Bounded by `batcher.max_queue` either way. |
+| `batcher.group_commit_max_bytes` | `4_194_304` (4 MiB) | The most body bytes the writer merges into one group, across partitions: one synced store write and, under `wal.type: dual`, one produce request. Every caller in a group waits for the whole group, so this bounds the ack latency a backlog adds (64 MiB at ~1 GB/s of WAL write is 65 ms before the fsync, which alone breaks the 50 ms p99); a single call larger than the cap is still committed alone. |
+| `batcher.group_commit_max_records` | `1_024` | The most hooks in one group. A call that would pass either cap starts the next group. |
+| `batcher.group_commit_delay_ms` | `1` | How long a saturated writer waits for the callers it just answered to call again, so they join the next group instead of forming the one after it (a closed loop of clients otherwise splits into two cohorts that commit alternately, each half the size it could be). Applies only when the writer's last group held 16 or more hooks, so it never delays a request at low load; `0` disables it. |
 | `batcher.max_delay_ms` | `0` | Commit immediately. The store commit runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
 | `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
 | `batcher.max_queue_bytes` | `268_435_456` (256 MiB) | The same bound in body bytes, buffered and in flight, so a burst of large hooks sheds load (`503`) before it exhausts memory. |
@@ -725,7 +735,7 @@ are booleans, `metrics.ip` an IP address, and a `tls` block names existing
 `certfile`/`keyfile`, a `verify` of `verify_none`/`verify_peer` (the latter
 with a `cacertfile`), non-empty `versions` from `tlsv1.2`/`tlsv1.3` and known
 `ciphers`;
-`batcher.max_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
+`batcher.max_delay_ms`, `batcher.group_commit_delay_ms`, `storage.roll_ms`, `storage.interval_ms`,
 `claim_check.read_retries`, `claim_check.read_queue_max`,
 `claim_check.read_cache_bytes` and `claim_check.max_concurrent_reads` may be
 `0` (no linger, roll at once, a compactor that runs only when asked, no read

@@ -58,6 +58,13 @@ jobs:
       - run: mix local.hex --force && mix local.rebar --force
       - name: examples/fleet-e2e/run.sh
         run: BUILD_ANKUSA=0 examples/fleet-e2e/run.sh
+      # The host-loss drill of `wal.type: dual` (ADR 0002): a node and its volume lost
+      # under load, the intake brokers stopped, a restore from the secondary backup alone;
+      # and its control, which must see `disk` lose the hooks acked since the last backup.
+      - name: examples/fleet-e2e/run.sh --wal dual --kill-node
+        run: BUILD_ANKUSA=0 examples/fleet-e2e/run.sh --wal dual --kill-node
+      - name: examples/fleet-e2e/run.sh --wal disk --kill-node
+        run: BUILD_ANKUSA=0 examples/fleet-e2e/run.sh --wal disk --kill-node
       - name: Keep the load generator's reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

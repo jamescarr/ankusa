@@ -944,10 +944,66 @@ sink's deliveries, the log's records):
 `bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
 by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:
 `Ankusa.Intake.Memory` confirms after 5 ms, one client measures the ack p50 over
-200 requests, 512 clients measure throughput over 6 000 (the best of three rounds). It passes only if the
+200 requests with 1 KB bodies, 512 clients measure throughput over 6 000 (the best of three rounds), and the log's mean batch is printed. It passes only if the
 dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the parallel commit costs the
-larger of fsync and confirm, not their sum) and the dual throughput is at least
-0.3 x the disk's (ADR 0002 asks for 0.8 x; see its Amendments for the measurement behind the lower floor).
+larger of fsync and confirm, not their sum), the dual throughput is at least
+10 000 req/s (the plan's per-node ingest SLO, absolute, so a slow disk cannot pass a ratio at half of it) and at least 0.3 x the disk's (a regression guard;
+ADR 0002 asked for 0.8 x, which the dual path cannot reach where fsync is near free: 512 clients in a closed loop with one
+commit in flight per batcher partition make the mean batch about 128 and cap the
+dual mode at `clients / (2 x (confirm + overhead))`, while the disk mode is
+CPU-bound; the ADR's Amendments carry the measurement, and the group commit
+of DUR-4 is what lifts the ceiling).
+
+The Kafka adapter is tested against real brokers, in
+[`packages/ankusa_kafka/test/ankusa/intake/kafka_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_kafka/test/ankusa/intake/kafka_test.exs)
+(the package's `docker-compose.yml` has a three-broker KRaft cluster beside Redpanda,
+and the tests stop and restart brokers with `docker compose`): a publish is confirmed
+at quorum and its position is the broker's offset; one broker down still confirms and
+two down is `unavailable`; `verify/1` refuses `min.insync.replicas` below 2, a
+replication factor below 3, unclean leader election, a retention below twice
+`backup.max_age_ms` and a `max.message.bytes` below `max_record_bytes`; the node's
+partition survives a partition-count change; replay filters by node, skips unknown
+kinds and versions and returns a duplicate record twice; broker error codes map to the four
+classes. `bench/partition_bench.exs` measures what one partition carries.
+`mix ankusa.recover`'s option parsing and the `--allow-gap` audit row are in
+`intake/recovery_test.exs`; the server's `wal.type: dual` and `intake.*` keys, the
+`ANKUSA_WAL_TYPE` and `ANKUSA_INTAKE_NODE_ID` overrides and the credentials' redaction
+are in `ankusa_server`'s `config_test.exs`.
+
+The fleet drill is the end-to-end proof:
+`examples/fleet-e2e/run.sh --wal dual --kill-node` loses `ankusa-a` **and its volume** under
+1 000 req/s with RabbitMQ paused (so the acked hooks are undelivered), starts a
+replacement with the same node id, stops the three intake brokers (every request
+`503 intake_unavailable`, none acked, `/ready` 503) and restores the node from the
+secondary backup alone with `recover`: `missing=0`, `duplicate_hooks=0`.
+`--wal disk --kill-node` runs the same host loss and **must lose** the hooks acked
+since the last backup, so the drill proves the difference. See
+[`examples/fleet-e2e/README.md`](https://github.com/jamescarr/ankusa/blob/main/examples/fleet-e2e/README.md).
+
+### Group commit
+
+- `queue_test.exs` (`group commit`): calls queued behind a suspended writer are one
+  synced commit (`[:ankusa, :commit, :stop]` `batch_size`) with dense seqs and each
+  caller's replies in its own order; a call that would pass
+  `batcher.group_commit_max_records` or `group_commit_max_bytes` starts the next group.
+- `dedupe_test.exs` (`the same key on two batcher partitions`): the same dedupe key
+  posted at once to two partitions, with the writer suspended so both read it as
+  absent, yields one hook, one delivery row and a `duplicate` with the first hook's
+  id, whether the two calls merge into one group or commit as two; a key the sweeper
+  deleted is not remembered as live. `queue_dual_test.exs` has the `wal: :dual`
+  case (the retry meets an unconfirmed original: `intake_pending`).
+
+`bench/store_commit.exs` (`MIX_ENV=test mix run bench/store_commit.exs`) drives
+`Ankusa.Edge.Batcher.commit/4` with 10 KB bodies over 4 partitions and makes the
+writer's commit cost 1, 5 and 10 ms (a telemetry handler sleeps in the writer before
+the store write). Throughput: 256 closed-loop clients, grouped against ungrouped
+(`group_commit_max_records: 1, max_commits: 1, group_commit_delay_ms: 0`: one commit
+per partition batch, one at a time, what the writer did before cross-partition group
+commit), printing records/s, commits/s, mean group and
+ack p50/p99. Burst: 1 000 req/s open loop, the writer stalled for one second, then
+drained while arrivals continue. It passes only if grouped is at least 2 x ungrouped
+at 5 ms and the ack p99 of the requests that arrived after the stall is at most 50 ms
+(the SLO; the group cap is what keeps a backlog from becoming one 64 MiB commit).
 
 ### Perf gate: `mise run bench:gate`
 

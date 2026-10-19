@@ -184,7 +184,7 @@ defmodule Ankusa.Intake.RecoveryTest do
     assert_receive {:replay, :unroutable, 1}
   end
 
-  test "a truncated log refuses a restored store and warns on an existing one" do
+  test "a truncated log refuses a restored store and warns on an existing one; --allow-gap goes on and writes an audit row" do
     config = log_config(log_path())
     start(config)
     for i <- 1..3, do: ingest(config, "evt-#{i}")
@@ -195,7 +195,76 @@ defmodule Ankusa.Intake.RecoveryTest do
 
     assert {:error, {:intake_truncated, 3, 10}} = Recovery.run(config.instance, origin: :restored)
     assert {:ok, _} = Recovery.run(config.instance, origin: :existing)
-    assert {:ok, _} = Recovery.run(config.instance, origin: :restored, allow_gap: true)
+
+    # refusing and warning write nothing
+    assert {:ok, %{entries: []}} =
+             Ankusa.Audit.list(config.instance, action: "intake.recover.allow_gap")
+
+    # a dry run says so and writes nothing either
+    assert {:ok, _} =
+             Recovery.run(config.instance, origin: :restored, allow_gap: true, dry_run: true)
+
+    assert {:ok, %{entries: []}} =
+             Ankusa.Audit.list(config.instance, action: "intake.recover.allow_gap")
+
+    assert {:ok, _} =
+             Recovery.run(config.instance,
+               origin: :restored,
+               allow_gap: true,
+               actor: "ankusa recover"
+             )
+
+    assert {:ok, %{entries: [row]}} =
+             Ankusa.Audit.list(config.instance, action: "intake.recover.allow_gap")
+
+    assert row.actor == "ankusa recover"
+    assert row.resource == "node-a"
+    assert row.result == "ok"
+
+    assert row.detail == %{node: "node-a", wanted: 3, earliest: 10, lost_positions: 7}
+  end
+
+  describe "parse_args (mix ankusa.recover and the image's recover command)" do
+    test "reads the flags and defaults to the store's own offset" do
+      assert {:ok, [from: :backup]} = Recovery.parse_args([])
+
+      assert {:ok, opts} =
+               Recovery.parse_args(
+                 ~w(--node a --from earliest --dry-run --allow-gap --instance i)
+               )
+
+      assert Enum.sort(opts) ==
+               [allow_gap: true, dry_run: true, from: :earliest, instance: "i", node: "a"]
+
+      assert {:ok, [from: 42]} = Recovery.parse_args(~w(--from 42))
+      assert {:ok, [from: :backup]} = Recovery.parse_args(~w(--from backup))
+    end
+
+    test "refuses what it cannot read" do
+      assert {:error, "--from must be backup, earliest or a position, got \"soon\""} =
+               Recovery.parse_args(~w(--from soon))
+
+      assert {:error, "--from must be backup, earliest or a position, got \"-1\""} =
+               Recovery.parse_args(~w(--from -1))
+
+      assert {:error, "invalid options: " <> _} = Recovery.parse_args(~w(--bogus))
+      assert {:error, "unexpected arguments: " <> _} = Recovery.parse_args(~w(stray))
+    end
+
+    test "format_summary is the one line both commands print" do
+      summary = %{
+        records: 5,
+        applied: 3,
+        present: 1,
+        collided: 0,
+        unroutable: 1,
+        skipped: 2,
+        republished: 4
+      }
+
+      assert Recovery.format_summary(summary) ==
+               "records=5 applied=3 present=1 collided=0 unroutable=1 skipped=2 republished=4"
+    end
   end
 
   test "node id mismatch refuses boot" do

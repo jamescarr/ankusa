@@ -35,6 +35,29 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   metadata stay up), their harness logs to stderr (it was silent), and they
   check `/ready`'s `reason` and the `ankusa_store_*` series.
   See `docs/storage.md#durability-corruption-full-disk`.
+- **Cross-partition group commit (DUR-4).** `Ankusa.Queue.Writer` takes every batch
+  the batcher partitions have queued and commits them as one group: one synced
+  store write (and, under `wal: :dual`, one intake publish), seqs dense across it,
+  every caller replied to with its own hooks. The work that needs no seq moved out
+  of the writer into the batcher's commit task: the hook's binary, its encoded
+  delivery rows, and a prefetch read of its dedupe keys. The writer re-validates
+  that read before it assigns seqs (the first occurrence of a key in a group wins,
+  a key committed since the caller read it is answered from what the writer wrote,
+  and under `dual` the pending set is consulted), so the same provider key posted
+  to two partitions at once still stores one hook. New keys
+  `batcher.group_commit_max_bytes` (default 4 MiB: every caller waits for its whole
+  group, so the cap bounds the ack latency a backlog adds) and
+  `batcher.group_commit_max_records` (1 024); a partition now keeps up to
+  `batcher.max_commits` (64) commits in flight instead of one, so the writer finds
+  every waiting caller in its mailbox, and a saturated writer waits
+  `batcher.group_commit_delay_ms` (1) for the callers it just answered to join the
+  next group (never at low load); `batcher.partitions` now defaults to 4. A
+  delivery row's `at` is the
+  time the hook was received rather than the
+  writer's stamp (the due key keeps the writer's). `bench/store_commit.exs`
+  measures commits/s and ack p99 at 1, 5 and 10 ms of fsync, and a one-second
+  stall's drain. See `docs/storage.md`.
+
 - **`queue.rocksdb`: the store's RocksDB settings are config, and `index` and
   `deliveries` carry a bloom filter (DUR-3).** `block_cache_bytes` (64 MiB),
   `bloom_bits_per_key` (10; 0 = off), `max_open_files` (65 536), `compaction_style`

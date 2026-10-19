@@ -603,6 +603,25 @@ defmodule Ankusa.ConfigTest do
         Config.new(batcher: %{partitions: 0})
       end
 
+      for key <- [:max_commits, :group_commit_max_bytes, :group_commit_max_records] do
+        assert_raise ArgumentError, "batcher.#{key} must be a positive integer, got 0", fn ->
+          Config.new(batcher: %{key => 0})
+        end
+      end
+
+      assert_raise ArgumentError,
+                   "batcher.group_commit_delay_ms must be a non-negative integer, got -1",
+                   fn -> Config.new(batcher: %{group_commit_delay_ms: -1}) end
+
+      assert Config.new(batcher: %{group_commit_delay_ms: 0}).batcher.group_commit_delay_ms == 0
+
+      assert %{partitions: 4, group_commit_max_bytes: 4_194_304, group_commit_max_records: 1_024} =
+               Map.take(Config.new([]).batcher, [
+                 :partitions,
+                 :group_commit_max_bytes,
+                 :group_commit_max_records
+               ])
+
       assert_raise ArgumentError, "dispatch.concurrency must be a positive integer, got 0", fn ->
         Config.new(dispatch: %{concurrency: 0})
       end

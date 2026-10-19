@@ -557,4 +557,88 @@ defmodule Ankusa.DedupeTest do
     assert env1.id == env2.id
     assert env2.seq == nil
   end
+
+  describe "the same key on two batcher partitions" do
+    alias Ankusa.Edge.Batcher
+
+    # Both partitions read the key as absent (the writer is suspended, so neither
+    # commit has happened) before the writer sees either call.
+    defp racing_commits(config) do
+      inst = config.instance
+      writer = Ankusa.whereis(inst, :queue_writer)
+      :ok = :sys.suspend(writer)
+
+      tasks =
+        for partition <- [0, 1] do
+          Task.async(fn -> Batcher.commit(inst, partition, direct_entry(direct_env(nil))) end)
+        end
+
+      assert wait_for(fn ->
+               Process.info(writer, :message_queue_len) == {:message_queue_len, 2}
+             end)
+
+      :ok = :sys.resume(writer)
+      Enum.map(tasks, &Task.await(&1, 10_000))
+    end
+
+    defp wait_for(fun, tries \\ 200) do
+      cond do
+        fun.() -> true
+        tries == 0 -> false
+        true -> Process.sleep(10) && wait_for(fun, tries - 1)
+      end
+    end
+
+    defp delivery_rows(inst) do
+      %{lo: lo, hi: hi} = Keys.family(:deliveries)
+
+      {:ok, n} =
+        Store.fold(inst, :deliveries, {lo, hi}, 0, fn _key, _value, n -> {:cont, n + 1} end)
+
+      n
+    end
+
+    defp assert_one_hook(inst, results) do
+      assert [{:committed, committed}] = for({:committed, _} = r <- results, do: r)
+      assert [{:duplicate, duplicate}] = for({:duplicate, _} = r <- results, do: r)
+
+      assert duplicate.id == committed.id
+      assert stored_ids(inst) == [committed.id]
+      assert delivery_rows(inst) == 1
+    end
+
+    test "merged into one group, one hook id and one delivery" do
+      config = start_edge(%{"demo" => []}, batcher: %{partitions: 2})
+
+      results = racing_commits(config)
+
+      assert_one_hook(config.instance, results)
+    end
+
+    test "in two groups, the second still meets the first's key although it read it as absent" do
+      # one hook per group: the second call's prefetch predates the first commit
+      config =
+        start_edge(%{"demo" => []}, batcher: %{partitions: 2, group_commit_max_records: 1})
+
+      results = racing_commits(config)
+
+      assert_one_hook(config.instance, results)
+    end
+
+    test "a key the sweeper deleted is not remembered, and commits again" do
+      config = start_edge(%{"demo" => []})
+      inst = config.instance
+
+      env = fn -> direct_env(nil) end
+      entry = fn -> %{direct_entry(env.()) | dedupe_ttl_ms: 30} end
+
+      assert {:ok, [{:committed, _}]} = Ankusa.Queue.enqueue(inst, [entry.()])
+      Process.sleep(60)
+      assert {:ok, _} = Ankusa.Queue.DedupeSweeper.sweep(inst)
+
+      assert {:ok, [{:committed, _}]} = Ankusa.Queue.enqueue(inst, [entry.()])
+      assert length(stored_ids(inst)) == 2
+      assert_counters_equal_fold(inst)
+    end
+  end
 end

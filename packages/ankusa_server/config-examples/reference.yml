@@ -426,10 +426,24 @@ queue:
       counters: 1048576
 
 batcher:
-  # The queue writer serializes commits itself, so partitions beyond a couple only
-  # add contention.
-  partitions: 2
+  # One process per partition holds its callers' request bodies and prepares
+  # their commit (rows, dedupe read). The queue writer merges every partition's
+  # queued batches into one group commit, so more partitions are not more fsyncs.
+  partitions: 4
   max_batch: 256
+  # Commits one partition keeps in flight: a batch goes to the writer without
+  # waiting for the one ahead, so the writer finds every waiting caller in its
+  # mailbox and merges them. 1 is the old one-commit-at-a-time behaviour.
+  max_commits: 64
+  # A group is cut at whichever cap comes first. Every caller in a group waits
+  # for the whole group, so the byte cap bounds the ack latency a backlog adds
+  # (default 4 MiB); under wal.type dual one group is one produce request.
+  group_commit_max_bytes: 4194304
+  group_commit_max_records: 1024
+  # How long a saturated writer (its last group held 16 or more hooks) waits for
+  # the callers it just answered to call again, so they join the next group.
+  # Never delays a request at low load; 0 disables it.
+  group_commit_delay_ms: 1
   # 0 = commit as soon as a batch is ready; the store commit runs in a task, so
   # raising this trades a little ack latency for larger batches.
   max_delay_ms: 0
@@ -491,12 +505,40 @@ dispatch:
 
 wal:
   # [env ANKUSA_WAL_TYPE] disk — the local RocksDB store; every hook is on disk before the ack, so it survives process crash and power loss on this host, not the loss of the host.
+  #                        dual — disk, and every hook is also confirmed in a replicated intake log (Kafka, see `intake`) before the ack,
+  #                               so a lost host loses nothing: an acked hook is lost only if this host and every in-sync replica of
+  #                               the log's partition are lost together. Needs `intake`, `backup.enabled` and `backup.max_age_ms`.
   #                        none — no local queue: ingest publishes to the source's sinks in the request and acks on
   #                               their confirm. The node keeps no hook state, drops the `dispatch` and `storage` roles, and every
   #                               source must have a durable sink (a broker ack, a publisher confirm, an upstream 2xx).
   type: disk
   # wal.type: none only: the deadline every sink must confirm under; keep it below the provider's timeout.
   publish_timeout_ms: 8000
+
+# The intake log of `wal.type: dual` (docs/adr/0002-dual-commit-intake-log.md): a Kafka topic with
+# replication factor 3, min.insync.replicas=2, unclean.leader.election.enable=false, retention.ms of at
+# least twice `backup.max_age_ms` and max.message.bytes of at least `max_record_bytes`, all checked at boot.
+# intake:
+#   type: kafka
+#   # [env ANKUSA_INTAKE_NODE_ID] this node's identity in the log, [a-z0-9._-]{1,64}, STABLE across a replacement:
+#   # a replacement node starts with the lost node's id (a StatefulSet pod name, an instance tag).
+#   node_id: ankusa-a
+#   fleet: default                  # the topic is `ankusa.intake.<fleet>` unless `topic` is set
+#   # topic: ankusa.intake.default
+#   kafka:
+#     brokers: ["kafka-1:9092", "kafka-2:9092", "kafka-3:9092"]
+#     ssl: false
+#     # sasl: {mechanism: scram_sha_512, username: ankusa, password: "${KAFKA_PASSWORD}"}
+#   publish_timeout_ms: 2000        # 100-60000, under the batcher's 15 s record deadline: one publish attempt
+#   reconcile_deadline_ms: 20000    # 1000-600000; under fleet.pending_ttl_ms when dedupe.scope is fleet
+#   breaker_failures: 3             # consecutive failed publishes that open the breaker (503 intake_unavailable)
+#   probe_ms: 1000
+#   retry_after_s: 2                # Retry-After of 503 intake_unavailable
+#   offset_flush_ms: 1000
+#   pending: {max_records: 50000, max_bytes: 268435456}
+#   max_record_bytes: 10000000      # at least http.max_body_bytes + 65536
+#   recover_on_boot: true           # false: run `recover` by hand (docker run ... recover) before the node serves
+#   verify_topic: true              # false: do not check the topic's settings (the startup line says UNVERIFIED)
 
 storage:
   # [env ANKUSA_STORAGE_TYPE] local | s3 | gcs
