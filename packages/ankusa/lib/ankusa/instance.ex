@@ -187,6 +187,12 @@ defmodule Ankusa.Instance do
   defp writer_children(%Config{wal: :disk}, opts), do: [{Ankusa.Queue.Writer, opts}]
   defp writer_children(_config, _opts), do: []
 
+  # Expires the dedupe keys the writer inserts (`Ankusa.Queue.DedupeSweeper`).
+  defp dedupe_sweeper_children(%Config{wal: :disk}, opts),
+    do: [{Ankusa.Queue.DedupeSweeper, opts}]
+
+  defp dedupe_sweeper_children(_config, _opts), do: []
+
   # A writable store (e.g. `Ankusa.SourceStore.Persistent`) must be up before the
   # edge accepts a request, since every ingest reads through it. A read-only
   # store is config-only and has no process: `function_exported?/1` on a module
@@ -222,6 +228,8 @@ defmodule Ankusa.Instance do
       # The route definitions and the decision cache, before the ingress
       # listener accepts a request: the guard fails closed, so a store that
       # isn't up yet would reject every hook.
+      # Last, so a crash of the sweeper restarts nothing that serves, and a
+      # restart of the writer (which it calls) restarts the sweeper.
       edge =
         routes_children(config, opts) ++
           writer_children(config, opts) ++
@@ -237,7 +245,8 @@ defmodule Ankusa.Instance do
             {Bandit,
              Listener.bandit_options(config, config.listener.tls) ++
                [plug: {Ankusa.Edge.Router, [instance: config.instance]}, port: config.port]}
-          ]
+          ] ++
+          dedupe_sweeper_children(config, opts)
 
       [
         %{

@@ -122,7 +122,7 @@ defmodule AnkusaServer.Config do
   @routes_seed_keys ~w(id tenant_id source_id path methods enabled ip_rules metadata)
   @rate_limits_keys ~w(default tenants per_ip node sources scope)
   @scopes ~w(node fleet)
-  @dedupe_scope_keys ~w(scope)
+  @dedupe_scope_keys ~w(scope max_entries max_entries_per_tenant)
   @fleet_keys ~w(store timeout_ms pending_ttl_ms breaker_window_ms breaker_min_calls breaker_failure_rate breaker_open_ms)
   @fleet_store_keys ~w(type url namespace pool_size)
   @fleet_store_types ~w(redis)
@@ -1419,7 +1419,7 @@ defmodule AnkusaServer.Config do
     ]
   end
 
-  # `dedupe.scope` and the `fleet` block behind both fleet scopes
+  # `dedupe.{scope, max_entries, max_entries_per_tenant}` and the `fleet` block behind both fleet scopes
   # (`Ankusa.Edge.Fleet`). A store with a `url` and no `type` is Redis, the one
   # fleet store there is.
   defp fleet_section(doc) do
@@ -1428,7 +1428,11 @@ defmodule AnkusaServer.Config do
     path = ["fleet"]
 
     [
-      dedupe: put_opt([], :scope, atom_enum_opt(dedupe, "scope", @scopes, ["dedupe"])),
+      dedupe:
+        []
+        |> put_opt(:scope, atom_enum_opt(dedupe, "scope", @scopes, ["dedupe"]))
+        |> put_opt(:max_entries, int_opt(dedupe, "max_entries", ["dedupe"]))
+        |> put_opt(:max_entries_per_tenant, int_opt(dedupe, "max_entries_per_tenant", ["dedupe"])),
       fleet:
         []
         |> put_opt(:store, fleet_store(fleet, path))

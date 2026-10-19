@@ -12,9 +12,9 @@ defmodule Ankusa.Metrics.Gauges do
     * `[:ankusa, :queue, :state]` — `pending` (first-attempt rows waiting),
       `scheduled` (retry rows waiting, including one whose backoff has just
       ended and is not yet claimed), `inflight`, `dead`, `archive_pending`,
-      `tenants` (how many tenants the store has handed an ordinal to) and
+      `dedupe` (live ingest-dedupe keys), `tenants` (how many tenants the store has handed an ordinal to) and
       `oldest_due_age_ms` (how long the oldest due row has been waiting; `0`
-      with nothing due). Read from the node's queue counters (six point reads)
+      with nothing due). Read from the node's queue counters (seven point reads)
       and the active-tenant index, so the cost is independent of the backlog and
       of the number of tenants; on a node that runs the store.
     * `[:ankusa, :tenant, :state]` — one event per tenant among the 100 with the
@@ -119,6 +119,7 @@ defmodule Ankusa.Metrics.Gauges do
         inflight: max(counters.inflight, 0),
         dead: max(counters.dead, 0),
         archive_pending: max(counters.archive_pending, 0),
+        dedupe: max(counters.dedupe, 0),
         tenants: tenants,
         oldest_due_age_ms: if(oldest, do: max(0, now - oldest), else: 0)
       })

@@ -65,7 +65,7 @@ defmodule Ankusa.Metrics do
   bounded), and anything else becomes `:other`. `:outcome` on ingest is already
   one of a fixed set (`:committed`, `:duplicate`, `:quarantined`, `:rejected`,
   `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
-  `:dedupe_pending`, `:quarantine_full`, `:overload`, `:tenant_limit` or
+  `:dedupe_pending`, `:quarantine_full`, `:overload`, `:tenant_limit`, `:dedupe_quota` or
   `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
   A request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
@@ -245,6 +245,14 @@ defmodule Ankusa.Metrics do
           tags: [:instance, :reason]
         )
       ),
+      sum(
+        "ankusa.dedupe.pruned.total",
+        scoped(own,
+          event_name: [:ankusa, :dedupe, :pruned],
+          measurement: :count,
+          tags: [:instance]
+        )
+      ),
       counter(
         "ankusa.dispatch.deliveries.total",
         scoped(own,
@@ -396,6 +404,9 @@ defmodule Ankusa.Metrics do
           {"ankusa.queue.inflight", [:ankusa, :queue, :state], :inflight, :unit},
           {"ankusa.queue.dead", [:ankusa, :queue, :state], :dead, :unit},
           {"ankusa.queue.archive_pending", [:ankusa, :queue, :state], :archive_pending, :unit},
+          {"ankusa.dedupe.keys", [:ankusa, :queue, :state], :dedupe, :unit},
+          {"ankusa.audit.retention.blocked_by_cursor", [:ankusa, :audit, :retention],
+           :blocked_by_cursor, :unit},
           {"ankusa.tenants", [:ankusa, :queue, :state], :tenants, :unit},
           {"ankusa.queue.oldest_due_age.seconds", [:ankusa, :queue, :state],
            &oldest_due_age_seconds/1, :second},

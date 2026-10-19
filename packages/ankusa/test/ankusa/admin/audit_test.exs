@@ -795,6 +795,93 @@ defmodule Ankusa.Admin.AuditTest do
     end
   end
 
+  describe "retention and the lifecycle outbox" do
+    setup do
+      config =
+        test_config(
+          roles: [:edge],
+          audit: %{retention_days: 1},
+          lifecycle: %{sinks: [{Ankusa.Sink.Log, []}]}
+        )
+
+      put_config(config)
+      start_supervised!({Store, instance: config.instance})
+      %{audit: config.instance}
+    end
+
+    defp seed_old_rows(inst, seqs) do
+      old = System.system_time(:millisecond) - 3 * 86_400_000
+
+      ops =
+        Enum.flat_map(seqs, fn seq ->
+          row = %{seq: seq, at: old, action: "old", actor: "x", tenant: nil, resource: nil}
+
+          [
+            {:put, :audit, Keys.audit(seq, old), <<"AA", 1>> <> :erlang.term_to_binary(row)},
+            {:put, :audit, Keys.lifecycle_entity(seq), JSON.encode!(%{"seq" => seq})}
+          ]
+        end)
+
+      :ok =
+        Store.write(
+          inst,
+          ops ++ [{:put, :default, Keys.audit_seq(), <<Enum.max(seqs)::64>>}],
+          sync: true
+        )
+    end
+
+    test "a lifecycle sink that never confirms keeps every row at or above the cursor", %{
+      audit: inst
+    } do
+      seed_old_rows(inst, 1..5)
+
+      # The cursor is where the slowest lifecycle sink stands: it has dealt
+      # with rows 1 and 2 and never confirms the rest.
+      :ok = Store.write(inst, [{:put, :default, Keys.lifecycle_cursor(), <<3::64>>}], sync: true)
+      start_audit(inst)
+
+      handler = {:audit_retention, self()}
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :audit, :retention],
+        fn _event, %{blocked_by_cursor: held}, _meta, pid -> send(pid, {:retention, held}) end,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:ok, 2} = Audit.prune(inst)
+      assert_receive {:retention, 3}
+
+      for seq <- 3..5 do
+        assert {:ok, %{"seq" => ^seq}} = Audit.entity(inst, seq)
+      end
+
+      assert Audit.entity(inst, 1) == :not_found
+      assert Audit.entity(inst, 2) == :not_found
+      assert {:ok, rows} = Audit.page(inst, 0, 10)
+      assert Enum.map(rows, &elem(&1, 0)) == [3, 4, 5]
+
+      # Prune again with the sink still down: nothing more goes, and the gauge holds.
+      assert {:ok, 0} = Audit.prune(inst)
+      assert_receive {:retention, 3}
+
+      # The sink catches up: retention proceeds and the gauge clears.
+      :ok = Store.write(inst, [{:put, :default, Keys.lifecycle_cursor(), <<6::64>>}], sync: true)
+      assert {:ok, 3} = Audit.prune(inst)
+      assert_receive {:retention, 0}
+      assert {:ok, []} = Audit.page(inst, 0, 10)
+    end
+
+    test "with no lifecycle cursor written yet retention is the date alone", %{audit: inst} do
+      seed_old_rows(inst, 1..3)
+      start_audit(inst)
+
+      assert {:ok, 3} = Audit.prune(inst)
+    end
+  end
+
   test "audit.retention_days must be a positive integer" do
     for bad <- [0, -1, 1.5, "365", nil] do
       assert_raise ArgumentError, ~r/audit\.retention_days must be an integer >= 1/, fn ->

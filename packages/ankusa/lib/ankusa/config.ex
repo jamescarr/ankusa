@@ -343,7 +343,16 @@ defmodule Ankusa.Config do
             # (`Ankusa.Dedupe`). `:node` is the writer's local index alone;
             # `:fleet` claims the key in `fleet.store` first, so a provider retry
             # that lands on another node is a duplicate, not a second hook.
-            dedupe: %{scope: :node},
+            #
+            # `max_entries` / `max_entries_per_tenant`: the most live dedupe keys
+            # the node's index holds, in all and for one tenant (an integer >= 1).
+            # A hook that would insert a key past either is refused with
+            # `503 dedupe_quota` (`Retry-After: 60`), never stored without its
+            # key: the keys expire on their own (`Ankusa.Queue.DedupeSweeper`).
+            # A key costs about 200 B of disk, so the defaults bound the index at
+            # about 20 GB; a tenant at 100 hooks/s with the 72 h default ttl holds
+            # about 26 M keys, so raise both for a bigger tenant or a longer ttl.
+            dedupe: %{scope: :node, max_entries: 100_000_000, max_entries_per_tenant: 30_000_000},
             # The shared store behind `rate_limits.scope: :fleet` and
             # `dedupe.scope: :fleet`, `{module, opts}` (a module implementing
             # `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store`, e.g.
@@ -760,6 +769,16 @@ defmodule Ankusa.Config do
       "an integer >= 1",
       &(is_integer(&1) and &1 >= 1)
     )
+
+    for key <- [:max_entries, :max_entries_per_tenant] do
+      check!(
+        config,
+        [:dedupe, key],
+        "dedupe.#{key}",
+        "an integer >= 1",
+        &(is_integer(&1) and &1 >= 1)
+      )
+    end
 
     check!(
       config,

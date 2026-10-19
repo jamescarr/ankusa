@@ -97,7 +97,7 @@ defmodule Ankusa.Store.Keys do
 
   # `counters` column family: one merge-operand row per tenant and field, plus
   # the node aggregate under ordinal 0 (`Ankusa.Queue.Deliveries.Counters`).
-  def counter(ord, field) when field in 1..6, do: <<ord::32, field::8>>
+  def counter(ord, field) when field in 1..7, do: <<ord::32, field::8>>
 
   # Ingest dedupe: `?u` maps a provider event key to
   # `<<expires_at::64, original_id::binary>>`, and `?e` is its expiry-sweep

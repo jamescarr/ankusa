@@ -8,14 +8,16 @@ defmodule Ankusa.DedupeTest do
 
   @secret "whsec_" <> Base.encode64("supersecret-key")
 
-  defp start_edge(sources) do
+  defp start_edge(sources, extra \\ []) do
     sources =
       Map.new(sources, fn {id, opts} ->
         {id, Keyword.put_new(opts, :sinks, [{Ankusa.Sink.Log, []}])}
       end)
 
     config =
-      test_config(roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: sources})
+      test_config(
+        [roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: sources}] ++ extra
+      )
 
     start_supervised!({Ankusa.Instance, config})
     config
@@ -164,7 +166,7 @@ defmodule Ankusa.DedupeTest do
     assert length(stored_ids(config.instance)) == 2
   end
 
-  test "the writer sweep deletes expired ?u and ?e keys" do
+  test "the sweeper deletes expired ?u and ?e keys" do
     config = start_edge(%{"demo" => []})
 
     env = %Envelope{
@@ -188,8 +190,7 @@ defmodule Ankusa.DedupeTest do
 
     Process.sleep(100)
 
-    writer = Ankusa.whereis(config.instance, :queue_writer)
-    send(writer, :sweep_dedupe)
+    assert {:ok, 1} = Ankusa.Queue.DedupeSweeper.sweep(config.instance)
 
     # The sweep deletes synchronously; wait until both keys are gone.
     deadline = System.monotonic_time(:millisecond) + 2_000
@@ -319,7 +320,7 @@ defmodule Ankusa.DedupeTest do
     bad = <<?e, 1::64, "no-separator">>
     :ok = Store.write(inst, [{:put, :index, bad, <<>>}], sync: true)
 
-    send(Ankusa.whereis(inst, :queue_writer), :sweep_dedupe)
+    assert {:ok, 0} = Ankusa.Queue.DedupeSweeper.sweep(inst)
 
     deadline = System.monotonic_time(:millisecond) + 2_000
 
@@ -336,6 +337,163 @@ defmodule Ankusa.DedupeTest do
     end
 
     wait.(wait)
+  end
+
+  describe "the dedupe sweeper and ceilings" do
+    alias Ankusa.Queue.DedupeSweeper
+    alias Ankusa.Queue.Deliveries.Counters
+    alias Ankusa.Queue.Tenants
+
+    defp keyed_entry(tenant, key, ttl_ms) do
+      env = %{direct_env(tenant) | dedupe_key: key}
+      %{envelope: env, sinks: [{Ankusa.Sink.Log, []}], dedupe_ttl_ms: ttl_ms}
+    end
+
+    defp assert_counters_equal_fold(inst),
+      do: assert(stored_counters(inst) == folded_counters(inst))
+
+    test "dedupe bucket sweep: expires every key past its ttl, a chunk at a time, outside the writer" do
+      inst = start_edge(%{"demo" => []}).instance
+      entries = for n <- 1..2_500, do: keyed_entry("acme", "k#{n}", 600)
+
+      assert {:ok, results} = Ankusa.Queue.enqueue(inst, entries)
+      assert Enum.all?(results, &match?({:committed, _}, &1))
+
+      ord = tenant_ord!(inst, "acme")
+      assert {:ok, %{dedupe: 2_500}} = Counters.read(inst, 0)
+      assert {:ok, %{dedupe: 2_500}} = Counters.read(inst, ord)
+      assert_counters_equal_fold(inst)
+
+      sweeper = Ankusa.whereis(inst, :dedupe_sweeper)
+      assert is_pid(sweeper)
+      refute sweeper == Ankusa.whereis(inst, :queue_writer)
+
+      # Past the ttl: more than one chunk of expired keys.
+      Process.sleep(700)
+
+      # The sweep keeps going until none is left.
+      assert {:ok, 2_500} = DedupeSweeper.sweep(inst)
+      assert {:ok, %{dedupe: 0}} = Counters.read(inst, 0)
+      assert {:ok, %{dedupe: 0}} = Counters.read(inst, ord)
+      assert :not_found = Store.get(inst, :index, Keys.dedupe("acme", "demo", "k1"))
+      assert :not_found = Store.get(inst, :index, Keys.dedupe("acme", "demo", "k2500"))
+      assert_counters_equal_fold(inst)
+    end
+
+    test "a key refreshed after the sweeper read it survives its stale delete" do
+      inst = start_edge(%{"demo" => []}).instance
+      u_key = Keys.dedupe("acme", "demo", "d1")
+
+      assert {:ok, [{:committed, _first}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "d1", 30)])
+
+      {:ok, <<old_at::64, _id::binary>>} = Store.get(inst, :index, u_key)
+      Process.sleep(60)
+
+      # The expired key is refreshed in place: the live count stays at one.
+      assert {:ok, [{:committed, second}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "d1", 60_000)])
+
+      ord = tenant_ord!(inst, "acme")
+      stale = {:expired, Keys.dedupe_expiry(old_at, "acme", "demo", "d1"), u_key, old_at, ord}
+
+      assert {:ok, 0} =
+               GenServer.call(Ankusa.whereis(inst, :queue_writer), {:expire_dedupe, [stale]})
+
+      assert {:ok, <<_at::64, id::binary>>} = Store.get(inst, :index, u_key)
+      assert id == second.id
+      assert {:ok, %{dedupe: 1}} = Counters.read(inst, ord)
+      assert {:ok, [{:duplicate, _}]} = Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "d1", 1)])
+      assert_counters_equal_fold(inst)
+    end
+
+    test "dedupe.max_entries refuses a new key, never skips its dedupe, and frees up on expiry" do
+      inst =
+        start_edge(%{"demo" => []}, dedupe: %{max_entries: 2, max_entries_per_tenant: 100}).instance
+
+      assert {:ok, [{:committed, _}, {:committed, _}, {:error, :dedupe_quota}]} =
+               Ankusa.Queue.enqueue(inst, [
+                 keyed_entry("acme", "k1", 60_000),
+                 keyed_entry("globex", "k2", 50),
+                 keyed_entry("acme", "k3", 60_000)
+               ])
+
+      # The refused hook was not stored, and its key was not written.
+      assert length(stored_ids(inst)) == 2
+      assert :not_found = Store.get(inst, :index, Keys.dedupe("acme", "demo", "k3"))
+      assert {:ok, %{dedupe: 2}} = Counters.read(inst, 0)
+
+      # A retry of a live key is a duplicate, not a refusal.
+      assert {:ok, [{:duplicate, _}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "k1", 60_000)])
+
+      # Still full: the next new key is refused again.
+      assert {:ok, [{:error, :dedupe_quota}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "k3", 60_000)])
+
+      # A key past its ttl is replaced in place, so it is admitted at the ceiling.
+      Process.sleep(80)
+
+      assert {:ok, [{:committed, _}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("globex", "k2", 60_000)])
+
+      assert {:ok, %{dedupe: 2}} = Counters.read(inst, 0)
+      assert_counters_equal_fold(inst)
+    end
+
+    test "dedupe.max_entries frees room as the sweeper expires keys" do
+      inst = start_edge(%{"demo" => []}, dedupe: %{max_entries: 1}).instance
+
+      assert {:ok, [{:committed, _}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "k1", 30)])
+
+      assert {:ok, [{:error, :dedupe_quota}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "k2", 60_000)])
+
+      Process.sleep(60)
+      assert {:ok, 1} = DedupeSweeper.sweep(inst)
+
+      assert {:ok, [{:committed, _}]} =
+               Ankusa.Queue.enqueue(inst, [keyed_entry("acme", "k2", 60_000)])
+
+      assert_counters_equal_fold(inst)
+    end
+
+    test "dedupe.max_entries_per_tenant caps one tenant and leaves the others their share" do
+      inst =
+        start_edge(%{"demo" => []}, dedupe: %{max_entries: 100, max_entries_per_tenant: 1}).instance
+
+      assert {:ok,
+              [
+                {:committed, _},
+                {:error, :dedupe_quota},
+                {:committed, _}
+              ]} =
+               Ankusa.Queue.enqueue(inst, [
+                 keyed_entry("acme", "k1", 60_000),
+                 keyed_entry("acme", "k2", 60_000),
+                 keyed_entry("globex", "k1", 60_000)
+               ])
+
+      assert {:ok, ord} = Tenants.ord(inst, "acme")
+      assert {:ok, %{dedupe: 1}} = Counters.read(inst, ord)
+      assert_counters_equal_fold(inst)
+    end
+
+    test "an ingest past the ceiling is a 503 dedupe_quota with Retry-After, and a retry still dedupes" do
+      config = start_edge(%{"demo" => [dedupe: :github]}, dedupe: %{max_entries: 1})
+
+      assert %{status: 201} = route(config, gh_request("x", "d1"))
+
+      refused = route(config, gh_request("x", "d2"))
+      assert refused.status == 503
+      assert JSON.decode!(refused.resp_body) == %{"error" => "dedupe_quota"}
+      assert Plug.Conn.get_resp_header(refused, "retry-after") == ["60"]
+      assert length(stored_ids(config.instance)) == 1
+
+      assert %{"duplicate" => true} =
+               JSON.decode!(route(config, gh_request("x", "d1")).resp_body)
+    end
   end
 
   test "new!/1 rejects malformed specs" do
