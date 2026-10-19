@@ -162,5 +162,33 @@ defmodule Ankusa.HttpClientTest do
                  allow_insecure_tls: true
                )
     end
+
+    test "a named finch pool owns its connection options", %{port: port, ca: ca} do
+      pool = [finch: [name: __MODULE__.OwnPool]]
+
+      assert_raise ArgumentError, ~r/named :finch pool/, fn ->
+        HttpClient.validate!(pool, true)
+      end
+
+      assert_raise ArgumentError, ~r/named :finch pool/, fn ->
+        HttpClient.validate!(pool ++ [connect_options: [timeout: 1]])
+      end
+
+      assert_raise ArgumentError, ~r/named :finch pool/, fn ->
+        HttpClient.validate!(pool, false, ca)
+      end
+
+      assert :ok = HttpClient.validate!(pool)
+
+      # The pool's own conn_opts (here: the private CA) are what the request uses.
+      start_supervised!(
+        {Finch,
+         name: __MODULE__.OwnPool,
+         pools: %{default: [conn_opts: [transport_opts: [cacertfile: ca]]]}}
+      )
+
+      assert {:ok, 200, "ok"} =
+               HttpClient.request(:get, "https://localhost:#{port}/", [], nil, 5_000, pool)
+    end
   end
 end

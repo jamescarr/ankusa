@@ -251,7 +251,7 @@ See [`claim-check.md`](claim-check.md).
 | Adapter | Deps | What it does |
 | --- | --- | --- |
 | `Sink.Log` | none | Default. Logs the delivery; nothing leaves the process. |
-| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature: `secret` is required unless `allow_unsigned: true`. Status mapping below. |
+| `Sink.Http` | `req` | Forwards the raw body verbatim to a URL, with `x-ankusa-id`/`x-ankusa-source`/`x-ankusa-idempotency-key`/`x-ankusa-verification`/`x-ankusa-tenant` (when set) headers, and a Standard Webhooks signature: `secret` is required unless `allow_unsigned: true`. The URL, headers and secret may be computed per tenant ([below](#sinkhttp-per-tenant-destinations)). Status mapping below. |
 | `Sink.RabbitMQ` | `:amqp`, separate `ankusa_rabbitmq` package | Publishes to an exchange. Detailed below. |
 | `Sink.Kafka` | `:brod` (native `crc32cer` NIF), separate `ankusa_kafka` package | Produces to a topic, keyed by `tenant_id/source_id`. Detailed below. |
 | `Sink.NATS` | `:gnat`, separate `ankusa_nats` package | Publishes to a JetStream subject, acknowledged by the stream. Detailed below. |
@@ -308,6 +308,55 @@ keeps it for good; `Ankusa.Sink.Reaper`), so a deleted or re-pointed source
 does not leave its connection open for the life of the node. The next
 delivery opens a new one; a delivery caught by the close fails that attempt
 and is retried.
+
+### `Sink.Http`: per-tenant destinations
+
+On a shared source (one `stripe` source behind `/webhooks/:tenant/stripe`) the
+receiver differs per tenant. In Elixir config, `url`, `headers` and `secret` may
+each be a one-arity function of the `%Ankusa.Envelope{}` or a `{mod, fun, args}`
+(called as `mod.fun(env, args...)`), resolved on **every attempt**:
+
+```elixir
+{Ankusa.Sink.Http,
+ url: fn env -> Tenants.endpoint(env.tenant_id) end,
+ headers: {Tenants, :auth_headers, []},
+ secret: {Tenants, :signing_secret, []}}
+```
+
+Everything above applies to the *resolved* values, not the function: each
+computed URL is checked against the `egress` policy on every attempt (a
+tenant-supplied URL cannot reach the private network, and a name that rebinds
+between attempts is caught), and a secret that resolves to nothing is
+`{:permanent, :unsigned_sink}` unless `allow_unsigned: true`, so a tenant with
+no secret is never sent unsigned. A function returns `{:error, reason}` to fail
+the attempt (`{:error, {:permanent, reason}}` to dead-letter a tenant with no
+endpoint); a raise is a transient failure; a value of the wrong shape is
+`{:permanent, {:computed, key, :invalid}}`, which never echoes the value. YAML
+and the admin API build static sinks only. `Ankusa.Sink.describe/3` reports
+the options that are `computed`; the sink stays out of the AsyncAPI document,
+which describes the envelope and not the raw body this sink sends.
+
+Computed URLs connect through `Ankusa.Sink.Http.Pool`, one Finch per instance,
+not Req's default of one pool per origin that is never closed (one per tenant
+receiver, so file descriptors and processes would grow with the tenant count
+until the node ran out). Its bounds:
+
+| | |
+| --- | --- |
+| Cap | 4 connections per origin (HTTP/1), so one tenant's slow receiver holds at most 4; 4,096 open origins per node |
+| Sweep | an origin with no delivery for 30 s has its pool closed; a connection idle 15 s is not reused |
+| Metric | `ankusa_sink_http_pool_origins` |
+| Refusal | a delivery that cannot get a connection within 5 s, or that would open origin 4,097, fails that attempt (`{:error, :pool_origins_exhausted}` for the latter) and is retried by the retry policy; deliveries to open origins are never refused for the ceiling |
+
+The pool verifies peers against the system trust store with one 5 s connect
+timeout, so a computed `url` cannot also set `cacertfile` or
+`allow_insecure_tls` (refused at load): give such a sink a pool of its own with
+`req_options: [finch: [name: MyFinch]]`, which owns its TLS options. A plain
+`http` URL whose host has only IPv6 addresses cannot be pinned and is
+`{:permanent, {:computed, :url, :unpinnable}}`. This pool is interim: owned,
+bounded pools for every outbound client are the hardening plan's DEL-3, which
+replaces it. Tests: `sink/http_test.exs` ("computed destinations": `computed url
+per tenant`, `computed url denied`, the pool and its idle reap).
 
 ### Idempotent receivers
 

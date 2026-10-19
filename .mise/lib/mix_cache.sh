@@ -205,3 +205,52 @@ mix_cache_warm() {
 
   rm -f "$err"
 }
+
+# Dialyzer PLTs. `_build/plts` sits beside `_build/<env>/lib`, which the entry
+# above restores, so without this every fresh worktree rebuilds the erts+Elixir
+# PLT before its first analysis.
+#
+# Only the core PLT is shared: `dialyxir_erlang-<otp>_elixir-<elixir>.plt` holds
+# erts and Elixir's own applications, whose beams are at the same absolute path
+# in every worktree of this machine, and its filename encodes both versions, so
+# a toolchain change names a different file rather than reusing an old one.
+# The `*_deps-<env>.plt` beside it is this checkout's dependency graph (dialyxir
+# pairs it with a `.hash`) and is never copied. Both are per project, not per
+# MIX_ENV, so this is called around `mix dialyzer`, not from mix_cache_warm.
+#
+# Keyed by package as well as toolchain: `plt_add_apps` is a package setting
+# (ankusa and async_api_spex add `:mix`) while the core PLT's filename carries
+# only the toolchain versions, so one file would otherwise be handed to a
+# package whose core PLT must contain more.
+mix_plt_dir() {
+  printf '%s/plts/%s/%s' "${ANKUSA_MIX_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/ankusa/mix}" \
+    "$1" \
+    "$(elixir -e 'IO.write([System.version(), "-otp", System.otp_release()])')"
+}
+
+mix_plt_restore() {
+  local src plt
+  src=$(mix_plt_dir "$1") || return 0
+  [ -d "$src" ] || return 0
+  mkdir -p _build/plts || return 0
+  for plt in "$src"/dialyxir_erlang-*.plt; do
+    [ -e "$plt" ] || continue
+    [ -e "_build/plts/${plt##*/}" ] || cp -p "$plt" "_build/plts/" || return 0
+  done
+}
+
+mix_plt_save() {
+  local dst plt name
+  [ -d _build/plts ] || return 0
+  dst=$(mix_plt_dir "$1") || return 0
+  mkdir -p "$dst" || return 0
+  for plt in _build/plts/dialyxir_erlang-*.plt; do
+    [ -e "$plt" ] || continue
+    name=${plt##*/}
+    case "$name" in *_deps-*) continue ;; esac
+    [ -e "$dst/$name" ] && continue
+    cp -p "$plt" "$dst/.tmp.$$.$name" || return 0
+    mv "$dst/.tmp.$$.$name" "$dst/$name" || return 0
+  done
+  rm -f "$dst"/.tmp.$$.* 2>/dev/null || true
+}

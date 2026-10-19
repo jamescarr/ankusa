@@ -264,6 +264,7 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_store_disk_bytes", inst) != nil
       assert gauge(scrape, "ankusa_quarantine_entries", inst) == 1.0
       assert gauge(scrape, "ankusa_quarantine_bytes", inst) > 0.0
+      assert gauge(scrape, "ankusa_sink_http_pool_origins", inst) == 0.0
     end
 
     test "a probe that fails emits nothing and the others still run" do
