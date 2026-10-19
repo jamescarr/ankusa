@@ -141,7 +141,7 @@ that is behind, off or on another node never blocks delivery.
 
 ### Tenants, counters and the active index
 
-Design and reasons: [ADR 0001](adr/0001-tenant-key-layout.md). Every tenant gets
+Design and reasons: [ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md). Every tenant gets
 a dense 32-bit **ordinal** at the first hook the store commits for it
 (`default` is the tenant of a hook with none); ordinals are never reused, 0 is
 the node's own aggregate, and `tenants.max` bounds how many exist (a hook of

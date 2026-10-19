@@ -141,7 +141,7 @@ The always-on tests cover:
   2 fixture (`store-v2.tar.zst`) carries audit rows, which
   `store_upgrade_test.exs` reads back; the format 1 fixture, upgraded, gives
   every source revision 1.
-- **Tenant key layout and counters** ([ADR 0001](adr/0001-tenant-key-layout.md);
+- **Tenant key layout and counters** ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md);
   `queue/deliveries_test.exs`, `store_upgrade_test.exs`, `metrics_test.exs`,
   `dispatch_test.exs`, `admin/router_test.exs`, `loss_test.exs`):
   `counters equal a fold after any sequence of transitions` (a property test
@@ -836,7 +836,7 @@ a millisecond, so a median moves by a factor of two with whatever else the
 machine does; noise only adds time, and a growth with the queue raises every
 sample). A script exits 1 unless its slowest cell is within 1.5× of its fastest
 (taken as at least 0.2 ms: the gauge tick costs about 0.1 ms, where two runs of
-one cell differ by 2×) and under 50 ms ([ADR 0001](adr/0001-tenant-key-layout.md),
+one cell differ by 2×) and under 50 ms ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md),
 Proof). A rebaseline run (`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 

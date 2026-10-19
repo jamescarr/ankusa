@@ -8,7 +8,7 @@ defmodule Ankusa.Queue.Writer do
   due key (with its active-tenant marker) per sink, the archive obligation when
   the `:storage` role runs, the counter deltas of all of them, the `m:next_seq`
   marker and, for a tenant seen for the first time, its ordinal (this process is
-  the only one that allocates them, `Ankusa.Queue.Tenants`). A failed commit
+  the only one that allocates them, see `queue/tenants.ex`). A failed commit
   consumes its seqs and ordinals (gaps are allowed) but acks nothing. A hook
   whose tenant would pass `tenants.max` is refused with `{:error,
   :tenant_limit}` in its place of the reply, and nothing of it is written.
@@ -221,18 +221,20 @@ defmodule Ankusa.Queue.Writer do
     now = max(System.system_time(:millisecond), state.last_at)
     tenants = items |> Enum.map(&item_tenant/1) |> Enum.uniq()
 
-    with {:ok, admission} <- admit(tenants, state) do
-      tagged = Enum.map(items, &{&1, Map.has_key?(admission.ords, item_tenant(&1))})
+    case admit(tenants, state) do
+      {:ok, admission} ->
+        tagged = Enum.map(items, &{&1, Map.has_key?(admission.ords, item_tenant(&1))})
 
-      if extra_ops != [] and Enum.any?(tagged, &(not elem(&1, 1))) do
-        # The caller's ops (a quarantine release's pen deletes) cover every
-        # item: refusing one would lose it, so refuse the call.
-        {:reply, {:error, :tenant_limit}, state}
-      else
-        commit_admitted(tagged, extra_ops, admission, now, state)
-      end
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+        if extra_ops != [] and Enum.any?(tagged, &(not elem(&1, 1))) do
+          # The caller's ops (a quarantine release's pen deletes) cover every
+          # item: refusing one would lose it, so refuse the call.
+          {:reply, {:error, :tenant_limit}, state}
+        else
+          commit_admitted(tagged, extra_ops, admission, now, state)
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 

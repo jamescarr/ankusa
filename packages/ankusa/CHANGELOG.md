@@ -14,7 +14,7 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 ### Added
 
 - **Tenant key layout, per-tenant counters and the active-tenant index
-  (TEN-1.b, [ADR 0001](../../docs/adr/0001-tenant-key-layout.md)).** Store
+  (TEN-1.b, [ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)).** Store
   format 3. Every tenant gets a dense ordinal (`tenants` column family, assigned
   once at its first committed hook, never reused); due, claimed and dead rows
   lead their keys with it (`?D`, `?F`, `?X` beside the global `?x`), so one

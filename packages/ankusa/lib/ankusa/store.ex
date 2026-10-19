@@ -12,16 +12,16 @@ defmodule Ankusa.Store do
       the audit sequence and key, the next tenant ordinal (`m:next_ord`)
     * `hooks` — `<<seq::64>>` → envelope
     * `deliveries` — `<<seq::64, sink::16>>` → delivery row
-    * `index` — due/inflight/dead rows (tenant-ordinal first, see
-      `Ankusa.Store.Keys`), the by-tenant dead index, active-tenant markers,
+    * `index` — due/inflight/dead rows (tenant-ordinal first, the key
+      constructors are in `store/keys.ex`), the by-tenant dead index, active-tenant markers,
       archive obligations, cleared markers, claim-check refs
     * `archive` — segment catalogue and imported legacy locations
     * `quarantine` — quarantined envelopes
     * `audit` — the audit trail (`<<?a, seq::64, at::64>>`) and the rows of
       mutations still in flight (`<<?p, seq::64>>`), see `Ankusa.Audit`
-    * `tenants` — tenant ordinal ↔ tenant id (`Ankusa.Queue.Tenants`)
+    * `tenants` — tenant ordinal ↔ tenant id (`queue/tenants.ex`)
     * `counters` — per-tenant and node-wide queue counters, written only as
-      `{:merge, :counters, key, delta}` operands (`Ankusa.Queue.Deliveries.Counters`)
+      `{:merge, :counters, key, delta}` operands (`queue/deliveries/counters.ex`)
 
   `Ankusa.Store` is the one process that owns the database handle; every other
   caller reads or writes through the functions here, which run the RocksDB

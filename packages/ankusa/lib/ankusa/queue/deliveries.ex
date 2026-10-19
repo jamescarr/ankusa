@@ -1121,9 +1121,10 @@ defmodule Ankusa.Queue.Deliveries do
 
   # Folds one chunk of dead keys (`chunk` is oldest first, as the reverse scan
   # built it) into the accumulator, keeping those whose owner matches `filter`.
-  # sobelow_skip ["Misc.BinToTerm"]
   defp owner_step(_instance, [], _filter, _limit, acc), do: {:ok, acc}
 
+  # Trusted, internally written data (this node's own store rows).
+  # sobelow_skip ["Misc.BinToTerm"]
   defp owner_step(instance, chunk, filter, limit, acc) do
     entries = Enum.reverse(chunk)
 

@@ -239,7 +239,7 @@ means restoring the pre-upgrade backup**, losing what was acked since and
 every audit row. A node's audit rows are its own; a fleet reads each node's
 trail with `GET /v1/audit` (scope `audit:read`) per node.
 
-**Format 3 (tenant ordinals and counters, [ADR 0001](adr/0001-tenant-key-layout.md)).**
+**Format 3 (tenant ordinals and counters, [ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)).**
 The store gains the `tenants` and `counters` column families. Every tenant
 gets a dense ordinal, due and claimed rows are re-keyed under it (`?d`/`?f`
 become `?D`/`?F`), the dead index gains a by-tenant companion (`?X`), a due
