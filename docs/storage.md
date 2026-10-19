@@ -387,7 +387,7 @@ is the hooks acked since the last backup.
 
 ## The intake log
 
-Under `wal.type: dual` ([ADR 0002](adr/0002-dual-commit-intake-log.md)) the
+Under `wal.type: dual` ([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)) the
 local store is not the only copy of an acked hook: the hook is also a record in
 a replicated log (a Kafka topic, `Ankusa.Intake.Kafka` from `ankusa_kafka`), and
 the `201` waits for both. What that adds to the store is four **meta rows** in

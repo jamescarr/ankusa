@@ -60,7 +60,7 @@ The log never gives up an ack silently: a node that cannot confirm in it
 answers `503 intake_unavailable` and acks nothing, never "disk only". A hook
 that half-persists (one half failed, the other did not) is carried to
 completion by a reconciler, not undone. See
-[`adr/0002-dual-commit-intake-log.md`](adr/0002-dual-commit-intake-log.md),
+[`adr/0002-dual-commit-intake-log.md`](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md),
 [`deployment.md`](deployment.md#host-loss-and-the-intake-log) and
 [`storage.md`](storage.md#the-intake-log); proofs: the fleet drill
 `examples/fleet-e2e/run.sh --wal dual --kill-node` (host loss, the log's brokers

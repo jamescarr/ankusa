@@ -54,7 +54,7 @@ defmodule AnkusaServer.CLI do
   no longer reaches back to the restored store, and writes an audit row saying so.
   """
   @spec recover([String.t()]) :: no_return()
-  def recover(args \\ []) do
+  def recover(args) do
     case Ankusa.Intake.Recovery.parse_args(args) do
       {:ok, opts} ->
         run_recovery(config!(), Keyword.put(opts, :actor, "ankusa recover"))

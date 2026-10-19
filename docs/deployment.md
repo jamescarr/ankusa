@@ -225,7 +225,7 @@ Measured numbers from a full ingest → dispatch → consumer run are recorded i
 With `wal.type: disk` an acked hook survives its **process** and a power cut, not
 its **host**: a lost box loses everything acked since the last backup
 (`backup.interval_ms`, 60 s). `wal.type: dual`
-([ADR 0002](adr/0002-dual-commit-intake-log.md)) removes that window: the `201`
+([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)) removes that window: the `201`
 waits for the hook to be fsynced here **and** confirmed in a replicated Kafka
 topic, the *intake log*. An acked hook is then lost only if the host **and** every
 in-sync replica of the log's partition are lost together. The price is a hop and a
