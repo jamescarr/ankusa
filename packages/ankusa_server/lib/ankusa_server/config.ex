@@ -49,7 +49,8 @@ defmodule AnkusaServer.Config do
   | `ANKUSA_ROUTES_ENABLED` | `routes.enabled` |
   | `ANKUSA_ROUTES_STORE_URL` | `routes.store.url` |
   | `ANKUSA_SOURCE_STORE_URL` | `source_store.url` |
-  | `ANKUSA_WAL_TYPE` | `wal.type` |
+  | `ANKUSA_WAL_TYPE` | `wal.type` (`disk`, `none` or `dual`) |
+  | `ANKUSA_INTAKE_NODE_ID` | `intake.node_id`: the node's stable identity under `wal.type: dual`, the same on a replacement |
   | `ANKUSA_STORAGE_TYPE` | `storage.type` |
   | `ANKUSA_S3_BUCKET`, `ANKUSA_S3_REGION`, `ANKUSA_S3_ENDPOINT` | `storage.s3.bucket/region/endpoint` |
   | `ANKUSA_GCS_BUCKET` | `storage.gcs.bucket` |
@@ -71,7 +72,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal intake storage claim_check backup sources source_store secrets lifecycle egress audit tenants queue archive)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
@@ -94,6 +95,10 @@ defmodule AnkusaServer.Config do
   @dispatch_tenant_keys ~w(max_inflight max_inflight_bytes concurrency)
   @retry_keys ~w(base_ms max_ms max_attempts jitter)
   @wal_keys ~w(type publish_timeout_ms)
+  @intake_types ~w(kafka)
+  @intake_keys ~w(type node_id fleet topic kafka publish_timeout_ms reconcile_deadline_ms breaker_failures probe_ms retry_after_s offset_flush_ms pending max_record_bytes recover_on_boot verify_topic)
+  @intake_pending_keys ~w(max_records max_bytes)
+  @intake_kafka_keys ~w(brokers ssl sasl)
   @storage_keys ~w(type roll_bytes roll_ms key_prefix s3 gcs catalogue_retention_days)
   @blob_store_keys ~w(type root s3 gcs)
   @s3_keys ~w(bucket region endpoint access_key_id secret_access_key session_token sse)
@@ -434,6 +439,7 @@ defmodule AnkusaServer.Config do
     {"ANKUSA_ROUTES_STORE_URL", ["routes", "store", "url"]},
     {"ANKUSA_SOURCE_STORE_URL", ["source_store", "url"]},
     {"ANKUSA_WAL_TYPE", ["wal", "type"]},
+    {"ANKUSA_INTAKE_NODE_ID", ["intake", "node_id"]},
     {"ANKUSA_STORAGE_TYPE", ["storage", "type"]},
     {"ANKUSA_S3_BUCKET", ["storage", "s3", "bucket"]},
     {"ANKUSA_S3_REGION", ["storage", "s3", "region"]},
@@ -539,6 +545,7 @@ defmodule AnkusaServer.Config do
         batcher_section(doc) ++
         dispatch_section(doc) ++
         wal_section(doc) ++
+        intake_section(doc) ++
         storage_section(doc) ++
         claim_check_section(doc) ++
         backup_section(doc) ++
@@ -983,15 +990,79 @@ defmodule AnkusaServer.Config do
   defp wal_section(doc) do
     wal = section!(doc, "wal", @wal_keys, [])
 
-    case enum!(wal["type"] || "disk", ~w(disk none), ["wal", "type"]) do
+    case enum!(wal["type"] || "disk", ~w(disk none dual), ["wal", "type"]) do
       "disk" ->
         [wal: :disk]
+
+      "dual" ->
+        [wal: :dual]
 
       "none" ->
         [wal: :none]
         |> put_opt(:direct_publish_timeout_ms, int_opt(wal, "publish_timeout_ms", ["wal"]))
     end
   end
+
+  # ── intake ──────────────────────────────────────────────────────────────────
+
+  # The intake log behind `wal.type: dual` (ADR 0002). Read whatever `wal.type` is:
+  # core checks every range, and the cross-key rules (a type and a node id, the
+  # backup, the deadlines) only under `dual`.
+  defp intake_section(doc) do
+    intake = section!(doc, "intake", @intake_keys, [])
+    path = ["intake"]
+
+    if map_size(intake) == 0 do
+      []
+    else
+      pending = section!(intake, "pending", @intake_pending_keys, path)
+
+      [
+        intake:
+          %{}
+          |> put_map(:type, atom_enum_opt(intake, "type", @intake_types, path))
+          |> put_map(:node_id, string_opt(intake, "node_id", path))
+          |> put_map(:fleet, string_opt(intake, "fleet", path))
+          |> put_map(:topic, string_opt(intake, "topic", path))
+          |> put_map(:kafka, intake_kafka(intake, path))
+          |> put_map(:publish_timeout_ms, int_opt(intake, "publish_timeout_ms", path))
+          |> put_map(:reconcile_deadline_ms, int_opt(intake, "reconcile_deadline_ms", path))
+          |> put_map(:breaker_failures, int_opt(intake, "breaker_failures", path))
+          |> put_map(:probe_ms, int_opt(intake, "probe_ms", path))
+          |> put_map(:retry_after_s, int_opt(intake, "retry_after_s", path))
+          |> put_map(:offset_flush_ms, int_opt(intake, "offset_flush_ms", path))
+          |> put_map(:max_record_bytes, int_opt(intake, "max_record_bytes", path))
+          |> put_map(:recover_on_boot, bool_opt(intake, "recover_on_boot", path))
+          |> put_map(:verify_topic, bool_opt(intake, "verify_topic", path))
+          |> put_map(:pending, intake_pending(pending, path ++ ["pending"]))
+      ]
+    end
+  end
+
+  defp intake_pending(pending, _path) when map_size(pending) == 0, do: nil
+
+  defp intake_pending(pending, path) do
+    %{}
+    |> put_map(:max_records, int_opt(pending, "max_records", path))
+    |> put_map(:max_bytes, int_opt(pending, "max_bytes", path))
+  end
+
+  defp intake_kafka(intake, path) do
+    case section!(intake, "kafka", @intake_kafka_keys, path) do
+      kafka when map_size(kafka) == 0 ->
+        nil
+
+      kafka ->
+        path = path ++ ["kafka"]
+
+        [brokers: string_list!(kafka["brokers"], path ++ ["brokers"])]
+        |> put_opt(:ssl, bool_opt(kafka, "ssl", path))
+        |> put_opt(:sasl, sasl(kafka["sasl"], path ++ ["sasl"]))
+    end
+  end
+
+  defp put_map(map, _key, nil), do: map
+  defp put_map(map, key, value), do: Map.put(map, key, value)
 
   # ── storage ─────────────────────────────────────────────────────────────────
 

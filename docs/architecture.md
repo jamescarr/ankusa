@@ -3,12 +3,13 @@
 ## The core invariant
 
 **Never return `2xx` until the hook is durably accepted.** Which system accepts
-it is one config key: `wal.type: disk` (the default) commits to this node's
+it is one config key, `wal.type`: `disk` (the default) commits to this node's
 store — the queue's mode; the name `wal` is historical — and dispatches
-asynchronously; `wal.type: none` publishes to the source's sinks
-inside the request and acks on their confirm. Neither ever promises what
-nothing stored. Every other design decision in this framework is downstream of
-that one sentence.
+asynchronously; `dual` does that **and** confirms the hook in a replicated
+intake log (Kafka) before the ack, so a lost host loses nothing; `none`
+publishes to the source's sinks inside the request and acks on their confirm.
+No mode ever promises what nothing stored. Every other design decision in this
+framework is downstream of that one sentence.
 
 - **Crash before the accept:** no `2xx` was sent. The provider retries. Nothing
   was lost because nothing was promised.
@@ -47,6 +48,32 @@ compactor wrote any, are catalogued again); the startup log names the
 interval. See [`storage.md`](storage.md#backup-and-restore); proofs:
 `store/backup_test.exs` (`verify detects corruption`, `manifest signature`,
 `final checkpoint on stop`, `secondary restore`).
+
+`wal.type: dual` closes that last window. Every hook is fsynced on this host
+**and** confirmed in the **intake log** — a replicated Kafka topic
+(`acks=all`, `min.insync.replicas=2`, `ankusa_kafka`'s `Ankusa.Intake.Kafka`) —
+before the `201`; the two halves run in parallel, so the ack costs the larger
+of the fsync and the confirm, not their sum. A replacement node started on an
+empty volume with the lost node's `intake.node_id` restores the latest backup
+and replays the log from the backup's offset: every acked hook comes back.
+The log never gives up an ack silently: a node that cannot confirm in it
+answers `503 intake_unavailable` and acks nothing, never "disk only". A hook
+that half-persists (one half failed, the other did not) is carried to
+completion by a reconciler, not undone. See
+[`adr/0002-dual-commit-intake-log.md`](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md),
+[`deployment.md`](deployment.md#host-loss-and-the-intake-log) and
+[`storage.md`](storage.md#the-intake-log); proofs: the fleet drill
+`examples/fleet-e2e/run.sh --wal dual --kill-node` (host loss, the log's brokers
+down, a secondary-backup-only restore), `queue_dual_test.exs` (`no ack without
+intake confirm`) and `loss_test.exs`.
+
+| `wal.type` | `2xx` means | An acked hook is lost when |
+| --- | --- | --- |
+| `disk` | fsynced on this host | this host is lost, after the last backup (`backup.interval_ms`, 60 s) |
+| `dual` | fsynced on this host **and** confirmed in the intake log | this host **and** every in-sync replica of the log's partition are lost together (Kafka: replication factor 3, `min.insync.replicas` 2: two brokers, before they fsync, plus the host) |
+| `none` | every sink confirmed | no sink keeps it (each sink's own durability) |
+
+The startup log says which row applies, in one line.
 
 `wal.type: none` makes the node stateless instead: no queue, no batcher, no
 dispatch pipeline, no compactor, no DLQ, and the only role left is `:edge`. The
@@ -239,6 +266,7 @@ From here, ingest is done. Two independent consumers work off the same store:
 | Ingest | Every accepted POST is durably accepted and answered `201 accepted`, and `201` is the only committed response. There is no `200`. Under the default `wal.type: disk` that accept is the store commit; under `wal.type: none` it is every sink's confirm. A source with [`dedupe:`](configuration.md#sources) collapses hooks sharing a provider event key within the TTL (default 72 h): the repeat gets `201` with the original `id` and `"duplicate": true`, and nothing new is stored. Without it, a provider retry after a lost ack is a new hook with a new `id`, stored and delivered again. The dedupe index is bounded: `dedupe.max_entries` live keys on the node and `dedupe.max_entries_per_tenant` for one tenant; a hook whose key would pass either is refused `503 dedupe_quota` (`Retry-After: 60`), never stored without its key, and keys are expired by `Ankusa.Queue.DedupeSweeper`, never inside the writer ([`storage.md`](storage.md#ingest-dedupe-keys-bounded-expired-outside-the-writer); tests `test/ankusa/dedupe_test.exs`: `dedupe bucket sweep`, `dedupe.max_entries refuses a new key`, `a key refreshed after the sweeper read it survives its stale delete`). Consumer contract in [`delivery.md`](delivery.md#idempotent-receivers). |
 | Fleet scope (`rate_limits.scope: :fleet`, `dedupe.scope: :fleet`) | The tenant quota and the provider event key are counted in `fleet.store` (Redis), one call per hook, so N nodes enforce one limit and one dedupe window. The event key is claimed *pending* before the commit and made *committed* only after it (`Ankusa.Dedupe.Store`): another node meeting a committed key answers `201` with the first hook's `id`, meeting a pending one `409 dedupe_pending` (a `2xx` for a hook whose commit then fails would lose it), and a failed commit releases the claim. Each call has a hard budget (`fleet.timeout_ms`) and a breaker takes a slow or dead store out of the path: the node then limits and dedupes alone and `ankusa_fleet_limiter_degraded` reads `1`, never a `503`. Proof: `edge_fleet_test.exs` and, against Redis, `ankusa_redis`'s `rate_limiter/store/redis_test.exs`. See [`configuration.md#fleet-scope`](configuration.md#fleet-scope). |
 | `wal: :none` (direct ack) | Ingest publishes to every sink concurrently in the request, under one deadline (`direct_publish_timeout_ms`, default 8 s), and answers `201` only after each confirmed; any sink failure, crash or timeout is a `503` with `Retry-After`, with no internal retry, and sinks that confirmed keep their copy. No queue, no batcher, no dispatch pipeline, no compactor, no DLQ: the provider is the retry and the sink's destination is the durable store. `c:Ankusa.Sink.durable?/1` is the per-sink promise, checked at boot for every static source. The local state this mode keeps is the quarantine pen (rows appear only for a source that asks for it), API-managed sources and rate-limit overrides, all in the store. |
+| `wal: :dual` (intake log) | A hook is acked when its synced local write **and** the intake log's confirm (`required_acks: -1`, every in-sync replica, at least `min.insync.replicas`) are both done; the batch's two halves run concurrently, so the ack is the larger of the two. The writer's reply is a message, not a wait: the next batch commits while the previous one waits for its confirm. A half-persisted hook (one half failed) is `503` to the provider and **carried**: the pending set holds it and the reconciler completes the missing half, with the fleet dedupe claim held pending and promoted only when both halves are confirmed, so the provider's retry is `503 intake_pending`, then `201 duplicate` with the first id, never a second hook. An open breaker (`intake.breaker_failures` failed publishes) answers `503 intake_unavailable` **before** either half is touched. Boot recovery replays the log from `m:intake_offset` through one seq-and-hook-id rule (a duplicate or reordered record changes nothing), republishes the local hooks above the watermark, and the node serves nothing until it is done. Kafka has no idempotent producer here (`brod`), so every reader dedupes. Proven by `queue_dual_test.exs`, `intake/{reconciler,recovery}_test.exs`, `ankusa_kafka`'s `intake/kafka_test.exs` and the fleet drill. |
 | Compactor | Never writes one object per hook: it takes archive obligations byte-sized up to `storage.roll_bytes` and packs them into one immutable segment plus one index object. A failed blob write ends the tick and the same hooks are retried next tick. |
 | Dispatch | At-least-once to every sink, concurrent up to `dispatch.concurrency` and bounded by `dispatch.max_inflight`/`max_inflight_bytes`, exponential backoff with jitter, dead-letter on give-up, a raising sink retried rather than fatal. Not ordered: ordering lanes are gone, and a consumer that needs order has to rebuild it from data it receives. A scan claims from the tenants with work due by deficit round-robin (each gets an equal share of a page, a tenant with less leaves the rest to the others, a tenant the page did not reach goes first next time), and each tenant is held to its own window (`dispatch.tenants`: `max_inflight`, `max_inflight_bytes`, `concurrency`), so a tenant whose sink is slow fills its own window and nobody else's: `tenant fairness` in `test/ankusa/dispatch/isolation_test.exs` runs 99:1 load behind a slow sink and holds the light tenant's p99 delivery lag within 2x of its solo p99 (`bench/tenant_fairness_bench.exs` prints both tenants' p99). Breakers and `dispatch.sink_concurrency` are per tenant (the sink key carries it). The scan costs the tenants with work due, not the backlog or the tenant count (`bench/dispatch_tick_bench.exs`). DLQ entries are dead delivery rows; a replay moves them back to pending, so a replayed hook leaves the DLQ. |
 | Quarantine | A durable pen in the store, bounded twice: a token bucket per source (`quarantine.burst`/`rate`, default 100 / 20 per s; over it, `429 quarantine_rate_limited`) and a cap on its total bytes (`quarantine.max_bytes`, default 1 GiB; a full pen answers `503 quarantine_full` and never evicts a held hook). It survives a restart, its byte count too, and a store that cannot write is a `503` that spends no token. A `quarantine` replay job re-verifies held hooks against the source's current verifier and commits the ones that pass with their original `id`; `DELETE /v1/quarantine` purges the rest. A secret list (`secret: [new, old]`) keeps a rotation out of the pen in the first place. |

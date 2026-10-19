@@ -14,8 +14,9 @@ below for the mode that has none of it.
 The local store is one RocksDB database per instance at
 `<data_dir>/<instance>/store`, opened by `Ankusa.Store`. Everything below lives
 in it: the committed hooks, their delivery rows and the archive's catalogue.
-The queue's mode is named by the historical `wal` key (`wal: :disk | :none`,
-YAML `wal.type`): `:disk` is the store-backed queue described here, `:none` is
+The queue's mode is named by the historical `wal` key (`wal: :disk | :dual | :none`,
+YAML `wal.type`): `:disk` is the store-backed queue described here, `:dual` is
+that queue plus [the intake log](#the-intake-log), `:none` is
 the direct path [below](#none-no-queue-no-store-hooks).
 
 Column families, all in that one database:
@@ -456,6 +457,71 @@ is the hooks acked since the last backup.
   successful backup — the data a lost host would take with it —
   `ankusa_backup_runs_total{result}` counts attempts, and
   `ankusa_backup_verify_failed_total{target}` counts verifications that failed.
+
+## The intake log
+
+Under `wal.type: dual` ([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)) the
+local store is not the only copy of an acked hook: the hook is also a record in
+a replicated log (a Kafka topic, `Ankusa.Intake.Kafka` from `ankusa_kafka`), and
+the `201` waits for both. What that adds to the store is four **meta rows** in
+the `default` family, nothing else, so the store format is unchanged and a
+release that does not know them ignores them:
+
+| Row | Holds |
+| --- | --- |
+| `m:intake_offset` | the highest log position whose record is **also in this store, durably**. Every checkpoint carries it and every backup manifest records it (`intake_offset`); it never runs ahead of the checkpointed store |
+| `m:intake_seq` | the watermark: the highest seq such that every seq at or below it was confirmed in the log or had no record. Boot recovery republishes the local hooks above it |
+| `m:intake_node` | the node id (`intake.node_id`) the store was stamped with; a different configured id refuses boot (`{:intake_node_mismatch, stamped, configured}`) |
+| `m:intake_partition` | the log partition this node writes (Kafka: `phash2(node_id) rem partition_count`, chosen once and never recomputed, so growing the topic never remaps a node) |
+
+**The record** is the exact `hooks` column family value (`Envelope.to_binary/2`,
+itself versioned) under the node's seq, with headers `ankusa_intake_v` (`1`),
+`ankusa_intake_kind` (`hook`), `ankusa_intake_node`, `ankusa_intake_seq`,
+`ankusa_intake_id`, `ankusa_intake_incarnation`, `ankusa_intake_tenant` and
+`ankusa_intake_source`; the Kafka key is the node id. The topic therefore holds
+customer payloads and needs the confidentiality of the archive bucket (TLS,
+ACLs, encryption at rest on the brokers' volumes). A reader skips, and counts, a
+version or kind it does not know.
+
+**What the backup and the log each do.** The recovery point of an acked hook is
+*the backup, plus the log since the backup's `intake_offset`*. The backup bounds
+replay time and carries everything the log does not hold (delivery state, DLQ,
+quarantine, API-managed sources, rate-limit overrides, the audit trail, the
+archive catalogue, `m:incarnation`) and any backlog older than the log's
+retention; the log carries every hook since. That is why `backup.enabled` and
+`backup.max_age_ms` are **required** under `dual`, and why the topic's
+`retention.ms` must be at least `2 x backup.max_age_ms` (`verify/1` refuses
+otherwise): a restore of a backup as old as `max_age_ms`, from the secondary
+bucket if the primary is gone, still finds its offset in the log.
+
+**Recovery.** A replacement node starts with the lost node's `intake.node_id` on
+an empty volume. It restores the latest backup (primary, then secondary; the
+manifest signature is checked), mints a new incarnation, then replays the log
+for its node id from `m:intake_offset + 1`, in chunks of 500 in one synced batch
+each. A record is applied through **one rule, keyed by seq and hook id**: no row
+at `hooks/<seq>` writes the hook under its original seq (delivery rows from the
+source's *current* config, dedupe keys, counters, `m:next_seq` raised); the same
+id is skipped; a *different* id is a seq collision, written under a fresh seq
+and logged, never over the other hook. A duplicate, a reordered or a
+twice-replayed record changes nothing, which is what lets the Kafka adapter live
+without an idempotent producer. Then the local hooks above `m:intake_seq` are
+republished and the node reports ready. The same code runs by hand against a
+stopped store as `mix ankusa.recover` (the server image: `docker run … recover`),
+which prints `records=… applied=… present=… collided=… unroutable=…
+skipped=… republished=…`, accepts `--dry-run` (read and count, write nothing),
+and changes nothing the second time.
+
+**A truncated log.** If the log's earliest position is above the restored store's
+`offset + 1` (the topic's retention ran out before this backup was restored),
+boot refuses with `{:intake_truncated, wanted, earliest}` and the node stays
+unready: hooks acked in that gap are not recoverable, and only an operator may
+accept that. `--allow-gap` does, logs the lost positions and writes the
+`intake.recover.allow_gap` row (`wanted`, `earliest`, `lost_positions`, the
+node id and the actor) to the node's own audit trail. On an ordinary restart a
+gap is a warning only: every hook in it is in the local store.
+
+Operating it is [`deployment.md`](deployment.md#host-loss-and-the-intake-log);
+its configuration is [`configuration.md`](configuration.md).
 
 ## Encryption at rest
 

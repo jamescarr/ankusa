@@ -36,39 +36,19 @@ defmodule Mix.Tasks.Ankusa.Recover do
 
   @impl Mix.Task
   def run(args) do
-    {opts, _argv, invalid} =
-      OptionParser.parse(args,
-        strict: [
-          instance: :string,
-          node: :string,
-          from: :string,
-          dry_run: :boolean,
-          allow_gap: :boolean
-        ]
-      )
-
-    if invalid != [], do: Mix.raise("invalid options: #{inspect(invalid)}")
+    run_opts =
+      case Recovery.parse_args(args) do
+        {:ok, opts} -> opts
+        {:error, message} -> Mix.raise(message)
+      end
 
     Mix.Task.run("app.config")
 
-    config = config(opts[:instance])
-
-    run_opts =
-      [from: from(opts[:from])]
-      |> put(:node, opts[:node])
-      |> put(:dry_run, opts[:dry_run])
-      |> put(:allow_gap, opts[:allow_gap])
+    config = config(run_opts[:instance])
 
     case Recovery.run_offline(config, run_opts) do
-      {:ok, summary} ->
-        Mix.shell().info(
-          "records=#{summary.records} applied=#{summary.applied} present=#{summary.present} " <>
-            "collided=#{summary.collided} unroutable=#{summary.unroutable} " <>
-            "skipped=#{summary.skipped} republished=#{summary.republished}"
-        )
-
-      {:error, reason} ->
-        Mix.raise("recovery failed: #{inspect(reason)}")
+      {:ok, summary} -> Mix.shell().info(Recovery.format_summary(summary))
+      {:error, reason} -> Mix.raise("recovery failed: #{inspect(reason)}")
     end
   end
 
@@ -82,18 +62,4 @@ defmodule Mix.Tasks.Ankusa.Recover do
       name -> Ankusa.Config.new(Keyword.put(options, :instance, String.to_atom(name)))
     end
   end
-
-  defp from(nil), do: :backup
-  defp from("backup"), do: :backup
-  defp from("earliest"), do: :earliest
-
-  defp from(value) do
-    case Integer.parse(value) do
-      {position, ""} when position >= 0 -> position
-      _ -> Mix.raise("--from must be backup, earliest or a position, got #{inspect(value)}")
-    end
-  end
-
-  defp put(opts, _key, nil), do: opts
-  defp put(opts, key, value), do: Keyword.put(opts, key, value)
 end

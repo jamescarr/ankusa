@@ -5,7 +5,8 @@
 #
 # The local commit and the publish run in parallel and both are required, so a
 # `dual` ack costs `max(fsync, confirm)`, not their sum. `Ankusa.Intake.Memory`
-# stands in for the log with a 5 ms confirm. Two measurements per mode:
+# stands in for the log with a 5 ms confirm. Two measurements per mode, with 1 KB
+# bodies (the plan's SLO size):
 #
 #   * ack latency: one client, 200 sequential requests (the p50)
 #   * throughput: 512 concurrent clients, 6 000 requests, the best of three rounds
@@ -13,19 +14,35 @@
 # Passes only if
 #
 #   * the dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the disk p50 is the
-#     fsync), and
-#   * the dual throughput is at least 0.3 x the disk throughput.
+#     fsync): the parallel commit, and
+#   * the dual throughput is at least 10 000 req/s: the plan's per-node ingest SLO
+#     (1 KB bodies, in process), an absolute number so a slow disk cannot make a
+#     ratio pass at half the SLO, and
+#   * the dual throughput is at least `RATIO_FLOOR` (0.3) x the disk throughput: a
+#     regression guard for the dual path's own overhead (ADR 0002 asked for 0.8; see
+#     its Amendments for why that is not a property of the dual path).
 #
-# ADR 0002 asks for 0.8 x. That holds where fsync dominates (0.87 x on a laptop
-# whose fsync is 4 ms) and not where it does not: on a CI runner whose fsync is
-# 0.3 ms, disk mode is CPU-bound at 37 000 req/s and dual, with a hop more per
-# batch and a batcher that flushes the first record of a round alone (one commit
-# in flight per partition), reaches 17 000 (0.46 x). The floor is 0.3 x until that
-# is understood (DUR-1.b.b); the p50 check is the one that proves "max, not sum".
+# Why not 0.8. 512 clients in a closed loop, one commit in flight per batcher
+# partition (`batcher.partitions` = 2, so 256 clients each): a request waits for the
+# batch ahead of it and then for its own, so an ack takes two batch cycles
+# `2 x (confirm + overhead)` and a partition's two consecutive batches share its 256
+# clients: the mean batch the log sees is about 128 (printed below), not the 256 the
+# batcher allows. The closed-loop ceiling is `clients / (2 x (confirm + overhead))`:
+# 512 / (2 x 7.2 ms) = 36 000 req/s with a 5 ms confirm and 2.2 ms of overhead per
+# batch (measured). Where fsync is milliseconds the disk mode is below that ceiling
+# too and the two nearly meet (0.82-0.87 on a laptop with a 4 ms fsync); where fsync
+# is near free the disk mode is CPU-bound (62 000 req/s on a RAM disk) while the dual
+# mode is held at the ceiling: 0.61. More clients lift the ceiling (1 024 clients:
+# mean batch 240). Letting a partition's next batch commit while the previous one
+# waits for its confirm is the batcher's and writer's group commit (DUR-4), not this
+# bench's; the absolute floor above is what the plan's SLO needs.
+#
+# Also printed: the mean batch the log saw, in records per publish.
 #
 # Exits 1 otherwise. `mise run bench:gate` runs it before the ingest gate.
 #
-# Env knobs: LATENCY_MS (5), SEQUENTIAL (200), REQUESTS (6000), CONCURRENCY (512).
+# Env knobs: LATENCY_MS (5), SEQUENTIAL (200), REQUESTS (6000), CONCURRENCY (512),
+# RATIO_FLOOR (0.3), ABSOLUTE_FLOOR (10000), TMPDIR (where the stores go).
 #
 # Why 512 clients: a closed loop of C clients on an ack that takes at least the
 # confirm latency L cannot pass C / L requests a second, so 128 clients at 5 ms
@@ -35,16 +52,16 @@
 
 Logger.configure(level: :warning)
 
-# (a module attribute needs a module: the bench's one tunable that is not an env knob)
-throughput_floor = 0.3
-
 latency_ms = String.to_integer(System.get_env("LATENCY_MS", "5"))
 sequential = String.to_integer(System.get_env("SEQUENTIAL", "200"))
 requests = String.to_integer(System.get_env("REQUESTS", "6000"))
 concurrency = String.to_integer(System.get_env("CONCURRENCY", "512"))
+ratio_floor = String.to_float(System.get_env("RATIO_FLOOR", "0.3"))
+absolute_floor = String.to_integer(System.get_env("ABSOLUTE_FLOOR", "10000"))
 
 defmodule Bench.Intake do
   alias Ankusa.Edge.Ingest
+  alias Ankusa.Intake.Memory
 
   def start(name, mode, latency_ms) do
     dir =
@@ -85,13 +102,14 @@ defmodule Bench.Intake do
     {sup, config}
   end
 
+  # 1 KB bodies, the size of the plan's ingest SLO.
   def request(i) do
     %{
       source_id: "bench",
       method: "POST",
       path: "/webhooks/bench",
       headers: [{"content-type", "application/json"}],
-      body: ~s({"n":#{i},"pad":"#{String.duplicate("x", 480)}"})
+      body: ~s({"n":#{i},"pad":"#{String.duplicate("x", 980)}"})
     }
   end
 
@@ -103,16 +121,32 @@ defmodule Bench.Intake do
 
   def p50(samples), do: Enum.at(Enum.sort(samples), div(length(samples), 2)) / 1000
 
-  def measure(instance, sequential, requests, concurrency) do
+  def measure(mode, instance, sequential, requests, concurrency) do
     # warm the store, the batchers and the code
     for i <- 1..200, do: ack(instance, i)
 
     latencies = for i <- 1..sequential, do: ack(instance, i)
 
+    before = log_counts(mode, instance)
+
     # the best of three rounds: noise only ever takes throughput away
     per_s = Enum.max(for _round <- 1..3, do: throughput(instance, requests, concurrency))
-    %{p50_ms: p50(latencies), per_s: per_s}
+
+    %{
+      p50_ms: p50(latencies),
+      per_s: per_s,
+      mean_batch: mean_batch(before, log_counts(mode, instance))
+    }
   end
+
+  # Records and publish calls the log has seen: the mean batch is their ratio.
+  defp log_counts(:dual, instance),
+    do: {length(Memory.records(instance)), Memory.publish_calls(instance)}
+
+  defp log_counts(:disk, _instance), do: nil
+
+  defp mean_batch({r0, p0}, {r1, p1}) when p1 > p0, do: (r1 - r0) / (p1 - p0)
+  defp mean_batch(_before, _after), do: nil
 
   defp throughput(instance, requests, concurrency) do
     started = System.monotonic_time(:microsecond)
@@ -126,11 +160,11 @@ defmodule Bench.Intake do
 end
 
 {disk_sup, disk} = Bench.Intake.start(:intake_bench_disk, :disk, latency_ms)
-disk_result = Bench.Intake.measure(disk.instance, sequential, requests, concurrency)
+disk_result = Bench.Intake.measure(:disk, disk.instance, sequential, requests, concurrency)
 Supervisor.stop(disk_sup)
 
 {dual_sup, dual} = Bench.Intake.start(:intake_bench_dual, :dual, latency_ms)
-dual_result = Bench.Intake.measure(dual.instance, sequential, requests, concurrency)
+dual_result = Bench.Intake.measure(:dual, dual.instance, sequential, requests, concurrency)
 Supervisor.stop(dual_sup)
 
 fmt = fn %{p50_ms: p50, per_s: per_s} ->
@@ -140,8 +174,15 @@ end
 IO.puts("disk                : #{fmt.(disk_result)}")
 IO.puts("dual (#{latency_ms} ms confirm): #{fmt.(dual_result)}")
 
+IO.puts(
+  "dual mean batch     : #{Float.round(dual_result.mean_batch || 0.0, 1)} records per publish " <>
+    "(at most 256 per partition)"
+)
+
+IO.puts("dual / disk         : #{Float.round(dual_result.per_s / disk_result.per_s, 2)} x")
+
 limit_ms = max(disk_result.p50_ms, latency_ms) + 5
-floor_per_s = throughput_floor * disk_result.per_s
+floor_per_s = ratio_floor * disk_result.per_s
 
 failures =
   [
@@ -149,9 +190,12 @@ failures =
       do:
         "FAIL p50: dual #{Float.round(dual_result.p50_ms, 2)} ms > max(disk #{Float.round(disk_result.p50_ms, 2)}, #{latency_ms}) + 5 = #{Float.round(limit_ms * 1.0, 2)} ms"
     ),
+    if(dual_result.per_s < absolute_floor,
+      do: "FAIL throughput: dual #{round(dual_result.per_s)} req/s < the SLO of #{absolute_floor}"
+    ),
     if(dual_result.per_s < floor_per_s,
       do:
-        "FAIL throughput: dual #{round(dual_result.per_s)} req/s < #{throughput_floor} x disk #{round(disk_result.per_s)} (#{round(floor_per_s)})"
+        "FAIL throughput: dual #{round(dual_result.per_s)} req/s < #{ratio_floor} x disk #{round(disk_result.per_s)} (#{round(floor_per_s)})"
     )
   ]
   |> Enum.reject(&is_nil/1)
@@ -161,7 +205,8 @@ IO.puts(
     disk_p50_ms: disk_result.p50_ms,
     dual_p50_ms: dual_result.p50_ms,
     disk_per_s: disk_result.per_s,
-    dual_per_s: dual_result.per_s
+    dual_per_s: dual_result.per_s,
+    dual_mean_batch: dual_result.mean_batch
   })
 )
 
