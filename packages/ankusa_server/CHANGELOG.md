@@ -8,6 +8,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Tenant-aware routes (TEN-4).** A `routes.seed` entry takes `tenant_id` (the
+  owning tenant, default `default`) and `source_id` (the one source it admits):
+  a route owned by a tenant admits hooks only into that tenant, and a route bound
+  to a source admits only that source (`404` otherwise). The route-management
+  listener serves `/v1/tenants/<tenant>/routes`, which needs `tenant:<tenant>`
+  rather than `tenant:*`, beside the all-tenants `/admin/routes`. See
+  `docs/configuration.md` and `docs/multi-tenancy.md`.
+
 - **`verify.type`: `standard_webhooks_asym`, `asymmetric`, `token`, `client_cert`
   (SEC-12).** A source can be verified by the provider's public key (Standard
   Webhooks `v1a` Ed25519 by preset, or any Ed25519/RSA scheme described inline:

@@ -80,16 +80,32 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     {:putIpRules, "pinned"},
     {:replaceRoute, "replaced"},
     {:updateRoute, "reenabled"},
-    {:deleteRoute, nil}
+    {:deleteRoute, nil},
+    # The tenant surface: the same life, for one tenant's route.
+    {:createTenantRoute, "created"},
+    {:listTenantRoutes, "oneRoute"},
+    {:getTenantRoute, "stripe"},
+    {:replaceTenantRoute, "replaced"},
+    {:updateTenantRoute, "reenabled"},
+    {:deleteTenantRoute, nil}
   ]
 
   # The table every error probe runs against: `stripe` has the documented
   # example's id and path, and `both` shares its path with a different method —
   # which is how a `PATCH` (whose `path` is immutable) can still be made to
   # collide, and how `PUT /admin/routes/both` can replace into a conflict.
+  # `mine` is acme's, and `mine-get` is globex's on the same path with another
+  # method, so acme's `PATCH` of `mine` can collide with a route it cannot see.
   @probe_seed [
     %{"id" => "stripe", "path" => "/webhooks/stripe", "methods" => ["POST"]},
-    %{"id" => "both", "path" => "/webhooks/stripe", "methods" => ["GET"]}
+    %{"id" => "both", "path" => "/webhooks/stripe", "methods" => ["GET"]},
+    %{"id" => "mine", "path" => "/webhooks/acme", "methods" => ["POST"], "tenant_id" => "acme"},
+    %{
+      "id" => "mine-get",
+      "path" => "/webhooks/acme",
+      "methods" => ["GET"],
+      "tenant_id" => "globex"
+    }
   ]
 
   # The request bodies that are too long to sit inline in the table below.
@@ -168,7 +184,51 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     {:testRoute, 403,
      [token: "writer", body: %{"method" => "POST", "path" => "/webhooks/stripe"}]},
     {:getIpRules, 403, [token: "writer"]},
-    {:putIpRules, 403, [token: "reader", body: %{"default" => "allow", "rules" => []}]}
+    {:putIpRules, 403, [token: "reader", body: %{"default" => "allow", "rules" => []}]},
+    # The tenant surface. `stripe` belongs to the default tenant, so on acme's
+    # path it is another tenant's route: the documented 404 and 409, with no
+    # holder named. `mine` is acme's own.
+    {:listTenantRoutes, 400, [query: "limit=abc"]},
+    {:listTenantRoutes, 400, [path: "/v1/tenants/a.b/routes"]},
+    {:createTenantRoute, 400, [body: %{"path" => "hooks/not-rooted"}]},
+    {:createTenantRoute, 400, [body: %{"path" => "/x", "tenant_id" => "globex"}]},
+    {:createTenantRoute, 409, [body: %{"id" => "stripe", "path" => "/hooks/x"}]},
+    {:createTenantRoute, 409, [body: %{"id" => "new", "path" => "/webhooks/stripe"}]},
+    {:getTenantRoute, 400, [path: "/v1/tenants/a.b/routes/x"]},
+    {:getTenantRoute, 404, []},
+    {:replaceTenantRoute, 400, [body: %{"path" => "hooks/not-rooted"}]},
+    {:replaceTenantRoute, 409, [body: %{"path" => "/webhooks/other"}]},
+    {:updateTenantRoute, 400,
+     [path: "/v1/tenants/acme/routes/mine", body: %{"path" => "/webhooks/moved"}]},
+    {:updateTenantRoute, 404, [body: %{"enabled" => false}]},
+    {:updateTenantRoute, 409,
+     [path: "/v1/tenants/acme/routes/mine", body: %{"methods" => ["GET"]}]},
+    {:deleteTenantRoute, 400, [path: "/v1/tenants/a.b/routes/x"]},
+    {:deleteTenantRoute, 404, []},
+    {:createTenantRoute, 503, [body: %{"path" => "/hooks/any"}]},
+    {:replaceTenantRoute, 503,
+     [path: "/v1/tenants/acme/routes/fresh", body: %{"path" => "/hooks/fresh"}]},
+    {:updateTenantRoute, 503,
+     [path: "/v1/tenants/acme/routes/mine", body: %{"enabled" => false}]},
+    {:deleteTenantRoute, 503, [path: "/v1/tenants/acme/routes/mine"]},
+    {:listTenantRoutes, 401, []},
+    {:createTenantRoute, 401, [body: %{"path" => "/hooks/any"}]},
+    {:getTenantRoute, 401, []},
+    {:replaceTenantRoute, 401, [body: %{"path" => "/webhooks/stripe"}]},
+    {:updateTenantRoute, 401, [body: %{"enabled" => false}]},
+    {:deleteTenantRoute, 401, []},
+    {:listTenantRoutes, 403, [token: "writer"]},
+    {:createTenantRoute, 403, [token: "reader", body: %{"path" => "/hooks/any"}]},
+    {:getTenantRoute, 403, [token: "writer"]},
+    {:replaceTenantRoute, 403, [token: "reader", body: %{"path" => "/webhooks/stripe"}]},
+    {:updateTenantRoute, 403, [token: "reader", body: %{"enabled" => false}]},
+    {:deleteTenantRoute, 403, [token: "reader"]},
+    # tenant:acme is not tenant:globex.
+    {:listTenantRoutes, 403, [token: "acme", path: "/v1/tenants/globex/routes"]},
+    {:createTenantRoute, 403,
+     [token: "acme", path: "/v1/tenants/globex/routes", body: %{"path" => "/hooks/any"}]},
+    {:getTenantRoute, 403, [token: "acme", path: "/v1/tenants/globex/routes/x"]},
+    {:deleteTenantRoute, 403, [token: "acme", path: "/v1/tenants/globex/routes/x"]}
   ]
 
   # The tokens the `401`/`403` probes authenticate with: one that may only read
@@ -183,6 +243,11 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
       id: "writer",
       sha256: Ankusa.Admin.Auth.Token.hash("writer"),
       scopes: ["routes:write", "tenant:*"]
+    },
+    %{
+      id: "acme",
+      sha256: Ankusa.Admin.Auth.Token.hash("acme"),
+      scopes: ["routes:read", "routes:write", "tenant:acme"]
     }
   ]
 
@@ -474,8 +539,10 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     # A route to address with `{id}`: a documented 404 for a *missing route* is
     # not the 404 this test is looking for, so the id has to exist — and it has
     # to be the id the document's `{id}` example names, which is what the
-    # substitution below uses.
-    assert create_route(config, "stripe", "/webhooks/stripe").status == 201
+    # substitution below uses. It is acme's, which is the tenant `{tenant}` is
+    # filled in with, so the tenant surface finds it too.
+    stripe = %{"path" => "/webhooks/stripe", "tenant_id" => "acme"}
+    assert call(config, "post", "/admin/routes", Map.put(stripe, "id", "stripe")).status == 201
 
     # `GET /admin/routes/test` is served by the `{id}` template, so a 404 there
     # would be "no such route" rather than "no such endpoint" — the dry run only
@@ -486,6 +553,9 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
       for {path, _item, _method, _operation} <- operations(document), do: path
 
     for path <- Enum.uniq(documented_paths) do
+      # A `DELETE` on an earlier path removed it: put it back for this one.
+      assert call(config, "put", "/admin/routes/stripe", stripe).status in [200, 201]
+
       # A concrete path is served by its own path item *and* by any documented
       # template that matches it: `/admin/routes/test` is also
       # `/admin/routes/{id}`, so PUT/PATCH/DELETE/GET on it are documented, by
@@ -691,7 +761,7 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
     def replace(_instance, _route, _version), do: {:error, :store_unavailable}
 
     @impl true
-    def delete(_instance, _id), do: {:error, :store_unavailable}
+    def delete(_instance, _id, _tenant), do: {:error, :store_unavailable}
 
     @impl true
     def put_ip_rules(_instance, _rules), do: {:error, :store_unavailable}
@@ -794,7 +864,8 @@ defmodule Ankusa.Routes.RouterOpenAPITest do
 
   # `{id}` in a *path template* is a parameter; in a documented request path it
   # is the example the sequence created.
-  defp substitute(path), do: String.replace(path, "{id}", "stripe")
+  defp substitute(path),
+    do: path |> String.replace("{id}", "stripe") |> String.replace("{tenant}", "acme")
 
   # A map, not encoded JSON: `call/4` does the encoding, and double-encoding
   # would send `"{\"id\":...}"` — a JSON *string*, which `read_json/1` correctly

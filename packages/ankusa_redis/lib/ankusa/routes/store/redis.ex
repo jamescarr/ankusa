@@ -17,7 +17,7 @@ defmodule Ankusa.Routes.Store.Redis do
 
   | Key | Type | Contents |
   | --- | --- | --- |
-  | `<namespace>:routes` | hash | field = route id, value = `Ankusa.Routes.Route.to_json/1` as JSON |
+  | `<namespace>:routes` | hash | field = route id, value = `Ankusa.Routes.Route.to_stored_json/1` as JSON (`tenant_id` and `source_id` are left out while they are `"default"` and `nil`, so a node from before tenant routes still reads a table that has none) |
   | `<namespace>:ip_rules` | string | the global rules, JSON |
   | `<namespace>:version` | string | monotonically increasing counter |
   | `<namespace>` | pub/sub channel | a nudge: "the version moved" |
@@ -36,8 +36,10 @@ defmodule Ankusa.Routes.Store.Redis do
       node has reloaded, so the caller's retry validates against what is really
       there. `insert` also checks `max_routes` against the shared hash inside the
       same script, so two nodes racing for the last slot cannot both take it.
-    * `delete` removes the route and bumps the version in one step, and answers
-      `:not_found` from Redis rather than from the node's copy.
+    * `delete` removes the route and bumps the version in one step, answers
+      `:not_found` from Redis rather than from the node's copy, and, when it is
+      made for one tenant, reads the stored route's owner in the same step and
+      answers `:not_found` for another tenant's route.
     * `put_ip_rules` writes the rules and bumps the version in one step.
 
   The condition is what keeps two nodes honest. Each validates a create against
@@ -171,7 +173,7 @@ defmodule Ankusa.Routes.Store.Redis do
   defdelegate replace(instance, route, version), to: State
 
   @impl Ankusa.Routes.Store
-  defdelegate delete(instance, id), to: State
+  defdelegate delete(instance, id, tenant), to: State
 
   @impl Ankusa.Routes.Store
   defdelegate put_ip_rules(instance, rules), to: State
@@ -219,10 +221,21 @@ defmodule Ankusa.Routes.Store.Redis.State do
   return {'ok', version}
   """
 
-  # KEYS: routes hash, version. ARGV: id.
+  # KEYS: routes hash, version. ARGV: id, tenant ('' deletes whoever owns it).
+  # A route stored without a `tenant_id` belongs to the default tenant.
   @delete_route """
   local version = tonumber(redis.call('GET', KEYS[2]) or '1')
-  if redis.call('HDEL', KEYS[1], ARGV[1]) == 0 then return {'not_found'} end
+  local raw = redis.call('HGET', KEYS[1], ARGV[1])
+  if not raw then return {'not_found'} end
+  if ARGV[2] ~= '' then
+    local owner = 'default'
+    local ok, route = pcall(cjson.decode, raw)
+    if ok and type(route) == 'table' and type(route['tenant_id']) == 'string' then
+      owner = route['tenant_id']
+    end
+    if owner ~= ARGV[2] then return {'not_found'} end
+  end
+  redis.call('HDEL', KEYS[1], ARGV[1])
   version = version + 1
   redis.call('SET', KEYS[2], version)
   return {'ok', version}
@@ -264,7 +277,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
     do: call(instance, {:replace, route, version})
 
   @impl Ankusa.Routes.Store
-  def delete(instance, id), do: call(instance, {:delete, id})
+  def delete(instance, id, tenant), do: call(instance, {:delete, id, tenant})
 
   @impl Ankusa.Routes.Store
   def put_ip_rules(instance, rules), do: call(instance, {:put_ip_rules, rules})
@@ -319,10 +332,10 @@ defmodule Ankusa.Routes.Store.Redis.State do
   def handle_call({:replace, route, version}, _from, state),
     do: write_route(state, route, version, :replace, 0)
 
-  def handle_call({:delete, id}, _from, state) do
+  def handle_call({:delete, id, tenant}, _from, state) do
     keys = [routes_key(state), version_key(state)]
 
-    case eval(state, @delete_route, keys, [id]) do
+    case eval(state, @delete_route, keys, [id, tenant]) do
       {:ok, ["ok", version]} ->
         committed(state, version, :delete, id, fn s -> %{s | routes: Map.delete(s.routes, id)} end)
 
@@ -691,7 +704,7 @@ defmodule Ankusa.Routes.Store.Redis.State do
 
   # ── keys ────────────────────────────────────────────────────────────────────
 
-  defp encode(route), do: JSON.encode!(Route.to_json(route))
+  defp encode(route), do: JSON.encode!(Route.to_stored_json(route))
 
   defp routes_key(state), do: state.namespace <> ":routes"
   defp ip_rules_key(state), do: state.namespace <> ":ip_rules"

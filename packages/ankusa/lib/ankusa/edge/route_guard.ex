@@ -43,6 +43,15 @@ defmodule Ankusa.Edge.RouteGuard do
   allowlist is broken. The same goes for a conn whose peer address is nil —
   there is no address to match rules against, so there is nothing to allow.
 
+  ## What a match assigns
+
+  A captured request carries the route that admitted it as
+  `conn.assigns.ankusa_route`, an `Ankusa.Routes.Route`. `Ankusa.Edge.Router`
+  hands it to `Ankusa.Edge.Ingest.lookup/3`, which holds the route's `tenant_id`
+  and `source_id` against what the resolver said: a route owned by one tenant
+  admits nothing into another tenant's source, and a route bound to a source
+  admits nothing for another. A mismatch is the `404` an unknown source gets.
+
   ## Telemetry
 
     * `[:ankusa, :routes, :match]` — metadata
@@ -70,6 +79,7 @@ defmodule Ankusa.Edge.RouteGuard do
   alias Ankusa.Config
   alias Ankusa.Net
   alias Ankusa.Routes
+  alias Ankusa.Routes.Route
 
   @impl Plug
   def init(opts), do: opts
@@ -116,10 +126,10 @@ defmodule Ankusa.Edge.RouteGuard do
 
   defp decide(conn, instance, config, ip) do
     {decision, cached} =
-      Routes.authorize_path(instance, conn.method, conn.path_info, conn.request_path, ip)
+      Routes.capture(instance, conn.method, conn.path_info, conn.request_path, ip)
 
     case decision do
-      {:ok, route_id} ->
+      {:ok, %Route{id: route_id} = route} ->
         Ankusa.Telemetry.emit([:routes, :match], %{}, %{
           instance: instance,
           route_id: route_id,
@@ -127,7 +137,7 @@ defmodule Ankusa.Edge.RouteGuard do
           cacheable: Ankusa.Routes.Cache.cacheable?(conn.path_info)
         })
 
-        Plug.Conn.assign(conn, :ankusa_route, route_id)
+        Plug.Conn.assign(conn, :ankusa_route, route)
 
       {:reject, reason} ->
         reject(conn, instance, config, reason)

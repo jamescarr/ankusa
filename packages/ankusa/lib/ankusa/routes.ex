@@ -28,6 +28,16 @@ defmodule Ankusa.Routes do
   A route declares rules so a provider can be pinned to its published ranges
   while a global ban list still applies to everything — see
   `docs/configuration.md`.
+
+  ## Tenants
+
+  A route is owned by a tenant (`Ankusa.Routes.Route`) and its id is unique
+  across all of them. The write and read functions take a `tenant:` option for
+  a caller acting for one tenant (the tenant-scoped API): a route another tenant
+  owns is then `{:error, :not_found}` to it, an id or path that another tenant
+  holds is a conflict that does not name the holder (`{:conflict, nil}`), and
+  the tenant in the body, if any, must be that tenant. Without the option the
+  caller is the operator and sees every tenant's routes.
   """
 
   require Logger
@@ -84,13 +94,33 @@ defmodule Ankusa.Routes do
   @spec authorize_path(atom(), String.t(), [String.t()], String.t(), Net.ip()) ::
           {decision(), boolean()}
   def authorize_path(instance, method, path_info, request_path, ip) do
+    case capture(instance, method, path_info, request_path, ip) do
+      {{:ok, %Route{id: id}}, cached} -> {{:ok, id}, cached}
+      {{:reject, _reason} = rejected, cached} -> {rejected, cached}
+    end
+  end
+
+  @doc """
+  `authorize_path/5`, answering with the matched route itself rather than its
+  id: the guard hands it to ingest, which holds the route's tenant and source
+  binding against what the resolver says (`Ankusa.Edge.Ingest.lookup/3`). The
+  route is the one the decision already read, so this costs nothing extra.
+  """
+  @spec capture(atom(), String.t(), [String.t()], String.t(), Net.ip()) ::
+          {{:ok, Route.t()} | {:reject, :no_route | :method | :ip_denied}, boolean()}
+  def capture(instance, method, path_info, request_path, ip) do
     case Matcher.normalize(path_info, request_path) do
       :error ->
         {{:reject, :no_route}, false}
 
       {:ok, segments} ->
-        %{decision: decision, cached: cached} = evaluate(instance, method, segments, ip)
-        {decision, cached}
+        case evaluate(instance, method, segments, ip) do
+          %{decision: {:ok, _id}, route: %Route{} = route, cached: cached} ->
+            {{:ok, route}, cached}
+
+          %{decision: {:reject, _reason} = rejected, cached: cached} ->
+            {rejected, cached}
+        end
     end
   end
 
@@ -121,7 +151,8 @@ defmodule Ankusa.Routes do
 
   `cursor` is the last id of the previous page (ids are opaque slugs, so
   "greater than" is a total order over them). `limit` is clamped to `1..200` and
-  `next_cursor` is only set when there is another page.
+  `next_cursor` is only set when there is another page. `tenant:` lists one
+  tenant's routes, by walking that tenant's index rather than the table.
   """
   @spec list(atom(), keyword()) ::
           {:ok, %{routes: [Route.t()], next_cursor: String.t() | nil}}
@@ -133,23 +164,9 @@ defmodule Ankusa.Routes do
     routes =
       instance
       |> meta()
-      |> then(fn
-        nil -> []
-        meta -> Snapshot.routes(instance, meta)
-      end)
-      |> then(fn rs ->
-        case cursor do
-          nil -> rs
-          c -> Enum.filter(rs, &(&1.id > c))
-        end
-      end)
-      |> then(fn rs ->
-        case enabled do
-          nil -> rs
-          e -> Enum.filter(rs, &(&1.enabled == e))
-        end
-      end)
-      |> Enum.sort_by(& &1.id)
+      |> candidates(instance, Keyword.get(opts, :tenant), cursor)
+      |> Stream.filter(&(is_nil(enabled) or &1.enabled == enabled))
+      |> Enum.take(limit + 1)
 
     page = Enum.take(routes, limit)
 
@@ -160,15 +177,23 @@ defmodule Ankusa.Routes do
     {:ok, %{routes: page, next_cursor: next_cursor}}
   end
 
-  @doc "Fetch one route definition."
-  @spec get(atom(), String.t()) :: {:ok, Route.t()} | {:error, :not_found}
-  def get(instance, id) do
-    case meta(instance) do
-      nil ->
-        {:error, :not_found}
+  defp candidates(nil, _instance, _tenant, _cursor), do: []
 
-      meta ->
-        fetch(instance, meta, id)
+  defp candidates(meta, instance, nil, cursor) do
+    routes = Snapshot.routes(instance, meta)
+    routes = if cursor, do: Enum.filter(routes, &(&1.id > cursor)), else: routes
+    Enum.sort_by(routes, & &1.id)
+  end
+
+  defp candidates(meta, instance, tenant, cursor),
+    do: Snapshot.tenant_routes(instance, meta, tenant, cursor)
+
+  @doc "Fetch one route definition (`tenant:`: only if that tenant owns it)."
+  @spec get(atom(), String.t(), keyword()) :: {:ok, Route.t()} | {:error, :not_found}
+  def get(instance, id, opts \\ []) do
+    case meta(instance) do
+      nil -> {:error, :not_found}
+      meta -> instance |> fetch(meta, id) |> owned_by(Keyword.get(opts, :tenant))
     end
   end
 
@@ -188,14 +213,17 @@ defmodule Ankusa.Routes do
   @spec create(atom(), term(), keyword()) ::
           {:ok, Route.t()}
           | {:error, {:invalid, String.t(), String.t()}}
-          | {:error, {:conflict, String.t()}}
+          | {:error, {:conflict, String.t() | nil}}
           | {:error, :too_many_routes | :store_unavailable}
   def create(instance, attrs, opts \\ []) do
-    with {:ok, route} <- Route.from_attrs(attrs) do
+    tenant = Keyword.get(opts, :tenant)
+
+    with {:ok, attrs} <- scoped_attrs(attrs, tenant),
+         {:ok, route} <- Route.from_attrs(attrs) do
       audited(instance, opts, fn ->
         with {:ok, meta} <- writable_meta(instance),
-             :ok <- unique_id(instance, meta, route),
-             :ok <- no_conflict(instance, meta, route) do
+             :ok <- unique_id(instance, meta, route, tenant),
+             :ok <- no_conflict(instance, meta, route, tenant) do
           {:ok,
            plan(instance, "route.create", nil, route, route, fn ->
              Store.insert(instance, route, meta.version)
@@ -214,14 +242,22 @@ defmodule Ankusa.Routes do
   @spec replace(atom(), String.t(), term(), keyword()) ::
           {:ok, Route.t()}
           | {:error, {:invalid, String.t(), String.t()}}
-          | {:error, {:conflict, String.t()}}
+          | {:error, {:conflict, String.t() | nil}}
           | {:error, :too_many_routes | :store_unavailable}
   def replace(instance, id, attrs, opts \\ []) do
-    with {:ok, route} <- Route.from_attrs(attrs, id: id) do
+    tenant = Keyword.get(opts, :tenant)
+
+    with {:ok, attrs} <- scoped_attrs(attrs, tenant),
+         {:ok, route} <- Route.from_attrs(attrs, id: id) do
       audited(instance, opts, fn ->
         with {:ok, meta} <- writable_meta(instance),
-             :ok <- no_conflict(instance, meta, route) do
+             :ok <- no_conflict(instance, meta, route, tenant) do
           case Snapshot.fetch(instance, meta, id) do
+            # Another tenant's id is not this caller's to replace, and the
+            # answer does not say whose it is.
+            {:ok, %Route{tenant_id: owner}} when not is_nil(tenant) and owner != tenant ->
+              {:error, {:conflict, nil}}
+
             {:ok, existing} ->
               # The stored route is what gets returned: `inserted_at` is the one the
               # route already had, and the caller has to be told that, not the
@@ -251,27 +287,30 @@ defmodule Ankusa.Routes do
   @doc """
   Partial update: `enabled`, `methods`, `ip_rules`, and `metadata` only.
 
-  `path` and `id` are immutable here — moving a route changes which requests it
-  captures, which is a `PUT` (a full, reviewable definition), not a patch.
-  Audited like `create/3`.
+  `path`, `id`, `tenant_id` and `source_id` are immutable here — moving a route
+  changes which requests it captures and which tenant and source it admits them
+  into, which is a `PUT` (a full, reviewable definition), not a patch. Audited
+  like `create/3`.
   """
   @spec update(atom(), String.t(), term(), keyword()) ::
           {:ok, Route.t()}
           | {:error, {:invalid, String.t(), String.t()}}
-          | {:error, {:conflict, String.t()}}
+          | {:error, {:conflict, String.t() | nil}}
           | {:error, :not_found | :too_many_routes | :store_unavailable}
   def update(instance, id, patch, opts \\ []) do
+    tenant = Keyword.get(opts, :tenant)
+
     # The route being patched and the conflict check are both validated against
     # ONE version: a concurrent writer that slips between the reads moves the
     # version, the store refuses this write as stale, and it is re-read.
     audited(instance, opts, fn ->
       with {:ok, meta} <- writable_meta(instance),
-           {:ok, existing} <- fetch(instance, meta, id),
+           {:ok, existing} <- instance |> fetch(meta, id) |> owned_by(tenant),
            {:ok, patch} <- patch_attrs(patch),
            attrs = Map.merge(attrs_of(existing), patch),
            {:ok, route} <- Route.from_attrs(attrs, id: id),
            route = %{route | inserted_at: existing.inserted_at, revision: existing.revision + 1},
-           :ok <- no_conflict(instance, meta, route) do
+           :ok <- no_conflict(instance, meta, route, tenant) do
         {:ok,
          plan(instance, "route.update", existing, route, route, fn ->
            Store.replace(instance, route, meta.version)
@@ -280,17 +319,32 @@ defmodule Ankusa.Routes do
     end)
   end
 
-  @doc "Delete a route definition. Audited like `create/3`."
+  @doc """
+  Delete a route definition. Audited like `create/3`. With `tenant:`, a route
+  that tenant does not own is `{:error, :not_found}`, and the store checks the
+  owner in the delete itself.
+  """
   @spec delete(atom(), String.t(), keyword()) :: :ok | {:error, :not_found | :store_unavailable}
   def delete(instance, id, opts \\ []) do
+    tenant = Keyword.get(opts, :tenant)
+
     # What the audit row says was deleted comes from this node's snapshot; the
     # store itself (Redis, shared by a fleet) decides whether there was a route.
     before =
-      case get(instance, id) do
+      case get(instance, id, opts) do
         {:ok, route} -> route
         {:error, :not_found} -> nil
       end
 
+    # A tenant only deletes what its own snapshot shows it owns.
+    if tenant && is_nil(before) do
+      {:error, :not_found}
+    else
+      delete_audited(instance, id, before, tenant, opts)
+    end
+  end
+
+  defp delete_audited(instance, id, before, tenant, opts) do
     # The event of a deletion reports the route as it was: nothing is left to read.
     entity =
       Lifecycle.outbox(instance, fn ->
@@ -303,6 +357,7 @@ defmodule Ankusa.Routes do
           Map.merge(
             %{
               action: "route.delete",
+              tenant: before && before.tenant_id,
               resource: id,
               before_hash: before && definition_hash(instance, before),
               revision: before && before.revision + 1
@@ -310,7 +365,7 @@ defmodule Ankusa.Routes do
             entity
           )
 
-        {:ok, %{attrs: attrs, apply: fn -> Store.delete(instance, id) end, reply: :ok}}
+        {:ok, %{attrs: attrs, apply: fn -> Store.delete(instance, id, tenant) end, reply: :ok}}
       end)
 
     with {:ok, :ok} <- result, do: :ok
@@ -418,7 +473,7 @@ defmodule Ankusa.Routes do
       # No route table loaded: routes are on with nothing to match, so nothing
       # is allowed. The guard logs a warning and rejects the same way.
       nil ->
-        %{decision: {:reject, :no_route}, cached: false, ip_rule: nil, route_id: nil}
+        %{decision: {:reject, :no_route}, cached: false, ip_rule: nil, route_id: nil, route: nil}
 
       table ->
         case first_rule(table.ip_rules, ip) do
@@ -429,7 +484,8 @@ defmodule Ankusa.Routes do
               decision: {:reject, :ip_denied},
               cached: false,
               ip_rule: ip_rule(rule, "global"),
-              route_id: nil
+              route_id: nil,
+              route: nil
             }
 
           {:allow, _rule} ->
@@ -438,16 +494,28 @@ defmodule Ankusa.Routes do
 
             case match do
               {:reject, reason} ->
-                %{decision: {:reject, reason}, cached: cached, ip_rule: nil, route_id: nil}
+                %{
+                  decision: {:reject, reason},
+                  cached: cached,
+                  ip_rule: nil,
+                  route_id: nil,
+                  route: nil
+                }
 
               {:match, id} ->
                 case Snapshot.fetch(instance, table, id) do
                   {:ok, route} ->
-                    route_ip(route, id, cached, ip)
+                    route_ip(route, cached, ip)
 
                   # Deleted between the match and this read.
                   :error ->
-                    %{decision: {:reject, :no_route}, cached: cached, ip_rule: nil, route_id: nil}
+                    %{
+                      decision: {:reject, :no_route},
+                      cached: cached,
+                      ip_rule: nil,
+                      route_id: nil,
+                      route: nil
+                    }
                 end
             end
         end
@@ -458,17 +526,24 @@ defmodule Ankusa.Routes do
   # deny already won above), so a route that declares rules and matches none of
   # them denies: the point of pinning a provider's ranges is that anything else
   # is refused.
-  defp route_ip(route, id, cached, ip) do
+  defp route_ip(%Route{id: id} = route, cached, ip) do
     case route_rule(route, ip) do
       {:allow, rule} ->
-        %{decision: {:ok, id}, cached: cached, ip_rule: ip_rule(rule, "route"), route_id: id}
+        %{
+          decision: {:ok, id},
+          cached: cached,
+          ip_rule: ip_rule(rule, "route"),
+          route_id: id,
+          route: route
+        }
 
       {:deny, rule} ->
         %{
           decision: {:reject, :ip_denied},
           cached: cached,
           ip_rule: ip_rule(rule, "route"),
-          route_id: id
+          route_id: id,
+          route: route
         }
     end
   end
@@ -591,6 +666,7 @@ defmodule Ankusa.Routes do
       Map.merge(
         %{
           action: action,
+          tenant: route.tenant_id,
           resource: route.id,
           before_hash: before && definition_hash(instance, before),
           after_hash: definition_hash(instance, route),
@@ -708,12 +784,19 @@ defmodule Ankusa.Routes do
   defp clamp_limit(limit) when is_integer(limit), do: limit |> max(1) |> min(@max_limit)
   defp clamp_limit(_limit), do: @default_limit
 
-  defp unique_id(instance, meta, route) do
+  # The id is one namespace across tenants. A caller acting for a tenant is not
+  # told whose route holds an id that is not its own.
+  defp unique_id(instance, meta, route, tenant) do
     case Snapshot.fetch(instance, meta, route.id) do
-      {:ok, _existing} -> {:error, {:conflict, route.id}}
+      {:ok, holder} -> {:error, {:conflict, holder_id(holder, tenant)}}
       :error -> :ok
     end
   end
+
+  defp holder_id(%Route{id: id, tenant_id: owner}, tenant) when is_nil(tenant) or owner == tenant,
+    do: id
+
+  defp holder_id(%Route{}, _tenant), do: nil
 
   defp fetch(instance, meta, id) do
     case Snapshot.fetch(instance, meta, id) do
@@ -722,11 +805,38 @@ defmodule Ankusa.Routes do
     end
   end
 
+  # A route another tenant owns is not there, for a caller acting for one tenant.
+  defp owned_by({:ok, %Route{tenant_id: owner}} = found, tenant)
+       when is_nil(tenant) or owner == tenant,
+       do: found
+
+  defp owned_by(_other, _tenant), do: {:error, :not_found}
+
+  # The tenant-scoped API names the tenant in the path, so a body that names a
+  # different one is a bad request rather than a quiet move of the route.
+  defp scoped_attrs(attrs, nil), do: {:ok, attrs}
+
+  defp scoped_attrs(attrs, tenant) do
+    with {:ok, attrs} <- Route.stringify(attrs, "route") do
+      case Map.get(attrs, "tenant_id") do
+        nil ->
+          {:ok, Map.put(attrs, "tenant_id", tenant)}
+
+        ^tenant ->
+          {:ok, attrs}
+
+        _other ->
+          {:error,
+           {:invalid, "tenant_id", "must be #{tenant}, the tenant in the path, or absent"}}
+      end
+    end
+  end
+
   # Two *enabled* routes collide when they capture the same request class: the
   # same compiled pattern and at least one method in common. Disabled routes are
   # exempt — they capture nothing, so a staging definition may sit next to a live
   # one. Compiled segments are compared, so an enabled route is never re-parsed.
-  defp no_conflict(instance, meta, route) do
+  defp no_conflict(instance, meta, route, tenant) do
     if route.enabled do
       new = Matcher.compile(route)
 
@@ -735,7 +845,7 @@ defmodule Ankusa.Routes do
                Enum.any?(other.methods, &(&1 in route.methods))
            end) do
         nil -> :ok
-        {other, _segments} -> {:error, {:conflict, other.id}}
+        {other, _segments} -> {:error, {:conflict, holder_id(other, tenant)}}
       end
     else
       :ok
@@ -749,7 +859,7 @@ defmodule Ankusa.Routes do
     with {:ok, patch} <- Route.stringify(patch, "route") do
       # Anything else in the patch — a typo, a forged `inserted_at` — is caught by
       # `Route.from_attrs/2` on the merged attributes.
-      case Enum.find(Map.keys(patch), &(&1 in ["id", "path"])) do
+      case Enum.find(Map.keys(patch), &(&1 in ["id", "path", "tenant_id", "source_id"])) do
         nil -> {:ok, patch}
         key -> {:error, {:invalid, key, "immutable; use PUT"}}
       end

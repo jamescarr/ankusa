@@ -298,7 +298,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/dispatch/pipeline.ex:501-512,627,936-1140`, `queue/deliveries.ex:66-93`, `config.ex:47-70`.
   *Evidence:* —
 
-- [ ] **TEN-4 — Tenant-aware routes bound to sources** · P0 · Deps: —
+- [x] **TEN-4 — Tenant-aware routes bound to sources** · P0 · Deps: —
   *Why:* routes have no tenant or source field (`routes/route.ex:40-49`); the guard's `route_id` is discarded by ingest (`edge/route_guard.ex:125-130`, `edge/router.ex:76-84`); route lifecycle events hardcode tenant `"default"` (`lifecycle.ex:46-47,126-133`); any route caller can write routes for the whole fleet.
   *Change:* `tenant_id` (default `"default"`) and optional `source_id` on `Route` (`from_attrs/to_json/from_json`), in snapshot keys and the `{tenant, id}` ordered index; routes API paths become `/v1/tenants/:tenant/routes[...]` (OpenAPI updated, `router_openapi_test.exs` regenerated); `RouteGuard` passes `route_id`/`tenant_id`/`source_id` into `Ingest`; a resolver result that disagrees with the route's binding is `404`; lifecycle route events carry the route's tenant; SEC-1 scopes enforce `tenant:<t>` on the route API.
   *Done when:* a route owned by tenant A cannot admit a hook into tenant B's source; route events name the tenant; cross-tenant route CRUD is 403.

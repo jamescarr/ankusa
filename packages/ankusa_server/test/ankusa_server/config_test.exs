@@ -1437,6 +1437,7 @@ defmodule AnkusaServer.ConfigTest do
         admin: {port: 4100}
         seed:
           - {id: seed, path: "/hooks/seed", methods: [POST], metadata: {owner: acme}}
+          - {id: bound, path: "/hooks/bound", tenant_id: acme, source_id: "acme.billing"}
       """)
 
     routes = Config.load!(path: path, env: %{}).config.routes
@@ -1462,8 +1463,15 @@ defmodule AnkusaServer.ConfigTest do
 
     assert Map.delete(routes.admin, :auth) == %{port: 4100, ip: "127.0.0.1", tls: nil}
 
-    assert [%{"id" => "seed", "path" => "/hooks/seed", "metadata" => %{"owner" => "acme"}}] =
-             routes.seed
+    assert [
+             %{"id" => "seed", "path" => "/hooks/seed", "metadata" => %{"owner" => "acme"}},
+             %{
+               "id" => "bound",
+               "path" => "/hooks/bound",
+               "tenant_id" => "acme",
+               "source_id" => "acme.billing"
+             }
+           ] = routes.seed
   end
 
   test "a redis store is selected by type, or by a url with no type" do

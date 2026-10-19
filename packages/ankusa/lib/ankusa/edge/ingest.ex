@@ -62,7 +62,9 @@ defmodule Ankusa.Edge.Ingest do
 
   # Extra keys (`:source_id`, `:tenant_id` from a `request`) ride along: a closed
   # map type here would make every `ingest/2` call "break the contract". The
-  # edge adds `:query` (the raw query string) and, for a source verified by
+  # edge adds `:query` (the raw query string), `:route_id` (the route the guard
+  # matched, `nil` with routes off; reported as `:route_id` on the
+  # `[:ankusa, :ingest]` span) and, for a source verified by
   # `Ankusa.Verifier.ClientCert` only, `:peer_cert` (the DER client certificate
   # the TLS handshake accepted, or `nil`).
   @type raw_request :: %{
@@ -101,19 +103,31 @@ defmodule Ankusa.Edge.Ingest do
 
   A source store that cannot answer (`{:error, :unavailable}`) is
   `{:error, :store_unavailable}`, a `503` the provider retries, never a `404`.
+
+  `binding` is the route the guard matched (`Ankusa.Routes.Route`; `nil` with
+  routes off, and for `ingest/2`), held against what the resolver said. A
+  disagreement is the same `404` as a missing source:
+
+    * a route bound to a `source_id` admits only that source;
+    * a route owned by a tenant (any `tenant_id` but `"default"`) admits only
+      that tenant: a resolver that names another tenant, or a source owned by
+      another, is refused. Where the resolver names no tenant and the source is
+      shared, the hook is stored under the route's tenant: the tenant a route
+      resolves for a shared source;
+    * a route owned by `"default"` binds no tenant, as before.
   """
-  @spec lookup(atom(), Ankusa.Route.t()) ::
+  @spec lookup(atom(), Ankusa.Route.t(), Ankusa.Routes.Route.t() | nil) ::
           {:ok, Source.t(), tenant_id :: String.t()}
           | {:error, :unknown_source | :store_unavailable}
-  def lookup(instance, %Ankusa.Route{} = route) do
-    case Ankusa.SourceStore.fetch(instance, route.source_id) do
-      {:ok, %Source{} = source} ->
-        tenant_id = route.tenant_id || source.tenant_id
+  def lookup(instance, %Ankusa.Route{} = route, binding \\ nil) do
+    with {:ok, route} <- bind(route, binding),
+         {:ok, %Source{} = source} <- Ankusa.SourceStore.fetch(instance, route.source_id) do
+      tenant_id = route.tenant_id || source.tenant_id
 
-        if bound_elsewhere?(source, route) or not Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id),
-          do: unknown_source(instance),
-          else: {:ok, source, tenant_id}
-
+      if bound_elsewhere?(source, route) or not Ankusa.ClaimCheck.Ref.valid_tenant?(tenant_id),
+        do: unknown_source(instance),
+        else: {:ok, source, tenant_id}
+    else
       {:error, :unavailable} ->
         refused(instance, :store_unavailable)
         {:error, :store_unavailable}
@@ -122,6 +136,23 @@ defmodule Ankusa.Edge.Ingest do
         unknown_source(instance)
     end
   end
+
+  # The route the guard matched against the resolver's answer. A route bound to
+  # another source never reaches the source store.
+  defp bind(route, nil), do: {:ok, route}
+
+  defp bind(%Ankusa.Route{source_id: source_id}, %Ankusa.Routes.Route{source_id: bound})
+       when is_binary(bound) and bound != source_id,
+       do: :error
+
+  defp bind(%Ankusa.Route{tenant_id: asked} = route, %Ankusa.Routes.Route{tenant_id: owner})
+       when owner != "default" do
+    if is_nil(asked) or asked == owner,
+      do: {:ok, %{route | tenant_id: owner}},
+      else: :error
+  end
+
+  defp bind(route, %Ankusa.Routes.Route{}), do: {:ok, route}
 
   defp bound_elsewhere?(%Source{tenant_id: "default"}, _route), do: false
   defp bound_elsewhere?(_source, %Ankusa.Route{tenant_id: nil}), do: false
@@ -195,7 +226,9 @@ defmodule Ankusa.Edge.Ingest do
   """
   @spec ingest(atom(), Source.t(), String.t(), raw_request()) :: result()
   def ingest(instance, %Source{} = source, tenant_id, req) do
-    Ankusa.Telemetry.span([:ingest], %{instance: instance, source_id: source.id}, fn ->
+    metadata = %{instance: instance, source_id: source.id, route_id: Map.get(req, :route_id)}
+
+    Ankusa.Telemetry.span([:ingest], metadata, fn ->
       {result, dropped} = accept(instance, source, tenant_id, req)
 
       {result, %{size: byte_size(req.body), outcome: tag(result), dropped_headers: dropped}}
