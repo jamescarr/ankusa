@@ -259,6 +259,7 @@ final class ConformanceTest extends TestCase
             'admin_metrics' => ['text' => self::admin($conn)->metrics()],
             'admin_config' => self::admin($conn)->config(),
             'admin_dlq_list' => self::admin($conn)->listDeadLetters(self::scalars($inp, 'params')),
+            'admin_audit_list' => self::admin($conn)->listAudit(self::scalars($inp, 'params'))->toArray(),
             'admin_quarantine' => self::admin($conn)->listQuarantined(self::scalars($inp, 'params')),
             'admin_replay_create' => self::admin($conn)->createReplay(self::object($inp['spec'] ?? null, 'spec')),
             'admin_replay_get' => self::admin($conn)->getReplay(self::string($inp, 'id')),

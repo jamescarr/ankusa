@@ -266,8 +266,9 @@ non-JSON success body, or unreachable; retryable).
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics,
-the redacted config, the DLQ, replay jobs, and the quarantine list — the
-`operations`, `dlq`, `replays` and `quarantine` tags of `admin.v1.yaml`.
+the redacted config, the DLQ, replay jobs, the quarantine list, and the audit
+trail — the `operations`, `dlq`, `replays`, `quarantine` and `audit` tags of
+`admin.v1.yaml`.
 
 ```php
 use Ankusa\Admin\AdminClient;
@@ -283,13 +284,20 @@ $job = $admin->createReplay(['kind' => 'dlq', 'source_id' => 'demo', 'rate' => 5
 $admin->getReplay($job['id']);              // the Replay object
 $admin->listReplays();                      // ['replays' => [...]], newest first
 $admin->updateReplay($job['id'], ['state' => 'paused']);  // or 'running'/'cancelled'
+
+// The audit trail, newest first, paged by cursor/limit and filtered by
+// since/until/actor/action/tenant:
+$page = $admin->listAudit(['tenant' => 'acme', 'limit' => 50]);
+$page->entries;       // list<AuditEntry>
+$page->nextCursor;    // pass as `cursor` for the next page; null on the last
 ```
 
 `createReplay()` returns the created job (HTTP 202) or, when an equivalent job
 is already running or paused, that job (HTTP 200) — so a proxy retry is
 idempotent. Methods: `health()`, `metrics()` (Prometheus text), `config()`,
 `listDeadLetters()`, `createReplay()`, `getReplay()`, `listReplays()`,
-`updateReplay()`, `listQuarantined()`. Failures are `AdminError` subclasses:
+`updateReplay()`, `listQuarantined()`, `listAudit()` (returns an `AuditPage` of
+`AuditEntry`). Failures are `AdminError` subclasses:
 `RoleNotEnabledError` (409 `role_not_enabled`, carrying `$role`),
 `AdminRejectedError` (any other 4xx, carrying `$errorCode`),
 and `AdminUnavailableError` (5xx, an unfollowed redirect, or unreachable;

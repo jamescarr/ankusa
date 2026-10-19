@@ -28,6 +28,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   `$allowUnsigned` it throws `InvalidSignatureError` (`invalid_secret`). The
   signature is judged before the hook id. Returns a `ReceivedDelivery`
   (`headers`, `verified`).
+- `AdminClient::listAudit()`: `GET /v1/audit`, the audit trail (newest first,
+  paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
+  `tenant`).
 
 ### Changed
 
