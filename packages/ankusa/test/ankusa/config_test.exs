@@ -485,7 +485,7 @@ defmodule Ankusa.ConfigTest do
     end
 
     test "an unknown wal value raises" do
-      assert_raise ArgumentError, ~r/wal must be :disk or :none/, fn ->
+      assert_raise ArgumentError, ~r/wal must be :disk, :dual or :none/, fn ->
         Config.new(wal: :bogus)
       end
     end
@@ -1297,6 +1297,150 @@ defmodule Ankusa.ConfigTest do
 
       assert %{max_entries: 1, max_entries_per_tenant: 1} =
                Config.new(dedupe: [max_entries: 1, max_entries_per_tenant: 1]).dedupe
+    end
+  end
+
+  describe "wal: :dual and the intake block" do
+    @dual [
+      wal: :dual,
+      intake: %{type: :memory, node_id: "node-a"},
+      backup: %{enabled: true, max_age_ms: 120_000}
+    ]
+
+    defp dual(overrides) do
+      Keyword.merge(@dual, overrides, fn
+        _key, a, b when is_map(a) and is_map(b) -> Map.merge(a, b)
+        _key, _a, b -> b
+      end)
+    end
+
+    test "the defaults and the minimum that boots" do
+      assert %{wal: :dual, intake: intake} = Config.new(@dual)
+
+      assert %{
+               fleet: "default",
+               topic: nil,
+               publish_timeout_ms: 2_000,
+               reconcile_deadline_ms: 20_000,
+               breaker_failures: 3,
+               probe_ms: 1_000,
+               retry_after_s: 2,
+               offset_flush_ms: 1_000,
+               pending: %{max_records: 50_000, max_bytes: 268_435_456},
+               max_record_bytes: 10_000_000,
+               recover_on_boot: true,
+               verify_topic: true
+             } = intake
+
+      assert Config.new().wal == :disk
+      assert Ankusa.Queue.label(:dual) == "dual"
+    end
+
+    test "dual needs intake.type, intake.node_id, backup.enabled, backup.max_age_ms and the edge" do
+      for {overrides, message} <- [
+            {[intake: %{type: nil}], ~r/needs intake\.type/},
+            {[intake: %{node_id: nil}], ~r/needs intake\.node_id/},
+            {[backup: %{enabled: false}], ~r/needs backup\.enabled and backup\.max_age_ms/},
+            {[backup: %{max_age_ms: nil}], ~r/needs backup\.enabled and backup\.max_age_ms/},
+            {[roles: [:dispatch]], ~r/requires the :edge role/}
+          ] do
+        assert_raise ArgumentError, message, fn -> Config.new(dual(overrides)) end
+      end
+    end
+
+    test "every numeric key has a range" do
+      for {key, bad, message} <- [
+            {:publish_timeout_ms, 99,
+             ~r/intake\.publish_timeout_ms must be an integer from 100 to 60000/},
+            {:publish_timeout_ms, 60_001,
+             ~r/intake\.publish_timeout_ms must be an integer from 100/},
+            {:reconcile_deadline_ms, 999,
+             ~r/intake\.reconcile_deadline_ms must be an integer from 1000 to 600000/},
+            {:reconcile_deadline_ms, 600_001, ~r/intake\.reconcile_deadline_ms/},
+            {:breaker_failures, 0, ~r/intake\.breaker_failures must be an integer from 1 to 100/},
+            {:breaker_failures, 101, ~r/intake\.breaker_failures/},
+            {:probe_ms, 99, ~r/intake\.probe_ms must be an integer from 100 to 60000/},
+            {:probe_ms, 60_001, ~r/intake\.probe_ms/},
+            {:retry_after_s, 0, ~r/intake\.retry_after_s must be an integer from 1 to 300/},
+            {:retry_after_s, 301, ~r/intake\.retry_after_s/},
+            {:offset_flush_ms, 99,
+             ~r/intake\.offset_flush_ms must be an integer from 100 to 60000/},
+            {:offset_flush_ms, 60_001, ~r/intake\.offset_flush_ms/},
+            {:max_record_bytes, 0, ~r/intake\.max_record_bytes must be a positive integer/},
+            {:recover_on_boot, "yes", ~r/intake\.recover_on_boot must be true or false/},
+            {:verify_topic, nil, ~r/intake\.verify_topic must be true or false/},
+            {:node_id, "Node A", ~r/intake\.node_id must be nil or a string of/},
+            {:fleet, "", ~r/intake\.fleet must be a string of/},
+            {:topic, "", ~r/intake\.topic must be nil or a non-empty string/},
+            {:type, :sqs, ~r/intake\.type must be nil, :kafka, :jetstream or :memory/}
+          ] do
+        assert_raise ArgumentError, message, fn -> Config.new(dual(intake: %{key => bad})) end
+      end
+
+      for {key, bad, message} <- [
+            {:max_records, 0,
+             ~r/intake\.pending\.max_records must be an integer from 1 to 10000000/},
+            {:max_records, 10_000_001, ~r/intake\.pending\.max_records/},
+            {:max_bytes, 0, ~r/intake\.pending\.max_bytes must be a positive integer/}
+          ] do
+        assert_raise ArgumentError, message, fn ->
+          Config.new(dual(intake: %{pending: %{key => bad}}))
+        end
+      end
+    end
+
+    test "the cross-key rules" do
+      assert_raise ArgumentError, ~r/publish_timeout_ms must be less than the batcher/, fn ->
+        Config.new(dual(intake: %{publish_timeout_ms: 15_000}))
+      end
+
+      assert_raise ArgumentError, ~r/must be at least max_body_bytes \+ 65536/, fn ->
+        Config.new(dual(max_body_bytes: 8_000_000, intake: %{max_record_bytes: 8_000_000}))
+      end
+
+      assert Config.new(dual(max_body_bytes: 1_000, intake: %{max_record_bytes: 66_536}))
+
+      fleet = [
+        fleet: %{store: {Ankusa.Sink.Log, []}, pending_ttl_ms: 10_000},
+        dedupe: %{scope: :fleet}
+      ]
+
+      assert_raise ArgumentError,
+                   ~r/reconcile_deadline_ms \(10000\) must be less than fleet\.pending_ttl_ms/,
+                   fn ->
+                     Config.new(dual(fleet ++ [intake: %{reconcile_deadline_ms: 10_000}]))
+                   end
+
+      assert Config.new(dual(fleet ++ [intake: %{reconcile_deadline_ms: 9_000}]))
+    end
+
+    test "an unknown intake key is refused, and the adapter blocks are taken whole" do
+      assert_raise ArgumentError, ~r/unknown Ankusa.Config key: intake.bogus/, fn ->
+        Config.new(dual(intake: %{bogus: 1}))
+      end
+
+      config =
+        Config.new(dual(intake: %{kafka: %{brokers: ["k:9092"], sasl: {:plain, "u", "p"}}}))
+
+      assert Enum.sort(config.intake.kafka) == [brokers: ["k:9092"], sasl: {:plain, "u", "p"}]
+    end
+
+    test "/v1/config redacts the adapter blocks (kafka sasl, jetstream credentials)" do
+      config =
+        Config.new(
+          dual(
+            intake: %{
+              kafka: [brokers: ["k:9092"], sasl: {:plain, "user", "hunter2"}],
+              jetstream: [url: "nats://u:pw@n:4222", token: "tok-secret"]
+            }
+          )
+        )
+
+      json = config |> Ankusa.Admin.Redact.config() |> JSON.encode!()
+      refute json =~ "hunter2"
+      refute json =~ "tok-secret"
+      refute json =~ "pw@"
+      assert json =~ "node-a"
     end
   end
 end

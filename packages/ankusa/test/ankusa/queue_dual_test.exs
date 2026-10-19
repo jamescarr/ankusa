@@ -167,7 +167,7 @@ defmodule Ankusa.QueueDualTest do
       first = Task.async(fn -> ingest(config, "evt-1") end)
       assert wait_until(fn -> pending(config) == 1 end)
 
-      assert {:error, :intake_unavailable} = ingest(config, "evt-2")
+      assert {:ok, [{:error, :intake_unavailable}]} = enqueue_direct(config)
       assert length(hook_ids(config)) == 1
 
       Memory.release(config.instance)
@@ -289,6 +289,38 @@ defmodule Ankusa.QueueDualTest do
     test "says UNVERIFIED when verify_topic is false" do
       config = dual_config(intake: %{verify_topic: false})
       assert Intake.durability(config) =~ "intake topic settings UNVERIFIED"
+    end
+  end
+
+  describe "metrics" do
+    test "the intake series exist, and their number does not grow with tenants" do
+      config = start_dual(metrics: %{enabled: true, port: 0})
+      Memory.fail(config.instance, :unavailable, 1)
+
+      assert {:error, :intake_unavailable} = ingest(config, "evt-1")
+      assert {:ok, _} = ingest(config, "evt-2")
+      assert drained(config)
+      Ankusa.Metrics.Gauges.measure(config.instance)
+
+      scrape = Ankusa.Metrics.scrape(config.instance)
+
+      for series <- [
+            ~s(ankusa_intake_publish_duration_seconds_count{instance="#{config.instance}",outcome="ok"}),
+            ~s(ankusa_intake_publish_duration_seconds_count{instance="#{config.instance}",outcome="unavailable"}),
+            ~s(ankusa_intake_failures_total{class="unavailable",instance="#{config.instance}"}),
+            ~s(ankusa_intake_reconciled_total{half="log",instance="#{config.instance}"}),
+            "ankusa_intake_pending_records",
+            "ankusa_intake_pending_bytes",
+            "ankusa_intake_reconcile_oldest_age_seconds",
+            "ankusa_intake_reconcile_stuck",
+            "ankusa_intake_offset_lag_seconds",
+            "ankusa_intake_ready"
+          ] do
+        assert scrape =~ series, "missing #{series}"
+      end
+
+      # no intake series carries a tenant
+      refute scrape =~ ~r/ankusa_intake_[a-z_]+\{[^}]*tenant/
     end
   end
 end

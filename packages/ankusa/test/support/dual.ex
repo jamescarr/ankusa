@@ -136,4 +136,25 @@ defmodule Ankusa.Test.Dual do
   def ops(table) do
     for {{:op, _}, op} <- :ets.tab2list(table) |> Enum.sort(), do: op
   end
+
+  @doc """
+  One hook straight into `Queue.enqueue/2`, past the batcher (whose partition runs
+  one commit at a time: a second request on the partition of a held one would
+  wait behind it). Returns the writer's per-item results.
+  """
+  def enqueue_direct(config) do
+    env = %Ankusa.Envelope{
+      id: Ankusa.UUIDv7.generate(),
+      source_id: "load",
+      tenant_id: "default",
+      received_at: System.system_time(:millisecond),
+      method: "POST",
+      path: "/webhooks/load",
+      headers: [],
+      body: "{}",
+      size: 2
+    }
+
+    Queue.enqueue(config.instance, [%{envelope: env, sinks: [{CollectSink, [pid: self()]}]}])
+  end
 end

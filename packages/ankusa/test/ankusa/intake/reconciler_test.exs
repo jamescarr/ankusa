@@ -121,6 +121,7 @@ defmodule Ankusa.Intake.ReconcilerTest do
     assert ops(fleet) == []
 
     assert wait_until(fn -> Pending.meta(table(config), :stuck) == 1 end, 4_000)
+    assert wait_until(fn -> length(ops(fleet)) == 1 end)
     assert [{:release, %{key: "evt-1"}}] = ops(fleet)
 
     # it is still pending and still retried: nothing is dropped
