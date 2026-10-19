@@ -33,7 +33,8 @@
           "content_type": "application/json",
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     },
@@ -68,7 +69,8 @@
           "content_type": null,
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     },
@@ -103,7 +105,8 @@
           "content_type": null,
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     },
@@ -361,7 +364,8 @@
           "content_type": "application/json",
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": "acme:demo:evt_1"
+          "idempotency_key": "acme:demo:evt_1",
+          "verification": null
         }
       }
     },
@@ -391,7 +395,8 @@
           "content_type": null,
           "dedupe_key": null,
           "replay_id": null,
-          "idempotency_key": null
+          "idempotency_key": null,
+          "verification": null
         }
       }
     },
