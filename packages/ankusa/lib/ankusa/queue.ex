@@ -40,9 +40,14 @@ defmodule Ankusa.Queue do
   takes, so a returned `{:error, _}` other than those two may mean the commit
   failed, and `{:ok, _}` means it is durable. The call is never abandoned
   half-way: an abandoned call would commit anyway, unacknowledged.
+
+  An entry's reply is `{:error, :tenant_limit}` instead when its tenant would
+  be one past `tenants.max`: that hook is not written.
   """
   @spec enqueue(atom(), [entry()], integer() | :infinity) ::
-          {:ok, [{:committed, Envelope.t()} | {:duplicate, Envelope.t()}]} | {:error, term()}
+          {:ok,
+           [{:committed, Envelope.t()} | {:duplicate, Envelope.t()} | {:error, :tenant_limit}]}
+          | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do
     GenServer.call(
       Ankusa.via(instance, :queue_writer),
@@ -57,6 +62,8 @@ defmodule Ankusa.Queue do
   row, with `extra_ops` (the pen deletes and the job's cursor) in the same
   synced batch — so a crash cannot leave a hook both committed and still held,
   or held and gone. `extra_ops` commit even when every entry is a duplicate.
+  A tenant past `tenants.max` is the whole call's `{:error, :tenant_limit}`:
+  nothing commits, the pen keeps its entries.
   Never deadline-bound.
   """
   @spec release(atom(), [entry()], [Ankusa.Store.op()]) ::
@@ -81,7 +88,8 @@ defmodule Ankusa.Queue do
           size: non_neg_integer(),
           sinks: [{non_neg_integer(), module()}],
           replay_id: String.t(),
-          source_id: String.t()
+          source_id: String.t(),
+          tenant_id: String.t() | nil
         }
 
   @doc """
@@ -183,8 +191,8 @@ defmodule Ankusa.Queue do
   and not listed; one beyond the returned page is still counted, so `total` is
   exact unless corruption hides past the page. Options: `:source_id`, `:since`
   (a unix-ms lower bound on the dead-letter time), `:tenants` (a list of tenant
-  ids: only dead letters of those tenants' hooks, found by reading each
-  candidate's hook until the tenant is in the index; `nil`, the default, is
+  ids: only dead letters of those tenants' hooks, read from each tenant's range
+  of the by-tenant dead index with no hook read; `nil`, the default, is
   every tenant), `:limit`.
   """
   @spec dead(atom(), keyword()) ::
@@ -194,13 +202,42 @@ defmodule Ankusa.Queue do
   @doc """
   The undelivered rows of one source in this node's queue: `pending` waiting
   in the due index (due now or after a backoff) and `inflight` claimed by
-  dispatch. Walks both indexes; rows written before delivery rows recorded
-  their source are matched by reading their hook.
+  dispatch. Walks both indexes (O(backlog)); rows written before delivery rows
+  recorded their source are matched by reading their hook. `tenant:` names the
+  one tenant a source owned by a tenant files its hooks under, and limits the
+  walk to that tenant's rows.
   """
-  @spec pending_for_source(atom(), String.t()) ::
+  @spec pending_for_source(atom(), String.t(), keyword()) ::
           {:ok, %{pending: non_neg_integer(), inflight: non_neg_integer()}} | {:error, term()}
-  def pending_for_source(instance, source_id),
-    do: Deliveries.pending_for_source(instance, source_id)
+  def pending_for_source(instance, source_id, opts \\ []),
+    do: Deliveries.pending_for_source(instance, source_id, opts)
+
+  @doc """
+  `%{pending, scheduled, inflight, bytes}` of one tenant, from its counters:
+  O(1). `pending` counts first-attempt rows waiting and `scheduled` retry rows
+  waiting (including a retry whose backoff just ended); `bytes` is the stored
+  size of every delivery row the tenant holds (a hook with *n* sinks counts *n*
+  times).
+  """
+  @spec pending_for_tenant(atom(), String.t()) ::
+          {:ok,
+           %{pending: integer(), scheduled: integer(), inflight: integer(), bytes: integer()}}
+          | {:error, term()}
+  def pending_for_tenant(instance, tenant), do: Deliveries.pending_for_tenant(instance, tenant)
+
+  @doc "`%{dead: n}`: the dead rows of one tenant, from its counter: O(1)."
+  @spec dead_for_tenant(atom(), String.t()) :: {:ok, %{dead: integer()}} | {:error, term()}
+  def dead_for_tenant(instance, tenant), do: Deliveries.dead_for_tenant(instance, tenant)
+
+  @doc """
+  Removes `tenant`'s `:pending` (every due row) and/or `:dead` rows (`kinds` a
+  subset of `[:pending, :dead]`) in synced chunks of 500: idempotent, so a run
+  that stopped part-way resumes by being called again, and it never touches
+  claimed rows. Returns the rows removed per kind.
+  """
+  @spec purge_tenant(atom(), String.t(), [:pending | :dead]) ::
+          {:ok, %{pending: non_neg_integer(), dead: non_neg_integer()}} | {:error, term()}
+  def purge_tenant(instance, tenant, kinds), do: Deliveries.purge_tenant(instance, tenant, kinds)
 
   defp next_seq(instance) do
     case Store.get(instance, :default, Keys.meta("next_seq")) do
@@ -211,7 +248,17 @@ defmodule Ankusa.Queue do
   end
 
   defp disk_bytes(instance) do
-    cfs = [:default, :hooks, :deliveries, :index, :archive, :quarantine]
+    cfs = [
+      :default,
+      :hooks,
+      :deliveries,
+      :index,
+      :archive,
+      :quarantine,
+      :audit,
+      :tenants,
+      :counters
+    ]
 
     Enum.reduce_while(cfs, {:ok, 0}, fn cf, {:ok, acc} ->
       case Store.property(instance, cf, "rocksdb.total-sst-files-size") do

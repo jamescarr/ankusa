@@ -168,4 +168,201 @@ defmodule Ankusa.TestHelpers do
       {"webhook-signature", "v1,#{sig}"}
     ]
   end
+
+  @doc """
+  The ordinal of `tenant`, allocated through the writer (the one process that
+  allocates) when the tenant has none yet: a hook with no sink and no archive
+  commits nothing but the ordinal.
+  """
+  def tenant_ord!(instance, tenant \\ "default") do
+    case Ankusa.Queue.Tenants.ord(instance, tenant) do
+      {:ok, ord} ->
+        ord
+
+      :not_found ->
+        env = %Ankusa.Envelope{
+          id: Ankusa.UUIDv7.generate(),
+          source_id: "ord-probe",
+          tenant_id: tenant,
+          received_at: System.system_time(:millisecond),
+          method: "POST",
+          path: "/",
+          headers: [],
+          body: "",
+          size: 0
+        }
+
+        {:ok, [{:committed, _}]} = Ankusa.Queue.enqueue(instance, [%{envelope: env, sinks: []}])
+        {:ok, ord} = Ankusa.Queue.Tenants.ord(instance, tenant)
+        ord
+    end
+  end
+
+  @doc """
+  The index side of a pending row at `at`, counters included: what a commit
+  leaves beside the hook and its delivery row.
+  """
+  def due_index_ops(instance, seq, sink, at, size, tenant \\ "default") do
+    ord = tenant_ord!(instance, tenant)
+
+    Ankusa.Queue.Deliveries.due_ops(ord, at, seq, sink, size, 0) ++
+      Ankusa.Queue.Deliveries.Counters.ops([{ord, :pending, 1}, {ord, :bytes, size}])
+  end
+
+  @doc "The index side of a dead row: both dead keys and the counters."
+  def dead_index_ops(instance, seq, sink, at, source_id, id, tenant \\ "default", size \\ 0) do
+    ord = tenant_ord!(instance, tenant)
+
+    [
+      {:put, :index, Ankusa.Store.Keys.dead(at, seq, sink),
+       :erlang.term_to_binary({source_id, id, ord})},
+      {:put, :index, Ankusa.Store.Keys.dead_by_tenant(ord, at, seq, sink), <<>>}
+    ] ++ Ankusa.Queue.Deliveries.Counters.ops([{ord, :dead, 1}, {ord, :bytes, size}])
+  end
+
+  @doc """
+  What the queue counters must be, folded from the index families: `%{ord =>
+  %{pending, scheduled, inflight, dead, bytes, archive_pending}}`, ordinal 0
+  the sum of the others. Only tenants with a non-zero counter appear.
+  """
+  def folded_counters(instance) do
+    alias Ankusa.Store
+    alias Ankusa.Store.Keys
+
+    zero = %{pending: 0, scheduled: 0, inflight: 0, dead: 0, bytes: 0, archive_pending: 0}
+
+    bump = fn acc, ord, field, n ->
+      Map.update(acc, ord, %{zero | field => n}, &%{&1 | field => &1[field] + n})
+    end
+
+    fold = fn family, acc, fun ->
+      %{lo: lo, hi: hi} = Keys.family(family)
+
+      {:ok, acc} =
+        Store.fold(instance, family, {lo, hi}, acc, fn k, v, acc -> {:cont, fun.(k, v, acc)} end)
+
+      acc
+    end
+
+    acc =
+      fold.(:due, %{}, fn key, <<size::32, kind::8>>, acc ->
+        {ord, _at, _seq, _sink} = Keys.decode_due(key)
+
+        acc
+        |> bump.(ord, if(kind == 0, do: :pending, else: :scheduled), 1)
+        |> bump.(ord, :bytes, size)
+      end)
+
+    acc =
+      fold.(:inflight, acc, fn key, <<size::32>>, acc ->
+        {ord, _seq, _sink} = Keys.decode_inflight(key)
+        acc |> bump.(ord, :inflight, 1) |> bump.(ord, :bytes, size)
+      end)
+
+    acc =
+      fold.(:dead_by_tenant, acc, fn key, _v, acc ->
+        {ord, at, seq, sink} = Keys.decode_dead_by_tenant(key)
+
+        size =
+          with {:ok, bin} <- Store.get(instance, :deliveries, Keys.delivery(seq, sink)),
+               {:ok, %{size: size}} <- Ankusa.Queue.Deliveries.decode_row(bin) do
+            size
+          else
+            _ -> 0
+          end
+
+        _ = at
+        acc |> bump.(ord, :dead, 1) |> bump.(ord, :bytes, size)
+      end)
+
+    acc =
+      fold.(:archive_pending, acc, fn _key, <<_size::32, ord::32>>, acc ->
+        bump.(acc, ord, :archive_pending, 1)
+      end)
+
+    total =
+      Enum.reduce(acc, zero, fn {_ord, counters}, total ->
+        Map.merge(total, counters, fn _field, a, b -> a + b end)
+      end)
+
+    acc |> Map.put(0, total) |> Map.reject(fn {_ord, c} -> c == zero end)
+  end
+
+  @doc "The counters as stored, for the ordinals of `folded_counters/1` and any more with a row."
+  def stored_counters(instance) do
+    {:ok, next} = Ankusa.Queue.Tenants.next_ord(instance)
+    zero = %{pending: 0, scheduled: 0, inflight: 0, dead: 0, bytes: 0, archive_pending: 0}
+
+    for ord <- 0..(next - 1), reduce: %{} do
+      acc ->
+        {:ok, counters} = Ankusa.Queue.Deliveries.Counters.read(instance, ord)
+        if counters == zero, do: acc, else: Map.put(acc, ord, counters)
+    end
+  end
+
+  @doc """
+  Runs `fun` in a fresh process traced for calls into the store's read API
+  and returns `{result, calls}`: `{:fold, family}`, `{:first, family}`,
+  `{:get, cf, [key]}` and `{:multi_get, cf, keys}`, in call order.
+
+  A process cannot be its own tracer in a way that delivers (the trace messages
+  never arrive), so `fun` runs in a spawned process traced by the caller.
+  """
+  def store_calls(fun) do
+    me = self()
+
+    pid =
+      spawn_link(fn ->
+        receive do
+          :go ->
+            result =
+              try do
+                {:ok, fun.()}
+              catch
+                kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+              end
+
+            send(me, {:store_calls_result, self(), result})
+        end
+      end)
+
+    patterns = [fold: 6, first: 4, get: 3, multi_get: 3]
+    for {f, a} <- patterns, do: :erlang.trace_pattern({Ankusa.Store, f, a}, true, [:local])
+    1 = :erlang.trace(pid, true, [:call, {:tracer, me}])
+    send(pid, :go)
+
+    outcome =
+      receive do
+        {:store_calls_result, ^pid, outcome} -> outcome
+      after
+        60_000 -> raise "store_calls: the traced function did not return"
+      end
+
+    # The traced process exits right after replying, which ends its tracing.
+    for {f, a} <- patterns, do: :erlang.trace_pattern({Ankusa.Store, f, a}, false, [:local])
+    calls = collect_store_calls(pid, [])
+
+    case outcome do
+      {:ok, result} -> {result, calls}
+      {:raised, kind, reason, stack} -> :erlang.raise(kind, reason, stack)
+    end
+  end
+
+  defp collect_store_calls(pid, acc) do
+    receive do
+      {:trace, ^pid, :call, {Ankusa.Store, :fold, [_instance, family | _]}} ->
+        collect_store_calls(pid, [{:fold, family} | acc])
+
+      {:trace, ^pid, :call, {Ankusa.Store, :first, [_instance, family | _]}} ->
+        collect_store_calls(pid, [{:first, family} | acc])
+
+      {:trace, ^pid, :call, {Ankusa.Store, :get, [_instance, cf, key]}} ->
+        collect_store_calls(pid, [{:get, cf, [key]} | acc])
+
+      {:trace, ^pid, :call, {Ankusa.Store, :multi_get, [_instance, cf, keys]}} ->
+        collect_store_calls(pid, [{:multi_get, cf, keys} | acc])
+    after
+      100 -> Enum.reverse(acc)
+    end
+  end
 end

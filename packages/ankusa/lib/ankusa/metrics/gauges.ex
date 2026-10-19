@@ -9,11 +9,17 @@ defmodule Ankusa.Metrics.Gauges do
     * `[:ankusa, :store, :state]` — `hooks`, `deliveries` (RocksDB key
       estimates), `disk_bytes`, `next_seq` (`Ankusa.Queue.stats/1`); on a node
       that runs the store.
-    * `[:ankusa, :queue, :state]` — `pending` (due now), `scheduled` (waiting
-      for a retry), `inflight`, `dead`, `archive_pending`, and
+    * `[:ankusa, :queue, :state]` — `pending` (first-attempt rows waiting),
+      `scheduled` (retry rows waiting, including one whose backoff has just
+      ended and is not yet claimed), `inflight`, `dead`, `archive_pending`,
+      `tenants` (how many tenants the store has handed an ordinal to) and
       `oldest_due_age_ms` (how long the oldest due row has been waiting; `0`
-      with nothing due). Counted by scanning the index keys, so the cost grows
-      with the backlog (about 1 µs a key); on a node that runs the store.
+      with nothing due). Read from the node's queue counters (six point reads)
+      and the active-tenant index, so the cost is independent of the backlog and
+      of the number of tenants; on a node that runs the store.
+    * `[:ankusa, :tenant, :state]` — one event per tenant among the 100 with the
+      most `pending` rows (`pending`, and the `tenant` in the metadata), taken
+      from the counters of the first 10 000 tenants of the active index.
     * `[:ankusa, :quarantine, :state]` — the pen's `bytes` and `entries`; on an
       `:edge` node.
     * `[:ankusa, :disk, :state]` — `free_bytes` and `total_bytes` of the file
@@ -35,10 +41,14 @@ defmodule Ankusa.Metrics.Gauges do
   # its process is running.
   @compile {:no_warn_undefined, :disksup}
 
-  alias Ankusa.{Config, Instance, Queue, Store}
+  alias Ankusa.{Config, Instance, Queue}
   alias Ankusa.Queue.Deliveries
+  alias Ankusa.Queue.Deliveries.Counters
+  alias Ankusa.Queue.Tenants
   alias Ankusa.Sink.Http.Pool
-  alias Ankusa.Store.Keys
+
+  @top_tenants 100
+  @candidate_tenants 10_000
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -100,34 +110,73 @@ defmodule Ankusa.Metrics.Gauges do
   defp queue(instance) do
     now = System.system_time(:millisecond)
 
-    with {:ok, {pending, scheduled}} <- count_due(instance, now),
-         {:ok, inflight} <- count(instance, :inflight),
-         {:ok, dead} <- count(instance, :dead),
-         {:ok, archive_pending} <- count(instance, :archive_pending),
-         {:ok, oldest} <- Deliveries.next_due_at(instance, 0) do
+    with {:ok, counters} <- Counters.read(instance, 0),
+         {:ok, tenants} <- Tenants.count(instance),
+         {:ok, oldest} <- Deliveries.next_due_at(instance, %{}, tenants: 1) do
       emit(instance, :queue, %{
-        pending: pending,
-        scheduled: scheduled,
-        inflight: inflight,
-        dead: dead,
-        archive_pending: archive_pending,
+        pending: max(counters.pending, 0),
+        scheduled: max(counters.scheduled, 0),
+        inflight: max(counters.inflight, 0),
+        dead: max(counters.dead, 0),
+        archive_pending: max(counters.archive_pending, 0),
+        tenants: tenants,
         oldest_due_age_ms: if(oldest, do: max(0, now - oldest), else: 0)
       })
+
+      tenant_pending(instance, now)
     end
   end
 
-  defp count_due(instance, now) do
-    %{lo: lo, hi: hi} = Keys.family(:due)
+  # `ankusa_tenant_pending{tenant}`: the top tenants by waiting first attempts.
+  # A tenant with `pending > 0` has a marker at or before the current second, so
+  # the first tenants of the active index (those that have waited longest) are
+  # the candidates, and their counters are one `multi_get`. A tenant that fell
+  # out of the top since the last tick is reported once as `0`, so its series
+  # does not keep a stale value (the poller process remembers the last set).
+  defp tenant_pending(instance, now) do
+    key = {__MODULE__, instance, :tenant_pending}
 
-    Store.fold(instance, :due, {lo, hi}, {0, 0}, fn key, _value, {pending, scheduled} ->
-      {at, _seq, _sink} = Keys.decode_due(key)
-      if at <= now, do: {:cont, {pending + 1, scheduled}}, else: {:cont, {pending, scheduled + 1}}
-    end)
+    with {:ok, ords} <- Deliveries.active_ords(instance, now, @candidate_tenants),
+         {:ok, pending} <- Counters.read_field(instance, ords, :pending),
+         {:ok, named} <- ords |> Enum.zip(pending) |> top_pending() |> name_tenants(instance) do
+      current = MapSet.new(named, &elem(&1, 0))
+      previous = Process.get(key, MapSet.new())
+
+      for {tenant, count} <- named, do: emit_tenant(instance, tenant, count)
+      for tenant <- MapSet.difference(previous, current), do: emit_tenant(instance, tenant, 0)
+
+      Process.put(key, current)
+      :ok
+    end
   end
 
-  defp count(instance, family) do
-    %{lo: lo, hi: hi} = Keys.family(family)
-    Store.fold(instance, family, {lo, hi}, 0, fn _key, _value, n -> {:cont, n + 1} end)
+  defp top_pending(pairs) do
+    pairs
+    |> Enum.filter(fn {_ord, count} -> count > 0 end)
+    |> Enum.sort_by(fn {_ord, count} -> count end, :desc)
+    |> Enum.take(@top_tenants)
+  end
+
+  defp name_tenants(top, instance) do
+    top
+    |> Enum.reduce_while({:ok, []}, fn {ord, count}, {:ok, acc} ->
+      case Tenants.name(instance, ord) do
+        {:ok, tenant} -> {:cont, {:ok, [{tenant, count} | acc]}}
+        :not_found -> {:cont, {:ok, acc}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp emit_tenant(instance, tenant, count) do
+    :telemetry.execute([:ankusa, :tenant, :state], %{pending: count}, %{
+      instance: instance,
+      tenant: tenant
+    })
   end
 
   defp quarantine(instance) do

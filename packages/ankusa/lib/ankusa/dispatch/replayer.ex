@@ -770,7 +770,8 @@ defmodule Ankusa.Dispatch.Replayer do
                 size: size,
                 sinks: indexes,
                 replay_id: job.id,
-                source_id: env.source_id
+                source_id: env.source_id,
+                tenant_id: env.tenant_id
               }
 
               {:cont, {:ok, [entry | entries], skipped}}

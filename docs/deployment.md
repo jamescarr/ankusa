@@ -219,7 +219,7 @@ Measured numbers from a full ingest → dispatch → consumer run are recorded i
 ## Upgrading between releases
 
 The store carries a **format version** (`m:format_version` in its `default`
-column family; this release writes format 2). A store without the key is
+column family; this release writes format 3). A store without the key is
 format 1 — every store written before the marker existed — and is stamped on
 its first open. A release that changes the key layout adds a migration to the
 store's migration registry; on boot, before the node serves, the
@@ -238,6 +238,31 @@ That is the rollback boundary: **once a node has booted format 2, going back
 means restoring the pre-upgrade backup**, losing what was acked since and
 every audit row. A node's audit rows are its own; a fleet reads each node's
 trail with `GET /v1/audit` (scope `audit:read`) per node.
+
+**Format 3 (tenant ordinals and counters, [ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)).**
+The store gains the `tenants` and `counters` column families. Every tenant
+gets a dense ordinal, due and claimed rows are re-keyed under it (`?d`/`?f`
+become `?D`/`?F`), the dead index gains a by-tenant companion (`?X`), a due
+row gets an active-tenant marker (`?A`), and the per-tenant queue counters
+are seeded from the rows. The migration runs on boot, before the node serves,
+in synced batches of 500 rows (due, claimed, dead, then archive obligations)
+and is proportional to the rows queued at the upgrade: a node with an empty
+queue migrates in a moment, one with millions of queued rows takes minutes
+and logs each step; it resumes where a kill left it and counts nothing twice.
+The gauges `ankusa_queue_pending` and `_scheduled` change meaning here:
+`pending` is first attempts waiting and `scheduled` is retries waiting
+(including one whose backoff has just ended); their sum is what it was, and
+`ankusa_queue_oldest_due_age_seconds` is still the alarm for a backlog. A
+format 2 release cannot open a format 3 store (`{:store_format_newer, 3, 2}`,
+and RocksDB refuses the families it does not list). That is the rollback
+boundary: **once a node has booted format 3, going back means restoring the
+pre-upgrade backup**, losing what was acked since, so take a backup before
+the first boot. A migration killed part-way leaves `m:migrating:3` and the
+store at format 2 with some rows moved; only a format 3 release can open it,
+and it resumes. A fleet upgrades node by node: stores are per node. A new
+key, `tenants.max` (default 1 000 000), refuses the hook of the tenant past
+it with `503 tenant_limit` and `Retry-After: 300`; tenants already known are
+never refused.
 
 Preview what a boot would do, without opening the store (read-only, safe
 beside a running node):

@@ -133,20 +133,20 @@ defmodule Ankusa.StoreTest do
     test "a family only sees its own keys", %{instance: inst} do
       :ok =
         Store.write(inst, [
-          {:put, :index, Keys.due(20, 2, 0), <<1::32>>},
-          {:put, :index, Keys.due(10, 1, 0), <<1::32>>},
+          {:put, :index, Keys.due(1, 20, 2, 0), <<1::32, 0>>},
+          {:put, :index, Keys.due(1, 10, 1, 0), <<1::32, 0>>},
           {:put, :index, Keys.dead(5, 9, 0), "d"},
-          {:put, :index, Keys.inflight(3, 0), <<>>}
+          {:put, :index, Keys.inflight(1, 3, 0), <<>>}
         ])
 
-      {lo, hi} = Keys.range(<<?d>>)
+      {lo, hi} = Keys.range(<<?D>>)
 
       assert {:ok, due} =
                Store.fold(inst, :due, {lo, hi}, [], fn k, _v, acc ->
                  {:cont, [Keys.decode_due(k) | acc]}
                end)
 
-      assert Enum.reverse(due) == [{10, 1, 0}, {20, 2, 0}]
+      assert Enum.reverse(due) == [{1, 10, 1, 0}, {1, 20, 2, 0}]
     end
   end
 
@@ -172,7 +172,7 @@ defmodule Ankusa.StoreTest do
     end
 
     test "a corrupt sst data block fails the scan", %{config: config, instance: inst} do
-      ops = for i <- 1..4000, do: {:put, :index, Keys.due(i, i, 0), <<512::32>>}
+      ops = for i <- 1..4000, do: {:put, :index, Keys.due(1, i, i, 0), <<512::32, 0>>}
       :ok = Store.write(inst, ops, sync: true)
       flush!(inst, :index)
       stop_supervised!({Store, inst})
@@ -180,7 +180,7 @@ defmodule Ankusa.StoreTest do
       flip_mid(largest(config, ".sst"))
       start_supervised!({Store, instance: inst})
 
-      {lo, hi} = Keys.range(<<?d>>)
+      {lo, hi} = Keys.range(<<?D>>)
 
       assert {:error, {:corruption, _}} =
                Store.fold(inst, :due, {lo, hi}, 0, fn _k, _v, n -> {:cont, n + 1} end)

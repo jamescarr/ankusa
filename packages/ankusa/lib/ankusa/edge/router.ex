@@ -296,6 +296,14 @@ defmodule Ankusa.Edge.Router do
     |> send_json(503, %{error: "quarantine_full"})
   end
 
+  # The node already knows `tenants.max` tenants: this one is refused until an
+  # operator raises the cap (or erases a tenant), so a short retry is no use.
+  defp respond(conn, {:error, :tenant_limit}) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "300")
+    |> send_json(503, %{error: "tenant_limit"})
+  end
+
   defp respond(conn, {:error, reason}) when reason in [:overload, :store_unavailable] do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "1")

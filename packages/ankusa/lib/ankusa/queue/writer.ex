@@ -5,9 +5,13 @@ defmodule Ankusa.Queue.Writer do
 
   One process per instance, under `Ankusa.via(instance, :queue_writer)`. The
   commit is a single atomic store batch: the hook, one pending delivery row and
-  due key per sink, the archive obligation when the `:storage` role runs, and
-  the `m:next_seq` marker. A failed commit consumes its seqs (gaps are
-  allowed) but acks nothing.
+  due key (with its active-tenant marker) per sink, the archive obligation when
+  the `:storage` role runs, the counter deltas of all of them, the `m:next_seq`
+  marker and, for a tenant seen for the first time, its ordinal (this process is
+  the only one that allocates them, see `queue/tenants.ex`). A failed commit
+  consumes its seqs and ordinals (gaps are allowed) but acks nothing. A hook
+  whose tenant would pass `tenants.max` is refused with `{:error,
+  :tenant_limit}` in its place of the reply, and nothing of it is written.
   """
 
   use GenServer
@@ -16,6 +20,7 @@ defmodule Ankusa.Queue.Writer do
 
   alias Ankusa.Config
   alias Ankusa.Queue.Deliveries
+  alias Ankusa.Queue.Tenants
   alias Ankusa.Store
   alias Ankusa.Store.Keys
 
@@ -34,12 +39,15 @@ defmodule Ankusa.Queue.Writer do
     config = Ankusa.config(instance)
 
     # A seq is never reused: if either read fails, refuse to start rather than
-    # guess a floor.
+    # guess a floor. The same for tenant ordinals.
     with {:ok, marker} <- marker_seq(instance),
-         {:ok, last} <- last_hook_seq(instance) do
+         {:ok, last} <- last_hook_seq(instance),
+         {:ok, ord_marker} <- Tenants.next_ord(instance),
+         {:ok, last_ord} <- last_tenant_ord(instance) do
       next_seq = max(marker, last + 1)
+      next_ord = max(ord_marker, last_ord + 1)
 
-      Logger.info("[ankusa] store next_seq=#{next_seq}")
+      Logger.info("[ankusa] store next_seq=#{next_seq} tenants=#{next_ord - 1}")
 
       Process.send_after(self(), :sweep_dedupe, 10_000)
 
@@ -47,6 +55,11 @@ defmodule Ankusa.Queue.Writer do
        %{
          instance: instance,
          next_seq: next_seq,
+         next_ord: next_ord,
+         tenants_max: config.tenants.max,
+         # tenant id => ordinal; only this process reads or writes it, and
+         # only after a commit succeeded
+         ords: :ets.new(:ankusa_tenant_ords, [:set, :private]),
          archive?: Config.role?(config, :storage),
          last_at: 0
        }}
@@ -72,6 +85,19 @@ defmodule Ankusa.Queue.Writer do
       {Keys.hook(1), hi},
       0,
       fn key, _v, _acc -> {:halt, :binary.decode_unsigned(key)} end,
+      reverse: true
+    )
+  end
+
+  defp last_tenant_ord(instance) do
+    %{hi: hi} = Keys.family(:tenants)
+
+    Store.fold(
+      instance,
+      :tenants,
+      {Keys.tenant(0), hi},
+      0,
+      fn <<?t, ord::32>>, _v, _acc -> {:halt, ord} end,
       reverse: true
     )
   end
@@ -112,59 +138,76 @@ defmodule Ankusa.Queue.Writer do
   defp redrive_batch(entries, extra_ops, state) do
     now = max(System.system_time(:millisecond), state.last_at)
     count = length(entries)
+    tenants = entries |> Enum.map(&Tenants.normalize(&1.tenant_id)) |> Enum.uniq()
 
-    ops =
-      entries
-      |> Enum.with_index(state.next_seq)
-      |> Enum.reduce([], fn {%{
-                               bin: bin,
-                               size: size,
-                               sinks: sinks,
-                               replay_id: replay_id,
-                               source_id: source_id
-                             }, seq},
-                            ops ->
-        row_ops =
-          Enum.flat_map(sinks, fn {index, mod} ->
-            row =
-              Deliveries.encode_row(%{
-                module: mod,
-                state: :pending,
-                attempts: 0,
-                at: now,
-                error: nil,
-                size: size,
-                source_id: source_id,
-                replay: replay_id
-              })
+    with {:ok, admission} <- admit(tenants, state),
+         true <- all_admitted?(tenants, admission) do
+      ops =
+        entries
+        |> Enum.with_index(state.next_seq)
+        |> Enum.reduce([], fn {%{
+                                 bin: bin,
+                                 size: size,
+                                 sinks: sinks,
+                                 replay_id: replay_id,
+                                 source_id: source_id
+                               } = entry, seq},
+                              ops ->
+          ord = Map.fetch!(admission.ords, Tenants.normalize(entry.tenant_id))
 
-            [
-              {:put, :deliveries, Keys.delivery(seq, index), row},
-              {:put, :index, Keys.due(now, seq, index), <<size::32>>}
-            ]
-          end)
+          row_ops =
+            Enum.flat_map(sinks, fn {index, mod} ->
+              row =
+                Deliveries.encode_row(%{
+                  module: mod,
+                  state: :pending,
+                  attempts: 0,
+                  at: now,
+                  error: nil,
+                  size: size,
+                  source_id: source_id,
+                  replay: replay_id
+                })
 
-        [{:put, :hooks, Keys.hook(seq), bin} | row_ops] ++ ops
-      end)
+              Deliveries.new_ops(ord, now, seq, index, size, row)
+            end)
 
-    bytes = Enum.sum(Enum.map(entries, & &1.size))
+          [{:put, :hooks, Keys.hook(seq), bin} | row_ops] ++ ops
+        end)
 
-    ops =
-      [{:put, :default, Keys.meta("next_seq"), <<state.next_seq + count::64>>} | ops] ++ extra_ops
+      bytes = Enum.sum(Enum.map(entries, & &1.size))
 
-    result = commit(state.instance, ops, count, bytes)
-
-    case result do
-      :ok ->
-        wake_dispatch(state.instance, now)
-        {:reply, {:ok, count}, %{state | next_seq: state.next_seq + count, last_at: now}}
-
-      {:error, reason} ->
-        Logger.error(
-          "[ankusa] store commit of #{count} replayed hook(s) failed, nothing acked: #{inspect(reason)}"
+      ops =
+        Deliveries.coalesce(
+          [{:put, :default, Keys.meta("next_seq"), <<state.next_seq + count::64>>} | ops] ++
+            admission.ops ++ extra_ops
         )
 
-        {:reply, {:error, reason}, %{state | next_seq: state.next_seq + count, last_at: now}}
+      result = commit(state.instance, ops, count, bytes)
+
+      state = %{
+        state
+        | next_seq: state.next_seq + count,
+          next_ord: admission.next_ord,
+          last_at: now
+      }
+
+      case result do
+        :ok ->
+          cache_put(state, admission.cache)
+          wake_dispatch(state.instance, now)
+          {:reply, {:ok, count}, state}
+
+        {:error, reason} ->
+          Logger.error(
+            "[ankusa] store commit of #{count} replayed hook(s) failed, nothing acked: #{inspect(reason)}"
+          )
+
+          {:reply, {:error, reason}, state}
+      end
+    else
+      false -> {:reply, {:error, :tenant_limit}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -176,57 +219,139 @@ defmodule Ankusa.Queue.Writer do
     # keeps its scan floor just under the stamps it has seen, and relies on
     # stamps never going down.
     now = max(System.system_time(:millisecond), state.last_at)
+    tenants = items |> Enum.map(&item_tenant/1) |> Enum.uniq()
 
-    case dedupe_check(state.instance, items, now) do
+    case admit(tenants, state) do
+      {:ok, admission} ->
+        tagged = Enum.map(items, &{&1, Map.has_key?(admission.ords, item_tenant(&1))})
+
+        if extra_ops != [] and Enum.any?(tagged, &(not elem(&1, 1))) do
+          # The caller's ops (a quarantine release's pen deletes) cover every
+          # item: refusing one would lose it, so refuse the call.
+          {:reply, {:error, :tenant_limit}, state}
+        else
+          commit_admitted(tagged, extra_ops, admission, now, state)
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp commit_admitted(tagged, extra_ops, admission, now, state) do
+    admitted = for {item, true} <- tagged, do: item
+
+    case dedupe_check(state.instance, admitted, now) do
       {:error, reason} ->
         # The dedupe read failed: no seq consumed, nothing written, nothing
         # acked. Callers see the store error, not a guessed commit.
         {:reply, {:error, reason}, state}
 
       {:ok, %{fresh: []} = checked} when extra_ops == [] ->
-        # Every item was a duplicate: write nothing, don't wake dispatch.
-        {:reply, {:ok, checked.results}, state}
+        # Every item was a duplicate (or refused): write nothing, don't wake dispatch.
+        {:reply, {:ok, with_refused(tagged, checked.results)}, state}
 
       {:ok, %{fresh: []} = checked} ->
         # No hook to commit, but the caller's own ops must still land.
         case Store.write(state.instance, extra_ops, sync: true) do
-          :ok -> {:reply, {:ok, checked.results}, state}
+          :ok -> {:reply, {:ok, with_refused(tagged, checked.results)}, state}
           {:error, reason} -> {:reply, {:error, reason}, state}
         end
 
       {:ok, checked} ->
         {ops, batch_size, bytes} =
-          build_ops(checked.fresh, state.next_seq, now, state.archive?)
+          build_ops(checked.fresh, state.next_seq, now, state.archive?, admission.ords)
 
-        ops = checked.dedupe_ops ++ ops ++ extra_ops
+        ops = Deliveries.coalesce(checked.dedupe_ops ++ ops ++ admission.ops ++ extra_ops)
 
         result = commit(state.instance, ops, batch_size, bytes)
 
+        state = %{
+          state
+          | next_seq: state.next_seq + length(checked.fresh),
+            next_ord: admission.next_ord,
+            last_at: now
+        }
+
         case result do
           :ok ->
+            cache_put(state, admission.cache)
             wake_dispatch(state.instance, now)
 
             committed =
               checked.fresh
-              |> Enum.with_index(state.next_seq)
+              |> Enum.with_index(state.next_seq - length(checked.fresh))
               |> Enum.map(fn {{env, _bin, _mods, _ttl, _replay_id}, seq} ->
                 {:committed, %{env | seq: seq}}
               end)
 
             results = reassemble(checked.results, committed)
-
-            {:reply, {:ok, results},
-             %{state | next_seq: state.next_seq + length(checked.fresh), last_at: now}}
+            {:reply, {:ok, with_refused(tagged, results)}, state}
 
           {:error, reason} ->
             Logger.error(
-              "[ankusa] store commit of #{length(items)} hook(s) failed, nothing acked: #{inspect(reason)}"
+              "[ankusa] store commit of #{length(tagged)} hook(s) failed, nothing acked: #{inspect(reason)}"
             )
 
-            {:reply, {:error, reason},
-             %{state | next_seq: state.next_seq + length(checked.fresh), last_at: now}}
+            {:reply, {:error, reason}, state}
         end
     end
+  end
+
+  # ── tenant ordinals ───────────────────────────────────────────────────────
+
+  @ord_cache_max 65_536
+
+  defp item_tenant({env, _bin, _mods, _ttl, _replay_id}), do: Tenants.normalize(env.tenant_id)
+
+  # Resolves the ordinals of `tenants`: the cache, then one `multi_get` of the
+  # rows of the uncached ones, then new ordinals for those with none (up to
+  # `tenants.max`). `ops` are the puts of the new ordinals, for the commit batch.
+  defp admit(tenants, state) do
+    {known, misses} =
+      Enum.reduce(tenants, {%{}, []}, fn tenant, {known, misses} ->
+        case :ets.lookup(state.ords, tenant) do
+          [{_, ord}] -> {Map.put(known, tenant, ord), misses}
+          [] -> {known, [tenant | misses]}
+        end
+      end)
+
+    misses = Enum.reverse(misses)
+
+    with {:ok, stored} <- Tenants.lookup(state.instance, misses) do
+      {new, ops, next_ord, _refused} =
+        Tenants.allocate(
+          state.next_ord,
+          Enum.reject(misses, &Map.has_key?(stored, &1)),
+          state.tenants_max
+        )
+
+      cache = Map.merge(stored, new)
+      {:ok, %{ords: Map.merge(known, cache), ops: ops, next_ord: next_ord, cache: cache}}
+    end
+  end
+
+  defp all_admitted?(tenants, admission),
+    do: Enum.all?(tenants, &Map.has_key?(admission.ords, &1))
+
+  # Cleared whole when full: a miss is one point read.
+  defp cache_put(state, cache) do
+    if :ets.info(state.ords, :size) + map_size(cache) > @ord_cache_max,
+      do: :ets.delete_all_objects(state.ords)
+
+    :ets.insert(state.ords, Map.to_list(cache))
+  end
+
+  # `results` holds the replies of the admitted items in item order; the refused
+  # ones get `{:error, :tenant_limit}` in their place.
+  defp with_refused(tagged, results) do
+    {merged, []} =
+      Enum.map_reduce(tagged, results, fn
+        {_item, true}, [result | rest] -> {result, rest}
+        {_item, false}, rest -> {{:error, :tenant_limit}, rest}
+      end)
+
+    merged
   end
 
   # ── ingest dedupe ─────────────────────────────────────────────────────────
@@ -441,11 +566,12 @@ defmodule Ankusa.Queue.Writer do
 
   # ── batch construction ───────────────────────────────────────────────────
 
-  defp build_ops(items, first_seq, now, archive?) do
+  defp build_ops(items, first_seq, now, archive?, ords) do
     items
     |> Enum.with_index(first_seq)
     |> Enum.reduce({[], 0, 0}, fn {{env, bin, mods, _ttl, replay_id}, seq}, {ops, count, bytes} ->
       size = byte_size(bin)
+      ord = Map.fetch!(ords, Tenants.normalize(env.tenant_id))
 
       # A row without `:replay` is a live delivery; a released quarantine hook's
       # rows carry the job's id, like a replayed dead letter's.
@@ -465,16 +591,10 @@ defmodule Ankusa.Queue.Writer do
         mods
         |> Enum.with_index()
         |> Enum.flat_map(fn {mod, i} ->
-          row = Deliveries.encode_row(%{base | module: mod})
-
-          [
-            {:put, :deliveries, Keys.delivery(seq, i), row},
-            {:put, :index, Keys.due(now, seq, i), <<size::32>>}
-          ]
+          Deliveries.new_ops(ord, now, seq, i, size, Deliveries.encode_row(%{base | module: mod}))
         end)
 
-      archive_ops =
-        if archive?, do: [{:put, :index, Keys.archive_pending(seq), <<size::32>>}], else: []
+      archive_ops = if archive?, do: Deliveries.archive_ops(ord, seq, size), else: []
 
       # A hook with no obligations (no sinks, archive off) consumes a seq but
       # writes nothing.

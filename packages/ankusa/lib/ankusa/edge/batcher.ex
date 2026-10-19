@@ -69,10 +69,11 @@ defmodule Ankusa.Edge.Batcher do
   Submit a record and block until it is durably committed (or shed).
 
   Returns `{:committed, env}` | `{:duplicate, env}` | `{:error, :overload}` |
-  `{:error, {:tenant_overload, retry_after_ms}}` | `{:error, :store_unavailable}`.
-  The queue itself is never allowed to crash the call: a failed commit (or a
-  dead writer process) is reported as `:store_unavailable`, which the edge maps
-  to `503`.
+  `{:error, {:tenant_overload, retry_after_ms}}` |
+  `{:error, :tenant_limit}` (the hook's tenant would pass `tenants.max`) |
+  `{:error, :store_unavailable}`. The queue itself is never allowed to crash the
+  call: a failed commit (or a dead writer process) is reported as
+  `:store_unavailable`, which the edge maps to `503`.
 
   The record's tenant share is counted before the call and given back when the
   call returns or exits, whatever the outcome, so a batcher that crashes with
@@ -86,7 +87,7 @@ defmodule Ankusa.Edge.Batcher do
   @spec commit(atom(), non_neg_integer(), Queue.entry(), timeout()) ::
           {:committed, Ankusa.Envelope.t()}
           | {:duplicate, Ankusa.Envelope.t()}
-          | {:error, :overload | :store_unavailable}
+          | {:error, :overload | :tenant_limit | :store_unavailable}
           | {:error, {:tenant_overload, pos_integer()}}
   def commit(instance, partition, record, timeout \\ 15_000) do
     case acquire(instance, record) do

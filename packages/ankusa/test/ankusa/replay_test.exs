@@ -92,9 +92,18 @@ defmodule Ankusa.ReplayTest do
         inst,
         [
           {:put, :hooks, Keys.hook(seq), Envelope.to_binary(env)},
-          {:put, :deliveries, Keys.delivery(seq, 0), Deliveries.encode_row(row)},
-          {:put, :index, Keys.dead(at, seq, 0), :erlang.term_to_binary({env.source_id, env.id})}
-        ],
+          {:put, :deliveries, Keys.delivery(seq, 0), Deliveries.encode_row(row)}
+        ] ++
+          dead_index_ops(
+            inst,
+            seq,
+            0,
+            at,
+            env.source_id,
+            env.id,
+            env.tenant_id || "default",
+            env.size
+          ),
         sync: true
       )
   end
@@ -442,9 +451,8 @@ defmodule Ankusa.ReplayTest do
         inst,
         [
           {:put, :hooks, Keys.hook(999), Envelope.to_binary(bad)},
-          {:put, :deliveries, Keys.delivery(999, 0), <<0, 1, 2>>},
-          {:put, :index, bad_key, :erlang.term_to_binary({bad.source_id, bad.id})}
-        ],
+          {:put, :deliveries, Keys.delivery(999, 0), <<0, 1, 2>>}
+        ] ++ dead_index_ops(inst, 999, 0, at, bad.source_id, bad.id),
         sync: true
       )
 
@@ -466,8 +474,9 @@ defmodule Ankusa.ReplayTest do
   defp dead_keys!(inst, source_id, first_seq, count, at) do
     ops =
       for seq <- first_seq..(first_seq + count - 1) do
-        {:put, :index, Keys.dead(at, seq, 0), :erlang.term_to_binary({source_id, "id-#{seq}"})}
+        dead_index_ops(inst, seq, 0, at, source_id, "id-#{seq}")
       end
+      |> List.flatten()
 
     :ok = Store.write(inst, ops, sync: true)
   end
@@ -489,7 +498,7 @@ defmodule Ankusa.ReplayTest do
     assert last == Keys.dead(at, 2_000_010, 0)
 
     # The next page, from that cursor, reaches the "b" row and finishes.
-    assert {:ok, [{_key, 3_000_000, 0}], _last, true, 16} =
+    assert {:ok, [{_key, 3_000_000, 0, _ord}], _last, true, 16} =
              Deliveries.dead_page(
                inst,
                {last <> <<0>>, elem(range, 1)},

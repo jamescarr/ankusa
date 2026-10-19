@@ -289,5 +289,90 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_dispatch_breakers_open", config.instance) == 0.0
       assert gauge(scrape, "ankusa_dispatch_runnable", config.instance) == 0.0
     end
+
+    # The families `Ankusa.Store` is asked to fold (`fold/6`) and to seek in
+    # (`first/4`) while `Gauges.measure/1` runs. The trace must have seen reads,
+    # so a broken trace cannot pass.
+    defp gauge_scans(inst) do
+      {_result, calls} = store_calls(fn -> Ankusa.Metrics.Gauges.measure(inst) end)
+      assert calls != []
+      %{folds: for({:fold, f} <- calls, do: f), seeks: for({:first, f} <- calls, do: f)}
+    end
+
+    defp tenant_gauge(scrape, tenant) do
+      case Regex.run(~r/^ankusa_tenant_pending\{[^}]*tenant="#{tenant}"[^}]*\} (\S+)$/m, scrape) do
+        [_, value] -> value |> Float.parse() |> elem(0)
+        nil -> nil
+      end
+    end
+
+    test "queue gauges read counters" do
+      config = start_instance()
+      inst = config.instance
+
+      for i <- 1..3 do
+        assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, request("demo", ~s({"id":"c#{i}"})))
+      end
+
+      scans = gauge_scans(inst)
+
+      # Nothing folds a queue family: the gauges are counter reads and one seek
+      # into the active index (plus the first due row it names).
+      refute Enum.any?(
+               scans.folds,
+               &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending])
+             )
+
+      assert Enum.count(scans.seeks, &(&1 == :due)) <= 1
+
+      scrape = Ankusa.Metrics.scrape(inst)
+      assert gauge(scrape, "ankusa_queue_pending", inst) == 3.0
+      assert gauge(scrape, "ankusa_queue_scheduled", inst) == 0.0
+      assert gauge(scrape, "ankusa_tenants", inst) == 1.0
+    end
+
+    test "oldest due age comes from the active index" do
+      config = start_instance()
+      inst = config.instance
+      now = System.system_time(:millisecond)
+
+      :ok = Ankusa.Store.write(inst, due_index_ops(inst, 700, 0, now - 7_000, 10), sync: true)
+
+      scans = gauge_scans(inst)
+
+      refute Enum.any?(
+               scans.folds,
+               &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending])
+             )
+
+      assert :active in scans.seeks or :active in scans.folds
+
+      scrape = Ankusa.Metrics.scrape(inst)
+      age = gauge(scrape, "ankusa_queue_oldest_due_age_seconds", inst)
+      assert age >= 7.0 and age < 30.0
+    end
+
+    test "top tenants by pending" do
+      config = start_instance()
+      inst = config.instance
+
+      for {tenant, n} <- [{"acme", 3}, {"globex", 1}, {"initech", 2}], i <- 1..n do
+        req = request("demo", ~s({"id":"#{tenant}#{i}"})) |> Map.put(:tenant_id, tenant)
+        assert {:ok, _} = Ankusa.Edge.Ingest.ingest(inst, req)
+      end
+
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+      assert tenant_gauge(scrape, "acme") == 3.0
+      assert tenant_gauge(scrape, "initech") == 2.0
+      assert tenant_gauge(scrape, "globex") == 1.0
+
+      # A tenant that leaves the list is reported once as 0, not left at its last value.
+      assert {:ok, %{pending: 3}} = Ankusa.Queue.purge_tenant(inst, "acme", [:pending])
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+      assert tenant_gauge(scrape, "acme") == 0.0
+      assert tenant_gauge(scrape, "initech") == 2.0
+    end
   end
 end

@@ -39,6 +39,15 @@ unfinished rows) and `dispatch.max_inflight_bytes` (default 128 MiB, the sum
 of their stored hook sizes). `dispatch.batch` (default 128) is the rows
 claimed per store scan. Dispatch stops claiming until something completes.
 
+A scan costs the tenants with work due, not the tenants there are: dispatch
+reads the active-tenant markers up to now, then claims due rows tenant by
+tenant, `dispatch.batch` in all, so one tenant with a million queued rows and a
+thousand tenants with a row due next week cost a scan the same as one tenant
+with one row (`a tick visits only tenants with work` in `dispatch_test.exs`,
+`bench/dispatch_tick_bench.exs`). Until TEN-3 the order of tenants within a scan
+is the order of their oldest due second; it is a read order, not a fairness
+guarantee.
+
 On `:give_up` from the retry policy the row becomes a dead row (the DLQ) and
 stops. One failing sink never blocks delivery to the others, and never blocks
 the next hook. A sink that **raises, throws, or exits** is treated exactly
@@ -883,8 +892,14 @@ reports the page delivered.
 whose `tenants` filter is those tenants (a job another tenant's token started is
 `404` to it), and naming a tenant the token does not hold is `403`.
 `Ankusa.Queue.dead/2` and `Ankusa.Replay.start/2` take the same filter as
-`:tenants`. The dead index does not carry the tenant yet, so a tenant-filtered
-read looks at the hook of every dead row that passes the other filters. A
+`:tenants`. The dead index is also kept by tenant (`?X`, [Tenants, counters and
+the active index](storage.md#tenants-counters-and-the-active-index)), so a
+tenant-filtered read is one reverse range scan of each named tenant's rows and
+reads no hook but those of the page it returns (`tenant scoped dlq reads one
+range` in `admin/router_test.exs`); `Ankusa.Queue.pending_for_tenant/2` and
+`dead_for_tenant/2` answer a tenant's counts from counters, in constant time,
+and `Ankusa.Queue.purge_tenant/3` removes a tenant's pending or dead rows in
+synced chunks. A
 `lifecycle` job's events belong to their tenant (a route's to `default`), so the
 same filter selects them.
 Delivery is at-least-once, so a replayed hook is a redelivery.
