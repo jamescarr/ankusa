@@ -101,6 +101,34 @@ defmodule Ankusa.StoreUpgradeTest do
       end
     end
 
+    # ADR 0002, section 12: a store from before the intake log has none of its
+    # rows. Under `wal: :dual` it boots with everything it held, stamps them, and
+    # republishes the whole local `hooks` family before it serves.
+    for path <- Path.wildcard(Path.join(@fixtures, "store-v*.tar.zst")) do
+      test "boots #{Path.basename(path)} under wal: :dual and republishes what it held" do
+        {config, manifest} = unpack_fixture(unquote(path))
+
+        dual = %{
+          config
+          | wal: :dual,
+            intake: %{config.intake | type: :memory, node_id: "fixture"},
+            backup: %{config.backup | enabled: true, max_age_ms: 3_600_000}
+        }
+
+        start_supervised!({Ankusa.Instance, dual})
+        assert_fixture(dual.instance, manifest)
+
+        assert [_ | _] = records = Ankusa.Intake.Memory.records(dual.instance)
+        assert Enum.all?(records, &(&1.node == "fixture"))
+
+        assert {:ok, <<_::64>>} =
+                 Ankusa.Store.get(dual.instance, :default, Ankusa.Store.Keys.meta("intake_seq"))
+
+        assert {:ok, "fixture"} =
+                 Ankusa.Store.get(dual.instance, :default, Ankusa.Store.Keys.meta("intake_node"))
+      end
+    end
+
     test "the fixture task writes one that boots" do
       path = Path.join(System.tmp_dir!(), "ankusa_fixture_#{System.unique_integer([:positive])}")
       on_exit(fn -> File.rm_rf(path) end)
