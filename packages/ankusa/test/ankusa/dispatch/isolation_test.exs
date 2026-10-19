@@ -45,6 +45,80 @@ defmodule Ankusa.Dispatch.IsolationTest do
     end
   end
 
+  # Holds its slot for `ms` and counts, in `atomics` (1: running now, 2: the
+  # most that ever ran at once), how many attempts overlapped.
+  defmodule CountingSleepSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(_env, _ctx, opts) do
+      ref = Keyword.fetch!(opts, :atomics)
+      bump_max(ref, :atomics.add_get(ref, 1, 1))
+      Process.sleep(Keyword.fetch!(opts, :ms))
+      :atomics.sub(ref, 1, 1)
+      :ok
+    end
+
+    defp bump_max(ref, now) do
+      seen = :atomics.get(ref, 2)
+
+      cond do
+        now <= seen -> :ok
+        :atomics.compare_exchange(ref, 2, seen, now) == :ok -> :ok
+        true -> bump_max(ref, now)
+      end
+    end
+  end
+
+  # Tells the test when a hook arrived, on the monotonic clock.
+  defmodule StampSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:stamp, env.id, System.monotonic_time(:microsecond)})
+      :ok
+    end
+  end
+
+  # Holds every attempt until the agent says `:open`.
+  defmodule HoldSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:held, env.id})
+      wait(Keyword.fetch!(opts, :agent))
+    end
+
+    defp wait(agent) do
+      if Agent.get(agent, & &1) == :open do
+        :ok
+      else
+        Process.sleep(5)
+        wait(agent)
+      end
+    end
+  end
+
+  # Fails for the tenant `bad`, delivers for everyone else.
+  defmodule TenantSink do
+    @behaviour Ankusa.Sink
+
+    @impl true
+    def deliver(%{tenant_id: "bad"}, _ctx, _opts), do: {:error, :down}
+
+    def deliver(%{tenant_id: "slow"}, _ctx, opts) do
+      Process.sleep(Keyword.fetch!(opts, :ms))
+      :ok
+    end
+
+    def deliver(env, _ctx, opts) do
+      send(Keyword.fetch!(opts, :pid), {:delivered, env.tenant_id, env.id})
+      :ok
+    end
+  end
+
   # Fails while its agent holds `:fail`; delivers once the test flips it.
   defmodule SwitchSink do
     @behaviour Ankusa.Sink
@@ -99,11 +173,11 @@ defmodule Ankusa.Dispatch.IsolationTest do
      Keyword.merge([base_ms: 0, max_attempts: 10, jitter: false], overrides)}
   end
 
-  defp build_env(source_id) do
+  defp build_env(source_id, tenant \\ "acme") do
     %Envelope{
       id: "evt_" <> Integer.to_string(System.unique_integer([:positive])),
       source_id: source_id,
-      tenant_id: "acme",
+      tenant_id: tenant,
       received_at: System.system_time(:millisecond),
       method: "POST",
       path: "/hooks",
@@ -182,6 +256,221 @@ defmodule Ankusa.Dispatch.IsolationTest do
       %{id: id} = enqueue!(inst, build_env("fast"))
 
       assert_receive {:delivered, :fast, ^id, 1}, 1_000
+    end
+  end
+
+  describe "per-tenant scheduling" do
+    # Commits `envs` as a few batches: a backlog in one call, not one fsync each.
+    defp enqueue_many!(inst, envs) do
+      for chunk <- Enum.chunk_every(envs, 256) do
+        items =
+          Enum.map(chunk, fn env ->
+            {:ok, source} = Ankusa.SourceStore.fetch(inst, env.source_id)
+            %{envelope: env, sinks: source.sinks}
+          end)
+
+        {:ok, _} = Ankusa.Queue.enqueue(inst, items)
+      end
+
+      :ok
+    end
+
+    defp claimed_rows(inst, ord) do
+      case :sys.get_state(Ankusa.whereis(inst, :dispatch)).tenant_claimed do
+        %{^ord => {rows, _bytes, _tenant}} -> rows
+        _ -> 0
+      end
+    end
+
+    # The p99 of `n` hooks of `tenant` committed 15 ms apart: milliseconds from
+    # just before the commit to the sink call. `sample` runs once per hook.
+    defp light_p99(inst, tenant, n, sample) do
+      starts =
+        for _ <- 1..n do
+          env = build_env("light", tenant)
+          t0 = System.monotonic_time(:microsecond)
+          enqueue!(inst, env)
+          sample.()
+          Process.sleep(15)
+          {env.id, t0}
+        end
+        |> Map.new()
+
+      lags =
+        for _ <- 1..n do
+          assert_receive {:stamp, id, t1}, 10_000
+          (t1 - Map.fetch!(starts, id)) / 1000
+        end
+
+      lags |> Enum.sort() |> Enum.at(ceil(0.99 * n) - 1)
+    end
+
+    # Ground rule 4's check, on dispatch: a tenant with 99 times another's load,
+    # whose sink is slow, must not move the light tenant's p99 by more than 2x
+    # (its solo p99 is a few milliseconds, so the bound has a floor of 25 ms: at
+    # that scale a scheduler hiccup is the whole difference), and it must never
+    # hold more than its own window.
+    test "tenant fairness" do
+      window = 16
+      atomics = :atomics.new(2, [])
+
+      sources = %{
+        "heavy" => %{sinks: [{CountingSleepSink, ms: 150, atomics: atomics}]},
+        "light" => %{sinks: [{StampSink, pid: self()}]}
+      }
+
+      dispatch = %{
+        concurrency: 8,
+        sink_concurrency: 4,
+        max_inflight: 64,
+        batch: 16,
+        tenants: %{default: %{max_inflight: window, concurrency: 4}}
+      }
+
+      solo = start(sources, dispatch)
+      solo_p99 = light_p99(solo, "light-tenant", 24, fn -> :ok end)
+
+      inst = start(sources, dispatch)
+      light = 24
+      heavy = 99 * light
+      enqueue_many!(inst, for(_ <- 1..heavy, do: build_env("heavy", "heavy-tenant")))
+      {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "heavy-tenant")
+
+      # the heavy tenant has filled its window and is queueing behind its slots
+      await(fn -> claimed_rows(inst, ord) == window end)
+
+      samples = :ets.new(:window_samples, [:public])
+      sample = fn -> :ets.insert(samples, {System.unique_integer(), claimed_rows(inst, ord)}) end
+
+      mixed_p99 = light_p99(inst, "light-tenant", light, sample)
+
+      widest = samples |> :ets.tab2list() |> Enum.map(&elem(&1, 1)) |> Enum.max()
+      assert widest == window, "the heavy tenant never filled its window (#{widest})"
+
+      # A never exceeds its window, nor its concurrency (4 per sink and per tenant)
+      assert :atomics.get(atomics, 2) in 2..4
+
+      assert mixed_p99 <= max(2 * solo_p99, 25),
+             "light tenant p99 #{mixed_p99} ms against #{solo_p99} ms alone"
+    end
+
+    defp await(fun, tries \\ 400) do
+      cond do
+        fun.() -> :ok
+        tries == 0 -> flunk("condition never became true")
+        true -> Process.sleep(10) && await(fun, tries - 1)
+      end
+    end
+
+    test "a page is shared across the active tenants, not taken by the oldest" do
+      inst =
+        start(
+          %{"s" => %{sinks: [{TagSink, tag: :s, pid: self()}]}},
+          %{concurrency: 1, max_inflight: 8, batch: 8}
+        )
+
+      # Both tenants are visible to the first scan: the pipeline waits.
+      pipeline = Ankusa.whereis(inst, :dispatch)
+      :ok = :sys.suspend(pipeline)
+      enqueue_many!(inst, for(_ <- 1..40, do: build_env("s", "x")))
+      %{id: y} = enqueue!(inst, build_env("s", "y"))
+      :ok = :sys.resume(pipeline)
+
+      # A window of 8 and a page of 8: oldest-first would claim eight of x's and
+      # leave y for after them. One at a time, y is the second to run.
+      first =
+        for _ <- 1..3 do
+          assert_receive {:delivered, :s, id, 1}, 5_000
+          id
+        end
+
+      assert y in first
+    end
+
+    test "a breaker is per tenant: one tenant's failing sink does not park another's" do
+      inst =
+        start(
+          %{"s" => %{sinks: [{TenantSink, pid: self()}]}},
+          %{breaker_failures: 2, breaker_open_ms: 60_000, breaker_max_open_ms: 60_000}
+        )
+
+      handler = "breaker-#{System.unique_integer([:positive])}"
+      parent = self()
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:ankusa, :dispatch, :breaker],
+          fn _event, _measure, meta, _config -> send(parent, {:breaker, meta.state}) end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      for _ <- 1..4, do: enqueue!(inst, build_env("s", "bad"))
+      assert_receive {:breaker, :open}, 5_000
+
+      %{id: id} = enqueue!(inst, build_env("s", "good"))
+      assert_receive {:delivered, "good", ^id}, 2_000
+    end
+
+    test "sink_concurrency is per tenant: a tenant's backlog on a slow sink does not hold another's" do
+      inst =
+        start(
+          %{"s" => %{sinks: [{TenantSink, pid: self(), ms: 10_000}]}},
+          %{concurrency: 4, sink_concurrency: 2, attempt_timeout_ms: 20_000}
+        )
+
+      # "slow" occupies its two slots and queues eighteen more behind them
+      for _ <- 1..20, do: enqueue!(inst, build_env("s", "slow"))
+      %{id: id} = enqueue!(inst, build_env("s", "fast"))
+
+      assert_receive {:delivered, "fast", ^id}, 1_000
+    end
+
+    test "a tenant's window caps its claimed rows, and the gauge reports it" do
+      {:ok, agent} = Agent.start_link(fn -> :closed end)
+
+      inst =
+        start(
+          %{"s" => %{sinks: [{HoldSink, pid: self(), agent: agent}]}},
+          %{
+            concurrency: 8,
+            max_inflight: 64,
+            tenants: %{:default => %{max_inflight: 8}, "capped" => %{max_inflight: 3}}
+          }
+        )
+
+      handler = "tenant-inflight-#{System.unique_integer([:positive])}"
+      parent = self()
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:ankusa, :dispatch, :tenant_state],
+          fn _event, measure, meta, _config ->
+            send(parent, {:tenant_inflight, meta.tenant, measure.inflight})
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      enqueue_many!(inst, for(_ <- 1..12, do: build_env("s", "capped")))
+      enqueue_many!(inst, for(_ <- 1..12, do: build_env("s", "open")))
+
+      # eight attempts run at once (three of "capped", five of "open": its own
+      # window is eight but the global concurrency is shared), and no more rows
+      # are claimed for "capped" than its override allows
+      for _ <- 1..8, do: assert_receive({:held, _}, 5_000)
+      {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "capped")
+      assert claimed_rows(inst, ord) == 3
+      assert_receive {:tenant_inflight, "capped", 3}, 3_000
+
+      # once it drains, the tenant is reported once as 0
+      Agent.update(agent, fn _ -> :open end)
+      assert {:ok, _} = Pipeline.tick(inst)
+      assert_receive {:tenant_inflight, "capped", 0}, 3_000
     end
   end
 

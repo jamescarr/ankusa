@@ -496,6 +496,85 @@ defmodule Ankusa.ConfigTest do
                      end
       end
     end
+
+    test "sink_concurrency defaults to 8 and is nil or a positive integer" do
+      assert Config.new().dispatch.sink_concurrency == 8
+
+      # More than `concurrency` is not an error: the global cap simply binds first.
+      for ok <- [nil, 1, 8, 64] do
+        assert :ok =
+                 Ankusa.Dispatch.Pipeline.validate_config!(
+                   Config.new(dispatch: %{concurrency: 4, sink_concurrency: ok})
+                 )
+      end
+
+      for bad <- [0, -1, 1.5, "8"] do
+        assert_raise ArgumentError,
+                     ~r/dispatch.sink_concurrency must be nil or a positive integer, got #{Regex.escape(inspect(bad))}/,
+                     fn ->
+                       Ankusa.Dispatch.Pipeline.validate_config!(
+                         Config.new(dispatch: %{sink_concurrency: bad})
+                       )
+                     end
+      end
+    end
+
+    test "tenants.default has the three per-tenant limits, and each is a positive integer" do
+      assert Config.new().dispatch.tenants == %{
+               default: %{max_inflight: 1024, max_inflight_bytes: 33_554_432, concurrency: 16}
+             }
+
+      assert :ok = Ankusa.Dispatch.Pipeline.validate_config!(Config.new())
+
+      for key <- [:max_inflight, :max_inflight_bytes, :concurrency], bad <- [0, -1, 1.5, nil] do
+        assert_raise ArgumentError,
+                     "dispatch.tenants.default.#{key} must be a positive integer, got #{inspect(bad)}",
+                     fn ->
+                       Ankusa.Dispatch.Pipeline.validate_config!(
+                         Config.new(dispatch: %{tenants: %{default: %{key => bad}}})
+                       )
+                     end
+      end
+    end
+
+    test "a tenant's entry overrides some keys, and keeps the built-in default" do
+      config =
+        Config.new(
+          dispatch: %{
+            tenants: %{:default => %{max_inflight: 10}, "acme" => %{concurrency: 2}}
+          }
+        )
+
+      assert config.dispatch.tenants == %{
+               :default => %{max_inflight: 10, max_inflight_bytes: 33_554_432, concurrency: 16},
+               "acme" => %{concurrency: 2}
+             }
+
+      assert :ok = Ankusa.Dispatch.Pipeline.validate_config!(config)
+
+      # a named tenant alone leaves `default` untouched
+      assert Config.new(dispatch: %{tenants: %{"acme" => %{}}}).dispatch.tenants.default ==
+               Config.new().dispatch.tenants.default
+    end
+
+    test "a malformed tenants map is refused, naming the key" do
+      for {tenants, message} <- [
+            {[], ~r/dispatch.tenants must be a map with a :default entry/},
+            {%{"acme" => %{}, default: 5},
+             ~r/dispatch.tenants must be a map with a :default entry/},
+            {%{"acme" => 5}, ~r/dispatch.tenants\["acme"\] must be a map of limits, got 5/},
+            {%{"acme" => %{inflight: 1}},
+             ~r/dispatch.tenants\["acme"\] has unknown key :inflight/},
+            {%{"acme" => %{concurrency: 0}},
+             ~r/dispatch.tenants\["acme"\].concurrency must be a positive integer, got 0/},
+            {%{"" => %{concurrency: 1}}, ~r/keys must be :default or a non-empty tenant id/},
+            {%{acme: %{concurrency: 1}}, ~r/keys must be :default or a non-empty tenant id/}
+          ] do
+        assert_raise ArgumentError, message, fn ->
+          Ankusa.Dispatch.Pipeline.validate_config!(Config.new(dispatch: %{tenants: tenants}))
+        end
+      end
+    end
   end
 
   describe "ranges" do

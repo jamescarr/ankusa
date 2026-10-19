@@ -44,9 +44,8 @@ reads the active-tenant markers up to now, then claims due rows tenant by
 tenant, `dispatch.batch` in all, so one tenant with a million queued rows and a
 thousand tenants with a row due next week cost a scan the same as one tenant
 with one row (`a tick visits only tenants with work` in `dispatch_test.exs`,
-`bench/dispatch_tick_bench.exs`). Until TEN-3 the order of tenants within a scan
-is the order of their oldest due second; it is a read order, not a fairness
-guarantee.
+`bench/dispatch_tick_bench.exs`). Which tenant's rows a page holds is decided
+by [deficit round-robin](#fairness-between-tenants), not by age.
 
 On `:give_up` from the retry policy the row becomes a dead row (the DLQ) and
 stops. One failing sink never blocks delivery to the others, and never blocks
@@ -65,14 +64,49 @@ hung sink frees its slot; the fallback claim check-in runs inside the same
 deadline. The sink may still complete the delivery after the kill; consumers
 dedupe on the idempotency key.
 
+### Fairness between tenants
+
+A tenant is the hook's tenant id (`default` for a hook without one). Three
+things keep one tenant from taking what another needs:
+
+- **The claim.** A scan splits its page (`dispatch.batch`) into equal shares
+  among the tenants with work due. A tenant with less due than its share leaves
+  the rest to the others (further passes within the scan); a tenant the page did
+  not reach goes first in the next scan, so with more active tenants than rows
+  in a page every tenant still gets its turn. A tenant with a million rows is one
+  share of a page, not the head of the line.
+- **The window.** Each tenant has its own `max_inflight` and
+  `max_inflight_bytes` of claimed, unfinished rows and its own `concurrency`
+  (`dispatch.tenants.default`, overridden per tenant id in
+  `dispatch.tenants["acme"]`; defaults a quarter of the global window and half
+  of `concurrency`). A tenant whose sink is slow claims rows until its window is
+  full and then stops: the global window and the slots stay free for the
+  others. A tenant at its window is skipped by the scan and by the wake-up
+  timer until an outcome frees room. The global limits still apply on top.
+  Hooks that all share one tenant (no tenant id, or one `default`) are one
+  tenant: raise `dispatch.tenants.default` to the global values to let them use
+  the whole window.
+- **The slots.** Free slots go round-robin across tenants first, then across the
+  sink keys of each tenant, so a tenant with a hundred sources gets no more turns
+  than one with one source, and never more running attempts than its
+  `concurrency`.
+
+`ankusa_dispatch_tenant_inflight{tenant}` is each tenant's claimed rows (how
+close it is to its window), for the 100 tenants holding the most. The
+`tenant fairness` case of `dispatch/isolation_test.exs` runs a tenant at 99
+times another's load behind a slow sink: the light tenant's p99 delivery lag
+stays within 2x of its solo p99 and the heavy tenant never holds more than its
+window; `bench/tenant_fairness_bench.exs` prints both tenants' p99.
+
 ### A slow or dead sink
 
-Claimed rows wait in one queue per **sink key** — `{source_id, sink index,
-sink module}` — and free slots go round-robin across the keys that have work,
-so one source's backlog never queues ahead of every other source's.
-`dispatch.sink_concurrency` (default `nil`) caps how many attempts one key
-runs at once; set it below `concurrency` so a destination that answers slowly
-can hold at most that many slots for `attempt_timeout_ms` each.
+Claimed rows wait in one queue per **sink key** — `{tenant_id, source_id, sink
+index, sink module}` — and a tenant's free slots go round-robin across the keys
+that have work, so one source's backlog never queues ahead of every other
+source's. `dispatch.sink_concurrency` (default `8`; `nil` for no cap) caps how
+many attempts one key runs at once; because the key carries the tenant, the cap
+is per tenant, and a destination that answers slowly can hold at most that many
+slots of each tenant for `attempt_timeout_ms` each.
 
 A destination that is down trips its key's **circuit breaker**:
 `dispatch.breaker_failures` (default 5; `0` disables breakers) consecutive

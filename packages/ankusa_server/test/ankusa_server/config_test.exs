@@ -103,10 +103,13 @@ defmodule AnkusaServer.ConfigTest do
     assert http_opts[:max_response_bytes] == 65_536
 
     assert %{
-             sink_concurrency: nil,
+             sink_concurrency: 8,
              breaker_failures: 5,
              breaker_open_ms: 30_000,
-             breaker_max_open_ms: 300_000
+             breaker_max_open_ms: 300_000,
+             tenants: %{
+               default: %{max_inflight: 1024, max_inflight_bytes: 33_554_432, concurrency: 16}
+             }
            } = config.dispatch
 
     assert config.batcher.max_queue_bytes == 268_435_456
@@ -1809,6 +1812,62 @@ defmodule AnkusaServer.ConfigTest do
           {"rate_limits: {tenants: {acme: {rate: 1, burst: 1, max_body_bytes: 99999999}}}",
            "rate_limits.tenants.acme.max_body_bytes must be an integer of at least 1 and at " <>
              "most the instance's max_body_bytes (8000000), got 99999999"}
+        ] do
+      path = tmp_config(yaml <> "\n")
+      error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+      assert error.message == message
+    end
+  end
+
+  test "dispatch.tenants maps to core's: default merges over the built-in, a tenant id overrides" do
+    path =
+      tmp_config("""
+      dispatch:
+        sink_concurrency: 4
+        tenants:
+          default: {max_inflight: 512}
+          acme: {concurrency: "24", max_inflight_bytes: 1000000}
+          globex:
+      """)
+
+    dispatch = Config.load!(path: path, env: %{}).config.dispatch
+
+    assert dispatch.sink_concurrency == 4
+
+    assert dispatch.tenants == %{
+             :default => %{max_inflight: 512, max_inflight_bytes: 33_554_432, concurrency: 16},
+             "acme" => %{concurrency: 24, max_inflight_bytes: 1_000_000},
+             "globex" => %{}
+           }
+  end
+
+  test "no dispatch.tenants means what core defaults to" do
+    path = tmp_config("dispatch: {batch: 64}\n")
+
+    assert Config.load!(path: path, env: %{}).config.dispatch.tenants ==
+             %Ankusa.Config{}.dispatch.tenants
+  end
+
+  test "dispatch.sink_concurrency: absent keeps core's 8, null switches the per-sink cap off" do
+    absent = tmp_config("dispatch: {batch: 64}\n")
+    assert Config.load!(path: absent, env: %{}).config.dispatch.sink_concurrency == 8
+
+    off = tmp_config("dispatch: {sink_concurrency: null}\n")
+    assert Config.load!(path: off, env: %{}).config.dispatch.sink_concurrency == nil
+  end
+
+  test "a bad dispatch.tenants names the key, and core's ranges come back as core's message" do
+    for {yaml, message} <- [
+          {"dispatch: {tenants: [acme]}",
+           ~s(dispatch.tenants: expected a mapping of tenant id to limits, got ["acme"])},
+          {"dispatch: {tenants: {acme: {max_inflight: lots}}}",
+           ~s(dispatch.tenants.acme.max_inflight: expected an integer, got "lots")},
+          {"dispatch: {tenants: {acme: {inflight: 1}}}",
+           ~s(dispatch.tenants.acme: unknown key "inflight")},
+          {"dispatch: {tenants: {acme: {concurrency: 0}}}",
+           ~s(dispatch.tenants["acme"].concurrency must be a positive integer, got 0)},
+          {"dispatch: {tenants: {default: {max_inflight_bytes: -5}}}",
+           "dispatch.tenants.default.max_inflight_bytes must be a positive integer, got -5"}
         ] do
       path = tmp_config(yaml <> "\n")
       error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
