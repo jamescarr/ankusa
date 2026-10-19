@@ -1123,14 +1123,144 @@ defmodule AnkusaServer.ConfigTest do
     assert config.wal == :none
   end
 
-  test "an unknown wal.type lists disk and none" do
+  test "an unknown wal.type lists disk, none and dual" do
     error =
       assert_raise ConfigError, fn ->
         Config.load!(path: tmp_config("wal: {type: memory}\n"), env: %{})
       end
 
     assert error.message =~ ~s(wal.type: unknown value "memory")
-    assert error.message =~ "disk, none"
+    assert error.message =~ "disk, none, dual"
+  end
+
+  # ── wal.type: dual (the intake log, ADR 0002) ───────────────────────────────
+
+  @dual """
+  wal: {type: dual}
+  backup:
+    enabled: true
+    max_age_ms: 300000
+    store: {type: s3, s3: {bucket: b, region: r}}
+  intake:
+    type: kafka
+    node_id: ankusa-a
+    fleet: eu
+    kafka:
+      brokers: ["kafka-1:9092", "kafka-2:9092"]
+      ssl: true
+      sasl: {mechanism: scram_sha_512, username: ankusa, password: kafka-leak}
+    publish_timeout_ms: 1500
+    reconcile_deadline_ms: 10000
+    breaker_failures: 5
+    probe_ms: 500
+    retry_after_s: 3
+    offset_flush_ms: 250
+    pending: {max_records: 1000, max_bytes: 1048576}
+    max_record_bytes: 20000000
+    recover_on_boot: false
+    verify_topic: false
+  sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+  """
+
+  test "wal: {type: dual} and the intake keys land in core's config" do
+    config = Config.load!(path: tmp_config(@dual), env: %{}).config
+
+    assert config.wal == :dual
+    assert Ankusa.Queue.label(config.wal) == "dual"
+    assert config.roles == [:edge, :dispatch, :storage]
+
+    assert %{
+             type: :kafka,
+             node_id: "ankusa-a",
+             fleet: "eu",
+             topic: nil,
+             publish_timeout_ms: 1_500,
+             reconcile_deadline_ms: 10_000,
+             breaker_failures: 5,
+             probe_ms: 500,
+             retry_after_s: 3,
+             offset_flush_ms: 250,
+             pending: %{max_records: 1_000, max_bytes: 1_048_576},
+             max_record_bytes: 20_000_000,
+             recover_on_boot: false,
+             verify_topic: false
+           } = config.intake
+
+    assert config.intake.kafka[:brokers] == ["kafka-1:9092", "kafka-2:9092"]
+    assert config.intake.kafka[:ssl] == true
+    assert {:scram_sha_512, "ankusa", "kafka-leak"} = config.intake.kafka[:sasl]
+    assert Ankusa.Intake.topic(config) == "ankusa.intake.eu"
+  end
+
+  test "ANKUSA_WAL_TYPE=dual and ANKUSA_INTAKE_NODE_ID reach the same keys" do
+    yaml = """
+    backup: {enabled: true, max_age_ms: 300000, store: {type: s3, s3: {bucket: b, region: r}}}
+    intake: {type: kafka, kafka: {brokers: ["k:9092"]}}
+    sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+    """
+
+    env = %{"ANKUSA_WAL_TYPE" => "dual", "ANKUSA_INTAKE_NODE_ID" => "pod-7"}
+    config = Config.load!(path: tmp_config(yaml), env: env).config
+    assert config.wal == :dual
+    assert config.intake.node_id == "pod-7"
+
+    # the node id alone is a complete `intake` block's identity, the rest is the file's
+    only_env = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+    assert Config.load!(path: tmp_config(only_env), env: %{"ANKUSA_INTAKE_NODE_ID" => "x"}).config.intake.node_id == "x"
+  end
+
+  test "the intake log's credentials never reach the printed config" do
+    printed = print_config(tmp_config(@dual))
+    refute printed =~ "kafka-leak"
+    assert printed =~ "ankusa-a"
+  end
+
+  test "wal: {type: dual} refuses what ADR 0002 requires" do
+    sources = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
+    backup = "backup: {enabled: true, max_age_ms: 300000, store: {type: s3, s3: {bucket: b, region: r}}}\n"
+    kafka = "intake: {type: kafka, node_id: a, kafka: {brokers: [\"k:9092\"]}"
+
+    refuse = fn yaml, message ->
+      error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+      assert error.message =~ message
+    end
+
+    refuse.("wal: {type: dual}\n" <> backup <> sources, "wal: :dual needs intake.type")
+    refuse.("wal: {type: dual}\n" <> backup <> "intake: {type: kafka}\n" <> sources, "needs intake.node_id")
+    refuse.("wal: {type: dual}\n" <> kafka <> "}\n" <> sources, "needs backup.enabled and backup.max_age_ms")
+
+    refuse.(
+      "wal: {type: dual}\n" <> backup <> kafka <> ", publish_timeout_ms: 20000}\n" <> sources,
+      "intake.publish_timeout_ms"
+    )
+
+    refuse.(
+      "wal: {type: dual}\n" <> backup <> kafka <> ", max_record_bytes: 1000}\n" <> sources,
+      "intake.max_record_bytes"
+    )
+
+    refuse.(
+      "wal: {type: dual}\n" <> backup <> "dedupe: {scope: fleet}\nfleet: {pending_ttl_ms: 5000, store: {url: \"redis://r\"}}\n" <> kafka <> "}\n" <> sources,
+      "reconcile_deadline_ms"
+    )
+  end
+
+  test "the intake block names its unknown and invalid keys" do
+    refuse = fn yaml, message ->
+      error = assert_raise ConfigError, fn -> Config.load!(path: tmp_config(yaml), env: %{}) end
+      assert error.message =~ message
+    end
+
+    refuse.("intake: {nope: 1}\n", ~s(intake: unknown key "nope"))
+    refuse.("intake: {type: jetstream}\n", ~s(intake.type: unknown value "jetstream"))
+    refuse.("intake: {kafka: {nope: 1}}\n", ~s(intake.kafka: unknown key "nope"))
+    refuse.("intake: {pending: {nope: 1}}\n", ~s(intake.pending: unknown key "nope"))
+    refuse.("intake: {kafka: {}}\nwal: {type: dual}\n", "intake.type")
+    refuse.("intake: {node_id: \"Bad Id\"}\n", "intake.node_id")
+    refuse.("intake: {probe_ms: 5}\n", "intake.probe_ms")
+    refuse.("intake: {breaker_failures: 0}\n", "intake.breaker_failures")
+    refuse.("intake: {retry_after_s: 301}\n", "intake.retry_after_s")
+    refuse.("intake: {pending: {max_records: 0}}\n", "intake.pending.max_records")
   end
 
   # ── lifecycle ───────────────────────────────────────────────────────────────

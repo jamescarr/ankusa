@@ -378,6 +378,29 @@ on the idempotency key; the ids it is built from mean different things:
   source's `dedupe`, or dedupe on the provider's own event id in the body
   (e.g. Stripe's `id`).
 
+Under [`wal.type: dual`](architecture.md#the-core-invariant) two more cases
+reach a consumer, both with the **same hook `id` and `idempotency_key`**, so
+the same dedupe covers them:
+
+- **Redelivery after a host loss.** A replacement node restores the latest
+  backup and replays the intake log
+  ([`deployment.md`](deployment.md#host-loss-and-the-intake-log)). A hook that
+  was committed after that backup and had already been delivered by the lost
+  node is delivered again by the replacement, which has no memory of the
+  delivery. The number is bounded by the hooks acked since the lost node's last
+  backup (a fresher `backup.interval_ms` shrinks it; the final checkpoint of a
+  clean stop makes it zero). Nothing is lost and no second hook is created:
+  `duplicate_hooks` in the fleet drill stays 0.
+- **A hook whose log half was missing.** A hook whose local write landed and
+  whose intake publish did not is delivered normally (dispatch is not gated on the
+  log), and the provider, who got a `503`, retries. With a `dedupe:` on the
+  source the retry is answered `503 intake_pending` until the reconciler has
+  republished the original, then `201` with the first `id`; without one it is a
+  new hook with a new `id`, delivered again (as after any lost `2xx`).
+
+Configure `dedupe:` on every source of a dual deployment: it is what turns the
+provider's retry of a `503` into the original hook instead of a second one.
+
 Provider request headers are forwarded to every sink per the source's
 `forward_headers` option (see [`configuration.md`](configuration.md#sources)):
 `Sink.Http` sends them as request headers, and the queue sinks carry them in

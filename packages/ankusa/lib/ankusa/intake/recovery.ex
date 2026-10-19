@@ -336,13 +336,7 @@ defmodule Ankusa.Intake.Recovery do
           {:error, {:intake_truncated, wanted, earliest}}
 
         origin == :restored ->
-          Logger.warning(
-            "[ankusa] intake log starts at #{earliest} but the restored store holds up to " <>
-              "#{offset}: hooks acked in positions #{wanted}..#{earliest - 1} are NOT recovered " <>
-              "(--allow-gap)"
-          )
-
-          :ok
+          accept_gap(instance, offset, earliest, opts)
 
         true ->
           Logger.warning(
@@ -354,6 +348,43 @@ defmodule Ankusa.Intake.Recovery do
       end
     else
       _ -> :ok
+    end
+  end
+
+  # `--allow-gap`: the operator accepts a loss the log can no longer cover. The
+  # decision is a row in the node's own audit trail, written before the replay
+  # goes on (a dry run only says so, and writes nothing).
+  defp accept_gap(instance, offset, earliest, opts) do
+    wanted = offset + 1
+
+    Logger.warning(
+      "[ankusa] intake log starts at #{earliest} but the restored store holds up to " <>
+        "#{offset}: hooks acked in positions #{wanted}..#{earliest - 1} are NOT recovered " <>
+        "(--allow-gap)"
+    )
+
+    if Keyword.get(opts, :dry_run, false) do
+      :ok
+    else
+      node = Ankusa.config(instance).intake.node_id
+
+      attrs = %{
+        action: "intake.recover.allow_gap",
+        resource: node,
+        detail: %{
+          node: node,
+          wanted: wanted,
+          earliest: earliest,
+          lost_positions: earliest - wanted
+        }
+      }
+
+      context = %Ankusa.Audit.Context{actor: Keyword.get(opts, :actor, "ankusa.recover")}
+
+      case Ankusa.Audit.commit(instance, context, attrs, []) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:audit_failed, reason}}
+      end
     end
   end
 
@@ -720,6 +751,7 @@ defmodule Ankusa.Intake.Recovery do
     {:ok, _} = Application.ensure_all_started(:ankusa)
     Ankusa.put_config(config)
     Intake.validate_config!(config)
+    start_adapter_app(config)
 
     store_path = Ankusa.Config.path(config, "store")
     origin = if File.exists?(Path.join(store_path, "CURRENT")), do: :existing, else: :restored
@@ -737,11 +769,12 @@ defmodule Ankusa.Intake.Recovery do
 
     with {:ok, adapter} <- adapter,
          {:ok, store} <- Store.start_link(child_opts),
+         {:ok, audit} <- Ankusa.Audit.start_link(child_opts),
          {:ok, sources} <- start_source_store(mod, child_opts) do
       try do
         run(instance, Keyword.put_new(opts, :origin, origin))
       after
-        for pid <- [sources, store, adapter], is_pid(pid), do: stop(pid)
+        for pid <- [sources, audit, store, adapter], is_pid(pid), do: stop(pid)
       end
     else
       {:error, reason} -> {:error, {:start_failed, reason}}
@@ -749,6 +782,75 @@ defmodule Ankusa.Intake.Recovery do
   end
 
   def run_offline(%Ankusa.Config{}, _opts), do: {:error, :not_dual}
+
+  # The adapter's own OTP application (brod and its dependencies for Kafka): an
+  # offline run starts the instance's processes by hand, not its release.
+  defp start_adapter_app(config) do
+    with {:ok, app} <- :application.get_application(Intake.module(config)),
+         do: Application.ensure_all_started(app)
+
+    :ok
+  end
+
+  @doc """
+  The options `run_offline/2` takes, from the command line of `mix ankusa.recover`
+  and of the server image's `recover` command: `--node`, `--from`
+  (`backup` | `earliest` | a position), `--dry-run`, `--allow-gap`. `{:ok, opts}`
+  or `{:error, message}`.
+  """
+  @spec parse_args([String.t()]) :: {:ok, keyword()} | {:error, String.t()}
+  def parse_args(args) do
+    {parsed, argv, invalid} =
+      OptionParser.parse(args,
+        strict: [
+          instance: :string,
+          node: :string,
+          from: :string,
+          dry_run: :boolean,
+          allow_gap: :boolean
+        ]
+      )
+
+    cond do
+      invalid != [] ->
+        {:error, "invalid options: #{inspect(invalid)}"}
+
+      argv != [] ->
+        {:error, "unexpected arguments: #{inspect(argv)}"}
+
+      true ->
+        with {:ok, from} <- parse_from(parsed[:from]) do
+          {:ok,
+           [from: from]
+           |> put_if(:instance, parsed[:instance])
+           |> put_if(:node, parsed[:node])
+           |> put_if(:dry_run, parsed[:dry_run])
+           |> put_if(:allow_gap, parsed[:allow_gap])}
+        end
+    end
+  end
+
+  defp parse_from(nil), do: {:ok, :backup}
+  defp parse_from("backup"), do: {:ok, :backup}
+  defp parse_from("earliest"), do: {:ok, :earliest}
+
+  defp parse_from(value) do
+    case Integer.parse(value) do
+      {position, ""} when position >= 0 -> {:ok, position}
+      _ -> {:error, "--from must be backup, earliest or a position, got #{inspect(value)}"}
+    end
+  end
+
+  defp put_if(opts, _key, nil), do: opts
+  defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
+
+  @doc "The one line `mix ankusa.recover` and the image's `recover` command print."
+  @spec format_summary(summary()) :: String.t()
+  def format_summary(summary) do
+    "records=#{summary.records} applied=#{summary.applied} present=#{summary.present} " <>
+      "collided=#{summary.collided} unroutable=#{summary.unroutable} " <>
+      "skipped=#{summary.skipped} republished=#{summary.republished}"
+  end
 
   defp start_source_store(mod, opts) do
     if Code.ensure_loaded?(mod) and function_exported?(mod, :start_link, 1),

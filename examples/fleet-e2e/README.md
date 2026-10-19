@@ -86,17 +86,49 @@ So `extra_deliveries = duplicate_hooks + redeliveries`, and `TEN-6` (fleet-scope
 dedupe, in [`ANKUSA_HARDENING_PLAN.md`](../../ANKUSA_HARDENING_PLAN.md)) zeroes the
 first term.
 
+### `--wal dual --kill-node`: losing the host, not the process
+
+
+```sh
+examples/fleet-e2e/run.sh --wal dual --kill-node   # missing=0
+examples/fleet-e2e/run.sh --wal disk --kill-node   # loses the hooks acked since the last backup, and says so
+```
+
+`--wal dual` runs the whole fleet under `wal.type: dual`
+([ADR 0002](../../docs/adr/0002-dual-commit-intake-log.md)): a three-broker KRaft
+Kafka (the `dual` compose profile, topic `ankusa.intake.fleet` with replication
+factor 3 and `min.insync.replicas=2`) is the intake log, every hook is confirmed
+in it before its `201`, and each node has an `intake.node_id` (`ankusa-a`,
+`ankusa-b`: `ANKUSA_INTAKE_NODE_ID`) that a replacement starts with.
+`--kill-node` turns the backup on (every 15 s, a primary and a secondary bucket)
+and, after the chaos phase, loses the *host*:
+
+| Phase | What it does | What it asserts |
+| --- | --- | --- |
+| host loss | `RATE` (1 000) per second; at +5 s RabbitMQ is **paused** so acked hooks wait undelivered on their node; at +12 s `ankusa-a` is killed **and its volume deleted**; at +14 s a replacement starts with the same node id on an empty volume; at +20 s RabbitMQ resumes | `dual`: the replacement restores the backup and replays the intake log, and every `201` id reaches the consumer (`missing=0`, `duplicate_hooks=0`). `disk`: only the backup comes back, so the hooks acked since it (still undelivered when the host died) are gone, and the run **fails unless it sees that loss** |
+| brokers down | (`dual`) the three brokers stop; 16 requests go straight to the nodes | every one is `503 intake_unavailable` with `Retry-After`, none is acked, `/ready` is 503; after the brokers return both nodes answer `201` |
+| secondary only | (`dual`) the same load; the primary backup is deleted, the host lost again | the store is restored from the **secondary** bucket and brought forward by the image's `recover` command (it must apply hooks from the log), then every `201` id reaches the consumer |
+
+Pausing RabbitMQ is what makes the loss real. Without it the dispatcher delivers
+a hook within milliseconds of the ack, so a node killed a moment later has
+nothing undelivered to lose and `disk` would look as safe as `dual`.
+
+`extra_deliveries` after a host loss includes the hooks the lost node had delivered
+and its replacement delivers again from the backup and the log (same hook id, same
+`idempotency_key`); the consumer dedupes on the key and `duplicate_hooks` stays 0.
+
 ### Knobs
 
 | Variable | Default | |
 | --- | --- | --- |
-| `RATE` | `200` | paced requests per second (steady, chaos) |
+| `RATE` | `200` (`1000` with `--kill-node`) | paced requests per second (steady, chaos, host loss) |
 | `DURATION` | `45` | seconds per paced phase; at least 40, the chaos timeline runs to +35 s |
 | `BURST_SECONDS`, `CONCURRENCY` | `10`, `32` | the closed-loop burst |
 | `BUILD_ANKUSA` | `1` | `0` skips `docker build` and uses `ANKUSA_IMAGE` |
 | `ANKUSA_IMAGE` | `ankusa-fleet-e2e:local` | the server image the nodes run |
 | `KEEP` | `0` | `1` leaves the stack up |
 | `OUT_DIR` | `examples/fleet-e2e/.e2e-out` | loadgen CSVs and JSON reports |
+| `WAL`, `BACKUP` | set by `--wal`, `--kill-node` | what the compose file passes the nodes (`ANKUSA_WAL_TYPE`, `ANKUSA_BACKUP_ENABLED`) |
 
 With `KEEP=1`, send hooks by hand with
 `curl -XPOST localhost:18080/webhooks/demo -d '{"id":"evt_1"}'` and watch the

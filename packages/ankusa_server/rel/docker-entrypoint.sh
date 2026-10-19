@@ -5,6 +5,8 @@
 #   check-config  validate the config and exit 0, or print the error and exit 78
 #   print-config  print the effective, redacted config as JSON
 #   version       print the server and core versions
+#   recover [--node ID] [--from backup|earliest|N] [--dry-run] [--allow-gap]
+#                 wal.type: dual: replay this node's intake log into its stopped store
 #   healthcheck   exit 0 when the node is ready (GET /ready), the image's HEALTHCHECK
 #   remote        an IEx shell attached to the running node (loopback distribution)
 #   rpc EXPR      evaluate EXPR inside the running node and print what it prints
@@ -17,6 +19,17 @@ case "${1:-start}" in
   check-config) exec /opt/ankusa/bin/ankusa eval 'AnkusaServer.CLI.check_config()' ;;
   print-config) exec /opt/ankusa/bin/ankusa eval 'AnkusaServer.CLI.print_config()' ;;
   version) exec /opt/ankusa/bin/ankusa eval 'AnkusaServer.CLI.version()' ;;
+  # The arguments become an Elixir list literal for `eval` (it takes no argv):
+  # backslash, double quote and `#` (interpolation) are escaped.
+  recover)
+    shift
+    list=""
+    for arg in "$@"; do
+      escaped=$(printf '%s' "$arg" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/#/\\#/g')
+      list="${list}\"${escaped}\","
+    done
+    exec /opt/ankusa/bin/ankusa eval "AnkusaServer.CLI.recover([${list%,}])"
+    ;;
   # The ingress listener first (an :edge node always has it); a node without
   # the :edge role, or whose ingress listener terminates TLS (this probe is
   # plain HTTP), answers the same probe on the admin listener, then on the

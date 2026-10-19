@@ -1,11 +1,46 @@
 name: ankusa_kafka
 
-# Local Redpanda for developing/testing Ankusa.Sink.Kafka. Tests create and
-# delete their own topics.
+# Local brokers for developing/testing this package. Tests create and delete their
+# own topics.
+#
+#   redpanda            Ankusa.Sink.Kafka's tests            localhost:19092
+#   kafka-1/2/3         Ankusa.Intake.Kafka's tests          localhost:29092,29093,29094
+#
+# The intake adapter (ADR 0002) needs what a production log has: three brokers,
+# `min.insync.replicas=2` on its topic, and brokers a test can stop. A three-node
+# KRaft cluster (every node broker and controller, no ZooKeeper) is that; its
+# topics are created by the tests with their own settings, so the broker-wide
+# defaults stay permissive for the sink's single-replica topics.
 #
 #   docker compose up -d --wait
 #   mix test
 #   docker compose down -v
+
+x-kafka: &kafka
+  image: apache/kafka:3.9.1
+  healthcheck:
+    test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+    interval: 3s
+    timeout: 10s
+    retries: 40
+    start_period: 5s
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+  # A stopped broker leaves the in-sync set after this long; the default is 30 s.
+  KAFKA_REPLICA_LAG_TIME_MAX_MS: 6000
+  KAFKA_HEAP_OPTS: -Xms256m -Xmx256m
 
 services:
   redpanda:
@@ -24,3 +59,36 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  kafka-1:
+    <<: *kafka
+    hostname: kafka-1
+    ports:
+      - "29092:29092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:9092,EXTERNAL://localhost:29092
+
+  kafka-2:
+    <<: *kafka
+    hostname: kafka-2
+    ports:
+      - "29093:29093"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092,EXTERNAL://localhost:29093
+
+  kafka-3:
+    <<: *kafka
+    hostname: kafka-3
+    ports:
+      - "29094:29094"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092,EXTERNAL://localhost:29094

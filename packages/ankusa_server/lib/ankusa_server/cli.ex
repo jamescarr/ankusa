@@ -1,7 +1,7 @@
 defmodule AnkusaServer.CLI do
   @moduledoc """
   The `bin/ankusa eval` entry points behind the container's `check-config`,
-  `print-config`, and `version` commands.
+  `print-config`, `version` and `recover` commands.
 
   These exist so an operator can answer "is my config valid?" and "what config
   is this container actually running?" from outside the container, without an
@@ -9,7 +9,8 @@ defmodule AnkusaServer.CLI do
   would fail to boot, and does not bind a port to look at a file).
 
   Each prints to stdout and exits: `0` on success, `78` (`EX_CONFIG`) on a
-  config error.
+  config error. `recover` also exits `1` when the recovery itself fails and `64`
+  for a bad option.
   """
 
   # Not `alias AnkusaServer.Application`: that would shadow `Elixir.Application`
@@ -41,6 +42,43 @@ defmodule AnkusaServer.CLI do
   def print_config do
     IO.puts(JSON.encode!(Ankusa.Admin.Redact.config(config!())))
     halt(0)
+  end
+
+  @doc """
+  Brings a **stopped** node's store forward from its intake log (`wal.type: dual`,
+  ADR 0002), by the code a booting node runs: `docker run … recover [--node ID]
+  [--from backup|earliest|POSITION] [--dry-run] [--allow-gap]`, with the same
+  config file and volume as the node. Prints one line (`records=… applied=…
+  present=… collided=… unroutable=… skipped=… republished=…`), exits `0` on
+  success, and changes nothing the second time. `--allow-gap` accepts a log that
+  no longer reaches back to the restored store, and writes an audit row saying so.
+  """
+  @spec recover([String.t()]) :: no_return()
+  def recover(args \\ []) do
+    case Ankusa.Intake.Recovery.parse_args(args) do
+      {:ok, opts} ->
+        run_recovery(config!(), Keyword.put(opts, :actor, "ankusa recover"))
+
+      {:error, message} ->
+        IO.puts(:stderr, "ankusa recover: " <> message)
+        halt(64)
+    end
+  end
+
+  defp run_recovery(config, opts) do
+    case Ankusa.Intake.Recovery.run_offline(config, opts) do
+      {:ok, summary} ->
+        IO.puts(Ankusa.Intake.Recovery.format_summary(summary))
+        halt(0)
+
+      {:error, :not_dual} ->
+        IO.puts(:stderr, "ankusa recover: wal.type is not dual: there is no intake log to replay")
+        halt(1)
+
+      {:error, reason} ->
+        IO.puts(:stderr, "ankusa recover: recovery failed: #{inspect(reason)}")
+        halt(1)
+    end
   end
 
   @doc "Print the server and core versions, exit 0."
