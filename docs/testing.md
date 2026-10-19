@@ -834,7 +834,7 @@ mise run test:crash
 # acked=14940 recovered=14940 missing=0 enospc_503=1 resumed=true
 ```
 
-- **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 96 MiB
+- **ENOSPC** (`mise run test:crash`, CI job `crash`): `/data` is a 192 MiB
   tmpfs. The harness ingests `RATE` (default 1000) hooks/s of `BODY_BYTES`
   (default 10 KiB) each; at +5 s a filler file takes every free byte. RocksDB
   pre-allocates its WAL (about 70 MiB here), so the node keeps acking until
@@ -844,7 +844,9 @@ mise run test:crash
   deleted, and a `201` and `/ready` `200` must come back on their own. The
   instance is `kill -9`ed under load once it has served again for 5 s and at
   least 20 s into the run, the store is reopened with `Ankusa.Store` alone,
-  and every id the harness printed as acked must read back (`missing=0`).
+  and every id the harness printed as acked must read back (`missing=0`). The
+  volume is 192 MiB because the load (10 MB/s) refilled a 96 MiB one within
+  seconds of the resume, and a node killed on a full disk cannot open its store.
 - **EIO and power loss** (`scripts/drills/flakey.sh`): `/data` is ext4 on a
   device-mapper device over a loop device. Two 2 s windows (+5 s, +10 s) where
   every I/O fails, with the same `503`/resume assertions, then at +20 s a power

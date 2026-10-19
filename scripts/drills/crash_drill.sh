@@ -12,7 +12,7 @@
 # 200) once it cleared, with the store's failure series (`ankusa_store_*`, read
 # from the metrics listener) showing the write failures and the reopen.
 #
-#   FAULT=enospc  /data is a 96 MiB tmpfs. At +5 s a filler file takes every
+#   FAULT=enospc  /data is a 192 MiB tmpfs. At +5 s a filler file takes every
 #                 free byte. RocksDB pre-allocates its WAL, so the node keeps
 #                 acking until that is used up; the filler stays until the
 #                 node has answered 503 and /ready 503 (and 2 s longer), then
@@ -302,6 +302,11 @@ if [ "$fault" = eio ]; then
     fail "e2fsck could not repair the filesystem after the cut"
   }
   mount -t ext4 "/dev/mapper/$dm_name" "$data"
+fi
+
+if [ "$fault" = enospc ]; then
+  # How much room the load left on the volume the store has to reopen on.
+  df -k "$data" >&2
 fi
 
 acked=$(acked_now)

@@ -154,7 +154,7 @@ This release writes v0. The release after it writes v1, so a rollback of
   call answers `:store_unavailable`) and retries by itself after 5 s, then
   twice as long each time up to 60 s, each wait jittered down by up to a
   quarter, so a fleet whose disks came back together does not replay its WALs
-  in step. The crash drill fills a 96 MiB tmpfs under load
+  in step. The crash drill fills a 192 MiB tmpfs under load
   and checks the `503`s, the `/ready` flip and the resume
   ([`testing.md`](testing.md#crash-consistency-drill-mise-run-testcrash)).
 - A failing store is visible without reading logs. `/ready` answers `503` with
