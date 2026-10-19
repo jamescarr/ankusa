@@ -85,6 +85,26 @@ jobs:
           key: mix-v9-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
             mix-v9-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+      # sdk-java's sbt build resolves its launcher, Scala and plugins through
+      # coursier on every run (~10 s of the 51 s check step) and recompiles
+      # 78 Java sources plus the test sources (~10 s); the conformance job
+      # runs a second sbt (`Test/compile`, `testOnly`) over the same tree.
+      # Locally the same command set is 20.42 s cold and 5.29 s with the
+      # coursier cache and `target/` present (104 MiB + 15 MiB). Keyed by the
+      # JDK/sbt pins (`.mise/conf.d/sdk-java.toml`), `build.sbt` and the sbt
+      # version: zinc detects a changed build and recompiles what it must, and
+      # the coursier jars stay valid, so the prefix stops after the toolchain.
+      - name: cache sbt
+        if: matrix.package == 'sdk-java'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/coursier
+            packages/sdk-java/target
+            packages/sdk-java/project/target
+          key: sbt-v1-${{ runner.os }}-${{ runner.arch }}-sdk-java-${{ hashFiles('.mise/conf.d/sdk-java.toml') }}-${{ hashFiles('packages/sdk-java/build.sbt', 'packages/sdk-java/project/build.properties', 'packages/sdk-java/project/plugins.sbt') }}
+          restore-keys: |
+            sbt-v1-${{ runner.os }}-${{ runner.arch }}-sdk-java-${{ hashFiles('.mise/conf.d/sdk-java.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -153,6 +173,19 @@ jobs:
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      # The java SDK's conformance run is a second sbt compile over
+      # `packages/sdk-java`; restore the `sdk-java` package job's entry (same
+      # key and prefix; both restore, the first to finish saves).
+      - name: cache sbt
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/coursier
+            packages/sdk-java/target
+            packages/sdk-java/project/target
+          key: sbt-v1-${{ runner.os }}-${{ runner.arch }}-sdk-java-${{ hashFiles('.mise/conf.d/sdk-java.toml') }}-${{ hashFiles('packages/sdk-java/build.sbt', 'packages/sdk-java/project/build.properties', 'packages/sdk-java/project/plugins.sbt') }}
+          restore-keys: |
+            sbt-v1-${{ runner.os }}-${{ runner.arch }}-sdk-java-${{ hashFiles('.mise/conf.d/sdk-java.toml') }}-
       - run: mise run check:conformance
 
   # The deployable wrappers and TypeScript workers: path-dep consumers of the
