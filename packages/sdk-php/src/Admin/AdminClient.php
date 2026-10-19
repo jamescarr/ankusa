@@ -204,6 +204,7 @@ final class AdminClient
                 "admin listener rejected the request ({$status}): " . HttpTransport::describe($body),
                 $status,
                 $code,
+                self::stringField($body, 'scope'),
             );
         }
 

@@ -85,6 +85,7 @@ final class ConformanceTest extends TestCase
         'conflicting_id' => 'conflictingId',
         'max_routes' => 'maxRoutes',
         'role' => 'role',
+        'scope' => 'scope',
     ];
 
     private static string $dir = '';
