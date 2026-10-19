@@ -313,6 +313,7 @@ func (c *AdminClient) call(ctx context.Context, method, path string, body []byte
 	var payload struct {
 		Error string `json:"error"`
 		Role  string `json:"role"`
+		Scope string `json:"scope"`
 	}
 	_ = json.Unmarshal(resp.body, &payload)
 
@@ -321,7 +322,7 @@ func (c *AdminClient) call(ctx context.Context, method, path string, body []byte
 		return nil, &RoleNotEnabledError{Role: payload.Role}
 
 	case resp.status >= 400 && resp.status <= 499:
-		return nil, &AdminRejectedError{Status: resp.status, Code: payload.Error}
+		return nil, &AdminRejectedError{Status: resp.status, Code: payload.Error, Scope: scopePointer(payload.Scope)}
 
 	default:
 		// 1xx, 3xx (redirects are never followed), 5xx.

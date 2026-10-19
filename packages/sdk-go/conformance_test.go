@@ -627,6 +627,7 @@ var errorFields = map[string]string{
 	"conflicting_id": "ConflictingID",
 	"max_routes":     "MaxRoutes",
 	"role":           "Role",
+	"scope":          "Scope",
 }
 
 // assertError checks a vector's `expect.error` against the returned error: the
