@@ -332,6 +332,13 @@ dedupe:
   # node. A key another node has claimed but not yet made durable is 409
   # `dedupe_pending` with Retry-After: the sender retries. Needs `fleet.store`.
   scope: node
+  # The most live dedupe keys this node's index holds, in all and for one tenant
+  # (about 200 B of disk each; a tenant at 100 hooks/s with the 72 h default ttl
+  # holds about 26 million). A hook whose key would be a new one past either is
+  # `503 dedupe_quota` with Retry-After: 60 and is never stored without its key;
+  # keys expire on their own. Integers >= 1.
+  max_entries: 100000000
+  max_entries_per_tenant: 30000000
 
 fleet:
   # The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`.

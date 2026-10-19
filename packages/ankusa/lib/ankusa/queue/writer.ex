@@ -20,6 +20,7 @@ defmodule Ankusa.Queue.Writer do
 
   alias Ankusa.Config
   alias Ankusa.Queue.Deliveries
+  alias Ankusa.Queue.Deliveries.Counters
   alias Ankusa.Queue.Tenants
   alias Ankusa.Store
   alias Ankusa.Store.Keys
@@ -49,7 +50,7 @@ defmodule Ankusa.Queue.Writer do
 
       Logger.info("[ankusa] store next_seq=#{next_seq} tenants=#{next_ord - 1}")
 
-      Process.send_after(self(), :sweep_dedupe, 10_000)
+      dedupe = config.dedupe
 
       {:ok,
        %{
@@ -57,6 +58,8 @@ defmodule Ankusa.Queue.Writer do
          next_seq: next_seq,
          next_ord: next_ord,
          tenants_max: config.tenants.max,
+         dedupe_max: dedupe.max_entries,
+         dedupe_per_tenant: dedupe.max_entries_per_tenant,
          # tenant id => ordinal; only this process reads or writes it, and
          # only after a commit succeeded
          ords: :ets.new(:ankusa_tenant_ords, [:set, :private]),
@@ -130,6 +133,14 @@ defmodule Ankusa.Queue.Writer do
     else
       {:reply, {:error, :caller_gone}, state}
     end
+  end
+
+  # One bounded batch of expired dedupe keys from `Ankusa.Queue.DedupeSweeper`.
+  # Each key is deleted only if it still holds the expiry the sweeper saw, so a
+  # refresh that landed since is never undone, and its counter goes down in the
+  # same batch. Not synced: a lost batch is found again by the next sweep.
+  def handle_call({:expire_dedupe, entries}, _from, state) do
+    {:reply, expire_dedupe(state.instance, entries), state}
   end
 
   defp expired?(:infinity), do: false
@@ -241,7 +252,7 @@ defmodule Ankusa.Queue.Writer do
   defp commit_admitted(tagged, extra_ops, admission, now, state) do
     admitted = for {item, true} <- tagged, do: item
 
-    case dedupe_check(state.instance, admitted, now) do
+    case dedupe_check(state, admitted, now, admission.ords, extra_ops == []) do
       {:error, reason} ->
         # The dedupe read failed: no seq consumed, nothing written, nothing
         # acked. Callers see the store error, not a guessed commit.
@@ -358,63 +369,90 @@ defmodule Ankusa.Queue.Writer do
 
   # Checks `env.dedupe_key` for every item that also carries a ttl, against the
   # stored `?u` keys and the batch itself. Returns, in original item order,
-  # `results` (a `:duplicate` per collapsed item, a `:fresh` marker per item
-  # that will commit) plus the fresh items, their dedupe ops, and the count.
-  # A stored entry counts as a duplicate only while `expires_at > now`.
-  defp dedupe_check(instance, items, now) do
+  # `results` (a `:duplicate` per collapsed item, `{:error, :dedupe_quota}` per
+  # item whose new key would pass `dedupe.max_entries` or
+  # `dedupe.max_entries_per_tenant`, a `:fresh` marker per item that will
+  # commit) plus the fresh items, their dedupe ops (the keys and the counter
+  # deltas of the keys they add), and the count. A stored entry counts as a
+  # duplicate only while `expires_at > now`. The quota is read from the
+  # `dedupe` counters (one `multi_get` per batch that has a keyed item) and
+  # counted up as the batch's new keys are admitted; refreshing an expired key
+  # adds none. A call that carries `extra_ops` (a quarantine release) is never
+  # refused: its hooks were acked long ago.
+  defp dedupe_check(state, items, now, ords, enforce?) do
+    instance = state.instance
     keyed = Enum.filter(items, fn {env, _bin, _mods, ttl, _replay_id} -> dedupe?(env, ttl) end)
 
     keys = Enum.map(keyed, fn {env, _bin, _mods, _ttl, _replay_id} -> u_key(env) end)
 
-    case read_stored(instance, keys) do
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, stored_results} <- read_stored(instance, keys),
+         {:ok, usage} <- read_usage(instance, keyed, ords) do
+      stored =
+        keyed
+        |> Enum.zip(stored_results)
+        |> Map.new(fn {{env, _bin, _mods, _ttl, _replay_id}, result} ->
+          {u_key(env), result}
+        end)
 
-      {:ok, stored_results} ->
-        stored =
-          keyed
-          |> Enum.zip(stored_results)
-          |> Map.new(fn {{env, _bin, _mods, _ttl, _replay_id}, result} ->
-            {u_key(env), result}
-          end)
+      {_seen, results, fresh, dedupe_ops, fresh_count, _usage, deltas} =
+        Enum.reduce(items, {%{}, [], [], [], 0, usage, []}, fn item,
+                                                               {seen, results, fresh, ops, n,
+                                                                usage, deltas} ->
+          {env, _bin, _mods, ttl, _replay_id} = item
 
-        {_seen, results, fresh, dedupe_ops, fresh_count} =
-          Enum.reduce(items, {%{}, [], [], [], 0}, fn item, {seen, results, fresh, ops, n} ->
-            {env, _bin, _mods, ttl, _replay_id} = item
+          key = if dedupe?(env, ttl), do: u_key(env)
 
-            key = if dedupe?(env, ttl), do: u_key(env)
+          cond do
+            key != nil and Map.has_key?(seen, key) ->
+              original_id = Map.fetch!(seen, key)
 
-            cond do
-              key != nil and Map.has_key?(seen, key) ->
-                original_id = Map.fetch!(seen, key)
+              {seen, [{:duplicate, %{env | id: original_id, seq: nil}} | results], fresh, ops, n,
+               usage, deltas}
 
-                {seen, [{:duplicate, %{env | id: original_id, seq: nil}} | results], fresh, ops,
-                 n}
+            key != nil ->
+              case Map.fetch(stored, key) do
+                {:ok, {:ok, <<expires_at::64, original_id::binary>>}} when expires_at > now ->
+                  seen = Map.put(seen, key, original_id)
 
-              key != nil ->
-                case Map.fetch(stored, key) do
-                  {:ok, {:ok, <<expires_at::64, original_id::binary>>}} when expires_at > now ->
-                    seen = Map.put(seen, key, original_id)
+                  {seen, [{:duplicate, %{env | id: original_id, seq: nil}} | results], fresh, ops,
+                   n, usage, deltas}
 
-                    {seen, [{:duplicate, %{env | id: original_id, seq: nil}} | results], fresh,
-                     ops, n}
+                {:ok, {:ok, <<old_at::64, _original_id::binary>>}} ->
+                  # An expired key is replaced in place: the live count is unchanged.
+                  seen = Map.put(seen, key, env.id)
 
-                  {:ok, {:ok, <<old_at::64, _original_id::binary>>}} ->
-                    seen = Map.put(seen, key, env.id)
+                  new_ops = [
+                    {:put, :index, key, <<now + ttl::64, env.id::binary>>},
+                    {:put, :index, expiry_key(now + ttl, env), <<>>},
+                    {:delete, :index, expiry_key(old_at, env)}
+                  ]
 
-                    new_ops = [
-                      {:put, :index, key, <<now + ttl::64, env.id::binary>>},
-                      {:put, :index, expiry_key(now + ttl, env), <<>>},
-                      {:delete, :index, expiry_key(old_at, env)}
-                    ]
+                  {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1, usage,
+                   deltas}
 
-                    {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1}
+                {:ok, {:ok, _corrupt}} ->
+                  # A value too short to hold its 8-byte expiry (the clauses above
+                  # took every decodable one). It may not suppress a hook, and it
+                  # is overwritten here so the key dedupes again, instead of
+                  # staying broken for good. It was counted when it was written.
+                  seen = Map.put(seen, key, env.id)
 
-                  {:ok, _absent_or_corrupt} ->
-                    # Nothing stored, or a value too short to hold its 8-byte
-                    # expiry (the clauses above took every decodable one). Neither
-                    # may suppress a hook, and a corrupt value is overwritten here
-                    # so the key dedupes again, instead of staying broken for good.
+                  new_ops = [
+                    {:put, :index, key, <<now + ttl::64, env.id::binary>>},
+                    {:put, :index, expiry_key(now + ttl, env), <<>>}
+                  ]
+
+                  {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1, usage,
+                   deltas}
+
+                {:ok, :not_found} ->
+                  ord = Map.fetch!(ords, item_tenant(item))
+
+                  if enforce? and over_quota?(state, usage, ord) do
+                    # Never stored without its key: the provider retries, and the
+                    # keys expire on their own.
+                    {seen, [{:error, :dedupe_quota} | results], fresh, ops, n, usage, deltas}
+                  else
                     seen = Map.put(seen, key, env.id)
 
                     new_ops = [
@@ -422,21 +460,82 @@ defmodule Ankusa.Queue.Writer do
                       {:put, :index, expiry_key(now + ttl, env), <<>>}
                     ]
 
-                    {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1}
-                end
+                    usage = usage |> Map.update(0, 1, &(&1 + 1)) |> Map.update(ord, 1, &(&1 + 1))
 
-              true ->
-                {seen, [{:fresh, item} | results], [item | fresh], ops, n + 1}
-            end
-          end)
+                    {seen, [{:fresh, item} | results], [item | fresh], new_ops ++ ops, n + 1,
+                     usage, [{ord, :dedupe, 1} | deltas]}
+                  end
+              end
 
-        {:ok,
-         %{
-           results: Enum.reverse(results),
-           fresh: Enum.reverse(fresh),
-           dedupe_ops: dedupe_ops,
-           fresh_count: fresh_count
-         }}
+            true ->
+              {seen, [{:fresh, item} | results], [item | fresh], ops, n + 1, usage, deltas}
+          end
+        end)
+
+      {:ok,
+       %{
+         results: Enum.reverse(results),
+         fresh: Enum.reverse(fresh),
+         dedupe_ops: Counters.ops(deltas) ++ dedupe_ops,
+         fresh_count: fresh_count
+       }}
+    end
+  end
+
+  # The live-key counts the batch's quota check starts from: the node's and each
+  # keyed tenant's, in one `multi_get`. No keyed item, no read.
+  defp read_usage(_instance, [], _ords), do: {:ok, %{}}
+
+  defp read_usage(instance, keyed, ords) do
+    ord_list =
+      keyed |> Enum.map(&Map.fetch!(ords, item_tenant(&1))) |> Enum.uniq()
+
+    with {:ok, counts} <- Counters.read_field(instance, [0 | ord_list], :dedupe) do
+      {:ok, [0 | ord_list] |> Enum.zip(counts) |> Map.new()}
+    end
+  end
+
+  defp over_quota?(state, usage, ord) do
+    Map.get(usage, 0, 0) >= state.dedupe_max or
+      Map.get(usage, ord, 0) >= state.dedupe_per_tenant
+  end
+
+  # `entries` come from `Ankusa.Queue.DedupeSweeper`:
+  # `{:expired, expiry_key, u_key, at, ord | nil}` (`ord` is the tenant's
+  # ordinal, `nil` when the tenant has none) and `{:undecodable, expiry_key}`.
+  # Returns `{:ok, deleted}`, the live keys it removed.
+  defp expire_dedupe(instance, entries) do
+    expired = for {:expired, _expiry, _u_key, _at, _ord} = entry <- entries, do: entry
+
+    with {:ok, stored} <- read_stored(instance, Enum.map(expired, &elem(&1, 2))) do
+      {ops, deltas, node_only, deleted} =
+        expired
+        |> Enum.zip(stored)
+        |> Enum.reduce({[], [], 0, 0}, fn
+          {{:expired, expiry, u_key, at, ord}, {:ok, <<stored_at::64, _id::binary>>}},
+          {ops, deltas, node_only, deleted}
+          when stored_at == at ->
+            ops = [{:delete, :index, expiry}, {:delete, :index, u_key} | ops]
+
+            if ord == nil,
+              do: {ops, deltas, node_only + 1, deleted + 1},
+              else: {ops, [{ord, :dedupe, -1} | deltas], node_only, deleted + 1}
+
+          # Refreshed, or already gone: only this expiry key is stale.
+          {{:expired, expiry, _u_key, _at, _ord}, _other}, {ops, deltas, node_only, deleted} ->
+            {[{:delete, :index, expiry} | ops], deltas, node_only, deleted}
+        end)
+
+      # A key written by a version we no longer understand is dropped rather
+      # than wedging the sweep.
+      undecodable = for {:undecodable, expiry} <- entries, do: {:delete, :index, expiry}
+
+      all =
+        Deliveries.coalesce(
+          ops ++ undecodable ++ Counters.ops(deltas) ++ Counters.node_ops(dedupe: -node_only)
+        )
+
+      with :ok <- Store.write(instance, all, sync: false), do: {:ok, deleted}
     end
   end
 
@@ -474,95 +573,19 @@ defmodule Ankusa.Queue.Writer do
       Enum.map_reduce(results, committed, fn
         {:fresh, _item}, [committed | rest] -> {committed, rest}
         {:duplicate, _} = reply, rest -> {reply, rest}
+        {:error, :dedupe_quota} = reply, rest -> {reply, rest}
       end)
 
     reassembled
   end
 
-  # ── dedupe expiry sweep ───────────────────────────────────────────────────
+  # ── messages ──────────────────────────────────────────────────────────────
 
-  @sweep_max 2_000
-  @sweep_backoff_ms 100
-  @sweep_interval_ms 10_000
-
+  # Expired dedupe keys are found and batched by `Ankusa.Queue.DedupeSweeper`;
+  # the writer only applies a batch it is handed (`{:expire_dedupe, entries}`),
+  # because a refresh and a delete of one key must not race.
   @impl true
-  def handle_info(:sweep_dedupe, state) do
-    state = sweep_dedupe(state)
-    {:noreply, state}
-  end
-
   def handle_info(_message, state), do: {:noreply, state}
-
-  # Deletes expired `?e`/`?u` keys. Runs inside the writer, so it can never
-  # race a refresh: a batch either lands before this sweep reads (and is not
-  # expired) or after it. `key/2` lookups also treat `expires_at <= now` as
-  # absent, so sweep lag is harmless.
-  defp sweep_dedupe(state) do
-    now = System.system_time(:millisecond)
-    range = {<<?e>>, <<?e, now + 1::64>>}
-
-    result =
-      case Store.fold(
-             state.instance,
-             :dedupe_expiry,
-             range,
-             {0, []},
-             fn key, _value, {n, acc} ->
-               if n < @sweep_max, do: {:cont, {n + 1, [key | acc]}}, else: {:halt, {n, acc}}
-             end
-           ) do
-        {:ok, {taken, expiry_keys}} ->
-          {u_keys, ops} =
-            expiry_keys
-            |> Enum.reverse()
-            |> Enum.reduce({[], []}, fn expiry_key, {u_keys, ops} ->
-              case Keys.decode_dedupe_expiry(expiry_key) do
-                {at, tenant_id, source_id, key} ->
-                  u_key = Keys.dedupe(tenant_id, source_id, key)
-                  {[{u_key, at} | u_keys], [{:delete, :index, expiry_key} | ops]}
-
-                :error ->
-                  # A key written by a version we no longer understand: drop it
-                  # rather than wedge the sweep.
-                  {u_keys, [{:delete, :index, expiry_key} | ops]}
-              end
-            end)
-
-          case Store.multi_get(state.instance, :index, Enum.map(u_keys, &elem(&1, 0))) do
-            {:ok, stored} ->
-              u_deletes =
-                u_keys
-                |> Enum.zip(stored)
-                |> Enum.filter(fn {{_u_key, at}, result} ->
-                  match?({:ok, <<^at::64, _id::binary>>}, result)
-                end)
-                |> Enum.map(fn {{u_key, _at}, _result} -> {:delete, :index, u_key} end)
-
-              case Store.write(state.instance, u_deletes ++ ops, sync: false) do
-                :ok -> {:swept, taken}
-                {:error, reason} -> {:error, reason}
-              end
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-
-    case result do
-      {:swept, taken} ->
-        rearm = if taken >= @sweep_max, do: @sweep_backoff_ms, else: @sweep_interval_ms
-        Process.send_after(self(), :sweep_dedupe, rearm)
-
-      {:error, reason} ->
-        Logger.warning("[ankusa] dedupe sweep failed, retrying: #{inspect(reason)}")
-        Process.send_after(self(), :sweep_dedupe, @sweep_interval_ms)
-    end
-
-    state
-  end
 
   # ── batch construction ───────────────────────────────────────────────────
 

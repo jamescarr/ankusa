@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`dedupe.max_entries` and `dedupe.max_entries_per_tenant` (DUR-2.a).** The most
+  live ingest-dedupe keys the node, and one tenant, holds (defaults 100 000 000 and
+  30 000 000, integers ≥ 1); a hook whose key would pass either is `503
+  dedupe_quota` with `Retry-After: 60`. The image's store moves to **format 4** on
+  first boot (a resumable migration counting the existing dedupe keys); an older
+  image cannot open it afterwards. See `docs/configuration.md`.
 - **`routes.memory_budget_bytes`, `routes.store.timeout_ms`/`load_timeout_ms` and
   `source_store.timeout_ms`/`load_timeout_ms` (TEN-9).** `routes.max_routes`
   defaults to 1 000 000 (was 10 000) behind `routes.memory_budget_bytes` (default

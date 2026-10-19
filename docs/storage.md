@@ -158,7 +158,8 @@ one tenant's rows are one contiguous range:
 | `<<?a, seq::64>>` | `<<size::32, ord::32>>` | archive obligation |
 
 `pending`, `scheduled`, `inflight`, `dead`, `bytes` (the stored size of every
-delivery row the tenant holds) and `archive_pending` are kept per tenant and per
+delivery row the tenant holds), `archive_pending` and `dedupe` (live ingest-dedupe
+keys, see below) are kept per tenant and per
 node in the `counters` family, as blind RocksDB merge operands in the same
 batch as the row change they count, so any process may change them and a crash
 leaves rows and counts together or neither. `Ankusa.Queue.pending_for_tenant/2`
@@ -176,6 +177,24 @@ is never written without its marker (`Deliveries.due_ops/6`), and a counter is
 never changed by hand: both only through the `Deliveries` op builders.
 `Ankusa.Queue.purge_tenant/3` removes a tenant's pending or dead rows in chunks
 of 500, resumable by calling it again.
+
+#### Ingest dedupe keys: bounded, expired outside the writer
+
+A source with `dedupe:` makes the writer put two index keys per new provider
+event key, in the commit batch of the hook: `?u` (tenant, source, event key →
+`<<expires_at::64, original_id>>`) and its expiry index `?e`. Both are bounded
+(ground rule 3 of the [hardening plan](hardening.md)):
+
+| | |
+| --- | --- |
+| **Cap** | `dedupe.max_entries` (100 000 000) live keys on the node, `dedupe.max_entries_per_tenant` (30 000 000) for one tenant: about 200 B of disk each |
+| **Count** | the `dedupe` counter (field 7 of the `counters` family, per tenant and node), a merge operand in the batch that inserts or deletes the key; the check is one `multi_get` per commit batch that has a keyed hook |
+| **Refusal** | a hook whose key would be a *new* live key past either cap is `503 dedupe_quota` with `Retry-After: 60`, counted as `outcome="dedupe_quota"` on `ankusa_ingest_requests_total`. It is never stored without its key (dedupe is never silently skipped); a retry of a live key is still a `duplicate`, and an expired key is replaced in place, so neither is refused at the cap |
+| **Sweep** | `Ankusa.Queue.DedupeSweeper`, its own supervised process: it scans `?e` for keys past their expiry every 10 s and then back to back while full chunks of 1 000 keep coming, and hands the writer each chunk to apply. The writer deletes a key only if it still holds the expiry the sweeper read, so a refresh is never undone, and takes the `dedupe` counter down in the same batch. The scan, decode and batching never run in the writer |
+| **Metric** | `ankusa_dedupe_keys` (the node counter), `ankusa_dedupe_pruned_total` |
+
+Store format 4 added the counter: its migration counts the `?e` keys a format 3
+store holds, in resumable batches of 500.
 
 ### `:none`: no queue, no store hooks
 

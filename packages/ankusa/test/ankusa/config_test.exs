@@ -1173,7 +1173,7 @@ defmodule Ankusa.ConfigTest do
       config = Config.new()
 
       assert config.rate_limits.scope == :node
-      assert config.dedupe == %{scope: :node}
+      assert config.dedupe.scope == :node
       assert config.fleet.store == nil
       assert config.fleet.timeout_ms == 20
     end
@@ -1221,6 +1221,24 @@ defmodule Ankusa.ConfigTest do
           ] do
         assert_raise ArgumentError, message, fn -> Config.new(fleet: [{key, value}]) end
       end
+    end
+  end
+
+  describe "dedupe ceilings" do
+    test "the defaults bound the index" do
+      assert %{max_entries: 100_000_000, max_entries_per_tenant: 30_000_000, scope: :node} =
+               Config.new().dedupe
+    end
+
+    test "max_entries and max_entries_per_tenant are positive integers" do
+      for key <- [:max_entries, :max_entries_per_tenant], bad <- [0, -1, 1.5, "10", nil] do
+        assert_raise ArgumentError, ~r/dedupe\.#{key} must be an integer >= 1/, fn ->
+          Config.new(dedupe: [{key, bad}])
+        end
+      end
+
+      assert %{max_entries: 1, max_entries_per_tenant: 1} =
+               Config.new(dedupe: [max_entries: 1, max_entries_per_tenant: 1]).dedupe
     end
   end
 end

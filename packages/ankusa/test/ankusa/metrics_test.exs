@@ -267,6 +267,21 @@ defmodule Ankusa.MetricsTest do
       assert gauge(scrape, "ankusa_sink_http_pool_origins", inst) == 0.0
     end
 
+    test "the dedupe and audit-retention series follow their events" do
+      config = start_instance()
+      inst = config.instance
+
+      :telemetry.execute([:ankusa, :audit, :retention], %{blocked_by_cursor: 7}, %{instance: inst})
+
+      :telemetry.execute([:ankusa, :dedupe, :pruned], %{count: 5}, %{instance: inst})
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert gauge(scrape, "ankusa_audit_retention_blocked_by_cursor", inst) == 7.0
+      assert gauge(scrape, "ankusa_dedupe_keys", inst) == 0.0
+      assert scrape =~ ~r/^ankusa_dedupe_pruned_total\{instance="#{inst}"\} 5(\.0)?$/m
+    end
+
     test "a probe that fails emits nothing and the others still run" do
       config = start_instance()
       inst = config.instance

@@ -13,6 +13,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Dedupe ceilings, the dedupe sweeper and audit retention behind the outbox
+  (DUR-2.a).** `dedupe.max_entries` (default 100 000 000) and
+  `dedupe.max_entries_per_tenant` (default 30 000 000) bound the live ingest-dedupe
+  keys: a hook whose key would be a new one past either is refused with
+  `503 {"error":"dedupe_quota"}` and `Retry-After: 60` (`outcome="dedupe_quota"` on
+  `ankusa_ingest_requests_total`), never stored without its key. The count is the new
+  `dedupe` counter (field 7 of the `counters` family, so the check is one read per
+  commit batch), and the expiry sweep moved out of `Ankusa.Queue.Writer` into the
+  supervised `Ankusa.Queue.DedupeSweeper`, which runs back to back while full
+  chunks of expired keys keep coming (the old sweep was capped at 2 000 keys per
+  10 s) and has the writer apply each chunk, deleting a key only if a refresh did
+  not replace it. **Store format 4**: the migration `3 -> 4` counts the `?e` keys
+  of a format 3 store, resumably; `test/fixtures/store-v4.tar.zst`. A format 3
+  release cannot open a format 4 store (no downgrade across this change). New
+  series `ankusa_dedupe_keys`, `ankusa_dedupe_pruned_total`. The audit trail's
+  retention (`audit.retention_days`) no longer deletes a row, or its lifecycle
+  entity, at or above `m:lifecycle_cursor` while `lifecycle.sinks` is set, so a
+  lifecycle sink that is down longer than the retention cannot lose events it has
+  not seen; `ankusa_audit_retention_blocked_by_cursor` reports the expired rows
+  held back. See `docs/storage.md#ingest-dedupe-keys-bounded-expired-outside-the-writer`.
 - **Routes at 10⁶ entries (TEN-9).** The route snapshot is indexed by the
   literal segments a pattern starts with (`{:lit, gen, prefix, priority, id}`,
   up to eight), so a request is matched against the few routes that share its

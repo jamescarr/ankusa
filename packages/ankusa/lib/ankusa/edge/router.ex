@@ -312,6 +312,15 @@ defmodule Ankusa.Edge.Router do
     |> send_json(503, %{error: "tenant_limit"})
   end
 
+  # The node holds `dedupe.max_entries` live dedupe keys (or the tenant holds
+  # `dedupe.max_entries_per_tenant`): the hook is refused rather than stored
+  # without its key. Keys expire on their own, so a minute is a fair retry.
+  defp respond(conn, {:error, :dedupe_quota}) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "60")
+    |> send_json(503, %{error: "dedupe_quota"})
+  end
+
   defp respond(conn, {:error, reason}) when reason in [:overload, :store_unavailable] do
     conn
     |> Plug.Conn.put_resp_header("retry-after", "1")

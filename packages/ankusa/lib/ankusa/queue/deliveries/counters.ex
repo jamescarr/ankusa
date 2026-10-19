@@ -1,8 +1,8 @@
 defmodule Ankusa.Queue.Deliveries.Counters do
   @moduledoc false
 
-  # Per-tenant queue counters (ADR 0001, section 4): six `counters` rows per
-  # tenant, plus the same six under ordinal 0 for the node. Every row is changed
+  # Per-tenant queue counters (ADR 0001, section 4): seven `counters` rows per
+  # tenant, plus the same seven under ordinal 0 for the node. Every row is changed
   # only by blind merge operands (`{:merge, :counters, key, delta}`), in the same
   # batch as the index change it describes, so concurrent writers (the Writer,
   # the Pipeline, the Replayer, the archive compactor) cannot lose a count and a
@@ -11,10 +11,23 @@ defmodule Ankusa.Queue.Deliveries.Counters do
   alias Ankusa.Store
   alias Ankusa.Store.Keys
 
-  @fields %{pending: 1, scheduled: 2, inflight: 3, dead: 4, bytes: 5, archive_pending: 6}
+  @fields %{
+    pending: 1,
+    scheduled: 2,
+    inflight: 3,
+    dead: 4,
+    bytes: 5,
+    archive_pending: 6,
+    dedupe: 7
+  }
+
   @names Map.keys(@fields)
 
-  @type field :: :pending | :scheduled | :inflight | :dead | :bytes | :archive_pending
+  # `dedupe` counts the live `?u` keys (DUR-2): the writer adds one for every
+  # key it inserts, the `Ankusa.Queue.DedupeSweeper` takes one off for every
+  # key it expires, so `dedupe.max_entries` is checked from one counter read.
+  @type field ::
+          :pending | :scheduled | :inflight | :dead | :bytes | :archive_pending | :dedupe
   @type delta :: {ord :: non_neg_integer(), field(), integer()}
 
   @doc "The counter fields, in `Keys.counter/2` order."
@@ -43,6 +56,17 @@ defmodule Ankusa.Queue.Deliveries.Counters do
       merges(aggregate, fn field -> {0, field} end)
   end
 
+  @doc """
+  Merge ops on the node aggregate (ordinal 0) alone, for a change whose tenant
+  has no ordinal: `node_ops(dedupe: -1)`.
+  """
+  @spec node_ops([{field(), integer()}]) :: [Store.op()]
+  def node_ops(deltas) do
+    for {field, delta} <- deltas, delta != 0 do
+      {:merge, :counters, Keys.counter(0, Map.fetch!(@fields, field)), delta}
+    end
+  end
+
   defp merges(sums, to_key) do
     for {key, delta} <- sums, delta != 0 do
       {ord, field} = to_key.(key)
@@ -50,7 +74,7 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     end
   end
 
-  @doc "The six counters of `ord` (0 is the node), each `0` when never written."
+  @doc "The seven counters of `ord` (0 is the node), each `0` when never written."
   @spec read(atom(), non_neg_integer()) :: {:ok, %{field() => integer()}} | {:error, term()}
   def read(instance, ord) do
     names = fields()
