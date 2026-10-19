@@ -53,6 +53,8 @@ defmodule Ankusa.Queue do
              {:committed, Envelope.t()}
              | {:duplicate, Envelope.t()}
              | {:error, :tenant_limit | :dedupe_quota}
+             | {:error, :intake_unavailable | :intake_pending | :store_unavailable}
+             | {:error, {:half, :intake_unavailable | :store_unavailable, String.t()}}
            ]}
           | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do

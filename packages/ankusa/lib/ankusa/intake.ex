@@ -99,8 +99,10 @@ defmodule Ankusa.Intake do
   @doc "The adapter module `intake.type` names."
   @spec module(Config.t()) :: module()
   def module(%Config{intake: %{type: :memory}}), do: Ankusa.Intake.Memory
-  def module(%Config{intake: %{type: :kafka}}), do: Ankusa.Intake.Kafka
-  def module(%Config{intake: %{type: :jetstream}}), do: Ankusa.Intake.JetStream
+  # The adapter packages are optional: their modules are named at run time, never
+  # at compile time (`validate_config!/1` checks they are loaded).
+  def module(%Config{intake: %{type: :kafka}}), do: Module.concat(Ankusa.Intake, Kafka)
+  def module(%Config{intake: %{type: :jetstream}}), do: Module.concat(Ankusa.Intake, JetStream)
 
   @doc "The log's name: `intake.topic`, else `ankusa.intake.<fleet>`."
   @spec topic(Config.t()) :: String.t()
@@ -161,7 +163,7 @@ defmodule Ankusa.Intake do
     ]
 
     started = System.monotonic_time()
-    result = safe(fn -> apply(mod, :publish_batch, [instance, records, opts]) end)
+    result = safe(fn -> mod.publish_batch(instance, records, opts) end)
     duration = System.monotonic_time() - started
 
     outcome = normalize(result)
@@ -191,7 +193,7 @@ defmodule Ankusa.Intake do
       partition: Ankusa.Intake.Pending.partition(instance)
     ]
 
-    case safe(fn -> apply(module(config), :replay, [instance, from, fun, opts]) end) do
+    case safe(fn -> module(config).replay(instance, from, fun, opts) end) do
       {:ok, last} -> {:ok, last}
       other -> with {:error, class, _} <- normalize(other), do: {:error, class}
     end
@@ -201,7 +203,7 @@ defmodule Ankusa.Intake do
   @spec ready?(atom()) :: boolean()
   def ready?(instance) do
     mod = module(Ankusa.config(instance))
-    safe(fn -> apply(mod, :ready?, [instance]) end) == true
+    safe(fn -> mod.ready?(instance) end) == true
   end
 
   @doc "The adapter's boot verification."
@@ -209,7 +211,7 @@ defmodule Ankusa.Intake do
   def verify(instance) do
     mod = module(Ankusa.config(instance))
 
-    case safe(fn -> apply(mod, :verify, [instance]) end) do
+    case safe(fn -> mod.verify(instance) end) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
       other -> {:error, other}
@@ -221,7 +223,7 @@ defmodule Ankusa.Intake do
   def describe(instance) do
     mod = module(Ankusa.config(instance))
 
-    case safe(fn -> apply(mod, :describe, [instance]) end) do
+    case safe(fn -> mod.describe(instance) end) do
       text when is_binary(text) -> text
       _ -> "intake topic settings unavailable"
     end
@@ -232,7 +234,7 @@ defmodule Ankusa.Intake do
   def earliest(instance) do
     mod = module(Ankusa.config(instance))
 
-    case safe(fn -> apply(mod, :earliest, [instance]) end) do
+    case safe(fn -> mod.earliest(instance) end) do
       {:ok, position} -> {:ok, position}
       other -> with {:error, class, _} <- normalize(other), do: {:error, class}
     end
@@ -245,7 +247,7 @@ defmodule Ankusa.Intake do
     mod = module(config)
 
     if function_exported?(mod, :assign_partition, 2) do
-      case safe(fn -> apply(mod, :assign_partition, [instance, config.intake.node_id]) end) do
+      case safe(fn -> mod.assign_partition(instance, config.intake.node_id) end) do
         {:ok, partition} when is_integer(partition) -> {:ok, partition}
         _ -> :none
       end

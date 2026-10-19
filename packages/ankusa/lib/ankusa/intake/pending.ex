@@ -127,7 +127,7 @@ defmodule Ankusa.Intake.Pending do
   Both halves of the batch's records are confirmed: remove them and advance the
   highest confirmed position.
   """
-  @spec confirm(table(), [non_neg_integer()], non_neg_integer()) :: :ok
+  @spec confirm(table(), [non_neg_integer()], non_neg_integer() | nil) :: :ok
   def confirm(t, seqs, position) do
     Enum.each(seqs, fn seq ->
       with [entry] <- :ets.take(t, {:p, seq}), do: forget(t, entry)

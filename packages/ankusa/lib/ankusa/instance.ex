@@ -196,7 +196,7 @@ defmodule Ankusa.Instance do
   # `wal: :dual` (ADR 0002): the adapter's own processes (its client, never the
   # sink's) start before the store, so boot recovery can reach the log.
   defp intake_children(%Config{wal: :dual} = config, opts),
-    do: [apply(Ankusa.Intake.module(config), :child_spec, [opts])]
+    do: [Ankusa.Intake.module(config).child_spec(opts)]
 
   defp intake_children(_config, _opts), do: []
 

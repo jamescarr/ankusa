@@ -353,6 +353,17 @@ defmodule Ankusa.Queue.Writer do
     ops = Deliveries.coalesce(checked.dedupe_ops ++ ops ++ admission.ops ++ extra_ops)
     published = if state.dual, do: published_records(state, checked.fresh, ops), else: []
 
+    cx = %{
+      from: from,
+      tagged: tagged,
+      checked: checked,
+      admission: admission,
+      ops: ops,
+      sizes: {batch_size, bytes},
+      now: now,
+      published: published
+    }
+
     cond do
       published == [] ->
         # `disk`, or a batch whose hooks have no obligations (nothing to publish)
@@ -360,29 +371,10 @@ defmodule Ankusa.Queue.Writer do
         disk_commit(tagged, checked, admission, ops, batch_size, bytes, now, state)
 
       extra_ops == [] ->
-        dual_commit(
-          from,
-          tagged,
-          checked,
-          admission,
-          ops,
-          {batch_size, bytes},
-          now,
-          published,
-          state
-        )
+        dual_commit(cx, state)
 
       true ->
-        release_commit(
-          tagged,
-          checked,
-          admission,
-          ops,
-          {batch_size, bytes},
-          now,
-          published,
-          state
-        )
+        release_commit(cx, state)
     end
   end
 
@@ -499,45 +491,25 @@ defmodule Ankusa.Queue.Writer do
 
   # Both halves start now: the publish in a task, the synced local write here.
   # The reply waits for the publish's result (`finish_dual/3`).
-  defp dual_commit(
-         from,
-         tagged,
-         checked,
-         admission,
-         ops,
-         {batch_size, bytes},
-         now,
-         published,
-         state
-       ) do
-    {batch, state} =
-      start_dual(
-        from,
-        tagged,
-        checked,
-        admission,
-        ops,
-        {batch_size, bytes},
-        now,
-        published,
-        state
-      )
+  defp dual_commit(cx, state) do
+    {batch, state} = start_dual(cx, state)
 
     task = batch.task
     {:noreply, %{state | inflight: Map.put(state.inflight, task.ref, batch)}}
   end
 
-  defp start_dual(
-         from,
-         tagged,
-         checked,
-         admission,
-         ops,
-         {batch_size, bytes},
-         now,
-         published,
-         state
-       ) do
+  defp start_dual(cx, state) do
+    %{
+      from: from,
+      tagged: tagged,
+      checked: checked,
+      admission: admission,
+      ops: ops,
+      sizes: {batch_size, bytes},
+      now: now,
+      published: published
+    } = cx
+
     t = state.table
     instance = state.instance
     mono = System.monotonic_time(:millisecond)
@@ -711,9 +683,8 @@ defmodule Ankusa.Queue.Writer do
   # still succeeds once the local half (which holds the cursor) is in; a local
   # half that fails is an error, the replayer retries the page, and a record that
   # reached the log first is replayed at boot as a hook with the same id.
-  defp release_commit(tagged, checked, admission, ops, sizes, now, published, state) do
-    {batch, state} =
-      start_dual(nil, tagged, checked, admission, ops, sizes, now, published, state)
+  defp release_commit(cx, state) do
+    {batch, state} = start_dual(%{cx | from: nil}, state)
 
     wait = state.config.intake.publish_timeout_ms + 1_000
 

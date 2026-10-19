@@ -181,29 +181,27 @@ defmodule Ankusa.Intake.Recovery do
     configured = config.intake.node_id
     asserted = Keyword.get(opts, :node)
 
-    cond do
-      asserted != nil and asserted != configured ->
-        {:error, {:intake_node_mismatch, asserted, configured}}
+    if asserted != nil and asserted != configured do
+      {:error, {:intake_node_mismatch, asserted, configured}}
+    else
+      case Store.get(instance, :default, Keys.meta("intake_node")) do
+        {:ok, ^configured} ->
+          :ok
 
-      true ->
-        case Store.get(instance, :default, Keys.meta("intake_node")) do
-          {:ok, ^configured} ->
-            :ok
+        {:ok, stamped} ->
+          {:error, {:intake_node_mismatch, stamped, configured}}
 
-          {:ok, stamped} ->
-            {:error, {:intake_node_mismatch, stamped, configured}}
+        :not_found ->
+          if Keyword.get(opts, :dry_run, false),
+            do: :ok,
+            else:
+              Store.write(instance, [{:put, :default, Keys.meta("intake_node"), configured}],
+                sync: true
+              )
 
-          :not_found ->
-            if Keyword.get(opts, :dry_run, false),
-              do: :ok,
-              else:
-                Store.write(instance, [{:put, :default, Keys.meta("intake_node"), configured}],
-                  sync: true
-                )
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -733,7 +731,7 @@ defmodule Ankusa.Intake.Recovery do
     child_opts = [instance: instance]
 
     adapter =
-      Supervisor.start_link([apply(Intake.module(config), :child_spec, [child_opts])],
+      Supervisor.start_link([Intake.module(config).child_spec(child_opts)],
         strategy: :one_for_one
       )
 

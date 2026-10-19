@@ -67,16 +67,14 @@ defmodule Ankusa.Intake.Memory do
         records
         |> Enum.filter(&(&1.node == node))
         |> Enum.reduce_while({:ok, nil}, fn record, {:ok, last} ->
-          cond do
-            not Intake.known?(record.kind, record.version) ->
-              Intake.skipped(instance)
-              {:cont, {:ok, last}}
-
-            true ->
-              case fun.(record) do
-                :ok -> {:cont, {:ok, record.position}}
-                {:error, _reason} -> {:halt, {:error, :unavailable}}
-              end
+          if Intake.known?(record.kind, record.version) do
+            case fun.(record) do
+              :ok -> {:cont, {:ok, record.position}}
+              {:error, _reason} -> {:halt, {:error, :unavailable}}
+            end
+          else
+            Intake.skipped(instance)
+            {:cont, {:ok, last}}
           end
         end)
     end

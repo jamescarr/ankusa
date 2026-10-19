@@ -240,10 +240,8 @@ defmodule Ankusa.Intake.Reconciler do
     :ok
   end
 
-  defp seq_of(
-         {{:p, seq}, _id, _size, _local, _log, _first_at, _bin, _batch, _claim, _triple,
-          _position, _attempts, _stuck, _next_at, _meta}
-       ), do: seq
+  # An entry's key is `{:p, seq}`.
+  defp seq_of(entry), do: entry |> elem(0) |> elem(1)
 
   defp backoff(t, entry, retry_after, now) do
     attempts = elem(entry, 11)
