@@ -226,7 +226,7 @@ unarchived hook`, `quarantine retention`, `catalogue retention`),
 Store format 6 added the claim leases (`?l`, one row per pack and hook, value
 `<<0::64>>` while the hook is live, else the grace expiry) and their counter
 `claim_leases` (field 9 of `counters`; its migration leases every `?k` claim row
-of a format 5 store, resumable in batches of 500). `Ankusa.Queue.Reclaim` turns a
+of a format 5 store, resumable in batches of 500). Reclaiming a hook turns its
 lease into a grace lease in the batch that deletes the hook;
 `Ankusa.ClaimCheck.Sweeper` deletes leases whose grace is over and never
 deletes a leased pack. See [claim-check.md](claim-check.md#claim-leases). A
