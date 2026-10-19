@@ -157,3 +157,13 @@
   `params` may carry `:limit`; `nil` values are left out of the query string."
   ([client] (list-quarantined client nil))
   ([client params] (call-json client "GET" "/v1/quarantine" {:query params})))
+
+(defn list-audit
+  "The audit trail, newest first: `GET /v1/audit`.
+
+  `params` may carry `:cursor`, `:limit`, `:since`, `:until`, `:actor`,
+  `:action` and `:tenant` (a map, or a seq of `[k v]` pairs when the order
+  must be exact); `nil` values are left out of the query string rather than
+  sent as `=`."
+  ([client] (list-audit client nil))
+  ([client params] (call-json client "GET" "/v1/audit" {:query params})))

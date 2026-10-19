@@ -119,6 +119,7 @@
     "admin_config" (admin/config (admin/client base-url opts))
     "admin_dlq_list" (admin/list-dead-letters (admin/client base-url opts) (get input "params"))
     "admin_quarantine" (admin/list-quarantined (admin/client base-url opts) (get input "params"))
+    "admin_audit_list" (admin/list-audit (admin/client base-url opts) (get input "params"))
     "admin_replay_create" (admin/create-replay (admin/client base-url opts) (get input "spec"))
     "admin_replay_get" (admin/get-replay (admin/client base-url opts) (get input "id"))
     "admin_replay_list" (admin/list-replays (admin/client base-url opts))

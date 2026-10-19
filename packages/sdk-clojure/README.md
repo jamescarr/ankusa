@@ -102,6 +102,7 @@ the redacted config, the DLQ, replay jobs, and the quarantine list.
 (admin/metrics a)                                 ; => Prometheus text, a string
 (admin/list-dead-letters a {:limit 10})
 (admin/list-quarantined a)
+(admin/list-audit a {:tenant "acme" :action "source.create" :limit 10}) ; newest-first audit trail
 
 ;; Replay dead letters ("dlq"), redrive an archived time window ("archive"), or
 ;; re-verify and release held hooks ("quarantine"), without flooding live traffic.

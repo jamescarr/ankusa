@@ -9,6 +9,9 @@ this project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `list-audit`: `GET /v1/audit`, the audit trail (newest first, paged by
+  `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
+  `tenant`).
 - `verification` on parsed headers, decoded messages and received deliveries:
   how Ankusa verified the hook at ingest (`{status, flagged}`, `null` from a
   node older than the field).
