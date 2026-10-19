@@ -14,6 +14,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   or comma-separated `${VAR}`, each at least 32 bytes), a final backup on SIGTERM,
   and a `/ready` `backup: stale` label (`503` with `require_fresh`). See
   `config-examples/reference.yml` and `docs/storage.md#backup-and-restore`.
+- **`routes.memory_budget_bytes`, `routes.store.timeout_ms`/`load_timeout_ms` and
+  `source_store.timeout_ms`/`load_timeout_ms` (TEN-9).** `routes.max_routes`
+  defaults to 1 000 000 (was 10 000) behind `routes.memory_budget_bytes` (default
+  8589934592), checked at boot against ~5 KiB per route. The two timeouts are
+  Redis-only keys, like `tick_ms` (a config error with `type: ets`): `timeout_ms`
+  bounds each Redis command and `load_timeout_ms` a whole load, which now reads
+  the routes and sources a page at a time. See `config-examples/reference.yml`
+  and `docs/configuration.md#route-management`.
 - **`metrics.detail` and `metrics.max_series_per_metric` (TEN-7).** The scrape's
   cardinality policy: `detail` is `tenant` (default: `tenant_id` on the per-hook
   series), `source` (`tenant_id` and `source_id`) or `none` (neither, and no

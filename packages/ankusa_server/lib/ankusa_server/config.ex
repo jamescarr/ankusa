@@ -107,14 +107,14 @@ defmodule AnkusaServer.Config do
                        ref_signing_keys ref_ttl_ms accept_unsigned_refs tls auth)
   @backup_keys ~w(enabled interval_ms keep store secondary timeout_ms verify_interval_ms
                   signing_key final_timeout_ms max_age_ms require_fresh)
-  @source_store_keys ~w(type url namespace tick_ms)
+  @source_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   @lifecycle_keys ~w(sinks)
   @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts)
-  @routes_keys ~w(enabled max_routes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
-  @routes_store_keys ~w(type url namespace tick_ms)
+  @routes_keys ~w(enabled max_routes memory_budget_bytes store cache trusted_proxies ip_rules admin log_sample ip_denied_status seed)
+  @routes_store_keys ~w(type url namespace tick_ms timeout_ms load_timeout_ms)
   # Keys a Redis store owns (`routes.store`, `source_store`); the other store
   # types must not silently drop them.
-  @redis_only_keys ~w(url namespace tick_ms)
+  @redis_only_keys ~w(url namespace tick_ms timeout_ms load_timeout_ms)
   @routes_cache_keys ~w(max_size ttl_ms negative_ttl_ms gc_interval_ms)
   @routes_ip_rules_keys ~w(default rules)
   @routes_rule_keys ~w(action cidr)
@@ -1240,6 +1240,7 @@ defmodule AnkusaServer.Config do
         []
         |> put_opt(:enabled, bool_opt(routes, "enabled", path))
         |> put_opt(:max_routes, int_opt(routes, "max_routes", path))
+        |> put_opt(:memory_budget_bytes, int_opt(routes, "memory_budget_bytes", path))
         |> put_opt(:log_sample, int_opt(routes, "log_sample", path))
         |> put_opt(:ip_denied_status, int_opt(routes, "ip_denied_status", path))
         |> put_opt(:trusted_proxies, trusted_proxies(routes, path))
@@ -1286,7 +1287,9 @@ defmodule AnkusaServer.Config do
         {Ankusa.Routes.Store.Redis,
          [url: required_string!(store, "url", path)]
          |> put_opt(:namespace, string_opt(store, "namespace", path))
-         |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))}
+         |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))
+         |> put_opt(:timeout_ms, int_opt(store, "timeout_ms", path))
+         |> put_opt(:load_timeout_ms, int_opt(store, "load_timeout_ms", path))}
     end
   end
 
@@ -1685,6 +1688,8 @@ defmodule AnkusaServer.Config do
           [url: required_string!(store, "url", path), sources: sources, decoder: decoder]
           |> put_opt(:namespace, string_opt(store, "namespace", path))
           |> put_opt(:tick_ms, int_opt(store, "tick_ms", path))
+          |> put_opt(:timeout_ms, int_opt(store, "timeout_ms", path))
+          |> put_opt(:load_timeout_ms, int_opt(store, "load_timeout_ms", path))
 
         [source_store: {Ankusa.SourceStore.Redis, opts}]
     end
