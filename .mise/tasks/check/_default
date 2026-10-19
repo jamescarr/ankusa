@@ -43,8 +43,10 @@ failed=""
 } | xargs -P "$jobs" -I '{}' sh -c 'mise run {}' || failed=1
 
 # The adapters run one at a time. Conformance needs no docker and no directory
-# they touch, so it overlaps them.
-mise run check:conformance &
+# they touch, so it overlaps them — serial, though: `check:conformance` runs the
+# SDKs concurrently by default, and four toolchain builds beside the adapters
+# trips ankusa_redis's p99 assertion (304 ms against its 150 ms bound, measured).
+CONFORMANCE_JOBS=1 mise run check:conformance &
 conformance=$!
 for p in $(pkg_names); do
   if [ -f "$(pkg_dir "$p")/docker-compose.yml" ]; then
