@@ -356,7 +356,14 @@ The plan's rates are fleet-wide: 10⁴–10⁵ req/s over 100 nodes or more, so 
 10 MB/s of produce per node. `packages/ankusa_kafka/bench/partition_bench.exs`
 measures one partition of a three-broker, replication-factor-3,
 `min.insync.replicas=2` cluster through the adapter at that rate and flat out.
-PARTITION_BENCH_RESULT
+On a laptop (the three brokers in docker beside the bench, so read it as an order of
+magnitude): at the per-node rate, 997 records/s of 10 000 bytes (9.5 MiB/s), the
+confirm took p50 5.1 ms and p99 17.0 ms; flat out, two publishers with 256-record
+batches in flight carried 12 551 records/s (119.7 MiB/s) through **one** partition
+at a confirm p50 of 36.9 ms, p99 136.7 ms. One partition per node therefore has
+about 12x headroom at the plan's per-node rate, and the explicit partition per
+node stands; several nodes may share a partition (the records carry the node id and
+replay filters by it) as long as their sum stays well under what it carries.
 
 ### Proof
 

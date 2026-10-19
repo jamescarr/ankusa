@@ -560,11 +560,6 @@ defmodule Ankusa.Intake.KafkaTest do
                  opts("ankusa.intake.test.never-created", 0)
                )
     end
-
-    defp start_adapter_without_ready(instance) do
-      start_supervised!(Kafka.child_spec(instance: instance))
-      wait(fn -> Process.whereis(Kafka.client(instance)) != nil end, 15_000, "the client")
-    end
   end
 
   # ── error codes ───────────────────────────────────────────────────────────

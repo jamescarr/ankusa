@@ -220,9 +220,10 @@ defmodule Ankusa.Intake.Kafka do
     node = Keyword.get(opts, :node, s.node)
 
     with {:ok, partition} <- produce_partition(s, Keyword.get(opts, :partition), node),
-         {:ok, producer} <- :brod.get_producer(s.client, s.topic, partition),
-         {:ok, ref} <- :brod.produce(producer, node, Enum.map(records, &message(&1, node))),
-         {:ok, offset} <- :brod.sync_produce_request_offset(ref, timeout) do
+         {:ok, producer} <- guard(fn -> :brod.get_producer(s.client, s.topic, partition) end),
+         {:ok, ref} <-
+           guard(fn -> :brod.produce(producer, node, Enum.map(records, &message(&1, node))) end),
+         {:ok, offset} <- guard(fn -> :brod.sync_produce_request_offset(ref, timeout) end) do
       {:ok, %{position: offset + length(records) - 1}}
     else
       {:error, reason} -> {:error, classify(reason)}
@@ -233,7 +234,7 @@ defmodule Ankusa.Intake.Kafka do
   defp head(s, opts) do
     with {:ok, partition} <- produce_partition(s, Keyword.get(opts, :partition), s.node),
          {:ok, latest} <-
-           :brod.resolve_offset(s.endpoints, s.topic, partition, :latest, s.conn) do
+           guard(fn -> :brod.resolve_offset(s.endpoints, s.topic, partition, :latest, s.conn) end) do
       {:ok, %{position: latest - 1}}
     else
       {:error, reason} -> {:error, classify(reason)}
@@ -292,7 +293,9 @@ defmodule Ankusa.Intake.Kafka do
   defp replay_from(s, instance, partition, cursor, latest, node, fun, last, empty) do
     fetch_opts = %{max_wait_time: 1_000, min_bytes: 1, max_bytes: @fetch_bytes}
 
-    case :brod.fetch({s.endpoints, s.conn}, s.topic, partition, cursor, fetch_opts) do
+    case guard(fn ->
+           :brod.fetch({s.endpoints, s.conn}, s.topic, partition, cursor, fetch_opts)
+         end) do
       {:ok, {_high_watermark, []}} when empty + 1 >= @empty_fetches ->
         {:error, :unavailable}
 
@@ -370,8 +373,17 @@ defmodule Ankusa.Intake.Kafka do
     end
   end
 
+  # brod throws `{:failed_to_connect, _}` when no broker answers and exits when a
+  # producer or client dies mid-call: the adapter returns values (rule 2).
+  defp guard(fun) do
+    fun.()
+  catch
+    :throw, reason -> {:error, reason}
+    :exit, reason -> {:error, reason}
+  end
+
   defp resolve(s, partition, time) do
-    case :brod.resolve_offset(s.endpoints, s.topic, partition, time, s.conn) do
+    case guard(fn -> :brod.resolve_offset(s.endpoints, s.topic, partition, time, s.conn) end) do
       {:ok, offset} -> {:ok, offset}
       {:error, reason} -> {:error, classify(reason)}
     end
@@ -387,7 +399,7 @@ defmodule Ankusa.Intake.Kafka do
   # ── verify ────────────────────────────────────────────────────────────────
 
   defp topic_metadata(s) do
-    case :brod.get_metadata(s.endpoints, [s.topic], s.conn) do
+    case guard(fn -> :brod.get_metadata(s.endpoints, [s.topic], s.conn) end) do
       {:ok, metadata} -> find_topic(metadata, s.topic)
       {:error, reason} -> {:error, classify(reason)}
     end
@@ -437,7 +449,7 @@ defmodule Ankusa.Intake.Kafka do
     resource = %{resource_type: @topic_resource, resource_name: s.topic, config_names: names}
     request = :kpro_req_lib.describe_configs(1, [resource], %{})
 
-    case :kpro.connect_any(s.endpoints, s.conn) do
+    case guard(fn -> :kpro.connect_any(s.endpoints, s.conn) end) do
       {:ok, connection} ->
         try do
           with {:ok, kpro_rsp(msg: msg)} <- :kpro.request_sync(connection, request, 5_000) do

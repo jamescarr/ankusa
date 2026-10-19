@@ -220,7 +220,13 @@ defmodule Ankusa.Intake.RecoveryTest do
     assert row.actor == "ankusa recover"
     assert row.resource == "node-a"
     assert row.result == "ok"
-    assert row.detail == %{"node" => "node-a", "wanted" => 3, "earliest" => 10, "lost_positions" => 7}
+
+    assert row.detail == %{
+             "node" => "node-a",
+             "wanted" => 3,
+             "earliest" => 10,
+             "lost_positions" => 7
+           }
   end
 
   describe "parse_args (mix ankusa.recover and the image's recover command)" do
@@ -228,7 +234,9 @@ defmodule Ankusa.Intake.RecoveryTest do
       assert {:ok, [from: :backup]} = Recovery.parse_args([])
 
       assert {:ok, opts} =
-               Recovery.parse_args(~w(--node a --from earliest --dry-run --allow-gap --instance i))
+               Recovery.parse_args(
+                 ~w(--node a --from earliest --dry-run --allow-gap --instance i)
+               )
 
       assert Enum.sort(opts) ==
                [allow_gap: true, dry_run: true, from: :earliest, instance: "i", node: "a"]

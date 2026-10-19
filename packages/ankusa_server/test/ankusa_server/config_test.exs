@@ -1206,7 +1206,9 @@ defmodule AnkusaServer.ConfigTest do
 
     # the node id alone is a complete `intake` block's identity, the rest is the file's
     only_env = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
-    assert Config.load!(path: tmp_config(only_env), env: %{"ANKUSA_INTAKE_NODE_ID" => "x"}).config.intake.node_id == "x"
+
+    assert Config.load!(path: tmp_config(only_env), env: %{"ANKUSA_INTAKE_NODE_ID" => "x"}).config.intake.node_id ==
+             "x"
   end
 
   test "the intake log's credentials never reach the printed config" do
@@ -1217,7 +1219,10 @@ defmodule AnkusaServer.ConfigTest do
 
   test "wal: {type: dual} refuses what ADR 0002 requires" do
     sources = "sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n"
-    backup = "backup: {enabled: true, max_age_ms: 300000, store: {type: s3, s3: {bucket: b, region: r}}}\n"
+
+    backup =
+      "backup: {enabled: true, max_age_ms: 300000, store: {type: s3, s3: {bucket: b, region: r}}}\n"
+
     kafka = "intake: {type: kafka, node_id: a, kafka: {brokers: [\"k:9092\"]}"
 
     refuse = fn yaml, message ->
@@ -1226,8 +1231,16 @@ defmodule AnkusaServer.ConfigTest do
     end
 
     refuse.("wal: {type: dual}\n" <> backup <> sources, "wal: :dual needs intake.type")
-    refuse.("wal: {type: dual}\n" <> backup <> "intake: {type: kafka}\n" <> sources, "needs intake.node_id")
-    refuse.("wal: {type: dual}\n" <> kafka <> "}\n" <> sources, "needs backup.enabled and backup.max_age_ms")
+
+    refuse.(
+      "wal: {type: dual}\n" <> backup <> "intake: {type: kafka}\n" <> sources,
+      "needs intake.node_id"
+    )
+
+    refuse.(
+      "wal: {type: dual}\n" <> kafka <> "}\n" <> sources,
+      "needs backup.enabled and backup.max_age_ms"
+    )
 
     refuse.(
       "wal: {type: dual}\n" <> backup <> kafka <> ", publish_timeout_ms: 20000}\n" <> sources,
@@ -1240,7 +1253,10 @@ defmodule AnkusaServer.ConfigTest do
     )
 
     refuse.(
-      "wal: {type: dual}\n" <> backup <> "dedupe: {scope: fleet}\nfleet: {pending_ttl_ms: 5000, store: {url: \"redis://r\"}}\n" <> kafka <> "}\n" <> sources,
+      "wal: {type: dual}\n" <>
+        backup <>
+        "dedupe: {scope: fleet}\nfleet: {pending_ttl_ms: 5000, store: {url: \"redis://r\"}}\n" <>
+        kafka <> "}\n" <> sources,
       "reconcile_deadline_ms"
     )
   end

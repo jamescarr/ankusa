@@ -132,7 +132,11 @@ defmodule Bench.Intake do
     # the best of three rounds: noise only ever takes throughput away
     per_s = Enum.max(for _round <- 1..3, do: throughput(instance, requests, concurrency))
 
-    %{p50_ms: p50(latencies), per_s: per_s, mean_batch: mean_batch(before, log_counts(mode, instance))}
+    %{
+      p50_ms: p50(latencies),
+      per_s: per_s,
+      mean_batch: mean_batch(before, log_counts(mode, instance))
+    }
   end
 
   # Records and publish calls the log has seen: the mean batch is their ratio.
