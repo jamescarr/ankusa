@@ -272,8 +272,9 @@ unfollowed redirect, a non-JSON success body, or unreachable; retryable).
 ## Admin client
 
 The operator API on `admin.port` (default 4002): health, Prometheus metrics, the
-redacted config, the DLQ, replay jobs, and the quarantine list — the
-`operations`, `dlq`, `replays`, and `quarantine` tags of `admin.v1.yaml`.
+redacted config, the DLQ, the audit trail, replay jobs, and the quarantine
+list — the `operations`, `dlq`, `audit`, `replays`, and `quarantine` tags of
+`admin.v1.yaml`.
 
 ```ruby
 require "ankusa/sdk"
@@ -283,6 +284,7 @@ admin = Ankusa::AdminClient.new(ENV.fetch("ADMIN_URL", "http://localhost:4002"))
 admin.health                          # {"status" => "ok", "instance" => ..., "roles" => [...]}
 admin.list_dead_letters({"limit" => 10})  # {"total" => ..., "entries" => [...]}
 admin.list_quarantined
+admin.list_audit({"tenant" => "acme", "limit" => 50})  # {"entries" => [...], "next_cursor" => ...}
 
 job = admin.create_replay({"kind" => "dlq", "source_id" => "stripe", "rate" => 500})
 admin.get_replay(job["id"])
@@ -293,10 +295,12 @@ admin.update_replay(job["id"], {"state" => "paused"})   # resume, pause or cance
 `create_replay` is idempotent for retries: a second POST of the same filter
 while the job is `running`/`paused` returns the existing job (`200`) instead of
 starting another (`202`). `list_replays` returns `{"replays" => [...]}` exactly
-as the API sends it.
+as the API sends it. `list_audit` returns the audit trail newest first,
+`{"entries" => [...], "next_cursor" => ...}`, paged by `cursor`/`limit` and
+filtered by `since`, `until`, `actor`, `action` and `tenant`.
 
 Methods: `health`, `metrics` (Prometheus text), `config`, `list_dead_letters`,
-`create_replay`, `get_replay`, `list_replays`, `update_replay`,
+`list_audit`, `create_replay`, `get_replay`, `list_replays`, `update_replay`,
 `list_quarantined`. Failures are `AdminError` subclasses: `RoleNotEnabledError`
 (409 `role_not_enabled`, carrying `role`), `AdminRejectedError` (any other 4xx —
 a missing replay is a 404 with `code` `replay_not_found`), and

@@ -212,6 +212,8 @@ class ConformanceTest < Minitest::Test
       with_client(Ankusa::AdminClient, input, requests, &:config)
     when "admin_dlq_list"
       with_client(Ankusa::AdminClient, input, requests) { |client| client.list_dead_letters(input["params"]) }
+    when "admin_audit_list"
+      with_client(Ankusa::AdminClient, input, requests) { |client| client.list_audit(input["params"]) }
     when "admin_replay_create"
       with_client(Ankusa::AdminClient, input, requests) { |client| client.create_replay(input.fetch("spec")) }
     when "admin_replay_get"

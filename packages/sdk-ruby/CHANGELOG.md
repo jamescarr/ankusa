@@ -28,6 +28,9 @@ this project follows [Semantic Versioning](https://semver.org/).
 - `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403
   forbidden` says the credential lacks (control planes require a credential
   since Ankusa 0.6).
+- `Admin#list_audit(**params)`: `GET /v1/audit`, the audit trail (newest first,
+  paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`, `action`,
+  `tenant`).
 
 ## [0.5.0] - 2026-10-14
 

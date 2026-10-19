@@ -83,6 +83,15 @@ module Ankusa
       json(request("GET", "/v1/dlq", query: params))
     end
 
+    # GET /v1/audit -> a page of the audit trail, newest first.
+    #
+    # `params` may carry `cursor`, `limit`, `since`, `until`, `actor`,
+    # `action` and `tenant`; absent keys are omitted from the query string
+    # rather than sent as `=`.
+    def list_audit(params = nil)
+      json(request("GET", "/v1/audit", query: params))
+    end
+
     # POST /v1/replays -> the created Replay, as a Hash.
     #
     # `spec` is the replay spec: `{"kind" => "dlq", ...}`,
