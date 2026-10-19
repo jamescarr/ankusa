@@ -45,6 +45,8 @@ defmodule Ankusa.Admin.RouterAuthTest do
   @every_scope Principal.scopes()
   @current_ref_key "current-ref-signing-key-aaaa1111"
   @previous_ref_key "previous-ref-signing-key-bbbb2222"
+  @backup_key "current-backup-signing-key-cccc3333-padding"
+  @backup_key_previous "previous-backup-signing-key-dddd4444-padding"
 
   defp token(id, plain, scopes), do: %{id: id, sha256: Token.hash(plain), scopes: scopes}
 
@@ -72,7 +74,8 @@ defmodule Ankusa.Admin.RouterAuthTest do
       test_config(
         roles: [:edge, :dispatch],
         admin: %{enabled: true, port: 0, auth: %{mode: :token, tokens: tokens}},
-        claim_check: %{ref_signing_keys: [@current_ref_key, @previous_ref_key]}
+        claim_check: %{ref_signing_keys: [@current_ref_key, @previous_ref_key]},
+        backup: %{signing_key: [@backup_key, @backup_key_previous]}
       )
 
     put_config(config)
@@ -245,5 +248,14 @@ defmodule Ankusa.Admin.RouterAuthTest do
     assert claim_check["ref_signing_keys"] == ["[REDACTED]", "[REDACTED]"]
     refute conn.resp_body =~ @current_ref_key
     refute conn.resp_body =~ @previous_ref_key
+  end
+
+  test "/v1/config hides every backup signing key and keeps their count", %{inst: inst} do
+    conn = call(inst, :get, "/v1/config", "operator")
+    assert %{"backup" => backup} = JSON.decode!(conn.resp_body)
+
+    assert backup["signing_key"] == ["[REDACTED]", "[REDACTED]"]
+    refute conn.resp_body =~ @backup_key
+    refute conn.resp_body =~ @backup_key_previous
   end
 end

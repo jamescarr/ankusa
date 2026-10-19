@@ -295,7 +295,14 @@ defmodule Ankusa.Store.BackupTest do
 
   test "segments archived after the backup are re-catalogued and their seqs are not reused" do
     root = blob_root()
-    config = start(root, roles: [:edge, :storage])
+    {:ok, failures} = Agent.start_link(fn -> 0 end)
+
+    config =
+      start(root,
+        roles: [:edge, :storage],
+        blob_store: {CountingBlobStore, root: root, failures: failures}
+      )
+
     inst = config.instance
 
     before = commit!(inst, 5)
@@ -303,7 +310,13 @@ defmodule Ankusa.Store.BackupTest do
     later = commit!(inst, 5)
     assert {:ok, 1} = Compactor.tick(inst)
 
-    lose_host_and_restart(config)
+    # The host is lost with the backup as its last one: a clean stop would take
+    # a final backup holding `later`, so the object store is down for it.
+    Agent.update(failures, fn _ -> 1_000 end)
+    ExUnit.CaptureLog.capture_log(fn -> stop_supervised!({Ankusa.Instance, inst}) end)
+    Agent.update(failures, fn _ -> 0 end)
+    File.rm_rf!(config.data_dir)
+    start_supervised!({Ankusa.Instance, config})
 
     # The restored store holds only what the backup did...
     assert stored_ids(inst) == Enum.map(before, & &1.id)
@@ -433,6 +446,379 @@ defmodule Ankusa.Store.BackupTest do
     :erlang.resume_process(pid)
     assert Task.await(task) == :ok
     assert File.exists?(Path.join(dir, "CURRENT"))
+  end
+
+  # ── DUR-6 ─────────────────────────────────────────────────────────────────
+
+  @key_a String.duplicate("a", 40)
+  @key_b String.duplicate("b", 40)
+
+  @doc false
+  def report(_event, measurements, meta, pid), do: send(pid, {:verify, measurements, meta})
+
+  defp backup_files(root, pattern),
+    do: root |> Path.join(pattern) |> Path.wildcard() |> Enum.sort()
+
+  defp flip_first_byte(file) do
+    <<first, rest::binary>> = File.read!(file)
+    File.write!(file, <<Bitwise.bxor(first, 1), rest::binary>>)
+  end
+
+  defp latest(root), do: File.read!(Path.join([root, "backup", "LATEST"]))
+
+  defp manifest_file(root, id), do: Path.join([root, "backup", id, "manifest.json"])
+
+  # A boot on an empty volume that is allowed to fail.
+  defp boot_empty(config) do
+    File.rm_rf!(config.data_dir)
+    Process.flag(:trap_exit, true)
+    Ankusa.Instance.start_link(config)
+  end
+
+  defp with_keys(config, keys), do: %{config | backup: %{config.backup | signing_key: keys}}
+
+  defp wait_until(fun, deadline_ms \\ 5_000) do
+    cond do
+      fun.() -> true
+      deadline_ms <= 0 -> false
+      true -> Process.sleep(20) && wait_until(fun, deadline_ms - 20)
+    end
+  end
+
+  test "verify detects corruption: a flipped byte, a short file, a missing file, a bad manifest; it never writes" do
+    root = blob_root()
+    config = start(root, blob_store: {CountingBlobStore, root: root, pid: self()})
+    inst = config.instance
+
+    assert Backup.verify(inst) == :none
+
+    commit!(inst, 50)
+    assert {:ok, %{id: id}} = Backup.run(inst)
+    drain_puts()
+
+    assert {:ok, %{id: ^id, files: files, bytes: bytes}} = Backup.verify(inst)
+    assert files > 0 and bytes > 0
+    assert drain_puts() == []
+
+    [sst | _] = backup_files(root, "backup/sst/*.sst")
+    name = Path.basename(sst)
+    original = File.read!(sst)
+
+    flip_first_byte(sst)
+    assert {:error, {:checksum_mismatch, ^name}} = Backup.verify(inst)
+
+    File.write!(sst, binary_part(original, 0, byte_size(original) - 1))
+    assert {:error, {:size_mismatch, ^name}} = Backup.verify(inst)
+
+    File.rm!(sst)
+    assert {:error, {:download_failed, key, :not_found}} = Backup.verify(inst)
+    assert String.ends_with?(key, "backup/sst/" <> name)
+
+    File.write!(sst, original)
+    assert {:ok, %{id: ^id}} = Backup.verify(inst)
+
+    manifest = manifest_file(root, id)
+    good = File.read!(manifest)
+    File.write!(manifest, "{")
+    assert {:error, {:manifest_invalid, ^id, {:json, _}}} = Backup.verify(inst)
+    File.write!(manifest, good)
+
+    assert Backup.verify(inst, target: :secondary) == {:error, :no_such_target}
+    assert drain_puts() == []
+  end
+
+  test "the verify job reports every verified target, and a corrupted backup is an error result" do
+    handler = "backup-verify-#{System.unique_integer([:positive])}"
+    :telemetry.attach(handler, [:ankusa, :backup, :verify], &__MODULE__.report/4, self())
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    root = blob_root()
+    config = start(root, backup: %{verify_interval_ms: 50})
+    inst = config.instance
+    commit!(inst, 50)
+    assert {:ok, _} = Backup.run(inst)
+
+    assert_receive {:verify, %{files: files}, %{instance: ^inst, target: :primary, result: :ok}},
+                   2_000
+
+    assert files > 0
+
+    [sst | _] = backup_files(root, "backup/sst/*.sst")
+    name = Path.basename(sst)
+    flip_first_byte(sst)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert_receive {:verify, _,
+                      %{target: :primary, result: :error, reason: {:checksum_mismatch, ^name}}},
+                     2_000
+    end)
+  end
+
+  test "manifest signature: unsigned, mis-signed and tampered manifests are refused at restore; rotation reads old backups" do
+    root = blob_root()
+    config = start(root, backup: %{signing_key: [@key_a]})
+    inst = config.instance
+    committed = commit!(inst, 30)
+    assert {:ok, _} = Backup.run(inst)
+    stop_supervised!({Ankusa.Instance, inst})
+
+    # The stop took one more backup: that is the one `LATEST` names.
+    id = latest(root)
+    file = manifest_file(root, id)
+    original = File.read!(file)
+    manifest = JSON.decode!(original)
+    assert manifest["version"] == 2
+    assert String.match?(manifest["signature"], ~r/\A[0-9a-f]{64}\z/)
+
+    assert {:store_restore_failed, _, {:manifest_invalid, ^id, :bad_signature}} =
+             restore_reason(boot_empty(with_keys(config, [@key_b])))
+
+    tampered = Map.update!(manifest, "created_at_ms", &(&1 + 1))
+    File.write!(file, JSON.encode!(tampered))
+
+    assert {:store_restore_failed, _, {:manifest_invalid, ^id, :bad_signature}} =
+             restore_reason(boot_empty(config))
+
+    [entry | rest] = manifest["files"]
+    resized = %{manifest | "files" => [%{entry | "size" => entry["size"] + 1} | rest]}
+    File.write!(file, JSON.encode!(resized))
+
+    assert {:store_restore_failed, _, {:manifest_invalid, ^id, :bad_signature}} =
+             restore_reason(boot_empty(config))
+
+    File.write!(file, manifest |> Map.delete("signature") |> JSON.encode!())
+
+    assert {:store_restore_failed, _, {:manifest_invalid, ^id, :unsigned}} =
+             restore_reason(boot_empty(config))
+
+    File.write!(file, manifest |> Map.put("signature", 1) |> JSON.encode!())
+
+    assert {:store_restore_failed, _, {:manifest_invalid, ^id, :bad_signature}} =
+             restore_reason(boot_empty(config))
+
+    refute File.exists?(Path.join(Ankusa.Config.path(config, "store"), "CURRENT"))
+
+    # Rotation: the old key is still listed, so the old backup restores.
+    File.write!(file, original)
+    File.rm_rf!(config.data_dir)
+    start_supervised!({Ankusa.Instance, with_keys(config, [@key_b, @key_a])})
+    assert stored_ids(inst) == Enum.map(committed, & &1.id)
+    stop_supervised!({Ankusa.Instance, inst})
+
+    # Signing is opt-in at restore: no key configured, nothing is checked, and
+    # the operator is told.
+    File.rm_rf!(config.data_dir)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        start_supervised!({Ankusa.Instance, with_keys(config, [])})
+      end)
+
+    assert log =~ "no backup.signing_key is configured"
+    assert stored_ids(inst) == Enum.map(committed, & &1.id)
+  end
+
+  test "a backup of a newer store format than this release writes is refused at restore" do
+    root = blob_root()
+    config = start(root)
+    commit!(config.instance, 10)
+    assert {:ok, _} = Backup.run(config.instance)
+    stop_supervised!({Ankusa.Instance, config.instance})
+
+    id = latest(root)
+    file = manifest_file(root, id)
+    manifest = file |> File.read!() |> JSON.decode!()
+    assert manifest["format_version"] == Ankusa.Store.Migrate.current_format()
+    File.write!(file, manifest |> Map.put("format_version", 99) |> JSON.encode!())
+
+    supported = Ankusa.Store.Migrate.current_format()
+
+    assert {:store_restore_failed, _, {:store_format_newer, 99, ^supported}} =
+             restore_reason(boot_empty(config))
+
+    refute File.exists?(Path.join(Ankusa.Config.path(config, "store"), "CURRENT"))
+  end
+
+  test "the manifest records the intake offset, and a restore carries it" do
+    root = blob_root()
+    config = start(root)
+    inst = config.instance
+    committed = commit!(inst, 10)
+
+    offset = Ankusa.Store.Keys.meta("intake_offset")
+    assert :ok = Store.write(inst, [{:put, :default, offset, <<42::64>>}], sync: true)
+    assert {:ok, %{id: id}} = Backup.run(inst)
+    assert (root |> manifest_file(id) |> File.read!() |> JSON.decode!())["intake_offset"] == 42
+
+    lose_host_and_restart(config)
+    assert Store.get(inst, :default, offset) == {:ok, <<42::64>>}
+    assert stored_ids(inst) == Enum.map(committed, & &1.id)
+  end
+
+  test "final checkpoint on stop: a clean stop leaves LATEST newer than the last periodic backup, holding every acked hook" do
+    root = blob_root()
+    config = start(root)
+    inst = config.instance
+
+    first = commit!(inst, 20)
+    assert {:ok, %{id: periodic}} = Backup.run(inst)
+    second = commit!(inst, 30)
+    assert latest(root) == periodic
+
+    stop_supervised!({Ankusa.Instance, inst})
+
+    final = latest(root)
+    assert final > periodic
+    assert (root |> manifest_file(final) |> File.read!() |> JSON.decode!())["id"] == final
+
+    File.rm_rf!(config.data_dir)
+    start_supervised!({Ankusa.Instance, config})
+    assert stored_ids(inst) == Enum.map(first ++ second, & &1.id)
+  end
+
+  test "a final checkpoint that outlasts backup.final_timeout_ms is abandoned and does not hold the stop" do
+    root = blob_root()
+
+    config =
+      start(root,
+        blob_store: {CountingBlobStore, root: root, put_delay_ms: 1_500},
+        backup: %{final_timeout_ms: 200}
+      )
+
+    commit!(config.instance, 20)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {micros, :ok} =
+          :timer.tc(fn -> stop_supervised!({Ankusa.Instance, config.instance}) end)
+
+        assert micros < 5_000_000
+      end)
+
+    assert log =~ "did not finish within 200 ms"
+    refute File.exists?(Path.join([root, "backup", "LATEST"]))
+  end
+
+  test "secondary restore: the primary bucket is lost and every acked id comes back from the secondary" do
+    primary = blob_root()
+    secondary = blob_root()
+    config = start(primary, backup: %{secondary: {LocalFS, root: secondary}})
+    inst = config.instance
+
+    committed = commit!(inst, 100)
+    assert {:ok, %{id: id}} = Backup.run(inst)
+    assert latest(primary) == id
+    assert latest(secondary) == id
+    assert {:ok, %{id: ^id}} = Backup.verify(inst, target: :secondary)
+
+    stop_supervised!({Ankusa.Instance, inst})
+    File.rm_rf!(primary)
+    File.rm_rf!(config.data_dir)
+
+    log = ExUnit.CaptureLog.capture_log(fn -> start_supervised!({Ankusa.Instance, config}) end)
+    assert log =~ "SECONDARY"
+    assert stored_ids(inst) == Enum.map(committed, & &1.id)
+  end
+
+  test "a primary that fails its checks falls back to the secondary; both failing refuses with the primary's reason" do
+    primary = blob_root()
+    secondary = blob_root()
+    config = start(primary, backup: %{secondary: {LocalFS, root: secondary}})
+    inst = config.instance
+    committed = commit!(inst, 60)
+    assert {:ok, _} = Backup.run(inst)
+    stop_supervised!({Ankusa.Instance, inst})
+
+    [sst | _] = backup_files(primary, "backup/sst/*.sst")
+    name = Path.basename(sst)
+    flip_first_byte(sst)
+    File.rm_rf!(config.data_dir)
+
+    ExUnit.CaptureLog.capture_log(fn -> start_supervised!({Ankusa.Instance, config}) end)
+    assert stored_ids(inst) == Enum.map(committed, & &1.id)
+    stop_supervised!({Ankusa.Instance, inst})
+
+    flip_first_byte(Path.join([secondary, "backup", "sst", name]))
+
+    assert {:store_restore_failed, _, {:checksum_mismatch, ^name}} =
+             ExUnit.CaptureLog.with_log(fn -> restore_reason(boot_empty(config)) end) |> elem(0)
+  end
+
+  test "a failing secondary fails the run, keeps the primary's backup, and does not re-upload the primary" do
+    primary = blob_root()
+    secondary = blob_root()
+    {:ok, failures} = Agent.start_link(fn -> 1_000 end)
+
+    config =
+      start(primary,
+        blob_store: {CountingBlobStore, root: primary, pid: self()},
+        backup: %{secondary: {CountingBlobStore, root: secondary, failures: failures}}
+      )
+
+    inst = config.instance
+    commit!(inst, 20)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, {:secondary, :injected_failure}} = Backup.run(inst)
+    end)
+
+    first = drain_puts()
+    assert Enum.any?(first, &String.starts_with?(&1, "backup/sst/"))
+    assert File.exists?(Path.join([primary, "backup", "LATEST"]))
+    refute File.exists?(Path.join([secondary, "backup", "LATEST"]))
+
+    Agent.update(failures, fn _ -> 0 end)
+    assert {:ok, %{id: id}} = Backup.run(inst)
+    refute Enum.any?(drain_puts(), &String.starts_with?(&1, "backup/sst/"))
+    assert latest(primary) == id
+    assert latest(secondary) == id
+  end
+
+  test "readiness: backup is fresh within max_age_ms, stale past it (503 only with require_fresh), unlabelled without one" do
+    plain = start(blob_root())
+    assert {:ok, body} = Ankusa.Health.ready(plain.instance)
+    refute Map.has_key?(body, :backup)
+
+    fresh = start(blob_root(), backup: %{max_age_ms: 3_600_000})
+    assert {:ok, %{backup: "fresh", status: "ready"}} = Ankusa.Health.ready(fresh.instance)
+
+    # Puts that always fail: no backup ever succeeds, so the age only grows.
+    {:ok, failures} = Agent.start_link(fn -> 1_000_000 end)
+    lax_root = blob_root()
+    strict_root = blob_root()
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      lax =
+        start(lax_root,
+          blob_store: {CountingBlobStore, root: lax_root, failures: failures},
+          backup: %{interval_ms: 50, max_age_ms: 100}
+        )
+
+      assert wait_until(fn ->
+               match?(
+                 {:ok, %{backup: "stale", status: "ready"}},
+                 Ankusa.Health.ready(lax.instance)
+               )
+             end)
+
+      strict =
+        start(strict_root,
+          blob_store: {CountingBlobStore, root: strict_root, failures: failures},
+          backup: %{interval_ms: 50, max_age_ms: 100, require_fresh: true}
+        )
+
+      assert wait_until(fn ->
+               match?(
+                 {:error, %{backup: "stale", status: "unavailable", store: "ok"}},
+                 Ankusa.Health.ready(strict.instance)
+               )
+             end)
+
+      # One good backup and it is fresh again.
+      Agent.update(failures, fn _ -> 0 end)
+      assert {:ok, _} = Backup.run(strict.instance)
+      assert {:ok, %{backup: "fresh"}} = Ankusa.Health.ready(strict.instance)
+    end)
   end
 
   defp in_flight_checkpoint(store, task) do

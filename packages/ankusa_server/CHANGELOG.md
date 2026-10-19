@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`backup.secondary`, `verify_interval_ms`, `signing_key`, `timeout_ms`,
+  `final_timeout_ms`, `max_age_ms`, `require_fresh` (DUR-6).** A second backup
+  store with restore fallback, a verify job, HMAC-SHA256-signed manifests (a list
+  or comma-separated `${VAR}`, each at least 32 bytes), a final backup on SIGTERM,
+  and a `/ready` `backup: stale` label (`503` with `require_fresh`). See
+  `config-examples/reference.yml` and `docs/storage.md#backup-and-restore`.
 - **`routes.memory_budget_bytes`, `routes.store.timeout_ms`/`load_timeout_ms` and
   `source_store.timeout_ms`/`load_timeout_ms` (TEN-9).** `routes.max_routes`
   defaults to 1 000 000 (was 10 000) behind `routes.memory_budget_bytes` (default
