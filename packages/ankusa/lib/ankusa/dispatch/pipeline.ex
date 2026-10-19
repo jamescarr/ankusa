@@ -87,15 +87,21 @@ defmodule Ankusa.Dispatch.Pipeline do
   # allows and the next synced commit would have flushed anyway.
   @flush_ms 10
   @flush_entries 256
-  # The due scan starts at `floor`, so it does not walk the tombstones of every
-  # row claimed before it (that made draining a backlog quadratic). The floor
-  # follows the claims, trailing the last claimed due time by `@floor_lag_ms`
-  # (clock jitter), and is kept under every row that can still become visible
-  # beneath it: a commit's wake carries the batch stamp, a retry or a replay
-  # lowers it to its own due time. A reset every `@floor_reset_ms` is the
-  # backstop for anything unforeseen.
+  # A scan visits the tenants the active index names (`Deliveries.active_tenants/3`)
+  # and claims from each one's due range, from that tenant's cursor on, so it
+  # does not walk the tombstones of every row claimed before it (that made
+  # draining a backlog quadratic). A cursor follows the claims, trailing the last
+  # claimed due time by `@floor_lag_ms` (clock jitter), and is kept under every
+  # row that can still become visible beneath it: a commit's wake carries the
+  # batch stamp, a retry or a replay lowers its tenant's cursor to its own due
+  # time. A cursor is dropped when its tenant drains; a reset of all of them every
+  # `@floor_reset_ms` is the backstop for anything unforeseen. Cursors are never
+  # persisted: after a restart a tenant starts from 0, which only re-reads work
+  # already known to be done.
   @floor_lag_ms 1_000
   @floor_reset_ms 300_000
+  # Markers read per scan.
+  @active_limit 4_096
   @holdoff_ms 1_000
   @max_sleep_ms 30_000
 
@@ -225,9 +231,13 @@ defmodule Ankusa.Dispatch.Pipeline do
        config: config,
        task_sup: task_sup,
        recovered?: false,
-       # see @floor_lag_ms
-       floor: 0,
+       # tenant ordinal => where its due scan starts, see @floor_lag_ms; and an
+       # upper bound of the cursors, so a wake that is not below any is O(1)
+       cursors: %{},
+       cursor_max: 0,
        floor_reset_at: mono_ms(),
+       # the most tenants one scan visited since the last report
+       tenants_visited: 0,
        # rows claimed and not yet finished, and their stored hook bytes
        claimed: 0,
        claimed_bytes: 0,
@@ -294,7 +304,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   def handle_call(:pressure, _from, state) do
     reply =
-      case Deliveries.next_due_at(state.instance, state.floor) do
+      case Deliveries.next_due_at(state.instance, state.cursors) do
         {:ok, nil} -> {:ok, %{lag_ms: 0, window_full: at_capacity?(state)}}
         {:ok, at} -> {:ok, %{lag_ms: max(0, now_ms() - at), window_full: at_capacity?(state)}}
         {:error, _reason} -> {:error, :unavailable}
@@ -302,6 +312,10 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     {:reply, reply, state}
   end
+
+  # Runs `fun` here, between two of this process's own steps: the one process
+  # that claims rows, so `fun` cannot race a claim (`Deliveries.purge_tenant/3`).
+  def handle_call({:exclusive, fun}, _from, state), do: {:reply, fun.(), state}
 
   def handle_call({:dead_letter_source, source_id}, _from, state) do
     # A buffered retry outcome is a row about to be pending again: write it
@@ -365,7 +379,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   # A commit's rows became visible only now, though they were stamped before it
   # (the fsync in between): a scan may already have gone past that stamp.
-  def handle_info({:wake, at}, state), do: handle_info(:wake, lower_floor(state, at))
+  def handle_info({:wake, at}, state), do: handle_info(:wake, lower_cursors(state, at))
 
   # A flush makes retries and expansions visible, and the capacity the outcomes
   # freed is claimed here, once, rather than once per outcome.
@@ -494,7 +508,7 @@ defmodule Ankusa.Dispatch.Pipeline do
     if at_capacity?(state) do
       %{state | window_full?: true}
     else
-      scan(maybe_reset_floor(state))
+      scan(maybe_reset_cursors(state))
     end
   end
 
@@ -509,20 +523,18 @@ defmodule Ankusa.Dispatch.Pipeline do
     limit = min(dispatch.batch, dispatch.max_inflight - state.claimed)
     budget = dispatch.max_inflight_bytes - state.claimed_bytes
 
-    case Deliveries.due(state.instance, now, state.floor, limit, budget) do
+    case Deliveries.active_tenants(state.instance, now, @active_limit) do
       {:ok, []} ->
         %{state | window_full?: false}
 
-      {:ok, dues} ->
-        case claim(state, dues, now) do
-          {:ok, state} ->
-            # Past the rows just claimed, and only once they are: a failed load or
-            # claim leaves them due, and the floor has to stay beneath them.
-            state = raise_floor(state, List.last(dues).at)
+      {:ok, tenants} ->
+        case visit(state, tenants, now, limit, budget, 0, 0) do
+          {:ok, state, claimed, visited} ->
+            state = %{state | tenants_visited: max(state.tenants_visited, visited)}
 
             # A full page means there is probably more; a short one means
             # nothing else is due right now.
-            if length(dues) == limit,
+            if claimed >= limit,
               do: fill(state),
               else: %{state | window_full?: at_capacity?(state)}
 
@@ -533,6 +545,73 @@ defmodule Ankusa.Dispatch.Pipeline do
       {:error, reason} ->
         Logger.error("[ankusa] dispatch could not scan the store, retrying: #{inspect(reason)}")
         holdoff(state)
+    end
+  end
+
+  # Tenants in marker order (oldest second first), each one's rows oldest first,
+  # until the page or the byte budget is spent. There is no fairness between
+  # tenants beyond that order (TEN-3).
+  defp visit(state, [], _now, _limit, _budget, claimed, visited),
+    do: {:ok, state, claimed, visited}
+
+  defp visit(state, [{ord, buckets} | rest], now, limit, budget, claimed, visited) do
+    remaining = limit - claimed
+
+    if remaining <= 0 or (claimed > 0 and budget <= 0) do
+      {:ok, state, claimed, visited}
+    else
+      floor = Map.get(state.cursors, ord, 0)
+
+      case Deliveries.due_for_tenant(state.instance, ord, now, floor, remaining, budget) do
+        {:ok, dues} ->
+          case claim_tenant(state, ord, dues, now) do
+            {:ok, state} ->
+              n = length(dues)
+              bytes = Enum.reduce(dues, 0, &(&1.size + &2))
+              state = tidy_tenant(state, ord, buckets, now)
+              visit(state, rest, now, limit, budget - bytes, claimed + n, visited + 1)
+
+            {:error, state} ->
+              {:error, state}
+          end
+
+        {:error, reason} ->
+          Logger.error("[ankusa] dispatch could not scan the store, retrying: #{inspect(reason)}")
+          {:error, state}
+      end
+    end
+  end
+
+  defp claim_tenant(state, _ord, [], _now), do: {:ok, state}
+
+  defp claim_tenant(state, ord, dues, now) do
+    case claim(state, dues, now) do
+      # Past the rows just claimed, and only once they are: a failed load or
+      # claim leaves them due, and the cursor has to stay beneath them.
+      {:ok, state} -> {:ok, raise_cursor(state, ord, List.last(dues).at)}
+      {:error, state} -> {:error, state}
+    end
+  end
+
+  # After a visit: stale markers go (at most once a second a tenant, it is a
+  # seek from the start of the tenant's range), and a tenant found to have
+  # nothing due loses its cursor (the scan starts again from 0 when it next has
+  # work).
+  defp tidy_tenant(state, ord, buckets, now) do
+    if Enum.any?(buckets, &(&1 < div(now, 1000))) do
+      case Deliveries.sweep_markers(state.instance, ord, buckets, now) do
+        {:ok, true} ->
+          %{state | cursors: Map.delete(state.cursors, ord)}
+
+        {:ok, false} ->
+          state
+
+        {:error, reason} ->
+          Logger.warning("[ankusa] dispatch could not tidy tenant #{ord}: #{inspect(reason)}")
+          state
+      end
+    else
+      state
     end
   end
 
@@ -559,9 +638,9 @@ defmodule Ankusa.Dispatch.Pipeline do
     %{state | holdoff?: true, timer: timer}
   end
 
-  defp maybe_reset_floor(state) do
+  defp maybe_reset_cursors(state) do
     if mono_ms() - state.floor_reset_at >= @floor_reset_ms do
-      %{state | floor: 0, floor_reset_at: mono_ms()}
+      %{state | cursors: %{}, cursor_max: 0, floor_reset_at: mono_ms()}
     else
       state
     end
@@ -585,16 +664,14 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   defp resolve_one(%{row: nil} = item, {state, ops, pairs, jobs, sources}, _now) do
     Logger.warning("[ankusa] delivery row #{item.seq}/#{item.sink} vanished; dropping its claim")
-    {state, [{:delete, :index, Keys.inflight(item.seq, item.sink)} | ops], pairs, jobs, sources}
+    drop = Deliveries.orphan_ops(:inflight, item.ord, item.seq, item.sink, item.size)
+    {state, drop ++ ops, pairs, jobs, sources}
   end
 
   defp resolve_one(%{env: nil} = item, {state, ops, pairs, jobs, sources}, _now) do
     Logger.error("[ankusa] hook #{item.seq} is missing; dropping its delivery row #{item.sink}")
 
-    drop = [
-      {:delete, :deliveries, Keys.delivery(item.seq, item.sink)},
-      {:delete, :index, Keys.inflight(item.seq, item.sink)}
-    ]
+    drop = Deliveries.orphan_ops(:inflight, item.ord, item.seq, item.sink, item.size)
 
     {state, drop ++ ops, pairs, jobs, sources}
   end
@@ -646,6 +723,7 @@ defmodule Ankusa.Dispatch.Pipeline do
       source == :unavailable ->
         later =
           Deliveries.retry_ops(
+            item.ord,
             item.seq,
             item.sink,
             item.row,
@@ -671,6 +749,7 @@ defmodule Ankusa.Dispatch.Pipeline do
               {:ok, spec} ->
                 job = %{
                   key: key,
+                  ord: item.ord,
                   seq: item.seq,
                   sink: item.sink,
                   size: item.size,
@@ -700,6 +779,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
         expansion =
           Deliveries.expand_ops(
+            item.ord,
             item.seq,
             item.sink,
             item.size,
@@ -716,14 +796,28 @@ defmodule Ankusa.Dispatch.Pipeline do
 
       {:error, reason} ->
         Logger.warning("[ankusa] could not expand imported row #{item.seq}: #{inspect(reason)}")
-        retry_later = Deliveries.retry_ops(item.seq, item.sink, item.row, now + @holdoff_ms, nil)
+
+        retry_later =
+          Deliveries.retry_ops(item.ord, item.seq, item.sink, item.row, now + @holdoff_ms, nil)
+
         {state, retry_later ++ ops, pairs, jobs, sources}
     end
   end
 
   defp dead(item, reason, {state, ops, pairs, jobs, sources}, now) do
     error = inspect(reason, limit: 50, printable_limit: 4096)
-    dead_ops = Deliveries.dead_ops(item.seq, item.sink, item.row, now, error, item.env)
+
+    dead_ops =
+      Deliveries.dead_ops(
+        :inflight,
+        item.ord,
+        item.seq,
+        item.sink,
+        item.row,
+        now,
+        error,
+        item.env
+      )
 
     state =
       state
@@ -760,21 +854,22 @@ defmodule Ankusa.Dispatch.Pipeline do
         end)
 
       {ops, dead} =
-        Enum.reduce(rows, {[], []}, fn %{seq: seq, sink: sink, key: key, row: row}, {ops, dead} ->
+        Enum.reduce(rows, {[], []}, fn %{seq: seq, sink: sink, key: key, row: row} = entry,
+                                       {ops, dead} ->
+          from = {:due, key, entry.kind}
+
           case Map.fetch!(envs, seq) do
             nil ->
               Logger.error("[ankusa] hook #{seq} is missing; dropping its delivery row #{sink}")
-
-              {[{:delete, :index, key}, {:delete, :deliveries, Keys.delivery(seq, sink)} | ops],
-               dead}
+              {Deliveries.orphan_ops(from, entry.ord, seq, sink, entry.size) ++ ops, dead}
 
             env ->
-              dead_ops = Deliveries.dead_ops(seq, sink, row, now, error, env)
-              {[{:delete, :index, key} | dead_ops] ++ ops, [{env, row} | dead]}
+              dead_ops = Deliveries.dead_ops(from, entry.ord, seq, sink, row, now, error, env)
+              {dead_ops ++ ops, [{env, row} | dead]}
           end
         end)
 
-      with :ok <- Store.write(state.instance, ops, sync: true) do
+      with :ok <- Store.write(state.instance, Deliveries.coalesce(ops), sync: true) do
         state =
           Enum.reduce(dead, state, fn {env, row}, state ->
             state
@@ -1016,8 +1111,8 @@ defmodule Ankusa.Dispatch.Pipeline do
     state |> bump_replay(job.row, :parked) |> append(park_ops(job, at))
   end
 
-  defp park_ops(%{seq: seq, sink: sink, row: row}, at),
-    do: Deliveries.retry_ops(seq, sink, row, at, "breaker open")
+  defp park_ops(%{ord: ord, seq: seq, sink: sink, row: row}, at),
+    do: Deliveries.retry_ops(ord, seq, sink, row, at, "breaker open")
 
   # Buffer outcome ops without the refill a full buffer otherwise triggers:
   # parking runs while a scan is still being resolved.
@@ -1324,7 +1419,8 @@ defmodule Ankusa.Dispatch.Pipeline do
           })
 
           {%{state | settled: state.settled + 1} |> bump_replay(job.row, :delivered),
-           Deliveries.delivered_ops(job.seq, job.sink), [cleared(job.seq, job.sink)]}
+           Deliveries.delivered_ops(job.ord, job.seq, job.sink, job.size),
+           [cleared(job.seq, job.sink)]}
 
         {:error, reason} ->
           failed(state, job, reason, attempts, now)
@@ -1366,13 +1462,15 @@ defmodule Ankusa.Dispatch.Pipeline do
     case decision do
       {:retry, delay} ->
         error = inspect(reason, limit: 50, printable_limit: 4096)
-        {state, Deliveries.retry_ops(job.seq, job.sink, row, now + delay, error), []}
+        {state, Deliveries.retry_ops(job.ord, job.seq, job.sink, row, now + delay, error), []}
 
       :give_up ->
         {mod, _opts} = job.spec
         error = inspect({:sink, mod, reason}, limit: 50, printable_limit: 4096)
         state = state |> settle_dead(job.env.source_id, mod, attempts) |> bump_replay(row, :dead)
-        {state, Deliveries.dead_ops(job.seq, job.sink, row, now, error, job.env), []}
+
+        {state,
+         Deliveries.dead_ops(:inflight, job.ord, job.seq, job.sink, row, now, error, job.env), []}
     end
   end
 
@@ -1385,12 +1483,13 @@ defmodule Ankusa.Dispatch.Pipeline do
         claimed: state.claimed,
         claimed_bytes: state.claimed_bytes,
         runnable: state.queued,
-        breakers_open: breakers_open(state)
+        breakers_open: breakers_open(state),
+        active_tenants: state.tenants_visited
       },
       %{instance: state.instance}
     )
 
-    state
+    %{state | tenants_visited: 0}
   end
 
   # A delivery belonging to a replay job: counted so the Replayer can report
@@ -1434,28 +1533,50 @@ defmodule Ankusa.Dispatch.Pipeline do
     :ok
   end
 
-  defp lower_floor(state, at), do: %{state | floor: min(state.floor, at)}
-  defp raise_floor(state, at), do: %{state | floor: max(state.floor, at - @floor_lag_ms)}
+  # A wake carries the stamp of a commit whose rows may be of any tenant and may
+  # sit under a cursor: every cursor above it comes down to it. `cursor_max`
+  # makes the usual case (no cursor above the stamp) one comparison.
+  defp lower_cursors(%{cursor_max: max} = state, at) when at >= max, do: state
+
+  defp lower_cursors(state, at) do
+    cursors = Map.new(state.cursors, fn {ord, floor} -> {ord, min(floor, at)} end)
+    %{state | cursors: cursors, cursor_max: min(state.cursor_max, at)}
+  end
+
+  defp lower_cursor(state, ord, at) do
+    case state.cursors do
+      %{^ord => floor} when floor > at -> %{state | cursors: Map.put(state.cursors, ord, at)}
+      _ -> state
+    end
+  end
+
+  defp raise_cursor(state, ord, at) do
+    floor = max(Map.get(state.cursors, ord, 0), at - @floor_lag_ms)
+
+    %{
+      state
+      | cursors: Map.put(state.cursors, ord, floor),
+        cursor_max: max(state.cursor_max, floor)
+    }
+  end
 
   # Every Pipeline write goes through here. Once it is in, the rows it made due
-  # (a retry, an expansion) are visible to scans, so the floor must be at or
-  # under the earliest of them: a scan that ran while the write was buffered, or
-  # failing and waiting for housekeeping, may have raised it past.
+  # (a retry, an expansion) are visible to scans, so their tenants' cursors must
+  # be at or under the earliest of them: a scan that ran while the write was
+  # buffered, or failing and waiting for housekeeping, may have raised one past.
   defp write(state, ops) do
-    case Store.write(state.instance, ops, sync: false) do
-      :ok -> {:ok, lower_floor_for(state, ops)}
+    case Store.write(state.instance, Deliveries.coalesce(ops), sync: false) do
+      :ok -> {:ok, lower_cursors_for(state, ops)}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp lower_floor_for(state, ops) do
-    Enum.reduce(ops, state, fn
-      {:put, :index, <<?d, _::binary>> = key, _value}, state ->
-        {at, _seq, _sink} = Keys.decode_due(key)
-        lower_floor(state, at)
-
-      _op, state ->
-        state
+  defp lower_cursors_for(state, ops) do
+    Enum.reduce(ops, state, fn op, state ->
+      case Deliveries.due_time(op) do
+        {ord, at} -> lower_cursor(state, ord, at)
+        nil -> state
+      end
     end)
   end
 
@@ -1535,7 +1656,7 @@ defmodule Ankusa.Dispatch.Pipeline do
   end
 
   defp schedule_next(state) do
-    case Deliveries.next_due_at(state.instance, state.floor) do
+    case Deliveries.next_due_at(state.instance, state.cursors) do
       {:ok, nil} ->
         cancel_timer(state)
 
@@ -1598,7 +1719,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   # A store that cannot answer must not hang `tick/1` callers forever.
   defp due_now?(state) do
-    case Deliveries.next_due_at(state.instance, state.floor) do
+    case Deliveries.next_due_at(state.instance, state.cursors) do
       {:ok, at} when is_integer(at) -> at <= now_ms()
       _ -> false
     end

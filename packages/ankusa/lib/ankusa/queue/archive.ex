@@ -3,8 +3,9 @@ defmodule Ankusa.Queue.Archive do
 
   # The archive's side of the store.
   #
-  #   ?a(seq)       archive obligation: `<<size::32>>`. The hook must be written
-  #                 to a segment before it can be deleted. Written in the commit
+  #   ?a(seq)       archive obligation: `<<size::32, ord::32>>`, `ord` the hook's tenant
+  #                 ordinal. The hook must be written to a segment before it can be deleted.
+  #                 Written in the commit
   #                 batch, only while the `:storage` role runs.
   #   ?S(first_seq) one row per segment: key, index key, seq/id ranges, count.
   #   ?L(event_id)  where a hook archived by a 0.3 node lives: `{segment, offset,
@@ -13,6 +14,8 @@ defmodule Ankusa.Queue.Archive do
   # Reads are sized in bytes from the keys' values, so nothing is read and
   # discarded to find out how much of a backlog fits a segment.
 
+  alias Ankusa.Queue.Deliveries
+  alias Ankusa.Queue.Deliveries.Counters
   alias Ankusa.Store
   alias Ankusa.Store.Keys
 
@@ -29,7 +32,7 @@ defmodule Ankusa.Queue.Archive do
 
     result =
       Store.fold(instance, :archive_pending, range, {[], 0, false}, fn
-        <<?a, seq::64>>, <<size::32>>, {taken, bytes, _more?} ->
+        <<?a, seq::64>>, <<size::32, _ord::32>>, {taken, bytes, _more?} ->
           if taken != [] and bytes >= roll_bytes,
             do: {:halt, {taken, bytes, true}},
             else: {:cont, {[{seq, size} | taken], bytes + size, false}}
@@ -60,6 +63,8 @@ defmodule Ankusa.Queue.Archive do
   Record a written segment: its catalogue row, every obligation it settles
   gone, and a marker per obligation so `Ankusa.Queue.Reclaim` can look at each
   hook. `row` is `nil` when every hook was already gone and nothing was written.
+  Each obligation that was still there also takes one off its tenant's
+  `archive_pending` counter, in the same batch.
   """
   @spec archived(atom(), map() | nil, [pos_integer()], [pos_integer()]) :: :ok | {:error, term()}
   def archived(instance, row, archived_seqs, missing_seqs \\ []) do
@@ -80,7 +85,21 @@ defmodule Ankusa.Queue.Archive do
     # An obligation whose hook is gone can never be archived; drop it.
     dropped = Enum.map(missing_seqs, &{:delete, :index, Keys.archive_pending(&1)})
 
-    Store.write(instance, catalogue ++ settled ++ dropped, sync: false)
+    # Only this process settles obligations, so the rows read here are the ones
+    # the deletes remove.
+    seqs = archived_seqs ++ missing_seqs
+
+    with {:ok, held} <- Store.multi_get(instance, :index, Enum.map(seqs, &Keys.archive_pending/1)) do
+      deltas =
+        for {_seq, {:ok, <<_size::32, ord::32>>}} <- Enum.zip(seqs, held),
+            do: {ord, :archive_pending, -1}
+
+      Store.write(
+        instance,
+        Deliveries.coalesce(catalogue ++ settled ++ dropped ++ Counters.ops(deltas)),
+        sync: false
+      )
+    end
   end
 
   @doc "Where an event archived by a 0.3 node lives, if it did."

@@ -2,13 +2,18 @@ defmodule Ankusa.Queue.Deliveries do
   @moduledoc false
 
   # Delivery rows: one `deliveries` row per hook and sink, plus an `index` key
-  # that says where the row is.
+  # that says where the row is. `ord` is the hook's tenant ordinal
+  # (`Ankusa.Queue.Tenants`); ADR 0001 has the layout.
   #
-  #   pending, due at T      deliveries(seq, i)  +  ?d(T, seq, i)
-  #   claimed by the Pipeline deliveries(seq, i)  +  ?f(seq, i)
-  #   dead (the DLQ)          deliveries(seq, i)  +  ?x(dead_at, seq, i)
+  #   pending, due at T      deliveries(seq, i)  +  ?D(ord, T, seq, i)  +  ?A(T/1000, ord)
+  #   claimed by the Pipeline deliveries(seq, i)  +  ?F(ord, seq, i)
+  #   dead (the DLQ)          deliveries(seq, i)  +  ?x(dead_at, seq, i)  +  ?X(ord, dead_at, seq, i)
   #
-  # Every transition is one batch, so a row always has exactly one index key.
+  # Every transition is one batch, so a row always has exactly one index key,
+  # and the batch carries the counter deltas of the transition
+  # (`Deliveries.Counters`, blind merge operands) and, for a due row, its
+  # active-tenant marker. Nothing outside this module builds a `?D`, `?F`,
+  # `?X` or `?A` key.
   # The row value is a term: `%{module, state, attempts, at, error, size,
   # source_id}`; `at` is the due time while pending and the dead-letter time
   # once dead, `size` the stored hook's byte size, and `source_id` the hook's
@@ -25,6 +30,8 @@ defmodule Ankusa.Queue.Deliveries do
   require Logger
 
   alias Ankusa.{Envelope, Store}
+  alias Ankusa.Queue.Deliveries.Counters
+  alias Ankusa.Queue.{Reclaim, Tenants}
   alias Ankusa.Store.Keys
 
   # Sink indexes that exist only for rows imported from a 0.3 data dir, where
@@ -86,7 +93,9 @@ defmodule Ankusa.Queue.Deliveries do
           at: integer(),
           seq: pos_integer(),
           sink: integer(),
-          size: integer()
+          size: integer(),
+          ord: pos_integer(),
+          kind: 0 | 1
         }
 
   # ── reads ─────────────────────────────────────────────────────────────────
@@ -102,23 +111,38 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
+  # A due row's `kind`: 0 a first attempt (ingest, replay revival, recovery,
+  # expansion), 1 a retry. It is what keeps the `pending` and `scheduled`
+  # counters exact without a clock.
+  @first_attempt 0
+  @retry 1
+
+  # Markers examined per read of the earliest due time, and tenants looked at
+  # in the first bucket.
+  @next_due_stale_max 32
+  @next_due_tenants 16
+  # Rows a marker cleanup looks at to restore a marker a racing writer needs.
+  @verify_max 256
+
   @doc """
-  Pending rows due at or before `now`, oldest first, from `floor` on. Stops at
-  `limit` rows, or before the row that would push the total stored size past
-  `byte_budget` — but always takes at least one, so a hook bigger than the
-  budget still makes progress.
+  The due rows of tenant `ord` at or before `now`, oldest first, from `floor`
+  on. Stops at `limit` rows, or before the row that would push the total
+  stored size past `byte_budget` — but always takes at least one, so a hook
+  bigger than the budget still makes progress.
   """
-  @spec due(atom(), integer(), integer(), pos_integer(), integer()) ::
+  @spec due_for_tenant(atom(), pos_integer(), integer(), integer(), pos_integer(), integer()) ::
           {:ok, [due()]} | {:error, term()}
-  def due(instance, now, floor, limit, byte_budget) do
-    range = {<<?d, floor::64>>, <<?d, now + 1::64>>}
+  def due_for_tenant(instance, ord, now, floor, limit, byte_budget) do
+    range = {<<?D, ord::32, floor::64>>, <<?D, ord::32, now + 1::64>>}
 
     result =
-      Store.fold(instance, :due, range, {0, 0, []}, fn key, <<size::32>>, {n, bytes, acc} ->
+      Store.fold(instance, :due, range, {0, 0, []}, fn key,
+                                                       <<size::32, kind::8>>,
+                                                       {n, bytes, acc} ->
         cond do
-          n == 0 -> {:cont, {1, size, [due_row(key, size)]}}
+          n == 0 -> {:cont, {1, size, [due_row(key, size, kind)]}}
           n >= limit or bytes + size > byte_budget -> {:halt, {n, bytes, acc}}
-          true -> {:cont, {n + 1, bytes + size, [due_row(key, size) | acc]}}
+          true -> {:cont, {n + 1, bytes + size, [due_row(key, size, kind) | acc]}}
         end
       end)
 
@@ -128,20 +152,226 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
-  defp due_row(key, size) do
-    {at, seq, sink} = Keys.decode_due(key)
-    %{key: key, at: at, seq: seq, sink: sink, size: size}
+  defp due_row(key, size, kind) do
+    {ord, at, seq, sink} = Keys.decode_due(key)
+    %{key: key, at: at, seq: seq, sink: sink, size: size, ord: ord, kind: kind}
   end
 
-  @doc "The due time of the earliest pending row at or after `floor`, or `nil`."
-  @spec next_due_at(atom(), integer()) :: {:ok, integer() | nil} | {:error, term()}
-  def next_due_at(instance, floor) do
-    %{hi: hi} = Keys.family(:due)
+  @doc """
+  The tenants with a due-row marker at or before `now`'s second, in marker
+  order (oldest second first), from the first `limit` markers: `[{ord,
+  [bucket]}]`, each tenant once with the buckets of its markers that were read.
+  It never touches a tenant with nothing due, so its cost does not depend on
+  the number of tenants or the size of the backlog.
+  """
+  @spec active_tenants(atom(), integer(), pos_integer()) ::
+          {:ok, [{pos_integer(), [integer()]}]} | {:error, term()}
+  def active_tenants(instance, now, limit) do
+    %{lo: lo} = Keys.family(:active)
+    range = {lo, <<?A, div(now, 1000) + 1::64>>}
 
-    Store.fold(instance, :due, {<<?d, floor::64>>, hi}, nil, fn key, _value, _acc ->
-      {at, _seq, _sink} = Keys.decode_due(key)
-      {:halt, at}
-    end)
+    with {:ok, {_n, markers}} <-
+           Store.fold(instance, :active, range, {0, []}, fn key, _value, {n, acc} ->
+             acc = [Keys.decode_active(key) | acc]
+             if n + 1 >= limit, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end) do
+      {:ok, group_markers(Enum.reverse(markers))}
+    end
+  end
+
+  defp group_markers(markers) do
+    {order, buckets} =
+      Enum.reduce(markers, {[], %{}}, fn {bucket, ord}, {order, buckets} ->
+        case buckets do
+          %{^ord => seen} -> {order, %{buckets | ord => [bucket | seen]}}
+          _ -> {[ord | order], Map.put(buckets, ord, [bucket])}
+        end
+      end)
+
+    for ord <- Enum.reverse(order), do: {ord, Enum.reverse(Map.fetch!(buckets, ord))}
+  end
+
+  @doc """
+  The due time of tenant `ord`'s earliest due row at or after `floor`, or
+  `nil`: one seek.
+  """
+  @spec first_due(atom(), pos_integer(), integer()) ::
+          {:ok, integer() | nil} | {:error, term()}
+  def first_due(instance, ord, floor) do
+    {_lower, upper} = Keys.range(<<?D, ord::32>>)
+
+    case Store.first(instance, :due, {<<?D, ord::32, floor::64>>, upper}) do
+      {:ok, {key, _value}} ->
+        {_ord, at, _seq, _sink} = Keys.decode_due(key)
+        {:ok, at}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  The due time of the earliest pending row, or `nil`, read from the active
+  index: the first markers are checked against their tenants' earliest rows
+  (`floors` maps a tenant to the scan floor to seek from), skipping at most 32
+  stale ones, and the earliest of the tenants sharing the first live second wins.
+  `opts`: `:tenants` (16), how many tenants of that second are looked at; the
+  gauge asks for one, since an age exact to the second needs no more, and a seek
+  into a tenant's range costs more the bigger the range.
+  """
+  @spec next_due_at(atom(), %{optional(pos_integer()) => integer()}, keyword()) ::
+          {:ok, integer() | nil} | {:error, term()}
+  def next_due_at(instance, floors \\ %{}, opts \\ []) do
+    %{lo: lo, hi: hi} = Keys.family(:active)
+
+    acc = %{
+      bucket: nil,
+      at: nil,
+      stale: 0,
+      seen: 0,
+      error: nil,
+      tenants: Keyword.get(opts, :tenants, @next_due_tenants)
+    }
+
+    scan =
+      Store.fold(instance, :active, {lo, hi}, acc, fn key, _value, acc ->
+        {bucket, ord} = Keys.decode_active(key)
+
+        if acc.bucket != nil and bucket != acc.bucket do
+          {:halt, acc}
+        else
+          next_due_marker(instance, bucket, ord, Map.get(floors, ord, 0), acc)
+        end
+      end)
+
+    case scan do
+      {:ok, %{error: nil, at: at}} -> {:ok, at}
+      {:ok, %{error: reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp next_due_marker(instance, bucket, ord, floor, acc) do
+    case first_due(instance, ord, floor) do
+      {:ok, at} when at == nil or div(at, 1000) > bucket ->
+        acc = %{acc | stale: acc.stale + 1}
+
+        # Too many dead markers in a row: report where they begin; the next
+        # dispatch scan removes them.
+        if acc.stale >= @next_due_stale_max,
+          do: {:halt, %{acc | at: acc.at || bucket * 1000}},
+          else: {:cont, acc}
+
+      {:ok, at} ->
+        acc = %{acc | bucket: bucket, at: min(acc.at || at, at), seen: acc.seen + 1}
+        if acc.seen >= acc.tenants, do: {:halt, acc}, else: {:cont, acc}
+
+      {:error, reason} ->
+        {:halt, %{acc | error: reason}}
+    end
+  end
+
+  @doc """
+  Marker cleanup, "delete, then verify" (ADR 0001, section 5), for tenant
+  `ord` after the Pipeline visited it. `buckets` are its markers that the visit
+  read. A marker is stale when its second is over and the tenant's earliest due
+  row is in a later one. Stale markers are deleted, then the tenant is read again
+  and the marker of any due row that a concurrent commit slipped into a deleted
+  second is put back. A writer's batch holds its row and its own marker, so no
+  interleaving leaves a due row without one. It reads the tenant from the start
+  of its range, not from a scan cursor: a row a stalled commit made visible
+  beneath the cursor must keep its marker. Returns whether the tenant has no due
+  row at all. `opts` (`:after_read`, `:after_delete`: a function called between
+  the steps) exist for the test that interleaves a commit with each step.
+  """
+  @spec sweep_markers(atom(), pos_integer(), [integer()], integer(), keyword()) ::
+          {:ok, boolean()} | {:error, term()}
+  def sweep_markers(instance, ord, buckets, now, opts \\ []) do
+    current = div(now, 1000)
+    candidates = Enum.filter(buckets, &(&1 < current))
+
+    with {:ok, first} <- first_due(instance, ord, 0),
+         :ok <- between(opts, :after_read) do
+      first_bucket = if first, do: div(first, 1000), else: current
+
+      case Enum.filter(candidates, &(&1 < first_bucket)) do
+        [] ->
+          {:ok, first == nil}
+
+        stale ->
+          with :ok <-
+                 Store.write(instance, Enum.map(stale, &{:delete, :index, Keys.active(&1, ord)}),
+                   sync: false
+                 ),
+               :ok <- between(opts, :after_delete),
+               :ok <- restore_markers(instance, ord, stale, first_bucket) do
+            {:ok, first == nil}
+          end
+      end
+    end
+  end
+
+  defp between(opts, step) do
+    if fun = Keyword.get(opts, step), do: fun.()
+    :ok
+  end
+
+  # Rows due before `first_bucket`'s second exist only if a commit landed
+  # between the two reads; each deleted second one of them is in gets its marker
+  # back.
+  defp restore_markers(instance, ord, stale, first_bucket) do
+    range = {<<?D, ord::32, 0::64>>, <<?D, ord::32, first_bucket * 1000::64>>}
+
+    with {:ok, {_n, buckets}} <-
+           Store.fold(instance, :due, range, {0, MapSet.new()}, fn key, _value, {n, acc} ->
+             {_ord, at, _seq, _sink} = Keys.decode_due(key)
+             acc = MapSet.put(acc, div(at, 1000))
+             if n + 1 >= @verify_max, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end) do
+      puts =
+        for bucket <- stale,
+            MapSet.member?(buckets, bucket),
+            do: {:put, :index, Keys.active(bucket, ord), <<>>}
+
+      Store.write(instance, puts, sync: false)
+    end
+  end
+
+  @doc "A due row, and its active marker: a due row is never written without one."
+  @spec due_ops(pos_integer(), integer(), pos_integer(), integer(), integer(), 0 | 1) ::
+          [Store.op()]
+  def due_ops(ord, at, seq, sink, size, kind) do
+    [
+      {:put, :index, Keys.due(ord, at, seq, sink), <<size::32, kind::8>>},
+      {:put, :index, Keys.active(div(at, 1000), ord), <<>>}
+    ]
+  end
+
+  @doc """
+  Folds a batch's counter merges into one per key, and its repeated active
+  markers into one, so a batch of many rows of few tenants writes few operands.
+  """
+  @spec coalesce([Store.op()]) :: [Store.op()]
+  def coalesce(ops) do
+    {rest, merges, _seen} =
+      Enum.reduce(ops, {[], %{}, MapSet.new()}, fn
+        {:merge, :counters, key, delta}, {rest, merges, seen} ->
+          {rest, Map.update(merges, key, delta, &(&1 + delta)), seen}
+
+        {:put, :index, <<?A, _::binary>> = key, _value} = op, {rest, merges, seen} ->
+          if MapSet.member?(seen, key),
+            do: {rest, merges, seen},
+            else: {[op | rest], merges, MapSet.put(seen, key)}
+
+        op, {rest, merges, seen} ->
+          {[op | rest], merges, seen}
+      end)
+
+    Enum.reverse(rest) ++
+      for({key, delta} <- merges, delta != 0, do: {:merge, :counters, key, delta})
   end
 
   @doc """
@@ -174,6 +404,8 @@ defmodule Ankusa.Queue.Deliveries do
            seq: due.seq,
            sink: due.sink,
            size: due.size,
+           ord: due.ord,
+           kind: due.kind,
            row: decode_stored_row(row),
            env: Map.fetch!(envs, due.seq),
            claim: Map.fetch!(claims, due.seq)
@@ -227,16 +459,17 @@ defmodule Ankusa.Queue.Deliveries do
   @doc """
   The undelivered rows of `source_id` in this node's queue: `pending` rows sit
   in the due index (due now or waiting out a backoff), `inflight` rows are
-  claimed by the Pipeline. Walks both indexes, the cost of one queue-gauge
-  tick.
+  claimed by the Pipeline. Walks both indexes — O(backlog) — unless `tenant:`
+  names the one tenant the source's rows belong to (an API-managed source owned
+  by a tenant): then it reads only that tenant's ranges.
   """
-  @spec pending_for_source(atom(), String.t()) ::
+  @spec pending_for_source(atom(), String.t(), keyword()) ::
           {:ok, %{pending: non_neg_integer(), inflight: non_neg_integer()}} | {:error, term()}
-  def pending_for_source(instance, source_id) do
+  def pending_for_source(instance, source_id, opts \\ []) do
     count = fn rows, n -> {:cont, n + length(rows)} end
 
-    with {:ok, pending} <- fold_source(instance, :due, source_id, 0, count),
-         {:ok, inflight} <- fold_source(instance, :inflight, source_id, 0, count) do
+    with {:ok, pending} <- fold_source(instance, :due, source_id, 0, count, opts),
+         {:ok, inflight} <- fold_source(instance, :inflight, source_id, 0, count, opts) do
       {:ok, %{pending: pending, inflight: inflight}}
     end
   end
@@ -247,22 +480,45 @@ defmodule Ankusa.Queue.Deliveries do
   examined, with the matching rows decoded, and returns `{:cont, acc}` or
   `{:halt, acc}`. A row written before rows carried `source_id` is matched by
   its hook's; an index key whose row or hook is gone is skipped. The scan
-  reads a snapshot, so `fun` may move the rows it is given.
+  reads a snapshot, so `fun` may move the rows it is given. `opts[:tenant]`
+  restricts the scan to one tenant's range (a tenant with no rows reads none).
   """
   @spec fold_source(
           atom(),
           :due | :inflight,
           String.t(),
           acc,
-          ([source_row()], acc -> {:cont, acc} | {:halt, acc})
+          ([source_row()], acc -> {:cont, acc} | {:halt, acc}),
+          keyword()
         ) :: {:ok, acc} | {:error, term()}
         when acc: term()
-  def fold_source(instance, family, source_id, acc, fun) when family in [:due, :inflight] do
-    %{lo: lo, hi: hi} = Keys.family(family)
+  def fold_source(instance, family, source_id, acc, fun, opts \\ [])
+      when family in [:due, :inflight] do
+    case source_range(instance, family, Keyword.get(opts, :tenant)) do
+      :empty -> {:ok, acc}
+      {:error, reason} -> {:error, reason}
+      {:ok, range} -> fold_source_range(instance, family, range, source_id, acc, fun)
+    end
+  end
 
+  defp source_range(instance, family, nil) do
+    %{lo: lo, hi: hi} = Keys.family(family)
+    _ = instance
+    {:ok, {lo, hi}}
+  end
+
+  defp source_range(instance, family, tenant) do
+    case Tenants.ord(instance, tenant) do
+      {:ok, ord} -> {:ok, Keys.range(<<if(family == :due, do: ?D, else: ?F), ord::32>>)}
+      :not_found -> :empty
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fold_source_range(instance, family, range, source_id, acc, fun) do
     scan =
-      Store.fold(instance, family, {lo, hi}, {[], 0, acc}, fn key, _value, {chunk, n, acc} ->
-        chunk = [index_entry(family, key) | chunk]
+      Store.fold(instance, family, range, {[], 0, acc}, fn key, value, {chunk, n, acc} ->
+        chunk = [index_entry(family, key, value) | chunk]
 
         if n + 1 < @source_chunk do
           {:cont, {chunk, n + 1, acc}}
@@ -293,14 +549,14 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
-  defp index_entry(:due, key) do
-    {_at, seq, sink} = Keys.decode_due(key)
-    %{key: key, seq: seq, sink: sink}
+  defp index_entry(:due, key, <<size::32, kind::8>>) do
+    {ord, at, seq, sink} = Keys.decode_due(key)
+    %{key: key, ord: ord, at: at, seq: seq, sink: sink, size: size, kind: kind}
   end
 
-  defp index_entry(:inflight, key) do
-    {seq, sink} = Keys.decode_inflight(key)
-    %{key: key, seq: seq, sink: sink}
+  defp index_entry(:inflight, key, <<size::32>>) do
+    {ord, seq, sink} = Keys.decode_inflight(key)
+    %{key: key, ord: ord, seq: seq, sink: sink, size: size}
   end
 
   # `chunk` is newest-first, as the fold built it.
@@ -355,22 +611,27 @@ defmodule Ankusa.Queue.Deliveries do
   # ── transitions ───────────────────────────────────────────────────────────
 
   @doc """
-  After a restart nothing is running, so every claimed row is due again. The
-  claim key's value is the stored size, which the due key needs.
+  After a restart nothing is running, so every claimed row is due again, as a
+  first attempt. The claim key's value is the stored size, which the due key
+  needs.
   """
   @spec recover_inflight(atom(), integer()) :: {:ok, non_neg_integer()} | {:error, term()}
   def recover_inflight(instance, now) do
     %{lo: lo, hi: hi} = Keys.family(:inflight)
 
     with {:ok, ops} <-
-           Store.fold(instance, :inflight, {lo, hi}, [], fn key, size, acc ->
-             {seq, sink} = Keys.decode_inflight(key)
+           Store.fold(instance, :inflight, {lo, hi}, [], fn key, <<size::32>>, acc ->
+             {ord, seq, sink} = Keys.decode_inflight(key)
 
              {:cont,
-              [{:delete, :index, key}, {:put, :index, Keys.due(now, seq, sink), size} | acc]}
+              [
+                {:delete, :index, key}
+                | due_ops(ord, now, seq, sink, size, @first_attempt) ++
+                    Counters.ops([{ord, :inflight, -1}, {ord, :pending, 1}]) ++ acc
+              ]}
            end),
-         :ok <- Store.write(instance, ops, sync: true) do
-      {:ok, div(length(ops), 2)}
+         :ok <- Store.write(instance, coalesce(ops), sync: true) do
+      {:ok, Enum.count(ops, &match?({:delete, :index, <<?F, _::binary>>}, &1))}
     end
   end
 
@@ -381,33 +642,58 @@ defmodule Ankusa.Queue.Deliveries do
       Enum.flat_map(dues, fn due ->
         [
           {:delete, :index, due.key},
-          {:put, :index, Keys.inflight(due.seq, due.sink), <<due.size::32>>}
+          {:put, :index, Keys.inflight(due.ord, due.seq, due.sink), <<due.size::32>>}
+          | Counters.ops([{due.ord, due_field(due.kind), -1}, {due.ord, :inflight, 1}])
         ]
       end)
 
-    Store.write(instance, ops, sync: false)
+    Store.write(instance, coalesce(ops), sync: false)
   end
+
+  defp due_field(@first_attempt), do: :pending
+  defp due_field(@retry), do: :scheduled
 
   # ── op builders ───────────────────────────────────────────────────────────
 
-  @doc "A delivered row is gone; the marker tells `Ankusa.Queue.Reclaim` to look at its hook."
-  def delivered_ops(seq, sink) do
-    [
-      {:delete, :deliveries, Keys.delivery(seq, sink)},
-      {:delete, :index, Keys.inflight(seq, sink)},
-      {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
-    ]
+  @doc """
+  The rows of a new delivery (ingest, archive replay, expansion): its row, a
+  first-attempt due row with its marker, and the `pending` and `bytes`
+  deltas.
+  """
+  @spec new_ops(pos_integer(), integer(), pos_integer(), integer(), integer(), binary()) ::
+          [Store.op()]
+  def new_ops(ord, at, seq, sink, size, row_bin) do
+    [{:put, :deliveries, Keys.delivery(seq, sink), row_bin}] ++
+      due_ops(ord, at, seq, sink, size, @first_attempt) ++
+      Counters.ops([{ord, :pending, 1}, {ord, :bytes, size}])
   end
 
-  @doc "Back to pending at `at`. `row` carries the new attempt count."
-  def retry_ops(seq, sink, row, at, error) do
+  @doc "An archive obligation of tenant `ord`'s hook."
+  @spec archive_ops(pos_integer(), pos_integer(), integer()) :: [Store.op()]
+  def archive_ops(ord, seq, size) do
+    [{:put, :index, Keys.archive_pending(seq), <<size::32, ord::32>>}] ++
+      Counters.ops([{ord, :archive_pending, 1}])
+  end
+
+  @doc "A delivered row is gone; the marker tells `Ankusa.Queue.Reclaim` to look at its hook."
+  def delivered_ops(ord, seq, sink, size) do
+    [
+      {:delete, :deliveries, Keys.delivery(seq, sink)},
+      {:delete, :index, Keys.inflight(ord, seq, sink)},
+      {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
+    ] ++ Counters.ops([{ord, :inflight, -1}, {ord, :bytes, -size}])
+  end
+
+  @doc "A claimed row back to pending at `at`, as a retry. `row` carries the new attempt count."
+  def retry_ops(ord, seq, sink, row, at, error) do
     row = %{row | at: at, error: error}
 
     [
       {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
-      {:delete, :index, Keys.inflight(seq, sink)},
-      {:put, :index, Keys.due(at, seq, sink), <<row.size::32>>}
-    ]
+      {:delete, :index, Keys.inflight(ord, seq, sink)}
+    ] ++
+      due_ops(ord, at, seq, sink, row.size, @retry) ++
+      Counters.ops([{ord, :inflight, -1}, {ord, :scheduled, 1}])
   end
 
   @unknown_source "unknown"
@@ -421,26 +707,59 @@ defmodule Ankusa.Queue.Deliveries do
   def owner(%Envelope{source_id: source_id, id: id}, _row), do: {source_id, id}
   def owner(_undecoded, row), do: {Map.get(row, :source_id) || @unknown_source, nil}
 
+  @typedoc "Where a row leaves from: the claim, or a due key (and its `kind`)."
+  @type from :: :inflight | {:due, binary(), 0 | 1}
+
+  defp leave(:inflight, ord, seq, sink),
+    do: {[{:delete, :index, Keys.inflight(ord, seq, sink)}], {ord, :inflight, -1}}
+
+  defp leave({:due, key, kind}, ord, _seq, _sink),
+    do: {[{:delete, :index, key}], {ord, due_field(kind), -1}}
+
   @doc """
   Dead-letter the row. `row` carries the final attempt count; `env` is the
   hook or its decode error (see `owner/2`).
   """
-  def dead_ops(seq, sink, row, at, error, env) do
+  @spec dead_ops(
+          from(),
+          pos_integer(),
+          pos_integer(),
+          integer(),
+          map(),
+          integer(),
+          term(),
+          term()
+        ) ::
+          [Store.op()]
+  def dead_ops(from, ord, seq, sink, row, at, error, env) do
     row = %{row | state: :dead, at: at, error: error}
+    {source_id, id} = owner(env, row)
+    {leaves, delta} = leave(from, ord, seq, sink)
 
-    [
-      {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
-      {:delete, :index, Keys.inflight(seq, sink)},
-      {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary(owner(env, row))}
-    ]
+    [{:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)}] ++
+      leaves ++
+      [
+        {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary({source_id, id, ord})},
+        {:put, :index, Keys.dead_by_tenant(ord, at, seq, sink), <<>>}
+      ] ++ Counters.ops([delta, {ord, :dead, 1}])
+  end
+
+  @doc "A row whose delivery row or hook is gone: drop it and what it counted."
+  @spec orphan_ops(from(), pos_integer(), pos_integer(), integer(), integer()) :: [Store.op()]
+  def orphan_ops(from, ord, seq, sink, size) do
+    {leaves, delta} = leave(from, ord, seq, sink)
+
+    [{:delete, :deliveries, Keys.delivery(seq, sink)}] ++
+      leaves ++ Counters.ops([delta, {ord, :bytes, -size}])
   end
 
   @doc """
   Replace an imported row whose sink was never recorded by one pending row for
   every current sink of its source that has none yet. A source with no sinks
-  has nothing to deliver, so the row just clears.
+  has nothing to deliver, so the row just clears. The imported row is claimed
+  (`inflight`) when this runs.
   """
-  def expand_ops(seq, unresolved_sink, size, source_id, source_sinks, existing, now) do
+  def expand_ops(ord, seq, unresolved_sink, size, source_id, source_sinks, existing, now) do
     rows =
       source_sinks
       |> Enum.with_index()
@@ -456,10 +775,7 @@ defmodule Ankusa.Queue.Deliveries do
           source_id: source_id
         }
 
-        [
-          {:put, :deliveries, Keys.delivery(seq, index), encode_row(row)},
-          {:put, :index, Keys.due(now, seq, index), <<size::32>>}
-        ]
+        new_ops(ord, now, seq, index, size, encode_row(row))
       end)
 
     cleared =
@@ -469,11 +785,7 @@ defmodule Ankusa.Queue.Deliveries do
         []
       end
 
-    rows ++
-      [
-        {:delete, :deliveries, Keys.delivery(seq, unresolved_sink)},
-        {:delete, :index, Keys.inflight(seq, unresolved_sink)}
-      ] ++ cleared
+    rows ++ orphan_ops(:inflight, ord, seq, unresolved_sink, size) ++ cleared
   end
 
   @doc "Persist the hook's claim-check ref, so every sink and every retry reuses it."
@@ -482,17 +794,40 @@ defmodule Ankusa.Queue.Deliveries do
   # ── the DLQ ───────────────────────────────────────────────────────────────
 
   # A paged scan over dead rows in `range`, for the replay engine. Keeps keys
-  # matching `filter` (`:source_id`, `:id`) — the dead-letter time is bounded
-  # by the range itself. Stops after `limit` hits or `max_scan` keys examined.
-  # Returns the hits (ascending), the last key seen (`nil` when the range held
-  # nothing), whether the range was exhausted, and the keys scanned.
+  # matching `filter` (`:source_id`, `:id`, `:tenants`) — the dead-letter time is
+  # bounded by the range itself. Stops after `limit` hits or `max_scan` keys
+  # examined. Returns the hits (ascending), the last key seen (`nil` when the
+  # range held nothing), whether the range was exhausted, and the keys scanned.
+  # The tenant of a dead row is the ordinal in its value: no hook is read.
+  @type hit :: {binary(), pos_integer(), non_neg_integer(), pos_integer()}
   @spec dead_page(atom(), {binary(), binary()}, map(), pos_integer(), pos_integer()) ::
-          {:ok, [{binary(), pos_integer(), non_neg_integer()}], binary() | nil, boolean(),
-           non_neg_integer()}
-          | {:error, term()}
+          {:ok, [hit()], binary() | nil, boolean(), non_neg_integer()} | {:error, term()}
   # Trusted, internally written data (this node's own store rows); never request input.
   # sobelow_skip ["Misc.BinToTerm"]
   def dead_page(instance, {lower, upper}, filter, limit, max_scan) do
+    with {:ok, ords} <- filter_ords(instance, filter) do
+      dead_page_scan(instance, {lower, upper}, filter, ords, limit, max_scan)
+    end
+  end
+
+  # A tenant filter names tenants that may have no ordinal: those have no rows.
+  defp filter_ords(instance, %{tenants: tenants}) when is_list(tenants),
+    do: tenant_ords(instance, tenants)
+
+  defp filter_ords(_instance, _filter), do: {:ok, nil}
+
+  defp tenant_ords(instance, tenants) do
+    with {:ok, found} <-
+           Tenants.lookup(instance, tenants |> Enum.map(&Tenants.normalize/1) |> Enum.uniq()) do
+      {:ok, found |> Map.values() |> Enum.sort()}
+    end
+  end
+
+  defp dead_page_scan(_instance, _range, _filter, [], _limit, _max_scan),
+    do: {:ok, [], nil, true, 0}
+
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp dead_page_scan(instance, {lower, upper}, filter, ords, limit, max_scan) do
     result =
       Store.fold(instance, :dead, {lower, upper}, {0, 0, [], nil}, fn key,
                                                                       value,
@@ -503,17 +838,17 @@ defmodule Ankusa.Queue.Deliveries do
           {:halt, {scanned, hit_n, hits, last}}
         else
           {_at, seq, sink} = Keys.decode_dead(key)
-          {source_id, id} = :erlang.binary_to_term(value)
+          {source_id, id, ord} = :erlang.binary_to_term(value)
 
           cond do
-            not dead_match?(filter, source_id, id) ->
+            not (dead_match?(filter, source_id, id) and tenant_match?(ords, ord)) ->
               {:cont, {scanned + 1, hit_n, hits, key}}
 
             hit_n >= limit ->
               {:halt, {scanned, hit_n, hits, last}}
 
             true ->
-              {:cont, {scanned + 1, hit_n + 1, [{key, seq, sink} | hits], key}}
+              {:cont, {scanned + 1, hit_n + 1, [{key, seq, sink, ord} | hits], key}}
           end
         end
       end)
@@ -522,41 +857,15 @@ defmodule Ankusa.Queue.Deliveries do
       {:ok, {scanned, hit_n, hits, last}} ->
         # The fold ends by halt (limit/max_scan reached) or by running off the
         # range; only the latter means every dead row in range was examined.
-        exhausted? = hit_n < limit and scanned < max_scan
-
-        # A tenant-filtered page may come back short of `limit` without being
-        # exhausted: the cursor still moves past the rows it left out.
-        with {:ok, hits} <- tenant_hits(instance, Enum.reverse(hits), filter) do
-          {:ok, hits, last, exhausted?, scanned}
-        end
+        {:ok, Enum.reverse(hits), last, hit_n < limit and scanned < max_scan, scanned}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  # Until the dead index carries the tenant (TEN-1), a tenant filter reads the
-  # hooks of the page's hits.
-  defp tenant_hits(instance, hits, %{tenants: tenants}) when is_list(tenants) do
-    keys = Enum.map(hits, fn {_key, seq, _sink} -> Keys.hook(seq) end)
-
-    with {:ok, bins} <- Store.multi_get(instance, :hooks, keys) do
-      kept = for {hit, {:ok, bin}} <- Enum.zip(hits, bins), hook_tenant_in?(bin, tenants), do: hit
-      {:ok, kept}
-    end
-  end
-
-  defp tenant_hits(_instance, hits, _filter), do: {:ok, hits}
-
-  # The hook's tenant; an envelope without one belongs to `"default"`, as in
-  # `Envelope.idempotency_key/1`. A hook this node cannot decode names no
-  # tenant, so it matches none.
-  defp hook_tenant_in?(bin, tenants) do
-    case Envelope.from_binary(bin) do
-      {:ok, env} -> (env.tenant_id || "default") in tenants
-      {:error, _reason} -> false
-    end
-  end
+  defp tenant_match?(nil, _ord), do: true
+  defp tenant_match?(ords, ord), do: ord in ords
 
   # `matches?/4` minus the `:since` bound: the page's range carries that.
   defp dead_match?(filter, source_id, id) do
@@ -567,17 +876,17 @@ defmodule Ankusa.Queue.Deliveries do
   # hook and gets `replay: replay_id`, `attempts: 0` and a due time of `now`.
   # A dead key whose row is gone is deleted as an orphan. Returns the batch ops
   # and the number of rows actually revived.
-  @spec revive_ops(atom(), [{binary(), pos_integer(), non_neg_integer()}], integer(), String.t()) ::
+  @spec revive_ops(atom(), [hit()], integer(), String.t()) ::
           {:ok, [Ankusa.Store.op()], non_neg_integer()} | {:error, term()}
   def revive_ops(instance, hits, now, replay_id) do
-    keys = Enum.map(hits, fn {_key, seq, sink} -> Keys.delivery(seq, sink) end)
+    keys = Enum.map(hits, fn {_key, seq, sink, _ord} -> Keys.delivery(seq, sink) end)
 
     with {:ok, rows} <- Store.multi_get(instance, :deliveries, keys) do
       {ops, revived} =
         hits
         |> Enum.zip(rows)
-        |> Enum.reduce({[], 0}, fn {{key, seq, sink}, result}, {ops, n} ->
-          {row_ops, n} = revive_row(key, seq, sink, result, now, replay_id, n)
+        |> Enum.reduce({[], 0}, fn {{key, seq, sink, ord}, result}, {ops, n} ->
+          {row_ops, n} = revive_row(key, seq, sink, ord, result, now, replay_id, n)
           {row_ops ++ ops, n}
         end)
 
@@ -590,7 +899,7 @@ defmodule Ankusa.Queue.Deliveries do
   # be revived: it stays in the DLQ (still visible to `GET /v1/dlq`) and the
   # job's cursor simply moves past it, so one corrupt row cannot wedge the
   # replay engine on it forever.
-  defp revive_row(key, seq, sink, {:ok, bin}, now, replay_id, n) do
+  defp revive_row(key, seq, sink, ord, {:ok, bin}, now, replay_id, n) do
     case decode_row(bin) do
       {:ok, %{size: size} = row} when is_integer(size) ->
         row =
@@ -599,10 +908,11 @@ defmodule Ankusa.Queue.Deliveries do
           |> Map.put(:replay, replay_id)
 
         {[
-           {:delete, :index, key},
-           {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)},
-           {:put, :index, Keys.due(now, seq, sink), <<size::32>>}
-         ], n + 1}
+           {:put, :deliveries, Keys.delivery(seq, sink), encode_row(row)}
+           | dead_gone(key, ord, seq, sink)
+         ] ++
+           due_ops(ord, now, seq, sink, size, @first_attempt) ++
+           Counters.ops([{ord, :dead, -1}, {ord, :pending, 1}]), n + 1}
 
       {:error, reason} ->
         left_in_dlq(seq, sink, reason, n)
@@ -612,8 +922,15 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
-  defp revive_row(key, _seq, _sink, :not_found, _now, _replay_id, n) do
-    {[{:delete, :index, key}], n}
+  # The row is gone, so what it counted in `bytes` cannot be taken back.
+  defp revive_row(key, seq, sink, ord, :not_found, _now, _replay_id, n) do
+    {dead_gone(key, ord, seq, sink) ++ Counters.ops([{ord, :dead, -1}]), n}
+  end
+
+  # Both dead keys of a row, from the global key.
+  defp dead_gone(key, ord, seq, sink) do
+    {at, ^seq, ^sink} = Keys.decode_dead(key)
+    [{:delete, :index, key}, {:delete, :index, Keys.dead_by_tenant(ord, at, seq, sink)}]
   end
 
   defp left_in_dlq(seq, sink, reason, n) do
@@ -627,23 +944,25 @@ defmodule Ankusa.Queue.Deliveries do
   @doc """
   The dead rows, newest first: `total` counts every match, `entries` holds the
   first `:limit`. `opts`: `:source_id`, `:since`, `:tenants` (only rows of
-  hooks owned by one of these tenants; `nil` is every tenant), `:limit`.
+  hooks owned by one of these tenants, read from the by-tenant index with no
+  hook read; `nil` is every tenant), `:limit`.
   """
   @spec dead(atom(), keyword()) ::
           {:ok, %{total: non_neg_integer(), entries: [map()]}} | {:error, term()}
   def dead(instance, opts) do
-    %{lo: lo, hi: hi} = Keys.family(:dead)
     limit = Keyword.fetch!(opts, :limit)
-    filter = opts |> Keyword.take([:source_id, :since]) |> Map.new()
+
+    filter =
+      for {k, v} <- Keyword.take(opts, [:source_id, :since]), v != nil, into: %{}, do: {k, v}
+
     tenants = Keyword.get(opts, :tenants)
 
     scan =
       if is_list(tenants),
-        do: dead_scan_tenants(instance, {lo, hi}, filter, tenants, limit),
-        else: dead_scan(instance, {lo, hi}, filter, limit)
+        do: dead_scan_tenants(instance, filter, tenants, limit),
+        else: dead_scan(instance, filter, limit)
 
-    with {:ok, {total, _kept_n, kept}} <- scan,
-         kept = Enum.reverse(kept),
+    with {:ok, {total, kept}} <- scan,
          {:ok, rows} <-
            Store.multi_get(
              instance,
@@ -687,105 +1006,173 @@ defmodule Ankusa.Queue.Deliveries do
     end
   end
 
-  # `{total, kept_n, kept}` of the dead keys matching `filter`, newest first:
-  # every match is counted, the first `limit` are kept (as a reversed list).
+  # `{total, kept}` of the dead keys matching `filter`, newest first: every
+  # match is counted, the first `limit` are kept as `{at, seq, sink, owner}`.
   # Trusted, internally written data (this node's own store rows); never request input.
   # sobelow_skip ["Misc.BinToTerm"]
-  defp dead_scan(instance, range, filter, limit) do
-    Store.fold(
-      instance,
-      :dead,
-      range,
-      {0, 0, []},
-      fn key, value, {total, kept_n, kept} = acc ->
-        {at, seq, sink} = Keys.decode_dead(key)
-        {source_id, id} = :erlang.binary_to_term(value)
+  defp dead_scan(instance, filter, limit) do
+    %{lo: lo, hi: hi} = Keys.family(:dead)
 
-        cond do
-          not matches?(filter, source_id, id, at) ->
-            {:cont, acc}
-
-          kept_n < limit ->
-            {:cont, {total + 1, kept_n + 1, [{at, seq, sink, {source_id, id}} | kept]}}
-
-          true ->
-            {:cont, {total + 1, kept_n, kept}}
-        end
-      end,
-      reverse: true
-    )
-  end
-
-  # `dead_scan/4` limited to hooks owned by one of `tenants`. The dead index
-  # does not carry the tenant (TEN-1 will), so the keys that pass `filter` are
-  # checked against their hooks 1 000 at a time: the scan holds one
-  # chunk of keys, never the whole DLQ.
-  # Trusted, internally written data (this node's own store rows); never request input.
-  # sobelow_skip ["Misc.BinToTerm"]
-  defp dead_scan_tenants(instance, range, filter, tenants, limit) do
     scan =
       Store.fold(
         instance,
         :dead,
+        {lo, hi},
+        {0, 0, []},
+        fn key, value, {total, kept_n, kept} = acc ->
+          {at, seq, sink} = Keys.decode_dead(key)
+          {source_id, id, _ord} = :erlang.binary_to_term(value)
+
+          cond do
+            not matches?(filter, source_id, id, at) ->
+              {:cont, acc}
+
+            kept_n < limit ->
+              {:cont, {total + 1, kept_n + 1, [{at, seq, sink, {source_id, id}} | kept]}}
+
+            true ->
+              {:cont, {total + 1, kept_n, kept}}
+          end
+        end,
+        reverse: true
+      )
+
+    with {:ok, {total, _kept_n, kept}} <- scan, do: {:ok, {total, Enum.reverse(kept)}}
+  end
+
+  # `dead_scan/3` limited to `tenants`: one reverse range scan of each tenant's
+  # by-tenant dead index, never a hook read. Only a `:source_id` filter needs the
+  # global dead row's value (the owner), read 1 000 keys at a time; the page's
+  # owners are read once at the end.
+  defp dead_scan_tenants(instance, filter, tenants, limit) do
+    with {:ok, ords} <- tenant_ords(instance, tenants),
+         {:ok, {total, kept}} <- scan_tenants(instance, ords, filter, limit),
+         {:ok, kept} <- fill_owners(instance, kept) do
+      {:ok, {total, kept}}
+    end
+  end
+
+  defp scan_tenants(instance, ords, filter, limit) do
+    Enum.reduce_while(ords, {:ok, {0, []}}, fn ord, {:ok, {total, kept}} ->
+      case tenant_dead(instance, ord, filter, limit) do
+        {:ok, {t, k}} ->
+          merged =
+            (kept ++ k)
+            |> Enum.sort_by(fn {at, seq, sink} -> {at, seq, sink} end, :desc)
+            |> Enum.take(limit)
+
+          {:cont, {:ok, {total + t, merged}}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # `{total, kept}` for one tenant, `kept` newest first, as `{at, seq, sink}`.
+  defp tenant_dead(instance, ord, filter, limit) do
+    {_lower, hi} = Keys.range(<<?X, ord::32>>)
+    range = {<<?X, ord::32, Map.get(filter, :since, 0)::64>>, hi}
+    need_owner? = Map.has_key?(filter, :source_id)
+
+    scan =
+      Store.fold(
+        instance,
+        :dead_by_tenant,
         range,
         {{0, 0, []}, [], 0},
-        fn key, value, {acc, chunk, n} ->
-          {at, seq, sink} = Keys.decode_dead(key)
-          {source_id, id} = :erlang.binary_to_term(value)
+        fn key, _value, {acc, chunk, n} ->
+          {_ord, at, seq, sink} = Keys.decode_dead_by_tenant(key)
 
-          if matches?(filter, source_id, id, at) do
-            chunk = [{at, seq, sink, {source_id, id}} | chunk]
+          cond do
+            not need_owner? ->
+              {:cont, {push_dead(acc, {at, seq, sink}, limit), [], 0}}
 
-            if n + 1 < @source_chunk do
-              {:cont, {acc, chunk, n + 1}}
-            else
-              case tenant_step(instance, chunk, tenants, limit, acc) do
+            n + 1 < @source_chunk ->
+              {:cont, {acc, [{at, seq, sink} | chunk], n + 1}}
+
+            true ->
+              case owner_step(instance, [{at, seq, sink} | chunk], filter, limit, acc) do
                 {:ok, acc} -> {:cont, {acc, [], 0}}
                 {:error, reason} -> {:halt, {:error, reason}}
               end
-            end
-          else
-            {:cont, {acc, chunk, n}}
           end
         end,
         reverse: true
       )
 
     case scan do
-      {:ok, {:error, reason}} -> {:error, reason}
-      {:ok, {acc, chunk, _n}} -> tenant_step(instance, chunk, tenants, limit, acc)
-      {:error, reason} -> {:error, reason}
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:ok, {acc, chunk, _n}} ->
+        with {:ok, {total, _kept_n, kept}} <- owner_step(instance, chunk, filter, limit, acc),
+             do: {:ok, {total, Enum.reverse(kept)}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  # Fold one chunk of dead keys (oldest first, as the reverse scan built it)
-  # into the `dead_scan/4` accumulator, keeping those whose hook belongs to
-  # `tenants`. A key whose hook is gone names no tenant and is left out.
-  defp tenant_step(_instance, [], _tenants, _limit, acc), do: {:ok, acc}
+  defp push_dead({total, kept_n, kept}, entry, limit) when kept_n < limit,
+    do: {total + 1, kept_n + 1, [entry | kept]}
 
-  defp tenant_step(instance, chunk, tenants, limit, acc) do
+  defp push_dead({total, kept_n, kept}, _entry, _limit), do: {total + 1, kept_n, kept}
+
+  # Folds one chunk of dead keys (`chunk` is oldest first, as the reverse scan
+  # built it) into the accumulator, keeping those whose owner matches `filter`.
+  defp owner_step(_instance, [], _filter, _limit, acc), do: {:ok, acc}
+
+  # Trusted, internally written data (this node's own store rows).
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp owner_step(instance, chunk, filter, limit, acc) do
     entries = Enum.reverse(chunk)
 
-    with {:ok, bins} <-
+    with {:ok, values} <-
            Store.multi_get(
              instance,
-             :hooks,
-             Enum.map(entries, fn {_, seq, _, _} -> Keys.hook(seq) end)
+             :index,
+             Enum.map(entries, fn {at, seq, sink} -> Keys.dead(at, seq, sink) end)
            ) do
       {:ok,
        entries
-       |> Enum.zip(bins)
+       |> Enum.zip(values)
        |> Enum.reduce(acc, fn
-         {entry, {:ok, bin}}, {total, kept_n, kept} = acc ->
-           cond do
-             not hook_tenant_in?(bin, tenants) -> acc
-             kept_n < limit -> {total + 1, kept_n + 1, [entry | kept]}
-             true -> {total + 1, kept_n, kept}
-           end
+         {entry, {:ok, value}}, acc ->
+           {source_id, id, _ord} = :erlang.binary_to_term(value)
+           {at, _seq, _sink} = entry
+
+           if matches?(filter, source_id, id, at), do: push_dead(acc, entry, limit), else: acc
 
          {_entry, :not_found}, acc ->
            acc
        end)}
+    end
+  end
+
+  # The owners of the kept page, from the global dead rows.
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp fill_owners(instance, kept) do
+    with {:ok, values} <-
+           Store.multi_get(
+             instance,
+             :index,
+             Enum.map(kept, fn {at, seq, sink} -> Keys.dead(at, seq, sink) end)
+           ) do
+      {:ok,
+       for {{at, seq, sink}, value} <- Enum.zip(kept, values) do
+         owner =
+           case value do
+             {:ok, bin} ->
+               {source_id, id, _ord} = :erlang.binary_to_term(bin)
+               {source_id, id}
+
+             :not_found ->
+               {@unknown_source, nil}
+           end
+
+         {at, seq, sink, owner}
+       end}
     end
   end
 
@@ -844,6 +1231,224 @@ defmodule Ankusa.Queue.Deliveries do
     case Map.get(filter, :since) do
       nil -> true
       since -> at >= since
+    end
+  end
+
+  # ── what other modules need without building a key ───────────────────────
+
+  @doc """
+  The distinct tenants with a marker at or before `now`'s second, oldest marker
+  first, at most `max` of them (`Ankusa.Metrics.Gauges` reads their counters).
+  """
+  @spec active_ords(atom(), integer(), pos_integer()) ::
+          {:ok, [pos_integer()]} | {:error, term()}
+  def active_ords(instance, now, max) do
+    %{lo: lo} = Keys.family(:active)
+
+    with {:ok, {_seen, ords}} <-
+           Store.fold(
+             instance,
+             :active,
+             {lo, <<?A, div(now, 1000) + 1::64>>},
+             {MapSet.new(), []},
+             fn key, _value, {seen, ords} = acc ->
+               {_bucket, ord} = Keys.decode_active(key)
+
+               cond do
+                 MapSet.member?(seen, ord) -> {:cont, acc}
+                 MapSet.size(seen) + 1 >= max -> {:halt, {MapSet.put(seen, ord), [ord | ords]}}
+                 true -> {:cont, {MapSet.put(seen, ord), [ord | ords]}}
+               end
+             end
+           ) do
+      {:ok, Enum.reverse(ords)}
+    end
+  end
+
+  @doc """
+  `{ord, at}` when `op` puts a due row, else `nil`: the Pipeline lowers a
+  tenant's scan cursor to the time of a row it has just made due.
+  """
+  @spec due_time(Store.op()) :: {pos_integer(), integer()} | nil
+  def due_time({:put, :index, <<?D, ord::32, at::64, _::binary>>, _value}), do: {ord, at}
+  def due_time(_op), do: nil
+
+  @doc false
+  # The format 2 -> 3 migration's rows: a claimed row and a dead row's by-tenant key.
+  def inflight_put(ord, seq, sink, size),
+    do: {:put, :index, Keys.inflight(ord, seq, sink), <<size::32>>}
+
+  @doc false
+  def dead_by_tenant_put(ord, at, seq, sink),
+    do: {:put, :index, Keys.dead_by_tenant(ord, at, seq, sink), <<>>}
+
+  # ── per-tenant reads and purge ────────────────────────────────────────────
+
+  @doc "`%{pending, scheduled, inflight, bytes}` of `tenant`: four counter reads."
+  @spec pending_for_tenant(atom(), String.t()) ::
+          {:ok,
+           %{pending: integer(), scheduled: integer(), inflight: integer(), bytes: integer()}}
+          | {:error, term()}
+  def pending_for_tenant(instance, tenant) do
+    counters(instance, tenant, [:pending, :scheduled, :inflight, :bytes])
+  end
+
+  @doc "`%{dead}` of `tenant`: one counter read."
+  @spec dead_for_tenant(atom(), String.t()) :: {:ok, %{dead: integer()}} | {:error, term()}
+  def dead_for_tenant(instance, tenant), do: counters(instance, tenant, [:dead])
+
+  defp counters(instance, tenant, fields) do
+    case Tenants.ord(instance, tenant) do
+      {:ok, ord} ->
+        with {:ok, all} <- Counters.read(instance, ord), do: {:ok, Map.take(all, fields)}
+
+      :not_found ->
+        {:ok, Map.new(fields, &{&1, 0})}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @purge_chunk 500
+
+  @doc """
+  Removes tenant `tenant`'s `:pending` (every due row, first attempts and
+  retries) and/or `:dead` rows, 500 at a time, one synced batch per chunk: the
+  index keys, the delivery row, a cleared marker so `Ankusa.Queue.Reclaim`
+  removes hooks nobody owes, and the counter deltas. Idempotent, so a run that
+  stopped part-way resumes by being called again; never touches inflight rows.
+  Each chunk runs inside the dispatch Pipeline when it runs on this node, so it
+  cannot race a claim; a replay job over the tenant must not run at the same
+  time (it moves dead rows the same way). Returns the rows removed per kind.
+  """
+  @spec purge_tenant(atom(), String.t(), [:pending | :dead]) ::
+          {:ok, %{pending: non_neg_integer(), dead: non_neg_integer()}} | {:error, term()}
+  def purge_tenant(instance, tenant, kinds) do
+    case Tenants.ord(instance, tenant) do
+      {:ok, ord} ->
+        Enum.reduce_while(kinds, {:ok, %{pending: 0, dead: 0}}, fn kind, {:ok, removed} ->
+          case purge_kind(instance, ord, kind, 0) do
+            {:ok, n} -> {:cont, {:ok, Map.put(removed, kind, n)}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+
+      :not_found ->
+        {:ok, %{pending: 0, dead: 0}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp purge_kind(instance, ord, kind, removed) do
+    case exclusive(instance, fn -> purge_chunk(instance, ord, kind) end) do
+      {:ok, 0} -> {:ok, removed}
+      {:ok, n} -> purge_kind(instance, ord, kind, removed + n)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Runs `fun` in the Pipeline process, the only one that claims rows.
+  defp exclusive(instance, fun) do
+    case Ankusa.whereis(instance, :dispatch) do
+      pid when is_pid(pid) -> GenServer.call(pid, {:exclusive, fun}, :infinity)
+      nil -> fun.()
+    end
+  end
+
+  defp purge_chunk(instance, ord, :pending) do
+    {lower, upper} = Keys.range(<<?D, ord::32>>)
+
+    with {:ok, {_n, rows}} <-
+           Store.fold(instance, :due, {lower, upper}, {0, []}, fn key,
+                                                                  <<size::32, kind::8>>,
+                                                                  {n, acc} ->
+             acc = [{key, size, kind} | acc]
+             if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end) do
+      ops =
+        Enum.flat_map(rows, fn {key, size, kind} ->
+          {_ord, _at, seq, sink} = Keys.decode_due(key)
+
+          [
+            {:delete, :index, key},
+            {:delete, :deliveries, Keys.delivery(seq, sink)},
+            {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
+            | Counters.ops([{ord, due_field(kind), -1}, {ord, :bytes, -size}])
+          ]
+        end)
+
+      finish_purge(instance, rows, ops, fn {key, _size, _kind} ->
+        {_ord, _at, seq, sink} = Keys.decode_due(key)
+        {seq, sink}
+      end)
+    end
+  end
+
+  defp purge_chunk(instance, ord, :dead) do
+    {lower, upper} = Keys.range(<<?X, ord::32>>)
+
+    with {:ok, {_n, keys}} <-
+           Store.fold(instance, :dead_by_tenant, {lower, upper}, {0, []}, fn key,
+                                                                             _value,
+                                                                             {n, acc} ->
+             acc = [Keys.decode_dead_by_tenant(key) | acc]
+             if n + 1 >= @purge_chunk, do: {:halt, {n + 1, acc}}, else: {:cont, {n + 1, acc}}
+           end),
+         {:ok, sizes} <- row_sizes(instance, keys) do
+      ops =
+        keys
+        |> Enum.zip(sizes)
+        |> Enum.flat_map(fn {{_ord, at, seq, sink}, size} ->
+          [
+            {:delete, :index, Keys.dead_by_tenant(ord, at, seq, sink)},
+            {:delete, :index, Keys.dead(at, seq, sink)},
+            {:delete, :deliveries, Keys.delivery(seq, sink)},
+            {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
+            | Counters.ops([{ord, :dead, -1}, {ord, :bytes, -size}])
+          ]
+        end)
+
+      finish_purge(instance, keys, ops, fn {_ord, _at, seq, sink} -> {seq, sink} end)
+    end
+  end
+
+  defp row_sizes(instance, keys) do
+    with {:ok, rows} <-
+           Store.multi_get(
+             instance,
+             :deliveries,
+             Enum.map(keys, fn {_ord, _at, seq, sink} -> Keys.delivery(seq, sink) end)
+           ) do
+      {:ok,
+       Enum.map(rows, fn
+         {:ok, bin} ->
+           case decode_row(bin) do
+             {:ok, %{size: size}} when is_integer(size) -> size
+             _ -> 0
+           end
+
+         :not_found ->
+           0
+       end)}
+    end
+  end
+
+  defp finish_purge(_instance, [], _ops, _pair), do: {:ok, 0}
+
+  defp finish_purge(instance, rows, ops, pair) do
+    pairs =
+      Enum.map(rows, fn row ->
+        {seq, sink} = pair.(row)
+        {seq, Keys.cleared(seq, 0, sink)}
+      end)
+
+    with :ok <- Store.write(instance, coalesce(ops), sync: true) do
+      # A failed reclaim only defers: the markers stay, and the sweep finds them.
+      _ = Reclaim.run(instance, pairs)
+      {:ok, length(rows)}
     end
   end
 end

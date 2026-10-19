@@ -1374,7 +1374,11 @@ defmodule Ankusa.Admin.RouterTest do
       ingest!(config, "acme.billing", "two")
       ingest!(config, "acme.other", "three")
 
-      {:ok, dues} = Deliveries.due(inst, System.system_time(:millisecond), 0, 10, 1_000_000)
+      {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "acme")
+
+      {:ok, dues} =
+        Deliveries.due_for_tenant(inst, ord, System.system_time(:millisecond), 0, 10, 1_000_000)
+
       assert [first, second, third] = Enum.sort_by(dues, & &1.seq)
 
       # `first` and `third` lose `source_id`, as rows from before it existed;
@@ -1712,6 +1716,32 @@ defmodule Ankusa.Admin.RouterTest do
       assert conn.status == 400
       assert %{"error" => "invalid_filter", "field" => "tenant"} = json(conn)
       assert tcall(inst, :get, "/v1/dlq?tenant[]=acme", "operator").status == 400
+    end
+
+    # ADR 0001 §6: a tenant-limited listing is one reverse range scan of that
+    # tenant's by-tenant dead index; it never folds the global dead family and
+    # reads a hook only for each row it returns (here one of acme's two).
+    test "tenant scoped dlq reads one range" do
+      config = start_tenant_instance(failing_sources())
+      inst = config.instance
+
+      acme_old = ingest!(config, "acme.hooks", ~s({"n":1}))
+      acme_new = ingest!(config, "acme.hooks", ~s({"n":2}))
+      _globex = ingest!(config, "globex.hooks", ~s({"n":3}))
+      assert {:ok, _settled} = Pipeline.tick(inst)
+
+      {body, calls} =
+        store_calls(fn -> json(tcall(inst, :get, "/v1/dlq?limit=1", "acme")) end)
+
+      assert %{"total" => 2, "entries" => [only]} = body
+      assert only["id"] == acme_new.id
+      refute only["id"] == acme_old.id
+
+      folds = for {:fold, family} <- calls, do: family
+      hook_reads = for {fun, :hooks, keys} <- calls, fun in [:get, :multi_get], do: length(keys)
+
+      assert folds == [:dead_by_tenant]
+      assert hook_reads == [1]
     end
 
     test "tenant scoped quarantine purge" do
