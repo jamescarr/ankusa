@@ -261,7 +261,7 @@ a string, is empty, or is `.`/`..` — raised before any request, because a URL
 parser would otherwise normalize it into the collection endpoint and hand back
 the list page as if it were a route), `RouteNotFoundError` (404),
 `RoutesRejectedError` (any other 4xx, carrying `code`, `field`, `message`,
-`conflicting_id`, `max_routes`), and `RoutesUnavailableError` (5xx, an
+`conflicting_id`, `max_routes`, `scope`), and `RoutesUnavailableError` (5xx, an
 unfollowed redirect, a non-JSON success body, or unreachable; retryable).
 
 ## Admin client
@@ -297,7 +297,8 @@ Methods: `health()`, `metrics()` (Prometheus text), `config()`,
 `update_replay()`, `list_quarantined()`. Failures are `AdminError` subclasses:
 `RoleNotEnabledError` (409 `role_not_enabled`, carrying `role`),
 `AdminRejectedError` (any other 4xx — a missing replay is a 404 with
-`code="replay_not_found"`), and `AdminUnavailableError` (5xx, an unfollowed
+`code="replay_not_found"`, carrying `scope` when a `403 forbidden` names the
+missing credential scope), and `AdminUnavailableError` (5xx, an unfollowed
 redirect, or unreachable; retryable).
 
 ## Sources client

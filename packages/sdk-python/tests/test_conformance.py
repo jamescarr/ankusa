@@ -450,6 +450,7 @@ def test_conformance(case: dict[str, Any]) -> None:
             "conflicting_id",
             "max_routes",
             "role",
+            "scope",
         ) if hasattr(err, k)}}
 
     expect = case["expect"]
