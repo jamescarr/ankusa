@@ -8,6 +8,17 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **Admission keys under `rate_limits` (TEN-2).** `per_ip` and `node`
+  (`{rate, burst}`, off by default), `sources.default` (`bytes_per_second`,
+  optional `burst_bytes`; 100 MB/s unless changed, `default: null` is off), and
+  on `default` and each `tenants` entry the optional `bytes_per_second`,
+  `burst_bytes`, `max_body_bytes`, `max_queue` and `max_queue_bytes`. `per_ip`,
+  `node` and `sources` are charged before the body is read (`429
+  ip_rate_limited` / `node_rate_limited` / `source_rate_limited`); a tenant past
+  its `max_queue` / `max_queue_bytes` share gets `429 tenant_overload`, never
+  `503`, and past `max_body_bytes` `413`. See the `ankusa` changelog,
+  [`configuration.md#rate-limits`](../../docs/configuration.md#rate-limits) and
+  `config-examples/reference.yml`.
 - **Tenant-aware routes (TEN-4).** A `routes.seed` entry takes `tenant_id` (the
   owning tenant, default `default`) and `source_id` (the one source it admits):
   a route owned by a tenant admits hooks only into that tenant, and a route bound
@@ -150,6 +161,11 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Changed
 
+- **`routing: tenant_path` needs `rate_limits.default` (TEN-2).** The URL
+  names the tenant, so a config with `routing: tenant_path` and no
+  `rate_limits.default` fails to load (and `check-config`) with
+  `rate_limits.default is required with routing: tenant_path`.
+  `config-examples/multi-tenant.yml` sets one.
 - **Breaking (SEC-10):** a `type: http` sink needs a `secret` (a `whsec_`
   secret, or a list while rotating) to load, or `allow_unsigned: true` to send
   deliveries with no signature. The same check runs when the admin API writes a

@@ -347,7 +347,8 @@ defmodule Ankusa.Edge.RouteGuardTest do
               "tenant_id" => "acme"
             }
           ],
-          route_resolver: {Ankusa.RouteResolver.TenantPath, []}
+          route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+          rate_limits: %{default: %{rate: 1_000, burst: 1_000}}
         )
 
       assert post(config, "/webhooks/acme/shared").status == 201

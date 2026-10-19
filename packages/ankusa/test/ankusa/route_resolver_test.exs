@@ -14,10 +14,12 @@ defmodule Ankusa.RouteResolverTest do
         {id, Keyword.put_new(opts, :sinks, [{Ankusa.Sink.Log, []}])}
       end)
 
+    # `TenantPath` refuses to boot without a default limit.
     config =
       test_config(
         roles: [:edge],
         route_resolver: resolver,
+        rate_limits: %{default: %{rate: 1_000_000, burst: 1_000_000}},
         source_store: {Ankusa.SourceStore.Static, sources: sources}
       )
 

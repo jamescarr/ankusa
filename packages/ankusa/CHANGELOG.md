@@ -13,6 +13,37 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Admission at the edge: per tenant, per source, per address, per node
+  (TEN-2).** `rate_limits` gains `per_ip` and `node` (`%{rate, burst}`, hooks
+  per second per client address and for the whole node; off by default) and
+  `sources.default.bytes_per_second` (body bytes per second per source, 100 MB/s
+  unless changed, `default: nil` is off). They run in `Ankusa.Edge.Router`
+  after the source lookup and **before the body is read**, so a forged flood
+  costs neither a read nor an HMAC: `429 ip_rate_limited`, `429
+  node_rate_limited`, `429 source_rate_limited`, each with `Retry-After` and
+  counted on `ankusa_ingest_refused_total{reason}`. The client address is
+  `Ankusa.Net.ClientIP`'s (`routes.trusted_proxies` decides whose
+  `X-Forwarded-For` counts), an IPv6 address is its `/64`, and addresses hash
+  into 2^20 buckets, so the table has a ceiling. The declared `Content-Length`
+  is charged up front; a body with none is charged once it has been read.
+  A tenant's limit (`rate_limits.tenants[t]` and `rate_limits.default`, and a
+  runtime override) may now also carry `bytes_per_second` and `burst_bytes`
+  (body bytes, charged with the hook after verification), `max_body_bytes`
+  (`413`, checked against the declared length before the read and enforced on
+  the bytes received; at most the instance's) and `max_queue` /
+  `max_queue_bytes`, the hooks and body bytes the tenant may hold in this
+  node's batchers at once. `Ankusa.Edge.Batcher.commit/4` counts the share in
+  ETS (`Ankusa.Edge.RateLimiter.acquire_queue/3`, released when the call
+  returns or exits, so a crashed batcher leaks nothing) and answers
+  `{:error, {:tenant_overload, retry_after_ms}}`, a `429 tenant_overload`,
+  never the global `503 overload`. New `Ankusa.Edge.RateLimiter` functions:
+  `pre_read/4`, `hit_ip/2`, `hit_node/1`, `hit_source_bytes/3`,
+  `body_limit/2`, `acquire_queue/3`, `release_queue/2`, and `hit/3`
+  (`hit/2` is unchanged). The admin API's rate-limit routes accept and return
+  the new keys (only when set), and `ingest.v1.yaml` / `admin.v1.yaml`
+  describe them. New refusal reasons `:ip_rate_limited`, `:node_rate_limited`,
+  `:source_rate_limited`; new ingest outcome `:tenant_overload`. Tested in
+  `edge_rate_limit_test.exs` and `config_test.exs`.
 - **Tenant-aware routes bound to sources (TEN-4).** A route now has a
   `tenant_id` (default `"default"`, the shared tenant) and an optional
   `source_id`, in `Route.from_attrs/2`, `to_json/1`, `from_json/1`, the
@@ -372,6 +403,15 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **A tenant-carrying URL scheme needs a `rate_limits.default` (TEN-2).**
+  `Ankusa.RouteResolver.TenantPath` (`routing: tenant_path`) with
+  `rate_limits.default: nil` now fails the boot in
+  `Ankusa.Edge.RateLimiter.validate_config!/1`: the URL names the tenant, so
+  every tenant the config does not list was unlimited. Give it a default.
+  The limit parser now takes the instance's `max_body_bytes` as a second
+  argument (`parse_limit(attrs, max_body_bytes)` replaces `parse_limit(attrs)`),
+  the ceiling for a tenant's own, and a limit that is not `rate` and `burst`
+  plus the optional keys above is refused with a new message.
 - **Breaking (SEC-10):** `Sink.Http` is signed by default. `validate_opts!/1`
   (so boot, and the image's loader) refuses a sink with neither `:secret` nor
   `allow_unsigned: true` (`Sink.Http requires secret: …`), and a delivery

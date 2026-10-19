@@ -1848,9 +1848,17 @@ components:
     RateLimit:
       type: object
       description: |
-        A rate limit. `rate` is hooks per second and may be fractional (`0.5`
-        is one every two seconds); `burst` is the most hooks admitted back to
-        back.
+        A tenant's ingest limit. `rate` is hooks per second and may be
+        fractional (`0.5` is one every two seconds); `burst` is the most hooks
+        admitted back to back. The rest are optional: `bytes_per_second` and
+        `burst_bytes` limit body bytes (charged with the hook, after
+        verification; `burst_bytes` defaults to one second's worth and needs
+        `bytes_per_second`), `max_body_bytes` is the biggest body the tenant may
+        send (`413` past it; at most the instance's `max_body_bytes`), and
+        `max_queue` / `max_queue_bytes` are the hooks and body bytes the tenant
+        may hold in this node's batchers at once (`429 tenant_overload` past
+        either). A limit replaces the one below it whole: keys left out are
+        unset, not inherited.
       required: [rate, burst]
       additionalProperties: false
       properties:
@@ -1862,9 +1870,31 @@ components:
           type: integer
           minimum: 1
           example: 100
+        bytes_per_second:
+          type: number
+          exclusiveMinimum: 0
+          example: 5000000
+        burst_bytes:
+          type: integer
+          minimum: 1
+          example: 10000000
+        max_body_bytes:
+          type: integer
+          minimum: 1
+          example: 1000000
+        max_queue:
+          type: integer
+          minimum: 1
+          example: 2000
+        max_queue_bytes:
+          type: integer
+          minimum: 1
+          example: 67108864
     TenantRateLimit:
       type: object
-      description: One tenant's limit, and whether it came from config or an override.
+      description: |
+        One tenant's limit, and whether it came from config or an override. The
+        optional keys of a `RateLimit` appear only when the limit sets them.
       required: [tenant, rate, burst, source]
       properties:
         tenant:
@@ -1875,6 +1905,21 @@ components:
         burst:
           type: [integer, 'null']
           description: '`null` when `source` is `none`.'
+        bytes_per_second:
+          type: number
+          exclusiveMinimum: 0
+        burst_bytes:
+          type: integer
+          minimum: 1
+        max_body_bytes:
+          type: integer
+          minimum: 1
+        max_queue:
+          type: integer
+          minimum: 1
+        max_queue_bytes:
+          type: integer
+          minimum: 1
         source:
           type: string
           enum: [override, config, default, none]
@@ -2227,7 +2272,7 @@ components:
             badTenant:
               value: {error: invalid_tenant}
     InvalidRateLimit:
-      description: '`400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, and unknown fields are refused. `message` says which.'
+      description: '`400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, the optional keys are in range (`burst_bytes` needs `bytes_per_second`; `max_body_bytes` is at most the instance''s), and unknown fields are refused. `message` says which.'
       content:
         application/json:
           schema:
@@ -2239,6 +2284,8 @@ components:
               value: {error: invalid_rate_limit, message: 'burst is required'}
             unknownField:
               value: {error: invalid_rate_limit, message: 'unknown field "per"'}
+            burstBytesAlone:
+              value: {error: invalid_rate_limit, message: 'burst_bytes needs bytes_per_second'}
             notJson:
               value: {error: invalid_rate_limit, message: 'body must be a JSON object'}
     RoleNotEnabled:

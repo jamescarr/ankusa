@@ -188,6 +188,16 @@ The always-on tests cover:
   per source (`429 quarantine_rate_limited` with `Retry-After` on one source
   leaves another's `202`), and a full pen is `503 quarantine_full` that evicts
   nothing, frees room on a purge, and still counts its bytes after a restart.
+  Admission (`edge_rate_limit_test.exs`): the per-address limit answers `429`
+  over a real socket before a declared 1 000-byte body is read, an IPv6 address
+  is its `/64`, `X-Forwarded-For` counts only behind a trusted proxy, an address
+  refused there has not spent the node's bucket, the per-node and per-source
+  byte limits (declared lengths before the read, undeclared ones after it), a
+  tenant's byte quota spent by verified hooks only, its `max_body_bytes` as
+  `413` before the read, and its queue share: with the writer suspended a
+  tenant past `max_queue` gets `429 tenant_overload` (never `503`) while
+  another tenant still gets `201`, counters never go negative, and 200
+  concurrent charges admit exactly the share.
   A commit is never
   abandoned: a record still buffered at its deadline behind a stuck commit is
   answered `503` and never stored, the writer refuses a batch whose deadline

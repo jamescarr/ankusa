@@ -30,6 +30,17 @@ defmodule Ankusa.Edge.Ingest do
   and never on the `[:ankusa, :ingest]` span, so an unauthenticated caller
   cannot mint a metric series per URL it invents. `ingest/2` is the
   transport-less entry point (tests, benches, embedding): lookup, then ingest.
+
+  ## Admission
+
+  What may be refused without the body — the tenant's `max_body_bytes`, and the
+  per-address, per-node and per-source limits — is the HTTP edge's, after the
+  lookup and before the read (`Ankusa.Edge.Router`,
+  `Ankusa.Edge.RateLimiter.pre_read/4`). What needs the verified hook is here:
+  the tenant's hooks and bytes per second (`{:error, {:rate_limited, ms}}`), and
+  its share of the batchers, charged by `Ankusa.Edge.Batcher.commit/4`
+  (`{:error, {:tenant_overload, ms}}`). Both are `429`s, and neither is the
+  node's `503 overload`.
   """
 
   alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine, RateLimiter, StoredHeaders}
@@ -47,11 +58,15 @@ defmodule Ankusa.Edge.Ingest do
              | :quarantine_full
              | {:invalid_header, String.t() | nil}
              | {:rate_limited, pos_integer()}
+             | {:tenant_overload, pos_integer()}
              | {:quarantine_rate_limited, pos_integer()}}
 
   @typedoc """
   Why a request was answered before it reached `ingest/4`. The whole set: every
   refusal goes through `refused/2`, so a metric label built from it is bounded.
+  The `*_rate_limited` ones are the pre-read admission limits
+  (`Ankusa.Edge.RateLimiter.pre_read/4`): per client address, per node, per
+  source.
   """
   @type refusal ::
           :unknown_source
@@ -59,6 +74,9 @@ defmodule Ankusa.Edge.Ingest do
           | :body_read_failed
           | :invalid_header
           | :store_unavailable
+          | :ip_rate_limited
+          | :node_rate_limited
+          | :source_rate_limited
 
   # Extra keys (`:source_id`, `:tenant_id` from a `request`) ride along: a closed
   # map type here would make every `ingest/2` call "break the contract". The
@@ -272,20 +290,23 @@ defmodule Ankusa.Edge.Ingest do
       # dedupe on a header the stored-header policy then removes.
       env = %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
 
-      case RateLimiter.hit(instance, env.tenant_id) do
+      case RateLimiter.hit(instance, env.tenant_id, env.size) do
         :ok ->
           commit_stored(instance, source, env)
 
         {:error, {:rate_limited, _}} = limited ->
-          Ankusa.Telemetry.emit([:rate_limit, :rejected], %{}, %{
-            instance: instance,
-            tenant_id: env.tenant_id,
-            source_id: env.source_id
-          })
-
+          rate_limit_rejected(instance, env)
           {limited, 0}
       end
     end
+  end
+
+  defp rate_limit_rejected(instance, env) do
+    Ankusa.Telemetry.emit([:rate_limit, :rejected], %{}, %{
+      instance: instance,
+      tenant_id: env.tenant_id,
+      source_id: env.source_id
+    })
   end
 
   # ── stored-header policy ──────────────────────────────────────────────────
@@ -389,11 +410,19 @@ defmodule Ankusa.Edge.Ingest do
         {:committed, committed} -> {:ok, committed}
         {:duplicate, duplicate} -> {:duplicate, duplicate}
         {:error, :overload} -> {:error, :overload}
+        {:error, {:tenant_overload, _ms}} = refused -> tenant_overload(instance, env, refused)
         {:error, :store_unavailable} -> {:error, :store_unavailable}
       end
     catch
       :exit, _ -> {:error, :store_unavailable}
     end
+  end
+
+  # The tenant is over its share of this node's batchers: its own `429`, counted
+  # with the tenant's other rate-limit denials, never the global `503`.
+  defp tenant_overload(instance, env, refused) do
+    rate_limit_rejected(instance, env)
+    refused
   end
 
   # ── quarantine ────────────────────────────────────────────────────────────
@@ -442,6 +471,7 @@ defmodule Ankusa.Edge.Ingest do
   defp tag({:quarantined, _}), do: :quarantined
   defp tag({:rejected, _}), do: :rejected
   defp tag({:error, {:rate_limited, _retry_after_ms}}), do: :rate_limited
+  defp tag({:error, {:tenant_overload, _retry_after_ms}}), do: :tenant_overload
   defp tag({:error, {:quarantine_rate_limited, _retry_after_ms}}), do: :quarantine_rate_limited
   defp tag({:error, reason}), do: reason
 end
