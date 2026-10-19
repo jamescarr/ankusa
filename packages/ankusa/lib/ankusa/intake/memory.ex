@@ -306,6 +306,8 @@ defmodule Ankusa.Intake.Memory do
     {position, state}
   end
 
+  # The log file is the test's own (`intake.memory.path`), never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp store(state, stamped) do
     records = Enum.reduce(stamped, state.records, &Map.put(&2, &1.position, &1))
 
@@ -324,6 +326,7 @@ defmodule Ankusa.Intake.Memory do
 
   defp load(%{path: nil} = state), do: state
 
+  # sobelow_skip ["Traversal.FileModule"]
   defp load(%{path: path} = state) do
     case File.read(path) do
       {:ok, data} ->
@@ -337,8 +340,10 @@ defmodule Ankusa.Intake.Memory do
     end
   end
 
+  # The file is the log this process wrote itself.
+  # sobelow_skip ["Misc.BinToTerm"]
   defp unframe(<<size::32, bin::binary-size(size), rest::binary>>, acc),
-    do: unframe(rest, [:erlang.binary_to_term(bin) | acc])
+    do: unframe(rest, [:erlang.binary_to_term(bin, [:safe]) | acc])
 
   defp unframe(_partial, acc), do: Enum.reverse(acc)
 
