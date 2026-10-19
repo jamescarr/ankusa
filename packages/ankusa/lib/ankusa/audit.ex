@@ -98,6 +98,19 @@ defmodule Ankusa.Audit do
   not seen. The expired rows it holds back are emitted as `blocked_by_cursor` on
   `[:ankusa, :audit, :retention]` after every sweep. Every committed row emits
   `[:ankusa, :audit]`.
+
+  ## Ceilings
+
+  The trail is bounded in `audit.max_rows` and `audit.max_bytes`, from counters
+  kept in every batch (`m:audit_usage`; recounted at boot when it does not match
+  the trail). Before a change is accepted the trail is pruned to them, oldest
+  first and never past `m:lifecycle_cursor`; a trail that is still over a ceiling,
+  or a lifecycle outbox holding `audit.outbox_max_backlog` or more events no sink
+  has confirmed (`m:audit_seq` minus the cursor), refuses the *new* change with
+  `{:error, :audit_backlog}` (`503 audit_backlog`, `Retry-After: 60` on the admin
+  APIs). An unpublished row is never dropped to make room, and a change already
+  begun is always recorded. A change the node makes itself (`Context.system/0`) is
+  not refused.
   """
 
   use GenServer
@@ -184,7 +197,8 @@ defmodule Ankusa.Audit do
   Commit `ops` (the change, for the node's own `Ankusa.Store`) and its audit row
   in one synced batch.
   """
-  @spec commit(atom(), Context.t(), attrs(), [Store.op()]) :: :ok | {:error, :store_unavailable}
+  @spec commit(atom(), Context.t(), attrs(), [Store.op()]) ::
+          :ok | {:error, :store_unavailable | :audit_backlog}
   def commit(instance, %Context{} = context, %{action: _} = attrs, ops) when is_list(ops),
     do: call(instance, {:commit, context, attrs, ops})
 
@@ -193,7 +207,8 @@ defmodule Ankusa.Audit do
   the handle `finish/3` takes. The caller is monitored: if it dies first, the
   row is finished as `"interrupted"`.
   """
-  @spec begin(atom(), Context.t(), attrs()) :: {:ok, pos_integer()} | {:error, :store_unavailable}
+  @spec begin(atom(), Context.t(), attrs()) ::
+          {:ok, pos_integer()} | {:error, :store_unavailable | :audit_backlog}
   def begin(instance, %Context{} = context, %{action: _} = attrs),
     do: call(instance, {:begin, context, attrs})
 
@@ -223,7 +238,7 @@ defmodule Ankusa.Audit do
   `"interrupted"`.
   """
   @spec record(atom(), Context.t(), attrs(), (-> {reply, map() | :discard})) ::
-          reply | {:error, :store_unavailable}
+          reply | {:error, :store_unavailable | :audit_backlog}
         when reply: term()
   def record(instance, %Context{} = context, attrs, fun) when is_function(fun, 0) do
     with {:ok, pending} <- begin(instance, context, attrs) do
@@ -365,6 +380,65 @@ defmodule Ankusa.Audit do
   @doc "The last `seq` the trail handed out (`0` for an empty trail)."
   @spec last_seq(atom()) :: {:ok, non_neg_integer()} | {:error, term()}
   def last_seq(instance), do: load_seq(instance)
+
+  @doc """
+  Whether a control-plane change is refused right now (`503 audit_backlog`,
+  `Retry-After: 60`): the trail holds more than `audit.max_rows` rows or
+  `audit.max_bytes` bytes (and pruning it to its ceilings, which the trail is then
+  asked to do, may not pass the lifecycle cursor), or the lifecycle outbox holds
+  `audit.outbox_max_backlog` events or more that no sink has confirmed. Read
+  from counters, never a scan; `false` where no trail runs.
+  """
+  @spec refusing?(atom()) :: boolean()
+  def refusing?(instance) do
+    audit = Ankusa.config(instance).audit
+    %{rows: rows, bytes: bytes, outbox_backlog: backlog} = stats(instance)
+
+    cond do
+      rows > audit.max_rows or bytes > audit.max_bytes ->
+        GenServer.cast(Ankusa.via(instance, :audit), :make_room)
+        true
+
+      backlog != nil ->
+        backlog >= audit.outbox_max_backlog
+
+      true ->
+        false
+    end
+  end
+
+  @doc """
+  The trail's size and the lifecycle outbox's lag, from counters: `rows`,
+  `bytes`, and `outbox_backlog`, the audit `seq`s the lifecycle publisher has not
+  yet confirmed (`nil` without lifecycle sinks, or before the publisher wrote
+  its cursor). All zero where no trail runs.
+  """
+  @spec stats(atom()) :: %{
+          rows: non_neg_integer(),
+          bytes: non_neg_integer(),
+          outbox_backlog: non_neg_integer() | nil
+        }
+  def stats(instance) do
+    with [{:usage, rows, bytes}] <- :ets.lookup(table(instance), :usage),
+         [{:last_seq, last}] <- :ets.lookup(table(instance), :last_seq) do
+      %{rows: rows, bytes: bytes, outbox_backlog: backlog(instance, last)}
+    else
+      _ -> %{rows: 0, bytes: 0, outbox_backlog: nil}
+    end
+  rescue
+    ArgumentError -> %{rows: 0, bytes: 0, outbox_backlog: nil}
+  end
+
+  defp backlog(instance, last_seq) do
+    if Ankusa.config(instance).lifecycle.sinks == [] do
+      nil
+    else
+      case Store.get(instance, :default, Keys.lifecycle_cursor()) do
+        {:ok, <<cursor::64>>} -> max(last_seq - cursor, 0)
+        _ -> nil
+      end
+    end
+  end
 
   @doc """
   The incarnation the audit row `seq` was written in: the id of the newest
@@ -522,7 +596,8 @@ defmodule Ankusa.Audit do
          {:ok, last_seq} <- load_seq(instance),
          {:ok, history} <- load_incarnations(instance),
          {:ok, restored} <- load_incarnation_pending(instance),
-         {:ok, leftovers} <- load_pending(instance) do
+         {:ok, leftovers} <- load_pending(instance),
+         {:ok, {rows, bytes, counted}} <- load_usage(instance) do
       :ets.new(table(instance), [:named_table, :protected, read_concurrency: true])
       true = :ets.insert(table(instance), [{:key, key}, {:incarnations, history}])
 
@@ -531,14 +606,18 @@ defmodule Ankusa.Audit do
       {deferred, now} =
         Enum.split_with(leftovers, fn {_seq, row} -> Lifecycle.reconcilable?(row) end)
 
-      state = %{
-        instance: instance,
-        next_seq: last_seq + 1,
-        pending: %{},
-        prune_interval: prune_interval,
-        leftovers: deferred,
-        reconcile_until: System.monotonic_time(:millisecond) + @reconcile_ms
-      }
+      state =
+        publish_usage(%{
+          instance: instance,
+          next_seq: last_seq + 1,
+          pending: %{},
+          prune_interval: prune_interval,
+          leftovers: deferred,
+          reconcile_until: System.monotonic_time(:millisecond) + @reconcile_ms,
+          rows: rows,
+          bytes: bytes,
+          counted: counted
+        })
 
       # The restore row goes first: it takes `last_seq + 1`, the first seq of
       # the new incarnation, before any leftover is settled or change taken.
@@ -570,30 +649,26 @@ defmodule Ankusa.Audit do
 
   @impl true
   def handle_call({:commit, context, attrs, ops}, _from, state) do
-    case commit_row(state, context, attrs, ops) do
+    case ensure_room(state, context) do
       {:ok, state} ->
-        {:reply, :ok, state}
+        case commit_row(state, context, attrs, ops) do
+          {:ok, state} ->
+            {:reply, :ok, state}
 
-      {:error, reason} ->
-        Logger.error("[ankusa] could not commit #{attrs.action}: #{inspect(reason)}")
-        {:reply, {:error, :store_unavailable}, state}
+          {:error, reason} ->
+            Logger.error("[ankusa] could not commit #{attrs.action}: #{inspect(reason)}")
+            {:reply, {:error, :store_unavailable}, state}
+        end
+
+      {{:error, :audit_backlog} = refused, state} ->
+        {:reply, refused, state}
     end
   end
 
   def handle_call({:begin, context, attrs}, {pid, _tag}, state) do
-    seq = state.next_seq
-    row = row(context, attrs, seq)
-    batch = [{:put, :audit, Keys.audit_pending(seq), encode(row)}, seq_op(seq)]
-
-    case Store.write(state.instance, batch, sync: true) do
-      :ok ->
-        ref = Process.monitor(pid)
-        pending = Map.put(state.pending, seq, %{row: row, ref: ref})
-        {:reply, {:ok, seq}, %{state | next_seq: seq + 1, pending: pending}}
-
-      {:error, reason} ->
-        Logger.error("[ankusa] could not record #{attrs.action}: #{inspect(reason)}")
-        {:reply, {:error, :store_unavailable}, state}
+    case ensure_room(state, context) do
+      {:ok, state} -> begin_row(state, context, attrs, pid)
+      {{:error, :audit_backlog} = refused, state} -> {:reply, refused, state}
     end
   end
 
@@ -637,7 +712,27 @@ defmodule Ankusa.Audit do
     end
   end
 
-  def handle_call(:prune, _from, state), do: {:reply, do_prune(state.instance), state}
+  def handle_call(:prune, _from, state) do
+    {result, state} = do_prune(state)
+    {:reply, result, state}
+  end
+
+  # A mutation was refused for want of room (`refusing?/1`): prune to the
+  # ceilings now, so the retry finds it.
+  @impl true
+  def handle_cast(:make_room, state) do
+    config = Ankusa.config(state.instance)
+
+    state =
+      with {:ok, floor} <- outbox_floor(state.instance, config),
+           true <- over?(state, config.audit) do
+        prune_to_ceiling(state, config.audit, floor)
+      else
+        _ -> state
+      end
+
+    {:noreply, state}
+  end
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
@@ -662,7 +757,7 @@ defmodule Ankusa.Audit do
   end
 
   def handle_info(:prune, state) do
-    _ = do_prune(state.instance)
+    {_result, state} = do_prune(state)
     Process.send_after(self(), :prune, state.prune_interval)
     {:noreply, state}
   end
@@ -701,24 +796,44 @@ defmodule Ankusa.Audit do
     :exit, _reason -> {:error, :store_unavailable}
   end
 
+  defp begin_row(state, context, attrs, pid) do
+    seq = state.next_seq
+    row = row(context, attrs, seq)
+    batch = [{:put, :audit, Keys.audit_pending(seq), encode(row)}, seq_op(seq)]
+
+    case Store.write(state.instance, batch, sync: true) do
+      :ok ->
+        ref = Process.monitor(pid)
+        pending = Map.put(state.pending, seq, %{row: row, ref: ref})
+        {:reply, {:ok, seq}, publish_usage(%{state | next_seq: seq + 1, pending: pending})}
+
+      {:error, reason} ->
+        Logger.error("[ankusa] could not record #{attrs.action}: #{inspect(reason)}")
+        {:reply, {:error, :store_unavailable}, state}
+    end
+  end
+
   # The pending row is deleted and its final row written in one batch.
   defp finalize(state, pending_seq, row, update) do
     seq = state.next_seq
     at = System.system_time(:millisecond)
     merged = row |> Map.merge(Map.take(update, @updatable)) |> Map.merge(%{seq: seq, at: at})
     {final, entity_ops} = split_entity(merged)
+    encoded = encode(final)
+    counted = counted(state, seq, byte_size(encoded) + entity_bytes(entity_ops))
 
     batch =
       [
         {:delete, :audit, Keys.audit_pending(pending_seq)},
-        {:put, :audit, Keys.audit(seq, at), encode(final)},
-        seq_op(seq)
+        {:put, :audit, Keys.audit(seq, at), encoded},
+        seq_op(seq),
+        usage_op(counted)
       ] ++ entity_ops
 
     case Store.write(state.instance, batch, sync: true) do
       :ok ->
         emit(state.instance, final)
-        {:ok, %{state | next_seq: seq + 1}}
+        {:ok, publish_usage(%{counted | next_seq: seq + 1})}
 
       {:error, reason} ->
         {:error, reason}
@@ -906,13 +1021,20 @@ defmodule Ankusa.Audit do
     seq = state.next_seq
     row = context |> row(attrs, seq) |> then(&%{&1 | publish: is_map(&1.entity)})
     {stored, entity_ops} = split_entity(row)
+    encoded = encode(stored)
+    counted = counted(state, seq, byte_size(encoded) + entity_bytes(entity_ops))
 
     batch =
-      ops ++ [{:put, :audit, Keys.audit(seq, row.at), encode(stored)}, seq_op(seq) | entity_ops]
+      ops ++
+        [
+          {:put, :audit, Keys.audit(seq, row.at), encoded},
+          seq_op(seq),
+          usage_op(counted) | entity_ops
+        ]
 
     with :ok <- Store.write(state.instance, batch, sync: true) do
       emit(state.instance, stored)
-      {:ok, %{state | next_seq: seq + 1}}
+      {:ok, publish_usage(%{counted | next_seq: seq + 1})}
     end
   end
 
@@ -949,13 +1071,17 @@ defmodule Ankusa.Audit do
   # cannot lose the `source.*` and `route.*` events no sink has seen. The rows
   # that are old enough but held back are counted into
   # `[:ankusa, :audit, :retention]` (`blocked_by_cursor`, `ankusa_audit_retention_blocked_by_cursor`)
-  # and logged, so the backlog is alarmed on rather than silently growing.
-  defp do_prune(instance) do
+  # and logged, so the backlog is alarmed on rather than silently growing. The
+  # same floor holds for the row and byte ceilings (`audit.max_rows`,
+  # `audit.max_bytes`): they prune oldest first, but never past the cursor.
+  defp do_prune(state) do
+    instance = state.instance
     config = Ankusa.config(instance)
     cutoff = System.system_time(:millisecond) - config.audit.retention_days * @day_ms
 
     with {:ok, floor} <- outbox_floor(instance, config),
-         {:ok, count, held} <- prune_batches(instance, cutoff, floor, @prune_batches, 0) do
+         {:ok, count, held, state} <-
+           prune_batches(state, config.audit, cutoff, floor, @prune_batches, 0) do
       if count > 0,
         do: Telemetry.emit([:audit, :pruned], %{count: count}, %{instance: instance})
 
@@ -969,11 +1095,15 @@ defmodule Ankusa.Audit do
         )
       end
 
-      {:ok, count}
+      {{:ok, count}, state}
     else
+      {:error, reason, state} ->
+        Logger.warning("[ankusa] pruning the audit trail failed: #{inspect(reason)}")
+        {{:error, reason}, state}
+
       {:error, reason} ->
         Logger.warning("[ankusa] pruning the audit trail failed: #{inspect(reason)}")
-        {:error, reason}
+        {{:error, reason}, state}
     end
   end
 
@@ -992,29 +1122,78 @@ defmodule Ankusa.Audit do
 
   @held_max 10_000
 
-  defp prune_batches(_instance, _cutoff, _floor, 0, total), do: {:ok, total, 0}
+  # Walks the trail oldest first and deletes what retention allows: a row older
+  # than `cutoff`, or any row while the trail is over `audit.max_rows` /
+  # `audit.max_bytes` (a `cutoff` of `0` is the ceilings alone). Never a row at
+  # or above `floor` (the lifecycle cursor). `{:ok, deleted, held, state}`; an
+  # error carries the state of the batches that did commit, so the counters
+  # stay true to the trail.
+  defp prune_batches(state, _audit, _cutoff, _floor, 0, total), do: {:ok, total, 0, state}
 
-  defp prune_batches(instance, cutoff, floor, left, total) do
+  defp prune_batches(state, audit, cutoff, floor, left, total) do
     %{lo: lo, hi: hi} = Keys.family(:audit)
 
     scan =
-      Store.fold(instance, :audit, {lo, hi}, {0, [], 0}, fn key, _value, {n, keys, held} = acc ->
+      Store.fold(state.instance, :audit, {lo, hi}, {0, [], 0, 0}, fn key,
+                                                                     value,
+                                                                     {n, keys, held, bytes} =
+                                                                       acc ->
         {seq, at} = Keys.decode_audit(key)
+        old? = at < cutoff
+        over? = state.rows - n > audit.max_rows or state.bytes - bytes > audit.max_bytes
 
         cond do
-          at >= cutoff -> {:halt, acc}
-          floor != nil and seq >= floor and held < @held_max -> {:cont, {n, keys, held + 1}}
-          floor != nil and seq >= floor -> {:halt, acc}
-          n < @prune_batch -> {:cont, {n + 1, [key | keys], held}}
-          true -> {:halt, acc}
+          not old? and not over? ->
+            {:halt, acc}
+
+          floor != nil and seq >= floor and old? and held < @held_max ->
+            {:cont, {n, keys, held + 1, bytes}}
+
+          floor != nil and seq >= floor ->
+            {:halt, acc}
+
+          n < @prune_batch ->
+            {:cont, {n + 1, [key | keys], held, bytes + byte_size(value)}}
+
+          true ->
+            {:halt, acc}
         end
       end)
 
-    with {:ok, {n, keys, held}} <- scan,
-         :ok <- Store.write(instance, Enum.flat_map(keys, &prune_ops/1), sync: false) do
+    with {:ok, {n, keys, held, bytes}} <- scan,
+         {:ok, state} <- delete_rows(state, keys, n, bytes) do
       if n < @prune_batch,
-        do: {:ok, total + n, held},
-        else: prune_batches(instance, cutoff, floor, left - 1, total + n)
+        do: {:ok, total + n, held, state},
+        else: prune_batches(state, audit, cutoff, floor, left - 1, total + n)
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  # The rows `keys` and the lifecycle entity beside each, deleted in one batch
+  # with the new usage (the entities' bytes are read first, so the count stays
+  # exact).
+  defp delete_rows(state, [], _n, _bytes), do: {:ok, state}
+
+  defp delete_rows(state, keys, n, bytes) do
+    entity_keys =
+      Enum.map(keys, fn key ->
+        {seq, _at} = Keys.decode_audit(key)
+        Keys.lifecycle_entity(seq)
+      end)
+
+    with {:ok, entities} <- Store.multi_get(state.instance, :audit, entity_keys) do
+      entity_bytes = for {:ok, bin} <- entities, reduce: 0, do: (acc -> acc + byte_size(bin))
+
+      state = %{
+        state
+        | rows: max(state.rows - n, 0),
+          bytes: max(state.bytes - bytes - entity_bytes, 0)
+      }
+
+      ops = Enum.flat_map(keys, &prune_ops/1) ++ [usage_op(state)]
+
+      with :ok <- Store.write(state.instance, ops, sync: false), do: {:ok, publish_usage(state)}
     end
   end
 
@@ -1022,6 +1201,137 @@ defmodule Ankusa.Audit do
   defp prune_ops(key) do
     {seq, _at} = Keys.decode_audit(key)
     [{:delete, :audit, key}, {:delete, :audit, Keys.lifecycle_entity(seq)}]
+  end
+
+  defp over?(state, audit), do: state.rows > audit.max_rows or state.bytes > audit.max_bytes
+
+  # Room for one more mutation, or `{:error, :audit_backlog}`: the trail is pruned
+  # to its ceilings first (oldest first, never past the lifecycle cursor), and a
+  # trail that is still over one, or a lifecycle outbox holding
+  # `audit.outbox_max_backlog` events or more that no sink has confirmed, refuses.
+  # An unpublished row is never dropped to make room. A change the node makes
+  # itself (`Context.system/0`) is not refused: it is one row for a whole batch of
+  # work, and refusing it could stop the very sweeps that make room.
+  defp ensure_room(state, %Context{actor: "system"}), do: {:ok, state}
+
+  defp ensure_room(state, _context) do
+    config = Ankusa.config(state.instance)
+    audit = config.audit
+
+    case outbox_floor(state.instance, config) do
+      {:ok, floor} ->
+        state = if over?(state, audit), do: prune_to_ceiling(state, audit, floor), else: state
+
+        cond do
+          over?(state, audit) ->
+            refuse(state, "the trail is over audit.max_rows / audit.max_bytes")
+
+          outbox_full?(state, config, floor) ->
+            refuse(
+              state,
+              "the lifecycle outbox holds audit.outbox_max_backlog unconfirmed events"
+            )
+
+          true ->
+            {:ok, state}
+        end
+
+      {:error, _reason} ->
+        # The cursor cannot be read, so the write that follows fails on its own.
+        {:ok, state}
+    end
+  end
+
+  defp refuse(state, why) do
+    Logger.warning("[ankusa] refusing a control-plane change: #{why}; nothing is dropped")
+    {{:error, :audit_backlog}, state}
+  end
+
+  defp outbox_full?(state, %{lifecycle: %{sinks: sinks}, audit: audit}, floor),
+    do: sinks != [] and floor != nil and state.next_seq - 1 - floor >= audit.outbox_max_backlog
+
+  defp prune_to_ceiling(state, audit, floor) do
+    case prune_batches(state, audit, 0, floor, 1, 0) do
+      {:ok, count, _held, state} ->
+        if count > 0,
+          do: Telemetry.emit([:audit, :pruned], %{count: count}, %{instance: state.instance})
+
+        state
+
+      {:error, _reason, state} ->
+        state
+    end
+  end
+
+  # ── the size of the trail ─────────────────────────────────────────────────
+
+  defp usage_op(state),
+    do:
+      {:put, :default, Keys.meta("audit_usage"),
+       <<state.rows::64, state.bytes::64, state.counted::64>>}
+
+  defp entity_bytes(entity_ops),
+    do: for({:put, :audit, _key, bin} <- entity_ops, reduce: 0, do: (acc -> acc + byte_size(bin)))
+
+  # `state` after one more row of `size` bytes with sequence number `seq`.
+  defp counted(state, seq, size),
+    do: %{state | rows: state.rows + 1, bytes: state.bytes + size, counted: seq}
+
+  # The counters, readable without a call: the row and byte counts, and the last
+  # `seq` handed out (what the lifecycle backlog is measured from).
+  defp publish_usage(state) do
+    true =
+      :ets.insert(table(state.instance), [
+        {:usage, state.rows, state.bytes},
+        {:last_seq, state.next_seq - 1}
+      ])
+
+    state
+  end
+
+  # The counters persisted by the last batch, if they describe the trail as it is
+  # (the newest row is the last one counted); else counted from the trail, once.
+  # A store that a release without the ceilings wrote to meanwhile fails the check
+  # and is recounted.
+  defp load_usage(instance) do
+    %{lo: lo, hi: hi} = Keys.family(:audit)
+
+    with {:ok, newest} <- Store.first(instance, :audit, {lo, hi}, reverse: true),
+         newest_seq = if(newest, do: elem(Keys.decode_audit(elem(newest, 0)), 0), else: 0),
+         {:ok, stored} <- Store.get(instance, :default, Keys.meta("audit_usage")) |> usage_value() do
+      case stored do
+        {rows, bytes, ^newest_seq} -> {:ok, {rows, bytes, newest_seq}}
+        _stale_or_absent -> recount(instance, newest_seq)
+      end
+    end
+  end
+
+  defp usage_value({:ok, <<rows::64, bytes::64, counted::64>>}), do: {:ok, {rows, bytes, counted}}
+  defp usage_value({:ok, _bad}), do: {:ok, :bad}
+  defp usage_value(:not_found), do: {:ok, :absent}
+  defp usage_value({:error, reason}), do: {:error, reason}
+
+  defp recount(instance, newest_seq) do
+    count = fn family, {rows, bytes} ->
+      %{lo: lo, hi: hi} = Keys.family(family)
+
+      Store.fold(instance, family, {lo, hi}, {rows, bytes}, fn _key, value, {r, b} ->
+        {:cont, {r + if(family == :audit, do: 1, else: 0), b + byte_size(value)}}
+      end)
+    end
+
+    with {:ok, acc} <- count.(:audit, {0, 0}),
+         {:ok, {rows, bytes}} <- count.(:lifecycle_entities, acc),
+         :ok <-
+           Store.write(
+             instance,
+             [
+               {:put, :default, Keys.meta("audit_usage"), <<rows::64, bytes::64, newest_seq::64>>}
+             ],
+             sync: true
+           ) do
+      {:ok, {rows, bytes, newest_seq}}
+    end
   end
 
   # The instance name is operator config: one atom per instance, never request input.

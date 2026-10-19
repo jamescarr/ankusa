@@ -154,4 +154,113 @@ defmodule Ankusa.Queue.Archive do
 
     with {:ok, rows} <- result, do: {:ok, Enum.reverse(rows)}
   end
+
+  @doc """
+  The catalogue row of the segment with the highest `first_seq` at or below `seq`
+  (the only segment that can hold the hook of `seq`), or `nil`: one reverse seek.
+  """
+  @spec segment_at(atom(), pos_integer()) :: {:ok, map() | nil} | {:error, term()}
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  def segment_at(instance, seq) do
+    %{lo: lo} = Keys.family(:segments)
+
+    with {:ok, found} <-
+           Store.first(instance, :segments, {lo, Keys.segment(seq + 1)}, reverse: true) do
+      case found do
+        nil -> {:ok, nil}
+        {_key, value} -> {:ok, :erlang.binary_to_term(value)}
+      end
+    end
+  end
+
+  @doc """
+  Catalogue rows, oldest first, at most `limit`, whose newest hook is older than
+  `cutoff_ms` (`{key, row}`). Segments are in `seq` order, which is time order up
+  to a few seconds of skew, so the scan stops at the first segment that is not
+  expired. A segment whose ids are not UUIDv7 has no age and is never listed.
+  `after_first_seq` resumes a walk after the segment that starts at it.
+  """
+  @spec expired_segments(atom(), integer(), pos_integer(), non_neg_integer()) ::
+          {:ok, [{binary(), map()}]} | {:error, term()}
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  def expired_segments(instance, cutoff_ms, limit, after_first_seq \\ 0) do
+    %{hi: hi} = Keys.family(:segments)
+
+    result =
+      Store.fold(instance, :segments, {Keys.segment(after_first_seq + 1), hi}, [], fn key,
+                                                                                      value,
+                                                                                      acc ->
+        row = :erlang.binary_to_term(value)
+
+        case Ankusa.UUIDv7.timestamp_ms(row.max_id) do
+          {:ok, ms} when ms < cutoff_ms ->
+            acc = [{key, row} | acc]
+            if length(acc) >= limit, do: {:halt, acc}, else: {:cont, acc}
+
+          {:ok, _newer} ->
+            {:halt, acc}
+
+          :error ->
+            {:cont, acc}
+        end
+      end)
+
+    with {:ok, rows} <- result, do: {:ok, Enum.reverse(rows)}
+  end
+
+  @doc """
+  The keys of the 0.3 import's location rows (`?L`), oldest first, at most
+  `limit`, whose hook id is older than `cutoff_ms`. Ids sort by time, so the scan
+  stops at the first one that is not expired; an id that is not a UUIDv7 has no
+  age and is never listed.
+  """
+  @spec expired_legacy(atom(), integer(), pos_integer()) :: {:ok, [binary()]} | {:error, term()}
+  def expired_legacy(instance, cutoff_ms, limit) do
+    %{lo: lo, hi: hi} = Keys.family(:legacy_locations)
+
+    result =
+      Store.fold(instance, :legacy_locations, {lo, hi}, [], fn <<?L, id::binary>> = key,
+                                                               _value,
+                                                               acc ->
+        case Ankusa.UUIDv7.timestamp_ms(id) do
+          {:ok, ms} when ms < cutoff_ms ->
+            acc = [key | acc]
+            if length(acc) >= limit, do: {:halt, acc}, else: {:cont, acc}
+
+          {:ok, _newer} ->
+            {:halt, acc}
+
+          :error ->
+            {:cont, acc}
+        end
+      end)
+
+    with {:ok, keys} <- result, do: {:ok, Enum.reverse(keys)}
+  end
+
+  @doc """
+  Whether any delivery row (pending or dead) is still owed for a hook of the
+  segment `row`. Such a hook is read from the store, not the archive, but it is
+  evicted from the DLQ only while the catalogue can find it, so its segment's
+  row stays.
+  """
+  @spec owed?(atom(), map()) :: {:ok, boolean()} | {:error, term()}
+  def owed?(instance, %{first_seq: first, last_seq: last}) do
+    with {:ok, found} <-
+           Store.first(
+             instance,
+             :deliveries,
+             {Keys.delivery(first, 0), Keys.delivery(last + 1, 0)}
+           ),
+         do: {:ok, found != nil}
+  end
+
+  @doc "Delete catalogue rows (`?S` and `?L` keys) in one batch."
+  @spec delete_rows(atom(), [binary()]) :: :ok | {:error, term()}
+  def delete_rows(_instance, []), do: :ok
+
+  def delete_rows(instance, keys),
+    do: Store.write(instance, Enum.map(keys, &{:delete, :archive, &1}), sync: false)
 end

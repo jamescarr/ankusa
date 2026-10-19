@@ -387,7 +387,8 @@ defmodule Ankusa.Instance do
       do:
         isolated(config, :dispatch, [
           {Ankusa.Dispatch.Pipeline, opts},
-          {Ankusa.Dispatch.Replayer, opts}
+          {Ankusa.Dispatch.Replayer, opts},
+          {Ankusa.Queue.DlqReaper, opts}
         ]),
       else: []
   end
