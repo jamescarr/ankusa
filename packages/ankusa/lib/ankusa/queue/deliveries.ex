@@ -118,9 +118,10 @@ defmodule Ankusa.Queue.Deliveries do
   @retry 1
 
   # Markers examined per read of the earliest due time, and tenants looked at
-  # in the first bucket.
+  # in the first bucket, and markers of skipped tenants passed over.
   @next_due_stale_max 32
   @next_due_tenants 16
+  @next_due_skip_max 4_096
   # Rows a marker cleanup looks at to restore a marker a racing writer needs.
   @verify_max 256
 
@@ -220,7 +221,11 @@ defmodule Ankusa.Queue.Deliveries do
   stale ones, and the earliest of the tenants sharing the first live second wins.
   `opts`: `:tenants` (16), how many tenants of that second are looked at; the
   gauge asks for one, since an age exact to the second needs no more, and a seek
-  into a tenant's range costs more the bigger the range.
+  into a tenant's range costs more the bigger the range. `:skip` (a `MapSet` of
+  tenant ordinals), the tenants not looked at: dispatch passes the ones at their
+  own window, whose due rows it cannot claim, so they do not keep it awake. At
+  most 4 096 markers of skipped tenants are passed over, after which nothing is
+  reported due (the outcome that frees a tenant's window wakes dispatch itself).
   """
   @spec next_due_at(atom(), %{optional(pos_integer()) => integer()}, keyword()) ::
           {:ok, integer() | nil} | {:error, term()}
@@ -233,17 +238,28 @@ defmodule Ankusa.Queue.Deliveries do
       stale: 0,
       seen: 0,
       error: nil,
-      tenants: Keyword.get(opts, :tenants, @next_due_tenants)
+      tenants: Keyword.get(opts, :tenants, @next_due_tenants),
+      skip: Keyword.get(opts, :skip, MapSet.new()),
+      skipped: 0
     }
 
     scan =
       Store.fold(instance, :active, {lo, hi}, acc, fn key, _value, acc ->
         {bucket, ord} = Keys.decode_active(key)
 
-        if acc.bucket != nil and bucket != acc.bucket do
-          {:halt, acc}
-        else
-          next_due_marker(instance, bucket, ord, Map.get(floors, ord, 0), acc)
+        cond do
+          acc.bucket != nil and bucket != acc.bucket ->
+            {:halt, acc}
+
+          MapSet.member?(acc.skip, ord) ->
+            skipped = acc.skipped + 1
+
+            if skipped >= @next_due_skip_max,
+              do: {:halt, acc},
+              else: {:cont, %{acc | skipped: skipped}}
+
+          true ->
+            next_due_marker(instance, bucket, ord, Map.get(floors, ord, 0), acc)
         end
       end)
 

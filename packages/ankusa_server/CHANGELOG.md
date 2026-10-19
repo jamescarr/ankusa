@@ -8,6 +8,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`dispatch.tenants` (TEN-3).** `default` and one entry per tenant id, each
+  any of `max_inflight`, `max_inflight_bytes` and `concurrency`: a tenant's
+  share of the global dispatch limits, so one tenant's slow destination fills its
+  own window and nobody else's (`default` there is always the default entry). See
+  the `ankusa` changelog,
+  [`configuration.md`](../../docs/configuration.md) and
+  [`delivery.md`](../../docs/delivery.md#fairness-between-tenants).
+
 - **Admission keys under `rate_limits` (TEN-2).** `per_ip` and `node`
   (`{rate, burst}`, off by default), `sources.default` (`bytes_per_second`,
   optional `burst_bytes`; 100 MB/s unless changed, `default: null` is off), and
@@ -160,6 +168,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `ankusa` changelog and [`configuration.md#egress`](../../docs/configuration.md#egress).
 
 ### Changed
+
+- **`dispatch.sink_concurrency` defaults to `8` (was unset), per tenant, and may
+  exceed `dispatch.concurrency` (TEN-3).** `config-examples/reference.yml`
+  shows both; `sink_concurrency: null` switches the cap off. One sink key now
+  delivers at most 8 attempts at once (8 ÷ the destination's latency per
+  second), so raise it for a high-volume source. A deployment whose hooks share
+  one tenant is held to the per-tenant defaults (`max_inflight: 1024`,
+  `max_inflight_bytes: 33554432`, `concurrency: 16`): raise
+  `dispatch.tenants.default` for the old ceilings.
 
 - **`routing: tenant_path` needs `rate_limits.default` (TEN-2).** The URL
   names the tenant, so a config with `routing: tenant_path` and no

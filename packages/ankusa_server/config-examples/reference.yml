@@ -339,10 +339,11 @@ dispatch:
   # as a failed attempt (the sink may still complete it; consumers dedupe on
   # the idempotency key). Keep it above every sink's own timeout.
   attempt_timeout_ms: 30000
-  # Per-sink isolation. Each sink of each source has its own queue; at most
-  # sink_concurrency attempts of one sink run at once (null = only the global
-  # `concurrency`), so a slow destination cannot take every slot.
-  sink_concurrency: null
+  # Per-sink isolation. Each sink of each source of each tenant has its own
+  # queue; at most sink_concurrency attempts of one such sink run at once (null
+  # = only the global `concurrency`), so a slow destination cannot take every
+  # slot.
+  sink_concurrency: 8
   # A sink that fails breaker_failures times in a row (0 = never) is skipped
   # for breaker_open_ms, doubling on each consecutive open up to
   # breaker_max_open_ms; its rows wait (attempts unchanged) and one probe
@@ -356,6 +357,23 @@ dispatch:
     max_attempts: 84
     # Full jitter: delay is multiplied by a random factor in [0.5, 1.0].
     jitter: true
+  # Per-tenant shares of the three global limits above (a tenant is the hook's
+  # tenant id; hooks without one are the tenant `default`), so one tenant whose
+  # destination is slow fills its own window and nobody else's. `default` applies
+  # to every tenant; an entry named by a tenant id overrides any of its keys for
+  # that tenant (the global limits still apply on top). Run a single tenant?
+  # Raise `default` to the global values.
+  tenants:
+    default:
+      # claimed, unfinished deliveries of one tenant...
+      max_inflight: 1024
+      # ...and the max sum of their stored hook sizes in bytes
+      max_inflight_bytes: 33554432
+      # attempts of one tenant running at once
+      concurrency: 16
+    # acme:
+    #   max_inflight: 2048
+    #   concurrency: 24
 
 wal:
   # [env ANKUSA_WAL_TYPE] disk — the local RocksDB store; every hook is on disk before the ack, so it survives process crash and power loss on this host, not the loss of the host.
