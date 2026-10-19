@@ -13,6 +13,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **`wal: :dual`: the ack waits for a replicated intake log too (DUR-1.b.a,
+  [ADR 0002](../../docs/adr/0002-dual-commit-intake-log.md)).** The core of the
+  dual commit: the `Ankusa.Intake` behaviour and `Ankusa.Intake.Memory` (a
+  file-backed test double with fault injection), `Queue.Writer` running the synced
+  local write and the confirmed publish **in parallel** (both required for the
+  `201`; the reply is a message when the publish task answers, so batches
+  pipeline), a bounded pending set, the breaker (`Intake.Gate`), the live
+  `Intake.Reconciler` that **carries** a half-persisted hook to completion (the
+  fleet dedupe claim is held, then promoted; a retry that meets an unconfirmed
+  original is `503 intake_pending`, never `201`), boot recovery
+  (`Intake.Recovery`: identity, replay from `m:intake_offset` through the
+  seq-and-id rule, republish of the local tail; `mix ankusa.recover`),
+  `Health.ready` `intake: up | down | recovering`, `GET /v1/wal` `intake`, the
+  `ankusa_intake_*` series, `503 intake_unavailable` / `intake_pending`, and
+  every `intake.*` key with its range. New meta rows only (`m:intake_seq`,
+  `m:intake_node`, `m:intake_partition`); the store format is unchanged. The
+  Kafka adapter, the YAML keys, the fleet drill and the architecture, storage and
+  deployment docs are DUR-1.b.b. `bench/intake_bench.exs` is part of `mise run
+  bench:gate`.
+
 - **Dedupe ceilings, the dedupe sweeper and audit retention behind the outbox
   (DUR-2.a).** `dedupe.max_entries` (default 100 000 000) and
   `dedupe.max_entries_per_tenant` (default 30 000 000) bound the live ingest-dedupe

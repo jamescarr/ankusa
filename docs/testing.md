@@ -853,6 +853,44 @@ The bench reports `ingest_per_s`, `p50_ms`, `p99_ms` (ingest latency),
 acked never arrived. The numbers are machine-dependent and move with the
 pipeline, so run it on your own hardware rather than reading a figure here.
 
+### Dual commit: `wal.type: dual`
+
+[ADR 0002](adr/0002-dual-commit-intake-log.md) lists every case; each half of the
+commit is driven alone with `Ankusa.Intake.Memory` (a file-backed log with
+injectable latency, per-call failures, a lost ack, a held publish) or by taking the
+store down, and asserts on what a consumer sees (the `201`, the stored hooks, the
+sink's deliveries, the log's records):
+
+- `queue_dual_test.exs`: `no ack without intake confirm`, the max-not-sum
+  latency, a log that fails after the local commit (one hook id per dedupe key,
+  one delivery, the retry is `intake_pending` until the reconciler completes
+  the hook and `duplicate` after), a store that fails after the publish, both
+  halves failing, a lost ack republished and applied once, the refusals before
+  either half (open breaker, pending ceilings, record too large), the breaker's
+  open / half-open / close cycle and that it never degrades to disk-only, the
+  router's `503`s and `Retry-After`, the fleet claim staying pending, the
+  startup lines, the metric series.
+- `intake/reconciler_test.exs`: the log half, the local half, a local half that
+  already landed is not reapplied, a stuck entry releases its claim, a permanent
+  failure is stuck and kept, `hold` against a finished entry, claims promote only
+  when both halves are confirmed.
+- `intake/recovery_test.exs`: replay from `m:intake_offset` with the original seqs,
+  duplicate and reordered records, a seq collision re-sequenced, republishing the
+  local tail (`disk` to `dual`), unknown versions, kinds and sources, a truncated
+  log, a node id mismatch, `Recovery.run_offline/2` (what `mix ankusa.recover`
+  runs) twice and with `--dry-run`, a clean stop leaving the offset at the log
+  head, and the offset staying below a record only the log holds.
+- `config_test.exs` (every `intake.*` range and the cross-key rules, the
+  `/v1/config` redaction), `health_test.exs` (`intake` up, down, recovering).
+
+`bench/intake_bench.exs` (`MIX_ENV=test mix run bench/intake_bench.exs`, also run
+by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:
+`Ankusa.Intake.Memory` confirms after 5 ms, one client measures the ack p50 over
+200 requests, 128 clients measure throughput over 6 000. It passes only if the
+dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the parallel commit costs the
+larger of fsync and confirm, not their sum) and the dual throughput is at least
+0.8 x the disk's.
+
 ### Perf gate: `mise run bench:gate`
 
 A hot-path change must not make ingest slower unnoticed, so
@@ -907,8 +945,8 @@ and the heavy tenant's peak claimed rows and running attempts, and exits 1 if
 the light tenant's p99 is more than 2× its solo p99 (or over 25 ms) or the
 heavy tenant passes its window.
 
-`mise run bench:gate` also runs three self-asserting scripts first, with no
-baseline entry:
+`mise run bench:gate` also runs four self-asserting scripts first, with no
+baseline entry (the fourth, [`bench/intake_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/intake_bench.exs), is under [Dual commit](#dual-commit-wal-type-dual)):
 [`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
 times `Ankusa.Metrics.Gauges.measure/1` and
 [`bench/dispatch_tick_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/dispatch_tick_bench.exs)

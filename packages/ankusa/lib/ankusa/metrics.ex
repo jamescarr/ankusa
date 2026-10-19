@@ -65,8 +65,8 @@ defmodule Ankusa.Metrics do
   bounded), and anything else becomes `:other`. `:outcome` on ingest is already
   one of a fixed set (`:committed`, `:duplicate`, `:quarantined`, `:rejected`,
   `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
-  `:dedupe_pending`, `:quarantine_full`, `:overload`, `:tenant_limit`, `:dedupe_quota` or
-  `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
+  `:dedupe_pending`, `:quarantine_full`, `:overload`, `:tenant_limit`, `:dedupe_quota`,
+  `:store_unavailable`, and under `wal: :dual` `:intake_unavailable` or `:intake_pending`) because `Ankusa.Edge.Ingest` tags it before emitting.
   A request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
   `:payload_too_large`, `:body_read_failed`, `:invalid_header`,
