@@ -229,7 +229,21 @@ defmodule Ankusa.Config do
             # mutating admin API. Off by default; the admin API keeps serving
             # `/metrics` either way. Also starts the metrics reporter and the
             # gauge poller when the admin API is off.
-            metrics: %{enabled: false, port: 4004, ip: "127.0.0.1", tls: nil},
+            #
+            # `detail` is the cardinality policy of the Prometheus scrape:
+            # `:tenant` (the default) labels per-hook series with `tenant_id`,
+            # `:source` adds `source_id` as well, `:none` carries neither (and
+            # omits the per-tenant gauges). `max_series_per_metric` caps how
+            # many distinct identity label sets one metric keeps; the rest are
+            # folded into `"other"` (`Ankusa.Metrics.Cardinality`).
+            metrics: %{
+              enabled: false,
+              port: 4004,
+              ip: "127.0.0.1",
+              tls: nil,
+              detail: :tenant,
+              max_series_per_metric: 5_000
+            },
             # route management: the allowlist guard plus its admin API. Off by
             # default, and off means "capture every POST", as it always has. On
             # means deny-by-default: a request is captured only if it matches an
@@ -610,6 +624,7 @@ defmodule Ankusa.Config do
     {[:backup, :interval_ms], "backup.interval_ms"},
     {[:backup, :keep], "backup.keep"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
+    {[:metrics, :max_series_per_metric], "metrics.max_series_per_metric"},
     {[:routes, :max_routes], "routes.max_routes"},
     {[:fleet, :pending_ttl_ms], "fleet.pending_ttl_ms"},
     {[:fleet, :breaker_window_ms], "fleet.breaker_window_ms"},
@@ -715,6 +730,14 @@ defmodule Ankusa.Config do
         ] do
       check!(config, path, key, "true or false", &is_boolean/1)
     end
+
+    check!(
+      config,
+      [:metrics, :detail],
+      "metrics.detail",
+      ":tenant, :source or :none",
+      &(&1 in [:tenant, :source, :none])
+    )
 
     config
   end

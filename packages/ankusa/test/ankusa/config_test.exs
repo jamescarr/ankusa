@@ -700,7 +700,15 @@ defmodule Ankusa.ConfigTest do
              } = config.listener
 
       assert config.listener.num_acceptors == System.schedulers_online() * 2
-      assert config.metrics == %{enabled: false, port: 4004, ip: "127.0.0.1", tls: nil}
+
+      assert config.metrics == %{
+               enabled: false,
+               port: 4004,
+               ip: "127.0.0.1",
+               tls: nil,
+               detail: :tenant,
+               max_series_per_metric: 5_000
+             }
 
       for section <- [config.admin, config.claim_check, config.routes.admin] do
         assert section.tls == nil
@@ -736,6 +744,26 @@ defmodule Ankusa.ConfigTest do
 
       assert_raise ArgumentError, ~r/metrics\.ip must be an IP address/, fn ->
         Config.new(metrics: %{ip: "localhost"})
+      end
+    end
+
+    test "metrics.detail is :tenant, :source or :none; the series ceiling a positive integer" do
+      for detail <- [:tenant, :source, :none] do
+        assert Config.new(metrics: %{detail: detail}).metrics.detail == detail
+      end
+
+      assert Config.new(metrics: %{max_series_per_metric: 1}).metrics.max_series_per_metric == 1
+
+      for detail <- [:sources, "tenant", nil] do
+        assert_raise ArgumentError,
+                     "metrics.detail must be :tenant, :source or :none, got #{inspect(detail)}",
+                     fn -> Config.new(metrics: %{detail: detail}) end
+      end
+
+      for ceiling <- [0, -1, 1.5, "5000", nil] do
+        assert_raise ArgumentError,
+                     "metrics.max_series_per_metric must be a positive integer, got #{inspect(ceiling)}",
+                     fn -> Config.new(metrics: %{max_series_per_metric: ceiling}) end
       end
     end
 

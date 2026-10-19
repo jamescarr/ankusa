@@ -147,6 +147,16 @@ metrics:
   ip: 127.0.0.1
   # A TLS block, shaped like `listener.tls`.
   # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
+  # The cardinality policy of every /metrics scrape, on this listener and on the
+  # admin API's. Which identity labels the per-hook series carry:
+  #   tenant — `tenant_id` (the default)
+  #   source — `tenant_id` and `source_id`; the most detail, the most series
+  #   none   — neither, and no per-tenant gauges: the scrape does not grow with
+  #            the number of tenants
+  detail: tenant
+  # How many distinct label sets one metric keeps; every later tenant or source
+  # is folded into the series labelled "other" (one slot is reserved for it).
+  max_series_per_metric: 5000
 
 routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.

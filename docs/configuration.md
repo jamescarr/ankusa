@@ -624,6 +624,8 @@ config :ankusa,
 | `admin.auth` | `%{mode: :none}` | Who may call the admin API: `mode` (`:none`, `:token`, `:jwt`, `:mtls`), `allow_insecure`, `tokens`, `jwt`, `mtls`. `mode: :none` is accepted only when `admin.ip` is loopback (or `allow_insecure: true`). See [Control-plane authentication](#control-plane-authentication). |
 | `metrics.enabled`, `metrics.port`, `metrics.ip` | `false`, `4004`, `"127.0.0.1"` | A listener serving only `/metrics`, `/health` and `/ready` (`Ankusa.Metrics.Router`); see [A separate metrics listener](#a-separate-metrics-listener). |
 | `metrics.tls` | `nil` | A TLS block for the metrics listener. |
+| `metrics.detail` | `:tenant` | Which identity labels the per-hook series carry: `:tenant` (`tenant_id`), `:source` (`tenant_id` and `source_id`) or `:none`. See [Metric cardinality](#metric-cardinality). |
+| `metrics.max_series_per_metric` | `5000` | The most label sets one metric keeps; later tenants/sources are folded into an `"other"` series (one slot is reserved for it). A positive integer. |
 | `claim_check.tls`, `routes.admin.tls` | `nil` | A TLS block for the claim-check gateway and the route-management API. |
 | `routes.admin.auth`, `claim_check.auth` | `%{mode: :none}` | The same block for the route-management API and the claim-check gateway. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
@@ -657,7 +659,8 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 `claim_check.store_cooldown_ms`, `claim_check.read_deadline_ms`,
 `claim_check.read_timeout_ms`, `claim_check.read_max_inflight`,
 `claim_check.read_cache_max_entry_bytes`, `backup.interval_ms`,
-`backup.keep`, `admin.gauge_interval_ms`, `routes.max_routes` and every
+`backup.keep`, `admin.gauge_interval_ms`, `metrics.max_series_per_metric`,
+`routes.max_routes` and every
 numeric `listener.*` key (`max_connections`, `num_acceptors`, the three
 timeouts, `max_requests_per_connection`, `max_header_count`,
 `max_header_length`) must be positive; `listener.http2` and `metrics.enabled`
@@ -749,6 +752,44 @@ route to it and none to the operator API. It works with `admin.enabled: false`
 (it then also starts the metrics reporter and the gauge poller), and the admin
 listener keeps serving `/metrics` either way. `metrics.tls` secures it like any
 other listener.
+
+#### Metric cardinality
+
+A scrape must not grow with the number of tenants or sources, so the per-hook
+series carry an identity label only as far as `metrics.detail` says, and each
+metric keeps a bounded number of them.
+
+| `metrics.detail` | Labels on the ingest, verify-failure, quarantine, rate-limit and delivery counters | Also |
+| --- | --- | --- |
+| `:tenant` (default) | `tenant_id` | the top-100 `ankusa_tenant_pending` and `ankusa_dispatch_tenant_inflight` gauges (label `tenant`) |
+| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` histogram carries both, too |
+| `:none` | neither | no per-tenant gauges: the series set is the same for one tenant and for a million |
+
+`metrics.max_series_per_metric` (default `5000`) caps the label sets one metric
+keeps. A metric admits its first `max_series_per_metric - 1` label sets that
+carry an identity; every later one is counted in a series whose identity
+labels (`tenant_id`, `source_id`, `tenant`) are `"other"`, with its other
+labels (`outcome`, `sink`, …) intact, so nothing is lost from a total and
+`sum without (tenant_id, source_id) (…)` is unchanged. The `"other"` series
+uses the last of the slots (one per combination of the metric's other labels);
+a tenant that is really named `other` shares it. The two per-tenant gauges
+drop a tenant past the ceiling instead, since `"other"` would show whichever
+tenant reported last. A series that was admitted is kept until the node
+restarts. A request for a source that does not exist never carries a label
+(`ankusa_ingest_refused_total{reason="unknown_source"}`), whatever the setting.
+
+Worst case, a scrape has up to `max_series_per_metric` series for each of the
+eight identity-carrying counters (`ankusa_ingest_requests_total`,
+`ankusa_verify_failures_total`, `ankusa_verifier_weak_hash_total`,
+`ankusa_quarantine_rate_limited_total`, `ankusa_quarantine_full_total`,
+`ankusa_rate_limit_rejected_total`, `ankusa_dispatch_deliveries_total`,
+`ankusa_dispatch_dead_lettered_total`) and each of the two gauges, whatever the
+number of tenants. The platform's budget is 10 000 series per node: with many
+active tenants, lower `max_series_per_metric` to fit it, or set `detail:
+none`, which makes the series set independent of the tenant count (the number
+of tenants is `ankusa_tenants`). The ingest and delivery counters are the ones
+that fill first; the failure counters (`verify_failures`, `weak_hash`,
+`quarantine_*`) only grow with tenants that have failures.
 
 #### The admin API
 

@@ -258,7 +258,12 @@ defmodule Ankusa.Edge.Ingest do
   """
   @spec ingest(atom(), Source.t(), String.t(), raw_request()) :: result()
   def ingest(instance, %Source{} = source, tenant_id, req) do
-    metadata = %{instance: instance, source_id: source.id, route_id: Map.get(req, :route_id)}
+    metadata = %{
+      instance: instance,
+      source_id: source.id,
+      tenant_id: tenant_id,
+      route_id: Map.get(req, :route_id)
+    }
 
     Ankusa.Telemetry.span([:ingest], metadata, fn ->
       {result, dropped} = accept(instance, source, tenant_id, req)
@@ -294,7 +299,7 @@ defmodule Ankusa.Edge.Ingest do
     if match?(%Verification{flagged: true}, env.verification) do
       # A forged, flag-accepted request must not claim a provider event key and
       # suppress the real event, so no key is extracted when the hook was flagged.
-      case Quarantine.hit(instance, env.source_id) do
+      case Quarantine.hit(instance, env.source_id, env.tenant_id) do
         :ok -> commit_stored(instance, source, env)
         {:rate_limited, ms} -> {{:error, {:quarantine_rate_limited, ms}}, 0}
         {:error, :store_unavailable} -> {{:error, :store_unavailable}, 0}
@@ -367,12 +372,16 @@ defmodule Ankusa.Edge.Ingest do
     opts = request_opts(mod, opts, req)
 
     outcome =
-      Ankusa.Telemetry.span([:verify], %{instance: instance, source_id: source.id}, fn ->
-        result = mod.verify(env, opts)
+      Ankusa.Telemetry.span(
+        [:verify],
+        %{instance: instance, source_id: source.id, tenant_id: env.tenant_id},
+        fn ->
+          result = mod.verify(env, opts)
 
-        {result,
-         %{provider: mod, scheme: scheme, status: verify_status(result), weak_hash: weak_hash}}
-      end)
+          {result,
+           %{provider: mod, scheme: scheme, status: verify_status(result), weak_hash: weak_hash}}
+        end
+      )
 
     case outcome do
       :ok ->

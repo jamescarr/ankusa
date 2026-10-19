@@ -1080,11 +1080,7 @@ defmodule Ankusa.Dispatch.Pipeline do
 
     state =
       state
-      |> settle_dead(
-        elem(Deliveries.owner(item.env, item.row), 0),
-        item.row.module,
-        item.row.attempts
-      )
+      |> settle_dead(item.env, item.row, item.row.module, item.row.attempts)
       |> bump_replay(item.row, :dead)
 
     {state, dead_ops ++ ops, pairs, jobs, sources}
@@ -1132,7 +1128,7 @@ defmodule Ankusa.Dispatch.Pipeline do
         state =
           Enum.reduce(dead, state, fn {env, row}, state ->
             state
-            |> settle_dead(elem(Deliveries.owner(env, row), 0), row.module, row.attempts)
+            |> settle_dead(env, row, row.module, row.attempts)
             |> bump_replay(row, :dead)
           end)
 
@@ -1141,23 +1137,33 @@ defmodule Ankusa.Dispatch.Pipeline do
     end
   end
 
-  defp settle_dead(state, source_id, module, attempts) do
+  defp settle_dead(state, env, row, module, attempts) do
+    {source_id, _id} = Deliveries.owner(env, row)
+    tenant_id = tenant_of(env)
+
     Telemetry.emit([:dispatch, :stop], %{}, %{
       instance: state.instance,
       result: :dlq,
       attempts: attempts,
       sink: module,
-      source_id: source_id
+      source_id: source_id,
+      tenant_id: tenant_id
     })
 
     Telemetry.emit([:dispatch, :dlq], %{}, %{
       instance: state.instance,
       source_id: source_id,
+      tenant_id: tenant_id,
       sink: module
     })
 
     %{state | settled: state.settled + 1}
   end
+
+  # The tenant a dead row's hook belonged to; a hook that did not decode has no
+  # tenant to name, so it is the default tenant's.
+  defp tenant_of(%Envelope{tenant_id: tenant_id}), do: Tenants.normalize(tenant_id)
+  defp tenant_of(_undecoded), do: Tenants.normalize(nil)
 
   # Sources are looked up once per scan (`sources` is the scan's cache). A store
   # that cannot answer is cached as `:unavailable` for the rest of the scan,
@@ -1514,6 +1520,7 @@ defmodule Ankusa.Dispatch.Pipeline do
       instance: state.instance,
       sink: mod,
       source_id: job.env.source_id,
+      tenant_id: Tenants.normalize(job.env.tenant_id),
       state: to
     })
   end
@@ -1751,7 +1758,8 @@ defmodule Ankusa.Dispatch.Pipeline do
             result: :ok,
             attempts: attempts,
             sink: mod,
-            source_id: job.env.source_id
+            source_id: job.env.source_id,
+            tenant_id: Tenants.normalize(job.env.tenant_id)
           })
 
           {%{state | settled: state.settled + 1} |> bump_replay(job.row, :delivered),
@@ -1803,7 +1811,7 @@ defmodule Ankusa.Dispatch.Pipeline do
       :give_up ->
         {mod, _opts} = job.spec
         error = inspect({:sink, mod, reason}, limit: 50, printable_limit: 4096)
-        state = state |> settle_dead(job.env.source_id, mod, attempts) |> bump_replay(row, :dead)
+        state = state |> settle_dead(job.env, row, mod, attempts) |> bump_replay(row, :dead)
 
         {state,
          Deliveries.dead_ops(:inflight, job.ord, job.seq, job.sink, row, now, error, job.env), []}

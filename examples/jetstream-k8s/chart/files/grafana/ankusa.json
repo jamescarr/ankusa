@@ -458,8 +458,8 @@
         },
         {
           "refId": "B",
-          "expr": "sum by (source_id, scheme) (rate(ankusa_verify_failures_total{app=~\"$app\"}[$__rate_interval]))",
-          "legendFormat": "verify failed {{source_id}} {{scheme}}"
+          "expr": "sum by (tenant_id, scheme) (rate(ankusa_verify_failures_total{app=~\"$app\"}[$__rate_interval]))",
+          "legendFormat": "verify failed {{tenant_id}} {{scheme}}"
         }
       ]
     },
@@ -1199,8 +1199,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (source_id, sink) (rate(ankusa_dispatch_dead_lettered_total{app=~\"$app\"}[$__rate_interval]))",
-          "legendFormat": "dead-lettered {{source_id}} {{sink}}"
+          "expr": "sum by (tenant_id, sink) (rate(ankusa_dispatch_dead_lettered_total{app=~\"$app\"}[$__rate_interval]))",
+          "legendFormat": "dead-lettered {{tenant_id}} {{sink}}"
         },
         {
           "refId": "B",
