@@ -8,6 +8,13 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`batcher.max_commits`, `group_commit_max_bytes` and `group_commit_max_records`
+  (DUR-4), and `batcher.partitions` defaults to 4.** YAML keys for the
+  cross-partition group commit: the commits a partition keeps in flight (default 2),
+  and the most body bytes (default 4 194 304) and hooks (default 1 024) the queue
+  writer merges into one synced commit across the batcher partitions. See
+  `docs/configuration.md`.
+
 - **`claim_check.redeem_grace_ms`, `sweep_max_objects` and `bucket_expiry_days`
   (DUR-2.c).** YAML keys for the claim leases: how long a claim pack stays redeemable
   after its hook is delivered (default 86 400 000 ms), how many packs and leases one

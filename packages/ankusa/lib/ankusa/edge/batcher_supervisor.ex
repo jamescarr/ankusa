@@ -1,9 +1,12 @@
 defmodule Ankusa.Edge.BatcherSupervisor do
   @moduledoc """
-  A fixed pool of `Ankusa.Edge.Batcher` processes, one per partition (two by
-  default). `Ankusa.Queue.Writer` serializes commits itself, so extra
-  partitions mostly add contention rather than throughput. What the pool still
-  buys is fault isolation: one wedged partition leaves the others committing.
+  A fixed pool of `Ankusa.Edge.Batcher` processes, one per partition (four by
+  default). A partition holds its callers' bodies and prepares their commit
+  (`Ankusa.Queue.enqueue/3`: the encoded rows and the dedupe read) in its own
+  task, in parallel with the others; `Ankusa.Queue.Writer` merges whatever every
+  partition has queued into one group commit, so more partitions are not more
+  fsyncs. The pool also buys fault isolation: one wedged partition leaves the
+  others committing.
   """
 
   use Supervisor

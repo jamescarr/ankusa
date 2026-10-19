@@ -54,12 +54,24 @@ defmodule Ankusa.Config do
             # direct mode only: the overall deadline every sink must confirm
             # under. Must stay under the provider's own timeout (GitHub's is 10 s).
             direct_publish_timeout_ms: 8_000,
-            # group-commit batcher. The queue writer serializes commits itself,
-            # so more partitions only add contention now that a partition commits
-            # asynchronously instead of holding the caller's message queue.
+            # group-commit batcher: one process per partition, each committing
+            # asynchronously. The queue writer merges the batches every
+            # partition has queued into one group (one synced write, one intake
+            # publish) and only the writer assigns seqs, so partitions are where
+            # request bodies are held and rows are encoded, not extra commits.
             batcher: %{
-              partitions: 2,
+              partitions: 4,
               max_batch: 256,
+              # commits one partition keeps in flight: the next batch is handed to
+              # the writer while the previous one syncs, so the writer always has
+              # a group waiting and a caller waits for one commit, not two
+              max_commits: 2,
+              # a group is cut at whichever of these two is reached first; every
+              # caller in it waits for the whole group, so the byte cap bounds
+              # the added ack latency (4 MiB is a few ms of WAL write), and under
+              # `wal: :dual` one group is one produce request
+              group_commit_max_bytes: 4_194_304,
+              group_commit_max_records: 1_024,
               # 0 = commit as soon as the batch fills, no linger: the commit is a
               # Task, so waiting costs a scheduling hop, not head-of-line
               # blocking.
@@ -743,6 +755,9 @@ defmodule Ankusa.Config do
     {[:direct_publish_timeout_ms], "direct_publish_timeout_ms"},
     {[:batcher, :partitions], "batcher.partitions"},
     {[:batcher, :max_batch], "batcher.max_batch"},
+    {[:batcher, :max_commits], "batcher.max_commits"},
+    {[:batcher, :group_commit_max_bytes], "batcher.group_commit_max_bytes"},
+    {[:batcher, :group_commit_max_records], "batcher.group_commit_max_records"},
     {[:batcher, :max_queue], "batcher.max_queue"},
     {[:batcher, :max_queue_bytes], "batcher.max_queue_bytes"},
     {[:dispatch, :batch], "dispatch.batch"},

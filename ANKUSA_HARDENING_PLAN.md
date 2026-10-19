@@ -411,7 +411,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/store.ex:45,67-79,596-632`, `test/ankusa/store_test.exs:318-345`, `config.ex`.
   *Evidence:* —
 
-- [ ] **DUR-4 — Cross-partition group commit and writer offload** · P1 · Deps: F1
+- [x] **DUR-4 — Cross-partition group commit and writer offload** · P1 · Deps: F1
   *Why:* each partition's batch is one serialized `multi_get` + row encoding + `sync: true` write inside one `Queue.Writer` GenServer (`queue/writer.ex:99-150,330-341,466-511`); a second partition only queues behind the first's fsync; no throughput measurement above 512 B bodies.
   *Change:* the batcher's task performs the dedupe `multi_get` and row encoding and hands prebuilt ops to the writer; the writer drains its mailbox, merges all queued batches into one synced write (cap `batcher.group_commit_max_bytes`, default 64 MiB), assigns seqs, replies to every caller; `batcher.partitions` default 4. `bench/store_commit.exs` measures commits/s and ack p99 at 1/5/10 ms simulated fsync.
   *Done when:* ≥ 2× ingest throughput at 10 KB bodies with 4 partitions vs. the F1 baseline; seqs stay dense and increasing; `loss_test` and F2 pass.

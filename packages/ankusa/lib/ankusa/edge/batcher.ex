@@ -2,14 +2,21 @@ defmodule Ankusa.Edge.Batcher do
   @moduledoc """
   Group-commit batcher, one process per partition. Requests hand it an envelope
   and **block on the reply**. The batcher buffers callers, then flushes the whole
-  batch to the queue in one `enqueue` (one fsync). Every blocked caller is replied
-  to *after* the commit returns — that is what makes the ack honest.
+  batch to the queue in one `enqueue`, which the queue writer merges with the
+  batches of the other partitions into one group commit (one fsync). Every
+  blocked caller is replied to *after* the commit returns — that is what makes the
+  ack honest.
 
   The append itself runs in a `Task`, so the batcher keeps accepting requests
-  while a commit is in flight: the next batch accumulates behind it and commits
-  the instant the previous one finishes. Nothing waits on a commit except the
-  callers whose own records are in it — with `max_delay_ms: 0` that is the
-  steady state, and the batch is naturally as large as concurrency allows.
+  while commits are in flight, up to `batcher.max_commits` of them (two by
+  default): a request that finds a free slot is handed to the writer at once, one
+  that does not accumulates behind the commits ahead and goes the instant one
+  finishes. Keeping a second commit queued at the writer is what lets it merge
+  the batches of every partition into one group, and what keeps a caller waiting
+  for one commit rather than for the one ahead of it and then its own. Nothing
+  waits on a commit except the callers whose own records are in it — with
+  `max_delay_ms: 0` that is the steady state, and the batch is naturally as
+  large as concurrency allows.
 
   The queue is bounded, and the bound counts buffered *and* in-flight records.
   When it is reached the batcher sheds load: the caller gets `{:error,
@@ -150,6 +157,7 @@ defmodule Ankusa.Edge.Batcher do
      %{
        instance: instance,
        max_batch: b.max_batch,
+       max_commits: b.max_commits,
        max_delay_ms: b.max_delay_ms,
        max_queue: b.max_queue,
        max_queue_bytes: b.max_queue_bytes,
@@ -159,8 +167,9 @@ defmodule Ankusa.Edge.Batcher do
        count: 0,
        # the body bytes in `buffer`
        bytes: 0,
-       # nil | %{ref: reference, entries: [{from, record, deadline}], bytes: n}
-       inflight: nil,
+       # commit task ref => %{entries: [{from, record, deadline}], bytes: n}, at
+       # most `max_commits` of them
+       inflight: %{},
        timer: nil,
        # The timer that answers buffered records at their deadline, and the
        # deadline it was armed for.
@@ -220,7 +229,7 @@ defmodule Ankusa.Edge.Batcher do
   def handle_info(:flush, state) do
     state = %{state | timer: nil}
 
-    if state.inflight == nil and state.count > 0 do
+    if map_size(state.inflight) < state.max_commits and state.count > 0 do
       {:noreply, start_commit(state)}
     else
       {:noreply, state}
@@ -241,9 +250,10 @@ defmodule Ankusa.Edge.Batcher do
     {:noreply, rearm_expiry(state)}
   end
 
-  def handle_info({ref, result}, %{inflight: %{ref: ref, entries: entries}} = state) do
+  def handle_info({ref, result}, %{inflight: inflight} = state) when is_map_key(inflight, ref) do
     Process.demonitor(ref, [:flush])
-    state = %{state | inflight: nil}
+    {%{entries: entries}, inflight} = Map.pop!(inflight, ref)
+    state = %{state | inflight: inflight}
 
     case result do
       {:ok, results} ->
@@ -265,7 +275,8 @@ defmodule Ankusa.Edge.Batcher do
     {:noreply, if(state.count > 0, do: start_commit(state), else: state)}
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{inflight: %{ref: ref}} = state) do
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{inflight: inflight} = state)
+      when is_map_key(inflight, ref) do
     # The commit task died without delivering a result (killed from outside;
     # `safe_enqueue/3` turns every error it could catch into a value). The task
     # is not linked, so the batcher and the records buffered behind this batch
@@ -275,11 +286,13 @@ defmodule Ankusa.Edge.Batcher do
     # already mid-commit, that batch is durable and its callers were told 503.
     Logger.warning("[ankusa] store commit task died: #{inspect(reason)}")
 
-    Enum.each(state.inflight.entries, fn {from, _record, _deadline} ->
+    {%{entries: entries}, inflight} = Map.pop!(inflight, ref)
+
+    Enum.each(entries, fn {from, _record, _deadline} ->
       GenServer.reply(from, {:error, :store_unavailable})
     end)
 
-    state = %{state | inflight: nil}
+    state = %{state | inflight: inflight}
     {:noreply, if(state.count > 0, do: start_commit(state), else: state)}
   end
 
@@ -289,11 +302,11 @@ defmodule Ankusa.Edge.Batcher do
 
   # ── commits ───────────────────────────────────────────────────────────────
 
-  defp inflight_size(%{inflight: nil}), do: 0
-  defp inflight_size(%{inflight: %{entries: entries}}), do: length(entries)
+  defp inflight_size(%{inflight: inflight}),
+    do: Enum.reduce(inflight, 0, fn {_ref, %{entries: entries}}, n -> n + length(entries) end)
 
-  defp inflight_bytes(%{inflight: nil}), do: 0
-  defp inflight_bytes(%{inflight: %{bytes: bytes}}), do: bytes
+  defp inflight_bytes(%{inflight: inflight}),
+    do: Enum.reduce(inflight, 0, fn {_ref, %{bytes: bytes}}, n -> n + bytes end)
 
   defp record_bytes(%{envelope: %{body: body}}) when is_binary(body), do: byte_size(body)
   defp record_bytes(_record), do: 0
@@ -302,9 +315,10 @@ defmodule Ankusa.Edge.Batcher do
     do:
       Enum.reduce(entries, 0, fn {_from, record, _deadline}, acc -> acc + record_bytes(record) end)
 
-  # A commit in flight already owns the batcher's turn; the new record waits
-  # in `buffer` and the completion flushes it immediately.
-  defp maybe_flush(%{inflight: inflight} = state) when inflight != nil, do: state
+  # Every commit slot taken: the new record waits in `buffer` and the next
+  # completion flushes it immediately.
+  defp maybe_flush(%{inflight: inflight, max_commits: max} = state) when map_size(inflight) >= max,
+    do: state
 
   defp maybe_flush(state) do
     cond do
@@ -339,7 +353,7 @@ defmodule Ankusa.Edge.Batcher do
         | buffer: remainder,
           count: length(remainder),
           bytes: state.bytes - batch_bytes,
-          inflight: %{ref: task.ref, entries: entries, bytes: batch_bytes}
+          inflight: Map.put(state.inflight, task.ref, %{entries: entries, bytes: batch_bytes})
       }
     end
   end

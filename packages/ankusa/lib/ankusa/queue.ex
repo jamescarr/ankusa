@@ -16,6 +16,7 @@ defmodule Ankusa.Queue do
 
   alias Ankusa.Envelope
   alias Ankusa.Queue.Deliveries
+  alias Ankusa.Queue.Writer
   alias Ankusa.Store
   alias Ankusa.Store.Keys
 
@@ -47,6 +48,15 @@ defmodule Ankusa.Queue do
   `{:error, :dedupe_quota}` when its dedupe key would be a new live key past
   `dedupe.max_entries` or `dedupe.max_entries_per_tenant`: the hook is not
   written either, and never stored without its key.
+
+  ## Group commit
+
+  The work that needs no seq runs here, in the caller (the batcher's commit
+  task), not in the writer: the hook's binary, one encoded delivery row per sink
+  and one `multi_get` of the dedupe keys (a *prefetch*). The writer merges every
+  call it has queued, across partitions, into one group with one synced write,
+  and re-validates the prefetch before it assigns seqs (`Ankusa.Queue.Writer`),
+  so two partitions that read the same key as absent still commit one hook.
   """
   @spec enqueue(atom(), [entry()], integer() | :infinity) ::
           {:ok,
@@ -59,11 +69,13 @@ defmodule Ankusa.Queue do
            ]}
           | {:error, term()}
   def enqueue(instance, entries, deadline \\ :infinity) do
-    GenServer.call(
-      Ankusa.via(instance, :queue_writer),
-      {:enqueue, items(entries), deadline, []},
-      :infinity
-    )
+    with {:ok, prepared} <- prepare(instance, entries, true) do
+      GenServer.call(
+        Ankusa.via(instance, :queue_writer),
+        {:enqueue, prepared, deadline, []},
+        :infinity
+      )
+    end
   end
 
   @doc """
@@ -80,18 +92,82 @@ defmodule Ankusa.Queue do
   @spec release(atom(), [entry()], [Ankusa.Store.op()]) ::
           {:ok, [{:committed, Envelope.t()} | {:duplicate, Envelope.t()}]} | {:error, term()}
   def release(instance, entries, extra_ops) do
+    {:ok, prepared} = prepare(instance, entries, false)
+
     GenServer.call(
       Ankusa.via(instance, :queue_writer),
-      {:enqueue, items(entries), :infinity, extra_ops},
+      {:enqueue, prepared, :infinity, extra_ops},
       :infinity
     )
   end
 
-  defp items(entries) do
-    Enum.map(entries, fn %{envelope: env, sinks: sinks} = entry ->
-      {env, Envelope.to_binary(%{env | seq: nil}), Enum.map(sinks, &elem(&1, 0)),
-       Map.get(entry, :dedupe_ttl_ms), Map.get(entry, :replay_id)}
-    end)
+  # What the writer is handed: the items (`{envelope, binary, rows, dedupe ttl,
+  # replay id}`, `rows` being the encoded delivery row of each sink, stamped with
+  # the time the hook was received), their count and body bytes, and, with
+  # `prefetch?`, the stored value of every dedupe key read at `read_at` (a
+  # `System.monotonic_time(:millisecond)` taken before the read, which is what
+  # tells the writer whether a write it made since could be missing from it).
+  defp prepare(instance, entries, prefetch?) do
+    read_at = System.monotonic_time(:millisecond)
+    at = System.system_time(:millisecond)
+
+    items =
+      Enum.map(entries, fn %{envelope: env, sinks: sinks} = entry ->
+        bin = Envelope.to_binary(%{env | seq: nil})
+        replay_id = Map.get(entry, :replay_id)
+        size = byte_size(bin)
+
+        rows =
+          Enum.map(sinks, fn {mod, _opts} ->
+            Deliveries.encode_row(row(env, size, mod, replay_id, at))
+          end)
+
+        {env, bin, rows, Map.get(entry, :dedupe_ttl_ms), replay_id}
+      end)
+
+    with {:ok, prefetch} <- if(prefetch?, do: prefetch(instance, items), else: {:ok, %{}}) do
+      {:ok,
+       %{
+         items: items,
+         count: length(items),
+         bytes:
+           Enum.reduce(items, 0, fn {_env, bin, _rows, _ttl, _r}, n -> n + byte_size(bin) end),
+         prefetch: prefetch,
+         read_at: read_at
+       }}
+    end
+  end
+
+  # A row without `:replay` is a live delivery; a released quarantine hook's
+  # rows carry the job's id, like a replayed dead letter's.
+  defp row(env, size, mod, replay_id, at) do
+    base = %{
+      module: mod,
+      state: :pending,
+      attempts: 0,
+      at: at,
+      error: nil,
+      size: size,
+      source_id: env.source_id
+    }
+
+    if is_binary(replay_id), do: Map.put(base, :replay, replay_id), else: base
+  end
+
+  defp prefetch(instance, items) do
+    keys =
+      for {env, _bin, _rows, ttl, _replay_id} <- items,
+          key = Writer.dedupe_key(env, ttl),
+          do: key
+
+    case Enum.uniq(keys) do
+      [] ->
+        {:ok, %{}}
+
+      keys ->
+        with {:ok, results} <- Store.multi_get(instance, :index, keys),
+             do: {:ok, keys |> Enum.zip(results) |> Map.new()}
+    end
   end
 
   @type redrive_entry :: %{

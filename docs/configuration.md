@@ -68,7 +68,7 @@ Every top-level section, with its keys and defaults:
 | `listener` | Limits for every HTTP listener, and the ingest port's TLS: `max_connections` (20000), `num_acceptors` (null = two per scheduler), `read_timeout_ms` (10000), `body_read_timeout_ms` (15000), `request_deadline_ms` (30000), `max_requests_per_connection` (1000), `max_header_count` (64), `max_header_length` (16384), `http2` (`false`), `tls` (`certfile`, `keyfile`, `cacertfile`, `verify` = `verify_none` \| `verify_peer`, `versions`, `ciphers`). See [Listeners](#listeners-limits-tls-and-mtls) |
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
-| `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
+| `batcher` | `partitions` (4), `max_batch` (256), `max_commits` (2), `group_commit_max_bytes` (4194304), `group_commit_max_records` (1024), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
 | `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
@@ -459,8 +459,11 @@ config :ankusa,
   wal: :disk,
   direct_publish_timeout_ms: 8_000,
   batcher: %{
-    partitions: 2,
+    partitions: 4,
     max_batch: 256,
+    max_commits: 2,
+    group_commit_max_bytes: 4_194_304,
+    group_commit_max_records: 1_024,
     max_delay_ms: 0,
     max_queue: 10_000,
     max_queue_bytes: 268_435_456
@@ -594,8 +597,11 @@ config :ankusa,
 | `intake.pending.max_records`, `intake.pending.max_bytes` | `50_000`, `268_435_456` | The pending set (records not yet confirmed in both places) is bounded; a full set is `503 intake_unavailable` (`ankusa_intake_refused_total{reason="backlog"}`) before a seq is assigned. |
 | `intake.max_record_bytes` | `10_000_000` | One intake record's ceiling; at least `max_body_bytes + 65 536` so a body the node accepts always fits. |
 | `intake.recover_on_boot`, `intake.verify_topic` | `true`, `true` | Replay the log into the store at boot (`false`: run `mix ankusa.recover` by hand); verify the log's settings at boot (`false` says `intake topic settings UNVERIFIED` in the startup line). |
-| `batcher.partitions` | `2` | One group-commit `GenServer` per partition. The queue writer serializes commits itself, so more partitions only add contention. |
-| `batcher.max_batch` | `256` | Flush once this many envelopes have queued. |
+| `batcher.partitions` | `4` | One group-commit `GenServer` per partition: where request bodies are held, delivery rows encoded and dedupe keys read (a prefetch the writer re-validates). Partitions do not add commits: the queue writer merges every partition's queued batches into one group (`batcher.group_commit_*`), so the number buys parallel preparation and fault isolation, not fsyncs. |
+| `batcher.max_batch` | `256` | Flush once this many envelopes have queued in one partition. |
+| `batcher.max_commits` | `2` | Commits one partition keeps in flight. The next batch is handed to the writer while the previous one syncs, so the writer always has a group waiting (and, under `wal.type: dual`, a publish overlaps the next local write) and a caller waits for one commit rather than for the one ahead of it plus its own. `1` is the old one-at-a-time behaviour. |
+| `batcher.group_commit_max_bytes` | `4_194_304` (4 MiB) | The most body bytes the writer merges into one group, across partitions: one synced store write and, under `wal.type: dual`, one produce request. Every caller in a group waits for the whole group, so this bounds the ack latency a backlog adds (64 MiB at ~1 GB/s of WAL write is 65 ms before the fsync, which alone breaks the 50 ms p99); a single call larger than the cap is still committed alone. |
+| `batcher.group_commit_max_records` | `1_024` | The most hooks in one group. A call that would pass either cap starts the next group. |
 | `batcher.max_delay_ms` | `0` | Commit immediately. The store commit runs in a task, so waiting is a scheduling hop rather than head-of-line blocking. Raise it to trade a little ack latency for larger batches. |
 | `batcher.max_queue` | `10_000` | Bound per partition, counting buffered **and** in-flight records; full means `{:error, :overload}` → `503`. |
 | `batcher.max_queue_bytes` | `268_435_456` (256 MiB) | The same bound in body bytes, buffered and in flight, so a burst of large hooks sheds load (`503`) before it exhausts memory. |
