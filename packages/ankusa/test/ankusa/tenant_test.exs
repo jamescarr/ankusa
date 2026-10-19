@@ -42,6 +42,26 @@ defmodule Ankusa.TenantTest do
     def deliver(_env, _ctx, _opts), do: {:error, {:permanent, :nope}}
   end
 
+  defmodule FleetStore do
+    @moduledoc "A fleet limiter store that only says which tenants' buckets were reset."
+    @behaviour Ankusa.RateLimiter.Store
+
+    def child_spec(opts),
+      do: %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
+
+    @impl true
+    def start_link(_opts), do: :ignore
+
+    @impl true
+    def hit(_instance, _charges, _claim, _timeout_ms), do: :ok
+
+    @impl true
+    def reset(_instance, tenant, _timeout_ms) do
+      send(:tenant_test, {:fleet_reset, tenant})
+      :ok
+    end
+  end
+
   defmodule TransientSink do
     @moduledoc "Fails every attempt, so the row is retried (an hour later)."
     @behaviour Ankusa.Sink
@@ -696,6 +716,19 @@ defmodule Ankusa.TenantTest do
 
       # globex was not touched.
       assert {:ok, _} = SourceStore.get(inst, "globex", "orders")
+    end
+
+    test "with fleet rate limits the tenant's fleet buckets are reset" do
+      start_instance(
+        rate_limits: %{scope: :fleet},
+        fleet: %{store: {FleetStore, []}, timeout_ms: 20}
+      )
+      |> Map.fetch!(:instance)
+      |> then(fn inst ->
+        source!(inst, "acme", "billing", "permanent")
+        erase!(inst, "acme")
+        assert_received {:fleet_reset, "acme"}
+      end)
     end
   end
 end

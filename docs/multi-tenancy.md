@@ -243,9 +243,11 @@ replay skips them — and any backup that predates the erase (restore, then eras
 again). A lifecycle replay after an erase emits the one `tenant.deleted` event
 and nothing else of the tenant. Ordinals are never reused, so an erased tenant
 still counts towards `tenants.max`. A tenant that sends again is a new tenant.
-Fleet-shared Redis state (`ankusa_redis` rate limits and dedupe keys) is not
-part of this job yet; the sources and routes of a Redis source or route store
-are, because they go through the same store API. Proof:
+With `rate_limits.scope: fleet` the tenant's Redis rate-limit buckets are
+deleted too; its fleet dedupe claims in Redis (`dedupe.scope: fleet`) are not
+removed, they expire on their own TTL (Redis has no prefix delete to take them
+by). The sources and routes of a Redis source or route store are erased,
+because they go through the same store API. Proof:
 `test/ankusa/tenant_test.exs` (`erase leaves no trace`, `resumes after kill -9`,
 `a running attempt cannot put a row back`).
 

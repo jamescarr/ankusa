@@ -95,9 +95,13 @@ defmodule Ankusa.Tenant.Erase do
         {:ok, 0}
       end
 
-    # The row itself too, whether or not a limiter was there to forget it.
+    # The row itself too, whether or not a limiter was there to forget it, and
+    # the tenant's fleet buckets (a no-op unless `rate_limits.scope: :fleet`;
+    # best effort, the buckets expire once full again). Fleet dedupe claims
+    # expire on their own TTL: Redis has no prefix delete to remove them by.
     with {:ok, n} <- override,
-         :ok <- Store.write(instance, [{:delete, :default, Keys.rate_limit(tenant)}], sync: true) do
+         :ok <- Store.write(instance, [{:delete, :default, Keys.rate_limit(tenant)}], sync: true),
+         :ok <- Ankusa.Edge.Fleet.reset_tenant(instance, tenant) do
       {:ok, %{rate_limits: n}}
     end
   end
