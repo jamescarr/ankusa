@@ -278,7 +278,7 @@ defmodule Ankusa.LifecycleTest do
       assert_receive {:lifecycle, ctx, _, %{"type" => "io.ankusa.route.created"} = created}, 2_000
       assert created["subject"] == "stripe"
       assert created["data"]["path"] == "/webhooks/stripe"
-      # Routes have no tenant: the envelope carries the default one.
+      # A route that belongs to no tenant: the envelope carries the default one.
       assert ctx.tenant_id == "default"
 
       # PUT on an id that exists is an update; on one that does not, a creation.
@@ -306,6 +306,29 @@ defmodule Ankusa.LifecycleTest do
       # The deletion is the route's fourth change; `data` is the route as it was.
       assert deleted["revision"] == 4
       assert deleted["data"]["revision"] == 3
+    end
+
+    test "tenant route event carries the route's tenant, on every change", %{config: config} do
+      instance = config.instance
+
+      {:ok, _} = Routes.create(instance, Map.put(@route, "tenant_id", "acme"))
+
+      assert_receive {:lifecycle, ctx, _, %{"type" => "io.ankusa.route.created"} = created}, 2_000
+      assert ctx.tenant_id == "acme"
+      assert created["data"]["tenant_id"] == "acme"
+
+      {:ok, _} = Routes.update(instance, "stripe", %{"enabled" => false}, tenant: "acme")
+      assert_receive {:lifecycle, ctx, _, %{"type" => "io.ankusa.route.updated"}}, 2_000
+      assert ctx.tenant_id == "acme"
+
+      # Another tenant cannot touch it, so there is no event for that attempt.
+      assert {:error, :not_found} = Routes.delete(instance, "stripe", tenant: "globex")
+      refute_receive {:lifecycle, _, _, _}, 100
+
+      :ok = Routes.delete(instance, "stripe", tenant: "acme")
+      assert_receive {:lifecycle, ctx, _, %{"type" => "io.ankusa.route.deleted"} = deleted}, 2_000
+      assert ctx.tenant_id == "acme"
+      assert deleted["data"]["tenant_id"] == "acme"
     end
 
     test "the reserved source is not reachable by ingest", %{config: config} do
@@ -506,7 +529,8 @@ defmodule Ankusa.LifecycleTest do
 
     assert_receive {:claimed, env, %{"claim" => claim, "sha256" => sha256} = message}, 2_000
     assert env.source_id == "ankusa:lifecycle"
-    # Routes carry no tenant; a claim needs a real one (`[A-Za-z0-9_-]{1,64}`).
+    # A route of no tenant is the default one; a claim needs a real tenant
+    # (`[A-Za-z0-9_-]{1,64}`), and the default is one.
     assert env.tenant_id == "default"
     assert message["tenant_id"] == "default"
     assert env.size > 200

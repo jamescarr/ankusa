@@ -159,6 +159,64 @@ defmodule Ankusa.Routes.Store.RedisTest do
     assert {:error, :not_found} = Routes.delete(config.instance, "a")
   end
 
+  test "a tenant's route reaches another node and is deleted only by its owner" do
+    node_a = start_node(tick_ms: 60_000)
+    node_b = start_node(tick_ms: 60_000)
+
+    assert {:ok, %{tenant_id: "acme", source_id: "acme.billing"}} =
+             Routes.create(
+               node_a.instance,
+               %{"id" => "t", "path" => "/hooks/t", "source_id" => "acme.billing"},
+               tenant: "acme"
+             )
+
+    eventually(fn -> "t" in route_ids(node_b.instance) end)
+
+    assert {:ok, %{tenant_id: "acme", source_id: "acme.billing"}} =
+             Routes.get(node_b.instance, "t")
+
+    assert {:ok, %{routes: [%{id: "t"}]}} = Routes.list(node_b.instance, tenant: "acme")
+    assert {:ok, %{routes: []}} = Routes.list(node_b.instance, tenant: "globex")
+
+    # The delete script reads the owner in Redis, past what either node's
+    # snapshot says: another tenant's delete changes nothing, the owner's does.
+    version = Routes.meta(node_a.instance).version
+    assert {:error, :not_found} = Ankusa.Routes.Store.delete(node_a.instance, "t", "globex")
+    assert Routes.meta(node_a.instance).version == version
+    assert {:ok, %{id: "t"}} = Routes.get(node_a.instance, "t")
+
+    assert :ok = Routes.delete(node_a.instance, "t", tenant: "acme")
+    eventually(fn -> "t" not in route_ids(node_b.instance) end)
+  end
+
+  test "the stored form leaves out a default tenant and no source, and still reads back", %{
+    conn: conn
+  } do
+    config = start_node()
+
+    assert {:ok, _} = Routes.create(config.instance, %{"id" => "plain", "path" => "/hooks/p"})
+
+    assert {:ok, _} =
+             Routes.create(
+               config.instance,
+               %{"id" => "owned", "path" => "/hooks/o", "tenant_id" => "acme"}
+             )
+
+    {:ok, plain} = Redix.command(conn, ["HGET", "#{@namespace}:routes", "plain"])
+    {:ok, owned} = Redix.command(conn, ["HGET", "#{@namespace}:routes", "owned"])
+
+    refute Map.has_key?(JSON.decode!(plain), "tenant_id")
+    refute Map.has_key?(JSON.decode!(plain), "source_id")
+    assert JSON.decode!(owned)["tenant_id"] == "acme"
+
+    # A definition stored before routes had a tenant is the default tenant's,
+    # and the tenant-checked delete treats it so.
+    node_b = start_node()
+    assert {:ok, %{tenant_id: "default"}} = Routes.get(node_b.instance, "plain")
+    assert {:error, :not_found} = Ankusa.Routes.Store.delete(node_b.instance, "plain", "acme")
+    assert :ok = Ankusa.Routes.Store.delete(node_b.instance, "plain", "default")
+  end
+
   test "the seed loads on a namespace's first boot, and never again" do
     first = start_node(seed: [%{"id" => "s", "path" => "/hooks/s"}])
 

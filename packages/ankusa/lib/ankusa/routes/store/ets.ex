@@ -39,7 +39,8 @@ defmodule Ankusa.Routes.Store.ETS do
     do: GenServer.call(server_name(instance), {:replace, route, version})
 
   @impl Ankusa.Routes.Store
-  def delete(instance, id), do: GenServer.call(server_name(instance), {:delete, id})
+  def delete(instance, id, tenant),
+    do: GenServer.call(server_name(instance), {:delete, id, tenant})
 
   @impl Ankusa.Routes.Store
   def put_ip_rules(instance, ip_rules),
@@ -116,14 +117,15 @@ defmodule Ankusa.Routes.Store.ETS do
      |> Snapshot.mutate({:put, route}, {:replace, route.id})}
   end
 
-  def handle_call({:delete, id}, _from, state) do
+  def handle_call({:delete, id, tenant}, _from, state) do
     case Map.fetch(state.routes, id) do
-      :error ->
-        {:reply, {:error, :not_found}, state}
-
-      {:ok, _route} ->
+      {:ok, %Route{tenant_id: owner}} when is_nil(tenant) or owner == tenant ->
         state = %{state | routes: Map.delete(state.routes, id)} |> bump_version()
         {:reply, :ok, Snapshot.mutate(state, {:delete, id}, {:delete, id})}
+
+      # Missing, or owned by another tenant: the same answer.
+      _other ->
+        {:reply, {:error, :not_found}, state}
     end
   end
 

@@ -155,8 +155,9 @@ every lifecycle sink independently:
 - The event is not listed by `GET /v1/tenants/{tenant}/sources`, never passes
   through ingest (so the tenant rate limiter and the quarantine never see it and
   `ankusa_ingest_*` does not count it), and is not archived. Source events carry
-  the source's tenant; route events carry the default tenant, `default`, because
-  a claim-checked body needs a real tenant. An event over a sink's
+  the source's tenant; route events carry the route's tenant (`tenant_id`, which
+  is `default` for a route that belongs to none), and a claim-checked body needs
+  a real tenant. An event over a sink's
   `inline_max_bytes` goes through the claim check inside the sink, like a hook.
 
 Only the node that served the change emits, so a route written on one node of a

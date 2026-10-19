@@ -13,6 +13,35 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Tenant-aware routes bound to sources (TEN-4).** A route now has a
+  `tenant_id` (default `"default"`, the shared tenant) and an optional
+  `source_id`, in `Route.from_attrs/2`, `to_json/1`, `from_json/1`, the
+  `routes.seed` entries and the admin API, and the route guard hands the route
+  it matched to ingest instead of discarding it: `conn.assigns.ankusa_route` is
+  now the `Ankusa.Routes.Route` (it was its id), `Routes.capture/5` is
+  `authorize_path/5` answering with the route, and `Ankusa.Edge.Ingest.lookup/3`
+  holds the route's binding against the resolver. A route owned by a tenant
+  admits hooks only into that tenant (another tenant in the URL, or a source
+  owned by another tenant, is the `404` an unknown source gets) and, matched
+  on a shared source that the URL names no tenant for, files the hook under its
+  own; a route bound to a `source_id` admits only that source. The ingest span
+  carries `:route_id`. Route lifecycle events and audit rows now carry the
+  route's tenant instead of `"default"`, so a replay or an audit read filtered
+  to a tenant sees its own routes. The route-management listener gains a tenant
+  surface, `GET|POST /v1/tenants/:tenant/routes` and
+  `GET|PUT|PATCH|DELETE /v1/tenants/:tenant/routes/:id`, that needs
+  `tenant:<tenant>` (not `tenant:*`) and shows and changes only that tenant's
+  routes, read from a `{tenant, id}` index in the snapshot table
+  (`Snapshot.tenant_routes/4`); another tenant's route is `404`, a body naming
+  another tenant is `400 invalid_route`, and an id or path another tenant holds is
+  a `409 duplicate_route` that does not name the holder. `/admin/routes` stays
+  the all-tenants operator surface (`tenant:*`), so the SDKs' routes clients are
+  unchanged. `tenant_id` and `source_id` are immutable under `PATCH`.
+  **Breaking for a custom `Ankusa.Routes.Store`:** `delete/2` is now
+  `delete/3`, taking the tenant the delete is made for (`nil`: any owner), which
+  the store checks in the delete itself. `Route.to_stored_json/1` leaves out a
+  default `tenant_id` and an absent `source_id`, so a node from before them still
+  reads a Redis table with no tenant routes.
 - **Verifier breadth: public-key, token and client-certificate (SEC-12).** A
   provider that signs with Ed25519 or RSA, sends a static credential, or
   authenticates by mutual TLS no longer has to be a `Verifier.None` source with
