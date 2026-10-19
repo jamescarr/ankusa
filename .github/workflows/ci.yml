@@ -63,7 +63,9 @@ jobs:
       # `Ankusa.SecretProvider`, `Ankusa.SourceStore.Static.publish/2`; SEC-12:
       # `Ankusa.Verifier.Asymmetric`/`Token`/`ClientCert`, called by the image's
       # loader; TEN-4: `Ankusa.Routes.Store.delete/3` replaced `delete/2`, so
-      # the stale PLT made dialyzer crash on `ankusa_redis`'s callback check).
+      # the stale PLT made dialyzer crash on `ankusa_redis`'s callback check;
+      # TEN-6: `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store` are new
+      # behaviours `ankusa_redis` implements, absent from the stale PLT).
       # The `v` is in the restore prefix too, so bumping it still misses.
       # A mix.lock change alone matches the prefix: the entry built from the
       # previous lockfile is restored, `mix deps.get --check-locked` fetches
@@ -76,9 +78,9 @@ jobs:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v6-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v7-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
-            mix-v6-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+            mix-v7-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
