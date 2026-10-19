@@ -643,12 +643,24 @@ defmodule Ankusa.ConfigTest do
             :read_deadline_ms,
             :read_timeout_ms,
             :read_max_inflight,
-            :read_cache_max_entry_bytes
+            :read_cache_max_entry_bytes,
+            :redeem_grace_ms,
+            :sweep_max_objects
           ] do
         assert_raise ArgumentError,
                      "claim_check.#{key} must be a positive integer, got 0",
                      fn -> Config.new(claim_check: %{key => 0}) end
       end
+
+      for bad <- [0, -1, 1.5, "30"] do
+        assert_raise ArgumentError,
+                     "claim_check.bucket_expiry_days must be nil or an integer >= 1, got #{inspect(bad)}",
+                     fn -> Config.new(claim_check: %{bucket_expiry_days: bad}) end
+      end
+
+      assert %Config{} = Config.new(claim_check: %{bucket_expiry_days: 1})
+      assert Config.new().claim_check.redeem_grace_ms == 86_400_000
+      assert Config.new().claim_check.sweep_max_objects == 10_000
     end
 
     test "a key prefix is empty or slash-terminated segments" do

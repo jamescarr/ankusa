@@ -106,6 +106,20 @@ defmodule Ankusa.Store.Keys do
   def cleared(seq, kind, sink), do: <<?c, seq::64, kind::8, sink::16>>
   def claim(seq), do: <<?k, seq::64>>
 
+  # Claim leases (DUR-2.c): one row per (claim pack, hook that references it),
+  # `<<?l, tenant, 0, pack_id::binary-26, seq::64>>`, in the index CF so the
+  # check-in and the reclaim commit with the hook's own batch. The value is
+  # `<<0::64>>` while the hook is live, and `<<expires_at_ms::64>>` once the hook
+  # is reclaimed: the pack then stays leased until then (`claim_check.redeem_grace_ms`),
+  # so a consumer that gets a queue message just after delivery can still redeem
+  # it. `claim_lease/2` is the prefix of every lease of one pack. Tenant ids are
+  # `[A-Za-z0-9_-]` and a pack id is a 26-character ULID, so the key parses
+  # unambiguously.
+  def claim_lease(tenant, pack_id) when is_binary(tenant) and byte_size(pack_id) == 26,
+    do: <<?l, tenant::binary, 0, pack_id::binary>>
+
+  def claim_lease(tenant, pack_id, seq), do: <<claim_lease(tenant, pack_id)::binary, seq::64>>
+
   # ── tenants and counters ──────────────────────────────────────────────────
 
   # `tenants` column family: `ord -> tenant id` and `tenant id -> ord`. Ordinal 0
@@ -115,7 +129,7 @@ defmodule Ankusa.Store.Keys do
 
   # `counters` column family: one merge-operand row per tenant and field, plus
   # the node aggregate under ordinal 0 (`Ankusa.Queue.Deliveries.Counters`).
-  def counter(ord, field) when field in 1..8, do: <<ord::32, field::8>>
+  def counter(ord, field) when field in 1..9, do: <<ord::32, field::8>>
 
   # Ingest dedupe: `?u` maps a provider event key to
   # `<<expires_at::64, original_id::binary>>`, and `?e` is its expiry-sweep
@@ -173,6 +187,14 @@ defmodule Ankusa.Store.Keys do
   def decode_inflight_v2(<<?f, seq::64, sink::16>>), do: {seq, sink}
   def decode_cleared(<<?c, seq::64, kind::8, sink::16>>), do: {seq, kind, sink}
   def decode_delivery(<<seq::64, sink::16>>), do: {seq, sink}
+
+  def decode_claim_lease(<<?l, rest::binary>>) do
+    case :binary.split(rest, <<0>>) do
+      [tenant, <<pack_id::binary-size(26), seq::64>>] -> {tenant, pack_id, seq}
+      _ -> :error
+    end
+  end
+
   def decode_audit(<<?a, seq::64, at::64>>), do: {seq, at}
   def decode_lifecycle_entity(<<?o, seq::64>>), do: seq
   def decode_audit_pending(<<?p, seq::64>>), do: seq
@@ -224,6 +246,8 @@ defmodule Ankusa.Store.Keys do
     counters: %{cf: :counters, lo: <<0::40>>, hi: <<@ff4::binary, 0xFF>>},
     archive_pending: %{cf: :index, lo: <<?a>>, hi: <<?a, @ff8::binary>>},
     cleared: %{cf: :index, lo: <<?c>>, hi: <<?c, @ff11::binary>>},
+    claims: %{cf: :index, lo: <<?k>>, hi: <<?k, @ff8::binary>>},
+    claim_leases: %{cf: :index, lo: <<?l>>, hi: <<?l, 0xFF>>},
     dedupe_expiry: %{cf: :index, lo: <<?e>>, hi: <<?e, @ff8::binary, 0xFF>>},
     segments: %{cf: :archive, lo: <<?S>>, hi: <<?S, @ff8::binary>>},
     legacy_locations: %{cf: :archive, lo: <<?L>>, hi: <<?L, 0xFF>>},

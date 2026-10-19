@@ -469,6 +469,11 @@ defmodule Ankusa.ClaimCheck do
       `claim_check.key_layout` `:flat` or `:sharded`
     * `claim_check.retention_days` set with any non-`LocalFS` claim store (the
       sweeper only ever covers `LocalFS`; S3/GCS need a bucket lifecycle rule)
+    * `claim_check.bucket_expiry_days` declared with an object-store claim store
+      shorter than the longest a claim can be needed: the retry horizon of the
+      default policy (21 days) + `queue.dlq.retention_days` + `claim_check.redeem_grace_ms`.
+      A bucket lifecycle rule cannot see claim leases, so the declared age is
+      the real cutoff; undeclared, boot warns with the minimum
     * `max_body_bytes` of 4 GiB or more: a pack can't hold a body that large
     * `claim_check.ref_signing_keys` must be a list of strings of at least 16
       bytes, and not empty while `claim_check.accept_unsigned_refs` is `false`
@@ -530,6 +535,8 @@ defmodule Ankusa.ClaimCheck do
         :ok
     end
 
+    validate_bucket_expiry!(config, modules)
+
     if Ankusa.BlobStore.LocalFS in modules and Config.role?(config, :claim_check) and
          not Enum.any?([:edge, :dispatch, :storage], &Config.role?(config, &1)) do
       Logger.warning(
@@ -541,6 +548,45 @@ defmodule Ankusa.ClaimCheck do
 
     :ok = validate_refs!(cc)
     validate_authorize!(cc)
+  end
+
+  # The retry horizon of the default exponential policy: 84 attempts, each at
+  # most 6 h apart (`Ankusa.RetryPolicy.Exponential`). A custom policy's horizon
+  # is the operator's to add to `bucket_expiry_days`.
+  @default_retry_horizon_days 21
+
+  # A bucket lifecycle rule expires claim objects by age and cannot see claim
+  # leases, so for object-store claims the declared bucket age is the real
+  # cutoff: it has to outlast a claim's longest need, or a hook that is still
+  # retrying, dead-lettered or just delivered loses its body.
+  defp validate_bucket_expiry!(config, modules) do
+    %Config{claim_check: cc} = config
+
+    if Enum.any?(modules, &(&1 != Ankusa.BlobStore.LocalFS)) do
+      grace_days = div(cc.redeem_grace_ms + 86_399_999, 86_400_000)
+      needed = @default_retry_horizon_days + config.queue.dlq.retention_days + grace_days
+
+      cond do
+        cc.bucket_expiry_days == nil and Config.role?(config, :dispatch) ->
+          Logger.warning(
+            "[ankusa] claim packs are in an object store and claim_check.bucket_expiry_days " <>
+              "is not declared: a bucket lifecycle rule cannot see claim leases, so it must " <>
+              "expire claims/ objects no earlier than #{needed} days (retry horizon " <>
+              "#{@default_retry_horizon_days} + queue.dlq.retention_days " <>
+              "#{config.queue.dlq.retention_days} + redeem grace #{grace_days})"
+          )
+
+        cc.bucket_expiry_days != nil and cc.bucket_expiry_days < needed ->
+          raise ArgumentError,
+                "claim_check.bucket_expiry_days is #{cc.bucket_expiry_days} but a claim can be " <>
+                  "needed for #{needed} days (retry horizon #{@default_retry_horizon_days} + " <>
+                  "queue.dlq.retention_days #{config.queue.dlq.retention_days} + redeem grace " <>
+                  "#{grace_days}): raise the bucket rule and this key, or lower the others"
+
+        true ->
+          :ok
+      end
+    end
   end
 
   defp valid_stores?([_ | _] = stores),

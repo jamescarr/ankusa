@@ -14,6 +14,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   `write_buffer_bytes.<family>`. The defaults put a bloom filter on the `index` and
   `deliveries` families; see `docs/configuration.md` and
   `config-examples/reference.yml`.
+- **`claim_check.redeem_grace_ms`, `sweep_max_objects` and `bucket_expiry_days`
+  (DUR-2.c).** YAML keys for the claim leases: how long a claim pack stays redeemable
+  after its hook is delivered (default 86 400 000 ms), how many packs and leases one
+  sweeper tick deletes (default 10 000), and the age of the bucket's own lifecycle
+  rule for S3/GCS claims (boot refuses one below the retry horizon + DLQ retention +
+  grace). The image's store moves to **format 6** on first boot (a resumable
+  migration leasing the claims of live hooks); an older image cannot open it
+  afterwards. `soak.sh` also fails when `ankusa_dlq_rows` or `ankusa_claim_leases`
+  is higher late in the run than early. See `docs/configuration.md`.
 
 - **`queue.dlq`, `quarantine.retention_days`, `storage.catalogue_retention_days`,
   `archive.retention_days` and `audit.max_rows|max_bytes|outbox_max_backlog`

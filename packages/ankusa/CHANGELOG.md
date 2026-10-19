@@ -29,6 +29,25 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   with tens of millions of dedupe keys. `bench/dedupe_bench.exs` measures a miss
   and a commit against a store of `KEYS` dedupe keys. See
   `docs/storage.md#rocksdb-tuning-and-the-index-filters`.
+- **Claim leases, and a bounded claim sweeper (DUR-2.c).** The `LocalFS` claim
+  retention sweeper no longer deletes a pack a hook still needs. Each hook that
+  checks its body in leases the pack (`Keys.claim_lease/3`, rows `?l`, counter
+  `claim_leases`, gauge `ankusa_claim_leases`) in the same batch; the lease is held
+  while the hook is live, a dead letter included, and when the hook is reclaimed it
+  runs on for `claim_check.redeem_grace_ms` (default 24 h) so the consumer of a
+  queue message that carries the ref can still redeem it. `Ankusa.ClaimCheck.Sweeper`
+  now runs on `:dispatch` nodes too, lists each expired `dt=` partition and deletes
+  only unleased packs, at most `claim_check.sweep_max_objects` (default 10 000) a
+  tick (`ankusa_claim_check_sweep_backlog`, `..._sweep_partitions_left`,
+  `ankusa_claim_check_pruned_total`, `ankusa_claim_check_leases_pruned_total`), and
+  deletes nothing when it cannot read the leases. Object-store claims have no lease:
+  declare the bucket lifecycle rule's age in `claim_check.bucket_expiry_days` and
+  boot refuses one shorter than the retry horizon (21 days) +
+  `queue.dlq.retention_days` + the redeem grace. **Store format 6**: the migration
+  `5 -> 6` leases the claim of every live hook, resumably;
+  `test/fixtures/store-v6.tar.zst`. A node running format 6 cannot be rolled back to
+  an image that writes format 5. See `docs/claim-check.md#claim-leases`.
+
 - **`wal: :dual`: the ack waits for a replicated intake log too (DUR-1.b.a,
   [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** The core of the
   dual commit: the `Ankusa.Intake` behaviour and `Ankusa.Intake.Memory` (a
