@@ -337,6 +337,50 @@ defmodule Ankusa.ClaimCheckTest do
                    end
     end
 
+    test "bucket_expiry_days must outlast retry horizon + DLQ retention + redeem grace" do
+      s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
+
+      config = fn days, extra ->
+        Config.new(
+          storage: %{blob_store: s3},
+          claim_check: Map.merge(%{bucket_expiry_days: days}, extra)
+        )
+      end
+
+      # 21 (default retry policy) + 30 (queue.dlq.retention_days) + 1 (24 h grace)
+      assert_raise ArgumentError,
+                   ~r/bucket_expiry_days is 51 but a claim can be needed for 52 days/,
+                   fn -> ClaimCheck.validate_config!(config.(51, %{})) end
+
+      assert :ok = ClaimCheck.validate_config!(config.(52, %{}))
+
+      # A longer grace raises the floor: 2 days of grace make it 53.
+      assert_raise ArgumentError,
+                   ~r/for 53 days/,
+                   fn ->
+                     ClaimCheck.validate_config!(config.(52, %{redeem_grace_ms: 172_800_000}))
+                   end
+
+      # A LocalFS claim store has leases instead: the key is not consulted.
+      assert :ok = ClaimCheck.validate_config!(Config.new(claim_check: %{bucket_expiry_days: 1}))
+    end
+
+    @tag :capture_log
+    test "an undeclared bucket expiry boots with a warning that names the minimum" do
+      s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok =
+                   ClaimCheck.validate_config!(
+                     Config.new(roles: [:dispatch], storage: %{blob_store: s3})
+                   )
+        end)
+
+      assert log =~ "claim_check.bucket_expiry_days is not declared"
+      assert log =~ "no earlier than 52 days"
+    end
+
     test "retention is judged against the claim stores, not the segment store" do
       s3 = {Ankusa.BlobStore.S3, bucket: "b", region: "us-east-1"}
 

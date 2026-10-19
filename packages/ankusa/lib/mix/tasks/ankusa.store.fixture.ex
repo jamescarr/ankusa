@@ -204,6 +204,10 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
         ingest!(inst, "demo", "waiting-#{tenant}-#{n}", [], tenant)
       end
 
+    # One waiting hook has its body checked in: a claim row, its pack under
+    # `segments/claims/`, and the held lease (format 6) that protects the pack.
+    claimed = claim!(inst, hd(waiting), "acme")
+
     {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, "acme")
 
     {:ok, [due | _]} =
@@ -221,6 +225,7 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
     %{
       "format_version" => String.to_integer(version),
       "hook_ids" => stored,
+      "claim_hook_ids" => [claimed],
       "pending_ids" => delivered.demo ++ delivered.acme ++ waiting,
       "dead_ids" => delivered.doomed,
       "archived_ids" => delivered.archived,
@@ -233,6 +238,17 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
       "segments" => delivered.segments,
       "tenants" => ["default", "acme", "globex", "deadonly"]
     }
+  end
+
+  defp claim!(inst, id, tenant) do
+    {:ok, claims} =
+      Ankusa.ClaimCheck.check_in(inst, tenant, [%{id: id, body: "claimed body of #{id}"}])
+
+    {:ok, hooks} = Queue.hooks(inst, 0, 100_000)
+    %{seq: seq} = Enum.find(hooks, &(&1.id == id))
+    {:ok, ord} = Ankusa.Queue.Tenants.ord(inst, tenant)
+    :ok = Store.write(inst, Ankusa.Queue.Deliveries.claim_ops(seq, ord, claims[id]), sync: true)
+    id
   end
 
   defp request(source_id, body, headers, tenant \\ nil) do

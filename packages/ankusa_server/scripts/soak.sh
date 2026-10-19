@@ -4,8 +4,10 @@
 # tools/loadgen, sample /metrics and the container's resident memory every
 # SAMPLE_INTERVAL seconds, let the queue drain, and fail when an accepted hook
 # never reached the sink (`missing > 0`), the container's RSS grew by more
-# than MAX_RSS_GROWTH (5 %) between the early and the late part of the run, or
-# a /metrics scrape held more than MAX_SERIES (10 000) lines.
+# than MAX_RSS_GROWTH (5 %) between the early and the late part of the run,
+# `ankusa_dlq_rows` or `ankusa_claim_leases` was higher late in the run than
+# early (the DLQ and the leases must be flat once retention has settled), or a
+# /metrics scrape held more than MAX_SERIES (10 000) lines.
 #
 #   packages/ankusa_server/scripts/soak.sh jamescarr/ankusa:dev
 #
@@ -122,7 +124,7 @@ echo "==> loadgen: $RATE req/s, $CONCURRENCY workers, ${BODY_BYTES}B bodies, ${D
 ) &
 LOADGEN_PID=$!
 
-echo "elapsed_s,rss_kb" >"$OUT/samples.csv"
+echo "elapsed_s,rss_kb,dlq_rows,claim_leases" >"$OUT/samples.csv"
 start=$SECONDS
 next=$((SECONDS + SAMPLE_INTERVAL))
 n=0
@@ -133,7 +135,7 @@ while kill -0 "$LOADGEN_PID" 2>/dev/null; do
     next=$((next + SAMPLE_INTERVAL))
     curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$ADMIN_URL/metrics" >"$OUT/metrics-$n.prom"
     rss=$(container_rss_kb)
-    echo "$((SECONDS - start)),$rss" >>"$OUT/samples.csv"
+    echo "$((SECONDS - start)),$rss,$(metric_sum "$OUT/metrics-$n.prom" ankusa_dlq_rows),$(metric_sum "$OUT/metrics-$n.prom" ankusa_claim_leases)" >>"$OUT/samples.csv"
     echo "    sample $n at $((SECONDS - start))s: rss ${rss} kB, delivered $(metric_sum "$OUT/metrics-$n.prom" ankusa_dispatch_deliveries_total 'result="ok"')"
   fi
 done
@@ -174,8 +176,19 @@ early=$(sed -n "$((w + 2)),$((2 * w + 1))p" "$OUT/samples.csv" | cut -d, -f2 | f
 late=$(sed -n "$((samples - w + 2)),$((samples + 1))p" "$OUT/samples.csv" | cut -d, -f2 | floor)
 growth=$(awk -v e="$early" -v l="$late" 'BEGIN { printf "%.4f", (e > 0 ? l / e - 1 : 0) }')
 
+# The DLQ and the claim leases must be flat once the run is past warm-up: the
+# highest sample of the last sixth may not exceed the highest of the second.
+ceiling() { awk 'NR == 1 || $1 > m { m = $1 } END { print m }'; }
+window() { # COLUMN FIRST LAST
+  sed -n "$2,$3p" "$OUT/samples.csv" | cut -d, -f"$1" | ceiling
+}
+dlq_early=$(window 3 $((w + 2)) $((2 * w + 1)))
+dlq_late=$(window 3 $((samples - w + 2)) $((samples + 1)))
+leases_early=$(window 4 $((w + 2)) $((2 * w + 1)))
+leases_late=$(window 4 $((samples - w + 2)) $((samples + 1)))
+
 cat >"$OUT/soak.json" <<EOF
-{"image":"$IMAGE","duration_s":$DURATION,"rate":$RATE,"accepted":$accepted,"shed":$shed,"errors":$errors,"delivered":$delivered,"missing":$missing,"dead":$dead,"samples":$samples,"rss_early_kb":$early,"rss_late_kb":$late,"rss_growth":$growth,"metrics_lines":$series}
+{"image":"$IMAGE","duration_s":$DURATION,"rate":$RATE,"accepted":$accepted,"shed":$shed,"errors":$errors,"delivered":$delivered,"missing":$missing,"dead":$dead,"samples":$samples,"rss_early_kb":$early,"rss_late_kb":$late,"rss_growth":$growth,"dlq_rows_early":$dlq_early,"dlq_rows_late":$dlq_late,"claim_leases_early":$leases_early,"claim_leases_late":$leases_late,"metrics_lines":$series}
 EOF
 
 echo
@@ -188,10 +201,14 @@ echo "dead         $dead"
 echo "rss early    $early kB (lowest of samples $((w + 1))-$((2 * w)))"
 echo "rss late     $late kB (lowest of samples $((samples - w + 1))-$samples)"
 echo "rss growth   $growth (limit $MAX_RSS_GROWTH)"
+echo "dlq rows     $dlq_early early, $dlq_late late (late may not exceed early)"
+echo "claim leases $leases_early early, $leases_late late (late may not exceed early)"
 echo "metrics      $series lines at most (limit $MAX_SERIES)"
 
 [ "$missing" -eq 0 ] || fail "missing $missing: accepted hooks that no sink delivered"
 [ "$series" -le "$MAX_SERIES" ] || fail "/metrics grew to $series lines > $MAX_SERIES"
 awk -v g="$growth" -v m="$MAX_RSS_GROWTH" 'BEGIN { exit !(g > m) }' && fail "rss grew $growth > $MAX_RSS_GROWTH"
+[ "$dlq_late" -le "$dlq_early" ] || fail "ankusa_dlq_rows grew from $dlq_early to $dlq_late: the DLQ is not flat"
+[ "$leases_late" -le "$leases_early" ] || fail "ankusa_claim_leases grew from $leases_early to $leases_late: leases are not flat"
 
 echo "soak OK: $IMAGE"

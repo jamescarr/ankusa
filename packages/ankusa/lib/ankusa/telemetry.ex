@@ -30,7 +30,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :dispatch, :state]` | `:running`, `:claimed`, `:claimed_bytes`, `:runnable`, `:breakers_open`, `:active_tenants` (the most tenants one scan visited since the last report) | `:instance` |
   | `[:ankusa, :store, :state]` | `:hooks`, `:deliveries`, `:disk_bytes`, `:next_seq` | `:instance` |
-  | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:tenants`, `:oldest_due_age_ms` | `:instance` |
+  | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:claim_leases` (claim packs leased to live or just-reclaimed hooks), `:tenants`, `:oldest_due_age_ms` | `:instance` |
   | `[:ankusa, :tenant, :state]` | `:pending` (one event per tenant of the top 100 by pending) | `:instance`, `:tenant` |
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
@@ -40,7 +40,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |
   | `[:ankusa, :claim_check, :check_in]` | `:duration`, `:size`, `:claims` | `:instance`, `:tenant_id`, `:pack_id`, `:result`, `:store` (index into `claim_check.blob_stores` the pack was written to, `nil` on failure) |
   | `[:ankusa, :claim_check, :redeem]` | `:duration`, `:size` | `:instance`, `:tenant_id`, `:claim_id`, `:result` |
-  | `[:ankusa, :claim_check, :sweep]` | `:deleted`, `:scanned`, `:duration` | `:instance` |
+  | `[:ankusa, :claim_check, :sweep]` | `:deleted` (partition directories removed), `:scanned` (partitions), `:packs` (pack objects deleted), `:kept` (packs a lease held back), `:leases_pruned` (lease rows deleted: grace over, or their hook no longer names the pack), `:backlog` (names the tick did not examine in the partition it stopped in), `:partitions_left` (expired partitions it did not reach), `:duration` | `:instance` |
   | `[:ankusa, :claim_check, :store_breaker]` | — | `:instance`, `:store` (index into `claim_check.blob_stores`), `:state` (`:open`, `:closed`), `:reason` (`nil` on `:closed`) |
   | `[:ankusa, :claim_check, :gateway]` | `:duration` | `:instance`, `:method`, `:status` (one per claim request the gateway answered) |
   | `[:ankusa, :claim_check, :read]` | `:duration` | `:instance`, `:kind` (`:index`, `:bytes`, `:range`), `:source` (`:cache`, `:store`, `:coalesced`, `:shed`, `:direct`), `:result` (`:ok`, `:not_found`, `:forbidden`, `:throttled`, `:unavailable`, `:overloaded`, `:deadline`), `:store`. One per caller: `:store` is the caller whose fetch went to the store, `:coalesced` one that joined it, `:shed` one answered without a fetch's result (the queue was full, or its deadline passed — a fetch it started still finishes and is counted as `:store`) |

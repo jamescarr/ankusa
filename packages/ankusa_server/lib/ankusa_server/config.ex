@@ -101,7 +101,8 @@ defmodule AnkusaServer.Config do
   @sse_keys ~w(type key_id)
   @sse_types %{"aes256" => :aes256, "kms" => :kms}
   @secrets_keys ~w(kek kek_previous providers cache_ttl_ms)
-  @claim_check_keys ~w(port retention_days pack_max_bytes ip store stores placement key_layout store_cooldown_ms
+  @claim_check_keys ~w(port retention_days redeem_grace_ms sweep_max_objects bucket_expiry_days
+                       pack_max_bytes ip store stores placement key_layout store_cooldown_ms
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
                        read_cache_bytes read_cache_max_entry_bytes max_concurrent_reads
                        ref_signing_keys ref_ttl_ms accept_unsigned_refs tls auth)
@@ -1110,6 +1111,9 @@ defmodule AnkusaServer.Config do
         |> put_opt(:port, int_opt(claim_check, "port", path))
         |> put_opt(:pack_max_bytes, int_opt(claim_check, "pack_max_bytes", path))
         |> put_opt(:retention_days, int_opt(claim_check, "retention_days", path))
+        |> put_opt(:redeem_grace_ms, int_opt(claim_check, "redeem_grace_ms", path))
+        |> put_opt(:sweep_max_objects, int_opt(claim_check, "sweep_max_objects", path))
+        |> put_opt(:bucket_expiry_days, int_opt(claim_check, "bucket_expiry_days", path))
         |> put_opt(:ip, string_opt(claim_check, "ip", path))
         |> put_opt(:blob_stores, claim_stores!(claim_check))
         |> put_opt(:placement, atom_enum_opt(claim_check, "placement", ~w(ordered hash), path))

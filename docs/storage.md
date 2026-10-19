@@ -221,6 +221,21 @@ unarchived hook`, `quarantine retention`, `catalogue retention`),
 `admin/audit_test.exs` (`outbox ceiling`), `admin/router_test.exs`
 (`DELETE /v1/dlq`, `audit_backlog`).
 
+#### Claim leases: a pack outlives its hook's last delivery
+
+Store format 6 added the claim leases (`?l`, one row per pack and hook, value
+`<<0::64>>` while the hook is live, else the grace expiry) and their counter
+`claim_leases` (field 9 of `counters`; its migration leases every `?k` claim row
+of a format 5 store, resumable in batches of 500). Reclaiming a hook turns its
+lease into a grace lease in the batch that deletes the hook;
+`Ankusa.ClaimCheck.Sweeper` deletes leases whose grace is over and never
+deletes a leased pack. See [claim-check.md](claim-check.md#claim-leases). A
+format 6 store cannot be opened by a format 5 image.
+
+Tests: `claim_check/sweeper_test.exs` (`lease blocks sweep`),
+`queue/deliveries_test.exs` (the sink-down drill), `store_upgrade_test.exs`
+(`the claim leases migration (format 5 -> 6)`).
+
 ### `:none`: no queue, no store hooks
 
 `wal: :none` is the other ack path: no hook queue, no batcher, no compactor, no

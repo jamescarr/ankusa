@@ -29,6 +29,7 @@ defmodule Ankusa.Queue.Deliveries do
 
   require Logger
 
+  alias Ankusa.ClaimCheck.Ref
   alias Ankusa.{Envelope, Store}
   alias Ankusa.Queue.Deliveries.Counters
   alias Ankusa.Queue.{Reclaim, Tenants}
@@ -807,8 +808,26 @@ defmodule Ankusa.Queue.Deliveries do
     rows ++ orphan_ops(:inflight, ord, seq, unresolved_sink, size) ++ cleared
   end
 
-  @doc "Persist the hook's claim-check ref, so every sink and every retry reuses it."
-  def claim_ops(seq, claim), do: [{:put, :index, Keys.claim(seq), :erlang.term_to_binary(claim)}]
+  @doc """
+  Persist the hook's claim-check ref, so every sink and every retry reuses it,
+  and lease the claim's pack to the hook (`Keys.claim_lease/3`, held until the
+  hook is reclaimed) with its count, in the same batch: the retention sweeper
+  (`Ankusa.ClaimCheck.Sweeper`) never deletes a leased pack.
+  """
+  def claim_ops(seq, ord, claim) do
+    [
+      {:put, :index, Keys.claim(seq), :erlang.term_to_binary(claim)},
+      {:put, :index, claim_lease_key(claim, seq), <<0::64>>}
+      | Counters.ops([{ord, :claim_leases, 1}])
+    ]
+  end
+
+  @doc "The lease key of the pack `claim` points into, for the hook `seq`."
+  @spec claim_lease_key(%{ref: Ref.t()}, pos_integer()) :: binary()
+  def claim_lease_key(%{ref: %Ref{} = ref}, seq) do
+    {:ok, pack_id, _index} = Ref.locate(ref.claim_id)
+    Keys.claim_lease(ref.tenant_id, pack_id, seq)
+  end
 
   # ── the DLQ ───────────────────────────────────────────────────────────────
 
