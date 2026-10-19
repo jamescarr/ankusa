@@ -113,13 +113,58 @@ defmodule Ankusa.Config do
                 }
               }
             },
-            # The dead-letter queue's ceilings (`Ankusa.Queue.DlqReaper`): a dead
-            # row is evicted once it is older than `retention_days`, and while the
-            # DLQ holds more than `max_rows` rows or `max_bytes` stored bytes, but
-            # only once its hook is archived and the catalogue can find it. A DLQ
-            # over a ceiling with nothing archived refuses new hooks with `503
-            # dlq_full` instead of deleting an acked one. Integers >= 1.
-            queue: %{dlq: %{retention_days: 30, max_rows: 10_000_000, max_bytes: 53_687_091_200}},
+            # The queue's store. `dlq` is the dead-letter queue's ceilings
+            # (`Ankusa.Queue.DlqReaper`): a dead row is evicted once it is older
+            # than `retention_days`, and while the DLQ holds more than `max_rows`
+            # rows or `max_bytes` stored bytes, but only once its hook is archived
+            # and the catalogue can find it. A DLQ over a ceiling with nothing
+            # archived refuses new hooks with `503 dlq_full` instead of deleting
+            # an acked one. Integers >= 1.
+            #
+            # `rocksdb` is the RocksDB settings of the node's store
+            # (`Ankusa.Store`), read when the database opens (a change needs a
+            # restart) and again by every reopen. It lives here, not in a section
+            # of its own, because `Ankusa.Config` is at the 31 fields a struct
+            # may have before it stops being a flat map.
+            # `block_cache_bytes` is the LRU cache shared by every column family;
+            # with the filters below its index and filter blocks live in it
+            # (`cache_index_and_filter_blocks`), so size it for them on a large
+            # store. `bloom_bits_per_key` is the bloom filter on the `index`
+            # family (dedupe keys, due/inflight/dead rows) and the `deliveries`
+            # family, which turns a point lookup of an absent key (a first-seen
+            # dedupe key) into one filter probe per file instead of an index and
+            # data block read; 0 turns it off. A filter exists only in files
+            # written after it was turned on, so an upgraded store gains it as
+            # compaction rewrites its files. `max_open_files` is -1 (no limit) or
+            # the table-file handles kept open (the process's file-descriptor
+            # limit still applies). `compaction_style` is :level or :universal
+            # for every family. `rate_limiter_bytes_per_sec` caps flush and
+            # compaction writes (0 = unlimited). `max_background_jobs` is the
+            # flush and compaction thread budget. `write_buffer_bytes` is the
+            # memtable of each column family (at least 65 536). Not secrets:
+            # `/v1/config` shows the section as it is.
+            queue: %{
+              dlq: %{retention_days: 30, max_rows: 10_000_000, max_bytes: 53_687_091_200},
+              rocksdb: %{
+                block_cache_bytes: 64 * 1024 * 1024,
+                bloom_bits_per_key: 10,
+                max_open_files: 65_536,
+                compaction_style: :level,
+                rate_limiter_bytes_per_sec: 0,
+                max_background_jobs: 4,
+                write_buffer_bytes: %{
+                  default: 4 * 1024 * 1024,
+                  hooks: 64 * 1024 * 1024,
+                  deliveries: 16 * 1024 * 1024,
+                  index: 16 * 1024 * 1024,
+                  archive: 4 * 1024 * 1024,
+                  quarantine: 4 * 1024 * 1024,
+                  audit: 4 * 1024 * 1024,
+                  tenants: 4 * 1024 * 1024,
+                  counters: 1024 * 1024
+                }
+              }
+            },
             # How long the archive keeps a segment object (and its index) through
             # the blob store's `delete/3`: `nil` keeps them (an S3/GCS bucket can
             # take a lifecycle rule instead), an integer >= 1 deletes the object
@@ -776,6 +821,37 @@ defmodule Ankusa.Config do
 
   @key_prefix ~r"\A([A-Za-z0-9._-]+/)+\z"
 
+  # `queue.rocksdb` (DUR-3): the ranges, so a bad value fails at `new/1` naming
+  # its key, not at the open (RocksDB would keep its own default for a value it
+  # cannot use, and report nothing).
+  defp validate_rocksdb!(config) do
+    for {key, constraint, valid?} <- [
+          {:block_cache_bytes, "an integer >= 1", &(is_integer(&1) and &1 >= 1)},
+          {:bloom_bits_per_key, "0 (off) or an integer from 1 to 32",
+           &(is_integer(&1) and &1 in 0..32)},
+          {:max_open_files, "-1 (no limit) or an integer >= 1",
+           &(is_integer(&1) and (&1 == -1 or &1 >= 1))},
+          {:compaction_style, ":level or :universal", &(&1 in [:level, :universal])},
+          {:rate_limiter_bytes_per_sec, "an integer >= 0 (0 = unlimited)",
+           &(is_integer(&1) and &1 >= 0)},
+          {:max_background_jobs, "an integer >= 1", &(is_integer(&1) and &1 >= 1)}
+        ] do
+      check!(config, [:queue, :rocksdb, key], "queue.rocksdb.#{key}", constraint, valid?)
+    end
+
+    for {cf, _} <- config.queue.rocksdb.write_buffer_bytes do
+      check!(
+        config,
+        [:queue, :rocksdb, :write_buffer_bytes, cf],
+        "queue.rocksdb.write_buffer_bytes.#{cf}",
+        "an integer >= 65536",
+        &(is_integer(&1) and &1 >= 65_536)
+      )
+    end
+
+    config
+  end
+
   # The retention windows and ceilings of the DLQ, the pen, the catalogue and the
   # audit trail (DUR-2.b).
   defp validate_retention!(config) do
@@ -870,6 +946,7 @@ defmodule Ankusa.Config do
     )
 
     validate_retention!(config)
+    validate_rocksdb!(config)
 
     for key <- [:max_entries, :max_entries_per_tenant] do
       check!(
@@ -1173,7 +1250,23 @@ defmodule Ankusa.Config do
 
   defp put_section(acc, :queue, v) do
     merged = merge_known!(acc.queue, v, "queue")
-    %{acc | queue: %{merged | dlq: merge_known!(acc.queue.dlq, merged.dlq, "queue.dlq")}}
+    rocksdb = merge_known!(acc.queue.rocksdb, merged.rocksdb, "queue.rocksdb")
+
+    buffers =
+      merge_known!(
+        acc.queue.rocksdb.write_buffer_bytes,
+        rocksdb.write_buffer_bytes,
+        "queue.rocksdb.write_buffer_bytes"
+      )
+
+    %{
+      acc
+      | queue: %{
+          merged
+          | dlq: merge_known!(acc.queue.dlq, merged.dlq, "queue.dlq"),
+            rocksdb: %{rocksdb | write_buffer_bytes: buffers}
+        }
+    }
   end
 
   defp put_section(acc, k, v) do

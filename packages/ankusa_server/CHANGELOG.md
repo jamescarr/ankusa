@@ -8,6 +8,13 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`queue.rocksdb.*` (DUR-3).** YAML keys for the store's RocksDB settings:
+  `block_cache_bytes`, `bloom_bits_per_key`, `max_open_files`, `compaction_style`,
+  `rate_limiter_bytes_per_sec`, `max_background_jobs` and
+  `write_buffer_bytes.<family>`. The defaults put a bloom filter on the `index` and
+  `deliveries` families; see `docs/configuration.md` and
+  `config-examples/reference.yml`.
+
 - **`queue.dlq`, `quarantine.retention_days`, `storage.catalogue_retention_days`,
   `archive.retention_days` and `audit.max_rows|max_bytes|outbox_max_backlog`
   (DUR-2.b).** YAML keys for the DLQ, quarantine, catalogue and audit retention and

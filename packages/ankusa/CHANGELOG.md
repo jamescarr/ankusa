@@ -13,6 +13,22 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **`queue.rocksdb`: the store's RocksDB settings are config, and `index` and
+  `deliveries` carry a bloom filter (DUR-3).** `block_cache_bytes` (64 MiB),
+  `bloom_bits_per_key` (10; 0 = off), `max_open_files` (65 536), `compaction_style`
+  (`:level` | `:universal`), `rate_limiter_bytes_per_sec` (0 = unlimited),
+  `max_background_jobs` (4) and `write_buffer_bytes` per column family, each
+  range-checked at `Ankusa.Config.new/1` and read back from the `OPTIONS-*` file in
+  `store_test.exs`. The defaults add a whole-key bloom filter with
+  `cache_index_and_filter_blocks` on the `index` and `deliveries` families, so a
+  first-seen dedupe key is one filter probe per file instead of an index and data
+  block read; there is no prefix extractor, because `index` also serves ordered
+  scans. Filters exist only in files written after the upgrade (compaction brings
+  the rest); the store format is unchanged and no migration runs. The index and
+  filter blocks now live in the block cache: size `block_cache_bytes` for a store
+  with tens of millions of dedupe keys. `bench/dedupe_bench.exs` measures a miss
+  and a commit against a store of `KEYS` dedupe keys. See
+  `docs/storage.md#rocksdb-tuning-and-the-index-filters`.
 - **`wal: :dual`: the ack waits for a replicated intake log too (DUR-1.b.a,
   [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** The core of the
   dual commit: the `Ankusa.Intake` behaviour and `Ankusa.Intake.Memory` (a

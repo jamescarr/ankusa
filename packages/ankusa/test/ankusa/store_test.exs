@@ -344,9 +344,140 @@ defmodule Ankusa.StoreTest do
       assert quarantine["compression"] == "kZSTD"
       assert quarantine["write_buffer_size"] == "4194304"
     end
+
+    # `queue.rocksdb`'s defaults (DUR-3): level compaction and a bloom filter
+    # with `cache_index_and_filter_blocks` on `index` and `deliveries` only,
+    # whole-key filtering (the dedupe lookup is a point read of a whole key),
+    # and no prefix extractor, because `index` also serves ordered scans.
+    test "the defaults put a bloom filter on index and deliveries, and on no other family", %{
+      config: config
+    } do
+      sections = options_sections(config)
+      db = sections["DBOptions"]
+
+      assert db["max_open_files"] == "65536"
+      assert db["max_background_jobs"] == "4"
+
+      for cf <- ~w(index deliveries) do
+        table = sections[~s(TableOptions/BlockBasedTable "#{cf}")]
+        assert table["filter_policy"] == "bloomfilter:10:false", cf
+        assert table["whole_key_filtering"] == "true", cf
+        assert table["cache_index_and_filter_blocks"] == "true", cf
+        assert sections[~s(CFOptions "#{cf}")]["prefix_extractor"] == "nullptr", cf
+      end
+
+      for cf <- ~w(default hooks archive quarantine audit tenants counters) do
+        table = sections[~s(TableOptions/BlockBasedTable "#{cf}")]
+        assert table["filter_policy"] == "nullptr", cf
+        assert table["cache_index_and_filter_blocks"] == "false", cf
+      end
+
+      for cf <- ~w(default hooks deliveries index archive quarantine audit tenants counters) do
+        assert sections[~s(CFOptions "#{cf}")]["compaction_style"] == "kCompactionStyleLevel", cf
+      end
+
+      # The counters family keeps its merge operator next to the new options.
+      assert sections[~s(CFOptions "counters")]["merge_operator"] == "ErlangMergeOperator"
+      assert sections[~s(CFOptions "index")]["merge_operator"] == "nullptr"
+
+      assert cache_capacity(config.instance) == 64 * 1024 * 1024
+    end
+
+    test "every queue.rocksdb key round-trips through the OPTIONS file" do
+      sizes = %{
+        default: 131_072,
+        hooks: 33_554_432,
+        deliveries: 8_388_608,
+        index: 2_097_152,
+        archive: 262_144,
+        quarantine: 524_288,
+        audit: 196_608,
+        tenants: 65_536,
+        counters: 3_145_728
+      }
+
+      config =
+        start_store(
+          queue: %{
+            rocksdb: %{
+              block_cache_bytes: 33_554_432,
+              bloom_bits_per_key: 14,
+              max_open_files: 1024,
+              compaction_style: :universal,
+              rate_limiter_bytes_per_sec: 10_485_760,
+              max_background_jobs: 2,
+              write_buffer_bytes: sizes
+            }
+          }
+        )
+
+      sections = options_sections(config)
+      db = sections["DBOptions"]
+
+      assert db["max_open_files"] == "1024"
+      assert db["max_background_jobs"] == "2"
+      assert cache_capacity(config.instance) == 33_554_432
+
+      for {cf, bytes} <- sizes do
+        cf = Atom.to_string(cf)
+        options = sections[~s(CFOptions "#{cf}")]
+        assert options["write_buffer_size"] == Integer.to_string(bytes), cf
+        assert options["compaction_style"] == "kCompactionStyleUniversal", cf
+      end
+
+      for cf <- ~w(index deliveries) do
+        table = sections[~s(TableOptions/BlockBasedTable "#{cf}")]
+        assert table["filter_policy"] == "bloomfilter:14:false", cf
+        assert table["whole_key_filtering"] == "true", cf
+        assert table["cache_index_and_filter_blocks"] == "true", cf
+      end
+
+      # RocksDB does not write the rate limiter into OPTIONS: the store holds
+      # it, and flushing through it works.
+      assert %{native: %{limiter: limiter}} = :sys.get_state(Ankusa.via(config.instance, :store))
+      assert limiter != nil
+      :ok = Store.write(config.instance, [{:put, :index, "limiter-probe", "v"}], sync: true)
+      flush!(config.instance, :index)
+      assert Store.get(config.instance, :index, "limiter-probe") == {:ok, "v"}
+    end
+
+    test "bloom_bits_per_key: 0 restores the plain block-cache table options" do
+      config = start_store(queue: %{rocksdb: %{bloom_bits_per_key: 0}})
+      sections = options_sections(config)
+
+      for cf <- ~w(index deliveries) do
+        table = sections[~s(TableOptions/BlockBasedTable "#{cf}")]
+        assert table["filter_policy"] == "nullptr", cf
+        assert table["cache_index_and_filter_blocks"] == "false", cf
+      end
+
+      assert %{native: %{limiter: nil}} = :sys.get_state(Ankusa.via(config.instance, :store))
+    end
+
+    test "a reopen keeps the configured options", %{instance: inst, config: config} do
+      :ok = Store.reopen(inst)
+      sections = options_sections(config)
+
+      assert sections["DBOptions"]["max_open_files"] == "65536"
+      table = sections[~s(TableOptions/BlockBasedTable "index")]
+      assert table["filter_policy"] == "bloomfilter:10:false"
+      assert cache_capacity(inst) == 64 * 1024 * 1024
+    end
   end
 
   # ── helpers ───────────────────────────────────────────────────────────────
+
+  defp start_store(overrides) do
+    config = test_config([roles: [:edge]] ++ overrides)
+    put_config(config)
+    start_supervised!({Store, instance: config.instance})
+    config
+  end
+
+  defp cache_capacity(inst) do
+    [{:handles, handles}] = :ets.lookup(:"ankusa_store_#{inst}", :handles)
+    :rocksdb.cache_info(handles.cache, :capacity)
+  end
 
   defp eventually(fun, tries \\ 100) do
     cond do

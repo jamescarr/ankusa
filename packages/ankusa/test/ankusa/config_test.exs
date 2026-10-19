@@ -1282,6 +1282,108 @@ defmodule Ankusa.ConfigTest do
     end
   end
 
+  describe "queue.rocksdb (DUR-3)" do
+    test "the defaults are the settings the store was hard-coded with, plus the filters" do
+      assert Config.new().queue.rocksdb == %{
+               block_cache_bytes: 67_108_864,
+               bloom_bits_per_key: 10,
+               max_open_files: 65_536,
+               compaction_style: :level,
+               rate_limiter_bytes_per_sec: 0,
+               max_background_jobs: 4,
+               write_buffer_bytes: %{
+                 default: 4_194_304,
+                 hooks: 67_108_864,
+                 deliveries: 16_777_216,
+                 index: 16_777_216,
+                 archive: 4_194_304,
+                 quarantine: 4_194_304,
+                 audit: 4_194_304,
+                 tenants: 4_194_304,
+                 counters: 1_048_576
+               }
+             }
+    end
+
+    test "an override keeps the other keys, one write buffer keeps the others, and dlq is untouched" do
+      %{dlq: dlq, rocksdb: rocksdb} =
+        Config.new(
+          queue: %{rocksdb: %{bloom_bits_per_key: 14, write_buffer_bytes: %{index: 1_048_576}}}
+        ).queue
+
+      assert rocksdb.bloom_bits_per_key == 14
+      assert rocksdb.max_open_files == 65_536
+      assert rocksdb.write_buffer_bytes.index == 1_048_576
+      assert rocksdb.write_buffer_bytes.hooks == 67_108_864
+      assert dlq == Config.new().queue.dlq
+    end
+
+    test "a dlq override keeps the rocksdb defaults" do
+      queue = Config.new(queue: %{dlq: %{max_rows: 5}}).queue
+      assert queue.dlq.max_rows == 5
+      assert queue.rocksdb == Config.new().queue.rocksdb
+    end
+
+    test "a keyword list is accepted at every level" do
+      assert %{rocksdb: %{max_background_jobs: 2, write_buffer_bytes: %{audit: 131_072}}} =
+               Config.new(
+                 queue: [rocksdb: [max_background_jobs: 2, write_buffer_bytes: [audit: 131_072]]]
+               ).queue
+    end
+
+    test "an unknown key, at any level, is refused by name" do
+      assert_raise ArgumentError, ~r/unknown Ankusa.Config key: queue\.bloom/, fn ->
+        Config.new(queue: %{bloom: 1})
+      end
+
+      assert_raise ArgumentError, ~r/unknown Ankusa.Config key: queue\.rocksdb\.bloom_bits/, fn ->
+        Config.new(queue: %{rocksdb: %{bloom_bits: 1}})
+      end
+
+      assert_raise ArgumentError,
+                   ~r/unknown Ankusa.Config key: queue\.rocksdb\.write_buffer_bytes\.blobs/,
+                   fn ->
+                     Config.new(queue: %{rocksdb: %{write_buffer_bytes: %{blobs: 65_536}}})
+                   end
+    end
+
+    test "every key is range-checked at Config.new/1, naming the key" do
+      for {key, bad, wanted} <- [
+            {:block_cache_bytes, [0, -1, 1.5, "64", nil], "an integer >= 1"},
+            {:bloom_bits_per_key, [-1, 33, 10.5, "10", nil],
+             "0 \\(off\\) or an integer from 1 to 32"},
+            {:max_open_files, [0, -2, 1.5, nil], "-1 \\(no limit\\) or an integer >= 1"},
+            {:compaction_style, [:fifo, "level", nil], ":level or :universal"},
+            {:rate_limiter_bytes_per_sec, [-1, 1.5, "1", nil], "an integer >= 0"},
+            {:max_background_jobs, [0, -1, 2.5, nil], "an integer >= 1"}
+          ],
+          value <- bad do
+        assert_raise ArgumentError, ~r/queue\.rocksdb\.#{key} must be #{wanted}/, fn ->
+          Config.new(queue: %{rocksdb: %{key => value}})
+        end
+      end
+
+      for value <- [0, 65_535, -1, 1.5, "4194304", nil] do
+        assert_raise ArgumentError,
+                     ~r/queue\.rocksdb\.write_buffer_bytes\.hooks must be an integer >= 65536/,
+                     fn ->
+                       Config.new(queue: %{rocksdb: %{write_buffer_bytes: %{hooks: value}}})
+                     end
+      end
+
+      assert %{max_open_files: -1, bloom_bits_per_key: 0, compaction_style: :universal} =
+               Config.new(
+                 queue: %{
+                   rocksdb: %{
+                     max_open_files: -1,
+                     bloom_bits_per_key: 0,
+                     compaction_style: :universal
+                   }
+                 }
+               ).queue.rocksdb
+    end
+  end
+
   describe "dedupe ceilings" do
     test "the defaults bound the index" do
       assert %{max_entries: 100_000_000, max_entries_per_tenant: 30_000_000, scope: :node} =

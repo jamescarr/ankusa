@@ -403,7 +403,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/queue/reclaim.ex:75-80`, `claim_check/sweeper.ex:75-130`, `store/keys.ex:44-57`.
   *Evidence:* —
 
-- [ ] **DUR-3 — RocksDB tunables and index-family filters** · P1 · Deps: —
+- [x] **DUR-3 — RocksDB tunables and index-family filters** · P1 · Deps: —
   *Why:* every RocksDB option is hard-coded (`store.ex:45,67-79,596-632`): 64 MiB block cache, no bloom filter, no `max_open_files`, no compaction style or rate limiter; dedupe `multi_get` misses hit several SSTs per key at 10⁸ keys.
   *Change:* `store.rocksdb: %{block_cache_bytes, bloom_bits_per_key: 10, max_open_files: 65_536, compaction_style, rate_limiter_bytes_per_sec, max_background_jobs, write_buffer_bytes: %{hooks, deliveries, index, ...}}` threaded through `descriptors/1` and `@db_opts`; defaults add bloom + `whole_key_filtering` + `cache_index_and_filter_blocks` on `index` and `deliveries`, a prefix extractor on dedupe keys; `store_test` reads the `OPTIONS-*` file back for each.
   *Done when:* with 10⁸ pre-seeded dedupe keys commit p99 improves vs. baseline and the number is recorded; every option round-trips through `OPTIONS-*`.
