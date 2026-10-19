@@ -38,6 +38,21 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `breaker_min_calls`, `breaker_failure_rate`, `breaker_open_ms`),
   `dedupe.scope`, `rate_limits.scope`; `RateLimiter.fleet_charges/3`. Tests:
   `edge_fleet_test.exs`, `config_test.exs`.
+- **Dispatch fairness by tenant (TEN-3).** A scan claims from the tenants with
+  work due by deficit round-robin (an equal share of the page each, a tenant
+  with less due leaves the rest to the others, a tenant the page did not reach
+  goes first in the next scan), and every tenant has its own window beside the
+  global one: `dispatch.tenants.default` and `dispatch.tenants["acme"]` set
+  `max_inflight` (default 1024), `max_inflight_bytes` (32 MiB) and
+  `concurrency` (16), so a tenant whose sink is slow fills its own window and
+  nobody else's. Slots go round-robin across tenants, then across a tenant's
+  keys. The sink key is now `{tenant_id, source_id, sink index, module}`:
+  circuit breakers and `dispatch.sink_concurrency` are per tenant. New gauge
+  `ankusa_dispatch_tenant_inflight{tenant}` (claimed rows, the 100 tenants
+  holding the most). `Deliveries.next_due_at/3` takes `skip:`, the tenants at
+  their window. Proof: `tenant fairness` in `test/ankusa/dispatch/isolation_test.exs`
+  and `bench/tenant_fairness_bench.exs`.
+
 - **Tenant key layout, per-tenant counters and the active-tenant index
   (TEN-1.b, [ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)).** Store
   format 3. Every tenant gets a dense ordinal (`tenants` column family, assigned
@@ -457,6 +472,20 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 - `Ankusa.fetch_config/1`, `Ankusa.HttpClient.validate!/2` (public).
 
 ### Changed
+
+- **`dispatch.sink_concurrency` defaults to `8` (was `nil`), and the per-tenant
+  windows of `dispatch.tenants.default` apply by default (TEN-3).** A
+  deployment whose hooks all share one tenant (none, or one tenant id) is held
+  to `max_inflight: 1024`, `max_inflight_bytes: 32 MiB` and `concurrency: 16`
+  instead of the global limits: raise `dispatch.tenants.default` to
+  `max_inflight: 4096`, `max_inflight_bytes: 134217728` and `concurrency: 32`
+  to restore the old ceilings. `dispatch.sink_concurrency` may now exceed
+  `dispatch.concurrency` (the global cap binds first), where it used to be
+  refused; the breaker and the sink cap are per tenant. The cap is also a
+  rate ceiling: one sink key delivers at most `sink_concurrency` ÷ the sink's
+  latency per second (`bench/core_bench.exs`'s 5 ms sink: `end_to_end_per_s`
+  3 595 → 1 140 at 512 B on one machine; ingest and its p99 unchanged), so set
+  `sink_concurrency` higher, or `nil`, for a source that needs more.
 
 - **A tenant-carrying URL scheme needs a `rate_limits.default` (TEN-2).**
   `Ankusa.RouteResolver.TenantPath` (`routing: tenant_path`) with

@@ -290,6 +290,20 @@ The always-on tests cover:
   current secret in the pen, releases it once the secret is rotated (past the
   timestamp tolerance: the window is judged at receive time) with its original
   id and the job's `replay_id`, and finds nothing left on a second run.
+- **Dispatch, per tenant** (`dispatch/isolation_test.exs`, `describe "per-tenant
+  scheduling"`): `tenant fairness` runs a tenant at 99 times another's load
+  behind a slow sink and asserts the light tenant's p99 delivery lag is within
+  2× of its solo p99 (floor 25 ms), the heavy tenant never holds more claimed
+  rows than its window and never runs more attempts than its concurrency; a
+  page is split across the active tenants instead of going to the one with the
+  oldest rows; a breaker, and `sink_concurrency`, are per tenant (one tenant's
+  failing or slow sink parks or holds nothing of another's); a tenant's own
+  `dispatch.tenants` window caps what it claims, and
+  `ankusa_dispatch_tenant_inflight` reports it and then reports 0. The new
+  keys' ranges are in `config_test.exs`. `bench/tenant_fairness_bench.exs`
+  (`MIX_ENV=test mix run bench/tenant_fairness_bench.exs`, not part of
+  `bench:gate`) runs the same 99:1 load through the edge and prints both
+  tenants' p99.
 - **Filesystem durability** (`fsync_test.exs`): the helpers return an error
   for a path they cannot open, write or rename, never raise, and `write_file`
   replaces content in one step and leaves no temp file. `mkdir_p/2` fsyncs the
@@ -851,6 +865,13 @@ class prints a `WARN` (a laptop is usually faster than the CI runner, so it
 passes; a slower one can fail without a regression). `BENCH_RUNS`,
 `BENCH_CONFIRM`, `BENCH_RUNNER`, `BENCH_BASELINE` and `BENCH_REBASELINE` are
 documented in the script's header.
+
+[`bench/tenant_fairness_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/tenant_fairness_bench.exs)
+is the fairness bench of TEN-3, run by hand: it prints a light tenant's p99
+delivery lag alone and beside a tenant at 99 times its load whose sink is slow,
+and the heavy tenant's peak claimed rows and running attempts, and exits 1 if
+the light tenant's p99 is more than 2× its solo p99 (or over 25 ms) or the
+heavy tenant passes its window.
 
 `mise run bench:gate` also runs two self-asserting scripts first, with no
 baseline entry:

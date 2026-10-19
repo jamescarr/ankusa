@@ -69,7 +69,7 @@ Every top-level section, with its keys and defaults:
 | `admin` | `enabled` (`true` in the image, `false` in core), `port` (4002), `ip` (`127.0.0.1`; `0.0.0.0` exposes it, and then needs `auth`), `gauge_interval_ms` (15000; how often the `/metrics` gauges are sampled), `tls` (a TLS block, like `listener.tls`), `auth` (who may call it: `mode` = `none` \| `token` \| `jwt` \| `mtls`, `allow_insecure`, `tokens`, `jwt`, `mtls`; see [Control-plane authentication](#control-plane-authentication)) |
 | `metrics` | `enabled` (`false`), `port` (4004), `ip` (`127.0.0.1`), `tls`. A listener that serves only `/metrics`, `/health` and `/ready`. See [A separate metrics listener](#a-separate-metrics-listener) |
 | `batcher` | `partitions` (2), `max_batch` (256), `max_delay_ms` (0), `max_queue` (10000), `max_queue_bytes` (268435456) |
-| `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) |
+| `dispatch` | `batch` (128), `concurrency` (32), `max_inflight` (4096), `max_inflight_bytes` (134217728), `attempt_timeout_ms` (30000), `sink_concurrency` (8; null = only `concurrency`), `breaker_failures` (5; 0 disables breakers), `breaker_open_ms` (30000), `breaker_max_open_ms` (300000), `tenants` (`default` and one entry per tenant id, each any of `max_inflight` (1024), `max_inflight_bytes` (33554432), `concurrency` (16)), `retry.base_ms` (100), `retry.max_ms` (300000), `retry.max_attempts` (84), `retry.jitter` (`true`). See [`delivery.md`](delivery.md#a-slow-or-dead-sink) and [Dispatch fairness between tenants](delivery.md#fairness-between-tenants) |
 | `wal` | `type` (`disk` \| `none`; the queue's mode — the name is historical), `publish_timeout_ms` (`8000`; `wal.type: none` only: the overall deadline every sink must confirm under — keep it below the provider's own timeout) |
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `storage.s3.sse`, `storage.gcs.sse` | `type` (`aes256` \| `kms`), `key_id` (the KMS key; required for `kms` on GCS, optional on S3). Server-side encryption sent on every object this store writes; the same `sse:` key is accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. See [Encryption at rest](storage.md#encryption-at-rest) |
@@ -465,10 +465,14 @@ config :ankusa,
     max_inflight: 4096,
     max_inflight_bytes: 134_217_728,
     attempt_timeout_ms: 30_000,
-    sink_concurrency: nil,
+    sink_concurrency: 8,
     breaker_failures: 5,
     breaker_open_ms: 30_000,
     breaker_max_open_ms: 300_000,
+    tenants: %{
+      default: %{max_inflight: 1024, max_inflight_bytes: 33_554_432, concurrency: 16},
+      "acme" => %{max_inflight: 2048, concurrency: 24}
+    },
     retry: {Ankusa.RetryPolicy.Exponential, []}
   },
   storage: %{
@@ -566,7 +570,9 @@ config :ankusa,
 | `dispatch.max_inflight` | `4096` | Max claimed, unfinished deliveries. Bounds how much a stalled destination can hold. |
 | `dispatch.max_inflight_bytes` | `134_217_728` (128 MiB) | ...and the max sum of their stored hook sizes. |
 | `dispatch.attempt_timeout_ms` | `30_000` | A delivery attempt that has not returned after this is killed and counts as a failed attempt (`{:attempt_timeout, ms}`). Keep it above every sink's own timeout. |
-| `dispatch.sink_concurrency` | `nil` | Each sink of each source (`{source_id, sink index, module}`) has its own queue; at most this many of its attempts run at once. `nil` leaves only the global `concurrency` cap. |
+| `dispatch.sink_concurrency` | `8` | Each sink of each source of each tenant (`{tenant_id, source_id, sink index, module}`) has its own queue and its own breaker; at most this many of its attempts run at once. `nil` leaves only the global `concurrency` cap. A value above `concurrency` is accepted: the global cap binds first. It is also a rate ceiling: one key delivers at most `sink_concurrency` ÷ the sink's latency per second (8 attempts of 5 ms is 1 600 a second, of 100 ms is 80), so raise it, or set `nil`, for a source whose volume needs more. |
+| `dispatch.tenants.default` | `%{max_inflight: 1024, max_inflight_bytes: 33_554_432, concurrency: 16}` | A tenant's share of the three global limits above: the most claimed, unfinished deliveries it may hold, the most stored hook bytes in them, and the most of its attempts running at once. A tenant whose sink is slow fills its own window and nobody else's; the global limits still apply on top. A tenant is the hook's tenant id (`default` for a hook without one). Defaults are a quarter of the global window and half of `concurrency`: **a deployment whose hooks all share one tenant should raise them to the global values.** Each key is a positive integer. |
+| `dispatch.tenants["acme"]` | _(none)_ | Overrides any of the three keys for the tenant with that id; a key it leaves out comes from `default`. In YAML the tenant id is the key under `dispatch.tenants` (`default` there is always the default entry, so a tenant named `default` takes it). `ankusa_dispatch_tenant_inflight{tenant}` reports the claimed rows of the 100 tenants holding the most. |
 | `dispatch.breaker_failures` | `5` | Consecutive failures that open a sink's breaker; `0` never opens one. An open sink's rows wait without spending attempts. |
 | `dispatch.breaker_open_ms`, `dispatch.breaker_max_open_ms` | `30_000`, `300_000` | How long a breaker stays open, doubling per consecutive open up to the max; one probe attempt then closes it or reopens it. In memory: a restart closes every breaker. |
 | `dispatch.retry` | `{Ankusa.RetryPolicy.Exponential, []}` | `{module, opts}` implementing `Ankusa.RetryPolicy`: dispatch-wide; there is no per-source retry policy. |
@@ -662,7 +668,10 @@ retry, no waiting for a slot, no claim cache, no request cap);
 `nil`, `true` or `false`, and every `claim_check.ref_signing_keys` entry is at
 least 16 bytes;
 `claim_check.retention_days` is `nil` or ≥ 1; `audit.retention_days` is ≥ 1; `tenants.max` is an integer from 1 to 4294967294; `storage.key_prefix` is `""` or
-`name/` parts; `dispatch.sink_concurrency` is `nil` or `1..concurrency`,
+`name/` parts; `dispatch.sink_concurrency` is `nil` or ≥ 1,
+every `dispatch.tenants.default` key and every key of a `dispatch.tenants` entry is
+an integer ≥ 1 (a tenant entry holds only `max_inflight`, `max_inflight_bytes`,
+`concurrency`, under a non-empty tenant id),
 `dispatch.breaker_failures` ≥ 0, `breaker_open_ms` positive and
 `breaker_max_open_ms` ≥ `breaker_open_ms`. An embedded source whose verifier secret is missing or
 undecodable fails boot too (`source <id>: verifier secret is missing or

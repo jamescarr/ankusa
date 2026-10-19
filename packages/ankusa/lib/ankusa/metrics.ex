@@ -362,8 +362,10 @@ defmodule Ankusa.Metrics do
   end
 
   # The tenants with the most first-attempt rows waiting (`Ankusa.Metrics.Gauges`
-  # reports the top 100 from the queue counters). A tenant that leaves the top is
-  # reported once as 0. Every tenant that ever entered it keeps a series until
+  # reports the top 100 from the queue counters), and the 100 holding the most
+  # claimed, unfinished deliveries (`Ankusa.Dispatch.Pipeline` reports them from
+  # its tenant windows, once per housekeeping tick). A tenant that leaves a top
+  # is reported once as 0. Every tenant that ever entered one keeps a series until
   # the cardinality policy (`metrics.max_series_per_metric`, TEN-7) bounds them.
   defp tenant_gauges(own) do
     [
@@ -372,6 +374,15 @@ defmodule Ankusa.Metrics do
         scoped(own,
           event_name: [:ankusa, :tenant, :state],
           measurement: :pending,
+          unit: :unit,
+          tags: [:instance, :tenant]
+        )
+      ),
+      last_value(
+        "ankusa.dispatch.tenant.inflight",
+        scoped(own,
+          event_name: [:ankusa, :dispatch, :tenant_state],
+          measurement: :inflight,
           unit: :unit,
           tags: [:instance, :tenant]
         )

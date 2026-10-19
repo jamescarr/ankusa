@@ -86,10 +86,10 @@ defmodule Ankusa.Config do
               # (http `timeout_ms` 5 s, nats/redis `publish_timeout_ms` 5 s, kafka
               # produce 5 s, the rabbitmq connection call 15 s).
               attempt_timeout_ms: 30_000,
-              # per-sink isolation, keyed by {source_id, sink index, sink module}:
-              # at most sink_concurrency attempts of one sink run at once (nil =
-              # only the global `concurrency` cap)...
-              sink_concurrency: nil,
+              # per-sink isolation, keyed by {tenant_id, source_id, sink index, sink
+              # module}: at most sink_concurrency attempts of one sink of one
+              # tenant run at once (nil = only the global `concurrency` cap)...
+              sink_concurrency: 8,
               # ...and a sink that fails breaker_failures times in a row (0 =
               # never) is skipped for breaker_open_ms, doubling per consecutive
               # open up to breaker_max_open_ms. Rows parked by an open breaker
@@ -97,7 +97,21 @@ defmodule Ankusa.Config do
               breaker_failures: 5,
               breaker_open_ms: 30_000,
               breaker_max_open_ms: 300_000,
-              retry: {Ankusa.RetryPolicy.Exponential, []}
+              retry: {Ankusa.RetryPolicy.Exponential, []},
+              # Per-tenant shares of the three global limits above, so one tenant
+              # cannot exhaust what everyone else needs: `default` applies to every
+              # tenant, `tenants["acme"]` (a tenant id string) overrides any of its
+              # keys for that tenant. The global limits still apply on top.
+              #   max_inflight       claimed, unfinished deliveries of one tenant
+              #   max_inflight_bytes ...and the sum of their stored hook sizes
+              #   concurrency        attempts of one tenant running at once
+              tenants: %{
+                default: %{
+                  max_inflight: 1024,
+                  max_inflight_bytes: 33_554_432,
+                  concurrency: 16
+                }
+              }
             },
             # segment compaction
             storage: %{
@@ -779,9 +793,25 @@ defmodule Ankusa.Config do
     raise ArgumentError, "wal must be :disk or :none, got #{inspect(other)}"
   end
 
+  # `dispatch.tenants` is a map of maps: a single-level merge would let
+  # `tenants: %{"acme" => ...}` drop the built-in `default` limits.
+  defp put_section(acc, :dispatch, v) do
+    merged = merge_known!(acc.dispatch, v, "dispatch")
+    %{acc | dispatch: %{merged | tenants: merge_tenants(acc.dispatch.tenants, merged.tenants)}}
+  end
+
   defp put_section(acc, k, v) do
     Map.put(acc, k, merge_known!(Map.get(acc, k), v, to_string(k)))
   end
+
+  defp merge_tenants(defaults, %{} = incoming) do
+    case Map.get(incoming, :default, %{}) do
+      %{} = default -> Map.put(incoming, :default, Map.merge(defaults.default, default))
+      _other -> incoming
+    end
+  end
+
+  defp merge_tenants(_defaults, incoming), do: incoming
 
   defp merge_known!(defaults, value, dotted_name) do
     incoming =
