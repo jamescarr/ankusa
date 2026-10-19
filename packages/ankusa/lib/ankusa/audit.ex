@@ -74,6 +74,20 @@ defmodule Ankusa.Audit do
   redacted an entity is one. `Ankusa.Lifecycle.Publisher` reads the flagged
   rows in `seq` order with `page/3` and keeps its place in `m:lifecycle_cursor`.
 
+  ## Restores and event identity
+
+  A store that came back from a backup (`Ankusa.Store` leaves
+  `m:incarnation_pending`) re-issues the `seq` numbers of every change the lost
+  one made after the backup, and some of those were already published. So the
+  first thing this process does on such a boot is open a new *incarnation*:
+  one history entry `{from seq, fresh id}` in `m:incarnation`, written with an
+  `instance.restore` row (event `io.ankusa.instance.restored`, carrying the
+  incarnation and the restored `seq`) in one synced batch, before any change is
+  taken. `incarnation/2` tells `Ankusa.Lifecycle` which id a row's event id is
+  keyed with: rows of the restored trail keep the ids they were published
+  under, every row from the new incarnation on gets a different one.
+
+
   ## Retention
 
   `audit.retention_days` (default 365). An hourly sweep deletes rows (and the
@@ -353,6 +367,24 @@ defmodule Ankusa.Audit do
   def last_seq(instance), do: load_seq(instance)
 
   @doc """
+  The incarnation the audit row `seq` was written in: the id of the newest
+  restore at or before it, `nil` for a store that was never restored from a
+  backup (and for the rows before its first restore).
+  """
+  @spec incarnation(atom(), pos_integer()) :: String.t() | nil
+  def incarnation(instance, seq) do
+    case :ets.lookup(table(instance), :incarnations) do
+      [{:incarnations, history}] ->
+        Enum.find_value(history, fn %{"from" => from, "id" => id} -> if seq >= from, do: id end)
+
+      [] ->
+        nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @doc """
   The redacted entity of the row `seq` (a row flagged `publish: true`), or
   `:not_found` when it was pruned.
   """
@@ -488,9 +520,11 @@ defmodule Ankusa.Audit do
 
     with {:ok, key} <- load_key(instance),
          {:ok, last_seq} <- load_seq(instance),
+         {:ok, history} <- load_incarnations(instance),
+         {:ok, restored} <- load_incarnation_pending(instance),
          {:ok, leftovers} <- load_pending(instance) do
       :ets.new(table(instance), [:named_table, :protected, read_concurrency: true])
-      true = :ets.insert(table(instance), {:key, key})
+      true = :ets.insert(table(instance), [{:key, key}, {:incarnations, history}])
 
       # A source or a route is settled once its store has loaded (see
       # `handle_info(:reconcile, _)`); everything else is settled now.
@@ -506,14 +540,15 @@ defmodule Ankusa.Audit do
         reconcile_until: System.monotonic_time(:millisecond) + @reconcile_ms
       }
 
-      case resolve_leftovers(state, now) do
-        {:ok, state} ->
-          Process.send_after(self(), :prune, prune_interval)
-          if deferred != [], do: Process.send_after(self(), :reconcile, @reconcile_tick_ms)
-          {:ok, state}
-
-        {:error, reason} ->
-          {:stop, {:audit_recovery_failed, reason}}
+      # The restore row goes first: it takes `last_seq + 1`, the first seq of
+      # the new incarnation, before any leftover is settled or change taken.
+      with {:ok, state} <- announce_restore(state, restored, history, last_seq),
+           {:ok, state} <- resolve_leftovers(state, now) do
+        Process.send_after(self(), :prune, prune_interval)
+        if deferred != [], do: Process.send_after(self(), :reconcile, @reconcile_tick_ms)
+        {:ok, state}
+      else
+        {:error, reason} -> {:stop, {:audit_recovery_failed, reason}}
       end
     else
       {:error, reason} -> {:stop, {:audit_open_failed, reason}}
@@ -535,17 +570,9 @@ defmodule Ankusa.Audit do
 
   @impl true
   def handle_call({:commit, context, attrs, ops}, _from, state) do
-    seq = state.next_seq
-    row = context |> row(attrs, seq) |> then(&%{&1 | publish: is_map(&1.entity)})
-    {stored, entity_ops} = split_entity(row)
-
-    batch =
-      ops ++ [{:put, :audit, Keys.audit(seq, row.at), encode(stored)}, seq_op(seq) | entity_ops]
-
-    case Store.write(state.instance, batch, sync: true) do
-      :ok ->
-        emit(state.instance, stored)
-        {:reply, :ok, %{state | next_seq: seq + 1}}
+    case commit_row(state, context, attrs, ops) do
+      {:ok, state} ->
+        {:reply, :ok, state}
 
       {:error, reason} ->
         Logger.error("[ankusa] could not commit #{attrs.action}: #{inspect(reason)}")
@@ -806,6 +833,86 @@ defmodule Ankusa.Audit do
       :not_found -> {:ok, 0}
       {:ok, other} -> {:error, {:bad_audit_seq, other}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The history of incarnations, newest first: `[%{"from" => seq, "id" => id}]`.
+  defp load_incarnations(instance) do
+    case Store.get(instance, :default, Keys.meta("incarnation")) do
+      :not_found ->
+        {:ok, []}
+
+      {:ok, json} ->
+        with {:ok, history} when is_list(history) <- JSON.decode(json),
+             true <- Enum.all?(history, &valid_incarnation?/1) do
+          {:ok, history}
+        else
+          _ -> {:error, :bad_incarnation}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp valid_incarnation?(%{"from" => from, "id" => id}),
+    do: is_integer(from) and from >= 1 and is_binary(id)
+
+  defp valid_incarnation?(_other), do: false
+
+  # The id a restore left for this boot to announce (`nil` when none).
+  defp load_incarnation_pending(instance) do
+    case Store.get(instance, :default, Keys.meta("incarnation_pending")) do
+      {:ok, id} -> {:ok, id}
+      :not_found -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp announce_restore(state, nil, _history, _last_seq), do: {:ok, state}
+
+  defp announce_restore(state, incarnation, history, last_seq) do
+    instance = state.instance
+    history = [%{"from" => last_seq + 1, "id" => incarnation} | history]
+    facts = %{"incarnation" => incarnation, "restored_sequence" => last_seq}
+
+    attrs =
+      Map.merge(
+        %{action: "instance.restore", resource: to_string(instance), detail: facts},
+        Lifecycle.outbox(instance, fn -> facts end)
+      )
+
+    ops = [
+      {:put, :default, Keys.meta("incarnation"), JSON.encode!(history)},
+      {:delete, :default, Keys.meta("incarnation_pending")}
+    ]
+
+    # In the table before the row is committed: the row is the new incarnation's
+    # first event, and its id is keyed with it.
+    true = :ets.insert(table(instance), {:incarnations, history})
+
+    with {:ok, state} <- commit_row(state, Context.system(), attrs, ops) do
+      Logger.warning(
+        "[ankusa] store restored from a backup: audit trail resumes after seq #{last_seq} " <>
+          "as incarnation #{incarnation}"
+      )
+
+      {:ok, state}
+    end
+  end
+
+  # The change's ops and its audit row in one synced batch.
+  defp commit_row(state, context, attrs, ops) do
+    seq = state.next_seq
+    row = context |> row(attrs, seq) |> then(&%{&1 | publish: is_map(&1.entity)})
+    {stored, entity_ops} = split_entity(row)
+
+    batch =
+      ops ++ [{:put, :audit, Keys.audit(seq, row.at), encode(stored)}, seq_op(seq) | entity_ops]
+
+    with :ok <- Store.write(state.instance, batch, sync: true) do
+      emit(state.instance, stored)
+      {:ok, %{state | next_seq: seq + 1}}
     end
   end
 

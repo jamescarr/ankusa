@@ -174,7 +174,11 @@ defmodule Ankusa.AsyncApi.LifecycleEvent do
           "`data` is the entity as the admin API shows it, secrets redacted, as the change " <>
           "left it; for a deletion, as it was the moment before. Delivery is at least once and " <>
           "in commit order: `id` is derived from the change, so the same event always has " <>
-          "the same id, and `revision` lets a consumer ignore a stale update.",
+          "the same id, and `revision` lets a consumer ignore a stale update. A store restored " <>
+          "from a backup announces itself first with `io.ankusa.instance.restored` (`data`: " <>
+          "`incarnation`, `restored_sequence`): `sequence` and `revision` restart after " <>
+          "`restored_sequence`, so a consumer that tracks their highest values resets them " <>
+          "for the instance.",
       "required" => [
         "specversion",
         "id",
@@ -196,7 +200,8 @@ defmodule Ankusa.AsyncApi.LifecycleEvent do
             "io.ankusa.source.deleted",
             "io.ankusa.route.created",
             "io.ankusa.route.updated",
-            "io.ankusa.route.deleted"
+            "io.ankusa.route.deleted",
+            "io.ankusa.instance.restored"
           ]
         },
         "subject" => %{

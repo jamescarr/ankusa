@@ -47,11 +47,14 @@ defmodule Ankusa.Lifecycle do
   A structured-mode CloudEvent, carried as the body of a `Ankusa.Sink.Message`
   with `content_type: "application/cloudevents+json"`:
 
-    * `id` — derived from the row, never minted: a keyed hash of the instance
-      and the row's `seq` laid out as a UUID. The same row is the same id
-      whenever and however often it is emitted.
+    * `id` — derived from the row, never minted: a keyed hash of the instance,
+      the row's `seq` and (for a row written after a restore from a backup) the
+      incarnation it belongs to, laid out as a UUID. The same row is the same id
+      whenever and however often it is emitted; a restored store that re-issues
+      a `seq` the lost one had published gives it a different one.
     * `type` — `io.ankusa.source.{created,updated,deleted}` or
-      `io.ankusa.route.{created,updated,deleted}`
+      `io.ankusa.route.{created,updated,deleted}`, or `io.ankusa.instance.restored`
+      (below)
     * `source` — `urn:ankusa:instance:<instance>`
     * `subject` — the source id (`<tenant>.<name>`) or the route id
     * `time` — when the change committed (the row's time, not the publisher's)
@@ -70,6 +73,19 @@ defmodule Ankusa.Lifecycle do
   A route event's envelope carries the route's tenant (`tenant_id`; `"default"`
   for a route that belongs to none), so a replay filtered by `tenant` and a
   tenant-limited reader of `GET /v1/audit` see their own routes' changes.
+
+  ## A restore is announced
+
+  A store restored from a backup (`Ankusa.Store.Backup`) resumes the audit trail
+  at the backup's `seq`, so it re-issues sequence numbers, and per-subject
+  revisions, that the lost node had already published. Before it takes any
+  change it emits `io.ankusa.instance.restored` (`subject` = the instance name;
+  `data` = `incarnation`, the fresh id the following event ids are keyed with,
+  and `restored_sequence`, the last `seq` the restored trail held). A consumer
+  that keeps the highest `sequence` or `revision` it has seen must reset that
+  state for this instance when it sees it: ordering restarted at
+  `restored_sequence + 1`. Events of the restored trail itself keep the ids they
+  were published under.
 
   ## A change nobody saw finish
 
@@ -169,6 +185,7 @@ defmodule Ankusa.Lifecycle do
   defp past("create"), do: "created"
   defp past("update"), do: "updated"
   defp past("delete"), do: "deleted"
+  defp past("restore"), do: "restored"
 
   @doc """
   The event of an audit row flagged for publication, as the `Ankusa.Envelope` a
@@ -241,12 +258,21 @@ defmodule Ankusa.Lifecycle do
       (is_nil(tenants) or tenant(row) in tenants)
   end
 
-  # A UUID (version 8, the custom-layout one) from a keyed hash of the instance
-  # and the row's `seq`. The key is the store's own (`m:audit_key`), so two
-  # nodes that both started at seq 1 never mint the same id for different
-  # events, and the same store gives the same id for the same row for good.
+  # A UUID (version 8, the custom-layout one) from a keyed hash of the instance,
+  # the row's `seq` and its incarnation (`Ankusa.Audit.incarnation/2`, absent for
+  # a store never restored from a backup, which keeps the original ids). The key
+  # is the store's own (`m:audit_key`), so two nodes that both started at seq 1
+  # never mint the same id for different events; the same store gives the same
+  # id for the same row for good; and a store restored from a backup, which
+  # re-issues the `seq`s the lost one published, gives them different ids.
   defp event_id(instance, seq) do
-    case Audit.digest(instance, {:lifecycle_event, instance, seq}) do
+    term =
+      case Audit.incarnation(instance, seq) do
+        nil -> {:lifecycle_event, instance, seq}
+        incarnation -> {:lifecycle_event, instance, incarnation, seq}
+      end
+
+    case Audit.digest(instance, term) do
       nil ->
         {:error, :no_audit_key}
 

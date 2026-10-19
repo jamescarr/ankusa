@@ -674,6 +674,86 @@ defmodule Ankusa.LifecycleTest do
     end
   end
 
+  describe "a store restored from a backup" do
+    alias Ankusa.Store.Backup
+    alias Ankusa.Test.CountingBlobStore
+
+    defp next_event_of_type(type) do
+      {_ctx, _env, event} = next_event()
+      if event["type"] == type, do: event, else: next_event_of_type(type)
+    end
+
+    test "opens a new incarnation: instance.restored comes first, re-issued seqs get new event ids" do
+      root = unique_data_dir(:lifecycle_bucket)
+      on_exit(fn -> File.rm_rf(root) end)
+      {:ok, failures} = Agent.start_link(fn -> 0 end)
+
+      config =
+        start_instance(
+          storage: %{interval_ms: 0, blob_store: {Ankusa.BlobStore.LocalFS, root: root}},
+          backup: %{
+            enabled: true,
+            interval_ms: 3_600_000,
+            blob_store: {CountingBlobStore, root: root, failures: failures}
+          }
+        )
+
+      inst = config.instance
+
+      # seq 1, then a backup: the restore point is N = 1.
+      {:ok, _} = SourceStore.put(inst, "acme", "one", @spec_map, :create)
+      assert {_, _, %{"sequence" => "1"} = first} = next_event()
+      assert {:ok, _} = Backup.run(inst)
+
+      # seq 2 and 3 are published and then lost with the host.
+      {:ok, _} = SourceStore.put(inst, "acme", "two", @spec_map, :create)
+      assert {_, _, %{"sequence" => "2"} = pre2} = next_event()
+      {:ok, _} = SourceStore.put(inst, "acme", "three", @spec_map, :create)
+      assert {_, _, %{"sequence" => "3"} = pre3} = next_event()
+
+      # The object store is down at the stop, so the final backup cannot land
+      # and the restore point stays at seq 1.
+      Agent.update(failures, fn _ -> 1_000 end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn -> stop_supervised!({Ankusa.Instance, inst}) end)
+
+      assert log =~ "final backup on stop failed"
+
+      Agent.update(failures, fn _ -> 0 end)
+      File.rm_rf!(config.data_dir)
+      start_supervised!({Ankusa.Instance, config})
+
+      # The restored trail's own rows keep their ids (a redelivery is the same
+      # event); then the restore is announced.
+      restored = next_event_of_type("io.ankusa.instance.restored")
+      assert restored["sequence"] == "2"
+      assert restored["subject"] == to_string(inst)
+      assert restored["data"]["restored_sequence"] == 1
+      assert is_binary(restored["data"]["incarnation"])
+      assert restored["id"] != pre2["id"]
+
+      # The first change after the restore re-issues seq 3, under a new id.
+      {:ok, _} = SourceStore.put(inst, "acme", "four", @spec_map, :create)
+      assert {_, _, four} = next_event()
+      assert four["type"] == "io.ankusa.source.created"
+      assert four["subject"] == "acme.four"
+      assert four["sequence"] == "3"
+      assert four["id"] != pre3["id"]
+
+      assert Audit.incarnation(inst, 1) == nil
+      assert Audit.incarnation(inst, 2) == restored["data"]["incarnation"]
+      assert Audit.incarnation(inst, 3) == restored["data"]["incarnation"]
+      assert Store.get(inst, :default, Keys.meta("incarnation_pending")) == :not_found
+
+      # Row 1 predates the restore: its event keeps the id it was published under.
+      [row1 | _] = rows(inst)
+      {:ok, entity1} = Audit.entity(inst, row1.seq)
+      assert {:ok, %{id: id1}} = Lifecycle.envelope(inst, row1, entity1)
+      assert id1 == first["id"]
+    end
+  end
+
   describe "survives kill" do
     @harness Path.expand("../support/lifecycle_harness.exs", __DIR__)
 

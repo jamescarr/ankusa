@@ -36,12 +36,17 @@ role together and scale out with independent nodes. See
 
 Losing the box is covered by [`backup`](configuration.md#backup), off by
 default: every `backup.interval_ms` (60 s) a checkpoint of the store goes to
-an object store, and a node that starts on an empty `data_dir` restores the
-latest one before it opens the store — or refuses to start when the backup
-location can't be read, never "starts empty". Hooks acked after the last
-backup are lost with the box (their archive copies, if the compactor wrote
-any, are catalogued again); the startup log names the interval. See
-[`storage.md`](storage.md#backup-and-restore).
+an object store (and to a second one, `backup.secondary`, if configured),
+described by a manifest that `backup.signing_key` signs and that
+`backup.verify_interval_ms` reads back; a clean stop takes one last checkpoint.
+A node that starts on an empty `data_dir` restores the latest one before it
+opens the store — or refuses to start when the backup location can't be read
+or a check fails, never "starts empty". Hooks acked after the last backup are
+lost with the box (none, after a clean stop; their archive copies, if the
+compactor wrote any, are catalogued again); the startup log names the
+interval. See [`storage.md`](storage.md#backup-and-restore); proofs:
+`store/backup_test.exs` (`verify detects corruption`, `manifest signature`,
+`final checkpoint on stop`, `secondary restore`).
 
 `wal.type: none` makes the node stateless instead: no queue, no batcher, no
 dispatch pipeline, no compactor, no DLQ, and the only role left is `:edge`. The
@@ -546,4 +551,5 @@ claimed; their sum is what `pending` alone used to say), so a backlog alarm
 belongs on `ankusa_queue_oldest_due_age_seconds`. Per-delivery counters carry the sink module as a
 `sink` label. With `backup.enabled`, the uploader reports after every attempt:
 `ankusa_backup_age_seconds` (since the last successful backup — the data a
-lost host would take with it) and `ankusa_backup_runs_total{result}`.
+lost host would take with it), `ankusa_backup_runs_total{result}` and
+`ankusa_backup_verify_failed_total{target}`.

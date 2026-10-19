@@ -111,6 +111,27 @@ The always-on tests cover:
   would reject) and an added row key survives a rewrite; an unknown version
   is an error value, and the pipeline dead-letters such a hook or row with
   that reason and lists it in the DLQ instead of raising.
+- **Backup and restore** (`store/backup_test.exs`, `lifecycle_test.exs`): a
+  backup, a wiped `data_dir` and a restart bring back every acked hook;
+  retention keeps `backup.keep` backups and what they reference; a second node
+  on one prefix is refused. `verify detects corruption` flips a byte, shortens,
+  deletes a file and breaks a manifest, and sees each (`Backup.verify/2` writes
+  nothing: no `put`), and the verify job reports every target on
+  `[:ankusa, :backup, :verify]` (`ankusa_backup_verify_failed_total` in
+  `metrics_test.exs`). `manifest signature` refuses an unsigned, mis-signed or
+  tampered manifest at restore (and accepts a rotated key list, and no key at
+  all with a warning); a backup of a newer store format is refused.
+  `final checkpoint on stop` stops an instance cleanly and restores
+  `LATEST` — newer than the last periodic backup — with every acked id; a final
+  backup slower than `backup.final_timeout_ms` is abandoned without holding the
+  stop. `secondary restore` loses the primary bucket and restores every acked
+  id from the secondary, falls back when the primary fails its checksum, and
+  refuses with the primary's reason when both do; a failing secondary fails the
+  run without making the primary upload again. `/ready` says `backup: stale`
+  past `backup.max_age_ms` and is `503` only with `require_fresh`. In
+  `lifecycle_test.exs`, `opens a new incarnation` restores a backup taken
+  before two published events and shows `io.ankusa.instance.restored` first,
+  and the re-issued sequence numbers under different event ids.
 - **Migration** (`store_migrate_test.exs`): a 0.3 data dir imports once — only
   what 0.3 had not finished (undelivered hooks deliver, unarchived hooks
   archive), dead letters carry over and replay to the current sinks, the

@@ -375,6 +375,14 @@ defmodule Ankusa.Metrics do
       counter(
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
+      ),
+      counter(
+        "ankusa.backup.verify.failed.total",
+        scoped(own,
+          event_name: [:ankusa, :backup, :verify],
+          keep: &(&1.result == :error),
+          tags: [:instance, :target]
+        )
       )
     ]
 

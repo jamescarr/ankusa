@@ -443,6 +443,63 @@ defmodule AnkusaServer.ConfigTest do
     assert error.message == "backup.keep must be a positive integer, got 0"
   end
 
+  test "backup verify, signing, secondary and freshness keys land in core's config" do
+    key1 = String.duplicate("a", 40)
+    key2 = String.duplicate("b", 40)
+
+    path =
+      tmp_config("""
+      backup:
+        enabled: true
+        timeout_ms: 5000
+        verify_interval_ms: 600000
+        final_timeout_ms: 10000
+        max_age_ms: 300000
+        require_fresh: true
+        signing_key: ["${KEY1}", "${KEY2}"]
+        secondary: {type: s3, s3: {bucket: dr, region: eu-west-1}}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
+
+    backup = Config.load!(path: path, env: %{"KEY1" => key1, "KEY2" => key2}).config.backup
+
+    assert %{
+             timeout_ms: 5000,
+             verify_interval_ms: 600_000,
+             final_timeout_ms: 10_000,
+             max_age_ms: 300_000,
+             require_fresh: true,
+             signing_key: [^key1, ^key2]
+           } = backup
+
+    assert {Ankusa.BlobStore.S3, opts} = backup.secondary
+    assert opts[:bucket] == "dr"
+    assert opts[:region] == "eu-west-1"
+
+    # One comma-separated string is a list too; none leaves manifests unsigned.
+    path = tmp_config("backup: {signing_key: \"${KEYS}\"}\n")
+
+    assert Config.load!(path: path, env: %{"KEYS" => key1 <> "," <> key2}).config.backup.signing_key ==
+             [key1, key2]
+
+    path = tmp_config("sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}\n")
+
+    assert %{signing_key: [], secondary: nil, verify_interval_ms: nil, max_age_ms: nil} =
+             Config.load!(path: path, env: %{}).config.backup
+
+    path = tmp_config("backup: {require_fresh: true}\n")
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "backup.require_fresh needs backup.max_age_ms"
+
+    path =
+      tmp_config(
+        "backup: {secondary: {type: gcs, gcs: {bucket: b, auth: none, sse: {type: kms}}}}\n"
+      )
+
+    error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
+    assert error.message == "backup.secondary: sse type :kms needs a key_id on gcs"
+  end
+
   @kek Base.encode64(:binary.copy(<<7>>, 32))
   @kek_old Base.encode64(:binary.copy(<<8>>, 32))
 

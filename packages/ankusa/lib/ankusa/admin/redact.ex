@@ -77,14 +77,16 @@ defmodule Ankusa.Admin.Redact do
   # its id and scopes but not its hash (a low-entropy token is brute-forceable
   # from it), a JWKS URL goes through the URL rules, and static keys are not
   # shown at all. Mode, claim names and the subject map are shown as they are.
-  # The claim gateway's ref signing keys are a list of plain strings, which
-  # open mode would show: each is hidden, the count stays.
+  # The claim gateway's ref signing keys and the backup manifest's signing keys
+  # are lists of plain strings, which open mode would show: each is hidden, the
+  # count stays.
   defp redact_auth(config) do
     config
     |> update_in([:admin, :auth], &auth_view/1)
     |> update_in([:routes, :admin, :auth], &auth_view/1)
     |> update_in([:claim_check, :auth], &auth_view/1)
     |> update_in([:claim_check, :ref_signing_keys], &Enum.map(&1, fn _key -> @redacted end))
+    |> update_in([:backup, :signing_key], &Enum.map(&1, fn _key -> @redacted end))
   end
 
   defp auth_view(%{tokens: tokens, jwt: jwt} = auth) do
