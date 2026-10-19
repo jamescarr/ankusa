@@ -74,7 +74,9 @@ jobs:
       # TEN-8: `Ankusa.Sink.Description` gained `payload` and `computed`, so
       # the stale PLT failed `ankusa_redis`'s `describe/2` callback check;
       # TEN-9: `Ankusa.Routes.Snapshot.check_budget/2`, called by
-      # `ankusa_redis`'s stores, is new).
+      # `ankusa_redis`'s stores, is new; DUR-1.b.b: `Ankusa.Intake.Recovery.parse_args/1`,
+      # `run_offline/2` and `format_summary/1`, called by the image's `recover`
+      # command, are new).
       # The `v` is in the restore prefix too, so bumping it still misses.
       # A mix.lock change alone matches the prefix: the entry built from the
       # previous lockfile is restored, `mix deps.get --check-locked` fetches
@@ -87,9 +89,9 @@ jobs:
           path: |
             packages/${{ matrix.package }}/deps
             packages/${{ matrix.package }}/_build
-          key: mix-v9-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
+          key: mix-v10-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
-            mix-v9-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+            mix-v10-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
       # sdk-go has no dependencies outside the standard library, but
       # `go test -race -count=1` rebuilds the race-instrumented standard
       # library and the package on every run — 39 s of a 77 s job; locally the

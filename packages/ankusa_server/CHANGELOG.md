@@ -17,6 +17,21 @@ project is versioned independently of the `ankusa` Hex packages: it is the
   answered to join the next group (default 1 ms, `0` disables). See
   `docs/configuration.md`.
 
+- **`wal.type: dual`, the `intake.*` keys and the `recover` command (DUR-1.b.b,
+  [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** `wal.type: dual` (or `ANKUSA_WAL_TYPE=dual`)
+  acks a hook only after it is fsynced on the node **and** confirmed in a replicated
+  Kafka topic, so a lost host loses nothing: `intake.type: kafka`, `intake.node_id`
+  (also `ANKUSA_INTAKE_NODE_ID`: the node's stable identity, the same on a
+  replacement), `intake.fleet`, `intake.topic`, `intake.kafka.{brokers,ssl,sasl}`
+  (the SASL password is redacted in `print-config` and `GET /v1/config`),
+  `intake.publish_timeout_ms`, `reconcile_deadline_ms`, `breaker_failures`,
+  `probe_ms`, `retry_after_s`, `offset_flush_ms`, `pending.{max_records,max_bytes}`,
+  `max_record_bytes`, `recover_on_boot` and `verify_topic`. Boot refuses `dual`
+  without `intake.type`, `intake.node_id`, `backup.enabled` and `backup.max_age_ms`.
+  `docker run … recover [--node ID] [--from backup|earliest|N] [--dry-run]
+  [--allow-gap]` replays a stopped node's intake log into its store (a replacement
+  node does the same at boot); `--allow-gap` writes an `intake.recover.allow_gap`
+  audit row. See `docs/configuration.md` and `docs/deployment.md`.
 - **`queue.rocksdb.*` (DUR-3).** YAML keys for the store's RocksDB settings:
   `block_cache_bytes`, `bloom_bits_per_key`, `max_open_files`, `compaction_style`,
   `rate_limiter_bytes_per_sec`, `max_background_jobs` and

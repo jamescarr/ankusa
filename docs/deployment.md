@@ -220,6 +220,162 @@ queue on pool checkout.
 Measured numbers from a full ingest → dispatch → consumer run are recorded in
 [`testing.md`](testing.md#load-and-end-to-end-kind--oban).
 
+## Host loss and the intake log
+
+With `wal.type: disk` an acked hook survives its **process** and a power cut, not
+its **host**: a lost box loses everything acked since the last backup
+(`backup.interval_ms`, 60 s). `wal.type: dual`
+([ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)) removes that window: the `201`
+waits for the hook to be fsynced here **and** confirmed in a replicated Kafka
+topic, the *intake log*. An acked hook is then lost only if the host **and** every
+in-sync replica of the log's partition are lost together. The price is a hop and a
+dependency: ack latency is the larger of the fsync and the broker confirm, and a
+node that cannot confirm in the log refuses (`503 intake_unavailable`) instead of
+acking on its disk alone.
+
+**1. Provision the log.** One topic for the fleet (`ankusa.intake.<fleet>`, or
+`intake.topic`), created by you; the node never creates or alters one and refuses
+to boot on a topic that does not keep the promise:
+
+| Setting | Needs | Why |
+| --- | --- | --- |
+| replication factor | 3 or more | a confirm is every in-sync replica |
+| `min.insync.replicas` | 2 or more | the broker refuses a produce (`not_enough_replicas`) when fewer are in sync, so a confirm is never one copy |
+| `unclean.leader.election.enable` | `false` | a replica that missed a confirmed record must never lead |
+| `retention.ms` | at least `2 x backup.max_age_ms` (or `-1`) | a restore of a backup as old as `max_age_ms`, even from the secondary bucket, must find its offset in the log |
+| `max.message.bytes` | at least `intake.max_record_bytes` (10 000 000) | a hook the node accepts (`http.max_body_bytes` plus framing) must fit |
+
+```sh
+kafka-topics.sh --bootstrap-server kafka-1:9092 --create --topic ankusa.intake.default \
+  --partitions 3 --replication-factor 3 --config min.insync.replicas=2 \
+  --config unclean.leader.election.enable=false --config retention.ms=86400000 \
+  --config max.message.bytes=11000000
+```
+
+Size it as `records/s x mean hook size x retention` before replication (the plan's
+10 KB mean body at 1 000 records/s per node is about 10 MB/s of produce per node,
+times the node count, times three for the replicas). The topic holds customer
+payloads: give it the confidentiality of the archive bucket (TLS and ACLs between
+nodes and brokers, encryption at rest on the brokers' volumes), and zone- or
+rack-aware replicas: `acks=all` replicates before it fsyncs, so two brokers
+losing power in the same instant lose the record. Each node writes **one
+partition** (`phash2(node_id) rem partition_count`, chosen at its first dual boot
+and never recomputed, so growing the topic never remaps a node); give the topic at
+least as many partitions as you have nodes where you can, and read
+[One partition per node](#one-partition-per-node) for what a partition carries.
+
+**2. Configure the nodes.** Every node needs a stable identity, the same on its
+replacement (a StatefulSet pod name, an instance tag), the backup (required: it
+carries what the log does not, and bounds replay), and a `dedupe:` on every source
+(it is what turns the provider's retry of a `503` into the original hook,
+[`delivery.md`](delivery.md#idempotent-receivers)):
+
+```yaml
+wal: {type: dual}
+intake:
+  type: kafka
+  node_id: "${POD_NAME}"            # or ANKUSA_INTAKE_NODE_ID
+  kafka: {brokers: ["kafka-1:9092", "kafka-2:9092", "kafka-3:9092"]}
+backup:
+  enabled: true
+  interval_ms: 60000
+  max_age_ms: 300000
+  secondary: {type: s3, s3: {bucket: ankusa-backups-dr, region: eu-west-1}}
+```
+
+Boot refuses `dual` without `intake.type`, `intake.node_id`, `backup.enabled` and
+`backup.max_age_ms`, and (with `verify_topic`) on a topic that fails the table
+above. The startup log says what you have, in one line (`Durable to power loss on
+this host AND confirmed in the intake log <topic> (acks=all, min.insync.replicas=2,
+replicas=3) before every 2xx: …`). Every key is in
+[`configuration.md`](configuration.md).
+
+**3. Watch it.** `GET /ready` reports `intake`: `up`, `down` (breaker open and the
+log not answering: the load balancer drains the node) or `recovering` (boot replay
+running). `GET /v1/wal` has an `intake` object (`node`, `partition`, `offset`,
+`watermark`, `pending`, `state`). `ankusa_intake_publish_duration_seconds`,
+`ankusa_intake_failures_total{class}`, `ankusa_intake_pending_records`,
+`ankusa_intake_reconcile_stuck` and `ankusa_intake_ready`; alert on
+`reconcile_stuck > 0` (a half-persisted hook the reconciler cannot finish),
+`ankusa_intake_ready == 0` for more than a probe interval, and the
+`503 intake_unavailable` rate at the edge (the availability cost of the log).
+
+**4. Replace a lost host.** A replacement starts with the **same `intake.node_id`**
+on an empty volume and the same config; there is nothing else to do:
+
+1. It restores the latest backup (the primary bucket, then the secondary; the
+   manifest signature is checked) and mints a new incarnation.
+2. It replays the log for its node id from the backup's `m:intake_offset`: every
+   hook acked since the backup is written back under its original seq, once
+   (a duplicate or reordered record changes nothing), and the hooks above the
+   watermark are republished.
+3. It reports ready and serves. Until then `/ready` is 503 (`intake: recovering`).
+
+Hooks the lost node had already delivered after that backup are delivered again by
+the replacement (same hook id, same `idempotency_key`): consumers dedupe, and the
+count is bounded by what was acked since the backup. If the log no longer reaches
+back to the backup's offset (retention ran out) boot refuses with
+`{:intake_truncated, wanted, earliest}`: the hooks in that gap are not
+recoverable, and only you decide to go on, with `recover --allow-gap` below.
+
+Do not start a second node with a node id that is still alive: two live nodes on
+one id interleave two seq spaces. The replay never overwrites a hook with a
+different id (it is written under a fresh seq and logged), and a backup prefix shared
+by two stores refuses to back up, but there is no broker-side fence; fence the old
+host before the new one starts.
+
+**5. `recover` by hand.** The same code runs against a **stopped** store, for a
+node you want recovered before it serves (`intake.recover_on_boot: false`), a dry
+run, or a log with a gap:
+
+```sh
+docker run --rm -v ankusa-a-data:/var/lib/ankusa -v ./ankusa.yml:/etc/ankusa/ankusa.yml:ro \
+  jamescarr/ankusa recover --dry-run                  # read and count, write nothing
+docker run --rm … jamescarr/ankusa recover            # restore if the volume is empty, then replay
+docker run --rm … jamescarr/ankusa recover --allow-gap   # accept a log that no longer reaches the backup
+mix ankusa.recover --instance default --node ankusa-a  # the same, from a Mix project
+```
+
+It prints `records=… applied=… present=… collided=… unroutable=… skipped=…
+republished=…`, exits `0`, and a second run changes nothing. `--node` asserts the
+id, `--from backup|earliest|N` chooses where to start. `--allow-gap` writes an
+`intake.recover.allow_gap` row to the node's audit trail (the lost positions, the
+node id, the actor) before it goes on.
+
+**6. Going back to `disk`.** A durability downgrade you choose: the promise above
+ends from that moment and the startup line changes. Drain the pending set first
+(`GET /v1/wal` shows `intake.pending`; the hooks in it are in the store but not
+in the log). Going `disk` to `dual` again is safe: boot recovery republishes every
+hook above the watermark, so the hooks acked under `disk` become covered at that
+boot.
+
+### One partition per node
+
+The plan's rates are fleet-wide: 10⁴–10⁵ req/s over 100 nodes or more, so about
+1 000 req/s per node at the 10 KB mean body, or 10 000 at 1 KB, either way about
+10 MB/s of produce per node. `packages/ankusa_kafka/bench/partition_bench.exs`
+measures one partition of a three-broker, replication-factor-3,
+`min.insync.replicas=2` cluster through the adapter at that rate and flat out.
+On a laptop (the three brokers in docker beside the bench, so read it as an order of
+magnitude): at the per-node rate, 997 records/s of 10 000 bytes (9.5 MiB/s), the
+confirm took p50 5.1 ms and p99 17.0 ms; flat out, two publishers with 256-record
+batches in flight carried 12 551 records/s (119.7 MiB/s) through **one** partition
+at a confirm p50 of 36.9 ms, p99 136.7 ms. One partition per node therefore has
+about 12x headroom at the plan's per-node rate, and the explicit partition per
+node stands; several nodes may share a partition (the records carry the node id and
+replay filters by it) as long as their sum stays well under what it carries.
+
+### Proof
+
+`examples/fleet-e2e/run.sh --wal dual --kill-node` kills `ankusa-a` **and deletes
+its volume** under 1 000 req/s with the consumer's broker paused (so the acked hooks
+are undelivered), starts a replacement with the same node id, stops the three intake
+brokers (every request is `503 intake_unavailable`, none is acked) and then
+restores the node from the secondary backup alone with `recover`: `missing=0`,
+`duplicate_hooks=0`. `--wal disk --kill-node` runs the same host loss without
+the log and must **lose** the hooks acked since the last backup, so the drill
+proves the difference. See [`examples/fleet-e2e`](https://github.com/jamescarr/ankusa/tree/main/examples/fleet-e2e/).
+
 ## Upgrading between releases
 
 The store carries a **format version** (`m:format_version` in its `default`

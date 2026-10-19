@@ -1,12 +1,14 @@
 name: ankusa-fleet-e2e
 
 # The fleet end to end: a load balancer, two Ankusa edge nodes with their own
-# stores, a shared route/source store (Redis), a shared bucket (MinIO), a
-# claim-check gateway, RabbitMQ, and a consumer that records every hook in
-# Postgres.
+# stores, a shared route/source store (Redis), a shared bucket (MinIO) and a
+# second one for the secondary backup, a claim-check gateway, RabbitMQ, and a
+# consumer that records every hook in Postgres. With `--wal dual` (the `dual`
+# profile) a three-broker Kafka is the intake log (ADR 0002).
 #
-#   examples/fleet-e2e/run.sh            # builds, starts, drives load, verifies
-#   KEEP=1 examples/fleet-e2e/run.sh     # leave the stack up afterwards
+#   examples/fleet-e2e/run.sh                        # builds, starts, drives load, verifies
+#   examples/fleet-e2e/run.sh --wal dual --kill-node # host loss, the log's brokers down, the secondary backup
+#   KEEP=1 examples/fleet-e2e/run.sh                 # leave the stack up afterwards
 #
 # Only 18080 (the load balancer), 14001/14002 (the nodes, so the run can send a
 # retry to one of them directly) and 15433 (Postgres, for loadgen.verify) are
@@ -21,10 +23,51 @@ x-ankusa: &ankusa
     REDIS_URL: redis://redis:6379
     RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
     S3_BUCKET: ankusa-fleet
+    S3_DR_BUCKET: ankusa-fleet-dr
     S3_ENDPOINT: http://minio:9000
     S3_ACCESS_KEY_ID: minioadmin
     S3_SECRET_ACCESS_KEY: minioadmin
   restart: "no"
+
+# What the two edge nodes add to it: the queue's mode, the backup, and the
+# identity in the intake log (stable across a replacement).
+x-ankusa-node-env: &ankusa-node-env
+  ANKUSA_WAL_TYPE: ${WAL:-disk}
+  ANKUSA_BACKUP_ENABLED: ${BACKUP:-false}
+
+x-ankusa-node-depends: &ankusa-node-depends
+  redis: {condition: service_healthy}
+  rabbitmq: {condition: service_healthy}
+  minio-bootstrap: {condition: service_completed_successfully}
+  # only a `dual` run has the topic
+  kafka-init: {condition: service_completed_successfully, required: false}
+
+x-kafka: &kafka
+  image: apache/kafka:3.9.1
+  profiles: [dual]
+  healthcheck:
+    test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+    interval: 3s
+    timeout: 10s
+    retries: 40
+    start_period: 5s
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+  KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+  KAFKA_REPLICA_LAG_TIME_MAX_MS: 6000
+  KAFKA_HEAP_OPTS: -Xms256m -Xmx256m
 
 services:
   redis:
@@ -42,6 +85,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
 
+  # `ankusa-fleet` holds the segments, the claims and each node's backups;
+  # `ankusa-fleet-dr` is `backup.secondary` (a second region, in a real fleet).
   minio-bootstrap:
     image: amazon/aws-cli:2.38.1
     depends_on: [minio]
@@ -55,7 +100,8 @@ services:
       - |
         until aws s3 ls >/dev/null 2>&1; do echo "waiting for minio..."; sleep 1; done
         aws s3 mb s3://ankusa-fleet || true
-        echo "bucket ankusa-fleet ready"
+        aws s3 mb s3://ankusa-fleet-dr || true
+        echo "buckets ankusa-fleet and ankusa-fleet-dr ready"
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
@@ -83,36 +129,78 @@ services:
       timeout: 3s
       retries: 30
 
+  # The intake log of a `--wal dual` run (ADR 0002): three KRaft brokers (each
+  # broker and controller), and the topic `ankusa.intake.fleet` with what
+  # `Ankusa.Intake.Kafka.verify/1` requires: replication factor 3,
+  # `min.insync.replicas=2`, no unclean leader election, a retention of at least
+  # twice `backup.max_age_ms`, room for a record of `max_record_bytes`.
+  kafka-1:
+    <<: *kafka
+    hostname: kafka-1
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:9092
+
+  kafka-2:
+    <<: *kafka
+    hostname: kafka-2
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092
+
+  kafka-3:
+    <<: *kafka
+    hostname: kafka-3
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092
+
+  kafka-init:
+    image: apache/kafka:3.9.1
+    profiles: [dual]
+    depends_on:
+      kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --create --if-not-exists \
+          --topic ankusa.intake.fleet --partitions 3 --replication-factor 3 \
+          --config min.insync.replicas=2 --config unclean.leader.election.enable=false \
+          --config retention.ms=3600000 --config max.message.bytes=11000000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --describe --topic ankusa.intake.fleet
+
   # Two edge nodes: every role, a store of their own, one segment prefix each.
   ankusa-a:
     <<: *ankusa
     environment:
-      <<: *ankusa-env
+      <<: [*ankusa-env, *ankusa-node-env]
       ANKUSA_STORAGE_KEY_PREFIX: node-a/
+      ANKUSA_INTAKE_NODE_ID: ankusa-a
     volumes:
       - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
       - ankusa-a-data:/var/lib/ankusa
     ports:
       - "127.0.0.1:14001:4000"
-    depends_on:
-      redis: {condition: service_healthy}
-      rabbitmq: {condition: service_healthy}
-      minio-bootstrap: {condition: service_completed_successfully}
+    depends_on: *ankusa-node-depends
 
   ankusa-b:
     <<: *ankusa
     environment:
-      <<: *ankusa-env
+      <<: [*ankusa-env, *ankusa-node-env]
       ANKUSA_STORAGE_KEY_PREFIX: node-b/
+      ANKUSA_INTAKE_NODE_ID: ankusa-b
     volumes:
       - ./ankusa.yml:/etc/ankusa/ankusa.yml:ro
       - ankusa-b-data:/var/lib/ankusa
     ports:
       - "127.0.0.1:14002:4000"
-    depends_on:
-      redis: {condition: service_healthy}
-      rabbitmq: {condition: service_healthy}
-      minio-bootstrap: {condition: service_completed_successfully}
+    depends_on: *ankusa-node-depends
 
   # The gateway: same image, same config, one role. It holds the bucket
   # credentials; the consumer holds none.

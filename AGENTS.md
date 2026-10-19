@@ -18,7 +18,7 @@ flowchart LR
 | Path | What |
 | --- | --- |
 | `packages/ankusa` | Core Mix project: edge/store/storage/dispatch machinery + every zero-external-dep default adapter. No adapter deps (`bandit`, `plug`, `cidr`, `req`, `aws_signature`, `rocksdb`, `telemetry_metrics`/`telemetry_metrics_prometheus_core`, `nebulex`/`nebulex_local`, `async_api_spex` only). |
-| `packages/ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats` | One sink adapter each (`Sink.RabbitMQ`/`Kafka`/`NATS`), path-depend on `ankusa` + one broker client (`amqp`/`brod`/`gnat`). Own `docker-compose.yml` for local broker infra. |
+| `packages/ankusa_rabbitmq`, `ankusa_kafka`, `ankusa_nats` | One sink adapter each (`Sink.RabbitMQ`/`Kafka`/`NATS`), path-depend on `ankusa` + one broker client (`amqp`/`brod`/`gnat`). `ankusa_kafka` also ships `Ankusa.Intake.Kafka`, the intake log of `wal.type: dual` (ADR 0002). Own `docker-compose.yml` for local broker infra (`ankusa_kafka`'s has a three-broker KRaft cluster beside Redpanda). |
 | `packages/ankusa_redis` | Redis adapters: the route store (`Ankusa.Routes.Store.Redis` — definitions in Redis, shared by every edge node) and the pub/sub sink (`Ankusa.Sink.Redis`). Path-depends on `ankusa` + one client (`redix`). Own `docker-compose.yml` (Redis on `:6399`). |
 | `packages/async_api_spex` | Generic AsyncAPI 3.0 library, no Ankusa code (structs, `use AsyncApiSpex.Schema`/`Message`/`Channel`/`Spec` — the last three decorate an app's existing structs and publishing modules into a document — validator, `AsyncApiSpex.Plug.RenderSpec`, `mix async_api_spex.gen`). Core depends on it for `Ankusa.AsyncApi`; every project that path-depends on core and builds in `:prod` (the adapters, `ankusa_server`, the examples) pins it by path with `override: true`. Publish it to Hex before core. |
 | `conformance/` | Language-neutral SDK vectors (`features.json`, `cases/*.json`) and the checker (`check.mjs`) every `packages/sdk-*` must pass; `mise run check:conformance`. |
@@ -37,7 +37,7 @@ Why the package split (and when a new adapter earns its own package):
 | Stage | Modules |
 | --- | --- |
 | Edge (ingress) | `edge/router.ex`, `edge/ingest.ex`, `edge/batcher.ex` + `batcher_supervisor.ex`, `edge/publish.ex`, `edge/quarantine.ex`, `edge/rate_limiter.ex`, `edge/route_guard.ex`, `dedupe.ex`, `route.ex`, `route_resolver.ex`, `verifier.ex` + `verifier/{hmac,asymmetric,token,client_cert,none,schemes,template}.ex` (`template.ex`: the header/timestamp/signed-bytes half `hmac` and `asymmetric` share) |
-| Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `intake.ex` + `intake/{pending,gate,reconciler,recovery,memory}.ex` (`wal: :dual`, ADR 0002: the intake log behaviour, the pending set, the breaker, the reconciler, boot recovery; `mix ankusa.recover`), `store.ex`, `store/{keys,migrate,migration}.ex` (the store format version and its migration registry), `store/backup.ex` (checkpoint upload to a primary and a secondary object store, signed manifests, verify, final backup on stop, boot restore), `fsync.ex` |
+| Queue / store (durability) | `queue.ex`, `queue/writer.ex`, `queue/{deliveries,reclaim,archive}.ex`, `intake.ex` + `intake/{pending,gate,reconciler,recovery,memory}.ex` (`wal: :dual`, ADR 0002: the intake log behaviour, the pending set, the breaker, the reconciler, boot recovery; `mix ankusa.recover`, and `docker run … recover` in the server image, both over `Recovery.run_offline/2`; the Kafka adapter is `ankusa_kafka`'s `Intake.Kafka`), `store.ex`, `store/{keys,migrate,migration}.ex` (the store format version and its migration registry), `store/backup.ex` (checkpoint upload to a primary and a secondary object store, signed manifests, verify, final backup on stop, boot restore), `fsync.ex` |
 | Storage (compaction + blobs) | `storage.ex`, `storage/compactor.ex`, `blob_store.ex`, `blob_store/{local_fs,s3,gcs,azure,oci}.ex`, `blob_store/azure/managed_identity.ex` |
 | Dispatch (sinks, retries, DLQ) | `dispatch/pipeline.ex`, `dispatch/replayer.ex`, `replay.ex`, `sink.ex`, `sink/{log,http,message,description,sqs,google_pubsub}.ex`, `retry_policy.ex`, `retry_policy/exponential.ex` |
 | Claim check (large payloads) | `claim_check.ex`, `claim_check/{pack,ref,router,stores,sweeper,cache,reader}.ex` (`stores.ex`: the claim store list, placement, write failover + breaker, read search; `cache.ex` + `reader.ex`: the gateway's read cache, and its coalescing, per-store adaptive limit, queue and deadline) |
@@ -88,7 +88,7 @@ one; CI runs the same tasks this table does.
 | `mise run check:conformance` | validate `conformance/` and run every `packages/sdk-*` against its vectors |
 | `mise run test:integration` | `ankusa` core's object-store adapters vs. the floci emulators |
 | `mise run test:crash` | crash-consistency drill (needs `docker`): ENOSPC on a 96 MiB tmpfs, then `kill -9` under load; every acked hook must read back. `scripts/drills/flakey.sh` is the power-loss variant on device-mapper (privileged Docker) |
-| `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`). The multi-node compose drill is `examples/fleet-e2e/run.sh` (needs `docker`, `mix`, `jq`); `.github/workflows/e2e.yml` runs both nightly, on tags, and the fleet one on PRs that touch it |
+| `mise run e2e` | kind + Oban end-to-end gate (needs `docker`; `kind`/`kubectl` from `.mise.toml`). The multi-node compose drill is `examples/fleet-e2e/run.sh` (needs `docker`, `mix`, `jq`; `--wal dual --kill-node` is the host-loss drill of the intake log, `--wal disk --kill-node` its control); `.github/workflows/e2e.yml` runs both nightly, on tags, and the fleet one on PRs that touch it |
 | `mise run format` | `mix format`, `gofmt`, google-java-format, and cljfmt across every package — run before pushing, not after CI complains |
 | `mise run deps` | refresh every `mix.lock` after adding/removing a core dependency |
 | `mise run new:adapter <name>` | scaffold `packages/ankusa_<name>/` |
@@ -116,6 +116,7 @@ until they pass too.
 | a hot-path file (`edge/`, `queue/`, `store/`, `dispatch/`, `verifier/`, `routes/`, `store.ex`, `queue.ex`, `dedupe.ex`, `envelope.ex`, `http.ex`, `route_resolver.ex`, `sink/message.ex`, `sink/http.ex` under `packages/ankusa/lib/ankusa/`) | `mise run bench:gate`; put before/after numbers in the PR |
 | the ack path (`queue/writer.ex`, `store.ex`, `edge/batcher.ex`) | `mise run test:crash`, and `scripts/drills/flakey.sh` where Docker can run `--privileged` |
 | the claim check, route or source stores, or anything a second node shares | `examples/fleet-e2e/run.sh` (`mise run e2e` before a release) |
+| the ack path under `wal.type: dual`, the intake log or its recovery | `examples/fleet-e2e/run.sh --wal dual --kill-node` (and `--wal disk --kill-node`, which must still lose hooks), `mise run check:package ankusa_kafka` |
 | anything, before tagging a release | `mise run e2e` |
 | everything | `mise run check` |
 

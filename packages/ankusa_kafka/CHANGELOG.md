@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Ankusa.Intake.Kafka`: the intake log of `wal.type: dual` (DUR-1.b.b,
+  [ADR 0002](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0002-dual-commit-intake-log.md)).** Every acked hook is also a record in a replicated Kafka
+  topic before the `201`. A brod client of its own
+  (`:"ankusa_kafka.<instance>.intake"`, never the sink's) produces with
+  `required_acks: -1`, `partition_onwire_limit: 1`, `max_retries: 0` and an
+  explicit partition, the node's stamped one (`phash2(node_id) rem
+  partition_count`, never recomputed, so growing the topic never remaps a node).
+  `verify/1` reads DescribeConfigs and metadata at boot and refuses a topic with
+  a replication factor under 3, `min.insync.replicas` under 2,
+  `unclean.leader.election.enable`, a `retention.ms` under twice
+  `backup.max_age_ms`, or a `max.message.bytes` under `intake.max_record_bytes`.
+  Broker error codes map to the four error classes. Replay filters by node id and
+  skips unknown kinds and versions. Needs `ankusa` with `Ankusa.Intake`. A
+  three-broker KRaft cluster joins the package's `docker-compose.yml` (the
+  Redpanda service stays for the sink's tests); `bench/partition_bench.exs` measures
+  what one partition carries.
+
 ## [0.6.0] - 2026-10-14
 
 ### Added
