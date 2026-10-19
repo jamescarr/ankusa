@@ -91,6 +91,28 @@ defmodule Ankusa.Routes.Matcher do
   end
 
   @doc """
+  Can one request path match both compiled patterns? Literals must agree at
+  every position, a `:param` agrees with any single segment, and a `:wildcard`
+  (always last, one or more segments) agrees with whatever remains of the
+  other pattern as long as something does.
+
+  This is what "two routes shadow each other" means; the route table's
+  `Ankusa.Routes.Snapshot.overlaps/4` finds the candidates through its prefix
+  index and asks this about each.
+  """
+  @spec overlap?([segment()], [segment()]) :: boolean()
+  def overlap?([], []), do: true
+  def overlap?([], [_ | _]), do: false
+  def overlap?([_ | _], []), do: false
+  def overlap?([:wildcard | _], [_ | _]), do: true
+  def overlap?([_ | _], [:wildcard | _]), do: true
+
+  def overlap?([{:literal, left} | rest], [{:literal, right} | other]),
+    do: left == right and overlap?(rest, other)
+
+  def overlap?([_segment | rest], [_other | others]), do: overlap?(rest, others)
+
+  @doc """
   Does a compiled pattern match these request segments?
 
   Both sides are non-empty-segment lists (`normalize/2` and `segments/1` drop

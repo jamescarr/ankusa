@@ -8,6 +8,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`routes.memory_budget_bytes`, `routes.store.timeout_ms`/`load_timeout_ms` and
+  `source_store.timeout_ms`/`load_timeout_ms` (TEN-9).** `routes.max_routes`
+  defaults to 1 000 000 (was 10 000) behind `routes.memory_budget_bytes` (default
+  8589934592), checked at boot against ~5 KiB per route. The two timeouts are
+  Redis-only keys, like `tick_ms` (a config error with `type: ets`): `timeout_ms`
+  bounds each Redis command and `load_timeout_ms` a whole load, which now reads
+  the routes and sources a page at a time. See `config-examples/reference.yml`
+  and `docs/configuration.md#route-management`.
 - **`rate_limits.scope`, `dedupe` and `fleet` (TEN-6).** `rate_limits.scope: fleet`
   and `dedupe: {scope: fleet}` share the tenant quota and the provider event key
   across edge nodes through `fleet.store` (`{type: redis, url, namespace,

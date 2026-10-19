@@ -179,11 +179,8 @@ defmodule Ankusa.Routes do
 
   defp candidates(nil, _instance, _tenant, _cursor), do: []
 
-  defp candidates(meta, instance, nil, cursor) do
-    routes = Snapshot.routes(instance, meta)
-    routes = if cursor, do: Enum.filter(routes, &(&1.id > cursor)), else: routes
-    Enum.sort_by(routes, & &1.id)
-  end
+  defp candidates(meta, instance, nil, cursor),
+    do: Snapshot.routes_after(instance, meta, cursor)
 
   defp candidates(meta, instance, tenant, cursor),
     do: Snapshot.tenant_routes(instance, meta, tenant, cursor)
@@ -835,17 +832,13 @@ defmodule Ankusa.Routes do
   # Two *enabled* routes collide when they capture the same request class: the
   # same compiled pattern and at least one method in common. Disabled routes are
   # exempt — they capture nothing, so a staging definition may sit next to a live
-  # one. Compiled segments are compared, so an enabled route is never re-parsed.
+  # one. The snapshot indexes enabled routes by `{compiled pattern, method}`, so
+  # this is one lookup per method of the route, whatever the table holds.
   defp no_conflict(instance, meta, route, tenant) do
     if route.enabled do
-      new = Matcher.compile(route)
-
-      case Enum.find(Snapshot.patterns(instance, meta), fn {other, other_segments} ->
-             other.id != route.id and other.enabled and other_segments == new and
-               Enum.any?(other.methods, &(&1 in route.methods))
-           end) do
-        nil -> :ok
-        {other, _segments} -> {:error, {:conflict, holder_id(other, tenant)}}
+      case Snapshot.conflict(instance, meta, route) do
+        :none -> :ok
+        {:ok, other} -> {:error, {:conflict, holder_id(other, tenant)}}
       end
     else
       :ok
@@ -878,6 +871,23 @@ defmodule Ankusa.Routes do
     unless is_integer(routes.max_routes) and routes.max_routes >= 1 do
       raise ArgumentError,
             "routes.max_routes must be a positive integer, got #{inspect(routes.max_routes)}"
+    end
+
+    unless is_integer(routes.memory_budget_bytes) and routes.memory_budget_bytes >= 1 do
+      raise ArgumentError,
+            "routes.memory_budget_bytes must be a positive integer, got " <>
+              inspect(routes.memory_budget_bytes)
+    end
+
+    # Checked at boot, before anything is loaded: a cap this node could not hold
+    # is refused here instead of by the OOM killer once the table has grown.
+    needed = Snapshot.estimated_bytes(routes.max_routes)
+
+    if needed > routes.memory_budget_bytes do
+      raise ArgumentError,
+            "routes.max_routes (#{routes.max_routes}) is estimated to need #{needed} bytes, " <>
+              "more than routes.memory_budget_bytes (#{routes.memory_budget_bytes}): " <>
+              "lower max_routes or raise the budget"
     end
 
     unless is_integer(routes.log_sample) and routes.log_sample >= 0 do

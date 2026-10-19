@@ -22,6 +22,12 @@ defmodule Ankusa.SourceStore.Redis do
     * `:namespace` — key prefix, default `"ankusa:sources:<instance>"`. Two
       nodes share sources **only if they use the same namespace**.
     * `:tick_ms` — the periodic version check, default 30s
+    * `:timeout_ms` — the timeout of every Redis command, an `HSCAN` page of a
+      load included, default 5s
+    * `:load_timeout_ms` — the deadline of a whole load (a boot or a reload
+      reads the hash a page at a time, `HSCAN … COUNT 1000`, not with one
+      `HGETALL`), default 5 min: a million sources load without any command
+      near a timeout
     * `:sources` — seed sources from configuration, the same shape
       `Ankusa.SourceStore.Static` takes. Seeds are this node's and read-only:
       they are never written to Redis, never appear in `list_tenant/2`, and a
@@ -260,13 +266,17 @@ defmodule Ankusa.SourceStore.Redis.State do
   require Logger
 
   alias Ankusa.Crypto.Envelope
+  alias Ankusa.Redis.{Options, Scan}
   alias Ankusa.SourceStore.Redis.TableOwner
   alias Ankusa.SourceStore.Table
 
-  # A write is at most three round trips — the script, a reload if it raced,
-  # the publish — each bounded by Redix's own timeout. The call outlasts them.
-  @redis_timeout 5_000
-  @call_timeout 20_000
+  # A write is at most three round trips (the script, a reload if it raced, the
+  # publish) and the reload is a whole load: the call outlasts all of them
+  # (`call_timeout/1`).
+  #
+  # A load that sees the version move under it is repeated this many times
+  # before its result is kept anyway (see `load/2`).
+  @load_attempts 3
 
   # KEYS: sources hash, version. ARGV: source id, entry JSON, mode.
   @put_source """
@@ -318,7 +328,7 @@ defmodule Ankusa.SourceStore.Redis.State do
           | {:error, :not_found}
           | {:error, :store_unavailable}
   def put(instance, tenant, name, spec, mode),
-    do: GenServer.call(server(instance), {:put, tenant, name, spec, mode}, @call_timeout)
+    do: GenServer.call(server(instance), {:put, tenant, name, spec, mode}, call_timeout(instance))
 
   @spec delete(atom(), String.t(), String.t()) ::
           :ok
@@ -326,7 +336,13 @@ defmodule Ankusa.SourceStore.Redis.State do
           | {:error, :invalid, String.t()}
           | {:error, :store_unavailable}
   def delete(instance, tenant, name),
-    do: GenServer.call(server(instance), {:delete, tenant, name}, @call_timeout)
+    do: GenServer.call(server(instance), {:delete, tenant, name}, call_timeout(instance))
+
+  defp call_timeout(instance) do
+    {_module, store_opts} = Ankusa.config(instance).source_store
+    {timeout_ms, load_timeout_ms} = Options.timeouts(store_opts, "source_store")
+    3 * timeout_ms + load_timeout_ms
+  end
 
   @doc """
   Rewrite every entry in Redis under the current KEK: entries still in
@@ -368,6 +384,8 @@ defmodule Ankusa.SourceStore.Redis.State do
 
     case take_table(instance) do
       {:ok, table} ->
+        {timeout_ms, load_timeout_ms} = Options.timeouts(store_opts, "source_store")
+
         state = %{
           instance: instance,
           namespace: namespace,
@@ -377,6 +395,8 @@ defmodule Ankusa.SourceStore.Redis.State do
           conn: Ankusa.via(instance, :source_redis),
           pubsub: Ankusa.via(instance, :source_redis_pubsub),
           tick_ms: Keyword.fetch!(opts, :tick_ms),
+          timeout_ms: timeout_ms,
+          load_timeout_ms: load_timeout_ms,
           version: 0,
           # said once per outage: the namespace lost its version key while this
           # node holds API-managed sources
@@ -471,8 +491,7 @@ defmodule Ankusa.SourceStore.Redis.State do
   end
 
   def handle_call(:rewrap, _from, state) do
-    with {:ok, flat} <- command(state, ["HGETALL", sources_key(state)]),
-         {:ok, plan, current} <- plan_rewrap(state, flat),
+    with {:ok, plan, current} <- plan_rewrap(state),
          {:ok, written, version} <- write_rewrap(state, plan) do
       state = resync_after_rewrap(state, written, version)
       {:reply, {:ok, %{rewrapped: written, current: current + length(plan) - written}}, state}
@@ -529,7 +548,7 @@ defmodule Ankusa.SourceStore.Redis.State do
     receive do
       {:redix_pubsub, _pid, ^ref, :subscribed, _properties} -> :ok
     after
-      @redis_timeout -> {:error, {:pubsub_subscribe_failed, :timeout}}
+      state.timeout_ms -> {:error, {:pubsub_subscribe_failed, :timeout}}
     end
   end
 
@@ -551,29 +570,49 @@ defmodule Ankusa.SourceStore.Redis.State do
 
   # ── reading Redis into the mirror ───────────────────────────────────────────
 
-  # The version and the hash are read in one MULTI/EXEC. The mirror is updated
-  # in place — every loaded entry written over its row, then rows Redis no
-  # longer holds deleted — so a reader never sees it empty.
-  defp load(state) do
-    commands = [["GET", version_key(state)], ["HGETALL", sources_key(state)]]
+  # The hash is read a page at a time (`HSCAN`), each entry written over its
+  # row in the mirror as its page arrives, then rows Redis no longer holds are
+  # deleted — so a reader never sees the mirror empty, and no command holds
+  # Redis for a table's worth of work. A scan is not a snapshot, so the
+  # version is read before and after: every write moves it in the same step as
+  # the hash, so equal versions mean the pages saw one hash. If it moved, the
+  # scan is repeated (a few times; source writes are rare) and, if it still
+  # does not hold still, kept with the version read *before*, which no longer
+  # matches Redis's, so the next broadcast or tick loads again.
+  defp load(state), do: load(state, 1)
 
-    with {:ok, [raw_version, flat]} <- transaction(state, commands),
-         :ok <- not_emptied(state, raw_version, flat),
-         {:ok, version} <- parse_version(raw_version || "0"),
-         {:ok, loaded} <- load_entries(state, flat) do
-      for {tenant, name} = key <- Table.stored_keys(state.table),
-          not MapSet.member?(loaded, key),
-          do: Table.delete_rows(state.table, tenant, name)
+  defp load(state, attempt) do
+    deadline = System.monotonic_time(:millisecond) + state.load_timeout_ms
 
-      :ets.insert(state.table, {:meta, version})
-      {:ok, %{state | version: version, warned_missing?: false}}
+    with {:ok, raw_version} <- command(state, ["GET", version_key(state)]),
+         {:ok, loaded} <- scan_entries(state, deadline),
+         :ok <- not_emptied(state, raw_version, loaded),
+         {:ok, version_after} <- command(state, ["GET", version_key(state)]),
+         {:ok, version} <- parse_version(raw_version || "0") do
+      if version_after == raw_version or attempt >= @load_attempts do
+        for {tenant, name} = key <- Table.stored_keys(state.table),
+            not MapSet.member?(loaded, key),
+            do: Table.delete_rows(state.table, tenant, name)
+
+        :ets.insert(state.table, {:meta, version})
+        {:ok, %{state | version: version, warned_missing?: false}}
+      else
+        load(state, attempt + 1)
+      end
     end
   end
 
-  defp load_entries(state, flat) do
-    flat
-    |> Enum.chunk_every(2)
-    |> Enum.reduce_while({:ok, MapSet.new()}, fn pair, {:ok, loaded} ->
+  defp scan_entries(state, deadline) do
+    Scan.reduce(state.conn, sources_key(state), MapSet.new(), &load_page(state, &1, &2),
+      timeout: state.timeout_ms,
+      deadline: deadline
+    )
+  end
+
+  # One page of entries into the mirror. `HSCAN` may return an entry more than
+  # once; loading one is a put over its own row, so that is harmless.
+  defp load_page(state, pairs, loaded) do
+    Enum.reduce_while(pairs, {:ok, loaded}, fn pair, {:ok, loaded} ->
       case load_entry(state, pair) do
         {:ok, keys} -> {:cont, {:ok, Enum.into(keys, loaded)}}
         {:error, _reason} = error -> {:halt, error}
@@ -584,7 +623,7 @@ defmodule Ankusa.SourceStore.Redis.State do
   # An entry no key opens is not skipped like one that no longer decodes: at a
   # first boot it stops the store, and on a later load it keeps the mirror (and
   # the version) as they were, so every tick says so again.
-  defp load_entry(state, [source_id, json]) do
+  defp load_entry(state, {source_id, json}) do
     with {:ok, %{"tenant" => tenant, "name" => name, "spec" => spec}}
          when is_binary(tenant) and is_binary(name) and is_map(spec) <- JSON.decode(json),
          {:ok, spec} <- unseal(state, source_id, spec) do
@@ -622,15 +661,32 @@ defmodule Ankusa.SourceStore.Redis.State do
   # ── rewrap ──────────────────────────────────────────────────────────────────
 
   # `{:ok, [{source_id, read, to_write}], already_current}`. An entry that is not
-  # an object is left as it is, as a load leaves it.
-  defp plan_rewrap(state, flat) do
-    flat
-    |> Enum.chunk_every(2)
-    |> Enum.reduce_while({:ok, [], 0}, fn [source_id, json], {:ok, plan, current} ->
+  # an object is left as it is, as a load leaves it. Read a page at a time like a
+  # load; an entry a page returns twice is planned once.
+  defp plan_rewrap(state) do
+    deadline = System.monotonic_time(:millisecond) + state.load_timeout_ms
+
+    result =
+      Scan.reduce(state.conn, sources_key(state), {%{}, MapSet.new()}, &plan_page(state, &1, &2),
+        timeout: state.timeout_ms,
+        deadline: deadline
+      )
+
+    with {:ok, {plan, current}} <- result,
+         do: {:ok, Map.values(plan), MapSet.size(current)}
+  end
+
+  defp plan_page(state, pairs, acc) do
+    Enum.reduce_while(pairs, {:ok, acc}, fn {source_id, json}, {:ok, {plan, current}} ->
       case rewrap_entry(state, source_id, json) do
-        {:ok, rewritten} -> {:cont, {:ok, [{source_id, json, rewritten} | plan], current}}
-        :current -> {:cont, {:ok, plan, current + 1}}
-        {:error, _reason} = error -> {:halt, error}
+        {:ok, rewritten} ->
+          {:cont, {:ok, {Map.put(plan, source_id, {source_id, json, rewritten}), current}}}
+
+        :current ->
+          {:cont, {:ok, {plan, MapSet.put(current, source_id)}}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
       end
     end)
   end
@@ -679,11 +735,13 @@ defmodule Ankusa.SourceStore.Redis.State do
   # No version key and no sources while this node holds some: a FLUSHDB, an
   # evicted namespace. Reading that as "every source was deleted" would 404
   # every hook at once, so the mirror keeps serving.
-  defp not_emptied(state, nil, []) do
-    if Table.stored_keys(state.table) == [], do: :ok, else: {:error, :namespace_empty}
+  defp not_emptied(state, nil, loaded) do
+    if MapSet.size(loaded) == 0 and Table.stored_keys(state.table) != [],
+      do: {:error, :namespace_empty},
+      else: :ok
   end
 
-  defp not_emptied(_state, _raw_version, _flat), do: :ok
+  defp not_emptied(_state, _raw_version, _loaded), do: :ok
 
   defp parse_version(version) when is_integer(version), do: {:ok, version}
 
@@ -843,15 +901,8 @@ defmodule Ankusa.SourceStore.Redis.State do
   end
 
   defp command(state, command) do
-    case Redix.command(state.conn, command, timeout: @redis_timeout) do
+    case Redix.command(state.conn, command, timeout: state.timeout_ms) do
       {:ok, value} -> {:ok, value}
-      {:error, reason} -> {:error, {:redis_unavailable, reason}}
-    end
-  end
-
-  defp transaction(state, commands) do
-    case Redix.transaction_pipeline(state.conn, commands, timeout: @redis_timeout) do
-      {:ok, results} -> {:ok, results}
       {:error, reason} -> {:error, {:redis_unavailable, reason}}
     end
   end

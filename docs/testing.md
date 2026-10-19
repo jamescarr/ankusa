@@ -878,7 +878,7 @@ and the heavy tenant's peak claimed rows and running attempts, and exits 1 if
 the light tenant's p99 is more than 2× its solo p99 (or over 25 ms) or the
 heavy tenant passes its window.
 
-`mise run bench:gate` also runs two self-asserting scripts first, with no
+`mise run bench:gate` also runs three self-asserting scripts first, with no
 baseline entry:
 [`bench/gauges_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/gauges_bench.exs)
 times `Ankusa.Metrics.Gauges.measure/1` and
@@ -896,7 +896,17 @@ as amended in TEN-1.b: a store a thousand times bigger costs a little more per
 seek, on a CI runner the gauge tick went from 0.27 ms at 10⁵ rows to 0.59 ms at
 10⁶, while a tick that grew with the queue would cost tens of milliseconds or
 more at the top of either axis).
-A rebaseline run (`BENCH_REBASELINE=1`) skips them: it measures the
+[`bench/routes_bench.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/bench/routes_bench.exs)
+publishes 10⁶ routes over 10⁵ distinct first segments (10⁵ routes in the gate:
+`ROUTES_BENCH_N`) and exits 1 unless the first publish and a reload each take
+under 60 s (scaled below 10⁶), a request no route matches is decided in under
+1 ms at p99 with the decision cache out of the picture (`Routes.dry_run/2`),
+one create and one list page cost no more than 3× (plus 5 ms: a create is a
+synced audit write) what they cost at 10³ routes, and a route costs no more
+than the per-route estimate `routes.memory_budget_bytes` is checked with. Its
+Redis half (boot and reload through `HSCAN`) is
+`packages/ankusa_redis/bench/routes_load_bench.exs`. A rebaseline run
+(`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 
 CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on
