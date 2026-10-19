@@ -133,9 +133,22 @@ defmodule AnkusaServer.Config do
   @source_limit_keys ~w(bytes_per_second burst_bytes)
   @quarantine_keys ~w(burst rate max_bytes retention_days)
   @audit_keys ~w(retention_days max_rows max_bytes outbox_max_backlog)
-  @queue_keys ~w(dlq)
+  @queue_keys ~w(dlq rocksdb)
   @dlq_keys ~w(retention_days max_rows max_bytes)
   @archive_keys ~w(retention_days)
+  @rocksdb_keys ~w(block_cache_bytes bloom_bits_per_key max_open_files compaction_style rate_limiter_bytes_per_sec max_background_jobs write_buffer_bytes)
+  # The column families whose memtable `queue.rocksdb.write_buffer_bytes` sizes.
+  @write_buffer_families %{
+    "default" => :default,
+    "hooks" => :hooks,
+    "deliveries" => :deliveries,
+    "index" => :index,
+    "archive" => :archive,
+    "quarantine" => :quarantine,
+    "audit" => :audit,
+    "tenants" => :tenants,
+    "counters" => :counters
+  }
   @tenants_keys ~w(max)
   # A rotation window needs two keys; a handful covers any overlap a provider
   # forces. More is a misconfiguration (each key costs an HMAC per hook).
@@ -1593,23 +1606,47 @@ defmodule AnkusaServer.Config do
     ]
   end
 
-  # ── queue.dlq and archive ───────────────────────────────────────────────────
+  # ── queue (dlq, rocksdb) and archive ────────────────────────────────────────
 
   # Types only; the ranges are core's (`Ankusa.Config`).
   defp queue_section(doc) do
     queue = section!(doc, "queue", @queue_keys, [])
     dlq = section!(queue, "dlq", @dlq_keys, ["queue"])
-    path = ["queue", "dlq"]
 
     [
       queue: [
         dlq:
           []
-          |> put_opt(:retention_days, int_opt(dlq, "retention_days", path))
-          |> put_opt(:max_rows, int_opt(dlq, "max_rows", path))
-          |> put_opt(:max_bytes, int_opt(dlq, "max_bytes", path))
+          |> put_opt(:retention_days, int_opt(dlq, "retention_days", ["queue", "dlq"]))
+          |> put_opt(:max_rows, int_opt(dlq, "max_rows", ["queue", "dlq"]))
+          |> put_opt(:max_bytes, int_opt(dlq, "max_bytes", ["queue", "dlq"])),
+        rocksdb: rocksdb_opts(queue)
       ]
     ]
+  end
+
+  defp rocksdb_opts(queue) do
+    path = ["queue", "rocksdb"]
+    rocksdb = section!(queue, "rocksdb", @rocksdb_keys, ["queue"])
+    buffers_path = path ++ ["write_buffer_bytes"]
+    sizes = section!(rocksdb, "write_buffer_bytes", Map.keys(@write_buffer_families), path)
+
+    buffers =
+      Enum.reduce(@write_buffer_families, [], fn {name, cf}, acc ->
+        put_opt(acc, cf, int_opt(sizes, name, buffers_path))
+      end)
+
+    []
+    |> put_opt(:block_cache_bytes, int_opt(rocksdb, "block_cache_bytes", path))
+    |> put_opt(:bloom_bits_per_key, int_opt(rocksdb, "bloom_bits_per_key", path))
+    |> put_opt(:max_open_files, int_opt(rocksdb, "max_open_files", path))
+    |> put_opt(
+      :compaction_style,
+      atom_enum_opt(rocksdb, "compaction_style", ~w(level universal), path)
+    )
+    |> put_opt(:rate_limiter_bytes_per_sec, int_opt(rocksdb, "rate_limiter_bytes_per_sec", path))
+    |> put_opt(:max_background_jobs, int_opt(rocksdb, "max_background_jobs", path))
+    |> put_opt(:write_buffer_bytes, if(buffers == [], do: nil, else: buffers))
   end
 
   defp archive_section(doc) do

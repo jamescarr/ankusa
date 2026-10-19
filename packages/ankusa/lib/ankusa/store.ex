@@ -50,8 +50,6 @@ defmodule Ankusa.Store do
 
   @cf_names ~w(default hooks deliveries index archive quarantine audit tenants counters)a
 
-  @cache_bytes 64 * 1024 * 1024
-
   # How long a store that failed to reopen waits before trying again by itself.
   @retry_open_ms 5_000
 
@@ -69,17 +67,17 @@ defmodule Ankusa.Store do
   # its few bytes while an ingest batch of real hooks is refused.
   @write_failure_window_ms 5_000
 
-  # `tolerate_corrupted_tail_records` drops a torn tail and fails the open on
-  # any damage before it. `paranoid_checks` makes every read report corruption
-  # instead of returning possibly-wrong bytes.
-  @db_opts [
+  # The database options that are not tunable. `tolerate_corrupted_tail_records`
+  # drops a torn tail and fails the open on any damage before it.
+  # `paranoid_checks` makes every read report corruption instead of returning
+  # possibly-wrong bytes. The tunables (`queue.rocksdb`) are added in `db_opts/1`.
+  @fixed_db_opts [
     create_if_missing: true,
     create_missing_column_families: true,
     paranoid_checks: true,
     wal_recovery_mode: :tolerate_corrupted_tail_records,
     max_total_wal_size: 512 * 1024 * 1024,
     db_write_buffer_size: 256 * 1024 * 1024,
-    max_background_jobs: 4,
     keep_log_file_num: 5,
     max_log_file_size: 16 * 1024 * 1024
   ]
@@ -101,7 +99,7 @@ defmodule Ankusa.Store do
 
   # rocksdb's spec says `new_cache/2` cannot fail, but the open path answers an
   # unexpected `{:error, _}` with a refused open rather than a crash.
-  @dialyzer {:no_match, init: 1}
+  @dialyzer {:no_match, init: 1, open_native: 1}
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
@@ -121,9 +119,9 @@ defmodule Ankusa.Store do
          {:ok, origin} <- maybe_restore(config, path, migrations) do
       boot = %{origin: origin, migrations: migrations}
 
-      case :rocksdb.new_cache(:lru, @cache_bytes) do
-        {:ok, cache} ->
-          with {:ok, state} <- open_and_publish(instance, path, cache, config, boot) do
+      case open_native(config.queue.rocksdb) do
+        {:ok, native} ->
+          with {:ok, state} <- open_and_publish(instance, path, native, config, boot) do
             {:ok,
              Map.merge(state, %{
                retry_open_ms: retry_open_ms,
@@ -184,25 +182,25 @@ defmodule Ankusa.Store do
     {:stop, {:store_restore_failed, path, reason}}
   end
 
-  defp open_and_publish(instance, path, cache, config, boot) do
-    case :rocksdb.open(String.to_charlist(path), @db_opts, descriptors(cache)) do
+  defp open_and_publish(instance, path, native, config, boot) do
+    case :rocksdb.open(String.to_charlist(path), db_opts(native), descriptors(native)) do
       {:ok, db, cf_handles} ->
         cfs = @cf_names |> Enum.zip(cf_handles) |> Map.new()
 
         case put_sentinels(db, cfs) do
-          :ok -> publish(instance, path, cache, db, cfs, config, boot)
-          {:error, reason} -> close_and_fail(path, cache, db, cfs, {:sentinels, reason})
+          :ok -> publish(instance, path, native, db, cfs, config, boot)
+          {:error, reason} -> close_and_fail(path, native, db, cfs, {:sentinels, reason})
         end
 
       {:error, reason} ->
-        :rocksdb.release_cache(cache)
+        release_native(native)
         open_failed(path, reason)
     end
   end
 
   # The instance name is operator config: one atom per instance, never request input.
   # sobelow_skip ["DOS.BinToAtom"]
-  defp publish(instance, path, cache, db, cfs, config, boot) do
+  defp publish(instance, path, native, db, cfs, config, boot) do
     table = :"ankusa_store_#{instance}"
 
     created =
@@ -214,7 +212,7 @@ defmodule Ankusa.Store do
       end
 
     if created do
-      true = :ets.insert(table, {:handles, %{db: db, cache: cache, cfs: cfs}})
+      true = :ets.insert(table, {:handles, %{db: db, cache: native.cache, cfs: cfs}})
 
       Logger.info("[ankusa] store at #{path}. #{durability(config)}")
 
@@ -226,7 +224,7 @@ defmodule Ankusa.Store do
       # can use `write/3` and `get/3`.
       case after_open(config, boot, path) do
         :ok ->
-          {:ok, %{db: db, cache: cache, cfs: cfs, table: table, path: path}}
+          {:ok, %{db: db, native: native, cfs: cfs, table: table, path: path}}
 
         {:error, reason} ->
           # A store newer than this release, a format migration that failed, a
@@ -237,11 +235,11 @@ defmodule Ankusa.Store do
           # else has the handles yet, so the table can go after the close.
           {_, _} = close_db(db, cfs)
           :ets.delete(table)
-          :rocksdb.release_cache(cache)
+          release_native(native)
           {:stop, reason}
       end
     else
-      close_and_fail(path, cache, db, cfs, :ets_table_exists)
+      close_and_fail(path, native, db, cfs, :ets_table_exists)
     end
   end
 
@@ -349,9 +347,9 @@ defmodule Ankusa.Store do
       {:error, {:legacy_import_failed, {kind, reason}}}
   end
 
-  defp close_and_fail(path, cache, db, cfs, reason) do
+  defp close_and_fail(path, native, db, cfs, reason) do
     {_, _} = close_db(db, cfs)
-    :rocksdb.release_cache(cache)
+    release_native(native)
     open_failed(path, reason)
   end
 
@@ -558,7 +556,7 @@ defmodule Ankusa.Store do
     _ = :ets.delete(state.table)
     state = await_checkpoint(state)
     if state.db, do: {_, _} = close_db(state.db, state.cfs)
-    _ = :rocksdb.release_cache(state.cache)
+    _ = release_native(state.native)
     :ok
   end
 
@@ -570,10 +568,17 @@ defmodule Ankusa.Store do
     state = await_checkpoint(state)
     if state.db, do: {_, _} = close_db(state.db, state.cfs)
 
-    case :rocksdb.open(String.to_charlist(state.path), @db_opts, descriptors(state.cache)) do
+    case :rocksdb.open(
+           String.to_charlist(state.path),
+           db_opts(state.native),
+           descriptors(state.native)
+         ) do
       {:ok, db, cf_handles} ->
         cfs = @cf_names |> Enum.zip(cf_handles) |> Map.new()
-        true = :ets.insert(state.table, {:handles, %{db: db, cache: state.cache, cfs: cfs}})
+
+        true =
+          :ets.insert(state.table, {:handles, %{db: db, cache: state.native.cache, cfs: cfs}})
+
         {:ok, cancel_retry(%{state | db: db, cfs: cfs})}
 
       {:error, reason} ->
@@ -657,40 +662,87 @@ defmodule Ankusa.Store do
   def report_write_failure(instance, reason),
     do: GenServer.cast(Ankusa.via(instance, :store), {:write_failed, reason})
 
-  defp descriptors(cache) do
-    block = [block_based_table_options: [block_cache: cache]]
+  # The native resources a store shares across opens: the block cache, the
+  # rate limiter (`nil` when `rate_limiter_bytes_per_sec` is 0) and the
+  # settings (`queue.rocksdb`) the database and its families are opened with.
+  # They outlive a reopen and are released when the store stops.
+  defp open_native(rocksdb) do
+    case :rocksdb.new_cache(:lru, rocksdb.block_cache_bytes) do
+      {:ok, cache} -> {:ok, %{cache: cache, limiter: new_limiter(rocksdb), rocksdb: rocksdb}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
+  defp new_limiter(%{rate_limiter_bytes_per_sec: 0}), do: nil
+
+  defp new_limiter(%{rate_limiter_bytes_per_sec: rate}) do
+    {:ok, limiter} = :rocksdb.new_rate_limiter(rate, false)
+    limiter
+  end
+
+  defp release_native(%{cache: cache, limiter: limiter}) do
+    if limiter, do: :rocksdb.release_rate_limiter(limiter)
+    :rocksdb.release_cache(cache)
+  end
+
+  defp db_opts(%{rocksdb: rocksdb, limiter: limiter}) do
+    opts =
+      [max_open_files: rocksdb.max_open_files, max_background_jobs: rocksdb.max_background_jobs] ++
+        @fixed_db_opts
+
+    if limiter, do: [{:rate_limiter, limiter} | opts], else: opts
+  end
+
+  defp descriptors(%{cache: cache, rocksdb: rocksdb}) do
     Enum.map(@cf_names, fn name ->
-      base = Keyword.merge(block, cf_opts(name))
-      {Atom.to_charlist(name), base}
+      opts =
+        [
+          block_based_table_options: table_options(name, cache, rocksdb),
+          compaction_style: rocksdb.compaction_style,
+          write_buffer_size: Map.fetch!(rocksdb.write_buffer_bytes, name)
+        ] ++ cf_opts(name)
+
+      {Atom.to_charlist(name), opts}
     end)
   end
+
+  # The families whose reads are point lookups of keys that are mostly absent
+  # (a first-seen dedupe key in `index`; `deliveries` rows) carry a bloom filter
+  # on whole keys (`whole_key_filtering` is RocksDB's default), kept in the
+  # block cache beside the index blocks so a filter or index block can never
+  # pin memory outside `block_cache_bytes`. `index` holds ordered scans too
+  # (due, inflight, dead), so it has no prefix extractor: a prefix filter would
+  # make every iterator choose between a total-order and a prefix seek. With
+  # `bloom_bits_per_key: 0` the table options are the plain block cache.
+  @filtered_cfs [:index, :deliveries]
+
+  defp table_options(name, cache, %{bloom_bits_per_key: bits})
+       when name in @filtered_cfs and bits > 0 do
+    [block_cache: cache, bloom_filter_policy: bits, cache_index_and_filter_blocks: true]
+  end
+
+  defp table_options(_name, cache, _rocksdb), do: [block_cache: cache]
 
   # Compression is pointless for fixed-size rows (deliveries) and index keys
   # whose values are a few bytes; it pays only on the hook payloads and
   # quarantined bodies. Those two go through zstd into blob files, so large
   # values land outside the block cache's LSM region.
-  defp cf_opts(name) when name in [:hooks, :quarantine], do: large_cf_opts(name)
+  defp cf_opts(name) when name in [:hooks, :quarantine], do: large_cf_opts()
 
   # Blind merge operands (`{:merge, ...}` ops) add into one row each, 64 bits
   # wide (`counter_merge_operator` is a 32-bit `stoi`). A read applies every
   # operand the memtable still holds for the key, so this family flushes early
-  # and a flush collapses them.
-  defp cf_opts(:counters) do
-    [compression: :none, write_buffer_size: 1024 * 1024, merge_operator: :erlang_merge_operator]
-  end
+  # (its `write_buffer_bytes` default is 1 MiB) and a flush collapses them.
+  defp cf_opts(:counters), do: [compression: :none, merge_operator: :erlang_merge_operator]
 
-  defp cf_opts(name) do
-    [compression: :none, write_buffer_size: buffer_size(name)]
-  end
+  defp cf_opts(_name), do: [compression: :none]
 
   # Blob files are capped at 64 MiB (RocksDB's default is 256 MiB), like the
   # SST files: a backup uploads one whole file at a time, so this bounds the
   # memory an upload or a restore holds.
-  defp large_cf_opts(name) do
+  defp large_cf_opts do
     [
       compression: :zstd,
-      write_buffer_size: buffer_size(name),
       enable_blob_files: true,
       min_blob_size: 4096,
       blob_file_size: 64 * 1024 * 1024,
@@ -698,10 +750,6 @@ defmodule Ankusa.Store do
       enable_blob_garbage_collection: true
     ]
   end
-
-  defp buffer_size(:hooks), do: 64 * 1024 * 1024
-  defp buffer_size(name) when name in [:deliveries, :index], do: 16 * 1024 * 1024
-  defp buffer_size(_), do: 4 * 1024 * 1024
 
   # ── writes ────────────────────────────────────────────────────────────────
 

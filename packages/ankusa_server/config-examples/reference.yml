@@ -389,6 +389,42 @@ quarantine:
   # entries unless a running or paused quarantine replay job can still reach them.
   retention_days: 14
 
+# The queue's store. `queue.dlq` has its own keys (`retention_days`, `max_rows`,
+# `max_bytes`; see the docs); `queue.rocksdb` is the RocksDB settings of this node's
+# store. Read when the database opens, so a change needs a restart. The values shown
+# are the defaults. Only `bloom_bits_per_key` and `block_cache_bytes` usually need a
+# look: raise the cache on a node whose store holds tens of millions of dedupe keys
+# (the filters live in it).
+queue:
+  rocksdb:
+    # LRU block cache shared by every column family, index and filter blocks included
+    block_cache_bytes: 67108864
+    # Bloom filter on the `index` family (dedupe keys, due/inflight/dead rows) and on
+    # `deliveries`: a first-seen dedupe key costs one filter probe per file instead of
+    # an index and data block read. 0 = off, 1-32 bits per key (10 = about 1% false
+    # positives). A filter exists only in files written after it was turned on, so an
+    # upgraded store gains it as compaction rewrites its files.
+    bloom_bits_per_key: 10
+    # table-file handles kept open; -1 = no limit (the process's fd limit still applies)
+    max_open_files: 65536
+    # level | universal, for every family
+    compaction_style: level
+    # cap on flush and compaction writes in bytes per second; 0 = unlimited
+    rate_limiter_bytes_per_sec: 0
+    # flush and compaction thread budget
+    max_background_jobs: 4
+    # memtable size per column family, at least 65536
+    write_buffer_bytes:
+      default: 4194304
+      hooks: 67108864
+      deliveries: 16777216
+      index: 16777216
+      archive: 4194304
+      quarantine: 4194304
+      audit: 4194304
+      tenants: 4194304
+      counters: 1048576
+
 batcher:
   # The queue writer serializes commits itself, so partitions beyond a couple only
   # add contention.
