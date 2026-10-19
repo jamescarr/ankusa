@@ -20,7 +20,7 @@ defmodule Ankusa.BlobStore.Breaker do
   `[:ankusa, :blob_store, :breaker]` (see `Ankusa.Telemetry`).
 
   The state is one ETS row per `{endpoint, bucket}`, in a table
-  `Ankusa.Application` owns. Concurrent requests update it without a lock: the
+  the application owns. Concurrent requests update it without a lock: the
   worst a race does is lose a latency sample or let a second probe through.
   `breaker_failures: 0` turns the breaker off, the latency trip with it.
   """

@@ -761,8 +761,9 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   `Ankusa.ClaimCheck.Stores`.
 - **Breaking:** `Ankusa.ClaimCheck.Ref`'s `object_key/2` and `key/1` take a
   layout: `Ankusa.ClaimCheck.Ref.object_key/3`, `Ankusa.ClaimCheck.Ref.key/2`.
-  `Ankusa.BlobStore.Retry`'s `run/2` is `Ankusa.BlobStore.Retry.run/3`, the
-  instance first.
+  `Ankusa.BlobStore.Retry`'s `run/2` became `run/3` (a later release added the
+  breaker scope and request kind: `Ankusa.BlobStore.Retry.run/5`), the instance
+  first.
 - `Ankusa.BlobStore.Retry` jitters each delay to between half and all of
   200 ms / 1 s / 5 s, so nodes throttled together don't retry in lockstep.
 - Metric labels with integer values (an HTTP status, a store index) are

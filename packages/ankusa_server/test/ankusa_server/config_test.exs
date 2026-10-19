@@ -333,21 +333,19 @@ defmodule AnkusaServer.ConfigTest do
     assert [{Ankusa.BlobStore.GCS, gcs}] = config.claim_check.blob_stores
     assert {gcs[:pool_count], gcs[:pool_timeout], gcs[:retries]} == {2, 2000, 4}
 
-    # Core's range check names the store and the key.
-    assert :ok = Ankusa.BlobStore.validate_config!(config)
+    # Core's range check runs when the file loads, and names the store and the key.
+    bad =
+      tmp_config("""
+      storage:
+        type: s3
+        s3: {bucket: b, region: r, op_deadline_ms: 10}
+      sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
+      """)
 
-    bad = tmp_config("""
-    storage:
-      type: s3
-      s3: {bucket: b, region: r, op_deadline_ms: 10}
-    sources: {demo: {verify: {type: none}, sinks: [{type: log}]}}
-    """)
+    error = assert_raise ConfigError, fn -> Config.load!(path: bad, env: %{}) end
 
-    config = Config.load!(path: bad, env: %{}).config
-
-    assert_raise ArgumentError, ~r/storage.blob_store: op_deadline_ms must be an integer from 1000/, fn ->
-      Ankusa.BlobStore.validate_config!(config)
-    end
+    assert error.message ==
+             "storage.blob_store: op_deadline_ms must be an integer from 1000 to 3600000, got 10"
   end
 
   test "claim_check read keys land in core's config, and core's ranges name a bad one" do
