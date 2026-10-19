@@ -491,7 +491,11 @@ defmodule AnkusaServer.ConfigTest do
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message == "backup.require_fresh needs backup.max_age_ms"
 
-    path = tmp_config("backup: {secondary: {type: gcs, gcs: {bucket: b, auth: none, sse: {type: kms}}}}\n")
+    path =
+      tmp_config(
+        "backup: {secondary: {type: gcs, gcs: {bucket: b, auth: none, sse: {type: kms}}}}\n"
+      )
+
     error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
     assert error.message == "backup.secondary: sse type :kms needs a key_id on gcs"
   end
