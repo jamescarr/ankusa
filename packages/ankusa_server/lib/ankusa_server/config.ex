@@ -79,7 +79,8 @@ defmodule AnkusaServer.Config do
   @store_headers_fields %{"drop" => :drop, "hash" => :hash}
   @admin_keys ~w(enabled port ip gauge_interval_ms tls auth)
   @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2)
-  @metrics_keys ~w(enabled port ip tls)
+  @metrics_keys ~w(enabled port ip tls detail max_series_per_metric)
+  @metrics_details ~w(tenant source none)
   @tls_keys ~w(certfile keyfile cacertfile verify versions ciphers)
   @auth_keys ~w(mode allow_insecure tokens jwt mtls)
   @auth_modes ~w(none token jwt mtls)
@@ -658,6 +659,8 @@ defmodule AnkusaServer.Config do
         |> put_opt(:port, int_opt(metrics, "port", path))
         |> put_opt(:ip, string_opt(metrics, "ip", path))
         |> put_opt(:tls, tls_opt(metrics, path))
+        |> put_opt(:detail, atom_enum_opt(metrics, "detail", @metrics_details, path))
+        |> put_opt(:max_series_per_metric, int_opt(metrics, "max_series_per_metric", path))
     ]
   end
 

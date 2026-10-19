@@ -4,7 +4,7 @@ defmodule ControlPanel.IngestMetrics do
   ankusa pod's admin port (`:4002/metrics`, Prometheus text), direct and
   durable alike.
 
-  * `ankusa_ingest_requests_total{instance,source_id,outcome}` is a counter per
+  * `ankusa_ingest_requests_total{instance,tenant_id,outcome}` is a counter per
     outcome: `committed` is a hook the pod acked with `201`, `duplicate` a
     repeated dedupe key it acked as one (durable pods only), every other
     outcome (`rejected`, `rate_limited`, `overload`, `store_unavailable`, ...)

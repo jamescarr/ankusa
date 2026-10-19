@@ -3,8 +3,9 @@
 # The soak gate: run the built image at a steady rate for DURATION seconds with
 # tools/loadgen, sample /metrics and the container's resident memory every
 # SAMPLE_INTERVAL seconds, let the queue drain, and fail when an accepted hook
-# never reached the sink (`missing > 0`) or the container's RSS grew by more
-# than MAX_RSS_GROWTH (5 %) between the early and the late part of the run.
+# never reached the sink (`missing > 0`), the container's RSS grew by more
+# than MAX_RSS_GROWTH (5 %) between the early and the late part of the run, or
+# a /metrics scrape held more than MAX_SERIES (10 000) lines.
 #
 #   packages/ankusa_server/scripts/soak.sh jamescarr/ankusa:dev
 #
@@ -24,6 +25,7 @@
 #   SAMPLE_INTERVAL=60    seconds between /metrics + RSS samples
 #   DRAIN_TIMEOUT=600     seconds to wait for the queue to empty after the load
 #   MAX_RSS_GROWTH=0.05   allowed RSS growth, early window to late window
+#   MAX_SERIES=10000      allowed lines in the largest /metrics scrape of the run
 #   SOAK_OUT=<dir>        where samples, metrics scrapes and soak.json go
 #                         (default: <repo>/soak-out)
 #   SOAK_HTTP_PORT=4000, SOAK_ADMIN_PORT=4002   host ports
@@ -45,6 +47,7 @@ BODY_BYTES="${BODY_BYTES:-1024}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-60}"
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-600}"
 MAX_RSS_GROWTH="${MAX_RSS_GROWTH:-0.05}"
+MAX_SERIES="${MAX_SERIES:-10000}"
 HTTP_PORT="${SOAK_HTTP_PORT:-4000}"
 ADMIN_PORT="${SOAK_ADMIN_PORT:-4002}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -158,6 +161,9 @@ done
 missing=$((accepted - delivered))
 [ "$missing" -ge 0 ] || missing=0
 dead=$(metric_sum "$OUT/metrics-final.prom" ankusa_queue_dead)
+# The largest scrape of the run, in lines (`curl /metrics | wc -l`): the series
+# budget per node, which must not grow with the load or the number of tenants.
+series=$(for f in "$OUT"/metrics-*.prom; do wc -l <"$f"; done | tr -d ' ' | sort -n | tail -1)
 
 samples=$(($(wc -l <"$OUT/samples.csv") - 1))
 [ "$samples" -ge 3 ] || fail "only $samples RSS samples (need 3+): raise DURATION or lower SAMPLE_INTERVAL"
@@ -169,7 +175,7 @@ late=$(sed -n "$((samples - w + 2)),$((samples + 1))p" "$OUT/samples.csv" | cut 
 growth=$(awk -v e="$early" -v l="$late" 'BEGIN { printf "%.4f", (e > 0 ? l / e - 1 : 0) }')
 
 cat >"$OUT/soak.json" <<EOF
-{"image":"$IMAGE","duration_s":$DURATION,"rate":$RATE,"accepted":$accepted,"shed":$shed,"errors":$errors,"delivered":$delivered,"missing":$missing,"dead":$dead,"samples":$samples,"rss_early_kb":$early,"rss_late_kb":$late,"rss_growth":$growth}
+{"image":"$IMAGE","duration_s":$DURATION,"rate":$RATE,"accepted":$accepted,"shed":$shed,"errors":$errors,"delivered":$delivered,"missing":$missing,"dead":$dead,"samples":$samples,"rss_early_kb":$early,"rss_late_kb":$late,"rss_growth":$growth,"metrics_lines":$series}
 EOF
 
 echo
@@ -182,8 +188,10 @@ echo "dead         $dead"
 echo "rss early    $early kB (lowest of samples $((w + 1))-$((2 * w)))"
 echo "rss late     $late kB (lowest of samples $((samples - w + 1))-$samples)"
 echo "rss growth   $growth (limit $MAX_RSS_GROWTH)"
+echo "metrics      $series lines at most (limit $MAX_SERIES)"
 
 [ "$missing" -eq 0 ] || fail "missing $missing: accepted hooks that no sink delivered"
+[ "$series" -le "$MAX_SERIES" ] || fail "/metrics grew to $series lines > $MAX_SERIES"
 awk -v g="$growth" -v m="$MAX_RSS_GROWTH" 'BEGIN { exit !(g > m) }' && fail "rss grew $growth > $MAX_RSS_GROWTH"
 
 echo "soak OK: $IMAGE"

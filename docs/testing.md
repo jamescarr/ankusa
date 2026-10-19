@@ -49,7 +49,15 @@ The always-on tests cover:
   `dedupe_test.exs` covers a provider retry collapsing to the original id with
   `duplicate: true`, a key past its TTL committing again, two entries sharing
   a key in one batch, per-tenant keys and the writer's expiry sweep;
-  `metrics_test.exs` covers the scrape's bounded labels and series.
+  `metrics_test.exs` covers the scrape's bounded labels and series, and the
+  cardinality policy (`metrics.detail`, `metrics.max_series_per_metric`):
+  "bounded series under 10k sources" (10 000 sources, one request each: the
+  ingest counter keeps at most the ceiling, the rest is one `other` series that
+  still sums to 10 000, and a scrape takes under 100 ms), the series set under
+  `detail: :none` being identical for one tenant and for forty, `tenant_id`
+  present and `source_id` absent by default, the gauges dropping what the
+  ceiling refuses, and a concurrent test that admission never exceeds the
+  ceiling or leaks a slot.
 - **Verifier hardening** (`verifier_test.exs` "tolerance range and weak hashes",
   `metrics_test.exs`, `ankusa_server` `config_test.exs` "tolerance range"):
   `tolerance` 0–3600 validates and 3601, a negative or a non-integer is
@@ -939,6 +947,9 @@ the queue to drain and fails when `missing > 0` (accepted hooks minus
 5 %: the lowest sample in the last sixth of the run against the lowest in the
 second sixth (the container's RSS is a sawtooth that climbs about 10 % and
 drops back every few minutes; the floor is the live set a leak would raise).
+It also fails when the largest `/metrics` scrape of the run holds more than
+`MAX_SERIES` (10 000) lines (`soak.json`'s `metrics_lines`): the per-node series
+budget of the [cardinality policy](configuration.md#metric-cardinality).
 A run shorter than about ten minutes is still in warm-up and fails this check;
 `MAX_RSS_GROWTH=1` turns it off for a quick smoke of the script. Samples,
 scrapes, the loadgen report and `soak.json` land in

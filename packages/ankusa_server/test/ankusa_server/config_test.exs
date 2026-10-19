@@ -701,6 +701,8 @@ defmodule AnkusaServer.ConfigTest do
           port: 9100
           ip: 0.0.0.0
           tls: {certfile: #{@tls_dir}/server.pem, keyfile: #{@tls_dir}/server-key.pem}
+          detail: source
+          max_series_per_metric: 100
         #{@sources}
         """)
 
@@ -735,7 +737,13 @@ defmodule AnkusaServer.ConfigTest do
         assert %{verify: :verify_none, versions: [:"tlsv1.2", :"tlsv1.3"]} = tls
       end
 
-      assert %{enabled: true, port: 9100, ip: "0.0.0.0"} = config.metrics
+      assert %{
+               enabled: true,
+               port: 9100,
+               ip: "0.0.0.0",
+               detail: :source,
+               max_series_per_metric: 100
+             } = config.metrics
     end
 
     test "without the sections the hardened defaults apply and nothing is TLS" do
@@ -744,7 +752,15 @@ defmodule AnkusaServer.ConfigTest do
       assert config.listener.read_timeout_ms == 10_000
       assert config.listener.http2 == false
       assert config.listener.tls == nil
-      assert config.metrics == %{enabled: false, port: 4004, ip: "127.0.0.1", tls: nil}
+
+      assert config.metrics == %{
+               enabled: false,
+               port: 4004,
+               ip: "127.0.0.1",
+               tls: nil,
+               detail: :tenant,
+               max_series_per_metric: 5_000
+             }
     end
 
     test "ANKUSA_METRICS_* turn the metrics listener on and move it" do
@@ -777,6 +793,9 @@ defmodule AnkusaServer.ConfigTest do
              "listener.read_timeout_ms: expected an integer"},
             {"listener: {http2: sure}", "listener.http2: expected a boolean"},
             {"metrics: {port: nope}", "metrics.port: expected an integer"},
+            {"metrics: {detail: everything}", ~s(metrics.detail: unknown value "everything")},
+            {"metrics: {max_series_per_metric: lots}",
+             "metrics.max_series_per_metric: expected an integer"},
             {"admin: {tls: {#{tls}, verify: nope}}", ~s(admin.tls.verify: unknown value "nope")}
           ] do
         path = tmp_config("#{yaml}\n#{@sources}")
@@ -796,7 +815,9 @@ defmodule AnkusaServer.ConfigTest do
             {"claim_check: {tls: {certfile: /nope.pem, keyfile: /nope-key.pem}}",
              "claim_check.tls.certfile must be a readable file"},
             {"listener: {max_connections: 0}",
-             "listener.max_connections must be a positive integer, got 0"}
+             "listener.max_connections must be a positive integer, got 0"},
+            {"metrics: {max_series_per_metric: 0}",
+             "metrics.max_series_per_metric must be a positive integer, got 0"}
           ] do
         path = tmp_config("#{yaml}\n#{@sources}")
         error = assert_raise ConfigError, fn -> Config.load!(path: path, env: %{}) end
