@@ -301,20 +301,37 @@ defmodule Ankusa.DispatchTest do
     assert {:ok, _settled} = Pipeline.tick(inst)
     for id <- ids, do: assert_receive({:delivered, :a, ^id}, 5_000)
 
-    assert await_active_tenants() == 3
+    await_active_tenants(3)
   end
 
   @doc false
   def forward_state(_event, measurements, _meta, pid),
     do: send(pid, {:dispatch_state, measurements})
 
-  # The first non-zero `active_tenants` the housekeeping tick reports.
-  defp await_active_tenants do
+  # Waits for a housekeeping report of exactly `expected` visited tenants. The
+  # report is once a second and resets the count, so one that lands while the
+  # scans are still in progress says fewer; those are skipped. More than
+  # `expected` means a tenant with nothing due was visited, which is the failure
+  # this test exists to catch.
+  defp await_active_tenants(expected, deadline_ms \\ 5_000) do
+    started = System.monotonic_time(:millisecond)
+
     receive do
-      {:dispatch_state, %{active_tenants: 0}} -> await_active_tenants()
-      {:dispatch_state, %{active_tenants: n}} -> n
+      {:dispatch_state, %{active_tenants: ^expected}} ->
+        :ok
+
+      {:dispatch_state, %{active_tenants: n}} when n < expected ->
+        left = deadline_ms - (System.monotonic_time(:millisecond) - started)
+
+        if left > 0,
+          do: await_active_tenants(expected, left),
+          else: flunk("dispatch reported #{n} visited tenants, expected #{expected}")
+
+      {:dispatch_state, %{active_tenants: n}} ->
+        flunk("dispatch visited #{n} tenants, expected #{expected}")
     after
-      5_000 -> flunk("dispatch reported no visited tenants")
+      deadline_ms ->
+        flunk("dispatch reported no scan of #{expected} tenants within #{deadline_ms} ms")
     end
   end
 
