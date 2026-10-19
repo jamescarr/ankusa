@@ -46,6 +46,7 @@ defmodule Ankusa.Dispatch.Replayer do
   alias Ankusa.Queue
   alias Ankusa.Queue.{Archive, Deliveries}
   alias Ankusa.Store.Keys
+  alias Ankusa.Tenant
 
   @tick_ms 200
   @max_items_per_tick 2_000
@@ -662,7 +663,17 @@ defmodule Ankusa.Dispatch.Replayer do
     |> Enum.sort_by(&elem(&1, 1))
   end
 
+  # The tombstones of erased tenants (`Ankusa.Tenant`) are read once per page: a
+  # segment is multi-tenant and outlives an erase, so what it still holds of an
+  # erased tenant is skipped here, never redriven.
   defp redrive_segment(state, job, entries, bin, row, n) do
+    case Tenant.erased(state.instance) do
+      {:ok, erased} -> redrive_entries(state, job, entries, bin, row, n, erased)
+      {:error, reason} -> {:error, state, job, reason}
+    end
+  end
+
+  defp redrive_entries(state, job, entries, bin, row, n, erased) do
     offset0 =
       case job.cursor do
         {_fs, :done} -> 0
@@ -689,7 +700,7 @@ defmodule Ankusa.Dispatch.Replayer do
               {:halt, {kept, skipped, scanned, false, offset}}
 
             true ->
-              case decode_entry(codec, bin, offset, length, from, to, job.filter) do
+              case decode_entry(codec, bin, offset, length, from, to, {job.filter, erased}) do
                 {:keep, entry} ->
                   {:cont, {[entry | kept], skipped, scanned + 1, done_all?, offset + length}}
 
@@ -706,7 +717,7 @@ defmodule Ankusa.Dispatch.Replayer do
     commit_archive(state, job, Enum.reverse(kept), skipped, scanned, row, done_all?, last_offset)
   end
 
-  defp decode_entry(codec, bin, offset, length, from, to, filter) do
+  defp decode_entry(codec, bin, offset, length, from, to, {filter, erased}) do
     case codec.decode_record(binary_part(bin, offset, length)) do
       {:ok, payload} ->
         case Ankusa.Envelope.from_binary(payload) do
@@ -715,6 +726,7 @@ defmodule Ankusa.Dispatch.Replayer do
               env.received_at < from or env.received_at > to -> :skip
               not matches_source?(filter, env.source_id) -> :skip
               not matches_tenant?(filter, env.tenant_id) -> :skip
+              Tenant.erased?(erased, env.tenant_id || "default", env.received_at) -> :unusable
               true -> {:keep, %{bin: payload, size: byte_size(payload), env: env}}
             end
 
@@ -1081,7 +1093,8 @@ defmodule Ankusa.Dispatch.Replayer do
 
     with {:ok, entries} <- Audit.page(state.instance, cursor, @lifecycle_scan),
          taken = Enum.take_while(entries, fn {seq, _row} -> seq <= job.ceiling end),
-         {:ok, page} <- lifecycle_collect(state.instance, taken, job, n) do
+         {:ok, erased} <- Tenant.erased(state.instance),
+         {:ok, page} <- lifecycle_collect({state.instance, erased}, taken, job, n) do
       page = %{
         page
         | exhausted?:
@@ -1095,7 +1108,7 @@ defmodule Ankusa.Dispatch.Replayer do
     end
   end
 
-  defp lifecycle_collect(instance, entries, job, n) do
+  defp lifecycle_collect(context, entries, job, n) do
     acc = %{
       rows: [],
       last: job.cursor || 0,
@@ -1114,7 +1127,7 @@ defmodule Ankusa.Dispatch.Replayer do
         {seq, decoded}, acc ->
           acc = %{acc | last: seq, scanned: acc.scanned + 1}
 
-          case lifecycle_entry(instance, decoded, job) do
+          case lifecycle_entry(context, decoded, job) do
             :skip -> {:cont, acc}
             :gone -> {:cont, %{acc | skipped: acc.skipped + 1}}
             {:ok, pair} -> {:cont, %{acc | rows: [pair | acc.rows], moved: acc.moved + 1}}
@@ -1128,21 +1141,29 @@ defmodule Ankusa.Dispatch.Replayer do
     end
   end
 
-  defp lifecycle_entry(instance, {:ok, %{publish: true} = row}, job) do
-    if Lifecycle.in_window?(row, job.filter) do
-      case Audit.entity(instance, row.seq) do
-        {:ok, entity} -> {:ok, {row, entity}}
-        :not_found -> :gone
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      :skip
+  # A tenant that is being erased, or was erased after the row was written, has
+  # nothing to re-emit: its entities are gone or going (`Ankusa.Tenant`), and a
+  # replayed `source.created` would announce an endpoint the erase removed.
+  defp lifecycle_entry({instance, erased}, {:ok, %{publish: true} = row}, job) do
+    cond do
+      not Lifecycle.in_window?(row, job.filter) ->
+        :skip
+
+      Tenant.suppressed?(instance, erased, row) ->
+        :gone
+
+      true ->
+        case Audit.entity(instance, row.seq) do
+          {:ok, entity} -> {:ok, {row, entity}}
+          :not_found -> :gone
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 
   # A row that cannot be read is a row that cannot be replayed.
-  defp lifecycle_entry(_instance, {:error, _reason}, _job), do: :gone
-  defp lifecycle_entry(_instance, {:ok, _row}, _job), do: :skip
+  defp lifecycle_entry(_context, {:error, _reason}, _job), do: :gone
+  defp lifecycle_entry(_context, {:ok, _row}, _job), do: :skip
 
   # Nothing to send in this page: the cursor moves on its own.
   defp lifecycle_hand_over(state, job, %{rows: []} = page) do

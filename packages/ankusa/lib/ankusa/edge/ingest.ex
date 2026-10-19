@@ -67,6 +67,7 @@ defmodule Ankusa.Edge.Ingest do
              :unknown_source
              | :overload
              | :tenant_limit
+             | :tenant_erasing
              | :dedupe_quota
              | :dlq_full
              | :store_unavailable
@@ -475,6 +476,7 @@ defmodule Ankusa.Edge.Ingest do
         {:duplicate, duplicate} -> {:duplicate, duplicate}
         {:error, :overload} -> {:error, :overload}
         {:error, :tenant_limit} -> {:error, :tenant_limit}
+        {:error, :tenant_erasing} -> {:error, :tenant_erasing}
         {:error, :dedupe_quota} -> {:error, :dedupe_quota}
         {:error, {:tenant_overload, _ms}} = refused -> tenant_overload(instance, env, refused)
         {:error, :store_unavailable} -> {:error, :store_unavailable}
@@ -502,6 +504,7 @@ defmodule Ankusa.Edge.Ingest do
       :ok -> {:quarantined, reason}
       {:rate_limited, retry_after_ms} -> {:error, {:quarantine_rate_limited, retry_after_ms}}
       :full -> {:error, :quarantine_full}
+      {:error, :tenant_erasing} -> {:error, :tenant_erasing}
       {:error, :store_unavailable} -> {:error, :store_unavailable}
     end
   end

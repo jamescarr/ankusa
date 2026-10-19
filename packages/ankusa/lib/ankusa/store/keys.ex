@@ -68,6 +68,13 @@ defmodule Ankusa.Store.Keys do
   # lifecycle sink (`Ankusa.Lifecycle.Publisher`): 8 bytes, big-endian.
   def lifecycle_cursor, do: "m:lifecycle_cursor"
 
+  # A tenant erase (`Ankusa.Tenant`): `m:erase:<tenant>` is the job's progress,
+  # present from the request until the erase commits; `m:erased:<tenant>` is
+  # the tombstone it leaves, `<<at::64>>` (ms): archived hooks of the tenant
+  # received at or before `at` are gone (`Ankusa.Tenant.erased?/3`).
+  def erase(tenant) when is_binary(tenant), do: "m:erase:" <> tenant
+  def erased(tenant) when is_binary(tenant), do: "m:erased:" <> tenant
+
   # ── hooks ─────────────────────────────────────────────────────────────────
 
   def hook(seq), do: <<seq::64>>
@@ -169,6 +176,8 @@ defmodule Ankusa.Store.Keys do
   def decode_audit(<<?a, seq::64, at::64>>), do: {seq, at}
   def decode_lifecycle_entity(<<?o, seq::64>>), do: seq
   def decode_audit_pending(<<?p, seq::64>>), do: seq
+  def decode_erase("m:erase:" <> tenant), do: tenant
+  def decode_erased("m:erased:" <> tenant), do: tenant
   def decode_source_revision(<<"v:", rest::binary>>), do: decode_source(<<"s:", rest::binary>>)
 
   def decode_dedupe_expiry(<<?e, at::64, rest::binary>>) do
@@ -225,6 +234,8 @@ defmodule Ankusa.Store.Keys do
     source_revisions: %{cf: :default, lo: "v:", hi: <<"v:", 0xFF>>},
     audit: %{cf: :audit, lo: <<?a>>, hi: <<?a, @ff16::binary>>},
     audit_pending: %{cf: :audit, lo: <<?p>>, hi: <<?p, @ff8::binary>>},
+    erases: %{cf: :default, lo: "m:erase:", hi: <<"m:erase:", 0xFF>>},
+    erased: %{cf: :default, lo: "m:erased:", hi: <<"m:erased:", 0xFF>>},
     lifecycle_entities: %{cf: :audit, lo: <<?o>>, hi: <<?o, @ff8::binary>>}
   }
 
