@@ -323,6 +323,7 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
+          {"ankusa.sink_http.pool.origins", [:ankusa, :sink_http, :state], :origins, :unit},
           {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}
         ] do
       last_value(

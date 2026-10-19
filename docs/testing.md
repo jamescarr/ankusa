@@ -160,7 +160,12 @@ The always-on tests cover:
   and `allow_hosts`, and that an `http` delivery really connects to the checked
   address over a socket) and TLS verification against a real `https` listener
   with a private CA (untrusted, `cacertfile`, hostname mismatch,
-  `allow_insecure_tls`, `verify_none` refused).
+  `allow_insecure_tls`, `verify_none` refused), and computed per-tenant
+  destinations (`computed url per tenant`, `computed url denied` — a private
+  address fails closed on its own attempt, a rebinding name is re-checked per
+  attempt — per-tenant headers and secrets, and the bounded pool against a real
+  `https` listener: static sinks stay off it, an idle origin is reaped, a new
+  origin is refused at the ceiling).
 - **Secrets at rest** (`crypto_test.exs`, `source_store_persistent_test.exs`,
   `secrets_rewrap_task_test.exs`, `blob_store_sse_test.exs`): the
   `Ankusa.Crypto.Envelope` value layout (a flipped bit in the IV, tag or

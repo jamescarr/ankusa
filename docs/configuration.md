@@ -287,6 +287,12 @@ and `public_key`.
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
 the message carries a claim reference. See [`claim-check.md`](claim-check.md).
 
+The `http` sink's `url`, `headers` and `secret` are static strings here. An
+embedding app can set each to a function of the envelope instead, to route a
+shared source's tenants to their own receivers; those connect through a bounded
+per-instance pool that takes no settings. See
+[`delivery.md`](delivery.md#sinkhttp-per-tenant-destinations).
+
 ### Environment overrides
 
 Anything you would normally read from the platform, so a container can be

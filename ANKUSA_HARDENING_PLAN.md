@@ -330,7 +330,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
   *Anchors:* `packages/ankusa/lib/ankusa/metrics.ex:84-312`, `telemetry.ex:9-46`.
   *Evidence:* —
 
-- [ ] **TEN-8 — Per-tenant HTTP destinations on shared sources** · P1 · Deps: SEC-3
+- [x] **TEN-8 — Per-tenant HTTP destinations on shared sources** · P1 · Deps: SEC-3
   *Why:* `Sink.Http` URL/headers are static (`sink/http.ex:89-120`), so a shared source cannot route tenants to their own endpoints without one source per tenant.
   *Change:* `:url` and `:headers` accept `{mod, fun, args}` or a 1-arity fun of `%Envelope{}` (as `GooglePubSub` does for `ordering_key`); resolved per attempt; every resolved target passes SEC-3; `Sink.Description` reports `computed`.
   *Done when:* a shared source with two tenants delivers each hook to its tenant's receiver; a computed target in a denied CIDR fails closed.
