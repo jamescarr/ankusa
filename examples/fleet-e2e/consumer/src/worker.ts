@@ -5,8 +5,11 @@
 //
 // The row is keyed by the message's `idempotency_key`: a provider retry that
 // reached the other edge node is a second hook with a new id but the same key,
-// and lands on the same row with `deliveries + 1`. A message RabbitMQ delivers
-// again after this process was killed mid-handling does the same.
+// and lands on the same row with `deliveries + 1` and its id added to `hook_ids`
+// (the distinct hooks Ankusa committed for the key: `duplicate_hooks` in the
+// verify report is `cardinality(hook_ids) - 1`). A message RabbitMQ delivers
+// again after this process was killed mid-handling is one more delivery of the
+// *same* hook: `deliveries + 1`, `hook_ids` unchanged.
 
 import amqp from "amqplib";
 import { ClaimCheckError, createClaimCheckClient, InvalidClaimRefError, parseClaimRef } from "ankusa";
@@ -51,10 +54,13 @@ async function resolveBody(msg: HookMessage): Promise<{ body: Buffer; via: strin
 async function record(msg: HookMessage, body: Buffer, via: string): Promise<void> {
   await db.query(
     `INSERT INTO processed_webhooks
-       (idempotency_key, ankusa_id, source_id, tenant_id, body, body_sha256, deliveries, processed_at, via)
-     VALUES ($1, $2, $3, $4, $5, $6, 1, now(), $7)
+       (idempotency_key, ankusa_id, source_id, tenant_id, body, body_sha256, deliveries, processed_at, via, hook_ids)
+     VALUES ($1, $2, $3, $4, $5, $6, 1, now(), $7, ARRAY[$2::text])
      ON CONFLICT (idempotency_key) DO UPDATE
-       SET deliveries = processed_webhooks.deliveries + 1`,
+       SET deliveries = processed_webhooks.deliveries + 1,
+           hook_ids = CASE WHEN $2::text = ANY (processed_webhooks.hook_ids)
+                           THEN processed_webhooks.hook_ids
+                           ELSE processed_webhooks.hook_ids || $2::text END`,
     [
       msg.idempotency_key ?? msg.id,
       msg.id,

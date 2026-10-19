@@ -224,6 +224,7 @@ defmodule Ankusa.Instance do
       edge =
         routes_children(config, opts) ++
           writer_children(config, opts) ++
+          fleet_children(config, opts) ++
           [
             {Ankusa.Edge.Quarantine, opts},
             # Before the batchers and the listener, so the tables exist before
@@ -250,6 +251,19 @@ defmodule Ankusa.Instance do
       []
     end
   end
+
+  # The shared store behind `rate_limits.scope: :fleet` / `dedupe.scope: :fleet`
+  # and the process that guards it (breaker, settle queue): before the
+  # listener, so the tables exist before the first request reaches `Ingest`. A
+  # store that cannot be reached at boot does not stop the node (see
+  # `Ankusa.RateLimiter.Store`).
+  defp fleet_children(%Config{fleet: %{store: {store, _opts}}} = config, opts) do
+    if :fleet in [config.rate_limits.scope, config.dedupe.scope],
+      do: [{store, opts}, {Ankusa.Edge.Fleet, opts}],
+      else: []
+  end
+
+  defp fleet_children(_config, _opts), do: []
 
   # The batcher exists to group WAL commits. `wal: :none` has no log to group:
   # ingest publishes to the sinks in the request instead.

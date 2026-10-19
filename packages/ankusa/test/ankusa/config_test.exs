@@ -279,13 +279,14 @@ defmodule Ankusa.ConfigTest do
       assert :ok = validated_limits(%{sources: %{}})
     end
 
-    test "the defaults: nothing but a generous per-source byte ceiling" do
+    test "the defaults: nothing but a generous per-source byte ceiling, per node" do
       assert %Config{}.rate_limits == %{
                default: nil,
                tenants: %{},
                per_ip: nil,
                node: nil,
-               sources: %{default: %{bytes_per_second: 100_000_000}}
+               sources: %{default: %{bytes_per_second: 100_000_000}},
+               scope: :node
              }
     end
 
@@ -1115,6 +1116,64 @@ defmodule Ankusa.ConfigTest do
         )
 
       assert [%{id: "ci", scopes: ["dlq:read"]}] = config.admin.auth.tokens
+    end
+  end
+
+  describe "fleet scopes" do
+    @store {Ankusa.RateLimiter.Store.Redis, url: "redis://localhost:6399"}
+
+    test "default to node scope with no fleet store" do
+      config = Config.new()
+
+      assert config.rate_limits.scope == :node
+      assert config.dedupe == %{scope: :node}
+      assert config.fleet.store == nil
+      assert config.fleet.timeout_ms == 20
+    end
+
+    test "a fleet scope needs the fleet store" do
+      assert_raise ArgumentError, ~r/rate_limits\.scope: :fleet needs fleet\.store/, fn ->
+        Config.new(rate_limits: [scope: :fleet])
+      end
+
+      assert_raise ArgumentError, ~r/dedupe\.scope: :fleet needs fleet\.store/, fn ->
+        Config.new(dedupe: [scope: :fleet])
+      end
+
+      config =
+        Config.new(rate_limits: [scope: :fleet], dedupe: [scope: :fleet], fleet: [store: @store])
+
+      assert config.rate_limits.scope == :fleet
+      assert config.dedupe.scope == :fleet
+    end
+
+    test "scope is :node or :fleet" do
+      assert_raise ArgumentError,
+                   ~r/rate_limits\.scope must be :node or :fleet, got :cluster/,
+                   fn ->
+                     Config.new(rate_limits: [scope: :cluster])
+                   end
+
+      assert_raise ArgumentError, ~r/dedupe\.scope must be :node or :fleet, got "fleet"/, fn ->
+        Config.new(dedupe: [scope: "fleet"])
+      end
+    end
+
+    test "the call budget, breaker and pending TTL are range checked" do
+      for {key, value, message} <- [
+            {:timeout_ms, 0, ~r/fleet\.timeout_ms must be an integer from 1 to 1000, got 0/},
+            {:timeout_ms, 1_001, ~r/fleet\.timeout_ms must be an integer from 1 to 1000/},
+            {:pending_ttl_ms, 0, ~r/fleet\.pending_ttl_ms must be a positive integer/},
+            {:breaker_window_ms, -1, ~r/fleet\.breaker_window_ms must be a positive integer/},
+            {:breaker_min_calls, 0, ~r/fleet\.breaker_min_calls must be a positive integer/},
+            {:breaker_open_ms, 0, ~r/fleet\.breaker_open_ms must be a positive integer/},
+            {:breaker_failure_rate, 0, ~r/fleet\.breaker_failure_rate must be a number above 0/},
+            {:breaker_failure_rate, 1.5,
+             ~r/fleet\.breaker_failure_rate must be a number above 0/},
+            {:store, :redis, ~r/fleet\.store must be nil or \{module, keyword\}/}
+          ] do
+        assert_raise ArgumentError, message, fn -> Config.new(fleet: [{key, value}]) end
+      end
     end
   end
 end

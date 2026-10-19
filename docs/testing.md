@@ -621,6 +621,26 @@ plaintext and previous-key entries to the current key, writes nothing and moves
 no version when there is nothing to move, and a node with only the new key then
 reads everything.
 
+`test/ankusa/rate_limiter/store/redis_test.exs` (12 tests) covers the fleet store
+(`Ankusa.RateLimiter.Store.Redis`, TEN-6) with two instances in one VM on one
+namespace standing in for two edge nodes. **`fleet limiter`**: two nodes enforce
+one tenant's 10 rps combined (the burst plus what refilled, where per-node
+buckets would admit double), the byte bucket and a `429`'s `Retry-After`, and an
+override change resetting the fleet bucket. **`fleet dedupe`**: the same event
+key posted to each node is one stored hook (the second answers `201 duplicate`
+with the first's id); a claim whose commit failed (`wal: none`, refusing sink) is
+released so the retry on the other node stores the hook; a claim still pending
+is `409 dedupe_pending` and stores nothing until it expires; a promoted key is
+`committed:<id>` for the source's TTL. **`degrades without redis`**: Redis behind
+a TCP forwarder that is killed mid-run, then restored — every answer is a `201` or
+the node's own `429`, never a `5xx`, the breaker opens and
+`ankusa_fleet_limiter_degraded` reads `1`, and the half-open probe closes it; and
+a forwarder that delays every reply 500 ms, where the ack p99 over 200 hooks
+stays under 150 ms and the breaker is open. A flushed script cache is answered
+with `EVAL`. The stub-store counterpart, which needs no Redis,
+is core's `edge_fleet_test.exs`: one store call per hook, the two-phase claim,
+the breaker's open, half-open and failed-probe transitions, and the fallback.
+
 `test/ankusa/sink/redis_test.exs` (6 tests) covers `Ankusa.Sink.Redis` against
 the same server, subscribing with `Redix.PubSub` in the test process: an inline
 message arriving on the channel with the `Ankusa.Sink.Message` body, a fat
@@ -936,7 +956,7 @@ the verifier is the one the kind drill uses.
 
 ```sh
 examples/fleet-e2e/run.sh
-# verify: missing=0 sha_mismatches=0 extra_deliveries=<n> claim_redeemed_cross_node=true
+# verify: missing=0 sha_mismatches=0 extra_deliveries=<n> claim_redeemed_cross_node=true duplicate_hooks=0
 ```
 
 Phases: **steady** (paced, through the load balancer); **fat hooks** (a 20 KB
@@ -944,15 +964,21 @@ body POSTed to each node directly must reach the consumer through a claim, with
 its sha256 intact: `claim_redeemed_cross_node`); **chaos** (the same load, with
 `ankusa-a` killed at +10 s and started at +20 s, one event delivered to node b
 and then *retried on node a*, and the consumer killed at +30 s); **burst**
-(closed loop). Each phase is verified; the run fails on any `missing` or
-`sha_mismatches`.
+(closed loop). Each phase is verified; the run fails on any `missing`,
+`sha_mismatches` or `duplicate_hooks`.
 
 `extra_deliveries` counts consumer receipts beyond the first per idempotency
-key: the provider retry (the dedupe index is per node, so the retry is a
-second hook that collapses into the same row) plus whatever RabbitMQ redelivers
-after the consumer kill. It is reported, not asserted to be zero; it must be
-zero once fleet-scoped dedupe lands (`TEN-6` in
+key, and has two components. **Duplicate hooks** are one provider event stored as
+two hooks (two ids): the example runs `dedupe.scope: fleet`, so the retry on node
+a is answered with node b's hook id and none is created. `duplicate_hooks`
+(distinct hook ids per idempotency key minus one, from the consumer table's
+`hook_ids`) reports that component alone, and the run fails unless it is `0`
+(`TEN-6` in
 [`ANKUSA_HARDENING_PLAN.md`](https://github.com/jamescarr/ankusa/blob/main/ANKUSA_HARDENING_PLAN.md)).
+**Broker redeliveries** are what RabbitMQ delivers again after the consumer kill:
+the same hook, at-least-once, which ingest cannot remove and the chaos phase
+exists to provoke. They stay in `extra_deliveries`, which is reported and
+bounded by the delivery contract, not asserted to be zero.
 
 CI: [`.github/workflows/e2e.yml`](https://github.com/jamescarr/ankusa/blob/main/.github/workflows/e2e.yml)
 runs it nightly, on `workflow_dispatch`, on every release tag, and on a pull

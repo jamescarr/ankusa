@@ -293,7 +293,42 @@ defmodule Ankusa.Config do
               tenants: %{},
               per_ip: nil,
               node: nil,
-              sources: %{default: %{bytes_per_second: 100_000_000}}
+              sources: %{default: %{bytes_per_second: 100_000_000}},
+              # `:node` | `:fleet`: where the *tenant quota* (`default`/`tenants`,
+              # hooks and bytes per second) is counted. `:fleet` shares one bucket
+              # per tenant across every edge node through `fleet.store`; `per_ip`,
+              # `node` and `sources` are CPU protection for this node and stay
+              # per node under either.
+              scope: :node
+            },
+            # `scope: :node | :fleet`: where the provider event key collapses
+            # (`Ankusa.Dedupe`). `:node` is the writer's local index alone;
+            # `:fleet` claims the key in `fleet.store` first, so a provider retry
+            # that lands on another node is a duplicate, not a second hook.
+            dedupe: %{scope: :node},
+            # The shared store behind `rate_limits.scope: :fleet` and
+            # `dedupe.scope: :fleet`, `{module, opts}` (a module implementing
+            # `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store`, e.g.
+            # `Ankusa.RateLimiter.Store.Redis` from `ankusa_redis`); `nil` with
+            # both scopes `:node`.
+            #
+            # A fleet call never holds a request longer than `timeout_ms`: a slow
+            # or dead store is answered from this node's own limiter and dedupe
+            # index instead (the ingest never refuses for a limiter outage). A
+            # breaker opens when, within `breaker_window_ms`, at least
+            # `breaker_min_calls` calls were made and `breaker_failure_rate` of
+            # them failed or timed out, stays open `breaker_open_ms`, then lets one
+            # probe call through. `pending_ttl_ms` is how long a claimed dedupe key
+            # stays "in flight" before another node may claim it: it must outlast
+            # the longest commit.
+            fleet: %{
+              store: nil,
+              timeout_ms: 20,
+              pending_ttl_ms: 30_000,
+              breaker_window_ms: 1_000,
+              breaker_min_calls: 20,
+              breaker_failure_rate: 0.5,
+              breaker_open_ms: 5_000
             },
             # tenants this node's store will know (`Ankusa.Queue.Tenants` hands
             # each one a dense ordinal at first sight and never takes it back): a
@@ -388,8 +423,8 @@ defmodule Ankusa.Config do
   @doc """
   Build a `%Ankusa.Config{}` from a keyword list, deep-merging the map-valued
   sections (`:listener`, `:batcher`, `:dispatch`, `:storage`, `:claim_check`,
-  `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:quarantine`, `:tenants`,
-  `:lifecycle`, `:egress`, `:secrets`) over the defaults. Every `tls` block (`listener.tls`,
+  `:backup`, `:admin`, `:metrics`, `:routes`, `:rate_limits`, `:dedupe`, `:fleet`,
+  `:quarantine`, `:tenants`, `:lifecycle`, `:egress`, `:secrets`) over the defaults. Every `tls` block (`listener.tls`,
   `admin.tls`, `routes.admin.tls`, `claim_check.tls`, `metrics.tls`) is
   validated and normalised by `Ankusa.Listener.normalize_tls!/2`, and
   `listener.num_acceptors: nil` becomes two per scheduler.
@@ -430,6 +465,8 @@ defmodule Ankusa.Config do
           :admin,
           :metrics,
           :rate_limits,
+          :dedupe,
+          :fleet,
           :quarantine,
           :lifecycle,
           :audit,
@@ -574,6 +611,10 @@ defmodule Ankusa.Config do
     {[:backup, :keep], "backup.keep"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
     {[:routes, :max_routes], "routes.max_routes"},
+    {[:fleet, :pending_ttl_ms], "fleet.pending_ttl_ms"},
+    {[:fleet, :breaker_window_ms], "fleet.breaker_window_ms"},
+    {[:fleet, :breaker_min_calls], "fleet.breaker_min_calls"},
+    {[:fleet, :breaker_open_ms], "fleet.breaker_open_ms"},
     {[:listener, :max_connections], "listener.max_connections"},
     {[:listener, :num_acceptors], "listener.num_acceptors"},
     {[:listener, :read_timeout_ms], "listener.read_timeout_ms"},
@@ -666,6 +707,8 @@ defmodule Ankusa.Config do
       &(&1 == "" or (is_binary(&1) and Regex.match?(@key_prefix, &1)))
     )
 
+    validate_fleet!(config)
+
     for {path, key} <- [
           {[:listener, :http2], "listener.http2"},
           {[:metrics, :enabled], "metrics.enabled"}
@@ -682,6 +725,47 @@ defmodule Ankusa.Config do
     unless valid?.(value) do
       raise ArgumentError, "#{key} must be #{constraint}, got #{inspect(value)}"
     end
+  end
+
+  # The fleet block's own ranges, and the rule that a fleet scope has a store to
+  # scope into.
+  defp validate_fleet!(config) do
+    check!(
+      config,
+      [:fleet, :timeout_ms],
+      "fleet.timeout_ms",
+      "an integer from 1 to 1000",
+      &(is_integer(&1) and &1 in 1..1_000)
+    )
+
+    check!(
+      config,
+      [:fleet, :breaker_failure_rate],
+      "fleet.breaker_failure_rate",
+      "a number above 0 and at most 1",
+      &(is_number(&1) and &1 > 0 and &1 <= 1)
+    )
+
+    check!(
+      config,
+      [:fleet, :store],
+      "fleet.store",
+      "nil or {module, keyword}",
+      &(&1 == nil or match?({mod, opts} when is_atom(mod) and is_list(opts), &1))
+    )
+
+    for {path, key} <- [
+          {[:rate_limits, :scope], "rate_limits.scope"},
+          {[:dedupe, :scope], "dedupe.scope"}
+        ] do
+      check!(config, path, key, ":node or :fleet", &(&1 in [:node, :fleet]))
+
+      if get_in(config, Enum.map(path, &Access.key/1)) == :fleet and config.fleet.store == nil do
+        raise ArgumentError, "#{key}: :fleet needs fleet.store (a shared store module)"
+      end
+    end
+
+    :ok
   end
 
   # `:dispatch` and `:storage` read the queue and nothing else, so with no queue

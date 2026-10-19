@@ -11,6 +11,9 @@ CREATE TABLE processed_webhooks (
   body            bytea NOT NULL,
   body_sha256     text NOT NULL,
   deliveries      integer NOT NULL DEFAULT 1,
+  -- Every distinct hook id Ankusa committed for this key: more than one means a
+  -- provider retry was stored twice instead of collapsing at ingest.
+  hook_ids        text[] NOT NULL DEFAULT '{}',
   -- Set once the body is in hand and recorded; loadgen.verify counts a row
   -- only when it is set.
   processed_at    timestamptz,

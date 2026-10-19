@@ -104,7 +104,13 @@ has appeared or the timeout elapses.
 - `sha_mismatches`: count of found rows whose `body_sha256` doesn't match
   the SHA-256 recorded for that id in the acked CSV.
 - `extra_deliveries`: sum of `deliveries - 1` over every found row (0 means
-  every accepted webhook was processed exactly once).
+  every accepted webhook was processed exactly once). It counts consumer
+  receipts, so it includes a broker redelivering the same hook.
+- `duplicate_hooks`: sum of `cardinality(hook_ids) - 1` over every found row:
+  the number of times one provider event key was stored as a second hook (a new
+  hook id). Only fleet-scoped dedupe can drive it to 0; a broker redelivery does
+  not move it. `null` when the consumer's `processed_webhooks` has no `hook_ids`
+  column (the `fleet-e2e` example's does).
 - `drain_s`: approximate wall-clock seconds from the start of polling until
   the missing set first became empty (each poll re-queries the full acked
   set, so this is the poll-iteration timestamp where the count first hit

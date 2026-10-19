@@ -8,6 +8,18 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`Ankusa.RateLimiter.Store.Redis` (TEN-6)**: the fleet store behind core's
+  `rate_limits.scope: :fleet` and `dedupe.scope: :fleet`, implementing
+  `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store`. One `EVALSHA` per hook runs
+  GCRA on the tenant's hook and byte buckets (Redis's own clock) and claims the
+  provider event key (`SET NX PX`, pending) in one step; a denied bucket writes
+  nothing and claims nothing, a taken key spends no bucket. The claim is promoted
+  to `committed:<hook id>` (or released, compare-and-delete) after the commit by
+  pipelined `settle/3` batches. Scripts are loaded at boot and a `NOSCRIPT` is
+  answered with `EVAL` inside the call budget; every command carries the caller's
+  `timeout_ms`; connecting never blocks the boot. Options: `url`, `namespace`
+  (default `ankusa:fleet:<instance>`), `pool_size` (4). Requires the `ankusa`
+  release with fleet scopes.
 - `Ankusa.Routes.Store.Redis` follows core's tenant-aware routes (TEN-4):
   `delete/3` takes the tenant the delete is made for, and the delete script
   reads the stored route's owner in the same step and answers `:not_found` for

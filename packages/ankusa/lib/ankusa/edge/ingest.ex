@@ -40,10 +40,22 @@ defmodule Ankusa.Edge.Ingest do
   the tenant's hooks and bytes per second (`{:error, {:rate_limited, ms}}`), and
   its share of the batchers, charged by `Ankusa.Edge.Batcher.commit/4`
   (`{:error, {:tenant_overload, ms}}`). Both are `429`s, and neither is the
-  node's `503 overload`.
+  node's `503 overload`. With `rate_limits.scope: :fleet` / `dedupe.scope: :fleet`
+  the quota and the provider event key are counted fleet-wide
+  (`Ankusa.Edge.Fleet`): an event key another node has claimed but not yet made
+  durable is `{:error, {:dedupe_pending, ms}}` (`409`, retried by the sender), and
+  one it has committed is a `{:duplicate, env}` carrying that node's hook id.
   """
 
-  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine, RateLimiter, StoredHeaders}
+  alias Ankusa.Edge.{
+    Batcher,
+    BatcherSupervisor,
+    Fleet,
+    Publish,
+    Quarantine,
+    StoredHeaders
+  }
+
   alias Ankusa.{Envelope, Source, Verification}
 
   @type result ::
@@ -60,7 +72,8 @@ defmodule Ankusa.Edge.Ingest do
              | {:invalid_header, String.t() | nil}
              | {:rate_limited, pos_integer()}
              | {:tenant_overload, pos_integer()}
-             | {:quarantine_rate_limited, pos_integer()}}
+             | {:quarantine_rate_limited, pos_integer()}
+             | {:dedupe_pending, pos_integer()}}
 
   @typedoc """
   Why a request was answered before it reached `ingest/4`. The whole set: every
@@ -291,13 +304,21 @@ defmodule Ankusa.Edge.Ingest do
       # dedupe on a header the stored-header policy then removes.
       env = %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
 
-      case RateLimiter.hit(instance, env.tenant_id, env.size) do
-        :ok ->
-          commit_stored(instance, source, env)
+      case Fleet.admit(instance, source, env) do
+        {:ok, claim} ->
+          {result, dropped} = commit_stored(instance, source, env)
+          Fleet.settle(instance, claim, result)
+          {result, dropped}
+
+        {:duplicate, hook_id} ->
+          {{:duplicate, %{env | id: hook_id, seq: nil}}, 0}
 
         {:error, {:rate_limited, _}} = limited ->
           rate_limit_rejected(instance, env)
           {limited, 0}
+
+        {:error, {:dedupe_pending, _}} = pending ->
+          {pending, 0}
       end
     end
   end
@@ -475,5 +496,6 @@ defmodule Ankusa.Edge.Ingest do
   defp tag({:error, {:rate_limited, _retry_after_ms}}), do: :rate_limited
   defp tag({:error, {:tenant_overload, _retry_after_ms}}), do: :tenant_overload
   defp tag({:error, {:quarantine_rate_limited, _retry_after_ms}}), do: :quarantine_rate_limited
+  defp tag({:error, {:dedupe_pending, _retry_after_ms}}), do: :dedupe_pending
   defp tag({:error, reason}), do: reason
 end

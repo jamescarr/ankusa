@@ -73,9 +73,15 @@ defmodule Ankusa.Edge.RateLimiter do
   compare, undo on refusal), held only while records are in flight and deleted
   at zero, so the table is bounded by the batchers' own caps.
 
-  The tables live on the edge node and nowhere else: a fleet of N edge nodes
-  admits up to N × the limit, and an override set against one node's admin port
-  is that node's alone. Per-tenant queue limits cover the group-commit batcher
+  The tables live on the edge node and nowhere else: with the default
+  `rate_limits.scope: :node` a fleet of N edge nodes admits up to N × the limit,
+  and an override set against one node's admin port is that node's alone.
+  `rate_limits.scope: :fleet` moves the tenant's buckets (hooks and bytes) into
+  `fleet.store` (`Ankusa.Edge.Fleet`, `fleet_charges/3`), so the fleet admits one
+  limit; this node's buckets then only answer when the store cannot. The override
+  is still read from this node (set it on every node), and `per_ip`, `node` and
+  `sources` stay per node under either scope: they protect this node's CPU, they
+  are not a quota. Per-tenant queue limits cover the group-commit batcher
   (`wal: disk`); `wal: none` publishes inside the request and has no queue.
   """
 
@@ -535,6 +541,34 @@ defmodule Ankusa.Edge.RateLimiter do
   defp burst_bytes(%{bytes_per_second: rate}), do: max(1, ceil(rate))
 
   @doc """
+  The buckets `hit/3` would charge for one hook of `bytes` body bytes, as
+  `Ankusa.RateLimiter.Store` charges (GCRA increment and capacity in
+  microseconds) — `[]` when the tenant has no limit. Reads the effective limit
+  on this node and charges nothing.
+  """
+  @spec fleet_charges(atom(), String.t(), non_neg_integer()) ::
+          [Ankusa.RateLimiter.Store.charge()]
+  def fleet_charges(instance, tenant_id, bytes) do
+    case effective(instance, tenant_id) do
+      {nil, :none} ->
+        []
+
+      {limit, _source} ->
+        {increment, capacity} = gcra(1_000_000, limit.rate, limit.burst, 1)
+        hooks = {:hooks, tenant_id, increment, capacity}
+
+        case limit do
+          %{bytes_per_second: rate} when bytes > 0 ->
+            {increment, capacity} = gcra(1_000_000, rate, burst_bytes(limit), bytes)
+            [hooks, {:bytes, tenant_id, increment, capacity}]
+
+          _ ->
+            [hooks]
+        end
+    end
+  end
+
+  @doc """
   The biggest body `tenant_id` may send, when its limit sets `max_body_bytes`
   (otherwise `nil`: the instance's `max_body_bytes` alone applies).
   """
@@ -695,10 +729,19 @@ defmodule Ankusa.Edge.RateLimiter do
   # `burst` of them. A cost bigger than the whole bucket is clamped to it, so it
   # is admitted only into a full bucket (and empties it) rather than never.
   defp charge(table, key, rate, burst, cost) do
-    interval = max(1, round(System.convert_time_unit(1, :second, :native) / rate))
-    capacity = interval * burst
+    {increment, capacity} =
+      gcra(System.convert_time_unit(1, :second, :native), rate, burst, cost)
 
-    hit_bucket(table, key, min(cost * interval, capacity), capacity)
+    hit_bucket(table, key, increment, capacity)
+  end
+
+  # The GCRA parameters for `cost` units against a bucket refilling `rate` units
+  # a second with room for `burst`, in a clock of `units_per_second`: the cost's
+  # increment (clamped to the bucket) and the bucket's capacity.
+  defp gcra(units_per_second, rate, burst, cost) do
+    interval = max(1, round(units_per_second / rate))
+    capacity = interval * burst
+    {min(cost * interval, capacity), capacity}
   end
 
   # GCRA: a bucket is described by its theoretical arrival time. The next charge
@@ -747,6 +790,7 @@ defmodule Ankusa.Edge.RateLimiter do
     table = buckets_table(instance)
     :ets.delete(table, tenant_id)
     :ets.delete(table, {:bytes, tenant_id})
+    Ankusa.Edge.Fleet.reset_tenant(instance, tenant_id)
   end
 
   # ── overrides ───────────────────────────────────────────────────────────────

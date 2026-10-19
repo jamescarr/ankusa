@@ -8,6 +8,14 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`rate_limits.scope`, `dedupe` and `fleet` (TEN-6).** `rate_limits.scope: fleet`
+  and `dedupe: {scope: fleet}` share the tenant quota and the provider event key
+  across edge nodes through `fleet.store` (`{type: redis, url, namespace,
+  pool_size}`), with the call budget and breaker keys `timeout_ms`,
+  `pending_ttl_ms`, `breaker_window_ms`, `breaker_min_calls`,
+  `breaker_failure_rate` and `breaker_open_ms`. Core's ranges and the rule that a
+  fleet scope needs `fleet.store` fail the boot with its message. See
+  `config-examples/reference.yml` and `docs/configuration.md#fleet-scope`.
 - **`dispatch.tenants` (TEN-3).** `default` and one entry per tenant id, each
   any of `max_inflight`, `max_inflight_bytes` and `concurrency`: a tenant's
   share of the global dispatch limits, so one tenant's slow destination fills its
