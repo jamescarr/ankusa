@@ -9,7 +9,7 @@
   | Error | `:retryable` | Cause |
   | --- | --- | --- |
   | `RoleNotEnabledError` | false | `409 role_not_enabled`: ask another node (`:role` names it) |
-  | `AdminRejectedError` | false | any other `4xx` (`:status`, `:code`) |
+  | `AdminRejectedError` | false | any other `4xx` (`:status`, `:code`, `:scope`) |
   | `AdminUnavailableError` | true | `5xx`, a redirect, a non-JSON body, or unreachable |
 
   Every call is one request: no retry, no followed redirect."
@@ -47,7 +47,9 @@
   [status decoded]
   (error/error "AdminRejectedError"
                (str "admin listener rejected the request (" status "): " (pr-str decoded))
-               {:status status :code (when (map? decoded) (:error decoded))}))
+               {:status status
+                :code (when (map? decoded) (:error decoded))
+                :scope (when (map? decoded) (:scope decoded))}))
 
 (defn- response-body
   "The body bytes of a 2xx response, or the error `response` classifies as."

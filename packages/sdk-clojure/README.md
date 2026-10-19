@@ -349,10 +349,10 @@ the keyword (or `nil` for an exception that is not the SDK's) and
 | `InvalidMessageError` | `false` | a queue message is not a valid v1 message | `:code`, `:field` |
 | `InvalidRouteIdError` | `false` | route id is not a string, empty, or exactly `.`/`..` | |
 | `RouteNotFoundError` | `false` | routes listener `404` | |
-| `RoutesRejectedError` | `false` | routes listener `4xx` other than `404` | `:status`, `:code`, `:field`, `:message`, `:conflicting-id`, `:max-routes` |
+| `RoutesRejectedError` | `false` | routes listener `4xx` other than `404` | `:status`, `:code`, `:field`, `:message`, `:conflicting-id`, `:max-routes`, `:scope` |
 | `RoutesUnavailableError` | `true` | routes listener unreachable, `5xx`, an unfollowed `3xx`, or a non-JSON success body | `:status`, `:reason` |
 | `RoleNotEnabledError` | `false` | admin listener `409` `role_not_enabled` | `:role` |
-| `AdminRejectedError` | `false` | admin listener `4xx` other than that 409 | `:status`, `:code` |
+| `AdminRejectedError` | `false` | admin listener `4xx` other than that 409 | `:status`, `:code`, `:scope` |
 | `AdminUnavailableError` | `true` | admin listener unreachable, `5xx`, an unfollowed `3xx`, or a non-JSON success body | `:status`, `:reason` |
 | `SourceNotFoundError`, `SourceConflictError`, `SourceStoreReadOnlyError`, `SourceInvalidError`, `VersionMismatchError` | `false` | sources `404`, `409`, read-only store, `400` or invalid id, version mismatch | `:status`, `:body` |
 | `SourcesUnavailableError` | `true` | admin listener unreachable, `5xx`, or any other unexpected status | `:status`, `:body` |

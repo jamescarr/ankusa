@@ -78,3 +78,6 @@ this project follows [Semantic Versioning](https://semver.org/).
   through `pr`, `pprint`, or a log line.
 - The language-neutral conformance runner (`clojure.test`,
   `ankusa.sdk.conformance-test`), passing every vector in `conformance/cases`.
+- `:scope` on the admin and routes rejected-error ex-data: the scope a `403
+  forbidden` says the credential lacks (control planes require a credential
+  since Ankusa 0.6).
