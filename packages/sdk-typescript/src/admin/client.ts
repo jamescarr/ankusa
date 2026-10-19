@@ -63,6 +63,7 @@ type FetchResult = { data?: unknown; error?: unknown; response: Response };
 type ErrorBody = {
   error?: string;
   role?: string;
+  scope?: string;
 };
 
 export function createAdminClient(options: AdminClientOptions): AdminClient {
@@ -98,7 +99,7 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     // Only a `4xx` is the node rejecting the request. An unfollowed `3xx` (or a
     // `1xx`) means the caller never reached the node, same as a `5xx`.
     if (status >= 400 && status < 500) {
-      throw new AdminRejectedError(`admin rejected (${status}): ${JSON.stringify(body)}`, status, e.error);
+      throw new AdminRejectedError(`admin rejected (${status}): ${JSON.stringify(body)}`, status, e.error, e.scope ?? null);
     }
     throw new AdminUnavailableError(`admin gateway error (${status}): ${JSON.stringify(body)}`);
   }

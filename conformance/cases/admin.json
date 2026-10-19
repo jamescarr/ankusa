@@ -1,6 +1,27 @@
 {
   "cases": [
     {
+      "id": "admin.auth.bearer_header_rides",
+      "feature": "admin.operations",
+      "operation": "admin_health",
+      "input": {"client": {"headers": {"authorization": "Bearer t0k3n"}}, "gateway": {"status": 200, "body": {"json": {"status": "ok", "instance": "default", "roles": ["edge"]}}}},
+      "expect": {"ok": {"status": "ok", "instance": "default", "roles": ["edge"]}, "requests": [{"method": "GET", "path": "/health", "headers": {"authorization": "Bearer t0k3n"}}]}
+    },
+    {
+      "id": "admin.auth.unauthorized",
+      "feature": "admin.errors",
+      "operation": "admin_dlq_list",
+      "input": {"gateway": {"status": 401, "body": {"json": {"error": "unauthorized"}}}},
+      "expect": {"error": {"class": "AdminRejectedError", "retryable": false, "status": 401, "code": "unauthorized", "scope": null}}
+    },
+    {
+      "id": "admin.auth.forbidden_scope",
+      "feature": "admin.errors",
+      "operation": "admin_dlq_list",
+      "input": {"gateway": {"status": 403, "body": {"json": {"error": "forbidden", "scope": "dlq:read"}}}},
+      "expect": {"error": {"class": "AdminRejectedError", "retryable": false, "status": 403, "code": "forbidden", "scope": "dlq:read"}}
+    },
+    {
       "id": "admin.health.ok",
       "feature": "admin.operations",
       "operation": "admin_health",

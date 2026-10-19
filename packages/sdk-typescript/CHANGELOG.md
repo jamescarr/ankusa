@@ -14,6 +14,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   `paths`. The routes client still calls `/admin/routes`, which spans tenants and
   needs `tenant:*`; it has no methods for the tenant paths yet, so a principal
   limited to one tenant calls them with its own HTTP client.
+- `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403
+  forbidden` says the credential lacks (control planes require a credential
+  since Ankusa 0.6).
 - `HookHeaders.verification`, `Message.verification`, and `ReceivedDelivery.verification`
   carry how Ankusa verified the hook at ingest (`{status, flagged}`, `null`
   from a node that predates the field). `parseHeaders` reads it from

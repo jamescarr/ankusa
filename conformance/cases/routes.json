@@ -1,6 +1,20 @@
 {
   "cases": [
     {
+      "id": "routes.auth.bearer_header_rides",
+      "feature": "routes.crud",
+      "operation": "routes_get",
+      "input": {"client": {"headers": {"authorization": "Bearer t0k3n"}}, "gateway": {"status": 200, "body": {"json": {"id": "stripe", "path": "/webhooks/stripe", "methods": ["POST"], "enabled": true, "ip_rules": [], "metadata": {}, "revision": 1, "inserted_at": "2026-09-28T14:16:26Z", "updated_at": "2026-09-28T14:16:26Z"}}}, "id": "stripe"},
+      "expect": {"ok": {"id": "stripe", "path": "/webhooks/stripe", "methods": ["POST"], "enabled": true, "ip_rules": [], "metadata": {}, "revision": 1, "inserted_at": "2026-09-28T14:16:26Z", "updated_at": "2026-09-28T14:16:26Z"}, "requests": [{"method": "GET", "path": "/admin/routes/stripe", "headers": {"authorization": "Bearer t0k3n"}}]}
+    },
+    {
+      "id": "routes.auth.forbidden_scope",
+      "feature": "routes.errors",
+      "operation": "routes_create",
+      "input": {"gateway": {"status": 403, "body": {"json": {"error": "forbidden", "scope": "routes:write"}}}, "input": {"id": "stripe", "path": "/webhooks/stripe"}},
+      "expect": {"error": {"class": "RoutesRejectedError", "retryable": false, "status": 403, "code": "forbidden", "scope": "routes:write"}}
+    },
+    {
       "id": "routes.health.ok",
       "feature": "routes.health",
       "operation": "routes_health",

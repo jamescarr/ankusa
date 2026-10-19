@@ -510,6 +510,7 @@ async function runCase(c: Case): Promise<void> {
       "conflicting_id",
       "max_routes",
       "role",
+      "scope",
     ] as const) {
       if (key in (err as object)) error[key] = (err as Record<string, unknown>)[key];
     }
