@@ -5,15 +5,18 @@ defmodule Ankusa.Sink.Http do
 
   `opts`:
 
-    * `:url`        — required target URL
+    * `:url`        — required target URL, or one computed per hook (see
+                       "Computed destinations")
     * `:method`     — HTTP method (default `:post`)
-    * `:headers`    — extra request headers as `[{key, value}]` strings
+    * `:headers`    — extra request headers as `[{key, value}]` strings, or
+                       computed per hook
     * `:timeout_ms` — request/connect timeout (default `5000`)
     * `:secret`     — **required unless `allow_unsigned: true`.** Signs every
                        delivery ([Standard
                        Webhooks](https://www.standardwebhooks.com/)): a
                        `whsec_…` secret, or a list of them while rotating (one
-                       `v1,` signature each). See `Ankusa.Sink.Http.Signer`
+                       `v1,` signature each); computed per hook like `:url`.
+                       See `Ankusa.Sink.Http.Signer`
     * `:allow_unsigned` — `true` sends deliveries with no signature (default
                        `false`). Without it a sink with no `:secret` is refused
                        by `validate_opts!/1` at load, and a delivery attempt
@@ -77,25 +80,144 @@ defmodule Ankusa.Sink.Http do
   resolve is `{:error, {:egress_denied, {:resolve, host, reason}}}` and is retried.
   The policy comes from the instance in `ctx.instance`; a ctx with none gets the
   default, which denies the private ranges.
+
+  ## Computed destinations
+
+  `:url`, `:headers` and `:secret` may each be a `{mod, fun, args}` (called as
+  `mod.fun(env, args...)`) or a 1-arity function of the `Ankusa.Envelope`,
+  resolved on **every attempt**, so one shared source delivers each tenant's
+  hooks to that tenant's receiver:
+
+      {Ankusa.Sink.Http,
+       url: fn env -> Tenants.endpoint(env.tenant_id) end,
+       secret: {Tenants, :signing_secret, []},
+       headers: fn env -> [{"x-api-key", Tenants.api_key(env.tenant_id)}] end}
+
+  A function returns what the static option holds (`:url` a string, `:headers`
+  a list of `{name, value}`, `:secret` what `:secret` accepts, `nil` for none),
+  or `{:error, reason}` to fail the attempt (`{:error, {:permanent, reason}}` to
+  dead-letter it, for a tenant with no endpoint); a raise is a transient
+  failure. A value of the wrong shape is `{:permanent, {:computed, key,
+  :invalid}}`. The function runs on the delivery task: it must not block on
+  slow I/O. These are Elixir options; the YAML loader and the admin API only
+  build static sinks.
+
+  The resolved URL is a target like any other: the egress policy above is
+  applied to it on every attempt, so a tenant-supplied URL cannot reach the
+  private network, and the signing rule is applied to the resolved secret (an
+  empty one is `{:permanent, :unsigned_sink}` unless `allow_unsigned: true`).
+
+  Computed URLs connect through the instance's bounded pool,
+  `Ankusa.Sink.Http.Pool`, instead of Req's default of one pool per origin kept
+  for the life of the VM (one per tenant receiver, without bound). That pool
+  verifies peers against the system trust store, so a computed `:url` cannot be
+  combined with `:cacertfile` or `:allow_insecure_tls` (`validate_opts!/1`
+  refuses it); name a pool of your own with `req_options: [finch: [name:
+  MyFinch]]` for those. A new origin is refused as `{:error,
+  :pool_origins_exhausted}` (retried) while the pool is at its origin ceiling,
+  and a plain `http` URL whose host has only IPv6 addresses cannot be pinned:
+  `{:permanent, {:computed, :url, :unpinnable}}`.
   """
 
   @behaviour Ankusa.Sink
 
   alias Ankusa.{Envelope, HttpClient}
   alias Ankusa.HttpClient.Egress
-  alias Ankusa.Sink.Http.Signer
+  alias Ankusa.Sink.Description
+  alias Ankusa.Sink.Http.{Pool, Signer}
   alias Ankusa.Sink.Message
 
   @permanent [400, 401, 403, 404, 410, 413, 422]
   @default_max_response_bytes 65_536
+  @computed_keys [:url, :headers, :secret]
 
   @impl true
   def deliver(env, ctx, opts) do
-    with {:ok, pinned} <- egress(ctx, opts),
-         {:ok, signature} <- signature(env, opts) do
-      send_hook(env, ctx, opts, signature, pinned)
+    with {:ok, resolved} <- resolve(opts, env),
+         {:ok, pinned} <- egress(ctx, resolved),
+         {:ok, pool} <- pool(ctx, opts, pinned),
+         {:ok, signature} <- signature(env, resolved) do
+      send_hook(env, ctx, resolved, signature, pinned, pool)
     end
   end
+
+  @impl true
+  def describe(_subject, opts) do
+    {protocol, host} = destination(Keyword.get(opts, :url))
+
+    %Description{
+      protocol: protocol,
+      host: host,
+      payload: :body,
+      computed: for(key <- @computed_keys, computed?(Keyword.get(opts, key)), do: key)
+    }
+  end
+
+  defp destination(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, port: port} when is_binary(scheme) and is_binary(host) ->
+        scheme = String.downcase(scheme)
+        {scheme, if(port in [nil, URI.default_port(scheme)], do: host, else: "#{host}:#{port}")}
+
+      %URI{} ->
+        {"http", nil}
+    end
+  end
+
+  defp destination(_computed_or_missing), do: {"http", nil}
+
+  defp computed?(spec), do: is_function(spec, 1) or mfa?(spec)
+  defp mfa?({mod, fun, args}), do: is_atom(mod) and is_atom(fun) and is_list(args)
+  defp mfa?(_other), do: false
+
+  # `:url`, `:headers` and `:secret` as this envelope's attempt sees them. A
+  # static option is left alone; a computed one is called and checked.
+  defp resolve(opts, env) do
+    Enum.reduce_while(@computed_keys, {:ok, opts}, fn key, {:ok, acc} ->
+      with spec when spec != nil <- Keyword.get(opts, key),
+           true <- computed?(spec),
+           {:ok, value} <- compute(spec, env, key) do
+        {:cont, {:ok, Keyword.put(acc, key, value)}}
+      else
+        {:error, _reason} = error -> {:halt, error}
+        _static_or_unset -> {:cont, {:ok, acc}}
+      end
+    end)
+  end
+
+  defp compute(spec, env, key) do
+    value = if is_function(spec, 1), do: spec.(env), else: apply_mfa(spec, env)
+
+    case value do
+      {:error, _reason} = error -> error
+      value -> checked(key, value)
+    end
+  end
+
+  defp apply_mfa({mod, fun, args}, env), do: apply(mod, fun, [env | args])
+
+  # The value is never echoed: a URL, a header or a secret may be a credential.
+  defp checked(:url, url) when is_binary(url) and url != "", do: {:ok, url}
+  defp checked(:secret, secret) when is_nil(secret) or is_binary(secret), do: {:ok, secret}
+
+  defp checked(:secret, secrets) when is_list(secrets) do
+    if Enum.all?(secrets, &is_binary/1), do: {:ok, secrets}, else: invalid(:secret)
+  end
+
+  defp checked(:headers, headers) when is_list(headers) do
+    if Enum.all?(headers, &header?/1), do: {:ok, headers}, else: invalid(:headers)
+  end
+
+  defp checked(key, _value), do: invalid(key)
+
+  defp header?({name, value}),
+    do:
+      (is_binary(name) or is_atom(name)) and
+        (is_binary(value) or is_atom(value) or is_integer(value))
+
+  defp header?(_other), do: false
+
+  defp invalid(key), do: {:error, {:permanent, {:computed, key, :invalid}}}
 
   @doc """
   Raise `ArgumentError` unless `opts` is a usable HTTP sink config: it has a
@@ -108,6 +230,7 @@ defmodule Ankusa.Sink.Http do
   """
   @spec validate_opts!(keyword()) :: :ok
   def validate_opts!(opts) do
+    validate_computed!(opts)
     validate_signing!(opts)
 
     insecure? = Keyword.get(opts, :allow_insecure_tls, false)
@@ -117,7 +240,11 @@ defmodule Ankusa.Sink.Http do
             "Sink.Http allow_insecure_tls must be true or false, got: #{inspect(insecure?)}"
     end
 
-    HttpClient.validate!(Keyword.get(opts, :req_options, []), insecure?)
+    HttpClient.validate!(
+      Keyword.get(opts, :req_options, []),
+      insecure?,
+      Keyword.get(opts, :cacertfile)
+    )
 
     case Keyword.get(opts, :cacertfile) do
       nil ->
@@ -133,6 +260,56 @@ defmodule Ankusa.Sink.Http do
       other ->
         raise ArgumentError, "Sink.Http cacertfile must be a path, got: #{inspect(other)}"
     end
+  end
+
+  defp validate_computed!(opts) do
+    for key <- @computed_keys,
+        {:ok, spec} <- [Keyword.fetch(opts, key)],
+        do: validate_spec!(key, spec)
+
+    if tls_exception?(opts) do
+      raise ArgumentError,
+            "Sink.Http cannot combine a computed :url with cacertfile or allow_insecure_tls: " <>
+              "computed URLs use the instance's pool, which verifies against the system " <>
+              "trust store. Name a pool of your own with req_options: [finch: [name: ...]]"
+    end
+
+    :ok
+  end
+
+  defp validate_spec!(key, spec) when is_function(spec) and not is_function(spec, 1) do
+    raise ArgumentError,
+          "Sink.Http #{inspect(key)} function must take the envelope (arity 1), got arity " <>
+            "#{:erlang.fun_info(spec, :arity) |> elem(1)}"
+  end
+
+  defp validate_spec!(key, {mod, fun, args} = spec) do
+    if mfa?(spec) do
+      Code.ensure_loaded(mod)
+
+      unless function_exported?(mod, fun, length(args) + 1) do
+        raise ArgumentError,
+              "Sink.Http #{inspect(key)} #{inspect(mod)}.#{fun}/#{length(args) + 1} is not " <>
+                "defined: a {mod, fun, args} is called as mod.fun(envelope, args...)"
+      end
+    end
+
+    :ok
+  end
+
+  defp validate_spec!(_key, _static), do: :ok
+
+  # A computed URL on the shared pool, with a TLS setting the pool cannot honour
+  # per destination, and no pool of the sink's own to put it on.
+  defp tls_exception?(opts) do
+    computed?(Keyword.get(opts, :url)) and
+      (Keyword.get(opts, :allow_insecure_tls, false) == true or
+         Keyword.get(opts, :cacertfile) != nil) and not own_transport?(opts)
+  end
+
+  defp own_transport?(opts) do
+    req_options = Keyword.get(opts, :req_options, [])
+    Keyword.has_key?(req_options, :finch) or Keyword.has_key?(req_options, :connect_options)
   end
 
   defp validate_signing!(opts) do
@@ -178,6 +355,19 @@ defmodule Ankusa.Sink.Http do
     end
   end
 
+  # Where a delivery's connection comes from: `nil` is Req's own pool (a static
+  # URL, a sink with a transport of its own, or no instance pool to use);
+  # otherwise the instance's bounded pool. See `Ankusa.Sink.Http.Pool`.
+  defp pool(ctx, opts, pinned) do
+    cond do
+      not computed?(Keyword.get(opts, :url)) or own_transport?(opts) -> {:ok, nil}
+      tls_exception?(opts) -> {:error, {:permanent, {:computed, :url, :tls_override}}}
+      not Pool.started?(ctx[:instance]) -> {:ok, nil}
+      pinned.connect_options != [] -> {:error, {:permanent, {:computed, :url, :unpinnable}}}
+      true -> with :ok <- Pool.admit(ctx.instance, pinned.url), do: {:ok, Pool.name(ctx.instance)}
+    end
+  end
+
   defp policy(ctx) do
     with instance when is_atom(instance) and instance != nil <- ctx[:instance],
          {:ok, config} <- Ankusa.fetch_config(instance) do
@@ -216,7 +406,7 @@ defmodule Ankusa.Sink.Http do
     end
   end
 
-  defp send_hook(env, ctx, opts, signature, pinned) do
+  defp send_hook(env, ctx, opts, signature, pinned, pool) do
     timeout = Keyword.get(opts, :timeout_ms, 5000)
 
     opts_headers =
@@ -251,6 +441,7 @@ defmodule Ankusa.Sink.Http do
       )
       |> Keyword.put(:allow_insecure_tls, insecure_tls?(opts))
       |> put_cacertfile(Keyword.get(opts, :cacertfile))
+      |> put_pool(pool)
 
     case HttpClient.request_with_headers(
            Keyword.get(opts, :method, :post),
@@ -298,6 +489,9 @@ defmodule Ankusa.Sink.Http do
 
   defp put_cacertfile(client_opts, nil), do: client_opts
   defp put_cacertfile(client_opts, path), do: Keyword.put(client_opts, :cacertfile, path)
+
+  defp put_pool(client_opts, nil), do: client_opts
+  defp put_pool(client_opts, pool), do: Keyword.put(client_opts, :finch, name: pool)
 
   @doc false
   # `Retry-After` as milliseconds from now: delay-seconds, or an IMF-fixdate

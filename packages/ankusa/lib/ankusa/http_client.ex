@@ -43,6 +43,16 @@ defmodule Ankusa.HttpClient do
   [verify: :verify_none]` raises `ArgumentError` from `validate!/2`, and the one
   way past it is `allow_insecure_tls: true` in `opts`, which `Ankusa.Sink.Http`
   exposes per sink for a receiver that cannot present a certificate.
+
+  ## A named pool owns its transport
+
+  `finch: [name: MyFinch]` sends the request through a pool the caller started,
+  and that pool's `conn_opts` are the connection options (timeout, TLS, proxy):
+  Req refuses `:finch` beside `:connect_options`, so the request carries none.
+  Asking for TLS settings per request on top of a named pool (`:cacertfile`,
+  `allow_insecure_tls: true`, `:connect_options`) raises `ArgumentError` from
+  `validate!/3`, rather than being ignored. `Ankusa.Sink.Http.Pool` is such a
+  pool.
   """
 
   @transport_options [:finch, :connect_options, :pool_timeout, :plug]
@@ -95,7 +105,7 @@ defmodule Ankusa.HttpClient do
     {max_bytes, opts} = Keyword.pop(opts, :max_response_bytes)
     {cacertfile, opts} = Keyword.pop(opts, :cacertfile)
     {insecure_tls?, opts} = Keyword.pop(opts, :allow_insecure_tls, false)
-    validate!(opts, insecure_tls?)
+    validate!(opts, insecure_tls?, cacertfile)
 
     request =
       [
@@ -106,13 +116,10 @@ defmodule Ankusa.HttpClient do
         http_errors: :return,
         retry: false,
         redirect: false,
-        receive_timeout: timeout_ms,
-        connect_options:
-          connect_options(url, timeout_ms, Keyword.get(opts, :connect_options, []), %{
-            cacertfile: cacertfile,
-            insecure?: insecure_tls?
-          })
-      ] ++ Keyword.drop(opts, [:connect_options]) ++ body_option(body) ++ cap_option(max_bytes)
+        receive_timeout: timeout_ms
+      ] ++
+        connect_option(url, timeout_ms, opts, %{cacertfile: cacertfile, insecure?: insecure_tls?}) ++
+        Keyword.drop(opts, [:connect_options]) ++ body_option(body) ++ cap_option(max_bytes)
 
     case Req.request(request) do
       {:ok, %Req.Response{status: status, headers: headers, body: body}} ->
@@ -129,6 +136,16 @@ defmodule Ankusa.HttpClient do
     error in RuntimeError -> {:error, error}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # A named pool owns the connection options; otherwise the request carries them.
+  defp connect_option(url, timeout_ms, opts, tls) do
+    if Keyword.has_key?(opts, :finch),
+      do: [],
+      else: [
+        connect_options:
+          connect_options(url, timeout_ms, Keyword.get(opts, :connect_options, []), tls)
+      ]
   end
 
   defp body_option(nil), do: []
@@ -184,14 +201,16 @@ defmodule Ankusa.HttpClient do
   Raise `ArgumentError` unless `req_options` holds only transport keys
   (`:finch`, `:connect_options`, `:pool_timeout`, `:plug`) and does not turn off
   TLS verification (`connect_options: [transport_opts: [verify: :verify_none]]`)
-  without `allow_insecure_tls?`.
+  without `allow_insecure_tls?`, nor asks a named `:finch` pool (see "A named
+  pool owns its transport") for per-request connection options: `:connect_options`,
+  a `cacertfile` or `allow_insecure_tls?: true`.
 
   `request/6` calls it on every request, and `Ankusa.Sink.Http.validate_opts!/1`
   calls it when a config is validated, so a bad `:req_options` on an HTTP sink
   fails at boot, not at its first delivery.
   """
-  @spec validate!(keyword(), boolean()) :: :ok
-  def validate!(req_options, allow_insecure_tls? \\ false) do
+  @spec validate!(keyword(), boolean(), String.t() | nil) :: :ok
+  def validate!(req_options, allow_insecure_tls? \\ false, cacertfile \\ nil) do
     case Keyword.keys(req_options) -- @transport_options do
       [] ->
         :ok
@@ -214,6 +233,15 @@ defmodule Ankusa.HttpClient do
               "turns off TLS peer verification, which is refused. Name a private CA " <>
               "with :cacertfile instead, or set allow_insecure_tls: true on the one " <>
               "sink that must talk to an unverifiable receiver."
+    end
+
+    if Keyword.has_key?(req_options, :finch) and
+         (Keyword.has_key?(req_options, :connect_options) or allow_insecure_tls? or
+            cacertfile != nil) do
+      raise ArgumentError,
+            "a named :finch pool owns its connection options: :connect_options, a " <>
+              "cacertfile and allow_insecure_tls cannot be combined with it. Configure " <>
+              "the pool's conn_opts (TLS, proxy, timeout) when you start it."
     end
 
     :ok
