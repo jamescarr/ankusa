@@ -352,7 +352,7 @@ defmodule Ankusa.DedupeTest do
     defp assert_counters_equal_fold(inst),
       do: assert(stored_counters(inst) == folded_counters(inst))
 
-    test "dedupe sweep: expires every key past its ttl outside the writer and counts it down" do
+    test "dedupe bucket sweep: expires every key past its ttl, a chunk at a time, outside the writer" do
       inst = start_edge(%{"demo" => []}).instance
       entries = for n <- 1..2_500, do: keyed_entry("acme", "k#{n}", 600)
 

@@ -1754,7 +1754,7 @@ defmodule AnkusaServer.ConfigTest do
     config = Config.load!(path: path, env: %{"FLEET_REDIS" => "redis://redis:6379"}).config
 
     assert config.rate_limits.scope == :fleet
-    assert config.dedupe == %{scope: :fleet}
+    assert config.dedupe.scope == :fleet
 
     assert config.fleet == %{
              store:
@@ -1775,6 +1775,30 @@ defmodule AnkusaServer.ConfigTest do
     assert config.rate_limits.scope == :node
     assert config.dedupe == %Ankusa.Config{}.dedupe
     assert config.fleet == %Ankusa.Config{}.fleet
+  end
+
+  test "dedupe.max_entries and max_entries_per_tenant map to core's config and are range checked" do
+    config =
+      Config.load!(
+        path: tmp_config("dedupe: {max_entries: 500, max_entries_per_tenant: 50}\n"),
+        env: %{}
+      ).config
+
+    assert config.dedupe == %{scope: :node, max_entries: 500, max_entries_per_tenant: 50}
+
+    for {yaml, message} <- [
+          {"dedupe: {max_entries: 0}", "dedupe.max_entries must be an integer >= 1, got 0"},
+          {"dedupe: {max_entries_per_tenant: 0}",
+           "dedupe.max_entries_per_tenant must be an integer >= 1, got 0"},
+          {"dedupe: {max_entries: lots}", ~s(dedupe.max_entries: expected an integer, got "lots")}
+        ] do
+      error =
+        assert_raise ConfigError, fn ->
+          Config.load!(path: tmp_config(yaml <> "\n"), env: %{})
+        end
+
+      assert Exception.message(error) =~ message
+    end
   end
 
   test "a bad fleet key names the key, and core's ranges and scope rules come back as core's message" do
