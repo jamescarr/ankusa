@@ -85,6 +85,41 @@ jobs:
           key: mix-v9-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-${{ hashFiles(format('packages/{0}/mix.lock', matrix.package)) }}
           restore-keys: |
             mix-v9-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ hashFiles('.mise.toml') }}-
+      # sdk-go has no dependencies outside the standard library, but
+      # `go test -race -count=1` rebuilds the race-instrumented standard
+      # library and the package on every run — 39 s of a 77 s job; locally the
+      # same command set is 13.15 s cold and 2.94 s with a warm GOCACHE
+      # (258 MiB). The build cache is content-addressed by source, toolchain
+      # and flags, so an entry from another commit is still valid: key it by
+      # the go pin and go.mod, and let a stale entry stay (a source change
+      # only recompiles that package).
+      - name: cache go build
+        if: matrix.package == 'sdk-go'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-v1-${{ runner.os }}-${{ runner.arch }}-sdk-go-${{ hashFiles('.mise/conf.d/sdk-go.toml') }}-${{ hashFiles('packages/sdk-go/go.mod', 'packages/sdk-go/go.sum') }}
+          restore-keys: |
+            go-v1-${{ runner.os }}-${{ runner.arch }}-sdk-go-${{ hashFiles('.mise/conf.d/sdk-go.toml') }}-
+      # sdk-rust's `target/` is the one build tree the caches did not carry:
+      # `check:package sdk-rust` compiles the dependency graph four times
+      # (clippy, test, doc, the packaged-source verify — 92 s on a hosted
+      # runner, warm 10 s) and the `sdk conformance` job builds it again.
+      # Keyed by the rust pin in `.mise/conf.d/sdk-rust.toml` (cargo's
+      # fingerprints are rustc-version specific) and Cargo.lock; the `v` is in
+      # the restore prefix too, so bumping it still misses, while a
+      # Cargo.lock change alone matches the prefix and cargo rebuilds only the
+      # crates whose sources changed. The conformance job restores the same
+      # entry (both jobs restore; the first to finish saves, and the package
+      # job's tree is a superset of what it builds).
+      - name: cache cargo target
+        if: matrix.package == 'sdk-rust'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: packages/sdk-rust/target
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-${{ hashFiles('packages/sdk-rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
       - name: rocksdb system deps
         run: sudo apt-get update && sudo apt-get install -y libzstd-dev
       - run: mix local.hex --force && mix local.rebar --force
@@ -153,6 +188,17 @@ jobs:
         with:
           version: 2026.10.12
           cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+      # The rust SDK's conformance run is `cargo build --locked --tests` +
+      # `cargo test --locked --test conformance`: the same dependency graph the
+      # `sdk-rust` package job compiles. Restore its entry (same key and
+      # prefix; whichever job saves first wins, and both restore).
+      - name: cache cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: packages/sdk-rust/target
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-${{ hashFiles('packages/sdk-rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-sdk-rust-${{ hashFiles('.mise/conf.d/sdk-rust.toml') }}-
       - run: mise run check:conformance
 
   # The deployable wrappers and TypeScript workers: path-dep consumers of the
