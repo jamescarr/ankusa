@@ -413,6 +413,14 @@ async function dispatch(c: Case, requests: Recorded[]): Promise<unknown> {
         await built.close();
       }
     }
+    case "admin_audit_list": {
+      const built = await buildClient(gateway, client, requests, makeAdminClient);
+      try {
+        return await (built.client as sdk.AdminClient).listAudit(input.params as sdk.ListAuditParams);
+      } finally {
+        await built.close();
+      }
+    }
     case "admin_replay_create": {
       const built = await buildClient(gateway, client, requests, makeAdminClient);
       try {

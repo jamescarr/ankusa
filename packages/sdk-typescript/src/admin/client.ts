@@ -30,9 +30,11 @@ export type Replay = components["schemas"]["Replay"];
 export type ReplayList = components["schemas"]["ReplayList"];
 export type ReplaySpec = components["schemas"]["ReplaySpec"];
 export type ReplayPatch = components["schemas"]["ReplayPatch"];
+export type AuditPage = components["schemas"]["AuditPage"];
 
 export type ListDeadLettersParams = NonNullable<paths["/v1/dlq"]["get"]["parameters"]["query"]>;
 export type ListQuarantinedParams = NonNullable<paths["/v1/quarantine"]["get"]["parameters"]["query"]>;
+export type ListAuditParams = NonNullable<paths["/v1/audit"]["get"]["parameters"]["query"]>;
 
 export type AdminClient = {
   /** Liveness probe: `GET /health`, `{status, instance, roles}` on the operator listener. */
@@ -56,6 +58,11 @@ export type AdminClient = {
   updateReplay(id: string, patch: ReplayPatch): Promise<Replay>;
   /** Recent quarantined hooks (newest first, metadata only). */
   listQuarantined(params?: ListQuarantinedParams): Promise<QuarantinePage>;
+  /**
+   * The audit trail, newest first, paged by cursor/limit and filtered by
+   * since, until, actor, action, tenant.
+   */
+  listAudit(params?: ListAuditParams): Promise<AuditPage>;
 };
 
 type FetchResult = { data?: unknown; error?: unknown; response: Response };
@@ -167,6 +174,12 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     );
   }
 
+  async function listAudit(params?: ListAuditParams): Promise<AuditPage> {
+    return request<AuditPage>(() =>
+      http.GET("/v1/audit", { params: { query: params }, signal: AbortSignal.timeout(timeoutMs) }),
+    );
+  }
+
   return {
     health,
     metrics,
@@ -177,5 +190,6 @@ export function createAdminClient(options: AdminClientOptions): AdminClient {
     listReplays,
     updateReplay,
     listQuarantined,
+    listAudit,
   };
 }

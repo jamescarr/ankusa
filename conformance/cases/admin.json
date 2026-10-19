@@ -1,6 +1,27 @@
 {
   "cases": [
     {
+      "id": "admin.audit.list.ok",
+      "feature": "admin.audit",
+      "operation": "admin_audit_list",
+      "input": {"gateway": {"status": 200, "body": {"json": {"entries": [{"seq": 42, "at": "2026-10-18T12:00:00Z", "actor": "ops@acme", "remote_ip": "10.0.0.7", "action": "route.update", "tenant": null, "resource": "stripe", "before_hash": "a1", "after_hash": "b2", "request_id": "req_1", "result": "ok", "revision": 3, "detail": {}}], "next_cursor": null}}}},
+      "expect": {"ok": {"entries": [{"seq": 42, "at": "2026-10-18T12:00:00Z", "actor": "ops@acme", "remote_ip": "10.0.0.7", "action": "route.update", "tenant": null, "resource": "stripe", "before_hash": "a1", "after_hash": "b2", "request_id": "req_1", "result": "ok", "revision": 3, "detail": {}}], "next_cursor": null}, "requests": [{"method": "GET", "path": "/v1/audit"}]}
+    },
+    {
+      "id": "admin.audit.list.filters_in_input_order",
+      "feature": "admin.audit",
+      "operation": "admin_audit_list",
+      "input": {"gateway": {"status": 200, "body": {"json": {"entries": [], "next_cursor": null}}}, "params": {"tenant": "acme", "action": "source.create", "limit": 10, "cursor": "c1"}},
+      "expect": {"ok": {"entries": [], "next_cursor": null}, "requests": [{"method": "GET", "path": "/v1/audit?tenant=acme&action=source.create&limit=10&cursor=c1"}]}
+    },
+    {
+      "id": "admin.audit.forbidden_needs_tenant_star",
+      "feature": "admin.audit",
+      "operation": "admin_audit_list",
+      "input": {"gateway": {"status": 403, "body": {"json": {"error": "forbidden", "scope": "tenant:*"}}}, "params": {"tenant": "other"}},
+      "expect": {"error": {"class": "AdminRejectedError", "retryable": false, "status": 403, "code": "forbidden", "scope": "tenant:*"}}
+    },
+    {
       "id": "admin.auth.bearer_header_rides",
       "feature": "admin.operations",
       "operation": "admin_health",

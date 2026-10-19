@@ -352,6 +352,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tenants/{tenant}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Erase a tenant
+         * @description Starts a resumable job that deletes everything this node holds for the
+         *     tenant: its stored sources and routes (each a `deleted` lifecycle event),
+         *     its rate-limit override, its pending, in-flight and dead delivery rows,
+         *     archive obligations, quarantine rows, claim objects (`claims/tenant=<t>/`
+         *     on every claim store), dedupe keys and entities; then writes the tombstone
+         *     `m:erased:<tenant>` and one `tenant.delete` audit row in one synced batch,
+         *     which becomes the `io.ankusa.tenant.deleted` lifecycle event. The tenant is
+         *     closed first: new hooks for it are `503 tenant_erasing`, dispatch stops
+         *     claiming its rows, and running attempts drain before rows are deleted.
+         *     A hook of the tenant that was archived before the erase answers `410`
+         *     (`Storage.fetch` is `{:error, :gone}`) until its segment expires. The job
+         *     survives a restart and resumes at boot. Refused with `409` while a
+         *     configured (static or seeded) source names the tenant, and for `default`.
+         *     `confirm` must be the tenant again.
+         */
+        delete: operations["eraseTenant"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tenant}/erase": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Where a tenant's erase is
+         * @description `state: erasing` with the `stage` it is in, or `state: erased` with the
+         *     time of the tombstone. `404` when this node has neither.
+         */
+        get: operations["getTenantErase"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/routes/test": {
         parameters: {
             query?: never;
@@ -829,6 +889,21 @@ export interface components {
             max_queue?: number;
             /** @example 67108864 */
             max_queue_bytes?: number;
+        };
+        /**
+         * @description One tenant's erase. `stage` and `started_at` (ISO 8601) appear while
+         *     `state` is `erasing` and the status is read; `erased_at` once it is `erased`.
+         */
+        TenantErase: {
+            tenant: string;
+            /** @enum {string} */
+            state: "erasing" | "erased";
+            /** @enum {string} */
+            stage?: "sources" | "routes" | "rate_limit" | "queue" | "archive" | "quarantine" | "claims" | "dedupe" | "entities" | "commit";
+            /** Format: date-time */
+            started_at?: string;
+            /** Format: date-time */
+            erased_at?: string;
         };
         /**
          * @description One tenant's limit, and whether it came from config or an override. The
@@ -1860,6 +1935,98 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["RateLimitNotFound"];
             409: components["responses"]["RoleNotEnabled"];
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    eraseTenant: {
+        parameters: {
+            query: {
+                /** @description The tenant being erased, typed again. */
+                confirm: string;
+            };
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A job for this tenant is already running. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantErase"];
+                };
+            };
+            /** @description The job is recorded and running. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantErase"];
+                };
+            };
+            /** @description `400`. `invalid_tenant`, or `confirm_mismatch`: `confirm` is not the tenant. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description `409`. `default_tenant`, `tenant_has_configured_sources` (`sources` lists them) or `role_not_enabled`. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["NodeStoreUnavailable"];
+        };
+    };
+    getTenantErase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The tenant id, as it appears in the catch URL. */
+                tenant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job's state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantErase"];
+                };
+            };
+            400: components["responses"]["InvalidTenant"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description `404`. `erase_not_found`: no erase of this tenant is running or recorded on this node. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             503: components["responses"]["NodeStoreUnavailable"];
         };
     };

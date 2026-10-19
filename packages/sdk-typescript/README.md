@@ -125,6 +125,7 @@ const admin = createAdminClient({ baseUrl: "http://localhost:4002" });
 await admin.health();                        // { status, instance, roles }
 await admin.listDeadLetters({ limit: 10 });
 await admin.listQuarantined();
+await admin.listAudit({ tenant: "acme", limit: 50 }); // { entries, next_cursor }
 
 // A replay job re-sends dead rows (`kind: "dlq"`) or archived hooks over a
 // `received_at` window (`kind: "archive"`), or held hooks re-verified and
@@ -139,7 +140,9 @@ await admin.updateReplay(job.id, { state: "paused" });   // "running" resumes, "
 
 Methods: `health()`, `metrics()` (Prometheus text), `config()`,
 `listDeadLetters()`, `createReplay()`, `getReplay()`, `listReplays()`,
-`updateReplay()`, `listQuarantined()`. `createReplay` is idempotent: posting
+`updateReplay()`, `listQuarantined()`, `listAudit()` (the audit trail,
+newest first; paged by `cursor`/`limit`, filtered by `since`, `until`,
+`actor`, `action`, `tenant`). `createReplay` is idempotent: posting
 the same kind and filter while a matching `running`/`paused` job exists
 returns that job. Failures are `AdminError` subclasses: `RoleNotEnabledError`
 (409 `role_not_enabled`, carrying `role`), `AdminRejectedError` (any other

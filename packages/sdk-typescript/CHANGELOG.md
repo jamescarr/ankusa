@@ -14,6 +14,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   `paths`. The routes client still calls `/admin/routes`, which spans tenants and
   needs `tenant:*`; it has no methods for the tenant paths yet, so a principal
   limited to one tenant calls them with its own HTTP client.
+- `AdminClient.listAudit(params?)`: `GET /v1/audit`, the audit trail (newest
+  first, paged by `cursor`/`limit`, filtered by `since`, `until`, `actor`,
+  `action`, `tenant`).
 - `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403
   forbidden` says the credential lacks (control planes require a credential
   since Ankusa 0.6).

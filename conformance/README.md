@@ -124,10 +124,15 @@ then runs every registered SDK's native runner.
   `{"replays": [Replay…]}`.
 - `admin_replay_update`: `{"gateway": Gateway, "id": string, "patch": object}`
   → `ok` is the full Replay object.
+- `admin_audit_list`: `{"gateway": Gateway, "params"?: object}` → `ok` is the
+  parsed JSON object (`{"entries": [...], "next_cursor": string|null}`). Query
+  params (`since`, `until`, `actor`, `action`, `tenant`, `cursor`, `limit`)
+  travel in the caller's input order, only those given.
 - Admin replay routes: 404 is `AdminRejectedError(status 404, code
   replay_not_found)`; a 409 whose `error` is `role_not_enabled` is
   `RoleNotEnabledError(role)`; every other 4xx is `AdminRejectedError(status,
-  code = the body's error)`; anything else that isn't 2xx (5xx, an unfollowed
+  code = the body's error, scope = the body's scope when present, else null)`;
+  anything else that isn't 2xx (5xx, an unfollowed
   3xx redirect, 1xx) or a transport failure is `AdminUnavailableError`.
 - `verify_signature`: `{"headers": {string: string}, "body": Body,
   "secrets": [string], "now": int, "tolerance_seconds"?: int}` → `ok` is
