@@ -30,8 +30,7 @@ public final class RoutesRejectedError extends RoutesError {
   private final @Nullable Integer maxRoutes;
 
   /**
-   * The scope a {@code 403 forbidden} says the credential lacks, or null when the body named
-   * none.
+   * The scope a {@code 403 forbidden} says the credential lacks, or null when the body named none.
    */
   private final @Nullable String scope;
 
@@ -44,8 +43,8 @@ public final class RoutesRejectedError extends RoutesError {
    * @param detail the message the body carried, or null
    * @param conflictingId the id the body named as conflicting, or null
    * @param maxRoutes the route limit the body named, or null
-   * @param scope the scope a {@code 403 forbidden} says the credential lacks, or null when the
-   *     body named none
+   * @param scope the scope a {@code 403 forbidden} says the credential lacks, or null when the body
+   *     named none
    */
   public RoutesRejectedError(
       int status,

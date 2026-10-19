@@ -18,8 +18,8 @@ import org.jspecify.annotations.Nullable;
  * @param enabled whether the route is served
  * @param ipRules the rules that decide which addresses may reach it
  * @param metadata free-form caller metadata, returned verbatim
- * @param revision counts the definition's changes, from 1 at creation; re-creating a deleted
- *     route starts again at 1; null from a node older than the field
+ * @param revision counts the definition's changes, from 1 at creation; re-creating a deleted route
+ *     starts again at 1; null from a node older than the field
  * @param insertedAt when the route was created
  * @param updatedAt when the route was last changed
  */
