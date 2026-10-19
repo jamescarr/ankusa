@@ -28,10 +28,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The lint tasks are actionlint, a shell pin check and a grep for links:
+      # no Elixir, no SDK toolchain. Installing the repo's whole set made the
+      # mise-action step 19–34 s (restoring a 655 MB cache) of a 26–36 s job;
+      # `actionlint` alone is a few MB and a couple of seconds.
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          install_args: actionlint
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-lint" # the default key skips .mise/conf.d/
       - run: mise run lint:workflows
       - run: mise run lint:pins
       - run: mise run check:links
@@ -233,10 +238,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `check:tools` is Mix only: the Elixir/OTP pair plus cmake for a native
+      # dep rebuilt on a cache miss. Share the package jobs' `hex` cache entry
+      # instead of restoring the repo's whole 655 MB toolchain cache.
       - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
         with:
           version: 2026.10.12
-          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}" # the default key skips .mise/conf.d/
+          install_args: elixir erlang cmake
+          cache_key: "{{default}}-${{ hashFiles('.mise/conf.d/*.toml') }}-hex" # the default key skips .mise/conf.d/
       - run: mix local.hex --force && mix local.rebar --force
       - run: mise run check:tools
 
