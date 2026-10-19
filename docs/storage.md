@@ -73,6 +73,28 @@ commit still consumes seqs. `[:ankusa, :commit, :stop]` reports `batch_size`,
 off has no obligations at all: it is acked and stamped with a seq but not
 stored.
 
+A commit is a **group**. The writer takes every batch the batcher partitions have
+queued (up to `batcher.group_commit_max_bytes`, 4 MiB, and
+`batcher.group_commit_max_records`) and writes them as one synced batch, so
+four partitions at one fsync each become one fsync; while it syncs, the next
+group accumulates in its mailbox. Everything that needs no seq is done before
+the writer is called, in the batcher's commit task: the hook's binary, its
+delivery rows, and a read of its dedupe keys. That read is a prefetch the
+writer re-validates before it assigns seqs: the first occurrence of a key in
+the group wins, and a key it wrote since the caller read it (an earlier
+group, or one whose intake publish is still in flight) is answered from what
+it wrote, so two partitions that saw the same provider key as absent still
+store one hook (`dedupe_test.exs`, "the same key on two batcher partitions").
+The cap is a latency bound: every caller waits for its whole group, so a
+group is kept to what one fsync and one produce request can carry in a few
+milliseconds ([`configuration.md`](configuration.md#library-configuration-elixir)).
+A writer that is saturated (its last group held 16 or more hooks) waits
+`batcher.group_commit_delay_ms` (1 ms) before it starts the next group, so the
+callers it just answered join it instead of forming the one after: under a
+closed loop of clients the groups are twice the size (`bench/store_commit.exs`),
+and at low load nothing waits. Per-tenant counters stay blind merge operands in
+the group's batch (ADR 0001).
+
 ### Encoding and versions
 
 A hook (the `hooks` family, and each record of an archive segment) is an
@@ -105,7 +127,7 @@ This release writes v0. The release after it writes v1, so a rollback of
 
 ### Durability, corruption, full disk
 
-- One `sync: true` batch per commit: hundreds of hooks, one fsync. The boot
+- One `sync: true` batch per group commit: hundreds of hooks from every partition, one fsync. The boot
   line says it plainly: `[ankusa] store at <path>. Durable to power loss on
   THIS host only.` `kill -9` loses no acked hook; RocksDB recovers its own WAL
   (`loss_test.exs`, and the [crash drill](testing.md#crash-consistency-drill-mise-run-testcrash),
