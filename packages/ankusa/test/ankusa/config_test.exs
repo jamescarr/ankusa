@@ -666,6 +666,64 @@ defmodule Ankusa.ConfigTest do
         Ankusa.Store.Backup.validate_config!(Config.new(backup: %{blob_store: "s3://secret"}))
       end
     end
+
+    test "timeouts, verify interval, freshness and signing keys are range-checked at Config.new/1" do
+      for key <- [:timeout_ms, :final_timeout_ms] do
+        assert_raise ArgumentError, "backup.#{key} must be a positive integer, got 0", fn ->
+          Config.new(backup: %{key => 0})
+        end
+      end
+
+      assert_raise ArgumentError,
+                   "backup.verify_interval_ms must be nil or a positive integer, got 0",
+                   fn -> Config.new(backup: %{verify_interval_ms: 0}) end
+
+      assert Config.new(backup: %{verify_interval_ms: 1}).backup.verify_interval_ms == 1
+
+      assert_raise ArgumentError,
+                   "backup.max_age_ms must be nil or an integer >= backup.interval_ms (60000), got 1000",
+                   fn -> Config.new(backup: %{max_age_ms: 1_000}) end
+
+      assert_raise ArgumentError, "backup.require_fresh needs backup.max_age_ms", fn ->
+        Config.new(backup: %{require_fresh: true})
+      end
+
+      assert Config.new(backup: %{require_fresh: true, max_age_ms: 120_000}).backup.max_age_ms ==
+               120_000
+    end
+
+    test "backup.signing_key is a string or a list of long-enough strings, kept as a list" do
+      key = String.duplicate("k", 32)
+      assert Config.new().backup.signing_key == []
+      assert Config.new(backup: %{signing_key: nil}).backup.signing_key == []
+      assert Config.new(backup: %{signing_key: key}).backup.signing_key == [key]
+
+      assert Config.new(backup: %{signing_key: [key, key <> "2"]}).backup.signing_key == [
+               key,
+               key <> "2"
+             ]
+
+      message =
+        "backup.signing_key must be a string or a list of strings of at least 32 bytes each"
+
+      for bad <- ["short", ["short"], [key, 1], 5] do
+        error =
+          assert_raise ArgumentError, message, fn -> Config.new(backup: %{signing_key: bad}) end
+
+        refute error.message =~ "short"
+      end
+    end
+
+    test "backup.secondary must be nil or {module, opts}" do
+      assert :ok =
+               Ankusa.Store.Backup.validate_config!(
+                 Config.new(backup: %{secondary: {Ankusa.BlobStore.LocalFS, root: "/tmp/x"}})
+               )
+
+      assert_raise ArgumentError, "backup.secondary must be nil or {module, opts}", fn ->
+        Ankusa.Store.Backup.validate_config!(Config.new(backup: %{secondary: "s3://secret"}))
+      end
+    end
   end
 
   describe "the listener and metrics sections" do

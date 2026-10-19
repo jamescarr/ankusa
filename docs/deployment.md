@@ -102,8 +102,12 @@ with segments (or `backup.store`) in a bucket: the node uploads a checkpoint
 every `backup.interval_ms` (60 s) while it runs, and a replacement started on
 an empty volume with the same config (same `storage.key_prefix`) restores the
 latest one before it accepts a hook — losing at most the hooks acked since that
-backup. A node that cannot read the backup location refuses to start rather
-than start empty; watch `ankusa_backup_age_seconds`. Details:
+backup, and none after a clean stop (SIGTERM takes one last backup, bounded by
+`backup.final_timeout_ms`). A node that cannot read the backup location, or
+whose backup fails its checks, refuses to start rather than start empty; set
+`backup.signing_key` so a restore only accepts manifests you signed,
+`backup.secondary` for a second region, and watch `ankusa_backup_age_seconds`
+and `ankusa_backup_verify_failed_total` (`backup.verify_interval_ms`). Details:
 [`storage.md`](storage.md#backup-and-restore). Without `backup`, stop the node
 and copy the whole `<data_dir>`; `segments/` is immutable and can be copied
 while it runs. If segments live in S3/GCS, the store directory is all you need.

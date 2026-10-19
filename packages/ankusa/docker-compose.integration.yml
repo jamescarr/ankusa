@@ -31,9 +31,10 @@ services:
     volumes:
       - floci-data:/app/data
 
-  # Creates the S3 bucket once floci is answering requests. Runs to
-  # completion; re-run is idempotent (`mb` on an existing bucket is a no-op
-  # error we swallow).
+  # Creates the S3 buckets once floci is answering requests: the segment bucket,
+  # and a second one standing in for another region's backup bucket
+  # (`backup.secondary`). Runs to completion; re-run is idempotent (`mb` on an
+  # existing bucket is a no-op error we swallow).
   s3-bootstrap:
     image: amazon/aws-cli:2.38.1
     depends_on: [floci]
@@ -43,12 +44,14 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL: http://floci:4566
       ANKUSA_S3_BUCKET: ankusa-segments-dev
+      ANKUSA_S3_SECONDARY_BUCKET: ankusa-backup-secondary-dev
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         until aws s3 ls >/dev/null 2>&1; do echo "waiting for floci..."; sleep 1; done
         aws s3 mb "s3://$$ANKUSA_S3_BUCKET" || true
-        echo "s3 bucket $$ANKUSA_S3_BUCKET ready"
+        aws s3 mb "s3://$$ANKUSA_S3_SECONDARY_BUCKET" || true
+        echo "s3 buckets $$ANKUSA_S3_BUCKET and $$ANKUSA_S3_SECONDARY_BUCKET ready"
 
   # GCS emulator.
   floci-gcp:

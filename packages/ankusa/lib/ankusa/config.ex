@@ -210,7 +210,28 @@ defmodule Ankusa.Config do
               keep: 3,
               # {module, opts} for backup objects; nil = storage.blob_store.
               # Keys go under storage.key_prefix either way: backups are per node.
-              blob_store: nil
+              blob_store: nil,
+              # {module, opts} of a second object store every backup is written to
+              # as well (another region or provider); restore falls back to it
+              # when the primary cannot be read or fails its checks. nil = none.
+              secondary: nil,
+              # most one object-store call of a backup, a verify or a restore may
+              # take before it counts as failed
+              timeout_ms: 120_000,
+              # how often the latest backup is read back and checked (size and
+              # sha256 of every file, the manifest's signature); nil = never
+              verify_interval_ms: nil,
+              # HMAC-SHA256 key(s) the manifest is signed with, as a string or
+              # a list (the first signs, any verifies: rotation). Normalised to
+              # a list; [] = unsigned manifests, and a restore accepts any
+              signing_key: [],
+              # how long a clean stop may spend on one last backup
+              final_timeout_ms: 20_000,
+              # `/ready` says `backup: stale` once the last successful backup is
+              # older than this; nil = no label
+              max_age_ms: nil,
+              # a stale backup makes `/ready` answer 503 (needs max_age_ms)
+              require_fresh: false
             },
             # operator HTTP API + Prometheus /metrics; off by default for embedded
             # use. Authenticated per `auth` (see `Ankusa.Admin.Auth`); `mode: :none`
@@ -503,7 +524,28 @@ defmodule Ankusa.Config do
     |> normalize_listeners!()
     |> validate_ranges!()
     |> normalize_store_headers!()
+    |> normalize_backup!()
     |> validate_secrets!()
+  end
+
+  # `backup.signing_key` is a string or a list of them; every key is a non-empty
+  # binary of at least 32 bytes (HMAC-SHA256 gains nothing from a shorter one
+  # and a short key is brute-forceable). The key is never echoed in the error.
+  defp normalize_backup!(config) do
+    keys =
+      case config.backup.signing_key do
+        nil -> []
+        key when is_binary(key) -> [key]
+        keys when is_list(keys) -> keys
+        _other -> :invalid
+      end
+
+    unless is_list(keys) and Enum.all?(keys, &(is_binary(&1) and byte_size(&1) >= 32)) do
+      raise ArgumentError,
+            "backup.signing_key must be a string or a list of strings of at least 32 bytes each"
+    end
+
+    %{config | backup: %{config.backup | signing_key: keys}}
   end
 
   defp validate_secrets!(config) do
@@ -623,6 +665,8 @@ defmodule Ankusa.Config do
     {[:claim_check, :read_cache_max_entry_bytes], "claim_check.read_cache_max_entry_bytes"},
     {[:backup, :interval_ms], "backup.interval_ms"},
     {[:backup, :keep], "backup.keep"},
+    {[:backup, :timeout_ms], "backup.timeout_ms"},
+    {[:backup, :final_timeout_ms], "backup.final_timeout_ms"},
     {[:admin, :gauge_interval_ms], "admin.gauge_interval_ms"},
     {[:metrics, :max_series_per_metric], "metrics.max_series_per_metric"},
     {[:routes, :max_routes], "routes.max_routes"},
@@ -723,6 +767,7 @@ defmodule Ankusa.Config do
     )
 
     validate_fleet!(config)
+    validate_backup!(config)
 
     for {path, key} <- [
           {[:listener, :http2], "listener.http2"},
@@ -740,6 +785,41 @@ defmodule Ankusa.Config do
     )
 
     config
+  end
+
+  # The backup block's cross-key rules; the plain ranges are in `@positive`.
+  defp validate_backup!(config) do
+    check!(
+      config,
+      [:backup, :verify_interval_ms],
+      "backup.verify_interval_ms",
+      "nil or a positive integer",
+      &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    interval = config.backup.interval_ms
+
+    check!(
+      config,
+      [:backup, :max_age_ms],
+      "backup.max_age_ms",
+      "nil or an integer >= backup.interval_ms (#{interval})",
+      &(&1 == nil or (is_integer(&1) and &1 >= interval))
+    )
+
+    check!(
+      config,
+      [:backup, :require_fresh],
+      "backup.require_fresh",
+      "true or false",
+      &is_boolean/1
+    )
+
+    if config.backup.require_fresh and config.backup.max_age_ms == nil do
+      raise ArgumentError, "backup.require_fresh needs backup.max_age_ms"
+    end
+
+    :ok
   end
 
   defp check!(config, path, key, constraint, valid?) do

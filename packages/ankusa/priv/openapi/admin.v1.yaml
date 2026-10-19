@@ -1544,6 +1544,13 @@ components:
             `none` on a node without a local store; `store_unavailable` when
             the store is closed or does not answer; `write_failed` when the
             probe write failed.
+        backup:
+          type: string
+          enum: [fresh, stale]
+          description: |
+            Present only with `backup.enabled` and `backup.max_age_ms`: `stale`
+            when the last successful backup is older than `max_age_ms` (or the
+            uploader is not running). `503` only with `backup.require_fresh`.
     Wal:
       type: object
       required: [instance, wal]

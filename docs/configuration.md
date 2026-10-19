@@ -74,7 +74,7 @@ Every top-level section, with its keys and defaults:
 | `storage` | `type` (`local` \| `s3` \| `gcs`), `roll_bytes` (16777216), `roll_ms` (30000), `key_prefix` (`""`; `name/` parts prepended to every segment key, so nodes can share a bucket), `s3.*` (`bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`), `gcs.*` (`bucket`, `endpoint`, `auth` = `metadata` \| `token` \| `none`; `token` is required when `auth: token`) |
 | `storage.s3.sse`, `storage.gcs.sse` | `type` (`aes256` \| `kms`), `key_id` (the KMS key; required for `kms` on GCS, optional on S3). Server-side encryption sent on every object this store writes; the same `sse:` key is accepted by the `s3`/`gcs` block of `claim_check.store(s)` and `backup.store`. See [Encryption at rest](storage.md#encryption-at-rest) |
 | `claim_check` | `port` (4001), `ip` (`127.0.0.1`), `tls` (a TLS block), `auth` (like `admin.auth`; reading a claim needs `claims:read` and the claim's tenant), `pack_max_bytes` (16777216), `retention_days` (null disables the sweeper; else ≥ 1), `store` (unset = the `storage` bucket; same shape as `storage` plus `root` for `type: local`), `stores` (a list of `store`-shaped entries, exclusive with `store`: failover between them), `placement` (`ordered` \| `hash`), `store_cooldown_ms` (30000), `key_layout` (`flat` \| `sharded`), and the gateway's reads: `read_deadline_ms` (5000), `read_timeout_ms` (3000), `read_retries` (1), `read_max_inflight` (48), `read_queue_max` (256), `read_cache_bytes` (134217728; 0 = no cache), `read_cache_max_entry_bytes` (1048576), `max_concurrent_reads` (1024; 0 = no cap), and signed refs: `ref_signing_keys` (`[]`; a list or a comma-separated string of `[current, previous…]`, each ≥ 16 bytes; use `${VAR}`), `ref_ttl_ms` (null = the retention, else 30 days), `accept_unsigned_refs` (null = only while no key is set). `claim_check.authorize` is Elixir config only. See [`claim-check.md`](claim-check.md#a-dedicated-claim-store), [Under load](claim-check.md#under-load) and [The reference](claim-check.md#the-reference) |
-| `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
+| `backup` | `enabled` (`false`), `interval_ms` (60000), `keep` (3), `store` (unset = the `storage` bucket; same shape as `claim_check.store`), `secondary` (a second store of the same shape: every backup is written to both, restore falls back to it), `timeout_ms` (120000), `verify_interval_ms` (unset = never), `signing_key` (a string or a list, e.g. `["${BACKUP_SIGNING_KEY}"]`: the first signs, any verifies), `final_timeout_ms` (20000), `max_age_ms` (unset = no `/ready` label), `require_fresh` (`false`). Continuous backup of the node's store, restored at boot into an empty `data_dir`; keys go under `storage.key_prefix`. See [`storage.md`](storage.md#backup-and-restore) |
 | `routes` | `enabled` (`false`), `max_routes` (10000), `store.type` (`ets` \| `redis`; `store.url`/`store.namespace`/`store.tick_ms` are Redis-only), `cache.*`, `trusted_proxies` (`[]`), `ip_rules.*`, `admin.port` (4003), `admin.ip` (`127.0.0.1`), `admin.tls` (a TLS block), `admin.auth` (like `admin.auth` of the operator API), `log_sample` (100), `ip_denied_status` (403), `seed` (`[]`; each entry takes `id`, `path`, `methods`, `enabled`, `ip_rules`, `metadata`, and any other key is a load error). See [Route management](#route-management) |
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
@@ -512,7 +512,19 @@ config :ankusa,
     accept_unsigned_refs: nil,
     authorize: nil
   },
-  backup: %{enabled: false, interval_ms: 60_000, keep: 3, blob_store: nil},
+  backup: %{
+    enabled: false,
+    interval_ms: 60_000,
+    keep: 3,
+    blob_store: nil,
+    secondary: nil,
+    timeout_ms: 120_000,
+    verify_interval_ms: nil,
+    signing_key: [],
+    final_timeout_ms: 20_000,
+    max_age_ms: nil,
+    require_fresh: false
+  },
   admin: %{enabled: false, port: 4002, ip: "127.0.0.1", gauge_interval_ms: 15_000},
   routes: %{
     enabled: false,
@@ -616,6 +628,13 @@ config :ankusa,
 | `backup.interval_ms` | `60_000` | How often a checkpoint is uploaded: the most a lost host loses. Only files the last backup doesn't already have are uploaded. |
 | `backup.keep` | `3` | Backups kept; older ones, and the files only they used, are deleted after each successful backup. |
 | `backup.blob_store` | `nil` | `{module, opts}` for backup objects; `nil` uses `storage.blob_store`. Keys are under `storage.key_prefix` either way: a backup is one node's, and a node whose prefix holds another store's backups refuses to back up. With `LocalFS` the backup shares the host's fate, and the node logs a warning saying so. |
+| `backup.secondary` | `nil` | `{module, opts}` of a second object store (another region or provider), under the same `storage.key_prefix`. Every backup is written to the primary and then to it, with the same checks; a run succeeds only when both hold it (a failing secondary is retried with backoff, and the primary is not uploaded again meanwhile). At restore the primary is tried first; if it is unreachable, empty, or fails a check, the secondary is. Its `:sse` option is checked like every other store's. |
+| `backup.timeout_ms` | `120_000` | The most one object-store call of a backup, a verify or a restore may take before it counts as failed. A positive integer. |
+| `backup.verify_interval_ms` | `nil` | Every this often the latest backup of every store is read back and checked (manifest signature, every file's size and sha256) without writing anything; a failure is logged and counted by `ankusa_backup_verify_failed_total{target}`. `nil` = never. A positive integer. |
+| `backup.signing_key` | `[]` | HMAC-SHA256 key(s), each a string of at least 32 bytes (`openssl rand -base64 32`), as a string or a list: the first signs every manifest, any of them verifies, so a rotation lists the new key first and keeps the old one until its backups have aged out. With keys configured a restore refuses an unsigned or mis-signed manifest (`{:manifest_invalid, id, :unsigned \| :bad_signature}`); with none it checks nothing. `/v1/config` shows each as `[REDACTED]`. |
+| `backup.final_timeout_ms` | `20_000` | A clean stop (SIGTERM, `docker stop`) takes one last backup before the store closes, at most this long. A positive integer; the supervisor waits this plus 10 s. |
+| `backup.max_age_ms` | `nil` | `/ready` carries `"backup": "fresh"` or `"stale"` once the last successful backup is older than this (or the uploader is not running). `nil` = no label. At least `backup.interval_ms`. |
+| `backup.require_fresh` | `false` | A stale backup makes `/ready` answer `503`. Needs `backup.max_age_ms`. |
 | `admin.enabled` | `false` | Start the admin API and `Ankusa.Metrics` on this instance. Off for embedded use; the `jamescarr/ankusa` image turns it on. |
 | `admin.port` | `4002` | The admin API's Bandit port. |
 | `admin.ip` | `"127.0.0.1"` | The address the admin API binds, same rules as `claim_check.ip`. |
@@ -659,7 +678,8 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 `claim_check.store_cooldown_ms`, `claim_check.read_deadline_ms`,
 `claim_check.read_timeout_ms`, `claim_check.read_max_inflight`,
 `claim_check.read_cache_max_entry_bytes`, `backup.interval_ms`,
-`backup.keep`, `admin.gauge_interval_ms`, `metrics.max_series_per_metric`,
+`backup.keep`, `backup.timeout_ms`, `backup.final_timeout_ms`,
+`admin.gauge_interval_ms`, `metrics.max_series_per_metric`,
 `routes.max_routes` and every
 numeric `listener.*` key (`max_connections`, `num_acceptors`, the three
 timeouts, `max_requests_per_connection`, `max_header_count`,

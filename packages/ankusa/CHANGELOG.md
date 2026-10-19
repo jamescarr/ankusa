@@ -13,6 +13,25 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Backup verification, signed manifests, a final backup on stop and a secondary
+  region (DUR-6).** `Ankusa.Store.Backup.verify/2` reads the latest backup back
+  (manifest, every file's size and sha256) without writing, on
+  `backup.verify_interval_ms`, counted by `ankusa_backup_verify_failed_total{target}`.
+  `backup.signing_key` (a string or a list, each at least 32 bytes) signs every
+  manifest with HMAC-SHA256 (manifest version 2; version 1 is still read) and a
+  restore refuses an unsigned or mis-signed one. A clean stop takes one last
+  backup under `backup.final_timeout_ms` (20 s). `backup.timeout_ms` bounds each
+  object-store call. `backup.max_age_ms` puts `"backup": "fresh" | "stale"` on
+  `/ready`, `503` only with `backup.require_fresh`. `backup.secondary` is a second
+  object store every backup is also written to, and restore falls back to. The
+  manifest records the store format (a backup of a newer one is refused at
+  restore) and `m:intake_offset`. `Backup.restore/2` is now `restore/3`.
+- **A restore is announced (DUR-6).** A store restored from a backup writes a
+  fresh `m:incarnation` and, before taking any change, emits
+  `io.ankusa.instance.restored` (`incarnation`, `restored_sequence`); lifecycle
+  event ids of rows from then on are keyed with the incarnation, so audit
+  sequence numbers the lost node had already published are not reused as event
+  ids. Rows of the restored trail keep their ids.
 - **Per-tenant observability with a cardinality policy (TEN-7).** `metrics.detail`
   (`:tenant` by default, `:source`, `:none`) says which identity labels the
   per-hook Prometheus series carry, and `metrics.max_series_per_metric` (default

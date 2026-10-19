@@ -8,6 +8,12 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`backup.secondary`, `verify_interval_ms`, `signing_key`, `timeout_ms`,
+  `final_timeout_ms`, `max_age_ms`, `require_fresh` (DUR-6).** A second backup
+  store with restore fallback, a verify job, HMAC-SHA256-signed manifests (a list
+  or comma-separated `${VAR}`, each at least 32 bytes), a final backup on SIGTERM,
+  and a `/ready` `backup: stale` label (`503` with `require_fresh`). See
+  `config-examples/reference.yml` and `docs/storage.md#backup-and-restore`.
 - **`metrics.detail` and `metrics.max_series_per_metric` (TEN-7).** The scrape's
   cardinality policy: `detail` is `tenant` (default: `tenant_id` on the per-hook
   series), `source` (`tenant_id` and `source_id`) or `none` (neither, and no

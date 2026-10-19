@@ -223,11 +223,56 @@ is the hooks acked since the last backup.
   `.blob` file (immutable, so each is uploaded once and shared by every
   backup that lists it), `backup/<id>/<name>` for the manifest, options, WAL
   and `CURRENT`, then `backup/<id>/manifest.json` (every file with its size
-  and sha256), then `backup/LATEST`. A backup exists only once `LATEST` names
+  and sha256, the store format version, the intake offset, and with
+  `backup.signing_key` an HMAC-SHA256 signature over all of it), then
+  `backup/LATEST`. A backup exists only once `LATEST` names
   it. After each one, backups beyond `backup.keep` (3) and every shared file
   no kept backup lists are deleted; a purge that can't list the store or read
   a kept manifest deletes nothing. A failed attempt is retried with the
-  compactor's backoff and never touches the store or the edge.
+  compactor's backoff and never touches the store or the edge. Each
+  object-store call is bounded by `backup.timeout_ms`.
+- **Signed manifests.** With `backup.signing_key` (a string or a list; the
+  first signs, any verifies, so a rotation lists the new key first) the
+  manifest carries `signature`, computed over a canonical JSON form of
+  everything else in it. A restore, and `Backup.verify/2`, refuse a manifest
+  that is unsigned or signed by no configured key
+  (`{:manifest_invalid, id, :unsigned | :bad_signature}`), so whoever can
+  write the bucket cannot make a node restore content it did not back up.
+  `LATEST` itself is a bare id and is not signed: it can be pointed at an
+  older backup this node signed, never at forged content. With no key
+  configured nothing is checked (a manifest that is signed anyway is logged as
+  unverified), and a backup taken before signing was turned on is refused
+  once it is, until the next backup replaces it. The signing key is not
+  stored in the bucket; a replacement node needs it in its config like the
+  rest of the backup block, and needs `secrets.kek` too: the backup holds
+  stored source secrets as ciphertext.
+- **Verify.** `Ankusa.Store.Backup.verify/2` reads `LATEST` back from an
+  object store, checks the manifest (signature included), then downloads every
+  file it lists, one at a time, against its size and sha256, writing nothing.
+  `backup.verify_interval_ms` runs it for every store on that interval;
+  a failed check is logged at error level and counted by
+  `ankusa_backup_verify_failed_total{target}` — alert on it, a backup nobody
+  has read back is a hope.
+- **A clean stop is a backup.** SIGTERM (or any `:shutdown` of the instance)
+  takes one last backup after the edge and dispatch have stopped and before
+  the store closes, bounded by `backup.final_timeout_ms` (20 s): the
+  recovery point of a node that was drained and stopped is the stop, not the
+  last periodic backup. A final backup that fails or times out is logged and
+  the periodic one stays `LATEST`. A node that crashes or is killed takes
+  none.
+- **A second region.** `backup.secondary` is another object store (same
+  `storage.key_prefix`). Every backup is written to the primary, then to it,
+  each with its own purge; a run succeeds only when both hold it, and a
+  failing secondary is a failed run (backoff, `ankusa_backup_runs_total{result="error"}`)
+  that does not make the primary upload everything again. At restore the
+  primary is tried first; unreachable, empty, or failing a check, the
+  secondary is restored from instead (`restored from the SECONDARY backup` is
+  logged at warning level). With both unusable the boot is refused with the
+  primary's reason.
+- **Freshness.** With `backup.max_age_ms`, `/ready` says `"backup": "fresh"` or
+  `"stale"` (last successful backup older than that, or the uploader not
+  running); a stale backup only turns the node unready with
+  `backup.require_fresh: true`.
 - **Restore.** A store directory with no `CURRENT` file holds no database. With
   `backup.enabled`, `Ankusa.Store` then restores `LATEST` before opening:
   every file is checked against the manifest's size and sha256 and written
@@ -251,6 +296,20 @@ is the hooks acked since the last backup.
   reconcile succeeds: a boot that finds both (the node died, or the reconcile
   failed, in between) logs "reconciling now" and reconciles before serving,
   instead of opening the database as an existing, reconciled store.
+- **A restore is a new incarnation.** The restored trail resumes at the
+  backup's audit `seq`, so it re-issues sequence numbers (and per-subject
+  revisions) the lost node may already have published as lifecycle events.
+  Before it takes any change, the restored store writes a fresh `m:incarnation`
+  and announces it as `io.ankusa.instance.restored` (`incarnation`,
+  `restored_sequence`); event ids from then on are keyed with it, so a
+  re-issued `seq` is a different event id, and consumers that track the highest
+  `sequence`/`revision` per instance reset them on that event. Events of the
+  restored trail itself keep the ids they were published under (proof:
+  `lifecycle_test.exs`, "opens a new incarnation"). See
+  [`asyncapi.md`](asyncapi.md). A checkpoint is the whole database, every
+  column family, so the audit trail, the lifecycle cursor, the counters and
+  the incarnation history come back with it (only the audit trail and the
+  incarnation history are asserted by a test).
 - **Where to point it.** With `LocalFS` the backup lives on the same disk as the
   store, and the node logs a warning saying so. Use a bucket: `storage.type:
   s3|gcs`, or a `backup.store` of its own. Backups are per node, so nodes
@@ -277,8 +336,9 @@ is the hooks acked since the last backup.
   store sets. Each backup uploads the files written since the previous one,
   plus a few small per-backup files.
 - **Watching it.** `ankusa_backup_age_seconds` is the time since the last
-  successful backup — the data a lost host would take with it — and
-  `ankusa_backup_runs_total{result}` counts attempts.
+  successful backup — the data a lost host would take with it —
+  `ankusa_backup_runs_total{result}` counts attempts, and
+  `ankusa_backup_verify_failed_total{target}` counts verifications that failed.
 
 ## Encryption at rest
 

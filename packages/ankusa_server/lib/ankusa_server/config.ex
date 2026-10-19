@@ -105,7 +105,8 @@ defmodule AnkusaServer.Config do
                        read_deadline_ms read_timeout_ms read_retries read_max_inflight read_queue_max
                        read_cache_bytes read_cache_max_entry_bytes max_concurrent_reads
                        ref_signing_keys ref_ttl_ms accept_unsigned_refs tls auth)
-  @backup_keys ~w(enabled interval_ms keep store)
+  @backup_keys ~w(enabled interval_ms keep store secondary timeout_ms verify_interval_ms
+                  signing_key final_timeout_ms max_age_ms require_fresh)
   @source_store_keys ~w(type url namespace tick_ms)
   @lifecycle_keys ~w(sinks)
   @egress_keys ~w(allow_insecure_http deny_cidrs allow_cidrs allow_hosts deny_hosts)
@@ -1186,24 +1187,43 @@ defmodule AnkusaServer.Config do
   defp backup_section(doc) do
     backup = section!(doc, "backup", @backup_keys, [])
 
-    blob_store =
-      case backup["store"] do
-        nil ->
-          nil
-
-        _store ->
-          store = section!(backup, "store", @blob_store_keys, ["backup"])
-          blob_store!(store, ["backup", "store"], true)
-      end
-
     [
       backup:
         []
         |> put_opt(:enabled, bool_opt(backup, "enabled", ["backup"]))
         |> put_opt(:interval_ms, int_opt(backup, "interval_ms", ["backup"]))
         |> put_opt(:keep, int_opt(backup, "keep", ["backup"]))
-        |> put_opt(:blob_store, blob_store)
+        |> put_opt(:blob_store, backup_store(backup, "store"))
+        |> put_opt(:secondary, backup_store(backup, "secondary"))
+        |> put_opt(:timeout_ms, int_opt(backup, "timeout_ms", ["backup"]))
+        |> put_opt(:verify_interval_ms, int_opt(backup, "verify_interval_ms", ["backup"]))
+        |> put_opt(:final_timeout_ms, int_opt(backup, "final_timeout_ms", ["backup"]))
+        |> put_opt(:max_age_ms, int_opt(backup, "max_age_ms", ["backup"]))
+        |> put_opt(:require_fresh, bool_opt(backup, "require_fresh", ["backup"]))
+        |> put_opt(:signing_key, backup_signing_keys(backup))
     ]
+  end
+
+  # `store` and `secondary` take the claim store's shape; unset leaves the key
+  # to core's default.
+  defp backup_store(backup, key) do
+    case backup[key] do
+      nil ->
+        nil
+
+      _store ->
+        store = section!(backup, key, @blob_store_keys, ["backup"])
+        blob_store!(store, ["backup", key], true)
+    end
+  end
+
+  # `[current, previous...]`: a list, or one comma-separated string (`${VAR}`).
+  # Empty or null leaves the manifests unsigned.
+  defp backup_signing_keys(backup) do
+    case backup["signing_key"] do
+      empty when empty in [nil, [], ""] -> nil
+      keys -> string_list!(keys, ["backup", "signing_key"])
+    end
   end
 
   # ── routes ──────────────────────────────────────────────────────────────────

@@ -36,7 +36,7 @@ defmodule Ankusa.Store do
   `checkpoint/2` is how `Ankusa.Store.Backup` snapshots the store: a consistent
   copy (hard links where it can) in a directory that must not exist yet. With
   `backup.enabled`, a store directory that holds no database is restored from
-  the latest backup before it is opened (see `Ankusa.Store.Backup.restore/2`).
+  the latest backup before it is opened (see `Ankusa.Store.Backup.restore/3`).
   """
 
   use GenServer
@@ -115,9 +115,11 @@ defmodule Ankusa.Store do
 
     # `origin` is how the directory came to hold a database; `migrations` is the
     # format registry this open applies (a test passes its own).
+    migrations = Keyword.get(opts, :migrations, Migrate.migrations())
+
     with :ok <- Ankusa.Fsync.mkdir_p(path, config.data_dir),
-         {:ok, origin} <- maybe_restore(config, path) do
-      boot = %{origin: origin, migrations: Keyword.get(opts, :migrations, Migrate.migrations())}
+         {:ok, origin} <- maybe_restore(config, path, migrations) do
+      boot = %{origin: origin, migrations: migrations}
 
       case :rocksdb.new_cache(:lru, @cache_bytes) do
         {:ok, cache} ->
@@ -150,10 +152,10 @@ defmodule Ankusa.Store do
   # to hold none, before RocksDB creates a fresh store there. A database whose
   # restore marker is still there was restored (or created fresh) by a boot
   # that died before reconciling it with the archive: reconcile it now.
-  defp maybe_restore(%Config{backup: %{enabled: true}} = config, path) do
+  defp maybe_restore(%Config{backup: %{enabled: true}} = config, path, migrations) do
     cond do
       not File.exists?(Path.join(path, "CURRENT")) ->
-        case Backup.restore(config, path) do
+        case Backup.restore(config, path, format: Migrate.current_format(migrations)) do
           {:ok, origin} -> {:ok, origin}
           {:error, reason} -> {:restore_failed, reason}
         end
@@ -171,7 +173,7 @@ defmodule Ankusa.Store do
     end
   end
 
-  defp maybe_restore(_config, _path), do: {:ok, :existing}
+  defp maybe_restore(_config, _path, _migrations), do: {:ok, :existing}
 
   defp restore_failed(path, reason) do
     Logger.error(
@@ -246,17 +248,41 @@ defmodule Ankusa.Store do
   defp durability(%Config{backup: %{enabled: true, interval_ms: interval}} = config) do
     {mod, _opts, _prefix} = Ankusa.BlobStore.resolve_config(config, :backup)
 
-    "Durable to power loss on this host; backed up to #{inspect(mod)} every #{interval} ms " <>
+    secondary =
+      case Ankusa.BlobStore.secondary_config(config) do
+        {second, _opts, _prefix} -> " and to #{inspect(second)}"
+        nil -> ""
+      end
+
+    "Durable to power loss on this host; backed up to #{inspect(mod)}#{secondary} every " <>
+      "#{interval} ms (and once more on a clean stop) " <>
       "— a lost host loses at most the hooks acked since the last backup."
   end
 
   defp durability(_config), do: "Durable to power loss on THIS host only."
 
   defp after_open(config, %{origin: origin, migrations: migrations}, path) do
-    with :ok <- run_migration(config, migrations) do
+    with :ok <- run_migration(config, migrations),
+         :ok <- mint_incarnation(config.instance, origin) do
       reconcile_archive(config, origin, path)
     end
   end
+
+  # A store that came back from a backup is a new incarnation of the instance:
+  # it re-issues audit sequence numbers the lost one already published, so the
+  # lifecycle event ids of the new ones must differ. The fresh id is left as
+  # `m:incarnation_pending`; `Ankusa.Audit` turns it into the history entry and
+  # announces it (`io.ankusa.instance.restored`) before it takes any change.
+  defp mint_incarnation(instance, :restored) do
+    id = Base.encode32(:crypto.strong_rand_bytes(10), case: :lower, padding: false)
+
+    case write(instance, [{:put, :default, Keys.meta("incarnation_pending"), id}], sync: true) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:incarnation_failed, reason}}
+    end
+  end
+
+  defp mint_incarnation(_instance, _origin), do: :ok
 
   # A store that started over (restored, or fresh with a backup configured)
   # may be behind the bucket: segments archived after its backup carry seqs it

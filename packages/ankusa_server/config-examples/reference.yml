@@ -606,6 +606,31 @@ backup:
   # store:
   #   type: s3
   #   s3: {bucket: "${BACKUP_BUCKET}", region: "${S3_REGION}"}
+  # A second object store every backup is also written to (another region or
+  # provider), same shape as `store`, under the same key_prefix. Restore falls
+  # back to it when the primary is unreachable, empty or fails a check; a run
+  # succeeds only when both hold the backup.
+  # secondary:
+  #   type: gcs
+  #   gcs: {bucket: "${BACKUP_DR_BUCKET}", auth: metadata}
+  # The most one object-store call of a backup, a verify or a restore may take.
+  timeout_ms: 120000
+  # Read the latest backup of every store back (manifest signature, every
+  # file's size and sha256) this often, writing nothing; a failure is logged and
+  # counted by ankusa_backup_verify_failed_total. Unset = never.
+  # verify_interval_ms: 600000
+  # HMAC-SHA256 key(s) the manifest is signed with, a list or one comma-separated
+  # string, each at least 32 bytes (`openssl rand -base64 32`); the first signs,
+  # any verifies (rotation: new key first). With keys a restore refuses an
+  # unsigned or mis-signed manifest. Keep them out of this file: ${VAR}.
+  # signing_key: ["${BACKUP_SIGNING_KEY}"]
+  # A clean stop (SIGTERM) takes one last backup, at most this long.
+  final_timeout_ms: 20000
+  # `/ready` carries "backup": "stale" once the last successful backup is older
+  # than this (at least interval_ms); unset = no label. `require_fresh: true`
+  # makes a stale backup a 503.
+  # max_age_ms: 300000
+  # require_fresh: false
 
 # Where outbound HTTP may go: every `type: http` sink (a source's, or the
 # lifecycle's) is checked on every attempt, so a sink URL cannot reach this

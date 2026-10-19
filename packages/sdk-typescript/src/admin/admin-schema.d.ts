@@ -600,6 +600,13 @@ export interface components {
              * @enum {string}
              */
             store: "ok" | "none" | "store_unavailable" | "write_failed";
+            /**
+             * @description Present only with `backup.enabled` and `backup.max_age_ms`: `stale`
+             *     when the last successful backup is older than `max_age_ms` (or the
+             *     uploader is not running). `503` only with `backup.require_fresh`.
+             * @enum {string}
+             */
+            backup?: "fresh" | "stale";
         };
         Wal: {
             instance: string;
@@ -795,23 +802,49 @@ export interface components {
             replays: components["schemas"]["Replay"][];
         };
         /**
-         * @description A rate limit. `rate` is hooks per second and may be fractional (`0.5`
-         *     is one every two seconds); `burst` is the most hooks admitted back to
-         *     back.
+         * @description A tenant's ingest limit. `rate` is hooks per second and may be
+         *     fractional (`0.5` is one every two seconds); `burst` is the most hooks
+         *     admitted back to back. The rest are optional: `bytes_per_second` and
+         *     `burst_bytes` limit body bytes (charged with the hook, after
+         *     verification; `burst_bytes` defaults to one second's worth and needs
+         *     `bytes_per_second`), `max_body_bytes` is the biggest body the tenant may
+         *     send (`413` past it; at most the instance's `max_body_bytes`), and
+         *     `max_queue` / `max_queue_bytes` are the hooks and body bytes the tenant
+         *     may hold in this node's batchers at once (`429 tenant_overload` past
+         *     either). A limit replaces the one below it whole: keys left out are
+         *     unset, not inherited.
          */
         RateLimit: {
             /** @example 50 */
             rate: number;
             /** @example 100 */
             burst: number;
+            /** @example 5000000 */
+            bytes_per_second?: number;
+            /** @example 10000000 */
+            burst_bytes?: number;
+            /** @example 1000000 */
+            max_body_bytes?: number;
+            /** @example 2000 */
+            max_queue?: number;
+            /** @example 67108864 */
+            max_queue_bytes?: number;
         };
-        /** @description One tenant's limit, and whether it came from config or an override. */
+        /**
+         * @description One tenant's limit, and whether it came from config or an override. The
+         *     optional keys of a `RateLimit` appear only when the limit sets them.
+         */
         TenantRateLimit: {
             tenant: string;
             /** @description `null` when `source` is `none`. */
             rate: number | null;
             /** @description `null` when `source` is `none`. */
             burst: number | null;
+            bytes_per_second?: number;
+            burst_bytes?: number;
+            max_body_bytes?: number;
+            max_queue?: number;
+            max_queue_bytes?: number;
             /**
              * @description `override`: this node's runtime override. `config`:
              *     `rate_limits.tenants`. `default`: `rate_limits.default`. `none`: no
@@ -1106,7 +1139,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description `400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, and unknown fields are refused. `message` says which. */
+        /** @description `400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, the optional keys are in range (`burst_bytes` needs `bytes_per_second`; `max_body_bytes` is at most the instance's), and unknown fields are refused. `message` says which. */
         InvalidRateLimit: {
             headers: {
                 [name: string]: unknown;

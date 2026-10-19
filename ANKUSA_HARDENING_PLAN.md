@@ -348,7 +348,7 @@ Format: `- [ ] **ID — Title** · priority · Deps`, then *Why* (the gap, with 
 
 ### Phase 3 — Durability and capacity
 
-- [ ] **DUR-6 — Backup verification, signed manifests, final checkpoint on stop, cross-region secondary** · P0 · Deps: —
+- [x] **DUR-6 — Backup verification, signed manifests, final checkpoint on stop, cross-region secondary** · P0 · Deps: —
   *Why:* restore happens only at boot (`store.ex:138-159`); the manifest is unauthenticated JSON (`store/backup.ex:714-746`); no verify job, no age threshold, no shutdown checkpoint (`backup.ex:75-137` has no `terminate/2`), one bucket, one region.
   *Change:* `Backup.verify/2` (list `LATEST`, stream objects, check size+sha256, no writes) on `backup.verify_interval_ms` emitting `ankusa_backup_verify_failed_total`; HMAC-SHA256-signed manifest with `backup.signing_key` (list for rotation), verified on restore; `terminate/2` runs one final checkpoint under `backup.final_timeout_ms` (default 20 s); `backup.timeout_ms` per upload; `backup.max_age_ms` → `/ready` label `backup: stale` (unready only with `backup.require_fresh: true`); `backup.secondary` (second blob store, dual-write, read fallback at restore); the checkpoint records `m:intake_offset` for DUR-1.
   *Done when:* a flipped byte fails verify; restore refuses an unsigned/mis-signed manifest; a clean stop leaves `LATEST` newer than the last periodic checkpoint; restore from the secondary bucket reproduces every acked id.
