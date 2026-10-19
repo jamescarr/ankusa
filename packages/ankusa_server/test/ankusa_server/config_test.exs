@@ -1696,6 +1696,70 @@ defmodule AnkusaServer.ConfigTest do
 
   # ── translation: rate limits ────────────────────────────────────────────────
 
+  test "the fleet scopes and the fleet store map to core's config" do
+    path =
+      tmp_config("""
+      rate_limits:
+        scope: fleet
+        default: {rate: 10, burst: 20}
+      dedupe: {scope: fleet}
+      fleet:
+        store: {url: "${FLEET_REDIS}", namespace: "ankusa:fleet:prod", pool_size: 8}
+        timeout_ms: 15
+        pending_ttl_ms: 20000
+        breaker_window_ms: 2000
+        breaker_min_calls: 50
+        breaker_failure_rate: 0.25
+        breaker_open_ms: 10000
+      """)
+
+    config = Config.load!(path: path, env: %{"FLEET_REDIS" => "redis://redis:6379"}).config
+
+    assert config.rate_limits.scope == :fleet
+    assert config.dedupe == %{scope: :fleet}
+
+    assert config.fleet == %{
+             store:
+               {Ankusa.RateLimiter.Store.Redis,
+                [url: "redis://redis:6379", namespace: "ankusa:fleet:prod", pool_size: 8]},
+             timeout_ms: 15,
+             pending_ttl_ms: 20_000,
+             breaker_window_ms: 2_000,
+             breaker_min_calls: 50,
+             breaker_failure_rate: 0.25,
+             breaker_open_ms: 10_000
+           }
+  end
+
+  test "no fleet keys means node scope, as core defaults" do
+    config = Config.load!(path: tmp_config("node: {}\n"), env: %{}).config
+
+    assert config.rate_limits.scope == :node
+    assert config.dedupe == %Ankusa.Config{}.dedupe
+    assert config.fleet == %Ankusa.Config{}.fleet
+  end
+
+  test "a bad fleet key names the key, and core's ranges and scope rules come back as core's message" do
+    for {yaml, message} <- [
+          {"fleet: {timeouts: 1}", ~s(fleet: unknown key "timeouts")},
+          {"fleet: {store: {type: memcached, url: x}}",
+           ~s(fleet.store.type: unknown value "memcached")},
+          {"fleet: {store: {namespace: x}}", ~s(fleet.store: missing required key "url")},
+          {"fleet: {timeout_ms: soon}", ~s(fleet.timeout_ms: expected an integer, got "soon")},
+          {"fleet: {timeout_ms: 0}", "fleet.timeout_ms must be an integer from 1 to 1000, got 0"},
+          {"rate_limits: {scope: cluster}", ~s(rate_limits.scope: unknown value "cluster")},
+          {"dedupe: {scope: fleet}", "dedupe.scope: :fleet needs fleet.store"},
+          {"rate_limits: {scope: fleet}", "rate_limits.scope: :fleet needs fleet.store"}
+        ] do
+      error =
+        assert_raise ConfigError, fn ->
+          Config.load!(path: tmp_config(yaml <> "\n"), env: %{})
+        end
+
+      assert error.message =~ message
+    end
+  end
+
   test "a rate_limits section maps to core's rate_limits config" do
     path =
       tmp_config("""
@@ -1740,23 +1804,24 @@ defmodule AnkusaServer.ConfigTest do
 
     rate_limits = Config.load!(path: path, env: %{}).config.rate_limits
 
-    assert rate_limits == %{
-             per_ip: %{rate: 20, burst: 40},
-             node: %{rate: 5000.5, burst: 10_000},
-             sources: %{default: %{bytes_per_second: 50_000_000, burst_bytes: 8_000_000}},
-             default: %{rate: 5, burst: 5, max_queue: 100},
-             tenants: %{
-               "acme" => %{
-                 rate: 100,
-                 burst: 200,
-                 bytes_per_second: 1_000_000.5,
-                 burst_bytes: 2_000_000,
-                 max_body_bytes: 1_000_000,
-                 max_queue: 50,
-                 max_queue_bytes: 4_000_000
+    assert rate_limits ==
+             Map.merge(%Ankusa.Config{}.rate_limits, %{
+               per_ip: %{rate: 20, burst: 40},
+               node: %{rate: 5000.5, burst: 10_000},
+               sources: %{default: %{bytes_per_second: 50_000_000, burst_bytes: 8_000_000}},
+               default: %{rate: 5, burst: 5, max_queue: 100},
+               tenants: %{
+                 "acme" => %{
+                   rate: 100,
+                   burst: 200,
+                   bytes_per_second: 1_000_000.5,
+                   burst_bytes: 2_000_000,
+                   max_body_bytes: 1_000_000,
+                   max_queue: 50,
+                   max_queue_bytes: 4_000_000
+                 }
                }
-             }
-           }
+             })
   end
 
   test "sources.default: absent keeps core's 100 MB/s, null switches the ceiling off" do

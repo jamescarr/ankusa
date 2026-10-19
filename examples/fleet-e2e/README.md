@@ -46,7 +46,7 @@ flowchart LR
 ```sh
 examples/fleet-e2e/run.sh
 # ...
-# verify: missing=0 sha_mismatches=0 extra_deliveries=<n> claim_redeemed_cross_node=true
+# verify: missing=0 sha_mismatches=0 extra_deliveries=<n> claim_redeemed_cross_node=true duplicate_hooks=0
 ```
 
 Needs `docker` with Compose, `mix`, `curl` and `jq`. It builds the server image
@@ -58,24 +58,33 @@ stack up, and runs four phases. Only `18080` (the load balancer), `14001` and
 | --- | --- | --- |
 | steady | `RATE`/s for `DURATION` s through the load balancer | `loadgen.verify`: every acked id processed, sha256 equal |
 | fat hooks | a 20 KB body POSTed to each node directly | each arrives with `via = claim:<id>`, redeemed through the gateway, sha256 equal |
-| chaos | the same load while `ankusa-a` is killed (+10 s) and started (+20 s), event *E* is delivered to node b and then **retried on node a**, and the consumer is killed (+30 s) | `loadgen.verify` again; both retry POSTs answer `201`; *E* is one row |
+| chaos | the same load while `ankusa-a` is killed (+10 s) and started (+20 s), event *E* is delivered to node b and then **retried on node a**, and the consumer is killed (+30 s) | `loadgen.verify` again; both retry POSTs answer `201`, the second with the first's hook id; *E* is one row with one hook id |
 | burst | `CONCURRENCY` closed-loop workers for `BURST_SECONDS` | `loadgen.verify` |
 
 Before the phases it also asserts that a path nobody defined is a `404` on both
 nodes and through the load balancer, which only holds if they enforce the same
 Redis-held routes.
 
-### `extra_deliveries`
+### `extra_deliveries` and `duplicate_hooks`
 
-The number of times the consumer received a hook beyond the first for its
-idempotency key, summed over the phases and the retry. The dedupe index is
-**per node**, so *E* retried on the other node is a second hook with a new id
-and the same key: the consumer collapses it into one row and counts one extra
-delivery. A RabbitMQ redelivery after the consumer kill counts too. The run
-reports the number and does not require it to be zero; once dedupe is
-fleet-scoped (`TEN-6` in
-[`ANKUSA_HARDENING_PLAN.md`](../../ANKUSA_HARDENING_PLAN.md)) the retry must
-collapse before dispatch, and the number must be 0.
+`extra_deliveries` is the number of times the consumer received a hook beyond the
+first for its idempotency key, summed over the phases and the retry. It has two
+components, and only one of them is Ankusa's to remove:
+
+* **duplicate hooks**: the same provider event stored as two hooks with two ids.
+  With `dedupe.scope: fleet` (this example's `ankusa.yml`) *E* retried on the other
+  node is answered with the first hook's id before anything is committed, so this
+  is 0. The run reports it separately as `duplicate_hooks` (distinct hook ids per
+  idempotency key, minus one, read from the consumer table's `hook_ids`) and
+  **fails** when it is not 0.
+* **broker redeliveries**: RabbitMQ delivering a hook again after the consumer
+  was killed mid-handling. That is the at-least-once contract, ingest cannot
+  prevent it, and the chaos phase deliberately provokes it. It stays in
+  `extra_deliveries`, which is reported and not asserted to be zero.
+
+So `extra_deliveries = duplicate_hooks + redeliveries`, and `TEN-6` (fleet-scoped
+dedupe, in [`ANKUSA_HARDENING_PLAN.md`](../../ANKUSA_HARDENING_PLAN.md)) zeroes the
+first term.
 
 ### Knobs
 

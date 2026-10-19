@@ -669,6 +669,34 @@ defmodule Ankusa.Admin.RouterTest do
              "[REDACTED]"
   end
 
+  test "GET /v1/config redacts the fleet store's URL password and shows its scopes" do
+    config =
+      test_config(
+        roles: [:edge],
+        admin: %{enabled: true},
+        rate_limits: %{scope: :fleet},
+        dedupe: %{scope: :fleet},
+        fleet: %{
+          store:
+            {Ankusa.RateLimiter.Store.Redis,
+             url: "redis://fleet:leakhunter@redis.internal:6379", namespace: "ankusa:fleet"}
+        }
+      )
+
+    put_config(config)
+
+    conn = call(config.instance, :get, "/v1/config")
+    assert conn.status == 200
+    refute conn.resp_body =~ "leakhunter"
+
+    decoded = JSON.decode!(conn.resp_body)
+    assert decoded["rate_limits"]["scope"] == "fleet"
+    assert decoded["dedupe"]["scope"] == "fleet"
+
+    assert decoded["fleet"]["store"]["opts"]["url"] ==
+             "redis://fleet:[REDACTED]@redis.internal:6379"
+  end
+
   test "GET /v1/config shows a {module, fun, args} callback without its args" do
     config =
       test_config(
