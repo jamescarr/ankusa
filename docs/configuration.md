@@ -79,7 +79,9 @@ Every top-level section, with its keys and defaults:
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `secrets` | `kek` (a 32-byte key, base64, optionally `<id>:<base64>`; use `${VAR}`), `kek_previous` (a list, or one comma-separated string, of keys that may still decrypt). With a `kek`, the secrets of API-managed sources are encrypted before they are stored (`source_store.type: persistent` or `redis`); unset, they are stored as plain JSON. See [Encryption at rest](storage.md#encryption-at-rest). `providers.<name>` (`type: aws` or `vault`, and their settings) and `cache_ttl_ms` (`0`) name the secret managers `${sm:<name>:<ref>}` reads from; see [Secret sources](#secret-sources) |
-| `rate_limits` | `default` (`null` = unlimited; **required** with `routing: tenant_path`), `tenants` (`{tenant_id: {rate, burst, ...}}`; a limit may add `bytes_per_second`, `burst_bytes`, `max_body_bytes`, `max_queue`, `max_queue_bytes`), `per_ip` (`{rate, burst}` or `null`), `node` (`{rate, burst}` or `null`), `sources` (`default: {bytes_per_second, burst_bytes}`; 100 MB/s, `null` = off). Per node. `per_ip`, `node` and `sources` are charged before the body is read; the tenant's after verification. See [Rate limits](#rate-limits) |
+| `rate_limits` | `default` (`null` = unlimited; **required** with `routing: tenant_path`), `tenants` (`{tenant_id: {rate, burst, ...}}`; a limit may add `bytes_per_second`, `burst_bytes`, `max_body_bytes`, `max_queue`, `max_queue_bytes`), `per_ip` (`{rate, burst}` or `null`), `node` (`{rate, burst}` or `null`), `sources` (`default: {bytes_per_second, burst_bytes}`; 100 MB/s, `null` = off), `scope` (`node` \| `fleet`; default `node`). Per node, except the tenant quota under `scope: fleet`. `per_ip`, `node` and `sources` are charged before the body is read; the tenant's after verification. See [Rate limits](#rate-limits) |
+| `dedupe` | `scope` (`node` \| `fleet`; default `node`). Where a source's provider event key (its `dedupe:`) collapses: `fleet` claims it in `fleet.store` first. Needs `fleet.store`. See [Fleet scope](#fleet-scope) |
+| `fleet` | `store` (`{type: redis, url, namespace, pool_size}`; absent with both scopes `node`), `timeout_ms` (20; 1–1000), `pending_ttl_ms` (30000), `breaker_window_ms` (1000), `breaker_min_calls` (20), `breaker_failure_rate` (0.5), `breaker_open_ms` (5000). The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`. See [Fleet scope](#fleet-scope) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones. Read with `GET /v1/audit` (scope `audit:read`). Per node |
 | `tenants` | `max` (1000000, an integer from 1 to 4294967294). How many tenants the node's store hands a dense ordinal to ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)); the hook of one past it is refused with `503 {"error":"tenant_limit"}` and `Retry-After: 300`. Tenants it already knows are never refused, and a tenant keeps its ordinal forever. Per node |
@@ -287,6 +289,12 @@ and `public_key`.
 
 Bodies above a sink's `inline_max_bytes` are checked in to the object store and
 the message carries a claim reference. See [`claim-check.md`](claim-check.md).
+
+The `http` sink's `url`, `headers` and `secret` are static strings here. An
+embedding app can set each to a function of the envelope instead, to route a
+shared source's tenants to their own receivers; those connect through a bounded
+per-instance pool that takes no settings. See
+[`delivery.md`](delivery.md#sinkhttp-per-tenant-destinations).
 
 ### Environment overrides
 
@@ -616,6 +624,8 @@ config :ankusa,
 | `admin.auth` | `%{mode: :none}` | Who may call the admin API: `mode` (`:none`, `:token`, `:jwt`, `:mtls`), `allow_insecure`, `tokens`, `jwt`, `mtls`. `mode: :none` is accepted only when `admin.ip` is loopback (or `allow_insecure: true`). See [Control-plane authentication](#control-plane-authentication). |
 | `metrics.enabled`, `metrics.port`, `metrics.ip` | `false`, `4004`, `"127.0.0.1"` | A listener serving only `/metrics`, `/health` and `/ready` (`Ankusa.Metrics.Router`); see [A separate metrics listener](#a-separate-metrics-listener). |
 | `metrics.tls` | `nil` | A TLS block for the metrics listener. |
+| `metrics.detail` | `:tenant` | Which identity labels the per-hook series carry: `:tenant` (`tenant_id`), `:source` (`tenant_id` and `source_id`) or `:none`. See [Metric cardinality](#metric-cardinality). |
+| `metrics.max_series_per_metric` | `5000` | The most label sets one metric keeps; later tenants/sources are folded into an `"other"` series (one slot is reserved for it). A positive integer. |
 | `claim_check.tls`, `routes.admin.tls` | `nil` | A TLS block for the claim-check gateway and the route-management API. |
 | `routes.admin.auth`, `claim_check.auth` | `%{mode: :none}` | The same block for the route-management API and the claim-check gateway. |
 | `routes.enabled` | `false` | Enforce route management. Off captures every `POST`, as before; on is **deny by default** — see [Route management](#route-management). |
@@ -632,6 +642,12 @@ config :ankusa,
 | `rate_limits.default`, `rate_limits.tenants` | `nil`, `%{}` | Per-tenant ingest limits, `%{rate: hooks_per_second, burst: hooks}`; fractions are allowed (`0.5` is one every two seconds) and both keys are required. Optional: `bytes_per_second` (a number > 0) and `burst_bytes` (an integer ≥ 1, needs `bytes_per_second`; default one second's worth), `max_body_bytes` (an integer from 1 to the instance's `max_body_bytes`; `413` past it), `max_queue` and `max_queue_bytes` (integers ≥ 1: what the tenant may hold in this node's batchers at once; past either is `429 tenant_overload`). Precedence is a runtime override, then the tenant's own entry, then `default`, and the first one found applies whole; no limit means unlimited. A `default` is required when the route resolver is `RouteResolver.TenantPath`. See [Rate limits](#rate-limits). |
 | `rate_limits.per_ip`, `rate_limits.node` | `nil`, `nil` | `%{rate: hooks_per_second, burst: hooks}` charged before the body is read: per client address (`routes.trusted_proxies` decides whose `X-Forwarded-For` counts; an IPv6 address is its `/64`) and for the whole node. Over it: `429 ip_rate_limited` / `429 node_rate_limited`. `nil` is off. |
 | `rate_limits.sources` | `%{default: %{bytes_per_second: 100_000_000}}` | Body bytes per second for each source, charged before the body is read with its declared `Content-Length` (a body with none is charged when read): `429 source_rate_limited`. `%{default: %{bytes_per_second: n, burst_bytes: n}}` (`burst_bytes` defaults to one second's worth); `%{default: nil}` switches it off. CPU protection, not a quota. |
+| `rate_limits.scope` | `:node` | `:node` or `:fleet`. Where the tenant quota (`default`, `tenants`: hooks and bytes per second) is counted. `:fleet` shares one bucket per tenant across every edge node through `fleet.store`; `per_ip`, `node` and `sources` stay per node. Needs `fleet.store`. See [Fleet scope](#fleet-scope). |
+| `dedupe.scope` | `:node` | `:node` or `:fleet`. `:fleet` claims a source's provider event key in `fleet.store` before the commit, so a retry on another node is `201 duplicate` (the first hook's id) or `409 dedupe_pending`, never a second hook. Needs `fleet.store`. See [Fleet scope](#fleet-scope). |
+| `fleet.store` | `nil` | `{module, opts}` implementing `Ankusa.RateLimiter.Store` and `Ankusa.Dedupe.Store`: `{Ankusa.RateLimiter.Store.Redis, url: "redis://…", namespace: "ankusa:fleet", pool_size: 4}` from `ankusa_redis`. Required by either `:fleet` scope; `nil` or `{module, keyword}`. |
+| `fleet.timeout_ms` | `20` | The hard budget of one fleet-store call, an integer from 1 to 1000. A call that fails or runs out of it is answered from this node alone. |
+| `fleet.pending_ttl_ms` | `30000` | How long a claimed dedupe key is "in flight" before another node may claim it; a positive integer, longer than the slowest commit. |
+| `fleet.breaker_window_ms`, `fleet.breaker_min_calls`, `fleet.breaker_failure_rate`, `fleet.breaker_open_ms` | `1000`, `20`, `0.5`, `5000` | The fleet breaker: once `breaker_min_calls` calls in a `breaker_window_ms` window were made and `breaker_failure_rate` (a number above 0, at most 1) of them failed or timed out, every hook is answered from this node for `breaker_open_ms`, then one probe decides. Positive integers except the rate. |
 | `quarantine.burst`, `quarantine.rate`, `quarantine.max_bytes` | `100`, `20`, `1_073_741_824` | The quarantine pen: one token bucket per source (`burst` hooks back to back, refilled `rate` per second; over it, `429 quarantine_rate_limited`) and a cap on the pen's total bytes (a hook that would cross it is `503 quarantine_full`; the pen never evicts). See [`delivery.md#quarantine`](delivery.md#quarantine). |
 | `audit.retention_days` | `365` | Days the audit trail keeps a row. An hourly sweep deletes older rows, oldest first, in bounded batches (`[:ankusa, :audit, :pruned]`). A positive integer. Every committed row emits `[:ankusa, :audit]`. See [Architecture](architecture.md#guarantees-by-component). |
 | `tenants.max` | `1_000_000` | The most tenants the store knows (each gets an ordinal at its first committed hook, none is ever reused). A hook of a tenant one past it is refused with `503 tenant_limit` and `Retry-After: 300`, tagged `outcome: :tenant_limit` on the ingest metrics; a known tenant is never refused. Not a secret, so `/v1/config` shows it. An integer from 1 to 4294967294; the store holds about 80 B per tenant plus six counters of 40 B. |
@@ -643,7 +659,8 @@ Boot checks ranges, not only types, and fails with `"<dotted.key> must be
 `claim_check.store_cooldown_ms`, `claim_check.read_deadline_ms`,
 `claim_check.read_timeout_ms`, `claim_check.read_max_inflight`,
 `claim_check.read_cache_max_entry_bytes`, `backup.interval_ms`,
-`backup.keep`, `admin.gauge_interval_ms`, `routes.max_routes` and every
+`backup.keep`, `admin.gauge_interval_ms`, `metrics.max_series_per_metric`,
+`routes.max_routes` and every
 numeric `listener.*` key (`max_connections`, `num_acceptors`, the three
 timeouts, `max_requests_per_connection`, `max_header_count`,
 `max_header_length`) must be positive; `listener.http2` and `metrics.enabled`
@@ -735,6 +752,44 @@ route to it and none to the operator API. It works with `admin.enabled: false`
 (it then also starts the metrics reporter and the gauge poller), and the admin
 listener keeps serving `/metrics` either way. `metrics.tls` secures it like any
 other listener.
+
+#### Metric cardinality
+
+A scrape must not grow with the number of tenants or sources, so the per-hook
+series carry an identity label only as far as `metrics.detail` says, and each
+metric keeps a bounded number of them.
+
+| `metrics.detail` | Labels on the ingest, verify-failure, quarantine, rate-limit and delivery counters | Also |
+| --- | --- | --- |
+| `:tenant` (default) | `tenant_id` | the top-100 `ankusa_tenant_pending` and `ankusa_dispatch_tenant_inflight` gauges (label `tenant`) |
+| `:source` | `tenant_id` and `source_id` | the `ankusa_ingest_duration_seconds` histogram carries both, too |
+| `:none` | neither | no per-tenant gauges: the series set is the same for one tenant and for a million |
+
+`metrics.max_series_per_metric` (default `5000`) caps the label sets one metric
+keeps. A metric admits its first `max_series_per_metric - 1` label sets that
+carry an identity; every later one is counted in a series whose identity
+labels (`tenant_id`, `source_id`, `tenant`) are `"other"`, with its other
+labels (`outcome`, `sink`, …) intact, so nothing is lost from a total and
+`sum without (tenant_id, source_id) (…)` is unchanged. The `"other"` series
+uses the last of the slots (one per combination of the metric's other labels);
+a tenant that is really named `other` shares it. The two per-tenant gauges
+drop a tenant past the ceiling instead, since `"other"` would show whichever
+tenant reported last. A series that was admitted is kept until the node
+restarts. A request for a source that does not exist never carries a label
+(`ankusa_ingest_refused_total{reason="unknown_source"}`), whatever the setting.
+
+Worst case, a scrape has up to `max_series_per_metric` series for each of the
+eight identity-carrying counters (`ankusa_ingest_requests_total`,
+`ankusa_verify_failures_total`, `ankusa_verifier_weak_hash_total`,
+`ankusa_quarantine_rate_limited_total`, `ankusa_quarantine_full_total`,
+`ankusa_rate_limit_rejected_total`, `ankusa_dispatch_deliveries_total`,
+`ankusa_dispatch_dead_lettered_total`) and each of the two gauges, whatever the
+number of tenants. The platform's budget is 10 000 series per node: with many
+active tenants, lower `max_series_per_metric` to fit it, or set `detail:
+none`, which makes the series set independent of the tenant count (the number
+of tenants is `ankusa_tenants`). The ingest and delivery counters are the ones
+that fill first; the failure counters (`verify_failures`, `weak_hash`,
+`quarantine_*`) only grow with tenants that have failures.
 
 #### The admin API
 
@@ -1023,9 +1078,11 @@ for silent), and emit `[:ankusa, :routes, :reject]`; captures emit
 
 #### Rate limits
 
-Ingest admission, enforced by each edge node **in its own memory**: a fleet of N
-edges admits up to N × the limit, so size the numbers per node, not for the
-fleet. It has two layers, in the order a request meets them.
+Ingest admission. By default each edge node enforces it **in its own memory**: a
+fleet of N edges admits up to N × the limit, so size the numbers per node, not
+for the fleet — or set `rate_limits.scope: fleet` for the tenant quota (see
+[Fleet scope](#fleet-scope)). It has two layers, in the order a request meets
+them.
 
 **Before the body is read** — CPU protection for the node, not a quota. These
 are charged after the source is looked up and before a byte of the body is
@@ -1108,6 +1165,70 @@ this node's store (one key per tenant), the same node-local model as
 the config. `PUT` and `DELETE` reset that tenant's buckets, so a raised limit
 is not held back by the old limit's accumulated debt. There is no "unlimited"
 value: to exempt a tenant from a `default`, give it a high limit of its own.
+
+#### Fleet scope
+
+`rate_limits.scope: fleet` and `dedupe.scope: fleet` move two node-local things
+into a store every edge node shares (`fleet.store`, Redis from `ankusa_redis`):
+the **tenant quota** (hooks and bytes per second, `rate_limits.default` and
+`tenants`) and the **provider event key** (a source's `dedupe:`).
+
+```yaml
+rate_limits:
+  scope: fleet
+  default: {rate: 10, burst: 20}
+dedupe:
+  scope: fleet
+fleet:
+  store: {type: redis, url: "${REDIS_URL}", namespace: ankusa:fleet}
+  timeout_ms: 20
+```
+
+With it, two nodes enforce one tenant's `10` hooks per second *combined*, and the
+same event posted to each node is one hook. Nodes share a bucket and a dedupe
+window only on the same `namespace`, and the limit each applies is the one in its
+own config (and its own runtime override: set an override on every node; a `PUT`
+or `DELETE` resets that tenant's fleet bucket). `per_ip`, `node` and `sources` are
+CPU protection for one node and stay per node: a flood is refused before the body
+is read and must not cost Redis a round trip.
+
+**One round trip.** A hook costs one store call: the tenant's charges and the
+dedupe claim are one script (`EVALSHA`, with `EVAL` when Redis lost the script).
+A tenant with no limit and a source with no dedupe key cost none. A hook that is a
+duplicate, or whose key is in flight elsewhere, spends none of the tenant's budget.
+
+**The claim is two-phase.** The key is claimed *pending* ahead of the commit and
+promoted to *committed* (with the hook's id, for the source's `dedupe.ttl_ms`)
+only after the synced commit, off the request path, in batches. Another node
+that meets a *committed* key answers `201` with the first hook's `id` and
+`"duplicate": true`; one that meets a *pending* key answers
+`409 dedupe_pending` with `Retry-After`, because "duplicate" is a `2xx`, and a
+`2xx` for a hook whose commit then failed is a lost webhook. A commit that
+fails releases the claim; a node that dies holding one leaves it to expire
+after `fleet.pending_ttl_ms`. Pending answers are counted as
+`outcome="dedupe_pending"` on `ankusa_ingest_requests_total`.
+
+**A store outage never refuses a hook.** Every fleet call has a hard budget,
+`fleet.timeout_ms`, so a Redis that answers in 300 ms costs each hook at most that
+budget, not 300 ms (which at 10 000 requests per second would pile up 3 000
+requests per node). A call that fails or times out is answered from this node's
+own limiter and its own dedupe index (`ankusa_fleet_fallback_total`). When
+`breaker_failure_rate` of at least `breaker_min_calls` calls in a
+`breaker_window_ms` window failed, a breaker opens and hooks go to the node with no
+call at all for `breaker_open_ms`; then one probe call decides whether it closes
+(`ankusa_fleet_breaker_transitions_total{state}`). While the node is answering
+alone, `ankusa_fleet_limiter_degraded{kind="rate_limit"|"dedupe"}` is `1` and a
+warning is logged at most once a minute. In that mode N nodes admit N × the
+limit again, and a retry on another node can be a second hook, which the consumer
+collapses on the `idempotency_key`.
+
+Settling the claims is bounded too: at most 50 000 outcomes wait for the next
+batch; one more is dropped (`ankusa_fleet_settle_dropped_total{reason}`), which
+costs a delay or a duplicate, never a hook. Tests:
+[`edge_fleet_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/test/ankusa/edge_fleet_test.exs)
+(the claim protocol, the breaker, fallback), and, against a real Redis,
+[`rate_limiter/store/redis_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa_redis/test/ankusa/rate_limiter/store/redis_test.exs)
+(`fleet limiter`, `fleet dedupe`, `degrades without redis`).
 
 #### Egress
 

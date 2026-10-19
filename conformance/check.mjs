@@ -1,7 +1,8 @@
 // Validate conformance/ and run every registered packages/sdk-* against its
 // vectors. Node 22 ESM, stdlib only. `mise run check:conformance` calls this.
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const ROOT = new URL("..", import.meta.url);
@@ -88,18 +89,52 @@ for (const feature of features) {
   console.log(`  ${feature.id}  ${caseCounts.get(feature.id) ?? 0}`);
 }
 
-let failed = false;
-for (const name of Object.keys(sdksFile.sdks).sort()) {
+// The SDKs are independent: each builds and tests in its own directory with its
+// own toolchain, so they run concurrently instead of one after another. A cold
+// runner spends most of this check waiting on a package manager; the pool is
+// bounded because ten toolchains at once thrash a four-core runner's disk and
+// memory. Every SDK still runs to completion, so one run reports every failure.
+// The checks themselves, their order within an SDK, and the verdict are
+// unchanged.
+//
+// CONFORMANCE_JOBS=1 serialises them. The local `mise run check` sets that: its
+// conformance stage overlaps the docker-compose adapters, and
+// ankusa_redis's "a Redis that answers in 500 ms holds an ack for the budget"
+// asserts a p99 on a quiet machine (measured 304 ms against a 150 ms bound
+// when four SDK builds ran beside it).
+const CONCURRENCY = Math.max(
+  1,
+  Math.min(Number(process.env.CONFORMANCE_JOBS) || 4, availableParallelism()),
+);
+const queue = Object.keys(sdksFile.sdks).sort();
+const results = new Map();
+
+async function runSdk(name) {
   const { setup = [], run } = sdksFile.sdks[name];
   const cwd = fileURLToPath(new URL(`packages/${name}`, ROOT));
-  let code = 0;
   for (const [command, ...args] of [...setup, run]) {
-    const result = spawnSync(command, args, { cwd, stdio: "inherit" });
-    if (result.status !== 0) {
-      code = result.status ?? 1;
-      break;
-    }
+    const code = await new Promise((resolve) => {
+      const child = spawn(command, args, { cwd, stdio: "inherit" });
+      child.on("error", () => resolve(1));
+      child.on("close", (status, signal) => resolve(status ?? (signal ? 1 : 0)));
+    });
+    if (code !== 0) return code;
   }
+  return 0;
+}
+
+await Promise.all(
+  Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+    while (queue.length > 0) {
+      const name = queue.shift();
+      results.set(name, await runSdk(name));
+    }
+  }),
+);
+
+let failed = false;
+for (const name of [...results.keys()].sort()) {
+  const code = results.get(name);
   if (code === 0) {
     console.log(`${name}  pass`);
   } else {

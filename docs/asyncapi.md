@@ -47,7 +47,8 @@ Kafka is one topic with the source in the record key, not a topic per source, so
 two Kafka sources on one topic are one channel with two messages. When a
 function (an embedding-only option) computes the address per hook, there is
 nothing to advertise: the channel has no address and says so. `log` and `http`
-sinks are not channels and are left out.
+sinks are not channels and are left out (an `http` sink's description says it
+carries the provider's raw body, not the envelope this document describes).
 
 Validate it with the AsyncAPI CLI:
 

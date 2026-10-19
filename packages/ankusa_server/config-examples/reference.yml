@@ -147,6 +147,16 @@ metrics:
   ip: 127.0.0.1
   # A TLS block, shaped like `listener.tls`.
   # tls: {certfile: /etc/ankusa/tls/server.pem, keyfile: /etc/ankusa/tls/server-key.pem}
+  # The cardinality policy of every /metrics scrape, on this listener and on the
+  # admin API's. Which identity labels the per-hook series carry:
+  #   tenant — `tenant_id` (the default)
+  #   source — `tenant_id` and `source_id`; the most detail, the most series
+  #   none   — neither, and no per-tenant gauges: the scrape does not grow with
+  #            the number of tenants
+  detail: tenant
+  # How many distinct label sets one metric keeps; every later tenant or source
+  # is folded into the series labelled "other" (one slot is reserved for it).
+  max_series_per_metric: 5000
 
 routes:
   # [env ANKUSA_ROUTES_ENABLED] Off captures every POST, as Ankusa always has.
@@ -275,6 +285,14 @@ rate_limits:
   # default: {rate: 50, burst: 100}
   tenants: {}
   #   acme: {rate: 500, burst: 1000, bytes_per_second: 5000000, max_queue: 2000}
+  #
+  # Where the tenant quota above is counted. `node` (the default): in this
+  # node's memory, so N edges admit N x the limit. `fleet`: one bucket per
+  # tenant (hooks and bytes) shared by every edge node through `fleet.store`
+  # below, so the fleet admits one limit. A runtime override (the admin API) is
+  # still read from the node you set it on: set it on every node. `per_ip`,
+  # `node` and `sources` below stay per node under either scope.
+  scope: node
 
   # Before the body is read: CPU protection for this node, not a quota. A forged
   # flood is refused before it costs a read or an HMAC.
@@ -294,6 +312,45 @@ rate_limits:
   # source_rate_limited. Generous by default; `default: null` switches it off.
   sources:
     default: {bytes_per_second: 100000000}
+
+dedupe:
+  # Where a provider's event key (a source's `dedupe`) collapses. `node` (the
+  # default): in this node's store, so a provider retry that lands on another node
+  # is a second hook. `fleet`: the key is claimed in `fleet.store` first, so the
+  # retry is answered with the first hook's id (201, `duplicate: true`) from any
+  # node. A key another node has claimed but not yet made durable is 409
+  # `dedupe_pending` with Retry-After: the sender retries. Needs `fleet.store`.
+  scope: node
+
+fleet:
+  # The shared store behind `rate_limits.scope: fleet` and `dedupe.scope: fleet`.
+  # Absent with both scopes `node`. A store that is down or slow never refuses a
+  # hook: each fleet call is cut off after `timeout_ms`, the hook is answered from
+  # this node's own limiter and dedupe index, and
+  # `ankusa_fleet_limiter_degraded{kind}` reads 1.
+  store: {}
+  # store:
+  #   type: redis
+  #   url: redis://redis:6379
+  #   # Nodes share limits and dedupe only on the same namespace
+  #   # (default `ankusa:fleet:<instance>`).
+  #   namespace: ankusa:fleet
+  #   pool_size: 4
+  #
+  # The hard budget of one fleet call, in ms (1 - 1000).
+  timeout_ms: 20
+  # How long a claimed event key stays "in flight" before another node may claim
+  # it. It must outlast the longest commit; a node that dies holding a claim
+  # leaves it to expire after this.
+  pending_ttl_ms: 30000
+  # The breaker: within `breaker_window_ms`, once `breaker_min_calls` calls were
+  # made and `breaker_failure_rate` (a number above 0 and at most 1) of them
+  # failed or timed out, every hook is answered from this node for
+  # `breaker_open_ms`, then one probe call decides whether it closes.
+  breaker_window_ms: 1000
+  breaker_min_calls: 20
+  breaker_failure_rate: 0.5
+  breaker_open_ms: 5000
 
 quarantine:
   # The holding pen for hooks that fail verification on a source with

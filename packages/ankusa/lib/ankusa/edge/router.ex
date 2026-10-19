@@ -284,6 +284,14 @@ defmodule Ankusa.Edge.Router do
     conn |> retry_after(retry_after_ms) |> send_json(429, %{error: "tenant_overload"})
   end
 
+  # Another node holds this provider event key and has not made its hook durable
+  # yet (`dedupe.scope: :fleet`): not a duplicate (that is a `2xx`, and the hook
+  # may still fail to commit), so the sender retries. A claim normally settles in
+  # milliseconds, so the store's hint is a second at most.
+  defp respond(conn, {:error, {:dedupe_pending, retry_after_ms}}) do
+    conn |> retry_after(retry_after_ms) |> send_json(409, %{error: "dedupe_pending"})
+  end
+
   defp respond(conn, {:error, {:quarantine_rate_limited, retry_after_ms}}) do
     conn |> retry_after(retry_after_ms) |> send_json(429, %{error: "quarantine_rate_limited"})
   end

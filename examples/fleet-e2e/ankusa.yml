@@ -64,13 +64,25 @@ source_store:
   url: "${REDIS_URL}"
   namespace: ankusa:sources:fleet
 
+# Provider event keys collapse fleet-wide: the node that receives an event claims
+# its key in Redis before committing, so the same event retried on the other node
+# is answered with the first hook's id instead of becoming a second hook. A Redis
+# that is down or slow is answered from each node's own dedupe index.
+dedupe:
+  scope: fleet
+
+fleet:
+  store:
+    url: "${REDIS_URL}"
+    namespace: ankusa:fleet:fleet
+
 sources:
   demo:
     verify: {type: none}
     on_verify_failure: accept_flag
-    # The loadgen bodies carry a unique `id`; a provider retry repeats it. The
-    # dedupe index is per node, so the same event sent to the other node is a
-    # second hook, and the consumer's idempotency key collapses the two.
+    # The loadgen bodies carry a unique `id`; a provider retry repeats it, and
+    # `dedupe.scope: fleet` collapses the retry on the other node into the first
+    # hook (run.sh's `duplicate_hooks` is 0).
     dedupe: {json: id}
     sinks:
       - type: rabbitmq

@@ -13,23 +13,28 @@ defmodule Ankusa.Telemetry do
 
   | Event | Measurements | Metadata |
   | --- | --- | --- |
-  | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:route_id` (the route the guard matched, `nil` with routes off; never a metric label), `:size`, `:outcome`, `:dropped_headers` (request headers the stored-header policy removed from the hook; `0` when it was not stored) |
+  | `[:ankusa, :ingest]` (span) | `:duration` | `:instance`, `:source_id`, `:tenant_id`, `:route_id` (the route the guard matched, `nil` with routes off; never a metric label), `:size`, `:outcome`, `:dropped_headers` (request headers the stored-header policy removed from the hook; `0` when it was not stored) |
   | `[:ankusa, :ingest, :refused]` | — | `:instance`, `:reason` (`:unknown_source`, `:payload_too_large`, `:body_read_failed`, `:invalid_header`, `:store_unavailable`) |
-  | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:provider`, `:scheme`, `:status`, `:weak_hash` |
-  | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` |
+  | `[:ankusa, :verify]` (span) | `:duration` | `:instance`, `:source_id`, `:tenant_id`, `:provider`, `:scheme`, `:status`, `:weak_hash` |
+  | `[:ankusa, :commit]` (span) | `:duration`, `:batch_size`, `:bytes` | `:instance` (a batch spans tenants, so it names none) |
   | `[:ankusa, :load_shed]` | `:queue`, `:bytes` | `:instance` |
-  | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
-  | `[:ankusa, :quarantine, :full]` | — | `:instance`, `:source_id` |
+  | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id`, `:tenant_id` |
+  | `[:ankusa, :quarantine, :full]` | — | `:instance`, `:source_id`, `:tenant_id` |
   | `[:ankusa, :rate_limit, :rejected]` | — | `:instance`, `:tenant_id`, `:source_id` |
-  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id` |
-  | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
-  | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:state` (`:open`, `:closed`) |
+  | `[:ankusa, :fleet, :degraded]` | `:degraded` (`1` while the kind is answered from this node alone, else `0`; every second, per kind that is `:fleet`-scoped) | `:instance`, `:kind` (`:rate_limit`, `:dedupe`) |
+  | `[:ankusa, :fleet, :breaker]` | — | `:instance`, `:state` (`:open`, `:closed`) |
+  | `[:ankusa, :fleet, :fallback]` | — | `:instance`, `:kind`, `:reason` (`:breaker_open`, `:error`). One per hook a fleet call did not answer |
+  | `[:ankusa, :fleet, :settle_dropped]` | `:count` | `:instance`, `:reason` (`:queue_full`, `:error`). Dedupe claim outcomes that were not delivered to the fleet store |
+  | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id`, `:tenant_id` |
+  | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:tenant_id`, `:sink` |
+  | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:tenant_id`, `:state` (`:open`, `:closed`) |
   | `[:ankusa, :dispatch, :state]` | `:running`, `:claimed`, `:claimed_bytes`, `:runnable`, `:breakers_open`, `:active_tenants` (the most tenants one scan visited since the last report) | `:instance` |
   | `[:ankusa, :store, :state]` | `:hooks`, `:deliveries`, `:disk_bytes`, `:next_seq` | `:instance` |
   | `[:ankusa, :queue, :state]` | `:pending` (first attempts waiting), `:scheduled` (retries waiting), `:inflight`, `:dead`, `:archive_pending`, `:tenants`, `:oldest_due_age_ms` | `:instance` |
   | `[:ankusa, :tenant, :state]` | `:pending` (one event per tenant of the top 100 by pending) | `:instance`, `:tenant` |
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
+  | `[:ankusa, :sink_http, :state]` | `:origins` (receivers with an open connection pool in `Ankusa.Sink.Http.Pool`) | `:instance` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
   | `[:ankusa, :backup, :stop]` | `:duration`, `:files`, `:bytes` | `:instance`, `:result` (`:ok`, `:error`), `:reason` (on `:error`) |
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |
@@ -57,7 +62,7 @@ defmodule Ankusa.Telemetry do
 
   `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
   `:rejected`, `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
-  `:quarantine_full`, `:overload` or `:store_unavailable`. `:source_id` on
+  `:dedupe_pending`, `:quarantine_full`, `:overload` or `:store_unavailable`. `:source_id` on
   `[:ankusa, :ingest]` is
   always a configured source's id: a request for a source that does not exist
   is a refusal, emitted as `[:ankusa, :ingest, :refused]`, never on the span.

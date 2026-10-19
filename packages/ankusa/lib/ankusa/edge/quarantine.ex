@@ -29,6 +29,7 @@ defmodule Ankusa.Edge.Quarantine do
 
   alias Ankusa.{Audit, Config, Envelope, Store}
   alias Ankusa.Audit.Context
+  alias Ankusa.Queue.Tenants
   alias Ankusa.Store.Keys
   alias Ankusa.Tenant.Gate
 
@@ -103,13 +104,14 @@ defmodule Ankusa.Edge.Quarantine do
   Spend one token of `source_id`'s bucket without writing anything: the charge
   for a hook a source accepts *flagged* (`on_verify_failure: :accept_flag`),
   which is committed like any hook but must not be free to forge. Same bucket,
-  same arithmetic as `put/3`. `{:rate_limited, retry_after_ms}` when it is
-  empty; `{:error, :store_unavailable}` when the pen does not answer.
+  same arithmetic as `put/3`; `tenant_id` only labels the refusal's telemetry.
+  `{:rate_limited, retry_after_ms}` when it is empty; `{:error, :store_unavailable}`
+  when the pen does not answer.
   """
-  @spec hit(atom(), String.t()) ::
+  @spec hit(atom(), String.t(), String.t() | nil) ::
           :ok | {:rate_limited, pos_integer()} | {:error, :store_unavailable}
-  def hit(instance, source_id) do
-    GenServer.call(Ankusa.via(instance, :quarantine), {:hit, source_id})
+  def hit(instance, source_id, tenant_id) do
+    GenServer.call(Ankusa.via(instance, :quarantine), {:hit, source_id, tenant_id})
   catch
     :exit, _reason -> {:error, :store_unavailable}
   end
@@ -341,13 +343,14 @@ defmodule Ankusa.Edge.Quarantine do
   end
 
   @impl true
-  def handle_call({:hit, source_id}, _from, state) do
+  def handle_call({:hit, source_id, tenant_id}, _from, state) do
     bucket = refill(Map.get(state.buckets, source_id), state, mono_ms())
 
     if bucket.tokens < 1.0 do
       Ankusa.Telemetry.emit([:quarantine, :rate_limited], %{}, %{
         instance: state.instance,
-        source_id: source_id
+        source_id: source_id,
+        tenant_id: Tenants.normalize(tenant_id)
       })
 
       retry_after_ms = max(ceil((1.0 - bucket.tokens) * 1000 / state.rate), 1)
@@ -364,7 +367,8 @@ defmodule Ankusa.Edge.Quarantine do
     if bucket.tokens < 1.0 do
       Ankusa.Telemetry.emit([:quarantine, :rate_limited], %{}, %{
         instance: state.instance,
-        source_id: source_id
+        source_id: source_id,
+        tenant_id: Tenants.normalize(env.tenant_id)
       })
 
       retry_after_ms = max(ceil((1.0 - bucket.tokens) * 1000 / state.rate), 1)
@@ -387,7 +391,8 @@ defmodule Ankusa.Edge.Quarantine do
       if state.bytes + size > state.max_bytes do
         Ankusa.Telemetry.emit([:quarantine, :full], %{}, %{
           instance: state.instance,
-          source_id: source_id
+          source_id: source_id,
+          tenant_id: Tenants.normalize(env.tenant_id)
         })
 
         {:reply, :full, put_bucket(state, source_id, bucket)}

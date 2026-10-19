@@ -71,7 +71,7 @@ defmodule AnkusaServer.Config do
   @default_path "/etc/ankusa/ankusa.yml"
   @fallback_path "./ankusa.yml"
 
-  @root_keys ~w(node log http listener admin metrics routes rate_limits quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress audit tenants)
+  @root_keys ~w(node log http listener admin metrics routes rate_limits dedupe fleet quarantine batcher dispatch wal storage claim_check backup sources source_store secrets lifecycle egress audit tenants)
   @node_keys ~w(roles data_dir)
   @log_keys ~w(level banner)
   @http_keys ~w(port max_body_bytes routing prefix store_headers)
@@ -79,7 +79,8 @@ defmodule AnkusaServer.Config do
   @store_headers_fields %{"drop" => :drop, "hash" => :hash}
   @admin_keys ~w(enabled port ip gauge_interval_ms tls auth)
   @listener_keys ~w(tls max_connections num_acceptors read_timeout_ms body_read_timeout_ms request_deadline_ms max_requests_per_connection max_header_count max_header_length http2)
-  @metrics_keys ~w(enabled port ip tls)
+  @metrics_keys ~w(enabled port ip tls detail max_series_per_metric)
+  @metrics_details ~w(tenant source none)
   @tls_keys ~w(certfile keyfile cacertfile verify versions ciphers)
   @auth_keys ~w(mode allow_insecure tokens jwt mtls)
   @auth_modes ~w(none token jwt mtls)
@@ -118,7 +119,12 @@ defmodule AnkusaServer.Config do
   @routes_rule_keys ~w(action cidr)
   @routes_admin_keys ~w(port ip tls auth)
   @routes_seed_keys ~w(id tenant_id source_id path methods enabled ip_rules metadata)
-  @rate_limits_keys ~w(default tenants per_ip node sources)
+  @rate_limits_keys ~w(default tenants per_ip node sources scope)
+  @scopes ~w(node fleet)
+  @dedupe_scope_keys ~w(scope)
+  @fleet_keys ~w(store timeout_ms pending_ttl_ms breaker_window_ms breaker_min_calls breaker_failure_rate breaker_open_ms)
+  @fleet_store_keys ~w(type url namespace pool_size)
+  @fleet_store_types ~w(redis)
   @rate_limit_keys ~w(rate burst bytes_per_second burst_bytes max_body_bytes max_queue max_queue_bytes)
   @hook_limit_keys ~w(rate burst)
   @rate_limit_sources_keys ~w(default)
@@ -506,6 +512,7 @@ defmodule AnkusaServer.Config do
         metrics_section(doc) ++
         routes_section(doc) ++
         rate_limits_section(doc) ++
+        fleet_section(doc) ++
         quarantine_section(doc) ++
         audit_section(doc) ++
         tenants_section(doc) ++
@@ -652,6 +659,8 @@ defmodule AnkusaServer.Config do
         |> put_opt(:port, int_opt(metrics, "port", path))
         |> put_opt(:ip, string_opt(metrics, "ip", path))
         |> put_opt(:tls, tls_opt(metrics, path))
+        |> put_opt(:detail, atom_enum_opt(metrics, "detail", @metrics_details, path))
+        |> put_opt(:max_series_per_metric, int_opt(metrics, "max_series_per_metric", path))
     ]
   end
 
@@ -1383,7 +1392,48 @@ defmodule AnkusaServer.Config do
         |> put_opt(:per_ip, hook_limit_opt(rate_limits, "per_ip", path))
         |> put_opt(:node, hook_limit_opt(rate_limits, "node", path))
         |> put_opt(:sources, rate_limit_sources(rate_limits, path))
+        |> put_opt(:scope, atom_enum_opt(rate_limits, "scope", @scopes, path))
     ]
+  end
+
+  # `dedupe.scope` and the `fleet` block behind both fleet scopes
+  # (`Ankusa.Edge.Fleet`). A store with a `url` and no `type` is Redis, the one
+  # fleet store there is.
+  defp fleet_section(doc) do
+    dedupe = section!(doc, "dedupe", @dedupe_scope_keys, [])
+    fleet = section!(doc, "fleet", @fleet_keys, [])
+    path = ["fleet"]
+
+    [
+      dedupe: put_opt([], :scope, atom_enum_opt(dedupe, "scope", @scopes, ["dedupe"])),
+      fleet:
+        []
+        |> put_opt(:store, fleet_store(fleet, path))
+        |> put_opt(:timeout_ms, int_opt(fleet, "timeout_ms", path))
+        |> put_opt(:pending_ttl_ms, int_opt(fleet, "pending_ttl_ms", path))
+        |> put_opt(:breaker_window_ms, int_opt(fleet, "breaker_window_ms", path))
+        |> put_opt(:breaker_min_calls, int_opt(fleet, "breaker_min_calls", path))
+        |> put_opt(:breaker_failure_rate, number_opt(fleet, "breaker_failure_rate", path))
+        |> put_opt(:breaker_open_ms, int_opt(fleet, "breaker_open_ms", path))
+    ]
+  end
+
+  defp fleet_store(fleet, path) do
+    case section!(fleet, "store", @fleet_store_keys, path) do
+      store when map_size(store) == 0 ->
+        nil
+
+      store ->
+        path = path ++ ["store"]
+
+        url = required_string!(store, "url", path)
+        enum!(store["type"] || "redis", @fleet_store_types, path ++ ["type"])
+
+        {Ankusa.RateLimiter.Store.Redis,
+         [url: url]
+         |> put_opt(:namespace, string_opt(store, "namespace", path))
+         |> put_opt(:pool_size, int_opt(store, "pool_size", path))}
+    end
   end
 
   defp rate_limit_opt(map, key, path) do

@@ -156,7 +156,8 @@ defmodule Ankusa.Edge.Publish do
       result: result,
       attempts: 1,
       sink: mod,
-      source_id: env.source_id
+      source_id: env.source_id,
+      tenant_id: Ankusa.Queue.Tenants.normalize(env.tenant_id)
     })
   end
 end

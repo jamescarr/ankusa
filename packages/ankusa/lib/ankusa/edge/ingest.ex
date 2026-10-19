@@ -40,10 +40,22 @@ defmodule Ankusa.Edge.Ingest do
   the tenant's hooks and bytes per second (`{:error, {:rate_limited, ms}}`), and
   its share of the batchers, charged by `Ankusa.Edge.Batcher.commit/4`
   (`{:error, {:tenant_overload, ms}}`). Both are `429`s, and neither is the
-  node's `503 overload`.
+  node's `503 overload`. With `rate_limits.scope: :fleet` / `dedupe.scope: :fleet`
+  the quota and the provider event key are counted fleet-wide
+  (`Ankusa.Edge.Fleet`): an event key another node has claimed but not yet made
+  durable is `{:error, {:dedupe_pending, ms}}` (`409`, retried by the sender), and
+  one it has committed is a `{:duplicate, env}` carrying that node's hook id.
   """
 
-  alias Ankusa.Edge.{Batcher, BatcherSupervisor, Publish, Quarantine, RateLimiter, StoredHeaders}
+  alias Ankusa.Edge.{
+    Batcher,
+    BatcherSupervisor,
+    Fleet,
+    Publish,
+    Quarantine,
+    StoredHeaders
+  }
+
   alias Ankusa.{Envelope, Source, Verification}
 
   @type result ::
@@ -61,7 +73,8 @@ defmodule Ankusa.Edge.Ingest do
              | {:invalid_header, String.t() | nil}
              | {:rate_limited, pos_integer()}
              | {:tenant_overload, pos_integer()}
-             | {:quarantine_rate_limited, pos_integer()}}
+             | {:quarantine_rate_limited, pos_integer()}
+             | {:dedupe_pending, pos_integer()}}
 
   @typedoc """
   Why a request was answered before it reached `ingest/4`. The whole set: every
@@ -246,7 +259,12 @@ defmodule Ankusa.Edge.Ingest do
   """
   @spec ingest(atom(), Source.t(), String.t(), raw_request()) :: result()
   def ingest(instance, %Source{} = source, tenant_id, req) do
-    metadata = %{instance: instance, source_id: source.id, route_id: Map.get(req, :route_id)}
+    metadata = %{
+      instance: instance,
+      source_id: source.id,
+      tenant_id: tenant_id,
+      route_id: Map.get(req, :route_id)
+    }
 
     Ankusa.Telemetry.span([:ingest], metadata, fn ->
       {result, dropped} = accept(instance, source, tenant_id, req)
@@ -282,7 +300,7 @@ defmodule Ankusa.Edge.Ingest do
     if match?(%Verification{flagged: true}, env.verification) do
       # A forged, flag-accepted request must not claim a provider event key and
       # suppress the real event, so no key is extracted when the hook was flagged.
-      case Quarantine.hit(instance, env.source_id) do
+      case Quarantine.hit(instance, env.source_id, env.tenant_id) do
         :ok -> commit_stored(instance, source, env)
         {:rate_limited, ms} -> {{:error, {:quarantine_rate_limited, ms}}, 0}
         {:error, :store_unavailable} -> {{:error, :store_unavailable}, 0}
@@ -292,13 +310,21 @@ defmodule Ankusa.Edge.Ingest do
       # dedupe on a header the stored-header policy then removes.
       env = %{env | dedupe_key: Ankusa.Dedupe.key(source.dedupe, env)}
 
-      case RateLimiter.hit(instance, env.tenant_id, env.size) do
-        :ok ->
-          commit_stored(instance, source, env)
+      case Fleet.admit(instance, source, env) do
+        {:ok, claim} ->
+          {result, dropped} = commit_stored(instance, source, env)
+          Fleet.settle(instance, claim, result)
+          {result, dropped}
+
+        {:duplicate, hook_id} ->
+          {{:duplicate, %{env | id: hook_id, seq: nil}}, 0}
 
         {:error, {:rate_limited, _}} = limited ->
           rate_limit_rejected(instance, env)
           {limited, 0}
+
+        {:error, {:dedupe_pending, _}} = pending ->
+          {pending, 0}
       end
     end
   end
@@ -347,12 +373,16 @@ defmodule Ankusa.Edge.Ingest do
     opts = request_opts(mod, opts, req)
 
     outcome =
-      Ankusa.Telemetry.span([:verify], %{instance: instance, source_id: source.id}, fn ->
-        result = mod.verify(env, opts)
+      Ankusa.Telemetry.span(
+        [:verify],
+        %{instance: instance, source_id: source.id, tenant_id: env.tenant_id},
+        fn ->
+          result = mod.verify(env, opts)
 
-        {result,
-         %{provider: mod, scheme: scheme, status: verify_status(result), weak_hash: weak_hash}}
-      end)
+          {result,
+           %{provider: mod, scheme: scheme, status: verify_status(result), weak_hash: weak_hash}}
+        end
+      )
 
     case outcome do
       :ok ->
@@ -478,5 +508,6 @@ defmodule Ankusa.Edge.Ingest do
   defp tag({:error, {:rate_limited, _retry_after_ms}}), do: :rate_limited
   defp tag({:error, {:tenant_overload, _retry_after_ms}}), do: :tenant_overload
   defp tag({:error, {:quarantine_rate_limited, _retry_after_ms}}), do: :quarantine_rate_limited
+  defp tag({:error, {:dedupe_pending, _retry_after_ms}}), do: :dedupe_pending
   defp tag({:error, reason}), do: reason
 end

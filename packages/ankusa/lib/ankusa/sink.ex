@@ -93,8 +93,10 @@ defmodule Ankusa.Sink do
 
   `subject` names the hook the description is for: `source_id`, and `tenant_id`
   (`nil` when the tenant varies per hook, i.e. a resolver that reads it from the
-  URL). Only messaging sinks implement this; `Ankusa.Sink.Log` and
-  `Ankusa.Sink.Http` have no channel to advertise and are left out.
+  URL). Messaging sinks describe the channel they publish the envelope to;
+  `Ankusa.Sink.Http` describes its destination with `payload: :body` and says
+  which options it `computed` per hook, and `Ankusa.Sink.Log` has no channel to
+  advertise. Only `payload: :message` descriptions reach the AsyncAPI document.
 
   The description must never contain credentials or URL userinfo.
   """

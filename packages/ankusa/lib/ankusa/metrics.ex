@@ -25,20 +25,50 @@ defmodule Ankusa.Metrics do
   exported in `System.monotonic_time/0`'s native units. The `:unit` options
   below therefore describe the value that actually reaches Prometheus.
 
+  ## Cardinality policy
+
+  A scrape must not grow with the number of tenants or sources: ten thousand
+  tenants each sending one hook must not be
+  ten thousand series. `metrics.detail` decides which identity labels a
+  per-hook metric carries, and `metrics.max_series_per_metric` caps what is kept
+  of them.
+
+    * `:tenant` (the default): `tenant_id` on the ingest, verify-failure,
+      quarantine, rate-limit and delivery counters, and the two per-tenant
+      gauges. Duration histograms carry no identity.
+    * `:source`: `tenant_id` and `source_id` on all of those, and on the ingest
+      duration histogram.
+    * `:none`: neither label, and no per-tenant gauges: the series set is the
+      same for one tenant and for a million.
+
+  Under `:tenant` and `:source`, a metric keeps its first
+  `max_series_per_metric - 1` label sets that carry an identity; every later one
+  is reported with `tenant_id`/`source_id`/`tenant` set to `"other"` (see
+  `Ankusa.Metrics.Cardinality`). An identity is never an unauthenticated
+  value: `tenant_id` and `source_id` are only set after the source has been
+  looked up, and a request for an unknown one is a refusal
+  (`ankusa.ingest.refused.total`) that carries neither.
+
+  The gauges that sample state (`ankusa.tenant.pending`,
+  `ankusa.dispatch.tenant.inflight`) report the top 100 tenants and, past the
+  ceiling, drop the tenants that were not admitted rather than overwrite a
+  shared `"other"` gauge with one tenant's value.
+
   ## Bounded labels
 
-  Label values come from telemetry metadata the framework controls, but failure
-  reasons are terms (`{:unavailable, {:status, 503, body}}`) and some tags are
-  modules. Both would be an unbounded or unusable label, so every tag value goes
-  through `normalize/1`: tuples collapse to their leading atom (`:unavailable`),
-  modules become strings (`"Ankusa.Sink.Http"`), integers are rendered as
-  numbers (only ever a store index or an HTTP status, both bounded), and
-  anything else becomes `:other`. `:outcome` on ingest is already one of a fixed set
-  (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
-  `:tenant_overload`, `:quarantine_rate_limited`, `:quarantine_full`, `:overload`, `:tenant_limit`, `:tenant_erasing` or
+  Every other label value comes from telemetry metadata the framework controls,
+  but failure reasons are terms (`{:unavailable, {:status, 503, body}}`) and
+  some tags are modules. Both would be an unbounded or unusable label, so every
+  tag value goes through `normalize/1`: tuples collapse to their leading atom
+  (`:unavailable`), modules become strings (`"Ankusa.Sink.Http"`), integers are
+  rendered as numbers (only ever a store index or an HTTP status, both
+  bounded), and anything else becomes `:other`. `:outcome` on ingest is already
+  one of a fixed set (`:committed`, `:duplicate`, `:quarantined`, `:rejected`,
+  `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
+  `:dedupe_pending`, `:quarantine_full`, `:overload`, `:tenant_limit`,
+  `:tenant_erasing` or
   `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
-  `:source_id` is bounded because it is only ever a configured source's id: a
-  request for a source that does not exist is counted on
+  A request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
   `:payload_too_large`, `:body_read_failed`, `:invalid_header`,
   `:store_unavailable`, `:ip_rate_limited`, `:node_rate_limited` or
@@ -47,6 +77,8 @@ defmodule Ankusa.Metrics do
 
   import Telemetry.Metrics
 
+  alias Ankusa.Metrics.Cardinality
+
   # 1 ms … 2.5 s, which covers a local WAL commit through a slow upstream sink.
   @seconds_buckets [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]
   # The claim gateway answers at up to `claim_check.read_deadline_ms` (5 s by
@@ -54,20 +86,31 @@ defmodule Ankusa.Metrics do
   @gateway_seconds_buckets @seconds_buckets ++ [5, 10]
 
   @doc """
-  Child spec for this instance's metrics reporter.
+  Child spec for this instance's metrics: a supervisor over the cardinality
+  policy's table (`Ankusa.Metrics.Cardinality`) and the reporter.
 
   `start_async: false` registers the metrics before the reporter's
   `start_link/1` returns, and `Ankusa.Instance` starts this child before any
-  other, so no sibling's events are missed.
+  other, so no sibling's events are missed. The two children restart together:
+  the reporter keeps every series it has seen, and the policy must keep the
+  record of which it admitted.
   """
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
     instance = Keyword.fetch!(opts, :instance)
+    %{id: {__MODULE__, instance}, start: {__MODULE__, :start_link, [instance]}, type: :supervisor}
+  end
 
-    Supervisor.child_spec(
-      {TelemetryMetricsPrometheus.Core,
-       name: reporter_name(instance), metrics: metrics(instance), start_async: false},
-      id: {__MODULE__, instance}
+  @doc false
+  @spec start_link(atom()) :: Supervisor.on_start()
+  def start_link(instance) do
+    Supervisor.start_link(
+      [
+        {Cardinality, instance: instance},
+        {TelemetryMetricsPrometheus.Core,
+         name: reporter_name(instance), metrics: metrics(instance), start_async: false}
+      ],
+      strategy: :one_for_all
     )
   end
 
@@ -88,13 +131,18 @@ defmodule Ankusa.Metrics do
   @spec metrics(atom()) :: [Telemetry.Metrics.t()]
   def metrics(instance) do
     own = &(&1[:instance] == instance)
+    policy = Ankusa.config(instance).metrics
+    ids = identity_tags(policy.detail)
+    # A histogram is a dozen series per label set, so it carries an identity
+    # only when the operator asked for the most detail.
+    histogram_ids = if policy.detail == :source, do: ids, else: []
 
-    [
+    definitions = [
       counter(
         "ankusa.ingest.requests.total",
         scoped(own,
           event_name: [:ankusa, :ingest, :stop],
-          tags: [:instance, :source_id, :outcome]
+          tags: [:instance] ++ ids ++ [:outcome]
         )
       ),
       distribution(
@@ -103,7 +151,7 @@ defmodule Ankusa.Metrics do
           event_name: [:ankusa, :ingest, :stop],
           measurement: &duration_seconds/1,
           unit: :second,
-          tags: [:instance, :source_id],
+          tags: [:instance] ++ histogram_ids,
           reporter_options: [buckets: @seconds_buckets]
         )
       ),
@@ -116,7 +164,7 @@ defmodule Ankusa.Metrics do
         scoped(own,
           event_name: [:ankusa, :verify, :stop],
           keep: &(&1.status == :failed),
-          tags: [:instance, :source_id, :provider, :scheme]
+          tags: [:instance] ++ ids ++ [:provider, :scheme]
         )
       ),
       counter(
@@ -124,7 +172,7 @@ defmodule Ankusa.Metrics do
         scoped(own,
           event_name: [:ankusa, :verify, :stop],
           keep: &(&1[:weak_hash] == true),
-          tags: [:instance, :source_id, :scheme]
+          tags: [:instance] ++ ids ++ [:scheme]
         )
       ),
       distribution(
@@ -156,28 +204,53 @@ defmodule Ankusa.Metrics do
         "ankusa.quarantine.rate_limited.total",
         scoped(own,
           event_name: [:ankusa, :quarantine, :rate_limited],
-          tags: [:instance, :source_id]
+          tags: [:instance | ids]
         )
       ),
       counter(
         "ankusa.quarantine.full.total",
         scoped(own,
           event_name: [:ankusa, :quarantine, :full],
-          tags: [:instance, :source_id]
+          tags: [:instance | ids]
         )
       ),
       counter(
         "ankusa.rate_limit.rejected.total",
         scoped(own,
           event_name: [:ankusa, :rate_limit, :rejected],
-          tags: [:instance, :tenant_id]
+          tags: [:instance | ids]
+        )
+      ),
+      last_value(
+        "ankusa.fleet.limiter.degraded",
+        scoped(own,
+          event_name: [:ankusa, :fleet, :degraded],
+          measurement: :degraded,
+          unit: :unit,
+          tags: [:instance, :kind]
+        )
+      ),
+      counter(
+        "ankusa.fleet.breaker.transitions.total",
+        scoped(own, event_name: [:ankusa, :fleet, :breaker], tags: [:instance, :state])
+      ),
+      counter(
+        "ankusa.fleet.fallback.total",
+        scoped(own, event_name: [:ankusa, :fleet, :fallback], tags: [:instance, :kind, :reason])
+      ),
+      sum(
+        "ankusa.fleet.settle.dropped.total",
+        scoped(own,
+          event_name: [:ankusa, :fleet, :settle_dropped],
+          measurement: :count,
+          tags: [:instance, :reason]
         )
       ),
       counter(
         "ankusa.dispatch.deliveries.total",
         scoped(own,
           event_name: [:ankusa, :dispatch, :stop],
-          tags: [:instance, :result, :sink]
+          tags: [:instance] ++ ids ++ [:result, :sink]
         )
       ),
       counter(
@@ -191,7 +264,7 @@ defmodule Ankusa.Metrics do
         "ankusa.dispatch.dead_lettered.total",
         scoped(own,
           event_name: [:ankusa, :dispatch, :dlq],
-          tags: [:instance, :source_id, :sink]
+          tags: [:instance] ++ ids ++ [:sink]
         )
       ),
       sum(
@@ -296,7 +369,10 @@ defmodule Ankusa.Metrics do
         "ankusa.backup.runs.total",
         scoped(own, event_name: [:ankusa, :backup, :stop], tags: [:instance, :result])
       )
-    ] ++ gauges(own) ++ read_gauges(own) ++ tenant_gauges(own)
+    ]
+
+    (definitions ++ gauges(own) ++ read_gauges(own) ++ tenant_gauges(own, policy.detail))
+    |> Enum.map(&police(&1, instance, policy))
   end
 
   # State, not events: `Ankusa.Metrics.Gauges` samples the store, the queue
@@ -325,6 +401,7 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
+          {"ankusa.sink_http.pool.origins", [:ankusa, :sink_http, :state], :origins, :unit},
           {"ankusa.dispatch.active_tenants", [:ankusa, :dispatch, :state], :active_tenants,
            :unit},
           {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}
@@ -340,9 +417,12 @@ defmodule Ankusa.Metrics do
   # reports the top 100 from the queue counters), and the 100 holding the most
   # claimed, unfinished deliveries (`Ankusa.Dispatch.Pipeline` reports them from
   # its tenant windows, once per housekeeping tick). A tenant that leaves a top
-  # is reported once as 0. Every tenant that ever entered one keeps a series until
-  # the cardinality policy (`metrics.max_series_per_metric`, TEN-7) bounds them.
-  defp tenant_gauges(own) do
+  # is reported once as 0. Every tenant that ever entered one keeps a series, up
+  # to the cardinality policy's ceiling (`metrics.max_series_per_metric`); with
+  # `metrics.detail: :none` there are no per-tenant gauges.
+  defp tenant_gauges(_own, :none), do: []
+
+  defp tenant_gauges(own, _detail) do
     [
       last_value(
         "ankusa.tenant.pending",
@@ -392,6 +472,34 @@ defmodule Ankusa.Metrics do
 
     Keyword.merge(opts, keep: keep, tag_values: &normalize/1)
   end
+
+  # The cardinality policy for one definition. A metric with no identity label
+  # is returned as it is. One with an identity folds the label sets past the
+  # ceiling into `"other"` (`Cardinality.fold/5`), except a gauge, which drops
+  # them: `"other"` would hold whichever tenant reported last.
+  defp police(metric, instance, policy) do
+    %{name: name, tags: tags} = metric
+    table = Cardinality.table(instance)
+    cap = policy.max_series_per_metric
+
+    cond do
+      not Cardinality.policed?(tags) ->
+        metric
+
+      is_struct(metric, Telemetry.Metrics.LastValue) ->
+        keep = metric.keep
+        admitted? = &(Cardinality.admit(table, name, tags, cap, normalize(&1)) == :admitted)
+        %{metric | keep: &(keep.(&1) and admitted?.(&1))}
+
+      true ->
+        %{metric | tag_values: &Cardinality.fold(table, name, tags, cap, normalize(&1))}
+    end
+  end
+
+  # The identity labels a per-hook metric carries at `detail`.
+  defp identity_tags(:none), do: []
+  defp identity_tags(:tenant), do: [:tenant_id]
+  defp identity_tags(:source), do: [:tenant_id, :source_id]
 
   # `Telemetry.Metrics` calls this with the whole metadata map.
   defp normalize(meta), do: Map.new(meta, fn {k, v} -> {k, normalize_value(v)} end)

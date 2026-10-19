@@ -30,6 +30,75 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   sources naming the tenant, and `default`, are refused with `409`.
   Proof: `test/ankusa/tenant_test.exs`, `tenant_s3_integration_test.exs`.
 
+- **Per-tenant observability with a cardinality policy (TEN-7).** `metrics.detail`
+  (`:tenant` by default, `:source`, `:none`) says which identity labels the
+  per-hook Prometheus series carry, and `metrics.max_series_per_metric` (default
+  `5000`, a positive integer) caps how many label sets one metric keeps: the first
+  `max_series_per_metric - 1` are admitted, every later one is counted under
+  `tenant_id`/`source_id` `"other"` (`Ankusa.Metrics.Cardinality`, an ETS
+  admission in the emitting process: one `:ets.member/2` for a known label set).
+  The ingest, verify-failure, quarantine, rate-limit and delivery counters now
+  carry `tenant_id`; `source_id` only under `:source`, which also puts both on
+  the ingest duration histogram; `:none` carries neither and drops the two
+  per-tenant gauges, so the scrape does not grow with the tenant count. A gauge
+  past the ceiling drops the tenant instead of writing to `"other"`. The
+  `[:ankusa, :ingest]`, `[:verify]`, `[:quarantine, *]` and `[:dispatch, :stop |
+  :dlq | :breaker]` events carry `:tenant_id` metadata. `Ankusa.Metrics` is now a
+  supervisor (the policy's table and the reporter restart together).
+  **Behaviour change:** `source_id` is no longer a label by default (it was on the
+  ingest, verify-failure, weak-hash, quarantine and dead-letter series, and the
+  ingest duration histogram), and `Ankusa.Edge.Quarantine.hit` takes the tenant
+  too (`instance, source_id, tenant_id`). See `docs/configuration.md#metric-cardinality`;
+  tests in `metrics_test.exs`, `config_test.exs`.
+- **Per-tenant HTTP destinations on shared sources (TEN-8).** `Sink.Http`'s
+  `:url`, `:headers` and `:secret` accept a one-arity function of the
+  `%Envelope{}` or a `{mod, fun, args}`, resolved on every attempt, so one
+  shared source delivers each tenant's hooks to that tenant's receiver. The
+  resolved URL goes through the egress policy on every attempt (a denied or
+  rebinding target fails closed as `{:permanent, {:egress_denied, _}}`), a
+  secret that resolves to nothing is `{:permanent, :unsigned_sink}` unless
+  `allow_unsigned: true`, and a value of the wrong shape is `{:permanent,
+  {:computed, key, :invalid}}`. `validate_opts!/1` checks the shapes at load.
+  `Sink.Http.describe/2` reports `computed: [...]` and `payload: :body` in the
+  new `Sink.Description` fields of those names (`payload: :message`, the
+  default, is what the AsyncAPI document keeps; `host` may now be `nil`).
+  Computed URLs connect through `Ankusa.Sink.Http.Pool`, one bounded Finch per
+  instance started by `Ankusa.Instance` (4 connections per origin, an origin's
+  pool closed after 30 s idle, new origins refused with
+  `{:error, :pool_origins_exhausted}` past 4,096, gauge
+  `ankusa_sink_http_pool_origins`), instead of Req's pool per origin that is
+  never closed; owned pools for every outbound client are DEL-3, which replaces
+  it. A computed `:url` cannot also set `:cacertfile` or `:allow_insecure_tls`.
+  `finch` is now a declared dependency (already locked through Req).
+  `HttpClient` honours `req_options: [finch: [name: pool]]`, which raised
+  before (Req refuses `:finch` beside the `:connect_options` it always set); the
+  pool then owns the connection options, and combining it with `:connect_options`,
+  `:cacertfile` or `allow_insecure_tls` raises `ArgumentError`.
+- **Fleet-scoped rate limits and dedupe (TEN-6).** `rate_limits.scope` and the new
+  `dedupe.scope` take `:node` (the default, unchanged) or `:fleet`: the tenant quota
+  (hooks and bytes per second) and the provider event key are then counted in
+  `fleet.store`, a module implementing the new `Ankusa.RateLimiter.Store` and
+  `Ankusa.Dedupe.Store` behaviours (`Ankusa.RateLimiter.Store.Redis` in
+  `ankusa_redis`), so N edge nodes enforce one limit and a provider retry on
+  another node is the first hook, not a second. `Ankusa.Edge.Fleet` is the request
+  path's one entry (`Ingest` calls it in place of `RateLimiter.hit/3`): one store
+  call per hook carries the tenant's charges and the dedupe claim. The claim is
+  two-phase: *pending* before the commit, *committed* (with the hook's id) after
+  it, off the request path in batches; a commit that fails releases it, a key
+  another node holds pending is `409 dedupe_pending` with `Retry-After`
+  (`outcome` `:dedupe_pending`), one it committed is `201` with the first hook's
+  `id` and `"duplicate": true`. A limiter outage never refuses a hook: every call
+  has a hard budget (`fleet.timeout_ms`, 1–1000, default 20), a call that fails or
+  times out is answered from the node's own limiter and dedupe index, and a breaker
+  (`fleet.breaker_*`) opens on the failure *rate* and probes half-open. New
+  telemetry and metrics: `[:ankusa, :fleet, :degraded | :breaker | :fallback |
+  :settle_dropped]`, `ankusa_fleet_limiter_degraded{kind}`,
+  `ankusa_fleet_breaker_transitions_total`, `ankusa_fleet_fallback_total`,
+  `ankusa_fleet_settle_dropped_total`. `per_ip`, `node` and `sources` stay per node.
+  New config: `fleet` (`store`, `timeout_ms`, `pending_ttl_ms`, `breaker_window_ms`,
+  `breaker_min_calls`, `breaker_failure_rate`, `breaker_open_ms`),
+  `dedupe.scope`, `rate_limits.scope`; `RateLimiter.fleet_charges/3`. Tests:
+  `edge_fleet_test.exs`, `config_test.exs`.
 - **Dispatch fairness by tenant (TEN-3).** A scan claims from the tenants with
   work due by deficit round-robin (an equal share of the page each, a tenant
   with less due leaves the rest to the others, a tenant the page did not reach
