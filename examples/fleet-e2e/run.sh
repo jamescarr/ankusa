@@ -56,7 +56,10 @@ done
 case "$WAL" in disk | dual) ;; *) usage ;; esac
 
 # Env knobs (override by exporting before invoking this script).
-if [ "$KILL_NODE" = 1 ]; then : "${RATE:=1000}"; else : "${RATE:=200}"; fi
+: "${RATE:=200}"
+# the host-loss phases run at the plan's per-node rate (1 000 req/s); the steady and chaos
+# phases keep RATE, so the fleet dedupe store is not starved on a small runner
+: "${HOSTLOSS_RATE:=1000}"
 : "${DURATION:=45}"
 : "${BURST_SECONDS:=10}"
 : "${CONCURRENCY:=32}"
@@ -379,9 +382,9 @@ OUTAGE_ACKED=0
 OUTAGE_REFUSED=0
 SECONDARY_APPLIED=0
 if [ "$KILL_NODE" = 1 ]; then
-  phase "host loss: ankusa-a and its volume are lost under load ($RATE/s, RabbitMQ paused so acked hooks are undelivered)"
+  phase "host loss: ankusa-a and its volume are lost under load ($HOSTLOSS_RATE/s, RabbitMQ paused so acked hooks are undelivered)"
   wait_for 240 "a backup of ankusa-a in the primary and the secondary bucket" backups_present
-  run_loadgen hostloss --rate "$RATE" --duration "$DURATION" --concurrency 64 &
+  run_loadgen hostloss --rate "$HOSTLOSS_RATE" --duration "$DURATION" --concurrency 64 &
   LOADGEN_PID=$!
   sleep 5
   echo "    +5s   pausing RabbitMQ: hooks acked from now on wait on their node"
@@ -453,7 +456,7 @@ if [ "$KILL_NODE" = 1 ] && [ "$WAL" = dual ]; then
   echo "    both nodes ack again"
 
   phase "host loss with only the secondary backup: the primary is deleted, \`recover\` replays the log"
-  run_loadgen secondary --rate "$RATE" --duration "$DURATION" --concurrency 64 &
+  run_loadgen secondary --rate "$HOSTLOSS_RATE" --duration "$DURATION" --concurrency 64 &
   LOADGEN_PID=$!
   sleep 20
   echo "    +20s  pausing RabbitMQ"

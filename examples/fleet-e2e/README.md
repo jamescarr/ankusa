@@ -105,7 +105,7 @@ and, after the chaos phase, loses the *host*:
 
 | Phase | What it does | What it asserts |
 | --- | --- | --- |
-| host loss | `RATE` (1 000) per second; at +5 s RabbitMQ is **paused** so acked hooks wait undelivered on their node; at +12 s `ankusa-a` is killed **and its volume deleted**; at +14 s a replacement starts with the same node id on an empty volume; at +20 s RabbitMQ resumes | `dual`: the replacement restores the backup and replays the intake log, and every `201` id reaches the consumer (`missing=0`, `duplicate_hooks=0`). `disk`: only the backup comes back, so the hooks acked since it (still undelivered when the host died) are gone, and the run **fails unless it sees that loss** |
+| host loss | `HOSTLOSS_RATE` (1 000) per second; at +5 s RabbitMQ is **paused** so acked hooks wait undelivered on their node; at +12 s `ankusa-a` is killed **and its volume deleted**; at +14 s a replacement starts with the same node id on an empty volume; at +20 s RabbitMQ resumes | `dual`: the replacement restores the backup and replays the intake log, and every `201` id reaches the consumer (`missing=0`, `duplicate_hooks=0`). `disk`: only the backup comes back, so the hooks acked since it (still undelivered when the host died) are gone, and the run **fails unless it sees that loss** |
 | brokers down | (`dual`) the three brokers stop; 16 requests go straight to the nodes | every one is `503 intake_unavailable` with `Retry-After`, none is acked, `/ready` is 503; after the brokers return both nodes answer `201` |
 | secondary only | (`dual`) the same load; the primary backup is deleted, the host lost again | the store is restored from the **secondary** bucket and brought forward by the image's `recover` command (it must apply hooks from the log), then every `201` id reaches the consumer |
 
@@ -121,7 +121,8 @@ and its replacement delivers again from the backup and the log (same hook id, sa
 
 | Variable | Default | |
 | --- | --- | --- |
-| `RATE` | `200` (`1000` with `--kill-node`) | paced requests per second (steady, chaos, host loss) |
+| `RATE` | `200` | paced requests per second (steady, chaos) |
+| `HOSTLOSS_RATE` | `1000` | paced requests per second of the `--kill-node` host-loss phases (the plan's per-node rate) |
 | `DURATION` | `45` | seconds per paced phase; at least 40, the chaos timeline runs to +35 s |
 | `BURST_SECONDS`, `CONCURRENCY` | `10`, `32` | the closed-loop burst |
 | `BUILD_ANKUSA` | `1` | `0` skips `docker build` and uses `ANKUSA_IMAGE` |
