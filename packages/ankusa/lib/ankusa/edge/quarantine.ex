@@ -37,6 +37,9 @@ defmodule Ankusa.Edge.Quarantine do
   @sweep_interval_ms 60_000
   @max_ms 0xFFFF_FFFF_FFFF_FFFF
   @purge_timeout_ms 60_000
+  @retention_interval_ms 3_600_000
+  @retention_chunk 1_000
+  @retention_chunks 100
 
   @typedoc """
   `:source_id`/`:id` match the summary; `:since`/`:until` (ms, inclusive) bound
@@ -150,6 +153,31 @@ defmodule Ankusa.Edge.Quarantine do
     )
   catch
     :exit, _reason -> {:error, :store_unavailable}
+  end
+
+  @doc """
+  Delete the entries held longer than `quarantine.retention_days`, oldest first,
+  in synced batches of at most #{1_000}, each with its audit row
+  (`quarantine.retention`). An entry a live `kind: :quarantine` replay job can
+  still reach (received at or after the earliest `since` of one) stays; so does
+  everything while the replayer cannot say. Runs hourly, in a process of its own;
+  callable on its own. `more` says a pass's budget, not the end of the pen,
+  stopped it. Emits `[:ankusa, :quarantine, :pruned]` (`count`, `bytes`) per batch.
+  """
+  @spec prune(atom()) ::
+          {:ok, %{deleted: non_neg_integer(), bytes: non_neg_integer(), more: boolean()}}
+          | {:error, term()}
+  def prune(instance) do
+    days = Ankusa.config(instance).quarantine.retention_days
+    cutoff = System.system_time(:millisecond) - days * 86_400_000
+
+    with {:ok, floor} <- Ankusa.Replay.live_floor(instance, :quarantine, :since) do
+      prune_chunks(instance, range(nil, min(cutoff, floor) - 1), @retention_chunks, %{
+        deleted: 0,
+        bytes: 0,
+        more: false
+      })
+    end
   end
 
   @doc """
@@ -326,6 +354,7 @@ defmodule Ankusa.Edge.Quarantine do
     case held_bytes(instance) do
       {:ok, bytes} ->
         schedule_sweep()
+        schedule_retention(@retention_interval_ms)
 
         {:ok,
          %{
@@ -334,7 +363,8 @@ defmodule Ankusa.Edge.Quarantine do
            rate: rate * 1.0,
            max_bytes: max_bytes,
            bytes: bytes,
-           buckets: %{}
+           buckets: %{},
+           pruning: nil
          }}
 
       {:error, reason} ->
@@ -463,6 +493,39 @@ defmodule Ankusa.Edge.Quarantine do
 
     schedule_sweep()
     {:noreply, %{state | buckets: buckets}}
+  end
+
+  # The retention sweep runs in a process of its own (`prune/1`): it asks the
+  # replayer for its jobs, which the pen must never wait on.
+  def handle_info(:retention, %{pruning: nil} = state) do
+    instance = state.instance
+
+    {_pid, ref} =
+      spawn_monitor(fn ->
+        case prune(instance) do
+          {:ok, %{more: true}} ->
+            exit({:shutdown, :more})
+
+          {:ok, _done} ->
+            exit(:normal)
+
+          {:error, reason} ->
+            Logger.warning("[ankusa] quarantine retention failed, retrying: #{inspect(reason)}")
+            exit(:normal)
+        end
+      end)
+
+    {:noreply, %{state | pruning: ref}}
+  end
+
+  def handle_info(:retention, state) do
+    schedule_retention(@retention_interval_ms)
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{pruning: ref} = state) do
+    schedule_retention(if reason == {:shutdown, :more}, do: 1_000, else: @retention_interval_ms)
+    {:noreply, %{state | pruning: nil}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -598,6 +661,58 @@ defmodule Ankusa.Edge.Quarantine do
     do: %{state | buckets: Map.put(state.buckets, source_id, bucket)}
 
   defp schedule_sweep, do: Process.send_after(self(), :sweep, @sweep_interval_ms)
+  defp schedule_retention(ms), do: Process.send_after(self(), :retention, ms)
+
+  defp prune_chunks(_instance, _range, 0, acc), do: {:ok, %{acc | more: true}}
+
+  defp prune_chunks(instance, range, left, acc) do
+    with {:ok, hits} <- purge_hits(instance, range, %{}, @retention_chunk) do
+      case hits do
+        [] ->
+          {:ok, acc}
+
+        hits ->
+          pruned = prune_hits(instance, hits)
+
+          with {:ok, bytes} <- pruned do
+            acc = %{acc | deleted: acc.deleted + length(hits), bytes: acc.bytes + bytes}
+
+            if length(hits) < @retention_chunk,
+              do: {:ok, acc},
+              else: prune_chunks(instance, range, left - 1, acc)
+          end
+      end
+    end
+  end
+
+  # One chunk, in one synced batch with its audit row: `{:ok, bytes}`.
+  defp prune_hits(instance, hits) do
+    ops = Enum.flat_map(hits, fn {key, _size} -> delete_ops(key) end)
+    bytes = hits |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+    <<?s, oldest::64, _::binary>> = hits |> hd() |> elem(0)
+    <<?s, newest::64, _::binary>> = hits |> List.last() |> elem(0)
+
+    attrs = %{
+      action: "quarantine.retention",
+      resource: "quarantine",
+      detail: %{
+        "deleted" => length(hits),
+        "bytes" => bytes,
+        "oldest_received_at" => oldest,
+        "newest_received_at" => newest
+      }
+    }
+
+    with :ok <- Audit.commit(instance, Context.system(), attrs, ops) do
+      released(instance, bytes)
+
+      Ankusa.Telemetry.emit([:quarantine, :pruned], %{count: length(hits), bytes: bytes}, %{
+        instance: instance
+      })
+
+      {:ok, bytes}
+    end
+  end
 
   defp mono_ms, do: System.monotonic_time(:millisecond)
 end

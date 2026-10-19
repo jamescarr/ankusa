@@ -31,6 +31,12 @@ defmodule Ankusa.Storage.Compactor do
   alias Ankusa.Queue.{Archive, Reclaim}
   alias Ankusa.Store.Keys
 
+  # The catalogue sweep: hourly, `@catalogue_batch` segments a batch.
+  @retention_interval_ms 3_600_000
+  @catalogue_batch 100
+  @catalogue_batches 20
+  @day_ms 86_400_000
+
   # ── lifecycle ─────────────────────────────────────────────────────────────
 
   def start_link(opts) do
@@ -46,6 +52,127 @@ defmodule Ankusa.Storage.Compactor do
   @spec tick(atom()) :: {:ok, non_neg_integer()}
   def tick(instance), do: GenServer.call(Ankusa.via(instance, :compactor), :tick)
 
+  @doc """
+  Delete the catalogue rows past retention: a segment's row (`?S`) once its newest
+  hook is older than `storage.catalogue_retention_days` (or, with
+  `archive.retention_days` set, that many days, deleting the segment object and
+  its index through the blob store as well), and a 0.3 import's location row
+  (`?L`) once its hook is. Runs hourly in a process of its own; callable on its
+  own.
+
+  What a replay or a delivery still needs stays: a segment an archive replay job
+  (`running` or `paused`) can still read (its newest hook is at or after the
+  job's `from`), and a segment holding the hook of a delivery row that is still
+  owed (pending or dead): the DLQ reaper evicts that row only while the catalogue
+  can find its hook. The sweep deletes nothing when the replayer cannot say what
+  its jobs need. Emits `[:ankusa, :archive, :pruned]` (`segments`, `objects`,
+  `legacy`); `more` says the pass's budget, not the catalogue, ran out.
+  """
+  @spec prune_catalogue(atom()) ::
+          {:ok,
+           %{
+             segments: non_neg_integer(),
+             objects: non_neg_integer(),
+             legacy: non_neg_integer(),
+             more: boolean()
+           }}
+          | {:error, term()}
+  def prune_catalogue(instance) do
+    %Config{storage: storage, archive: archive} = Ankusa.config(instance)
+    objects? = archive.retention_days != nil
+    days = archive.retention_days || storage.catalogue_retention_days
+    cutoff = System.system_time(:millisecond) - days * @day_ms
+
+    with {:ok, floor} <- Ankusa.Replay.live_floor(instance, :archive, :from) do
+      cutoff = if floor == :infinity, do: cutoff, else: min(cutoff, floor - 1_000)
+      done = %{segments: 0, objects: 0, more: false}
+
+      with {:ok, done} <- prune_segments(instance, cutoff, objects?, 0, @catalogue_batches, done),
+           {:ok, legacy} <- prune_legacy(instance, cutoff, @catalogue_batches, 0) do
+        done = Map.put(done, :legacy, legacy)
+
+        if done.segments + legacy > 0,
+          do:
+            Ankusa.Telemetry.emit(
+              [:archive, :pruned],
+              Map.take(done, [:segments, :objects, :legacy]),
+              %{instance: instance}
+            )
+
+        {:ok, done}
+      end
+    end
+  end
+
+  defp prune_segments(_instance, _cutoff, _objects?, _after, 0, done),
+    do: {:ok, %{done | more: true}}
+
+  defp prune_segments(instance, cutoff, objects?, after_seq, left, done) do
+    with {:ok, rows} <- Archive.expired_segments(instance, cutoff, @catalogue_batch, after_seq),
+         {:ok, doomed} <- not_owed(instance, rows),
+         :ok <- delete_objects(instance, doomed, objects?),
+         :ok <- Archive.delete_rows(instance, Enum.map(doomed, &elem(&1, 0))) do
+      done = %{
+        done
+        | segments: done.segments + length(doomed),
+          objects: done.objects + if(objects?, do: 2 * length(doomed), else: 0)
+      }
+
+      if length(rows) < @catalogue_batch do
+        {:ok, done}
+      else
+        {_key, last} = List.last(rows)
+        prune_segments(instance, cutoff, objects?, last.first_seq, left - 1, done)
+      end
+    end
+  end
+
+  # The rows no delivery row is still owed for: `{:ok, [{key, row}]}`.
+  defp not_owed(instance, rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn {_key, row} = entry, {:ok, keep} ->
+      case Archive.owed?(instance, row) do
+        {:ok, true} -> {:cont, {:ok, keep}}
+        {:ok, false} -> {:cont, {:ok, [entry | keep]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, keep} -> {:ok, Enum.reverse(keep)}
+      error -> error
+    end
+  end
+
+  defp delete_objects(_instance, _doomed, false), do: :ok
+
+  defp delete_objects(instance, doomed, true) do
+    for {_key, row} <- doomed, key <- [row.key, row.idx_key], reduce: :ok do
+      :ok -> delete_object(instance, key)
+      error -> error
+    end
+  end
+
+  # A blob store is user code: a raise or an exit is this sweep's failure, retried
+  # on the next pass (the catalogue row stays until its objects are gone).
+  defp delete_object(instance, key) do
+    Ankusa.BlobStore.delete(instance, :segments, key)
+    :ok
+  rescue
+    error -> {:error, {:raised, error}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp prune_legacy(_instance, _cutoff, 0, total), do: {:ok, total}
+
+  defp prune_legacy(instance, cutoff, left, total) do
+    with {:ok, keys} <- Archive.expired_legacy(instance, cutoff, @catalogue_batch * 10),
+         :ok <- Archive.delete_rows(instance, keys) do
+      if length(keys) < @catalogue_batch * 10,
+        do: {:ok, total + length(keys)},
+        else: prune_legacy(instance, cutoff, left - 1, total + length(keys))
+    end
+  end
+
   @impl true
   def init(opts) do
     instance = Keyword.fetch!(opts, :instance)
@@ -58,7 +185,17 @@ defmodule Ankusa.Storage.Compactor do
     end
 
     schedule(interval)
-    {:ok, %{instance: instance, config: config, interval: interval, after_seq: 0, failures: 0}}
+    Process.send_after(self(), :retention, @retention_interval_ms)
+
+    {:ok,
+     %{
+       instance: instance,
+       config: config,
+       interval: interval,
+       after_seq: 0,
+       failures: 0,
+       pruning: nil
+     }}
   end
 
   # Crash reports print the state; the config carries the object store's
@@ -83,6 +220,43 @@ defmodule Ankusa.Storage.Compactor do
     schedule(next_delay(state))
     {:noreply, state}
   end
+
+  # The catalogue sweep runs in a process of its own (`prune_catalogue/1`): it
+  # asks the replayer for its jobs and may delete objects, neither of which the
+  # compactor's tick should wait on.
+  def handle_info(:retention, %{pruning: nil} = state) do
+    instance = state.instance
+
+    {_pid, ref} =
+      spawn_monitor(fn ->
+        case prune_catalogue(instance) do
+          {:ok, %{more: true}} ->
+            exit({:shutdown, :more})
+
+          {:ok, _done} ->
+            exit(:normal)
+
+          {:error, reason} ->
+            Logger.warning("[ankusa] catalogue retention failed, retrying: #{inspect(reason)}")
+            exit(:normal)
+        end
+      end)
+
+    {:noreply, %{state | pruning: ref}}
+  end
+
+  def handle_info(:retention, state) do
+    Process.send_after(self(), :retention, @retention_interval_ms)
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{pruning: ref} = state) do
+    next = if reason == {:shutdown, :more}, do: 1_000, else: @retention_interval_ms
+    Process.send_after(self(), :retention, next)
+    {:noreply, %{state | pruning: nil}}
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   # Same shape as Ankusa.Instance.Isolated's restart backoff, plus the jitter
   # RetryPolicy.Exponential uses: an unreachable object store is retried at

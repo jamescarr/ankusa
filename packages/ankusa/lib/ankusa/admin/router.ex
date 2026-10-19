@@ -22,7 +22,7 @@ defmodule Ankusa.Admin.Router do
   | --- | --- |
   | `GET /metrics`, `GET /v1/wal` | `metrics:read` |
   | `GET /v1/config`, `GET /asyncapi.json` | `config:read` |
-  | `GET /v1/dlq` | `dlq:read` + a `tenant` (filtered) |
+  | `GET /v1/dlq`, `DELETE /v1/dlq` | `dlq:read` / `dlq:write` + a `tenant` (filtered) |
   | `POST /v1/replays` | `replays:write` + a `tenant` (filtered), and `dlq:write` / `quarantine:write` for those kinds |
   | `GET /v1/replays[/:id]` | `replays:read` + a `tenant` (filtered) |
   | `PATCH /v1/replays/:id` | `replays:write` + a `tenant` (filtered) |
@@ -127,6 +127,10 @@ defmodule Ankusa.Admin.Router do
 
   get "/v1/dlq" do
     scoped_role(conn, "dlq:read", :dispatch, &dlq_index/2)
+  end
+
+  delete "/v1/dlq" do
+    scoped_role(conn, "dlq:write", :dispatch, &dlq_purge/2)
   end
 
   # The tenant the job is limited to is in the body, so only the scope and
@@ -252,6 +256,52 @@ defmodule Ankusa.Admin.Router do
     else
       {:error, field} -> invalid_filter(conn, field)
     end
+  end
+
+  # Evicts dead rows for good, the oldest first, under the DLQ reaper's rule: a
+  # row whose hook is not archived is skipped (`unarchived`), never deleted.
+  # `since`/`until` are inclusive bounds on the dead-letter time (ms). No filter
+  # at all evicts the oldest `limit` archived rows of the caller's tenants.
+  defp dlq_purge(conn, tenants) do
+    params = Plug.Conn.fetch_query_params(conn).query_params
+
+    with {:ok, source_id} <- string_param(params, "source_id"),
+         {:ok, since} <- non_neg_param(params, "since"),
+         {:ok, until} <- non_neg_param(params, "until"),
+         :ok <- if(since && until && until < since, do: {:error, "until"}, else: :ok),
+         {:ok, limit} <- int_param(params, "limit", @default_purge_limit) do
+      filter =
+        Map.merge(
+          %{source_id: source_id, since: since, until: until},
+          tenant_filter(tenants)
+        )
+
+      limit = limit |> max(1) |> min(@max_purge_limit)
+
+      case Ankusa.Queue.DlqReaper.evict(instance(conn), filter, limit,
+             audit: Context.from_conn(conn)
+           ) do
+        {:ok, result} ->
+          send_json(conn, 200, Map.take(result, [:deleted, :bytes, :unarchived, :more]))
+
+        {:error, :audit_backlog} ->
+          audit_backlog(conn)
+
+        {:error, _reason} ->
+          send_json(conn, 503, %{error: "store_unavailable"})
+      end
+    else
+      {:error, field} -> invalid_filter(conn, field)
+    end
+  end
+
+  # The audit trail (or the lifecycle outbox) is over its ceiling: a mutation is
+  # refused rather than an unpublished row dropped (`audit.max_rows`,
+  # `audit.max_bytes`, `audit.outbox_max_backlog`).
+  defp audit_backlog(conn) do
+    conn
+    |> Plug.Conn.put_resp_header("retry-after", "60")
+    |> send_json(503, %{error: "audit_backlog"})
   end
 
   defp quarantine_index(conn, tenants) do

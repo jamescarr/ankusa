@@ -55,11 +55,24 @@ defmodule Ankusa.Storage do
     end
   end
 
+  @doc """
+  The index object of a segment (`%{event_id => {offset, length, seq}}`), as the
+  catalogue row `row` names it: one object read, no frame. `:error` when the
+  object is missing or unreadable.
+  """
+  @spec segment_index(atom(), map()) :: {:ok, map()} | :error
   # Trusted, internally written data (this node's own store rows); never request input.
   # sobelow_skip ["Misc.BinToTerm"]
-  defp locate_in(instance, %{key: key, idx_key: idx_key}, event_id) do
-    with {:ok, bin} <- Ankusa.BlobStore.get(instance, :segments, idx_key),
-         {:ok, {offset, length, seq}} <- Map.fetch(:erlang.binary_to_term(bin), event_id) do
+  def segment_index(instance, %{idx_key: idx_key}) do
+    case Ankusa.BlobStore.get(instance, :segments, idx_key) do
+      {:ok, bin} -> {:ok, :erlang.binary_to_term(bin)}
+      _ -> :error
+    end
+  end
+
+  defp locate_in(instance, %{key: key} = row, event_id) do
+    with {:ok, index} <- segment_index(instance, row),
+         {:ok, {offset, length, seq}} <- Map.fetch(index, event_id) do
       {:ok, {key, offset, length, seq}}
     else
       _ -> nil

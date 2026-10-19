@@ -31,6 +31,11 @@ defmodule Ankusa.Store.Keys do
   def meta("incarnation"), do: "m:incarnation"
   def meta("incarnation_pending"), do: "m:incarnation_pending"
   def meta("intake_offset"), do: "m:intake_offset"
+  # The audit trail's size (`<<rows::64, bytes::64, newest_counted_seq::64>>`),
+  # written in every batch that adds or removes a row, so `audit.max_rows` and
+  # `audit.max_bytes` are checked in O(1) (`Ankusa.Audit`). A value that does not
+  # match the newest row of the trail is recounted at boot.
+  def meta("audit_usage"), do: "m:audit_usage"
   def meta("imported:" <> artifact), do: "m:imported:" <> artifact
 
   # The store's layout version (an integer in decimal), and the resumable marker
@@ -104,7 +109,7 @@ defmodule Ankusa.Store.Keys do
 
   # `counters` column family: one merge-operand row per tenant and field, plus
   # the node aggregate under ordinal 0 (`Ankusa.Queue.Deliveries.Counters`).
-  def counter(ord, field) when field in 1..7, do: <<ord::32, field::8>>
+  def counter(ord, field) when field in 1..8, do: <<ord::32, field::8>>
 
   # Ingest dedupe: `?u` maps a provider event key to
   # `<<expires_at::64, original_id::binary>>`, and `?e` is its expiry-sweep
@@ -215,6 +220,7 @@ defmodule Ankusa.Store.Keys do
     cleared: %{cf: :index, lo: <<?c>>, hi: <<?c, @ff11::binary>>},
     dedupe_expiry: %{cf: :index, lo: <<?e>>, hi: <<?e, @ff8::binary, 0xFF>>},
     segments: %{cf: :archive, lo: <<?S>>, hi: <<?S, @ff8::binary>>},
+    legacy_locations: %{cf: :archive, lo: <<?L>>, hi: <<?L, 0xFF>>},
     quarantine: %{cf: :quarantine, lo: <<?s>>, hi: <<?s, @ff8::binary>>},
     sources: %{cf: :default, lo: "s:", hi: <<"s:", 0xFF>>},
     rate_limits: %{cf: :default, lo: "r:", hi: <<"r:", 0xFF>>},

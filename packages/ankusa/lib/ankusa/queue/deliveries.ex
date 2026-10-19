@@ -757,8 +757,11 @@ defmodule Ankusa.Queue.Deliveries do
       [
         {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary({source_id, id, ord})},
         {:put, :index, Keys.dead_by_tenant(ord, at, seq, sink), <<>>}
-      ] ++ Counters.ops([delta, {ord, :dead, 1}])
+      ] ++ Counters.ops([delta, {ord, :dead, 1}, {ord, :dead_bytes, row_size(row)}])
   end
+
+  defp row_size(%{size: size}) when is_integer(size), do: size
+  defp row_size(_row), do: 0
 
   @doc "A row whose delivery row or hook is gone: drop it and what it counted."
   @spec orphan_ops(from(), pos_integer(), pos_integer(), integer(), integer()) :: [Store.op()]
@@ -888,6 +891,100 @@ defmodule Ankusa.Queue.Deliveries do
     keep?(filter, :source_id, source_id) and keep?(filter, :id, id)
   end
 
+  @typedoc "A dead row a reaper or an operator may evict: `{key, seq, sink, ord, source_id, id}`."
+  @type candidate ::
+          {binary(), pos_integer(), non_neg_integer(), pos_integer(), String.t(),
+           String.t() | nil}
+
+  # The dead rows of `range` (`?x` keys, oldest first) that match `filter`
+  # (`:source_id`, `:tenants`): at most `limit` of them, after examining at most
+  # `max_scan` keys. Returns the candidates (ascending), the last key examined
+  # (`nil` when the range held nothing) and whether the range was exhausted.
+  @spec dead_candidates(atom(), {binary(), binary()}, map(), pos_integer(), pos_integer()) ::
+          {:ok, [candidate()], binary() | nil, boolean()} | {:error, term()}
+  def dead_candidates(instance, range, filter, limit, max_scan) do
+    with {:ok, ords} <- filter_ords(instance, filter) do
+      candidates_scan(instance, range, filter, ords, limit, max_scan)
+    end
+  end
+
+  defp candidates_scan(_instance, _range, _filter, [], _limit, _max_scan),
+    do: {:ok, [], nil, true}
+
+  # Trusted, internally written data (this node's own store rows); never request input.
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp candidates_scan(instance, range, filter, ords, limit, max_scan) do
+    result =
+      Store.fold(instance, :dead, range, {0, 0, [], nil, false}, fn key,
+                                                                    value,
+                                                                    {scanned, n, hits, _last, _} ->
+        {_at, seq, sink} = Keys.decode_dead(key)
+        {source_id, id, ord} = :erlang.binary_to_term(value)
+
+        {n, hits} =
+          if dead_match?(filter, source_id, id) and tenant_match?(ords, ord),
+            do: {n + 1, [{key, seq, sink, ord, source_id, id} | hits]},
+            else: {n, hits}
+
+        if n >= limit or scanned + 1 >= max_scan,
+          do: {:halt, {scanned + 1, n, hits, key, true}},
+          else: {:cont, {scanned + 1, n, hits, key, false}}
+      end)
+
+    case result do
+      {:ok, {_scanned, _n, hits, last, halted?}} -> {:ok, Enum.reverse(hits), last, not halted?}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The batch that evicts the dead rows `candidates` for good: both dead keys, the
+  delivery row, a cleared marker (so `Ankusa.Queue.Reclaim` deletes a hook that
+  nobody owes any more) and the counters (`dead`, `bytes`, `dead_bytes`). Returns
+  the ops and, per row, what the audit row and the telemetry report
+  (`%{key, seq, sink, ord, source_id, id, size}`). Whether a row *may* be evicted
+  is the caller's decision (`Ankusa.Queue.DlqReaper`): this only builds the batch.
+  """
+  @spec evict_ops(atom(), [candidate()]) ::
+          {:ok, [Store.op()], [map()]} | {:error, term()}
+  def evict_ops(_instance, []), do: {:ok, [], []}
+
+  def evict_ops(instance, candidates) do
+    keys =
+      Enum.map(candidates, fn {_key, seq, sink, _ord, _source_id, _id} ->
+        Keys.delivery(seq, sink)
+      end)
+
+    with {:ok, rows} <- Store.multi_get(instance, :deliveries, keys) do
+      evicted =
+        for {{key, seq, sink, ord, source_id, id}, row} <- Enum.zip(candidates, rows) do
+          size =
+            with {:ok, bin} <- row,
+                 {:ok, %{size: size}} when is_integer(size) <- decode_row(bin) do
+              size
+            else
+              _ -> 0
+            end
+
+          %{key: key, seq: seq, sink: sink, ord: ord, source_id: source_id, id: id, size: size}
+        end
+
+      {:ok, coalesce(Enum.flat_map(evicted, &evict_row_ops/1)), evicted}
+    end
+  end
+
+  defp evict_row_ops(%{key: key, seq: seq, sink: sink, ord: ord, size: size}) do
+    {at, ^seq, ^sink} = Keys.decode_dead(key)
+
+    [
+      {:delete, :index, key},
+      {:delete, :index, Keys.dead_by_tenant(ord, at, seq, sink)},
+      {:delete, :deliveries, Keys.delivery(seq, sink)},
+      {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
+      | Counters.ops([{ord, :dead, -1}, {ord, :bytes, -size}, {ord, :dead_bytes, -size}])
+    ]
+  end
+
   # Move dead rows back to pending for a replay job: the revived row keeps its
   # hook and gets `replay: replay_id`, `attempts: 0` and a due time of `now`.
   # A dead key whose row is gone is deleted as an orphan. Returns the batch ops
@@ -928,7 +1025,7 @@ defmodule Ankusa.Queue.Deliveries do
            | dead_gone(key, ord, seq, sink)
          ] ++
            due_ops(ord, now, seq, sink, size, @first_attempt) ++
-           Counters.ops([{ord, :dead, -1}, {ord, :pending, 1}]), n + 1}
+           Counters.ops([{ord, :dead, -1}, {ord, :dead_bytes, -size}, {ord, :pending, 1}]), n + 1}
 
       {:error, reason} ->
         left_in_dlq(seq, sink, reason, n)
@@ -1525,7 +1622,7 @@ defmodule Ankusa.Queue.Deliveries do
             {:delete, :index, Keys.dead(at, seq, sink)},
             {:delete, :deliveries, Keys.delivery(seq, sink)},
             {:put, :index, Keys.cleared(seq, 0, sink), <<>>}
-            | Counters.ops([{ord, :dead, -1}, {ord, :bytes, -size}])
+            | Counters.ops([{ord, :dead, -1}, {ord, :bytes, -size}, {ord, :dead_bytes, -size}])
           ]
         end)
 

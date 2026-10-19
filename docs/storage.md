@@ -204,6 +204,23 @@ event key, in the commit batch of the hook: `?u` (tenant, source, event key →
 Store format 4 added the counter: its migration counts the `?e` keys a format 3
 store holds, in resumable batches of 500.
 
+#### Dead letters, quarantine, catalogue and audit: bounded
+
+Store format 5 added the `dead_bytes` counter (field 8 of `counters`; its
+migration sums the delivery rows of the `?x` keys, resumable in batches of 500).
+
+| | Cap | Sweep | Refusal |
+| --- | --- | --- | --- |
+| **DLQ** | `queue.dlq.max_rows`, `max_bytes`, `retention_days` | `Ankusa.Queue.DlqReaper`, only archived rows (an `?a` obligation is gone and a segment index holds the id) | `503 dlq_full` + `Retry-After: 60` ingest back-pressure, never a delete |
+| **Quarantine** | `quarantine.max_bytes`, `retention_days` | hourly, skipping what a live replay job reaches | `503 quarantine_full` |
+| **Catalogue** (`?S`, `?L`) | `storage.catalogue_retention_days`, `archive.retention_days` | hourly in the compactor's sibling process | none; a segment with an owed delivery row or a live archive replay stays |
+| **Audit** (+ `?o` entities) | `audit.max_rows`, `max_bytes`, `outbox_max_backlog` | hourly, and before a change is accepted; never past `m:lifecycle_cursor` | `503 audit_backlog` + `Retry-After: 60` on admin mutations |
+
+Tests: `queue/deliveries_test.exs` (`dlq reaper`, `dlq reaper never evicts an
+unarchived hook`, `quarantine retention`, `catalogue retention`),
+`admin/audit_test.exs` (`outbox ceiling`), `admin/router_test.exs`
+(`DELETE /v1/dlq`, `audit_backlog`).
+
 ### `:none`: no queue, no store hooks
 
 `wal: :none` is the other ack path: no hook queue, no batcher, no compactor, no

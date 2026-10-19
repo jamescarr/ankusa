@@ -1633,7 +1633,7 @@ defmodule Ankusa.Admin.RouterTest do
 
     # `acme` and `globex` each hold every operation scope for their own tenant;
     # `operator` holds `tenant:*`; `nobody` holds a scope and no tenant.
-    defp start_tenant_instance(sources) do
+    defp start_tenant_instance(sources, extra \\ []) do
       tokens = [
         token("operator", @every_scope ++ ["tenant:*"]),
         token("acme", @every_scope ++ ["tenant:acme"]),
@@ -1644,17 +1644,23 @@ defmodule Ankusa.Admin.RouterTest do
 
       config =
         test_config(
-          roles: [:edge, :dispatch],
-          admin: %{enabled: true, port: 0, auth: %{mode: :token, tokens: tokens}},
-          source_store: {Ankusa.SourceStore.Static, sources: sources},
-          rate_limits: %{
-            default: %{rate: 5, burst: 10},
-            tenants: %{"acme" => %{rate: 1, burst: 2}, "globex" => %{rate: 3, burst: 4}}
-          },
-          dispatch: %{
-            retry: {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
-            breaker_failures: 0
-          }
+          Keyword.merge(
+            [
+              roles: [:edge, :dispatch],
+              admin: %{enabled: true, port: 0, auth: %{mode: :token, tokens: tokens}},
+              source_store: {Ankusa.SourceStore.Static, sources: sources},
+              rate_limits: %{
+                default: %{rate: 5, burst: 10},
+                tenants: %{"acme" => %{rate: 1, burst: 2}, "globex" => %{rate: 3, burst: 4}}
+              },
+              dispatch: %{
+                retry:
+                  {Ankusa.RetryPolicy.Exponential, base_ms: 0, max_attempts: 1, jitter: false},
+                breaker_failures: 0
+              }
+            ],
+            extra
+          )
         )
 
       put_config(config)
@@ -1823,6 +1829,107 @@ defmodule Ankusa.Admin.RouterTest do
                json(tcall(inst, :delete, "/v1/quarantine?tenant=acme", "operator"))
 
       assert %{"deleted" => 1} = json(tcall(inst, :delete, "/v1/quarantine", "operator"))
+    end
+
+    test "DELETE /v1/dlq evicts archived rows of the caller's tenants, is 401/403 without scope, and is audited" do
+      config =
+        start_tenant_instance(failing_sources(),
+          roles: [:edge, :dispatch, :storage],
+          storage: %{interval_ms: 0}
+        )
+
+      inst = config.instance
+      acme = ingest!(config, "acme.hooks", ~s({"n":1}))
+      _globex = ingest!(config, "globex.hooks", ~s({"n":2}))
+      assert {:ok, _settled} = Pipeline.tick(inst)
+      assert %{"total" => 2} = json(tcall(inst, :get, "/v1/dlq", "operator"))
+
+      # Not archived yet: nothing is deleted, and the response says so.
+      assert %{"deleted" => 0, "unarchived" => 2} =
+               json(tcall(inst, :delete, "/v1/dlq", "operator"))
+
+      assert %{"total" => 2} = json(tcall(inst, :get, "/v1/dlq", "operator"))
+      assert {:ok, _segments} = Ankusa.Storage.Compactor.tick(inst)
+
+      # No credential is 401; a principal without `dlq:write` is 403 (`nobody` holds
+      # no tenant either), and so is naming a tenant the caller does not hold.
+      assert Plug.Test.conn(:delete, "/v1/dlq")
+             |> then(&Router.call(&1, Router.init(instance: inst)))
+             |> Map.fetch!(:status) == 401
+
+      conn = tcall(inst, :delete, "/v1/dlq", "nobody")
+      assert conn.status == 403
+      assert %{"error" => "forbidden"} = json(conn)
+      assert tcall(inst, :delete, "/v1/dlq?tenant=globex", "acme").status == 403
+      assert %{"total" => 2} = json(tcall(inst, :get, "/v1/dlq", "operator"))
+
+      for query <- ["until=-1", "since=10&until=5", "limit=x"] do
+        assert tcall(inst, :delete, "/v1/dlq?" <> query, "operator").status == 400
+      end
+
+      # A tenant-limited caller deletes its own rows only.
+      assert %{"deleted" => 1, "unarchived" => 0, "bytes" => bytes} =
+               json(tcall(inst, :delete, "/v1/dlq", "acme"))
+
+      assert bytes > 0
+      assert %{"total" => 1, "entries" => [left]} = json(tcall(inst, :get, "/v1/dlq", "operator"))
+      refute left["id"] == acme.id
+
+      # The change is audited, in the tenant's trail, with the caller as the actor.
+      assert %{"entries" => [row]} =
+               json(tcall(inst, :get, "/v1/audit?action=dlq.purge", "operator"))
+
+      assert %{"action" => "dlq.purge", "actor" => "acme", "tenant" => "acme"} = row
+      assert %{"count" => 1, "reason" => "purge"} = row["detail"]
+
+      assert %{"entries" => []} =
+               json(tcall(inst, :get, "/v1/audit?action=dlq.purge", "globex"))
+    end
+
+    test "a change is 503 audit_backlog with Retry-After while the trail is over its ceiling, and nothing is dropped" do
+      # A lifecycle sink that never confirms keeps the outbox cursor at 0, so no row
+      # may be pruned to make room.
+      config =
+        start_tenant_instance(failing_sources(),
+          audit: %{max_rows: 1, outbox_max_backlog: 100},
+          lifecycle: %{sinks: [{AlwaysFailSink, []}]}
+        )
+
+      inst = config.instance
+      wait_for_cursor(inst)
+
+      body = ~s({"rate":2.5,"burst":4})
+      assert tcall(inst, :put, "/v1/tenants/acme/rate-limit", "operator", body).status == 200
+      assert tcall(inst, :put, "/v1/tenants/acme/rate-limit", "operator", body).status == 200
+      assert %{"entries" => before} = json(tcall(inst, :get, "/v1/audit", "operator"))
+
+      conn = tcall(inst, :put, "/v1/tenants/acme/rate-limit", "operator", body)
+      assert conn.status == 503
+      assert Plug.Conn.get_resp_header(conn, "retry-after") == ["60"]
+      assert json(conn) == %{"error" => "audit_backlog"}
+
+      # Every mutating method is refused, reads are not, and no row went.
+      assert tcall(inst, :delete, "/v1/dlq", "operator").status == 503
+      assert tcall(inst, :delete, "/v1/tenants/acme/rate-limit", "operator").status == 503
+      assert tcall(inst, :get, "/v1/dlq", "operator").status == 200
+      assert %{"entries" => ^before} = json(tcall(inst, :get, "/v1/audit", "operator"))
+
+      # An unauthorized caller learns nothing about it: 403, not 503.
+      assert tcall(inst, :put, "/v1/tenants/acme/rate-limit", "nobody", body).status == 403
+    end
+
+    defp wait_for_cursor(inst, left \\ 200) do
+      case Ankusa.Store.get(inst, :default, Ankusa.Store.Keys.lifecycle_cursor()) do
+        {:ok, _cursor} ->
+          :ok
+
+        _ when left > 0 ->
+          Process.sleep(10)
+          wait_for_cursor(inst, left - 1)
+
+        _ ->
+          flunk("the lifecycle publisher never wrote its cursor")
+      end
     end
 
     test "tenant scoped replay" do

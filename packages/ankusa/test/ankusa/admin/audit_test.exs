@@ -882,6 +882,87 @@ defmodule Ankusa.Admin.AuditTest do
     end
   end
 
+  describe "outbox ceiling" do
+    @ops %Context{actor: "ops"}
+    @event %{action: "source.create", tenant: "acme", resource: "s", entity: %{"id" => "s"}}
+
+    defp start_trail(audit) do
+      config =
+        test_config(
+          roles: [:edge],
+          audit: audit,
+          lifecycle: %{sinks: [{Ankusa.Sink.Log, []}]}
+        )
+
+      put_config(config)
+      inst = config.instance
+      start_supervised!({Store, instance: inst})
+
+      # The publisher's first boot writes its cursor at the last seq: what the
+      # trail holds then is history, and the sink stands at 0.
+      :ok = Store.write(inst, [{:put, :default, Keys.lifecycle_cursor(), <<0::64>>}], sync: true)
+      start_supervised!({Audit, instance: inst})
+      inst
+    end
+
+    defp cursor!(inst, seq),
+      do:
+        :ok =
+          Store.write(inst, [{:put, :default, Keys.lifecycle_cursor(), <<seq::64>>}], sync: true)
+
+    test "outbox ceiling: a lifecycle sink that never confirms stops new mutations and loses no row" do
+      inst = start_trail(%{outbox_max_backlog: 3})
+
+      for n <- 1..3, do: assert(:ok = Audit.commit(inst, @ops, %{@event | resource: "s#{n}"}, []))
+      assert %{outbox_backlog: 3} = Audit.stats(inst)
+      assert Audit.refusing?(inst)
+
+      # The change's own ops never run, and nothing is dropped to make room.
+      assert {:error, :audit_backlog} =
+               Audit.commit(inst, @ops, @event, [{:put, :default, "k", "v"}])
+
+      assert {:error, :audit_backlog} = Audit.begin(inst, @ops, @event)
+      assert Store.get(inst, :default, "k") == :not_found
+      assert {:ok, rows} = Audit.page(inst, 0, 10)
+      assert Enum.map(rows, &elem(&1, 0)) == [1, 2, 3]
+      for seq <- 1..3, do: assert({:ok, _} = Audit.entity(inst, seq))
+
+      # What the node does itself (a restore, a sweep's own row) still goes through.
+      assert :ok = Audit.commit(inst, Context.system(), @event, [])
+
+      # The sink catches up: new changes are accepted again.
+      cursor!(inst, 4)
+      refute Audit.refusing?(inst)
+      assert :ok = Audit.commit(inst, @ops, @event, [])
+    end
+
+    test "a trail over audit.max_rows is pruned oldest first, never past the cursor, else refuses" do
+      inst = start_trail(%{max_rows: 3, outbox_max_backlog: 1_000})
+
+      for n <- 1..4, do: assert(:ok = Audit.commit(inst, @ops, %{@event | resource: "s#{n}"}, []))
+      assert %{rows: 4} = Audit.stats(inst)
+
+      # Over the ceiling with the sink at 0: every row is unpublished, so none may go.
+      assert {:error, :audit_backlog} = Audit.commit(inst, @ops, @event, [])
+      assert {:ok, rows} = Audit.page(inst, 0, 10)
+      assert Enum.map(rows, &elem(&1, 0)) == [1, 2, 3, 4]
+
+      # The sink confirmed rows 1 and 2: the oldest goes, with its entity, and the
+      # change is accepted.
+      cursor!(inst, 3)
+      assert :ok = Audit.commit(inst, @ops, @event, [])
+      assert {:ok, rows} = Audit.page(inst, 0, 10)
+      assert Enum.map(rows, &elem(&1, 0)) == [2, 3, 4, 5]
+      assert Audit.entity(inst, 1) == :not_found
+      assert %{rows: 4} = Audit.stats(inst)
+
+      # The counters survive a restart and match the trail.
+      stop_supervised!({Audit, inst})
+      start_supervised!({Audit, instance: inst})
+      assert %{rows: 4} = Audit.stats(inst)
+    end
+  end
+
   test "audit.retention_days must be a positive integer" do
     for bad <- [0, -1, 1.5, "365", nil] do
       assert_raise ArgumentError, ~r/audit\.retention_days must be an integer >= 1/, fn ->
@@ -889,7 +970,18 @@ defmodule Ankusa.Admin.AuditTest do
       end
     end
 
-    assert Ankusa.Config.new().audit == %{retention_days: 365}
+    assert Ankusa.Config.new().audit == %{
+             retention_days: 365,
+             max_rows: 10_000_000,
+             max_bytes: 5_368_709_120,
+             outbox_max_backlog: 100_000
+           }
+
+    for key <- [:max_rows, :max_bytes, :outbox_max_backlog], bad <- [0, -1, 1.5, "1", nil] do
+      assert_raise ArgumentError, ~r/audit\.#{key} must be an integer >= 1/, fn ->
+        Ankusa.Config.new(audit: %{key => bad})
+      end
+    end
 
     assert_raise ArgumentError, ~r/unknown Ankusa.Config key: audit.days/, fn ->
       Ankusa.Config.new(audit: %{days: 1})

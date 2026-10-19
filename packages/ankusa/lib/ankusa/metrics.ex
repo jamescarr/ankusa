@@ -254,6 +254,38 @@ defmodule Ankusa.Metrics do
           tags: [:instance]
         )
       ),
+      sum(
+        "ankusa.dlq.evicted.total",
+        scoped(own,
+          event_name: [:ankusa, :dlq, :evicted],
+          measurement: :count,
+          tags: [:instance] ++ ids ++ [:reason]
+        )
+      ),
+      sum(
+        "ankusa.quarantine.pruned.total",
+        scoped(own,
+          event_name: [:ankusa, :quarantine, :pruned],
+          measurement: :count,
+          tags: [:instance]
+        )
+      ),
+      sum(
+        "ankusa.archive.catalogue_pruned.total",
+        scoped(own,
+          event_name: [:ankusa, :archive, :pruned],
+          measurement: :segments,
+          tags: [:instance]
+        )
+      ),
+      sum(
+        "ankusa.audit.pruned.total",
+        scoped(own,
+          event_name: [:ankusa, :audit, :pruned],
+          measurement: :count,
+          tags: [:instance]
+        )
+      ),
       counter(
         "ankusa.dispatch.deliveries.total",
         scoped(own,
@@ -406,6 +438,12 @@ defmodule Ankusa.Metrics do
           {"ankusa.queue.dead", [:ankusa, :queue, :state], :dead, :unit},
           {"ankusa.queue.archive_pending", [:ankusa, :queue, :state], :archive_pending, :unit},
           {"ankusa.dedupe.keys", [:ankusa, :queue, :state], :dedupe, :unit},
+          {"ankusa.dlq.rows", [:ankusa, :queue, :state], :dead, :unit},
+          {"ankusa.dlq.bytes", [:ankusa, :queue, :state], :dead_bytes, :byte},
+          {"ankusa.dlq.full", [:ankusa, :queue, :state], :dlq_full, :unit},
+          {"ankusa.audit.rows", [:ankusa, :audit, :state], :rows, :unit},
+          {"ankusa.audit.bytes", [:ankusa, :audit, :state], :bytes, :byte},
+          {"ankusa.audit.outbox_backlog", [:ankusa, :audit, :state], :outbox_backlog, :unit},
           {"ankusa.audit.retention.blocked_by_cursor", [:ankusa, :audit, :retention],
            :blocked_by_cursor, :unit},
           {"ankusa.tenants", [:ankusa, :queue, :state], :tenants, :unit},
