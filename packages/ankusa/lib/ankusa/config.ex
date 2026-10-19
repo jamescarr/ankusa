@@ -743,6 +743,40 @@ defmodule Ankusa.Config do
 
   @key_prefix ~r"\A([A-Za-z0-9._-]+/)+\z"
 
+  # The retention windows and ceilings of the DLQ, the pen, the catalogue and the
+  # audit trail (DUR-2.b).
+  defp validate_retention!(config) do
+    for {path, key} <- [
+          {[:queue, :dlq, :retention_days], "queue.dlq.retention_days"},
+          {[:queue, :dlq, :max_rows], "queue.dlq.max_rows"},
+          {[:queue, :dlq, :max_bytes], "queue.dlq.max_bytes"},
+          {[:storage, :catalogue_retention_days], "storage.catalogue_retention_days"},
+          {[:quarantine, :retention_days], "quarantine.retention_days"},
+          {[:audit, :max_rows], "audit.max_rows"},
+          {[:audit, :max_bytes], "audit.max_bytes"},
+          {[:audit, :outbox_max_backlog], "audit.outbox_max_backlog"}
+        ] do
+      check!(config, path, key, "an integer >= 1", &(is_integer(&1) and &1 >= 1))
+    end
+
+    check!(
+      config,
+      [:archive, :retention_days],
+      "archive.retention_days",
+      "nil or an integer >= 1",
+      &(&1 == nil or (is_integer(&1) and &1 >= 1))
+    )
+
+    if config.archive.retention_days != nil and
+         config.archive.retention_days > config.storage.catalogue_retention_days do
+      raise ArgumentError,
+            "archive.retention_days (#{config.archive.retention_days}) must not exceed " <>
+              "storage.catalogue_retention_days (#{config.storage.catalogue_retention_days}): " <>
+              "a segment object is deleted together with its catalogue row, so the " <>
+              "catalogue would forget segments it never deleted"
+    end
+  end
+
   defp validate_ranges!(config) do
     for {path, key} <- @ports do
       check!(
@@ -802,35 +836,7 @@ defmodule Ankusa.Config do
       &(is_integer(&1) and &1 >= 1)
     )
 
-    for {path, key} <- [
-          {[:queue, :dlq, :retention_days], "queue.dlq.retention_days"},
-          {[:queue, :dlq, :max_rows], "queue.dlq.max_rows"},
-          {[:queue, :dlq, :max_bytes], "queue.dlq.max_bytes"},
-          {[:storage, :catalogue_retention_days], "storage.catalogue_retention_days"},
-          {[:quarantine, :retention_days], "quarantine.retention_days"},
-          {[:audit, :max_rows], "audit.max_rows"},
-          {[:audit, :max_bytes], "audit.max_bytes"},
-          {[:audit, :outbox_max_backlog], "audit.outbox_max_backlog"}
-        ] do
-      check!(config, path, key, "an integer >= 1", &(is_integer(&1) and &1 >= 1))
-    end
-
-    check!(
-      config,
-      [:archive, :retention_days],
-      "archive.retention_days",
-      "nil or an integer >= 1",
-      &(&1 == nil or (is_integer(&1) and &1 >= 1))
-    )
-
-    if config.archive.retention_days != nil and
-         config.archive.retention_days > config.storage.catalogue_retention_days do
-      raise ArgumentError,
-            "archive.retention_days (#{config.archive.retention_days}) must not exceed " <>
-              "storage.catalogue_retention_days (#{config.storage.catalogue_retention_days}): " <>
-              "a segment object is deleted together with its catalogue row, so the " <>
-              "catalogue would forget segments it never deleted"
-    end
+    validate_retention!(config)
 
     for key <- [:max_entries, :max_entries_per_tenant] do
       check!(

@@ -59,6 +59,10 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :routes, :changed]` | — | `:instance`, `:action`, `:route_id`, `:version` |
   | `[:ankusa, :audit]` | `:count` (1) | `:instance`, `:seq`, `:action`, `:actor`, `:tenant`, `:resource`, `:result` (`"ok"`, `"failed"`, `"interrupted"`). One per row committed to the audit trail |
   | `[:ankusa, :audit, :pruned]` | `:count` | `:instance`. Rows the retention sweep (`audit.retention_days`) deleted |
+  | `[:ankusa, :dlq, :evicted]` | `:count`, `:bytes` | `:instance`, `:tenant_id`, `:reason` (`"retention"`, `"max_rows"`, `"max_bytes"`, `"purge"`), `:ids`, `:seqs`. One per eviction batch of one tenant |
+  | `[:ankusa, :quarantine, :pruned]` | `:count`, `:bytes` | `:instance`. Entries the retention sweep deleted |
+  | `[:ankusa, :archive, :pruned]` | `:segments`, `:objects`, `:legacy` | `:instance`. Catalogue rows (and segment objects) the retention sweep deleted |
+  | `[:ankusa, :audit, :state]` | `:rows`, `:bytes`, `:outbox_backlog` | `:instance`. The trail's size and the lifecycle outbox's lag |
 
   `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
   `:rejected`, `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,

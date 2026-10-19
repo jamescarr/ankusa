@@ -109,16 +109,10 @@ defmodule Ankusa.Metrics.Gauges do
   end
 
   # The audit trail's size and the lifecycle outbox's lag, from counters
-  # (`Ankusa.Audit.stats/1`); a node with no trail reports nothing.
+  # (`Ankusa.Audit.stats/1`, zeros where no trail runs).
   defp audit(instance) do
-    case :ets.whereis(:"ankusa_audit_#{instance}") do
-      :undefined ->
-        :ok
-
-      _table ->
-        %{rows: rows, bytes: bytes, outbox_backlog: backlog} = Ankusa.Audit.stats(instance)
-        emit(instance, :audit, %{rows: rows, bytes: bytes, outbox_backlog: backlog || 0})
-    end
+    %{rows: rows, bytes: bytes, outbox_backlog: backlog} = Ankusa.Audit.stats(instance)
+    emit(instance, :audit, %{rows: rows, bytes: bytes, outbox_backlog: backlog || 0})
   end
 
   defp queue(instance) do
