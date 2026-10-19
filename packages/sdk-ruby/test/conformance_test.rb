@@ -38,7 +38,7 @@ CONFORMANCE_ERROR_CLASSES = %w[
 
 # The attributes a vector may assert on a thrown error. `retryable` reads
 # `retryable?`; the rest read the method of the same name.
-CONFORMANCE_ERROR_ATTRIBUTES = %w[retryable status body code field message conflicting_id max_routes role].freeze
+CONFORMANCE_ERROR_ATTRIBUTES = %w[retryable status body code field message conflicting_id max_routes role scope].freeze
 
 class ConformanceTest < Minitest::Test
   def run_conformance_case(case_hash)

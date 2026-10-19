@@ -25,6 +25,9 @@ this project follows [Semantic Versioning](https://semver.org/).
   `allow_unsigned: true` it raises `InvalidSignatureError` (`invalid_secret`).
   The signature is judged before the hook id. Returns a `ReceivedDelivery`
   (`headers`, `verified`).
+- `scope` on `AdminRejectedError` and `RoutesRejectedError`: the scope a `403
+  forbidden` says the credential lacks (control planes require a credential
+  since Ankusa 0.6).
 
 ## [0.5.0] - 2026-10-14
 

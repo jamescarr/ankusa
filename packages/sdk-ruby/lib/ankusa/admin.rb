@@ -34,14 +34,16 @@ module Ankusa
   # The listener rejected the request (any other 4xx).
   #
   # `status` is the HTTP status; `code` is the body's `error` field
-  # (`invalid_filter`, ...).
+  # (`invalid_filter`, ...). `scope` is the scope a 403 forbidden says the
+  # credential lacks, nil when absent or not a 403.
   class AdminRejectedError < AdminError
-    attr_reader :status, :code
+    attr_reader :status, :code, :scope
 
-    def initialize(message, status:, code:)
+    def initialize(message, status:, code:, scope: nil)
       super(message)
       @status = status
       @code = code
+      @scope = scope
     end
   end
 
@@ -153,10 +155,12 @@ module Ankusa
       end
 
       if status >= 400 && status < 500
+        scope = body.is_a?(Hash) ? body["scope"] : nil
         raise AdminRejectedError.new(
           "admin listener rejected the request (#{status}): #{body.inspect}",
           status: status,
-          code: code
+          code: code,
+          scope: scope
         )
       end
 
