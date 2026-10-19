@@ -230,17 +230,21 @@ wait "$LOADGEN_PID" || FAILED=1
 LOADGEN_PID=""
 verify_phase chaos 300
 
-# The retry is one idempotency key. The dedupe index is per node, so the two
-# hooks have different ids and the consumer sees the event twice; one row, with
-# `deliveries` counting both.
+# The retry is one idempotency key, delivered to two nodes. `dedupe.scope: fleet`
+# makes the second node answer with the first node's hook id, so it is one hook:
+# one row, one hook id, one delivery. (If it were two hooks the consumer would see
+# the event twice, one row with `deliveries` counting both: `duplicate_hooks`
+# counts exactly that, and a RabbitMQ redelivery cannot add to it.)
 RETRY_EXTRA=0
+RETRY_DUP_HOOKS=0
 if [ -n "$hook_a" ] && [ -n "$hook_b" ]; then
   want_deliveries=2
   [ "$hook_a" = "$hook_b" ] && want_deliveries=1
   if wait_row 90 "the retried event ($retry_key) with $want_deliveries deliveries" \
     "SELECT count(*) FROM processed_webhooks WHERE idempotency_key = '$retry_key' AND deliveries >= $want_deliveries AND processed_at IS NOT NULL"; then
     RETRY_EXTRA="$(psql_q "SELECT deliveries - 1 FROM processed_webhooks WHERE idempotency_key = '$retry_key'")"
-    echo "    $retry_key: one row, $((RETRY_EXTRA + 1)) delivery(ies) (hook ids $hook_b, $hook_a)"
+    RETRY_DUP_HOOKS="$(psql_q "SELECT cardinality(hook_ids) - 1 FROM processed_webhooks WHERE idempotency_key = '$retry_key'")"
+    echo "    $retry_key: one row, $((RETRY_EXTRA + 1)) delivery(ies), $((RETRY_DUP_HOOKS + 1)) hook(s) (hook ids $hook_b, $hook_a)"
   else
     FAILED=1
   fi
@@ -254,9 +258,15 @@ verify_phase burst 900
 
 # Sum the per-phase verify reports. `missing` in a report is a sample of up to
 # ten ids, so the count is acked - processed.
+#
+# `extra_deliveries` is consumer receipts beyond the first per idempotency key:
+# duplicate hooks (what fleet dedupe removes) plus the hooks RabbitMQ redelivers
+# after the consumer kill (which ingest cannot remove). `duplicate_hooks` is the
+# first component alone, distinct hook ids per key minus one, and must be 0.
 MISSING=0
 SHA_MISMATCHES=0
 EXTRA=$RETRY_EXTRA
+DUPLICATE_HOOKS=$RETRY_DUP_HOOKS
 for phase in steady chaos burst; do
   report="$OUT_ABS/$phase-verify.json"
   if [ ! -f "$report" ]; then
@@ -267,12 +277,23 @@ for phase in steady chaos burst; do
   MISSING=$((MISSING + $(jq '.acked - .processed' "$report")))
   SHA_MISMATCHES=$((SHA_MISMATCHES + $(jq '.sha_mismatches' "$report")))
   EXTRA=$((EXTRA + $(jq '.extra_deliveries' "$report")))
+  dup="$(jq '.duplicate_hooks // empty' "$report")"
+  if [ -z "$dup" ]; then
+    echo "error: $phase-verify.json has no duplicate_hooks (the consumer's table has no hook_ids)" >&2
+    FAILED=1
+    dup=0
+  fi
+  DUPLICATE_HOOKS=$((DUPLICATE_HOOKS + dup))
 done
 
 echo
-echo "verify: missing=$MISSING sha_mismatches=$SHA_MISMATCHES extra_deliveries=$EXTRA claim_redeemed_cross_node=$CLAIM_OK"
+echo "verify: missing=$MISSING sha_mismatches=$SHA_MISMATCHES extra_deliveries=$EXTRA claim_redeemed_cross_node=$CLAIM_OK duplicate_hooks=$DUPLICATE_HOOKS"
 
 if [ "$MISSING" != 0 ] || [ "$SHA_MISMATCHES" != 0 ]; then FAILED=1; fi
+if [ "$DUPLICATE_HOOKS" != 0 ]; then
+  echo "error: $DUPLICATE_HOOKS provider retr(ies) were stored as a second hook: dedupe.scope: fleet did not collapse them" >&2
+  FAILED=1
+fi
 if [ "$FAILED" != "0" ]; then
   echo "==> the fleet lost or corrupted a hook, or an assertion failed; see $OUT_DIR/*-verify.json" >&2
   exit 1

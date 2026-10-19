@@ -21,6 +21,10 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :quarantine, :rate_limited]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :quarantine, :full]` | — | `:instance`, `:source_id` |
   | `[:ankusa, :rate_limit, :rejected]` | — | `:instance`, `:tenant_id`, `:source_id` |
+  | `[:ankusa, :fleet, :degraded]` | `:degraded` (`1` while the kind is answered from this node alone, else `0`; every second, per kind that is `:fleet`-scoped) | `:instance`, `:kind` (`:rate_limit`, `:dedupe`) |
+  | `[:ankusa, :fleet, :breaker]` | — | `:instance`, `:state` (`:open`, `:closed`) |
+  | `[:ankusa, :fleet, :fallback]` | — | `:instance`, `:kind`, `:reason` (`:breaker_open`, `:error`). One per hook a fleet call did not answer |
+  | `[:ankusa, :fleet, :settle_dropped]` | `:count` | `:instance`, `:reason` (`:queue_full`, `:error`). Dedupe claim outcomes that were not delivered to the fleet store |
   | `[:ankusa, :dispatch, :stop]` | — | `:instance`, `:result`, `:attempts`, `:sink`, `:source_id` |
   | `[:ankusa, :dispatch, :dlq]` | — | `:instance`, `:source_id`, `:sink` |
   | `[:ankusa, :dispatch, :breaker]` | — | `:instance`, `:sink`, `:source_id`, `:state` (`:open`, `:closed`) |
@@ -58,7 +62,7 @@ defmodule Ankusa.Telemetry do
 
   `:outcome` on `:ingest` is one of `:committed`, `:duplicate`, `:quarantined`,
   `:rejected`, `:rate_limited`, `:tenant_overload`, `:quarantine_rate_limited`,
-  `:quarantine_full`, `:overload` or `:store_unavailable`. `:source_id` on
+  `:dedupe_pending`, `:quarantine_full`, `:overload` or `:store_unavailable`. `:source_id` on
   `[:ankusa, :ingest]` is
   always a configured source's id: a request for a source that does not exist
   is a refusal, emitted as `[:ankusa, :ingest, :refused]`, never on the span.

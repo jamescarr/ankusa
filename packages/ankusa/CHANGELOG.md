@@ -37,6 +37,31 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   before (Req refuses `:finch` beside the `:connect_options` it always set); the
   pool then owns the connection options, and combining it with `:connect_options`,
   `:cacertfile` or `allow_insecure_tls` raises `ArgumentError`.
+- **Fleet-scoped rate limits and dedupe (TEN-6).** `rate_limits.scope` and the new
+  `dedupe.scope` take `:node` (the default, unchanged) or `:fleet`: the tenant quota
+  (hooks and bytes per second) and the provider event key are then counted in
+  `fleet.store`, a module implementing the new `Ankusa.RateLimiter.Store` and
+  `Ankusa.Dedupe.Store` behaviours (`Ankusa.RateLimiter.Store.Redis` in
+  `ankusa_redis`), so N edge nodes enforce one limit and a provider retry on
+  another node is the first hook, not a second. `Ankusa.Edge.Fleet` is the request
+  path's one entry (`Ingest` calls it in place of `RateLimiter.hit/3`): one store
+  call per hook carries the tenant's charges and the dedupe claim. The claim is
+  two-phase: *pending* before the commit, *committed* (with the hook's id) after
+  it, off the request path in batches; a commit that fails releases it, a key
+  another node holds pending is `409 dedupe_pending` with `Retry-After`
+  (`outcome` `:dedupe_pending`), one it committed is `201` with the first hook's
+  `id` and `"duplicate": true`. A limiter outage never refuses a hook: every call
+  has a hard budget (`fleet.timeout_ms`, 1–1000, default 20), a call that fails or
+  times out is answered from the node's own limiter and dedupe index, and a breaker
+  (`fleet.breaker_*`) opens on the failure *rate* and probes half-open. New
+  telemetry and metrics: `[:ankusa, :fleet, :degraded | :breaker | :fallback |
+  :settle_dropped]`, `ankusa_fleet_limiter_degraded{kind}`,
+  `ankusa_fleet_breaker_transitions_total`, `ankusa_fleet_fallback_total`,
+  `ankusa_fleet_settle_dropped_total`. `per_ip`, `node` and `sources` stay per node.
+  New config: `fleet` (`store`, `timeout_ms`, `pending_ttl_ms`, `breaker_window_ms`,
+  `breaker_min_calls`, `breaker_failure_rate`, `breaker_open_ms`),
+  `dedupe.scope`, `rate_limits.scope`; `RateLimiter.fleet_charges/3`. Tests:
+  `edge_fleet_test.exs`, `config_test.exs`.
 - **Dispatch fairness by tenant (TEN-3).** A scan claims from the tenants with
   work due by deficit round-robin (an equal share of the page each, a tenant
   with less due leaves the rest to the others, a tenant the page did not reach

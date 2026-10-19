@@ -58,12 +58,25 @@ defmodule Mix.Tasks.Loadgen.Verify do
 
     sha_mismatches =
       found_by_id
-      |> Enum.count(fn {id, {sha, _deliveries}} -> Map.fetch!(expected_by_id, id) != sha end)
+      |> Enum.count(fn {id, {sha, _deliveries, _hooks}} ->
+        Map.fetch!(expected_by_id, id) != sha
+      end)
 
     extra_deliveries =
       found_by_id
-      |> Enum.map(fn {_id, {_sha, deliveries}} -> max(deliveries - 1, 0) end)
+      |> Enum.map(fn {_id, {_sha, deliveries, _hooks}} -> max(deliveries - 1, 0) end)
       |> Enum.sum()
+
+    # Distinct hooks Ankusa committed per provider event key, minus one: what
+    # fleet-scoped dedupe removes. `extra_deliveries` also counts a broker
+    # redelivering the same hook, which ingest cannot prevent. `nil` when the
+    # consumer's table does not record hook ids.
+    duplicate_hooks =
+      if Enum.all?(found_by_id, fn {_id, {_sha, _deliveries, hooks}} -> is_integer(hooks) end) do
+        found_by_id
+        |> Enum.map(fn {_id, {_sha, _deliveries, hooks}} -> max(hooks - 1, 0) end)
+        |> Enum.sum()
+      end
 
     total_processed = total_processed_count(conn)
     unacked_processed = max(total_processed - map_size(found_by_id), 0)
@@ -74,6 +87,7 @@ defmodule Mix.Tasks.Loadgen.Verify do
       missing: Enum.take(missing_ids, 10),
       sha_mismatches: sha_mismatches,
       extra_deliveries: extra_deliveries,
+      duplicate_hooks: duplicate_hooks,
       drain_s: drain_s,
       unacked_processed: unacked_processed
     }
@@ -152,6 +166,8 @@ defmodule Mix.Tasks.Loadgen.Verify do
   end
 
   defp query_found(conn, acked_ids) do
+    hooks = hooks_expr(conn)
+
     acked_ids
     |> Enum.chunk_every(@chunk_size)
     |> Enum.reduce(%{}, fn chunk, acc ->
@@ -161,14 +177,27 @@ defmodule Mix.Tasks.Loadgen.Verify do
           # A row counts only after its worker ran: `processed_at` is the
           # effect-completion stamp, so a delivery still sitting in the
           # queue is not "processed" yet.
-          "SELECT ankusa_id, body_sha256, deliveries FROM processed_webhooks WHERE ankusa_id = ANY($1) AND processed_at IS NOT NULL",
+          "SELECT ankusa_id, body_sha256, deliveries, #{hooks} FROM processed_webhooks WHERE ankusa_id = ANY($1) AND processed_at IS NOT NULL",
           [chunk]
         )
 
-      Enum.reduce(rows, acc, fn [id, sha, deliveries], acc2 ->
-        Map.put(acc2, id, {sha, deliveries})
+      Enum.reduce(rows, acc, fn [id, sha, deliveries, hooks], acc2 ->
+        Map.put(acc2, id, {sha, deliveries, hooks})
       end)
     end)
+  end
+
+  # The distinct hooks a row has seen, when the consumer's table has the
+  # `hook_ids` column (the fleet example's does; the Oban example's does not).
+  defp hooks_expr(conn) do
+    %Postgrex.Result{rows: [[count]]} =
+      Postgrex.query!(
+        conn,
+        "SELECT count(*) FROM information_schema.columns WHERE table_name = 'processed_webhooks' AND column_name = 'hook_ids'",
+        []
+      )
+
+    if count > 0, do: "cardinality(hook_ids)", else: "NULL"
   end
 
   defp total_processed_count(conn) do
@@ -194,6 +223,7 @@ defmodule Mix.Tasks.Loadgen.Verify do
     missing           #{missing_count} (showing up to 10: #{inspect(report.missing)})
     sha_mismatches    #{report.sha_mismatches}
     extra_deliveries  #{report.extra_deliveries}
+    duplicate_hooks   #{inspect(report.duplicate_hooks)}
     drain_s           #{report.drain_s}
     unacked_processed #{report.unacked_processed}
     """)

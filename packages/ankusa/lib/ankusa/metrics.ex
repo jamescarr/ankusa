@@ -35,8 +35,8 @@ defmodule Ankusa.Metrics do
   numbers (only ever a store index or an HTTP status, both bounded), and
   anything else becomes `:other`. `:outcome` on ingest is already one of a fixed set
   (`:committed`, `:duplicate`, `:quarantined`, `:rejected`, `:rate_limited`,
-  `:tenant_overload`, `:quarantine_rate_limited`, `:quarantine_full`, `:overload`, `:tenant_limit` or
-  `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
+  `:tenant_overload`, `:quarantine_rate_limited`, `:dedupe_pending`, `:quarantine_full`,
+  `:overload`, `:tenant_limit` or `:store_unavailable`) because `Ankusa.Edge.Ingest` tags it before emitting.
   `:source_id` is bounded because it is only ever a configured source's id: a
   request for a source that does not exist is counted on
   `ankusa.ingest.refused.total`, whose `:reason` is one of `:unknown_source`,
@@ -171,6 +171,31 @@ defmodule Ankusa.Metrics do
         scoped(own,
           event_name: [:ankusa, :rate_limit, :rejected],
           tags: [:instance, :tenant_id]
+        )
+      ),
+      last_value(
+        "ankusa.fleet.limiter.degraded",
+        scoped(own,
+          event_name: [:ankusa, :fleet, :degraded],
+          measurement: :degraded,
+          unit: :unit,
+          tags: [:instance, :kind]
+        )
+      ),
+      counter(
+        "ankusa.fleet.breaker.transitions.total",
+        scoped(own, event_name: [:ankusa, :fleet, :breaker], tags: [:instance, :state])
+      ),
+      counter(
+        "ankusa.fleet.fallback.total",
+        scoped(own, event_name: [:ankusa, :fleet, :fallback], tags: [:instance, :kind, :reason])
+      ),
+      sum(
+        "ankusa.fleet.settle.dropped.total",
+        scoped(own,
+          event_name: [:ankusa, :fleet, :settle_dropped],
+          measurement: :count,
+          tags: [:instance, :reason]
         )
       ),
       counter(
