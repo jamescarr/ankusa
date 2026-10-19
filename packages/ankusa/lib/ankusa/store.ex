@@ -558,7 +558,9 @@ defmodule Ankusa.Store do
   end
 
   # One small synced file write: what a WAL append and its fsync need from the
-  # directory, without touching the database.
+  # directory, without touching the database. The path is the store's own
+  # directory plus a fixed name, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp disk_write(path) do
     with {:ok, io} <- :file.open(path, [:write, :raw, :binary]) do
       try do
