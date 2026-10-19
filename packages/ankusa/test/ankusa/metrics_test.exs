@@ -42,7 +42,7 @@ defmodule Ankusa.MetricsTest do
     config
   end
 
-  test "a scrape reports a committed ingest with bounded labels" do
+  test "a scrape reports a committed ingest by tenant, with bounded labels" do
     config = start_instance()
 
     assert {:ok, _env} =
@@ -52,8 +52,10 @@ defmodule Ankusa.MetricsTest do
 
     assert scrape =~ "ankusa_ingest_requests_total{"
     assert scrape =~ ~s(outcome="committed")
-    assert scrape =~ ~s(source_id="demo")
+    assert scrape =~ ~s(tenant_id="default")
     assert scrape =~ ~s(instance="#{config.instance}")
+    # `metrics.detail` defaults to `:tenant`: a source is not a label.
+    refute scrape =~ "source_id="
   end
 
   test "unknown sources never mint a source_id series" do
@@ -138,7 +140,8 @@ defmodule Ankusa.MetricsTest do
                on_verify_failure: :accept_flag,
                sinks: [{Ankusa.Sink.Log, []}]
              ]
-           }}
+           }},
+        metrics: %{detail: :source}
       )
 
     good = Base.encode16(:crypto.mac(:hmac, :sha, "k", "{}"), case: :lower)
@@ -372,6 +375,289 @@ defmodule Ankusa.MetricsTest do
       scrape = Ankusa.Metrics.scrape(inst)
       assert tenant_gauge(scrape, "acme") == 0.0
       assert tenant_gauge(scrape, "initech") == 2.0
+    end
+  end
+
+  describe "cardinality policy" do
+    defp series(scrape, name) do
+      scrape |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, name <> "{"))
+    end
+
+    defp label(line, key) do
+      case Regex.run(~r/[{,]#{key}="([^"]*)"/, line) do
+        [_, value] -> value
+        nil -> nil
+      end
+    end
+
+    defp sample(line) do
+      line |> String.split(" ") |> List.last() |> Float.parse() |> elem(0)
+    end
+
+    # Every series of a scrape, without its value and its instance label: what two
+    # instances are compared on.
+    defp series_set(scrape, instance) do
+      scrape
+      |> String.split("\n", trim: true)
+      |> Enum.reject(&String.starts_with?(&1, "#"))
+      |> Enum.map(fn line ->
+        line
+        |> String.replace(~s(instance="#{instance}"), "instance=\"-\"")
+        |> String.replace(~r/ \S+$/, "")
+      end)
+      |> MapSet.new()
+    end
+
+    defp ingest_as(inst, tenant, n) do
+      req = request("demo", ~s({"id":"#{tenant}-#{n}"})) |> Map.put(:tenant_id, tenant)
+      assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, req)
+    end
+
+    @tag timeout: 180_000
+    test "bounded series under 10k sources" do
+      sources =
+        for i <- 1..10_000, into: %{} do
+          {"s#{i}",
+           [
+             verifier: {Ankusa.Verifier.None, []},
+             sinks: [{Ankusa.Sink.Log, []}],
+             tenant_id: "t#{i}"
+           ]}
+        end
+
+      config = start_instance(source_store: {Static, sources: sources})
+      inst = config.instance
+
+      1..10_000
+      |> Task.async_stream(
+        fn i -> Ankusa.Edge.Ingest.ingest(inst, request("s#{i}", ~s({"id":"#{i}"}))) end,
+        max_concurrency: 64,
+        timeout: 120_000
+      )
+      |> Enum.each(fn {:ok, result} -> assert {:ok, _env} = result end)
+
+      cap = config.metrics.max_series_per_metric
+      assert cap == 5_000
+
+      micros =
+        for _ <- 1..3 do
+          {us, scrape} = :timer.tc(fn -> Ankusa.Metrics.scrape(inst) end)
+          {us, scrape}
+        end
+
+      {fastest, scrape} = Enum.min_by(micros, &elem(&1, 0))
+      assert fastest < 100_000, "a scrape took #{fastest} µs"
+
+      lines = series(scrape, "ankusa_ingest_requests_total")
+      others = Enum.filter(lines, &(label(&1, "tenant_id") == "other"))
+
+      assert length(lines) <= cap
+      assert length(others) == 1
+      # Folded, not dropped: every request is counted once.
+      assert lines |> Enum.map(&sample/1) |> Enum.sum() == 10_000.0
+      assert sample(hd(others)) == 10_000.0 - (length(lines) - 1)
+
+      # By default no series carries a source, and the whole scrape stays small.
+      refute scrape =~ "source_id="
+      assert length(String.split(scrape, "\n")) <= 10_000
+    end
+
+    test "past the ceiling a source is folded into other, with detail: :source" do
+      sources =
+        for i <- 1..20, into: %{} do
+          {"s#{i}", [verifier: {Ankusa.Verifier.None, []}, sinks: [{Ankusa.Sink.Log, []}]]}
+        end
+
+      config =
+        start_instance(
+          source_store: {Static, sources: sources},
+          metrics: %{detail: :source, max_series_per_metric: 6}
+        )
+
+      for i <- 1..20 do
+        assert {:ok, _env} =
+                 Ankusa.Edge.Ingest.ingest(config.instance, request("s#{i}", ~s({"id":"#{i}"})))
+      end
+
+      lines = series(Ankusa.Metrics.scrape(config.instance), "ankusa_ingest_requests_total")
+      named = Enum.reject(lines, &(label(&1, "source_id") == "other"))
+
+      # Five admitted, the sixth slot is `other`'s.
+      assert length(named) == 5
+      assert length(lines) == 6
+      assert Enum.all?(lines, &(label(&1, "tenant_id") in ["default", "other"]))
+      assert lines |> Enum.map(&sample/1) |> Enum.sum() == 20.0
+
+      other = Enum.find(lines, &(label(&1, "source_id") == "other"))
+      assert label(other, "tenant_id") == "other"
+      assert sample(other) == 15.0
+    end
+
+    test "detail: :source carries tenant and source, and its duration histogram too" do
+      config = start_instance(metrics: %{detail: :source})
+      inst = config.instance
+
+      assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, request("demo", ~s({"id":"d1"})))
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert scrape =~
+               ~r/^ankusa_ingest_requests_total\{(?=[^}]*source_id="demo")(?=[^}]*tenant_id="default")[^}]*\} 1$/m
+
+      assert scrape =~
+               ~r/^ankusa_ingest_duration_seconds_bucket\{(?=[^}]*source_id="demo")(?=[^}]*tenant_id="default")/m
+    end
+
+    test "detail: :tenant leaves the duration histogram without an identity" do
+      config = start_instance()
+      inst = config.instance
+
+      ingest_as(inst, "acme", 1)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert scrape =~ ~r/^ankusa_ingest_requests_total\{[^}]*tenant_id="acme"/m
+      assert scrape =~ "ankusa_ingest_duration_seconds_bucket{"
+      refute scrape =~ ~r/^ankusa_ingest_duration_seconds_bucket\{[^}]*tenant_id/m
+    end
+
+    test "detail: :none has no identity label and no per-tenant gauge, at any tenant count" do
+      one = start_instance(metrics: %{detail: :none})
+      many = start_instance(metrics: %{detail: :none})
+
+      ingest_as(one.instance, "t0", 0)
+      for i <- 1..40, do: ingest_as(many.instance, "t#{i}", i)
+
+      for config <- [one, many], do: :ok = Ankusa.Metrics.Gauges.measure(config.instance)
+
+      scrape_one = Ankusa.Metrics.scrape(one.instance)
+      scrape_many = Ankusa.Metrics.scrape(many.instance)
+
+      for scrape <- [scrape_one, scrape_many] do
+        refute scrape =~ "tenant_id="
+        refute scrape =~ "source_id="
+        refute scrape =~ "ankusa_tenant_pending"
+        refute scrape =~ "ankusa_dispatch_tenant_inflight"
+        assert scrape =~ ~r/^ankusa_ingest_requests_total\{[^}]*outcome="committed"/m
+      end
+
+      # The series set is the same for one tenant and for forty.
+      assert series_set(scrape_one, one.instance) == series_set(scrape_many, many.instance)
+
+      assert gauge(scrape_many, "ankusa_tenants", many.instance) == 40.0
+      assert gauge(scrape_one, "ankusa_tenants", one.instance) == 1.0
+    end
+
+    test "the default scrape names tenants, never sources, and keeps the series families" do
+      config = start_instance(rate_limits: %{tenants: %{"acme" => %{rate: 0.001, burst: 1}}})
+      inst = config.instance
+
+      ingest_as(inst, "acme", 1)
+      req = Map.put(request("demo", "x"), :tenant_id, "acme")
+      assert {:error, {:rate_limited, _}} = Ankusa.Edge.Ingest.ingest(inst, req)
+      assert {:quarantined, _} = Ankusa.Edge.Ingest.ingest(inst, request("strict", "{}"))
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      refute scrape =~ "source_id="
+
+      families =
+        scrape
+        |> String.split("\n", trim: true)
+        |> Enum.reject(&String.starts_with?(&1, "#"))
+        |> Enum.map(&(&1 |> String.split("{") |> hd()))
+        |> MapSet.new()
+
+      for family <- ~w(ankusa_ingest_requests_total ankusa_ingest_duration_seconds_bucket
+                       ankusa_ingest_duration_seconds_count ankusa_ingest_duration_seconds_sum
+                       ankusa_verify_failures_total ankusa_rate_limit_rejected_total
+                       ankusa_wal_commit_duration_seconds_bucket ankusa_tenant_pending
+                       ankusa_queue_pending ankusa_tenants) do
+        assert family in families, "#{family} missing from the scrape"
+      end
+
+      # Every identity-carrying series names the tenant.
+      for name <-
+            ~w(ankusa_ingest_requests_total ankusa_verify_failures_total ankusa_rate_limit_rejected_total) do
+        assert [_ | _] = lines = series(scrape, name)
+        assert Enum.all?(lines, &(label(&1, "tenant_id") != nil)), name
+      end
+    end
+
+    test "a gauge past the ceiling drops the tenant instead of writing to other" do
+      config = start_instance(metrics: %{max_series_per_metric: 2})
+      inst = config.instance
+
+      for {tenant, n} <- [{"acme", 3}, {"globex", 1}, {"initech", 2}], i <- 1..n do
+        ingest_as(inst, tenant, i)
+      end
+
+      :ok = Ankusa.Metrics.Gauges.measure(inst)
+      lines = series(Ankusa.Metrics.scrape(inst), "ankusa_tenant_pending")
+
+      # One slot for the gauge, none for an "other" that would hold a stray value.
+      assert [line] = lines
+      refute label(line, "tenant") == "other"
+    end
+
+    test "the quarantine and dispatch counters carry the tenant" do
+      sources = %{
+        "strict" => [
+          verifier: {Ankusa.Verifier.Hmac, scheme: :stripe, secret: "whsec_x"},
+          on_verify_failure: :quarantine
+        ],
+        "q" => [verifier: {Ankusa.Verifier.None, []}, sinks: [{OkSink, []}]]
+      }
+
+      config =
+        start_instance(
+          roles: [:edge, :dispatch],
+          source_store: {Static, sources: sources},
+          quarantine: %{rate: 0.001, burst: 1}
+        )
+
+      inst = config.instance
+      forged = Map.put(request("strict", "{}"), :tenant_id, "acme")
+
+      assert {:quarantined, _} = Ankusa.Edge.Ingest.ingest(inst, forged)
+      assert {:error, {:quarantine_rate_limited, _}} = Ankusa.Edge.Ingest.ingest(inst, forged)
+
+      req = Map.put(request("q", ~s({"id":"1"})), :tenant_id, "globex")
+      assert {:ok, _env} = Ankusa.Edge.Ingest.ingest(inst, req)
+      assert {:ok, _} = Ankusa.Dispatch.Pipeline.tick(inst)
+
+      scrape = Ankusa.Metrics.scrape(inst)
+
+      assert scrape =~ ~r/^ankusa_quarantine_rate_limited_total\{[^}]*tenant_id="acme"[^}]*\} 1$/m
+
+      assert scrape =~
+               ~r/^ankusa_dispatch_deliveries_total\{[^}]*result="ok"[^}]*tenant_id="globex"[^}]*\} 1$/m
+
+      refute scrape =~ "source_id="
+    end
+
+    test "admission never exceeds its ceiling and leaks no slot under concurrent first sightings" do
+      inst = :"cardinality_#{System.unique_integer([:positive])}"
+      start_supervised!({Ankusa.Metrics.Cardinality, instance: inst})
+      table = Ankusa.Metrics.Cardinality.table(inst)
+
+      outcomes =
+        for key <- 1..500, _worker <- 1..8 do
+          Task.async(fn ->
+            Ankusa.Metrics.Cardinality.admit(table, [:m], [:tenant_id], 50, %{
+              tenant_id: Integer.to_string(key)
+            })
+          end)
+        end
+        |> Task.await_many(30_000)
+
+      admitted = for {{[:m], %{tenant_id: _}}} <- :ets.tab2list(table), do: 1
+
+      assert length(outcomes) == 4_000
+      assert Enum.all?(outcomes, &(&1 in [:admitted, :overflow]))
+      # 50 slots, one of them `other`'s: never more than 49 label sets, and the
+      # counter holds exactly the sets that were inserted (a slot reserved by a
+      # process that lost the race for its set was given back).
+      assert length(admitted) in 1..49
+      assert :ets.lookup(table, {:count, [:m]}) == [{{:count, [:m]}, length(admitted)}]
     end
   end
 end

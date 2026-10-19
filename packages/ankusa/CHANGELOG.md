@@ -13,6 +13,26 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Per-tenant observability with a cardinality policy (TEN-7).** `metrics.detail`
+  (`:tenant` by default, `:source`, `:none`) says which identity labels the
+  per-hook Prometheus series carry, and `metrics.max_series_per_metric` (default
+  `5000`, a positive integer) caps how many label sets one metric keeps: the first
+  `max_series_per_metric - 1` are admitted, every later one is counted under
+  `tenant_id`/`source_id` `"other"` (`Ankusa.Metrics.Cardinality`, an ETS
+  admission in the emitting process: one `:ets.member/2` for a known label set).
+  The ingest, verify-failure, quarantine, rate-limit and delivery counters now
+  carry `tenant_id`; `source_id` only under `:source`, which also puts both on
+  the ingest duration histogram; `:none` carries neither and drops the two
+  per-tenant gauges, so the scrape does not grow with the tenant count. A gauge
+  past the ceiling drops the tenant instead of writing to `"other"`. The
+  `[:ankusa, :ingest]`, `[:verify]`, `[:quarantine, *]` and `[:dispatch, :stop |
+  :dlq | :breaker]` events carry `:tenant_id` metadata. `Ankusa.Metrics` is now a
+  supervisor (the policy's table and the reporter restart together).
+  **Behaviour change:** `source_id` is no longer a label by default (it was on the
+  ingest, verify-failure, weak-hash, quarantine and dead-letter series, and the
+  ingest duration histogram), and `Ankusa.Edge.Quarantine.hit` takes the tenant
+  too (`instance, source_id, tenant_id`). See `docs/configuration.md#metric-cardinality`;
+  tests in `metrics_test.exs`, `config_test.exs`.
 - **Fleet-scoped rate limits and dedupe (TEN-6).** `rate_limits.scope` and the new
   `dedupe.scope` take `:node` (the default, unchanged) or `:fleet`: the tenant quota
   (hooks and bytes per second) and the provider event key are then counted in

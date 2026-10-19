@@ -8,6 +8,15 @@ project is versioned independently of the `ankusa` Hex packages: it is the
 
 ### Added
 
+- **`metrics.detail` and `metrics.max_series_per_metric` (TEN-7).** The scrape's
+  cardinality policy: `detail` is `tenant` (default: `tenant_id` on the per-hook
+  series), `source` (`tenant_id` and `source_id`) or `none` (neither, and no
+  per-tenant gauges); `max_series_per_metric` (default `5000`) caps the label sets
+  one metric keeps, later tenants or sources are folded into `"other"`. **Behaviour
+  change:** `source_id` is no longer a label by default; set `metrics.detail:
+  source` to get it back. See `config-examples/reference.yml` and
+  `docs/configuration.md#metric-cardinality`. `scripts/soak.sh` fails a run whose
+  largest `/metrics` scrape exceeds `MAX_SERIES` (10 000) lines.
 - **`rate_limits.scope`, `dedupe` and `fleet` (TEN-6).** `rate_limits.scope: fleet`
   and `dedupe: {scope: fleet}` share the tenant quota and the provider event key
   across edge nodes through `fleet.store` (`{type: redis, url, namespace,
