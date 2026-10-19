@@ -43,6 +43,66 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
   ([Upgrading between releases](../../docs/deployment.md#upgrading-between-releases)).
   `mix ankusa.store.fixture` writes the new layout (`store-v3.tar.zst`).
 
+- **Admission at the edge: per tenant, per source, per address, per node
+  (TEN-2).** `rate_limits` gains `per_ip` and `node` (`%{rate, burst}`, hooks
+  per second per client address and for the whole node; off by default) and
+  `sources.default.bytes_per_second` (body bytes per second per source, 100 MB/s
+  unless changed, `default: nil` is off). They run in `Ankusa.Edge.Router`
+  after the source lookup and **before the body is read**, so a forged flood
+  costs neither a read nor an HMAC: `429 ip_rate_limited`, `429
+  node_rate_limited`, `429 source_rate_limited`, each with `Retry-After` and
+  counted on `ankusa_ingest_refused_total{reason}`. The client address is
+  `Ankusa.Net.ClientIP`'s (`routes.trusted_proxies` decides whose
+  `X-Forwarded-For` counts), an IPv6 address is its `/64`, and addresses hash
+  into 2^20 buckets, so the table has a ceiling. The declared `Content-Length`
+  is charged up front; a body with none is charged once it has been read.
+  A tenant's limit (`rate_limits.tenants[t]` and `rate_limits.default`, and a
+  runtime override) may now also carry `bytes_per_second` and `burst_bytes`
+  (body bytes, charged with the hook after verification), `max_body_bytes`
+  (`413`, checked against the declared length before the read and enforced on
+  the bytes received; at most the instance's) and `max_queue` /
+  `max_queue_bytes`, the hooks and body bytes the tenant may hold in this
+  node's batchers at once. `Ankusa.Edge.Batcher.commit/4` counts the share in
+  ETS (`Ankusa.Edge.RateLimiter.acquire_queue/3`, released when the call
+  returns or exits, so a crashed batcher leaks nothing) and answers
+  `{:error, {:tenant_overload, retry_after_ms}}`, a `429 tenant_overload`,
+  never the global `503 overload`. New `Ankusa.Edge.RateLimiter` functions:
+  `pre_read/4`, `hit_ip/2`, `hit_node/1`, `hit_source_bytes/3`,
+  `body_limit/2`, `acquire_queue/3`, `release_queue/2`, and `hit/3`
+  (`hit/2` is unchanged). The admin API's rate-limit routes accept and return
+  the new keys (only when set), and `ingest.v1.yaml` / `admin.v1.yaml`
+  describe them. New refusal reasons `:ip_rate_limited`, `:node_rate_limited`,
+  `:source_rate_limited`; new ingest outcome `:tenant_overload`. Tested in
+  `edge_rate_limit_test.exs` and `config_test.exs`.
+- **Tenant-aware routes bound to sources (TEN-4).** A route now has a
+  `tenant_id` (default `"default"`, the shared tenant) and an optional
+  `source_id`, in `Route.from_attrs/2`, `to_json/1`, `from_json/1`, the
+  `routes.seed` entries and the admin API, and the route guard hands the route
+  it matched to ingest instead of discarding it: `conn.assigns.ankusa_route` is
+  now the `Ankusa.Routes.Route` (it was its id), `Routes.capture/5` is
+  `authorize_path/5` answering with the route, and `Ankusa.Edge.Ingest.lookup/3`
+  holds the route's binding against the resolver. A route owned by a tenant
+  admits hooks only into that tenant (another tenant in the URL, or a source
+  owned by another tenant, is the `404` an unknown source gets) and, matched
+  on a shared source that the URL names no tenant for, files the hook under its
+  own; a route bound to a `source_id` admits only that source. The ingest span
+  carries `:route_id`. Route lifecycle events and audit rows now carry the
+  route's tenant instead of `"default"`, so a replay or an audit read filtered
+  to a tenant sees its own routes. The route-management listener gains a tenant
+  surface, `GET|POST /v1/tenants/:tenant/routes` and
+  `GET|PUT|PATCH|DELETE /v1/tenants/:tenant/routes/:id`, that needs
+  `tenant:<tenant>` (not `tenant:*`) and shows and changes only that tenant's
+  routes, read from a `{tenant, id}` index in the snapshot table
+  (`Snapshot.tenant_routes/4`); another tenant's route is `404`, a body naming
+  another tenant is `400 invalid_route`, and an id or path another tenant holds is
+  a `409 duplicate_route` that does not name the holder. `/admin/routes` stays
+  the all-tenants operator surface (`tenant:*`), so the SDKs' routes clients are
+  unchanged. `tenant_id` and `source_id` are immutable under `PATCH`.
+  **Breaking for a custom `Ankusa.Routes.Store`:** `delete/2` is now
+  `delete/3`, taking the tenant the delete is made for (`nil`: any owner), which
+  the store checks in the delete itself. `Route.to_stored_json/1` leaves out a
+  default `tenant_id` and an absent `source_id`, so a node from before them still
+  reads a Redis table with no tenant routes.
 - **Verifier breadth: public-key, token and client-certificate (SEC-12).** A
   provider that signs with Ed25519 or RSA, sends a static credential, or
   authenticates by mutual TLS no longer has to be a `Verifier.None` source with
@@ -373,6 +433,15 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Changed
 
+- **A tenant-carrying URL scheme needs a `rate_limits.default` (TEN-2).**
+  `Ankusa.RouteResolver.TenantPath` (`routing: tenant_path`) with
+  `rate_limits.default: nil` now fails the boot in
+  `Ankusa.Edge.RateLimiter.validate_config!/1`: the URL names the tenant, so
+  every tenant the config does not list was unlimited. Give it a default.
+  The limit parser now takes the instance's `max_body_bytes` as a second
+  argument (`parse_limit(attrs, max_body_bytes)` replaces `parse_limit(attrs)`),
+  the ceiling for a tenant's own, and a limit that is not `rate` and `burst`
+  plus the optional keys above is refused with a new message.
 - **Breaking (SEC-10):** `Sink.Http` is signed by default. `validate_opts!/1`
   (so boot, and the image's loader) refuses a sink with neither `:secret` nor
   `allow_unsigned: true` (`Sink.Http requires secret: …`), and a delivery

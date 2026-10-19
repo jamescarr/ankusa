@@ -8,6 +8,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Ankusa.Routes.Store.Redis` follows core's tenant-aware routes (TEN-4):
+  `delete/3` takes the tenant the delete is made for, and the delete script
+  reads the stored route's owner in the same step and answers `:not_found` for
+  another tenant's route, so a tenant-scoped delete can never remove a route that
+  was re-created under another tenant between the caller's read and the delete.
+  A definition is stored with `Ankusa.Routes.Route.to_stored_json/1`, which
+  leaves out `tenant_id` while it is `"default"` and `source_id` while it is
+  absent, so a node from before tenant routes still reads a table that has none;
+  once a route owned by a tenant is stored, an older node refuses the reload and
+  keeps serving what it had. Requires the `ankusa` release with tenant routes.
 - `Ankusa.SourceStore.Redis.ready?/1` (core's optional `ready?/1` source-store
   callback): whether the mirror has loaded from Redis, which core's lifecycle
   outbox waits for before it settles a source change a killed node left

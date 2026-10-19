@@ -226,14 +226,15 @@ defmodule Ankusa.ConfigTest do
       end
     end
 
-    test "rejects a limit that is not exactly rate and burst, or out of range" do
+    test "rejects a limit that is not rate and burst (and the optional keys), or out of range" do
       for {rate_limits, message} <- [
             {%{default: %{rate: 0, burst: 1}},
              "rate_limits.default.rate must be a number greater than 0, got 0"},
             {%{tenants: %{"acme" => %{rate: 1, burst: 0}}},
              "rate_limits.tenants.acme.burst must be an integer of at least 1, got 0"},
             {%{tenants: %{"acme" => [rate: 1, burst: 1]}},
-             "rate_limits.tenants.acme must be a map with exactly :rate and :burst, " <>
+             "rate_limits.tenants.acme must be a map with :rate and :burst and, optionally, " <>
+               ":bytes_per_second, :burst_bytes, :max_body_bytes, :max_queue, :max_queue_bytes, " <>
                "got [rate: 1, burst: 1]"},
             {%{tenants: %{"bad.tenant" => %{rate: 1, burst: 1}}},
              "rate_limits.tenants: tenant id \"bad.tenant\" must match [A-Za-z0-9_-]{1,64}"},
@@ -244,14 +245,155 @@ defmodule Ankusa.ConfigTest do
       end
     end
 
-    test "rejects a limit carrying a key that is neither rate nor burst" do
+    test "rejects a limit carrying a key it does not know" do
       # The message embeds the offending map, whose inspect order is the atom
       # table's, so only the prefix is pinned.
       assert_raise ArgumentError,
-                   ~r/^rate_limits\.tenants\.acme must be a map with exactly :rate and :burst/,
+                   ~r/^rate_limits\.tenants\.acme must be a map with :rate and :burst and, optionally/,
                    fn ->
                      validated_limits(%{tenants: %{"acme" => %{rate: 1, burst: 1, per: 1}}})
                    end
+    end
+
+    test "accepts the admission keys: per ip, node, sources, and a tenant's bytes, body and queue" do
+      assert :ok =
+               validated_limits(%{
+                 per_ip: %{rate: 20, burst: 40},
+                 node: %{rate: 0.5, burst: 1},
+                 sources: %{default: %{bytes_per_second: 50_000_000.5, burst_bytes: 8_000_000}},
+                 default: %{rate: 5, burst: 5, max_queue: 100},
+                 tenants: %{
+                   "acme" => %{
+                     rate: 100,
+                     burst: 200,
+                     bytes_per_second: 1_000_000,
+                     burst_bytes: 2_000_000,
+                     max_body_bytes: 8_000_000,
+                     max_queue: 1,
+                     max_queue_bytes: 1
+                   }
+                 }
+               })
+
+      assert :ok = validated_limits(%{sources: %{default: nil}})
+      assert :ok = validated_limits(%{sources: %{}})
+    end
+
+    test "the defaults: nothing but a generous per-source byte ceiling" do
+      assert %Config{}.rate_limits == %{
+               default: nil,
+               tenants: %{},
+               per_ip: nil,
+               node: nil,
+               sources: %{default: %{bytes_per_second: 100_000_000}}
+             }
+    end
+
+    test "range-checks every admission key" do
+      acme = fn extra -> %{tenants: %{"acme" => Map.merge(%{rate: 1, burst: 1}, extra)}} end
+
+      for {rate_limits, message} <- [
+            {%{per_ip: %{rate: 0, burst: 1}},
+             "rate_limits.per_ip.rate must be a number greater than 0, got 0"},
+            {%{per_ip: %{rate: 1, burst: 0}},
+             "rate_limits.per_ip.burst must be an integer of at least 1, got 0"},
+            {%{per_ip: [rate: 1, burst: 1]},
+             "rate_limits.per_ip must be a map with exactly :rate and :burst, " <>
+               "got [rate: 1, burst: 1]"},
+            {%{node: %{rate: -1, burst: 1}},
+             "rate_limits.node.rate must be a number greater than 0, got -1"},
+            {%{node: %{rate: 1, burst: 1.5}},
+             "rate_limits.node.burst must be an integer of at least 1, got 1.5"},
+            {%{sources: %{default: %{bytes_per_second: 0}}},
+             "rate_limits.sources.default.bytes_per_second must be a number greater than 0, " <>
+               "got 0"},
+            {%{sources: %{default: %{bytes_per_second: 1, burst_bytes: 0}}},
+             "rate_limits.sources.default.burst_bytes must be an integer of at least 1, got 0"},
+            {%{sources: %{default: %{burst_bytes: 5}}},
+             "rate_limits.sources.default must be nil or a map with :bytes_per_second and, " <>
+               "optionally, :burst_bytes, got %{burst_bytes: 5}"},
+            {%{sources: %{default: 5}},
+             "rate_limits.sources.default must be nil or a map with :bytes_per_second and, " <>
+               "optionally, :burst_bytes, got 5"},
+            {%{sources: %{other: %{bytes_per_second: 1}}},
+             "rate_limits.sources: unknown key :other; only :default is supported"},
+            {%{sources: []}, "rate_limits.sources must be a map, got []"},
+            {acme.(%{bytes_per_second: 0}),
+             "rate_limits.tenants.acme.bytes_per_second must be a number greater than 0, got 0"},
+            {acme.(%{bytes_per_second: "fast"}),
+             "rate_limits.tenants.acme.bytes_per_second must be a number greater than 0, " <>
+               "got \"fast\""},
+            {acme.(%{bytes_per_second: 1, burst_bytes: 0}),
+             "rate_limits.tenants.acme.burst_bytes must be an integer of at least 1, got 0"},
+            {acme.(%{burst_bytes: 10}),
+             "rate_limits.tenants.acme.burst_bytes needs bytes_per_second"},
+            {acme.(%{max_body_bytes: 0}),
+             "rate_limits.tenants.acme.max_body_bytes must be an integer of at least 1 and at " <>
+               "most the instance's max_body_bytes (8000000), got 0"},
+            {acme.(%{max_body_bytes: 8_000_001}),
+             "rate_limits.tenants.acme.max_body_bytes must be an integer of at least 1 and at " <>
+               "most the instance's max_body_bytes (8000000), got 8000001"},
+            {acme.(%{max_queue: 0}),
+             "rate_limits.tenants.acme.max_queue must be an integer of at least 1, got 0"},
+            {acme.(%{max_queue_bytes: -5}),
+             "rate_limits.tenants.acme.max_queue_bytes must be an integer of at least 1, got -5"},
+            {%{default: %{rate: 1, burst: 1, max_queue: 0.5}},
+             "rate_limits.default.max_queue must be an integer of at least 1, got 0.5"}
+          ] do
+        error = assert_raise ArgumentError, fn -> validated_limits(rate_limits) end
+        assert error.message == message
+      end
+
+      # The message embeds the offending map, whose inspect order is the atom
+      # table's, so only the prefix is pinned.
+      assert_raise ArgumentError,
+                   ~r/^rate_limits\.per_ip must be a map with exactly :rate and :burst, got/,
+                   fn -> validated_limits(%{per_ip: %{rate: 1, burst: 1, extra: 1}}) end
+    end
+
+    test "the instance's own max_body_bytes is the ceiling a tenant's may not pass" do
+      config =
+        Config.new(
+          max_body_bytes: 100,
+          rate_limits: %{tenants: %{"acme" => %{rate: 1, burst: 1, max_body_bytes: 100}}}
+        )
+
+      assert :ok = Ankusa.Edge.RateLimiter.validate_config!(config)
+
+      assert_raise ArgumentError, ~r/max_body_bytes \(100\), got 101/, fn ->
+        Config.new(
+          max_body_bytes: 100,
+          rate_limits: %{tenants: %{"acme" => %{rate: 1, burst: 1, max_body_bytes: 101}}}
+        )
+        |> Ankusa.Edge.RateLimiter.validate_config!()
+      end
+    end
+
+    test "a tenant-carrying URL scheme needs a default limit: the URL names the tenant" do
+      tenant_path = {Ankusa.RouteResolver.TenantPath, []}
+
+      error =
+        assert_raise ArgumentError, fn ->
+          Ankusa.Edge.RateLimiter.validate_config!(
+            Config.new(
+              route_resolver: tenant_path,
+              rate_limits: %{tenants: %{"acme" => %{rate: 1, burst: 1}}}
+            )
+          )
+        end
+
+      assert error.message =~ "rate_limits.default is required with routing: tenant_path"
+
+      assert :ok =
+               Ankusa.Edge.RateLimiter.validate_config!(
+                 Config.new(
+                   route_resolver: tenant_path,
+                   rate_limits: %{default: %{rate: 50, burst: 100}}
+                 )
+               )
+
+      # The path scheme names no tenant, so it stays unlimited by default.
+      assert :ok = Ankusa.Edge.RateLimiter.validate_config!(Config.new())
     end
   end
 

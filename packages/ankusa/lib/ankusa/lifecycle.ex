@@ -67,8 +67,9 @@ defmodule Ankusa.Lifecycle do
       are totally ordered by it
     * `replayid` — only on an event a replay job re-emitted
 
-  Routes belong to no tenant, so a route event's envelope carries the default
-  tenant, `"default"`.
+  A route event's envelope carries the route's tenant (`tenant_id`; `"default"`
+  for a route that belongs to none), so a replay filtered by `tenant` and a
+  tenant-limited reader of `GET /v1/audit` see their own routes' changes.
 
   ## A change nobody saw finish
 
@@ -219,7 +220,10 @@ defmodule Ankusa.Lifecycle do
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
 
-  @doc "The tenant a row's event is delivered under: a route's is the default one."
+  @doc """
+  The tenant a row's event is delivered under: the row's own (a source's tenant,
+  or the tenant that owns a route), the default one for a row that has none.
+  """
   @spec tenant(Audit.row()) :: String.t()
   def tenant(row), do: Map.get(row, :tenant) || "default"
 

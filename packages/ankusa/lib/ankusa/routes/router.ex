@@ -13,10 +13,17 @@ defmodule Ankusa.Routes.Router do
   Every route but `GET /health` needs a credential (`routes.admin.auth`, see
   `Ankusa.Admin.Auth`): `401` without one, `403` without the scope. Reading
   (`GET`, and the dry run `POST /admin/routes/test`) needs `routes:read`; every
-  other write needs `routes:write`. Route definitions and IP rules belong to
-  no tenant, so both scopes only count together with `tenant:*`: a principal
-  limited to some tenants must not edit what every tenant's ingest is checked
-  against.
+  other write needs `routes:write`.
+
+  There are two surfaces over the same definitions. The **operator surface**,
+  `/admin/routes` and `/admin/ip-rules`, spans tenants, so its scopes only count
+  together with `tenant:*`: a principal limited to some tenants must not edit
+  what every tenant's ingest is checked against. The **tenant surface**,
+  `/v1/tenants/:tenant/routes`, needs `tenant:<tenant>` (or `tenant:*`) instead,
+  and shows and changes only that tenant's routes: one that another tenant owns
+  is `404`, a body naming another tenant is `400`, and a principal without the
+  tenant is `403`. A tenant that is not `[A-Za-z0-9_-]{1,64}` is
+  `400 invalid_tenant`.
 
   ## Responding
 
@@ -28,6 +35,12 @@ defmodule Ankusa.Routes.Router do
   | `PUT` | `/admin/routes/:id` | `200` route (idempotent; creates if absent) |
   | `PATCH` | `/admin/routes/:id` | `200` route |
   | `DELETE` | `/admin/routes/:id` | `204` |
+  | `GET` | `/v1/tenants/:tenant/routes?enabled=&limit=&cursor=` | `200` the page of that tenant's routes |
+  | `POST` | `/v1/tenants/:tenant/routes` | `201` route owned by the tenant |
+  | `GET` | `/v1/tenants/:tenant/routes/:id` | `200` route |
+  | `PUT` | `/v1/tenants/:tenant/routes/:id` | `200` route (idempotent; creates if absent) |
+  | `PATCH` | `/v1/tenants/:tenant/routes/:id` | `200` route |
+  | `DELETE` | `/v1/tenants/:tenant/routes/:id` | `204` |
   | `GET` | `/admin/ip-rules` | `200` `{"default": ..., "rules": [...]}` |
   | `PUT` | `/admin/ip-rules` | `200` the stored rules |
   | `POST` | `/admin/routes/test` | `200` `{"decision": ..., "reason": ..., "route_id": ..., "ip_rule": ...}` |
@@ -35,10 +48,11 @@ defmodule Ankusa.Routes.Router do
 
   Errors are JSON objects with a stable `error` code:
   `invalid_route` (with `field` and `message`), `duplicate_route` (with
-  `conflicting_id`), `too_many_routes` (with `max_routes`), `invalid_query`,
-  `invalid_ip_rules`, `invalid_request`, `invalid_body`, `not_found`, and
-  `store_unavailable` (a `503`: the backing store could not be reached, or a
-  write lost every race against concurrent writers — retry).
+  `conflicting_id`, left out on the tenant surface when another tenant holds the
+  id or the path), `too_many_routes` (with `max_routes`), `invalid_query`,
+  `invalid_tenant`, `invalid_ip_rules`, `invalid_request`, `invalid_body`,
+  `not_found`, and `store_unavailable` (a `503`: the backing store could not be
+  reached, or a write lost every race against concurrent writers — retry).
 
   Writes are checked against the table they were validated against: two requests
   creating the same id, or two enabled routes for the same path and method,
@@ -78,18 +92,25 @@ defmodule Ankusa.Routes.Router do
   plug(:authorize_scope)
   plug(:dispatch)
 
-  # One rule for the whole surface: reading is `routes:read`, writing is
-  # `routes:write`. The dry run is a `POST` that changes nothing.
+  # Reading is `routes:read`, writing is `routes:write`; the dry run is a `POST`
+  # that changes nothing. The tenant surface checks the tenant in its path, the
+  # operator surface needs `tenant:*`.
   defp authorize_scope(%Plug.Conn{path_info: ["health"]} = conn, _opts), do: conn
 
-  defp authorize_scope(%Plug.Conn{} = conn, _opts) do
-    scope =
-      if conn.method in ["GET", "HEAD"] or
-           (conn.method == "POST" and conn.path_info == ["admin", "routes", "test"]),
-         do: "routes:read",
-         else: "routes:write"
+  defp authorize_scope(
+         %Plug.Conn{path_info: ["v1", "tenants", tenant, "routes" | _rest]} = conn,
+         _opts
+       ),
+       do: Auth.authorize_tenant(conn, required_scope(conn), tenant, & &1)
 
-    Auth.authorize_global(conn, scope, & &1)
+  defp authorize_scope(%Plug.Conn{} = conn, _opts),
+    do: Auth.authorize_global(conn, required_scope(conn), & &1)
+
+  defp required_scope(%Plug.Conn{} = conn) do
+    if conn.method in ["GET", "HEAD"] or
+         (conn.method == "POST" and conn.path_info == ["admin", "routes", "test"]),
+       do: "routes:read",
+       else: "routes:write"
   end
 
   get "/health" do
@@ -114,72 +135,52 @@ defmodule Ankusa.Routes.Router do
   end
 
   get "/admin/routes" do
-    instance = instance(conn)
-
-    with {:ok, query} <- parse_query(conn),
-         {:ok, page} <- Routes.list(instance, query) do
-      send_json(conn, 200, %{
-        "routes" => Enum.map(page.routes, &Route.to_json/1),
-        "next_cursor" => page.next_cursor
-      })
-    else
-      {:error, field} -> invalid_query(conn, field)
-    end
+    list_routes(conn, nil)
   end
 
   post "/admin/routes" do
-    instance = instance(conn)
-
-    case read_json(conn) do
-      {:ok, body, conn} ->
-        conn |> write(Routes.create(instance, body, audit: Context.from_conn(conn)), 201)
-
-      {:error, :body, conn} ->
-        invalid_body(conn)
-    end
+    create_route(conn, nil)
   end
 
   get "/admin/routes/:id" do
-    instance = instance(conn)
-
-    case Routes.get(instance, id) do
-      {:ok, route} -> send_json(conn, 200, Route.to_json(route))
-      {:error, :not_found} -> not_found(conn)
-    end
+    get_route(conn, id, nil)
   end
 
   put "/admin/routes/:id" do
-    instance = instance(conn)
-
-    case read_json(conn) do
-      {:ok, body, conn} ->
-        conn |> write(Routes.replace(instance, id, body, audit: Context.from_conn(conn)), 200)
-
-      {:error, :body, conn} ->
-        invalid_body(conn)
-    end
+    replace_route(conn, id, nil)
   end
 
   patch "/admin/routes/:id" do
-    instance = instance(conn)
-
-    case read_json(conn) do
-      {:ok, body, conn} ->
-        conn |> write(Routes.update(instance, id, body, audit: Context.from_conn(conn)), 200)
-
-      {:error, :body, conn} ->
-        invalid_body(conn)
-    end
+    update_route(conn, id, nil)
   end
 
   delete "/admin/routes/:id" do
-    instance = instance(conn)
+    delete_route(conn, id, nil)
+  end
 
-    case Routes.delete(instance, id, audit: Context.from_conn(conn)) do
-      :ok -> Plug.Conn.send_resp(conn, 204, "")
-      {:error, :not_found} -> not_found(conn)
-      {:error, reason} -> store_error(conn, reason)
-    end
+  # The tenant surface: the same operations over one tenant's routes.
+  get "/v1/tenants/:tenant/routes" do
+    for_tenant(conn, tenant, &list_routes(&1, tenant))
+  end
+
+  post "/v1/tenants/:tenant/routes" do
+    for_tenant(conn, tenant, &create_route(&1, tenant))
+  end
+
+  get "/v1/tenants/:tenant/routes/:id" do
+    for_tenant(conn, tenant, &get_route(&1, id, tenant))
+  end
+
+  put "/v1/tenants/:tenant/routes/:id" do
+    for_tenant(conn, tenant, &replace_route(&1, id, tenant))
+  end
+
+  patch "/v1/tenants/:tenant/routes/:id" do
+    for_tenant(conn, tenant, &update_route(&1, id, tenant))
+  end
+
+  delete "/v1/tenants/:tenant/routes/:id" do
+    for_tenant(conn, tenant, &delete_route(&1, id, tenant))
   end
 
   get "/admin/ip-rules" do
@@ -211,6 +212,89 @@ defmodule Ankusa.Routes.Router do
     send_json(conn, 404, %{error: "not_found"})
   end
 
+  # ── operations, shared by both surfaces ─────────────────────────────────────
+
+  # `tenant` is `nil` on the operator surface and the path's tenant on the
+  # tenant surface, where it becomes the `tenant:` option of `Ankusa.Routes`.
+  defp for_tenant(conn, tenant, fun) do
+    if Ankusa.ClaimCheck.Ref.valid_tenant?(tenant),
+      do: fun.(conn),
+      else: send_json(conn, 400, %{error: "invalid_tenant"})
+  end
+
+  defp scoped(opts, nil), do: opts
+  defp scoped(opts, tenant), do: Keyword.put(opts, :tenant, tenant)
+
+  defp list_routes(conn, tenant) do
+    instance = instance(conn)
+
+    with {:ok, query} <- parse_query(conn),
+         {:ok, page} <- Routes.list(instance, scoped(query, tenant)) do
+      send_json(conn, 200, %{
+        "routes" => Enum.map(page.routes, &Route.to_json/1),
+        "next_cursor" => page.next_cursor
+      })
+    else
+      {:error, field} -> invalid_query(conn, field)
+    end
+  end
+
+  defp create_route(conn, tenant) do
+    instance = instance(conn)
+
+    case read_json(conn) do
+      {:ok, body, conn} ->
+        opts = scoped([audit: Context.from_conn(conn)], tenant)
+        conn |> write(Routes.create(instance, body, opts), 201)
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
+    end
+  end
+
+  defp get_route(conn, id, tenant) do
+    case Routes.get(instance(conn), id, scoped([], tenant)) do
+      {:ok, route} -> send_json(conn, 200, Route.to_json(route))
+      {:error, :not_found} -> not_found(conn)
+    end
+  end
+
+  defp replace_route(conn, id, tenant) do
+    instance = instance(conn)
+
+    case read_json(conn) do
+      {:ok, body, conn} ->
+        opts = scoped([audit: Context.from_conn(conn)], tenant)
+        conn |> write(Routes.replace(instance, id, body, opts), 200)
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
+    end
+  end
+
+  defp update_route(conn, id, tenant) do
+    instance = instance(conn)
+
+    case read_json(conn) do
+      {:ok, body, conn} ->
+        opts = scoped([audit: Context.from_conn(conn)], tenant)
+        conn |> write(Routes.update(instance, id, body, opts), 200)
+
+      {:error, :body, conn} ->
+        invalid_body(conn)
+    end
+  end
+
+  defp delete_route(conn, id, tenant) do
+    opts = scoped([audit: Context.from_conn(conn)], tenant)
+
+    case Routes.delete(instance(conn), id, opts) do
+      :ok -> Plug.Conn.send_resp(conn, 204, "")
+      {:error, :not_found} -> not_found(conn)
+      {:error, reason} -> store_error(conn, reason)
+    end
+  end
+
   # ── writes ──────────────────────────────────────────────────────────────────
 
   defp write(conn, {:ok, %Route{} = route}, status),
@@ -218,6 +302,10 @@ defmodule Ankusa.Routes.Router do
 
   defp write(conn, {:error, {:invalid, field, message}}, _status),
     do: send_json(conn, 400, %{error: "invalid_route", field: field, message: message})
+
+  # Another tenant holds it: the answer does not say whose.
+  defp write(conn, {:error, {:conflict, nil}}, _status),
+    do: send_json(conn, 409, %{error: "duplicate_route"})
 
   defp write(conn, {:error, {:conflict, conflicting_id}}, _status),
     do: send_json(conn, 409, %{error: "duplicate_route", conflicting_id: conflicting_id})

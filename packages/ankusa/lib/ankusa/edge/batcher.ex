@@ -16,6 +16,14 @@ defmodule Ankusa.Edge.Batcher do
   :overload}`, which the edge turns into a `503` with `Retry-After`. Never ack
   what you haven't saved.
 
+  The bound is the partition's, so on its own one tenant could fill it and every
+  other tenant would be shed with it. A tenant whose limit sets `max_queue` or
+  `max_queue_bytes` (`Ankusa.Edge.RateLimiter`) is counted by `commit/4`
+  across this node's partitions before the call reaches a partition, and is
+  refused `{:error, {:tenant_overload, retry_after_ms}}` (a `429`) past its
+  share: the partition is never asked, and the global `503` is left to the
+  tenants still within theirs.
+
   ## Deadlines
 
   Every record carries a deadline: the latest moment its batch may *start*
@@ -37,6 +45,7 @@ defmodule Ankusa.Edge.Batcher do
 
   require Logger
 
+  alias Ankusa.Edge.RateLimiter
   alias Ankusa.Queue
 
   # ── api ───────────────────────────────────────────────────────────────────
@@ -60,10 +69,15 @@ defmodule Ankusa.Edge.Batcher do
   Submit a record and block until it is durably committed (or shed).
 
   Returns `{:committed, env}` | `{:duplicate, env}` | `{:error, :overload}` |
+  `{:error, {:tenant_overload, retry_after_ms}}` |
   `{:error, :tenant_limit}` (the hook's tenant would pass `tenants.max`) |
   `{:error, :store_unavailable}`. The queue itself is never allowed to crash the
   call: a failed commit (or a dead writer process) is reported as
   `:store_unavailable`, which the edge maps to `503`.
+
+  The record's tenant share is counted before the call and given back when the
+  call returns or exits, whatever the outcome, so a batcher that crashes with
+  records buffered leaks nothing.
 
   `timeout` (milliseconds, or `:infinity`) bounds how long the record may wait
   before its batch *starts* committing. Once it has started the call waits for
@@ -74,12 +88,34 @@ defmodule Ankusa.Edge.Batcher do
           {:committed, Ankusa.Envelope.t()}
           | {:duplicate, Ankusa.Envelope.t()}
           | {:error, :overload | :tenant_limit | :store_unavailable}
+          | {:error, {:tenant_overload, pos_integer()}}
   def commit(instance, partition, record, timeout \\ 15_000) do
-    GenServer.call(
-      Ankusa.via(instance, {:batcher, partition}),
-      {:enqueue, record, deadline(timeout)},
-      :infinity
-    )
+    case acquire(instance, record) do
+      {:ok, lease} ->
+        try do
+          GenServer.call(
+            Ankusa.via(instance, {:batcher, partition}),
+            {:enqueue, record, deadline(timeout)},
+            :infinity
+          )
+        after
+          RateLimiter.release_queue(instance, lease)
+        end
+
+      {:error, {:tenant_overload, _retry_after_ms}} = refused ->
+        refused
+    end
+  end
+
+  # A record with no tenant (the tests' bare entries) has no share to count.
+  defp acquire(instance, record) do
+    case record do
+      %{envelope: %{tenant_id: tenant_id}} when is_binary(tenant_id) ->
+        RateLimiter.acquire_queue(instance, tenant_id, record_bytes(record))
+
+      _ ->
+        {:ok, nil}
+    end
   end
 
   # `:infinity` stays an atom all the way to the writer. Atoms sort above every

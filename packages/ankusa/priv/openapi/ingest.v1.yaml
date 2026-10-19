@@ -222,6 +222,10 @@ components:
             - overload
             - store_unavailable
             - rate_limited
+            - tenant_overload
+            - ip_rate_limited
+            - node_rate_limited
+            - source_rate_limited
             - quarantine_rate_limited
             - quarantine_full
         reason:
@@ -229,7 +233,7 @@ components:
           description: Present on `verification_failed` and `body_read_failed`.
         limit:
           type: integer
-          description: Present on `payload_too_large`; the configured `max_body_bytes`.
+          description: Present on `payload_too_large`; the `max_body_bytes` that applies to this request — the tenant's own when it has one, else the instance's.
         header:
           type: [string, "null"]
           description: Present on `invalid_header`; the offending header name, or null when the name itself is not printable.
@@ -294,7 +298,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     TooLarge:
-      description: '`413`. `payload_too_large`. Permanent; body exceeds `max_body_bytes`.'
+      description: '`413`. `payload_too_large`. Permanent; body exceeds `max_body_bytes` — the instance''s, or the tenant''s own (`rate_limits.tenants[t].max_body_bytes`), which is named in `limit`. Refused on the declared `Content-Length` before the body is read.'
       content:
         application/json:
           schema:
@@ -304,8 +308,18 @@ components:
         `429`. Nothing was stored. Transient — retry after the `Retry-After`
         seconds. `error` is one of:
 
-        - `rate_limited`: this hook's tenant is over its ingest rate limit on
-          this node (`rate_limits`).
+        - `rate_limited`: this hook's tenant is over its ingest quota on this
+          node (`rate_limits`: hooks or bytes per second).
+        - `tenant_overload`: this hook's tenant holds its whole share of this
+          node's batchers (`rate_limits.tenants[t].max_queue` /
+          `max_queue_bytes`). `Retry-After` is `1`. Other tenants are not
+          affected, and this is never the global `503 overload`.
+        - `ip_rate_limited`, `node_rate_limited`: the client address, or the
+          node as a whole, is over `rate_limits.per_ip` / `rate_limits.node`.
+          Answered before the request body is read.
+        - `source_rate_limited`: the source is over its body-bytes-per-second
+          ceiling (`rate_limits.sources.default`). Answered before the body is
+          read when `Content-Length` is declared, after it otherwise.
         - `quarantine_rate_limited`: verification failed, the source's
           `on_verify_failure` is `quarantine`, and the source's quarantine
           bucket on this node (`quarantine.burst`/`quarantine.rate`) is empty.

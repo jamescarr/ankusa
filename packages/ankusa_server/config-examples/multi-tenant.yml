@@ -24,6 +24,16 @@ http:
   routing: tenant_path
   prefix: /webhooks
 
+rate_limits:
+  # Required with routing: tenant_path. The URL names the tenant, so without a
+  # default every tenant not listed here would have no limit at all. Per node:
+  # a fleet of N edges admits up to N x this.
+  default: {rate: 50, burst: 100}
+  tenants:
+    # A tenant of its own: more hooks, a body cap, and the most it may hold in
+    # this node's queues at once (past it: 429 tenant_overload, not 503).
+    acme: {rate: 500, burst: 1000, max_body_bytes: 1000000, max_queue: 2000}
+
 admin:
   enabled: true
 

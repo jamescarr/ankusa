@@ -20,7 +20,9 @@ info:
     `sources:read|write`, `dlq:read|write`, `replays:read|write`,
     `quarantine:read|write`, `rate_limits:read|write`, `routes:read|write`,
     `claims:read`, `audit:read`, plus `tenant:<id>` or `tenant:*` for the tenants they apply
-    to; a resource that spans tenants needs `tenant:*`. Each operation below
+    to; a resource that spans tenants needs `tenant:*` (the route definitions
+    have a tenant surface too: `/v1/tenants/{tenant}/routes` needs only
+    `tenant:<tenant>`). Each operation below
     says which it needs. `GET /v1/config` is redacted anyway, because many
     people may hold `config:read`.
 
@@ -82,9 +84,19 @@ tags:
     description: |
       Route definitions and the global IP rules, on the `routes.admin.port`
       listener. Requires `routes.enabled: true` and the `:edge` role. A route is
-      a **capture gate**, not an identity: it decides whether a request is
-      captured, while `Ankusa.RouteResolver` and the source store still decide
-      which source and tenant it belongs to.
+      a **capture gate** owned by a tenant (`tenant_id`, default `default`, the
+      shared tenant) and optionally bound to one source (`source_id`): it
+      decides whether a request is captured, while `Ankusa.RouteResolver` and
+      the source store still decide which source and tenant it belongs to, and
+      the route has to agree. A route owned by one tenant admits nothing into
+      another tenant's source, and a route bound to a source admits nothing for
+      another; a disagreement is a `404` to the sender.
+
+      Two surfaces serve the same definitions. `/admin/routes` spans tenants
+      and needs `tenant:*`. `/v1/tenants/{tenant}/routes` needs only
+      `tenant:<tenant>` and shows and changes only that tenant's routes: one
+      another tenant owns is a `404`, a `403` is the answer to a principal that
+      lacks the tenant. Route ids are one namespace across tenants.
 paths:
   /health:
     servers:
@@ -874,6 +886,8 @@ paths:
                   value:
                     routes:
                       - id: stripe
+                        tenant_id: default
+                        source_id: null
                         path: /webhooks/stripe
                         methods: [POST]
                         enabled: true
@@ -930,6 +944,8 @@ paths:
                 created:
                   value:
                     id: stripe
+                    tenant_id: default
+                    source_id: null
                     path: /webhooks/stripe
                     methods: [POST]
                     enabled: true
@@ -975,6 +991,8 @@ paths:
                 stripe:
                   value:
                     id: stripe
+                    tenant_id: default
+                    source_id: null
                     path: /webhooks/stripe
                     methods: [POST]
                     enabled: true
@@ -1021,6 +1039,8 @@ paths:
                 replaced:
                   value:
                     id: stripe
+                    tenant_id: default
+                    source_id: null
                     path: /webhooks/stripe
                     methods: [POST]
                     enabled: false
@@ -1067,6 +1087,8 @@ paths:
                 reenabled:
                   value:
                     id: stripe
+                    tenant_id: default
+                    source_id: null
                     path: /webhooks/stripe
                     methods: [POST]
                     enabled: true
@@ -1103,6 +1125,308 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '204':
           description: Deleted. No body.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+  /v1/tenants/{tenant}/routes:
+    servers:
+      - url: http://localhost:4003
+        description: Route-management listener (default `routes.admin.port`).
+    parameters:
+      - name: tenant
+        in: path
+        required: true
+        description: The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+        schema:
+          type: string
+        example: acme
+    get:
+      operationId: listTenantRoutes
+      tags: [routes]
+      summary: List one tenant's route definitions
+      description: |
+        Ordered by id, like `GET /admin/routes`, but only the routes the tenant
+        owns, read from the tenant's own index: the cost is the page, not the
+        table. Another tenant's routes are not in the answer.
+      parameters:
+        - name: enabled
+          in: query
+          required: false
+          description: Filter by `enabled`. Anything other than `true`/`false` is `400 invalid_query`.
+          schema:
+            type: string
+            enum: ['true', 'false']
+          example: 'true'
+        - name: limit
+          in: query
+          required: false
+          description: Maximum routes per page. Clamped to 1..200.
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 200
+          example: 100
+        - name: cursor
+          in: query
+          required: false
+          description: The `next_cursor` of the previous page; returns ids greater than it.
+          schema:
+            type: string
+          example: checkout
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: One page of the tenant's route definitions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoutePage'
+              examples:
+                oneRoute:
+                  summary: After creating `stripe` for `acme`
+                  value:
+                    routes:
+                      - id: stripe
+                        tenant_id: acme
+                        source_id: acme.stripe
+                        path: /webhooks/acme/stripe
+                        methods: [POST]
+                        enabled: true
+                        ip_rules: []
+                        metadata: {owner: payments}
+                        revision: 1
+                        inserted_at: '2026-09-28T14:17:02Z'
+                        updated_at: '2026-09-28T14:17:02Z'
+                    next_cursor: null
+        '400':
+          $ref: '#/components/responses/InvalidQuery'
+    post:
+      operationId: createTenantRoute
+      tags: [routes]
+      summary: Create a route definition owned by the tenant
+      description: |
+        Like `POST /admin/routes`, with the tenant taken from the path: the body
+        may omit `tenant_id` or repeat the path's, and naming another tenant is a
+        `400 invalid_route` (`field: tenant_id`). An id (or an enabled route's
+        path and method) that another tenant holds is a `409 duplicate_route`
+        that does **not** name the holder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteInput'
+            example:
+              id: stripe
+              source_id: acme.stripe
+              path: /webhooks/acme/stripe
+              methods: [POST]
+              metadata: {owner: payments}
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: The stored route, owned by the tenant in the path.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                created:
+                  value:
+                    id: stripe
+                    tenant_id: acme
+                    source_id: acme.stripe
+                    path: /webhooks/acme/stripe
+                    methods: [POST]
+                    enabled: true
+                    ip_rules: []
+                    metadata: {owner: payments}
+                    revision: 1
+                    inserted_at: '2026-09-28T14:17:02Z'
+                    updated_at: '2026-09-28T14:17:02Z'
+        '400':
+          $ref: '#/components/responses/InvalidRoute'
+        '409':
+          $ref: '#/components/responses/DuplicateRoute'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+  /v1/tenants/{tenant}/routes/{id}:
+    servers:
+      - url: http://localhost:4003
+        description: Route-management listener (default `routes.admin.port`).
+    parameters:
+      - name: tenant
+        in: path
+        required: true
+        description: The tenant (`[A-Za-z0-9_-]{1,64}`). The principal needs `tenant:<tenant>` or `tenant:*`.
+        schema:
+          type: string
+        example: acme
+      - name: id
+        in: path
+        required: true
+        description: The route's id (a lowercase slug). A route another tenant owns is a `404`.
+        schema:
+          type: string
+        example: stripe
+    get:
+      operationId: getTenantRoute
+      tags: [routes]
+      summary: Fetch one of the tenant's route definitions
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                stripe:
+                  value:
+                    id: stripe
+                    tenant_id: acme
+                    source_id: acme.stripe
+                    path: /webhooks/acme/stripe
+                    methods: [POST]
+                    enabled: true
+                    ip_rules: []
+                    metadata: {owner: payments}
+                    revision: 1
+                    inserted_at: '2026-09-28T14:17:02Z'
+                    updated_at: '2026-09-28T14:17:02Z'
+        '400':
+          $ref: '#/components/responses/InvalidTenant'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: replaceTenantRoute
+      tags: [routes]
+      summary: Replace one of the tenant's route definitions
+      description: |
+        Like `PUT /admin/routes/{id}`: a full, idempotent definition, creating
+        the route when the id is free. The tenant is the path's; a body that
+        names another is `400`. An id another tenant owns is a
+        `409 duplicate_route` that does not name the holder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RouteInput'
+            example:
+              source_id: acme.stripe
+              path: /webhooks/acme/stripe
+              methods: [POST]
+              enabled: false
+              metadata: {owner: payments, staging: true}
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The stored route, with the `inserted_at` it already had.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                replaced:
+                  value:
+                    id: stripe
+                    tenant_id: acme
+                    source_id: acme.stripe
+                    path: /webhooks/acme/stripe
+                    methods: [POST]
+                    enabled: false
+                    ip_rules: []
+                    metadata: {owner: payments, staging: true}
+                    revision: 2
+                    inserted_at: '2026-09-28T14:17:02Z'
+                    updated_at: '2026-09-28T14:17:09Z'
+        '400':
+          $ref: '#/components/responses/InvalidRoute'
+        '409':
+          $ref: '#/components/responses/DuplicateRoute'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+    patch:
+      operationId: updateTenantRoute
+      tags: [routes]
+      summary: Patch one of the tenant's route definitions
+      description: |
+        Only `enabled`, `methods`, `ip_rules`, and `metadata` are patchable;
+        `id`, `path`, `tenant_id` and `source_id` are **immutable** here and
+        answer `400 invalid_route` with `message: "immutable; use PUT"`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoutePatch'
+            example: {enabled: true}
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The patched route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Route'
+              examples:
+                reenabled:
+                  value:
+                    id: stripe
+                    tenant_id: acme
+                    source_id: acme.stripe
+                    path: /webhooks/acme/stripe
+                    methods: [POST]
+                    enabled: true
+                    ip_rules: []
+                    metadata: {owner: payments, staging: true}
+                    revision: 3
+                    inserted_at: '2026-09-28T14:17:02Z'
+                    updated_at: '2026-09-28T14:17:12Z'
+        '400':
+          $ref: '#/components/responses/InvalidRoute'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/DuplicateRoute'
+        '503':
+          $ref: '#/components/responses/StoreUnavailable'
+    delete:
+      operationId: deleteTenantRoute
+      tags: [routes]
+      summary: Delete one of the tenant's route definitions
+      description: |
+        Immediate, like `DELETE /admin/routes/{id}`. A route another tenant owns
+        is a `404`, and the store checks the owner in the delete itself, so a
+        route re-created under another tenant a moment ago is never removed.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '204':
+          description: Deleted. No body.
+        '400':
+          $ref: '#/components/responses/InvalidTenant'
         '404':
           $ref: '#/components/responses/NotFound'
         '503':
@@ -1524,9 +1848,17 @@ components:
     RateLimit:
       type: object
       description: |
-        A rate limit. `rate` is hooks per second and may be fractional (`0.5`
-        is one every two seconds); `burst` is the most hooks admitted back to
-        back.
+        A tenant's ingest limit. `rate` is hooks per second and may be
+        fractional (`0.5` is one every two seconds); `burst` is the most hooks
+        admitted back to back. The rest are optional: `bytes_per_second` and
+        `burst_bytes` limit body bytes (charged with the hook, after
+        verification; `burst_bytes` defaults to one second's worth and needs
+        `bytes_per_second`), `max_body_bytes` is the biggest body the tenant may
+        send (`413` past it; at most the instance's `max_body_bytes`), and
+        `max_queue` / `max_queue_bytes` are the hooks and body bytes the tenant
+        may hold in this node's batchers at once (`429 tenant_overload` past
+        either). A limit replaces the one below it whole: keys left out are
+        unset, not inherited.
       required: [rate, burst]
       additionalProperties: false
       properties:
@@ -1538,9 +1870,31 @@ components:
           type: integer
           minimum: 1
           example: 100
+        bytes_per_second:
+          type: number
+          exclusiveMinimum: 0
+          example: 5000000
+        burst_bytes:
+          type: integer
+          minimum: 1
+          example: 10000000
+        max_body_bytes:
+          type: integer
+          minimum: 1
+          example: 1000000
+        max_queue:
+          type: integer
+          minimum: 1
+          example: 2000
+        max_queue_bytes:
+          type: integer
+          minimum: 1
+          example: 67108864
     TenantRateLimit:
       type: object
-      description: One tenant's limit, and whether it came from config or an override.
+      description: |
+        One tenant's limit, and whether it came from config or an override. The
+        optional keys of a `RateLimit` appear only when the limit sets them.
       required: [tenant, rate, burst, source]
       properties:
         tenant:
@@ -1551,6 +1905,21 @@ components:
         burst:
           type: [integer, 'null']
           description: '`null` when `source` is `none`.'
+        bytes_per_second:
+          type: number
+          exclusiveMinimum: 0
+        burst_bytes:
+          type: integer
+          minimum: 1
+        max_body_bytes:
+          type: integer
+          minimum: 1
+        max_queue:
+          type: integer
+          minimum: 1
+        max_queue_bytes:
+          type: integer
+          minimum: 1
         source:
           type: string
           enum: [override, config, default, none]
@@ -1624,8 +1993,10 @@ components:
       type: object
       description: |
         A route definition: the capture gate. It decides whether a request is
-        captured, not which source it belongs to.
-      required: [id, path, methods, enabled, ip_rules, metadata, revision, inserted_at, updated_at]
+        captured and, with `tenant_id` and `source_id`, which tenant and source
+        it may admit it into. A resolver result that disagrees with the binding
+        is a `404` to the sender.
+      required: [id, tenant_id, source_id, path, methods, enabled, ip_rules, metadata, revision, inserted_at, updated_at]
       properties:
         id:
           type: string
@@ -1634,6 +2005,22 @@ components:
             by the client or generated (a lowercase ULID). Immutable after
             creation.
           example: stripe
+        tenant_id:
+          type: string
+          description: |
+            The owning tenant, `[A-Za-z0-9_-]{1,64}`; `default` (the default) is
+            the shared tenant and binds none. A route owned by a tenant admits
+            hooks only into that tenant: a request whose resolver names another
+            tenant, or whose source belongs to another, is a `404`. Where the
+            resolver names no tenant and the source is shared, the hook is
+            stored under this tenant.
+          example: default
+        source_id:
+          type: [string, 'null']
+          description: |
+            The one source the route admits, or `null` to leave it to the
+            resolver. A request the resolver maps to another source is a `404`.
+          example: null
         path:
           type: string
           description: |
@@ -1694,6 +2081,16 @@ components:
         id:
           type: string
           description: Optional on create. On `PUT` the path's `id` wins.
+        tenant_id:
+          type: string
+          description: |
+            Defaults to `default`. On the tenant surface the path's tenant is
+            used, and a different one is `400 invalid_route`.
+          default: default
+        source_id:
+          type: [string, 'null']
+          description: Optional; at most 256 characters, without whitespace or `/`.
+          default: null
         path:
           type: string
           example: /webhooks/stripe
@@ -1718,8 +2115,8 @@ components:
     RoutePatch:
       type: object
       description: |
-        Only these four fields are patchable. `path` and `id` answer
-        `400 invalid_route` with `message: "immutable; use PUT"`.
+        Only these four fields are patchable. `path`, `id`, `tenant_id` and
+        `source_id` answer `400 invalid_route` with `message: "immutable; use PUT"`.
       properties:
         enabled:
           type: boolean
@@ -1875,7 +2272,7 @@ components:
             badTenant:
               value: {error: invalid_tenant}
     InvalidRateLimit:
-      description: '`400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, and unknown fields are refused. `message` says which.'
+      description: '`400`. `invalid_rate_limit`: the body is not a JSON object, or not a limit — `rate` and `burst` are both required, `rate` is a number greater than 0, `burst` an integer of at least 1, the optional keys are in range (`burst_bytes` needs `bytes_per_second`; `max_body_bytes` is at most the instance''s), and unknown fields are refused. `message` says which.'
       content:
         application/json:
           schema:
@@ -1887,6 +2284,8 @@ components:
               value: {error: invalid_rate_limit, message: 'burst is required'}
             unknownField:
               value: {error: invalid_rate_limit, message: 'unknown field "per"'}
+            burstBytesAlone:
+              value: {error: invalid_rate_limit, message: 'burst_bytes needs bytes_per_second'}
             notJson:
               value: {error: invalid_rate_limit, message: 'body must be a JSON object'}
     RoleNotEnabled:
@@ -1910,7 +2309,7 @@ components:
             $ref: '#/components/schemas/Error'
           example: {error: wal_disabled}
     InvalidRoute:
-      description: '`400`. `invalid_route`: a route definition that would not mean what it says — a path that is not rooted or has an illegal segment, a non-boolean `enabled`, a bad CIDR, unknown fields, or `path`/`id` in a `PATCH`. `field` names it and `message` says why. Also `invalid_body` when the body never parsed.'
+      description: '`400`. `invalid_route`: a route definition that would not mean what it says — a path that is not rooted or has an illegal segment, a non-boolean `enabled`, a bad CIDR, a `tenant_id` or `source_id` that is not valid (or, on the tenant surface, a `tenant_id` other than the path''s), unknown fields, or `path`/`id`/`tenant_id`/`source_id` in a `PATCH`. `field` names it and `message` says why. Also `invalid_body` when the body never parsed, and, on the tenant surface, `invalid_tenant` when the tenant in the path is not an identity.'
       content:
         application/json:
           schema:
@@ -1927,6 +2326,18 @@ components:
               value: {error: invalid_route, field: path, message: 'invalid segment "*"'}
             immutablePath:
               value: {error: invalid_route, field: path, message: 'immutable; use PUT'}
+            immutableTenant:
+              value: {error: invalid_route, field: tenant_id, message: 'immutable; use PUT'}
+            badTenantId:
+              value: {error: invalid_route, field: tenant_id, message: 'must match [A-Za-z0-9_-]{1,64}'}
+            otherTenantId:
+              summary: The tenant surface took the tenant from the path, and the body names another
+              value: {error: invalid_route, field: tenant_id, message: 'must be acme, the tenant in the path, or absent'}
+            badSourceId:
+              value: {error: invalid_route, field: source_id, message: 'must be a non-empty string of at most 256 characters, without whitespace or "/"'}
+            badTenant:
+              summary: '`invalid_tenant` instead, when the tenant in the path is not an identity'
+              value: {error: invalid_tenant}
             notJson:
               summary: '`invalid_body` instead, when the body never parsed'
               value: {error: invalid_body}
@@ -1941,6 +2352,9 @@ components:
               value: {error: invalid_query, field: limit}
             badEnabled:
               value: {error: invalid_query, field: enabled}
+            badTenant:
+              summary: '`invalid_tenant` instead, when the tenant in the path is not an identity'
+              value: {error: invalid_tenant}
     InvalidRequest:
       description: '`400`. `invalid_request`: the dry run''s `method`, `path`, or `ip` is missing or unusable. `field` names it. Also `invalid_body` when the request body never parsed.'
       content:
@@ -1997,6 +2411,9 @@ components:
               value: {error: duplicate_route, conflicting_id: stripe}
             samePathAndMethod:
               value: {error: duplicate_route, conflicting_id: checkout}
+            heldElsewhere:
+              summary: On the tenant surface, an id or an enabled path and method another tenant holds — whose it is is not said
+              value: {error: duplicate_route}
             atCap:
               summary: '`too_many_routes` instead, when the cap is reached'
               value: {error: too_many_routes, max_routes: 10000}
@@ -2064,3 +2481,6 @@ components:
             missingTenant:
               summary: A resource that spans tenants needs `tenant:*`
               value: {error: forbidden, scope: 'tenant:*'}
+            missingTenantScope:
+              summary: The tenant surface, for a tenant the principal does not hold
+              value: {error: forbidden, scope: 'tenant:globex'}

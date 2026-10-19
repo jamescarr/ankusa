@@ -79,7 +79,7 @@ Every top-level section, with its keys and defaults:
 | `sources` | One entry per catch-URL source. See below |
 | `source_store` | `type` (`static` \| `persistent` \| `redis`; `persistent` adds API-managed sources kept in this node's store, `redis` keeps them in Redis, shared by every node with the same namespace; a `url` with no `type` means `redis`), `url`, `namespace` (`ankusa:sources:<instance>`), `tick_ms` (30000) — the last three only with `type: redis`. See [`multi-tenancy.md#dynamic-sources`](multi-tenancy.md#dynamic-sources) |
 | `secrets` | `kek` (a 32-byte key, base64, optionally `<id>:<base64>`; use `${VAR}`), `kek_previous` (a list, or one comma-separated string, of keys that may still decrypt). With a `kek`, the secrets of API-managed sources are encrypted before they are stored (`source_store.type: persistent` or `redis`); unset, they are stored as plain JSON. See [Encryption at rest](storage.md#encryption-at-rest). `providers.<name>` (`type: aws` or `vault`, and their settings) and `cache_ttl_ms` (`0`) name the secret managers `${sm:<name>:<ref>}` reads from; see [Secret sources](#secret-sources) |
-| `rate_limits` | `default` (`null` = unlimited), `tenants` (`{tenant_id: {rate, burst}}`). Per node, charged after verification. See [Rate limits](#rate-limits) |
+| `rate_limits` | `default` (`null` = unlimited; **required** with `routing: tenant_path`), `tenants` (`{tenant_id: {rate, burst, ...}}`; a limit may add `bytes_per_second`, `burst_bytes`, `max_body_bytes`, `max_queue`, `max_queue_bytes`), `per_ip` (`{rate, burst}` or `null`), `node` (`{rate, burst}` or `null`), `sources` (`default: {bytes_per_second, burst_bytes}`; 100 MB/s, `null` = off). Per node. `per_ip`, `node` and `sources` are charged before the body is read; the tenant's after verification. See [Rate limits](#rate-limits) |
 | `quarantine` | `burst` (100), `rate` (20 per second), `max_bytes` (1 GiB). The pen for hooks whose source has `on_verify_failure: quarantine`: one token bucket per source (over it, `429 quarantine_rate_limited`), and a byte cap (a full pen answers `503 quarantine_full`; it never evicts). Per node. See [`delivery.md#quarantine`](delivery.md#quarantine) |
 | `audit` | `retention_days` (365, an integer ≥ 1). How long the [audit trail](architecture.md#guarantees-by-component) keeps its rows: an hourly sweep deletes older ones. Read with `GET /v1/audit` (scope `audit:read`). Per node |
 | `tenants` | `max` (1000000, an integer from 1 to 4294967294). How many tenants the node's store hands a dense ordinal to ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md)); the hook of one past it is refused with `503 {"error":"tenant_limit"}` and `Retry-After: 300`. Tenants it already knows are never refused, and a tenant keeps its ordinal forever. Per node |
@@ -514,7 +514,13 @@ config :ankusa,
     ip_denied_status: 403,
     seed: []
   },
-  rate_limits: %{default: nil, tenants: %{}},
+  rate_limits: %{
+    default: nil,
+    tenants: %{},
+    per_ip: nil,
+    node: nil,
+    sources: %{default: %{bytes_per_second: 100_000_000}}
+  },
   quarantine: %{burst: 100, rate: 20, max_bytes: 1_073_741_824},
   audit: %{retention_days: 365},
   tenants: %{max: 1_000_000},
@@ -617,7 +623,9 @@ config :ankusa,
 | `routes.log_sample` | `100` | 1 in N rejections is logged at `:debug`; `0` disables it. |
 | `routes.ip_denied_status` | `403` | Status for an IP denial, or `404` for uniformity with a missing route. With `403` a sender can tell a route that has its own `ip_rules` (which denied it) from a path that does not exist (`404`); `404` removes that distinction. |
 | `routes.seed` | `[]` | Route definitions loaded at boot (see below). With the ETS store they are loaded on **every** boot. |
-| `rate_limits.default`, `rate_limits.tenants` | `nil`, `%{}` | Per-tenant ingest limits, `%{rate: hooks_per_second, burst: hooks}`; fractions are allowed (`0.5` is one every two seconds) and both keys are required. Precedence is a runtime override, then the tenant's own entry, then `default`; no limit means unlimited. See [Rate limits](#rate-limits). |
+| `rate_limits.default`, `rate_limits.tenants` | `nil`, `%{}` | Per-tenant ingest limits, `%{rate: hooks_per_second, burst: hooks}`; fractions are allowed (`0.5` is one every two seconds) and both keys are required. Optional: `bytes_per_second` (a number > 0) and `burst_bytes` (an integer ≥ 1, needs `bytes_per_second`; default one second's worth), `max_body_bytes` (an integer from 1 to the instance's `max_body_bytes`; `413` past it), `max_queue` and `max_queue_bytes` (integers ≥ 1: what the tenant may hold in this node's batchers at once; past either is `429 tenant_overload`). Precedence is a runtime override, then the tenant's own entry, then `default`, and the first one found applies whole; no limit means unlimited. A `default` is required when the route resolver is `RouteResolver.TenantPath`. See [Rate limits](#rate-limits). |
+| `rate_limits.per_ip`, `rate_limits.node` | `nil`, `nil` | `%{rate: hooks_per_second, burst: hooks}` charged before the body is read: per client address (`routes.trusted_proxies` decides whose `X-Forwarded-For` counts; an IPv6 address is its `/64`) and for the whole node. Over it: `429 ip_rate_limited` / `429 node_rate_limited`. `nil` is off. |
+| `rate_limits.sources` | `%{default: %{bytes_per_second: 100_000_000}}` | Body bytes per second for each source, charged before the body is read with its declared `Content-Length` (a body with none is charged when read): `429 source_rate_limited`. `%{default: %{bytes_per_second: n, burst_bytes: n}}` (`burst_bytes` defaults to one second's worth); `%{default: nil}` switches it off. CPU protection, not a quota. |
 | `quarantine.burst`, `quarantine.rate`, `quarantine.max_bytes` | `100`, `20`, `1_073_741_824` | The quarantine pen: one token bucket per source (`burst` hooks back to back, refilled `rate` per second; over it, `429 quarantine_rate_limited`) and a cap on the pen's total bytes (a hook that would cross it is `503 quarantine_full`; the pen never evicts). See [`delivery.md#quarantine`](delivery.md#quarantine). |
 | `audit.retention_days` | `365` | Days the audit trail keeps a row. An hourly sweep deletes older rows, oldest first, in bounded batches (`[:ankusa, :audit, :pruned]`). A positive integer. Every committed row emits `[:ankusa, :audit]`. See [Architecture](architecture.md#guarantees-by-component). |
 | `tenants.max` | `1_000_000` | The most tenants the store knows (each gets an ordinal at its first committed hook, none is ever reused). A hook of a tenant one past it is refused with `503 tenant_limit` and `Retry-After: 300`, tagged `outcome: :tenant_limit` on the ingest metrics; a known tenant is never refused. Not a secret, so `/v1/config` shows it. An integer from 1 to 4294967294; the store holds about 80 B per tenant plus six counters of 40 B. |
@@ -929,9 +937,11 @@ first boot, so a route deleted there is not resurrected by a restart.
 **Management API**, on `routes.admin.port` (its own listener, never the ingest
 port), authenticated by `routes.admin.auth` like the operator admin API (see
 [Control-plane authentication](#control-plane-authentication)): `routes:read`
-for `GET` and the dry run, `routes:write` for everything else, and in both
-cases `tenant:*`, since route definitions and IP rules belong to no tenant.
-The HTTP contract is the `routes` tag of
+for `GET` and the dry run, `routes:write` for everything else. It has two
+surfaces over the same definitions. `/admin/routes` and `/admin/ip-rules` span
+tenants (and the IP rules belong to none), so they need `tenant:*` as well.
+`/v1/tenants/:tenant/routes` needs `tenant:<tenant>` instead and shows and
+changes only that tenant's routes. The HTTP contract is the `routes` tag of
 [`priv/openapi/admin.v1.yaml`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/priv/openapi/admin.v1.yaml),
 examples included — and
 [`test/ankusa/routes/router_openapi_test.exs`](https://github.com/jamescarr/ankusa/blob/main/packages/ankusa/test/ankusa/routes/router_openapi_test.exs)
@@ -942,17 +952,45 @@ cannot drift apart:
 | --- | --- | --- |
 | `GET` | `/admin/routes?enabled=&limit=&cursor=` | list, id-ordered, cursor-paginated |
 | `POST` / `PUT` / `PATCH` / `DELETE` | `/admin/routes[/:id]` | create, replace, update, delete |
+| `GET` | `/v1/tenants/:tenant/routes?enabled=&limit=&cursor=` | the same list, for one tenant's routes |
+| `POST` / `PUT` / `PATCH` / `DELETE` | `/v1/tenants/:tenant/routes[/:id]` | the same writes, for one tenant's routes |
 | `GET` / `PUT` | `/admin/ip-rules` | the global rules and default |
 | `POST` | `/admin/routes/test` | dry run: `{method, path, ip}` → decision, reason, route id, and the rule that decided it |
 | `GET` | `/health` | `{status, routes}` |
 
-A route is `{id, path, methods: [POST], enabled, ip_rules, metadata,
-inserted_at, updated_at}`. Ids are lowercase slugs, `path`/`id` are immutable
-under `PATCH` (moving a route changes what it captures — that is a `PUT`), and
-two enabled routes may not share a path and method. `POST /admin/routes/test`
-answers "why was this rejected" without capturing anything and **without
-reading or writing the decision cache**, so a dry run can never change what
-live requests decide, and a route change can be checked before it goes live.
+A route is `{id, tenant_id, source_id, path, methods: [POST], enabled,
+ip_rules, metadata, revision, inserted_at, updated_at}`. Ids are lowercase slugs
+(one namespace across tenants), `id`/`path`/`tenant_id`/`source_id` are immutable
+under `PATCH` (moving a route changes what it captures and where it files it —
+that is a `PUT`), and two enabled routes may not share a path and method.
+`POST /admin/routes/test` answers "why was this rejected" without capturing
+anything and **without reading or writing the decision cache**, so a dry run can
+never change what live requests decide, and a route change can be checked before
+it goes live.
+
+**A route is owned by a tenant and may be bound to a source.** `tenant_id`
+(default `default`, the shared tenant) and `source_id` (default none) are held
+against what the catch URL's resolver says (see
+[Multi-tenancy](multi-tenancy.md#routes-are-owned-by-a-tenant-and-bound-to-a-source)):
+a route owned by one tenant admits nothing into another tenant's source, and a
+route bound to a source admits nothing for another one. A disagreement is the
+`404` an unknown source gets. In a `routes.seed` entry both are plain keys.
+
+**The tenant surface.** `POST /v1/tenants/acme/routes` creates a route owned by
+`acme` (a body that names another tenant is `400 invalid_route`, field
+`tenant_id`). Another tenant's route is `404` there, never listed, never
+changed; an id or an enabled path and method that another tenant holds is
+`409 duplicate_route` without `conflicting_id`, so the answer does not say whose
+it is. Its delete is checked against the owner in the store itself (a Lua
+script, for the Redis store), so a route that was re-created under another
+tenant a moment ago is never removed by it. Route paths are one fleet-wide
+namespace — a tenant that may write routes can claim any path nobody holds and
+shadow a less specific pattern — so give `routes:write` with `tenant:<t>` only to
+a principal you would trust with that. The Redis store keeps `tenant_id` and
+`source_id` out of a definition that has none (so a node from before them still
+reads a table with no tenant routes); once a route owned by a tenant is stored,
+an older node refuses the reload and keeps serving what it had until it is
+upgraded.
 
 `PUT /admin/ip-rules` requires both `default` and `rules`. Omitting either is a
 `400 invalid_ip_rules` that names the field, because an omitted `default` used
@@ -974,37 +1012,91 @@ for silent), and emit `[:ankusa, :routes, :reject]`; captures emit
 
 #### Rate limits
 
-Per-tenant ingest limits, enforced by each edge node **in its own memory**: a
-fleet of N edges admits up to N × the limit, so size the numbers per node, not
-for the fleet. A catch-URL scheme that lets the sender choose its tenant
-(`routing: tenant_path`) has as many budgets as there are tenant names.
+Ingest admission, enforced by each edge node **in its own memory**: a fleet of N
+edges admits up to N × the limit, so size the numbers per node, not for the
+fleet. It has two layers, in the order a request meets them.
+
+**Before the body is read** — CPU protection for the node, not a quota. These
+are charged after the source is looked up and before a byte of the body is
+read, so a forged flood costs neither a read nor an HMAC:
+
+```yaml
+rate_limits:
+  per_ip: {rate: 20, burst: 40}     # hooks/s per client address; off by default
+  node: {rate: 5000, burst: 10000}  # hooks/s for the whole node; off by default
+  sources:
+    default: {bytes_per_second: 100000000}   # body bytes/s per source; the default
+```
+
+Each answers `429` with its own error and a `Retry-After`: `ip_rate_limited`,
+`node_rate_limited`, `source_rate_limited`. Each is counted on
+`ankusa_ingest_refused_total{reason}` and nothing else, so none of them mints
+a metric series per sender. The client address is the peer's, or, when the peer
+is in `routes.trusted_proxies`, the client in `X-Forwarded-For` (the same rule
+as the route guard's `ip_rules`); an IPv6 address counts as its `/64`. Addresses
+hash into a fixed 2^20 buckets, so a flood from invented addresses cannot grow
+the table. The source ceiling is charged with the request's declared
+`Content-Length` (a chunked body is charged once it has been read); a source's
+ceiling is generous by default (100 MB/s) and `default: null` switches it off.
+An address refused by `per_ip` has not touched the node's bucket.
+
+**After verification** — the tenant's quota. A catch-URL scheme that lets the
+sender choose its tenant (`routing: tenant_path`) has as many budgets as there
+are tenant names, so it **requires** a `default`: without one the boot is
+refused, because every tenant the config does not list would be unlimited.
 
 ```yaml
 rate_limits:
   default: {rate: 50, burst: 100}
   tenants:
-    acme: {rate: 500, burst: 1000}
+    acme:
+      rate: 500                   # hooks per second
+      burst: 1000                 # the most admitted back to back
+      bytes_per_second: 5000000   # body bytes per second (optional)
+      burst_bytes: 10000000       # default: one second's worth
+      max_body_bytes: 1000000     # at most http.max_body_bytes; 413 past it
+      max_queue: 2000             # hooks held in this node's batchers at once
+      max_queue_bytes: 67108864   # body bytes held there at once
 ```
 
-A hook is charged **after verification and before the durable write**, so only
-hooks verification accepted spend a tenant's budget: a flood of forged requests
-is free and can never lock a tenant out. Over the limit, the sender gets `429`
-with a `Retry-After` header and nothing is stored — no hook record, no
-dispatch, no claim. The check costs one ETS compare-and-swap per accepted hook, and a
-denial writes nothing; the `[:ankusa, :rate_limit, :rejected]` event and its
-`ankusa_rate_limit_rejected_total` counter (tagged by tenant) are the signal,
-so rejections are not logged.
+`rate` and `burst` are required; the rest are optional, and a tenant's entry
+replaces the `default` whole (its keys do not merge). A hook is charged **after
+verification and before the durable write**, so only hooks verification
+accepted spend a tenant's budget: a flood of forged requests is free and can
+never lock a tenant out. Over `rate` or `bytes_per_second` the sender gets
+`429 rate_limited` with a `Retry-After` header and nothing is stored — no hook
+record, no dispatch, no claim. A body bigger than `burst_bytes` is admitted
+into a full bucket and empties it, rather than never. `max_body_bytes` is
+checked against the declared `Content-Length` before the body is read and
+enforced on the bytes received otherwise: `413 payload_too_large`, with that
+tenant's limit.
 
-Limits can also be adjusted per tenant at runtime, with no restart:
+`max_queue` and `max_queue_bytes` are the tenant's share of the group-commit
+batchers (`wal: disk`; `wal: none` publishes inside the request and has no
+queue): the hooks and body bytes it may have buffered or in flight on this node
+across partitions. Past either, the sender gets `429 tenant_overload` with
+`Retry-After: 1`, **never** the global `503 overload`, so one tenant filling its
+share does not shed the tenants still within theirs. The share is counted when
+the hook is handed to the batcher and given back when the call returns, so a
+batcher that crashes leaks nothing. Leave them unset and a tenant is bounded by
+the partition's `batcher.max_queue` alone, which it can fill for everybody.
+
+The checks cost one ETS compare-and-swap per bucket per request, and a denial
+writes nothing; the `[:ankusa, :rate_limit, :rejected]` event and its
+`ankusa_rate_limit_rejected_total` counter (tagged by tenant) are the signal for
+the tenant's own denials, so rejections are not logged. A hook that clears the
+hook bucket and is then denied on bytes has spent its hook token.
+
+Tenant limits can also be adjusted at runtime, with no restart:
 `GET /v1/rate-limits` and `GET|PUT|DELETE /v1/tenants/{tenant}/rate-limit` on
-`admin.port` (`:edge` role only, `409 role_not_enabled` elsewhere). An override
-lives on **the node that accepted it** and is persisted in this node's store
-(one key per tenant), the same node-local model as `source_store.type:
-persistent`'s API-managed sources — put
-durable limits in the config. `PUT` and `DELETE`
-reset that tenant's bucket, so a raised limit is not held back by the old
-limit's accumulated debt. There is no "unlimited" value: to exempt a tenant
-from a `default`, give it a high limit of its own.
+`admin.port` (`:edge` role only, `409 role_not_enabled` elsewhere). The body of
+a `PUT` takes every key above, and the override replaces the tenant's limit
+whole. An override lives on **the node that accepted it** and is persisted in
+this node's store (one key per tenant), the same node-local model as
+`source_store.type: persistent`'s API-managed sources — put durable limits in
+the config. `PUT` and `DELETE` reset that tenant's buckets, so a raised limit
+is not held back by the old limit's accumulated debt. There is no "unlimited"
+value: to exempt a tenant from a `default`, give it a high limit of its own.
 
 #### Egress
 

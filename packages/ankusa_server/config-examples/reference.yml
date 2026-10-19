@@ -206,8 +206,9 @@ routes:
 
   admin:
     # Its own listener, authenticated like `admin:` above (see its `auth`
-    # comment). Route definitions belong to no tenant, so `routes:read` and
-    # `routes:write` only count together with tenant:*.
+    # comment). `/admin/routes` spans tenants, so `routes:read` and
+    # `routes:write` only count together with tenant:*; `/v1/tenants/<t>/routes`
+    # needs only tenant:<t> and shows that tenant's routes alone.
     # [env ANKUSA_ROUTES_ADMIN_TOKEN] replaces the `auth` block below with one
     # token holding both.
     port: 4003
@@ -230,6 +231,14 @@ routes:
   #   methods: [POST]
   #   ip_rules: [{action: allow, cidr: "203.0.113.0/24"}]
   #   metadata: {owner: payments}
+  # - id: acme-stripe
+  #   # The owning tenant (default: `default`, the shared tenant, which binds
+  #   # none). A route owned by a tenant admits hooks only into that tenant:
+  #   # another tenant's source, or another tenant in the URL, is a 404.
+  #   tenant_id: acme
+  #   # The one source the route admits (default: whichever the URL resolves).
+  #   source_id: acme.stripe
+  #   path: /webhooks/acme/stripe
 
 rate_limits:
   # Per-tenant ingest limits, enforced by each edge node in its own memory: a
@@ -251,11 +260,40 @@ rate_limits:
   # `rate` is hooks per second (fractions are allowed: 0.5 is one every two
   # seconds) and `burst` is the most admitted back to back. Both are required,
   # neither is inferred. No `default` and no tenant entry means unlimited; to
-  # exempt one tenant from a default, give it a high limit of its own.
+  # exempt one tenant from a default, give it a high limit of its own. With
+  # `routing: tenant_path` a `default` is required (the URL names the tenant).
+  #
+  # A tenant's limit (and the default) can also carry, all optional:
+  #   bytes_per_second, burst_bytes  body bytes, charged with the hook (burst_bytes
+  #                                  defaults to one second's worth)
+  #   max_body_bytes                 the biggest body the tenant may send (413);
+  #                                  at most http.max_body_bytes
+  #   max_queue, max_queue_bytes     the hooks and body bytes the tenant may hold
+  #                                  in this node's batchers at once; past either
+  #                                  is 429 tenant_overload, never the global 503
   default: null
   # default: {rate: 50, burst: 100}
   tenants: {}
-  #   acme: {rate: 500, burst: 1000}
+  #   acme: {rate: 500, burst: 1000, bytes_per_second: 5000000, max_queue: 2000}
+
+  # Before the body is read: CPU protection for this node, not a quota. A forged
+  # flood is refused before it costs a read or an HMAC.
+  #
+  # Hooks per second per client address (an IPv6 address counts as its /64). The
+  # address is the peer's, or the client in X-Forwarded-For when the peer is in
+  # routes.trusted_proxies. Over it: 429 ip_rate_limited. null = off.
+  per_ip: null
+  # per_ip: {rate: 20, burst: 40}
+  #
+  # Hooks per second for the whole node: 429 node_rate_limited. null = off.
+  node: null
+  # node: {rate: 5000, burst: 10000}
+  #
+  # Body bytes per second per source, charged with the declared Content-Length
+  # (a body with no declared length is charged once read): 429
+  # source_rate_limited. Generous by default; `default: null` switches it off.
+  sources:
+    default: {bytes_per_second: 100000000}
 
 quarantine:
   # The holding pen for hooks that fail verification on a source with

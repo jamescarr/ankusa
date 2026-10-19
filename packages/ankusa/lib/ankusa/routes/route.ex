@@ -3,10 +3,22 @@ defmodule Ankusa.Routes.Route do
   One route definition: which requests the edge captures when route management
   is on.
 
-  A route is a **capture gate**, not an identity. It decides method and path
-  matching and, optionally, which client addresses may use it;
-  `Ankusa.RouteResolver` still maps the accepted request to a `source_id` and
-  `tenant_id`. That is why there is no `source_id` field here.
+  A route is a **capture gate** that is *owned* by a tenant and may be *bound* to
+  a source. It decides method and path matching and, optionally, which client
+  addresses may use it; `Ankusa.RouteResolver` still maps the accepted request
+  to a `source_id` and `tenant_id`, and the route then has to agree with that
+  answer (`Ankusa.Edge.Ingest.lookup/3`):
+
+    * `tenant_id` (default `"default"`) — the owning tenant. A route owned by a
+      tenant admits hooks only into that tenant: a request whose resolver names
+      another tenant, or whose source belongs to another tenant, is a `404`.
+      The tenant `"default"` is the shared one (as it is for a source): such a
+      route is not tied to a tenant. A route owned by a tenant, matched on a
+      shared source with no tenant in the URL, files the hook under the route's
+      tenant.
+    * `source_id` (default `nil`) — the one source the route admits. A request
+      the resolver maps to another source is a `404`; `nil` leaves it to the
+      resolver.
 
   ## Path patterns
 
@@ -37,6 +49,8 @@ defmodule Ankusa.Routes.Route do
 
   @type t :: %__MODULE__{
           id: String.t(),
+          tenant_id: String.t(),
+          source_id: String.t() | nil,
           path: String.t(),
           methods: [String.t()],
           enabled: boolean(),
@@ -53,6 +67,7 @@ defmodule Ankusa.Routes.Route do
   # starts again at 1.
   defstruct [
     :id,
+    :source_id,
     :path,
     :methods,
     :enabled,
@@ -60,14 +75,18 @@ defmodule Ankusa.Routes.Route do
     :metadata,
     :inserted_at,
     :updated_at,
+    tenant_id: "default",
     revision: 1
   ]
 
-  @fields ~w(id path methods enabled ip_rules metadata)
+  @fields ~w(id tenant_id source_id path methods enabled ip_rules metadata)
   @id_re ~r/\A[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?\z/
   @method_re ~r/\A[A-Z]+\z/
+  @source_id_re ~r/\A[^\s\/[:cntrl:]]{1,256}\z/u
 
   @id_message "must be a lowercase slug of at most 64 characters"
+  @tenant_message "must match [A-Za-z0-9_-]{1,64}"
+  @source_id_message "must be a non-empty string of at most 256 characters, without whitespace or \"/\""
   @methods_message "must be a non-empty list of HTTP methods"
 
   @doc """
@@ -85,6 +104,8 @@ defmodule Ankusa.Routes.Route do
   def from_attrs(attrs, opts \\ []) do
     with {:ok, attrs} <- attrs(attrs),
          {:ok, id} <- id(attrs, opts),
+         {:ok, tenant_id} <- tenant_id(attrs),
+         {:ok, source_id} <- source_id(attrs),
          {:ok, path} <- path(attrs),
          {:ok, methods} <- methods(attrs),
          {:ok, enabled} <- enabled(attrs),
@@ -95,6 +116,8 @@ defmodule Ankusa.Routes.Route do
       {:ok,
        %__MODULE__{
          id: id,
+         tenant_id: tenant_id,
+         source_id: source_id,
          path: path,
          methods: methods,
          enabled: enabled,
@@ -111,6 +134,8 @@ defmodule Ankusa.Routes.Route do
   def to_json(%__MODULE__{} = route) do
     %{
       "id" => route.id,
+      "tenant_id" => route.tenant_id,
+      "source_id" => route.source_id,
       "path" => route.path,
       "methods" => route.methods,
       "enabled" => route.enabled,
@@ -120,6 +145,22 @@ defmodule Ankusa.Routes.Route do
       "inserted_at" => DateTime.to_iso8601(route.inserted_at),
       "updated_at" => DateTime.to_iso8601(route.updated_at)
     }
+  end
+
+  @doc """
+  The JSON a store persists: `to_json/1` without the binding fields a route
+  that has none (`tenant_id: "default"`, `source_id: nil`) leaves out, so a
+  node that predates them still reads every definition written before a tenant
+  route exists (`from_json/1` gives the omitted fields their defaults).
+  """
+  @spec to_stored_json(t()) :: map()
+  def to_stored_json(%__MODULE__{} = route) do
+    route
+    |> to_json()
+    |> then(fn json ->
+      json = if route.tenant_id == "default", do: Map.delete(json, "tenant_id"), else: json
+      if is_nil(route.source_id), do: Map.delete(json, "source_id"), else: json
+    end)
   end
 
   @doc "The inverse of `to_json/1`, for a definition read back from a store."
@@ -238,6 +279,36 @@ defmodule Ankusa.Routes.Route do
       # one would answer 201 for a route the caller did not name.
       _other ->
         {:error, invalid("id")}
+    end
+  end
+
+  defp tenant_id(attrs) do
+    case attrs["tenant_id"] do
+      nil ->
+        {:ok, "default"}
+
+      value when is_binary(value) ->
+        if Ankusa.ClaimCheck.Ref.valid_tenant?(value),
+          do: {:ok, value},
+          else: {:error, {:invalid, "tenant_id", @tenant_message}}
+
+      _other ->
+        {:error, {:invalid, "tenant_id", @tenant_message}}
+    end
+  end
+
+  defp source_id(attrs) do
+    case attrs["source_id"] do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        if Regex.match?(@source_id_re, value),
+          do: {:ok, value},
+          else: {:error, {:invalid, "source_id", @source_id_message}}
+
+      _other ->
+        {:error, {:invalid, "source_id", @source_id_message}}
     end
   end
 

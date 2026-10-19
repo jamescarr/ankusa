@@ -107,9 +107,11 @@ defmodule Ankusa.Edge.RouteGuardTest do
       assert records(config) == 0
     end
 
-    test "the route id is assigned for downstream consumers", %{config: config} do
+    test "the matched route is assigned for downstream consumers", %{config: config} do
       conn = post(config, "/webhooks/demo")
-      assert conn.assigns.ankusa_route == "demo"
+
+      assert %Ankusa.Routes.Route{id: "demo", tenant_id: "default", source_id: nil} =
+               conn.assigns.ankusa_route
     end
 
     test "telemetry reports the match, the cache hit, and the rejection reasons", %{
@@ -260,6 +262,124 @@ defmodule Ankusa.Edge.RouteGuardTest do
       assert post(config, "/webhooks/demo").status == 201
       assert post(config, "/webhooks/demo").status == 201
       assert records(config) == 2
+    end
+  end
+
+  # A route is owned by a tenant and may be bound to a source, and the resolver's
+  # answer has to agree with it: the cases below are the "route binds source"
+  # claim, each one a request that would be a 201 if the route did not bind.
+  describe "route binds source" do
+    @source [verifier: {Ankusa.Verifier.None, []}, sinks: [{Ankusa.Sink.Log, []}]]
+
+    defp start_bound(seed, extra \\ []) do
+      sources = %{
+        "acme-src" => [{:tenant_id, "acme"} | @source],
+        "globex-src" => [{:tenant_id, "globex"} | @source],
+        "shared" => [{:trust_url_tenant, true} | @source]
+      }
+
+      start_routes(
+        [seed: seed],
+        Keyword.merge([source_store: {Ankusa.SourceStore.Static, sources: sources}], extra)
+      )
+    end
+
+    defp stored_tenants(config) do
+      {:ok, hooks} = Ankusa.Queue.hooks(config.instance, 0, 100)
+      Enum.map(hooks, & &1.tenant_id)
+    end
+
+    test "a route owned by tenant A cannot admit a hook into tenant B's source" do
+      config =
+        start_bound([
+          %{"id" => "a-own", "path" => "/webhooks/acme-src", "tenant_id" => "acme"},
+          %{"id" => "a-into-b", "path" => "/webhooks/globex-src", "tenant_id" => "acme"}
+        ])
+
+      conn = post(config, "/webhooks/globex-src")
+      assert conn.status == 404
+      assert JSON.decode!(conn.resp_body) == %{"error" => "unknown_source"}
+      assert records(config) == 0
+
+      # The same route on A's own source is fine, and stores under A.
+      assert post(config, "/webhooks/acme-src").status == 201
+      assert stored_tenants(config) == ["acme"]
+    end
+
+    test "a route bound to a source admits only that source" do
+      config =
+        start_bound([
+          %{"id" => "only-shared", "path" => "/webhooks/*", "source_id" => "shared"}
+        ])
+
+      assert post(config, "/webhooks/acme-src").status == 404
+      assert records(config) == 0
+
+      assert post(config, "/webhooks/shared").status == 201
+      assert records(config) == 1
+    end
+
+    test "a route owned by a tenant files a shared source's hook under that tenant" do
+      config =
+        start_bound([
+          %{"id" => "acme-shared", "path" => "/webhooks/shared", "tenant_id" => "acme"}
+        ])
+
+      assert post(config, "/webhooks/shared").status == 201
+      assert stored_tenants(config) == ["acme"]
+    end
+
+    test "a default-tenant route binds no tenant: the source's own decides" do
+      config = start_bound([%{"id" => "any", "path" => "/webhooks/*"}])
+
+      assert post(config, "/webhooks/acme-src").status == 201
+      assert post(config, "/webhooks/shared").status == 201
+      assert Enum.sort(stored_tenants(config)) == ["acme", "default"]
+    end
+
+    test "the tenant in the URL must be the route's, even on a shared source" do
+      config =
+        start_bound(
+          [
+            %{
+              "id" => "acme-shared",
+              "path" => "/webhooks/:tenant/shared",
+              "tenant_id" => "acme"
+            }
+          ],
+          route_resolver: {Ankusa.RouteResolver.TenantPath, []},
+          rate_limits: %{default: %{rate: 1_000, burst: 1_000}}
+        )
+
+      assert post(config, "/webhooks/acme/shared").status == 201
+      assert stored_tenants(config) == ["acme"]
+
+      conn = post(config, "/webhooks/globex/shared")
+      assert conn.status == 404
+      assert JSON.decode!(conn.resp_body) == %{"error" => "unknown_source"}
+      assert records(config) == 1
+    end
+
+    test "the route a hook came through is on the ingest span" do
+      config =
+        start_bound([
+          %{"id" => "acme-own", "path" => "/webhooks/acme-src", "tenant_id" => "acme"}
+        ])
+
+      handler = "route-id-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:ankusa, :ingest, :stop],
+        fn _event, _measurements, meta, _ -> send(test_pid, {:ingest, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert post(config, "/webhooks/acme-src").status == 201
+      assert_receive {:ingest, %{source_id: "acme-src", route_id: "acme-own"}}
     end
   end
 end
