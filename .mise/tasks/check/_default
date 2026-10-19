@@ -4,12 +4,61 @@ set -euo pipefail
 source "$MISE_PROJECT_ROOT/.mise/lib/pkg.sh"
 cd "$ROOT"
 
+# The checks are independent, so run them concurrently instead of one after the
+# other. What is not independent:
+#   - a package whose check:package brings docker-compose up runs alone (the
+#     adapters share the docker daemon);
+#   - check:conformance installs and builds inside packages/sdk-* (`npm ci`,
+#     `bundle install`, `composer install`, `uv sync`, sbt, cargo) — the same
+#     directories `check:package sdk-*` writes — so it starts after that pool;
+#   - check:examples rebuilds the SDK packages' dist/ that its workers import,
+#     the same directories conformance and `check:package sdk-*` use, so it
+#     runs last.
+#
+# CHECK_JOBS caps the pool: default a quarter of the cores, 1..3. Each slot can
+# be a Mix suite or an sbt/cargo build; more than three on one laptop's disk
+# makes every one of them slower.
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+jobs=${CHECK_JOBS:-$((cores / 4))}
+[ "$jobs" -ge 1 ] || jobs=1
+[ "$jobs" -le 3 ] || jobs=3
+
 mise run lint:workflows
 mise run lint:pins
 mise run check:links
+
+failed=""
+
+# In parallel: every package check that starts no docker container, plus the
+# tools check. One line per invocation (`-I`), so a task name and its package
+# argument stay together; xargs exits non-zero if any fails but does not stop
+# the others, so one run reports every failure.
+{
+  for p in $(pkg_names); do
+    if [ ! -f "$(pkg_dir "$p")/docker-compose.yml" ]; then
+      printf 'check:package %s\n' "$p"
+    fi
+  done
+  printf 'check:tools\n'
+} | xargs -P "$jobs" -I '{}' sh -c 'mise run {}' || failed=1
+
+# The adapters run one at a time. Conformance needs no docker and no directory
+# they touch, so it overlaps them.
+mise run check:conformance &
+conformance=$!
 for p in $(pkg_names); do
-  mise run check:package "$p"
+  if [ -f "$(pkg_dir "$p")/docker-compose.yml" ]; then
+    mise run check:package "$p" || failed=1
+  fi
 done
-mise run check:conformance
-mise run check:examples
-mise run check:tools
+wait "$conformance" || failed=1
+
+# Last: it rebuilds the SDK packages' dist/ that its workers import, the same
+# directories `check:package sdk-*` touched above.
+mise run check:examples || failed=1
+
+if [ -n "$failed" ]; then
+  echo "FAILED: see the failing check's output above" >&2
+  exit 1
+fi
+echo "all checks passed"

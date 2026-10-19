@@ -75,7 +75,17 @@ mix_cache_warm() {
     for src in "$cache"/deps/*; do
       [ -e "$src" ] || continue
       n="deps/${src##*/}"
-      [ -e "$n" ] || [ -L "$n" ] || _mix_cache_clone "$src" "$n"
+      if [ ! -e "$n" ] && [ ! -L "$n" ]; then
+        _mix_cache_clone "$src" "$n"
+        # A rebar/cmake dep's own build tree (deps/<app>/_build) records the
+        # absolute directory it was configured in, and CMake refuses to reuse
+        # it from another worktree ("current CMakeCache.txt directory … is
+        # different"). Drop what we just restored so a rebuild reconfigures
+        # cleanly; entries saved before this was stripped still carry it.
+        rm -rf "$n/_build"
+        # Same for a CMake tree kept elsewhere (crc32cer uses c_src/build).
+        find "$n" -name CMakeCache.txt -delete 2>/dev/null || true
+      fi
     done
     for src in "$cache"/lib/*; do
       [ -e "$src" ] || continue
@@ -173,6 +183,9 @@ mix_cache_warm() {
     tmp="$cache_root/.tmp.$$"
     mkdir -p "$tmp/lib"
     _mix_cache_clone deps "$tmp/deps"
+    # Keep the entry path-independent: a dep's own CMake build tree names the
+    # directory it was configured in and cannot be reused elsewhere.
+    rm -rf "$tmp/deps"/*/_build
     for n in deps/*; do
       if [ -d "_build/$env/lib/${n##*/}" ]; then
         _mix_cache_clone "_build/$env/lib/${n##*/}" "$tmp/lib/${n##*/}"
