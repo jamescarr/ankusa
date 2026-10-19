@@ -243,7 +243,7 @@ defmodule Ankusa.TenantTest do
             {:default, Keys.erase(tenant)},
             {:tenants, Keys.tenant_ord(tenant)},
             {:index, Keys.dedupe(tenant, "#{tenant}.billing", "evt-1")}
-          ] ++ for(f <- 1..7, do: {:counters, Keys.counter(ord, f)}),
+          ] ++ for(f <- 1..8, do: {:counters, Keys.counter(ord, f)}),
           fn {cf, key} -> point.(cf, key) end
         ),
       quarantine:
