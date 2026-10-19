@@ -123,6 +123,10 @@ An unresolvable URL shape returns `:error`, which the router turns into a
   (`ctx.tenant_id`), so a sink can route, tag, or partition by it. For
   example, `Ankusa.Sink.RabbitMQ`'s default routing key doesn't include it, but a
   custom `:routing_key` function easily can (`"ankusa.#{env.tenant_id}.#{env.source_id}"`).
+  An HTTP sink can route by it too: `Sink.Http`'s `url`, `headers` and `secret`
+  take a function of the envelope, so one shared source delivers each tenant's
+  hooks to that tenant's receiver (see
+  [`delivery.md`](delivery.md#sinkhttp-per-tenant-destinations)).
 
 Resolution order for a given request: `route.tenant_id` (if the resolver set
 one) wins; otherwise `source.tenant_id` (if the source's config set one);

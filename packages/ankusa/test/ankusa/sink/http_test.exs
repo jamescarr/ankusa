@@ -666,4 +666,391 @@ defmodule Ankusa.Sink.HttpTest do
       end
     end
   end
+
+  describe "computed destinations" do
+    alias Ankusa.Sink.Http.Pool
+
+    @instance :sink_http_computed_test
+    @key :crypto.strong_rand_bytes(32)
+    @acme_secret "whsec_" <> Base.encode64(@key)
+
+    defmodule Tenants do
+      @moduledoc false
+      def endpoint(env, base), do: base <> "/t/" <> env.tenant_id
+    end
+
+    defmodule Echo do
+      @moduledoc false
+      @behaviour Plug
+      import Plug.Conn
+
+      @impl true
+      def init(opts), do: opts
+
+      @impl true
+      def call(conn, opts) do
+        send(opts[:test], {:request, conn.request_path})
+        send_resp(conn, 200, "ok")
+      end
+    end
+
+    defp computed(extra),
+      do: [req_options: [plug: {Req.Test, __MODULE__}], allow_unsigned: true] ++ extra
+
+    defp paths(capture),
+      do:
+        capture
+        |> Agent.get(& &1)
+        |> Enum.map(fn {_method, path, _h, _b} -> path end)
+        |> Enum.sort()
+
+    test "computed url per tenant", %{capture: capture} do
+      per_tenant = fn env -> "https://203.0.113.10/t/" <> env.tenant_id end
+
+      for url <- [per_tenant, {Tenants, :endpoint, ["https://203.0.113.10"]}],
+          tenant <- ["acme", "globex"] do
+        assert :ok =
+                 Sink.Http.deliver(
+                   envelope(%{tenant_id: tenant}),
+                   %{attempt: 1},
+                   computed(url: url)
+                 )
+      end
+
+      assert paths(capture) == ["/t/acme", "/t/acme", "/t/globex", "/t/globex"]
+    end
+
+    test "computed url denied", %{capture: capture} do
+      # One sink, two tenants: the one whose receiver sits on the private network
+      # fails closed, on its own attempt, and the other is delivered.
+      by_tenant = fn
+        %{tenant_id: "acme"} -> "https://203.0.113.10/t/acme"
+        %{tenant_id: "globex"} -> "https://10.1.2.3/t/globex"
+        %{tenant_id: "imds"} -> "https://169.254.169.254/latest/meta-data/"
+        %{tenant_id: "loop"} -> "https://127.0.0.1/"
+      end
+
+      deliver = fn tenant ->
+        Sink.Http.deliver(envelope(%{tenant_id: tenant}), %{attempt: 1}, computed(url: by_tenant))
+      end
+
+      assert :ok = deliver.("acme")
+
+      for tenant <- ["globex", "imds", "loop"] do
+        assert {:error, {:permanent, {:egress_denied, {:address, _host, _address}}}} =
+                 deliver.(tenant)
+      end
+
+      assert paths(capture) == ["/t/acme"]
+    end
+
+    test "a computed url is checked against the resolved name on every attempt" do
+      {:ok, answers} = Agent.start_link(fn -> [{203, 0, 113, 10}, {10, 0, 0, 5}] end)
+
+      resolver = fn name, family ->
+        case {List.to_string(name), family} do
+          {"hooks.example", :inet} ->
+            {:ok, [Agent.get_and_update(answers, fn [head | rest] -> {head, rest ++ [head]} end)]}
+
+          _other ->
+            {:error, :nxdomain}
+        end
+      end
+
+      Ankusa.put_config(Ankusa.Config.new(instance: @instance))
+      on_exit(fn -> :persistent_term.erase({Ankusa, :config, @instance}) end)
+      ctx = %{instance: @instance, attempt: 1, egress_resolver: resolver}
+      opts = computed(url: fn _env -> "https://hooks.example/t" end)
+
+      assert :ok = Sink.Http.deliver(envelope(), ctx, opts)
+
+      assert {:error, {:permanent, {:egress_denied, {:address, "hooks.example", "10.0.0.5"}}}} =
+               Sink.Http.deliver(envelope(), ctx, opts)
+    end
+
+    test "computed headers per tenant", %{capture: capture} do
+      token = fn env -> [{"x-tenant-token", "tok-" <> env.tenant_id}, {:"x-plan", :gold}] end
+
+      for tenant <- ["acme", "globex"] do
+        assert :ok =
+                 Sink.Http.deliver(
+                   envelope(%{tenant_id: tenant}),
+                   %{attempt: 1},
+                   computed(url: "https://203.0.113.10/h", headers: token)
+                 )
+      end
+
+      sent =
+        capture
+        |> Agent.get(& &1)
+        |> Enum.map(fn {_m, _p, headers, _b} -> Map.new(headers) end)
+
+      assert Enum.sort(Enum.map(sent, & &1["x-tenant-token"])) == ["tok-acme", "tok-globex"]
+      assert Enum.all?(sent, &(&1["x-plan"] == "gold"))
+    end
+
+    test "computed secret per tenant signs with that tenant's secret", %{capture: capture} do
+      secret_for = fn
+        %{tenant_id: "acme"} -> @acme_secret
+        %{tenant_id: "ghost"} -> nil
+      end
+
+      opts = [
+        url: "https://203.0.113.10/s",
+        secret: secret_for,
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      env = envelope(%{tenant_id: "acme"})
+      assert :ok = Sink.Http.deliver(env, %{attempt: 1}, opts)
+      assert [{"POST", "/s", headers, body}] = Agent.get(capture, & &1)
+      received = %{env | headers: headers, body: body}
+
+      assert :ok =
+               Ankusa.Verifier.Hmac.verify(received,
+                 scheme: :standard_webhooks,
+                 secret: @acme_secret
+               )
+
+      # A tenant with no secret is not sent unsigned: the rule holds per destination.
+      assert {:error, {:permanent, :unsigned_sink}} =
+               Sink.Http.deliver(envelope(%{tenant_id: "ghost"}), %{attempt: 1}, opts)
+
+      assert length(Agent.get(capture, & &1)) == 1
+    end
+
+    test "what a computed option returns is checked, and never echoed" do
+      deliver = fn key, value ->
+        opts = computed(url: "https://203.0.113.10/c") |> Keyword.put(key, fn _env -> value end)
+        Sink.Http.deliver(envelope(), %{attempt: 1}, opts)
+      end
+
+      assert deliver.(:url, 12_345) == {:error, {:permanent, {:computed, :url, :invalid}}}
+      assert deliver.(:url, "") == {:error, {:permanent, {:computed, :url, :invalid}}}
+
+      assert deliver.(:headers, [:oops]) ==
+               {:error, {:permanent, {:computed, :headers, :invalid}}}
+
+      assert deliver.(:secret, 5) == {:error, {:permanent, {:computed, :secret, :invalid}}}
+      assert deliver.(:secret, [:a]) == {:error, {:permanent, {:computed, :secret, :invalid}}}
+
+      # The function's own refusal passes through; a raise is a failed attempt.
+      assert deliver.(:url, {:error, {:permanent, :no_endpoint}}) ==
+               {:error, {:permanent, :no_endpoint}}
+
+      assert {:error, {:raised, %RuntimeError{message: "no tenant"}}} =
+               Sink.safe_deliver(
+                 Sink.Http,
+                 envelope(),
+                 %{attempt: 1},
+                 computed(url: fn _env -> raise "no tenant" end)
+               )
+    end
+
+    test "validate_opts! accepts computed options and refuses ones that cannot work" do
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: fn _env -> "https://a.example/" end,
+                 secret: @acme_secret
+               )
+
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: {Tenants, :endpoint, ["https://a.example"]},
+                 allow_unsigned: true
+               )
+
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: "https://a.example/",
+                 secret: fn _env -> @acme_secret end
+               )
+
+      assert :ok =
+               Sink.Http.validate_opts!(
+                 url: "https://a.example/",
+                 allow_unsigned: true,
+                 headers: fn _env -> [] end
+               )
+
+      assert_raise ArgumentError, ~r/arity 1/, fn ->
+        Sink.Http.validate_opts!(url: fn _a, _b -> "x" end, allow_unsigned: true)
+      end
+
+      assert_raise ArgumentError, ~r/Tenants.nope\/2 is not defined/, fn ->
+        Sink.Http.validate_opts!(
+          url: {Tenants, :nope, ["https://a.example"]},
+          allow_unsigned: true
+        )
+      end
+
+      assert_raise ArgumentError, ~r/requires secret/, fn ->
+        Sink.Http.validate_opts!(url: fn _env -> "https://a.example/" end)
+      end
+
+      assert_raise ArgumentError, ~r/cannot combine a computed :url/, fn ->
+        Sink.Http.validate_opts!(
+          url: fn _env -> "https://a.example/" end,
+          allow_unsigned: true,
+          allow_insecure_tls: true
+        )
+      end
+
+      # and a sink that skipped validation is refused at delivery, nothing sent
+      assert {:error, {:permanent, {:computed, :url, :tls_override}}} =
+               Sink.Http.deliver(
+                 envelope(),
+                 %{attempt: 1},
+                 computed(url: fn _env -> "https://203.0.113.10/" end, allow_insecure_tls: true)
+               )
+    end
+
+    test "the description reports what is computed" do
+      subject = %{source_id: "stripe", tenant_id: nil}
+
+      assert %Ankusa.Sink.Description{
+               protocol: "http",
+               host: nil,
+               payload: :body,
+               computed: [:url, :secret]
+             } =
+               Sink.describe(Sink.Http, subject,
+                 url: fn _env -> "https://a.example/" end,
+                 secret: {Tenants, :endpoint, ["x"]}
+               )
+
+      assert %Ankusa.Sink.Description{
+               protocol: "https",
+               host: "hooks.example",
+               payload: :body,
+               computed: []
+             } =
+               Sink.describe(Sink.Http, subject, url: "https://user:pw@hooks.example/path?k=v")
+
+      assert %Ankusa.Sink.Description{host: "hooks.example:8443"} =
+               Sink.describe(Sink.Http, subject, url: "https://hooks.example:8443/")
+    end
+
+    # A real https listener whose certificate chains to a private CA, an instance
+    # that lets `localhost` through the egress policy, and its computed-URL pool
+    # trusting that CA and reaping idle origins after `idle_ms`.
+    defp pool_fixture(idle_ms) do
+      %{client_config: client, server_config: server} =
+        :public_key.pkix_test_data(%{
+          server_chain: %{
+            root: [digest: :sha256, key: {:namedCurve, :secp256r1}],
+            peer: [
+              digest: :sha256,
+              key: {:namedCurve, :secp256r1},
+              extensions: [{:Extension, {2, 5, 29, 17}, false, [{:dNSName, ~c"localhost"}]}]
+            ]
+          },
+          client_chain: %{root: [], peer: []}
+        })
+
+      dir = Path.join(System.tmp_dir!(), "ankusa-pool-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      {key_type, key_der} = server[:key]
+      cert = Path.join(dir, "cert.pem")
+      key = Path.join(dir, "key.pem")
+      ca = Path.join(dir, "ca.pem")
+      File.write!(cert, :public_key.pem_encode([{:Certificate, server[:cert], :not_encrypted}]))
+      File.write!(key, :public_key.pem_encode([{key_type, key_der, :not_encrypted}]))
+
+      File.write!(
+        ca,
+        :public_key.pem_encode(
+          for der <- client[:cacerts], do: {:Certificate, der, :not_encrypted}
+        )
+      )
+
+      port = Ankusa.TestHelpers.free_port()
+
+      start_supervised!(
+        {Bandit,
+         plug: {Echo, test: self()},
+         scheme: :https,
+         ip: {127, 0, 0, 1},
+         port: port,
+         certfile: cert,
+         keyfile: key}
+      )
+
+      Ankusa.put_config(
+        Ankusa.Config.new(instance: @instance, egress: %{allow_hosts: ["localhost"]})
+      )
+
+      on_exit(fn -> :persistent_term.erase({Ankusa, :config, @instance}) end)
+
+      start_supervised!(
+        {Pool, instance: @instance, pool_max_idle_ms: idle_ms, transport_opts: [cacertfile: ca]}
+      )
+
+      %{port: port, ca: ca, ctx: %{instance: @instance, attempt: 1}}
+    end
+
+    defp eventually(fun, tries \\ 60) do
+      cond do
+        fun.() -> :ok
+        tries == 0 -> flunk("condition never held")
+        true -> Process.sleep(100) && eventually(fun, tries - 1)
+      end
+    end
+
+    test "computed urls share the instance's bounded pool; static ones do not" do
+      %{port: port, ca: ca, ctx: ctx} = pool_fixture(500)
+      url = "https://localhost:#{port}"
+
+      assert :ok =
+               Sink.Http.deliver(envelope(), ctx,
+                 url: url <> "/static",
+                 allow_unsigned: true,
+                 cacertfile: ca
+               )
+
+      assert_received {:request, "/static"}
+      assert Pool.origins(@instance) == 0
+
+      per_tenant = fn env -> url <> "/t/" <> env.tenant_id end
+
+      for tenant <- ["acme", "globex"] do
+        assert :ok =
+                 Sink.Http.deliver(
+                   envelope(%{tenant_id: tenant}),
+                   ctx,
+                   url: per_tenant,
+                   allow_unsigned: true
+                 )
+
+        expected = "/t/" <> tenant
+        assert_received {:request, ^expected}
+      end
+
+      # Both tenants are one origin here (one host and port).
+      assert Pool.origins(@instance) == 1
+      assert {:ok, 1} = Finch.get_pool_count(Pool.name(@instance), url)
+
+      # An origin nobody delivers to is reaped: the pool does not keep one per
+      # tenant receiver for the life of the node.
+      eventually(fn -> Pool.origins(@instance) == 0 end)
+    end
+
+    test "a new origin is refused at the ceiling; an open one never is" do
+      %{port: port, ctx: ctx} = pool_fixture(60_000)
+      url = "https://localhost:#{port}/x"
+
+      assert :ok =
+               Sink.Http.deliver(envelope(), ctx, url: fn _env -> url end, allow_unsigned: true)
+
+      assert Pool.origins(@instance) == 1
+
+      assert :ok = Pool.admit(@instance, url, 1)
+      assert :ok = Pool.admit(@instance, "https://other.example/", 2)
+
+      assert {:error, :pool_origins_exhausted} =
+               Pool.admit(@instance, "https://other.example/", 1)
+    end
+  end
 end

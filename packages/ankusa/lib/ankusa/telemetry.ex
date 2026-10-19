@@ -34,6 +34,7 @@ defmodule Ankusa.Telemetry do
   | `[:ankusa, :tenant, :state]` | `:pending` (one event per tenant of the top 100 by pending) | `:instance`, `:tenant` |
   | `[:ankusa, :quarantine, :state]` | `:bytes`, `:entries` | `:instance` |
   | `[:ankusa, :disk, :state]` | `:free_bytes`, `:total_bytes` | `:instance` |
+  | `[:ankusa, :sink_http, :state]` | `:origins` (receivers with an open connection pool in `Ankusa.Sink.Http.Pool`) | `:instance` |
   | `[:ankusa, :compact, :stop]` | `:records`, `:bytes`, `:duration` | `:instance` |
   | `[:ankusa, :backup, :stop]` | `:duration`, `:files`, `:bytes` | `:instance`, `:result` (`:ok`, `:error`), `:reason` (on `:error`) |
   | `[:ankusa, :backup, :state]` | `:age_seconds` (since the last successful backup, or since the uploader started) | `:instance` |

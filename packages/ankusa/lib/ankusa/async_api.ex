@@ -11,8 +11,10 @@ defmodule Ankusa.AsyncApi do
 
   Each source in `Ankusa.SourceStore` contributes one entry per sink that
   implements `c:Ankusa.Sink.describe/2`: the Kafka, RabbitMQ, NATS, and Redis
-  sinks. `Ankusa.Sink.Log` and `Ankusa.Sink.Http` have no channel to advertise
-  and are left out. When lifecycle events are on (`Ankusa.Lifecycle`), their
+  sinks. `Ankusa.Sink.Log` has no channel to advertise, and `Ankusa.Sink.Http`
+  describes a destination that carries the provider's raw body (`payload:
+  :body`), not the envelope this document describes: both are left out. When
+  lifecycle events are on (`Ankusa.Lifecycle`), their
   sinks contribute entries too, carrying `LifecycleEventV1`.
 
   Entries become document parts like so:
@@ -114,7 +116,7 @@ defmodule Ankusa.AsyncApi do
 
     for {mod, opts} <- sinks,
         description = Sink.describe(mod, subject, opts),
-        description != nil do
+        description != nil and description.payload == :message do
       %{source_id: source_id, tenant_id: tenant_id, lifecycle?: lifecycle?, d: description}
     end
   end

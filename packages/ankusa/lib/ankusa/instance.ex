@@ -94,6 +94,7 @@ defmodule Ankusa.Instance do
         claim_store_children(opts) ++
         store_children(config, opts) ++
         backup_children(config, opts) ++
+        [{Ankusa.Sink.Http.Pool, opts}] ++
         source_store_children(config, opts) ++
         lifecycle_children(config, opts) ++
         edge_children(config, opts) ++

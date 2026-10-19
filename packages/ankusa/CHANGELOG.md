@@ -13,6 +13,30 @@ accordance with SemVer. A pushed `<pkg>-vX.Y.Z` git tag publishes. See
 
 ### Added
 
+- **Per-tenant HTTP destinations on shared sources (TEN-8).** `Sink.Http`'s
+  `:url`, `:headers` and `:secret` accept a one-arity function of the
+  `%Envelope{}` or a `{mod, fun, args}`, resolved on every attempt, so one
+  shared source delivers each tenant's hooks to that tenant's receiver. The
+  resolved URL goes through the egress policy on every attempt (a denied or
+  rebinding target fails closed as `{:permanent, {:egress_denied, _}}`), a
+  secret that resolves to nothing is `{:permanent, :unsigned_sink}` unless
+  `allow_unsigned: true`, and a value of the wrong shape is `{:permanent,
+  {:computed, key, :invalid}}`. `validate_opts!/1` checks the shapes at load.
+  `Sink.Http.describe/2` reports `computed: [...]` and `payload: :body` in the
+  new `Sink.Description` fields of those names (`payload: :message`, the
+  default, is what the AsyncAPI document keeps; `host` may now be `nil`).
+  Computed URLs connect through `Ankusa.Sink.Http.Pool`, one bounded Finch per
+  instance started by `Ankusa.Instance` (4 connections per origin, an origin's
+  pool closed after 30 s idle, new origins refused with
+  `{:error, :pool_origins_exhausted}` past 4,096, gauge
+  `ankusa_sink_http_pool_origins`), instead of Req's pool per origin that is
+  never closed; owned pools for every outbound client are DEL-3, which replaces
+  it. A computed `:url` cannot also set `:cacertfile` or `:allow_insecure_tls`.
+  `finch` is now a declared dependency (already locked through Req).
+  `HttpClient` honours `req_options: [finch: [name: pool]]`, which raised
+  before (Req refuses `:finch` beside the `:connect_options` it always set); the
+  pool then owns the connection options, and combining it with `:connect_options`,
+  `:cacertfile` or `allow_insecure_tls` raises `ArgumentError`.
 - **Fleet-scoped rate limits and dedupe (TEN-6).** `rate_limits.scope` and the new
   `dedupe.scope` take `:node` (the default, unchanged) or `:fleet`: the tenant quota
   (hooks and bytes per second) and the provider event key are then counted in

@@ -148,6 +148,10 @@ defmodule Ankusa.MixProject do
       # (`Ankusa.HttpClient` always verifies peers), so a minimal container
       # never fails every TLS request closed for want of a bundle.
       {:castore, "~> 1.0"},
+      # The connection pool computed `Sink.Http` destinations share
+      # (`Ankusa.Sink.Http.Pool`). Req already brings it; core now calls it
+      # directly, so it is declared (the version Req is locked to everywhere).
+      {:finch, "~> 0.24"},
       # AWS Signature V4 — the signing implementation behind the official
       # aws-elixir SDK. Replaces ~80 lines of hand-rolled canonical-request /
       # string-to-sign / HMAC-chain code; signs Ankusa.BlobStore.S3 and Ankusa.Sink.SQS.
