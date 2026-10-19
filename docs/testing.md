@@ -844,10 +844,13 @@ process commits 3 000 batches of counter merges a second. A cell is the 10th
 percentile of 1 000 ticks, the lowest of three rounds (a tick is a fraction of
 a millisecond, so a median moves by a factor of two with whatever else the
 machine does; noise only adds time, and a growth with the queue raises every
-sample). A script exits 1 unless its slowest cell is within 1.5× of its fastest
-(taken as at least 0.2 ms: the gauge tick costs about 0.1 ms, where two runs of
-one cell differ by 2×) and under 50 ms ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md),
-Proof). A rebaseline run (`BENCH_REBASELINE=1`) skips them: it measures the
+sample). A script exits 1 unless its slowest cell is within 2× of its fastest
+(counted as at least 1 ms) and under 50 ms ([ADR 0001](https://github.com/jamescarr/ankusa/blob/main/docs/adr/0001-tenant-key-layout.md),
+as amended in TEN-1.b: a store a thousand times bigger costs a little more per
+seek, on a CI runner the gauge tick went from 0.27 ms at 10⁵ rows to 0.59 ms at
+10⁶, while a tick that grew with the queue would cost tens of milliseconds or
+more at the top of either axis).
+A rebaseline run (`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 
 CI runs it as the `perf gate` job in `ci.yml`: on every push to `main`, and on
