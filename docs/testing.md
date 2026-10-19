@@ -914,7 +914,7 @@ by `mise run bench:gate`) compares `wal: :dual` with `wal: :disk` in one VM:
 200 requests, 512 clients measure throughput over 6 000 (the best of three rounds). It passes only if the
 dual p50 is within `max(disk p50, 5 ms) + 5 ms` (the parallel commit costs the
 larger of fsync and confirm, not their sum) and the dual throughput is at least
-0.8 x the disk's.
+0.3 x the disk's (ADR 0002 asks for 0.8 x; see its Amendments for the measurement behind the lower floor).
 
 ### Perf gate: `mise run bench:gate`
 
