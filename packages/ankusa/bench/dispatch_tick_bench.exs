@@ -14,12 +14,14 @@ Code.require_file("tenant_seed.exs", __DIR__)
 
 cells =
   Bench.TenantSeed.cells([1_000, 10_000, 100_000, 1_000_000], [10, 1_000, 100_000], fn instance,
-                                                                                   _ords ->
+                                                                                       _ords ->
     now = System.system_time(:millisecond)
     {:ok, active} = Ankusa.Queue.Deliveries.active_tenants(instance, now, 4_096)
 
     for {ord, _buckets} <- active do
-      {:ok, rows} = Ankusa.Queue.Deliveries.due_for_tenant(instance, ord, now, 0, 128, 134_217_728)
+      {:ok, rows} =
+        Ankusa.Queue.Deliveries.due_for_tenant(instance, ord, now, 0, 128, 134_217_728)
+
       true = rows != []
     end
   end)

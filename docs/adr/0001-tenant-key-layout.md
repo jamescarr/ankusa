@@ -229,7 +229,7 @@ Everything below is named so TEN-1.b's PR can be checked against this list; a mi
 
 **Benches** (self-asserting scripts run from `mise run bench:gate`; no `baseline.json` entry, so no rebaseline PR):
 
-- `mix run bench/gauges_bench.exs` (new): the gauge tick against 10³, 10⁴, 10⁵ and 10⁶ queued rows, **and** against 10, 10³ and 10⁵ tenants with the number of active tenants fixed at 8 (rows of the others scheduled far ahead or dead). Passes only if the slowest cell is within 1.5× of the fastest and under 50 ms, with 3 000 merging batches per second running during the measurement.
+- `mix run bench/gauges_bench.exs` (new): the gauge tick against 10³, 10⁴, 10⁵ and 10⁶ queued rows, **and** against 10, 10³ and 10⁵ tenants with the number of active tenants fixed at 8 (rows of the others scheduled far ahead or dead). Passes only if the slowest cell is within 1.5× of the fastest and under 50 ms, with 3 000 merging batches per second running during the measurement. *Amended in TEN-1.b:* a cell is the 10th percentile of 1 000 ticks (lowest of three rounds), and the fastest cell counts as at least 0.2 ms, because the tick costs about 0.1 ms and two runs of one cell differ by a factor of two at that scale (measured: 0.094 to 0.215 ms across seven cells with no trend in either axis); a tick that grew with the queue would cost milliseconds and fail both limits.
 - `mix run bench/dispatch_tick_bench.exs` (new): the dispatch tick (`active_tenants` plus `due_for_tenant` for each) over the same two axes, same pass rule.
 - `mise run bench:gate` → PASS with before/after numbers in the PR description (hot-path files `queue/`, `store/`, `store.ex`, `dispatch/` change).
 

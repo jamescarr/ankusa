@@ -220,7 +220,8 @@ defmodule Ankusa.Queue do
   times).
   """
   @spec pending_for_tenant(atom(), String.t()) ::
-          {:ok, %{pending: integer(), scheduled: integer(), inflight: integer(), bytes: integer()}}
+          {:ok,
+           %{pending: integer(), scheduled: integer(), inflight: integer(), bytes: integer()}}
           | {:error, term()}
   def pending_for_tenant(instance, tenant), do: Deliveries.pending_for_tenant(instance, tenant)
 
@@ -247,7 +248,17 @@ defmodule Ankusa.Queue do
   end
 
   defp disk_bytes(instance) do
-    cfs = [:default, :hooks, :deliveries, :index, :archive, :quarantine, :audit, :tenants, :counters]
+    cfs = [
+      :default,
+      :hooks,
+      :deliveries,
+      :index,
+      :archive,
+      :quarantine,
+      :audit,
+      :tenants,
+      :counters
+    ]
 
     Enum.reduce_while(cfs, {:ok, 0}, fn cf, {:ok, acc} ->
       case Store.property(instance, cf, "rocksdb.total-sst-files-size") do

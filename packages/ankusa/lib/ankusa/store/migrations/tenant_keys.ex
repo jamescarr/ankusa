@@ -128,7 +128,10 @@ defmodule Ankusa.Store.Migrations.TenantKeys do
   # ── phases ────────────────────────────────────────────────────────────────
 
   defp convert(1, instance, rows, started) do
-    keyed = for {key, value} <- rows, {at, seq, sink} = Keys.decode_due_v2(key), do: {key, value, seq, sink, at}
+    keyed =
+      for {key, value} <- rows,
+          {at, seq, sink} = Keys.decode_due_v2(key),
+          do: {key, value, seq, sink, at}
 
     with {:ok, ords, alloc} <- ordinals(instance, Enum.map(keyed, &elem(&1, 2))) do
       {ops, deltas} =
@@ -147,7 +150,10 @@ defmodule Ankusa.Store.Migrations.TenantKeys do
   end
 
   defp convert(2, instance, rows, _started) do
-    keyed = for {key, value} <- rows, {seq, sink} = Keys.decode_inflight_v2(key), do: {key, value, seq, sink}
+    keyed =
+      for {key, value} <- rows,
+          {seq, sink} = Keys.decode_inflight_v2(key),
+          do: {key, value, seq, sink}
 
     with {:ok, ords, alloc} <- ordinals(instance, Enum.map(keyed, &elem(&1, 2))) do
       {ops, deltas} =
@@ -199,7 +205,9 @@ defmodule Ankusa.Store.Migrations.TenantKeys do
       {ops, deltas} =
         Enum.reduce(old, {[], []}, fn {key, seq, size}, {ops, deltas} ->
           ord = Map.fetch!(ords, seq)
-          {[{:put, :index, key, <<size::32, ord::32>>} | ops], [{ord, :archive_pending, 1} | deltas]}
+
+          {[{:put, :index, key, <<size::32, ord::32>>} | ops],
+           [{ord, :archive_pending, 1} | deltas]}
         end)
 
       {:ok, {ops, deltas}, alloc}

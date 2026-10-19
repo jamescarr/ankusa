@@ -69,7 +69,10 @@ defmodule Ankusa.Queue.DeliveriesTest do
 
   defp fold(inst, family, fun) do
     %{lo: lo, hi: hi} = Keys.family(family)
-    {:ok, rows} = Store.fold(inst, family, {lo, hi}, [], fn k, v, acc -> {:cont, [fun.(k, v) | acc]} end)
+
+    {:ok, rows} =
+      Store.fold(inst, family, {lo, hi}, [], fn k, v, acc -> {:cont, [fun.(k, v) | acc]} end)
+
     Enum.reverse(rows)
   end
 
@@ -139,7 +142,14 @@ defmodule Ankusa.Queue.DeliveriesTest do
 
     write!(inst, [
       {:put, :hooks, Keys.hook(seq), bin}
-      | Deliveries.new_ops(ord, System.system_time(:millisecond), seq, @unresolved, byte_size(bin), row)
+      | Deliveries.new_ops(
+          ord,
+          System.system_time(:millisecond),
+          seq,
+          @unresolved,
+          byte_size(bin),
+          row
+        )
     ])
   end
 
@@ -195,7 +205,16 @@ defmodule Ankusa.Queue.DeliveriesTest do
 
         write!(
           inst,
-          Deliveries.expand_ops(f.ord, f.seq, @unresolved, f.size, "load", @sinks, MapSet.new(), now)
+          Deliveries.expand_ops(
+            f.ord,
+            f.seq,
+            @unresolved,
+            f.size,
+            "load",
+            @sinks,
+            MapSet.new(),
+            now
+          )
         )
     end
   end
@@ -267,7 +286,6 @@ defmodule Ankusa.Queue.DeliveriesTest do
     )
   end
 
-
   # ── the properties ───────────────────────────────────────────────────────
 
   describe "counters" do
@@ -319,7 +337,16 @@ defmodule Ankusa.Queue.DeliveriesTest do
 
         write!(
           inst,
-          Deliveries.dead_ops(:inflight, f.ord, f.seq, f.sink, r, System.system_time(:millisecond), "x", nil)
+          Deliveries.dead_ops(
+            :inflight,
+            f.ord,
+            f.seq,
+            f.sink,
+            r,
+            System.system_time(:millisecond),
+            "x",
+            nil
+          )
         )
       end
 
@@ -330,6 +357,7 @@ defmodule Ankusa.Queue.DeliveriesTest do
       assert {:ok, %{dead: 2}} = Queue.dead_for_tenant(inst, "acme")
       assert {:ok, %{pending: 4}} = Queue.pending_for_tenant(inst, "globex")
       assert {:ok, %{dead: 0}} = Queue.dead_for_tenant(inst, "globex")
+
       assert {:ok, %{pending: 0, scheduled: 0, inflight: 0, bytes: 0}} =
                Queue.pending_for_tenant(inst, "nobody")
 
@@ -352,7 +380,9 @@ defmodule Ankusa.Queue.DeliveriesTest do
 
   describe "tenant ordinals" do
     test "tenant ordinal is assigned once and never reused" do
-      config = test_config(roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: %{}})
+      config =
+        test_config(roles: [:edge], source_store: {Ankusa.SourceStore.Static, sources: %{}})
+
       put_config(config)
       inst = config.instance
       start_supervised!({Ankusa.Instance, config})
@@ -393,7 +423,11 @@ defmodule Ankusa.Queue.DeliveriesTest do
       inst = start_instance(tenants: %{max: 2})
 
       assert [{:committed, _}, {:committed, _}] =
-               Queue.enqueue(inst, for(t <- ["a", "b"], do: %{envelope: envelope(t), sinks: @sinks})) |> elem(1)
+               Queue.enqueue(
+                 inst,
+                 for(t <- ["a", "b"], do: %{envelope: envelope(t), sinks: @sinks})
+               )
+               |> elem(1)
 
       before = stored_ids(inst)
 
@@ -412,7 +446,8 @@ defmodule Ankusa.Queue.DeliveriesTest do
     test "an existing tenant is never refused at the cap" do
       inst = start_instance(tenants: %{max: 1})
 
-      assert {:ok, [{:committed, _}]} = Queue.enqueue(inst, [%{envelope: envelope("only"), sinks: @sinks}])
+      assert {:ok, [{:committed, _}]} =
+               Queue.enqueue(inst, [%{envelope: envelope("only"), sinks: @sinks}])
 
       for _ <- 1..3 do
         assert {:ok, [{:committed, _}]} =
@@ -525,7 +560,12 @@ defmodule Ankusa.Queue.DeliveriesTest do
   describe "the layout" do
     test "only Deliveries builds a ?D, ?F, ?X or ?A key" do
       lib = Path.expand("../../../lib", __DIR__)
-      allowed = [Path.join(lib, "ankusa/queue/deliveries.ex"), Path.join(lib, "ankusa/store/keys.ex")]
+
+      allowed = [
+        Path.join(lib, "ankusa/queue/deliveries.ex"),
+        Path.join(lib, "ankusa/store/keys.ex")
+      ]
+
       constructor = ~r/Keys\.(due|inflight|dead_by_tenant|active)\(|<<\?[DFXA]\b/
 
       offenders =

@@ -85,7 +85,10 @@ defmodule Ankusa.Queue.Tenants do
 
         _ ->
           Enum.flat_map(ords, fn {tenant, ord} ->
-            [{:put, :tenants, Keys.tenant(ord), tenant}, {:put, :tenants, Keys.tenant_ord(tenant), <<ord::32>>}]
+            [
+              {:put, :tenants, Keys.tenant(ord), tenant},
+              {:put, :tenants, Keys.tenant_ord(tenant), <<ord::32>>}
+            ]
           end) ++ [{:put, :default, Keys.meta("next_ord"), <<next::32>>}]
       end
 
@@ -100,9 +103,14 @@ defmodule Ankusa.Queue.Tenants do
   def lookup(_instance, []), do: {:ok, %{}}
 
   def lookup(instance, tenants) do
-    with {:ok, results} <- Store.multi_get(instance, :tenants, Enum.map(tenants, &Keys.tenant_ord/1)) do
+    with {:ok, results} <-
+           Store.multi_get(instance, :tenants, Enum.map(tenants, &Keys.tenant_ord/1)) do
       {:ok,
-       for({tenant, {:ok, <<ord::32>>}} <- Enum.zip(tenants, results), into: %{}, do: {tenant, ord})}
+       for(
+         {tenant, {:ok, <<ord::32>>}} <- Enum.zip(tenants, results),
+         into: %{},
+         do: {tenant, ord}
+       )}
     end
   end
 end

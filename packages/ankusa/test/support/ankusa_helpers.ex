@@ -230,18 +230,27 @@ defmodule Ankusa.TestHelpers do
     alias Ankusa.Store.Keys
 
     zero = %{pending: 0, scheduled: 0, inflight: 0, dead: 0, bytes: 0, archive_pending: 0}
-    bump = fn acc, ord, field, n -> Map.update(acc, ord, %{zero | field => n}, &%{&1 | field => &1[field] + n}) end
+
+    bump = fn acc, ord, field, n ->
+      Map.update(acc, ord, %{zero | field => n}, &%{&1 | field => &1[field] + n})
+    end
 
     fold = fn family, acc, fun ->
       %{lo: lo, hi: hi} = Keys.family(family)
-      {:ok, acc} = Store.fold(instance, family, {lo, hi}, acc, fn k, v, acc -> {:cont, fun.(k, v, acc)} end)
+
+      {:ok, acc} =
+        Store.fold(instance, family, {lo, hi}, acc, fn k, v, acc -> {:cont, fun.(k, v, acc)} end)
+
       acc
     end
 
     acc =
       fold.(:due, %{}, fn key, <<size::32, kind::8>>, acc ->
         {ord, _at, _seq, _sink} = Keys.decode_due(key)
-        acc |> bump.(ord, if(kind == 0, do: :pending, else: :scheduled), 1) |> bump.(ord, :bytes, size)
+
+        acc
+        |> bump.(ord, if(kind == 0, do: :pending, else: :scheduled), 1)
+        |> bump.(ord, :bytes, size)
       end)
 
     acc =

@@ -56,7 +56,11 @@ defmodule Ankusa.Queue.Deliveries.Counters do
     names = fields()
 
     with {:ok, values} <-
-           Store.multi_get(instance, :counters, Enum.map(names, &Keys.counter(ord, Map.fetch!(@fields, &1)))) do
+           Store.multi_get(
+             instance,
+             :counters,
+             Enum.map(names, &Keys.counter(ord, Map.fetch!(@fields, &1)))
+           ) do
       {:ok, names |> Enum.zip(Enum.map(values, &decode/1)) |> Map.new()}
     end
   end
@@ -68,7 +72,8 @@ defmodule Ankusa.Queue.Deliveries.Counters do
   def read_field(instance, ords, field) do
     index = Map.fetch!(@fields, field)
 
-    with {:ok, values} <- Store.multi_get(instance, :counters, Enum.map(ords, &Keys.counter(&1, index))) do
+    with {:ok, values} <-
+           Store.multi_get(instance, :counters, Enum.map(ords, &Keys.counter(&1, index))) do
       {:ok, Enum.map(values, &decode/1)}
     end
   end

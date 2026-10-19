@@ -265,7 +265,9 @@ defmodule Ankusa.StoreUpgradeTest do
       assert_received {:mix_shell, :info, ["store: " <> _]}
       assert_received {:mix_shell, :info, ["format: 1 (this release: 3)"]}
       assert_received {:mix_shell, :info, ["  1 -> 2: " <> _]}
-      assert_received {:mix_shell, :info, ["  2 -> 3: re-key due/inflight/dead by tenant ordinal" <> _]}
+
+      assert_received {:mix_shell, :info,
+                       ["  2 -> 3: re-key due/inflight/dead by tenant ordinal" <> _]}
 
       MigrateTask.run(args)
       assert_received {:mix_shell, :info, [line]}
@@ -344,7 +346,8 @@ defmodule Ankusa.StoreUpgradeTest do
       names = for ord <- 1..4, do: elem(Tenants.name(inst, ord), 1)
       assert Enum.sort(names) == ["acme", "deadonly", "default", "globex"]
 
-      for {name, ord} <- Enum.with_index(names, 1), do: assert({:ok, ^ord} = Tenants.ord(inst, name))
+      for {name, ord} <- Enum.with_index(names, 1),
+          do: assert({:ok, ^ord} = Tenants.ord(inst, name))
     end
 
     test "a hook with no tenant or no envelope files under default" do
@@ -354,7 +357,11 @@ defmodule Ankusa.StoreUpgradeTest do
       # Seq 6 has no tenant, 7 holds bytes that are no envelope, 8 has no hook.
       assert {:ok, default} = Tenants.ord(inst, "default")
 
-      assert for({{ord, _at, seq, _sink}, _size, _kind} <- fold_rows(inst, :due), seq in [6, 7, 8], do: ord) ==
+      assert for(
+               {{ord, _at, seq, _sink}, _size, _kind} <- fold_rows(inst, :due),
+               seq in [6, 7, 8],
+               do: ord
+             ) ==
                [default, default, default]
 
       assert {:ok, %{pending: 3}} = Queue.pending_for_tenant(inst, "default")
@@ -443,7 +450,10 @@ defmodule Ankusa.StoreUpgradeTest do
 
     test "the v3 fixture task writes a store that boots" do
       path =
-        Path.join(System.tmp_dir!(), "ankusa_fixture_v3_#{System.unique_integer([:positive])}.tar.zst")
+        Path.join(
+          System.tmp_dir!(),
+          "ankusa_fixture_v3_#{System.unique_integer([:positive])}.tar.zst"
+        )
 
       on_exit(fn -> File.rm(path) end)
 
@@ -532,10 +542,19 @@ defmodule Ankusa.StoreUpgradeTest do
     ]
 
     due =
-      for {seq, at} <- [{1, past}, {2, past}, {3, future}, {4, future}, {6, past}, {7, past}, {8, past}],
+      for {seq, at} <- [
+            {1, past},
+            {2, past},
+            {3, future},
+            {4, future},
+            {6, past},
+            {7, past},
+            {8, past}
+          ],
           do: {:put, :index, Keys.due_v2(at, seq, 0), <<100::32>>}
 
     more = for sink <- 1..extra//1, do: {:put, :index, Keys.due_v2(past, 1, sink), <<100::32>>}
+
     dead = fn at, seq, sink, owner ->
       {:put, :index, Keys.dead(at, seq, sink), :erlang.term_to_binary(owner)}
     end
@@ -563,7 +582,17 @@ defmodule Ankusa.StoreUpgradeTest do
 
   # Every row the migration writes, and the counters.
   defp snapshot(inst) do
-    families = [:due, :inflight, :dead, :dead_by_tenant, :active, :archive_pending, :tenants, :tenant_ords]
+    families = [
+      :due,
+      :inflight,
+      :dead,
+      :dead_by_tenant,
+      :active,
+      :archive_pending,
+      :tenants,
+      :tenant_ords
+    ]
+
     {Map.new(families, fn family -> {family, fold_rows(inst, family)} end), stored_counters(inst)}
   end
 
@@ -576,7 +605,10 @@ defmodule Ankusa.StoreUpgradeTest do
 
   defp fold_raw(inst, family) do
     %{lo: lo, hi: hi} = Keys.family(family)
-    {:ok, rows} = Store.fold(inst, family, {lo, hi}, [], fn k, v, acc -> {:cont, [{k, v} | acc]} end)
+
+    {:ok, rows} =
+      Store.fold(inst, family, {lo, hi}, [], fn k, v, acc -> {:cont, [{k, v} | acc]} end)
+
     Enum.reverse(rows)
   end
 

@@ -12,16 +12,18 @@
 #   tenants  10, 10^3, 10^5 tenants, 8 of them with due rows (the others' rows
 #            are scheduled a day ahead)
 #
-# Passes only if the slowest cell is within 1.5x of the fastest and under 50 ms
-# (lowest of 5 medians of 200 ticks per cell). Exits 1 otherwise. `mise run bench:gate` runs
-# it after the ingest gate.
+# Passes only if the slowest cell is within 1.5x of the fastest (taken as at
+# least 0.2 ms, below which two runs of one cell differ by 2x) and under 50 ms
+# (a cell is the 10th percentile of 1 000 ticks, the lowest of 3 rounds: see
+# `Bench.TenantSeed.quiet_ms/3`). Exits 1 otherwise. `mise run bench:gate` runs
+# it before the ingest gate.
 
 Logger.configure(level: :warning)
 Code.require_file("tenant_seed.exs", __DIR__)
 
 cells =
   Bench.TenantSeed.cells([1_000, 10_000, 100_000, 1_000_000], [10, 1_000, 100_000], fn instance,
-                                                                                   _ords ->
+                                                                                       _ords ->
     :ok = Ankusa.Metrics.Gauges.measure(instance)
   end)
 

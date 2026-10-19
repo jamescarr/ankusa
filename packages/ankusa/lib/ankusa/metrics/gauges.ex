@@ -101,7 +101,7 @@ defmodule Ankusa.Metrics.Gauges do
 
     with {:ok, counters} <- Counters.read(instance, 0),
          {:ok, tenants} <- Tenants.count(instance),
-         {:ok, oldest} <- Deliveries.next_due_at(instance) do
+         {:ok, oldest} <- Deliveries.next_due_at(instance, %{}, tenants: 1) do
       emit(instance, :queue, %{
         pending: max(counters.pending, 0),
         scheduled: max(counters.scheduled, 0),

@@ -235,7 +235,14 @@ defmodule Ankusa.DispatchTest do
   test "a row that became visible below the scan floor is delivered when its wake arrives" do
     inst = start(%{"src1" => %{sinks: [{TagSink, tag: :a, pid: self()}]}})
 
-    write_pending!(inst, 999_999, build_env("src1"), TagSink, System.system_time(:millisecond) + 3_600_000)
+    write_pending!(
+      inst,
+      999_999,
+      build_env("src1"),
+      TagSink,
+      System.system_time(:millisecond) + 3_600_000
+    )
+
     # Deliver one hook, so the scan floor climbs to just under its due time.
     first = enqueue!(inst, build_env("src1")).id
     assert {:ok, _} = Pipeline.tick(inst)
@@ -281,7 +288,12 @@ defmodule Ankusa.DispatchTest do
     handler = "visits-#{System.unique_integer([:positive])}"
 
     :ok =
-      :telemetry.attach(handler, [:ankusa, :dispatch, :state], &__MODULE__.forward_state/4, self())
+      :telemetry.attach(
+        handler,
+        [:ankusa, :dispatch, :state],
+        &__MODULE__.forward_state/4,
+        self()
+      )
 
     on_exit(fn -> :telemetry.detach(handler) end)
 
@@ -293,7 +305,8 @@ defmodule Ankusa.DispatchTest do
   end
 
   @doc false
-  def forward_state(_event, measurements, _meta, pid), do: send(pid, {:dispatch_state, measurements})
+  def forward_state(_event, measurements, _meta, pid),
+    do: send(pid, {:dispatch_state, measurements})
 
   # The first non-zero `active_tenants` the housekeeping tick reports.
   defp await_active_tenants do

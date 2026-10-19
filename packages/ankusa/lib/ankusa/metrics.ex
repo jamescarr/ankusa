@@ -324,7 +324,8 @@ defmodule Ankusa.Metrics do
           {"ankusa.dispatch.claimed.bytes", [:ankusa, :dispatch, :state], :claimed_bytes, :byte},
           {"ankusa.dispatch.runnable", [:ankusa, :dispatch, :state], :runnable, :unit},
           {"ankusa.dispatch.breakers_open", [:ankusa, :dispatch, :state], :breakers_open, :unit},
-          {"ankusa.dispatch.active_tenants", [:ankusa, :dispatch, :state], :active_tenants, :unit},
+          {"ankusa.dispatch.active_tenants", [:ankusa, :dispatch, :state], :active_tenants,
+           :unit},
           {"ankusa.backup.age.seconds", [:ankusa, :backup, :state], :age_seconds, :second}
         ] do
       last_value(

@@ -184,7 +184,13 @@ defmodule Ankusa.Queue.Writer do
         )
 
       result = commit(state.instance, ops, count, bytes)
-      state = %{state | next_seq: state.next_seq + count, next_ord: admission.next_ord, last_at: now}
+
+      state = %{
+        state
+        | next_seq: state.next_seq + count,
+          next_ord: admission.next_ord,
+          last_at: now
+      }
 
       case result do
         :ok ->
@@ -323,7 +329,8 @@ defmodule Ankusa.Queue.Writer do
     end
   end
 
-  defp all_admitted?(tenants, admission), do: Enum.all?(tenants, &Map.has_key?(admission.ords, &1))
+  defp all_admitted?(tenants, admission),
+    do: Enum.all?(tenants, &Map.has_key?(admission.ords, &1))
 
   # Cleared whole when full: a miss is one point read.
   defp cache_put(state, cache) do

@@ -61,7 +61,10 @@ defmodule Ankusa.CrashHarness do
   @doc "Boot the instance and ingest until killed."
   def serve do
     tenants = env_int("TENANTS", 1)
-    config = config(System.fetch_env!("DATA_DIR"), port: env_int("HTTP_PORT", 0), tenants: tenants)
+
+    config =
+      config(System.fetch_env!("DATA_DIR"), port: env_int("HTTP_PORT", 0), tenants: tenants)
+
     source_ids = tenants |> sources() |> Enum.map(&elem(&1, 0))
     pace_ms = pace_ms(env_int("RATE", 0), env_int("CONCURRENCY", 32))
     body = body(env_int("BODY_BYTES", 0))

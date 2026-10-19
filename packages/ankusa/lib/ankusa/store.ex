@@ -721,7 +721,13 @@ defmodule Ankusa.Store do
     do: :rocksdb.batch_delete_range(batch, Map.fetch!(cfs, cf), from, to)
 
   defp add_op(batch, cfs, {:merge, :counters, k, delta}) when is_binary(k) and is_integer(delta),
-    do: :rocksdb.batch_merge(batch, Map.fetch!(cfs, :counters), k, :erlang.term_to_binary({:int_add, delta}))
+    do:
+      :rocksdb.batch_merge(
+        batch,
+        Map.fetch!(cfs, :counters),
+        k,
+        :erlang.term_to_binary({:int_add, delta})
+      )
 
   # ── reads ─────────────────────────────────────────────────────────────────
 
@@ -792,7 +798,14 @@ defmodule Ankusa.Store do
   @spec first(atom(), atom(), {binary(), binary()}, keyword()) ::
           {:ok, {binary(), binary()} | nil} | {:error, term()}
   def first(instance, family, range, opts \\ []) do
-    scan_range(instance, family, range, nil, fn key, value, _acc -> {:halt, {key, value}} end, opts)
+    scan_range(
+      instance,
+      family,
+      range,
+      nil,
+      fn key, value, _acc -> {:halt, {key, value}} end,
+      opts
+    )
   end
 
   defp scan_range(instance, family, {lower, upper}, acc, fun, opts)

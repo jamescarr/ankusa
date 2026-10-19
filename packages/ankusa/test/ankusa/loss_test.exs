@@ -89,7 +89,10 @@ defmodule Ankusa.LossTest do
 
     for {tenant, count} <- by_tenant do
       {:ok, ord} = Ankusa.Queue.Tenants.ord(config.instance, tenant)
-      assert due_by_ord[ord] == count, "tenant #{tenant}: #{due_by_ord[ord]} due rows, #{count} hooks"
+
+      assert due_by_ord[ord] == count,
+             "tenant #{tenant}: #{due_by_ord[ord]} due rows, #{count} hooks"
+
       assert {:ok, %{pending: ^count, scheduled: 0, inflight: 0}} =
                Ankusa.Queue.pending_for_tenant(config.instance, tenant)
     end

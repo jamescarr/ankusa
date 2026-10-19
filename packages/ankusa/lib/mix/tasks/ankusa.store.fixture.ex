@@ -161,7 +161,9 @@ defmodule Mix.Tasks.Ankusa.Store.Fixture do
     {:duplicate, %Envelope{id: original}} = dup
     original == hd(demo) or Mix.raise("the dedupe key did not collapse onto its first hook")
 
-    acme = for n <- 1..2, do: ingest!(inst, "demo", "acme-#{n}", [{"x-event-id", "acme-#{n}"}], "acme")
+    acme =
+      for n <- 1..2, do: ingest!(inst, "demo", "acme-#{n}", [{"x-event-id", "acme-#{n}"}], "acme")
+
     doomed = for n <- 1..3, do: ingest!(inst, "doomed", "doomed-#{n}", [])
     dead_only = for n <- 1..2, do: ingest!(inst, "doomed", "deadonly-#{n}", [], "deadonly")
     archived = for n <- 1..4, do: ingest!(inst, "archived", "archived-#{n}", [])

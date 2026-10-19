@@ -317,7 +317,11 @@ defmodule Ankusa.MetricsTest do
 
       # Nothing folds a queue family: the gauges are counter reads and one seek
       # into the active index (plus the first due row it names).
-      refute Enum.any?(scans.folds, &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending]))
+      refute Enum.any?(
+               scans.folds,
+               &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending])
+             )
+
       assert Enum.count(scans.seeks, &(&1 == :due)) <= 1
 
       scrape = Ankusa.Metrics.scrape(inst)
@@ -334,7 +338,12 @@ defmodule Ankusa.MetricsTest do
       :ok = Ankusa.Store.write(inst, due_index_ops(inst, 700, 0, now - 7_000, 10), sync: true)
 
       scans = gauge_scans(inst)
-      refute Enum.any?(scans.folds, &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending]))
+
+      refute Enum.any?(
+               scans.folds,
+               &(&1 in [:due, :inflight, :dead, :dead_by_tenant, :archive_pending])
+             )
+
       assert :active in scans.seeks or :active in scans.folds
 
       scrape = Ankusa.Metrics.scrape(inst)

@@ -830,11 +830,13 @@ times `Ankusa.Metrics.Gauges.measure/1` and
 times a dispatch scan (`Deliveries.active_tenants/3` plus `due_for_tenant/6`
 for each tenant named), each against 10³, 10⁴, 10⁵ and 10⁶ queued rows over 10
 tenants and against 10, 10³ and 10⁵ tenants of which 8 have rows due, while a
-process commits 3 000 batches of counter merges a second. A cell is the lowest
-of five medians of 200 ticks (a tick is a fraction of a millisecond, so one
-median moves with whatever else the machine does; a growth with the queue
-raises every round). A script exits 1 unless its slowest cell is within 1.5× of
-its fastest and under 50 ms ([ADR 0001](adr/0001-tenant-key-layout.md),
+process commits 3 000 batches of counter merges a second. A cell is the 10th
+percentile of 1 000 ticks, the lowest of three rounds (a tick is a fraction of
+a millisecond, so a median moves by a factor of two with whatever else the
+machine does; noise only adds time, and a growth with the queue raises every
+sample). A script exits 1 unless its slowest cell is within 1.5× of its fastest
+(taken as at least 0.2 ms: the gauge tick costs about 0.1 ms, where two runs of
+one cell differ by 2×) and under 50 ms ([ADR 0001](adr/0001-tenant-key-layout.md),
 Proof). A rebaseline run (`BENCH_REBASELINE=1`) skips them: it measures the
 base commit's sources, which have neither the layout nor these APIs.
 

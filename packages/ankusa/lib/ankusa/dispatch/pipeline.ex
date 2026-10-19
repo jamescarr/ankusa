@@ -796,16 +796,28 @@ defmodule Ankusa.Dispatch.Pipeline do
 
       {:error, reason} ->
         Logger.warning("[ankusa] could not expand imported row #{item.seq}: #{inspect(reason)}")
+
         retry_later =
           Deliveries.retry_ops(item.ord, item.seq, item.sink, item.row, now + @holdoff_ms, nil)
+
         {state, retry_later ++ ops, pairs, jobs, sources}
     end
   end
 
   defp dead(item, reason, {state, ops, pairs, jobs, sources}, now) do
     error = inspect(reason, limit: 50, printable_limit: 4096)
+
     dead_ops =
-      Deliveries.dead_ops(:inflight, item.ord, item.seq, item.sink, item.row, now, error, item.env)
+      Deliveries.dead_ops(
+        :inflight,
+        item.ord,
+        item.seq,
+        item.sink,
+        item.row,
+        now,
+        error,
+        item.env
+      )
 
     state =
       state
@@ -1407,7 +1419,8 @@ defmodule Ankusa.Dispatch.Pipeline do
           })
 
           {%{state | settled: state.settled + 1} |> bump_replay(job.row, :delivered),
-           Deliveries.delivered_ops(job.ord, job.seq, job.sink, job.size), [cleared(job.seq, job.sink)]}
+           Deliveries.delivered_ops(job.ord, job.seq, job.sink, job.size),
+           [cleared(job.seq, job.sink)]}
 
         {:error, reason} ->
           failed(state, job, reason, attempts, now)
@@ -1455,6 +1468,7 @@ defmodule Ankusa.Dispatch.Pipeline do
         {mod, _opts} = job.spec
         error = inspect({:sink, mod, reason}, limit: 50, printable_limit: 4096)
         state = state |> settle_dead(job.env.source_id, mod, attempts) |> bump_replay(row, :dead)
+
         {state,
          Deliveries.dead_ops(:inflight, job.ord, job.seq, job.sink, row, now, error, job.env), []}
     end
@@ -1538,7 +1552,12 @@ defmodule Ankusa.Dispatch.Pipeline do
 
   defp raise_cursor(state, ord, at) do
     floor = max(Map.get(state.cursors, ord, 0), at - @floor_lag_ms)
-    %{state | cursors: Map.put(state.cursors, ord, floor), cursor_max: max(state.cursor_max, floor)}
+
+    %{
+      state
+      | cursors: Map.put(state.cursors, ord, floor),
+        cursor_max: max(state.cursor_max, floor)
+    }
   end
 
   # Every Pipeline write goes through here. Once it is in, the rows it made due
