@@ -38,7 +38,7 @@ pub use crate::signature::{
     verify_signature,
 };
 pub use crate::transport::{ReqwestTransport, Transport, TransportError};
-pub use crate::webhook::{HookHeaders, MissingHookIdError, parse_headers};
+pub use crate::webhook::{HookHeaders, MissingHookIdError, Verification, parse_headers};
 
 #[cfg(test)]
 mod tests {

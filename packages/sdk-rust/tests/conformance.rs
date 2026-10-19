@@ -26,8 +26,8 @@ use ankusa::{
     InvalidClaimRefError, InvalidMessageError, InvalidSignatureError, IpRules,
     ListDeadLettersParams, ListQuarantinedParams, ListRoutesParams, Message, MissingHookIdError,
     ReceiveError, ReceiveOptions, ReplayPatch, ReplaySpec, RouteInput, RoutePatch, RoutesClient,
-    RoutesError, Transport, TransportError, VerifyOptions, decode_message, parse_claim_ref,
-    parse_headers, receive_delivery, verify_signature,
+    RoutesError, Transport, TransportError, Verification, VerifyOptions, decode_message,
+    parse_claim_ref, parse_headers, receive_delivery, verify_signature,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -304,6 +304,7 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "dedupe_key": parsed.dedupe_key,
                 "replay_id": parsed.replay_id,
                 "idempotency_key": parsed.idempotency_key,
+                "verification": verification_json(parsed.verification.as_ref()),
             }))
         }
         "parse_headers" => {
@@ -317,6 +318,7 @@ async fn run_op<T: Transport>(builder: ClientBuilder<T>, case: &Case) -> Result<
                 "dedupe_key": parsed.dedupe_key,
                 "replay_id": parsed.replay_id,
                 "idempotency_key": parsed.idempotency_key,
+                "verification": verification_json(parsed.verification.as_ref()),
             }))
         }
         "decode_message" => {
@@ -768,7 +770,19 @@ fn message_json(message: &Message) -> Value {
         "replay_id": message.replay_id,
         "idempotency_key": message.idempotency_key,
         "headers": message.headers,
+        "verification": verification_json(message.verification.as_ref()),
     })
+}
+
+/// `Verification` as the vectors shape it: `{status, flagged}` or `null`.
+fn verification_json(verification: Option<&Verification>) -> Value {
+    match verification {
+        Some(verification) => json!({
+            "status": verification.status,
+            "flagged": verification.flagged,
+        }),
+        None => Value::Null,
+    }
 }
 
 fn json_or_null(bytes: &[u8]) -> Value {
